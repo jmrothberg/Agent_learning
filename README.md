@@ -10,12 +10,15 @@ turn is treated as sacred and saved to `games/best.html`; regressions
 are detected and reverted; user feedback typed mid-run is the highest-
 priority signal in the loop.
 
+**Remote:** https://github.com/jmrothberg/Agent_learning/
+
 ---
 
 ## Quick start
 
 ```bash
 # 1. clone & enter
+git clone https://github.com/jmrothberg/Agent_learning.git
 cd Agent_learning
 
 # 2. python venv (already provisioned in .venv/, but if you blow it away):
