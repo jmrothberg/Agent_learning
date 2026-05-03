@@ -1,0 +1,8 @@
+# Python deps for the coding-box agent.
+# After `pip install -r requirements.txt` you ALSO need:
+#   playwright install chromium
+# (that downloads the headless browser the agent uses to test games)
+
+ollama>=0.3.0
+playwright>=1.40.0
+textual>=0.50.0

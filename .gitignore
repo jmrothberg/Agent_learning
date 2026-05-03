@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+# Virtualenv
+.venv/
+venv/
+env/
+
+# Generated game artifacts (huge + per-session, no point versioning)
+games/game.html
+games/current.html
+games/best.html
+games/snapshots/
+games/traces/
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+*.swp
