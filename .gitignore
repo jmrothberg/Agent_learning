@@ -17,6 +17,7 @@ games/current.html
 games/best.html
 games/snapshots/
 games/traces/
+games/test_*.html
 
 # Editor / OS noise
 .vscode/

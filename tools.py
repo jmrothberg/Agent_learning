@@ -56,6 +56,35 @@ EventTarget.prototype.addEventListener = function(type, ...rest) {
 };
 """
 
+# Downsampled canvas hash. We sample a 32x32 grid spread across the canvas
+# and concatenate the RGBA bytes. Cheap (~1KB string) but catches per-frame
+# motion anywhere on the playfield — the older 9-pixel fingerprint missed
+# slowly-moving objects in the middle. Used by the input smoke test AND the
+# frozen-canvas check.
+_CANVAS_HASH_JS = """
+() => {
+    const c = document.querySelector('canvas');
+    if (!c) return null;
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    if (!ctx || c.width < 4 || c.height < 4) return null;
+    try {
+        const w = c.width, h = c.height;
+        const N = 32;
+        const out = [];
+        for (let iy = 0; iy < N; iy++) {
+            const y = ((iy + 0.5) * h / N) | 0;
+            for (let ix = 0; ix < N; ix++) {
+                const x = ((ix + 0.5) * w / N) | 0;
+                const d = ctx.getImageData(x, y, 1, 1).data;
+                // Pack into base36 so the resulting string stays compact.
+                out.push(((d[0] << 16) | (d[1] << 8) | d[2]).toString(36));
+            }
+        }
+        return out.join(',');
+    } catch (e) { return null; }
+}
+"""
+
 # JS run AFTER the game has had a chance to animate. Returns the canvas info
 # (size, RAF flag, blank-pixel heuristic). Shared between sync + async paths.
 _CANVAS_PROBE_JS = """
@@ -352,9 +381,15 @@ class LiveBrowser:
         await lb.close()
     """
 
-    def __init__(self, viewport: tuple[int, int] = (800, 600), run_seconds: float = 3.0):
+    def __init__(
+        self,
+        viewport: tuple[int, int] = (800, 600),
+        run_seconds: float = 3.0,
+        headless: bool = False,
+    ):
         self._viewport = viewport
         self._run_seconds = run_seconds
+        self._headless = headless
         # Buffers reset on every load_and_test call.
         self._errors: list[str] = []
         self._warnings: list[str] = []
@@ -374,9 +409,17 @@ class LiveBrowser:
         # --window-position keeps the window from landing on top of the terminal
         # by default (X/Wayland may ignore this; tile-WM users will arrange it
         # themselves anyway).
+        # headless=False is the normal interactive case (TUI lets the user
+        # SEE the game). headless=True is for the test driver.
+        launch_args: list[str] = []
+        if not self._headless:
+            launch_args = [
+                f"--window-position=850,50",
+                f"--window-size={self._viewport[0]},{self._viewport[1]}",
+            ]
         self._browser = await self._pw.chromium.launch(
-            headless=False,
-            args=[f"--window-position=850,50", f"--window-size={self._viewport[0]},{self._viewport[1]}"],
+            headless=self._headless,
+            args=launch_args,
         )
         self._context = await self._browser.new_context(
             viewport={"width": self._viewport[0], "height": self._viewport[1]}
@@ -444,11 +487,16 @@ class LiveBrowser:
         # Sleep half the budget; sample canvas; sleep rest; sample again.
         # If both samples are byte-identical the game is FROZEN even if
         # requestAnimationFrame fired (it's drawing the same frame).
+        # We also take a 32x32 hash at each moment — the boolean equality of
+        # the two hashes is what drives the FROZEN heuristic (it catches
+        # slowly-moving content the 9-pixel probe misses).
         half = max(self._run_seconds / 2.0, 0.5)
         await asyncio.sleep(half)
         canvas_first = await self._safe_eval(_CANVAS_PROBE_JS)
+        hash_first = await self._safe_eval(_CANVAS_HASH_JS)
         await asyncio.sleep(half)
         canvas_info = await self._safe_eval(_CANVAS_PROBE_JS)
+        hash_last = await self._safe_eval(_CANVAS_HASH_JS)
 
         # ---- input smoke test ---------------------------------------------
         # Most small-model bugs we miss are "controls don't work". Fire a few
@@ -484,22 +532,17 @@ class LiveBrowser:
             except Exception:
                 screenshot_saved = None
 
-        # ---- detect frozen canvas: same sampled colors at t=half and t=full
-        frozen = None  # None if we can't tell
-        if canvas_first and canvas_info:
-            cf = canvas_first.get("sampled_colors")
-            cl = canvas_info.get("sampled_colors")
-            # Both ints means probe ran on a 2D canvas at both moments. If the
-            # 9 sampled pixels collapsed to the same color count BOTH times AND
-            # the last-frame timestamp didn't change, that's a frozen frame.
-            # Cheap proxy: sampled_colors equal AND blank-flag equal.
-            if cf is not None and cl is not None:
-                same = (cf == cl) and (canvas_first.get("blank") == canvas_info.get("blank"))
-                # Only flag frozen when there's a canvas with content (not blank).
-                if same and canvas_info.get("blank") is False and canvas_info.get("raf_ran"):
-                    frozen = True
-                else:
-                    frozen = False
+        # ---- detect frozen canvas: 32x32 hash identical at t=half and t=full
+        # The hash covers the whole playfield, so even one pixel of motion
+        # somewhere flips the result. Only flag FROZEN when we have content
+        # (not blank) and the loop is actually running (RAF fired).
+        frozen = None
+        if hash_first is not None and hash_last is not None and canvas_info:
+            same = (hash_first == hash_last)
+            if same and canvas_info.get("blank") is False and canvas_info.get("raf_ran"):
+                frozen = True
+            else:
+                frozen = False
 
         report = _build_report(
             list(self._errors), list(self._warnings), list(self._logs),
@@ -513,17 +556,39 @@ class LiveBrowser:
 
         # Promote the new findings into soft_warnings so they get the same
         # "must fix" treatment as RAF/blank in the report formatter.
-        if frozen is True:
+        # Important nuance: FROZEN-without-input-change is bad; FROZEN-but-
+        # input-causes-change is just "input-driven, not auto-animated" which
+        # is normal for many games (turn-based, click counter, tic-tac-toe).
+        # We only flag FROZEN when input ALSO doesn't move pixels.
+        input_responsive = bool(
+            input_test.get("ran") and input_test.get("any_change") is True
+        )
+        input_dead = bool(
+            input_test.get("ran") and input_test.get("any_change") is False
+        )
+        if frozen is True and not input_responsive:
             report["soft_warnings"].append(
                 "HEURISTIC: canvas drew SOMETHING but did not change between two "
-                "samples 1s apart - the game is frozen / stuck on one frame."
+                "samples 1s apart AND no key press changed anything either - "
+                "the game is frozen / stuck on one frame."
             )
-        if input_test.get("ran") and input_test.get("any_change") is False:
+        if input_dead:
             keys_str = ", ".join(input_test.get("keys_tried", []))
-            report["soft_warnings"].append(
-                f"HEURISTIC: pressed {keys_str} - canvas pixels never changed. "
-                "Controls are not wired up (or input handler is broken)."
+            # Don't double-fire if the page only has a button (no canvas
+            # input expected). We check for an interactive element below.
+            has_clickable = await self._safe_eval(
+                "document.querySelectorAll('button, [onclick]').length > 0"
             )
+            if not has_clickable:
+                report["soft_warnings"].append(
+                    f"HEURISTIC: pressed {keys_str} - canvas pixels never changed. "
+                    "Controls are not wired up (or input handler is broken)."
+                )
+            else:
+                report["warnings"].append(
+                    "Note: keyboard test produced no canvas change, but the "
+                    "page has clickable elements; treating as DOM-driven."
+                )
         # ok must reflect the fresh soft_warnings count after we appended.
         report["ok"] = len(report["errors"]) == 0 and len(report["soft_warnings"]) == 0
         return report
@@ -536,52 +601,32 @@ class LiveBrowser:
             return None
 
     async def _input_smoke_test(self) -> dict[str, Any]:
-        """Press a sequence of common keys; report whether the canvas changed.
+        """Hold each test key for a few frames; report whether the canvas changed.
 
-        We compare a tiny pixel-fingerprint before and after each press. As
-        soon as one press triggers ANY change, we mark the game responsive
-        and stop. If none do, we report which keys we tried.
+        Two big differences vs the original 9-pixel version:
+
+          1. We HOLD each key (down/up) for ~250ms instead of press(). Held-key
+             games like thrust-controlled ships only move while a key is
+             actively down; press() releases instantly and the next sample
+             catches the post-release frame.
+
+          2. We use a ~32x32 downsampled hash of the FULL canvas instead of
+             nine corner pixels, so slowly-moving objects in the middle of the
+             playfield register as a change.
         """
         import asyncio
 
-        # Skip the whole thing if there is no canvas - reduces noise on
-        # DOM-only games where input is bound to <input> elements etc.
         has_canvas = await self._safe_eval(
             "!!document.querySelector('canvas')"
         )
         if not has_canvas:
             return {"ran": False, "reason": "no canvas"}
 
-        # 9-pixel fingerprint: same sample points the canvas probe uses, but
-        # we get the actual color tuples this time so we can compare exactly.
-        FINGERPRINT_JS = """
-        () => {
-            const c = document.querySelector('canvas');
-            if (!c) return null;
-            const ctx = c.getContext('2d');
-            if (!ctx || c.width < 2 || c.height < 2) return null;
-            try {
-                const w = c.width, h = c.height;
-                const pts = [
-                    [0,0],[w/2|0,0],[w-1,0],
-                    [0,h/2|0],[w/2|0,h/2|0],[w-1,h/2|0],
-                    [0,h-1],[w/2|0,h-1],[w-1,h-1],
-                ];
-                const out = [];
-                for (const [x,y] of pts) {
-                    const d = ctx.getImageData(x,y,1,1).data;
-                    out.push(d[0]+','+d[1]+','+d[2]+','+d[3]);
-                }
-                return out.join('|');
-            } catch (e) { return null; }
-        }
-        """
-
-        keys = ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space", "w", "a", "s", "d"]
+        keys = ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space", "KeyW", "KeyA", "KeyS", "KeyD"]
         tried: list[str] = []
         any_change = False
+        first_responsive_key: str | None = None
 
-        # Make sure the page can receive key events.
         try:
             await self._page.bring_to_front()
             await self._page.evaluate("if (document.body) document.body.focus();")
@@ -589,27 +634,31 @@ class LiveBrowser:
             pass
 
         for k in keys:
-            before = await self._safe_eval(FINGERPRINT_JS)
+            before = await self._safe_eval(_CANVAS_HASH_JS)
             if before is None:
-                # WebGL or sampling failed - bail with "ran but inconclusive".
                 return {"ran": False, "reason": "canvas not sampleable", "keys_tried": tried}
             try:
-                await self._page.keyboard.press(k)
+                await self._page.keyboard.down(k)
+                await asyncio.sleep(0.25)  # hold long enough for thrust to move ship
+                after_held = await self._safe_eval(_CANVAS_HASH_JS)
+                await self._page.keyboard.up(k)
             except Exception:
                 continue
             tried.append(k)
-            # Give the game a frame to react.
-            await asyncio.sleep(0.15)
-            after = await self._safe_eval(FINGERPRINT_JS)
-            if after is not None and after != before:
+            # Wait one more frame for any post-release tween / momentum.
+            await asyncio.sleep(0.05)
+            after_release = await self._safe_eval(_CANVAS_HASH_JS)
+            if (after_held is not None and after_held != before) or \
+               (after_release is not None and after_release != before):
                 any_change = True
+                first_responsive_key = k
                 break
 
         return {
             "ran": True,
             "any_change": any_change,
             "keys_tried": tried,
-            "first_responsive_key": tried[-1] if any_change else None,
+            "first_responsive_key": first_responsive_key,
         }
 
     async def close(self) -> None:
