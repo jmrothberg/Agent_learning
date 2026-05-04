@@ -876,26 +876,40 @@ class CodingBoxApp(App):
 
     def _cmd_help(self) -> None:
         lines = [
+            "[bold cyan]── what to type when ──[/bold cyan]",
+            "  [b]first run[/b]                  describe the game you want, press Enter",
+            "  [b]small change to what shipped[/b]  just type it — no slash needed",
+            "                                  e.g. [italic]ship is too slow, double the thrust[/italic]",
+            "  [b]ship as-is, stop[/b]              type [b]done[/b] / [b]looks good[/b] / [b]ship[/b] (or Ctrl+D)",
+            "  [b]brand-new unrelated game[/b]      [b]/new <goal>[/b]",
+            "  [b]start from an existing .html[/b]  [b]/seed <path>[/b]  then  [b]/new <goal>[/b]",
+            "",
+            "[dim]After <done/> the input box reads [b]'feedback to extend, /new <goal>"
+            " for a fresh game'[/b] — that's the trigger for auto-extend.[/dim]",
+            "",
             "[bold cyan]── slash commands ──[/bold cyan]",
             "  [b]/help[/b]                    show this help (also /h, /?)",
             "  [b]/list[/b]                    list installed Ollama models with numbers (also /models)",
             "  [b]/model <name|N>[/b]          stage model (STICKY across /new) · /model alone clears",
-            "  [b]/new <goal>[/b]              end current session, start a fresh one",
-            "  [b]/ship[/b]                    ship current build (= Ctrl+D)",
+            "  [b]/seed <path>[/b]             stage a baseline .html (STICKY across /new) · /seed alone clears",
+            "  [b]/iters <N>[/b]               set max iterations (sticky)",
+            "  [b]/reset[/b]                   wipe ALL staged state (seed + model + iters → defaults)",
+            "  [b]/new <goal>[/b]              end current session, start a fresh one (uses staged seed/model)",
+            "  [b]/ship[/b]                    ship current build (= Ctrl+D, or type 'done')",
             "  [b]/open[/b]                    open the current game in your default browser",
             "  [b]/log[/b]                     print all session artifact paths (= Ctrl+L; also /paths, /files)",
-            "  [b]/clear[/b]                   clear the agent log pane",
-            "  [b]/iters <N>[/b]               set max iterations for the next session/extension",
-            "  [b]/seed <path>[/b]             stage a baseline .html (STICKY across /new) · /seed alone clears",
-            "  [b]/reset[/b]                   wipe ALL staged state (seed + model + iters → defaults)",
+            "  [b]/clear[/b]                   clear the agent log pane (does not affect staged state)",
             "  [b]/status[/b]                  print model, phase, iteration, paths, what's staged",
             "  [b]/quit[/b]                    quit (= Ctrl+Q)",
             "",
-            "[bold]Sticky staging[/bold] — /seed and /model persist across multiple /new",
-            "calls. Clear individually with the bare command, or all at once with /reset.",
-            "[dim]Workflow: /seed games/foo.html  →  /new add multiplayer  →  /new add boss  ▸ both use foo.html[/dim]",
-            "[dim]Plain text after <done/> auto-extends the current game (no slash needed).[/dim]",
-            "[dim]Type 'done' / 'looks good' / 'ship' to ship without Ctrl+D.[/dim]",
+            "[bold cyan]── sticky staging ──[/bold cyan]",
+            "  /seed, /model, /iters PERSIST across multiple /new calls. Set once,",
+            "  reuse forever. Clear individually with the bare command "
+            "(e.g. [b]/seed[/b] alone),",
+            "  or wipe all of them with [b]/reset[/b].",
+            "",
+            "[dim]Example: /seed games/asteroids.html  →  /new add multiplayer  "
+            "→  /new add boss  ▸ both use asteroids.html[/dim]",
         ]
         for line in lines:
             self._log(line)

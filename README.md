@@ -144,6 +144,28 @@ ollama list         # confirm at least one usable tag
 
 ---
 
+## What to type when (the only cheat sheet you need)
+
+Once the TUI is running, the input box is the only place you interact with
+the agent. Five things you'll do:
+
+| What you want                                       | What to type                                          |
+| --------------------------------------------------- | ----------------------------------------------------- |
+| **First run** — describe the game                   | the description, then Enter (e.g. `snake with score`) |
+| **Small change to what just shipped** (most common) | **just type it** — `make the bunkers green`           |
+| **Ship as-is, stop iterating**                      | `done` / `looks good` / `ship` (or `Ctrl+D`)          |
+| **Brand-new unrelated game**                        | `/new <goal>`                                         |
+| **Start from an existing `.html`**                  | `/seed <path>` then `/new <goal>`                     |
+
+That's it. After the model says `<done/>`, plain text auto-extends the *same*
+game (skips planning, jumps straight to patching the existing file). You only
+need `/new` when you're starting an unrelated game — small tweaks are just
+typing.
+
+`/help` inside the TUI shows the same cheat sheet plus the full command list.
+
+---
+
 ## What the TUI looks like
 
 ```
