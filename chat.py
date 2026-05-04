@@ -877,15 +877,14 @@ class CodingBoxApp(App):
             "[bold cyan]── slash commands ──[/bold cyan]",
             "  [b]/help[/b]                    show this help (also /h, /?)",
             "  [b]/list[/b]                    list installed Ollama models with numbers (also /models)",
-            "  [b]/model <name|N>[/b]          stage model for the next /new session",
+            "  [b]/model <name|N>[/b]          stage model (STICKY across /new) · /model alone clears",
             "  [b]/new <goal>[/b]              end current session, start a fresh one",
             "  [b]/ship[/b]                    ship current build (= Ctrl+D)",
             "  [b]/open[/b]                    open the current game in your default browser",
             "  [b]/log[/b]                     print all session artifact paths (= Ctrl+L; also /paths, /files)",
             "  [b]/clear[/b]                   clear the agent log pane",
             "  [b]/iters <N>[/b]               set max iterations for the next session/extension",
-            "  [b]/seed <path>[/b]             stage an existing .html file as the baseline for the next /new",
-            "  [b]/seed[/b] (no arg)           clear the staged seed file",
+            "  [b]/seed <path>[/b]             stage a baseline .html (STICKY across /new) · /seed alone clears",
             "  [b]/status[/b]                  print model, phase, iteration, paths",
             "  [b]/quit[/b]                    quit (= Ctrl+Q)",
             "[dim]Plain text after a session is done auto-extends the game (no slash needed).[/dim]",
@@ -911,7 +910,11 @@ class CodingBoxApp(App):
 
     def _cmd_set_model(self, arg: str) -> None:
         if not arg:
-            self._log_info("usage: /model <name-or-number>  (see /list)")
+            if self._next_model is None:
+                self._log_info("no staged model (usage: /model <name-or-number>)")
+            else:
+                self._log_info(f"cleared staged model (was: {self._next_model})")
+                self._next_model = None
             return
         installed, _ = _installed_models_via_http()
         if not installed:
@@ -1047,9 +1050,10 @@ class CodingBoxApp(App):
                 return
 
         # /model staged tag wins; otherwise resolve from env / ps / installed.
+        # Staging is STICKY across /new calls — clear with /model (no arg)
+        # or replace with another /model <tag>.
         if self._next_model:
-            model_name, model_src = self._next_model, "/model staged"
-            self._next_model = None
+            model_name, model_src = self._next_model, "/model staged (sticky)"
         else:
             model_name, model_src = resolve_chat_model(MODEL)
         self._session_model = model_name
@@ -1067,11 +1071,15 @@ class CodingBoxApp(App):
         self._best_path = GAMES_DIR / f"{basename}.best.html"
         self._log_info(f"Game file: [b]{self._out_path}[/b]")
 
-        # Consume the staged seed file (if any) for THIS session only.
+        # Use the staged seed file (if any). Staging is STICKY — every /new
+        # uses the same seed until you /seed (no arg) to clear or /seed
+        # <other> to replace. Matches /model's sticky behavior.
         seed = self._next_seed
-        self._next_seed = None
         if seed is not None:
-            self._log_info(f"using staged seed file: [b]{_esc(str(seed))}[/b]")
+            self._log_info(
+                f"using staged seed file (sticky): [b]{_esc(str(seed))}[/b] "
+                "[dim](/seed (no arg) to clear)[/dim]"
+            )
 
         # Auto-bump streaming timeouts for larger models — qwen3.6:35b
         # writing a full Space Invaders takes 25+ minutes per stream and
