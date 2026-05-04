@@ -144,6 +144,9 @@ def _running_models_with_meta() -> list[dict]:
     record with the latest `expires_at` is the one you most recently talked
     to — which is what people mean when they say "I have ollama running X".
     Tries every loopback base; first reachable one wins.
+
+    Records also include parameter_size when Ollama reports it — used to
+    auto-scale the streaming budget in resolve_session_timeouts().
     """
     import json
     import urllib.error
@@ -165,10 +168,72 @@ def _running_models_with_meta() -> list[dict]:
             name = (m.get("name") or m.get("model") or "").strip()
             if not name:
                 continue
-            out.append({"name": name, "expires_at": m.get("expires_at") or ""})
+            details = m.get("details") or {}
+            out.append({
+                "name": name,
+                "expires_at": m.get("expires_at") or "",
+                "parameter_size": (details.get("parameter_size") or "").strip(),
+                "context_length": m.get("context_length") or 0,
+            })
         if out:
             return out
     return []
+
+
+def _parse_param_billions(p: str) -> float:
+    """'20.9B' -> 20.9; '7B' -> 7.0; '36.0B' -> 36.0; '' -> 0.0."""
+    s = (p or "").strip().upper().rstrip("B")
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
+
+
+def _model_param_size(model: str) -> str:
+    """Best-effort parameter_size string for a model (e.g. '36.0B').
+
+    Tries /api/ps first (loaded models, fast). Falls back to ollama.show()
+    (works for installed-but-not-loaded models — that's the common case
+    when the user hasn't run the model yet). Returns '' if both fail.
+    """
+    for m in _running_models_with_meta():
+        if m["name"] == model and m.get("parameter_size"):
+            return m["parameter_size"]
+    try:
+        info = ollama.show(model=model)
+        details = getattr(info, "details", None)
+        if details is not None:
+            return (getattr(details, "parameter_size", "") or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def resolve_session_timeouts(model: str) -> tuple[float, float]:
+    """Pick (stall_seconds, overall_seconds) for a given model.
+
+    Scaling is by parameter count (queried from /api/ps then /api/show).
+    Larger models take longer per token AND tend to write more verbose
+    output, so we bump BOTH timeouts:
+
+        params      stall    overall
+        ─────────   ─────    ───────
+        ≤ 13B       60       600    (small/fast, default-ish)
+        14–25B      90       900    (gpt-oss 20B ballpark)
+        26–40B      150      1800   (qwen3.6:35b — Space Invaders takes 25+ min)
+        > 40B       240      2700   (70B class)
+
+    These are wall-clock budgets PER STREAM, not total session.
+    """
+    b = _parse_param_billions(_model_param_size(model))
+    if b > 40:
+        return 240.0, 2700.0
+    if b > 25:
+        return 150.0, 1800.0
+    if b > 13:
+        return 90.0, 900.0
+    # Default / unknown: err small so we detect a true wedge fast.
+    return 60.0, 600.0
 
 
 def _installed_models_via_http() -> tuple[list[str], str | None]:
@@ -963,12 +1028,24 @@ class CodingBoxApp(App):
         if seed is not None:
             self._log_info(f"using staged seed file: [b]{_esc(str(seed))}[/b]")
 
+        # Auto-bump streaming timeouts for larger models — qwen3.6:35b
+        # writing a full Space Invaders takes 25+ minutes per stream and
+        # the default 600s budget kills it mid-output every time.
+        stall_s, overall_s = resolve_session_timeouts(model_name)
+        if overall_s > 600:
+            self._log_info(
+                f"[dim]large model detected — using stall={stall_s:.0f}s "
+                f"overall={overall_s:.0f}s per stream[/dim]"
+            )
+
         self.agent = GameAgent(
             model=model_name,
             out_path=self._out_path,
             browser=self.browser,
             max_iters=self._max_iters,
             seed_file=seed,
+            stall_seconds=stall_s,
+            overall_seconds=overall_s,
         )
         self.agent.set_token_callback(self._emit_token)
 
@@ -1017,7 +1094,9 @@ class CodingBoxApp(App):
     async def _new_session(self, goal: str) -> None:
         """End the current session (if any) and start a fresh one.
 
-        Browser is reused. Log mirror is rotated to the new basename.
+        Browser is reused but cleared to a status page so a failed new
+        session can't masquerade as the previous one's output. Log mirror
+        is rotated to the new basename.
         """
         # Drop the old agent reference; the worker (if any) has already
         # finished — we checked _session_done in _cmd_new.
@@ -1030,6 +1109,18 @@ class CodingBoxApp(App):
                 pass
             self._log_file_handle = None
             self._log_file_path = None
+        # Clear the browser to a status page so the previous game isn't
+        # still visible — otherwise a failed new session looks like the
+        # old one is still working, and any feedback gets routed to the
+        # WRONG file path.
+        if self.browser is not None:
+            try:
+                await self.browser.show_status(
+                    "Starting new session…",
+                    f"Goal: {goal[:200]}",
+                )
+            except Exception:
+                pass
         self.query_one("#log-pane", RichLog).clear()
         self._goal = goal
         self._iteration_label = "—"

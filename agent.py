@@ -74,6 +74,25 @@ from tools import LiveBrowser, format_report_for_model
 
 
 _HTML_RE = re.compile(r"<html_file>\s*(.*?)\s*</html_file>", re.DOTALL | re.IGNORECASE)
+# Models that don't follow the <html_file> wrapper instruction often emit a
+# markdown ```html fence instead, or just a bare <!DOCTYPE html>...</html>
+# block. We accept both as fallbacks so we don't throw away an otherwise
+# valid game just because the format anchor was ignored.
+_HTML_FENCE_RE = re.compile(
+    r"```(?:html|HTML)?\s*\n(.*?\n)```",
+    re.DOTALL,
+)
+_BARE_DOCTYPE_RE = re.compile(
+    r"(<!DOCTYPE\s+html[^>]*>.*?</html\s*>)",
+    re.DOTALL | re.IGNORECASE,
+)
+# Some models also write <html_file> with a stray opening but never close it
+# (especially after a stall). If we see an opener and a complete <html>
+# document inside, we accept the document.
+_UNCLOSED_HTML_FILE_RE = re.compile(
+    r"<html_file>\s*(?:```(?:html)?\s*\n)?(<!DOCTYPE\s+html.*?</html\s*>)",
+    re.DOTALL | re.IGNORECASE,
+)
 _DONE_RE = re.compile(r"<done\s*/?>", re.IGNORECASE)
 _CONFIRM_RE = re.compile(r"<confirm[_-]?done\s*/?>", re.IGNORECASE)
 _QUESTION_RE = re.compile(r"<question>\s*(.*?)\s*</question>", re.DOTALL | re.IGNORECASE)
@@ -116,6 +135,11 @@ class GameAgent:
         # token can be 20-40s on a fresh load; we want headroom but still
         # detect a true wedge promptly.
         stall_seconds: float = 90.0,
+        # Total wall-clock budget for one stream. 600s is enough for a 20B
+        # model to write a 5K-token game; 35B+ models need more, especially
+        # for verbose outputs like full Space Invaders. chat.py bumps this
+        # automatically based on detected model parameter_size.
+        overall_seconds: float = 600.0,
         memory_root: str | Path = "games/memory",
         # Optional path to an existing HTML file to start from. When set,
         # the agent skips memory-skeleton retrieval and uses this file as
@@ -130,6 +154,7 @@ class GameAgent:
         self.best_of_n = max(1, best_of_n)
         self.num_ctx = num_ctx
         self.stall_seconds = stall_seconds
+        self.overall_seconds = overall_seconds
         self.seed_file: Path | None = Path(seed_file) if seed_file else None
         self._client = ollama.AsyncClient()
         self._messages: list[dict] = []
@@ -391,7 +416,7 @@ class GameAgent:
             on_token=on_token,
             options={"temperature": temp, "num_ctx": self.num_ctx},
             stall_seconds=self.stall_seconds,
-            overall_seconds=600.0,
+            overall_seconds=self.overall_seconds,
             max_retries=1,
             on_stall=lambda r, attempt: self._trace({
                 "kind": "stream_stalled",
@@ -461,7 +486,7 @@ class GameAgent:
             n=n,
             options={"num_ctx": self.num_ctx},
             stall_seconds=self.stall_seconds,
-            overall_seconds=600.0,
+            overall_seconds=self.overall_seconds,
             scorer=scorer,
             on_progress=lambda i, msg: self._trace({
                 "kind": "best_of_n_progress",
@@ -509,15 +534,74 @@ class GameAgent:
         return None, "no <patch> or <html_file> in reply"
 
     @staticmethod
-    def _extract_html(reply: str) -> str | None:
-        m = _HTML_RE.search(reply)
-        if not m:
+    def _truncation_diagnosis(reply: str) -> str | None:
+        """If the reply looks like an HTML game cut off mid-stream, describe
+        the truncation so the user knows it was a stall, not a model dud.
+
+        Returns None if the reply doesn't look truncated (e.g. it was just a
+        plan or a chat response with no HTML attempt).
+        """
+        low = reply.lower()
+        has_doctype = "<!doctype" in low
+        has_html_open = "<html" in low
+        if not (has_doctype or has_html_open):
             return None
-        body = m.group(1).strip()
-        if body.startswith("```"):
-            body = re.sub(r"^```[a-zA-Z]*\n?", "", body)
-            body = re.sub(r"\n?```$", "", body)
-        return body.strip() or None
+        ends = {
+            "</html>": "</html>" in low,
+            "</body>": "</body>" in low,
+            "</script>": "</script>" in low or "<script" not in low,
+            "</html_file>": "</html_file>" in low or "<html_file>" not in low,
+        }
+        missing = [tag for tag, present in ends.items() if not present]
+        if not missing:
+            return None
+        return (
+            f"reply began an HTML document ({len(reply):,} bytes streamed) "
+            f"but was cut off — missing closing tags: {missing}. "
+            f"Likely a stream stall mid-output. Consider a smaller goal, a "
+            f"smaller model, or `/iters 1` to re-roll."
+        )
+
+    @staticmethod
+    def _extract_html(reply: str) -> str | None:
+        """Pull a complete HTML game out of a model reply.
+
+        We accept four formats so we never throw away a valid game just
+        because the model ignored the <html_file> anchor (a common failure
+        mode of smaller models like qwen3.6:27b — they wrap output in a
+        markdown fence or emit bare <!DOCTYPE>):
+
+          1. <html_file>BODY</html_file>           ← preferred
+          2. <html_file>```html\\nBODY\\n```        ← model double-wrapped
+          3. <html_file>BODY (no closing tag, but BODY contains </html>)
+             — common after stream stalls truncate the closing tag
+          4. ```html\\n<!DOCTYPE html>...</html>\\n```   ← markdown fence only
+          5. <!DOCTYPE html>...</html>             ← bare document
+        """
+        # 1. Canonical wrapper.
+        m = _HTML_RE.search(reply)
+        if m:
+            body = m.group(1).strip()
+            if body.startswith("```"):
+                body = re.sub(r"^```[a-zA-Z]*\n?", "", body)
+                body = re.sub(r"\n?```$", "", body)
+            body = body.strip()
+            if body:
+                return body
+        # 2/3. <html_file> opener but no proper close — pull the embedded doc.
+        m = _UNCLOSED_HTML_FILE_RE.search(reply)
+        if m:
+            return m.group(1).strip()
+        # 4. Markdown fence whose contents look like HTML.
+        for fm in _HTML_FENCE_RE.finditer(reply):
+            inner = fm.group(1).strip()
+            if "<html" in inner.lower() and "</html" in inner.lower():
+                return inner
+        # 5. Bare doctype...html fragment anywhere in the reply.
+        m = _BARE_DOCTYPE_RE.search(reply)
+        if m:
+            return m.group(1).strip()
+        return None
 
     @staticmethod
     def _extract_question(reply: str) -> str | None:
@@ -826,7 +910,11 @@ class GameAgent:
             # ---- materialize: patches OR full file --------------------
             new_html, materialize_msg = await self._materialize(reply)
             if new_html is None:
-                yield self._record(AgentEvent("info", f"no usable code: {materialize_msg}"))
+                trunc = self._truncation_diagnosis(reply)
+                if trunc:
+                    yield self._record(AgentEvent("error", f"TRUNCATED REPLY — {trunc}"))
+                else:
+                    yield self._record(AgentEvent("info", f"no usable code: {materialize_msg}"))
                 # If the reply had patches but they failed to apply, give the
                 # model the specific failures + current file so it can retry.
                 if patches_in_reply and self._current_file:

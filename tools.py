@@ -661,6 +661,36 @@ class LiveBrowser:
             "first_responsive_key": first_responsive_key,
         }
 
+    async def show_status(self, title: str, message: str = "") -> None:
+        """Replace whatever the browser is currently displaying with a small
+        status page. Used between sessions so a failed new session can't
+        masquerade as the previous successful one (the browser otherwise
+        keeps the last-loaded game on screen).
+        """
+        if self._page is None:
+            return
+        # Inline HTML via data: URL — no temp file needed.
+        from html import escape
+        from urllib.parse import quote
+        body = (
+            "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+            f"<title>{escape(title)}</title>"
+            "<style>html,body{margin:0;height:100%;background:#0b1020;"
+            "color:#e7ecff;font:16px/1.4 system-ui,sans-serif;}"
+            "div{position:fixed;inset:0;display:grid;place-items:center;"
+            "text-align:center;padding:20px;}"
+            "h1{font-size:22px;color:#79a;margin:0 0 12px;}"
+            "p{opacity:.75;max-width:600px;}</style></head>"
+            f"<body><div><div><h1>{escape(title)}</h1>"
+            f"<p>{escape(message)}</p></div></div></body></html>"
+        )
+        try:
+            await self._page.goto("data:text/html;charset=utf-8," + quote(body),
+                                  wait_until="load", timeout=5_000)
+        except Exception:
+            # Best-effort; never let a status update crash the TUI.
+            pass
+
     async def close(self) -> None:
         """Tear down. Safe to call multiple times."""
         try:
