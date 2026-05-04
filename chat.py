@@ -865,6 +865,8 @@ class CodingBoxApp(App):
                 self._cmd_set_iters(arg)
             elif cmd == "seed":
                 self._cmd_set_seed(arg)
+            elif cmd == "reset":
+                self._cmd_reset()
             elif cmd == "status":
                 self._cmd_status()
             else:
@@ -885,10 +887,15 @@ class CodingBoxApp(App):
             "  [b]/clear[/b]                   clear the agent log pane",
             "  [b]/iters <N>[/b]               set max iterations for the next session/extension",
             "  [b]/seed <path>[/b]             stage a baseline .html (STICKY across /new) · /seed alone clears",
-            "  [b]/status[/b]                  print model, phase, iteration, paths",
+            "  [b]/reset[/b]                   wipe ALL staged state (seed + model + iters → defaults)",
+            "  [b]/status[/b]                  print model, phase, iteration, paths, what's staged",
             "  [b]/quit[/b]                    quit (= Ctrl+Q)",
-            "[dim]Plain text after a session is done auto-extends the game (no slash needed).[/dim]",
-            "[dim]Workflow: /seed games/foo.html  →  /new add multiplayer  ▸ adapts foo.html[/dim]",
+            "",
+            "[bold]Sticky staging[/bold] — /seed and /model persist across multiple /new",
+            "calls. Clear individually with the bare command, or all at once with /reset.",
+            "[dim]Workflow: /seed games/foo.html  →  /new add multiplayer  →  /new add boss  ▸ both use foo.html[/dim]",
+            "[dim]Plain text after <done/> auto-extends the current game (no slash needed).[/dim]",
+            "[dim]Type 'done' / 'looks good' / 'ship' to ship without Ctrl+D.[/dim]",
         ]
         for line in lines:
             self._log(line)
@@ -1009,6 +1016,39 @@ class CodingBoxApp(App):
         self._log_info(
             f"staged seed for next /new: [b]{_esc(str(self._next_seed))}[/b] "
             f"[dim]({size:,} bytes)[/dim]"
+        )
+
+    def _cmd_reset(self) -> None:
+        """Wipe ALL staged state in one shot.
+
+        After /reset:
+          - no /seed staged → next /new starts from a memory skeleton
+          - no /model staged → next /new uses /api/ps detection
+          - max-iters back to default (6)
+
+        Does NOT touch the currently-running session (if any), the browser,
+        or anything on disk. To also start a fresh session, follow with
+        /new <goal>.
+        """
+        had_seed = self._next_seed
+        had_model = self._next_model
+        had_iters = self._max_iters
+        self._next_seed = None
+        self._next_model = None
+        self._max_iters = 6
+        bits: list[str] = []
+        if had_seed is not None:
+            bits.append(f"seed={had_seed}")
+        if had_model is not None:
+            bits.append(f"model={had_model}")
+        if had_iters != 6:
+            bits.append(f"iters={had_iters}→6")
+        if not bits:
+            self._log_info("nothing to reset (no staged seed/model, iters at default)")
+            return
+        self._log_info(
+            f"[yellow]reset:[/yellow] cleared {', '.join(bits)}. "
+            "Next /new starts from defaults. [dim](Run /new <goal> to start fresh.)[/dim]"
         )
 
     def _cmd_status(self) -> None:

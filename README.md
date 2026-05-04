@@ -169,21 +169,53 @@ ollama list         # confirm at least one usable tag
 ## Slash commands
 
 Type at the input box at any time. The session continues even after the
-model says `<done/>` — plain text auto-extends the existing game.
+model says `<done/>` — plain text auto-extends the existing game, and a
+short ship phrase (`done`, `ok`, `looks good`, `lgtm`, `ship`, `perfect`,
+`stop`, `finished`, …) ships immediately, same as `Ctrl+D`.
 
-| Command              | What it does                                                      |
-| -------------------- | ----------------------------------------------------------------- |
-| `/help` (`/h`, `/?`) | print all commands                                                |
-| `/list` (`/models`)  | numbered list of installed Ollama models, marks `*` for loaded    |
-| `/model <name\|N>`   | stage a model for the next `/new` session (current session keeps its tag) |
-| `/new <goal>`        | end current session (must be done first), start a fresh one       |
-| `/ship`              | ship now (= Ctrl+D)                                               |
-| `/open`              | open the current `.html` in your default system browser           |
-| `/log` (`/paths`)    | print game / log / jsonl / conversation / snapshots / best paths  |
-| `/clear`             | clear the agent log pane                                          |
-| `/iters <N>`         | change `max_iters` for the next session or extension              |
-| `/status`            | print model, phase, iteration, paths, max-iters                   |
-| `/quit`              | quit (= Ctrl+Q)                                                   |
+| Command              | What it does                                                                          |
+| -------------------- | ------------------------------------------------------------------------------------- |
+| `/help` (`/h`, `/?`) | print all commands                                                                    |
+| `/list` (`/models`)  | numbered list of installed Ollama models, marks `*` for loaded                        |
+| `/model <name\|N>`   | stage a model — **STICKY** across `/new`s · `/model` alone clears the staging         |
+| `/seed <path>`       | stage a baseline `.html` to adapt — **STICKY** across `/new`s · `/seed` alone clears  |
+| `/new <goal>`        | end current session (must be done first), start a fresh one — uses staged seed/model  |
+| `/iters <N>`         | change `max_iters` for the next session/extension (also sticky)                       |
+| `/reset`             | wipe ALL staged state at once (seed + model + iters → defaults)                       |
+| `/ship`              | ship now (= Ctrl+D, or just type `done`/`looks good`/`ship`)                          |
+| `/open`              | open the current `.html` in your default system browser                               |
+| `/log` (`/paths`)    | print game / log / jsonl / conversation / snapshots / best paths                      |
+| `/clear`             | clear the agent log pane (does not affect staged state)                               |
+| `/status`            | print model, phase, iteration, paths, **what's currently staged**                     |
+| `/quit`              | quit (= Ctrl+Q)                                                                       |
+
+### Sticky staging — and how to actually start fresh
+
+`/seed`, `/model`, and `/iters` are **sticky**. Once set, they apply to *every*
+subsequent `/new` until you change them. This matches the most common workflow
+("I want to iterate on this file with this model"):
+
+```
+/seed games/asteroids_20260503.html
+/model qwen3.6:35b
+/new add multiplayer       ← uses the seed + the model
+/new add a boss enemy      ← still uses the same seed + model
+/new high-score table      ← still uses them
+```
+
+To clear:
+
+| To clear…                       | Type                          |
+| ------------------------------- | ----------------------------- |
+| just the staged seed            | `/seed`        (no argument)  |
+| just the staged model           | `/model`       (no argument)  |
+| reset iters to default (6)      | `/iters 6`                    |
+| **everything staged at once**   | `/reset`                      |
+| clear the log pane              | `/clear`                      |
+
+`/reset` doesn't touch the running session, the browser, or anything on disk —
+it just resets staging to defaults. Follow with `/new <goal>` to actually
+start a fresh session.
 
 ---
 
