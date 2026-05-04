@@ -11,12 +11,13 @@ __pycache__/
 venv/
 env/
 
-# Generated game artifacts (huge + per-session, no point versioning)
-games/game.html
-games/current.html
-games/best.html
+# Generated game artifacts (huge + per-session, no point versioning).
+# Sessions now write games/<goal-slug>_<ts>.html (+ .best.html sibling),
+# so a single glob covers them all.
+games/*.html
 games/snapshots/
 games/traces/
+games/memory/
 games/test_*.html
 
 # Editor / OS noise

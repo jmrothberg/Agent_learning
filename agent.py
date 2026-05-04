@@ -104,9 +104,17 @@ class GameAgent:
         browser: LiveBrowser,
         max_iters: int = 6,
         *,
-        best_of_n: int = 2,
-        num_ctx: int = 16384,
-        stall_seconds: float = 60.0,
+        best_of_n: int = 1,
+        # 8192 matches Ollama's default load size for gpt-oss. Sending a
+        # different value forces a model reload every request and was the
+        # root cause of "Ollama call failed" errors after several runs.
+        # Conversation pruning (_prune_messages) keeps us under this even
+        # across many iterations.
+        num_ctx: int = 8192,
+        # 90s per-chunk inactivity. With 16K ctx + 20B model, time-to-first
+        # token can be 20-40s on a fresh load; we want headroom but still
+        # detect a true wedge promptly.
+        stall_seconds: float = 90.0,
         memory_root: str | Path = "games/memory",
     ):
         self.model = model
@@ -122,13 +130,19 @@ class GameAgent:
         self._pending_answer: str | None = None
         self._user_force_done = False
 
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self._session_id = ts
+        # All per-session artifact paths share the out_path stem so a session
+        # named e.g. "asteroids_20260503_175727.html" produces matching
+        # asteroids_20260503_175727.{jsonl,log,best.html,conversation.md} and
+        # snapshots/asteroids_20260503_175727/. The driver (chat.py / coder.py)
+        # is responsible for making the stem unique + meaningful — usually
+        # "<goal-slug>_<timestamp>".
+        basename = self.out_path.stem or datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._session_id = basename
         out_dir = self.out_path.parent
-        self.trace_path: Path = out_dir / "traces" / f"{ts}.jsonl"
-        self.snapshots_dir: Path = out_dir / "snapshots" / ts
-        self.best_path: Path = out_dir / "best.html"
-        self.conversation_path: Path = out_dir / "traces" / f"{ts}.conversation.md"
+        self.trace_path: Path = out_dir / "traces" / f"{basename}.jsonl"
+        self.snapshots_dir: Path = out_dir / "snapshots" / basename
+        self.best_path: Path = out_dir / f"{basename}.best.html"
+        self.conversation_path: Path = out_dir / "traces" / f"{basename}.conversation.md"
         self._previous_report_ok: bool | None = None
         self._snapshot_n: int = 0
         self._is_vlm: bool | None = None
@@ -515,88 +529,149 @@ class GameAgent:
 
     # -- main loop ----------------------------------------------------------
 
-    async def run(self, goal: str) -> AsyncIterator[AgentEvent]:
+    async def run(
+        self,
+        goal: str,
+        *,
+        continuation: bool = False,
+    ) -> AsyncIterator[AgentEvent]:
+        """Drive a planning + iteration session.
+
+        continuation=False (default): fresh session. Resets _messages, runs
+        phase A planning, picks a memory skeleton, and seeds the first build.
+
+        continuation=True: extend a previously-finished session. `goal` is
+        treated as new user feedback for the existing game on disk; planning
+        and first-build are skipped, the iteration loop resumes immediately
+        with a continuation prompt. _messages, _current_file, _snapshot_n,
+        browser, and model are all reused.
+        """
         self._goal = goal
         self.out_path.parent.mkdir(parents=True, exist_ok=True)
-        self._messages = [
-            {"role": "system", "content": SYSTEM_PROMPT.replace("{goal}", goal)},
-            {"role": "user", "content": PLAN_INSTRUCTION},
-        ]
 
-        self._trace({
-            "kind": "session_start",
-            "model": self.model,
-            "goal": goal,
-            "out_path": str(self.out_path),
-            "trace_path": str(self.trace_path),
-            "snapshots_dir": str(self.snapshots_dir),
-            "best_path": str(self.best_path),
-            "max_iters": self.max_iters,
-            "best_of_n": self.best_of_n,
-            "num_ctx": self.num_ctx,
-            "stall_seconds": self.stall_seconds,
-            "memory_root": str(self._memory.root),
-        })
-        yield self._record(AgentEvent(
-            "info",
-            f"Trace: {self.trace_path}  (snapshots: {self.snapshots_dir})",
-        ))
-
-        # ---- PHASE A: planning ------------------------------------------
-        yield self._record(AgentEvent("phase", "planning"))
-        try:
-            plan_reply = await self._stream(self._token_cb_wrapper)
-        except Exception as e:
-            yield self._record(AgentEvent("error", f"Ollama call failed during planning: {e}"))
-            return
-        self._messages.append({"role": "assistant", "content": plan_reply})
-        self._dump_conversation()
-        yield self._record(AgentEvent("plan", plan_reply))
-
-        q = self._extract_question(plan_reply)
-        if q is not None:
-            yield self._record(AgentEvent("question", q))
-            while self._pending_answer is None:
-                await asyncio.sleep(0.1)
+        if continuation:
+            # Make sure we have something to extend.
+            if not self._current_file:
+                try:
+                    self._current_file = self.out_path.read_text(encoding="utf-8")
+                except Exception as e:
+                    yield self._record(AgentEvent(
+                        "error", f"can't extend: no current file ({e})"
+                    ))
+                    return
+            # Reset transient state so the loop runs again fresh.
+            self._user_force_done = False
+            self._fix_mode = True
+            self._previous_report_ok = True
+            # Queue the new request as user feedback so _flush_user_injections
+            # folds it into the next prompt with the standard "USER FEEDBACK"
+            # banner the model already knows how to react to.
+            self.add_user_feedback(goal)
+            self._trace({"kind": "continuation_start", "feedback": goal})
+            yield self._record(AgentEvent(
+                "info", f"continuing on existing file with new request: {goal[:160]}"
+            ))
             self._messages.append({
                 "role": "user",
                 "content": self._flush_user_injections(
-                    "Thanks. Now produce the <plan> per the original instructions."
+                    "CONTINUATION TURN: the user has new feedback above for the "
+                    "game you previously shipped. The current file is unchanged "
+                    "on disk. Reply with one or more <patch> blocks that address "
+                    "the feedback. Use a full <html_file> only if patches truly "
+                    "cannot express the change."
                 ),
             })
+        else:
+            self._messages = [
+                {"role": "system", "content": SYSTEM_PROMPT.replace("{goal}", goal)},
+                {"role": "user", "content": PLAN_INSTRUCTION},
+            ]
+
+            self._trace({
+                "kind": "session_start",
+                "model": self.model,
+                "goal": goal,
+                "out_path": str(self.out_path),
+                "trace_path": str(self.trace_path),
+                "snapshots_dir": str(self.snapshots_dir),
+                "best_path": str(self.best_path),
+                "max_iters": self.max_iters,
+                "best_of_n": self.best_of_n,
+                "num_ctx": self.num_ctx,
+                "stall_seconds": self.stall_seconds,
+                "memory_root": str(self._memory.root),
+            })
+            yield self._record(AgentEvent(
+                "info",
+                f"Trace: {self.trace_path}  (snapshots: {self.snapshots_dir})",
+            ))
+
+            # ---- PHASE A: planning ------------------------------------------
+            yield self._record(AgentEvent("phase", "planning"))
             try:
                 plan_reply = await self._stream(self._token_cb_wrapper)
             except Exception as e:
-                yield self._record(AgentEvent("error", f"Ollama call failed: {e}"))
+                yield self._record(AgentEvent("error", f"Ollama call failed during planning: {e}"))
                 return
             self._messages.append({"role": "assistant", "content": plan_reply})
             self._dump_conversation()
             yield self._record(AgentEvent("plan", plan_reply))
 
-        # ---- retrieve a skeleton from memory for the first build --------
-        skel = self._memory.retrieve_skeleton(goal)
-        memory_msg = (
-            f"using skeleton: {skel.name}"
-            + (f" (sim={skel.score:.2f}, src goal: {skel.source_goal!r})"
-               if skel.source_goal else " (default)")
-        )
-        yield self._record(AgentEvent("memory", memory_msg, {
-            "skeleton": skel.name, "score": skel.score, "source_goal": skel.source_goal,
-        }))
+            q = self._extract_question(plan_reply)
+            if q is not None:
+                yield self._record(AgentEvent("question", q))
+                while self._pending_answer is None:
+                    await asyncio.sleep(0.1)
+                self._messages.append({
+                    "role": "user",
+                    "content": self._flush_user_injections(
+                        "Thanks. Now produce the <plan> per the original instructions."
+                    ),
+                })
+                try:
+                    plan_reply = await self._stream(self._token_cb_wrapper)
+                except Exception as e:
+                    yield self._record(AgentEvent("error", f"Ollama call failed: {e}"))
+                    return
+                self._messages.append({"role": "assistant", "content": plan_reply})
+                self._dump_conversation()
+                yield self._record(AgentEvent("plan", plan_reply))
 
-        self._messages.append({
-            "role": "user",
-            "content": self._flush_user_injections(
-                first_build_instruction(skel.html, skel.source_goal)
-            ),
-        })
+            # ---- retrieve a skeleton from memory for the first build --------
+            skel = self._memory.retrieve_skeleton(goal)
+            memory_msg = (
+                f"using skeleton: {skel.name}"
+                + (f" (sim={skel.score:.2f}, src goal: {skel.source_goal!r})"
+                   if skel.source_goal else " (default)")
+            )
+            yield self._record(AgentEvent("memory", memory_msg, {
+                "skeleton": skel.name, "score": skel.score, "source_goal": skel.source_goal,
+            }))
+
+            self._messages.append({
+                "role": "user",
+                "content": self._flush_user_injections(
+                    first_build_instruction(skel.html, skel.source_goal)
+                ),
+            })
 
         # ---- PHASE B: build/iterate -------------------------------------
         awaiting_confirm = False
 
-        for iteration in range(1, self.max_iters + 1):
+        # In continuation mode the iteration counter resumes from where the
+        # previous run left off; the user-visible label uses a relative count
+        # so they see "extension 1/N" instead of confusing "iteration 4/9".
+        start_iter = self._snapshot_n + 1 if continuation else 1
+        end_iter = start_iter + self.max_iters - 1
+
+        for iteration in range(start_iter, end_iter + 1):
             self._last_iter_run = iteration
-            yield self._record(AgentEvent("phase", f"iteration {iteration}/{self.max_iters}"))
+            if continuation:
+                rel = iteration - start_iter + 1
+                phase_text = f"extension {rel}/{self.max_iters}"
+            else:
+                phase_text = f"iteration {iteration}/{self.max_iters}"
+            yield self._record(AgentEvent("phase", phase_text))
 
             # Prune older turns before generating, so we don't hit context.
             self._prune_messages()
@@ -669,28 +744,43 @@ class GameAgent:
                 })
                 continue
 
-            # ---- handle confirm-done after critique --------------------
+            # ---- handle done / confirm-done with no new code ----------
+            # Two paths land here:
+            #   (a) we asked the critique question (awaiting_confirm) and the
+            #       model replied <confirm_done/>;
+            #   (b) the previous iter passed cleanly and we sent the post-
+            #       clean prompt encouraging <done/> — model replied <done/>
+            #       (or <confirm_done/>) with no new code.
+            # Either way: nothing to apply, nothing to test, ship it.
+            said_done_or_confirm = bool(
+                _CONFIRM_RE.search(reply) or _DONE_RE.search(reply)
+            )
             if (
-                awaiting_confirm
+                said_done_or_confirm
                 and html_in_reply is None
                 and not patches_in_reply
-                and _CONFIRM_RE.search(reply)
+                and (awaiting_confirm or self._previous_report_ok is True)
             ):
                 if self.has_pending_user_input():
                     yield self._record(AgentEvent(
                         "info",
-                        "Model said <confirm_done/> but user feedback is pending - applying it instead of exiting.",
+                        "Model said done but user feedback is pending - applying it instead of exiting.",
                     ))
                     awaiting_confirm = False
                     self._messages.append({
                         "role": "user",
                         "content": self._flush_user_injections(
-                            "You were about to confirm done, but the user just sent the "
+                            "You were about to ship, but the user just sent the "
                             "feedback above. Address it now and re-send a fix as <patch>."
                         ),
                     })
                     continue
-                yield self._record(AgentEvent("done", "Model confirmed after self-critique."))
+                reason = (
+                    "Model confirmed after self-critique."
+                    if awaiting_confirm
+                    else "Model declared done after a clean run."
+                )
+                yield self._record(AgentEvent("done", reason))
                 self._record_session_outcome(ok=True)
                 return
 

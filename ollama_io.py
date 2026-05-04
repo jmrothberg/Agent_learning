@@ -209,38 +209,42 @@ async def best_of_n(
     overall_seconds: float = 600.0,
     scorer: Callable[[str], Awaitable[tuple[float, dict]]],
     on_progress: Callable[[int, str], None] | None = None,
+    early_exit_score: float = 1.0,
 ) -> tuple[Candidate, list[Candidate]]:
-    """Sample N completions in parallel, score each, return (best, all_sorted).
+    """Sample candidates SEQUENTIALLY with early exit, score each, return winner.
 
-    `temperatures`: per-sample temps. If None we use a default spread that
-    keeps one near-greedy sample (precision) and a couple of explorers.
-    `scorer(text) -> (score, extra)` is awaited concurrently with the next
-    sample's generation when possible.
+    Originally we ran candidates in parallel via asyncio.gather, but local
+    Ollama serializes generation requests at the daemon level — so "parallel"
+    just queued the second request behind the first AND tripped the stall
+    watchdog while the second candidate sat waiting. Sequential is faster
+    in wall time AND correct.
 
-    Returns ((winner, all_candidates_sorted_high_to_low). Caller uses winner
-    for the next agent step; the rest are typically traced for audit.
+    Early exit: as soon as a candidate scores at least `early_exit_score`
+    (default 1.0 = passes the test), we stop sampling. So when the first
+    sample is good, best-of-N costs roughly the same as best-of-1.
     """
     if temperatures is None:
-        # 0.2 = greedy-ish (best for precision fixes), 0.6/0.9 = exploration.
-        # We trim the list to length n so callers can shrink it.
+        # Sample 0 = near-greedy (precision). Subsequent samples explore.
+        # Anything beyond 3 reuses the last temp.
         temperatures = [0.2, 0.6, 0.9][:n]
     temps = list(temperatures)
     if len(temps) < n:
-        # Pad by reusing the last temperature.
         temps += [temps[-1]] * (n - len(temps))
 
     base_options = dict(options or {})
+    cands: list[Candidate] = []
 
-    async def one(i: int, t: float) -> Candidate:
+    for i, t in enumerate(temps):
         opts = dict(base_options)
         opts["temperature"] = t
         if on_progress is not None:
             on_progress(i, f"start (T={t})")
+
         result = await stream_chat(
             client,
             model,
             messages,
-            on_token=None,  # silent; we'll only show the winner
+            on_token=None,
             options=opts,
             stall_seconds=stall_seconds,
             overall_seconds=overall_seconds,
@@ -254,21 +258,18 @@ async def best_of_n(
             score, extra = -1.0, {"scorer_error": str(e)}
         if on_progress is not None:
             on_progress(i, f"scored {score:+.2f}")
-        return Candidate(
+        cands.append(Candidate(
             text=result.text,
             score=score,
             extra=extra,
             tokens=result.tokens,
             duration_s=result.duration_s,
             stalled=result.stalled,
-        )
+        ))
+        if score >= early_exit_score:
+            if on_progress is not None:
+                on_progress(i, f"early-exit at {score:+.2f}")
+            break
 
-    # Generation can run in parallel; scoring (browser-test) is also async, so
-    # asyncio.gather lets the browser pool all candidates concurrently. The
-    # one shared resource is the Ollama daemon itself — most local servers
-    # serialize generation requests anyway, so "parallel" here means we
-    # overlap generation with scoring of earlier samples, not pure parallel
-    # token production.
-    cands = await asyncio.gather(*(one(i, t) for i, t in enumerate(temps)))
     cands.sort(key=lambda c: (c.score, -c.duration_s), reverse=True)
     return cands[0], cands

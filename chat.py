@@ -40,11 +40,15 @@ Workflow:
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import ollama
+from rich.markup import escape as _esc
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -55,8 +59,23 @@ from coder import MODEL  # CLI / last-resort default when ps is empty and no env
 from tools import LiveBrowser
 
 
-# Where the game lives on disk. Same default as the CLI.
-DEFAULT_OUT_PATH = Path("games/game.html")
+# Parent directory for all generated artifacts. Each session writes a unique
+# file inside here named "<goal-slug>_<timestamp>.html" so prior runs are
+# never overwritten. Snapshots, traces, logs and best.html all derive from
+# the same stem (see agent.py).
+GAMES_DIR = Path("games")
+
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _slugify(text: str, max_len: int = 30) -> str:
+    """Compact, filename-safe stem from a free-form goal."""
+    s = _SLUG_RE.sub("-", (text or "").lower()).strip("-")
+    if not s:
+        s = "game"
+    if len(s) > max_len:
+        s = s[:max_len].rstrip("-") or "game"
+    return s
 
 
 def _ollama_ps_base_urls() -> list[str]:
@@ -116,6 +135,40 @@ def _http_get_models(base: str, endpoint: str) -> tuple[list[str], str | None]:
 def _running_models_via_http_one(base: str) -> tuple[list[str], str | None]:
     """Currently-loaded (in-memory) models from /api/ps."""
     return _http_get_models(base, "/api/ps")
+
+
+def _running_models_with_meta() -> list[dict]:
+    """Currently-loaded models from /api/ps WITH metadata.
+
+    Ollama renews each loaded model's `expires_at` (TTL) on every use, so the
+    record with the latest `expires_at` is the one you most recently talked
+    to — which is what people mean when they say "I have ollama running X".
+    Tries every loopback base; first reachable one wins.
+    """
+    import json
+    import urllib.error
+    import urllib.request
+
+    for base in _ollama_ps_base_urls():
+        url = base.rstrip("/") + "/api/ps"
+        try:
+            with urllib.request.urlopen(
+                urllib.request.Request(url, method="GET"), timeout=5
+            ) as resp:
+                data = json.loads(resp.read().decode())
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
+            continue
+        out: list[dict] = []
+        for m in data.get("models") or []:
+            if not isinstance(m, dict):
+                continue
+            name = (m.get("name") or m.get("model") or "").strip()
+            if not name:
+                continue
+            out.append({"name": name, "expires_at": m.get("expires_at") or ""})
+        if out:
+            return out
+    return []
 
 
 def _installed_models_via_http() -> tuple[list[str], str | None]:
@@ -206,7 +259,7 @@ def _running_models_via_cli() -> tuple[list[str], str | None]:
 # Model tags that we know are broken on this machine (Ollama returns 500 for
 # them). When falling back to "first installed", we skip these so we never pick
 # a model that we already know cannot load.
-_KNOWN_BROKEN_TAGS: set[str] = {"qwen3.6:27b"}
+_KNOWN_BROKEN_TAGS: set[str] = {"qwen3.6:27b", "qwen3.6:35b"}
 
 
 def _pick_first_workable(names: list[str]) -> str | None:
@@ -264,14 +317,19 @@ def _running_models_all_sources() -> tuple[list[str], str, str]:
 
 
 def resolve_chat_model(fallback: str) -> tuple[str, str]:
-    """Pick which Ollama tag chat.py should use. Simple two-step:
+    """Pick which Ollama tag chat.py should use.
 
-      1. OLLAMA_MODEL env var wins, full stop.
-      2. Else: ask Ollama which models are INSTALLED (/api/tags) and pick the
-         first one that isn't on _KNOWN_BROKEN_TAGS. Ollama auto-loads it on
-         the first chat request - we don't need to probe what's "currently in
-         memory" or do anything clever.
-      3. Else: fallback (coder.MODEL).
+    Order of preference (matches what users actually expect):
+      1. OLLAMA_MODEL / CHAT_OLLAMA_MODEL env var — explicit override.
+      2. Models currently LOADED IN MEMORY (/api/ps), preferring the one with
+         the latest `expires_at`. Ollama bumps that TTL on every use, so the
+         freshest entry is the model the user most recently ran. The
+         broken-tag blacklist is NOT applied here — if the model is in ps it
+         was loaded successfully, and silently overriding the user's explicit
+         `ollama run` would be infuriating.
+      3. First INSTALLED model (/api/tags) skipping _KNOWN_BROKEN_TAGS — only
+         a guess, used when nothing is loaded yet.
+      4. Hard fallback (coder.MODEL).
 
     Returns (model_name, source_label) for the TUI to log.
     """
@@ -280,10 +338,27 @@ def resolve_chat_model(fallback: str) -> tuple[str, str]:
         if raw:
             return raw, f"{key} env"
 
+    running = _running_models_with_meta()
+    if running:
+        # Sort by expires_at descending — ISO-8601 strings sort lexically the
+        # right way. Ties (or missing values) fall back to ps order.
+        running.sort(key=lambda m: m.get("expires_at") or "", reverse=True)
+        chosen = running[0]["name"]
+        names = [m["name"] for m in running]
+        if len(names) == 1:
+            return chosen, f"loaded in ollama (/api/ps): {chosen!r}"
+        return chosen, (
+            f"loaded in ollama: {names} — picking most-recently-used "
+            f"{chosen!r} (latest expires_at)"
+        )
+
     installed, err = _installed_models_via_http()
     if installed:
         chosen = _pick_first_workable(installed) or installed[0]
-        return chosen, f"installed: [{', '.join(installed)}] — using {chosen!r}"
+        return chosen, (
+            f"nothing running; first installed (skipping broken): {chosen!r} "
+            f"of {installed}"
+        )
 
     fb = fallback.strip() or "llama3.2"
     if err:
@@ -404,6 +479,19 @@ class CodingBoxApp(App):
         # "not yet open" - _log() handles that gracefully.
         self._log_file_handle = None
         self._log_file_path: Path | None = None
+        # Per-session paths assigned in _start_session. None until then.
+        self._out_path: Path | None = None
+        self._best_path: Path | None = None
+        # True between session-end and session-start. Used so feedback typed
+        # after <done/> automatically triggers a continuation extension
+        # instead of being silently queued forever.
+        self._session_done: bool = True
+        # /model stages a tag for the NEXT session; the running session keeps
+        # whatever it was constructed with. None = use resolve_chat_model().
+        self._next_model: str | None = None
+        # /iters lets the user change the max-iters cap before starting a
+        # session or extending. Default matches GameAgent's default.
+        self._max_iters: int = 6
 
     # ----------------------------- layout ---------------------------------
 
@@ -438,6 +526,10 @@ class CodingBoxApp(App):
             "if the shell stops echoing after exit, run `reset`.[/dim]"
         )
         self._log_info(
+            "[dim]Slash commands available — type [b]/help[/b] for the full list "
+            "(/list, /model, /new, /open, /clear, /iters, /status, /ship, /quit).[/dim]"
+        )
+        self._log_info(
             "[dim]Cut/paste: hold [b]Shift[/b] while click-dragging in the agent "
             "log pane (this bypasses Textual's mouse capture so your terminal can "
             "select text). Then Ctrl+Shift+C to copy. Or just `cat` the .log file "
@@ -451,10 +543,16 @@ class CodingBoxApp(App):
     # Pattern matches `[tag]`, `[/tag]`, `[tag=value]`, etc - same syntax Rich
     # uses for inline styling. We only strip from the FILE copy; the TUI still
     # gets the colored version.
-    _MARKUP_RE = __import__("re").compile(r"\[/?[a-zA-Z][^\[\]]*\]")
+    _MARKUP_RE = re.compile(r"\[/?[a-zA-Z][^\[\]]*\]")
 
     def _log(self, text: str) -> None:
-        """Append a line to the agent log pane AND mirror to the .log file."""
+        """Append a Rich-markup line to the agent log pane AND mirror to file.
+
+        Use this for OUR annotation text (headers, status lines, prefixes) —
+        anything you want Rich to color. For raw model output that may contain
+        bracket-y code (e.g. `KEYMAP[e.code]`, `bullets[i]`), use _log_raw
+        instead — Rich would otherwise eat those brackets as fake markup tags.
+        """
         self.query_one("#log-pane", RichLog).write(text)
         if self._log_file_handle is not None:
             try:
@@ -463,6 +561,22 @@ class CodingBoxApp(App):
                 self._log_file_handle.flush()  # so `tail -f` sees it live
             except Exception:
                 # Mirror must never crash the TUI.
+                pass
+
+    def _log_raw(self, text: str) -> None:
+        """Append text VERBATIM — no Rich markup parsing, no regex stripping.
+
+        Streamed model tokens go through here. JS code legitimately contains
+        `[i]`, `[k]`, `[e.code]`, etc.; the regex used in _log would eat those
+        in the file mirror, and `RichLog(markup=True)` would eat them in the
+        pane. Wrapping in `Text` bypasses Rich's parser entirely.
+        """
+        self.query_one("#log-pane", RichLog).write(Text(text))
+        if self._log_file_handle is not None:
+            try:
+                self._log_file_handle.write(text.rstrip("\n") + "\n")
+                self._log_file_handle.flush()
+            except Exception:
                 pass
 
     def _log_info(self, text: str) -> None:
@@ -486,12 +600,14 @@ class CodingBoxApp(App):
             *complete, self._stream_buf = self._stream_buf.split("\n")
             for line in complete:
                 if line.strip():
-                    self._log(line)
+                    # Raw: model output contains JS bracket indexing that
+                    # would otherwise be eaten by Rich's markup parser.
+                    self._log_raw(line)
 
     def _flush_stream(self) -> None:
         """Push any remaining buffered tokens (no trailing newline)."""
         if self._stream_buf.strip():
-            self._log(self._stream_buf)
+            self._log_raw(self._stream_buf)
         self._stream_buf = ""
 
     def _update_status(self, extra: str = "") -> None:
@@ -527,31 +643,46 @@ class CodingBoxApp(App):
 
     async def action_show_log_paths(self) -> None:
         """Ctrl+L - print every artifact path so the user can `cat` them."""
-        if self._log_file_path is None:
+        if self._log_file_path is None or self._out_path is None:
             self._log_info("[dim]no session active yet - paths appear after you submit a goal[/dim]")
             return
-        ts_stem = self._log_file_path.stem  # e.g. 20260503_160301
+        stem = self._log_file_path.stem  # e.g. asteroids_20260503_175727
         traces = self._log_file_path.parent
-        snaps = DEFAULT_OUT_PATH.parent / "snapshots" / ts_stem
+        snaps = GAMES_DIR / "snapshots" / stem
         self._log("[bold cyan]── log artifacts ──[/bold cyan]")
+        self._log(f"  game file:    {self._out_path}")
         self._log(f"  full log:     {self._log_file_path}")
-        self._log(f"  jsonl trace:  {traces / (ts_stem + '.jsonl')}")
-        self._log(f"  conversation: {traces / (ts_stem + '.conversation.md')}")
+        self._log(f"  jsonl trace:  {traces / (stem + '.jsonl')}")
+        self._log(f"  conversation: {traces / (stem + '.conversation.md')}")
         self._log(f"  snapshots:    {snaps}")
-        self._log(f"  best clean:   {DEFAULT_OUT_PATH.parent / 'best.html'}")
+        if self._best_path is not None:
+            self._log(f"  best clean:   {self._best_path}")
         self._log("[dim]Tip: paste the full log above into your AI assistant to debug.[/dim]")
 
     # ----------------------------- input handler --------------------------
 
     async def on_input_submitted(self, message: Input.Submitted) -> None:
-        """Single dispatch point for the user's bottom input box."""
+        """Single dispatch point for the user's bottom input box.
+
+        Dispatch order:
+          1. Empty → ignore.
+          2. Starts with `/` → slash command.
+          3. awaiting_kind == "goal"   → start fresh session.
+          4. awaiting_kind == "answer" → reply to model's <question>.
+          5. awaiting_kind == "feedback":
+                - session running → queue as mid-run feedback.
+                - session done    → auto-extend (continuation mode).
+        """
         text = (message.value or "").strip()
         message.input.value = ""
         if not text:
             return
 
+        if text.startswith("/"):
+            await self._handle_slash(text)
+            return
+
         if self._awaiting_kind == "goal":
-            # First message: the game description. Spin up the agent + browser.
             self._goal = text
             self._log(f"[bold green]>[/bold green] {text}")
             message.input.placeholder = "type feedback any time, or Ctrl+D when done"
@@ -568,75 +699,300 @@ class CodingBoxApp(App):
 
         else:  # "feedback"
             self._log(f"[bold blue]> feedback:[/bold blue] {text}")
-            if self.agent is not None:
-                self.agent.add_user_feedback(text)
-                # Tell the user CLEARLY their words were captured. Otherwise
-                # they assume the input field swallowed the text.
-                pending = len(self.agent._pending_feedback)
-                self._log(
-                    f"[dim cyan]  ✓ queued (pending: {pending}). "
-                    f"Will be applied at the next user-turn boundary - watch "
-                    f"for an [italic]→ applying your input[/italic] line.[/dim cyan]"
-                )
-            else:
+            if self.agent is None:
                 self._log("[dim red]  (no active agent - feedback ignored)[/dim red]")
+                return
+            if self._session_done:
+                # Session ended after <done/> — feedback is no longer queued
+                # and forgotten. Restart the agent in continuation mode so
+                # the new request is applied as patches against the existing
+                # game file.
+                await self._extend_session(text)
+                return
+            self.agent.add_user_feedback(text)
+            pending = len(self.agent._pending_feedback)
+            self._log(
+                f"[dim cyan]  ✓ queued (pending: {pending}). "
+                f"Will be applied at the next user-turn boundary - watch "
+                f"for an [italic]→ applying your input[/italic] line.[/dim cyan]"
+            )
+
+    # ----------------------------- slash commands -------------------------
+
+    async def _handle_slash(self, text: str) -> None:
+        """Parse `/cmd args...` and dispatch. Unknown commands log help hint."""
+        parts = text[1:].strip().split(maxsplit=1)
+        if not parts:
+            self._log_info("type /help to see available commands")
+            return
+        cmd = parts[0].lower()
+        arg = parts[1].strip() if len(parts) > 1 else ""
+        # Echo the command so the trace shows what was typed.
+        self._log(f"[bold cyan]>[/bold cyan] /{cmd}{(' ' + arg) if arg else ''}")
+        try:
+            if cmd in ("help", "h", "?"):
+                self._cmd_help()
+            elif cmd in ("list", "models"):
+                self._cmd_list_models()
+            elif cmd == "model":
+                self._cmd_set_model(arg)
+            elif cmd == "new":
+                await self._cmd_new(arg)
+            elif cmd == "ship":
+                await self.action_ship_it()
+            elif cmd == "quit":
+                await self.action_quit_app()
+            elif cmd in ("log", "paths", "files"):
+                await self.action_show_log_paths()
+            elif cmd == "open":
+                self._cmd_open()
+            elif cmd == "clear":
+                self.query_one("#log-pane", RichLog).clear()
+            elif cmd == "iters":
+                self._cmd_set_iters(arg)
+            elif cmd == "status":
+                self._cmd_status()
+            else:
+                self._log_info(f"unknown command /{cmd} — type /help")
+        except Exception as e:
+            self._log_error(f"/{cmd} failed: {e}")
+
+    def _cmd_help(self) -> None:
+        lines = [
+            "[bold cyan]── slash commands ──[/bold cyan]",
+            "  [b]/help[/b]                    show this help (also /h, /?)",
+            "  [b]/list[/b]                    list installed Ollama models with numbers (also /models)",
+            "  [b]/model <name|N>[/b]          stage model for the next /new session",
+            "  [b]/new <goal>[/b]              end current session, start a fresh one",
+            "  [b]/ship[/b]                    ship current build (= Ctrl+D)",
+            "  [b]/open[/b]                    open the current game in your default browser",
+            "  [b]/log[/b]                     print all session artifact paths (= Ctrl+L; also /paths, /files)",
+            "  [b]/clear[/b]                   clear the agent log pane",
+            "  [b]/iters <N>[/b]               set max iterations for the next session/extension",
+            "  [b]/status[/b]                  print model, phase, iteration, paths",
+            "  [b]/quit[/b]                    quit (= Ctrl+Q)",
+            "[dim]Plain text after a session is done auto-extends the game (no slash needed).[/dim]",
+        ]
+        for line in lines:
+            self._log(line)
+
+    def _cmd_list_models(self) -> None:
+        installed, err = _installed_models_via_http()
+        if not installed:
+            self._log_error(f"no installed models reachable: {err or 'unknown'}")
+            return
+        running = {m["name"] for m in _running_models_with_meta()}
+        self._log("[bold cyan]── installed models ──[/bold cyan]")
+        self._log("[dim]  * = currently loaded in ollama  · ← active = this session is using it[/dim]")
+        for i, name in enumerate(installed, 1):
+            loaded = "*" if name in running else " "
+            active = "  [yellow]← active[/yellow]" if name == self._session_model else ""
+            staged = "  [magenta]← staged for next /new[/magenta]" if name == self._next_model else ""
+            self._log(f"  [{i:>2}] {loaded} {_esc(name)}{active}{staged}")
+        self._log("[dim]Use /model <number-or-name> to switch.[/dim]")
+
+    def _cmd_set_model(self, arg: str) -> None:
+        if not arg:
+            self._log_info("usage: /model <name-or-number>  (see /list)")
+            return
+        installed, _ = _installed_models_via_http()
+        if not installed:
+            self._log_error("no installed models to choose from")
+            return
+        chosen: str | None = None
+        if arg.isdigit():
+            idx = int(arg) - 1
+            if 0 <= idx < len(installed):
+                chosen = installed[idx]
+        if chosen is None and arg in installed:
+            chosen = arg
+        if chosen is None:
+            matches = [n for n in installed if arg.lower() in n.lower()]
+            if len(matches) == 1:
+                chosen = matches[0]
+            elif len(matches) > 1:
+                self._log_error(f"ambiguous: {matches}")
+                return
+        if chosen is None:
+            self._log_error(f"no match for {arg!r} — try /list")
+            return
+        self._next_model = chosen
+        self._log_info(
+            f"staged [b]{_esc(chosen)}[/b] for next /new session "
+            "[dim](current session keeps its model)[/dim]"
+        )
+
+    async def _cmd_new(self, arg: str) -> None:
+        if not arg:
+            self._log_info("usage: /new <game description>")
+            return
+        if self.agent is not None and not self._session_done:
+            self._log_error(
+                "a session is currently running — press Ctrl+D to ship it "
+                "first, then /new <goal>"
+            )
+            return
+        await self._new_session(arg)
+
+    def _cmd_open(self) -> None:
+        if self._out_path is None or not self._out_path.exists():
+            self._log_error("no game file to open yet")
+            return
+        import webbrowser
+        url = f"file://{self._out_path.resolve()}"
+        try:
+            webbrowser.open(url)
+            self._log_info(f"opened {url}")
+        except Exception as e:
+            self._log_error(f"could not open browser: {e}")
+
+    def _cmd_set_iters(self, arg: str) -> None:
+        if not arg.isdigit() or int(arg) <= 0:
+            self._log_info(f"usage: /iters <positive int>  (current: {self._max_iters})")
+            return
+        self._max_iters = int(arg)
+        self._log_info(
+            f"max iterations set to [b]{self._max_iters}[/b] for next session/extension"
+        )
+
+    def _cmd_status(self) -> None:
+        lines = [
+            "[bold cyan]── status ──[/bold cyan]",
+            f"  model (active):    {_esc(self._session_model or '—')}",
+            f"  model (next /new): {_esc(self._next_model or '(auto-detect)')}",
+            f"  goal:              {_esc(self._goal or '—')}",
+            f"  phase:             {_esc(self._phase_label)}",
+            f"  iteration:         {_esc(self._iteration_label)}",
+            f"  max iters:         {self._max_iters}",
+            f"  session done:      {self._session_done}",
+            f"  game file:         {self._out_path or '—'}",
+            f"  log file:          {self._log_file_path or '—'}",
+        ]
+        for line in lines:
+            self._log(line)
 
     # ----------------------------- session --------------------------------
 
     async def _start_session(self, goal: str) -> None:
         """Boot the LiveBrowser + GameAgent and start consuming events."""
         self._phase_label = "starting browser"
+        self._session_done = False
         self._update_status()
 
-        self.browser = LiveBrowser(viewport=(800, 600), run_seconds=3.0)
-        try:
-            await self.browser.start()
-        except Exception as e:
-            self._log_error(
-                f"Could not launch Chromium: {e}\n"
-                "Make sure you ran `playwright install chromium` and that you "
-                "have a graphical display (this needs headless=False)."
-            )
-            return
+        if self.browser is None:
+            self.browser = LiveBrowser(viewport=(800, 600), run_seconds=3.0)
+            try:
+                await self.browser.start()
+            except Exception as e:
+                self._log_error(
+                    f"Could not launch Chromium: {e}\n"
+                    "Make sure you ran `playwright install chromium` and that you "
+                    "have a graphical display (this needs headless=False)."
+                )
+                self._session_done = True
+                return
 
-        # Resolve tag here (not at app launch) so you can `ollama run mymodel`
-        # in another terminal while the TUI is open, then submit your goal.
-        model_name, model_src = resolve_chat_model(MODEL)
+        # /model staged tag wins; otherwise resolve from env / ps / installed.
+        if self._next_model:
+            model_name, model_src = self._next_model, "/model staged"
+            self._next_model = None
+        else:
+            model_name, model_src = resolve_chat_model(MODEL)
         self._session_model = model_name
         self.title = f"Coding Box - {model_name}"
-        self._log_info(f"Using model [b]{model_name}[/b] [dim]({model_src})[/dim]")
+        self._log_info(f"Using model [b]{_esc(model_name)}[/b] [dim]({_esc(model_src)})[/dim]")
         self._update_status()
+
+        # Build a unique, meaningful basename for every session artifact:
+        # "<goal-slug>_<timestamp>". The agent derives trace/snapshots/best
+        # paths from out_path.stem, so they all share this basename.
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        basename = f"{_slugify(goal)}_{ts}"
+        GAMES_DIR.mkdir(parents=True, exist_ok=True)
+        self._out_path = GAMES_DIR / f"{basename}.html"
+        self._best_path = GAMES_DIR / f"{basename}.best.html"
+        self._log_info(f"Game file: [b]{self._out_path}[/b]")
 
         self.agent = GameAgent(
             model=model_name,
-            out_path=DEFAULT_OUT_PATH,
+            out_path=self._out_path,
             browser=self.browser,
-            max_iters=6,
+            max_iters=self._max_iters,
         )
         self.agent.set_token_callback(self._emit_token)
 
-        # Open the plain-text log mirror. We use the same timestamp dir the
-        # agent uses so .jsonl + .log live side by side and are easy to pair.
-        try:
-            from datetime import datetime as _dt
+        self._open_log_mirror(basename)
 
-            log_dir = DEFAULT_OUT_PATH.parent / "traces"
+        # Spawn the agent loop as a background task so the TUI stays responsive.
+        self.run_worker(self._consume_events(goal, continuation=False), exclusive=True)
+
+    async def _extend_session(self, feedback: str) -> None:
+        """Continuation: re-run the agent on the existing file with new feedback.
+
+        Triggered when the user types plain text after the agent declared
+        <done/>. Reuses agent, browser, model, and out_path — only kicks off
+        another iteration loop with the feedback as a fix prompt.
+        """
+        if self.agent is None or self.browser is None:
+            self._log_error("can't extend — no active agent/browser")
+            return
+        # Apply any /iters change before extending.
+        self.agent.max_iters = self._max_iters
+        self._session_done = False
+        self._phase_label = "extending"
+        self.sub_title = "agent is working (extension)"
+        self._update_status()
+        self._log_info(
+            f"[yellow]extending session[/yellow] with feedback: {_esc(feedback[:160])}"
+        )
+        self.run_worker(self._consume_events(feedback, continuation=True), exclusive=True)
+
+    async def _new_session(self, goal: str) -> None:
+        """End the current session (if any) and start a fresh one.
+
+        Browser is reused. Log mirror is rotated to the new basename.
+        """
+        # Drop the old agent reference; the worker (if any) has already
+        # finished — we checked _session_done in _cmd_new.
+        self.agent = None
+        # Close the previous log mirror.
+        if self._log_file_handle is not None:
+            try:
+                self._log_file_handle.close()
+            except Exception:
+                pass
+            self._log_file_handle = None
+            self._log_file_path = None
+        self.query_one("#log-pane", RichLog).clear()
+        self._goal = goal
+        self._iteration_label = "—"
+        self._awaiting_kind = "feedback"
+        self._log(f"[bold green]>[/bold green] /new {_esc(goal)}")
+        await self._start_session(goal)
+
+    def _open_log_mirror(self, basename: str) -> None:
+        """Open or rotate the plain-text .log mirror for the new session."""
+        # Close prior handle if rotating.
+        if self._log_file_handle is not None:
+            try:
+                self._log_file_handle.close()
+            except Exception:
+                pass
+            self._log_file_handle = None
+        try:
+            log_dir = GAMES_DIR / "traces"
             log_dir.mkdir(parents=True, exist_ok=True)
-            ts = _dt.now().strftime("%Y%m%d_%H%M%S")
-            self._log_file_path = log_dir / f"{ts}.log"
+            self._log_file_path = log_dir / f"{basename}.log"
             self._log_file_handle = self._log_file_path.open("w", encoding="utf-8")
             self._log_info(f"Mirroring log to: {self._log_file_path}")
         except Exception as e:
             self._log_info(f"[dim]could not open log mirror: {e}[/dim]")
 
-        # Spawn the agent loop as a background task so the TUI stays responsive.
-        self.run_worker(self._consume_events(goal), exclusive=True)
-
-    async def _consume_events(self, goal: str) -> None:
+    async def _consume_events(self, goal: str, *, continuation: bool = False) -> None:
         """Drain the AgentEvent stream and update widgets accordingly."""
         assert self.agent is not None
         try:
-            async for ev in self.agent.run(goal):
+            async for ev in self.agent.run(goal, continuation=continuation):
                 self._handle_event(ev)
         except Exception as e:
             # Include the FULL traceback so the .log file has enough info to
@@ -645,20 +1001,36 @@ class CodingBoxApp(App):
             import traceback
             tb = traceback.format_exc()
             self._log_error(f"Agent crashed: {e}")
-            self._log(f"[dim red]{tb}[/dim red]")
+            self._log(f"[dim red]{_esc(tb)}[/dim red]")
         finally:
             self._flush_stream()
             self._phase_label = "finished"
+            self._session_done = True
+            # Reset input mode in case the session ended mid-question; if we
+            # left it on "answer", post-done text would be routed to a defunct
+            # add_user_answer instead of triggering a continuation.
+            self._awaiting_kind = "feedback"
+            inp = self.query_one("#user-input", Input)
+            inp.placeholder = "type feedback to extend, /new <goal> for a fresh game"
             self._update_status()
-            self.sub_title = "session ended - Ctrl+Q to quit"
+            self.sub_title = "session ended - type more feedback to extend, or /new <goal>"
             # Always end with a clear footer pointing at the log files so the
             # user can paste them to an AI for debugging.
             await self.action_show_log_paths()
+            self._log(
+                "[bold yellow]Done.[/bold yellow] Type more feedback to "
+                "[b]extend this game[/b] (auto-continuation), [b]/new <goal>[/b] "
+                "for a fresh session, [b]/help[/b] for all commands."
+            )
 
     def _handle_event(self, ev: AgentEvent) -> None:
         """Pattern-match on event kind and update the UI."""
         # Always flush any half-streamed line before logging a new event header.
         self._flush_stream()
+        # ev.text often contains bracket characters (test reports list keys
+        # like ['ArrowUp'], notes may quote code). Escape before interpolating
+        # into a Rich markup format string so '[' isn't read as a fake tag.
+        text_safe = _esc(ev.text or "")
 
         if ev.kind == "phase":
             # "planning", "iteration N/M", "self-critique"
@@ -666,7 +1038,7 @@ class CodingBoxApp(App):
             if ev.text.startswith("iteration"):
                 self._iteration_label = ev.text.replace("iteration ", "")
             self._update_status()
-            self._log(f"\n[bold yellow]── {ev.text} ──[/bold yellow]")
+            self._log(f"\n[bold yellow]── {text_safe} ──[/bold yellow]")
 
         elif ev.kind == "plan":
             # The full plan is already in the log via streaming tokens; just
@@ -674,7 +1046,7 @@ class CodingBoxApp(App):
             self._log("[dim](plan complete)[/dim]")
 
         elif ev.kind == "code":
-            self._log(f"[green]wrote {ev.text}[/green] ({ev.data.get('size', 0)} bytes)")
+            self._log(f"[green]wrote {text_safe}[/green] ({ev.data.get('size', 0)} bytes)")
 
         elif ev.kind == "test":
             # ev.text is the human-readable report, ev.data is the dict.
@@ -684,32 +1056,32 @@ class CodingBoxApp(App):
             n_iss = len(ev.data.get("soft_warnings", []))
             self._log(f"{tag} ({n_err} error(s), {n_iss} issue(s))")
             # Also drop the full report into the right-hand status panel.
-            self._update_status(extra=f"[b]Last test:[/b]\n{ev.text}")
+            self._update_status(extra=f"[b]Last test:[/b]\n{text_safe}")
 
         elif ev.kind == "question":
-            self._log(f"\n[bold magenta]?[/bold magenta] [bold]Model asks:[/bold] {ev.text}")
+            self._log(f"\n[bold magenta]?[/bold magenta] [bold]Model asks:[/bold] {text_safe}")
             self._awaiting_kind = "answer"
             inp = self.query_one("#user-input", Input)
             inp.placeholder = "type your answer and press Enter"
             inp.focus()
 
         elif ev.kind == "done":
-            self._log(f"\n[bold green]DONE[/bold green] - {ev.text}")
-            self._log(f"[dim]Final game: {DEFAULT_OUT_PATH.resolve()}[/dim]")
+            self._log(f"\n[bold green]DONE[/bold green] - {text_safe}")
+            if self._out_path is not None:
+                self._log(f"[dim]Final game: {self._out_path.resolve()}[/dim]")
             # Surface the auto-saved best version + trace location so the user
             # knows where to look if they want to inspect or recover.
-            best = DEFAULT_OUT_PATH.parent / "best.html"
-            if best.exists():
-                self._log(f"[dim]Best clean version: {best.resolve()}[/dim]")
-            traces_dir = DEFAULT_OUT_PATH.parent / "traces"
+            if self._best_path is not None and self._best_path.exists():
+                self._log(f"[dim]Best clean version: {self._best_path.resolve()}[/dim]")
+            traces_dir = GAMES_DIR / "traces"
             if traces_dir.exists():
                 self._log(f"[dim]Trace logs: {traces_dir.resolve()}[/dim]")
 
         elif ev.kind == "error":
-            self._log_error(ev.text)
+            self._log_error(text_safe)
 
         elif ev.kind == "info":
-            self._log_info(ev.text)
+            self._log_info(text_safe)
 
     # ----------------------------- shutdown -------------------------------
 

@@ -24,8 +24,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import re
 import sys
 import webbrowser
+from datetime import datetime
 from pathlib import Path
 
 from agent import AgentEvent, GameAgent
@@ -36,6 +38,30 @@ from tools import LiveBrowser
 # (env var → installed). Keeping this constant here so the CLI is
 # usable on its own without resolve_chat_model.
 MODEL = os.environ.get("OLLAMA_MODEL", "gpt-oss:latest")
+
+# Sentinel: --out was not supplied → derive a unique meaningful name from
+# the goal (instead of clobbering games/game.html every run).
+_DEFAULT_OUT = "games/game.html"
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _slugify(text: str, max_len: int = 30) -> str:
+    s = _SLUG_RE.sub("-", (text or "").lower()).strip("-")
+    if not s:
+        s = "game"
+    if len(s) > max_len:
+        s = s[:max_len].rstrip("-") or "game"
+    return s
+
+
+def _resolve_out_path(arg_out: str, goal: str) -> Path:
+    """If the user accepted the default, give the file a unique meaningful
+    stem so successive runs don't overwrite each other. If they passed
+    --out explicitly, respect their choice verbatim."""
+    if arg_out != _DEFAULT_OUT:
+        return Path(arg_out)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return Path("games") / f"{_slugify(goal)}_{ts}.html"
 
 
 def _print_event(ev: AgentEvent) -> None:
@@ -145,10 +171,20 @@ def main() -> int:
     p.add_argument("goal", help="What game to build, in plain English.")
     p.add_argument("--model", default=MODEL, help=f"Ollama model tag (default: {MODEL})")
     p.add_argument("--max-iters", type=int, default=6)
-    p.add_argument("--out", default="games/game.html")
-    p.add_argument("--best-of-n", type=int, default=2)
-    p.add_argument("--num-ctx", type=int, default=16384)
-    p.add_argument("--stall-seconds", type=float, default=60.0)
+    p.add_argument(
+        "--out",
+        default=_DEFAULT_OUT,
+        help="Output path. Default: games/<goal-slug>_<timestamp>.html "
+             "(unique per run). Pass an explicit path to override.",
+    )
+    p.add_argument("--best-of-n", type=int, default=1,
+                   help="Sample N candidates per fix, sequentially with early exit. "
+                        "Default 1 (off). Set 2-3 to retry harder when local model is weak.")
+    p.add_argument("--num-ctx", type=int, default=8192,
+                   help="Ollama context window. Default 8192 matches the "
+                        "default load size — anything different forces a "
+                        "model reload on every request.")
+    p.add_argument("--stall-seconds", type=float, default=90.0)
     p.add_argument("--headless", action="store_true", help="Run Chromium without a visible window.")
     p.add_argument("--open", action="store_true", help="Open final game in your browser.")
     args = p.parse_args()
@@ -157,7 +193,7 @@ def main() -> int:
         goal=args.goal,
         model=args.model,
         max_iters=args.max_iters,
-        out_path=Path(args.out),
+        out_path=_resolve_out_path(args.out, args.goal),
         best_of_n=args.best_of_n,
         num_ctx=args.num_ctx,
         stall_seconds=args.stall_seconds,
