@@ -67,6 +67,33 @@ GAMES_DIR = Path("games")
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
+# Short, unambiguous "I'm satisfied" phrases — typed at the input box these
+# trigger a ship (= same effect as Ctrl+D / /ship) instead of being queued
+# as feedback for the model. Match is case-insensitive, strips trailing
+# punctuation/whitespace, and requires an EXACT full-string match — so
+# "done" ships but "almost done, add sound" goes through as feedback.
+_SHIP_PHRASES: frozenset[str] = frozenset({
+    "done", "ok", "okay", "ok done", "okay done", "ok, done", "okay, done",
+    "im done", "i'm done", "we're done", "we are done", "all done",
+    "ship", "ship it", "ship it!", "ship now", "ship them", "deploy",
+    "looks good", "lgtm", "looks great", "looks fine",
+    "perfect", "great", "nice", "good", "good enough", "fine",
+    "stop", "stop it", "finish", "finished",
+    "yes", "yes ship", "yep", "yep done",
+})
+
+
+def _looks_like_ship(text: str) -> bool:
+    """Detect a clear ship-now intent without false-positives on real feedback.
+
+    Conservative on purpose: only matches *exact* (after normalizing case,
+    whitespace, and trailing .!?) full-string matches in `_SHIP_PHRASES`.
+    A user who types "ok done now add sound" still gets treated as feedback;
+    "ok done" by itself ships.
+    """
+    s = " ".join(text.strip().lower().rstrip(".!?").split())
+    return s in _SHIP_PHRASES
+
 
 def _slugify(text: str, max_len: int = 30) -> str:
     """Compact, filename-safe stem from a free-form goal."""
@@ -753,7 +780,7 @@ class CodingBoxApp(App):
         if self._awaiting_kind == "goal":
             self._goal = text
             self._log(f"[bold green]>[/bold green] {text}")
-            message.input.placeholder = "type feedback any time, or Ctrl+D when done"
+            message.input.placeholder = "feedback · 'done' or Ctrl+D to ship · /help"
             self.sub_title = "agent is working"
             await self._start_session(text)
             self._awaiting_kind = "feedback"
@@ -762,13 +789,31 @@ class CodingBoxApp(App):
             self._log(f"[bold magenta]> answer:[/bold magenta] {text}")
             if self.agent is not None:
                 self.agent.add_user_answer(text)
-            message.input.placeholder = "type feedback any time, or Ctrl+D when done"
+            message.input.placeholder = "feedback · 'done' or Ctrl+D to ship · /help"
             self._awaiting_kind = "feedback"
 
         else:  # "feedback"
             self._log(f"[bold blue]> feedback:[/bold blue] {text}")
             if self.agent is None:
                 self._log("[dim red]  (no active agent - feedback ignored)[/dim red]")
+                return
+            # Natural-language ship detection: "done", "ok", "looks good", etc.
+            # ALWAYS shippable, whether the session is mid-run or already done.
+            if _looks_like_ship(text):
+                if self._session_done:
+                    self._log_info(
+                        f"[yellow]'{_esc(text)}' is a ship phrase but the "
+                        "session is already finished — nothing to ship. "
+                        "Type a new request to extend, or /new <goal> for fresh.[/yellow]"
+                    )
+                    return
+                self.agent.request_done()
+                self._log_info(
+                    f"[yellow]'{_esc(text)}' interpreted as SHIP IT.[/yellow] "
+                    "Agent will finish the current turn and stop. "
+                    "[dim](To force more iteration on a 'done'-ish phrase, "
+                    "rephrase as a request, e.g. 'looks good, but add sound'.)[/dim]"
+                )
                 return
             if self._session_done:
                 # Session ended after <done/> — feedback is no longer queued
