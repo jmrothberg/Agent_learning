@@ -68,6 +68,7 @@ from prompts import (
     patch_retry_instruction,
     post_clean_instruction,
     regression_instruction,
+    seed_build_instruction,
 )
 from tools import LiveBrowser, format_report_for_model
 
@@ -116,6 +117,11 @@ class GameAgent:
         # detect a true wedge promptly.
         stall_seconds: float = 90.0,
         memory_root: str | Path = "games/memory",
+        # Optional path to an existing HTML file to start from. When set,
+        # the agent skips memory-skeleton retrieval and uses this file as
+        # the baseline; the model is asked to ADAPT it (via patches) to
+        # the user's goal rather than build from scratch.
+        seed_file: str | Path | None = None,
     ):
         self.model = model
         self.out_path = Path(out_path)
@@ -124,6 +130,7 @@ class GameAgent:
         self.best_of_n = max(1, best_of_n)
         self.num_ctx = num_ctx
         self.stall_seconds = stall_seconds
+        self.seed_file: Path | None = Path(seed_file) if seed_file else None
         self._client = ollama.AsyncClient()
         self._messages: list[dict] = []
         self._pending_feedback: list[str] = []
@@ -637,23 +644,55 @@ class GameAgent:
                 self._dump_conversation()
                 yield self._record(AgentEvent("plan", plan_reply))
 
-            # ---- retrieve a skeleton from memory for the first build --------
-            skel = self._memory.retrieve_skeleton(goal)
-            memory_msg = (
-                f"using skeleton: {skel.name}"
-                + (f" (sim={skel.score:.2f}, src goal: {skel.source_goal!r})"
-                   if skel.source_goal else " (default)")
-            )
-            yield self._record(AgentEvent("memory", memory_msg, {
-                "skeleton": skel.name, "score": skel.score, "source_goal": skel.source_goal,
-            }))
+            # ---- seed file OR memory skeleton for the first build ----------
+            if self.seed_file is not None:
+                # User explicitly handed us a starting file. Skip memory
+                # retrieval entirely; pre-populate the on-disk file and the
+                # in-memory baseline so patches can apply against it from
+                # the very first iteration. The plan is already done, so
+                # the model immediately sees: goal + plan + existing code.
+                try:
+                    seed_html = self.seed_file.read_text(encoding="utf-8")
+                except Exception as e:
+                    yield self._record(AgentEvent(
+                        "error",
+                        f"could not read seed file {self.seed_file}: {e}",
+                    ))
+                    return
+                # Land it on disk as the working file before iteration 1
+                # so a patch-only first reply has something to patch.
+                self.out_path.write_text(seed_html, encoding="utf-8")
+                self._current_file = seed_html
+                yield self._record(AgentEvent("memory", (
+                    f"using user-provided seed file: {self.seed_file} "
+                    f"({len(seed_html)} bytes) — memory skeleton skipped"
+                ), {
+                    "seed_file": str(self.seed_file),
+                    "seed_bytes": len(seed_html),
+                }))
+                self._messages.append({
+                    "role": "user",
+                    "content": self._flush_user_injections(
+                        seed_build_instruction(seed_html, str(self.seed_file))
+                    ),
+                })
+            else:
+                skel = self._memory.retrieve_skeleton(goal)
+                memory_msg = (
+                    f"using skeleton: {skel.name}"
+                    + (f" (sim={skel.score:.2f}, src goal: {skel.source_goal!r})"
+                       if skel.source_goal else " (default)")
+                )
+                yield self._record(AgentEvent("memory", memory_msg, {
+                    "skeleton": skel.name, "score": skel.score, "source_goal": skel.source_goal,
+                }))
 
-            self._messages.append({
-                "role": "user",
-                "content": self._flush_user_injections(
-                    first_build_instruction(skel.html, skel.source_goal)
-                ),
-            })
+                self._messages.append({
+                    "role": "user",
+                    "content": self._flush_user_injections(
+                        first_build_instruction(skel.html, skel.source_goal)
+                    ),
+                })
 
         # ---- PHASE B: build/iterate -------------------------------------
         awaiting_confirm = False

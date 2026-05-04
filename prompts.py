@@ -177,6 +177,30 @@ def first_build_instruction(seed_html: str, seed_source: str | None = None) -> s
     )
 
 
+def seed_build_instruction(seed_html: str, seed_path: str) -> str:
+    """First-build prompt when the user explicitly hands us a starting file.
+
+    Differs from `first_build_instruction`: the file is the user's own working
+    code (not a memory skeleton), so we strongly prefer <patch> blocks over a
+    full rewrite — the user is presumably attached to what's already there
+    and a wholesale rewrite would lose work they care about.
+    """
+    return (
+        "Plan accepted. The user is starting from an EXISTING game file they "
+        "want you to ADAPT (not replace) to match the goal above.\n\n"
+        f"SEED FILE: {seed_path}  (already saved on disk as the working file)\n\n"
+        "Strongly PREFER one or more <patch> SEARCH/REPLACE blocks against the "
+        "code below. Patches are smaller, safer, and preserve the user's "
+        "structure. Send a complete <html_file> ONLY if the goal genuinely "
+        "requires structural changes patches can't reasonably express.\n\n"
+        "Always include a <notes> tag describing what each patch does.\n\n"
+        "EXISTING FILE:\n"
+        "```html\n"
+        f"{seed_html}\n"
+        "```\n"
+    )
+
+
 # Sent BEFORE the patch turn that follows a failed test. Stays separate from
 # the actual error report so the model sees the role/format reminder right
 # before its turn (per Anthropic's "anchor near the action" guidance for

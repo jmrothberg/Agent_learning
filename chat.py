@@ -492,6 +492,9 @@ class CodingBoxApp(App):
         # /iters lets the user change the max-iters cap before starting a
         # session or extending. Default matches GameAgent's default.
         self._max_iters: int = 6
+        # /seed stages an existing HTML file as the baseline for the next
+        # /new session. Cleared once consumed.
+        self._next_seed: Path | None = None
 
     # ----------------------------- layout ---------------------------------
 
@@ -750,6 +753,8 @@ class CodingBoxApp(App):
                 self.query_one("#log-pane", RichLog).clear()
             elif cmd == "iters":
                 self._cmd_set_iters(arg)
+            elif cmd == "seed":
+                self._cmd_set_seed(arg)
             elif cmd == "status":
                 self._cmd_status()
             else:
@@ -769,9 +774,12 @@ class CodingBoxApp(App):
             "  [b]/log[/b]                     print all session artifact paths (= Ctrl+L; also /paths, /files)",
             "  [b]/clear[/b]                   clear the agent log pane",
             "  [b]/iters <N>[/b]               set max iterations for the next session/extension",
+            "  [b]/seed <path>[/b]             stage an existing .html file as the baseline for the next /new",
+            "  [b]/seed[/b] (no arg)           clear the staged seed file",
             "  [b]/status[/b]                  print model, phase, iteration, paths",
             "  [b]/quit[/b]                    quit (= Ctrl+Q)",
             "[dim]Plain text after a session is done auto-extends the game (no slash needed).[/dim]",
+            "[dim]Workflow: /seed games/foo.html  →  /new add multiplayer  ▸ adapts foo.html[/dim]",
         ]
         for line in lines:
             self._log(line)
@@ -855,6 +863,41 @@ class CodingBoxApp(App):
             f"max iterations set to [b]{self._max_iters}[/b] for next session/extension"
         )
 
+    def _cmd_set_seed(self, arg: str) -> None:
+        """/seed <path> stages an existing HTML file as the baseline for the
+        next /new session. /seed with no argument clears the staged file.
+
+        The file is NOT copied yet — it's just remembered. Path is checked
+        for existence, .html-ness, and a sane size; we error early instead
+        of letting the agent fail mid-run on a bad path.
+        """
+        if not arg:
+            if self._next_seed is None:
+                self._log_info("no staged seed file (usage: /seed <path>)")
+            else:
+                self._log_info(f"cleared staged seed file (was: {self._next_seed})")
+                self._next_seed = None
+            return
+        # Allow shell-style ~ expansion and quoted paths.
+        candidate = Path(arg.strip().strip("'\"")).expanduser()
+        if not candidate.exists():
+            self._log_error(f"seed file does not exist: {candidate}")
+            return
+        if not candidate.is_file():
+            self._log_error(f"seed path is not a file: {candidate}")
+            return
+        if candidate.suffix.lower() not in {".html", ".htm"}:
+            self._log_info(
+                f"[yellow]warning:[/yellow] {candidate.suffix!r} is not .html — "
+                "staging anyway, but the harness expects HTML"
+            )
+        size = candidate.stat().st_size
+        self._next_seed = candidate.resolve()
+        self._log_info(
+            f"staged seed for next /new: [b]{_esc(str(self._next_seed))}[/b] "
+            f"[dim]({size:,} bytes)[/dim]"
+        )
+
     def _cmd_status(self) -> None:
         lines = [
             "[bold cyan]── status ──[/bold cyan]",
@@ -864,6 +907,7 @@ class CodingBoxApp(App):
             f"  phase:             {_esc(self._phase_label)}",
             f"  iteration:         {_esc(self._iteration_label)}",
             f"  max iters:         {self._max_iters}",
+            f"  staged seed:       {_esc(str(self._next_seed) if self._next_seed else '—')}",
             f"  session done:      {self._session_done}",
             f"  game file:         {self._out_path or '—'}",
             f"  log file:          {self._log_file_path or '—'}",
@@ -913,11 +957,18 @@ class CodingBoxApp(App):
         self._best_path = GAMES_DIR / f"{basename}.best.html"
         self._log_info(f"Game file: [b]{self._out_path}[/b]")
 
+        # Consume the staged seed file (if any) for THIS session only.
+        seed = self._next_seed
+        self._next_seed = None
+        if seed is not None:
+            self._log_info(f"using staged seed file: [b]{_esc(str(seed))}[/b]")
+
         self.agent = GameAgent(
             model=model_name,
             out_path=self._out_path,
             browser=self.browser,
             max_iters=self._max_iters,
+            seed_file=seed,
         )
         self.agent.set_token_callback(self._emit_token)
 
@@ -932,9 +983,25 @@ class CodingBoxApp(App):
         Triggered when the user types plain text after the agent declared
         <done/>. Reuses agent, browser, model, and out_path — only kicks off
         another iteration loop with the feedback as a fix prompt.
+
+        Graceful fallback: if the previous session never produced a working
+        file (model exhausted iterations without emitting valid <patch> /
+        <html_file>), there's nothing to extend — silently switch to a
+        fresh session with the original goal + feedback combined, instead
+        of dying with the misleading "no current file" error.
         """
         if self.agent is None or self.browser is None:
             self._log_error("can't extend — no active agent/browser")
+            return
+        # No file on disk means the previous run produced nothing to patch.
+        if self._out_path is None or not self._out_path.exists():
+            self._log_info(
+                "[yellow]previous session produced no working file[/yellow] — "
+                "starting a fresh session with your feedback as a refinement "
+                "of the original goal"
+            )
+            combined = f"{self._goal} — {feedback}" if self._goal else feedback
+            await self._new_session(combined)
             return
         # Apply any /iters change before extending.
         self.agent.max_iters = self._max_iters

@@ -112,6 +112,7 @@ async def _run(
     stall_seconds: float,
     headless: bool,
     open_when_done: bool,
+    seed_file: Path | None,
 ) -> int:
     browser = LiveBrowser(viewport=(800, 600), run_seconds=3.0, headless=headless)
     try:
@@ -133,6 +134,7 @@ async def _run(
         best_of_n=best_of_n,
         num_ctx=num_ctx,
         stall_seconds=stall_seconds,
+        seed_file=seed_file,
     )
 
     # Stream tokens to stdout, one chunk at a time. Newlines flush.
@@ -187,7 +189,21 @@ def main() -> int:
     p.add_argument("--stall-seconds", type=float, default=90.0)
     p.add_argument("--headless", action="store_true", help="Run Chromium without a visible window.")
     p.add_argument("--open", action="store_true", help="Open final game in your browser.")
+    p.add_argument(
+        "--seed",
+        default=None,
+        help="Path to an existing .html file to start from. The agent will "
+             "ADAPT it to your goal via patches instead of generating from "
+             "scratch (memory skeleton is skipped).",
+    )
     args = p.parse_args()
+
+    seed_path: Path | None = None
+    if args.seed:
+        seed_path = Path(args.seed).expanduser()
+        if not seed_path.is_file():
+            print(f"--seed path is not a file: {seed_path}", file=sys.stderr)
+            return 2
 
     return asyncio.run(_run(
         goal=args.goal,
@@ -199,6 +215,7 @@ def main() -> int:
         stall_seconds=args.stall_seconds,
         headless=args.headless,
         open_when_done=args.open,
+        seed_file=seed_path,
     ))
 
 
