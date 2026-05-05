@@ -24,6 +24,15 @@ HTML/JS rules of thumb, so tomorrow's session starts smarter than today's.**
 > actually hits. See [How the agent compounds](#how-the-agent-compounds)
 > below.
 
+**Default interactive stack (`chat.py`, `coder.py`):** both construct
+`GameAgent` with **`prompt_version="v0"`** (classic `prompts.py`). The model
+does **not** receive the retrieved `<playbook>` block, `<criteria>`, or JSON
+`<probes>` on that path — those are **`prompts_v1.py`** features. Use
+`tune.py run --prompt-version v1`, or pass `prompt_version="v1"` when creating
+`GameAgent`, to exercise the full prompt + playbook injection described below.
+(Traces may still record `playbook_retrieved` on v0 for the offline learner,
+but the running model’s prompts omit that block until v1+.)
+
 **Remote:** https://github.com/jmrothberg/Agent_learning/
 
 ## Contents
@@ -175,7 +184,7 @@ Each technique is matched to a *specific* small-model failure mode:
 | **Continuation extends**     | "Add sound" after `<done/>` means restart from scratch         | `agent.run(continuation=True)`              |
 | **Adaptive temperature**     | Same temp for creative-build and bug-fix turns                 | `agent._stream` (`0.7` build → `0.25` fix)  |
 | **Conversation pruning**     | Long sessions overflow context; old code crowds out new turns  | `agent._prune_messages`                     |
-| **Playbook injection**       | Same dumb mistake every session — model has no long-term memory | `memory.Playbook.retrieve` → `<playbook>` block in v1 prompts |
+| **Playbook injection**       | Same dumb mistake every session — model has no long-term memory | `memory.Playbook.retrieve` → `<playbook>` in **v1+** prompts only (`prompt_version != "v0"`) |
 | **Acceptance criteria**      | "Passes the smoke test" but doesn't actually fulfill the goal  | `prompts_v1.PLAN_INSTRUCTION` `<criteria>`  |
 | **Runtime probes**           | Game looks fine to the heuristics but the player can't actually play | model emits `<probes>` JSON → executed by `tools.LiveBrowser._run_probe` |
 | **Stuck-loop reflection**    | Same wrong fix tried 3 times in a row                          | v1 `fix_instruction` switches to "5–7 different sources" mode after `stuck_streak >= 2` |
@@ -257,23 +266,28 @@ the trace records:
 - the fix that landed clean
 
 The Reflector reads that pattern back. If a similar bug surfaces in a
-future session, the relevant bullet (or a freshly-minted one) gets
-retrieved into the v1 prompt automatically — the model doesn't repeat
-the same mistake.
+future session, the relevant bullet (or a freshly-minted one) can be
+retrieved into the **v1** prompt — so the live model sees it only when you run
+with **`prompt_version=v1`** (e.g. `tune.py` or a custom `GameAgent`); the
+default **v0** `chat.py` path does not inject that block.
 
 **Closing the loop:**
 
 ```bash
-# Every battery run can refresh the playbook in one shot.
-python tune.py run --auto-learn
+# Every battery run can refresh the playbook in one shot (isolated copy under
+# the run dir unless you also pass --learn-shared).
+python tune.py run --prompt-version v1 --auto-learn --learn-shared
 
 # Or reflect over real (not battery) sessions you've shipped this week.
 python learner.py apply games/traces/
 
 # Inspect what the agent has learned.
 ls games/memory/playbook.jsonl                # the file
-python learner.py walk                        # past sessions
+python learner.py walk                        # past sessions (default: games/traces/)
 ```
+
+For one session’s detail, pass a **trace path** (`.jsonl`) or a session-id
+substring — `learner.py show` resolves `games/traces/**/*<id>*.jsonl`.
 
 ---
 
@@ -285,17 +299,34 @@ getting better?" measurement and offline learning respectively.
 **`tune.py` — measure the agent against a fixed battery.** Used to
 compare prompt / playbook / probe changes apples-to-apples.
 
+**Defaults:** `tune.py run` uses **quick** mode unless you pass **`--full`** —
+quick = `max_iters=2`, `best_of_n=1`; full = `max_iters=4`, `best_of_n=2`.
+**`--prompt-version`** defaults to **`v0`**; use **`v1`** for playbook +
+criteria + probes. Default model is env **`TUNE_MODEL`** or **`qwen3.6:27b`**.
+Chromium is **visible** unless **`--headless`**.
+
 ```bash
-# Run all 10 canonical goals (asteroids, snake, breakout, pong,
-# space-invaders, flappy, minesweeper, tic-tac-toe, drawing, todo)
-# against the current prompt + playbook. Visible Chromium by default.
+# Run all goals in games/tune/battery.jsonl — quick mode, v0 prompt.
 python tune.py run
 
-# Different prompt version, with offline learning at the end.
-python tune.py run --prompt-version v1 --auto-learn
+# Stronger search budget + v1 prompt + apply learner to this run’s traces.
+python tune.py run --full --prompt-version v1 --auto-learn
+
+# Push curated playbook updates to the shared games/memory tree (not only the run’s _memory).
+python tune.py run --prompt-version v1 --auto-learn --learn-shared
+
+# Override skeleton: bundled default vs memory retrieval (mirrors production).
+python tune.py run --skeleton-mode retrieve        # or default, default_v2
+
+# Enable agent feature flags for A/B (comma-separated: prefill, vlm_critique,
+# double_screenshot, architect, all).
+python tune.py run --features prefill,architect
 
 # Just one test (asteroids is the canonical "did anything regress?" check).
 python tune.py run --tests asteroids
+
+python tune.py list                              # past runs under games/tune/
+python tune.py show <run_id>                     # print that run’s SUMMARY.md
 
 # Compare two completed runs by per-test pass/fail.
 python tune.py diff baseline_v0 v1_run
@@ -315,7 +346,8 @@ production traces (`games/traces/`) or a tune run's traces.
 # One-line summary per past session.
 python learner.py walk
 
-# Full structured dump of one session.
+# Full structured dump of one session (path to .jsonl, or session id substring).
+python learner.py show games/traces/<slug>_<ts>.jsonl
 python learner.py show <session-id>
 
 # Reflect over traces and PRINT proposed deltas (no writes).
@@ -617,12 +649,17 @@ the diagram above for the full picture; this is the implementation
 shorthand:
 
 1. **PHASE A · planning** (1 turn): model emits `<plan>...</plan>` only.
+   With **`prompt_version=v1`**, the plan also carries **`<criteria>...</criteria>`**
+   (machine-checkable acceptance checks).
 2. **PHASE B · build / iterate** (up to `max_iters`): model emits
    `<patch>` blocks (preferred) or a full `<html_file>...</html_file>`.
    Harness runs it in real Chromium and reports back: console errors,
    page errors, canvas state, RAF firing, input listener count,
    frozen-canvas check, automated input smoke test, and (if the model
    is a VLM) attaches the latest screenshot for vision review.
+   **v1** may emit **`<probes>...</probes>`** (JSON) — the harness executes them
+   via `tools.LiveBrowser`. Failed iterations use **`score_test_report()`**
+   for partial-credit scoring when ranking best-of-N candidates.
 3. **PHASE C · self-critique** (1 turn): when the model says `<done/>`
    on a clean run, it gets one final pass to either send a fix or
    reply `<confirm_done/>`.
@@ -678,6 +715,7 @@ describe your next goal.
 | Can't select text in TUI          | hold `Shift` while click-dragging                                                      |
 | Feedback ignored                  | check the log for `→ applying your input` — if missing, see `<slug>_<ts>.jsonl` for `feedback_queued` / `feedback_injected` events |
 | Feedback after done does nothing  | it should auto-extend; verify the bottom hint says "type feedback to extend"          |
+| Playbook / criteria never show up in traces | normal for **`chat.py`**: default is **`prompt_version=v0`**. Use `tune.py run --prompt-version v1` or pass `prompt_version="v1"` into `GameAgent` to exercise injected `<playbook>` + `<criteria>` / `<probes>`. |
 
 ---
 
@@ -685,10 +723,14 @@ describe your next goal.
 
 See `requirements.txt`. Key packages:
 
-- `ollama` — python client for the local Ollama daemon
+- `ollama` — python client for the local Ollama daemon (also used by
+  `learner.py reflect` / `apply` to call the Reflector; default model is
+  set in `learner.py` and overridable with `--model`)
 - `playwright` — real Chromium for game testing
 - `textual` — the TUI framework
 - `rich` — markup + escape helpers used by the TUI mirror layer
+
+`tune.py` / `learner.py` have no extra pip dependencies beyond the above.
 
 ---
 

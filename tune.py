@@ -170,7 +170,9 @@ async def _run_one(
     memory_root: str,
     run_dir: Path,
     browser: LiveBrowser,
+    feature_kwargs: dict[str, Any] | None = None,
 ) -> TestResult:
+    feature_kwargs = feature_kwargs or {}
     """Drive GameAgent on one battery goal; capture pass/fail + artifacts.
 
     Each test gets its own subdir under the run dir. The agent's natural
@@ -195,6 +197,7 @@ async def _run_one(
         prompt_version=prompt_version,
         skeleton_mode=skeleton_mode,
         memory_root=memory_root,
+        **feature_kwargs,
     )
     agent = GameAgent(**agent_kwargs)
 
@@ -318,6 +321,36 @@ def _summary_md(
     return "\n".join(lines)
 
 
+_FEATURE_FLAGS = {
+    "prefill":            "use_prefill",
+    "vlm_critique":       "use_vlm_critique",
+    "double_screenshot":  "use_double_screenshot",
+    "architect":          "use_architect_split",
+}
+
+
+def _parse_features(text: str) -> dict[str, bool]:
+    """Convert --features 'prefill,vlm_critique' into the GameAgent kwargs.
+
+    Special tokens: 'all' = all of them; '' / 'none' = no features.
+    Unknown tokens are ignored with a stderr warning.
+    """
+    kwargs: dict[str, bool] = {f: False for f in _FEATURE_FLAGS.values()}
+    text = (text or "").strip().lower()
+    if not text or text == "none":
+        return kwargs
+    if text == "all":
+        return {f: True for f in _FEATURE_FLAGS.values()}
+    for tok in (s.strip() for s in text.split(",")):
+        if not tok:
+            continue
+        if tok not in _FEATURE_FLAGS:
+            print(f"warn: unknown feature {tok!r}", file=sys.stderr)
+            continue
+        kwargs[_FEATURE_FLAGS[tok]] = True
+    return kwargs
+
+
 async def cmd_run(args) -> int:
     battery_path = Path(args.battery) if args.battery else DEFAULT_BATTERY
     tests = load_battery(battery_path)
@@ -365,10 +398,17 @@ async def cmd_run(args) -> int:
 
     started_at = datetime.now().isoformat(timespec="seconds")
 
+    feature_kwargs = _parse_features(args.features)
+    feature_str = (
+        ",".join(k.replace("use_", "") for k, v in feature_kwargs.items() if v)
+        or "none"
+    )
+
     print(
         f"== tune run · model={args.model} · prompt={args.prompt_version} · "
         f"mode={mode} · iters={max_iters} · best_of_n={best_of_n} · "
-        f"skeleton={args.skeleton_mode} · tests={len(tests)}"
+        f"skeleton={args.skeleton_mode} · features={feature_str} · "
+        f"tests={len(tests)}"
     )
     print(f"== artifacts: {run_dir}")
     print(f"== memory:    {memory_root}")
@@ -400,6 +440,7 @@ async def cmd_run(args) -> int:
                     memory_root=memory_root,
                     run_dir=run_dir,
                     browser=browser,
+                    feature_kwargs=feature_kwargs,
                 )
             except KeyboardInterrupt:
                 print("INTERRUPTED")
@@ -820,6 +861,11 @@ def main() -> int:
     pr.add_argument("--reflector-model", default=None,
                     help="model for the offline reflector (default: same "
                          "as --model, so we don't load a second model)")
+    pr.add_argument("--features", default="",
+                    help="comma-separated agent feature flags to enable "
+                         "(prefill, vlm_critique, double_screenshot, "
+                         "architect, all). Default off for fair A/B "
+                         "against baseline runs.")
 
     sub.add_parser("list", help="list past runs")
 

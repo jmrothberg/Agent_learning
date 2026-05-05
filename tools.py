@@ -523,6 +523,7 @@ class LiveBrowser:
         screenshot_path: str | Path | None = None,
         *,
         probes: list[dict] | None = None,
+        screenshot_before_path: str | Path | None = None,
     ) -> dict[str, Any]:
         """Navigate to the file, let it run, return the report.
 
@@ -566,6 +567,17 @@ class LiveBrowser:
         await asyncio.sleep(half)
         canvas_first = await self._safe_eval(_CANVAS_PROBE_JS)
         hash_first = await self._safe_eval(_CANVAS_HASH_JS)
+        # Optional "before-input" screenshot — captures the t=startup
+        # state so a VLM can later see motion as a before/after pair.
+        screenshot_before_saved: str | None = None
+        if screenshot_before_path is not None:
+            try:
+                bp = Path(screenshot_before_path)
+                bp.parent.mkdir(parents=True, exist_ok=True)
+                await self._page.screenshot(path=str(bp), full_page=False)
+                screenshot_before_saved = str(bp)
+            except Exception:
+                screenshot_before_saved = None
         await asyncio.sleep(half)
         canvas_info = await self._safe_eval(_CANVAS_PROBE_JS)
         hash_last = await self._safe_eval(_CANVAS_HASH_JS)
@@ -638,6 +650,7 @@ class LiveBrowser:
         # Attach the new fields. The model never sees raw bytes - just paths
         # and small booleans / counts via format_report_for_model.
         report["screenshot"] = screenshot_saved
+        report["screenshot_before"] = screenshot_before_saved
         report["frozen_canvas"] = frozen
         report["input_test"] = input_test
         report["probes"] = probe_results

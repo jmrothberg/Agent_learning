@@ -1153,6 +1153,10 @@ class CodingBoxApp(App):
             seed_file=seed,
             stall_seconds=stall_s,
             overall_seconds=overall_s,
+            # v1 prompt: includes <playbook> retrieval, <criteria>,
+            # <probes>, stuck-loop ladder. Real sessions need this on
+            # so the offline learner has rich traces to reflect over.
+            prompt_version="v1",
         )
         self.agent.set_token_callback(self._emit_token)
 

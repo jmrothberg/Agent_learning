@@ -135,6 +135,10 @@ async def _run(
         num_ctx=num_ctx,
         stall_seconds=stall_seconds,
         seed_file=seed_file,
+        # Default to v1 prompt: <playbook> + <criteria> + <probes>.
+        # Real sessions feed the offline learner; v1 produces the
+        # rich traces it needs.
+        prompt_version="v1",
     )
 
     # Stream tokens to stdout, one chunk at a time. Newlines flush.

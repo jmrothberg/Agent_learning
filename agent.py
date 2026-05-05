@@ -168,6 +168,29 @@ class GameAgent:
         # outcome. Off by default so tune-mode A/B experiments can
         # compare a frozen playbook. Flip on once a baseline is locked.
         playbook_writeback: bool = False,
+        # ----- behavior bundles (independently testable) -----------------
+        # Continue.dev-style assistant prefill: open the model's turn
+        # with `<plan>\n` (Phase A) or `<diagnose>\n` (fix turns) so
+        # format compliance is forced. Cost: ~0 tokens, just changes
+        # request shape.
+        use_prefill: bool = False,
+        # Always attach the latest screenshot to Phase C self-critique
+        # when the model is a VLM. Today the screenshot is only attached
+        # on FAIL turns; this extends it to clean+done so polish bugs
+        # ("ship is half off-canvas", "score invisible") stop slipping
+        # past CONFIRM_DONE.
+        use_vlm_critique: bool = False,
+        # Capture two screenshots — t=startup and t=after-input-press —
+        # so the model can see motion/state-change for fix turns. Costs
+        # one extra Playwright screenshot call per iter.
+        use_double_screenshot: bool = False,
+        # On detected complex first-builds, do a 2-call architect/editor
+        # split: model-1 produces an English plan describing data
+        # structures + render layers, model-2 (same Ollama model, fresh
+        # turn) writes the code. Aider's pattern. Doubles wall-clock on
+        # the FIRST iter only — gated on a complexity heuristic so
+        # simple goals stay one-shot.
+        use_architect_split: bool = False,
     ):
         self.model = model
         self.out_path = Path(out_path)
@@ -217,6 +240,14 @@ class GameAgent:
         self._p = self._load_prompt_module(prompt_version)
         self._last_diagnose: str | None = None
         self._stuck_streak: int = 0
+        self._use_prefill = bool(use_prefill)
+        self._use_vlm_critique = bool(use_vlm_critique)
+        self._use_double_screenshot = bool(use_double_screenshot)
+        self._use_architect_split = bool(use_architect_split)
+        # Most-recent before/after screenshot bytes for the VLM. Filled
+        # by the verifier on each iter; consumed by `_stream`.
+        self._last_screenshot_before: bytes | None = None
+        self._last_screenshot_after: bytes | None = None
         # Acceptance criteria the model emitted during Phase A — fed back
         # into fix prompts so the model self-checks against its own bar.
         self._criteria: str = ""
@@ -468,11 +499,20 @@ class GameAgent:
         caps = getattr(info, "capabilities", None) or []
         return any(str(c).lower() == "vision" for c in caps)
 
-    async def _stream(self, on_token, *, override_temp: float | None = None) -> str:
+    async def _stream(
+        self, on_token, *,
+        override_temp: float | None = None,
+        prefill: str = "",
+    ) -> str:
         """Stream once, with watchdog. Recovers from stalls by raising/logging.
 
         Image attachment: if VLM is detected and self._next_image_bytes is set,
         attach to the LAST user message and clear the buffer.
+
+        Prefill (Continue.dev pattern): when non-empty AND use_prefill is on,
+        a trailing assistant message with `prefill` content is appended so
+        Ollama continues from there. The prefill is prepended to the
+        returned text so downstream parsers see the full output.
         """
         if self._is_vlm is None:
             self._is_vlm = await self._detect_vlm()
@@ -481,35 +521,67 @@ class GameAgent:
 
         if (
             self._is_vlm
-            and self._next_image_bytes
             and self._messages
             and self._messages[-1].get("role") == "user"
         ):
-            self._messages[-1]["images"] = [self._next_image_bytes]
-            self._trace({"kind": "image_attached", "bytes": len(self._next_image_bytes)})
-            self._next_image_bytes = None
+            # Multi-image attach: prefer the before/after pair when the
+            # double-screenshot feature is on and both are present.
+            imgs: list[bytes] = []
+            if self._use_double_screenshot:
+                if self._last_screenshot_before:
+                    imgs.append(self._last_screenshot_before)
+                if self._last_screenshot_after:
+                    imgs.append(self._last_screenshot_after)
+            elif self._next_image_bytes:
+                imgs.append(self._next_image_bytes)
+            if imgs:
+                self._messages[-1]["images"] = imgs
+                self._trace({
+                    "kind": "image_attached",
+                    "count": len(imgs),
+                    "bytes": sum(len(b) for b in imgs),
+                })
+                self._next_image_bytes = None
+
+        # Optional Continue.dev-style assistant prefill. Only applied
+        # when feature is on AND `prefill` is provided. We insert a
+        # trailing assistant message; Ollama's chat API treats it as a
+        # partial completion to extend.
+        prefill_used = False
+        if self._use_prefill and prefill:
+            self._messages.append({"role": "assistant", "content": prefill})
+            prefill_used = True
+            self._trace({"kind": "prefill", "len": len(prefill)})
 
         temp = override_temp if override_temp is not None else (
             0.25 if self._fix_mode else 0.7
         )
         self._trace({"kind": "stream_start", "temperature": temp, "fix_mode": self._fix_mode})
 
-        result = await stream_chat_with_retry(
-            self._client,
-            self.model,
-            self._messages,
-            on_token=on_token,
-            options={"temperature": temp, "num_ctx": self.num_ctx},
-            stall_seconds=self.stall_seconds,
-            overall_seconds=self.overall_seconds,
-            max_retries=1,
-            on_stall=lambda r, attempt: self._trace({
-                "kind": "stream_stalled",
-                "attempt": attempt,
-                "tokens_before_stall": r.tokens,
-                "duration_s": r.duration_s,
-            }),
-        )
+        try:
+            result = await stream_chat_with_retry(
+                self._client,
+                self.model,
+                self._messages,
+                on_token=on_token,
+                options={"temperature": temp, "num_ctx": self.num_ctx},
+                stall_seconds=self.stall_seconds,
+                overall_seconds=self.overall_seconds,
+                max_retries=1,
+                on_stall=lambda r, attempt: self._trace({
+                    "kind": "stream_stalled",
+                    "attempt": attempt,
+                    "tokens_before_stall": r.tokens,
+                    "duration_s": r.duration_s,
+                }),
+            )
+        finally:
+            # Always remove our prefill scaffolding before returning so
+            # the message history we save & feed to subsequent turns
+            # contains a single coherent assistant message.
+            if prefill_used and self._messages and self._messages[-1].get("role") == "assistant":
+                self._messages.pop()
+
         self._trace({
             "kind": "stream_done",
             "tokens": result.tokens,
@@ -523,7 +595,9 @@ class GameAgent:
                 f"{self.stall_seconds}s. Try a smaller context (num_ctx={self.num_ctx}) "
                 "or different model."
             )
-        return result.text
+        # Prepend the prefill so downstream parsers (regex for <plan>,
+        # <diagnose>, etc.) match against the full intended output.
+        return (prefill + result.text) if prefill_used else result.text
 
     # -- best-of-N for fix iterations --------------------------------------
 
@@ -713,6 +787,32 @@ class GameAgent:
     def _extract_criteria(reply: str) -> str | None:
         m = _CRITERIA_RE.search(reply)
         return m.group(1).strip() if m else None
+
+    _ARCHITECT_KEYWORDS = (
+        "level", "boss", "multi", "stage", "wave", "campaign",
+        "physics", "raycast", "particle", "shader", "3d", "three.js",
+        "phaser", "engine", "ai opponent", "tournament", "tile", "rpg",
+        "platformer", "scrolling", "parallax", "inventory", "puzzle",
+        "minesweeper", "tower defense", "flappy", "endless", "shoot em up",
+    )
+
+    @classmethod
+    def _is_complex_goal(cls, goal: str) -> bool:
+        """Heuristic gate for the architect/editor split. Conservative —
+        prefers single-call when uncertain so we don't double the wall-
+        clock on simple goals.
+        """
+        if not goal:
+            return False
+        g = goal.lower()
+        if len(g) > 90:
+            return True
+        if sum(1 for k in cls._ARCHITECT_KEYWORDS if k in g) >= 1:
+            return True
+        # Multi-clause goals ("X with Y and Z") are usually richer.
+        if g.count(" with ") + g.count(" and ") >= 2:
+            return True
+        return False
 
     @staticmethod
     def _extract_probes(reply: str) -> list[dict]:
@@ -942,13 +1042,76 @@ class GameAgent:
 
                 pb_block = self._retrieve_playbook_block(goal, code=skel.html)
                 pb_kwargs = {"playbook_block": pb_block} if (pb_block and self._prompt_version != "v0") else {}
+
+                # Optional architect step — produce an English design
+                # before code. Only fires on detected complex goals AND
+                # when the feature is on. The architect note becomes
+                # part of the first-build user turn so the editor model
+                # has a concrete plan to execute.
+                architect_note = ""
+                if (
+                    self._use_architect_split
+                    and self._is_complex_goal(goal)
+                ):
+                    yield self._record(AgentEvent(
+                        "phase", "architect",
+                        {"goal_chars": len(goal)},
+                    ))
+                    self._messages.append({
+                        "role": "user",
+                        "content": (
+                            "Before code, do an ARCHITECT pass — describe the "
+                            "implementation in English. No code, no <html_file>, "
+                            "no <patch>. Use this format:\n\n"
+                            "<architect>\n"
+                            "Data: <key globals / state shape>\n"
+                            "Loop: <update / draw responsibilities>\n"
+                            "Layers: <draw order, e.g. bg → entities → fx → hud>\n"
+                            "Risks: <2-3 places this typically goes wrong>\n"
+                            "</architect>\n\n"
+                            "Keep it short — 1-2 sentences per line. The next "
+                            "turn will hand this to the editor model along with "
+                            "the seed code."
+                        ),
+                    })
+                    try:
+                        arch_reply = await self._stream(self._token_cb_wrapper)
+                    except Exception as e:
+                        yield self._record(AgentEvent(
+                            "info", f"architect call failed, continuing single-shot: {e}",
+                        ))
+                        # Pop the architect user message so we don't leave
+                        # the conversation in a half-state.
+                        if self._messages and self._messages[-1].get("role") == "user":
+                            self._messages.pop()
+                    else:
+                        self._messages.append({"role": "assistant", "content": arch_reply})
+                        m = re.search(r"<architect>\s*(.*?)\s*</architect>",
+                                      arch_reply, re.DOTALL | re.IGNORECASE)
+                        if m:
+                            architect_note = m.group(1).strip()
+                            self._trace({
+                                "kind": "architect_note",
+                                "len": len(architect_note),
+                            })
+                            yield self._record(AgentEvent(
+                                "info",
+                                f"architect: {architect_note[:160]}",
+                            ))
+
+                build_msg = self._p.first_build_instruction(
+                    skel.html, skel.source_goal, **pb_kwargs,
+                )
+                if architect_note:
+                    build_msg = (
+                        "ARCHITECT NOTE (your own plan from the previous turn — "
+                        "follow it):\n"
+                        f"<architect>\n{architect_note}\n</architect>\n\n"
+                        + build_msg
+                    )
                 self._messages.append({
                     "role": "user",
-                    "content": self._flush_user_injections(
-                        self._p.first_build_instruction(
-                            skel.html, skel.source_goal, **pb_kwargs,
-                        )
-                    ),
+                    "content": self._flush_user_injections(build_msg),
                 })
 
         # ---- PHASE B: build/iterate -------------------------------------
@@ -1000,7 +1163,15 @@ class GameAgent:
                         },
                     ))
                 else:
-                    reply = await self._stream(self._token_cb_wrapper)
+                    # Prefill diagnose tag on fix turns so format compliance
+                    # is forced. First-build (iter 1, fix_mode False) doesn't
+                    # use diagnose, so prefill is empty there.
+                    reply_prefill = ""
+                    if self._use_prefill and self._fix_mode:
+                        reply_prefill = "<diagnose>\n"
+                    reply = await self._stream(
+                        self._token_cb_wrapper, prefill=reply_prefill,
+                    )
             except Exception as e:
                 yield self._record(AgentEvent("error", f"Ollama call failed: {e}"))
                 return
@@ -1135,9 +1306,15 @@ class GameAgent:
             ))
 
             # ---- run the test ------------------------------------------
+            shot_before_path = (
+                snap_path.with_name(snap_path.stem + "_before.png")
+                if (snap_path and self._use_double_screenshot)
+                else None
+            )
             try:
                 report = await self.browser.load_and_test(
                     self.out_path, screenshot_path=shot_path,
+                    screenshot_before_path=shot_before_path,
                     probes=self._probes or None,
                 )
             except Exception as e:
@@ -1159,9 +1336,19 @@ class GameAgent:
             if shot_path is not None and report.get("screenshot"):
                 if self._is_vlm is not False:
                     try:
-                        self._next_image_bytes = Path(report["screenshot"]).read_bytes()
+                        after_bytes = Path(report["screenshot"]).read_bytes()
+                        self._next_image_bytes = after_bytes
+                        self._last_screenshot_after = after_bytes
                     except Exception:
                         self._next_image_bytes = None
+                        self._last_screenshot_after = None
+            if self._use_double_screenshot and report.get("screenshot_before"):
+                try:
+                    self._last_screenshot_before = Path(
+                        report["screenshot_before"]
+                    ).read_bytes()
+                except Exception:
+                    self._last_screenshot_before = None
 
             said_done = bool(_DONE_RE.search(reply))
             regressed = (self._previous_report_ok is True) and (not report["ok"])
@@ -1260,10 +1447,30 @@ class GameAgent:
                 if notice:
                     yield self._record(AgentEvent("info", notice))
                 # Critique always uses single-sample (we want the model's
-                # honest call, not a vote).
+                # honest call, not a vote). When VLM-critique feature is
+                # on AND we have an "after" screenshot, attach it AND
+                # append a visual review note so confirm_done is gated on
+                # actually seeing the rendered game.
+                critique_msg = self._p.CRITIQUE_INSTRUCTION
+                if (
+                    self._use_vlm_critique
+                    and self._is_vlm
+                    and self._last_screenshot_after
+                ):
+                    critique_msg = critique_msg + (
+                        "\n\nA SCREENSHOT of the final game state is "
+                        "attached. Look at it. In <notes>, name one "
+                        "concrete visual thing you SEE (HUD position, "
+                        "ship visible, score legible). If anything looks "
+                        "broken — ship off-canvas, score not visible, "
+                        "modal blocking gameplay — that IS a crash-class "
+                        "bug for the player; send a <patch>. Otherwise "
+                        "<confirm_done/>."
+                    )
+                    self._next_image_bytes = self._last_screenshot_after
                 self._messages.append({
                     "role": "user",
-                    "content": self._flush_user_injections(self._p.CRITIQUE_INSTRUCTION),
+                    "content": self._flush_user_injections(critique_msg),
                 })
                 self._previous_report_ok = report["ok"]
                 self._fix_mode = False

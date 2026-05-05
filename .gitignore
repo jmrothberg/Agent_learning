@@ -26,3 +26,6 @@ games/tune/
 .idea/
 .DS_Store
 *.swp
+
+# Claude harness internals (per-session settings, scheduled-task locks, etc.)
+.claude/
