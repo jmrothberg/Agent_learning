@@ -40,16 +40,28 @@ import json
 import re
 import shutil
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 
-# Bundled default skeleton. Same one the system prompt used to embed —
-# moved here so the prompt itself can stay short. Kept inline (not a sibling
-# file) so a fresh checkout has a working seed even before any sessions ran.
+# Bundled default skeletons. Kept inline (not sibling files) so a fresh
+# checkout has a working seed even before any sessions ran.
+#
+# DEFAULT_SKELETON  — the original ~80-line scaffold. Stable for v0.
+# CANVAS_SKELETON_V2 — a denser ~250-line scaffold that pre-empts many
+#                     playbook bullets in the seed itself: focus-aware
+#                     key state with blur clearing; dt with 0.1s cap and
+#                     resume-time reset; DPR with resize handler; layered
+#                     draw (bg/entities/fx/hud); pointer-events HUD;
+#                     try/catch frame body; lazy AudioContext on first
+#                     gesture; restart that cancels pending RAF and zeroes
+#                     state. Switch via skeleton_mode="default_v2" when
+#                     you want to test "what if every game starts from
+#                     a near-bug-free scaffold?".
 DEFAULT_SKELETON_NAME = "canvas_basic.html"
+CANVAS_SKELETON_V2_NAME = "canvas_basic_v2.html"
 DEFAULT_SKELETON = """<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -162,6 +174,219 @@ DEFAULT_SKELETON = """<!DOCTYPE html>
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
+})();
+</script>
+</body></html>
+"""
+
+
+# Larger, bug-hardened scaffold. Pre-empts ~half of the playbook bullets
+# by baking the right pattern into the seed itself, so the model only has
+# to fill in update/draw/state — not re-discover correct DPR scaling,
+# focus-loss handling, or restart cleanup every time. Use via
+# skeleton_mode="default_v2" once the v0/v1 baseline is in.
+CANVAS_SKELETON_V2 = """<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Game</title>
+<style>
+  :root { color-scheme: dark; --bg:#0b1020; --fg:#e7ecff; --panel:#1a2348;
+          --accent:#3b62ff; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font:16px/1.4 system-ui,sans-serif; overflow:hidden;
+    -webkit-tap-highlight-color:transparent; user-select:none; }
+  #wrap { position:fixed; inset:0; display:grid; place-items:center; }
+  canvas { background:#10162e; border-radius:12px; box-shadow:0 10px 40px #0008;
+    max-width:96vw; max-height:90vh; touch-action:none; }
+  #hud { position:fixed; top:12px; left:12px; background:#0008; padding:8px 12px;
+    border-radius:8px; pointer-events:none; font-variant-numeric:tabular-nums; }
+  #hud span { margin-right:14px; }
+  #help { position:fixed; bottom:12px; left:12px; opacity:.75; font-size:13px;
+    pointer-events:none; }
+  #modal { position:fixed; inset:0; display:none; place-items:center;
+    background:#000a; backdrop-filter:blur(4px); }
+  #modal .card { background:var(--panel); padding:24px 28px; border-radius:14px;
+    text-align:center; box-shadow:0 20px 60px #000a; min-width:240px; }
+  #modal h2 { margin:0 0 8px; }
+  #pauseTag { position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
+    background:#000c; padding:14px 22px; border-radius:10px; display:none;
+    font-size:24px; pointer-events:none; }
+  #errOverlay { position:fixed; inset:auto 12px 12px 12px; max-height:30%;
+    overflow:auto; background:#400; color:#fdd; padding:8px 12px; font:12px/1.3 monospace;
+    border-radius:6px; display:none; pointer-events:none; }
+  button { background:var(--accent); color:#fff; border:0; padding:10px 18px;
+    border-radius:8px; font-size:15px; cursor:pointer; }
+  button:hover { filter:brightness(1.1); }
+</style></head>
+<body>
+<div id="wrap"><canvas id="c" width="800" height="600"></canvas></div>
+<div id="hud">
+  <span>Score: <b id="score">0</b></span>
+  <span>Lives: <b id="lives">3</b></span>
+</div>
+<div id="help">Arrows / WASD to move · Space to act · P to pause</div>
+<div id="pauseTag">PAUSED</div>
+<div id="modal"><div class="card">
+  <h2 id="endTitle">Game Over</h2>
+  <p id="endMsg">Final score: <span id="endScore">0</span></p>
+  <button id="restart">Play again</button>
+</div></div>
+<div id="errOverlay"></div>
+<script>
+(() => {
+  "use strict";
+
+  // ---- DOM refs (cached once) ------------------------------------------
+  const cvs   = document.getElementById("c");
+  const ctx   = cvs.getContext("2d");
+  const W = 800, H = 600;
+  const scoreEl = document.getElementById("score");
+  const livesEl = document.getElementById("lives");
+  const modal   = document.getElementById("modal");
+  const endTitle = document.getElementById("endTitle");
+  const endScoreEl = document.getElementById("endScore");
+  const pauseTag = document.getElementById("pauseTag");
+  const errBox  = document.getElementById("errOverlay");
+
+  // ---- DPR scaling — set on init, re-apply on resize -------------------
+  function fit() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    cvs.width  = W * dpr;
+    cvs.height = H * dpr;
+    cvs.style.width  = W + "px";
+    cvs.style.height = H + "px";
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  fit();
+  window.addEventListener("resize", fit);
+
+  // ---- Input — held + pressed + released, on window, with preventDefault
+  // pressed/released fire ONCE per key transition; cleared at end of frame.
+  const KEYMAP = {
+    ArrowUp:"up", ArrowDown:"down", ArrowLeft:"left", ArrowRight:"right",
+    KeyW:"up",    KeyS:"down",     KeyA:"left",     KeyD:"right",
+    Space:"act",  Enter:"act",     KeyP:"pause",    Escape:"pause",
+  };
+  const keys     = Object.create(null);
+  const pressed  = Object.create(null);
+  const released = Object.create(null);
+  function onKey(e, down) {
+    const k = KEYMAP[e.code];
+    if (!k) return;
+    if (down) {
+      if (!keys[k]) pressed[k] = true;
+      keys[k] = true;
+      // Stop arrow keys from scrolling, space from page-jumping etc.
+      e.preventDefault();
+    } else {
+      if (keys[k]) released[k] = true;
+      keys[k] = false;
+    }
+  }
+  window.addEventListener("keydown", e => onKey(e, true),  { passive:false });
+  window.addEventListener("keyup",   e => onKey(e, false), { passive:false });
+  // Mobile / touch — same `act` event as Space.
+  cvs.addEventListener("pointerdown", () => { pressed.act = true; }, { passive:true });
+
+  // ---- Focus / visibility — pause on tab-out, clear keys, reset dt -----
+  let paused = false;
+  function clearKeys() {
+    for (const k in keys) keys[k] = false;
+    for (const k in pressed) pressed[k] = false;
+  }
+  window.addEventListener("blur",  () => { paused = true;  clearKeys(); });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) { paused = true; clearKeys(); }
+    else                 { last = performance.now(); }   // reset dt anchor
+  });
+
+  // ---- Lazy audio — first user gesture creates / resumes the context ---
+  let audio = null;
+  function ensureAudio() {
+    if (audio) return audio;
+    try { audio = new (window.AudioContext || window.webkitAudioContext)(); }
+    catch (e) { return null; }
+    return audio;
+  }
+  function unlockAudio() { const a = ensureAudio(); if (a && a.state === "suspended") a.resume(); }
+  window.addEventListener("keydown",     unlockAudio, { once:true });
+  window.addEventListener("pointerdown", unlockAudio, { once:true });
+
+  // ---- State + restart cleanup -----------------------------------------
+  // game-specific globals go here. Replace freely.
+  const state = { score: 0, lives: 3, over: false, t: 0,
+                  player: { x: W/2, y: H/2, r: 12 } };
+  let rafHandle = 0;
+  function reset() {
+    state.score = 0; state.lives = 3; state.over = false; state.t = 0;
+    state.player.x = W/2; state.player.y = H/2;
+    paused = false;
+    modal.style.display = "none";
+    errBox.style.display = "none"; errBox.textContent = "";
+    if (rafHandle) cancelAnimationFrame(rafHandle);
+    last = performance.now();
+    rafHandle = requestAnimationFrame(frame);
+  }
+  document.getElementById("restart").addEventListener("click", reset);
+
+  // ---- Game logic — replace these with your update/draw ----------------
+  function update(dt) {
+    if (state.over) return;
+    if (pressed.pause) paused = !paused;
+    if (paused) return;
+    state.t += dt;
+    const speed = 220;
+    const p = state.player;
+    if (keys.left)  p.x -= speed * dt;
+    if (keys.right) p.x += speed * dt;
+    if (keys.up)    p.y -= speed * dt;
+    if (keys.down)  p.y += speed * dt;
+    p.x = Math.max(p.r, Math.min(W - p.r, p.x));
+    p.y = Math.max(p.r, Math.min(H - p.r, p.y));
+    if (pressed.act) state.score += 1;
+  }
+  function draw() {
+    // Layer 0 — clear / background
+    ctx.clearRect(0, 0, W, H);
+    // Layer 1 — entities (drawn first so HUD goes on top)
+    const p = state.player;
+    ctx.fillStyle = "#7ab6ff";
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
+    // Layer 2 — effects (particles, etc.) — none in skeleton
+    // Layer 3 — HUD overlays (in-canvas; outer DOM HUD is its own layer)
+  }
+  function gameOver(reason) {
+    state.over = true;
+    endTitle.textContent = reason || "Game Over";
+    endScoreEl.textContent = state.score;
+    modal.style.display = "grid";
+  }
+
+  // ---- Frame loop with try/catch + dt cap + resume reset ---------------
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    try {
+      update(dt);
+      draw();
+      // Update DOM HUD (cheap; tabular-nums prevents reflow jitter).
+      scoreEl.textContent = state.score;
+      livesEl.textContent = state.lives;
+      pauseTag.style.display = paused && !state.over ? "block" : "none";
+    } catch (err) {
+      console.error("game crashed:", err);
+      errBox.textContent = "crash: " + (err && err.message || err);
+      errBox.style.display = "block";
+      // Continue the loop so the user can see the error overlay.
+    } finally {
+      // Clear one-shot inputs at frame end.
+      for (const k in pressed)  pressed[k]  = false;
+      for (const k in released) released[k] = false;
+    }
+    rafHandle = requestAnimationFrame(frame);
+  }
+  rafHandle = requestAnimationFrame(frame);
 })();
 </script>
 </body></html>
@@ -445,3 +670,537 @@ _VOLATILE_RE = re.compile(
 
 def _strip_volatile(s: str) -> str:
     return _VOLATILE_RE.sub("N", s)
+
+
+# ===========================================================================
+# Playbook — accumulated, structured rules of thumb the agent retrieves at
+# inference time. Separate file from mistakes.jsonl: mistakes are
+# error-signature keyed retrospective fix notes; the playbook is forward-
+# looking guidance the agent uses while planning and building.
+#
+# Inspired by ACE (arXiv 2510.04618): bullets carry helpful/harmful counters
+# so the offline learner can prune rules that fire on failed runs and reward
+# rules that fire on passing ones, without context-collapsing rewrites.
+# ===========================================================================
+
+
+PLAYBOOK_FILENAME = "playbook.jsonl"
+
+
+@dataclass
+class Bullet:
+    """A single playbook entry: a one-paragraph rule with metadata.
+
+    `tags` are short strings used both for retrieval (match against goal +
+    code) and for organization. `helpful`/`harmful` are running counters
+    updated by the offline learner.
+    """
+
+    id: str
+    content: str
+    tags: list[str] = field(default_factory=list)
+    helpful: int = 0
+    harmful: int = 0
+    source: str = "seed"            # 'seed' | 'learned' | session id
+    created_at: str = ""
+
+    def score(self) -> int:
+        """Net usefulness — used as a tiebreaker in retrieval and for pruning."""
+        return self.helpful - self.harmful
+
+    def to_jsonl(self) -> str:
+        return json.dumps({
+            "id": self.id,
+            "content": self.content,
+            "tags": self.tags,
+            "helpful": self.helpful,
+            "harmful": self.harmful,
+            "source": self.source,
+            "created_at": self.created_at,
+        }, ensure_ascii=False)
+
+
+@dataclass
+class BulletHit:
+    """A retrieval result — bullet plus the retrieval score."""
+
+    bullet: Bullet
+    score: float
+
+
+# Hand-curated seed bullets, distilled from the OpenGame paper, the
+# Macklon canvas-bug taxonomy (arXiv 2201.07351), JS13k post-mortems, and
+# the SOTA-prompt mining of Aider/Cline/Bolt. Each bullet is one paragraph
+# the model can drop directly into an iteration's reasoning. Tags drive
+# retrieval, so they're chosen to match the words a goal/code is likely
+# to use ("ship", "thrust", "rotation" all on the asteroids bullet).
+SEED_BULLETS: list[Bullet] = [
+    Bullet(
+        id="rotation-thrust-vector",
+        content=(
+            "When applying thrust to a rotatable ship/character, compute "
+            "velocity from its facing angle: vx = Math.cos(angle) * speed, "
+            "vy = Math.sin(angle) * speed. NEVER use plain world-axis dx/dy. "
+            "Canvas y grows downward, so 'forward at angle 0' means +x with "
+            "no y change; rotating CCW by π/2 (-Math.PI/2 from +x) points up."
+        ),
+        tags=["ship", "thrust", "rotation", "asteroids", "angle", "spaceship",
+              "movement", "physics"],
+    ),
+    Bullet(
+        id="asteroid-irregular-polygons",
+        content=(
+            "Asteroids must be irregular polygons, not perfect circles. "
+            "Pre-generate ≥8 vertices at angles 0..2π with per-vertex jitter "
+            "of radius * (0.7..1.3); store the offsets per asteroid and draw "
+            "with ctx.beginPath / lineTo / closePath. Drawing arc(0,0,r,0,2π) "
+            "ships a circle and feels wrong."
+        ),
+        tags=["asteroids", "shape", "polygon", "drawing", "rocks"],
+    ),
+    Bullet(
+        id="raf-must-start",
+        content=(
+            "Animation requires BOTH (a) a frame() function whose final "
+            "statement is requestAnimationFrame(frame), and (b) at least one "
+            "initial requestAnimationFrame(frame) call to kick the loop off. "
+            "Missing either leaves a static canvas — a common silent failure."
+        ),
+        tags=["raf", "animation", "loop", "render"],
+    ),
+    Bullet(
+        id="ecode-not-ekey",
+        content=(
+            "Keyboard input MUST use e.code values like 'ArrowLeft', 'KeyW', "
+            "'Space'. Don't use e.key (varies with keyboard layout) or "
+            "e.keyCode (deprecated, missing on some browsers). Mapping: "
+            "{ArrowUp:'up', ArrowDown:'down', ArrowLeft:'left', "
+            "ArrowRight:'right', KeyW:'up', KeyS:'down', KeyA:'left', "
+            "KeyD:'right', Space:'fire'}."
+        ),
+        tags=["input", "keyboard", "keys", "controls"],
+    ),
+    Bullet(
+        id="preventdefault-game-keys",
+        content=(
+            "Arrow keys and Space scroll the page by default and steal focus. "
+            "Inside keydown, call e.preventDefault() for any code in your "
+            "game key set. Attach the listener to window with "
+            "{passive:false} so preventDefault actually takes effect."
+        ),
+        tags=["input", "keyboard", "preventdefault", "scroll", "controls"],
+    ),
+    Bullet(
+        id="window-listener-not-canvas",
+        content=(
+            "Attach keydown/keyup listeners to window (or document), NOT to "
+            "the <canvas> element. Canvas isn't focused by default and won't "
+            "receive keys. If you really need canvas focus, set tabIndex=0 "
+            "and call .focus() after creation."
+        ),
+        tags=["input", "keyboard", "focus", "canvas"],
+    ),
+    Bullet(
+        id="clear-keys-on-blur",
+        content=(
+            "Add window.addEventListener('blur', () => for (k in keys) "
+            "keys[k]=false) to clear held keys on focus loss; otherwise "
+            "Alt-Tab leaves the player thrusting forever. Same on "
+            "document.addEventListener('visibilitychange', ...) when hidden."
+        ),
+        tags=["input", "keyboard", "focus", "blur", "stuck"],
+    ),
+    Bullet(
+        id="dt-physics-with-cap",
+        content=(
+            "Use delta-time physics: dt = Math.min(0.05, (now - last)/1000); "
+            "last = now. Multiply movement by dt so speed is frame-rate "
+            "independent. Cap dt to ~0.05s before stepping — without the cap, "
+            "tab-switch triggers a 5+ second dt and objects tunnel through "
+            "everything (the 'spiral of death')."
+        ),
+        tags=["physics", "frame-rate", "dt", "delta-time", "loop", "movement"],
+    ),
+    Bullet(
+        id="canvas-dpr-scaling",
+        content=(
+            "On retina/HiDPI displays, the canvas is blurry without DPR "
+            "scaling. Set: const dpr = Math.min(window.devicePixelRatio||1, "
+            "2); cvs.width = cssW * dpr; cvs.height = cssH * dpr; "
+            "cvs.style.width = cssW + 'px'; cvs.style.height = cssH + 'px'; "
+            "ctx.setTransform(dpr,0,0,dpr,0,0). Re-apply on 'resize'."
+        ),
+        tags=["canvas", "dpr", "retina", "scaling", "blurry"],
+    ),
+    Bullet(
+        id="visible-hud-score",
+        content=(
+            "Score and controls must be visible at all times. Either render "
+            "a #hud div with position:fixed (top-left) and update its text "
+            "from the game state, or fillText('Score: '+score, 12, 24) every "
+            "frame inside draw(). A game without a visible score is judged "
+            "broken even if it works."
+        ),
+        tags=["hud", "score", "ui", "instructions", "visible"],
+    ),
+    Bullet(
+        id="game-over-reachable",
+        content=(
+            "There MUST be a way to lose AND a way to restart. Use a state "
+            "machine with state.over flag; show a modal on game over; bind "
+            "Space or a button to reset the state and restart the loop. "
+            "Cancel any pending animation frames on restart."
+        ),
+        tags=["game-state", "game-over", "restart", "modal", "lose"],
+    ),
+    Bullet(
+        id="image-load-race",
+        content=(
+            "drawImage on an Image whose .src was just set paints nothing — "
+            "loading is async. Either: (a) wait for img.decode() / onload "
+            "before starting the loop, or (b) generate sprites procedurally "
+            "via offscreen canvas at boot. Don't drawImage in the same tick "
+            "you assign .src."
+        ),
+        tags=["image", "load", "drawimage", "race", "async", "sprite"],
+    ),
+    Bullet(
+        id="touch-pointer-events",
+        content=(
+            "For mobile/touch, bind pointerdown/pointermove/pointerup OR "
+            "touchstart/touchmove/touchend (with preventDefault) to the same "
+            "action handlers as keys. Use Pointer Events when possible — "
+            "they unify mouse+touch+pen and avoid the touchstart→mousedown "
+            "double-fire."
+        ),
+        tags=["input", "mobile", "touch", "pointer", "controls"],
+    ),
+    Bullet(
+        id="visibility-pause",
+        content=(
+            "On document.visibilitychange when document.hidden, pause the "
+            "loop AND reset 'last' time on resume. Without this, dt explodes "
+            "to seconds when returning to the tab and physics fly off."
+        ),
+        tags=["pause", "visibility", "tab", "focus"],
+    ),
+    Bullet(
+        id="js-modulo-negative",
+        content=(
+            "JavaScript modulo on negative numbers returns a negative result: "
+            "(-1) % 800 === -1, not 799. For wrap-around use "
+            "((x % w) + w) % w."
+        ),
+        tags=["math", "modulo", "wrap", "toroidal"],
+    ),
+    Bullet(
+        id="z-order-layers",
+        content=(
+            "Drawing order matters. Inside draw(): clear → background → "
+            "entities → effects/particles → HUD overlay. Don't draw HUD "
+            "inside the entity loop or it will be obscured by sprites drawn "
+            "later in the same loop."
+        ),
+        tags=["render", "draw", "z-order", "layers", "hud"],
+    ),
+    Bullet(
+        id="frame-trycatch",
+        content=(
+            "Wrap the frame() body in try/catch that logs to console.error. "
+            "One uncaught exception inside requestAnimationFrame silently "
+            "stops the loop with no visible error in the page — the game "
+            "looks frozen with no diagnosis."
+        ),
+        tags=["error-handling", "trycatch", "raf", "loop"],
+    ),
+    Bullet(
+        id="restart-cleanup",
+        content=(
+            "On restart, cancel pending animation frames "
+            "(cancelAnimationFrame) and don't re-add the same event "
+            "listeners — without cleanup, listeners stack and each restart "
+            "doubles input speed. Prefer mutating in-place over re-binding."
+        ),
+        tags=["restart", "cleanup", "listeners", "leak"],
+    ),
+    Bullet(
+        id="snake-grid-tick",
+        content=(
+            "Snake/grid games move in fixed-cell ticks, not free RAF motion. "
+            "Use an accumulator: tickAccum += dt; if (tickAccum >= TICK) { "
+            "step(); tickAccum -= TICK; }. The head must advance EXACTLY one "
+            "cell per step; turning sets the next direction, applied at the "
+            "next step."
+        ),
+        tags=["snake", "grid", "tick", "discrete", "step"],
+    ),
+    Bullet(
+        id="breakout-ball-launch",
+        content=(
+            "Breakout's ball must launch with NON-ZERO dy. A common bug is "
+            "dy=0 on launch — ball travels horizontally forever, paddle "
+            "never sees it. Initial state: dx = ±2, dy = -3 (negative = up). "
+            "On paddle hit, mirror dy and bias dx by hit-position offset."
+        ),
+        tags=["breakout", "ball", "physics", "paddle"],
+    ),
+    Bullet(
+        id="single-html-file-cdn",
+        content=(
+            "Output is a SINGLE .html file containing inline <style> and "
+            "<script>. CDN libraries via <script src='https://...'> are "
+            "allowed (Phaser, three.js, kontra). No bundlers, no node_modules, "
+            "no separate .js or .css files."
+        ),
+        tags=["build", "single-file", "html", "cdn", "structure"],
+    ),
+    Bullet(
+        id="no-localstorage-init",
+        content=(
+            "Don't read/write localStorage on first load without a "
+            "feature-detect — some headless contexts throw "
+            "SecurityError. try { localStorage.getItem('x') } catch (_) {} "
+            "before relying on it."
+        ),
+        tags=["localstorage", "persistence", "init"],
+    ),
+    Bullet(
+        id="hud-pointer-events",
+        content=(
+            "If the HUD is a positioned div over the canvas, set "
+            "pointer-events:none on it so clicks/touches pass through to "
+            "the game. Otherwise the HUD silently swallows input."
+        ),
+        tags=["hud", "ui", "pointer-events", "input"],
+    ),
+    Bullet(
+        id="audio-autoplay-gesture",
+        content=(
+            "Browsers block autoplay until a user gesture. If using "
+            "AudioContext, create it on first keydown/click: "
+            "if (!audio) { audio = new (window.AudioContext||...)(); } "
+            "audio.resume()."
+        ),
+        tags=["audio", "sound", "autoplay", "gesture"],
+    ),
+    Bullet(
+        id="phaser-three-cdn-defer",
+        content=(
+            "When loading Phaser/three.js via CDN, place the <script "
+            "src='...'> in <head> with `defer`, and put your game code in a "
+            "<script> AFTER the body — otherwise the library may not exist "
+            "when your script runs."
+        ),
+        tags=["phaser", "three", "cdn", "load", "library"],
+    ),
+    Bullet(
+        id="ui-driven-no-canvas",
+        content=(
+            "For UI-style requests (todo list, calculator, tic-tac-toe, word "
+            "games) prefer DOM elements over canvas. Use <button>, <input>, "
+            "<ul>, addEventListener('click', ...). Reserve canvas for games "
+            "that genuinely need per-pixel rendering or smooth animation."
+        ),
+        tags=["ui", "dom", "todo", "calculator", "click", "non-canvas"],
+    ),
+    Bullet(
+        id="aabb-collision",
+        content=(
+            "For axis-aligned bounding boxes, collision is: "
+            "a.x < b.x+b.w && a.x+a.w > b.x && a.y < b.y+b.h && a.y+a.h > b.y. "
+            "Always check ALL FOUR conditions; getting one direction wrong "
+            "produces ghost-collisions (objects pass through one side only)."
+        ),
+        tags=["collision", "aabb", "physics", "bbox"],
+    ),
+    Bullet(
+        id="circle-collision",
+        content=(
+            "Circle-circle collision: const dx=a.x-b.x, dy=a.y-b.y, "
+            "rsum=a.r+b.r; if (dx*dx + dy*dy < rsum*rsum) { hit }. "
+            "Use squared distance — avoids sqrt in the hot loop."
+        ),
+        tags=["collision", "circle", "physics"],
+    ),
+    Bullet(
+        id="bullet-pool",
+        content=(
+            "Bullets/projectiles: pre-allocate a pool and reuse via an "
+            "active flag, instead of new Bullet()/array.push every fire. "
+            "Garbage collection in the middle of a frame causes hitches "
+            "visible as stutter."
+        ),
+        tags=["bullets", "pool", "performance", "gc", "shooter"],
+    ),
+    Bullet(
+        id="seed-respect",
+        content=(
+            "When the user provides a seed file, PREFER patches over a full "
+            "rewrite. A wholesale rewrite loses structural choices the user "
+            "may care about (variable names, layout, styling). Patches keep "
+            "their work intact and only change what the goal demands."
+        ),
+        tags=["seed", "patches", "rewrite", "preserve"],
+    ),
+]
+
+
+class Playbook:
+    """Filesystem-backed playbook of structured rules.
+
+    On first use the file is seeded with SEED_BULLETS; subsequent saves
+    persist the merged set. Retrieval is keyword/Jaccard against the goal
+    and (optionally) the in-progress code.
+    """
+
+    def __init__(self, root: str | Path = "games/memory"):
+        self.root = Path(root)
+        self.path = self.root / PLAYBOOK_FILENAME
+
+    # --- bootstrap ---------------------------------------------------------
+
+    def ensure(self) -> None:
+        try:
+            self.root.mkdir(parents=True, exist_ok=True)
+            if not self.path.exists():
+                self._save_all(SEED_BULLETS)
+        except Exception:
+            pass
+
+    def _save_all(self, bullets: list[Bullet]) -> None:
+        try:
+            tmp = self.path.with_suffix(".jsonl.tmp")
+            with tmp.open("w", encoding="utf-8") as f:
+                for b in bullets:
+                    if not b.created_at:
+                        b.created_at = datetime.utcnow().isoformat() + "Z"
+                    f.write(b.to_jsonl() + "\n")
+            tmp.replace(self.path)
+        except Exception:
+            pass
+
+    def load_all(self) -> list[Bullet]:
+        self.ensure()
+        out: list[Bullet] = []
+        try:
+            with self.path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                        out.append(Bullet(
+                            id=str(rec["id"]),
+                            content=str(rec["content"]),
+                            tags=list(rec.get("tags") or []),
+                            helpful=int(rec.get("helpful") or 0),
+                            harmful=int(rec.get("harmful") or 0),
+                            source=str(rec.get("source") or "seed"),
+                            created_at=str(rec.get("created_at") or ""),
+                        ))
+                    except Exception:
+                        continue
+        except Exception:
+            return []
+        return out
+
+    # --- retrieval ---------------------------------------------------------
+
+    def retrieve(
+        self,
+        goal: str,
+        *,
+        code: str = "",
+        k: int = 8,
+    ) -> list[BulletHit]:
+        """Return up to k bullets most relevant to goal (+ optional code).
+
+        Scoring: weighted Jaccard between (goal+code) tokens and bullet
+        (tags+content) tokens. Tag matches count double. Bullets with net
+        negative score are deprioritized but not excluded — useful info
+        can sit in mildly-harmful bullets while we accumulate counts.
+        """
+        bullets = self.load_all()
+        if not bullets:
+            return []
+
+        query_toks = _tokenize(goal) + _tokenize(code)
+        if not query_toks:
+            # Goal-less call: return top-N by net helpfulness as a fallback.
+            ordered = sorted(bullets, key=lambda b: (-b.score(), b.id))
+            return [BulletHit(b, 0.0) for b in ordered[:k]]
+
+        q_counter = Counter(query_toks)
+        hits: list[BulletHit] = []
+        for b in bullets:
+            tag_toks = _tokenize(" ".join(b.tags))
+            content_toks = _tokenize(b.content)
+            # Tag tokens are weighted 2x — they're hand-curated for retrieval.
+            t_counter = Counter()
+            for t in tag_toks:
+                t_counter[t] += 2
+            for t in content_toks:
+                t_counter[t] += 1
+            inter = sum((q_counter & t_counter).values())
+            union = sum((q_counter | t_counter).values())
+            if union <= 0:
+                continue
+            sim = inter / union
+            # Tiny boost for net-helpful bullets so identical-similarity
+            # ties go to the more-validated one.
+            sim_with_score = sim + 0.001 * b.score()
+            if sim > 0:
+                hits.append(BulletHit(b, sim_with_score))
+
+        hits.sort(key=lambda h: h.score, reverse=True)
+        return hits[:k]
+
+    # --- delta ops (used by offline learner) -------------------------------
+
+    def add(self, bullet: Bullet) -> None:
+        all_b = self.load_all()
+        # Replace if id already exists (idempotent ADD).
+        all_b = [b for b in all_b if b.id != bullet.id] + [bullet]
+        self._save_all(all_b)
+
+    def update_counters(
+        self,
+        bullet_ids: list[str],
+        *,
+        helpful_delta: int = 0,
+        harmful_delta: int = 0,
+    ) -> None:
+        all_b = self.load_all()
+        idset = set(bullet_ids)
+        for b in all_b:
+            if b.id in idset:
+                b.helpful = max(0, b.helpful + helpful_delta)
+                b.harmful = max(0, b.harmful + harmful_delta)
+        self._save_all(all_b)
+
+    def remove(self, bullet_id: str) -> None:
+        all_b = self.load_all()
+        all_b = [b for b in all_b if b.id != bullet_id]
+        self._save_all(all_b)
+
+
+def render_playbook_block(hits: list[BulletHit], header: str | None = None) -> str:
+    """Format retrieved bullets as a compact <playbook> block for the prompt.
+
+    Empty list → empty string (caller should detect and skip injection).
+    """
+    if not hits:
+        return ""
+    head = header or (
+        "RELEVANT PLAYBOOK ENTRIES — these are accumulated lessons from past "
+        "runs, ordered by relevance to your goal. Apply when applicable; "
+        "ignore the ones that don't fit."
+    )
+    lines = ["<playbook>", head, ""]
+    for h in hits:
+        b = h.bullet
+        meta = f" (score={b.score():+d})" if (b.helpful or b.harmful) else ""
+        lines.append(f"- [{b.id}]{meta} {b.content}")
+    lines.append("</playbook>")
+    return "\n".join(lines)

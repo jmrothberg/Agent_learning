@@ -19,6 +19,7 @@ games/snapshots/
 games/traces/
 games/memory/
 games/test_*.html
+games/tune/
 
 # Editor / OS noise
 .vscode/

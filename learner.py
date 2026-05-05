@@ -1,0 +1,620 @@
+"""learner.py — offline Reflector + Curator over agent traces.
+
+Walks `games/traces/*.jsonl` (or a tune run's traces tree), distills each
+session into a compact record, asks an LLM Reflector to propose playbook
+deltas (new bullets + counter updates), and applies them via the
+deterministic Curator. Mirrors the ACE pattern (arXiv 2510.04618):
+localized deltas only, never wholesale rewrites.
+
+Subcommands:
+    learner walk [paths...]        # parse traces, print 1-line per session
+    learner show <trace_path>      # full structured dump of one session
+    learner reflect <paths...>     # run Reflector, print proposed deltas
+    learner apply <paths...>       # reflect + curate (writes playbook.jsonl)
+
+Notes:
+  - The Reflector defaults to qwen3.6:35b (better reasoning for offline
+    one-shot tasks) but the coder model is fine too — the prompt is
+    structured to work on either.
+  - Deltas are applied deterministically: ADD a new bullet if id is
+    novel; UPDATE counters on existing bullets; never rewrite content of
+    seed bullets without explicit `--allow-overwrite-seed`.
+  - Idempotency: re-running on the same traces will increment counters
+    again — gate with `--once` or use `--apply` only on new sessions.
+
+Trace events the learner reads (see agent.py):
+  session_start, event:phase, event:plan, event:memory, event:test,
+  event:diagnose, event:done, event:error, playbook_retrieved,
+  session_outcome, mistake_signature, vlm_detected, stream_done.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import re
+import sys
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any
+
+import ollama
+
+from memory import Bullet, Playbook
+from ollama_io import stream_chat_with_retry
+
+
+REPO_ROOT = Path(__file__).resolve().parent
+DEFAULT_PLAYBOOK_ROOT = REPO_ROOT / "games" / "memory"
+DEFAULT_TRACES_DIR = REPO_ROOT / "games" / "traces"
+DEFAULT_REFLECTOR_MODEL = "qwen3.6:35b"
+
+
+# ---------------------------------------------------------------------------
+# Session shape
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class IterReport:
+    n: int
+    ok: bool
+    errors: list[str] = field(default_factory=list)
+    soft_warnings: list[str] = field(default_factory=list)
+    diagnose: str = ""
+    notes: str = ""
+
+
+@dataclass
+class Session:
+    trace_path: Path
+    session_id: str = ""
+    goal: str = ""
+    model: str = ""
+    started_at: str = ""
+    final_ok: bool | None = None
+    iters: list[IterReport] = field(default_factory=list)
+    plan: str = ""
+    skeleton_used: str = ""
+    skeleton_score: float | None = None
+    bullets_retrieved: list[str] = field(default_factory=list)
+    duration_s: float = 0.0
+
+
+def _safe_load_jsonl(path: Path) -> list[dict]:
+    out: list[dict] = []
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                s = line.strip()
+                if not s:
+                    continue
+                try:
+                    out.append(json.loads(s))
+                except Exception:
+                    continue
+    except Exception:
+        return []
+    return out
+
+
+_PLAN_TAG_RE = re.compile(r"<plan>\s*(.*?)\s*</plan>", re.DOTALL | re.IGNORECASE)
+
+
+def parse_session(path: Path) -> Session:
+    """Build a structured Session from one agent trace file."""
+    s = Session(trace_path=path)
+    rows = _safe_load_jsonl(path)
+    if not rows:
+        return s
+
+    cur_iter: int = 0
+    last_diagnose = ""
+    last_notes = ""
+    for r in rows:
+        kind = r.get("kind") or r.get("event") or ""
+        if kind == "session_start":
+            s.session_id = str(r.get("session_id") or path.stem)
+            s.goal = str(r.get("goal") or "")
+            s.model = str(r.get("model") or "")
+            s.started_at = str(r.get("ts") or "")
+        elif kind == "event":
+            ev = r.get("event") or ""
+            text = r.get("text_preview") or ""
+            data = r.get("data") or {}
+            if ev == "memory":
+                s.skeleton_used = str(data.get("skeleton") or "")
+                s.skeleton_score = data.get("score") if "score" in data else None
+            elif ev == "plan":
+                m = _PLAN_TAG_RE.search(text)
+                s.plan = (m.group(1).strip() if m else text)[:1500]
+            elif ev == "phase":
+                t = (text or "").strip()
+                if t.startswith("iteration"):
+                    try:
+                        cur_iter = int(t.split()[1].split("/")[0])
+                    except Exception:
+                        pass
+            elif ev == "diagnose":
+                last_diagnose = text[:600]
+            elif ev == "info" and text.startswith("notes:"):
+                last_notes = text[len("notes:"):].strip()[:300]
+            elif ev == "test":
+                # data is the report dict
+                ok = bool(data.get("ok", False))
+                errs = list(data.get("errors") or [])[:5]
+                soft = list(data.get("soft_warnings") or [])[:5]
+                s.iters.append(IterReport(
+                    n=cur_iter or len(s.iters) + 1,
+                    ok=ok,
+                    errors=[str(e)[:240] for e in errs],
+                    soft_warnings=[str(w)[:240] for w in soft],
+                    diagnose=last_diagnose,
+                    notes=last_notes,
+                ))
+                last_diagnose = ""
+                last_notes = ""
+            elif ev == "done":
+                s.final_ok = True
+            elif ev == "error":
+                if s.final_ok is None:
+                    s.final_ok = False
+        elif kind == "playbook_retrieved":
+            ids = r.get("ids") or []
+            for i in ids:
+                if i not in s.bullets_retrieved:
+                    s.bullets_retrieved.append(i)
+        elif kind == "session_outcome":
+            s.final_ok = bool(r.get("ok"))
+        elif kind == "stream_done":
+            try:
+                s.duration_s += float(r.get("duration_s") or 0.0)
+            except Exception:
+                pass
+
+    if s.final_ok is None:
+        s.final_ok = bool(s.iters and s.iters[-1].ok)
+    s.duration_s = round(s.duration_s, 1)
+    return s
+
+
+# ---------------------------------------------------------------------------
+# Walking
+# ---------------------------------------------------------------------------
+
+
+def walk_traces(roots: list[Path]) -> list[Session]:
+    """Find every *.jsonl trace under each root and parse it.
+
+    Skips non-trace files (we identify a trace by presence of a
+    `session_start` row) so accidental .jsonl artifacts are ignored.
+    """
+    seen: set[Path] = set()
+    sessions: list[Session] = []
+    for root in roots:
+        if root.is_file() and root.suffix == ".jsonl":
+            sessions.append(parse_session(root))
+            seen.add(root.resolve())
+            continue
+        if not root.exists():
+            continue
+        for p in sorted(root.rglob("*.jsonl")):
+            rp = p.resolve()
+            if rp in seen:
+                continue
+            seen.add(rp)
+            s = parse_session(p)
+            if s.goal or s.iters:
+                sessions.append(s)
+    return sessions
+
+
+def cmd_walk(args) -> int:
+    sessions = walk_traces([Path(r) for r in (args.paths or [str(DEFAULT_TRACES_DIR)])])
+    if not sessions:
+        print("no traces found")
+        return 0
+    for s in sessions:
+        ok = "OK  " if s.final_ok else "FAIL"
+        iters = len(s.iters)
+        bullets = f"bullets={len(s.bullets_retrieved)}" if s.bullets_retrieved else ""
+        print(
+            f"{ok}  {s.session_id:<40}  "
+            f"iters={iters}  {s.duration_s:>7.1f}s  "
+            f"goal={s.goal[:60]!r}  {bullets}".strip()
+        )
+    n_ok = sum(1 for s in sessions if s.final_ok)
+    print(f"\n== {n_ok}/{len(sessions)} sessions OK")
+    return 0
+
+
+def cmd_show(args) -> int:
+    p = Path(args.trace_path)
+    if not p.exists():
+        # Allow passing a session id; search default tree.
+        candidates = list(DEFAULT_TRACES_DIR.rglob(f"{args.trace_path}*.jsonl"))
+        if not candidates:
+            print(f"no trace at {p}", file=sys.stderr)
+            return 2
+        p = candidates[0]
+    s = parse_session(p)
+    print(f"trace:    {p}")
+    print(f"session:  {s.session_id}")
+    print(f"goal:     {s.goal}")
+    print(f"model:    {s.model}")
+    print(f"started:  {s.started_at}")
+    print(f"final:    {'OK' if s.final_ok else 'FAIL'}")
+    print(f"duration: {s.duration_s}s")
+    print(f"plan:")
+    for line in (s.plan or "(none)").splitlines():
+        print(f"  {line}")
+    if s.bullets_retrieved:
+        print(f"bullets retrieved ({len(s.bullets_retrieved)}):")
+        for b in s.bullets_retrieved:
+            print(f"  - {b}")
+    print(f"iters ({len(s.iters)}):")
+    for it in s.iters:
+        tag = "OK" if it.ok else "FAIL"
+        print(f"  iter {it.n} [{tag}]")
+        for e in it.errors:
+            print(f"    err: {e}")
+        for w in it.soft_warnings:
+            print(f"    iss: {w}")
+        if it.diagnose:
+            print(f"    diagnose: {it.diagnose[:200]}")
+        if it.notes:
+            print(f"    notes:    {it.notes}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Reflector — LLM-driven proposal of playbook deltas
+# ---------------------------------------------------------------------------
+
+REFLECTOR_SYSTEM = """You are an offline reflector for a coding agent
+that builds single-file HTML5/JS games. Your job is to look at a single
+agent session and propose updates to a persistent "playbook" of rules.
+
+The playbook is a list of structured bullets. Each bullet has:
+  - id (kebab-case)
+  - tags (short keywords used for retrieval against future goals)
+  - content (one paragraph: a concrete, transferable code rule)
+  - helpful / harmful counters (incremented based on outcomes)
+
+You propose DELTAS only, never rewrites:
+  - new_bullets:      bullets to ADD that capture a transferable lesson
+  - counter_updates:  helpful++ for bullets whose content matches what
+                      ultimately worked; harmful++ for bullets that
+                      were retrieved but the run still failed
+
+ULTRA IMPORTANT rules:
+  - Only propose new bullets that are GENERIC and TRANSFERABLE. Do not
+    propose bullets that are specific to one goal ("for asteroids X..."
+    is fine; "in this game, when the asteroid is named Bob..." is not).
+  - Do not duplicate existing playbook bullets. If the lesson is already
+    captured by an existing bullet, propose a counter_update instead.
+  - Bullets should be ONE PARAGRAPH. Be concrete: name functions,
+    variables, conventions, with code-snippet phrasing where helpful.
+  - If nothing learnable came out of this session, return empty arrays.
+
+Output STRICT JSON ONLY. No prose outside the JSON. Schema:
+
+{
+  "observations": ["short string per significant event"],
+  "new_bullets": [
+    {"id": "kebab-id", "tags": ["t1","t2"], "content": "one paragraph"}
+  ],
+  "counter_updates": [
+    {"id": "existing-id", "helpful": 1, "harmful": 0, "reason": "..."}
+  ]
+}
+"""
+
+
+def _format_session_for_reflector(s: Session, existing_bullets: list[Bullet]) -> str:
+    lines: list[str] = []
+    lines.append(f"GOAL: {s.goal}")
+    lines.append(f"MODEL: {s.model}")
+    lines.append(f"OUTCOME: {'OK' if s.final_ok else 'FAIL'}")
+    lines.append(f"DURATION: {s.duration_s}s across {len(s.iters)} iterations")
+    if s.skeleton_used:
+        ss = f" (sim={s.skeleton_score:.2f})" if s.skeleton_score is not None else ""
+        lines.append(f"SKELETON: {s.skeleton_used}{ss}")
+    if s.plan:
+        lines.append("\nPLAN:")
+        lines.append(s.plan)
+    if s.bullets_retrieved:
+        lines.append("\nPLAYBOOK BULLETS RETRIEVED THIS SESSION:")
+        by_id = {b.id: b for b in existing_bullets}
+        for bid in s.bullets_retrieved:
+            b = by_id.get(bid)
+            if b:
+                lines.append(f"  - [{bid}] tags={b.tags}  helpful={b.helpful} harmful={b.harmful}")
+                lines.append(f"      {b.content[:200]}")
+            else:
+                lines.append(f"  - [{bid}] (no longer in playbook)")
+    lines.append("\nITERATIONS:")
+    for it in s.iters:
+        tag = "OK" if it.ok else "FAIL"
+        lines.append(f"  iter {it.n} [{tag}]")
+        for e in it.errors[:3]:
+            lines.append(f"    err: {e}")
+        for w in it.soft_warnings[:3]:
+            lines.append(f"    iss: {w}")
+        if it.diagnose:
+            lines.append(f"    diagnose: {it.diagnose[:240]}")
+        if it.notes:
+            lines.append(f"    notes:    {it.notes}")
+    if s.bullets_retrieved:
+        lines.append("\nIMPORTANT: when proposing counter_updates, prefer "
+                     "the IDs above (they were live this session).")
+    lines.append("\nExisting playbook IDs (do NOT duplicate):")
+    lines.append(", ".join(b.id for b in existing_bullets))
+    return "\n".join(lines)
+
+
+_JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+
+async def reflect_one(
+    session: Session,
+    existing_bullets: list[Bullet],
+    *,
+    model: str,
+    client: ollama.AsyncClient,
+) -> dict:
+    """Run the Reflector on one session; return the parsed JSON proposal.
+
+    Returns an empty proposal on parse / network failure rather than
+    raising — the curator will simply have nothing to apply.
+    """
+    user_msg = _format_session_for_reflector(session, existing_bullets)
+    messages = [
+        {"role": "system", "content": REFLECTOR_SYSTEM},
+        {"role": "user", "content": user_msg},
+    ]
+    try:
+        result = await stream_chat_with_retry(
+            client,
+            model,
+            messages,
+            on_token=lambda _t: None,
+            options={"temperature": 0.25, "num_ctx": 8192},
+            stall_seconds=120.0,
+            overall_seconds=900.0,
+            max_retries=1,
+        )
+        text = (result.text or "").strip()
+    except Exception as e:
+        return {"observations": [f"reflector exception: {e}"],
+                "new_bullets": [], "counter_updates": []}
+    m = _JSON_RE.search(text)
+    if not m:
+        return {"observations": ["reflector returned no JSON"],
+                "new_bullets": [], "counter_updates": []}
+    try:
+        obj = json.loads(m.group(0))
+    except Exception:
+        # Try to fix common JSON sins (trailing commas).
+        cleaned = re.sub(r",(\s*[}\]])", r"\1", m.group(0))
+        try:
+            obj = json.loads(cleaned)
+        except Exception as e:
+            return {"observations": [f"json parse failed: {e}"],
+                    "new_bullets": [], "counter_updates": []}
+    obj.setdefault("observations", [])
+    obj.setdefault("new_bullets", [])
+    obj.setdefault("counter_updates", [])
+    return obj
+
+
+# ---------------------------------------------------------------------------
+# Curator — deterministic merge
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CurationLog:
+    added: list[str] = field(default_factory=list)
+    updated_counters: list[tuple[str, int, int]] = field(default_factory=list)
+    skipped: list[tuple[str, str]] = field(default_factory=list)
+
+
+def curate(
+    proposals: list[dict],
+    playbook: Playbook,
+    *,
+    apply: bool = False,
+    allow_overwrite_seed: bool = False,
+) -> CurationLog:
+    """Apply Reflector proposals to a playbook deterministically.
+
+    `proposals` is the list of reflector JSON outputs (one per session).
+    `apply=False` means dry-run: log what would change, don't write.
+    """
+    log = CurationLog()
+    existing = {b.id: b for b in playbook.load_all()}
+
+    for prop in proposals:
+        for nb in prop.get("new_bullets") or []:
+            try:
+                bid = str(nb["id"]).strip()
+                content = str(nb["content"]).strip()
+                tags = [str(t).strip() for t in (nb.get("tags") or []) if str(t).strip()]
+            except Exception:
+                continue
+            if not bid or not content:
+                continue
+            if bid in existing:
+                ex = existing[bid]
+                if ex.source == "seed" and not allow_overwrite_seed:
+                    log.skipped.append((bid, "seed bullet, not overwriting"))
+                    continue
+                # Treat ADD-on-existing as a content refresh: keep counters.
+                ex.content = content
+                ex.tags = tags or ex.tags
+                ex.source = "learned"
+                if apply:
+                    playbook.add(ex)
+                log.added.append(bid + " (refreshed)")
+                continue
+            new_b = Bullet(
+                id=bid, content=content, tags=tags, source="learned",
+            )
+            existing[bid] = new_b
+            if apply:
+                playbook.add(new_b)
+            log.added.append(bid)
+
+        for cu in prop.get("counter_updates") or []:
+            try:
+                bid = str(cu["id"]).strip()
+                helpful = int(cu.get("helpful") or 0)
+                harmful = int(cu.get("harmful") or 0)
+            except Exception:
+                continue
+            if not bid:
+                continue
+            if bid not in existing:
+                log.skipped.append((bid, "counter_update for unknown id"))
+                continue
+            if apply:
+                playbook.update_counters([bid],
+                                          helpful_delta=helpful,
+                                          harmful_delta=harmful)
+            log.updated_counters.append((bid, helpful, harmful))
+
+    return log
+
+
+# ---------------------------------------------------------------------------
+# Reflect / apply commands
+# ---------------------------------------------------------------------------
+
+
+async def cmd_reflect(args) -> int:
+    return await _run_reflect_apply(args, apply=False)
+
+
+async def cmd_apply(args) -> int:
+    return await _run_reflect_apply(args, apply=True)
+
+
+async def _run_reflect_apply(args, *, apply: bool) -> int:
+    paths = [Path(p) for p in (args.paths or [str(DEFAULT_TRACES_DIR)])]
+    sessions = walk_traces(paths)
+    if not sessions:
+        print("no traces found")
+        return 0
+
+    if args.tests:
+        wanted = {s.strip() for s in args.tests.split(",") if s.strip()}
+        sessions = [s for s in sessions if any(t in s.session_id or t in s.goal for t in wanted)]
+        if not sessions:
+            print(f"no sessions matched --tests={args.tests}")
+            return 0
+
+    if args.failures_only:
+        sessions = [s for s in sessions if not s.final_ok]
+    if args.successes_only:
+        sessions = [s for s in sessions if s.final_ok]
+
+    print(f"reflecting over {len(sessions)} session(s) using {args.model} ...")
+    pb_root = Path(args.playbook_root or DEFAULT_PLAYBOOK_ROOT)
+    playbook = Playbook(root=pb_root)
+    playbook.ensure()
+    existing = playbook.load_all()
+
+    client = ollama.AsyncClient()
+    proposals: list[dict] = []
+    for i, s in enumerate(sessions, 1):
+        print(f"[{i}/{len(sessions)}] {s.session_id}  goal={s.goal[:50]!r}  "
+              f"{'OK' if s.final_ok else 'FAIL'}")
+        prop = await reflect_one(s, existing, model=args.model, client=client)
+        n_new = len(prop.get("new_bullets") or [])
+        n_cu = len(prop.get("counter_updates") or [])
+        n_obs = len(prop.get("observations") or [])
+        print(f"     → obs={n_obs}  new={n_new}  counters={n_cu}")
+        proposals.append(prop)
+
+    log = curate(proposals, playbook, apply=apply,
+                 allow_overwrite_seed=args.allow_overwrite_seed)
+
+    print()
+    print(f"== curator log ({'applied' if apply else 'dry-run'}) ==")
+    if log.added:
+        print(f"  added/refreshed ({len(log.added)}):")
+        for x in log.added:
+            print(f"    + {x}")
+    if log.updated_counters:
+        print(f"  counter updates ({len(log.updated_counters)}):")
+        for bid, h, hh in log.updated_counters:
+            print(f"    Δ {bid}  helpful{h:+d}  harmful{hh:+d}")
+    if log.skipped:
+        print(f"  skipped ({len(log.skipped)}):")
+        for bid, reason in log.skipped:
+            print(f"    - {bid}: {reason}")
+    if not (log.added or log.updated_counters or log.skipped):
+        print("  (no changes)")
+    print(f"\nplaybook: {playbook.path}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Entry
+# ---------------------------------------------------------------------------
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(description="Offline learner for the coding agent.")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    pw = sub.add_parser("walk", help="parse trace files, one line per session")
+    pw.add_argument("paths", nargs="*",
+                    help=f"files or dirs (default {DEFAULT_TRACES_DIR})")
+
+    ps = sub.add_parser("show", help="print a structured dump of one session")
+    ps.add_argument("trace_path", help="path or session id prefix")
+
+    pr = sub.add_parser("reflect", help="run Reflector on traces (dry-run, no writes)")
+    pr.add_argument("paths", nargs="*",
+                    help=f"trace files or dirs (default {DEFAULT_TRACES_DIR})")
+    pr.add_argument("--model", default=DEFAULT_REFLECTOR_MODEL,
+                    help=f"Reflector model (default {DEFAULT_REFLECTOR_MODEL})")
+    pr.add_argument("--tests", default=None,
+                    help="comma-separated substrings to filter session ids/goals")
+    pr.add_argument("--failures-only", action="store_true",
+                    help="only reflect on FAIL sessions")
+    pr.add_argument("--successes-only", action="store_true",
+                    help="only reflect on OK sessions")
+    pr.add_argument("--playbook-root", default=None,
+                    help=f"playbook dir (default {DEFAULT_PLAYBOOK_ROOT})")
+    pr.add_argument("--allow-overwrite-seed", action="store_true",
+                    help="allow ADD ops to overwrite seed-source bullets")
+
+    pa = sub.add_parser("apply", help="run Reflector + Curator (writes playbook)")
+    for a in pr._actions:                     # mirror reflect args
+        if a.dest in ("help",):
+            continue
+        # add_action throws if the kwarg combo doesn't match — skip cleanly.
+        try:
+            pa._add_action(a)
+        except Exception:
+            pass
+
+    args = p.parse_args()
+
+    if args.cmd == "walk":
+        return cmd_walk(args)
+    if args.cmd == "show":
+        return cmd_show(args)
+    if args.cmd == "reflect":
+        return asyncio.run(cmd_reflect(args))
+    if args.cmd == "apply":
+        return asyncio.run(cmd_apply(args))
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

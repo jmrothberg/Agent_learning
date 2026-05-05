@@ -53,24 +53,27 @@ from typing import AsyncIterator
 
 import ollama
 
-from memory import GameMemory, signature_for_report
+from memory import (
+    CANVAS_SKELETON_V2,
+    CANVAS_SKELETON_V2_NAME,
+    DEFAULT_SKELETON,
+    DEFAULT_SKELETON_NAME,
+    GameMemory,
+    Playbook,
+    SkeletonHit,
+    render_playbook_block,
+    signature_for_report,
+)
 from ollama_io import Candidate, StreamResult, best_of_n as _best_of_n
 from ollama_io import stream_chat, stream_chat_with_retry
 from patches import apply_patches, extract_patches
-from prompts import (
-    CRITIQUE_INSTRUCTION,
-    PLAN_INSTRUCTION,
-    SYSTEM_PROMPT,
-    VLM_REVIEW_NOTE,
-    diagnose_instruction,
-    first_build_instruction,
-    fix_instruction,
-    patch_retry_instruction,
-    post_clean_instruction,
-    regression_instruction,
-    seed_build_instruction,
-)
-from tools import LiveBrowser, format_report_for_model
+
+# Prompt-module routing: v0 is the original prompts.py kept for backward
+# compatibility; v1+ are siblings (prompts_v1.py, prompts_v2.py, ...). The
+# agent picks one at construction time via the `prompt_version` argument.
+import prompts as _prompts_v0  # noqa: E402
+
+from tools import LiveBrowser, format_report_for_model, score_test_report
 
 
 _HTML_RE = re.compile(r"<html_file>\s*(.*?)\s*</html_file>", re.DOTALL | re.IGNORECASE)
@@ -98,6 +101,8 @@ _CONFIRM_RE = re.compile(r"<confirm[_-]?done\s*/?>", re.IGNORECASE)
 _QUESTION_RE = re.compile(r"<question>\s*(.*?)\s*</question>", re.DOTALL | re.IGNORECASE)
 _DIAGNOSE_RE = re.compile(r"<diagnose>\s*(.*?)\s*</diagnose>", re.DOTALL | re.IGNORECASE)
 _NOTES_RE = re.compile(r"<notes>\s*(.*?)\s*</notes>", re.DOTALL | re.IGNORECASE)
+_CRITERIA_RE = re.compile(r"<criteria>\s*(.*?)\s*</criteria>", re.DOTALL | re.IGNORECASE)
+_PROBES_RE = re.compile(r"<probes>\s*(.*?)\s*</probes>", re.DOTALL | re.IGNORECASE)
 
 
 # Once the messages list has more turns than this, older turns get their
@@ -146,6 +151,23 @@ class GameAgent:
         # the baseline; the model is asked to ADAPT it (via patches) to
         # the user's goal rather than build from scratch.
         seed_file: str | Path | None = None,
+        # Which prompt module to load. "v0" = prompts.py (original);
+        # "v1", "v2", ... = prompts_vN.py (research-tuned variants). Falls
+        # back to v0 if the requested module isn't installed.
+        prompt_version: str = "v0",
+        # How to seed the first build. "retrieve" (default) = best-match
+        # skeleton from past wins; "default" = always use the bundled
+        # canvas_basic skeleton (good for tune mode — measures from-scratch
+        # ability); "none" = no skeleton, model writes blank-slate.
+        skeleton_mode: str = "retrieve",
+        # How many playbook bullets to inject per render. v1+ prompts use
+        # this; v0 ignores it.
+        playbook_top_k: int = 6,
+        # When True, increment helpful/harmful counters on the playbook
+        # bullets that were active during each iteration based on the
+        # outcome. Off by default so tune-mode A/B experiments can
+        # compare a frozen playbook. Flip on once a baseline is locked.
+        playbook_writeback: bool = False,
     ):
         self.model = model
         self.out_path = Path(out_path)
@@ -182,7 +204,27 @@ class GameAgent:
         self._fix_mode: bool = False
         self._memory = GameMemory(root=memory_root)
         self._memory.ensure()
+        self._playbook = Playbook(root=memory_root)
+        self._playbook.ensure()
+        self._playbook_top_k = max(0, int(playbook_top_k))
+        self._playbook_writeback = bool(playbook_writeback)
+        # Bullet IDs retrieved on the most recent prompt render — used by
+        # the writeback feedback loop to credit/blame them after the next
+        # test result.
+        self._active_bullet_ids: list[str] = []
+        self._skeleton_mode = skeleton_mode
+        self._prompt_version = prompt_version
+        self._p = self._load_prompt_module(prompt_version)
         self._last_diagnose: str | None = None
+        self._stuck_streak: int = 0
+        # Acceptance criteria the model emitted during Phase A — fed back
+        # into fix prompts so the model self-checks against its own bar.
+        self._criteria: str = ""
+        # Executable acceptance probes — JS expressions the model proposes
+        # in Phase A. Each iter's verifier runs them in the page; results
+        # join the report. Empty list = no model probes (universal probes
+        # still run).
+        self._probes: list[dict] = []
         self._token_cb = None
         self._goal: str = ""
         # Tracks the most recent test-report summary for memory.record_outcome.
@@ -192,6 +234,49 @@ class GameAgent:
         # always inline THIS in fix prompts (instead of asking the model to
         # remember its own previous reply).
         self._current_file: str = ""
+
+    @staticmethod
+    def _load_prompt_module(version: str):
+        """Resolve the prompt module for `version`. Falls back to v0 silently
+        if the requested module isn't importable, and traces the fallback so
+        misconfigured tune runs are visible.
+        """
+        if version == "v0" or not version:
+            return _prompts_v0
+        try:
+            import importlib
+            return importlib.import_module(f"prompts_{version}")
+        except Exception:
+            return _prompts_v0
+
+    def _retrieve_playbook_block(self, goal: str, *, code: str = "") -> str:
+        """Get top-K bullets and render them as a `<playbook>` block.
+
+        Empty string when nothing matches OR when the active prompt module
+        has set PLAYBOOK_DISABLED = True (gives a v0-prompt the option to
+        opt out wholesale).
+
+        Logs the retrieved bullet IDs to the trace so the offline learner
+        can later credit/blame each bullet for the eventual outcome.
+        """
+        if self._playbook_top_k <= 0:
+            return ""
+        if getattr(self._p, "PLAYBOOK_DISABLED", False):
+            return ""
+        try:
+            hits = self._playbook.retrieve(goal, code=code, k=self._playbook_top_k)
+            if hits:
+                ids = [h.bullet.id for h in hits]
+                self._trace({
+                    "kind": "playbook_retrieved",
+                    "ids": ids,
+                    "scores": [round(h.score, 4) for h in hits],
+                    "goal_preview": goal[:120],
+                })
+                self._active_bullet_ids = list(ids)
+            return render_playbook_block(hits)
+        except Exception:
+            return ""
 
     # -- TUI-facing setters -------------------------------------------------
 
@@ -449,11 +534,11 @@ class GameAgent:
         """Sample N completions and score each by running its result through
         the test harness against a temp file. Used when fixing a failed iter.
 
-        Scorer:
-          +1.0 if patches/file produced and test passed
-          +0.5 if patches/file applied cleanly but test still failed
-          0.0  if patches/file extracted but couldn't be applied
-          -1.0 if no usable code came back at all
+        Scorer is a continuous quality score in [0, 100] from
+        `score_test_report` so partial-credit candidates ("almost works")
+        win over fully-broken ones. Pass = 100; "applied but several
+        errors" lands ~30; "wouldn't apply at all" returns -10 so it
+        always loses to anything that ran.
         """
         # We deliberately DO NOT stream tokens for these candidates — only
         # the winning one is replayed visually after we pick it.
@@ -463,21 +548,23 @@ class GameAgent:
             extra["materialized"] = bool(html)
             extra["materialize_msg"] = applied_msg
             if not html:
-                return -1.0, extra
-            # Score by running headless via the LiveBrowser. The browser is
-            # currently showing the LAST file we wrote; we'll switch back to
-            # it after scoring. For scoring we write to a side-by-side temp.
+                return -10.0, extra
             tmp_path = self.snapshots_dir / f"cand_{self._snapshot_n+1:02d}_{abs(hash(text))%10000:04d}.html"
             try:
                 tmp_path.parent.mkdir(parents=True, exist_ok=True)
                 tmp_path.write_text(html, encoding="utf-8")
-                report = await self.browser.load_and_test(tmp_path, screenshot_path=None)
+                report = await self.browser.load_and_test(
+                    tmp_path, screenshot_path=None,
+                    probes=self._probes or None,
+                )
                 extra["report_ok"] = report.get("ok", False)
                 extra["report_summary"] = format_report_for_model(report)[:400]
-                return (1.0 if report["ok"] else 0.5), extra
+                return score_test_report(report), extra
             except Exception as e:
                 extra["scorer_exception"] = str(e)
-                return 0.5, extra
+                # Scorer crashed — treat as worse than "applied but
+                # broken" but better than "didn't apply".
+                return 10.0, extra
 
         winner, all_cands = await _best_of_n(
             self._client,
@@ -488,6 +575,10 @@ class GameAgent:
             stall_seconds=self.stall_seconds,
             overall_seconds=self.overall_seconds,
             scorer=scorer,
+            # score_test_report() returns 0-100; passing test = 100, so
+            # we early-exit at 100 (any partial-credit candidate keeps
+            # sampling).
+            early_exit_score=100.0,
             on_progress=lambda i, msg: self._trace({
                 "kind": "best_of_n_progress",
                 "candidate": i,
@@ -618,6 +709,43 @@ class GameAgent:
         m = _NOTES_RE.search(reply)
         return m.group(1).strip() if m else None
 
+    @staticmethod
+    def _extract_criteria(reply: str) -> str | None:
+        m = _CRITERIA_RE.search(reply)
+        return m.group(1).strip() if m else None
+
+    @staticmethod
+    def _extract_probes(reply: str) -> list[dict]:
+        """Pull a JSON list-of-{name,expr} out of <probes>...</probes>.
+
+        Tolerant: accepts either a JSON list of objects, or a list of
+        plain strings (treated as `expr`, with name auto-assigned). Bad
+        JSON returns []; the agent shouldn't ever crash on a probe parse
+        failure since universal probes still cover the basics.
+        """
+        m = _PROBES_RE.search(reply)
+        if not m:
+            return []
+        body = m.group(1).strip()
+        # Strip a fenced ```json``` if present.
+        body = re.sub(r"^```(?:json|JSON)?\s*\n", "", body)
+        body = re.sub(r"\n?```$", "", body).strip()
+        try:
+            obj = json.loads(body)
+        except Exception:
+            return []
+        out: list[dict] = []
+        if isinstance(obj, list):
+            for i, item in enumerate(obj, 1):
+                if isinstance(item, dict) and item.get("expr"):
+                    out.append({
+                        "name": str(item.get("name") or f"probe_{i}")[:60],
+                        "expr": str(item["expr"])[:600],
+                    })
+                elif isinstance(item, str):
+                    out.append({"name": f"probe_{i}", "expr": item[:600]})
+        return out[:8]   # cap so a chatty model can't bloat the verifier
+
     # -- main loop ----------------------------------------------------------
 
     async def run(
@@ -674,8 +802,8 @@ class GameAgent:
             })
         else:
             self._messages = [
-                {"role": "system", "content": SYSTEM_PROMPT.replace("{goal}", goal)},
-                {"role": "user", "content": PLAN_INSTRUCTION},
+                {"role": "system", "content": self._p.SYSTEM_PROMPT.replace("{goal}", goal)},
+                {"role": "user", "content": self._p.PLAN_INSTRUCTION},
             ]
 
             self._trace({
@@ -707,6 +835,18 @@ class GameAgent:
             self._messages.append({"role": "assistant", "content": plan_reply})
             self._dump_conversation()
             yield self._record(AgentEvent("plan", plan_reply))
+            crit = self._extract_criteria(plan_reply)
+            if crit:
+                self._criteria = crit
+                self._trace({"kind": "criteria", "text": crit[:600]})
+            probes = self._extract_probes(plan_reply)
+            if probes:
+                self._probes = probes
+                self._trace({
+                    "kind": "probes_parsed",
+                    "count": len(probes),
+                    "names": [p.get("name") for p in probes],
+                })
 
             q = self._extract_question(plan_reply)
             if q is not None:
@@ -754,27 +894,60 @@ class GameAgent:
                     "seed_file": str(self.seed_file),
                     "seed_bytes": len(seed_html),
                 }))
+                pb_block = self._retrieve_playbook_block(goal, code=seed_html)
+                pb_kwargs = {"playbook_block": pb_block} if (pb_block and self._prompt_version != "v0") else {}
                 self._messages.append({
                     "role": "user",
                     "content": self._flush_user_injections(
-                        seed_build_instruction(seed_html, str(self.seed_file))
+                        self._p.seed_build_instruction(
+                            seed_html, str(self.seed_file), **pb_kwargs,
+                        )
                     ),
                 })
             else:
-                skel = self._memory.retrieve_skeleton(goal)
+                if self._skeleton_mode == "default":
+                    # Force the bundled scaffold — used by tune mode so we
+                    # measure the agent's reasoning, not skeleton-of-self
+                    # retrieval. Bypasses memory entirely.
+                    skel = SkeletonHit(
+                        name=DEFAULT_SKELETON_NAME,
+                        html=DEFAULT_SKELETON,
+                        score=0.0,
+                        source_goal=None,
+                    )
+                elif self._skeleton_mode == "default_v2":
+                    # Bigger bug-hardened scaffold — pre-empts focus-loss,
+                    # restart-cleanup, dt-cap, DPR-resize and ~7 other
+                    # playbook bullets in the seed itself. The model only
+                    # has to fill update/draw/state.
+                    skel = SkeletonHit(
+                        name=CANVAS_SKELETON_V2_NAME,
+                        html=CANVAS_SKELETON_V2,
+                        score=0.0,
+                        source_goal=None,
+                    )
+                else:
+                    skel = self._memory.retrieve_skeleton(goal)
                 memory_msg = (
                     f"using skeleton: {skel.name}"
                     + (f" (sim={skel.score:.2f}, src goal: {skel.source_goal!r})"
                        if skel.source_goal else " (default)")
+                    + (f" [skeleton_mode={self._skeleton_mode}]" if self._skeleton_mode != "retrieve" else "")
                 )
                 yield self._record(AgentEvent("memory", memory_msg, {
-                    "skeleton": skel.name, "score": skel.score, "source_goal": skel.source_goal,
+                    "skeleton": skel.name, "score": skel.score,
+                    "source_goal": skel.source_goal,
+                    "skeleton_mode": self._skeleton_mode,
                 }))
 
+                pb_block = self._retrieve_playbook_block(goal, code=skel.html)
+                pb_kwargs = {"playbook_block": pb_block} if (pb_block and self._prompt_version != "v0") else {}
                 self._messages.append({
                     "role": "user",
                     "content": self._flush_user_injections(
-                        first_build_instruction(skel.html, skel.source_goal)
+                        self._p.first_build_instruction(
+                            skel.html, skel.source_goal, **pb_kwargs,
+                        )
                     ),
                 })
 
@@ -922,7 +1095,7 @@ class GameAgent:
                     self._messages.append({
                         "role": "user",
                         "content": self._flush_user_injections(
-                            patch_retry_instruction(res.failed, self._current_file)
+                            self._p.patch_retry_instruction(res.failed, self._current_file)
                         ),
                     })
                 else:
@@ -965,6 +1138,7 @@ class GameAgent:
             try:
                 report = await self.browser.load_and_test(
                     self.out_path, screenshot_path=shot_path,
+                    probes=self._probes or None,
                 )
             except Exception as e:
                 yield self._record(AgentEvent("info", f"browser harness crashed: {e}"))
@@ -991,6 +1165,38 @@ class GameAgent:
 
             said_done = bool(_DONE_RE.search(reply))
             regressed = (self._previous_report_ok is True) and (not report["ok"])
+
+            # Track stuck-streak — used by v1's fix prompt to switch to
+            # the "5-7 different sources" reflection ladder after repeat
+            # failures on the same goal.
+            if report["ok"]:
+                self._stuck_streak = 0
+            else:
+                self._stuck_streak += 1
+
+            # Online playbook counter feedback. Off by default (tune
+            # baselines should not write back). When on:
+            #   - pass + active bullets → helpful++ for each
+            #   - 3rd+ consecutive failure + active bullets → harmful++
+            if self._playbook_writeback and self._active_bullet_ids:
+                if report["ok"]:
+                    self._playbook.update_counters(
+                        list(self._active_bullet_ids), helpful_delta=1,
+                    )
+                    self._trace({
+                        "kind": "playbook_writeback",
+                        "ids": list(self._active_bullet_ids),
+                        "delta": "helpful+1",
+                    })
+                elif self._stuck_streak >= 3:
+                    self._playbook.update_counters(
+                        list(self._active_bullet_ids), harmful_delta=1,
+                    )
+                    self._trace({
+                        "kind": "playbook_writeback",
+                        "ids": list(self._active_bullet_ids),
+                        "delta": "harmful+1",
+                    })
 
             # Save best.html on every clean iteration AND record the success
             # in memory so future similar goals can retrieve this code.
@@ -1057,7 +1263,7 @@ class GameAgent:
                 # honest call, not a vote).
                 self._messages.append({
                     "role": "user",
-                    "content": self._flush_user_injections(CRITIQUE_INSTRUCTION),
+                    "content": self._flush_user_injections(self._p.CRITIQUE_INSTRUCTION),
                 })
                 self._previous_report_ok = report["ok"]
                 self._fix_mode = False
@@ -1153,11 +1359,11 @@ class GameAgent:
         report_text = format_report_for_model(report)
 
         if report["ok"]:
-            return post_clean_instruction(report_text)
+            return self._p.post_clean_instruction(report_text)
 
         if regressed:
             best = self._read_best_or_empty()
-            return regression_instruction(report_text, best)
+            return self._p.regression_instruction(report_text, best)
 
         # Failed: combined diagnose+fix prompt with memory hints inline.
         sig = signature_for_report(report)
@@ -1173,7 +1379,28 @@ class GameAgent:
         # which dramatically increases the chance the model actually emits
         # <diagnose>. (Empirical: when the format ask was below the report,
         # gpt-oss skipped it ~100% of the time.)
-        fix = fix_instruction(report_text, self._current_file, hints)
+        pb_block = self._retrieve_playbook_block(self._goal, code=self._current_file)
+        fix_kwargs: dict = {}
+        if pb_block and self._prompt_version != "v0":
+            fix_kwargs["playbook_block"] = pb_block
+        # Track stuck-streak so v1's fix prompt can switch to the
+        # 5-7-causes reflection ladder after repeated failures.
+        if self._prompt_version != "v0":
+            fix_kwargs["stuck_streak"] = self._stuck_streak
+        # Feed the model its own Phase-A acceptance criteria so each fix
+        # is anchored to "what does the working game owe me?" instead of
+        # only "what does the report say is wrong?". Criteria are emitted
+        # by v1's PLAN_INSTRUCTION; v0 doesn't ask for them, so this is
+        # naturally a no-op there.
+        if self._prompt_version != "v0" and self._criteria:
+            fix_kwargs["criteria_block"] = self._criteria
+        try:
+            fix = self._p.fix_instruction(
+                report_text, self._current_file, hints, **fix_kwargs,
+            )
+        except TypeError:
+            # v0's signature doesn't take playbook/stuck/criteria kwargs.
+            fix = self._p.fix_instruction(report_text, self._current_file, hints)
         if partial_failed:
             fix += (
                 "\n\nNOTE: some of your previous patches did not apply. "
@@ -1181,7 +1408,7 @@ class GameAgent:
                 + "\n".join(f"  - {reason}" for (_i, _p, reason) in partial_failed)
             )
         if self._is_vlm and self._next_image_bytes:
-            fix += "\n\n" + VLM_REVIEW_NOTE
+            fix += "\n\n" + self._p.VLM_REVIEW_NOTE
 
         format_anchor = (
             "REPLY FORMAT FOR THIS TURN — emit these tags IN THIS ORDER:\n"

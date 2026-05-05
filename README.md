@@ -5,12 +5,65 @@ test, and iteratively fix single-file HTML5 games — with live feedback
 from a real Chromium browser. Comes with a Textual TUI for two-way chat
 and a plain CLI for unattended runs.
 
-The core thesis: **a small validated model beats a large unvalidated one.**
+The core thesis: **a small validated model beats a large unvalidated one,
+and an agent that learns from every session beats a static prompt.**
 Every model output is run in a real browser, every error is fed back,
-every clean turn is preserved, every regression is reverted, and user
-feedback typed mid-run is the highest-priority signal in the loop.
+every clean turn is preserved, every regression is reverted, user feedback
+typed mid-run is the highest-priority signal in the loop — **and every
+session feeds an offline learner that grows the agent's `playbook` of
+HTML/JS rules of thumb, so tomorrow's session starts smarter than today's.**
+
+> **This isn't a one-shot tune.** The agent ships with a 30-bullet seeded
+> playbook (canonical bugs and best practices distilled from the literature),
+> and **every game you build, every piece of feedback you type, and every
+> failed iter that gets fixed becomes input** to a Reflector + Curator
+> pipeline that mints new playbook bullets, increments helpful/harmful
+> counters on existing ones, and prunes rules that drift negative. After
+> a month of use the playbook in `games/memory/playbook.jsonl` reflects
+> *your* games, *your* preferences, and the failure modes *your* model
+> actually hits. See [How the agent compounds](#how-the-agent-compounds)
+> below.
 
 **Remote:** https://github.com/jmrothberg/Agent_learning/
+
+## Contents
+
+- [Prerequisites](#prerequisites)
+- [How a small model writes big code](#how-a-small-model-writes-big-code)
+- [How the agent compounds (it learns from your sessions)](#how-the-agent-compounds)
+- [Tuning rig & playbook commands](#tuning-rig--playbook-commands)
+- [Quick start](#quick-start)
+- [CLI (`coder.py`)](#cli-coderpy)
+- [What to type when (cheat sheet)](#what-to-type-when-the-only-cheat-sheet-you-need)
+- [What the TUI looks like](#what-the-tui-looks-like)
+- [Slash commands](#slash-commands)
+- [Keys](#keys)
+- [How feedback works](#how-feedback-works-this-is-the-important-bit)
+- [Model selection](#model-selection)
+- [File layout](#file-layout-where-to-look-when-something-fails)
+- [How the loop works (in code)](#how-the-loop-works-in-code)
+- [Restarting / resuming](#restarting-resuming-after-a-crash)
+- [Troubleshooting](#troubleshooting)
+- [Dependencies](#dependencies)
+- [License](#license)
+
+---
+
+## Prerequisites
+
+- **Python 3.10+** recommended (async stack, typing, pathlib).
+- **Ollama** running locally (`ollama serve`) with at least one pulled model.
+- **Playwright Chromium**: after `pip install -r requirements.txt`, run  
+  `playwright install chromium`.
+- **Display for `chat.py`**: the default TUI launches a **visible** Chromium
+  window. You need a working desktop/Wayland/X11 session (or X forwarding
+  that Playwright can use). For SSH-only or CI machines, use  
+  `coder.py --headless` instead of the TUI.
+- **`OLLAMA_HOST`**: if your daemon is not on the default address, set this
+  before launching (the Python client and HTTP fallbacks respect it).
+- **Trust**: the model writes HTML/JS that is executed in a real browser from
+  `file://` URLs. Only run models and seeds you trust; treat generated games
+  like untrusted web pages if you re-host them.
 
 ---
 
@@ -29,7 +82,7 @@ feedback typed mid-run is the highest-priority signal in the loop.
                                          │  goal
                                          ▼
                     ┌──────────────────────────────────────┐
-                    │  MEMORY ▸ retrieve_skeleton(goal)    │
+                    │  MEMORY ▸ GameMemory.retrieve_skeleton │
                     │  Nearest past WORKING game seeds     │
                     │  the very first <html_file>.         │
                     └──────────────────┬───────────────────┘
@@ -53,7 +106,7 @@ feedback typed mid-run is the highest-priority signal in the loop.
    │          │  T = 0.25  (precision)                 │                  │
    │          │                                        │ failure          │
    │          │   ┌────────────────────────────────────▼─────────────┐    │
-   │          │   │  MEMORY ▸ retrieve_mistakes(signature, k=3)      │    │
+   │          │   │  MEMORY ▸ GameMemory.retrieve_mistakes(sig, k=3) │    │
    │          │   │  past root-causes for THIS failure type, inlined │    │
    │          │   │  into the next prompt as hints                   │    │
    │          │   └──────────────────────────────────────────────────┘    │
@@ -62,11 +115,12 @@ feedback typed mid-run is the highest-priority signal in the loop.
    │   │ BEST-OF-N    │    │ VLM SCREENSHOT  │    │ USER FEEDBACK     │   │
    │   │ ─────────    │    │ ─────────────── │    │ ─────────────     │   │
    │   │ sample N     │    │ vision model    │    │ free text typed   │   │
-   │   │ silently,    │    │ gets the .png + │    │ at any time, in   │   │
-   │   │ score each   │    │ "compare to     │    │ a HIGHEST-PRIORITY│   │
-   │   │ in headless  │    │  expectation"   │    │ banner, OVERRIDES │   │
-   │   │ Chromium,    │    │ catches "runs   │    │ plan + defaults   │   │
-   │   │ keep winner  │    │ but looks wrong"│    │ this turn         │   │
+   │   │ completions  │    │ gets the .png + │    │ at any time, in   │   │
+   │   │ without TUI  │    │ "compare to     │    │ a HIGHEST-PRIORITY│   │
+   │   │ streaming;   │    │  expectation"   │    │ banner, OVERRIDES │   │
+   │   │ score each   │    │ catches "runs   │    │ plan + defaults   │   │
+   │   │ in the same  │    │ but looks wrong"│    │ this turn         │   │
+   │   │ LiveBrowser  │    │                 │    │                   │   │
    │   └──────────────┘    └─────────────────┘    └───────────────────┘   │
    └────────────────────────────────┬─────────────────────────────────────┘
                                     │  <done/>
@@ -87,6 +141,12 @@ feedback typed mid-run is the highest-priority signal in the loop.
             └────────────────────────────────────────────────────┘
 ```
 
+**Diagram note — best-of-N:** each candidate is scored by loading temporary
+HTML through the **same** `LiveBrowser` instance as the rest of the session
+(`tools.LiveBrowser.load_and_test`). With `chat.py` that is usually a **visible**
+window; with `coder.py --headless` it stays headless. There is no separate
+always-headless scorer.
+
 ### Why this competes with much larger models
 
 A 20B local model has limited reasoning per turn. The harness multiplies
@@ -102,10 +162,10 @@ Each technique is matched to a *specific* small-model failure mode:
 | Technique                    | Failure it prevents                                            | Where it lives                              |
 | ---------------------------- | -------------------------------------------------------------- | ------------------------------------------- |
 | **Plan first**               | Code-first models skip controls / win conditions / edge cases  | `prompts.PLAN_INSTRUCTION`                  |
-| **Memory · skeleton**        | First-build cold start ("how do I even structure this?")       | `memory.retrieve_skeleton`                  |
+| **Memory · skeleton**        | First-build cold start ("how do I even structure this?")       | `memory.GameMemory.retrieve_skeleton`       |
 | **Patches > rewrites**       | Token budget blown re-emitting unchanged code; truncation bugs | `patches.extract_patches`, `apply_patches`  |
 | **Real-browser tests**       | Hallucinated APIs, wrong event names, broken bracket indexing  | `tools.LiveBrowser.load_and_test`           |
-| **Memory · past mistakes**   | Re-making the same fix five sessions in a row                  | `memory.retrieve_mistakes` + `record_mistake` |
+| **Memory · past mistakes**   | Re-making the same fix five sessions in a row                  | `memory.GameMemory.retrieve_mistakes`, `record_mistake` |
 | **Diagnose-then-fix**        | Patches applied without root-cause analysis; whack-a-mole      | `prompts.fix_instruction`                   |
 | **Best-of-N (fix mode)**     | One sample landing on a bad local minimum                      | `agent._generate_and_score_candidates`      |
 | **VLM screenshot review**    | "Game runs but looks wrong" — bugs the harness can't detect    | `agent._stream` → `image_attached`          |
@@ -115,6 +175,165 @@ Each technique is matched to a *specific* small-model failure mode:
 | **Continuation extends**     | "Add sound" after `<done/>` means restart from scratch         | `agent.run(continuation=True)`              |
 | **Adaptive temperature**     | Same temp for creative-build and bug-fix turns                 | `agent._stream` (`0.7` build → `0.25` fix)  |
 | **Conversation pruning**     | Long sessions overflow context; old code crowds out new turns  | `agent._prune_messages`                     |
+| **Playbook injection**       | Same dumb mistake every session — model has no long-term memory | `memory.Playbook.retrieve` → `<playbook>` block in v1 prompts |
+| **Acceptance criteria**      | "Passes the smoke test" but doesn't actually fulfill the goal  | `prompts_v1.PLAN_INSTRUCTION` `<criteria>`  |
+| **Runtime probes**           | Game looks fine to the heuristics but the player can't actually play | model emits `<probes>` JSON → executed by `tools.LiveBrowser._run_probe` |
+| **Stuck-loop reflection**    | Same wrong fix tried 3 times in a row                          | v1 `fix_instruction` switches to "5–7 different sources" mode after `stuck_streak >= 2` |
+| **Offline learner**          | Lessons learned in session N never reach session N+1           | `learner.py` (Reflector + Curator) → `playbook.jsonl`  |
+| **Tune battery**             | Prompt / probe / playbook changes broke something silently     | `tune.py run` battery + `tune.py diff a b` per-test deltas |
+
+---
+
+## How the agent compounds
+
+Most "AI coding tools" are a static prompt. This one isn't. Three loops
+run on different timescales, and each one *feeds the next*:
+
+```
+   ┌─────────── inside one session ────────────┐
+   │  plan → build → test → diagnose → fix     │
+   │  ⤷ user feedback wins every tie           │
+   │  ⤷ best.html saved on every clean turn    │
+   └────────────────┬──────────────────────────┘
+                    │ trace, snapshots, reports
+                    ▼
+   ┌─────── across sessions (the playbook) ────┐
+   │  Reflector reads completed traces and     │
+   │  proposes bullet deltas:                  │
+   │    + ADD a transferable rule we learned   │
+   │    + helpful++ on bullets that fired on   │
+   │      a passing run                        │
+   │    + harmful++ on bullets active during   │
+   │      stuck-loop failures                  │
+   │  Curator merges deltas deterministically  │
+   │    (no wholesale rewrites — ACE pattern)  │
+   │  Pruner drops bullets where harmful>>>    │
+   │    helpful so the playbook self-curates   │
+   └────────────────┬──────────────────────────┘
+                    │ updated playbook.jsonl
+                    ▼
+   ┌────── feeds the next session ─────────────┐
+   │  v1 system prompt retrieves the top-K     │
+   │  relevant bullets per goal and injects    │
+   │  them as a <playbook> block. The first    │
+   │  build is informed by every lesson the    │
+   │  agent has ever learned.                  │
+   └───────────────────────────────────────────┘
+```
+
+**What the playbook actually contains (sample bullets):**
+
+```
+[rotation-thrust-vector] tags=[ship,thrust,rotation,asteroids,angle]
+  When applying thrust to a rotatable ship/character, compute velocity
+  from its facing angle: vx = Math.cos(angle) * speed, vy = Math.sin(angle)
+  * speed. NEVER use plain world-axis dx/dy. ...
+
+[first-click-safety] tags=[grid,minesweeper,first-click,fairness]
+  For grid games with hidden hazards, ensure the first player interaction
+  is always safe by generating hazards AFTER the first click. ...
+
+[obstacle-gap-bounds] tags=[obstacles,random,gaps,playability,flappy]
+  When generating scrolling obstacles with randomized vertical gaps,
+  clamp the gap position to guarantee it never clips the screen edges
+  or becomes impassable. ...
+```
+
+The first set ships seeded — distilled from the OpenGame paper, the
+Macklon canvas-bug taxonomy (arXiv 2201.07351), JS13k post-mortems, and
+mining the actual system prompts of Aider / Cline / OpenHands / Bolt /
+Continue. As you build games, the offline learner adds bullets like
+`first-click-safety` and `obstacle-gap-bounds` automatically — those
+two were learned by the agent itself during a 10-game battery.
+
+**How user feedback makes it smarter:**
+
+When you type feedback mid-run (e.g. "ship is moving sideways instead of
+forward"), the agent applies it as the highest-priority injection AND
+the trace records:
+
+- the failing report
+- the diagnosis the model produced after seeing your feedback
+- the fix that landed clean
+
+The Reflector reads that pattern back. If a similar bug surfaces in a
+future session, the relevant bullet (or a freshly-minted one) gets
+retrieved into the v1 prompt automatically — the model doesn't repeat
+the same mistake.
+
+**Closing the loop:**
+
+```bash
+# Every battery run can refresh the playbook in one shot.
+python tune.py run --auto-learn
+
+# Or reflect over real (not battery) sessions you've shipped this week.
+python learner.py apply games/traces/
+
+# Inspect what the agent has learned.
+ls games/memory/playbook.jsonl                # the file
+python learner.py walk                        # past sessions
+```
+
+---
+
+## Tuning rig & playbook commands
+
+`tune.py` and `learner.py` are the meta-tools that drive "is the agent
+getting better?" measurement and offline learning respectively.
+
+**`tune.py` — measure the agent against a fixed battery.** Used to
+compare prompt / playbook / probe changes apples-to-apples.
+
+```bash
+# Run all 10 canonical goals (asteroids, snake, breakout, pong,
+# space-invaders, flappy, minesweeper, tic-tac-toe, drawing, todo)
+# against the current prompt + playbook. Visible Chromium by default.
+python tune.py run
+
+# Different prompt version, with offline learning at the end.
+python tune.py run --prompt-version v1 --auto-learn
+
+# Just one test (asteroids is the canonical "did anything regress?" check).
+python tune.py run --tests asteroids
+
+# Compare two completed runs by per-test pass/fail.
+python tune.py diff baseline_v0 v1_run
+
+# Postmortem one test in a run.
+python tune.py why v1_run flappy-bird
+
+# Cluster failure signatures across a run; show which playbook
+# bullets WOULD have matched the failing goal (= candidate new bullets).
+python tune.py analyze v1_run
+```
+
+**`learner.py` — Reflector + Curator over traces.** Reads either
+production traces (`games/traces/`) or a tune run's traces.
+
+```bash
+# One-line summary per past session.
+python learner.py walk
+
+# Full structured dump of one session.
+python learner.py show <session-id>
+
+# Reflect over traces and PRINT proposed deltas (no writes).
+python learner.py reflect games/traces/
+
+# Reflect AND apply (writes to playbook.jsonl).
+python learner.py apply games/traces/
+```
+
+**Playbook file:** `games/memory/playbook.jsonl` (one bullet per line,
+human-readable). Hand-edit it freely — the curator merges deterministically
+on top, and the prompt only injects the top-K bullets relevant to the
+current goal so adding a niche bullet won't crowd out the basics.
+
+The seeded 30 bullets are tagged `source: "seed"`; learner additions are
+tagged `source: "learned"`. Helpful/harmful counters live in the same
+record so you can see at a glance which rules fire on passing vs failing
+runs.
 
 ---
 
@@ -141,6 +360,27 @@ ollama list         # confirm at least one usable tag
 # 5. or one-shot CLI
 .venv/bin/python coder.py "build me a simple snake game"
 ```
+
+---
+
+## CLI (`coder.py`)
+
+Same `GameAgent` as the TUI, without Textual. Useful for scripting, CI, or
+machines without a display (`--headless`).
+
+| Flag | Default | Meaning |
+| ---- | ------- | ------- |
+| `--model` | env `OLLAMA_MODEL` or `coder.MODEL` | Ollama model tag |
+| `--max-iters` | `6` | Cap plan/build iterations |
+| `--out` | unique `games/<slug>_<timestamp>.html` | Output HTML path |
+| `--best-of-n` | `1` | Sample N candidate fixes per failed iteration |
+| `--num-ctx` | `8192` | Ollama context window |
+| `--stall-seconds` | `90` | Per-chunk stream inactivity timeout |
+| `--headless` | off | Run Chromium without a visible window |
+| `--open` | off | Open the final HTML in the system browser |
+| `--seed` | none | Existing `.html` to adapt (skips memory skeleton) |
+
+Run `.venv/bin/python coder.py -h` for the full argument help text.
 
 ---
 
@@ -311,8 +551,10 @@ OLLAMA_MODEL=gpt-oss:latest .venv/bin/python chat.py
 
 …or, inside the TUI, `/list` then `/model <number>`.
 
-The blacklist (`chat._KNOWN_BROKEN_TAGS`) only affects the installed-list
-fallback, never your explicit choice or what's currently loaded.
+The blacklist is the set `chat._KNOWN_BROKEN_TAGS` (currently includes
+`qwen3.6:27b` and `qwen3.6:35b` — edit there if your setup disagrees). It
+**only** skips tags when walking the installed-model list in step 3. It never
+applies to step 2 (already-loaded / `ps`) or to an explicit env var / `/model`.
 
 ---
 
@@ -325,23 +567,38 @@ No artifact ever overwrites a previous session's.
 Agent_learning/
 ├── chat.py              # Textual TUI (recommended entry point)
 ├── coder.py             # CLI agent (one-shot, no UI)
+├── tune.py               # battery runner + diff/why/analyze + auto-learn
+├── learner.py            # offline Reflector + Curator over traces
 ├── agent.py             # async event-driven agent core
-├── tools.py             # Playwright browser harness + game heuristics
-├── prompts.py           # SYSTEM_PROMPT + per-phase instructions
-├── memory.py            # skeleton + mistake retrieval, signature hashing
+├── tools.py             # Playwright browser harness + game heuristics + score_test_report
+├── prompts.py           # v0 SYSTEM_PROMPT + per-phase instructions
+├── prompts_v1.py         # v1 prompt: XML-structured, criteria, probes, stuck-loop ladder
+├── memory.py            # skeletons + mistake retrieval + Playbook (bullets w/ counters)
 ├── patches.py           # SEARCH/REPLACE patch parser & applier
 ├── ollama_io.py         # streaming watchdog + best-of-N sampler
 ├── requirements.txt
 └── games/
-    ├── <slug>_<ts>.html              # the live game file (e.g. asteroids_20260503_185455.html)
+    ├── <slug>_<ts>.html              # the live game file
     ├── <slug>_<ts>.best.html         # last clean version (auto-saved)
     ├── snapshots/<slug>_<ts>/
     │   ├── iter_01.html              # every iteration's full HTML
     │   └── iter_01.png               # browser screenshot per iteration
-    └── traces/
-        ├── <slug>_<ts>.log           # plain-text mirror of the TUI agent log
-        ├── <slug>_<ts>.jsonl         # structured event stream (one JSON per line)
-        └── <slug>_<ts>.conversation.md  # FULL message history sent to/from the model
+    ├── traces/
+    │   ├── <slug>_<ts>.log           # plain-text mirror of the TUI agent log
+    │   ├── <slug>_<ts>.jsonl         # structured event stream (one JSON per line)
+    │   └── <slug>_<ts>.conversation.md  # FULL message history sent to/from the model
+    ├── memory/
+    │   ├── skeletons/                # bundled + auto-promoted past wins
+    │   ├── mistakes.jsonl            # error-signature → fix-summary log
+    │   ├── playbook.jsonl            # ★ THE PLAYBOOK ★ — accumulated rules
+    │   └── goals/<session-id>/       # outcome.json + best.html copy per session
+    └── tune/
+        ├── battery.jsonl             # 10 canonical goals
+        └── run_<timestamp>/          # per-tune-run artifacts
+            ├── manifest.json
+            ├── SUMMARY.md
+            ├── _memory/              # isolated playbook for this run
+            └── <slug>/result.json
 ```
 
 When a session goes wrong, the single most useful file to share for
@@ -380,6 +637,12 @@ Type more text and the agent re-enters the loop in continuation mode
 (see `agent.run(continuation=True)`): planning is skipped, the existing
 file is the baseline, and your feedback is the first fix prompt.
 
+**Best-of-N (fix iterations):** when `best_of_n > 1` on `GameAgent` (today:
+pass `--best-of-n N` to `coder.py`; the TUI leaves the default `1`), the agent
+samples multiple completions and scores each by testing temp HTML through the
+session `LiveBrowser` (same visibility mode as the rest of the run — see the
+diagram note above).
+
 ---
 
 ## Restarting / resuming after a crash
@@ -406,7 +669,8 @@ describe your next goal.
 
 | Symptom                           | Fix                                                                                    |
 | --------------------------------- | -------------------------------------------------------------------------------------- |
-| `Could not launch Chromium`       | run `playwright install chromium`                                                      |
+| `Could not launch Chromium`       | run `playwright install chromium`; ensure a display for non-headless runs (use `coder.py --headless` on servers) |
+| Blank window / browser won't open | confirm you have a desktop session; try `echo $DISPLAY` (X11) or Wayland; SSH needs forwarding or headless CLI |
 | Picks the wrong model             | `/list` then `/model <N>`, or `OLLAMA_MODEL=<tag> .venv/bin/python chat.py`           |
 | Model picked is stale             | `/api/ps` is sorted by `expires_at` — touch your preferred model to bump it           |
 | Ollama 500 on model load          | the tag is broken locally; pick another with `/list` + `/model <N>`                    |
@@ -425,3 +689,11 @@ See `requirements.txt`. Key packages:
 - `playwright` — real Chromium for game testing
 - `textual` — the TUI framework
 - `rich` — markup + escape helpers used by the TUI mirror layer
+
+---
+
+## License
+
+No `LICENSE` file ships in this repository yet. If you fork or redistribute
+the code, add a license you are comfortable with (or confirm terms with the
+repository owner on GitHub).

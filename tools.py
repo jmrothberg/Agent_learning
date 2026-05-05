@@ -87,6 +87,14 @@ _CANVAS_HASH_JS = """
 
 # JS run AFTER the game has had a chance to animate. Returns the canvas info
 # (size, RAF flag, blank-pixel heuristic). Shared between sync + async paths.
+#
+# Blank detection samples a 32x32 grid (1024 samples) instead of 9 corner
+# pixels. The 9-corner version was producing FALSE POSITIVES on any game
+# with a centered "Press Space to Start" / score-only-in-middle screen
+# because the four corner samples + four edge midpoints + one center
+# sample would all hit the uniform background and miss the centered
+# content. With 1024 samples, even small centered text / a single
+# rendered sprite produces colors.size >= 2 → not blank.
 _CANVAS_PROBE_JS = """
 () => {
     const c = document.querySelector('canvas');
@@ -98,19 +106,21 @@ _CANVAS_PROBE_JS = """
         blank: null,
         sampled_colors: null,
     };
-    const ctx = c.getContext('2d');
-    if (!ctx || c.width < 2 || c.height < 2) return out;
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    if (!ctx || c.width < 4 || c.height < 4) return out;
     try {
         const w = c.width, h = c.height;
-        const pts = [
-            [0,0],[w/2|0,0],[w-1,0],
-            [0,h/2|0],[w/2|0,h/2|0],[w-1,h/2|0],
-            [0,h-1],[w/2|0,h-1],[w-1,h-1],
-        ];
+        const N = 32;
         const colors = new Set();
-        for (const [x,y] of pts) {
-            const d = ctx.getImageData(x,y,1,1).data;
-            colors.add(d[0]+','+d[1]+','+d[2]+','+d[3]);
+        for (let iy = 0; iy < N; iy++) {
+            const y = ((iy + 0.5) * h / N) | 0;
+            for (let ix = 0; ix < N; ix++) {
+                const x = ((ix + 0.5) * w / N) | 0;
+                const d = ctx.getImageData(x, y, 1, 1).data;
+                colors.add((d[0] << 16 | d[1] << 8 | d[2]) | 0);
+                if (colors.size > 4) break; // early-out: clearly not blank
+            }
+            if (colors.size > 4) break;
         }
         out.sampled_colors = colors.size;
         out.blank = colors.size <= 1;
@@ -145,11 +155,11 @@ def _build_report(
                 "HEURISTIC: <canvas> exists but requestAnimationFrame never fired - "
                 "your animation loop is not running."
             )
-        if canvas_info.get("blank") is True:
-            soft_warnings.append(
-                f"HEURISTIC: canvas appears blank (all {canvas_info.get('sampled_colors')} sampled "
-                "pixels are identical) - nothing is being drawn."
-            )
+        # NOTE: BLANK canvas alone is NOT a fail signal. Many legitimate
+        # apps start blank (drawing canvas, paint, charting tools where
+        # data is fed via input). LiveBrowser appends a stronger
+        # "blank AND input did nothing" warning later in load_and_test
+        # once it knows the input-smoke result.
     if listener_info["total"] == 0:
         soft_warnings.append(
             "HEURISTIC: zero addEventListener calls detected - the game probably "
@@ -279,6 +289,58 @@ def test_html_file(path: str | Path, run_seconds: float = 3.0) -> dict[str, Any]
     return _build_report(errors, warnings, logs, title, canvas_info, listener_info, body_text)
 
 
+def score_test_report(report: dict[str, Any]) -> float:
+    """Continuous quality score in [0, 100] for a test report.
+
+    Used by best-of-N candidate selection (and `tune why` postmortem
+    rendering) so partial-credit candidates win over completely-broken
+    ones, instead of a binary pass/fail. Designed to be monotone in
+    "how close the candidate is to passing", so picking the max gives a
+    sensible candidate even when none pass.
+
+    Scoring (max 100):
+      * test passes outright           → 100
+      * else, weighted demerits / bonuses on:
+        - errors (real JS exceptions)  : -8 per, capped at -40
+        - soft_warnings (heuristics)   : -5 per, capped at -20
+        - frozen_canvas True           : -10
+        - canvas blank True            : -10
+        - listener_total > 0           : +5
+        - raf_ran True                 : +5
+        - input_test passes            : +10
+    """
+    if report is None:
+        return 0.0
+    if report.get("ok") is True:
+        return 100.0
+    s = 50.0
+    n_err = len(report.get("errors") or [])
+    s -= min(n_err, 5) * 8
+    n_iss = len(report.get("soft_warnings") or [])
+    s -= min(n_iss, 4) * 5
+    if report.get("frozen_canvas") is True:
+        s -= 10
+    canv = report.get("canvas") or {}
+    if canv.get("blank") is True:
+        s -= 10
+    li = report.get("input_listeners") or {}
+    if int(li.get("total") or 0) > 0:
+        s += 5
+    if canv.get("raf_ran") is True:
+        s += 5
+    it = report.get("input_test") or {}
+    if it.get("ran") and it.get("any_change") is True:
+        s += 10
+    # Model-proposed acceptance probes (when present): each contributes a
+    # small bonus, so a candidate that passes its own acceptance criteria
+    # outranks one that doesn't.
+    probes = report.get("probes") or []
+    if probes:
+        n_pass = sum(1 for p in probes if p.get("ok"))
+        s += min(15, n_pass * 3)
+    return max(0.0, min(100.0, s))
+
+
 def format_report_for_model(report: dict[str, Any]) -> str:
     """Turn the report dict into the SHORT plain-text block we feed to the model.
 
@@ -340,6 +402,14 @@ def format_report_for_model(report: dict[str, Any]) -> str:
         lines.append("Warnings:")
         for w in report["warnings"]:
             lines.append(f"  - {w}")
+    if report.get("probes"):
+        n_pass = sum(1 for p in report["probes"] if p.get("ok"))
+        n = len(report["probes"])
+        lines.append(f"Acceptance probes: {n_pass}/{n} pass")
+        for p in report["probes"]:
+            tag = "ok " if p.get("ok") else "FAIL"
+            err = f"  ({p['err']})" if p.get("err") else ""
+            lines.append(f"  {tag} {p.get('name','probe')}: {p.get('expr','')[:80]}{err}")
     if report["logs"] and not report["errors"]:
         # Only show logs when there are no errors - otherwise the model focuses
         # on the wrong thing.
@@ -451,6 +521,8 @@ class LiveBrowser:
         self,
         path: str | Path,
         screenshot_path: str | Path | None = None,
+        *,
+        probes: list[dict] | None = None,
     ) -> dict[str, Any]:
         """Navigate to the file, let it run, return the report.
 
@@ -504,6 +576,21 @@ class LiveBrowser:
         # snapshots are compared via a key-set hash from the same probe.
         input_test = await self._input_smoke_test()
 
+        # ---- model-proposed probes ----------------------------------------
+        # Agent emits <probes> in Phase A — JSON list of {name, expr} where
+        # expr is a JS expression that should evaluate truthy on the running
+        # game. We run each in the page context. Per-probe results join the
+        # report so the model sees its own assertions checked.
+        probe_results: list[dict[str, Any]] = []
+        if probes:
+            for p in probes:
+                pname = str(p.get("name") or "probe")[:60]
+                pexpr = str(p.get("expr") or "true")[:600]
+                ok, err = await self._run_probe(pexpr)
+                probe_results.append({
+                    "name": pname, "expr": pexpr[:200], "ok": ok, "err": err,
+                })
+
         title = (await self._page.title()) or ""
         try:
             body_text = await self._page.evaluate(
@@ -553,6 +640,7 @@ class LiveBrowser:
         report["screenshot"] = screenshot_saved
         report["frozen_canvas"] = frozen
         report["input_test"] = input_test
+        report["probes"] = probe_results
 
         # Promote the new findings into soft_warnings so they get the same
         # "must fix" treatment as RAF/blank in the report formatter.
@@ -566,6 +654,15 @@ class LiveBrowser:
         input_dead = bool(
             input_test.get("ran") and input_test.get("any_change") is False
         )
+        # Blank canvas + dead keyboard = real failure. Blank with
+        # responsive input (drawing canvas after a stroke) is fine.
+        if (canvas_info and canvas_info.get("blank") is True
+                and input_dead and not input_responsive):
+            report["soft_warnings"].append(
+                f"HEURISTIC: canvas pixels are uniform AND keyboard input "
+                f"didn't change anything either — the game is not "
+                f"rendering / not interactive."
+            )
         if frozen is True and not input_responsive:
             report["soft_warnings"].append(
                 "HEURISTIC: canvas drew SOMETHING but did not change between two "
@@ -599,6 +696,23 @@ class LiveBrowser:
             return await self._page.evaluate(js)
         except Exception:
             return None
+
+    async def _run_probe(self, expr: str) -> tuple[bool, str]:
+        """Run one model-proposed probe expression in the page; return
+        (ok, err). Wraps in (() => Boolean(EXPR))() so the model can write
+        either a boolean expression or a IIFE.
+        """
+        wrapped = (
+            "(() => { try { return Boolean(" + expr + "); } "
+            "catch (e) { return { __probe_err: String(e && e.message || e) }; } })()"
+        )
+        try:
+            res = await self._page.evaluate(wrapped)
+            if isinstance(res, dict) and res.get("__probe_err"):
+                return False, str(res["__probe_err"])[:200]
+            return bool(res), ""
+        except Exception as e:
+            return False, str(e)[:200]
 
     async def _input_smoke_test(self) -> dict[str, Any]:
         """Hold each test key for a few frames; report whether the canvas changed.
