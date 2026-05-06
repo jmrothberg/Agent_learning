@@ -881,7 +881,7 @@ typing.
 ## What the TUI looks like
 
 ```
-┌─ Coding Box · <model> ─────────────────────────────────────────────┐
+┌─ JMR's Coding Box — <model> ───────────────────────────────────────┐
 │ ── planning ──                            │ Phase: extension 2/6   │
 │ <plan>...</plan>                          │ Iteration: 4/6         │
 │ ── iteration 1/6 ──                       │ Model: qwen3.6:35b     │

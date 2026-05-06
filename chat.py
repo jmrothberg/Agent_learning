@@ -606,7 +606,7 @@ class CodingBoxApp(App):
         yield Footer()
 
     async def on_mount(self) -> None:
-        self.title = "Coding Box"
+        self.title = "JMR's Coding Box"
         self.sub_title = "type your game idea below, then Enter"
         self._update_status()
         # Show what model we'll use when the user submits a goal. One call,
@@ -1114,7 +1114,7 @@ class CodingBoxApp(App):
         else:
             model_name, model_src = resolve_chat_model(MODEL)
         self._session_model = model_name
-        self.title = f"Coding Box - {model_name}"
+        self.title = f"JMR's Coding Box — {model_name}"
         self._log_info(f"Using model [b]{_esc(model_name)}[/b] [dim]({_esc(model_src)})[/dim]")
         self._update_status()
 
