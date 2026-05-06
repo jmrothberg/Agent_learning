@@ -587,8 +587,19 @@ class GameAgent:
             "tokens": result.tokens,
             "duration_s": round(result.duration_s, 2),
             "stalled": result.stalled,
+            "looped": result.looped,
             "len": len(result.text),
         })
+        if result.looped:
+            # Visible to the user via the agent log so they understand why
+            # the stream cut off mid-output. Trim trailing whitespace from
+            # the partial text so downstream regexes see a clean tail.
+            self._record(AgentEvent(
+                "info",
+                f"[yellow]repetition loop detected[/yellow] — model was emitting "
+                f"the same 1-2 short lines on repeat after {result.tokens} tokens "
+                f"({result.duration_s:.0f}s). Aborted stream and kept partial output."
+            ))
         if result.stalled and not result.text.strip():
             raise RuntimeError(
                 f"Model produced no tokens before stalling at "

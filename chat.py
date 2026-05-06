@@ -348,10 +348,13 @@ def _running_models_via_cli() -> tuple[list[str], str | None]:
     return [], " | ".join(diags[:5])
 
 
-# Model tags that we know are broken on this machine (Ollama returns 500 for
-# them). When falling back to "first installed", we skip these so we never pick
-# a model that we already know cannot load.
-_KNOWN_BROKEN_TAGS: set[str] = {"qwen3.6:27b", "qwen3.6:35b"}
+# Model tags we want auto-detection to skip when nothing is loaded in
+# /api/ps and we have to guess from the installed list. Empty by default —
+# the previous entries (qwen3.6:27b/35b) are now the user's actual working
+# models and excluding them caused chat.py to fall through to gpt-oss
+# every fresh launch. Keep this here so a future broken tag can be
+# blacklisted without touching the rest of the resolver.
+_KNOWN_BROKEN_TAGS: set[str] = set()
 
 
 def _pick_first_workable(names: list[str]) -> str | None:

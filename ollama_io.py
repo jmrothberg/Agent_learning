@@ -42,6 +42,23 @@ class StreamStalled(RuntimeError):
     """
 
 
+# Mid-stream repetition detector tunables. Local LLMs (qwen3.6, gpt-oss)
+# occasionally enter a "looping" state where they emit the same 1-2 short
+# lines forever — see games/traces/missile-command_20260505_224321.log for
+# 400+ lines of `</body></html>\n</html_file>\n`. The stall watchdog never
+# fires because tokens ARE flowing. We watch a sliding window of recent
+# completed lines: if it fills with very few unique values, we abort.
+#
+# Defaults are conservative — a real long file (Space Invaders) emits
+# thousands of unique lines, so even after 30 lines a healthy stream
+# averages 25+ unique values in the window.
+_REPEAT_WINDOW_LINES = 30
+_REPEAT_MIN_LINES = 12      # need this many lines before we even consider
+_REPEAT_MAX_UNIQUE = 2      # window collapses to ≤2 unique lines = looping
+_REPEAT_LINE_MAX_LEN = 80   # only count short-line repetition (long lines
+                            # rarely loop; short ones often do)
+
+
 @dataclass
 class StreamResult:
     """What stream_chat returns when it completes (or stalls)."""
@@ -51,6 +68,9 @@ class StreamResult:
     duration_s: float   # wall-clock elapsed on the streaming call
     stalled: bool       # True if we returned because of a stall
     stall_at_token: int | None = None  # which token index we stalled on
+    # True when we aborted because the model entered a repetition loop
+    # (distinct from a true stall). Caller can log this differently.
+    looped: bool = False
 
 
 async def stream_chat(
@@ -79,7 +99,13 @@ async def stream_chat(
     parts: list[str] = []
     n_tokens = 0
     stalled = False
+    looped = False
     stall_at: int | None = None
+    # Sliding window of completed-line strings, used by the repetition
+    # detector. We assemble lines from the streaming pieces (each chunk
+    # may be a partial line or several lines).
+    line_buf = ""
+    recent_lines: list[str] = []
 
     # ollama.AsyncClient.chat returns an async iterator of dicts. We pull
     # .__aiter__() so we can wrap each .__anext__() in asyncio.wait_for.
@@ -117,6 +143,30 @@ async def stream_chat(
                 except Exception:
                     # A misbehaving UI callback must never kill the stream.
                     pass
+
+            # ---- repetition detector --------------------------------
+            # Build complete-line strings from the piece stream, push
+            # them into the window, and check for a stuck loop. We only
+            # examine SHORT lines (long ones — like full HTML lines —
+            # are nearly always unique even in healthy output). Skip
+            # blank lines so trailing newlines don't poison the window.
+            line_buf += piece
+            if "\n" in line_buf:
+                *complete, line_buf = line_buf.split("\n")
+                for ln in complete:
+                    s = ln.strip()
+                    if not s or len(s) > _REPEAT_LINE_MAX_LEN:
+                        continue
+                    recent_lines.append(s)
+                    if len(recent_lines) > _REPEAT_WINDOW_LINES:
+                        recent_lines.pop(0)
+                if (
+                    len(recent_lines) >= _REPEAT_MIN_LINES
+                    and len(set(recent_lines)) <= _REPEAT_MAX_UNIQUE
+                ):
+                    looped = True
+                    stall_at = n_tokens
+                    break
     finally:
         # Best-effort close in both branches. Ollama's AsyncStream exposes
         # .aclose() in newer versions; older versions don't, hence the guard.
@@ -131,8 +181,12 @@ async def stream_chat(
         text="".join(parts),
         tokens=n_tokens,
         duration_s=time.monotonic() - started,
-        stalled=stalled,
+        # `stalled` covers both the original stall semantics AND a
+        # repetition loop, so existing callers that only check `.stalled`
+        # still abort correctly. `looped` lets callers distinguish.
+        stalled=stalled or looped,
         stall_at_token=stall_at,
+        looped=looped,
     )
 
 
