@@ -102,6 +102,35 @@ PROBES_FORMAT = FormatSpec(
     ],
 )
 
+ASSETS_FORMAT = FormatSpec(
+    name="<assets>",
+    snippet=(
+        "<assets>[{name,prompt,size?}, ...]</assets>  Phase A only — "
+        "request generated PNG sprites the harness will provide."
+    ),
+    guidelines=[
+        "<assets> is OPTIONAL and Phase A only. Use it when the game "
+        "would benefit from sprite art (most arcade / shooter / "
+        "platformer games do). Each entry is {name, prompt, size?}; "
+        "the harness runs Z-Image-Turbo locally and the resulting PNG "
+        "paths come back in your first-build prompt.",
+        "Prompts should be SHORT and visual: \"pixel-art retro arcade "
+        "spaceship facing right, white outline, transparent background\". "
+        "Prefer pixel-art / sprite-sheet style with transparent "
+        "backgrounds for game sprites.",
+        "Optional `size` is a string (\"64x64\", \"128x96\") or an int "
+        "(square). Default 128 px square. Keep sprites small — 32–128 px "
+        "is typical; over-large sprites blur when drawn small.",
+        "Skip <assets> for DOM-only games (todo, calculator, tic-tac-toe) "
+        "where text + emojis suffice. Skip when no canvas-rendered "
+        "entities exist.",
+        "When the harness returns no asset paths in the first-build "
+        "prompt, Z-Image-Turbo was not reachable; fall back to "
+        "procedural drawing (ctx.fillRect / ctx.arc) as you would have "
+        "without <assets>.",
+    ],
+)
+
 HTML_FORMAT = FormatSpec(
     name="<html_file>",
     snippet=(
@@ -219,6 +248,7 @@ ALL_FORMATS: list[FormatSpec] = [
     PLAN_FORMAT,
     CRITERIA_FORMAT,
     PROBES_FORMAT,
+    ASSETS_FORMAT,
     HTML_FORMAT,
     PATCH_FORMAT,
     DIAGNOSE_FORMAT,
@@ -509,6 +539,20 @@ Probes that reference globals (state, player, etc.) MUST exist on
 window — either expose them (e.g. `window.state = state`) or use DOM /
 canvas-pixel checks instead. Aim for 3 to 5 probes that together check
 the criteria above. Keep each expr short.
+
+OPTIONAL — emit an <assets> block if sprite art would help:
+
+<assets>
+[
+  {"name": "ship",     "prompt": "pixel-art retro arcade spaceship facing right, white outline, transparent background"},
+  {"name": "asteroid", "prompt": "pixel-art irregular grey rocky asteroid, transparent bg", "size": "64x64"}
+]
+</assets>
+
+The harness runs a local Z-Image-Turbo diffuser and saves PNGs next to
+your HTML file. Their paths come back in the first-build prompt; load
+each via `new Image()` + `await img.decode()`. Skip <assets> for DOM-
+only games (todo lists, calculators) where text suffices.
 
 No <html_file> yet. No prose outside tags.
 """

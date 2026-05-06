@@ -213,6 +213,7 @@ Each technique is matched to a *specific* small-model failure mode:
 | **API allowlist (hallucination guard)** | Models invent methods (`ctx.drawCircle`, `audioCtx.playSound`); Chromium TypeError eats a round-trip | `tools._check_api_allowlist` (canvas2d / AudioContext / canvas-elt receivers) |
 | **Project-config injection** | Per-repo conventions ("always Phaser, never React") have to be re-stated every session | `agent._read_project_config` reads `AGENTS.md` / `CLAUDE.md` from cwd |
 | **Bullet-on-demand retrieval** | Eager top-K injection burns context on bullets the model may not need | `<lookup_bullet>id</lookup_bullet>` + `memory.render_playbook_block(mode="hybrid")` |
+| **Generated sprites (Z-Image-Turbo)** | Procedural canvas drawing limits arcade-style polish; agent can request real PNG sprites that the harness mints in-process — no separate server | `<assets>[{name,prompt,size?}]</assets>` in Phase A → `assets.generate_assets` → paths injected into first-build prompt |
 | **Two-stage retrieval**      | Same playbook bullets injected at plan time AND code time → context bloat without precision | `agent._retrieve_playbook_block(stage="plan"/"code")` |
 | **Quality-ranked retrieval** | Identical-relevance bullets returned in arbitrary order; loser equally likely as winner | `Playbook.retrieve` quality multiplier `1 + 0.10·tanh(score/5)` |
 | **Shingle dedup**            | Two near-identical bullets crowd out the third diverse one     | `memory.dedup_hits` (5-gram word shingles, Jaccard ≥ 0.85) |
@@ -381,6 +382,63 @@ On error, the agent skips the Chromium round-trip and feeds a structured
 report back to the model on the next turn — same shape as a real test
 report, with the title `(skipped browser — pre-flight failed)` so the
 trace is unambiguous.
+
+### Generated sprites — Z-Image-Turbo, no server
+
+Most arcade-style games look better with real sprite PNGs than with
+procedural `ctx.fillRect` rectangles. The agent can now request them.
+
+In Phase A the model emits an optional `<assets>` block alongside
+`<plan>` / `<criteria>` / `<probes>`:
+
+```xml
+<assets>
+[
+  {"name": "ship",     "prompt": "pixel-art retro arcade spaceship facing right, white outline, transparent background"},
+  {"name": "asteroid", "prompt": "pixel-art irregular grey rocky asteroid, transparent bg", "size": "64x64"},
+  {"name": "explosion","prompt": "pixel-art orange explosion sprite, transparent bg",        "size": 96}
+]
+</assets>
+```
+
+The harness then:
+
+1. Lazy-imports `ImageGenerator` from
+   [`/home/jonathan/Colossal_Cave/diffusion_manager.py`](file:///home/jonathan/Colossal_Cave/diffusion_manager.py)
+   (path is configurable in `assets._DEFAULT_DIFFUSER_DIR`).
+2. Loads the **Z-Image-Turbo** pipeline once per session (~30-60 s for
+   the first call, ~2-4 s per image after — only fires if the model
+   actually requests assets, so non-asset sessions pay nothing).
+3. Generates each missing PNG at native 768×768, downscales with
+   PIL Lanczos to the per-asset target size (default 128 px).
+4. Caches by `sha256(model_id, normalized_prompt, size)` so repeated
+   prompts across sessions are free.
+5. Saves PNGs into `games/<slug>_<ts>_assets/<name>.png`, hard-linked
+   from the cache.
+6. Prepends a `GENERATED ASSETS` block to the first-build prompt
+   listing each `name → ./<rel-path>` so the model can `<img src>` or
+   `new Image()` directly.
+
+The existing `image-load-race` playbook bullet (`memory.py:858`) tells
+the model to wait for `await img.decode()` before drawing; that
+contract holds whether sprites are model-generated or hand-supplied.
+
+**Requirements** (all auto-detected — no env var needed):
+
+- A CUDA GPU.
+- `Colossal_Cave/diffusion_manager.py` reachable at the path above.
+- `diffusers` + `torch` + `pillow` installed in the venv.
+- `Z-Image-Turbo` model files in `/home/jonathan/Models_Diffusers/`
+  (or wherever `diffusion_manager._local_model_path()` finds them).
+
+**When any of those are missing**, the pipeline silently no-ops:
+agent logs `Z-Image-Turbo not reachable — proceeding without assets,
+model will draw procedurally`, the session continues exactly as before.
+
+**Skip `<assets>` for DOM-only games** (todo list, calculator, tic-
+tac-toe). The format spec instructs the model to emit `<assets>` only
+when sprite art would help; for pure-DOM apps, text + emojis are
+sufficient and skipping saves ~10-20 s of generation per session.
 
 ### Roadmap items also shipped on this branch
 
@@ -1054,9 +1112,10 @@ Agent_learning/
 ├── agent.py             # async event-driven agent core
 ├── tools.py             # Playwright browser harness + game heuristics + score_test_report
 ├── prompts.py           # v0 SYSTEM_PROMPT + per-phase instructions
-├── prompts_v1.py        # v1 prompt: XML-structured, FormatSpec-assembled, criteria/probes
+├── prompts_v1.py        # v1 prompt: XML-structured, FormatSpec-assembled, criteria/probes/assets
 ├── memory.py            # skeletons + mistakes + Playbook (quality-ranked, deduped, budgeted)
 ├── patches.py           # SEARCH/REPLACE patch engine: fuzzy norm, uniqueness, repair layer
+├── assets.py            # Z-Image-Turbo sprite generation (lazy import, content-hash cache)
 ├── ollama_io.py         # streaming watchdog + best-of-N sampler
 ├── tests/
 │   ├── test_patches.py        # 24 tests — fuzzy match, uniqueness, overlap, repair
@@ -1064,7 +1123,8 @@ Agent_learning/
 │   ├── test_retrieval.py      # 20 tests — quality rank, two-stage, dedup, budget, hybrid
 │   ├── test_microprobes.py    # 23 tests — pre-Chromium sanity + API allowlist
 │   ├── test_lookup.py         # 8 tests — <lookup_bullet> tag → playbook body injection
-│   └── test_project_config.py # 7 tests — AGENTS.md / CLAUDE.md auto-loading
+│   ├── test_project_config.py # 7 tests — AGENTS.md / CLAUDE.md auto-loading
+│   └── test_assets.py         # 22 tests — &lt;assets&gt; parsing, cache, sprite gen w/ stub
 ├── requirements.txt
 └── games/
     ├── <slug>_<ts>.html              # the live game file

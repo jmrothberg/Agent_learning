@@ -49,10 +49,16 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 import ollama
 
+from assets import (
+    generate_assets,
+    parse_assets_block,
+    render_asset_paths_block,
+    try_load_image_generator,
+)
 from memory import (
     CANVAS_SKELETON_V2,
     CANVAS_SKELETON_V2_NAME,
@@ -339,6 +345,14 @@ class GameAgent:
         # assistant reply. Drained into the next user message so the model
         # actually receives the requested body. Pi-mono "skills" pattern.
         self._pending_bullet_lookups: list[str] = []
+        # Lazy ImageGenerator for Z-Image-Turbo sprite generation. Only
+        # loaded if the model emits an <assets> block in Phase A; the
+        # diffusers / torch import + pipeline init costs ~30-60s, so we
+        # never pay for it on sessions that don't request art.
+        self._asset_generator: Any = None
+        # Resolved asset paths from Phase A (name → absolute path); used
+        # by the first-build prompt assembler.
+        self._session_assets: dict[str, Path] = {}
 
     @staticmethod
     def _load_prompt_module(version: str):
@@ -1370,6 +1384,67 @@ class GameAgent:
                 self._dump_conversation()
                 yield self._record(AgentEvent("plan", plan_reply))
 
+            # ---- Phase A → first-build: optional asset generation ----------
+            # If the model emitted <assets> in its plan AND the local
+            # Z-Image-Turbo diffuser is reachable, generate sprites and
+            # collect their paths. Both halves are optional: no-asset
+            # plans skip everything; reachable-but-no-GPU systems log
+            # and skip; failures on individual assets don't abort.
+            asset_specs = parse_assets_block(plan_reply)
+            if asset_specs:
+                yield self._record(AgentEvent(
+                    "info",
+                    f"plan requested {len(asset_specs)} asset(s); "
+                    "loading Z-Image-Turbo (first call only, ~30-60s)…",
+                    {"assets_requested": [s["name"] for s in asset_specs]},
+                ))
+                if self._asset_generator is None:
+                    # asyncio.to_thread keeps the TUI responsive during
+                    # the (slow) first-load of the diffusion pipeline.
+                    self._asset_generator = await asyncio.to_thread(
+                        try_load_image_generator,
+                    )
+                if self._asset_generator is None:
+                    yield self._record(AgentEvent(
+                        "info",
+                        "Z-Image-Turbo not reachable (no CUDA / no diffusers / "
+                        "Colossal_Cave/diffusion_manager.py missing) — "
+                        "proceeding without assets, model will draw "
+                        "procedurally."
+                    ))
+                else:
+                    session_assets_dir = (
+                        self.out_path.parent / f"{self._session_id}_assets"
+                    )
+                    try:
+                        self._session_assets = await asyncio.to_thread(
+                            generate_assets,
+                            asset_specs,
+                            session_assets_dir,
+                            image_generator=self._asset_generator,
+                        )
+                    except Exception as e:
+                        yield self._record(AgentEvent(
+                            "info",
+                            f"asset generation crashed: {e!r} — proceeding without."
+                        ))
+                        self._session_assets = {}
+                    self._trace({
+                        "kind": "assets_generated",
+                        "requested": len(asset_specs),
+                        "produced": len(self._session_assets),
+                        "names": list(self._session_assets.keys()),
+                        "session_dir": str(session_assets_dir),
+                    })
+                    if self._session_assets:
+                        yield self._record(AgentEvent(
+                            "info",
+                            f"generated {len(self._session_assets)}/"
+                            f"{len(asset_specs)} sprites at "
+                            f"{session_assets_dir}",
+                            {"assets": {n: str(p) for n, p in self._session_assets.items()}},
+                        ))
+
             # ---- seed file OR memory skeleton for the first build ----------
             if self.seed_file is not None:
                 # User explicitly handed us a starting file. Skip memory
@@ -1402,13 +1477,17 @@ class GameAgent:
                     goal, code=seed_html, stage="plan",
                 )
                 pb_kwargs = {"playbook_block": pb_block} if (pb_block and self._prompt_version != "v0") else {}
+                build_msg = self._p.seed_build_instruction(
+                    seed_html, str(self.seed_file), **pb_kwargs,
+                )
+                asset_block = render_asset_paths_block(
+                    self._session_assets, self.out_path,
+                )
+                if asset_block:
+                    build_msg = asset_block + "\n\n" + build_msg
                 self._messages.append({
                     "role": "user",
-                    "content": self._flush_user_injections(
-                        self._p.seed_build_instruction(
-                            seed_html, str(self.seed_file), **pb_kwargs,
-                        )
-                    ),
+                    "content": self._flush_user_injections(build_msg),
                 })
             else:
                 if self._skeleton_mode == "default":
@@ -1518,6 +1597,11 @@ class GameAgent:
                         f"<architect>\n{architect_note}\n</architect>\n\n"
                         + build_msg
                     )
+                asset_block = render_asset_paths_block(
+                    self._session_assets, self.out_path,
+                )
+                if asset_block:
+                    build_msg = asset_block + "\n\n" + build_msg
                 self._messages.append({
                     "role": "user",
                     "content": self._flush_user_injections(build_msg),
