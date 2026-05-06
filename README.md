@@ -401,16 +401,19 @@ In Phase A the model emits an optional `<assets>` block alongside
 </assets>
 ```
 
-The harness then:
+The harness then (all in-process, no server, no subprocess):
 
-1. Lazy-imports `ImageGenerator` from
-   [`/home/jonathan/Colossal_Cave/diffusion_manager.py`](file:///home/jonathan/Colossal_Cave/diffusion_manager.py)
-   (path is configurable in `assets._DEFAULT_DIFFUSER_DIR`).
-2. Loads the **Z-Image-Turbo** pipeline once per session (~30-60 s for
-   the first call, ~2-4 s per image after — only fires if the model
-   actually requests assets, so non-asset sessions pay nothing).
-3. Generates each missing PNG at native 768×768, downscales with
-   PIL Lanczos to the per-asset target size (default 128 px).
+1. Calls `assets.try_load_image_generator()` which constructs an
+   in-tree `ZImageTurboGenerator` (vendored from `diffusion_manager.py`
+   on 2026-05-06 — Z-Image-Turbo path only, watermarking and other
+   pipeline branches stripped). Pure Python `import` chain; same
+   process as `chat.py`, same GPU.
+2. Lazy-loads the **Z-Image-Turbo** weights once per session (~30-60 s
+   the first time the agent emits `<assets>`; ~2-4 s per image after).
+   Pipeline never loads on sessions that don't request assets, so the
+   cost is opt-in per turn.
+3. Generates each missing PNG at native 768×768, downscales with PIL
+   Lanczos to the per-asset target size (default 128 px).
 4. Caches by `sha256(model_id, normalized_prompt, size)` so repeated
    prompts across sessions are free.
 5. Saves PNGs into `games/<slug>_<ts>_assets/<name>.png`, hard-linked
@@ -423,22 +426,40 @@ The existing `image-load-race` playbook bullet (`memory.py:858`) tells
 the model to wait for `await img.decode()` before drawing; that
 contract holds whether sprites are model-generated or hand-supplied.
 
-**Requirements** (all auto-detected — no env var needed):
+**Setup — install the optional GPU stack into THIS venv:**
 
-- A CUDA GPU.
-- `Colossal_Cave/diffusion_manager.py` reachable at the path above.
-- `diffusers` + `torch` + `pillow` installed in the venv.
-- `Z-Image-Turbo` model files in `/home/jonathan/Models_Diffusers/`
-  (or wherever `diffusion_manager._local_model_path()` finds them).
+```bash
+./scripts/install_diffuser.sh
+# or directly:
+.venv/bin/pip install -r requirements-diffuser.txt
+```
 
-**When any of those are missing**, the pipeline silently no-ops:
-agent logs `Z-Image-Turbo not reachable — proceeding without assets,
-model will draw procedurally`, the session continues exactly as before.
+This installs `torch`, `diffusers`, `transformers`, `accelerate`, and
+`safetensors` into `Agent_learning/.venv` (~5 GB download). Everything
+the asset pipeline needs is then **inside this repo's venv** — no
+sibling-repo paths, no shared interpreters, fully portable.
+
+**Where the model weights live:**
+
+`Z-Image-Turbo` weights are *data*, not code, so they live outside the
+repo (~5 GB of model files don't belong in git). Search order:
+
+1. `$DIFFUSION_MODELS_DIR/Z-Image-Turbo/` if the env var is set
+2. `/home/jonathan/Models_Diffusers/Z-Image-Turbo/` (the user's standard layout)
+3. `./models_diffusers/Z-Image-Turbo/` (relative — for portability)
+4. **HuggingFace fallback:** `Tongyi-MAI/Z-Image-Turbo` is downloaded
+   to `~/.cache/huggingface/hub/` on first use — no manual download
+   needed.
+
+**When the install hasn't run** (no `torch` / no CUDA / no model),
+`try_load_image_generator()` returns `None` silently and the agent
+logs `Z-Image-Turbo not reachable — proceeding without assets, model
+will draw procedurally`. Sessions continue exactly as before — sprite
+generation is fully optional.
 
 **Skip `<assets>` for DOM-only games** (todo list, calculator, tic-
 tac-toe). The format spec instructs the model to emit `<assets>` only
-when sprite art would help; for pure-DOM apps, text + emojis are
-sufficient and skipping saves ~10-20 s of generation per session.
+when sprite art would help; for pure-DOM apps, text + emojis suffice.
 
 ### Roadmap items also shipped on this branch
 

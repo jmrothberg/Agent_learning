@@ -42,14 +42,22 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Where the user's diffusion_manager.py lives. Adding to sys.path
-# (instead of vendoring) means upstream improvements to that script
-# carry over automatically — single source of truth for the diffuser.
-_DEFAULT_DIFFUSER_DIR = "/home/jonathan/Colossal_Cave"
-
 # Per-asset default target size. Sprites are typically 32-128 px; 128
 # is a good middle ground, can be overridden per-asset by the model.
 _DEFAULT_TARGET_SIZE = 128
+
+# Where Z-Image-Turbo's weights live on disk. Search order:
+#   1. $DIFFUSION_MODELS_DIR env var (if set)
+#   2. /home/jonathan/Models_Diffusers (the user's standard layout)
+#   3. ./models_diffusers (relative — for portability)
+#   4. HuggingFace hub fallback (Tongyi-MAI/Z-Image-Turbo) on first run.
+# Model files are DATA, not code; they live outside the repo by design
+# (5GB+) but the search code itself stays self-contained here.
+_MODEL_SEARCH_DIRS = [
+    "/home/jonathan/Models_Diffusers",
+    "./models_diffusers",
+]
+_HF_FALLBACK_MODEL_ID = "Tongyi-MAI/Z-Image-Turbo"
 
 # Cap so a chatty plan can't trigger 50 generations.
 _MAX_ASSETS_PER_TURN = 8
@@ -138,24 +146,141 @@ def _safe_filename(name: str) -> str:
     return cleaned[:48] or "asset"
 
 
-def try_load_image_generator(model_id: str = "Z-Image-Turbo",
-                             diffuser_dir: str = _DEFAULT_DIFFUSER_DIR):
-    """Import the user's diffusion_manager.py and instantiate
-    ImageGenerator. Returns None if anything is unavailable — the
-    caller MUST treat None as "skip asset generation, proceed without."
+# ---------------------------------------------------------------------------
+# Z-Image-Turbo loader (self-contained, vendored from Colossal_Cave on
+# 2026-05-06 with the watermark / Generated_Art / multi-pipeline branches
+# stripped out — Agent_learning only ever uses the Z-Image-Turbo path)
+# ---------------------------------------------------------------------------
 
-    Failure modes (all returning None silently): diffuser_dir not on
-    disk, the import fails (no diffusers / no torch), no CUDA, or
-    pipeline construction itself raises.
+
+def _resolve_zimage_path() -> str:
+    """Find Z-Image-Turbo weights on disk, or return the HF model ID
+    so diffusers downloads on first run. Search:
+      1. $DIFFUSION_MODELS_DIR env var
+      2. _MODEL_SEARCH_DIRS (the user's standard /home/jonathan/Models_Diffusers
+         layout, plus a relative fallback)
+      3. The HuggingFace hub fallback ID (Tongyi-MAI/Z-Image-Turbo).
     """
-    if diffuser_dir and diffuser_dir not in sys.path:
-        sys.path.insert(0, diffuser_dir)
-    try:
-        from diffusion_manager import ImageGenerator  # type: ignore
-    except Exception:
+    import os
+    env_dir = (os.environ.get("DIFFUSION_MODELS_DIR") or "").strip()
+    candidates: list[str] = []
+    if env_dir:
+        candidates.extend([
+            os.path.join(env_dir, "Z-Image-Turbo"),
+            os.path.join(env_dir, "Tongyi-MAI_Z-Image-Turbo"),
+        ])
+    for base in _MODEL_SEARCH_DIRS:
+        candidates.extend([
+            os.path.join(base, "Z-Image-Turbo"),
+            os.path.join(base, "Tongyi-MAI_Z-Image-Turbo"),
+        ])
+    for c in candidates:
+        if os.path.isdir(c):
+            return c
+    return _HF_FALLBACK_MODEL_ID
+
+
+class ZImageTurboGenerator:
+    """In-process Z-Image-Turbo wrapper. No server, no subprocess.
+
+    Usage:
+        gen = ZImageTurboGenerator()
+        path = gen.generate("pixel-art retro spaceship")  # returns PNG path
+
+    The pipeline is loaded lazily on the first `.generate()` call so
+    importing this module is cheap. After the first call, the model
+    stays resident in GPU VRAM for the rest of the Python process —
+    subsequent calls cost only the inference time (~2-4 s per 768×768
+    image at 8 inference steps).
+
+    `.cleanup()` releases the pipeline + frees CUDA memory if the
+    caller wants to reclaim the VRAM mid-session.
+    """
+
+    def __init__(self, model_path: str | None = None) -> None:
+        self.model_path = model_path or _resolve_zimage_path()
+        self._pipeline: Any = None  # lazy-init in .generate()
+
+    def cleanup(self) -> None:
+        if self._pipeline is None:
+            return
+        try:
+            import torch
+            del self._pipeline
+            self._pipeline = None
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            self._pipeline = None
+
+    def _lazy_init(self) -> bool:
+        if self._pipeline is not None:
+            return True
+        try:
+            import torch
+            from diffusers import ZImagePipeline
+        except Exception:
+            return False
+        if not torch.cuda.is_available():
+            # Z-Image-Turbo is GPU-only by design; the original
+            # diffusion_manager bails on CPU too. Honest upstream behavior.
+            return False
+        try:
+            self._pipeline = ZImagePipeline.from_pretrained(
+                self.model_path,
+                torch_dtype=torch.bfloat16,  # optimal for Blackwell-class GPUs
+                low_cpu_mem_usage=False,
+            )
+            self._pipeline.to("cuda")
+            return True
+        except Exception:
+            self._pipeline = None
+            return False
+
+    def generate(self, prompt: str) -> str | None:
+        """Run inference and save a 768×768 PNG to a temp file. Returns
+        the absolute path, or None on failure (caller skips that asset)."""
+        if not self._lazy_init():
+            return None
+        try:
+            import tempfile
+            import torch
+            image = self._pipeline(
+                prompt=prompt,
+                height=768,
+                width=768,
+                num_inference_steps=9,   # 8 actual DiT forwards in turbo mode
+                guidance_scale=0.0,      # turbo: guidance must be 0
+                generator=torch.Generator("cuda").manual_seed(42),
+            ).images[0]
+            f = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+            f.close()
+            image.save(f.name, format="PNG")
+            return f.name
+        except Exception:
+            return None
+
+
+def try_load_image_generator(
+    model_id: str = "Z-Image-Turbo",  # kept for API stability; unused
+    diffuser_dir: str | None = None,  # kept for API stability; unused
+) -> Any:
+    """Construct a ZImageTurboGenerator if torch + diffusers + a CUDA
+    GPU are available in THIS interpreter. Returns None silently if
+    anything is missing — the caller treats None as "skip asset
+    generation, proceed without."
+
+    Self-contained: no sys.path injection of sibling repos, no
+    subprocess, no server. If the Agent_learning venv lacks torch,
+    install it INTO the venv (see README "Generated sprites" for
+    the install command); the agent will not borrow from elsewhere.
+    """
+    import importlib.util as _iu
+    if _iu.find_spec("torch") is None or _iu.find_spec("diffusers") is None:
         return None
     try:
-        return ImageGenerator(model_id=model_id)
+        gen = ZImageTurboGenerator()
+        return gen
     except Exception:
         return None
 

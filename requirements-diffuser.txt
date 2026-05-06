@@ -1,0 +1,18 @@
+# Optional GPU stack for Z-Image-Turbo sprite generation (assets.py).
+# Install with:  ./scripts/install_diffuser.sh
+# or:           .venv/bin/pip install -r requirements-diffuser.txt
+#
+# After install, the FIRST <assets> request in a session will:
+#   1. Download Z-Image-Turbo weights (~5GB) from HuggingFace into
+#      ~/.cache/huggingface/hub/, OR re-use weights at
+#      ~/Models_Diffusers/Z-Image-Turbo/ if present.
+#   2. Load the pipeline into GPU VRAM (~30-60s the first time).
+#   3. Generate each requested sprite at 768x768 (~2-4s per image).
+#
+# All in-process. No HTTP server, no subprocess.
+
+torch>=2.0.0
+diffusers>=0.30.0
+transformers>=4.40.0
+accelerate>=0.30.0
+safetensors>=0.4.0

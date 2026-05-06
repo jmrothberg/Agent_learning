@@ -6,3 +6,13 @@
 ollama>=0.3.0
 playwright>=1.40.0
 textual>=0.50.0
+pillow>=10.0.0          # used by assets.py for sprite resize/save
+rich>=13.0.0            # textual's transitive dep, listed for clarity
+
+# OPTIONAL — Z-Image-Turbo sprite generation (assets.py).
+# These are NOT auto-installed because the GPU stack is ~5GB and most
+# sessions don't need it. Install once if you want the agent to
+# generate PNG sprites via <assets> in Phase A:
+#   ./scripts/install_diffuser.sh
+# or manually:
+#   pip install -r requirements-diffuser.txt
