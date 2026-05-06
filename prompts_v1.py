@@ -194,6 +194,26 @@ CONFIRM_DONE_FORMAT = FormatSpec(
     ),
 )
 
+LOOKUP_BULLET_FORMAT = FormatSpec(
+    name="<lookup_bullet>",
+    snippet=(
+        "<lookup_bullet>id</lookup_bullet>  Pull a playbook bullet's "
+        "full body when only its index entry was inlined."
+    ),
+    guidelines=[
+        "Use <lookup_bullet>id</lookup_bullet> ONLY when the playbook "
+        "block ends with an 'ADDITIONAL PLAYBOOK INDEX' section — those "
+        "bullets ship with ID + tags only, body on demand. The agent "
+        "fetches the body and injects it into your NEXT user-turn "
+        "message; do not act on those bullets until then.",
+        "You can emit several <lookup_bullet> tags in one reply to "
+        "fetch multiple at once. The agent caps the number resolved "
+        "per turn so a flood of lookups can't drown the context.",
+        "Do not <lookup_bullet> a bullet whose body was already inlined "
+        "in the same turn — you already have it.",
+    ],
+)
+
 # Default ordering for the <output-tags> block.
 ALL_FORMATS: list[FormatSpec] = [
     PLAN_FORMAT,
@@ -204,6 +224,7 @@ ALL_FORMATS: list[FormatSpec] = [
     DIAGNOSE_FORMAT,
     NOTES_FORMAT,
     QUESTION_FORMAT,
+    LOOKUP_BULLET_FORMAT,
     DONE_FORMAT,
     CONFIRM_DONE_FORMAT,
 ]

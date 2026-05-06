@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 import sys
-from pathlib import Path
+from pathlib import Path  # noqa: F401  (used in some test fixtures)
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -24,6 +24,7 @@ from memory import (  # noqa: E402
     Playbook,
     cap_hits_by_budget,
     dedup_hits,
+    lookup_bullet,
     render_playbook_block,
 )
 
@@ -196,3 +197,100 @@ def test_shingles_handles_short_text():
     assert sh  # non-empty
     # Not crashing on empty either.
     assert memory._shingles("") == set()
+
+
+# ---------------------------------------------------------------------------
+# Hybrid mode + lookup_bullet (roadmap item #3 — pi-mono skills pattern)
+# ---------------------------------------------------------------------------
+
+
+def _hits(n: int) -> list[BulletHit]:
+    return [
+        BulletHit(
+            Bullet(
+                id=f"bullet-{i}",
+                content=f"Distinct bullet number {i} content " * 3,
+                tags=[f"tag{i}", "shared"],
+            ),
+            0.5 - i * 0.01,
+        )
+        for i in range(n)
+    ]
+
+
+def test_hybrid_mode_renders_full_top_n_then_summary():
+    """First `full_top_n` bullets get their full body; the rest render
+    as ID + tags only."""
+    hits = _hits(7)
+    block = render_playbook_block(
+        hits, mode="hybrid", full_top_n=3, char_budget=10000,
+    )
+    # Top 3 bullets have their content text.
+    for i in range(3):
+        assert f"Distinct bullet number {i}" in block, f"bullet-{i} missing"
+    # Bullets 3..6 should appear as ID-only entries (tags shown, content NOT).
+    for i in range(3, 7):
+        assert f"[bullet-{i}]" in block
+        assert f"Distinct bullet number {i}" not in block, f"bullet-{i} body leaked"
+    assert "ADDITIONAL PLAYBOOK INDEX" in block
+    assert "<lookup_bullet>" in block
+
+
+def test_full_mode_renders_all_bodies():
+    """mode='full' (default) renders every bullet's full body — no
+    ADDITIONAL section."""
+    hits = _hits(5)
+    block = render_playbook_block(hits, mode="full", char_budget=10000)
+    for i in range(5):
+        assert f"Distinct bullet number {i}" in block
+    assert "ADDITIONAL PLAYBOOK INDEX" not in block
+    assert "<lookup_bullet>" not in block
+
+
+def test_hybrid_mode_with_few_hits_no_index():
+    """If there are <= full_top_n hits, hybrid behaves like full — no
+    'ADDITIONAL' section gets emitted."""
+    hits = _hits(2)
+    block = render_playbook_block(
+        hits, mode="hybrid", full_top_n=3, char_budget=10000,
+    )
+    assert "ADDITIONAL PLAYBOOK INDEX" not in block
+    for i in range(2):
+        assert f"Distinct bullet number {i}" in block
+
+
+def test_lookup_bullet_finds_bullet_by_id(tmp_path: Path):
+    bullets = [
+        Bullet(id="alpha", content="alpha content", tags=["a"]),
+        Bullet(id="beta", content="beta content", tags=["b"]),
+    ]
+    pb = Playbook(root=str(tmp_path / "memory"))
+    pb.ensure()
+    pb._save_all(bullets)
+    found = lookup_bullet(pb, "beta")
+    assert found is not None
+    assert found.id == "beta"
+    assert "beta content" in found.content
+
+
+def test_lookup_bullet_returns_none_for_missing(tmp_path: Path):
+    pb = Playbook(root=str(tmp_path / "memory"))
+    pb.ensure()
+    pb._save_all([Bullet(id="only", content="x", tags=[])])
+    assert lookup_bullet(pb, "does-not-exist") is None
+
+
+def test_hybrid_mode_index_shows_score_when_nonzero():
+    """Bullet with helpful/harmful counters shows score in summary line."""
+    hits = [
+        BulletHit(
+            Bullet(id=f"b{i}", content=f"body {i}" * 5,
+                   tags=["x"], helpful=i, harmful=0), 0.5 - i * 0.01,
+        )
+        for i in range(5)
+    ]
+    block = render_playbook_block(
+        hits, mode="hybrid", full_top_n=2, char_budget=10000,
+    )
+    # b3 (helpful=3) is in the summary section; should show score=+3.
+    assert "score=+3" in block or "score=+4" in block

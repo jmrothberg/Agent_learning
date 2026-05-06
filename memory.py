@@ -1335,11 +1335,23 @@ def render_playbook_block(
     *,
     dedup: bool = True,
     char_budget: int = _DEFAULT_PLAYBOOK_CHAR_BUDGET,
+    mode: str = "full",
+    full_top_n: int = 3,
 ) -> str:
     """Format retrieved bullets as a compact <playbook> block for the prompt.
 
     Pipeline: optional dedup → budget cap → render. Both filters are
     on-by-default per the OpenCoder findings (#5 dedup, #2 budget).
+
+    `mode` selects the rendering shape:
+      - "full" (default): every bullet kept after cap renders with full
+        body. Best when retrieval is already narrow (code stage, K ≤ 3).
+      - "hybrid": the top `full_top_n` bullets get full body; the rest
+        render as ID + tags only with a hint that the model can emit
+        <lookup_bullet>id</lookup_bullet> to fetch the body in the next
+        turn. Pi-mono "skills" pattern — advertise breadth, expand on
+        demand. Best when retrieval is broad (plan stage, K ≥ 6) so the
+        model sees more options without paying for them in tokens.
 
     Empty / fully-filtered list → empty string (caller should detect and
     skip injection).
@@ -1356,9 +1368,44 @@ def render_playbook_block(
         "ignore the ones that don't fit."
     )
     lines = ["<playbook>", head, ""]
-    for h in work:
+
+    if mode == "hybrid":
+        full_set = work[:full_top_n]
+        summary_set = work[full_top_n:]
+    else:
+        full_set = work
+        summary_set = []
+
+    for h in full_set:
         b = h.bullet
         meta = f" (score={b.score():+d})" if (b.helpful or b.harmful) else ""
         lines.append(f"- [{b.id}]{meta} {b.content}")
+
+    if summary_set:
+        lines.append("")
+        lines.append(
+            "ADDITIONAL PLAYBOOK INDEX (body NOT included to save context — "
+            "emit <lookup_bullet>id</lookup_bullet> in your reply to have "
+            "any of these expanded into your next turn):"
+        )
+        for h in summary_set:
+            b = h.bullet
+            tags = ",".join(b.tags[:5]) if b.tags else "untagged"
+            meta = f" score={b.score():+d}" if (b.helpful or b.harmful) else ""
+            lines.append(f"- [{b.id}]{meta} tags=[{tags}]")
+
     lines.append("</playbook>")
     return "\n".join(lines)
+
+
+def lookup_bullet(playbook: "Playbook", bullet_id: str) -> Bullet | None:
+    """Fetch a single bullet from `playbook` by exact ID match.
+
+    Used by the agent's `<lookup_bullet>` handler to resolve on-demand
+    skill-style lookups. Returns None if the ID doesn't exist (rather
+    than raising, so the agent can fall through gracefully).
+    """
+    for b in playbook.load_all():
+        if b.id == bullet_id:
+            return b
+    return None

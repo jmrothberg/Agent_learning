@@ -210,6 +210,9 @@ Each technique is matched to a *specific* small-model failure mode:
 | **Per-format guidelines**    | Big monolithic system prompt fragments rules across sections; small-model attention frays | `prompts_v1.FormatSpec` + `build_system_prompt` (deduped) |
 | **Structured compaction**    | Long extension sessions drift; bug-fix context lost first when history is naively elided | `agent._build_structured_summary` + 2-tier `_prune_messages` |
 | **Pre-Chromium micro-probes**| Truncated stream / unbalanced braces / elision markers waste a 3 s browser round-trip | `tools.run_micro_probes` |
+| **API allowlist (hallucination guard)** | Models invent methods (`ctx.drawCircle`, `audioCtx.playSound`); Chromium TypeError eats a round-trip | `tools._check_api_allowlist` (canvas2d / AudioContext / canvas-elt receivers) |
+| **Project-config injection** | Per-repo conventions ("always Phaser, never React") have to be re-stated every session | `agent._read_project_config` reads `AGENTS.md` / `CLAUDE.md` from cwd |
+| **Bullet-on-demand retrieval** | Eager top-K injection burns context on bullets the model may not need | `<lookup_bullet>id</lookup_bullet>` + `memory.render_playbook_block(mode="hybrid")` |
 | **Two-stage retrieval**      | Same playbook bullets injected at plan time AND code time → context bloat without precision | `agent._retrieve_playbook_block(stage="plan"/"code")` |
 | **Quality-ranked retrieval** | Identical-relevance bullets returned in arbitrary order; loser equally likely as winner | `Playbook.retrieve` quality multiplier `1 + 0.10·tanh(score/5)` |
 | **Shingle dedup**            | Two near-identical bullets crowd out the third diverse one     | `memory.dedup_hits` (5-gram word shingles, Jaccard ≥ 0.85) |
@@ -379,10 +382,45 @@ report back to the model on the next turn — same shape as a real test
 report, with the title `(skipped browser — pre-flight failed)` so the
 trace is unambiguous.
 
-Coverage: 17 unit tests in `tests/test_microprobes.py`,
-14 in `tests/test_retrieval.py`,
-9 in `tests/test_compaction.py`.
-Total new test count: **62 passing**.
+### Roadmap items also shipped on this branch
+
+Three of the highest-ROI gaps from the original roadmap landed in the
+same commit family as the 10 ports above:
+
+- **Project-config injection** (`agent._read_project_config`). At
+  session start we read `AGENTS.md` and `CLAUDE.md` from the working
+  directory (falling back to `out_path.parent.parent`), cap the total
+  at 6 KB, and append the contents as a `<project-context>` block at
+  the END of the system prompt. Pi-mono pattern: a repo can lock in
+  "always vanilla JS, never React" once and every session inherits it.
+
+- **API hallucination guard** (`tools._check_api_allowlist`). Inside
+  `run_micro_probes`, scan inline scripts for `<receiver>.<method>(`
+  patterns where the receiver name is one of the strict conventions
+  (`ctx`, `audioCtx`, `cvs`, …) and the method is not on the canonical
+  allowlist for that receiver type. Reported as a *warning*, not an
+  error — false-positive risk is real (user objects named `ctx`), and
+  Chromium has the final word. Bias: false negatives over false
+  positives.
+
+- **Bullet-on-demand retrieval** (pi-mono "skills" pattern). New
+  `mode="hybrid"` for `render_playbook_block`: ships top-3 with full
+  body + remaining bullets as ID-only index entries with their tags.
+  When the model wants the body of an indexed bullet, it emits
+  `<lookup_bullet>id</lookup_bullet>` in its reply; the agent's
+  `_extract_and_queue_lookups` resolves and queues the body for
+  injection into the *next* user-turn message via
+  `_flush_user_injections`. Capped at 5 lookups per turn so a chatty
+  reply can't drown context. The plan stage (broad retrieval) defaults
+  to hybrid; the code stage (narrow, K ≤ 3) stays full.
+
+Coverage: 23 unit tests in `tests/test_microprobes.py`,
+20 in `tests/test_retrieval.py`,
+9 in `tests/test_compaction.py`,
+24 in `tests/test_patches.py`,
+8 in `tests/test_lookup.py`,
+7 in `tests/test_project_config.py`.
+Total: **89 passing**.
 
 ---
 
@@ -423,8 +461,9 @@ make the borrowing explicit and the divergences honest.
 | **Save-best-on-clean + regression detect**    | **Yes** — every clean turn → `best.html`; revert prompt if next breaks      | git (manual)                                      | n/a                                    |
 | **`<done/>` then plain text auto-extends**    | **Yes** — same file, continuation mode                                      | Follow-up + steering                              | n/a                                    |
 | **Architect/editor 2-call split**             | Optional, complexity-gated                                                  | No                                                | n/a                                    |
-| **AGENTS.md / project-config injection**      | **No** (gap — see roadmap)                                                  | Yes — both `AGENTS.md` and `CLAUDE.md`            | n/a                                    |
-| **Skills / lazy-loaded reference docs**       | **No** — playbook is eager-injected only                                    | Yes — skills advertised, model `read`s on demand  | n/a                                    |
+| **AGENTS.md / project-config injection**      | **Yes** — `AGENTS.md` + `CLAUDE.md` auto-loaded from cwd ★ (ported)        | Yes — both `AGENTS.md` and `CLAUDE.md`            | n/a                                    |
+| **API hallucination guard**                   | **Yes** — receiver-name allowlist for canvas2d / AudioContext / canvas-elt | No                                                | n/a                                    |
+| **Skills / lazy-loaded reference docs**       | **Yes** — hybrid playbook mode + `<lookup_bullet>` tag ★ (ported pattern)  | Yes — skills advertised, model `read`s on demand  | n/a                                    |
 | **Model-agnostic across Anthropic/OpenAI/etc.** | **No** (deliberate; Ollama-focused)                                       | Yes                                               | n/a                                    |
 | **JSON repair for streamed tool args**        | **No** — we use XML, no JSON args to repair                                 | Yes — `repairJson` + partial-json fallback        | n/a                                    |
 
@@ -1022,8 +1061,10 @@ Agent_learning/
 ├── tests/
 │   ├── test_patches.py        # 24 tests — fuzzy match, uniqueness, overlap, repair
 │   ├── test_compaction.py     # 9 tests — structured summary + 2-tier prune
-│   ├── test_retrieval.py      # 14 tests — quality rank, two-stage, dedup, budget
-│   └── test_microprobes.py    # 17 tests — pre-Chromium structural sanity checks
+│   ├── test_retrieval.py      # 20 tests — quality rank, two-stage, dedup, budget, hybrid
+│   ├── test_microprobes.py    # 23 tests — pre-Chromium sanity + API allowlist
+│   ├── test_lookup.py         # 8 tests — <lookup_bullet> tag → playbook body injection
+│   └── test_project_config.py # 7 tests — AGENTS.md / CLAUDE.md auto-loading
 ├── requirements.txt
 └── games/
     ├── <slug>_<ts>.html              # the live game file
@@ -1138,15 +1179,17 @@ describe your next goal.
 ## Roadmap & known gaps
 
 What's missing if you want this to be the *strongest* mid-size-LLM
-coding agent. None of these are in flight; this is an honest checklist
-so you can decide what to PR.
+coding agent. None of the rows below are in flight; this is an honest
+checklist so you can decide what to PR.
+
+> **Recently shipped (out of the roadmap):**
+> - ✅ **AGENTS.md / CLAUDE.md project-config injection** — read at session start from cwd, appended as `<project-context>` (`agent._read_project_config`).
+> - ✅ **API allowlist for Canvas / Audio / DOM** — receiver-name + method-allowlist scanner inside `run_micro_probes`; flags hallucinated `ctx.drawCircle`, `audioCtx.playSound`, etc., as warnings before the Chromium round-trip.
+> - ✅ **Bullet-on-demand retrieval (skills pattern)** — `render_playbook_block(mode="hybrid")` ships top-3 with full body + the rest as ID-only index entries; the model emits `<lookup_bullet>id</lookup_bullet>` and the agent injects the body in the next turn.
 
 | Gap                                          | Why it matters                                                                                                     | Effort | Notes                                                                                                                            |
 | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ------ | -------------------------------------------------------------------------------------------------------------------------------- |
-| **Project-config injection (AGENTS.md / CLAUDE.md)** | Pi-mono auto-folds a project's AGENTS.md into the system prompt as `# Project Context`. We don't read any per-project config — every session re-learns the user's preferences via the playbook. Adding this would let a single repo say "always use Phaser, never use React" once. | low    | Pattern: read `AGENTS.md` / `CLAUDE.md` from the working dir at session start; append as `<project-context>` at the end of the system prompt. |
-| **API allowlist for Canvas / Audio / DOM**   | Models hallucinate methods (`ctx.drawCircle()`, `audio.play(volume=0.5)`). Today the Chromium round-trip catches them — but slowly. A tiny JSON of canonical signatures could reject the patch *before* the round-trip. | low    | The Wikipedia grounding lesson applies: **no allowlist of game genres**, but an allowlist of *real method signatures* is fine. |
 | **Native tool-calling format (replace XML)** | Ollama supports JSON tool-calling for several models. Native-call output is more reliable than tag parsing on RLHF'd models, and we'd inherit Ollama's schema validation for free. | medium | We deferred this earlier as "real cost without measurement." Worth revisiting once a tune-battery baseline lands. |
-| **Bullet-on-demand retrieval (skills pattern)** | Today every fix turn injects the top-K relevant playbook bullets. Pi-mono's `skills` pattern advertises bullet IDs in the prompt and lets the model `read` only the one it actually needs. Saves tokens, sharpens attention. | medium | Requires a `read_bullet(id)` tool and a small change to `<playbook>` rendering — IDs only, body on request. |
 | **Streaming patch validation**               | Today we validate patches *after* the stream finishes. Catching a malformed `<patch>` mid-stream lets us abort early and re-prompt before wasting tokens. | medium | Hook into `ollama_io.stream_chat`; partial-parse `<patch>` blocks as they close.                                                  |
 | **Diff preview before patch apply**          | UX win: show the user the unified diff produced by `<patch>` before writing the file. Users could veto or hand-edit.                                  | low    | Mostly Textual layout; the patch engine already returns the spliced text.                                                         |
 | **Real JS syntax check (`node --check`)**    | The pre-Chromium micro-probe uses bracket-balance heuristics. If `node` is on PATH, we could pipe each `<script>` through `node --check` for a real syntax verdict.                                             | low    | Already covered by the bracket-balance heuristic for the common cases; this is a quality-not-quantity upgrade.                    |
@@ -1154,12 +1197,14 @@ so you can decide what to PR.
 | **Playbook auto-pruning by age**             | Bullets with low net score sit forever; the offline learner only adds. A periodic pruner that drops bullets with `harmful >> helpful` after N retrievals would keep the corpus tight. | low    | `learner.py` has the data; needs a `prune` subcommand and a freshness counter on each bullet.                                    |
 | **CDN integrity hashes for `<script src=...>`** | Games sometimes pull from `cdn.example.com/phaser.js`; an SRI-style allowlist would reject typosquatted CDNs.                                          | low    | Maintain a small JSON of `{cdn_host: allowed_paths}`.                                                                             |
 | **Cross-session user-preference memory**     | Beyond playbook (which is HTML/JS lessons): "user wants minimalist UI", "user prefers WASD over arrows", "this user always asks for sound" — all currently learned per-session and forgotten. | medium | Same shape as playbook; different namespace.                                                                                      |
+| **Receiver-type inference for API allowlist** | Today the allowlist scanner only checks variables whose name matches a strict convention (`ctx`, `audioCtx`, …). A tiny type-inference pass (`getContext('2d')` → mark var as canvas2d) would catch hallucinations on unconventionally-named receivers too. | medium | Adds false-positive risk; gate with a tune-battery measurement first. |
+| **Generalize the agent loop beyond HTML/JS** | Verticalization is what buys us the runtime-validation layer, but it also means we can't help with non-browser code (Python scripts, Rust kernels, etc.). | high   | Would essentially be a sibling agent sharing the patch engine + retrieval; non-trivial.   |
 
 If you want the *single highest-ROI next step* per axis:
 
-- **Reliability:** API allowlist for Canvas/Audio/DOM (cheap, prevents real failure mode).
-- **Maintainability:** AGENTS.md / project-config injection (pi has it, well-tested pattern).
-- **Token efficiency:** bullet-on-demand retrieval (pi-mono skills pattern).
+- **Token efficiency / safety on long sessions:** streaming patch validation.
+- **UX for interactive use:** diff preview before patch apply.
+- **Hardening:** sandboxed `file://` loading.
 
 ---
 

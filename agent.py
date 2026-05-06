@@ -61,6 +61,7 @@ from memory import (
     GameMemory,
     Playbook,
     SkeletonHit,
+    lookup_bullet,
     render_playbook_block,
     signature_for_report,
 )
@@ -80,6 +81,52 @@ from tools import (
     run_micro_probes,
     score_test_report,
 )
+
+
+# Pi-mono pattern: read AGENTS.md / CLAUDE.md from the working tree at
+# session start and append it as <project-context> in the system prompt.
+# Lets a repo enforce house-style ("always vanilla JS, no React") once
+# instead of re-saying it via feedback every session.
+_PROJECT_CONFIG_FILES = ("AGENTS.md", "CLAUDE.md")
+# Cap so a sprawling project README doesn't crowd out the rest of the
+# system prompt. ~6KB ≈ 1500 tokens, still room for the goal + workflow.
+_PROJECT_CONFIG_MAX_CHARS = 6000
+
+
+def _read_project_config(base_dir: Path) -> tuple[str, list[str]]:
+    """Read AGENTS.md / CLAUDE.md (in that order) from `base_dir`.
+
+    Returns (concat_text, source_paths). `concat_text` is empty if no
+    project-config files exist or are readable. Total length is capped
+    at _PROJECT_CONFIG_MAX_CHARS; truncation appends a marker so the
+    model knows it was cut.
+    """
+    parts: list[str] = []
+    sources: list[str] = []
+    used = 0
+    for name in _PROJECT_CONFIG_FILES:
+        p = base_dir / name
+        try:
+            if not p.is_file():
+                continue
+            body = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if not body.strip():
+            continue
+        sources.append(str(p))
+        remaining = _PROJECT_CONFIG_MAX_CHARS - used
+        if remaining <= 0:
+            break
+        if len(body) > remaining:
+            body = body[:remaining] + (
+                f"\n\n[... {name} truncated to fit project-context budget ...]"
+            )
+        # Prefix each file with its name so the model can tell them apart
+        # if the project ships both.
+        parts.append(f"## {name}\n\n{body.strip()}")
+        used += len(body) + len(name) + 8
+    return ("\n\n".join(parts), sources)
 
 
 _HTML_RE = re.compile(r"<html_file>\s*(.*?)\s*</html_file>", re.DOTALL | re.IGNORECASE)
@@ -109,6 +156,14 @@ _DIAGNOSE_RE = re.compile(r"<diagnose>\s*(.*?)\s*</diagnose>", re.DOTALL | re.IG
 _NOTES_RE = re.compile(r"<notes>\s*(.*?)\s*</notes>", re.DOTALL | re.IGNORECASE)
 _CRITERIA_RE = re.compile(r"<criteria>\s*(.*?)\s*</criteria>", re.DOTALL | re.IGNORECASE)
 _PROBES_RE = re.compile(r"<probes>\s*(.*?)\s*</probes>", re.DOTALL | re.IGNORECASE)
+# Pi-mono "skills" pattern: <lookup_bullet>id</lookup_bullet> requests
+# the full body of a playbook bullet whose index-entry was inlined in
+# hybrid mode. Resolved + injected at the next user-turn boundary.
+_LOOKUP_BULLET_RE = re.compile(
+    r"<lookup_bullet>\s*(.*?)\s*</lookup_bullet>", re.DOTALL | re.IGNORECASE
+)
+# Cap to keep one chatty reply from blowing up context.
+_MAX_BULLET_LOOKUPS_PER_TURN = 5
 
 
 # Once the messages list has more turns than this, older turns get their
@@ -280,6 +335,10 @@ class GameAgent:
         # always inline THIS in fix prompts (instead of asking the model to
         # remember its own previous reply).
         self._current_file: str = ""
+        # Bullet bodies queued by <lookup_bullet> tags in the most recent
+        # assistant reply. Drained into the next user message so the model
+        # actually receives the requested body. Pi-mono "skills" pattern.
+        self._pending_bullet_lookups: list[str] = []
 
     @staticmethod
     def _load_prompt_module(version: str):
@@ -340,9 +399,15 @@ class GameAgent:
             if stage == "plan":
                 k = self._playbook_top_k + self._PLAN_STAGE_TOP_K_BONUS
                 budget = self._PLAN_STAGE_CHAR_BUDGET
+                # Plan stage advertises breadth: top-3 full + the rest as
+                # ID-only index. Model emits <lookup_bullet> if it wants
+                # the body of any indexed entry. Pi-mono "skills" pattern.
+                render_mode = "hybrid"
             else:
                 k = min(self._playbook_top_k, self._CODE_STAGE_TOP_K)
                 budget = self._CODE_STAGE_CHAR_BUDGET
+                # Code stage already narrowly retrieves; full bodies on all.
+                render_mode = "full"
             hits = self._playbook.retrieve(
                 goal, code=code, k=k, stage=stage,
             )
@@ -355,11 +420,63 @@ class GameAgent:
                     "scores": [round(h.score, 4) for h in hits],
                     "goal_preview": goal[:120],
                     "char_budget": budget,
+                    "render_mode": render_mode,
                 })
                 self._active_bullet_ids = list(ids)
-            return render_playbook_block(hits, char_budget=budget)
+            return render_playbook_block(
+                hits, char_budget=budget, mode=render_mode,
+            )
         except Exception:
             return ""
+
+    def _extract_and_queue_lookups(self, reply: str) -> None:
+        """Find <lookup_bullet>id</lookup_bullet> tags in an assistant reply,
+        resolve each against the playbook, and queue rendered bodies for
+        injection into the next user-turn message. Pi-mono skills pattern.
+
+        Capped at _MAX_BULLET_LOOKUPS_PER_TURN per reply so a chatty
+        model can't bloat context. Unknown IDs are surfaced as
+        "NOT FOUND" entries so the model knows its lookup missed.
+        """
+        if not reply:
+            return
+        raw_ids = [m.group(1).strip() for m in _LOOKUP_BULLET_RE.finditer(reply)]
+        if not raw_ids:
+            return
+        seen: set[str] = set()
+        resolved: list[str] = []
+        for bid in raw_ids[:_MAX_BULLET_LOOKUPS_PER_TURN]:
+            if not bid or bid in seen:
+                continue
+            seen.add(bid)
+            b = lookup_bullet(self._playbook, bid)
+            if b is None:
+                resolved.append(
+                    f"## [{bid}] — NOT FOUND in current playbook "
+                    "(typo, or that ID is no longer available)"
+                )
+                continue
+            tag_str = ",".join(b.tags[:5]) if b.tags else "untagged"
+            resolved.append(
+                f"## [{b.id}]  tags=[{tag_str}]\n{b.content}"
+            )
+        if not resolved:
+            return
+        block = (
+            "================ PLAYBOOK LOOKUP RESULTS ================\n"
+            "You requested these bullet bodies via <lookup_bullet> in your "
+            "previous turn. Apply them where relevant — they were on the "
+            "INDEX list and you asked for the body, so the body is now "
+            "yours to use this turn.\n\n"
+            + "\n\n".join(resolved)
+            + "\n========================================================="
+        )
+        self._pending_bullet_lookups.append(block)
+        self._trace({
+            "kind": "bullet_lookups_resolved",
+            "ids": list(seen),
+            "count": len(resolved),
+        })
 
     # -- TUI-facing setters -------------------------------------------------
 
@@ -672,6 +789,13 @@ class GameAgent:
             for fb in self._pending_feedback:
                 self._trace({"kind": "feedback_injected", "text": fb})
             self._pending_feedback.clear()
+        # Drain any <lookup_bullet> resolutions queued by the previous
+        # assistant reply. These come BEFORE the base message so the
+        # model sees them as fresh material before the iteration prompt.
+        if self._pending_bullet_lookups:
+            for block in self._pending_bullet_lookups:
+                parts.append(block)
+            self._pending_bullet_lookups.clear()
         if base_message:
             parts.append(base_message)
         return "\n\n".join(parts)
@@ -1135,8 +1259,35 @@ class GameAgent:
             else:
                 plan_msg = self._p.PLAN_INSTRUCTION
 
+            # Pi-mono-style project-config injection. Reads AGENTS.md /
+            # CLAUDE.md from cwd; falls back to the out_path's parent so
+            # `python coder.py` from outside the project tree still picks
+            # them up. Appended INSIDE the system message rather than as
+            # a separate user turn — keeps it ambient instead of
+            # interactive.
+            sys_prompt = self._p.SYSTEM_PROMPT.replace("{goal}", goal)
+            cfg_text, cfg_sources = _read_project_config(Path.cwd())
+            if not cfg_text:
+                cfg_text, cfg_sources = _read_project_config(self.out_path.parent.parent)
+            if cfg_text:
+                sys_prompt = (
+                    sys_prompt
+                    + "\n\n<project-context>\n"
+                    + "Project-level configuration loaded from the working tree. "
+                    + "Treat its rules as additional hard requirements; they "
+                    + "override anything in <hard-rules> or <iteration-policy> "
+                    + "where they conflict.\n\n"
+                    + cfg_text
+                    + "\n</project-context>"
+                )
+                self._trace({
+                    "kind": "project_config_loaded",
+                    "sources": cfg_sources,
+                    "chars": len(cfg_text),
+                })
+
             self._messages = [
-                {"role": "system", "content": self._p.SYSTEM_PROMPT.replace("{goal}", goal)},
+                {"role": "system", "content": sys_prompt},
                 {"role": "user", "content": plan_msg},
             ]
 
@@ -1182,6 +1333,7 @@ class GameAgent:
                 yield self._record(AgentEvent("error", f"Ollama call failed during planning: {e}"))
                 return
             self._messages.append({"role": "assistant", "content": plan_reply})
+            self._extract_and_queue_lookups(plan_reply)
             self._dump_conversation()
             yield self._record(AgentEvent("plan", plan_reply))
             crit = self._extract_criteria(plan_reply)
@@ -1214,6 +1366,7 @@ class GameAgent:
                     yield self._record(AgentEvent("error", f"Ollama call failed: {e}"))
                     return
                 self._messages.append({"role": "assistant", "content": plan_reply})
+                self._extract_and_queue_lookups(plan_reply)
                 self._dump_conversation()
                 yield self._record(AgentEvent("plan", plan_reply))
 
@@ -1433,6 +1586,7 @@ class GameAgent:
                 return
 
             self._messages.append({"role": "assistant", "content": reply})
+            self._extract_and_queue_lookups(reply)
             self._dump_conversation()
             self._trace({
                 "kind": "assistant_reply",
@@ -1848,6 +2002,7 @@ class GameAgent:
             try:
                 reply = await self._stream(self._token_cb_wrapper)
                 self._messages.append({"role": "assistant", "content": reply})
+                self._extract_and_queue_lookups(reply)
                 self._dump_conversation()
                 self._trace({
                     "kind": "assistant_reply",

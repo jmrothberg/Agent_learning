@@ -223,3 +223,86 @@ def test_format_clean_report_has_no_errors_section():
     out = format_micro_probes_for_model(r)
     assert "OK: True" in out, f"got: {out}"
     assert "ERRORS" not in out
+
+
+# ---------------------------------------------------------------------------
+# API allowlist (roadmap item #2)
+# ---------------------------------------------------------------------------
+
+
+def test_api_allowlist_flags_canvas2d_hallucination():
+    """`ctx.drawCircle(...)` is a known hallucination — flag as warning."""
+    html = _wrap(
+        "const ctx = document.querySelector('canvas').getContext('2d');\n"
+        "ctx.fillRect(0,0,100,100);\n"   # real
+        "ctx.drawCircle(50,50,20);\n"     # hallucinated
+    )
+    r = run_micro_probes(html)
+    assert r["ok"] is True  # warnings, not errors
+    assert any("drawCircle" in w and "CanvasRenderingContext2D" in w for w in r["warnings"])
+    assert r["stats"].get("api_hallucinations", 0) >= 1
+
+
+def test_api_allowlist_does_not_flag_real_canvas2d_method():
+    """Real ctx methods (fillRect, arc, beginPath, etc.) must not warn."""
+    html = _wrap(
+        "const ctx = document.querySelector('canvas').getContext('2d');\n"
+        "ctx.fillRect(0,0,100,100);\n"
+        "ctx.arc(50,50,20,0,2*Math.PI);\n"
+        "ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(100,100); ctx.stroke();\n"
+    )
+    r = run_micro_probes(html)
+    assert r["ok"] is True
+    assert r["stats"].get("api_hallucinations", 0) == 0
+
+
+def test_api_allowlist_does_not_flag_unknown_receiver():
+    """User-defined object with a custom method must NOT trigger a warning —
+    we only check known receiver-name conventions (`ctx`, `audioCtx`, etc)."""
+    html = _wrap(
+        "const myThing = { drawCircle: () => {} };\n"
+        "myThing.drawCircle();\n"
+        "const game = { spawn: () => {} };\n"
+        "game.spawn();\n"
+    )
+    r = run_micro_probes(html)
+    assert r["ok"] is True
+    assert r["stats"].get("api_hallucinations", 0) == 0
+
+
+def test_api_allowlist_flags_audio_context_hallucination():
+    """audioCtx is the strict convention — flag unknown methods on it."""
+    html = _wrap(
+        "const audioCtx = new AudioContext();\n"
+        "const osc = audioCtx.createOscillator();\n"   # real
+        "audioCtx.playSound();\n"                       # hallucinated
+    )
+    r = run_micro_probes(html)
+    assert r["ok"] is True
+    assert any("playSound" in w and "AudioContext" in w for w in r["warnings"])
+
+
+def test_api_allowlist_does_not_double_flag():
+    """Same hallucination called twice should warn ONCE (deduped)."""
+    html = _wrap(
+        "const ctx = document.querySelector('canvas').getContext('2d');\n"
+        "ctx.drawCircle(0,0,10);\n"
+        "ctx.drawCircle(50,50,20);\n"
+        "ctx.drawCircle(100,100,30);\n"
+    )
+    r = run_micro_probes(html)
+    matching = [w for w in r["warnings"] if "drawCircle" in w]
+    assert len(matching) == 1
+
+
+def test_api_allowlist_strips_strings_and_comments():
+    """`ctx.drawCircle()` inside a string or comment must NOT trigger."""
+    html = _wrap(
+        "const ctx = document.querySelector('canvas').getContext('2d');\n"
+        "// ctx.drawCircle() — not really called\n"
+        'const note = "ctx.drawCircle is not real";\n'
+        "ctx.fillRect(0,0,100,100);\n"
+    )
+    r = run_micro_probes(html)
+    assert r["ok"] is True
+    assert r["stats"].get("api_hallucinations", 0) == 0

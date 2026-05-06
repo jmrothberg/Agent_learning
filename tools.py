@@ -201,6 +201,124 @@ def _build_report(
 # unrecoverable without re-prompting; everything fuzzy goes to WARNINGS
 # so the Chromium load still gets a chance.
 
+# --- API allowlist (browser API hallucination guard) ----------------------
+#
+# Models hallucinate methods that don't exist (`ctx.drawCircle`,
+# `ctx.fillCircle`, `audioCtx.playSound`, etc). These crash at runtime
+# and we eventually catch them via Chromium's console.error — but slow.
+# A small allowlist of real method names per known receiver convention
+# lets us flag the hallucinated call at micro-probe time, before the
+# Chromium round-trip.
+#
+# Conservative philosophy:
+#   - Only check receivers whose variable name matches a STRICT convention
+#     (`ctx` for canvas2d, `audioCtx` for AudioContext, `cvs` for the
+#     element). If the user named their canvas context `myThing`, we
+#     don't try — false negatives are fine, false positives are not.
+#   - Output as a WARNING, not an ERROR. Chromium has the final word;
+#     this is a fast preview so the model can preempt obvious mistakes.
+#   - Allowlist values are method names commonly used in games. NOT
+#     exhaustive — the goal is to catch hallucinations, not to gate
+#     legitimate calls. We bias toward false negatives.
+
+# Receivers we treat as canvas2d. Variable names from the games
+# literature (Aider/Cline/Bolt prompts, Mozilla MDN, JS13k post-mortems).
+_CANVAS2D_RECEIVERS = {"ctx", "c2d", "ctx2d", "context", "gfx", "g2", "g2d"}
+
+# Receivers we treat as AudioContext. We use audioCtx, not bare `audio`,
+# because `audio` is overloaded (HTMLAudioElement OR AudioContext); if
+# the user wrote `audio`, we can't know which they meant. Strict here.
+_AUDIOCTX_RECEIVERS = {"audioctx", "audiocontext", "actx", "audctx"}
+
+# Receivers we treat as HTMLCanvasElement (the <canvas> DOM element,
+# distinct from its 2D rendering context).
+_CANVAS_ELT_RECEIVERS = {"cvs", "canvas", "canvasel", "canvaselt"}
+
+# Real CanvasRenderingContext2D methods (subset useful for games).
+# Source: MDN. Hallucinations the model often emits (drawCircle,
+# fillCircle, drawLine, line, point) are NOT in this set, so flagged.
+_CANVAS2D_METHODS = frozenset({
+    "arc", "arcto", "beginpath", "beziercurveto", "clearrect", "clip",
+    "closepath", "createimagedata", "createlineargradient", "createpattern",
+    "createradialgradient", "createconicgradient", "drawimage",
+    "drawfocusifneeded", "ellipse", "fill", "fillrect", "filltext",
+    "getcontextattributes", "getimagedata", "getlinedash", "gettransform",
+    "ispointinpath", "ispointinstroke", "lineto", "measuretext", "moveto",
+    "putimagedata", "quadraticcurveto", "rect", "resettransform", "restore",
+    "rotate", "roundrect", "save", "scale", "setlinedash", "settransform",
+    "stroke", "strokerect", "stroketext", "transform", "translate",
+    # Properties accessed as `.foo` are stripped before we check, but
+    # methods called as e.g. `.translate()` ARE checked.
+})
+
+_AUDIOCTX_METHODS = frozenset({
+    "createoscillator", "creategain", "createmediastreamsource",
+    "createmediaelementsource", "createanalyser", "createbiquadfilter",
+    "createbuffer", "createbuffersource", "createchannelmerger",
+    "createchannelsplitter", "createconstantsource", "createconvolver",
+    "createdelay", "createdynamicscompressor", "createiirfilter",
+    "createpanner", "createperiodicwave", "createscriptprocessor",
+    "createstereopanner", "createwaveshaper", "decodeaudiodata",
+    "resume", "suspend", "close", "getoutputtimestamp",
+    # Modern AudioContext additions
+    "audioworklet",
+})
+
+_CANVAS_ELT_METHODS = frozenset({
+    "getcontext", "todataurl", "toblob", "capturestream",
+    "transfercontroltoOffscreen", "transfercontroltooffscreen",
+    "addeventlistener", "removeeventlistener", "dispatchevent",
+    "focus", "blur", "click", "getboundingclientrect",
+    "queryselector", "queryselectorall",
+    # Generic Element methods worth keeping
+    "appendchild", "removechild", "setattribute", "getattribute",
+    "remove", "contains",
+})
+
+# Map of (lowered receiver name) -> (allowlist set, friendly label).
+_RECEIVER_TYPES: dict[str, tuple[frozenset[str], str]] = {}
+for r in _CANVAS2D_RECEIVERS:
+    _RECEIVER_TYPES[r] = (_CANVAS2D_METHODS, "CanvasRenderingContext2D")
+for r in _AUDIOCTX_RECEIVERS:
+    _RECEIVER_TYPES[r] = (_AUDIOCTX_METHODS, "AudioContext")
+for r in _CANVAS_ELT_RECEIVERS:
+    _RECEIVER_TYPES[r] = (_CANVAS_ELT_METHODS, "HTMLCanvasElement")
+
+# Match `<word>.<word>(` in JS source. The receiver word must be on the
+# left of the dot, the method on the right, with a `(` immediately after
+# (i.e. it's CALLED, not just read). Greedy-tolerant of whitespace
+# between tokens.
+_METHOD_CALL_RE = re.compile(
+    r"\b([A-Za-z_$][A-Za-z0-9_$]*)\s*\.\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*\("
+)
+
+
+def _check_api_allowlist(js: str) -> list[tuple[str, str, str]]:
+    """Find unknown-method calls on known-receiver variable names.
+
+    Returns a list of (receiver_var, method, type_label) tuples — one
+    per distinct hallucination found. Comments and string literals are
+    stripped first via _strip_js_noise. Caller decides severity.
+    """
+    stripped = _strip_js_noise(js)
+    seen: set[tuple[str, str]] = set()
+    out: list[tuple[str, str, str]] = []
+    for m in _METHOD_CALL_RE.finditer(stripped):
+        recv, method = m.group(1), m.group(2)
+        recv_key = recv.lower()
+        if recv_key not in _RECEIVER_TYPES:
+            continue
+        allowlist, type_label = _RECEIVER_TYPES[recv_key]
+        if method.lower() in allowlist:
+            continue
+        key = (recv, method)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((recv, method, type_label))
+    return out
+
+
 # Used for cheap brace-balance checks. Strips line + block comments and
 # string literals so a `for (;;)` inside a comment doesn't trip us.
 _LINE_COMMENT_RE = re.compile(r"//[^\n]*")
@@ -331,6 +449,29 @@ def run_micro_probes(html: str) -> dict[str, Any]:
                 "(could be a regex-literal false-positive — Chromium "
                 "will confirm)."
             )
+
+    # --- API allowlist (hallucinated method calls) --------------------
+    # Scan inline scripts for `<known-receiver>.<method>(` patterns where
+    # the method is not on the canonical allowlist for that receiver
+    # type. Reported as warnings, not errors — Chromium has the final
+    # word and the allowlist is intentionally incomplete (better to miss
+    # a hallucination than to flag a real method we forgot).
+    api_warnings: list[str] = []
+    for (_attrs, body) in scripts:
+        if not body.strip():
+            continue
+        for recv, method, type_label in _check_api_allowlist(body):
+            api_warnings.append(
+                f"`{recv}.{method}(...)` called but '{method}' is NOT a "
+                f"known method on {type_label}. If `{recv}` is a "
+                f"{type_label}, this is a hallucination — pick the "
+                "real method name (Chromium will throw a TypeError "
+                "otherwise). If `{recv}` is your own object, this "
+                "warning is a false positive; ignore."
+            )
+    if api_warnings:
+        warnings.extend(api_warnings)
+        stats["api_hallucinations"] = len(api_warnings)
 
     # --- elision sentinels ---------------------------------------------
     # Models occasionally slip "// ... rest of code unchanged ..." into
