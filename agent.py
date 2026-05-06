@@ -901,9 +901,45 @@ class GameAgent:
                 ),
             })
         else:
+            # Open-domain research: try Wikipedia for the goal before
+            # planning. If we get a hit, prepend the reference to the
+            # planning user-turn so the model's <plan> + <criteria> are
+            # grounded in real mechanics instead of model priors. The
+            # missile-command session in games/traces/ shipped Space
+            # Invaders with the labels swapped — that's the failure
+            # mode this prevents.
+            #
+            # Networked + has its own rate-limit sleeps, so run in a
+            # worker thread to keep the TUI responsive. Total budget
+            # ~3s for a typical hit, ~6s worst case.
+            reference_block = ""
+            try:
+                import research as _research
+                reference_block = await asyncio.to_thread(_research.fetch, goal) or ""
+            except Exception as e:
+                yield self._record(AgentEvent(
+                    "info", f"research lookup failed: {e!r}"
+                ))
+
+            if reference_block and hasattr(self._p, "plan_instruction"):
+                plan_msg = self._p.plan_instruction(reference_block=reference_block)
+            elif reference_block:
+                # v0 prompt module — no plan_instruction() helper. Manually
+                # prepend the reference and an authority sentence.
+                plan_msg = (
+                    f"{reference_block}\n\n"
+                    "AUTHORITY: the <reference> block above is from Wikipedia "
+                    "and describes the actual game the user named. Treat its "
+                    "mechanics as authoritative. Your plan and criteria MUST "
+                    "match those mechanics — do not invent different ones.\n\n"
+                    f"{self._p.PLAN_INSTRUCTION}"
+                )
+            else:
+                plan_msg = self._p.PLAN_INSTRUCTION
+
             self._messages = [
                 {"role": "system", "content": self._p.SYSTEM_PROMPT.replace("{goal}", goal)},
-                {"role": "user", "content": self._p.PLAN_INSTRUCTION},
+                {"role": "user", "content": plan_msg},
             ]
 
             self._trace({
@@ -919,11 +955,26 @@ class GameAgent:
                 "num_ctx": self.num_ctx,
                 "stall_seconds": self.stall_seconds,
                 "memory_root": str(self._memory.root),
+                "reference_chars": len(reference_block),
             })
             yield self._record(AgentEvent(
                 "info",
                 f"Trace: {self.trace_path}  (snapshots: {self.snapshots_dir})",
             ))
+            if reference_block:
+                # Surface the matched title so the user sees what we pulled.
+                first_line = reference_block.splitlines()[1] if "\n" in reference_block else ""
+                yield self._record(AgentEvent(
+                    "info",
+                    f"research: pulled Wikipedia reference ({len(reference_block)} chars) "
+                    f"— {first_line}"
+                ))
+            else:
+                yield self._record(AgentEvent(
+                    "info",
+                    "research: no Wikipedia match for this goal "
+                    "(planning from model priors)"
+                ))
 
             # ---- PHASE A: planning ------------------------------------------
             yield self._record(AgentEvent("phase", "planning"))

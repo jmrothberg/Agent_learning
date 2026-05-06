@@ -55,6 +55,30 @@ _PATCH_RE = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 
+# Detects a SEARCH/REPLACE marker as a STANDALONE LINE (no surrounding
+# code on the same line). Used to reject patches whose body contains
+# embedded markers — a real failure mode where the model writes a
+# malformed patch with two `>>>>>>> REPLACE` markers and the regex
+# above backtracks past the first one, capturing it (plus a chunk of
+# real code) into the REPLACE body. Applying that splices literal
+# `>>>>>>> REPLACE` lines into the file. See the missile-command
+# session in games/traces/game-of-misile-command-good-gr_*.log:
+# turn 12 caused turn 13 to fail with "Unexpected token '>>>'" via
+# exactly this path.
+#
+# Uses MULTILINE + ^/$ so we ONLY match a marker that is the WHOLE line
+# (modulo whitespace). Avoids false positives on legitimate code that
+# happens to contain '=======' inline (e.g. JS assignments using long
+# divider comments).
+_EMBEDDED_MARKER_RE = re.compile(
+    r"^\s*(?:<{5,}\s*SEARCH|={5,}|>{5,}\s*REPLACE)\s*$",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+
+def _has_embedded_marker(text: str) -> bool:
+    return bool(_EMBEDDED_MARKER_RE.search(text or ""))
+
 
 @dataclass
 class Patch:
@@ -107,6 +131,23 @@ def apply_patches(source: str, patches: list[Patch]) -> PatchResult:
     applied = 0
 
     for i, p in enumerate(patches):
+        # Reject patches whose SEARCH or REPLACE body contains embedded
+        # SEARCH/REPLACE markers on a standalone line. That body almost
+        # always came from regex backtracking through a malformed reply
+        # (two `>>>>>>> REPLACE` markers, nested headers, etc.), and
+        # applying it would splice literal markers into the file. We
+        # surface a specific failure so the next-turn prompt tells the
+        # model to fix its format, not its logic.
+        if _has_embedded_marker(p.search) or _has_embedded_marker(p.replace):
+            failed.append((i, p, (
+                "patch body contains an embedded SEARCH/REPLACE marker "
+                "(<<<<<<<, =======, or >>>>>>>) on its own line — looks "
+                "like nested or malformed headers. Re-emit ONE marker "
+                "set per <patch> block; do not put '>>>>>>> REPLACE' "
+                "anywhere except as the closing line."
+            )))
+            continue
+
         if p.is_prepend:
             # No SEARCH means: insert REPLACE at the start of file.
             text = p.replace + ("\n" if not p.replace.endswith("\n") else "") + text

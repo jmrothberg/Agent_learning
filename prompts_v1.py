@@ -210,6 +210,36 @@ tags."""
 # Phase A — planning + acceptance criteria
 # ===========================================================================
 
+def plan_instruction(*, reference_block: str = "") -> str:
+    """Phase A planning prompt, optionally prefixed with a Wikipedia
+    reference block fetched by research.fetch().
+
+    When a reference is present, we tell the model to treat it as
+    authoritative: a 30B local model has thin world knowledge for
+    arcade-game mechanics, and without grounding it tends to ship a
+    plausible but wrong genre (e.g. Space Invaders when asked for
+    Missile Command). The reference block is short enough to keep in
+    context across the planning + first-build turns.
+    """
+    if not reference_block:
+        return PLAN_INSTRUCTION
+    return (
+        f"{reference_block}\n\n"
+        "AUTHORITY OF <reference>: the block above is from Wikipedia and "
+        "describes the actual game the user named. Treat its mechanics, "
+        "controls, win/lose conditions, and visual style as AUTHORITATIVE. "
+        "Your <plan>, <criteria>, and <probes> MUST match what the "
+        "reference describes — do not invent different mechanics. If the "
+        "reference says the player aims a crosshair with the mouse, your "
+        "plan must say crosshair-with-mouse, not arrow keys. If it says "
+        "the player defends six cities, your plan must include cities, "
+        "not generic enemies. The user is going to recognize the game; "
+        "if your <plan> doesn't match the reference, the run is wrong "
+        "before any code is written.\n\n"
+        f"{PLAN_INSTRUCTION}"
+    )
+
+
 PLAN_INSTRUCTION = """Before writing any code, output a short plan, a
 list of acceptance criteria, and a JSON list of EXECUTABLE probes the
 verifier will literally run on your game each iteration.
