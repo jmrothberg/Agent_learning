@@ -171,6 +171,8 @@ Each technique is matched to a *specific* small-model failure mode:
 | Technique                    | Failure it prevents                                            | Where it lives                              |
 | ---------------------------- | -------------------------------------------------------------- | ------------------------------------------- |
 | **Plan first**               | Code-first models skip controls / win conditions / edge cases  | `prompts.PLAN_INSTRUCTION`                  |
+| **Web research grounding**   | Model "knows" the game name but not the mechanics — ships Space Invaders when asked for Missile Command | `research.fetch` → `<reference>` injected into Phase A; v1 prompt marks it AUTHORITATIVE |
+| **Repetition watchdog**      | Model gets stuck looping the same 1–2 short lines while tokens keep flowing (stall watchdog wouldn't fire) | `ollama_io.stream_chat` sliding-window detector → `StreamResult.looped` |
 | **Memory · skeleton**        | First-build cold start ("how do I even structure this?")       | `memory.GameMemory.retrieve_skeleton`       |
 | **Patches > rewrites**       | Token budget blown re-emitting unchanged code; truncation bugs | `patches.extract_patches`, `apply_patches`  |
 | **Real-browser tests**       | Hallucinated APIs, wrong event names, broken bracket indexing  | `tools.LiveBrowser.load_and_test`           |
@@ -288,6 +290,152 @@ python learner.py walk                        # past sessions (default: games/tr
 
 For one session’s detail, pass a **trace path** (`.jsonl`) or a session-id
 substring — `learner.py show` resolves `games/traces/**/*<id>*.jsonl`.
+
+---
+
+## Web research grounding
+
+Local LLMs in the 20–35B class have **thin world knowledge** for arcade
+games. Ask one to build "Missile Command" cold and it will cheerfully
+ship Space Invaders with the labels swapped — the May 5 trace at
+`games/traces/game-of-misile-command-good-gr_20260505_133453.*` is the
+canonical example: player at the bottom moving left/right with arrow
+keys, firing bullets *up* at "enemy bases" raining bullets *down*. Not
+remotely Missile Command.
+
+Fix: before the planning turn, the agent looks the goal up on Wikipedia
+and prepends the result as a `<reference>` block. The v1 planning
+prompt then says, in plain English, *treat this as authoritative*. The
+same model that previously produced Space Invaders now plans cities,
+crosshair, three batteries, fireballs.
+
+**How it works** (`research.py`, `agent.py:903`):
+
+1. `_search_queries(goal)` strips leading/trailing **filler** words
+   ("game of", "make a", "good graphics", "the original arcade") so a
+   long natural-language goal turns into a tight title-shaped query.
+   Wikipedia's `opensearch` endpoint matches against page titles
+   starting at the beginning, so "game of misile command" returns
+   nothing while "misile command" returns "Missile Command" — the
+   stripping is what makes the lookup work.
+2. For each query (raw + ` video game` + ` arcade game` suffixes), call
+   `opensearch`. Throttled to 1 req / 600 ms — anonymous Wikipedia silently
+   returns empty for ~5+ rapid bursts.
+3. **Open-domain title filter**: a candidate is accepted only if its
+   title (sans disambiguators like `(video game)`) appears in the goal.
+   Substring match for clean inputs, **squashed** match for
+   concatenated names ("Pac-Man" vs goal "pacman"), and a
+   token-Levenshtein fallback for typos ("misile" vs "missile",
+   distance 1 → match). Crucially, **no game list is hardcoded** —
+   the agent must handle any HTML/JS request open-domain.
+4. **Gameishness rank**: when multiple titles pass (e.g. `Snake` the
+   animal AND `Snake (video game genre)`), prefer titles tagged
+   `(video game)`/`(arcade)` or whose summary description mentions
+   "video game", "arcade game", "shooter", "platformer", etc. Stops
+   on first gameish hit to minimize calls.
+5. Render `<reference source="wikipedia">` with TITLE / DESCRIPTION /
+   SOURCE / SUMMARY / GAMEPLAY (parsed from the wikitext "Gameplay"
+   section when present). Capped at 1800 chars.
+
+**When it fires:** every fresh session at Phase A. Skipped on
+`continuation=True` (you're patching, not rebuilding).
+
+**When it returns nothing** ("make a game where bunnies fight robots",
+"a calculator with a sound on click"): the planning prompt falls
+through to v1's normal `PLAN_INSTRUCTION` and the model plans from its
+priors — same as before.
+
+CLI for sanity-checking by hand:
+
+```bash
+.venv/bin/python research.py "missile command"
+.venv/bin/python research.py "make a snake game"
+.venv/bin/python research.py "make a game where bunnies fight robots"   # → no reference
+```
+
+A planning-only smoke test sits at `tests/test_research_planning.py` —
+runs one Ollama planning call and checks the resulting `<plan>` against
+Missile-Command vs Space-Invaders keyword lists.
+
+---
+
+## Memory hygiene — when learning goes wrong
+
+The agent stores three flavors of "memory" under `games/memory/`. They
+are **not all equally trustworthy**, and you should know the
+difference before reasoning about why a session went the way it did.
+
+```
+games/memory/
+├── playbook.jsonl   ← curated bullets w/ helpful/harmful counters
+├── skeletons/
+│   ├── canvas_basic.html              ← bundled default
+│   └── won_<session_id>.{html,json}   ← auto-saved on every clean win
+├── goals/<session_id>/                ← per-win record (best.html, outcome.json)
+└── mistakes.jsonl                     ← {error_signature, fix_summary} pairs
+```
+
+**Trustworthy by construction:**
+
+- **`playbook.jsonl`** is the long-term lessons file. Every bullet has
+  a `source` field. Bullets with `source: "seed"` are the **hand-curated
+  baseline** distilled from research literature (the OpenGame paper,
+  Macklon's canvas-bug taxonomy, Aider/Cline/Bolt prompt mining). They
+  are reviewed; they don't go stale.
+- **`canvas_basic.html`** is the bundled default skeleton.
+
+**Can be wrong, and how it goes wrong:**
+
+- **`skeletons/won_<session_id>.html`** is dropped automatically every
+  time a session passes the harness's automated test. The harness only
+  checks "the game runs, accepts input, and animates" — it does **not**
+  check "the game is the one the user asked for". So the May 5 broken
+  Missile Command session passed (a Space-Invaders-shaped game runs
+  perfectly fine!) and saved its file as `won_game-of-misile-command-…`.
+  Future Missile Command goals would then *retrieve that file as the
+  starting skeleton*, locking in the wrong game on iteration 1. We
+  removed it as part of the same commit that added research grounding;
+  see `scripts/forget_session.py`.
+- **`mistakes.jsonl`** can pin a fix to the wrong root cause if the
+  Reflector misreads a trace. Far less impactful than a bad skeleton —
+  the entries are short hints, not starting code.
+- **Auto-distilled `playbook` bullets** (`source != "seed"`) come from
+  the offline learner. They go through the helpful/harmful counter
+  loop, so a bad bullet that gets retrieved into stuck-loop turns gets
+  pruned; in practice the seed bullets dominate retrieval. Inspect
+  with `python learner.py walk` and remove individual entries by
+  editing `playbook.jsonl` directly if needed.
+
+**Why this matters now:** before the Wikipedia grounding landed, the
+agent had no way to *know* the Missile Command session was wrong. The
+research step is the new front-line defense — it shapes the plan before
+any code is written, so wrong-game wins should be much rarer going
+forward. But everything saved before that fix landed is suspect.
+
+**Cleanup utility:**
+
+```bash
+# See what's stored.
+.venv/bin/python scripts/forget_session.py --list
+
+# Wipe one session's skeleton + goals record + matching mistakes entries.
+.venv/bin/python scripts/forget_session.py game-of-misile-command-good-gr_20260505_133453
+
+# Dry-run first if unsure.
+.venv/bin/python scripts/forget_session.py --dry-run <session_id>
+```
+
+What `forget_session.py` touches:
+
+- `games/memory/skeletons/won_<id>.{html,json}`
+- `games/memory/goals/<id>/`
+- entries in `mistakes.jsonl` whose `session` field matches
+
+What it leaves alone (deliberately): `playbook.jsonl` (no entries are
+pinned to a single session), and the on-disk session artifacts under
+`games/traces/`, `games/snapshots/`, and the per-session `.html` files
+in `games/`. Those are read-only history — delete by hand if you also
+want them gone.
 
 ---
 
@@ -583,10 +731,20 @@ OLLAMA_MODEL=gpt-oss:latest .venv/bin/python chat.py
 
 …or, inside the TUI, `/list` then `/model <number>`.
 
-The blacklist is the set `chat._KNOWN_BROKEN_TAGS` (currently includes
-`qwen3.6:27b` and `qwen3.6:35b` — edit there if your setup disagrees). It
-**only** skips tags when walking the installed-model list in step 3. It never
-applies to step 2 (already-loaded / `ps`) or to an explicit env var / `/model`.
+### What the model blacklist is
+
+`chat._KNOWN_BROKEN_TAGS` is a **stay-clear list** for auto-detection. If the
+Ollama daemon on your machine returns 500 (or wedges) when asked to load
+some particular tag, put that tag in the set and step 3 above will skip
+over it instead of picking it as the "first installed". The list is **only
+consulted in step 3**; steps 1, 2, and `/model` ignore it entirely — if
+you explicitly choose a tag, you get that tag.
+
+The set ships **empty** today. The previous default (`qwen3.6:27b/35b`) was
+a stale workaround from before those models were healthy on this machine,
+and leaving them in caused fresh launches to silently fall through to
+`gpt-oss:latest`. If you ever discover a tag that crashes Ollama on load,
+add it here and the resolver will route around it.
 
 ---
 
