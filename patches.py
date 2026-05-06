@@ -36,11 +36,30 @@ block means "delete".
 
 The agent always falls back to a full-file rewrite if patches don't apply,
 so format errors degrade gracefully instead of being fatal.
+
+Match cascade (most specific to most lenient):
+  1. Exact substring match.
+  2. Character-preserving normalization: smart-quotes / dash variants /
+     NBSP and other unicode spaces collapsed to ASCII. Each transform is
+     1:1, so positions in normalized space map directly to original
+     indices. This rescues the most common small-model failures (model
+     emits `'` where the file has `'`, or `—` where the file has `-`).
+  3. Whitespace-collapse (runs of spaces/tabs treated as a single space).
+  4. Trim (strip leading/trailing whitespace on both sides).
+
+Cross-patch validation:
+  * Per patch, count matches. >1 ⇒ ambiguous, reject with a prescriptive
+    "add more surrounding context" error.
+  * Across patches, sort matches by start index; reject any pair whose
+    spans overlap with a "merge edits N and M into one patch" error.
+  * Apply in REVERSE source-order so each splice keeps earlier offsets
+    valid. (Pi-mono's edit-diff engine pattern.)
 """
 
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 
 
@@ -80,6 +99,141 @@ def _has_embedded_marker(text: str) -> bool:
     return bool(_EMBEDDED_MARKER_RE.search(text or ""))
 
 
+# ---------------------------------------------------------------------------
+# Char-preserving normalization (1:1 mapping, no length change)
+# ---------------------------------------------------------------------------
+#
+# Each entry maps a single unicode code point to a single ASCII code point,
+# so str.translate() is character-preserving: position i in the normalized
+# string corresponds to position i in the original string. This lets us
+# match in normalized space and splice in original space without an index
+# map. Pi-mono's edit-diff.ts uses the same set; small models (qwen3.6,
+# gpt-oss) frequently emit smart quotes / em-dashes after "polishing"
+# their patch text, which then fails exact match against the LF-clean
+# file we wrote ourselves.
+
+_SMART_QUOTES = str.maketrans({
+    "‘": "'",  # LEFT SINGLE QUOTATION MARK
+    "’": "'",  # RIGHT SINGLE QUOTATION MARK (also "apostrophe")
+    "‚": "'",  # SINGLE LOW-9 QUOTATION MARK
+    "‛": "'",  # SINGLE HIGH-REVERSED-9
+    "′": "'",  # PRIME
+    "“": '"',  # LEFT DOUBLE QUOTATION MARK
+    "”": '"',  # RIGHT DOUBLE QUOTATION MARK
+    "„": '"',  # DOUBLE LOW-9 QUOTATION MARK
+    "‟": '"',  # DOUBLE HIGH-REVERSED-9
+    "″": '"',  # DOUBLE PRIME
+})
+
+_DASHES = str.maketrans({
+    "‐": "-",  # HYPHEN
+    "‑": "-",  # NON-BREAKING HYPHEN
+    "‒": "-",  # FIGURE DASH
+    "–": "-",  # EN DASH
+    "—": "-",  # EM DASH
+    "―": "-",  # HORIZONTAL BAR
+    "−": "-",  # MINUS SIGN
+})
+
+_SPACES = str.maketrans({
+    " ": " ",  # NO-BREAK SPACE
+    " ": " ",  # OGHAM SPACE MARK
+    " ": " ",  # EN QUAD
+    " ": " ",  # EM QUAD
+    " ": " ",  # EN SPACE
+    " ": " ",  # EM SPACE
+    " ": " ",  # THREE-PER-EM SPACE
+    " ": " ",  # FOUR-PER-EM SPACE
+    " ": " ",  # SIX-PER-EM SPACE
+    " ": " ",  # FIGURE SPACE
+    " ": " ",  # PUNCTUATION SPACE
+    " ": " ",  # THIN SPACE
+    " ": " ",  # HAIR SPACE
+    " ": " ",  # NARROW NO-BREAK SPACE
+    " ": " ",  # MEDIUM MATHEMATICAL SPACE
+    "　": " ",  # IDEOGRAPHIC SPACE
+})
+
+
+def _normalize_chars(s: str) -> str:
+    """Char-preserving fuzzy normalization.
+
+    Applies smart-quote / dash / unicode-space → ASCII translations. Each
+    translation is 1:1, so len(_normalize_chars(s)) == len(s) and position
+    i in the result maps to position i in the original.
+    """
+    return s.translate(_SMART_QUOTES).translate(_DASHES).translate(_SPACES)
+
+
+# ---------------------------------------------------------------------------
+# Repair layer (run before extract_patches)
+# ---------------------------------------------------------------------------
+
+# Strip a UTF-8 BOM at the very start of the reply (some Ollama proxies
+# inject one). Cheap, harmless when absent.
+_BOM = "﻿"
+
+# Match ```html or ```js or ``` on its own line, used to strip stray code
+# fences from inside <patch> bodies. Models sometimes wrap each side of
+# the SEARCH/REPLACE in a fence, which then fails exact match.
+_PATCH_INTERNAL_FENCE_RE = re.compile(
+    r"^[ \t]*```[a-zA-Z]*[ \t]*\n?|\n?[ \t]*```[ \t]*$",
+    re.MULTILINE,
+)
+
+
+def _normalize_lines(s: str) -> str:
+    """Normalize line endings to LF.
+
+    Drops CR characters; the result is shorter when CRLF or bare-CR was
+    present. This is NOT character-preserving — only call this on whole
+    text that we treat uniformly afterwards (whole reply, whole source).
+    """
+    if "\r" not in s:
+        return s
+    return s.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _strip_internal_fences(body: str) -> str:
+    """Remove stray ```lang / ``` fences from a SEARCH or REPLACE body.
+
+    The model occasionally wraps its patch body in a markdown fence ("just
+    to be safe"). Those literal fence lines then fail to match the file
+    on disk. We strip the FIRST opening fence and LAST closing fence; we
+    do NOT strip every fence-looking line, because legitimate code may
+    contain "```" inside a string literal.
+    """
+    if "```" not in body:
+        return body
+    new = _PATCH_INTERNAL_FENCE_RE.sub("", body, count=2)
+    return new
+
+
+def repair_reply(reply: str) -> str:
+    """Pi-mono-style "prepareArguments" pass: fix common malformations
+    BEFORE the regex parser sees the text.
+
+    Currently handles:
+      * UTF-8 BOM at start
+      * CRLF / bare-CR line endings (normalized to LF)
+
+    We do NOT touch the body of <patch> blocks here; per-patch repairs
+    (fence stripping) happen after extraction so we don't accidentally
+    eat a fence that lives in REGULAR text outside a patch.
+    """
+    if not reply:
+        return reply
+    if reply.startswith(_BOM):
+        reply = reply[1:]
+    reply = _normalize_lines(reply)
+    return reply
+
+
+# ---------------------------------------------------------------------------
+# Data classes
+# ---------------------------------------------------------------------------
+
+
 @dataclass
 class Patch:
     """A single SEARCH/REPLACE block parsed from the model's reply."""
@@ -105,109 +259,58 @@ class PatchResult:
     failed: list[tuple[int, Patch, str]]  # (index, patch, reason) for each failure
 
 
+# ---------------------------------------------------------------------------
+# Extraction
+# ---------------------------------------------------------------------------
+
+
 def extract_patches(reply: str) -> list[Patch]:
-    """Pull every <patch>...</patch> block out of a model reply, in order."""
+    """Pull every <patch>...</patch> block out of a model reply, in order.
+
+    Runs `repair_reply` first so CRLF / BOM / etc. don't break the regex.
+    Strips stray markdown fences from each patch body so a model that
+    wrapped its SEARCH/REPLACE in ```html``` doesn't fail the literal
+    match on the fence lines.
+    """
+    reply = repair_reply(reply)
     out: list[Patch] = []
     for m in _PATCH_RE.finditer(reply):
-        out.append(Patch(search=m.group("search"), replace=m.group("replace")))
+        search = _strip_internal_fences(m.group("search"))
+        replace = _strip_internal_fences(m.group("replace"))
+        out.append(Patch(search=search, replace=replace))
     return out
 
 
-def apply_patches(source: str, patches: list[Patch]) -> PatchResult:
-    """Apply a sequence of SEARCH/REPLACE patches to `source`.
+# ---------------------------------------------------------------------------
+# Match cascade
+# ---------------------------------------------------------------------------
 
-    A patch fails (is recorded but does NOT abort the rest) if its SEARCH
-    block doesn't appear verbatim in the current text. We return both the
-    final text and the list of failures so the caller can re-prompt the
-    model with the specific failures.
 
-    Whitespace strategy: we try exact match first, then a "lenient" match
-    where we collapse runs of spaces/tabs in both source and search to a
-    single space. That handles models that re-indent by accident without
-    breaking on intentional whitespace differences in strings.
+def _find_all_exact(text: str, needle: str) -> list[tuple[int, int]]:
+    """All non-overlapping (start, end) positions of `needle` in `text`."""
+    out: list[tuple[int, int]] = []
+    L = len(needle)
+    if L == 0:
+        return out
+    pos = 0
+    while True:
+        i = text.find(needle, pos)
+        if i < 0:
+            return out
+        out.append((i, i + L))
+        pos = i + L  # non-overlapping: jump past the match
+
+
+def _find_all_normalized(text: str, needle: str) -> list[tuple[int, int]]:
+    """Match after char-preserving normalization (smart quotes / dashes /
+    unicode spaces). Because the normalization is 1:1, positions in the
+    normalized text equal positions in the original text.
     """
-    text = source
-    failed: list[tuple[int, Patch, str]] = []
-    applied = 0
-
-    for i, p in enumerate(patches):
-        # Reject patches whose SEARCH or REPLACE body contains embedded
-        # SEARCH/REPLACE markers on a standalone line. That body almost
-        # always came from regex backtracking through a malformed reply
-        # (two `>>>>>>> REPLACE` markers, nested headers, etc.), and
-        # applying it would splice literal markers into the file. We
-        # surface a specific failure so the next-turn prompt tells the
-        # model to fix its format, not its logic.
-        if _has_embedded_marker(p.search) or _has_embedded_marker(p.replace):
-            failed.append((i, p, (
-                "patch body contains an embedded SEARCH/REPLACE marker "
-                "(<<<<<<<, =======, or >>>>>>>) on its own line — looks "
-                "like nested or malformed headers. Re-emit ONE marker "
-                "set per <patch> block; do not put '>>>>>>> REPLACE' "
-                "anywhere except as the closing line."
-            )))
-            continue
-
-        if p.is_prepend:
-            # No SEARCH means: insert REPLACE at the start of file.
-            text = p.replace + ("\n" if not p.replace.endswith("\n") else "") + text
-            applied += 1
-            continue
-
-        # 1) exact match — by far the most common case
-        if p.search in text:
-            text = text.replace(p.search, p.replace, 1)
-            applied += 1
-            continue
-
-        # 2) lenient whitespace match — find a slice of `text` that matches
-        #    SEARCH after we collapse internal runs of spaces/tabs.
-        lenient = _lenient_find_replace(text, p.search, p.replace)
-        if lenient is not None:
-            text = lenient
-            applied += 1
-            continue
-
-        # 3) trimmed — strip leading/trailing whitespace on both sides
-        if p.search.strip() in text:
-            text = text.replace(p.search.strip(), p.replace, 1)
-            applied += 1
-            continue
-
-        # 4) failed — record what we tried so the model can correct it
-        snippet = (p.search[:120] + "...") if len(p.search) > 120 else p.search
-        failed.append((i, p, f"SEARCH block not found in file: {snippet!r}"))
-
-    return PatchResult(text=text, applied=applied, failed=failed)
-
-
-def _lenient_find_replace(text: str, search: str, replace: str) -> str | None:
-    """Try to apply replace by matching search modulo whitespace runs.
-
-    We can't do this with a simple .replace because the slice we replace must
-    be the actual substring in `text`, not the whitespace-normalized version.
-    So we walk the text looking for a window whose normalized form equals the
-    normalized search, then splice.
-    """
-    norm_search = _norm_ws(search)
-    if not norm_search:
-        return None
-
-    # Build a normalized index → original index map so we can recover the
-    # actual substring once we find a normalized match. Simple approach: walk
-    # in O(N*M) which is fine for files ≤ ~50KB.
-    norm_text = _norm_ws(text)
-    pos = norm_text.find(norm_search)
-    if pos == -1:
-        return None
-
-    # Find the slice bounds in the original text. We do it by re-walking
-    # both strings in lock-step and counting normalized chars consumed.
-    start = _orig_offset(text, pos)
-    end = _orig_offset(text, pos + len(norm_search))
-    if start is None or end is None or start > end:
-        return None
-    return text[:start] + replace + text[end:]
+    norm_text = _normalize_chars(text)
+    norm_needle = _normalize_chars(needle)
+    if norm_needle == needle and norm_text == text:
+        return []  # nothing changed; exact would have caught it
+    return _find_all_exact(norm_text, norm_needle)
 
 
 _WS_RUN = re.compile(r"[ \t]+")
@@ -220,7 +323,7 @@ def _norm_ws(s: str) -> str:
 
 def _orig_offset(text: str, norm_pos: int) -> int | None:
     """Return the index into `text` corresponding to `norm_pos` after
-    whitespace collapsing. None if norm_pos is past the end.
+    whitespace collapsing. None if `norm_pos` is past the end.
     """
     n = 0
     i = 0
@@ -230,7 +333,6 @@ def _orig_offset(text: str, norm_pos: int) -> int | None:
             return i
         ch = text[i]
         if ch == " " or ch == "\t":
-            # consume the entire run, count as ONE normalized char
             j = i
             while j < L and text[j] in " \t":
                 j += 1
@@ -242,3 +344,175 @@ def _orig_offset(text: str, norm_pos: int) -> int | None:
     if n == norm_pos:
         return L
     return None
+
+
+def _find_all_lenient_ws(text: str, needle: str) -> list[tuple[int, int]]:
+    """Match after collapsing runs of spaces/tabs in both sides.
+
+    Walks the normalized text and for each match recovers the original-
+    text bounds via `_orig_offset`. Newlines are preserved unchanged so
+    line structure stays meaningful.
+    """
+    norm_needle = _norm_ws(needle)
+    if not norm_needle:
+        return []
+    norm_text = _norm_ws(text)
+    out: list[tuple[int, int]] = []
+    pos = 0
+    while True:
+        i = norm_text.find(norm_needle, pos)
+        if i < 0:
+            return out
+        start = _orig_offset(text, i)
+        end = _orig_offset(text, i + len(norm_needle))
+        if start is None or end is None or start >= end:
+            return out
+        out.append((start, end))
+        pos = i + len(norm_needle)
+
+
+def _find_all_trimmed(text: str, needle: str) -> list[tuple[int, int]]:
+    """Last-chance match: strip leading/trailing whitespace from `needle`
+    and search again. Useful for patches that copied an extra blank line.
+    """
+    stripped = needle.strip()
+    if not stripped or stripped == needle:
+        return []
+    return _find_all_exact(text, stripped)
+
+
+def _locate(text: str, search: str) -> tuple[list[tuple[int, int]], str]:
+    """Run the match cascade. Returns (matches, layer_label).
+
+    Stops at the first layer that produces ≥1 matches; later layers are
+    not consulted. layer_label is a short tag for trace/error messages.
+    """
+    m = _find_all_exact(text, search)
+    if m:
+        return m, "exact"
+    m = _find_all_normalized(text, search)
+    if m:
+        return m, "char-norm"
+    m = _find_all_lenient_ws(text, search)
+    if m:
+        return m, "ws-collapse"
+    m = _find_all_trimmed(text, search)
+    if m:
+        return m, "trimmed"
+    return [], "none"
+
+
+# ---------------------------------------------------------------------------
+# Apply
+# ---------------------------------------------------------------------------
+
+
+def apply_patches(source: str, patches: list[Patch]) -> PatchResult:
+    """Apply a sequence of SEARCH/REPLACE patches to `source`.
+
+    Cross-patch contract:
+      * Each non-prepend patch must match EXACTLY ONCE in the source. >1
+        match returns an "ambiguous" failure so the model adds more
+        surrounding context.
+      * Patches must not overlap in source. Overlapping pairs return a
+        "merge edits N and M" failure for both members.
+      * Surviving patches are applied in REVERSE source-order so earlier
+        offsets stay valid (pi-mono's edit-diff engine pattern).
+
+    Failed patches do NOT abort the rest — partial application is still
+    written out so the test harness can give the model meaningful feedback
+    on the next turn.
+    """
+    # Normalize source line endings once. The model's SEARCH text was
+    # already LF-normalized inside repair_reply (called from extract_patches),
+    # so both sides are now in the same line-ending world.
+    source = _normalize_lines(source)
+
+    failed: list[tuple[int, Patch, str]] = []
+    # (orig_index, start, end, replacement_text, layer)
+    spans: list[tuple[int, int, int, str, str]] = []
+    # Prepend patches don't have a source position; we handle them last by
+    # accumulating into a prefix string in their original reply order.
+    prepend_buf: list[tuple[int, str]] = []
+
+    for i, p in enumerate(patches):
+        # --- early reject: embedded markers ---------------------------
+        if _has_embedded_marker(p.search) or _has_embedded_marker(p.replace):
+            failed.append((i, p, (
+                "patch body contains an embedded SEARCH/REPLACE marker "
+                "(<<<<<<<, =======, or >>>>>>>) on its own line — looks "
+                "like nested or malformed headers. Re-emit ONE marker "
+                "set per <patch> block; do not put '>>>>>>> REPLACE' "
+                "anywhere except as the closing line."
+            )))
+            continue
+
+        # --- prepend (empty SEARCH) ----------------------------------
+        if p.is_prepend:
+            prepend_buf.append((i, p.replace))
+            continue
+
+        # --- locate ----------------------------------------------------
+        matches, layer = _locate(source, p.search)
+        if not matches:
+            snippet = (p.search[:120] + "...") if len(p.search) > 120 else p.search
+            failed.append((i, p, (
+                f"SEARCH block not found in file: {snippet!r}. The CURRENT "
+                "FILE ON DISK is the truth — re-copy the lines exactly, "
+                "including indentation."
+            )))
+            continue
+        if len(matches) > 1:
+            snippet = (p.search[:80] + "...") if len(p.search) > 80 else p.search
+            failed.append((i, p, (
+                f"SEARCH block matched {len(matches)} places in the file — "
+                "ambiguous. Add more SURROUNDING CONTEXT (e.g. the function "
+                f"name above and a unique line below) so it matches exactly "
+                f"once. SEARCH was: {snippet!r}"
+            )))
+            continue
+
+        start, end = matches[0]
+        spans.append((i, start, end, p.replace, layer))
+
+    # --- non-overlap validation across surviving spans ----------------
+    # Sort by start; any pair with prev.end > next.start is an overlap.
+    if len(spans) >= 2:
+        sorted_spans = sorted(spans, key=lambda s: s[1])
+        bad_indices: set[int] = set()
+        for a, b in zip(sorted_spans, sorted_spans[1:]):
+            if a[2] > b[1]:
+                bad_indices.add(a[0])
+                bad_indices.add(b[0])
+        if bad_indices:
+            for (orig_i, start, end, rep, layer) in list(spans):
+                if orig_i in bad_indices:
+                    failed.append((orig_i, patches[orig_i], (
+                        f"patch #{orig_i + 1} overlaps another patch in this "
+                        "reply — both touch the same region of the file. "
+                        "Merge them into ONE <patch> with combined SEARCH "
+                        "and REPLACE; pi-mono-style: edits[].oldText is "
+                        "matched against the ORIGINAL file, so overlapping "
+                        "patches are ambiguous."
+                    )))
+            spans = [s for s in spans if s[0] not in bad_indices]
+
+    # --- apply in REVERSE source-order so offsets stay stable -------
+    text = source
+    spans.sort(key=lambda s: s[1], reverse=True)
+    applied = 0
+    for (_orig_i, start, end, rep, _layer) in spans:
+        text = text[:start] + rep + text[end:]
+        applied += 1
+
+    # --- prepend after spans applied (so prepend lands at NEW pos 0) -
+    if prepend_buf:
+        prefix_parts: list[str] = []
+        for (_i, content) in prepend_buf:
+            prefix_parts.append(
+                content + ("" if content.endswith("\n") else "\n")
+            )
+            applied += 1
+        text = "".join(prefix_parts) + text
+
+    return PatchResult(text=text, applied=applied, failed=failed)

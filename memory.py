@@ -37,6 +37,7 @@ All file I/O is best-effort: memory must NEVER crash the agent.
 from __future__ import annotations
 
 import json
+import math
 import re
 import shutil
 from collections import Counter
@@ -44,6 +45,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+# Local alias so the retrieve() formula reads cleanly. Keeps the function's
+# scoring expression close to its docstring.
+_tanh = math.tanh
 
 
 # Bundled default skeletons. Kept inline (not sibling files) so a fresh
@@ -1113,13 +1118,33 @@ class Playbook:
         *,
         code: str = "",
         k: int = 8,
+        stage: str = "code",
     ) -> list[BulletHit]:
         """Return up to k bullets most relevant to goal (+ optional code).
 
-        Scoring: weighted Jaccard between (goal+code) tokens and bullet
-        (tags+content) tokens. Tag matches count double. Bullets with net
-        negative score are deprioritized but not excluded — useful info
-        can sit in mildly-harmful bullets while we accumulate counts.
+        Scoring is a relevance × quality product:
+
+          relevance = weighted Jaccard between (goal+code) tokens and bullet
+                      (tags+content) tokens, with tag matches weighted 2x.
+
+          quality  = 1.0 + 0.10 * tanh(b.score() / 5)
+                      → bounded in [~0.90, ~1.10], so a +5 bullet gets
+                      ~7% boost, a -5 bullet gets ~7% penalty.
+
+        OpenCoder lesson — when collapsing duplicates, prefer the WINNER:
+        the quality multiplier is multiplicative on relevance so duplicate-
+        relevance bullets reorder by net helpfulness without overwhelming
+        the relevance signal.
+
+        `stage` controls how strict we are about quality:
+          - "plan" (broad, OpenCoder Stage-1): include all positive-relevance
+            hits, even net-harmful ones — exposure to history.
+          - "code" (narrow, OpenCoder Stage-2): drop bullets with net score
+            ≤ -2, since at code-time we want only validated patterns. This
+            mirrors OpenCoder's two-stage SFT (broad first, narrow second).
+
+        Caller is responsible for any further dedup / budget capping
+        (see `dedup_hits` and `cap_hits_by_budget`).
         """
         bullets = self.load_all()
         if not bullets:
@@ -1127,17 +1152,20 @@ class Playbook:
 
         query_toks = _tokenize(goal) + _tokenize(code)
         if not query_toks:
-            # Goal-less call: return top-N by net helpfulness as a fallback.
             ordered = sorted(bullets, key=lambda b: (-b.score(), b.id))
             return [BulletHit(b, 0.0) for b in ordered[:k]]
 
         q_counter = Counter(query_toks)
         hits: list[BulletHit] = []
         for b in bullets:
+            # Code-stage filter: drop persistently-harmful bullets so the
+            # model isn't exposed to known-bad patterns at coding time.
+            if stage == "code" and b.score() <= -2:
+                continue
+
             tag_toks = _tokenize(" ".join(b.tags))
             content_toks = _tokenize(b.content)
-            # Tag tokens are weighted 2x — they're hand-curated for retrieval.
-            t_counter = Counter()
+            t_counter: Counter = Counter()
             for t in tag_toks:
                 t_counter[t] += 2
             for t in content_toks:
@@ -1147,11 +1175,12 @@ class Playbook:
             if union <= 0:
                 continue
             sim = inter / union
-            # Tiny boost for net-helpful bullets so identical-similarity
-            # ties go to the more-validated one.
-            sim_with_score = sim + 0.001 * b.score()
-            if sim > 0:
-                hits.append(BulletHit(b, sim_with_score))
+            if sim <= 0:
+                continue
+
+            # Quality multiplier: bounded ±10% of relevance.
+            quality = 1.0 + 0.10 * _tanh(b.score() / 5.0)
+            hits.append(BulletHit(b, sim * quality))
 
         hits.sort(key=lambda h: h.score, reverse=True)
         return hits[:k]
@@ -1185,12 +1214,141 @@ class Playbook:
         self._save_all(all_b)
 
 
-def render_playbook_block(hits: list[BulletHit], header: str | None = None) -> str:
-    """Format retrieved bullets as a compact <playbook> block for the prompt.
+# ===========================================================================
+# Shingle dedup + context-budget cap (OpenCoder #5, #2)
+# ===========================================================================
+#
+# OpenCoder's file-level dedup beat repo-level dedup: 75% of files were
+# duplicates, and the smaller file-level corpus trained a *better* model.
+# At inference the analog is dedup-before-concatenate: when two retrieved
+# bullets cover the same idea (smart-quote drift, fuzzy tagging) only the
+# higher-quality one belongs in the prompt.
+#
+# Annealing-mix lesson (OpenCoder): ~16% of training tokens were the
+# "high-signal" curated set; removing it collapsed scores. The inference
+# analog is a context budget — the high-signal exemplars get a CAPPED
+# share of the prompt rather than being allowed to bloat indefinitely.
 
-    Empty list → empty string (caller should detect and skip injection).
+# 5-gram word shingles, lowercased + alphanum-normalized, dedup pairs
+# whose Jaccard similarity exceeds this threshold. 0.85 ≈ "they say
+# essentially the same thing"; tuned to be conservative — false positives
+# are worse than false negatives because we lose information.
+_SHINGLE_DEDUP_THRESHOLD = 0.85
+_SHINGLE_N = 5
+
+# Default char budget for a rendered <playbook> block. ~3.6KB ≈ 900 tokens
+# at the typical 4 chars/token. With an 8K-16K total context and an HTML
+# file inline at fix turns, this lands the playbook at ~5-12% of total —
+# OpenCoder's 16% rule taken with a safety margin since the model also
+# needs room for its own reply.
+_DEFAULT_PLAYBOOK_CHAR_BUDGET = 3600
+
+_NONALNUM = re.compile(r"[^a-z0-9 ]+")
+
+
+def _shingles(text: str, n: int = _SHINGLE_N) -> set[str]:
+    """Return the set of n-gram word shingles for `text`, lowercased.
+
+    Used for dedup similarity. Cheap; allocates O(words) strings.
+    """
+    words = _NONALNUM.sub(" ", text.lower()).split()
+    if len(words) < n:
+        return {" ".join(words)} if words else set()
+    return {" ".join(words[i:i + n]) for i in range(len(words) - n + 1)}
+
+
+def _jaccard(a: set[str], b: set[str]) -> float:
+    if not a or not b:
+        return 0.0
+    inter = len(a & b)
+    union = len(a | b)
+    return inter / union if union else 0.0
+
+
+def dedup_hits(
+    hits: list[BulletHit],
+    *,
+    threshold: float = _SHINGLE_DEDUP_THRESHOLD,
+) -> list[BulletHit]:
+    """Drop near-duplicate bullets, keeping the higher-scoring of each pair.
+
+    Walks `hits` in order (callers usually pass them already sorted by
+    retrieval score). For each candidate, compares its content shingles
+    against every already-kept bullet; if Jaccard similarity exceeds
+    threshold, drop the candidate (it's a near-duplicate of something
+    already kept and ranked higher).
+
+    Result preserves the input ordering of the kept bullets.
+
+    OpenCoder pattern: when picking among duplicates, pick by quality.
+    The input-ordering convention here means callers control "quality"
+    (typically retrieval score, which already folds in helpful-harmful);
+    we just enforce the dedup discipline.
+    """
+    if len(hits) <= 1:
+        return list(hits)
+    kept: list[BulletHit] = []
+    kept_shingles: list[set[str]] = []
+    for h in hits:
+        sh = _shingles(h.bullet.content)
+        if any(_jaccard(sh, k) >= threshold for k in kept_shingles):
+            continue
+        kept.append(h)
+        kept_shingles.append(sh)
+    return kept
+
+
+def cap_hits_by_budget(
+    hits: list[BulletHit],
+    *,
+    char_budget: int = _DEFAULT_PLAYBOOK_CHAR_BUDGET,
+) -> list[BulletHit]:
+    """Truncate `hits` so the rendered block fits inside `char_budget`.
+
+    OpenCoder's annealing-mix lesson: cap high-signal exemplars at a fixed
+    fraction of total context. We approximate that here by char count
+    (≈4 chars/token) on the rendered output. Lower-ranked tail is dropped
+    first; a single bullet that already exceeds the budget still gets
+    included (we never return an empty list when the input was non-empty
+    and the first bullet has signal).
     """
     if not hits:
+        return hits
+    out: list[BulletHit] = []
+    used = 0
+    # Budget overhead for the wrapping <playbook> tags + header — keep a
+    # 200-char headroom so the rendered version really fits.
+    header_overhead = 200
+    for h in hits:
+        # `score=±N` meta + bullet markup + content + newline ≈ len(content) + 30
+        line_cost = len(h.bullet.content) + 30
+        if used + line_cost > char_budget - header_overhead and out:
+            break
+        out.append(h)
+        used += line_cost
+    return out
+
+
+def render_playbook_block(
+    hits: list[BulletHit],
+    header: str | None = None,
+    *,
+    dedup: bool = True,
+    char_budget: int = _DEFAULT_PLAYBOOK_CHAR_BUDGET,
+) -> str:
+    """Format retrieved bullets as a compact <playbook> block for the prompt.
+
+    Pipeline: optional dedup → budget cap → render. Both filters are
+    on-by-default per the OpenCoder findings (#5 dedup, #2 budget).
+
+    Empty / fully-filtered list → empty string (caller should detect and
+    skip injection).
+    """
+    work = list(hits)
+    if dedup:
+        work = dedup_hits(work)
+    work = cap_hits_by_budget(work, char_budget=char_budget)
+    if not work:
         return ""
     head = header or (
         "RELEVANT PLAYBOOK ENTRIES — these are accumulated lessons from past "
@@ -1198,7 +1356,7 @@ def render_playbook_block(hits: list[BulletHit], header: str | None = None) -> s
         "ignore the ones that don't fit."
     )
     lines = ["<playbook>", head, ""]
-    for h in hits:
+    for h in work:
         b = h.bullet
         meta = f" (score={b.score():+d})" if (b.helpful or b.harmful) else ""
         lines.append(f"- [{b.id}]{meta} {b.content}")

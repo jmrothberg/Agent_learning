@@ -39,6 +39,7 @@ but the running model’s prompts omit that block until v1+.)
 
 - [Prerequisites](#prerequisites)
 - [How a small model writes big code](#how-a-small-model-writes-big-code)
+- [Patch engine, retrieval & pre-flight upgrades](#patch-engine-retrieval--pre-flight-upgrades)
 - [How the agent compounds (it learns from your sessions)](#how-the-agent-compounds)
 - [Tuning rig & playbook commands](#tuning-rig--playbook-commands)
 - [Quick start](#quick-start)
@@ -190,8 +191,185 @@ Each technique is matched to a *specific* small-model failure mode:
 | **Acceptance criteria**      | "Passes the smoke test" but doesn't actually fulfill the goal  | `prompts_v1.PLAN_INSTRUCTION` `<criteria>`  |
 | **Runtime probes**           | Game looks fine to the heuristics but the player can't actually play | model emits `<probes>` JSON → executed by `tools.LiveBrowser._run_probe` |
 | **Stuck-loop reflection**    | Same wrong fix tried 3 times in a row                          | v1 `fix_instruction` switches to "5–7 different sources" mode after `stuck_streak >= 2` |
+| **Fuzzy patch matching**     | Smart-quote / em-dash / NBSP drift between model output and file → `<patch>` "SEARCH not found" | `patches._normalize_chars` (1:1 char-preserving NFKC-lite) |
+| **Patch uniqueness + non-overlap** | Ambiguous SEARCH silently picks wrong site; overlapping patches splice garbage | `patches._locate` + reverse-order apply in `apply_patches` |
+| **Patch repair layer**       | BOM / CRLF / stray ```html fences inside SEARCH-REPLACE bodies fail exact match | `patches.repair_reply` + `_strip_internal_fences` |
+| **Per-format guidelines**    | Big monolithic system prompt fragments rules across sections; small-model attention frays | `prompts_v1.FormatSpec` + `build_system_prompt` (deduped) |
+| **Structured compaction**    | Long extension sessions drift; bug-fix context lost first when history is naively elided | `agent._build_structured_summary` + 2-tier `_prune_messages` |
+| **Pre-Chromium micro-probes**| Truncated stream / unbalanced braces / elision markers waste a 3 s browser round-trip | `tools.run_micro_probes` |
+| **Two-stage retrieval**      | Same playbook bullets injected at plan time AND code time → context bloat without precision | `agent._retrieve_playbook_block(stage="plan"/"code")` |
+| **Quality-ranked retrieval** | Identical-relevance bullets returned in arbitrary order; loser equally likely as winner | `Playbook.retrieve` quality multiplier `1 + 0.10·tanh(score/5)` |
+| **Shingle dedup**            | Two near-identical bullets crowd out the third diverse one     | `memory.dedup_hits` (5-gram word shingles, Jaccard ≥ 0.85) |
+| **80/16 context budget**     | Playbook block grows unboundedly as the corpus grows           | `memory.cap_hits_by_budget` + char-budget arg on `render_playbook_block` |
 | **Offline learner**          | Lessons learned in session N never reach session N+1           | `learner.py` (Reflector + Curator) → `playbook.jsonl`  |
 | **Tune battery**             | Prompt / probe / playbook changes broke something silently     | `tune.py run` battery + `tune.py diff a b` per-test deltas |
+
+---
+
+## Patch engine, retrieval & pre-flight upgrades
+
+Two adjacent code-agents in the wild taught the loop new tricks:
+
+- **[badlogic/pi-mono `coding-agent`](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent)** — a focused TS coding agent
+  whose `edit-diff` engine, system-prompt assembly, and compaction patterns
+  are unusually well-engineered for small/mid models.
+- **[OpenCoder](https://opencoder-llm.github.io/)** (Huang et al., 2024,
+  arXiv 2411.04905) — the open recipe for a top-tier code LLM. Its data-
+  curation findings translate cleanly into *inference-time context-curation*
+  rules, which is exactly what the playbook retrieval needed.
+
+Ten features ported, grouped by where they live:
+
+### `patches.py` — patch engine, pi-mono pattern
+
+The SEARCH/REPLACE format is unchanged, but the matcher is now a cascade:
+
+```
+exact  →  char-preserving normalized  →  whitespace-collapse  →  trimmed
+```
+
+Char-preserving normalization (`_normalize_chars`) maps every smart quote
+(`’`/`‘`/`“`/`”`/`″`/`′`) to ASCII, every dash variant (`–` `—` `―` `−`)
+to `-`, and every unicode space (NBSP ` `, en/em/figure spaces, ideographic
+`　`) to a regular ASCII space — each transform is 1:1, so positions in
+normalized space map directly to original-text indices, no offset map
+needed. This rescues the most common qwen3.6 / gpt-oss failure mode:
+the model "polishes" its patch text, the file on disk has the original
+ASCII, and `<patch>` reports SEARCH-not-found.
+
+Cross-patch validation now mirrors pi-mono's edit-diff:
+
+- **Uniqueness check.** If SEARCH matches more than one place in the
+  source, the patch is rejected with a prescriptive error ("add more
+  surrounding context"). Previous behavior silently picked the first
+  match — sometimes the wrong one.
+- **Non-overlap.** With multiple `<patch>` blocks per reply, the engine
+  finds each match in the *original* source, sorts by start index, and
+  rejects pairs whose spans overlap (with a "merge edits N and M into
+  one" instruction). Then applies in **reverse source-order** so earlier
+  splices keep later offsets valid.
+
+A repair pass (`repair_reply`) runs before the regex parser:
+
+- Strips a UTF-8 BOM at the very start.
+- Normalizes CRLF / bare-CR to LF.
+- After parsing, each `<patch>` body has stray markdown fences removed
+  (`_strip_internal_fences`) — models occasionally wrap the body in
+  ```` ```html ```` for "safety", which then fails the literal match.
+
+Coverage: 24 unit tests in `tests/test_patches.py`.
+
+### `prompts_v1.py` — per-format guidelines, pi-mono pattern
+
+`SYSTEM_PROMPT` is now built from data, not written by hand:
+
+```python
+FormatSpec(
+    name="<patch>",
+    snippet="<patch>...</patch>  SEARCH/REPLACE block",
+    guidelines=[
+        "SEARCH must appear in the current file character-for-character …",
+        "If SEARCH would match more than one place, the patch is rejected …",
+        "Do not emit overlapping or nested patches …",
+        # …
+    ],
+)
+```
+
+Each output tag (`<patch>`, `<html_file>`, `<question>`, `<diagnose>`,
+`<criteria>`, `<probes>`, `<notes>`, `<done/>`, `<confirm_done/>`) owns
+its own guidelines array. `build_system_prompt(goal, formats=...)` walks
+the enabled formats, dedupes guidelines (so the same rule never appears
+twice), and renders the `<output-tags>` list, the `<guidelines>` block,
+and the cross-cutting `<hard-rules>` / `<anti-patterns>` blocks. The
+result is the same effective prompt as before, but smaller and
+maintainable from data.
+
+### `agent.py` — structured compaction, pi-mono pattern
+
+`_prune_messages` is now two-tier:
+
+- **≤ 14 messages:** existing per-turn HTML elision (replace `<html_file>`
+  bodies with `[omitted: N bytes]`). Cheap, lossy on iteration history,
+  safe.
+- **> 14 messages:** replace messages 1..cutoff with one **state-anchor
+  message** built deterministically from agent state by
+  `_build_structured_summary` — a fixed Markdown skeleton:
+
+  ```
+  ## Goal
+  ## Acceptance criteria
+  ## Executable probes
+  ## Progress
+  ## Key decisions
+  ## Last test report
+  ## Files in session
+  ## Critical context
+  ```
+
+  No extra LLM call (we already track every field). The system prompt
+  and the last 4 turns survive intact.
+
+This kicks in on long extension sessions where the elision path would
+have lost too much per-turn diagnostic context.
+
+### `memory.py` — quality-ranked, deduped, budgeted retrieval (OpenCoder)
+
+The OpenCoder paper's data-curation findings translate to inference-time
+context-curation almost line-for-line:
+
+- **Quality multiplier.** `Playbook.retrieve()` now scores each hit as
+  `relevance × (1.0 + 0.10·tanh(score/5))`, a bounded ±10% boost based on
+  the bullet's helpful-minus-harmful counter. Equal-relevance ties go to
+  the validated winner, but a heavy-winner on an off-topic bullet can't
+  outrank an on-topic newcomer.
+- **Two-stage retrieval.** A new `stage="plan"|"code"` argument selects
+  the OpenCoder-style broad-then-narrow split: plan-stage returns top_k+2
+  bullets (lenient, even slightly-harmful entries — the model benefits
+  from "see the whole space"), code-stage returns top-3 with score ≤ -2
+  bullets dropped (validated patterns only). `agent._retrieve_playbook_block`
+  passes `stage="plan"` for first-build calls and `stage="code"` for
+  fix-turn calls.
+- **Shingle dedup** (`dedup_hits`). 5-gram word shingles + Jaccard
+  ≥ 0.85; near-duplicate bullets collapse to the highest-ranked one.
+- **80/16 budget cap** (`cap_hits_by_budget`). The rendered `<playbook>`
+  block is truncated to a char budget — 4500 chars for plan stage, 2400
+  for code stage. Mirrors OpenCoder's annealing-mix finding that ~16% of
+  context being "high-signal" is the sweet spot; more dilutes.
+
+`render_playbook_block` runs dedup → cap → render by default, so callers
+get the new behavior automatically.
+
+### `tools.py` — pre-Chromium micro-probes (OpenCoder)
+
+OpenCoder's Educational-Instruct lesson: cheap execution filters, often.
+The harness already has a 3 s Chromium round-trip per iteration; we now
+run a fast pre-flight first.
+
+`run_micro_probes(html)` checks:
+
+- **Size** (errors if < 200 bytes — the patch left the file empty).
+- **Structural completeness:** `<!DOCTYPE>` / `<html>` / `</html>` /
+  `<body>` / `</body>` all balanced. An unclosed root tag is a stream-
+  truncation indicator.
+- **Script presence:** at least one `<script>` block (or inline event
+  handler for DOM-only games — open-domain, no genre lock-in).
+- **Bracket balance** for each inline `<script>` body, after stripping
+  comments and string/template literals. Off-by-2-or-more = error;
+  off-by-1 = warning (regex-literal false positives are real).
+- **Elision sentinels:** `// ... rest unchanged ...`, `// (existing code)`,
+  etc. — the model occasionally slips these in even after we tell it not
+  to.
+
+On error, the agent skips the Chromium round-trip and feeds a structured
+report back to the model on the next turn — same shape as a real test
+report, with the title `(skipped browser — pre-flight failed)` so the
+trace is unambiguous.
+
+Coverage: 17 unit tests in `tests/test_microprobes.py`,
+14 in `tests/test_retrieval.py`,
+9 in `tests/test_compaction.py`.
+Total new test count: **62 passing**.
 
 ---
 
@@ -762,10 +940,15 @@ Agent_learning/
 ├── agent.py             # async event-driven agent core
 ├── tools.py             # Playwright browser harness + game heuristics + score_test_report
 ├── prompts.py           # v0 SYSTEM_PROMPT + per-phase instructions
-├── prompts_v1.py         # v1 prompt: XML-structured, criteria, probes, stuck-loop ladder
-├── memory.py            # skeletons + mistake retrieval + Playbook (bullets w/ counters)
-├── patches.py           # SEARCH/REPLACE patch parser & applier
+├── prompts_v1.py        # v1 prompt: XML-structured, FormatSpec-assembled, criteria/probes
+├── memory.py            # skeletons + mistakes + Playbook (quality-ranked, deduped, budgeted)
+├── patches.py           # SEARCH/REPLACE patch engine: fuzzy norm, uniqueness, repair layer
 ├── ollama_io.py         # streaming watchdog + best-of-N sampler
+├── tests/
+│   ├── test_patches.py        # 24 tests — fuzzy match, uniqueness, overlap, repair
+│   ├── test_compaction.py     # 9 tests — structured summary + 2-tier prune
+│   ├── test_retrieval.py      # 14 tests — quality rank, two-stage, dedup, budget
+│   └── test_microprobes.py    # 17 tests — pre-Chromium structural sanity checks
 ├── requirements.txt
 └── games/
     ├── <slug>_<ts>.html              # the live game file

@@ -26,6 +26,11 @@ Compared to v0 (prompts.py), v1 layers in concrete techniques drawn from:
     enumerated BEFORE coding.
   - Self-Debug: explain-line-by-line BEFORE proposing the fix.
   - ACE: structured `<playbook>` injection slot for retrieved bullets.
+  - pi-mono coding-agent (badlogic/pi-mono): per-tool guidelines folded
+    into the system prompt, deduped — each output format owns its own
+    rules, the prompt is assembled from enabled-format specs. This is
+    why SYSTEM_PROMPT below is now built from FormatSpec data instead
+    of being a single static string.
 
 Sources catalog: see /tmp/agent_prompts/ on the dev box for verbatim
 extracts of the originals these techniques come from.
@@ -33,20 +38,262 @@ extracts of the originals these techniques come from.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+
 
 # ===========================================================================
-# SYSTEM PROMPT
+# SYSTEM PROMPT — built from per-format specs (pi-mono pattern)
 # ===========================================================================
 #
-# Sections, each fenced with XML tags so a (non-trained-on-your-prompt)
-# model parses unambiguously. Section bodies use compact prose; lists use
-# bullets. Anti-pattern callouts use Bolt's escalation grammar.
+# Each output tag (<patch>, <html_file>, <question>, etc.) is its OWN
+# FormatSpec carrying:
+#   - a one-line snippet that goes into the <output-tags> list
+#   - a guidelines[] array of bullet rules that get folded into a
+#     <guidelines> block, deduped across formats
 #
-# {goal} is filled by agent.py at runtime. We mention the goal inside
-# <objective> AND inside the role line — repeating goal anchoring helps a
-# small/mid model stay on task across long sessions.
+# Cross-cutting rules (HARD_RULES, ANTI_PATTERNS) stay as flat lists
+# because they aren't about any single format.
+#
+# This refactor is structural — `build_system_prompt(goal, **features)`
+# composes the prompt at construction time so we can later disable
+# specific formats (e.g. drop <question> in unattended runs) without
+# editing the prompt text. Pi-mono's coding-agent does the same thing:
+# its system prompt is auto-built from whatever tools are wired in.
+#
+# {goal} is filled by agent.py at runtime via a literal placeholder.
 
-SYSTEM_PROMPT = """<role>
+
+@dataclass
+class FormatSpec:
+    """One output tag and the rules that apply to using it."""
+
+    name: str                   # e.g. "<patch>"
+    snippet: str                # one-line entry for the <output-tags> list
+    guidelines: list[str] = field(default_factory=list)
+
+
+# --- format specs ----------------------------------------------------------
+
+PLAN_FORMAT = FormatSpec(
+    name="<plan>",
+    snippet=(
+        "<plan>...</plan>             Phase A design (text only)."
+    ),
+)
+
+CRITERIA_FORMAT = FormatSpec(
+    name="<criteria>",
+    snippet=(
+        "<criteria>...</criteria>     Phase A acceptance bullets — basic, "
+        "edge, stress."
+    ),
+)
+
+PROBES_FORMAT = FormatSpec(
+    name="<probes>",
+    snippet=(
+        "<probes>[...]</probes>       Phase A executable JS probes the "
+        "verifier literally runs each iter."
+    ),
+    guidelines=[
+        "Probes that reference globals (state, player, etc.) MUST exist on "
+        "window — either expose them (e.g. `window.state = state`) or use "
+        "DOM / canvas-pixel checks instead.",
+    ],
+)
+
+HTML_FORMAT = FormatSpec(
+    name="<html_file>",
+    snippet=(
+        "<html_file>...</html_file>   Complete file, first build OR rare "
+        "full rewrite."
+    ),
+    guidelines=[
+        "Inside <html_file>, emit the COMPLETE file. NEVER abbreviate "
+        "('...rest unchanged...', '// (existing code)', or any elision "
+        "marker).",
+        "Use <html_file> only when patches truly cannot express the "
+        "change. Default to <patch> for everything after the first build.",
+    ],
+)
+
+PATCH_FORMAT = FormatSpec(
+    name="<patch>",
+    snippet=(
+        "<patch>...</patch>           SEARCH/REPLACE block; format below."
+    ),
+    guidelines=[
+        "SEARCH must appear in the current file character-for-character "
+        "(whitespace inside lines matters). The harness will tell you "
+        "exactly what didn't match if it fails.",
+        "If your SEARCH would match more than one place in the file, the "
+        "patch is rejected as ambiguous — add MORE surrounding context "
+        "(e.g. the function name above and a unique line below) so it "
+        "matches exactly once.",
+        "Do not emit overlapping or nested patches. SEARCH text is matched "
+        "against the ORIGINAL file (not after earlier patches in the same "
+        "reply); if two changes touch the same region, MERGE them into "
+        "ONE <patch> block.",
+        "Multiple <patch> blocks per reply are allowed; they target "
+        "different regions and are applied together.",
+        "Empty SEARCH = prepend; empty REPLACE = delete (use both rarely).",
+        "A <patch> reply must NOT also include <html_file>. They are "
+        "mutually exclusive: patch OR full rewrite, never both.",
+        "CURRENT FILE TRUTH SOURCE: when you receive a fix prompt, the "
+        "inline 'CURRENT FILE ON DISK' block IS the truth — patch against "
+        "it. Do NOT trust earlier turns' code; that file may have changed.",
+    ],
+)
+
+DIAGNOSE_FORMAT = FormatSpec(
+    name="<diagnose>",
+    snippet=(
+        "<diagnose>...</diagnose>     Root cause in ≤2 sentences BEFORE "
+        "patches on a fix turn."
+    ),
+    guidelines=[
+        "Be concrete: name the function, the variable, or the missing "
+        "wiring. If multiple things are wrong, list the ONE that explains "
+        "the most failures.",
+    ],
+)
+
+NOTES_FORMAT = FormatSpec(
+    name="<notes>",
+    snippet=(
+        "<notes>...</notes>           One sentence — what you changed "
+        "and why."
+    ),
+)
+
+QUESTION_FORMAT = FormatSpec(
+    name="<question>",
+    snippet=(
+        "<question>...</question>     ONE specific question; no code in "
+        "the same turn."
+    ),
+    guidelines=[
+        "Use <question> sparingly — only when a wrong guess would waste "
+        "real iterations.",
+        "When you ask a question, do NOT also send <patch> or <html_file> "
+        "in the same turn.",
+    ],
+)
+
+DONE_FORMAT = FormatSpec(
+    name="<done/>",
+    snippet=(
+        "<done/>                      You believe the game is finished."
+    ),
+)
+
+CONFIRM_DONE_FORMAT = FormatSpec(
+    name="<confirm_done/>",
+    snippet=(
+        "<confirm_done/>              Phase C: ship."
+    ),
+)
+
+# Default ordering for the <output-tags> block.
+ALL_FORMATS: list[FormatSpec] = [
+    PLAN_FORMAT,
+    CRITERIA_FORMAT,
+    PROBES_FORMAT,
+    HTML_FORMAT,
+    PATCH_FORMAT,
+    DIAGNOSE_FORMAT,
+    NOTES_FORMAT,
+    QUESTION_FORMAT,
+    DONE_FORMAT,
+    CONFIRM_DONE_FORMAT,
+]
+
+
+# --- cross-cutting rules ---------------------------------------------------
+
+HARD_RULES: list[str] = [
+    "Single-file: HTML + CSS + JavaScript in ONE file. There is only ONE "
+    "file the harness loads.",
+    "Vanilla JS by default. CDN <script src=\"...\"> tags are allowed for "
+    "Phaser, three.js, kontra.js etc. when warranted. NO bundlers, NO "
+    "node_modules.",
+    "Drive animation with requestAnimationFrame (RAF), never setInterval.",
+    "Keyboard input: e.code values ('ArrowUp', 'KeyW', 'Space'), NOT "
+    "e.key (layout-dependent), NOT e.keyCode (deprecated). Listen on "
+    "window. Call e.preventDefault() for arrow keys + space.",
+    "Wire mouse / pointer / touch input where it makes sense.",
+    "Always include a visible score, instructions, and a clear way to "
+    "lose AND restart.",
+    "Wrap your frame loop body in try / catch that logs to console.error "
+    "so the harness sees crashes instead of a silently frozen game.",
+    "Never write to localStorage on first load without a feature-detect.",
+    "Use device-pixel-ratio canvas scaling so HiDPI displays aren't blurry.",
+]
+
+ANTI_PATTERNS: list[str] = [
+    "NEVER abbreviate code with '// ... rest unchanged ...', "
+    "'// (existing code)', '<- leave original here ->', or any other "
+    "elision marker. Inside <html_file>, emit the COMPLETE file. Inside "
+    "<patch>, emit the EXACT lines.",
+    "NEVER start your reply with 'Great', 'Certainly', 'Okay', 'Sure', "
+    "or any other preamble. Be direct: open with the first required tag.",
+    "NEVER narrate what you are about to output ('Now I'll write the "
+    "artifact...'). The parser ignores prose; you are wasting tokens.",
+    "NEVER invent placeholder filenames or paths. There is only ONE file: "
+    "the one the harness loads.",
+    "NEVER skip the format anchor: <plan> in Phase A; <html_file> OR "
+    "<patch> in Phase B; <confirm_done/> OR <patch> in Phase C.",
+    "NEVER use Math.random() seed-dependently in ways that make the game "
+    "deterministic across reloads — the test harness assumes some motion.",
+]
+
+
+# --- builder ---------------------------------------------------------------
+
+
+def _bulleted(items: list[str], indent: str = "  - ") -> str:
+    """Render a list of strings as Markdown-style bullets, deduped while
+    preserving order. Pi-mono dedupes guidelines across enabled tools so
+    the same rule doesn't appear twice in the assembled prompt.
+    """
+    seen: set[str] = set()
+    lines: list[str] = []
+    for it in items:
+        key = it.strip()
+        if key in seen:
+            continue
+        seen.add(key)
+        lines.append(f"{indent}{it}")
+    return "\n".join(lines)
+
+
+def build_system_prompt(
+    goal: str,
+    *,
+    formats: list[FormatSpec] | None = None,
+) -> str:
+    """Assemble the system prompt from per-format specs (pi-mono style).
+
+    `goal` is interpolated into the <objective> block. Pass the literal
+    "{goal}" to produce a template that agent.py can later .replace().
+
+    `formats` defaults to ALL_FORMATS. Pass a subset to disable specific
+    output tags (e.g. drop QUESTION_FORMAT for unattended runs).
+    """
+    fmts = formats if formats is not None else ALL_FORMATS
+
+    output_tags = "\n".join(f"  {f.snippet}" for f in fmts)
+
+    # Per-format guidelines, deduped across formats.
+    all_guidelines: list[str] = []
+    for f in fmts:
+        all_guidelines.extend(f.guidelines)
+    guidelines_block = _bulleted(all_guidelines)
+
+    hard_rules_block = _bulleted(HARD_RULES)
+    anti_patterns_block = _bulleted(ANTI_PATTERNS)
+
+    return f"""<role>
 Act as an expert HTML5 game and UI engineer. You ship single-file HTML
 applications (HTML + CSS + JavaScript in ONE file) that work in real
 Chromium. You are diligent and tireless. You NEVER leave comments
@@ -69,6 +316,8 @@ PHASE A — planning (1 turn). You output ONLY the tags below, no code:
   <criteria>...</criteria>    3 to 5 acceptance criteria covering basic,
                               edge, and stress cases the working game
                               MUST satisfy.
+  <probes>[...]</probes>      JSON list of executable JS expressions the
+                              verifier runs in the page each iter.
 
 PHASE B — build / iterate. The harness runs your code in real Chromium
 and reports back: console errors, page errors, canvas state, RAF firing,
@@ -95,18 +344,7 @@ bug a real player would hit.
 Use these tags exactly. The parser reads tags only; prose outside tags is
 ignored.
 
-  <plan>...</plan>             Phase A design (text only).
-  <criteria>...</criteria>     Phase A acceptance bullets.
-  <html_file>...</html_file>   Complete file, first build OR rare full
-                               rewrite. NEVER abbreviate ("...rest
-                               unchanged...") — see <anti-patterns>.
-  <patch>...</patch>           SEARCH/REPLACE block; format below.
-  <diagnose>...</diagnose>     Root cause in ≤2 sentences before patches.
-  <notes>...</notes>           One sentence — what you changed and why.
-  <question>...</question>     ONE specific question; do not also send
-                               code in the same turn.
-  <done/>                      You believe the game is finished.
-  <confirm_done/>              Phase C: ship.
+{output_tags}
 </output-tags>
 
 <patch-format>
@@ -117,55 +355,22 @@ exact lines from the current file, including their indentation
 the lines that should replace them
 >>>>>>> REPLACE
 </patch>
-
-  - SEARCH must appear VERBATIM in the current file (whitespace inside
-    lines matters). If it doesn't match, the patch fails and you'll be
-    told exactly what didn't match.
-  - Multiple <patch> blocks per reply are allowed; they apply in order.
-  - Empty SEARCH = prepend; empty REPLACE = delete (use rarely).
-  - A <patch> reply must NOT include <html_file>. They are mutually
-    exclusive: patch OR full rewrite, never both.
-
-CURRENT FILE TRUTH SOURCE: when you receive a fix prompt, the inline
-"CURRENT FILE ON DISK" block IS the truth — patch against it
-character-for-character. Do NOT trust earlier turns' code; that file may
-have changed.
 </patch-format>
 
+<guidelines>
+Per-format rules (apply when you use the named tag):
+
+{guidelines_block}
+</guidelines>
+
 <hard-rules>
-  - Vanilla JS by default. CDN <script src="..."> tags are allowed for
-    Phaser, three.js, kontra.js etc. when warranted. NO bundlers, NO
-    node_modules.
-  - Drive animation with requestAnimationFrame (RAF), never setInterval.
-  - Keyboard input: e.code values ('ArrowUp', 'KeyW', 'Space'), NOT
-    e.key (layout-dependent), NOT e.keyCode (deprecated). Listen on
-    window. Call e.preventDefault() for arrow keys + space.
-  - Wire mouse / pointer / touch input where it makes sense.
-  - Always include a visible score, instructions, and a clear way to
-    lose AND restart.
-  - Wrap your frame loop body in try / catch that logs to console.error
-    so the harness sees crashes instead of a silently frozen game.
-  - Never write to localStorage on first load without a feature-detect.
-  - Use device-pixel-ratio canvas scaling so HiDPI displays aren't blurry.
+{hard_rules_block}
 </hard-rules>
 
 <anti-patterns>
 ULTRA IMPORTANT — never do these. They have caused failed runs:
 
-  - NEVER abbreviate code with "// ... rest unchanged ...",
-    "// (existing code)", "<- leave original here ->", or any other
-    elision marker. Inside <html_file>, emit the COMPLETE file. Inside
-    <patch>, emit the EXACT lines.
-  - NEVER start your reply with "Great", "Certainly", "Okay", "Sure", or
-    any other preamble. Be direct: open with the first required tag.
-  - NEVER narrate what you are about to output ("Now I'll write the
-    artifact..."). The parser ignores prose; you are wasting tokens.
-  - NEVER invent placeholder filenames or paths. There is only ONE file:
-    the one the harness loads.
-  - NEVER skip the format anchor: <plan> in Phase A; <html_file> OR
-    <patch> in Phase B; <confirm_done/> OR <patch> in Phase C.
-  - NEVER use Math.random() seed-dependently in ways that make the game
-    deterministic across reloads — the test harness assumes some motion.
+{anti_patterns_block}
 </anti-patterns>
 
 <iteration-policy>
@@ -195,15 +400,16 @@ A REAL HUMAN is watching the Chromium window. They can type feedback at
 any time; if they do, it appears in your next user-turn message inside a
 loud fenced block prefixed with "USER FEEDBACK". That feedback OVERRIDES
 any plan or default behavior — address it explicitly the same turn.
-
-You can ask ONE specific question via <question>...</question>, but use
-this sparingly — only when a wrong guess would waste real iterations.
-When you ask a question, do NOT also send code in the same turn.
 </user-presence>
 
 The parser reads tags only. Anything outside tags is ignored. Now wait
 for the harness's first user turn (planning) and respond with the right
 tags."""
+
+
+# Module-level export. Agent.py does `.replace("{goal}", goal)` on this,
+# so we keep the literal placeholder in the rendered template.
+SYSTEM_PROMPT = build_system_prompt("{goal}")
 
 
 # ===========================================================================

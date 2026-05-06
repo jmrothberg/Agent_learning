@@ -73,7 +73,13 @@ from patches import apply_patches, extract_patches
 # agent picks one at construction time via the `prompt_version` argument.
 import prompts as _prompts_v0  # noqa: E402
 
-from tools import LiveBrowser, format_report_for_model, score_test_report
+from tools import (
+    LiveBrowser,
+    format_micro_probes_for_model,
+    format_report_for_model,
+    run_micro_probes,
+    score_test_report,
+)
 
 
 _HTML_RE = re.compile(r"<html_file>\s*(.*?)\s*</html_file>", re.DOTALL | re.IGNORECASE)
@@ -110,6 +116,15 @@ _PROBES_RE = re.compile(r"<probes>\s*(.*?)\s*</probes>", re.DOTALL | re.IGNORECA
 # so context stays bounded. Tunable; the agent always passes the CURRENT
 # file inline in the fix prompt, so old code in history is just bloat.
 _PRUNE_KEEP_RECENT_TURNS = 4
+
+# Above this total-message count, switch from per-turn HTML elision to a
+# pi-mono-style STRUCTURED COMPACTION: replace messages 1..cutoff with a
+# single deterministic summary that captures goal, criteria, progress,
+# stuck-streak, and last test report. The system prompt + last
+# _PRUNE_KEEP_RECENT_TURNS turns survive intact. Threshold tuned so a 6-iter
+# run rarely triggers it (planning + first build + ~5 fix turns ≈ 12 msgs)
+# but a long extension session does.
+_STRUCTURED_PRUNE_THRESHOLD = 14
 
 
 @dataclass
@@ -280,32 +295,69 @@ class GameAgent:
         except Exception:
             return _prompts_v0
 
-    def _retrieve_playbook_block(self, goal: str, *, code: str = "") -> str:
+    # OpenCoder #1 — two-stage retrieval (broad-then-narrow). Plan stage
+    # gets a wider, more permissive cut of the playbook (small models
+    # benefit from "see the whole space"); code stage gets a tighter cut
+    # of validated patterns only (no net-harmful bullets, fewer entries,
+    # smaller char budget). Mirrors OpenCoder's two-stage SFT — broad
+    # first, narrow second.
+    _PLAN_STAGE_TOP_K_BONUS = 2          # plan retrieves K + bonus bullets
+    _CODE_STAGE_TOP_K = 3                # narrow cut at code time
+    _PLAN_STAGE_CHAR_BUDGET = 4500       # ~1100 tokens, broad context
+    _CODE_STAGE_CHAR_BUDGET = 2400       # ~600 tokens, tight context
+
+    def _retrieve_playbook_block(
+        self,
+        goal: str,
+        *,
+        code: str = "",
+        stage: str = "code",
+    ) -> str:
         """Get top-K bullets and render them as a `<playbook>` block.
+
+        `stage` selects OpenCoder-style two-stage retrieval:
+          - "plan" (Stage-1, broad): top_k+bonus bullets, all positive
+            relevance hits including net-harmful (exposure to history),
+            larger char budget.
+          - "code" (Stage-2, narrow, default): top-3 only, drops bullets
+            with score ≤ -2 (validated-only patterns), smaller budget.
+
+        After retrieval, `render_playbook_block` runs shingle dedup
+        (OpenCoder #5) and budget capping (OpenCoder #2) before emitting
+        the prompt block.
 
         Empty string when nothing matches OR when the active prompt module
         has set PLAYBOOK_DISABLED = True (gives a v0-prompt the option to
-        opt out wholesale).
-
-        Logs the retrieved bullet IDs to the trace so the offline learner
-        can later credit/blame each bullet for the eventual outcome.
+        opt out wholesale). Logs retrieved bullet IDs + stage to the trace
+        so the offline learner can later credit/blame each bullet for the
+        eventual outcome.
         """
         if self._playbook_top_k <= 0:
             return ""
         if getattr(self._p, "PLAYBOOK_DISABLED", False):
             return ""
         try:
-            hits = self._playbook.retrieve(goal, code=code, k=self._playbook_top_k)
+            if stage == "plan":
+                k = self._playbook_top_k + self._PLAN_STAGE_TOP_K_BONUS
+                budget = self._PLAN_STAGE_CHAR_BUDGET
+            else:
+                k = min(self._playbook_top_k, self._CODE_STAGE_TOP_K)
+                budget = self._CODE_STAGE_CHAR_BUDGET
+            hits = self._playbook.retrieve(
+                goal, code=code, k=k, stage=stage,
+            )
             if hits:
                 ids = [h.bullet.id for h in hits]
                 self._trace({
                     "kind": "playbook_retrieved",
+                    "stage": stage,
                     "ids": ids,
                     "scores": [round(h.score, 4) for h in hits],
                     "goal_preview": goal[:120],
+                    "char_budget": budget,
                 })
                 self._active_bullet_ids = list(ids)
-            return render_playbook_block(hits)
+            return render_playbook_block(hits, char_budget=budget)
         except Exception:
             return ""
 
@@ -431,16 +483,151 @@ class GameAgent:
         c = self._SUMMARIZE_FENCE_RE.sub(fence_repl, c)
         return c
 
-    def _prune_messages(self) -> None:
-        """Compress code-heavy old turns so context stays bounded.
+    def _build_structured_summary(self) -> str:
+        """Pi-mono-style structured compaction summary.
 
-        We always keep the system prompt (index 0) and the last
-        _PRUNE_KEEP_RECENT_TURNS messages intact. Everything between gets
-        its inline HTML replaced with `[omitted: N bytes]`.
+        Replaces older raw turns with a fixed-skeleton snapshot built
+        deterministically from agent state. Skeleton mirrors pi's
+        compaction prompt — Goal / Constraints / Progress / Key Decisions
+        / Files / Critical Context — but our build is data-driven (no
+        extra LLM round-trip) since we already track every field.
+
+        Useful when iteration count grows past _STRUCTURED_PRUNE_THRESHOLD:
+        the model still gets a coherent state anchor instead of a wall of
+        elided messages, AND we don't pay a summarizer call. The message
+        is injected as role="user" with a loud STATE-ANCHOR prefix —
+        Ollama's chat API treats multiple system roles inconsistently
+        across providers; a labeled user message is the portable choice.
         """
-        if len(self._messages) <= 1 + _PRUNE_KEEP_RECENT_TURNS:
+        lines: list[str] = ["# Session state anchor (older turns elided)", ""]
+
+        lines += ["## Goal", self._goal or "(not set)", ""]
+
+        if self._criteria:
+            lines += [
+                "## Acceptance criteria (from your Phase A plan)",
+                self._criteria.strip(),
+                "",
+            ]
+
+        if self._probes:
+            names = [str(p.get("name", "?")) for p in self._probes]
+            lines += [
+                "## Executable probes (verifier runs each iter)",
+                "  - " + ", ".join(names),
+                "",
+            ]
+
+        # Progress
+        prog: list[str] = ["## Progress"]
+        if self._snapshot_n == 0:
+            prog.append("- not yet built")
+        else:
+            if self._previous_report_ok is True:
+                prog.append(f"- iteration {self._snapshot_n}: PASSED all tests")
+            elif self._previous_report_ok is False:
+                prog.append(f"- iteration {self._snapshot_n}: FAILING")
+            else:
+                prog.append(f"- iteration {self._snapshot_n}: status unknown")
+            if self._stuck_streak >= 2:
+                prog.append(
+                    f"- stuck-streak: {self._stuck_streak} consecutive "
+                    "failures on this issue"
+                )
+            if self.best_path.exists():
+                prog.append(
+                    f"- last known-good saved at {self.best_path.name} "
+                    "(treat as the baseline; don't regress it)"
+                )
+        lines += prog + [""]
+
+        # Key decisions / diagnoses
+        if self._last_diagnose:
+            lines += [
+                "## Key decisions",
+                f"- last diagnose: {self._last_diagnose[:300]}",
+                "",
+            ]
+
+        # Last test report (truncated — pi-mono caps tool results to ~2000 chars)
+        if self._last_report_summary:
+            lines += [
+                "## Last test report",
+                self._last_report_summary[:800],
+                "",
+            ]
+
+        # Files in session
+        files: list[str] = ["## Files in session"]
+        cur_size = len(self._current_file)
+        files.append(
+            f"- {self.out_path.name}: working file ({cur_size:,} bytes)"
+        )
+        if self.best_path.exists() and self.best_path.name != self.out_path.name:
+            files.append(f"- {self.best_path.name}: last clean version")
+        lines += files + [""]
+
+        # Critical context — preserved across compaction so the model
+        # never forgets the truth-source contract.
+        lines += [
+            "## Critical context",
+            "- The CURRENT FILE ON DISK shown inline in the most recent "
+            "fix prompt is the source of truth — patch against THAT, "
+            "character-for-character. Do NOT trust earlier turns' code.",
+            "- Combine related fixes into one multi-patch reply.",
+            "- Working > perfect: prefer <done/> after a clean test.",
+        ]
+
+        return "\n".join(lines)
+
+    def _prune_messages(self) -> None:
+        """Compress old turns so context stays bounded.
+
+        Two strategies, by message count:
+          * ≤ _PRUNE_KEEP_RECENT_TURNS+1 messages: no-op.
+          * ≤ _STRUCTURED_PRUNE_THRESHOLD: per-turn HTML elision (the
+            original behavior — keeps message shape, strips embedded HTML).
+          * > _STRUCTURED_PRUNE_THRESHOLD: pi-mono-style structured
+            compaction — replace messages 1..cutoff with a single
+            deterministic state-anchor message; keep system prompt and
+            last _PRUNE_KEEP_RECENT_TURNS turns.
+
+        The system prompt (index 0) and the most recent K turns are
+        always preserved verbatim.
+        """
+        n = len(self._messages)
+        if n <= 1 + _PRUNE_KEEP_RECENT_TURNS:
             return
-        cutoff = len(self._messages) - _PRUNE_KEEP_RECENT_TURNS
+
+        if n > _STRUCTURED_PRUNE_THRESHOLD:
+            cutoff = n - _PRUNE_KEEP_RECENT_TURNS
+            summary = self._build_structured_summary()
+            anchor_msg = {
+                "role": "user",
+                "content": (
+                    "================ STATE ANCHOR (compaction) ================\n"
+                    "Older turns were elided to keep context bounded. The "
+                    "snapshot below is a deterministic summary of session "
+                    "state — treat it as authoritative for goal, criteria, "
+                    "progress, and critical context.\n\n"
+                    f"{summary}\n"
+                    "==========================================================="
+                ),
+            }
+            new_messages = [self._messages[0], anchor_msg] + self._messages[cutoff:]
+            self._trace({
+                "kind": "structured_compaction",
+                "original_messages": n,
+                "kept_recent": _PRUNE_KEEP_RECENT_TURNS,
+                "summary_chars": len(summary),
+                "new_messages": len(new_messages),
+            })
+            self._messages = new_messages
+            return
+
+        # Default elision path: keep message shape, strip embedded HTML
+        # bodies. Cheap, lossy on iteration history, but safe.
+        cutoff = n - _PRUNE_KEEP_RECENT_TURNS
         for i in range(1, cutoff):
             msg = self._messages[i]
             c = msg.get("content", "") or ""
@@ -1056,7 +1243,11 @@ class GameAgent:
                     "seed_file": str(self.seed_file),
                     "seed_bytes": len(seed_html),
                 }))
-                pb_block = self._retrieve_playbook_block(goal, code=seed_html)
+                # First build = plan-stage equivalent: model is choosing
+                # the implementation shape, broad context helps.
+                pb_block = self._retrieve_playbook_block(
+                    goal, code=seed_html, stage="plan",
+                )
                 pb_kwargs = {"playbook_block": pb_block} if (pb_block and self._prompt_version != "v0") else {}
                 self._messages.append({
                     "role": "user",
@@ -1102,7 +1293,10 @@ class GameAgent:
                     "skeleton_mode": self._skeleton_mode,
                 }))
 
-                pb_block = self._retrieve_playbook_block(goal, code=skel.html)
+                # First build with memory skeleton — plan stage (broad).
+                pb_block = self._retrieve_playbook_block(
+                    goal, code=skel.html, stage="plan",
+                )
                 pb_kwargs = {"playbook_block": pb_block} if (pb_block and self._prompt_version != "v0") else {}
 
                 # Optional architect step — produce an English design
@@ -1366,6 +1560,78 @@ class GameAgent:
                     "patches_failed": len(partial_failed),
                 },
             ))
+
+            # ---- pre-Chromium micro-probes (OpenCoder #4) ---------------
+            # Cheap structural sanity check before paying the ~3s Chromium
+            # round-trip. Catches truncation, empty scripts, badly-
+            # unbalanced braces, and elision markers. Only ERRORS skip
+            # the browser; warnings pass through and Chromium gets the
+            # final word.
+            mp = run_micro_probes(new_html)
+            self._trace({
+                "kind": "micro_probes",
+                "ok": mp.get("ok", False),
+                "errors": list(mp.get("errors") or []),
+                "warnings": list(mp.get("warnings") or []),
+                "stats": mp.get("stats") or {},
+            })
+            if not mp.get("ok", True):
+                mp_text = format_micro_probes_for_model(mp)
+                self._last_report_summary = mp_text
+                # Surface as a "test" event so the TUI prints it the
+                # same way it shows browser test failures.
+                yield self._record(AgentEvent(
+                    "test",
+                    mp_text,
+                    {
+                        "ok": False,
+                        "errors": mp.get("errors") or [],
+                        "soft_warnings": [],
+                        "warnings": mp.get("warnings") or [],
+                        # Keep parity with the browser-report shape so
+                        # downstream consumers (best.html save, regression
+                        # detection) don't trip on a missing key.
+                        "title": "(skipped browser — pre-flight failed)",
+                        "canvas": None,
+                        "input_listeners": {},
+                        "input_test": None,
+                        "frozen_canvas": None,
+                        "body_chars": 0,
+                        "body_sample": "",
+                        "logs": [],
+                        "probes": [],
+                        "screenshot": None,
+                        "screenshot_before": None,
+                    },
+                ))
+                # Build the same kind of fix prompt the test loop builds
+                # below; bypass the Chromium path entirely.
+                self._stuck_streak += 1
+                fake_report = {
+                    "ok": False,
+                    "errors": mp.get("errors") or [],
+                    "soft_warnings": [],
+                    "warnings": mp.get("warnings") or [],
+                    "title": "(pre-flight)",
+                    "canvas": None,
+                    "input_listeners": {},
+                    "input_test": None,
+                    "frozen_canvas": None,
+                    "body_chars": 0,
+                    "body_sample": "",
+                    "logs": [],
+                    "probes": [],
+                }
+                next_user = self._build_fix_prompt(
+                    report=fake_report, regressed=False, partial_failed=partial_failed,
+                )
+                self._fix_mode = True
+                self._messages.append({
+                    "role": "user",
+                    "content": self._flush_user_injections(next_user),
+                })
+                self._previous_report_ok = False
+                continue
 
             # ---- run the test ------------------------------------------
             shot_before_path = (
@@ -1648,7 +1914,11 @@ class GameAgent:
         # which dramatically increases the chance the model actually emits
         # <diagnose>. (Empirical: when the format ask was below the report,
         # gpt-oss skipped it ~100% of the time.)
-        pb_block = self._retrieve_playbook_block(self._goal, code=self._current_file)
+        # Fix-turn = code stage (narrow): only validated patterns,
+        # tighter char budget, no net-harmful bullets.
+        pb_block = self._retrieve_playbook_block(
+            self._goal, code=self._current_file, stage="code",
+        )
         fix_kwargs: dict = {}
         if pb_block and self._prompt_version != "v0":
             fix_kwargs["playbook_block"] = pb_block

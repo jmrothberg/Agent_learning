@@ -6,10 +6,18 @@ It launches a headless Chromium via Playwright, loads the file, lets it
 animate for a few seconds (so requestAnimationFrame loops actually tick),
 then returns a SHORT report. Keeping the report short matters: a small
 model gets confused by huge logs, so we cap and truncate aggressively.
+
+Also exposes `run_micro_probes(html: str) -> dict` — fast pre-flight
+checks (HTML structure, script presence, bracket balance) that run
+BEFORE the Chromium round-trip. OpenCoder's "Educational-Instruct" lesson:
+cheap execution filters, often. A micro-probe failure is structurally
+unrecoverable (truncated stream, syntactically broken script) and
+doesn't need a 3+ second browser load to confirm.
 """
 
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -178,6 +186,211 @@ def _build_report(
         "body_chars": len(body_text),
         "body_sample": _truncate(body_text.strip(), _MAX_BODY_TEXT),
     }
+
+
+# ---------------------------------------------------------------------------
+# Micro-probes: fast pre-flight checks (no browser)
+# ---------------------------------------------------------------------------
+#
+# Run BEFORE the Chromium round-trip to catch structurally-broken output
+# (truncated streams, empty scripts, badly-unbalanced braces). Cheap; runs
+# in <1 ms on a typical 5KB game file. OpenCoder's Educational-Instruct
+# pattern: discard samples cheaply and often.
+#
+# Conservative on errors. Only flags as ERROR what is almost certainly
+# unrecoverable without re-prompting; everything fuzzy goes to WARNINGS
+# so the Chromium load still gets a chance.
+
+# Used for cheap brace-balance checks. Strips line + block comments and
+# string literals so a `for (;;)` inside a comment doesn't trip us.
+_LINE_COMMENT_RE = re.compile(r"//[^\n]*")
+_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+_STRING_LITERAL_RE = re.compile(
+    r'"(?:[^"\\]|\\.)*"'        # double-quoted
+    r"|'(?:[^'\\]|\\.)*'"       # single-quoted
+    r"|`(?:[^`\\]|\\.)*`",      # template literal (good-enough)
+    re.DOTALL,
+)
+_SCRIPT_BLOCK_RE = re.compile(
+    r"<script\b([^>]*)>(.*?)</script\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _strip_js_noise(js: str) -> str:
+    """Remove comments and string literals so brace-counting is reliable."""
+    js = _BLOCK_COMMENT_RE.sub("", js)
+    js = _LINE_COMMENT_RE.sub("", js)
+    js = _STRING_LITERAL_RE.sub("''", js)
+    return js
+
+
+def _bracket_imbalance(js: str) -> dict[str, int]:
+    """Return |open - close| count per bracket type after stripping strings
+    and comments. Zero = balanced.
+    """
+    stripped = _strip_js_noise(js)
+    return {
+        "{}": stripped.count("{") - stripped.count("}"),
+        "()": stripped.count("(") - stripped.count(")"),
+        "[]": stripped.count("[") - stripped.count("]"),
+    }
+
+
+def run_micro_probes(html: str) -> dict[str, Any]:
+    """Pre-Chromium structural sanity check.
+
+    Report shape:
+      ok:        bool          - True if no errors (warnings allowed).
+      errors:    list[str]     - structurally-broken; Chromium will fail.
+      warnings:  list[str]     - suspicious but maybe ok; Chromium continues.
+      stats:     dict          - small numeric snapshot of what we measured.
+
+    The agent uses this between materialize and Chromium: an `ok=False`
+    report skips the browser round-trip and feeds errors back to the
+    model on the next turn.
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+    stats: dict[str, Any] = {
+        "size_bytes": len(html or ""),
+    }
+
+    if not html or len(html) < 200:
+        errors.append(
+            f"file is essentially empty ({len(html or '')} bytes) — likely "
+            "the patch left the document near-empty or the model produced "
+            "no usable content."
+        )
+        return {"ok": False, "errors": errors, "warnings": warnings, "stats": stats}
+
+    low = html.lower()
+
+    # --- structural completeness ---------------------------------------
+    if "<!doctype" not in low and "<html" not in low:
+        errors.append(
+            "no <!DOCTYPE> or <html> root tag — the file does not look "
+            "like an HTML document."
+        )
+    if "<html" in low and "</html" not in low:
+        errors.append(
+            "<html> opened but never closed — likely the stream was "
+            "truncated. Re-emit the rest of the file (or a full <html_file> "
+            "rewrite if patches can't recover)."
+        )
+    if "<body" in low and "</body" not in low:
+        errors.append(
+            "<body> opened but never closed — truncation indicator. "
+            "Close the </body> and </html> tags."
+        )
+
+    # --- script presence -----------------------------------------------
+    scripts = _SCRIPT_BLOCK_RE.findall(html)
+    has_inline_handlers = bool(re.search(r"\bon[a-z]+\s*=", html, re.IGNORECASE))
+    n_inline = sum(1 for (_attrs, body) in scripts if body.strip())
+    n_external = sum(1 for (attrs, body) in scripts if "src=" in attrs.lower())
+    stats["scripts_inline"] = n_inline
+    stats["scripts_external"] = n_external
+    stats["inline_event_handlers"] = has_inline_handlers
+
+    if n_inline == 0 and n_external == 0 and not has_inline_handlers:
+        errors.append(
+            "no <script> blocks (inline or external) and no inline event "
+            "handlers — the file has no game logic. Add a <script> with "
+            "the game implementation."
+        )
+
+    # --- bracket balance per inline script -----------------------------
+    # Per pi-mono's prescriptive-error pattern: tell the model EXACTLY
+    # which kind is unbalanced and by how much.
+    total_imbalance = {"{}": 0, "()": 0, "[]": 0}
+    for (_attrs, body) in scripts:
+        if not body.strip():
+            continue
+        imb = _bracket_imbalance(body)
+        for k, v in imb.items():
+            total_imbalance[k] += v
+    stats["bracket_imbalance"] = total_imbalance
+
+    for kind, delta in total_imbalance.items():
+        # Heuristic strips can over-count by ~1 in pathological corner
+        # cases (regex literals look like division, etc). Allow ±1 as
+        # WARNING; ±2 as ERROR.
+        if abs(delta) >= 2:
+            sign = "extra opening" if delta > 0 else "extra closing"
+            errors.append(
+                f"unbalanced {kind} brackets in <script>: {sign} "
+                f"{kind[0] if delta>0 else kind[1]} by {abs(delta)} "
+                "(after stripping comments and string literals). "
+                "Almost certainly a syntax error — close the missing "
+                "brace before re-running."
+            )
+        elif delta != 0:
+            warnings.append(
+                f"possibly unbalanced {kind} in <script> by {delta} "
+                "(could be a regex-literal false-positive — Chromium "
+                "will confirm)."
+            )
+
+    # --- elision sentinels ---------------------------------------------
+    # Models occasionally slip "// ... rest of code unchanged ..." into
+    # a patch even after we tell them not to. Catch it here so we don't
+    # ship a half-implemented file.
+    elision_markers = [
+        "// ... rest unchanged",
+        "// ... rest of code",
+        "// rest of",
+        "// (existing code)",
+        "/* existing code */",
+        "<- leave original",
+    ]
+    for m in elision_markers:
+        if m.lower() in low:
+            errors.append(
+                f"elision marker found in source: {m!r} — the file is "
+                "incomplete. Re-emit the patch with the EXACT lines, no "
+                "shortcuts."
+            )
+            break
+
+    return {
+        "ok": not errors,
+        "errors": errors,
+        "warnings": warnings,
+        "stats": stats,
+    }
+
+
+def format_micro_probes_for_model(report: dict[str, Any]) -> str:
+    """Compact text version of a micro-probe report for the user-turn
+    feedback message. Mirrors `format_report_for_model`'s shape so the
+    model sees a familiar structure.
+    """
+    lines = ["MICRO-PROBE PRE-FLIGHT (structural sanity, no browser yet):"]
+    lines.append(f"OK: {report.get('ok', False)}")
+    stats = report.get("stats") or {}
+    if stats:
+        bits = [f"size={stats.get('size_bytes', 0)}b"]
+        if "scripts_inline" in stats:
+            bits.append(
+                f"scripts(inline/external)={stats['scripts_inline']}/"
+                f"{stats.get('scripts_external', 0)}"
+            )
+        if "bracket_imbalance" in stats:
+            imb = stats["bracket_imbalance"]
+            non_zero = {k: v for k, v in imb.items() if v != 0}
+            if non_zero:
+                bits.append(f"bracket_imbalance={non_zero}")
+        lines.append("Stats: " + ", ".join(bits))
+    if report.get("errors"):
+        lines.append("ERRORS (must fix):")
+        for e in report["errors"]:
+            lines.append(f"  - {e}")
+    if report.get("warnings"):
+        lines.append("Warnings:")
+        for w in report["warnings"]:
+            lines.append(f"  - {w}")
+    return "\n".join(lines)
 
 
 def test_html_file(path: str | Path, run_seconds: float = 3.0) -> dict[str, Any]:
