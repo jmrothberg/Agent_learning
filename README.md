@@ -13,6 +13,17 @@ typed mid-run is the highest-priority signal in the loop — **and every
 session feeds an offline learner that grows the agent's `playbook` of
 HTML/JS rules of thumb, so tomorrow's session starts smarter than today's.**
 
+The patch engine, prompt assembly, retrieval, and pre-flight checks
+borrow heavily from the best ideas in
+[badlogic/pi-mono coding-agent](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent)
+(TS, multi-provider, native function-calling) and the
+[OpenCoder](https://opencoder-llm.github.io/) project
+(arXiv 2411.04905, the open recipe for a top-tier code LLM). See
+[Compared to pi-mono and OpenCoder](#compared-to-pi-mono-and-opencoder)
+for what we ported, where we deliberately diverge, and what each tool
+is best at — they're not direct competitors, and this README does not
+try to make them into one.
+
 > **This isn't a one-shot tune.** The agent ships with a 30-bullet seeded
 > playbook (canonical bugs and best practices distilled from the literature),
 > and **every game you build, every piece of feedback you type, and every
@@ -40,6 +51,7 @@ but the running model’s prompts omit that block until v1+.)
 - [Prerequisites](#prerequisites)
 - [How a small model writes big code](#how-a-small-model-writes-big-code)
 - [Patch engine, retrieval & pre-flight upgrades](#patch-engine-retrieval--pre-flight-upgrades)
+- [Compared to pi-mono and OpenCoder](#compared-to-pi-mono-and-opencoder)
 - [How the agent compounds (it learns from your sessions)](#how-the-agent-compounds)
 - [Tuning rig & playbook commands](#tuning-rig--playbook-commands)
 - [Quick start](#quick-start)
@@ -54,6 +66,7 @@ but the running model’s prompts omit that block until v1+.)
 - [How the loop works (in code)](#how-the-loop-works-in-code)
 - [Restarting / resuming](#restarting-resuming-after-a-crash)
 - [Troubleshooting](#troubleshooting)
+- [Roadmap & known gaps](#roadmap--known-gaps)
 - [Dependencies](#dependencies)
 - [License](#license)
 
@@ -370,6 +383,68 @@ Coverage: 17 unit tests in `tests/test_microprobes.py`,
 14 in `tests/test_retrieval.py`,
 9 in `tests/test_compaction.py`.
 Total new test count: **62 passing**.
+
+---
+
+## Compared to pi-mono and OpenCoder
+
+These three tools are **not direct substitutes**. Pi-mono is a general-
+purpose multi-language coding agent with native function-calling and a
+broad tool taxonomy. OpenCoder is an open *model* + training recipe, not
+an agent at all. Coding Box is a verticalized HTML/JS-game agent that
+ships with browser verification, cross-session memory, and visual review
+out of the box. We borrowed liberally from both; this table is meant to
+make the borrowing explicit and the divergences honest.
+
+| Capability                                    | Coding Box (this repo)                                                       | pi-mono coding-agent                              | OpenCoder                              |
+| --------------------------------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------- | -------------------------------------- |
+| **Domain**                                    | HTML5 single-file games + browser-runnable code (verticalized)              | General-purpose multi-language coding             | (Model + training recipe, not agent)   |
+| **Model providers**                           | Ollama only (deliberate)                                                    | OpenAI, Anthropic, GLM, Ollama, more              | Standalone — bring your own runtime    |
+| **Tool / output format**                      | XML tags parsed from text (`<patch>`, `<html_file>`, `<probes>`, …)         | Native function-calling (TypeBox-validated)       | n/a                                    |
+| **Patch / edit format**                       | SEARCH/REPLACE w/ fuzzy norm + uniqueness + non-overlap + reverse apply ★   | `edits[].oldText/newText` w/ same engine ★ source | n/a                                    |
+| **Patch repair layer**                        | BOM, CRLF, internal-fence stripping ★ (ported)                              | BOM, CRLF, fuzzy normalize ★ (origin)             | n/a                                    |
+| **System prompt assembly**                    | Per-format `FormatSpec` + deduped guidelines ★ (ported)                     | Per-tool `promptGuidelines` ★ (origin)            | n/a                                    |
+| **Long-session compaction**                   | Two-tier: HTML elision → deterministic structured anchor ★ (ported pattern) | LLM-summarized w/ fixed skeleton ★ (origin)       | n/a                                    |
+| **Retrieval quality ranking**                 | `relevance × (1 + 0.10·tanh(score/5))` ★ (inferred from #2)                 | None (single AGENTS.md context)                   | Star-count + recency at training       |
+| **Two-stage broad → narrow**                  | Plan-stage broad / code-stage narrow at retrieval ★ (ported)                | Single retrieval                                  | Two-stage SFT at training ★ (origin)   |
+| **Context dedup + budget cap**                | Shingle Jaccard ≥ 0.85 + char-budget per stage ★ (inferred from data dedup) | None                                              | File-level MinHash dedup at training   |
+| **Pre-Chromium structural probes**            | `run_micro_probes` (size, structure, scripts, brackets, elision) ★ (ported) | None                                              | Execution-filter at training (Educational-Instruct) |
+| **Real-browser verification**                 | **Yes** — Playwright Chromium, RAF, frozen-canvas, input smoke, screenshot  | bash + user-invoked tests                         | n/a                                    |
+| **VLM screenshot review**                     | **Yes** — vision model gets `.png` on fix turns                             | No                                                | n/a                                    |
+| **Web research grounding (per-goal)**         | **Yes** — Wikipedia title-match w/ Levenshtein typos, no genre allowlist    | No                                                | n/a                                    |
+| **Cross-session memory**                      | **Yes** — playbook with helpful/harmful counters + offline learner          | AGENTS.md / CLAUDE.md (project-level, manual)     | At training only                       |
+| **Acceptance criteria + executable probes**   | **Yes** — `<criteria>` + JSON `<probes>` literally executed in the page     | No                                                | n/a                                    |
+| **Best-of-N w/ runtime scoring**              | **Yes** — sample N, score each in the same browser, pick winner             | No                                                | n/a                                    |
+| **Diagnose-then-fix combined turn**           | **Yes** — `<diagnose>` required before `<patch>` on fix turns               | No                                                | n/a                                    |
+| **Adaptive temperature (build vs fix)**       | **Yes** — 0.7 build / 0.25 fix                                              | Single temp                                       | n/a                                    |
+| **Stuck-loop reflection ladder**              | **Yes** — "5–7 different sources" mode after 2+ failures                    | No                                                | n/a                                    |
+| **Repetition-loop watchdog**                  | **Yes** — sliding-window detector kills wedged streams                      | Stall watchdog only                               | n/a                                    |
+| **User feedback mid-stream**                  | HIGHEST-PRIORITY banner; drained at next turn boundary                      | Steering messages (similar)                       | n/a                                    |
+| **Save-best-on-clean + regression detect**    | **Yes** — every clean turn → `best.html`; revert prompt if next breaks      | git (manual)                                      | n/a                                    |
+| **`<done/>` then plain text auto-extends**    | **Yes** — same file, continuation mode                                      | Follow-up + steering                              | n/a                                    |
+| **Architect/editor 2-call split**             | Optional, complexity-gated                                                  | No                                                | n/a                                    |
+| **AGENTS.md / project-config injection**      | **No** (gap — see roadmap)                                                  | Yes — both `AGENTS.md` and `CLAUDE.md`            | n/a                                    |
+| **Skills / lazy-loaded reference docs**       | **No** — playbook is eager-injected only                                    | Yes — skills advertised, model `read`s on demand  | n/a                                    |
+| **Model-agnostic across Anthropic/OpenAI/etc.** | **No** (deliberate; Ollama-focused)                                       | Yes                                               | n/a                                    |
+| **JSON repair for streamed tool args**        | **No** — we use XML, no JSON args to repair                                 | Yes — `repairJson` + partial-json fallback        | n/a                                    |
+
+★ = pattern ported from one of the other tools (or inspired by their published recipe).
+
+**TL;DR positioning:**
+
+- **Pi-mono coding-agent** is the right choice if you want a *general-
+  purpose, multi-provider* coding agent that works across many languages
+  with native function-calling. It has the better tool framework; we
+  ported its patch engine, prompt assembly, and compaction patterns.
+- **OpenCoder** is the right choice if you want to *understand or train*
+  a top-tier open code LLM end-to-end. It's a model + recipe, not a
+  daily-driver agent; we ported its data-curation principles to
+  inference-time context curation.
+- **Coding Box** is the right choice if you want to drive a small/mid
+  local Ollama model to ship browser-runnable HTML/JS specifically, with
+  Chromium as ground truth and a playbook that gets smarter every
+  session. Verticalization buys us the runtime-validation layer; the
+  cost is we don't help you write a Rust kernel module.
 
 ---
 
@@ -1057,6 +1132,34 @@ describe your next goal.
 | Feedback ignored                  | check the log for `→ applying your input` — if missing, see `<slug>_<ts>.jsonl` for `feedback_queued` / `feedback_injected` events |
 | Feedback after done does nothing  | it should auto-extend; verify the bottom hint says "type feedback to extend"          |
 | Playbook / criteria never show up in traces | normal for **`chat.py`**: default is **`prompt_version=v0`**. Use `tune.py run --prompt-version v1` or pass `prompt_version="v1"` into `GameAgent` to exercise injected `<playbook>` + `<criteria>` / `<probes>`. |
+
+---
+
+## Roadmap & known gaps
+
+What's missing if you want this to be the *strongest* mid-size-LLM
+coding agent. None of these are in flight; this is an honest checklist
+so you can decide what to PR.
+
+| Gap                                          | Why it matters                                                                                                     | Effort | Notes                                                                                                                            |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ------ | -------------------------------------------------------------------------------------------------------------------------------- |
+| **Project-config injection (AGENTS.md / CLAUDE.md)** | Pi-mono auto-folds a project's AGENTS.md into the system prompt as `# Project Context`. We don't read any per-project config — every session re-learns the user's preferences via the playbook. Adding this would let a single repo say "always use Phaser, never use React" once. | low    | Pattern: read `AGENTS.md` / `CLAUDE.md` from the working dir at session start; append as `<project-context>` at the end of the system prompt. |
+| **API allowlist for Canvas / Audio / DOM**   | Models hallucinate methods (`ctx.drawCircle()`, `audio.play(volume=0.5)`). Today the Chromium round-trip catches them — but slowly. A tiny JSON of canonical signatures could reject the patch *before* the round-trip. | low    | The Wikipedia grounding lesson applies: **no allowlist of game genres**, but an allowlist of *real method signatures* is fine. |
+| **Native tool-calling format (replace XML)** | Ollama supports JSON tool-calling for several models. Native-call output is more reliable than tag parsing on RLHF'd models, and we'd inherit Ollama's schema validation for free. | medium | We deferred this earlier as "real cost without measurement." Worth revisiting once a tune-battery baseline lands. |
+| **Bullet-on-demand retrieval (skills pattern)** | Today every fix turn injects the top-K relevant playbook bullets. Pi-mono's `skills` pattern advertises bullet IDs in the prompt and lets the model `read` only the one it actually needs. Saves tokens, sharpens attention. | medium | Requires a `read_bullet(id)` tool and a small change to `<playbook>` rendering — IDs only, body on request. |
+| **Streaming patch validation**               | Today we validate patches *after* the stream finishes. Catching a malformed `<patch>` mid-stream lets us abort early and re-prompt before wasting tokens. | medium | Hook into `ollama_io.stream_chat`; partial-parse `<patch>` blocks as they close.                                                  |
+| **Diff preview before patch apply**          | UX win: show the user the unified diff produced by `<patch>` before writing the file. Users could veto or hand-edit.                                  | low    | Mostly Textual layout; the patch engine already returns the spliced text.                                                         |
+| **Real JS syntax check (`node --check`)**    | The pre-Chromium micro-probe uses bracket-balance heuristics. If `node` is on PATH, we could pipe each `<script>` through `node --check` for a real syntax verdict.                                             | low    | Already covered by the bracket-balance heuristic for the common cases; this is a quality-not-quantity upgrade.                    |
+| **Sandboxed `file://` loading**              | Generated games run unrestricted in Chromium. The README warns about this; a real fix would route loads through a service worker or Origin Isolation policy that limits network access. | medium | Threat model is "agent generates bad code that exfils data" — currently mitigated only by user trust + local-model assumption.   |
+| **Playbook auto-pruning by age**             | Bullets with low net score sit forever; the offline learner only adds. A periodic pruner that drops bullets with `harmful >> helpful` after N retrievals would keep the corpus tight. | low    | `learner.py` has the data; needs a `prune` subcommand and a freshness counter on each bullet.                                    |
+| **CDN integrity hashes for `<script src=...>`** | Games sometimes pull from `cdn.example.com/phaser.js`; an SRI-style allowlist would reject typosquatted CDNs.                                          | low    | Maintain a small JSON of `{cdn_host: allowed_paths}`.                                                                             |
+| **Cross-session user-preference memory**     | Beyond playbook (which is HTML/JS lessons): "user wants minimalist UI", "user prefers WASD over arrows", "this user always asks for sound" — all currently learned per-session and forgotten. | medium | Same shape as playbook; different namespace.                                                                                      |
+
+If you want the *single highest-ROI next step* per axis:
+
+- **Reliability:** API allowlist for Canvas/Audio/DOM (cheap, prevents real failure mode).
+- **Maintainability:** AGENTS.md / project-config injection (pi has it, well-tested pattern).
+- **Token efficiency:** bullet-on-demand retrieval (pi-mono skills pattern).
 
 ---
 
