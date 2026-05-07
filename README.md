@@ -57,6 +57,7 @@ but the running model’s prompts omit that block until v1+.)
 - [Quick start](#quick-start)
 - [CLI (`coder.py`)](#cli-coderpy)
 - [What to type when (cheat sheet)](#what-to-type-when-the-only-cheat-sheet-you-need)
+  - [How to write a prompt that ships a playable game](#how-to-write-a-prompt-that-ships-a-playable-game)
 - [What the TUI looks like](#what-the-tui-looks-like)
 - [Slash commands](#slash-commands)
 - [Keys](#keys)
@@ -219,6 +220,11 @@ Each technique is matched to a *specific* small-model failure mode:
 | **Playbook injection**       | Same dumb mistake every session — model has no long-term memory | `memory.Playbook.retrieve` → `<playbook>` in **v1+** prompts only (`prompt_version != "v0"`) |
 | **Acceptance criteria**      | "Passes the smoke test" but doesn't actually fulfill the goal  | `prompts_v1.PLAN_INSTRUCTION` `<criteria>`  |
 | **Runtime probes**           | Game looks fine to the heuristics but the player can't actually play | model emits `<probes>` JSON → executed by `tools.LiveBrowser._run_probe` |
+| **Probes gate `ok`**         | Probe results were advisory; harness reported `ok=True` even when the model's own probes failed (e.g. `monsters: []` ships as "passed") | `tools.py:1057` post-step appends `PROBE FAILED` to `soft_warnings`; existing `ok = no errors AND no soft_warnings` formula now catches it |
+| **`<done/>` clean-streak**   | Model declared done on the first ok=True iter and shipped a flaky pass | `agent._consecutive_clean_iters` ≥ 2 required before honoring `<done/>` (default; `_min_clean_streak_to_ship`) |
+| **3D intent detector**       | Model hand-rolls a raycaster in 12 KB when a CDN three.js + sprite billboards would ship a real 3D game in the same effort | `prompts_v1._detect_3d_intent` triggers on `3d / fps / first-person / raycaster / voxel / minecraftlike / wolfenstein / perspective`; injects three.js / babylon CDN nudge into Phase A |
+| **Mixed sprite/procedural**  | Model forces every entity into one bucket; misses that destructible-state needs procedural drawing while static character needs sprites | `prompts_v1.ASSETS_FORMAT.guidelines` explicitly teaches: sprites for static (player/enemies/walls), procedural for destructible (bunkers crumbling brick-by-brick, cracks, damage levels) |
+| **Sprite-orientation pattern** | `drawImage` ships a sideways gun because the sprite was rendered facing right but drawn flat | `assets.render_asset_paths_block` includes the `save / translate / rotate / drawImage / restore` snippet inline in the asset paths block the model receives |
 | **Stuck-loop reflection**    | Same wrong fix tried 3 times in a row                          | v1 `fix_instruction` switches to "5–7 different sources" mode after `stuck_streak >= 2` |
 | **Fuzzy patch matching**     | Smart-quote / em-dash / NBSP drift between model output and file → `<patch>` "SEARCH not found" | `patches._normalize_chars` (1:1 char-preserving NFKC-lite) |
 | **Patch uniqueness + non-overlap** | Ambiguous SEARCH silently picks wrong site; overlapping patches splice garbage | `patches._locate` + reverse-order apply in `apply_patches` |
@@ -1066,6 +1072,41 @@ need `/new` when you're starting an unrelated game — small tweaks are just
 typing.
 
 `/help` inside the TUI shows the same cheat sheet plus the full command list.
+
+### How to write a prompt that ships a playable game
+
+These six rules are also printed at the top of every fresh TUI session
+(see `chat.py` `on_mount`). They're the highest-leverage things you can
+do to nudge a medium-skilled local model toward an actually-playable
+result instead of a "passes the test but unplayable" demo:
+
+1. **Be specific about controls + win/lose.** *"WASD to move, mouse to
+   aim, space to shoot, lose at 0 HP, restart with R."* Vague goals →
+   vague games — the model fills the gaps with whatever's easiest.
+2. **Name what's on screen.** Enemies, projectiles, terrain types,
+   pickups. The agent uses these names to populate `<assets>`
+   automatically; if you don't name them, neither will the model.
+3. **Ask for art directly.** Words like *"sprite art" / "pixel-art" /
+   "cool graphics" / "great visuals"* trigger the Z-Image-Turbo
+   pipeline via `_detect_art_intent`. Skip them for DOM-only apps
+   (todo, calculator) where text + emojis suffice.
+4. **Mark mixed graphics explicitly.** *"Sprites for X, but procedural
+   for Y because Y gets destroyed brick-by-brick."* The new
+   `ASSETS_FORMAT` guideline teaches this pattern; stating it in your
+   prompt makes the model commit.
+5. **For 3D, just say "3D" or "first-person".** `_detect_3d_intent`
+   recognizes those plus *fps / raycaster / voxel / minecraftlike /
+   wolfenstein* and switches the model to `three.js` via CDN. Don't
+   ask for a raycaster from scratch unless you really mean it.
+6. **Iterate via plain text after `<done/>`.** Mid-game tweaks like
+   *"the gun is sideways, rotate 90°"* auto-extend the same file —
+   you don't need `/new` for these. Use `/new <goal>` only when
+   switching to an unrelated game.
+
+The TUI also prints a `>> APPLIED to this turn: feedback: '...'` line
+in the agent log every time your queued input lands in a prompt, so
+you can watch each piece of feedback being consumed (see
+[How feedback works](#how-feedback-works-this-is-the-important-bit)).
 
 ---
 
