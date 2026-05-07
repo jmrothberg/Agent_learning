@@ -447,6 +447,13 @@ def render_asset_paths_block(
     Paths are resolved relative to the directory of the HTML file so
     the model can `<img src="./<name>.png">` directly. Empty input →
     empty string (caller should not inject).
+
+    The phrasing is intentionally aggressive ("YOU MUST", "REGRESSION
+    IF YOU DON'T") because small models (qwen3.6, gpt-oss) default to
+    procedural ctx.fillRect drawing — that's what's in their training
+    distribution. Without explicit, repeated instruction to use the
+    PNGs, the model treats the asset list as descriptive rather than
+    actionable, and ships a bare procedural game.
     """
     if not asset_paths:
         return ""
@@ -454,10 +461,39 @@ def render_asset_paths_block(
     lines = [
         "================ GENERATED ASSETS (sprites) ================",
         "Z-Image-Turbo generated these PNGs and saved them next to your",
-        "HTML file. Reference them via <img> or `new Image()`. ALWAYS",
-        "wait for `await img.decode()` (or onload) before drawing — see",
-        "playbook bullet image-load-race.",
+        "HTML file. YOU MUST USE THEM via `new Image()` + `drawImage()`",
+        "for EVERY entity listed below. Procedural ctx.fillRect drawing",
+        "for these entities IS A REGRESSION on this turn — the user",
+        "explicitly asked for sprite art and got the PNGs you requested.",
         "",
+        "ULTRA IMPORTANT — pattern you MUST follow:",
+        "",
+        "  // 1. Build an asset-loader (do this ONCE at startup):",
+        "  const ASSETS = {};",
+        "  async function loadAssets() {",
+        "    const entries = [",
+    ]
+    for name, path in asset_paths.items():
+        try:
+            rel = Path(path).resolve().relative_to(html_dir)
+        except ValueError:
+            rel = path
+        lines.append(f"      ['{name}', './{rel}'],")
+    lines += [
+        "    ];",
+        "    for (const [name, src] of entries) {",
+        "      const img = new Image();",
+        "      img.src = src;",
+        "      await img.decode();",
+        "      ASSETS[name] = img;",
+        "    }",
+        "  }",
+        "  // 2. Wait for it BEFORE starting the game loop:",
+        "  loadAssets().then(() => requestAnimationFrame(frame));",
+        "  // 3. In your draw():",
+        "  ctx.drawImage(ASSETS.<name>, x, y, w, h);",
+        "",
+        "Available assets — name → relative path:",
     ]
     for name, path in asset_paths.items():
         try:
@@ -465,6 +501,13 @@ def render_asset_paths_block(
         except ValueError:
             rel = path
         lines.append(f"  - {name}: ./{rel}")
+    lines.append("")
+    lines.append(
+        "If you fall back to procedural drawing for an entity that has "
+        "a sprite above, you have FAILED THIS TURN. The seed code is "
+        "procedural by default — REPLACE its draw bodies with "
+        "drawImage() calls."
+    )
     lines.append(
         "============================================================"
     )

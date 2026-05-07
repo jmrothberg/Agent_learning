@@ -698,6 +698,26 @@ class GameAgent:
             files.append(f"- {self.best_path.name}: last clean version")
         lines += files + [""]
 
+        # Generated assets — REQUIRED in summary so the model still
+        # knows the PNG names after compaction wipes earlier turns.
+        # Without this, "use the art you generated" feedback can't be
+        # acted on because the model has forgotten the asset paths.
+        if self._session_assets:
+            html_dir = self.out_path.resolve().parent
+            asset_lines: list[str] = ["## Generated assets (USE these — not procedural fillRect)"]
+            for name, path in self._session_assets.items():
+                try:
+                    rel = Path(path).resolve().relative_to(html_dir)
+                except ValueError:
+                    rel = path
+                asset_lines.append(f"- {name}: ./{rel}")
+            asset_lines.append(
+                "Load with `new Image()` + `await img.decode()`, then "
+                "draw with `ctx.drawImage(img, x, y, w, h)`. Procedural "
+                "drawing for entities covered above IS A REGRESSION."
+            )
+            lines += asset_lines + [""]
+
         # Critical context — preserved across compaction so the model
         # never forgets the truth-source contract.
         lines += [
@@ -1200,8 +1220,16 @@ class GameAgent:
         and first-build are skipped, the iteration loop resumes immediately
         with a continuation prompt. _messages, _current_file, _snapshot_n,
         browser, and model are all reused.
+
+        BUG fixed in this version: `self._goal` was being OVERWRITTEN with
+        the new feedback on continuation, so the structured-compaction
+        summary's "Goal" line ended up reading "use the art you generate"
+        (the latest feedback) instead of the original "doom shooter"
+        request. Now we only set `_goal` on a fresh session and treat the
+        continuation `goal` arg as feedback, leaving the original intact.
         """
-        self._goal = goal
+        if not continuation:
+            self._goal = goal
         self.out_path.parent.mkdir(parents=True, exist_ok=True)
 
         if continuation:

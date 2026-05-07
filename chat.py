@@ -709,7 +709,16 @@ class CodingBoxApp(App):
         self._stream_buf = ""
 
     def _update_status(self, extra: str = "") -> None:
-        """Render the right-hand status panel."""
+        """Render the right-hand status panel.
+
+        The panel always shows phase / iteration / model / goal. When
+        feedback has been typed but not yet drained into a user turn,
+        a "Queued" section appears beneath the goal listing each queued
+        message; entries vanish from the panel the moment the agent
+        consumes them at the next user-turn boundary. Visible feedback
+        is the most reliable way for the user to see that their typing
+        landed AND when it gets applied.
+        """
         body = (
             f"[b]Phase:[/b] {self._phase_label}\n"
             f"[b]Iteration:[/b] {self._iteration_label}\n"
@@ -717,6 +726,26 @@ class CodingBoxApp(App):
         if self._session_model:
             body += f"[b]Model:[/b] {self._session_model}\n"
         body += f"[b]Goal:[/b] {self._goal or '—'}\n"
+
+        # Queued user input — pending until the agent drains it. Direct
+        # attribute access is fine; chat.py already pokes _pending_feedback
+        # in on_input_submitted to print the running count.
+        if self.agent is not None:
+            pending_fb = list(getattr(self.agent, "_pending_feedback", []) or [])
+            pending_ans = getattr(self.agent, "_pending_answer", None)
+            queue_lines: list[str] = []
+            if pending_ans:
+                queue_lines.append(
+                    f"  [magenta]answer:[/magenta] {_esc(pending_ans[:80])}"
+                )
+            for i, fb in enumerate(pending_fb, 1):
+                preview = fb[:80] + ("…" if len(fb) > 80 else "")
+                queue_lines.append(f"  [blue]{i}.[/blue] {_esc(preview)}")
+            if queue_lines:
+                body += f"\n[b]Queued ({len(queue_lines)}):[/b]\n"
+                body += "\n".join(queue_lines) + "\n"
+                body += "[dim]Applied at the next user-turn boundary.[/dim]\n"
+
         # Show the FULL log path persistently so the user always knows what
         # file to `cat` / share when something goes wrong.
         if self._log_file_path is not None:
@@ -794,6 +823,7 @@ class CodingBoxApp(App):
                 self.agent.add_user_answer(text)
             message.input.placeholder = "feedback · 'done' or Ctrl+D to ship · /help"
             self._awaiting_kind = "feedback"
+            self._update_status()
 
         else:  # "feedback"
             self._log(f"[bold blue]> feedback:[/bold blue] {text}")
@@ -832,6 +862,10 @@ class CodingBoxApp(App):
                 f"Will be applied at the next user-turn boundary - watch "
                 f"for an [italic]→ applying your input[/italic] line.[/dim cyan]"
             )
+            # Refresh the right-hand status panel so the new entry shows up
+            # under "Queued (N)" immediately. Without this the panel only
+            # refreshes on the next agent event, which can be 30+s away.
+            self._update_status()
 
     # ----------------------------- slash commands -------------------------
 
@@ -1299,6 +1333,14 @@ class CodingBoxApp(App):
         """Pattern-match on event kind and update the UI."""
         # Always flush any half-streamed line before logging a new event header.
         self._flush_stream()
+        # Refresh the status panel on EVERY event so the queued-feedback
+        # list disappears the moment the agent drains it (the agent's
+        # internal flush happens between events, not via a callback).
+        # Cheap render — Textual diffs the Static content.
+        try:
+            self._update_status()
+        except Exception:
+            pass
         # ev.text often contains bracket characters (test reports list keys
         # like ['ArrowUp'], notes may quote code). Escape before interpolating
         # into a Rich markup format string so '[' isn't read as a fake tag.

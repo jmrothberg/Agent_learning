@@ -285,7 +285,14 @@ def test_render_block_uses_relative_paths(tmp_path: Path):
     block = render_asset_paths_block({"ship": ship}, html)
     assert "GENERATED ASSETS" in block
     assert "./game_assets/ship.png" in block
-    assert "image-load-race" in block  # links to playbook bullet
+    # The block should show the actual loading pattern (await img.decode()
+    # + drawImage) so the model has working code to copy, not just a
+    # reference to a playbook bullet it'd have to look up.
+    assert "img.decode()" in block
+    assert "drawImage" in block
+    # And it should be insistent — qwen3.6-class models default to
+    # procedural drawing without explicit "MUST" framing.
+    assert "MUST USE THEM" in block or "REGRESSION" in block
 
 
 def test_render_block_empty_input_returns_empty():
