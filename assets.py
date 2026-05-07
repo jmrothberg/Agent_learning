@@ -425,36 +425,77 @@ def generate_assets(
         return {}
 
     out: dict[str, Path] = {}
+    # 2.2: per-asset stats accumulated as a side channel. Caller can
+    # check `image_generator.last_stats` (a list of per-asset dicts)
+    # after the call. Using an attribute on the generator instance so
+    # the function signature stays backward-compatible.
+    asset_stats: list[dict[str, Any]] = []
     for spec in specs:
+        import time
+        t0 = time.time()
         name = _safe_filename(spec["name"])
         prompt = spec["prompt"]
         size = spec["size"]
         key = _cache_key(model_id, prompt, size)
         cache_path = cache_root / f"{key}.png"
         target_path = session_dir / f"{name}.png"
+        stat: dict[str, Any] = {
+            "name": name,
+            "prompt": prompt[:140],
+            "target_size": list(size),
+            "cache_hit": False,
+            "gen_seconds": 0.0,
+            "bg_color": None,
+            "alpha_pixel_ratio": 0.0,
+        }
         if cache_path.exists():
             _link_or_copy(cache_path, target_path)
             out[name] = target_path.resolve()
+            stat["cache_hit"] = True
+            stat["gen_seconds"] = round(time.time() - t0, 3)
+            asset_stats.append(stat)
             continue
         # Cache miss — generate.
         gen_path = _safe_generate(image_generator, prompt)
         if gen_path is None:
+            stat["error"] = "diffuser returned None (OOM / NSFW filter / etc)"
+            asset_stats.append(stat)
             continue
         try:
             from PIL import Image
             with Image.open(gen_path) as src_img:
                 src_img.load()
+                stat["native_size"] = [src_img.width, src_img.height]
+                # Resize first; chroma-key second. Resizing 768→128 is
+                # ~36x cheaper to mask than masking at native res.
                 if size != (src_img.width, src_img.height):
                     resized = src_img.resize(size, Image.LANCZOS)
                 else:
                     resized = src_img
-                resized.save(cache_path, format="PNG")
+                # 1.3: apply chroma-key to add a transparent background.
+                # Z-Image-Turbo renders with a solid bg even when the
+                # prompt says "transparent background"; this turns it
+                # into actual alpha so the model never has to clean it
+                # up at runtime.
+                keyed, ck_stats = _chroma_key_to_rgba(resized)
+                stat["bg_color"] = (
+                    list(ck_stats["bg_color"])
+                    if ck_stats["bg_color"] is not None else None
+                )
+                stat["alpha_pixel_ratio"] = ck_stats["alpha_pixel_ratio"]
+                keyed.save(cache_path, format="PNG")
             _link_or_copy(cache_path, target_path)
             out[name] = target_path.resolve()
-        except Exception:
-            # Couldn't post-process this one; skip it. Other assets in
-            # the batch still proceed.
-            continue
+        except Exception as e:
+            stat["error"] = f"{type(e).__name__}: {str(e)[:120]}"
+        finally:
+            stat["gen_seconds"] = round(time.time() - t0, 3)
+            asset_stats.append(stat)
+    # Stash stats on the generator so the caller can read them out.
+    try:
+        image_generator.last_stats = asset_stats  # type: ignore[attr-defined]
+    except Exception:
+        pass
     return out
 
 
@@ -465,6 +506,99 @@ def _safe_generate(gen: Any, prompt: str) -> str | None:
         return gen.generate(prompt)
     except Exception:
         return None
+
+
+# 1.3 — chroma-key pass. Z-Image-Turbo (and most diffusion models)
+# render with a uniform background even when the prompt says
+# "transparent background". The model used to be asked to clean the
+# white square at runtime via getImageData / pixel manipulation,
+# which CORS-tainted the canvas (see games/traces/using-great-graphics-
+# that-you_20260507_103355 for the cascade failure). Right fix is to
+# do the chroma-key once, in PIL, before the PNG ever reaches the
+# game. RGBA output → drawImage just works with full alpha.
+
+def _detect_bg_color(img) -> tuple[int, int, int] | None:
+    """Sample the four corners + four edge-midpoints; return the most
+    common color if it dominates (>= 6 of 8 samples agree within
+    tolerance), else None (don't mask — we'd risk eating real pixels).
+    """
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    w, h = img.size
+    px = img.load()
+    samples = [
+        px[0, 0],            px[w - 1, 0],
+        px[0, h - 1],        px[w - 1, h - 1],
+        px[w // 2, 0],       px[w // 2, h - 1],
+        px[0, h // 2],       px[w - 1, h // 2],
+    ]
+    # Group samples within tolerance — find the largest cluster.
+    tol = 16
+    best: tuple[tuple[int, int, int], int] | None = None
+    for s in samples:
+        n = sum(
+            1 for o in samples
+            if (abs(o[0] - s[0]) <= tol
+                and abs(o[1] - s[1]) <= tol
+                and abs(o[2] - s[2]) <= tol)
+        )
+        if best is None or n > best[1]:
+            best = (s, n)
+    if best is None or best[1] < 6:
+        # No clearly-dominant background — leave the image alone.
+        return None
+    return best[0]
+
+
+def _apply_chroma_key_alpha(img, bg: tuple[int, int, int],
+                             tolerance: int = 24) -> tuple[Any, float]:
+    """Convert pixels within `tolerance` of `bg` to alpha=0.
+
+    Returns (rgba_image, alpha_pixel_ratio). The ratio is the fraction
+    of pixels that became transparent — useful for trace logging.
+    Border pixels also get a small alpha falloff so edges don't look
+    fringy after chroma-keying.
+    """
+    if img.mode != "RGBA":
+        img = img.convert("RGBA")
+    px = img.load()
+    w, h = img.size
+    bg_r, bg_g, bg_b = bg
+    masked = 0
+    total = w * h
+    for y in range(h):
+        for x in range(w):
+            r, g, b, a = px[x, y]
+            dr = abs(r - bg_r)
+            dg = abs(g - bg_g)
+            db = abs(b - bg_b)
+            if dr <= tolerance and dg <= tolerance and db <= tolerance:
+                px[x, y] = (r, g, b, 0)
+                masked += 1
+    return img, (masked / total if total else 0.0)
+
+
+def _chroma_key_to_rgba(pil_img) -> tuple[Any, dict]:
+    """Top-level helper: detect background color, apply alpha mask,
+    return the RGBA image plus a small stats dict for tracing.
+
+    Stats dict shape:
+      {"bg_color": (r,g,b) | None, "alpha_pixel_ratio": float}
+
+    If no dominant bg color was detected, leaves the image alone (only
+    converts to RGBA so save format is consistent).
+    """
+    stats: dict[str, Any] = {"bg_color": None, "alpha_pixel_ratio": 0.0}
+    bg = _detect_bg_color(pil_img)
+    if bg is None:
+        # No clear bg — convert mode but skip masking.
+        if pil_img.mode != "RGBA":
+            pil_img = pil_img.convert("RGBA")
+        return pil_img, stats
+    stats["bg_color"] = bg
+    keyed, ratio = _apply_chroma_key_alpha(pil_img, bg)
+    stats["alpha_pixel_ratio"] = round(ratio, 3)
+    return keyed, stats
 
 
 def _link_or_copy(src: Path, dst: Path) -> None:

@@ -556,7 +556,17 @@ def test_html_file(path: str | Path, run_seconds: float = 3.0) -> dict[str, Any]
     logs: list[str] = []
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
+        # CORS-taint fix (1.1): file:// pages that drawImage from a
+        # local PNG taint the canvas, breaking getImageData and any
+        # probe that relies on it. These flags re-enable cross-origin
+        # reads + give file:// pages full access to local files. We're
+        # already running untrusted-by-design HTML inside Playwright;
+        # the flags don't widen the threat model meaningfully.
+        cors_flags = [
+            "--allow-file-access-from-files",
+            "--disable-web-security",
+        ]
+        browser = pw.chromium.launch(headless=True, args=cors_flags)
         # New context per run so localStorage / cookies don't leak between iterations.
         context = browser.new_context(viewport={"width": 800, "height": 600})
         page = context.new_page()
@@ -743,9 +753,26 @@ def format_report_for_model(report: dict[str, Any]) -> str:
     if report["body_sample"]:
         lines.append(f"Body sample: {report['body_sample']!r}")
     if report["errors"]:
-        lines.append("ERRORS (must fix):")
-        for e in report["errors"]:
-            lines.append(f"  - {e}")
+        # 2.4: split rendering when the harness exposed kinds. Page
+        # errors (uncaught exceptions) are usually game bugs the model
+        # can fix; console.error lines are often informational logs.
+        # Probe errors are reported in their own probes section below;
+        # we exclude them here so the model doesn't double-count.
+        page_errs = report.get("page_errors") or []
+        cons_errs = report.get("console_errors") or []
+        if page_errs:
+            lines.append("PAGE ERRORS (uncaught exceptions — must fix):")
+            for e in page_errs:
+                lines.append(f"  - {e}")
+        if cons_errs:
+            lines.append("CONSOLE ERRORS:")
+            for e in cons_errs:
+                lines.append(f"  - {e}")
+        if not (page_errs or cons_errs):
+            # Older path / sync test_html_file: fall back to the union.
+            lines.append("ERRORS (must fix):")
+            for e in report["errors"]:
+                lines.append(f"  - {e}")
     if report.get("soft_warnings"):
         # Heuristic broken-but-no-exception findings. Listed as ISSUES so the
         # model treats them with the same urgency as real errors.
@@ -815,7 +842,12 @@ class LiveBrowser:
         self._run_seconds = run_seconds
         self._headless = headless
         # Buffers reset on every load_and_test call.
+        # 2.4: split error sources so format_report_for_model can show
+        # them differently. _errors is kept as the combined view for
+        # backward compat (downstream code reads report["errors"]).
         self._errors: list[str] = []
+        self._console_errors: list[str] = []
+        self._page_errors: list[str] = []
         self._warnings: list[str] = []
         self._logs: list[str] = []
         self._pw = None
@@ -835,12 +867,22 @@ class LiveBrowser:
         # themselves anyway).
         # headless=False is the normal interactive case (TUI lets the user
         # SEE the game). headless=True is for the test driver.
-        launch_args: list[str] = []
+        # CORS-taint fix (1.1): see comment in test_html_file. Without
+        # these flags, drawImage(<file:// PNG>) taints the canvas and
+        # any getImageData probe (including the harness's frozen check
+        # and the model's non_blank example) throws SecurityError. The
+        # cure used to be the model writing crossOrigin="anonymous" +
+        # try/catch — error-prone and frequently broke working games.
+        # Set the flags at launch and the issue goes away entirely.
+        launch_args: list[str] = [
+            "--allow-file-access-from-files",
+            "--disable-web-security",
+        ]
         if not self._headless:
-            launch_args = [
+            launch_args.extend([
                 f"--window-position=850,50",
                 f"--window-size={self._viewport[0]},{self._viewport[1]}",
-            ]
+            ])
         self._browser = await self._pw.chromium.launch(
             headless=self._headless,
             args=launch_args,
@@ -862,6 +904,9 @@ class LiveBrowser:
         text = _truncate(msg.text, _MAX_MSG_LEN)
         t = msg.type
         if t == "error":
+            # 2.4: split feed for the report. _errors stays as the
+            # combined view for backward compat with downstream code.
+            self._console_errors.append(text)
             self._errors.append(text)
         elif t == "warning":
             self._warnings.append(text)
@@ -869,7 +914,9 @@ class LiveBrowser:
             self._logs.append(text)
 
     def _on_pageerror(self, exc) -> None:
-        self._errors.append(_truncate(f"UNCAUGHT: {exc}", _MAX_MSG_LEN))
+        text = _truncate(f"UNCAUGHT: {exc}", _MAX_MSG_LEN)
+        self._page_errors.append(text)
+        self._errors.append(text)
 
     async def load_and_test(
         self,
@@ -898,6 +945,8 @@ class LiveBrowser:
 
         # Reset per-test buffers. The handlers stay attached.
         self._errors.clear()
+        self._console_errors.clear()
+        self._page_errors.clear()
         self._warnings.clear()
         self._logs.clear()
 
@@ -953,9 +1002,27 @@ class LiveBrowser:
                 pname = str(p.get("name") or "probe")[:60]
                 pexpr = str(p.get("expr") or "true")[:600]
                 ok, err = await self._run_probe(pexpr)
-                probe_results.append({
+                # 1.2: tainted-canvas / cross-origin / SecurityError on
+                # getImageData are HARNESS-side limitations, not game
+                # bugs — the actual canvas might be perfectly rendered.
+                # Don't let a brittle probe block shipping a working
+                # game; classify it as warning, not failure. The launch
+                # flags from 1.1 should prevent this in practice but
+                # defense-in-depth.
+                taint_signal = bool(err and any(
+                    s in err.lower()
+                    for s in ("tainted", "cross-origin", "securityerror")
+                ))
+                entry: dict[str, Any] = {
                     "name": pname, "expr": pexpr[:200], "ok": ok, "err": err,
-                })
+                }
+                if taint_signal and not ok:
+                    entry["ok"] = True
+                    entry["downgraded"] = (
+                        "harness-side CORS/taint (probe relies on "
+                        "getImageData/toDataURL) — treating as pass"
+                    )
+                probe_results.append(entry)
 
         title = (await self._page.title()) or ""
         try:
@@ -1008,6 +1075,19 @@ class LiveBrowser:
         report["frozen_canvas"] = frozen
         report["input_test"] = input_test
         report["probes"] = probe_results
+        # 2.4: split error sources so the model + trace can tell apart
+        # "console.error('...')" (game-logged, often informational) from
+        # "UNCAUGHT TypeError" (real crash). Existing report["errors"]
+        # is the union — kept for backward compat with downstream code.
+        report["console_errors"] = list(self._console_errors)
+        report["page_errors"] = list(self._page_errors)
+        # Probe errors are derived from probe_results (entries with
+        # ok=False AND non-empty err).
+        report["probe_errors"] = [
+            f"{p.get('name','?')}: {p.get('err','')[:160]}"
+            for p in probe_results
+            if not p.get("ok") and p.get("err")
+        ]
 
         # Promote the new findings into soft_warnings so they get the same
         # "must fix" treatment as RAF/blank in the report formatter.

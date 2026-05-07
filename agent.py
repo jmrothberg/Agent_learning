@@ -1438,10 +1438,22 @@ class GameAgent:
             probes = self._extract_probes(plan_reply)
             if probes:
                 self._probes = probes
+                # 2.1: log full probe text alongside the count so brittle
+                # probes (instantaneous-state, getImageData-based,
+                # window-global-without-bind) are visible upfront and we
+                # don't have to dig through a 1000-char preview to find
+                # the expression that's blocking ship.
                 self._trace({
                     "kind": "probes_parsed",
                     "count": len(probes),
                     "names": [p.get("name") for p in probes],
+                    "full": [
+                        {
+                            "name": str(p.get("name", "?"))[:60],
+                            "expr": str(p.get("expr", ""))[:300],
+                        }
+                        for p in probes
+                    ],
                 })
 
             q = self._extract_question(plan_reply)
@@ -1510,12 +1522,23 @@ class GameAgent:
                             f"asset generation crashed: {e!r} — proceeding without."
                         ))
                         self._session_assets = {}
+                    # 2.2: pull per-asset stats (prompt, native_size,
+                    # bg_color, alpha_pixel_ratio, gen_seconds, errors)
+                    # off the generator instance — generate_assets
+                    # stashes them there. Lets the trace record exactly
+                    # which assets were cache hits vs fresh, what bg
+                    # color was detected, and how transparent the
+                    # chroma-key actually got.
+                    per_asset = getattr(
+                        self._asset_generator, "last_stats", None,
+                    ) or []
                     self._trace({
                         "kind": "assets_generated",
                         "requested": len(asset_specs),
                         "produced": len(self._session_assets),
                         "names": list(self._session_assets.keys()),
                         "session_dir": str(session_assets_dir),
+                        "per_asset": per_asset,
                     })
                     if self._session_assets:
                         yield self._record(AgentEvent(
@@ -1874,11 +1897,30 @@ class GameAgent:
             self._current_file = new_html
             snap_path = self._save_snapshot(new_html)
             shot_path = snap_path.with_suffix(".png") if snap_path else None
+            # 2.3: per-iter HTML sha256 so test events can be correlated
+            # back to the exact code that produced them. Iter snapshots
+            # share this hash with their .html sibling on disk.
+            import hashlib as _hashlib
+            html_sha = _hashlib.sha256(
+                new_html.encode("utf-8", "replace")
+            ).hexdigest()[:16]
+            self._trace({
+                "kind": "code_snapshot",
+                "iteration": iteration,
+                "html_sha256": html_sha,
+                "size": len(new_html),
+                "snapshot": str(snap_path) if snap_path else None,
+                "screenshot": str(shot_path) if shot_path else None,
+                "materialize": materialize_msg,
+                "patches_applied": len(patches_in_reply) - len(partial_failed),
+                "patches_failed": len(partial_failed),
+            })
             yield self._record(AgentEvent(
                 "code",
                 str(self.out_path),
                 {
                     "size": len(new_html),
+                    "html_sha256": html_sha,
                     "snapshot": str(snap_path) if snap_path else None,
                     "screenshot": str(shot_path) if shot_path else None,
                     "materialize": materialize_msg,

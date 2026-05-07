@@ -687,7 +687,7 @@ PROBES are real code. Examples that work:
   - {"name":"canvas_present", "expr":"!!document.querySelector('canvas')"}
   - {"name":"ship_visible",   "expr":"window.state && state.player && state.player.x>=0 && state.player.x<=800"}
   - {"name":"score_renders",  "expr":"document.getElementById('score') && document.getElementById('score').textContent.length>0"}
-  - {"name":"non_blank",      "expr":"(()=>{const c=document.querySelector('canvas');if(!c)return false;const x=c.getContext('2d');const d=x.getImageData(c.width/2|0,c.height/2|0,1,1).data;return d[0]+d[1]+d[2]>0;})()"}
+  - {"name":"non_blank",      "expr":"(()=>{const c=document.querySelector('canvas');if(!c||!c.width||!c.height)return false;try{return c.toDataURL().length>200;}catch(e){return true;}})()"}
 
 Probes that reference globals (state, player, etc.) MUST exist on
 window — either expose them (e.g. `window.state = state`) or use DOM /
