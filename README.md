@@ -84,6 +84,22 @@ but the running model’s prompts omit that block until v1+.)
   `coder.py --headless` instead of the TUI.
 - **`OLLAMA_HOST`**: if your daemon is not on the default address, set this
   before launching (the Python client and HTTP fallbacks respect it).
+- **Context window**: the agent uses `num_ctx=32768` by default — qwen3.6 /
+  gpt-oss support 128K natively, and 32K covers planning + first build +
+  several feedback turns before structured compaction kicks in. Override
+  with `CODING_BOX_NUM_CTX=65536` (or any size your GPU supports) before
+  launching, or pass `--num-ctx N` to `coder.py`. To avoid a model reload
+  on the first call, **preload your model at the matching size**:
+  ```bash
+  ollama run --ctx-size 32768 qwen3.6:35b
+  ```
+- **Optional sprite generation**: the agent can emit `<assets>` blocks
+  in Phase A and the harness will run Z-Image-Turbo locally to mint PNG
+  sprites the game uses via `<img>` / `drawImage()`. See [Generated
+  sprites](#generated-sprites--z-image-turbo-no-server) for the one-line
+  install (`./scripts/install_diffuser.sh`). Skip if you don't have a
+  GPU — the agent runs fine without it, falling back to procedural
+  canvas drawing.
 - **Trust**: the model writes HTML/JS that is executed in a real browser from
   `file://` URLs. Only run models and seeds you trust; treat generated games
   like untrusted web pages if you re-host them.
@@ -1021,7 +1037,7 @@ machines without a display (`--headless`).
 | `--max-iters` | `6` | Cap plan/build iterations |
 | `--out` | unique `games/<slug>_<timestamp>.html` | Output HTML path |
 | `--best-of-n` | `1` | Sample N candidate fixes per failed iteration |
-| `--num-ctx` | `8192` | Ollama context window |
+| `--num-ctx` | `32768` (env `CODING_BOX_NUM_CTX`) | Ollama context window. qwen3.6 / gpt-oss support 128K+; 32K covers planning + first build + several feedback turns before structured compaction. Changing between calls forces an Ollama model reload — preload at this size first with `ollama run --ctx-size 32768 <model>`. |
 | `--stall-seconds` | `90` | Per-chunk stream inactivity timeout |
 | `--headless` | off | Run Chromium without a visible window |
 | `--open` | off | Open the final HTML in the system browser |
@@ -1149,12 +1165,21 @@ You can type ANY text in the input box during a run. It is NOT sent to
 the model immediately — it is queued and injected at the very next
 user-turn boundary.
 
-The TUI gives four signals so you always know where your words are:
+The TUI gives **five** independent signals so you always know where your
+words are at every stage of the round-trip:
 
-1. `> feedback: your text` — the moment you press Enter
-2. `✓ queued (pending: N)` — immediate ack
-3. `→ applying your input to next turn` — the moment the words land in a prompt
-4. The model's next reply addresses your feedback explicitly
+1. `> feedback: your text` in the **left agent log** — the moment you press Enter.
+2. `✓ queued (pending: N)` in the **left agent log** — immediate ack that
+   the input handler captured the text.
+3. `Queued (N):` section in the **right status panel** — lists every
+   pending message with a numbered preview. Updates instantly on type;
+   each item disappears the moment the agent consumes it.
+4. `>> APPLIED to this turn: feedback: '...'` in the **left agent log** —
+   fires inside `_flush_user_injections` at the user-turn boundary, so
+   you see exactly which messages reached the model in which turn.
+   (The earlier `→ applying your input to next turn` line still fires
+   from older code paths — both are confirmation, not duplicates.)
+5. The model's next reply addresses your feedback explicitly.
 
 Your feedback is wrapped in a loud banner at the top of the prompt:
 
@@ -1347,7 +1372,7 @@ describe your next goal.
 | Ollama 500 on model load          | the tag is broken locally; pick another with `/list` + `/model <N>`                    |
 | Terminal stops echoing after exit | `reset` (Ctrl+Q is the proper exit, not Ctrl+C)                                        |
 | Can't select text in TUI          | hold `Shift` while click-dragging                                                      |
-| Feedback ignored                  | check the log for `→ applying your input` — if missing, see `<slug>_<ts>.jsonl` for `feedback_queued` / `feedback_injected` events |
+| Feedback ignored                  | check the agent log for `>> APPLIED to this turn:` (fires at every user-turn boundary) AND the right-pane `Queued (N):` panel emptying. If the panel never empties, the agent isn't draining; if the APPLIED line shows up but the model's reply ignores it, the model is choosing not to act. Also see `<slug>_<ts>.jsonl` for `feedback_queued` / `feedback_injected` events. |
 | Feedback after done does nothing  | it should auto-extend; verify the bottom hint says "type feedback to extend"          |
 | Playbook / criteria never show up in traces | normal for **`chat.py`**: default is **`prompt_version=v0`**. Use `tune.py run --prompt-version v1` or pass `prompt_version="v1"` into `GameAgent` to exercise injected `<playbook>` + `<criteria>` / `<probes>`. |
 
