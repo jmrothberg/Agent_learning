@@ -1257,8 +1257,20 @@ class GameAgent:
                     "info", f"research lookup failed: {e!r}"
                 ))
 
-            if reference_block and hasattr(self._p, "plan_instruction"):
-                plan_msg = self._p.plan_instruction(reference_block=reference_block)
+            if hasattr(self._p, "plan_instruction"):
+                # v1+ planner takes goal so it can detect art-modality
+                # keywords ("sprite", "art", "graphics") and escalate
+                # the <assets> directive to REQUIRED for that turn.
+                # Tolerant of older signatures: try with goal first,
+                # fall through to the reference-only call.
+                try:
+                    plan_msg = self._p.plan_instruction(
+                        reference_block=reference_block, goal=goal,
+                    )
+                except TypeError:
+                    plan_msg = self._p.plan_instruction(
+                        reference_block=reference_block,
+                    )
             elif reference_block:
                 # v0 prompt module — no plan_instruction() helper. Manually
                 # prepend the reference and an authority sentence.

@@ -105,15 +105,17 @@ PROBES_FORMAT = FormatSpec(
 ASSETS_FORMAT = FormatSpec(
     name="<assets>",
     snippet=(
-        "<assets>[{name,prompt,size?}, ...]</assets>  Phase A only — "
-        "request generated PNG sprites the harness will provide."
+        "<assets>[{name,prompt,size?}, ...]</assets>  Phase A — request "
+        "generated PNG sprites for every visual entity in the game."
     ),
     guidelines=[
-        "<assets> is OPTIONAL and Phase A only. Use it when the game "
-        "would benefit from sprite art (most arcade / shooter / "
-        "platformer games do). Each entry is {name, prompt, size?}; "
-        "the harness runs Z-Image-Turbo locally and the resulting PNG "
-        "paths come back in your first-build prompt.",
+        "EMIT <assets> for any canvas-rendered game with visual "
+        "entities the player sees: characters, enemies, projectiles, "
+        "pickups, terrain tiles, decorations. Most arcade / shooter / "
+        "platformer / RPG / racing / adventure games qualify. The "
+        "harness runs Z-Image-Turbo locally and the PNG paths come "
+        "back in your first-build prompt; load each via `new Image()` "
+        "+ `await img.decode()` (see playbook bullet image-load-race).",
         "Prompts should be SHORT and visual: \"pixel-art retro arcade "
         "spaceship facing right, white outline, transparent background\". "
         "Prefer pixel-art / sprite-sheet style with transparent "
@@ -121,13 +123,14 @@ ASSETS_FORMAT = FormatSpec(
         "Optional `size` is a string (\"64x64\", \"128x96\") or an int "
         "(square). Default 128 px square. Keep sprites small — 32–128 px "
         "is typical; over-large sprites blur when drawn small.",
-        "Skip <assets> for DOM-only games (todo, calculator, tic-tac-toe) "
-        "where text + emojis suffice. Skip when no canvas-rendered "
-        "entities exist.",
+        "SKIP <assets> ONLY for pure-DOM apps where text + emojis are "
+        "enough — todo lists, calculators, tic-tac-toe, color pickers. "
+        "If the canvas has any rendered entity with visual character, "
+        "EMIT <assets>; do not pre-emptively decide procedural drawing "
+        "would be 'good enough'.",
         "When the harness returns no asset paths in the first-build "
-        "prompt, Z-Image-Turbo was not reachable; fall back to "
-        "procedural drawing (ctx.fillRect / ctx.arc) as you would have "
-        "without <assets>.",
+        "prompt, Z-Image-Turbo was not reachable on this machine; only "
+        "THEN fall back to procedural drawing (ctx.fillRect / ctx.arc).",
     ],
 )
 
@@ -467,7 +470,46 @@ SYSTEM_PROMPT = build_system_prompt("{goal}")
 # Phase A — planning + acceptance criteria
 # ===========================================================================
 
-def plan_instruction(*, reference_block: str = "") -> str:
+# Modality keywords that signal the user wants generated art. Stays
+# genre-free per the project rule (no asteroids/snake/etc.) — these are
+# all about output character, not subject matter. When any of these
+# words appear in the goal, plan_instruction() escalates the <assets>
+# directive from "expected" to "REQUIRED THIS TURN" so qwen3.6 / gpt-oss
+# size models can't politely skip it.
+_ART_KEYWORDS = frozenset({
+    "art", "sprite", "sprites", "spritesheet", "graphic", "graphics",
+    "visual", "visuals", "pixel", "pixels", "pixelart", "image", "images",
+    "texture", "textures", "asset", "assets", "draw", "drawing", "drawn",
+    "icon", "icons", "render", "rendering", "illustration", "illustrations",
+    "artwork", "looks", "look", "gorgeous", "beautiful", "pretty",
+    "cool", "stunning", "polished",
+})
+
+
+def _detect_art_intent(goal: str) -> list[str]:
+    """Return a list of art-modality keywords found in `goal`. Empty
+    list means no intent detected; non-empty triggers a stronger
+    <assets> directive in the planning prompt.
+
+    Tokenization is just lowercased word splitting — no genre lookup,
+    no NER, nothing model-dependent. The match list is surfaced back
+    into the prompt so the model can see exactly which words triggered
+    the escalation.
+    """
+    if not goal:
+        return []
+    import re
+    words = re.findall(r"[a-zA-Z]+", goal.lower())
+    seen: set[str] = set()
+    out: list[str] = []
+    for w in words:
+        if w in _ART_KEYWORDS and w not in seen:
+            seen.add(w)
+            out.append(w)
+    return out
+
+
+def plan_instruction(*, reference_block: str = "", goal: str = "") -> str:
     """Phase A planning prompt, optionally prefixed with a Wikipedia
     reference block fetched by research.fetch().
 
@@ -477,9 +519,35 @@ def plan_instruction(*, reference_block: str = "") -> str:
     plausible but wrong genre (e.g. Space Invaders when asked for
     Missile Command). The reference block is short enough to keep in
     context across the planning + first-build turns.
+
+    When `goal` contains art-modality keywords (sprite, graphic, art,
+    pixel, image, …), we escalate the <assets> requirement — the model
+    must emit an <assets> block this turn or be wrong. Stops qwen3.6
+    from politely skipping the asset pipeline when the user explicitly
+    asks for sprites.
     """
+    art_keywords = _detect_art_intent(goal)
+    art_nudge = ""
+    if art_keywords:
+        kws = ", ".join(repr(k) for k in art_keywords)
+        art_nudge = (
+            "\n\nART INTENT DETECTED — your goal mentions "
+            f"{kws}. The user EXPLICITLY wants generated art. You MUST "
+            "emit an <assets> block this turn with one entry per visual "
+            "entity in the game (every character, enemy, projectile, "
+            "pickup, decoration the player will see). Skipping <assets> "
+            "and falling back to procedural ctx.fillRect drawing IS A "
+            "FAILURE for this goal — the user will notice the difference "
+            "between bare squares and real sprite art. ULTRA IMPORTANT: "
+            "do not omit <assets>; do not say \"I'll draw procedurally\"; "
+            "do not assume the diffuser is unavailable (the harness will "
+            "tell you if it is).\n"
+        )
+
+    body = PLAN_INSTRUCTION + art_nudge
+
     if not reference_block:
-        return PLAN_INSTRUCTION
+        return body
     return (
         f"{reference_block}\n\n"
         "AUTHORITY OF <reference>: the block above is from Wikipedia and "
@@ -493,7 +561,7 @@ def plan_instruction(*, reference_block: str = "") -> str:
         "not generic enemies. The user is going to recognize the game; "
         "if your <plan> doesn't match the reference, the run is wrong "
         "before any code is written.\n\n"
-        f"{PLAN_INSTRUCTION}"
+        f"{body}"
     )
 
 
@@ -540,7 +608,9 @@ window — either expose them (e.g. `window.state = state`) or use DOM /
 canvas-pixel checks instead. Aim for 3 to 5 probes that together check
 the criteria above. Keep each expr short.
 
-OPTIONAL — emit an <assets> block if sprite art would help:
+EXPECTED — emit an <assets> block whenever the game has visual entities
+the player will see (sprites, characters, projectiles, terrain). Most
+canvas games qualify: shooters, platformers, RPGs, racers, adventures.
 
 <assets>
 [
@@ -551,8 +621,12 @@ OPTIONAL — emit an <assets> block if sprite art would help:
 
 The harness runs a local Z-Image-Turbo diffuser and saves PNGs next to
 your HTML file. Their paths come back in the first-build prompt; load
-each via `new Image()` + `await img.decode()`. Skip <assets> for DOM-
-only games (todo lists, calculators) where text suffices.
+each via `new Image()` + `await img.decode()`.
+
+SKIP <assets> ONLY for pure-DOM apps where text + emojis suffice (todo
+lists, calculators, tic-tac-toe, color pickers). If the canvas has any
+rendered entity with visual character, EMIT <assets> — do NOT decide
+pre-emptively that procedural ctx.fillRect drawing is "good enough".
 
 No <html_file> yet. No prose outside tags.
 """
