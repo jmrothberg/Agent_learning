@@ -116,6 +116,14 @@ ASSETS_FORMAT = FormatSpec(
         "harness runs Z-Image-Turbo locally and the PNG paths come "
         "back in your first-build prompt; load each via `new Image()` "
         "+ `await img.decode()` (see playbook bullet image-load-race).",
+        "MIX sprites and procedural drawing freely. Sprites are right "
+        "for STATIC visual character (player, enemies, weapons, terrain "
+        "tiles, pickups). Procedural drawing is right for DESTRUCTIBLE "
+        "or STATE-RICH entities where runtime visual state must show "
+        "through (bunkers crumbling brick-by-brick, cracks appearing "
+        "on damage, health bars filling up, particle trails). Don't "
+        "force everything into one bucket — the typical game has "
+        "sprite walls/enemies AND procedural cell-based destructibles.",
         "Prompts should be SHORT and visual: \"pixel-art retro arcade "
         "spaceship facing right, white outline, transparent background\". "
         "Prefer pixel-art / sprite-sheet style with transparent "
@@ -486,6 +494,56 @@ _ART_KEYWORDS = frozenset({
 })
 
 
+# Modality keywords that signal the goal needs a 3D rendering technique.
+# Genre-free per the project rule — these all describe rendering shape
+# ("first-person view", "raycaster", "voxel"), not a specific game. The
+# goal is to nudge the model toward a real 3D library (three.js / babylon
+# / PlayCanvas via CDN) rather than hand-rolling a raycaster in 12 KB,
+# which is what produced the unplayable doom session.
+_3D_KEYWORDS = frozenset({
+    "3d", "three", "threejs",
+    "first-person", "firstperson", "fps",
+    "raycaster", "raycasting", "raycast",
+    "voxel", "voxels",
+    "wolfenstein", "doom-like", "doomlike", "minecraft-like", "minecraftlike",
+    "perspective",
+})
+
+
+def _detect_3d_intent(goal: str) -> list[str]:
+    """Return a list of 3D-modality keywords found in `goal`. Empty list
+    means the goal is plain 2D / DOM-only and needs no 3D nudge.
+    Single-token matches; multi-token phrases like "first person" are
+    detected by joining adjacent words and checking the joined form.
+
+    Tokenizer keeps digits so "3D" is matched as "3d" (not stripped to
+    "d"). Lowercased so the keyword set can stay all-lowercase.
+    """
+    if not goal:
+        return []
+    import re
+    words = [w.lower() for w in re.findall(r"[a-zA-Z0-9]+", goal)]
+    out: list[str] = []
+    seen: set[str] = set()
+    # Single-word match.
+    for w in words:
+        if w in _3D_KEYWORDS and w not in seen:
+            seen.add(w)
+            out.append(w)
+    # Two-word join match for "first person", "doom like", etc.
+    for i in range(len(words) - 1):
+        j = words[i] + words[i + 1]
+        if j in _3D_KEYWORDS and j not in seen:
+            seen.add(j)
+            out.append(j)
+        # And with hyphen variant
+        jh = words[i] + "-" + words[i + 1]
+        if jh in _3D_KEYWORDS and jh not in seen:
+            seen.add(jh)
+            out.append(jh)
+    return out
+
+
 def _detect_art_intent(goal: str) -> list[str]:
     """Return a list of art-modality keywords found in `goal`. Empty
     list means no intent detected; non-empty triggers a stronger
@@ -544,7 +602,35 @@ def plan_instruction(*, reference_block: str = "", goal: str = "") -> str:
             "tell you if it is).\n"
         )
 
-    body = PLAN_INSTRUCTION + art_nudge
+    threed_keywords = _detect_3d_intent(goal)
+    threed_nudge = ""
+    if threed_keywords:
+        kws = ", ".join(repr(k) for k in threed_keywords)
+        threed_nudge = (
+            "\n\n3D INTENT DETECTED — your goal mentions "
+            f"{kws}. STRONGLY PREFER three.js (or babylon.js / "
+            "PlayCanvas) via CDN over hand-rolling a raycaster or "
+            "writing 3D math from scratch. A few hundred lines of "
+            "`THREE.WebGLRenderer` + `Scene` + sprite-billboard "
+            "`Mesh`es will outperform 1000 lines of raycaster code, "
+            "and the user gets actual 3D fidelity.\n"
+            "\n"
+            "Suggested CDN imports (one is plenty):\n"
+            "  <script src=\"https://cdn.jsdelivr.net/npm/three@0.160/build/three.min.js\"></script>\n"
+            "  <script src=\"https://cdnjs.cloudflare.com/ajax/libs/babylonjs/6.32.0/babylon.min.js\"></script>\n"
+            "\n"
+            "Pair three.js with <assets>: load the generated PNGs as "
+            "`THREE.TextureLoader().load(path)` and apply them to "
+            "PlaneGeometry walls, SpriteMaterial billboards (for enemies/"
+            "weapons), or BoxGeometry tiles. That's how you ship real "
+            "Doom-shaped output instead of a 12 KB raycaster sketch.\n"
+            "\n"
+            "ONLY hand-roll a raycaster if the goal explicitly says "
+            "\"raycaster from scratch\" or \"no libraries\". Otherwise "
+            "use the library.\n"
+        )
+
+    body = PLAN_INSTRUCTION + art_nudge + threed_nudge
 
     if not reference_block:
         return body

@@ -1053,6 +1053,26 @@ class LiveBrowser:
                     "Note: keyboard test produced no canvas change, but the "
                     "page has clickable elements; treating as DOM-driven."
                 )
+        # A1 — probe failures gate the test. Until this commit, probes
+        # were advisory: the harness reported probe results but `ok`
+        # ignored them. So a game where the model's own probes
+        # (`player.health > 0`, `monsters.length > 0`) failed would
+        # still get `ok=True` and ship as "passed". Now any probe
+        # whose .ok is False appends a PROBE FAILED soft_warning,
+        # which the existing `ok` formula catches. See games/traces/
+        # game-of-doom-a-first-person-sh_20260506_230058.jsonl iter 1
+        # for the failure case this fixes.
+        for p in (report.get("probes") or []):
+            if p.get("ok"):
+                continue
+            name = p.get("name", "probe")
+            expr = (p.get("expr") or "")[:80]
+            err = p.get("err") or "evaluated falsy"
+            report["soft_warnings"].append(
+                f"PROBE FAILED [{name}]: `{expr}` — {err}. "
+                "Your Phase A acceptance criterion is unmet; fix the "
+                "game so it evaluates truthy."
+            )
         # ok must reflect the fresh soft_warnings count after we appended.
         report["ok"] = len(report["errors"]) == 0 and len(report["soft_warnings"]) == 0
         return report

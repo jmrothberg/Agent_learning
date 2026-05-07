@@ -633,6 +633,43 @@ class CodingBoxApp(App):
             "select text). Then Ctrl+Shift+C to copy. Or just `cat` the .log file "
             "from another terminal - path appears in the right pane.[/dim]"
         )
+        # Short prompt-engineering tips for medium-skilled local models
+        # (qwen3.6:27b/35b). Long-form guidance lives in the README;
+        # these are the four lines that move the success rate the most.
+        self._log("")
+        self._log("[bold]── how to write a prompt that ships a playable game ──[/bold]")
+        self._log(
+            "  • [b]Be specific about controls + win/lose:[/b] "
+            "\"WASD to move, mouse to aim, space to shoot, lose at 0 HP, "
+            "restart with R\". Vague goals → vague games."
+        )
+        self._log(
+            "  • [b]Name what's on screen:[/b] enemies, projectiles, terrain. "
+            "The agent uses these to request sprite art automatically."
+        )
+        self._log(
+            "  • [b]Ask for art directly:[/b] words like [italic]"
+            "\"sprite art\", \"pixel-art\", \"cool graphics\"[/italic] "
+            "trigger the Z-Image-Turbo pipeline. Skip them for DOM-only "
+            "apps (todo, calculator)."
+        )
+        self._log(
+            "  • [b]Mark mixed graphics explicitly:[/b] "
+            "\"sprites for X, but procedural for Y because Y gets destroyed "
+            "brick-by-brick\" — the model honors this and keeps state-rich "
+            "entities procedural."
+        )
+        self._log(
+            "  • [b]For 3D, just say \"3D\" or \"first-person\":[/b] the agent "
+            "detects this and switches to three.js via CDN. Don't ask for a "
+            "raycaster from scratch unless you really mean it."
+        )
+        self._log(
+            "  • [b]Iterate via plain text:[/b] after [b]<done/>[/b] just "
+            "type changes ([italic]\"the gun is sideways, rotate 90°\"[/italic]) "
+            "— it auto-extends. Use [b]/new <goal>[/b] only for unrelated games."
+        )
+        self._log("")
         self.query_one(Input).focus()
 
     # ----------------------------- helpers --------------------------------

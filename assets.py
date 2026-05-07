@@ -557,6 +557,29 @@ def render_asset_paths_block(
         "procedural by default — REPLACE its draw bodies with "
         "drawImage() calls."
     )
+    lines.append("")
+    lines.append(
+        "ORIENTATION: Z-Image-Turbo renders sprites in the orientation "
+        "the prompt described (e.g. \"facing right\"). If your in-game "
+        "entity faces a different way, ROTATE before drawing — do NOT "
+        "ship a sideways gun or a backwards player. Pattern:"
+    )
+    lines.append("")
+    lines.append(
+        "  ctx.save();"
+    )
+    lines.append(
+        "  ctx.translate(x + w / 2, y + h / 2);"
+    )
+    lines.append(
+        "  ctx.rotate(angle);  // radians; 0 = sprite's native facing"
+    )
+    lines.append(
+        "  ctx.drawImage(ASSETS.ship, -w / 2, -h / 2, w, h);"
+    )
+    lines.append(
+        "  ctx.restore();"
+    )
     lines.append(
         "============================================================"
     )

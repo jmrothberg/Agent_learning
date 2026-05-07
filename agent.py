@@ -303,6 +303,14 @@ class GameAgent:
         self.best_path: Path = out_dir / f"{basename}.best.html"
         self.conversation_path: Path = out_dir / "traces" / f"{basename}.conversation.md"
         self._previous_report_ok: bool | None = None
+        # A2 — streak of consecutive clean iterations. <done/> is only
+        # honored when streak >= 2, so the model can't ship after a
+        # single passing iter. Resets to 0 on any failed test, including
+        # probe failures (see A1). awaiting_confirm bypasses this check
+        # because the post-self-critique <confirm_done/> is a separate
+        # signal that already represents "model verified twice."
+        self._consecutive_clean_iters: int = 0
+        self._min_clean_streak_to_ship: int = 2
         self._snapshot_n: int = 0
         self._is_vlm: bool | None = None
         self._next_image_bytes: bytes | None = None
@@ -1789,11 +1797,18 @@ class GameAgent:
             said_done_or_confirm = bool(
                 _CONFIRM_RE.search(reply) or _DONE_RE.search(reply)
             )
+            # A2: <done/> needs a clean-streak of N iters (default 2).
+            # awaiting_confirm bypasses the streak — the post-critique
+            # <confirm_done/> already represents independent verification.
+            streak_ok = (
+                self._consecutive_clean_iters >= self._min_clean_streak_to_ship
+            )
             if (
                 said_done_or_confirm
                 and html_in_reply is None
                 and not patches_in_reply
-                and (awaiting_confirm or self._previous_report_ok is True)
+                and (awaiting_confirm
+                     or (self._previous_report_ok is True and streak_ok))
             ):
                 if self.has_pending_user_input():
                     yield self._record(AgentEvent(
@@ -1997,8 +2012,16 @@ class GameAgent:
             # failures on the same goal.
             if report["ok"]:
                 self._stuck_streak = 0
+                self._consecutive_clean_iters += 1
             else:
                 self._stuck_streak += 1
+                self._consecutive_clean_iters = 0
+            self._trace({
+                "kind": "streak_update",
+                "consecutive_clean_iters": self._consecutive_clean_iters,
+                "stuck_streak": self._stuck_streak,
+                "min_to_ship": self._min_clean_streak_to_ship,
+            })
 
             # Online playbook counter feedback. Off by default (tune
             # baselines should not write back). When on:
