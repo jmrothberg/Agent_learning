@@ -20,6 +20,10 @@ games/traces/
 games/memory/
 games/test_*.html
 games/tune/
+# Asset-pipeline artifacts (PNGs are 50-200KB each; cache grows over time)
+games/_asset_cache/
+games/_smoke/
+games/*_assets/
 
 # Editor / OS noise
 .vscode/

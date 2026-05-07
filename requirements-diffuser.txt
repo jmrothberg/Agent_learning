@@ -1,18 +1,28 @@
 # Optional GPU stack for Z-Image-Turbo sprite generation (assets.py).
-# Install with:  ./scripts/install_diffuser.sh
-# or:           .venv/bin/pip install -r requirements-diffuser.txt
+# Install with:  ./scripts/install_diffuser.sh   (recommended — handles
+# the torch nightly + diffusers git HEAD that Z-Image-Turbo requires).
+#
+# IMPORTANT: this file does NOT pin torch / diffusers because the
+# correct flavor depends on your CUDA version. The install script
+# pulls torch nightly (cu130 — needed for current GPUs) and diffusers
+# from git HEAD (Z-Image-Turbo support landed too recently for any
+# tagged release). The lines below are the *plain* deps that come
+# from PyPI normally.
+#
+# Manual install path (won't get Z-Image-Turbo support):
+#   .venv/bin/pip install -r requirements-diffuser.txt
 #
 # After install, the FIRST <assets> request in a session will:
-#   1. Download Z-Image-Turbo weights (~5GB) from HuggingFace into
-#      ~/.cache/huggingface/hub/, OR re-use weights at
-#      ~/Models_Diffusers/Z-Image-Turbo/ if present.
+#   1. Re-use Z-Image-Turbo weights at ~/Models_Diffusers/Z-Image-
+#      Turbo/ if present, else download (~5GB) from HuggingFace into
+#      ~/.cache/huggingface/hub/.
 #   2. Load the pipeline into GPU VRAM (~30-60s the first time).
 #   3. Generate each requested sprite at 768x768 (~2-4s per image).
 #
 # All in-process. No HTTP server, no subprocess.
 
-torch>=2.0.0
-diffusers>=0.30.0
 transformers>=4.40.0
 accelerate>=0.30.0
 safetensors>=0.4.0
+# torch and diffusers — install via scripts/install_diffuser.sh
+# (cu130 nightly + diffusers git HEAD).
