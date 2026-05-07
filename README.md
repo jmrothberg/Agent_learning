@@ -426,40 +426,80 @@ The existing `image-load-race` playbook bullet (`memory.py:858`) tells
 the model to wait for `await img.decode()` before drawing; that
 contract holds whether sprites are model-generated or hand-supplied.
 
-**Setup — install the optional GPU stack into THIS venv:**
+### What you need
+
+|                          | Linux + NVIDIA              | macOS (Apple Silicon)         | No GPU         |
+| ------------------------ | --------------------------- | ----------------------------- | -------------- |
+| **Hardware**             | NVIDIA GPU, ≥10 GB VRAM     | Apple Silicon, ≥16 GB RAM     | n/a            |
+| **Install**              | `./scripts/install_diffuser.sh` | `./scripts/install_diffuser.sh` | skip       |
+| **Torch flavor**         | nightly cu130 (default; override via `TORCH_CUDA=121`) | nightly w/ MPS         | n/a            |
+| **Model weights (~5 GB)**| auto-downloaded to `~/.cache/huggingface/hub/` on first `<assets>` use, OR pre-placed (see below) | same | n/a            |
+| **First-run cost**       | ~30 s pipeline load + ~14 s/image (256×256) | ~60 s + ~30–60 s/image (estimate, **experimental**) | n/a |
+| **Subsequent runs**      | ~14 s/image; cache hits = free hard-link | longer on MPS, still cache-free on hits | n/a |
+| **When unavailable**     | `try_load_image_generator()` returns `None` silently → agent logs *"Z-Image-Turbo not reachable, drawing procedurally"* and the session continues exactly as before. | same | same   |
+
+The Linux path is **verified working** on the user's NVIDIA GB10
+(testing record in commit `504b4a0`). MPS on Apple Silicon is
+experimental — Z-Image-Turbo's authors test on CUDA only; whether it
+works on a given Mac depends on the diffusers / torch nightly's MPS
+coverage of the model's specific ops. The pipeline detects MPS at
+runtime and uses `float16` instead of `bfloat16` (MPS bf16 is uneven).
+
+### Setup — one command
 
 ```bash
-./scripts/install_diffuser.sh
-# or directly:
-.venv/bin/pip install -r requirements-diffuser.txt
+./scripts/install_diffuser.sh         # Linux: cu130 nightly torch
+                                       # macOS: nightly w/ MPS
+                                       # other: CPU torch + warning
 ```
 
-This installs `torch`, `diffusers`, `transformers`, `accelerate`, and
-`safetensors` into `Agent_learning/.venv` (~5 GB download). Everything
-the asset pipeline needs is then **inside this repo's venv** — no
-sibling-repo paths, no shared interpreters, fully portable.
+The script:
+1. Detects your platform via `uname -s` and picks the right torch
+   index URL (`download.pytorch.org/whl/nightly/cu130` on Linux,
+   `…/whl/nightly/cpu` on macOS — that's the wheel that includes
+   MPS support).
+2. Installs torch + torchvision + torchaudio.
+3. Installs diffusers from **git HEAD** — `ZImagePipeline` only landed
+   recently, no tagged release has it yet.
+4. Installs transformers + accelerate + safetensors + pillow.
+5. Verifies CUDA / MPS, imports `ZImagePipeline`, calls
+   `assets.try_load_image_generator()` — must return a real
+   `ZImageTurboGenerator` (not `None`) for the install to count.
 
-**Where the model weights live:**
+If you have an older NVIDIA GPU that needs CUDA 12.x:
 
-`Z-Image-Turbo` weights are *data*, not code, so they live outside the
-repo (~5 GB of model files don't belong in git). Search order:
+```bash
+TORCH_CUDA=121 ./scripts/install_diffuser.sh
+TORCH_CUDA=124 ./scripts/install_diffuser.sh
+```
 
-1. `$DIFFUSION_MODELS_DIR/Z-Image-Turbo/` if the env var is set
-2. `/home/jonathan/Models_Diffusers/Z-Image-Turbo/` (the user's standard layout)
-3. `./models_diffusers/Z-Image-Turbo/` (relative — for portability)
-4. **HuggingFace fallback:** `Tongyi-MAI/Z-Image-Turbo` is downloaded
-   to `~/.cache/huggingface/hub/` on first use — no manual download
-   needed.
+### Where the model weights live (cross-platform)
 
-**When the install hasn't run** (no `torch` / no CUDA / no model),
-`try_load_image_generator()` returns `None` silently and the agent
-logs `Z-Image-Turbo not reachable — proceeding without assets, model
-will draw procedurally`. Sessions continue exactly as before — sprite
-generation is fully optional.
+Z-Image-Turbo weights are *data*, not code — they live outside the
+repo by design (~5 GB doesn't belong in git). The loader searches the
+following paths and uses the first one that exists:
 
-**Skip `<assets>` for DOM-only games** (todo list, calculator, tic-
-tac-toe). The format spec instructs the model to emit `<assets>` only
-when sprite art would help; for pure-DOM apps, text + emojis suffice.
+| Order | Path                                | Note                                      |
+| :---: | ----------------------------------- | ----------------------------------------- |
+| 1     | `$DIFFUSION_MODELS_DIR/Z-Image-Turbo/` | **Recommended override** — set this once |
+| 2     | `~/Models_Diffusers/Z-Image-Turbo/` | Linux convention                          |
+| 3     | `~/Diffusion_Models/Z-Image-Turbo/` | macOS convention                          |
+| 4     | `/home/jonathan/Models_Diffusers/Z-Image-Turbo/` | Legacy, kept for compat       |
+| 5     | `./models_diffusers/Z-Image-Turbo/` | Repo-relative — for portability           |
+| 6     | **HuggingFace fallback** `Tongyi-MAI/Z-Image-Turbo` | Auto-downloaded on first use to `~/.cache/huggingface/hub/`. Honors `HF_HOME` if set. |
+
+To use a custom location (e.g. an external SSD), add to your shell rc:
+
+```bash
+# Linux / macOS
+export DIFFUSION_MODELS_DIR=/Volumes/External/Diffusion_Models   # mac
+export DIFFUSION_MODELS_DIR=/data/Diffusion_Models                # linux
+```
+
+Skip every step above and the agent still works — it just won't have
+sprites. **Skip `<assets>` for DOM-only games** (todo list,
+calculator, tic-tac-toe); the format spec instructs the model to emit
+`<assets>` only when sprite art would help.
 
 ### Roadmap items also shipped on this branch
 

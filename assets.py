@@ -46,17 +46,42 @@ from typing import Any
 # is a good middle ground, can be overridden per-asset by the model.
 _DEFAULT_TARGET_SIZE = 128
 
-# Where Z-Image-Turbo's weights live on disk. Search order:
-#   1. $DIFFUSION_MODELS_DIR env var (if set)
-#   2. /home/jonathan/Models_Diffusers (the user's standard layout)
-#   3. ./models_diffusers (relative — for portability)
-#   4. HuggingFace hub fallback (Tongyi-MAI/Z-Image-Turbo) on first run.
+# Where Z-Image-Turbo's weights live on disk. Cross-platform — works on
+# Linux (Models_Diffusers convention) and macOS (Diffusion_Models
+# convention). Override per-machine via DIFFUSION_MODELS_DIR.
+#
+# Search order — first existing directory wins:
+#   1. $DIFFUSION_MODELS_DIR env var (preferred override)
+#   2. ~/Models_Diffusers      (this user's Linux layout)
+#   3. ~/Diffusion_Models      (this user's macOS layout)
+#   4. /home/jonathan/Models_Diffusers   (legacy, kept so existing
+#                                         setups don't break on update)
+#   5. ./models_diffusers      (repo-relative — for portability when
+#                               cloning fresh on a new machine)
+#   6. HuggingFace fallback: `Tongyi-MAI/Z-Image-Turbo` is downloaded
+#      to ~/.cache/huggingface/hub/ on first run if no local path
+#      matches — no manual download needed.
+#
 # Model files are DATA, not code; they live outside the repo by design
 # (5GB+) but the search code itself stays self-contained here.
-_MODEL_SEARCH_DIRS = [
-    "/home/jonathan/Models_Diffusers",
-    "./models_diffusers",
-]
+
+import os as _os
+
+
+def _default_model_search_dirs() -> list[str]:
+    """Build the search list at import time. `~` is expanded so the
+    list is concrete absolute paths plus one relative entry.
+    """
+    home = _os.path.expanduser("~")
+    return [
+        _os.path.join(home, "Models_Diffusers"),
+        _os.path.join(home, "Diffusion_Models"),
+        "/home/jonathan/Models_Diffusers",
+        "./models_diffusers",
+    ]
+
+
+_MODEL_SEARCH_DIRS = _default_model_search_dirs()
 _HF_FALLBACK_MODEL_ID = "Tongyi-MAI/Z-Image-Turbo"
 
 # Cap so a chatty plan can't trigger 50 generations.
@@ -200,6 +225,8 @@ class ZImageTurboGenerator:
     def __init__(self, model_path: str | None = None) -> None:
         self.model_path = model_path or _resolve_zimage_path()
         self._pipeline: Any = None  # lazy-init in .generate()
+        # Resolved at first .generate() call; "cuda", "mps", or None.
+        self._device: str | None = None
 
     def cleanup(self) -> None:
         if self._pipeline is None:
@@ -221,20 +248,37 @@ class ZImageTurboGenerator:
             from diffusers import ZImagePipeline
         except Exception:
             return False
-        if not torch.cuda.is_available():
-            # Z-Image-Turbo is GPU-only by design; the original
-            # diffusion_manager bails on CPU too. Honest upstream behavior.
+
+        # Pick the best available device. Z-Image-Turbo's authors
+        # ship and test on CUDA; MPS is experimental — may work on
+        # recent Apple Silicon + diffusers nightlies, may not. CPU is
+        # excluded because inference would take 10+ minutes per image
+        # (an hour for a 5-asset session), worse than just drawing
+        # procedurally.
+        if torch.cuda.is_available():
+            device = "cuda"
+            dtype = torch.bfloat16   # Blackwell-class GPU sweet spot
+        elif (
+            hasattr(torch.backends, "mps")
+            and torch.backends.mps.is_available()
+        ):
+            device = "mps"
+            dtype = torch.float16    # MPS bf16 support is uneven
+        else:
             return False
+
         try:
             self._pipeline = ZImagePipeline.from_pretrained(
                 self.model_path,
-                torch_dtype=torch.bfloat16,  # optimal for Blackwell-class GPUs
+                torch_dtype=dtype,
                 low_cpu_mem_usage=False,
             )
-            self._pipeline.to("cuda")
+            self._pipeline.to(device)
+            self._device = device
             return True
         except Exception:
             self._pipeline = None
+            self._device = None
             return False
 
     def generate(self, prompt: str) -> str | None:
@@ -245,13 +289,17 @@ class ZImageTurboGenerator:
         try:
             import tempfile
             import torch
+            # `torch.Generator(device)` ensures the seed RNG lives on
+            # the same device as the pipeline; mismatched devices throw
+            # `RuntimeError: Expected all tensors to be on the same device`.
+            gen = torch.Generator(self._device or "cpu").manual_seed(42)
             image = self._pipeline(
                 prompt=prompt,
                 height=768,
                 width=768,
                 num_inference_steps=9,   # 8 actual DiT forwards in turbo mode
                 guidance_scale=0.0,      # turbo: guidance must be 0
-                generator=torch.Generator("cuda").manual_seed(42),
+                generator=gen,
             ).images[0]
             f = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
             f.close()

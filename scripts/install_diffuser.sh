@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 # Install the optional Z-Image-Turbo sprite-generation GPU stack into
-# Agent_learning/.venv. Re-uses pip's wheel cache so if you already
-# have these versions in another venv on this machine, it's fast.
+# Agent_learning/.venv. Cross-platform: detects Linux (CUDA) vs macOS
+# (MPS) vs other (CPU — not recommended for Z-Image-Turbo) and picks
+# the right torch wheel index.
+#
+# Re-uses pip's wheel cache so if you already have these versions
+# elsewhere on this machine, it's fast.
 #
 # After this completes, sessions whose Phase A includes an <assets>
 # block will generate real PNG sprites in-process (no server) and
 # inject the paths into the first-build prompt.
 #
-# Skip this if you don't have a CUDA GPU, or just don't want sprite
-# generation — the agent runs fine without it (procedural ctx.fillRect
-# drawing, like every prior version).
+# Skip this if you don't have a GPU — the agent runs fine without it,
+# falling back to procedural ctx.fillRect drawing.
 
 set -euo pipefail
 
@@ -24,16 +27,48 @@ PIP=".venv/bin/pip"
 PY=".venv/bin/python"
 
 # ---------------------------------------------------------------------------
-# Z-Image-Turbo support is recent — only the diffusers git HEAD knows
-# about ZImagePipeline (no tagged release as of 2026-05-06). torch
-# nightly with CUDA 13 is what current GPUs (Blackwell, etc.) need.
-# These versions match the user's working Colossal_Cave setup.
+# Platform detection. Z-Image-Turbo support is recent — only diffusers
+# git HEAD knows about ZImagePipeline (no tagged release as of
+# 2026-05-06). The torch flavor differs by platform:
+#
+#   Linux + NVIDIA   →  cu130 nightly (Blackwell-class GPUs need cu13)
+#   macOS            →  generic nightly (Apple Silicon MPS support
+#                       built into the wheels from PyPI)
+#   anything else    →  CPU torch from PyPI (warned: too slow for
+#                       Z-Image-Turbo in practice)
+#
+# Override CUDA version with $TORCH_CUDA (e.g. 121, 124, 130) if your
+# GPU needs an older one.
 # ---------------------------------------------------------------------------
 
-echo "[1/3] Installing torch nightly (cu130) — re-uses wheel cache if present …"
-$PIP install --pre \
-  --index-url https://download.pytorch.org/whl/nightly/cu130 \
-  torch torchvision torchaudio
+OS="$(uname -s)"
+TORCH_CUDA="${TORCH_CUDA:-130}"
+
+case "$OS" in
+  Darwin)
+    PLATFORM_LABEL="macOS (MPS / Apple Silicon)"
+    TORCH_INDEX_FLAGS="--pre --index-url https://download.pytorch.org/whl/nightly/cpu"
+    DEVICE_NOTE="Apple Silicon Macs use MPS via the same PyTorch wheel — Z-Image-Turbo on MPS is EXPERIMENTAL."
+    ;;
+  Linux)
+    PLATFORM_LABEL="Linux + NVIDIA (CUDA $TORCH_CUDA)"
+    TORCH_INDEX_FLAGS="--pre --index-url https://download.pytorch.org/whl/nightly/cu${TORCH_CUDA}"
+    DEVICE_NOTE="If your GPU needs a different CUDA version, re-run with TORCH_CUDA=121 (or 124, etc)."
+    ;;
+  *)
+    PLATFORM_LABEL="$OS (no GPU support)"
+    TORCH_INDEX_FLAGS="--pre"
+    DEVICE_NOTE="WARNING: no recognized GPU platform; CPU inference is impractically slow for Z-Image-Turbo."
+    ;;
+esac
+
+echo "Platform: $PLATFORM_LABEL"
+echo "          $DEVICE_NOTE"
+echo
+
+echo "[1/3] Installing torch + torchvision + torchaudio …"
+# shellcheck disable=SC2086
+$PIP install $TORCH_INDEX_FLAGS torch torchvision torchaudio
 
 echo
 echo "[2/3] Installing diffusers from git HEAD (needed for ZImagePipeline) …"
@@ -44,7 +79,7 @@ echo "[3/3] Installing transformers / accelerate / safetensors / pillow …"
 $PIP install --upgrade transformers accelerate safetensors pillow
 
 echo
-echo "Verifying CUDA + diffusers + ZImagePipeline are wired up …"
+echo "Verifying GPU + diffusers + ZImagePipeline are wired up …"
 $PY - <<'PY'
 import importlib.util as iu
 ok_torch = iu.find_spec("torch") is not None
@@ -54,14 +89,21 @@ print(f"  diffusers installed:    {ok_diffusers}")
 if ok_torch:
     import torch
     print(f"  torch version:          {torch.__version__}")
-    print(f"  CUDA available:         {torch.cuda.is_available()}")
-    if torch.cuda.is_available():
+    cuda_ok = torch.cuda.is_available()
+    mps_ok = (
+        hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+    )
+    print(f"  CUDA available:         {cuda_ok}")
+    print(f"  MPS available:          {mps_ok}")
+    if cuda_ok:
         print(f"  CUDA device:            {torch.cuda.get_device_name(0)}")
         free, total = torch.cuda.mem_get_info(0)
         print(f"  GPU memory free/total:  {free/1e9:.1f}GB / {total/1e9:.1f}GB")
+    elif not (cuda_ok or mps_ok):
+        print("  No GPU detected — Z-Image-Turbo will refuse to load.")
 if ok_diffusers:
     try:
-        from diffusers import ZImagePipeline
+        from diffusers import ZImagePipeline  # noqa: F401
         print(f"  ZImagePipeline class:   importable ✓")
     except Exception as e:
         print(f"  ZImagePipeline class:   IMPORT FAILED — {e!r}")
@@ -74,8 +116,9 @@ import assets
 gen = assets.try_load_image_generator()
 print(f"  → {gen!r}")
 if gen is None:
-    print("  Still None — see warnings above. Most likely no CUDA GPU on this host.")
+    print("  Still None — most likely no GPU on this host.")
 else:
     print("  ✓ ready. Z-Image-Turbo will load on the first <assets> request")
-    print("    (~30-60s once per session, then ~2-4s per sprite).")
+    print("    (~30-60s once per session, then ~2-4s per sprite on CUDA;")
+    print("     longer on MPS).")
 PY
