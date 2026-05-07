@@ -206,12 +206,18 @@ class GameAgent:
         max_iters: int = 6,
         *,
         best_of_n: int = 1,
-        # 8192 matches Ollama's default load size for gpt-oss. Sending a
-        # different value forces a model reload every request and was the
-        # root cause of "Ollama call failed" errors after several runs.
-        # Conversation pruning (_prune_messages) keeps us under this even
-        # across many iterations.
-        num_ctx: int = 8192,
+        # Ollama context window. qwen3.6:27b/35b natively supports 128K+,
+        # gpt-oss supports 128K — at 8K we were truncating mid-<assets>
+        # block on long planning turns (see games/traces/make-a-small-
+        # first-person-shoo_20260506_222042). Bumped default to 32768
+        # which fits the system prompt + plan + first-build with room
+        # for several feedback iterations before structured compaction.
+        # Override explicitly via constructor or via the
+        # CODING_BOX_NUM_CTX env var if your model needs different.
+        # Note: changing num_ctx between calls forces an Ollama model
+        # reload — to avoid that, preload at the desired size with
+        # `ollama run --ctx-size 32768 <model>` before starting a session.
+        num_ctx: int = 32768,
         # 90s per-chunk inactivity. With 16K ctx + 20B model, time-to-first
         # token can be 20-40s on a fresh load; we want headroom but still
         # detect a true wedge promptly.
@@ -802,6 +808,18 @@ class GameAgent:
 
     def _flush_user_injections(self, base_message: str) -> str:
         parts: list[str] = []
+        # Snapshot the queue BEFORE consuming so we can push a visible
+        # "✓ APPLIED to this turn" confirmation into the agent log via
+        # the TUI's token callback. Without this, only the right-hand
+        # status panel reflects the queue draining — the left-hand log
+        # (where the user's eye lives) shows nothing, leaving them
+        # uncertain whether their typing actually reached the model.
+        consumed_items: list[str] = []
+        if self._pending_answer is not None:
+            consumed_items.append(f"answer: {self._pending_answer[:120]}")
+        for fb in self._pending_feedback:
+            consumed_items.append(f"feedback: {fb[:120]}")
+
         if self._pending_answer is not None:
             ans = self._pending_answer
             parts.append(
@@ -832,6 +850,21 @@ class GameAgent:
             self._pending_bullet_lookups.clear()
         if base_message:
             parts.append(base_message)
+
+        # Push a confirmation line into the TUI agent log via the token
+        # callback. Plain text only — the TUI renders streamed tokens
+        # via Rich's Text() (no markup parsing) so any [tag] would
+        # appear literally. Newlines bracket the line so the streaming
+        # buffer flushes it as a discrete log line. Bypassed on CLI
+        # runs (no callback wired) — those users see feedback_injected
+        # events in the trace instead.
+        if consumed_items and self._token_cb is not None:
+            try:
+                preview = "; ".join(consumed_items)
+                self._token_cb(f"\n>> APPLIED to this turn: {preview}\n")
+            except Exception:
+                pass
+
         return "\n\n".join(parts)
 
     # -- streaming ----------------------------------------------------------

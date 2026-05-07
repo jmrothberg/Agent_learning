@@ -105,6 +105,11 @@ fi
 # Mistakes: drop the file entirely (recreated on next session).
 rm -f games/memory/mistakes.jsonl
 
+# Per-session asset dirs (games/<slug>_<ts>_assets/). The shared cache
+# at games/_asset_cache/ stays — that's what makes re-runs free.
+find games -maxdepth 1 -mindepth 1 -type d -name "*_assets" \
+    -not -name "_asset_cache" -exec rm -rf {} +
+
 # Tune-battery runs: drop subdirs, keep battery.jsonl test definitions.
 if [ -d games/tune ]; then
     find games/tune -maxdepth 1 -mindepth 1 -type d -exec rm -rf {} +
