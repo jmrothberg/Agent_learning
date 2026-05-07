@@ -90,13 +90,61 @@ _MAX_ASSETS_PER_TURN = 8
 _ASSETS_RE = re.compile(
     r"<assets>\s*(.*?)\s*</assets>", re.DOTALL | re.IGNORECASE,
 )
+# Truncated case — model emitted <assets>[...content...] but the stream
+# ended before </assets>. We've seen this on long planning turns where
+# the model exhausts the token budget mid-block. Recover by treating
+# everything from <assets>[ to end-of-reply as the body, then trying to
+# repair the JSON list (drop the incomplete trailing entry, close the
+# bracket).
+_ASSETS_OPEN_RE = re.compile(
+    r"<assets>\s*(\[.*?)$", re.DOTALL | re.IGNORECASE,
+)
+
+
+def _extract_assets_body(reply: str) -> str | None:
+    """Pull the body of an <assets>...</assets> block, tolerating a
+    missing closing tag. Returns None when nothing usable was found."""
+    m = _ASSETS_RE.search(reply)
+    if m:
+        return m.group(1)
+    m = _ASSETS_OPEN_RE.search(reply)
+    if m:
+        return m.group(1)
+    return None
+
+
+def _try_repair_truncated_json_list(text: str) -> list[Any]:
+    """Best-effort recovery of a JSON list whose stream was cut off.
+
+    Walks back from the end of `text` looking for the last `}` (closing
+    a complete object) and treats everything up to that point as a
+    valid list, plus a synthesized `]`. Drops any incomplete trailing
+    entry. Returns [] if recovery fails. Used only when the strict
+    `json.loads(body)` already failed.
+    """
+    text = text.rstrip().rstrip(",").rstrip()
+    if text.endswith("]"):
+        return []  # already closed; strict parse will have caught real errors
+    last_brace = text.rfind("}")
+    if last_brace < 0:
+        return []
+    candidate = text[: last_brace + 1] + "]"
+    try:
+        obj = json.loads(candidate)
+        return obj if isinstance(obj, list) else []
+    except Exception:
+        return []
 
 
 def parse_assets_block(reply: str) -> list[dict]:
     """Extract the JSON list inside <assets>...</assets>.
 
-    Tolerant of fenced ```json wrappers (some models love adding them).
-    Returns [] if the tag is missing or the JSON is malformed; the
+    Tolerant of fenced ```json wrappers (some models love adding them)
+    AND of truncated streams that cut off before </assets> (recovered
+    by `_try_repair_truncated_json_list` — drops the incomplete final
+    entry and treats the rest as a complete list).
+
+    Returns [] if no <assets> opener is present or recovery fails; the
     caller should treat empty as "model didn't request assets" and
     skip the pipeline.
 
@@ -105,16 +153,17 @@ def parse_assets_block(reply: str) -> list[dict]:
     """
     if not reply:
         return []
-    m = _ASSETS_RE.search(reply)
-    if not m:
+    body = _extract_assets_body(reply)
+    if body is None:
         return []
-    body = m.group(1).strip()
+    body = body.strip()
     body = re.sub(r"^```(?:json|JSON)?\s*\n", "", body)
     body = re.sub(r"\n?```$", "", body).strip()
     try:
         obj = json.loads(body)
     except Exception:
-        return []
+        # Truncated stream / trailing garbage — try repair.
+        obj = _try_repair_truncated_json_list(body)
     if not isinstance(obj, list):
         return []
     out: list[dict] = []

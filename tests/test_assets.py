@@ -130,6 +130,46 @@ def test_parse_malformed_json_returns_empty():
     assert parse_assets_block(reply) == []
 
 
+def test_parse_recovers_from_truncated_stream():
+    """Real failure mode from May 7 FPS run: model emitted <assets>
+    + a JSON list, but the stream ended mid-prompt before the closing
+    `]` and `</assets>`. We should recover all complete entries and
+    drop the incomplete trailing one."""
+    reply = '''<plan>doom shooter</plan>
+<criteria>...</criteria>
+<probes>[]</probes>
+<assets>
+[
+  {"name": "demon",   "prompt": "pixel-art red demon"},
+  {"name": "imp",     "prompt": "pixel-art brown imp"},
+  {"name": "shotgun", "prompt": "pixel-art shotgun first person"},
+  {"name": "wall",    "prompt": "pixel-art stone wall texture"},
+  {"name": "muzzle_flash", "prompt": "pixel-art yellow muzzle flas'''
+    out = parse_assets_block(reply)
+    assert len(out) == 4   # demon, imp, shotgun, wall — muzzle_flash was incomplete
+    names = [s["name"] for s in out]
+    assert "demon" in names
+    assert "wall" in names
+    assert "muzzle_flash" not in names
+
+
+def test_parse_recovers_with_no_closing_bracket():
+    """Variant: stream truncated INSIDE a complete object, before the
+    list bracket closes. The last `}` is well-formed, so we recover."""
+    reply = '<assets>[{"name":"a","prompt":"p1"},{"name":"b","prompt":"p2"}'
+    out = parse_assets_block(reply)
+    assert len(out) == 2
+    assert [s["name"] for s in out] == ["a", "b"]
+
+
+def test_parse_truncation_recovery_falls_through_on_no_objects():
+    """If the truncated body has no complete `{...}` we can find,
+    return [] instead of crashing."""
+    reply = '<assets>\n[\n  {"incomplete'
+    out = parse_assets_block(reply)
+    assert out == []
+
+
 def test_parse_size_int_default():
     reply = '''<assets>[{"name":"x","prompt":"y","size": 96}]</assets>'''
     out = parse_assets_block(reply)
