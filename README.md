@@ -225,6 +225,10 @@ Each technique is matched to a *specific* small-model failure mode:
 | **3D intent detector**       | Model hand-rolls a raycaster in 12 KB when a CDN three.js + sprite billboards would ship a real 3D game in the same effort | `prompts_v1._detect_3d_intent` triggers on `3d / fps / first-person / raycaster / voxel / minecraftlike / wolfenstein / perspective`; injects three.js / babylon CDN nudge into Phase A |
 | **Mixed sprite/procedural**  | Model forces every entity into one bucket; misses that destructible-state needs procedural drawing while static character needs sprites | `prompts_v1.ASSETS_FORMAT.guidelines` explicitly teaches: sprites for static (player/enemies/walls), procedural for destructible (bunkers crumbling brick-by-brick, cracks, damage levels) |
 | **Sprite-orientation pattern** | `drawImage` ships a sideways gun because the sprite was rendered facing right but drawn flat | `assets.render_asset_paths_block` includes the `save / translate / rotate / drawImage / restore` snippet inline in the asset paths block the model receives |
+| **Honest probe signal**      | Probe failures triggered by harness-side canvas-tainting (file:// + drawImage made `getImageData` throw `SecurityError`); a working render was reported as failed and shipped a regression | Chromium launches with `--allow-file-access-from-files` + `--disable-web-security`; probe runner detects `tainted / cross-origin / SecurityError` and downgrades those probes to `ok=True` with a `downgraded` reason; `non_blank` example replaced with a `toDataURL`+try/catch+dimension fallback |
+| **Chroma-key transparent backgrounds** | Z-Image-Turbo doesn't honor `transparent background` prompts; the model tried to chroma-key in JS at runtime, tainting the canvas and breaking RAF | `assets._chroma_key_to_rgba`: PIL pass after generation samples 8 corner+edge points, requires ≥6/8 agreement to pick a dominant bg color, alpha-masks within tolerance, saves RGBA PNG. Stats logged per-asset (`bg_color`, `alpha_pixel_ratio`) so you can see at a glance whether the chroma-key actually fired |
+| **Per-iter HTML hash**       | Test events were hard to correlate with the exact code that produced them; "did iter 3 actually change anything?" required manual diffing of snapshots | `code_snapshot` trace event includes 16-hex `html_sha256` so iter→code linkage is direct |
+| **Error source split**       | One catch-all `errors[]` mixed `console.error('debug')` (informational) with `UNCAUGHT TypeError` (real crash) — model treated them with equal urgency | Report fields split: `console_errors` / `page_errors` / `probe_errors`. `format_report_for_model` renders **PAGE ERRORS (must fix)** separately from CONSOLE ERRORS |
 | **Stuck-loop reflection**    | Same wrong fix tried 3 times in a row                          | v1 `fix_instruction` switches to "5–7 different sources" mode after `stuck_streak >= 2` |
 | **Fuzzy patch matching**     | Smart-quote / em-dash / NBSP drift between model output and file → `<patch>` "SEARCH not found" | `patches._normalize_chars` (1:1 char-preserving NFKC-lite) |
 | **Patch uniqueness + non-overlap** | Ambiguous SEARCH silently picks wrong site; overlapping patches splice garbage | `patches._locate` + reverse-order apply in `apply_patches` |
@@ -435,9 +439,20 @@ The harness then (all in-process, no server, no subprocess):
    Pipeline never loads on sessions that don't request assets, so the
    cost is opt-in per turn.
 3. Generates each missing PNG at native 768×768, downscales with PIL
-   Lanczos to the per-asset target size (default 128 px).
+   Lanczos to the per-asset target size (default 128 px), then runs
+   a **chroma-key alpha pass** (`_chroma_key_to_rgba`) to remove the
+   solid background Z-Image-Turbo always produces — even when the
+   prompt says "transparent background". The pass samples 8 corner
+   and edge pixels, requires ≥6/8 agreement to pick a dominant bg
+   color, and alpha-masks pixels within tolerance. If no clear bg
+   color is detected (e.g. a foreground that fills the frame), the
+   pass leaves the image alone — better to skip masking than risk
+   eating real pixels. Per-asset `bg_color` + `alpha_pixel_ratio`
+   are logged in the trace so you can see whether the chroma-key
+   actually fired and how aggressively.
 4. Caches by `sha256(model_id, normalized_prompt, size)` so repeated
-   prompts across sessions are free.
+   prompts across sessions are free. Cache stores the post-chroma-key
+   RGBA PNG.
 5. Saves PNGs into `games/<slug>_<ts>_assets/<name>.png`, hard-linked
    from the cache.
 6. Prepends a `GENERATED ASSETS` block to the first-build prompt
