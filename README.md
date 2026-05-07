@@ -461,7 +461,8 @@ The script:
 2. Installs torch + torchvision + torchaudio.
 3. Installs diffusers from **git HEAD** — `ZImagePipeline` only landed
    recently, no tagged release has it yet.
-4. Installs transformers + accelerate + safetensors + pillow.
+4. Installs transformers + accelerate + safetensors + pillow (the
+   plain pip-pinnable deps — see `requirements-diffuser.txt`).
 5. Verifies CUDA / MPS, imports `ZImagePipeline`, calls
    `assets.try_load_image_generator()` — must return a real
    `ZImageTurboGenerator` (not `None`) for the install to count.
@@ -472,6 +473,42 @@ If you have an older NVIDIA GPU that needs CUDA 12.x:
 TORCH_CUDA=121 ./scripts/install_diffuser.sh
 TORCH_CUDA=124 ./scripts/install_diffuser.sh
 ```
+
+After install, **smoke-test the pipeline end-to-end** before running a
+real session:
+
+```bash
+.venv/bin/python scripts/_smoke_doom.py
+```
+
+This generates a single 256×256 PNG from the prompt *"doom video game
+cover art, demon with red skin and horns screaming"*, saves it to
+`games/_smoke/doom.png`, and prints the path. ~120 s on first run
+(pipeline load + first-call CUDA kernel compile); ~14 s on subsequent
+runs. If this works, real sessions will work.
+
+### How the model knows to use sprites
+
+The agent is biased toward emitting `<assets>` for any canvas-rendered
+game; small models (qwen3.6, gpt-oss) will sometimes politely skip it
+without a stronger nudge. Two layers:
+
+1. **Always-on framing.** `prompts_v1.PLAN_INSTRUCTION` says `<assets>`
+   is **EXPECTED** (not optional) for canvas games and **SKIP only for
+   pure-DOM apps** (todo / calculator / tic-tac-toe).
+2. **Goal-keyword escalation.** `prompts_v1._detect_art_intent(goal)`
+   scans the user's goal for modality words (`sprite`, `art`,
+   `graphic`, `pixel`, `image`, `texture`, `asset`, `draw`, `icon`,
+   `render`, `illustration`, plus polish adjectives like `cool` /
+   `gorgeous` / `stunning`). Any match injects an `ART INTENT DETECTED`
+   callout above the planning template with `ULTRA IMPORTANT` framing,
+   making `<assets>` mandatory for that turn.
+
+The keyword list is intentionally **genre-free** — only words about
+output character, never subject matter. So "build me a doom-like
+shooter" doesn't fire; "build me a doom-like shooter with cool sprite
+art" does. This matches the project rule against hardcoded genre
+lists for retrieval / probes / skeletons.
 
 ### Where the model weights live (cross-platform)
 
@@ -823,7 +860,10 @@ research step is the new front-line defense — it shapes the plan before
 any code is written, so wrong-game wins should be much rarer going
 forward. But everything saved before that fix landed is suspect.
 
-**Cleanup utility:**
+**Cleanup utilities — two flavors:**
+
+For **single-session surgery** (one bad session whose skeleton +
+goals you want to forget):
 
 ```bash
 # See what's stored.
@@ -835,6 +875,22 @@ forward. But everything saved before that fix landed is suspect.
 # Dry-run first if unsure.
 .venv/bin/python scripts/forget_session.py --dry-run <session_id>
 ```
+
+For **bulk wipe** when `games/` has accumulated a lot of stale runs
+and you want a fresh baseline:
+
+```bash
+./scripts/clean_artifacts.sh          # interactive — shows what will go, then asks
+./scripts/clean_artifacts.sh --yes    # unattended
+```
+
+This deletes per-session HTML, traces, snapshots, every `won_*`
+auto-promoted skeleton (but **keeps `canvas_basic.html`**), the
+`goals/` cache, `mistakes.jsonl`, and tune-battery run dirs (but
+keeps `tune/battery.jsonl`). The seed playbook, asset cache, and
+smoke artifacts survive. First run on a busy `games/` typically
+shrinks it from several megabytes to a few hundred KB; re-runs are
+no-ops once the tree is clean.
 
 What `forget_session.py` touches:
 
