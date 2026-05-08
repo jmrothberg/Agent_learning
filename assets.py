@@ -419,28 +419,78 @@ class ZImageTurboGenerator:
             return None
 
 
-def try_load_image_generator(
-    model_id: str = "Z-Image-Turbo",  # kept for API stability; unused
-    diffuser_dir: str | None = None,  # kept for API stability; unused
-) -> Any:
-    """Construct a ZImageTurboGenerator if torch + diffusers + a CUDA
-    GPU are available in THIS interpreter. Returns None silently if
-    anything is missing — the caller treats None as "skip asset
-    generation, proceed without."
+# Module-level cache for a preloaded generator. Set by `preload()`
+# (called from chat.py's main BEFORE Playwright/Chromium starts) and
+# returned by subsequent `try_load_image_generator()` calls so the
+# agent reuses the already-loaded pipeline instead of triggering its
+# own _lazy_init — which would fork a subprocess with Playwright's
+# IPC pipes already in the inherited fd table, making
+# _posixsubprocess.fork_exec raise "bad value(s) in fds_to_keep".
+# That subprocess fork happens once per pipeline load (huggingface_hub
+# / safetensors / transformers do it during from_pretrained); doing
+# it before Playwright opens its pipes is the entire fix.
+_PRELOADED: Any = None
 
-    Self-contained: no sys.path injection of sibling repos, no
-    subprocess, no server. If the Agent_learning venv lacks torch,
-    install it INTO the venv (see README "Generated sprites" for
-    the install command); the agent will not borrow from elsewhere.
+
+def preload() -> Any:
+    """Eagerly construct + load the Z-Image-Turbo pipeline RIGHT NOW.
+
+    Call this from your program's main entry, BEFORE any subprocess-
+    spawning library (Playwright/Chromium, multiprocessing pools, etc)
+    has opened file descriptors. The ~15-30s pipeline load includes a
+    fork of subprocess.Popen via huggingface_hub or transformers; if
+    that fork happens AFTER Playwright is up, the inherited fd table
+    has Playwright's pipe handles and the fork raises ValueError:
+    bad value(s) in fds_to_keep. Loading first sidesteps this entirely.
+
+    Returns the loaded generator (cached and reused by future calls
+    to try_load_image_generator), or None when torch/diffusers aren't
+    installed. Idempotent: subsequent calls return the same instance.
     """
+    global _PRELOADED
+    if _PRELOADED is not None:
+        return _PRELOADED
+    gen = _construct_generator()
+    if gen is None:
+        return None
+    # Trigger the heavy load NOW so the subprocess fork happens
+    # before Playwright/etc opens any FDs. _lazy_init returns False
+    # on failure with the reason on _last_error; we still cache the
+    # wrapper so the agent path can read _last_error and skip
+    # gracefully instead of retrying the broken fork.
+    gen._lazy_init()
+    _PRELOADED = gen
+    return gen
+
+
+def _construct_generator() -> Any:
+    """Internal: just check imports and construct a wrapper. Pulled
+    out of try_load_image_generator so preload() can share it."""
     import importlib.util as _iu
     if _iu.find_spec("torch") is None or _iu.find_spec("diffusers") is None:
         return None
     try:
-        gen = ZImageTurboGenerator()
-        return gen
+        return ZImageTurboGenerator()
     except Exception:
         return None
+
+
+def try_load_image_generator(
+    model_id: str = "Z-Image-Turbo",  # kept for API stability; unused
+    diffuser_dir: str | None = None,  # kept for API stability; unused
+) -> Any:
+    """Return the Z-Image-Turbo wrapper. If `preload()` ran earlier,
+    reuses that already-loaded pipeline (this is the path chat.py
+    takes). Otherwise constructs a fresh wrapper that lazy-loads on
+    first .generate() — fine for the smoke test (clean process, no
+    competing fds) but will fail from inside chat.py because Playwright
+    has already opened its IPC pipes.
+
+    Returns None when torch+diffusers aren't installed.
+    """
+    if _PRELOADED is not None:
+        return _PRELOADED
+    return _construct_generator()
 
 
 def generate_assets(

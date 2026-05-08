@@ -1789,6 +1789,29 @@ class CodingBoxApp(App):
 
 
 def main() -> int:
+    # Pre-load the Z-Image-Turbo pipeline NOW, before Textual mounts
+    # and before Playwright/Chromium opens its IPC pipes. The
+    # diffusers from_pretrained path forks a subprocess (via
+    # huggingface_hub / safetensors); doing that fork after Playwright
+    # is up makes _posixsubprocess.fork_exec reject the inherited fd
+    # table with "bad value(s) in fds_to_keep" — which is why the
+    # smoke test (clean process) succeeds and chat.py (Playwright
+    # already running) fails for every asset. SKIP_DIFFUSER_PRELOAD=1
+    # opts out for users who never want art and don't want to wait
+    # ~15-30s on launch.
+    if os.environ.get("SKIP_DIFFUSER_PRELOAD", "").strip() not in ("", "0", "false", "False"):
+        pass
+    else:
+        try:
+            import assets as _assets
+            _assets.preload()
+        except Exception:
+            # preload() captures its own errors on the wrapper's
+            # _last_error; a bare exception here would only fire if
+            # the import itself failed, which we handle silently
+            # (the agent will skip assets and the user can read the
+            # real reason from the .log on their next session).
+            pass
     try:
         CodingBoxApp().run()
     finally:
