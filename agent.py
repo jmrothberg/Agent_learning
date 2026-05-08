@@ -1545,7 +1545,10 @@ class GameAgent:
                 plan_reply = await self._stream(self._token_cb_wrapper)
             except Exception as e:
                 yield self._record(AgentEvent("activity", "idle"))
-                yield self._record(AgentEvent("error", f"Ollama call failed during planning: {e}"))
+                yield self._record(AgentEvent(
+                    "error",
+                    f"{self._backend.info.name.upper()} call failed during planning: {e}",
+                ))
                 return
             yield self._record(AgentEvent("activity", "idle"))
             self._messages.append({"role": "assistant", "content": plan_reply})
@@ -1596,7 +1599,10 @@ class GameAgent:
                     plan_reply = await self._stream(self._token_cb_wrapper)
                 except Exception as e:
                     yield self._record(AgentEvent("activity", "idle"))
-                    yield self._record(AgentEvent("error", f"Ollama call failed: {e}"))
+                    yield self._record(AgentEvent(
+                        "error",
+                        f"{self._backend.info.name.upper()} call failed: {e}",
+                    ))
                     return
                 yield self._record(AgentEvent("activity", "idle"))
                 self._messages.append({"role": "assistant", "content": plan_reply})
@@ -2000,7 +2006,10 @@ class GameAgent:
                     yield self._record(AgentEvent("activity", "idle"))
             except Exception as e:
                 yield self._record(AgentEvent("activity", "idle"))
-                yield self._record(AgentEvent("error", f"Ollama call failed: {e}"))
+                yield self._record(AgentEvent(
+                    "error",
+                    f"{self._backend.info.name.upper()} call failed: {e}",
+                ))
                 return
 
             self._messages.append({"role": "assistant", "content": reply})
