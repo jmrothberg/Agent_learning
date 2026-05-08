@@ -45,13 +45,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncIterator
-
-import ollama
 
 from assets import (
     generate_assets,
@@ -59,6 +58,7 @@ from assets import (
     render_asset_paths_block,
     try_load_image_generator,
 )
+from backend import Backend, BackendInfo, make_backend
 from memory import (
     CANVAS_SKELETON_V2,
     CANVAS_SKELETON_V2_NAME,
@@ -71,8 +71,7 @@ from memory import (
     render_playbook_block,
     signature_for_report,
 )
-from ollama_io import Candidate, StreamResult, best_of_n as _best_of_n
-from ollama_io import stream_chat, stream_chat_with_retry
+from ollama_io import Candidate, StreamResult
 from patches import apply_patches, extract_patches
 
 # Prompt-module routing: v0 is the original prompts.py kept for backward
@@ -200,11 +199,17 @@ class GameAgent:
 
     def __init__(
         self,
-        model: str,
-        out_path: Path,
-        browser: LiveBrowser,
+        model: str | None = None,
+        out_path: Path | None = None,
+        browser: LiveBrowser | None = None,
         max_iters: int = 6,
         *,
+        # Resolved LLM backend (Ollama or MLX). Drivers (chat.py, coder.py)
+        # build it via `make_backend(detect_backend(...))`. When omitted,
+        # we construct a legacy OllamaBackend from `model` so older callers
+        # (and unit tests that pass `model="stub"` without ever streaming)
+        # keep working unchanged.
+        backend: Backend | None = None,
         best_of_n: int = 1,
         # Ollama context window. qwen3.6:27b/35b natively supports 128K+,
         # gpt-oss supports 128K — at 8K we were truncating mid-<assets>
@@ -281,7 +286,22 @@ class GameAgent:
         # "mid"/"large" to override classification.
         model_class: str = "auto",
     ):
-        self.model = model
+        # Backend resolution. Legacy callers pass `model="..."` without
+        # `backend=` (notably the unit-test fixtures that never stream);
+        # build a default OllamaBackend in that case so behavior is
+        # identical to before this refactor.
+        if backend is None:
+            if not model:
+                raise TypeError(
+                    "GameAgent requires either `backend=` (resolved via "
+                    "backend.detect_backend()) or `model=<tag>` for legacy callers"
+                )
+            backend = make_backend(BackendInfo(
+                name="ollama", model=model,
+                source="legacy: GameAgent(model=...) without backend=",
+                endpoint=os.environ.get("OLLAMA_HOST") or "http://127.0.0.1:11434",
+            ))
+        self._backend: Backend = backend
         self.out_path = Path(out_path)
         self.browser = browser
         self.max_iters = max_iters
@@ -290,7 +310,6 @@ class GameAgent:
         self.stall_seconds = stall_seconds
         self.overall_seconds = overall_seconds
         self.seed_file: Path | None = Path(seed_file) if seed_file else None
-        self._client = ollama.AsyncClient()
         self._messages: list[dict] = []
         self._pending_feedback: list[str] = []
         self._pending_answer: str | None = None
@@ -403,6 +422,15 @@ class GameAgent:
         # Resolved asset paths from Phase A (name → absolute path); used
         # by the first-build prompt assembler.
         self._session_assets: dict[str, Path] = {}
+
+    # Read-through to the resolved backend's model id. Existing call sites
+    # (trace metadata, conversation dump, memory.record_outcome, ...) used
+    # `self.model` as a string; keeping it as a property means the agent
+    # always reports whatever the backend resolved to without callers
+    # having to know about Backend internals.
+    @property
+    def model(self) -> str:
+        return self._backend.info.model
 
     # Stop-Losing-To-OneShot todo #6 — explicit known-mid table.
     # Open-domain rule: this is about output capacity (parameter count
@@ -965,12 +993,7 @@ class GameAgent:
     # -- streaming ----------------------------------------------------------
 
     async def _detect_vlm(self) -> bool:
-        try:
-            info = await self._client.show(model=self.model)
-        except Exception:
-            return False
-        caps = getattr(info, "capabilities", None) or []
-        return any(str(c).lower() == "vision" for c in caps)
+        return await self._backend.is_vlm()
 
     async def _stream(
         self, on_token, *,
@@ -1032,9 +1055,7 @@ class GameAgent:
         self._trace({"kind": "stream_start", "temperature": temp, "fix_mode": self._fix_mode})
 
         try:
-            result = await stream_chat_with_retry(
-                self._client,
-                self.model,
+            result = await self._backend.stream_chat(
                 self._messages,
                 on_token=on_token,
                 options={"temperature": temp, "num_ctx": self.num_ctx},
@@ -1127,9 +1148,7 @@ class GameAgent:
                 # broken" but better than "didn't apply".
                 return 10.0, extra
 
-        winner, all_cands = await _best_of_n(
-            self._client,
-            self.model,
+        winner, all_cands = await self._backend.best_of_n(
             self._messages,
             n=n,
             options={"num_ctx": self.num_ctx},

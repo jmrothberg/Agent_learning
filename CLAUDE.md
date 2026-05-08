@@ -40,6 +40,12 @@ TORCH_CUDA=121 ./scripts/install_diffuser.sh   # for older NVIDIA GPUs
 .venv/bin/python coder.py "build me a snake game with a wraparound board"
 .venv/bin/python coder.py "snake" --max-iters 4 --best-of-n 1 --headless
 
+# MLX backend (Apple Silicon — usually faster than Ollama at the same param count)
+mlx_lm.server --model mlx-community/Qwen2.5-Coder-32B-Instruct-4bit --port 8080
+.venv/bin/python coder.py "snake" --backend mlx
+# Or just leave --backend at "auto" — when both daemons are up with a model
+# loaded, MLX wins automatically.
+
 # Tests (all pure-function, no model/Chromium calls; full suite < 1s)
 .venv/bin/python -m pytest tests/ -q
 .venv/bin/python -m pytest tests/test_patches.py -v        # one file
@@ -63,9 +69,12 @@ python learner.py apply games/traces/             # propose AND write to playboo
 ```
 
 **Env vars that matter:**
-- `OLLAMA_MODEL` / `CHAT_OLLAMA_MODEL` — explicit model override (else: detected from `/api/ps`, then first installed)
-- `OLLAMA_HOST` — non-default daemon address
-- `CODING_BOX_NUM_CTX` — Ollama context window (default 32768; supports 128K+ on most local models)
+- `LLM_BACKEND` — `auto` (default) | `ollama` | `mlx`. `auto` probes both daemons and picks whichever has a model loaded; if both qualify, MLX wins (faster on Apple Silicon).
+- `OLLAMA_MODEL` / `CHAT_OLLAMA_MODEL` — explicit Ollama model override (else: detected from `/api/ps`, then first installed)
+- `OLLAMA_HOST` — non-default Ollama daemon address
+- `MLX_MODEL` — explicit MLX model id override (else: `--model X` arg of running `mlx_lm.server`, then `/v1/models[0]`)
+- `MLX_HOST` — non-default mlx_lm.server address (default `http://127.0.0.1:8080`)
+- `CODING_BOX_NUM_CTX` — Ollama context window (default 32768; supports 128K+ on most local models). MLX has no equivalent; uses model native context.
 - `DIFFUSION_MODELS_DIR` — override Z-Image-Turbo weights search path (Linux: `~/Models_Diffusers`, Mac: `~/Diffusion_Models`, then HuggingFace fallback)
 - `TORCH_CUDA` — CUDA version for `install_diffuser.sh` (`130` default, `121`/`124` for older GPUs)
 

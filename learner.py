@@ -33,16 +33,16 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import re
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-import ollama
-
+import backend as backend_mod
+from backend import Backend
 from memory import Bullet, Playbook
-from ollama_io import stream_chat_with_retry
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -361,23 +361,34 @@ async def reflect_one(
     session: Session,
     existing_bullets: list[Bullet],
     *,
-    model: str,
-    client: ollama.AsyncClient,
+    backend: Backend | None = None,
+    model: str | None = None,
+    client=None,  # legacy ollama.AsyncClient — kept for backward compat
 ) -> dict:
     """Run the Reflector on one session; return the parsed JSON proposal.
 
     Returns an empty proposal on parse / network failure rather than
     raising — the curator will simply have nothing to apply.
+
+    Either pass `backend=` (preferred) or the legacy `model=`/`client=`
+    pair (auto-wraps in an OllamaBackend).
     """
+    if backend is None:
+        # Legacy path: synthesize an OllamaBackend from `model` + `client`.
+        if not model:
+            raise TypeError("reflect_one requires either backend= or model=")
+        backend = backend_mod.make_backend(backend_mod.BackendInfo(
+            name="ollama", model=model,
+            source="legacy reflect_one(model=...)",
+            endpoint=os.environ.get("OLLAMA_HOST") or "http://127.0.0.1:11434",
+        ))
     user_msg = _format_session_for_reflector(session, existing_bullets)
     messages = [
         {"role": "system", "content": REFLECTOR_SYSTEM},
         {"role": "user", "content": user_msg},
     ]
     try:
-        result = await stream_chat_with_retry(
-            client,
-            model,
+        result = await backend.stream_chat(
             messages,
             on_token=lambda _t: None,
             options={"temperature": 0.25, "num_ctx": 8192},
@@ -526,12 +537,20 @@ async def _run_reflect_apply(args, *, apply: bool) -> int:
     playbook.ensure()
     existing = playbook.load_all()
 
-    client = ollama.AsyncClient()
+    info = backend_mod.detect_backend()
+    if args.model:
+        info = backend_mod.BackendInfo(
+            name=info.name, model=args.model,
+            source=f"--model {args.model!r}",
+            endpoint=info.endpoint,
+        )
+    bk = backend_mod.make_backend(info)
+    print(f"reflector backend: {info.name.upper()} · {info.model} [{info.source}]")
     proposals: list[dict] = []
     for i, s in enumerate(sessions, 1):
         print(f"[{i}/{len(sessions)}] {s.session_id}  goal={s.goal[:50]!r}  "
               f"{'OK' if s.final_ok else 'FAIL'}")
-        prop = await reflect_one(s, existing, model=args.model, client=client)
+        prop = await reflect_one(s, existing, backend=bk)
         n_new = len(prop.get("new_bullets") or [])
         n_cu = len(prop.get("counter_updates") or [])
         n_obs = len(prop.get("observations") or [])

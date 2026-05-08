@@ -4,6 +4,7 @@
 # (that downloads the headless browser the agent uses to test games)
 
 ollama>=0.3.0
+httpx>=0.27.0           # used by backend.MLXBackend to talk to mlx_lm.server (SSE)
 playwright>=1.40.0
 textual>=0.50.0
 pillow>=10.0.0          # used by assets.py for sprite resize/save

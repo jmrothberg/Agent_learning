@@ -10,26 +10,25 @@ destroy incoming enemies; ArrowUp/ArrowDown to aim, Space to fire" —
 Space Invaders. This test verifies the new prompt grounds the model
 in the actual game.
 
-Runs ONE Ollama planning call (no iteration, no browser). Wall-clock
-~30-60s on a loaded gpt-oss model.
+Runs ONE planning call against the live LLM backend (Ollama or MLX, whichever
+backend.detect_backend picks). No iteration, no browser. Wall-clock ~30-60s
+on a loaded mid-tier model.
 
 Usage:
     .venv/bin/python tests/test_research_planning.py
-        # uses gpt-oss:latest (override with OLLAMA_MODEL env)
+        # honors LLM_BACKEND, OLLAMA_MODEL, MLX_MODEL env vars
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 from pathlib import Path
 
 # Allow running from repo root.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import ollama  # noqa: E402
-
+import backend as backend_mod  # noqa: E402
 import prompts_v1  # noqa: E402
 import research  # noqa: E402
 
@@ -59,7 +58,8 @@ SPACE_INVADERS_KEYWORDS = (
 
 
 async def main() -> int:
-    model = os.environ.get("OLLAMA_MODEL", "gpt-oss:latest")
+    info = backend_mod.detect_backend()
+    bk = backend_mod.make_backend(info)
     print(f"[1/3] Fetching Wikipedia reference for: {GOAL[:80]!r}")
     ref = research.fetch(GOAL)
     if not ref:
@@ -75,28 +75,31 @@ async def main() -> int:
     plan_msg = prompts_v1.plan_instruction(reference_block=ref)
     system_msg = prompts_v1.SYSTEM_PROMPT.replace("{goal}", GOAL)
 
-    print(f"[3/3] Streaming plan from {model} (this loads the model first run)…")
-    client = ollama.AsyncClient()
+    print(f"[3/3] Streaming plan from {info.name.upper()}={info.model} "
+          f"[{info.source}] (loads model on first call)…")
     pieces: list[str] = []
+
+    def on_token(piece: str) -> None:
+        pieces.append(piece)
+        sys.stdout.write(piece)
+        sys.stdout.flush()
+
     try:
-        stream = await client.chat(
-            model=model,
-            messages=[
+        result = await bk.stream_chat(
+            [
                 {"role": "system", "content": system_msg},
                 {"role": "user", "content": plan_msg},
             ],
-            stream=True,
-            options={"num_ctx": 8192},
+            on_token=on_token,
+            options={"num_ctx": 8192, "temperature": 0.7},
+            stall_seconds=120.0,
+            overall_seconds=900.0,
         )
-        async for chunk in stream:
-            piece = (chunk.get("message") or {}).get("content") or ""
-            if piece:
-                pieces.append(piece)
-                # Print streaming so the user sees progress.
-                sys.stdout.write(piece)
-                sys.stdout.flush()
+        if result.stalled and not pieces:
+            print(f"\nFAIL: stream produced no tokens before stalling.")
+            return 1
     except Exception as e:
-        print(f"\nFAIL: Ollama stream failed: {e!r}")
+        print(f"\nFAIL: stream failed: {e!r}")
         return 1
     print()
 
