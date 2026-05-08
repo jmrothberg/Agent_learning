@@ -17,11 +17,16 @@ The actual playable game opens in a real Chromium window beside the terminal
 (LiveBrowser, headless=False). You arrange the windows side by side.
 
 Model selection (when you press Enter on your game idea):
-  1. If env OLLAMA_MODEL (or CHAT_OLLAMA_MODEL) is set → use that tag.
-  2. Else detect a loaded model, in order: Python `ollama.ps()`, then raw
-     GET /api/ps, then the `ollama ps` shell command (first non-empty wins).
-     That matches whatever you have in memory from `ollama run ...`.
-  3. Else → fall back to coder.MODEL (the CLI default in coder.py).
+  1. backend.detect_backend() probes both daemons:
+       Ollama (port 11434) — auto-picks the loaded model from /api/ps,
+       respecting OLLAMA_MODEL / CHAT_OLLAMA_MODEL env overrides.
+       mlx_lm.server (port 8080) — auto-picks the model from the running
+       process's `--model` arg, falling back to /v1/models. Override
+       with MLX_MODEL env var.
+  2. If both daemons have a loaded model, MLX wins (faster on Apple Silicon).
+     Force one with LLM_BACKEND=ollama / LLM_BACKEND=mlx, or use the
+     /backend slash command in the TUI.
+  3. If neither is loaded, falls back to first installed Ollama tag.
 
 Workflow:
   1. App launches, asks "What game do you want to build?".
@@ -55,8 +60,8 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Footer, Header, Input, RichLog, Static
 
+import backend as backend_mod
 from agent import AgentEvent, GameAgent
-from coder import MODEL  # CLI / last-resort default when ps is empty and no env
 from tools import LiveBrowser
 
 
@@ -646,9 +651,23 @@ class CodingBoxApp(App):
         # after <done/> automatically triggers a continuation extension
         # instead of being silently queued forever.
         self._session_done: bool = True
-        # /model stages a tag for the NEXT session; the running session keeps
-        # whatever it was constructed with. None = use resolve_chat_model().
+        # /model stages an Ollama tag for the NEXT session; the running
+        # session keeps whatever it was constructed with. None = let
+        # backend.detect_backend pick.
         self._next_model: str | None = None
+        # /backend stages a backend preference for the NEXT session.
+        # None / "auto" = probe both daemons and pick whichever has a
+        # model loaded (MLX wins ties). "ollama" / "mlx" = force.
+        self._next_backend: str | None = None
+        # Snapshot of the last /list output: list of (backend_name, model_id)
+        # pairs in display order, so /load N or /model N can pick by number
+        # across BOTH backends. Empty until the user runs /list once; the
+        # /load handler refreshes it on demand if empty.
+        self._last_listing: list[tuple[str, str]] = []
+        # Resolved Backend + BackendInfo for the running session.
+        # Constructed in _start_session.
+        self._session_backend = None
+        self._session_backend_info: backend_mod.BackendInfo | None = None
         # /iters lets the user change the max-iters cap before starting a
         # session or extending. Default matches GameAgent's default.
         self._max_iters: int = 6
@@ -682,8 +701,14 @@ class CodingBoxApp(App):
         self.set_interval(1.0, self._tick_status)
         # Show what model we'll use when the user submits a goal. One call,
         # one line. Override with OLLAMA_MODEL env var if you want.
-        preview_model, preview_src = resolve_chat_model(MODEL)
-        self._log_info(f"Will use model: [b]{preview_model}[/b] [dim]({preview_src})[/dim]")
+        try:
+            preview = backend_mod.detect_backend(self._next_backend)
+            self._log_info(
+                f"Will use [b]{preview.name.upper()}[/b] · "
+                f"[b]{_esc(preview.model)}[/b] [dim]({_esc(preview.source)})[/dim]"
+            )
+        except RuntimeError as e:
+            self._log_error(str(e))
         if _KNOWN_BROKEN_TAGS:
             self._log_info(
                 f"[dim]Skipping known-broken tags: {sorted(_KNOWN_BROKEN_TAGS)}. "
@@ -899,6 +924,8 @@ class CodingBoxApp(App):
                 out += f", {self._streak_stuck} stuck"
             out += ")[/dim]"
         out += "\n"
+        if self._session_backend_info is not None:
+            out += f"[b]Backend:[/b] {self._session_backend_info.name.upper()}\n"
         if self._session_model:
             out += f"[b]Model:[/b] {self._session_model}\n"
         out += f"[b]Goal:[/b] {self._goal or '—'}\n"
@@ -1094,8 +1121,12 @@ class CodingBoxApp(App):
                 self._cmd_help()
             elif cmd in ("list", "models"):
                 self._cmd_list_models()
-            elif cmd == "model":
+            elif cmd in ("model", "load"):
                 self._cmd_set_model(arg)
+            elif cmd == "backend":
+                self._cmd_set_backend(arg)
+            elif cmd == "unload":
+                self._cmd_unload(arg)
             elif cmd == "new":
                 await self._cmd_new(arg)
             elif cmd == "ship":
@@ -1138,8 +1169,10 @@ class CodingBoxApp(App):
             "",
             "[bold cyan]── slash commands ──[/bold cyan]",
             "  [b]/help[/b]                    show this help (also /h, /?)",
-            "  [b]/list[/b]                    list installed Ollama models with numbers (also /models)",
-            "  [b]/model <name|N>[/b]          stage model (STICKY across /new) · /model alone clears",
+            "  [b]/list[/b]                    unified Ollama + MLX list with numbers (also /models)",
+            "  [b]/load <N|name>[/b]           pick model #N from /list (any backend) · STICKY across /new (also /model)",
+            "  [b]/backend <auto|ollama|mlx>[/b]  stage default backend when no specific model is staged",
+            "  [b]/unload [N|name|all|mlx][/b]  free VRAM · #N from /list · bare = active session · all = every Ollama (MLX untouched) · mlx = kill cmd",
             "  [b]/seed <path>[/b]             stage a baseline .html (STICKY across /new) · /seed alone clears",
             "  [b]/iters <N>[/b]               set max iterations (sticky)",
             "  [b]/reset[/b]                   wipe ALL staged state (seed + model + iters → defaults)",
@@ -1164,55 +1197,337 @@ class CodingBoxApp(App):
         for line in lines:
             self._log(line)
 
+    def _refresh_listing(self) -> list[tuple[str, str]]:
+        """Build a unified (backend, model) list across both daemons.
+
+        Order: every Ollama installed tag first (loaded + unloaded), then
+        every MLX downloaded model. Stable across calls so the numbers
+        the user just saw in /list mean the same thing in /load N.
+        Stored on self._last_listing for the /load handler to consume.
+        """
+        listing: list[tuple[str, str]] = []
+        ollama_installed, _ = backend_mod.list_ollama_inventory()
+        for name in ollama_installed:
+            listing.append(("ollama", name))
+        mlx_downloaded, _ = backend_mod.list_mlx_inventory()
+        for name in mlx_downloaded:
+            listing.append(("mlx", name))
+        self._last_listing = listing
+        return listing
+
     def _cmd_list_models(self) -> None:
-        installed, err = _installed_models_via_http()
-        if not installed:
-            self._log_error(f"no installed models reachable: {err or 'unknown'}")
+        listing = self._refresh_listing()
+        ollama_installed, ollama_loaded = backend_mod.list_ollama_inventory()
+        mlx_downloaded, mlx_active = backend_mod.list_mlx_inventory()
+
+        if not listing:
+            self._log_error(
+                "no LLM backend reachable — start ollama (`ollama run <model>`) "
+                "or mlx_lm.server (`mlx_lm.server --model <hf-id> --port 8080`)"
+            )
             return
-        running = {m["name"] for m in _running_models_with_meta()}
-        self._log("[bold cyan]── installed models ──[/bold cyan]")
-        self._log("[dim]  * = currently loaded in ollama  · ← active = this session is using it[/dim]")
-        for i, name in enumerate(installed, 1):
-            loaded = "*" if name in running else " "
-            active = "  [yellow]← active[/yellow]" if name == self._session_model else ""
-            staged = "  [magenta]← staged for next /new[/magenta]" if name == self._next_model else ""
-            self._log(f"  [{i:>2}] {loaded} {_esc(name)}{active}{staged}")
-        self._log("[dim]Use /model <number-or-name> to switch.[/dim]")
+
+        self._log("[bold cyan]── available models ──[/bold cyan]")
+        self._log(
+            "[dim]  [O]/[M] = backend  ·  * = loaded right now  ·  "
+            "← active = this session  ·  ← staged = next /new[/dim]"
+        )
+        # Track which model the next /new will resolve to so it gets the
+        # ← staged marker even when the user hasn't typed /load yet.
+        staged_backend = self._next_backend or "ollama"
+        for i, (b, name) in enumerate(listing, 1):
+            if b == "ollama":
+                tag = "O"
+                loaded = "*" if name in ollama_loaded else " "
+                is_active = (
+                    self._session_backend_info is not None
+                    and self._session_backend_info.name == "ollama"
+                    and name == self._session_model
+                )
+                is_staged = name == self._next_model and staged_backend == "ollama"
+            else:
+                tag = "M"
+                loaded = "*" if name == mlx_active else " "
+                is_active = (
+                    self._session_backend_info is not None
+                    and self._session_backend_info.name == "mlx"
+                    and name == self._session_model
+                )
+                is_staged = name == self._next_model and staged_backend == "mlx"
+            mark_active = "  [yellow]← active[/yellow]" if is_active else ""
+            mark_staged = "  [magenta]← staged[/magenta]" if is_staged else ""
+            self._log(
+                f"  [{i:>2}] [b]{tag}[/b] {loaded} {_esc(name)}"
+                f"{mark_active}{mark_staged}"
+            )
+        self._log(
+            "[dim]Use [b]/load N[/b] (or /model N) to stage by number, or "
+            "[b]/load <name>[/b] for a substring match. /backend toggles the "
+            "default daemon when no specific model is staged.[/dim]"
+        )
+
+    def _cmd_unload(self, arg: str) -> None:
+        """/unload [N|name|all|mlx] — free VRAM held by an LLM daemon.
+
+          /unload                     unload the active session's model
+                                      (Ollama only — MLX has no API)
+          /unload <N>                 unload entry #N from /list (any backend)
+          /unload <name>              unload by exact tag or substring match
+          /unload all                 unload every model loaded in Ollama
+                                      (does NOT touch MLX — kill mlx_lm.server
+                                       manually for that)
+          /unload mlx                 print the kill command for mlx_lm.server
+
+        Models stay installed on disk; only the VRAM allocation is released.
+        For MLX picks, prints the kill command (mlx_lm.server is
+        single-process-per-model — no API to evict).
+        """
+        norm = arg.strip()
+        norm_lc = norm.lower()
+
+        if norm_lc == "mlx":
+            self._print_mlx_kill_hint()
+            return
+
+        if norm_lc == "all":
+            results = backend_mod.unload_all_ollama_models()
+            if not results:
+                self._log_info("[dim]no Ollama models currently loaded[/dim]")
+                return
+            for name, ok, msg in results:
+                tag = "[green]✓[/green]" if ok else "[red]✗[/red]"
+                self._log_info(f"  {tag} {_esc(name)} — {_esc(msg)}")
+            self._log_info("[dim](MLX untouched — /unload mlx for that.)[/dim]")
+            return
+
+        # Default (no arg): unload the active session's Ollama model.
+        if not norm:
+            if (
+                self._session_backend_info is None
+                or self._session_backend_info.name != "ollama"
+            ):
+                self._log_info(
+                    "no active Ollama session to unload. Try [b]/unload <N>[/b] "
+                    "(number from /list), [b]/unload all[/b] to evict every "
+                    "loaded Ollama model, or [b]/unload mlx[/b] for MLX hints."
+                )
+                return
+            self._unload_ollama_named(self._session_backend_info.model)
+            return
+
+        # Resolve the argument against the unified /list. Same matching
+        # rules as /load so the user can index into the same numbered
+        # list they just saw.
+        backend_name, model_name = self._resolve_listing_arg(norm)
+        if model_name is None:
+            return  # error already logged
+        if backend_name == "mlx":
+            self._log_info(
+                f"[yellow]{_esc(model_name)}[/yellow] is an MLX model — "
+                "MLX is single-process-per-model and has no unload API."
+            )
+            self._print_mlx_kill_hint()
+            return
+        # Ollama tag — issue the unload.
+        self._unload_ollama_named(model_name)
+
+    def _resolve_listing_arg(self, arg: str) -> tuple[str | None, str | None]:
+        """Match `arg` (number, exact tag, or substring) against /list.
+
+        Refreshes the listing on demand if /list hasn't been run. Returns
+        (backend_name, model_name) on hit, (None, None) on miss/ambiguity
+        AND logs the appropriate error so the caller can simply return.
+        """
+        if not self._last_listing:
+            self._refresh_listing()
+        listing = self._last_listing
+        if not listing:
+            self._log_error(
+                "no LLM backend reachable — start ollama or mlx_lm.server first"
+            )
+            return None, None
+
+        if arg.isdigit():
+            idx = int(arg) - 1
+            if 0 <= idx < len(listing):
+                b, n = listing[idx]
+                return b, n
+            self._log_error(
+                f"out of range: /list has {len(listing)} entries (1-{len(listing)})"
+            )
+            return None, None
+
+        for b, n in listing:
+            if arg == n:
+                return b, n
+
+        needle = arg.lower()
+        matches = [(b, n) for b, n in listing if needle in n.lower()]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            names = [f"{b.upper()}:{n}" for b, n in matches]
+            self._log_error(f"ambiguous {arg!r} — matches: {names}")
+            return None, None
+        self._log_error(f"no match for {arg!r} — try /list")
+        return None, None
+
+    def _unload_ollama_named(self, name: str) -> None:
+        ok, msg = backend_mod.unload_ollama_model(name)
+        tag = "[green]✓[/green]" if ok else "[red]✗[/red]"
+        self._log_info(f"{tag} {_esc(name)} — {_esc(msg)}")
+
+    def _print_mlx_kill_hint(self) -> None:
+        pids = backend_mod.mlx_server_pids()
+        if not pids:
+            self._log_info("[dim]no mlx_lm.server process is running[/dim]")
+            return
+        self._log_info(
+            "[yellow]MLX has no programmatic unload[/yellow] — "
+            f"kill the server to free VRAM:  [b]kill {' '.join(str(p) for p in pids)}[/b]"
+        )
+        self._log(
+            "[dim]Or:  pkill -f mlx_lm.server   "
+            "(restart it with `mlx_lm.server --model <hf-id> --port 8080` "
+            "when you want MLX back)[/dim]"
+        )
+
+    def _cmd_set_backend(self, arg: str) -> None:
+        """/backend [auto|ollama|mlx] — pick the LLM daemon for the next /new.
+
+        Sticky across /new, like /model. Bare /backend prints the current
+        staged choice and what would resolve right now. Useful when both
+        Ollama and mlx_lm.server are running and you want to force one.
+        """
+        norm = arg.strip().lower()
+        if not norm:
+            current = self._next_backend or "auto"
+            self._log_info(
+                f"staged backend (next /new): [b]{current}[/b]. "
+                "Pass /backend ollama, /backend mlx, or /backend auto."
+            )
+            try:
+                preview = backend_mod.detect_backend(self._next_backend)
+                self._log_info(
+                    f"would resolve to → [b]{preview.name.upper()}[/b] · "
+                    f"[b]{_esc(preview.model)}[/b] [dim]({_esc(preview.source)})[/dim]"
+                )
+            except RuntimeError as e:
+                self._log_info(f"[dim]({e})[/dim]")
+            return
+        if norm in ("auto", "any", "default"):
+            self._next_backend = None
+            self._log_info("backend → [b]auto[/b] (probe both, MLX wins ties)")
+            return
+        if norm in ("ollama", "ol", "o"):
+            self._next_backend = "ollama"
+            self._log_info("backend → [b]ollama[/b] (sticky)")
+            return
+        if norm in ("mlx", "m"):
+            self._next_backend = "mlx"
+            self._log_info("backend → [b]mlx[/b] (sticky)")
+            return
+        self._log_error(
+            f"unknown backend {arg!r} — pick one of: auto, ollama, mlx"
+        )
 
     def _cmd_set_model(self, arg: str) -> None:
+        """/model <N|name> — pick by global number from /list, or by substring.
+
+        N is the unified-list index across both Ollama and MLX (the
+        number printed in /list). Substring matches against any
+        installed Ollama tag or downloaded MLX id; ambiguous matches
+        require disambiguation. Bare /model clears the staged model.
+        """
         if not arg:
             if self._next_model is None:
-                self._log_info("no staged model (usage: /model <name-or-number>)")
+                self._log_info(
+                    "no staged model (usage: /model <number-from-/list-or-name>)"
+                )
             else:
                 self._log_info(f"cleared staged model (was: {self._next_model})")
                 self._next_model = None
+                # Don't clear _next_backend — user may still want to force a
+                # specific daemon for the next /new.
             return
-        installed, _ = _installed_models_via_http()
-        if not installed:
-            self._log_error("no installed models to choose from")
+
+        # Refresh the unified listing if /list hasn't been run yet.
+        if not self._last_listing:
+            self._refresh_listing()
+        listing = self._last_listing
+        if not listing:
+            self._log_error(
+                "no LLM backend reachable — start ollama or mlx_lm.server first"
+            )
             return
-        chosen: str | None = None
+
+        chosen_backend: str | None = None
+        chosen_name: str | None = None
+
+        # 1) Numeric → unified-list index.
         if arg.isdigit():
             idx = int(arg) - 1
-            if 0 <= idx < len(installed):
-                chosen = installed[idx]
-        if chosen is None and arg in installed:
-            chosen = arg
-        if chosen is None:
-            matches = [n for n in installed if arg.lower() in n.lower()]
-            if len(matches) == 1:
-                chosen = matches[0]
-            elif len(matches) > 1:
-                self._log_error(f"ambiguous: {matches}")
+            if 0 <= idx < len(listing):
+                chosen_backend, chosen_name = listing[idx]
+            else:
+                self._log_error(
+                    f"out of range: /list has {len(listing)} entries (1-{len(listing)})"
+                )
                 return
-        if chosen is None:
+
+        # 2) Exact full-string match (e.g. user pasted a tag).
+        if chosen_name is None:
+            for b, name in listing:
+                if arg == name:
+                    chosen_backend, chosen_name = b, name
+                    break
+
+        # 3) Case-insensitive substring match. Ambiguity is an error so we
+        #    don't silently pick the wrong model.
+        if chosen_name is None:
+            needle = arg.lower()
+            matches = [(b, n) for b, n in listing if needle in n.lower()]
+            if len(matches) == 1:
+                chosen_backend, chosen_name = matches[0]
+            elif len(matches) > 1:
+                names = [f"{b.upper()}:{n}" for b, n in matches]
+                self._log_error(f"ambiguous {arg!r} — matches: {names}")
+                return
+
+        if chosen_name is None or chosen_backend is None:
             self._log_error(f"no match for {arg!r} — try /list")
             return
-        self._next_model = chosen
+
+        # Stage backend + model together. _start_session honors this pair
+        # over plain detect_backend so the user's pick wins even when both
+        # daemons are running.
+        self._next_backend = chosen_backend
+        self._next_model = chosen_name
+        backend_label = chosen_backend.upper()
         self._log_info(
-            f"staged [b]{_esc(chosen)}[/b] for next /new session "
-            "[dim](current session keeps its model)[/dim]"
+            f"staged [b]{backend_label}[/b] · [b]{_esc(chosen_name)}[/b] "
+            "for next /new session [dim](current session keeps its model)[/dim]"
         )
+
+        # MLX-specific: warn if the staged model differs from the running
+        # mlx_lm.server's --model arg. The server CAN dynamic-swap on first
+        # request, but it's a 30-60s pause; the user should know.
+        if chosen_backend == "mlx":
+            _, mlx_active = backend_mod.list_mlx_inventory()
+            if mlx_active is None:
+                self._log_info(
+                    "[yellow]heads-up:[/yellow] no mlx_lm.server is running. "
+                    f"Start one with: [b]mlx_lm.server --model {_esc(chosen_name)} "
+                    "--port 8080[/b]"
+                )
+            elif mlx_active != chosen_name:
+                self._log_info(
+                    f"[yellow]heads-up:[/yellow] mlx_lm.server is currently running "
+                    f"[b]{_esc(mlx_active)}[/b]. The first request of /new will "
+                    "dynamic-swap to the staged model (~30-60s pause). To preload, "
+                    f"restart it: [b]pkill -f mlx_lm.server && "
+                    f"mlx_lm.server --model {_esc(chosen_name)} --port 8080[/b]"
+                )
 
     async def _cmd_new(self, arg: str) -> None:
         if not arg:
@@ -1296,15 +1611,19 @@ class CodingBoxApp(App):
         """
         had_seed = self._next_seed
         had_model = self._next_model
+        had_backend = self._next_backend
         had_iters = self._max_iters
         self._next_seed = None
         self._next_model = None
+        self._next_backend = None
         self._max_iters = 6
         bits: list[str] = []
         if had_seed is not None:
             bits.append(f"seed={had_seed}")
         if had_model is not None:
             bits.append(f"model={had_model}")
+        if had_backend is not None:
+            bits.append(f"backend={had_backend}")
         if had_iters != 6:
             bits.append(f"iters={had_iters}→6")
         if not bits:
@@ -1323,6 +1642,8 @@ class CodingBoxApp(App):
             step_label = "ON" if getattr(self.agent, "_step_mode", False) else "off"
         lines = [
             "[bold cyan]── status ──[/bold cyan]",
+            f"  backend (active):  {_esc(self._session_backend_info.name if self._session_backend_info else '—')}",
+            f"  backend (next /new): {_esc(self._next_backend or '(auto)')}",
             f"  model (active):    {_esc(self._session_model or '—')}",
             f"  model (next /new): {_esc(self._next_model or '(auto-detect)')}",
             f"  goal:              {_esc(self._goal or '—')}",
@@ -1389,16 +1710,53 @@ class CodingBoxApp(App):
                 self._session_done = True
                 return
 
-        # /model staged tag wins; otherwise resolve from env / ps / installed.
-        # Staging is STICKY across /new calls — clear with /model (no arg)
-        # or replace with another /model <tag>.
-        if self._next_model:
-            model_name, model_src = self._next_model, "/model staged (sticky)"
+        # Resolve the LLM backend (Ollama or MLX) and the model id within
+        # it. Three sticky-staging tiers, in order of specificity:
+        #   1. /model <N> or /load <N>  → both _next_backend AND _next_model
+        #      were set to a specific (backend, model) from /list. Use it
+        #      directly; this is the user's most explicit pick.
+        #   2. /model <name> alone (legacy) → _next_model only, treat as
+        #      Ollama tag.
+        #   3. /backend <auto|ollama|mlx> → run detect_backend with the
+        #      preference applied.
+        # Clear with the bare /model and /backend commands.
+        if self._next_backend in ("ollama", "mlx") and self._next_model:
+            endpoint = (
+                backend_mod.mlx_endpoint_url() if self._next_backend == "mlx"
+                else backend_mod.ollama_endpoint_url()
+            )
+            info = backend_mod.BackendInfo(
+                name=self._next_backend, model=self._next_model,
+                source=f"/{'load' if self._next_backend == 'mlx' else 'model'} staged (sticky)",
+                endpoint=endpoint,
+            )
+        elif self._next_model:
+            info = backend_mod.BackendInfo(
+                name="ollama", model=self._next_model,
+                source="/model staged (sticky)",
+                endpoint=backend_mod.ollama_endpoint_url(),
+            )
         else:
-            model_name, model_src = resolve_chat_model(MODEL)
+            try:
+                info = backend_mod.detect_backend(self._next_backend)
+            except RuntimeError as e:
+                self._log_error(str(e))
+                self._session_done = True
+                return
+        try:
+            self._session_backend = backend_mod.make_backend(info)
+        except Exception as e:
+            self._log_error(f"could not initialize backend: {e}")
+            self._session_done = True
+            return
+        self._session_backend_info = info
+        model_name = info.model
         self._session_model = model_name
-        self.title = f"JMR's Coding Box — {model_name}"
-        self._log_info(f"Using model [b]{_esc(model_name)}[/b] [dim]({_esc(model_src)})[/dim]")
+        self.title = f"JMR's Coding Box — {info.name.upper()} · {model_name}"
+        self._log_info(
+            f"Using [b]{info.name.upper()}[/b] · [b]{_esc(model_name)}[/b] "
+            f"[dim]({_esc(info.source)})[/dim]"
+        )
         self._update_status()
 
         # Build a unique, meaningful basename for every session artifact:
@@ -1432,7 +1790,7 @@ class CodingBoxApp(App):
             )
 
         self.agent = GameAgent(
-            model=model_name,
+            backend=self._session_backend,
             out_path=self._out_path,
             browser=self.browser,
             max_iters=self._max_iters,

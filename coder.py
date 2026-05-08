@@ -5,7 +5,12 @@ Usage:
     python coder.py "snake" --max-iters 4 --best-of-n 1 --headless
 
 Optional flags:
-    --model NAME        Override the Ollama model tag (default: see MODEL below)
+    --backend BACKEND   Pick LLM daemon: auto (default) | ollama | mlx.
+                        'auto' probes both; if both have a model loaded,
+                        MLX wins. Can also be set via LLM_BACKEND env.
+    --model NAME        Override the model id resolved by backend detection.
+                        (Ollama tag like 'qwen3.6:27b', or MLX HF id like
+                        'mlx-community/Qwen2.5-Coder-32B-Instruct-4bit'.)
     --max-iters N       Cap iterations (default 6)
     --out PATH          Where to save the final game (default games/game.html)
     --best-of-n N       Sample N candidates per fix turn (default 2)
@@ -30,14 +35,9 @@ import webbrowser
 from datetime import datetime
 from pathlib import Path
 
+import backend as backend_mod
 from agent import AgentEvent, GameAgent
 from tools import LiveBrowser
-
-
-# Hard fallback model. chat.py prefers a different resolution path
-# (env var → installed). Keeping this constant here so the CLI is
-# usable on its own without resolve_chat_model.
-MODEL = os.environ.get("OLLAMA_MODEL", "gpt-oss:latest")
 
 # Sentinel: --out was not supplied → derive a unique meaningful name from
 # the goal (instead of clobbering games/game.html every run).
@@ -108,7 +108,8 @@ def _print_event(ev: AgentEvent) -> None:
 
 async def _run(
     goal: str,
-    model: str,
+    backend_pref: str,
+    model_override: str | None,
     max_iters: int,
     out_path: Path,
     best_of_n: int,
@@ -120,6 +121,23 @@ async def _run(
     step: bool = False,
     model_class: str = "auto",
 ) -> int:
+    # Resolve which LLM daemon we'll talk to. --backend overrides the
+    # LLM_BACKEND env. If --model was given, build a BackendInfo
+    # directly with that model (still resolved against the chosen
+    # daemon's endpoint).
+    try:
+        info = backend_mod.detect_backend(backend_pref)
+    except RuntimeError as e:
+        print(f"backend resolution failed: {e}", file=sys.stderr)
+        return 2
+    if model_override:
+        info = backend_mod.BackendInfo(
+            name=info.name, model=model_override,
+            source=f"--model {model_override!r}",
+            endpoint=info.endpoint,
+        )
+    backend_inst = backend_mod.make_backend(info)
+
     browser = LiveBrowser(viewport=(800, 600), run_seconds=3.0, headless=headless)
     try:
         await browser.start()
@@ -133,7 +151,7 @@ async def _run(
         return 2
 
     agent = GameAgent(
-        model=model,
+        backend=backend_inst,
         out_path=out_path,
         browser=browser,
         max_iters=max_iters,
@@ -162,7 +180,8 @@ async def _run(
         agent.set_step_mode(True)
 
     print(
-        f"== Coding Box CLI · model={model} · headless={headless} · "
+        f"== Coding Box CLI · {info.name.upper()}={info.model} "
+        f"[{info.source}] · headless={headless} · "
         f"best-of-N={best_of_n} · step={step}"
     )
     print(f"== Goal: {goal}\n")
@@ -209,9 +228,26 @@ async def _run(
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="Coding-box CLI driver (Ollama).")
+    p = argparse.ArgumentParser(
+        description="Coding-box CLI driver (auto-detects Ollama or MLX)."
+    )
     p.add_argument("goal", help="What game to build, in plain English.")
-    p.add_argument("--model", default=MODEL, help=f"Ollama model tag (default: {MODEL})")
+    p.add_argument(
+        "--backend",
+        choices=["auto", "ollama", "mlx"],
+        default=os.environ.get("LLM_BACKEND", "auto"),
+        help="LLM daemon to use. 'auto' probes both and prefers whichever "
+             "has a model loaded (MLX wins ties on Apple Silicon). "
+             "Override LLM_BACKEND env if set.",
+    )
+    p.add_argument(
+        "--model",
+        default=None,
+        help="Override the model id resolved by backend detection. "
+             "Ollama tag (e.g. 'qwen3.6:27b') or MLX HF id "
+             "(e.g. 'mlx-community/Qwen2.5-Coder-32B-Instruct-4bit'). "
+             "When omitted, backend.detect_backend picks for you.",
+    )
     p.add_argument("--max-iters", type=int, default=6)
     p.add_argument(
         "--out",
@@ -270,7 +306,8 @@ def main() -> int:
 
     return asyncio.run(_run(
         goal=args.goal,
-        model=args.model,
+        backend_pref=args.backend,
+        model_override=args.model,
         max_iters=args.max_iters,
         out_path=_resolve_out_path(args.out, args.goal),
         best_of_n=args.best_of_n,

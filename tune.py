@@ -506,7 +506,7 @@ async def _auto_learn(run_dir: Path, results, args, memory_root) -> None:
     """
     from learner import walk_traces, reflect_one, curate
     from memory import Playbook
-    import ollama
+    import backend as backend_mod
 
     pb_root = (
         Path(REPO_ROOT) / "games" / "memory"
@@ -524,11 +524,21 @@ async def _auto_learn(run_dir: Path, results, args, memory_root) -> None:
     rmodel = args.reflector_model or args.model
     print(f"== auto-learn: {len(sessions)} session(s) → reflector={rmodel} → "
           f"playbook={pb_root}")
-    client = ollama.AsyncClient()
+    # Reflector runs on Ollama by default — it reads existing traces and
+    # doesn't benefit from the MLX speed advantage. Honor LLM_BACKEND if
+    # the user has explicitly set it.
+    info = backend_mod.detect_backend()
+    if rmodel:
+        info = backend_mod.BackendInfo(
+            name=info.name, model=rmodel,
+            source=f"--reflector-model {rmodel!r}",
+            endpoint=info.endpoint,
+        )
+    bk = backend_mod.make_backend(info)
     existing = playbook.load_all()
     proposals = []
     for s in sessions:
-        prop = await reflect_one(s, existing, model=rmodel, client=client)
+        prop = await reflect_one(s, existing, backend=bk)
         proposals.append(prop)
         nb = len(prop.get("new_bullets") or [])
         nc = len(prop.get("counter_updates") or [])
