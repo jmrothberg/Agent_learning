@@ -284,6 +284,11 @@ class ZImageTurboGenerator:
         self._pipeline: Any = None  # lazy-init in .generate()
         # Resolved at first .generate() call; "cuda", "mps", or None.
         self._device: str | None = None
+        # Last error captured from _lazy_init or generate. Surfaced via
+        # last_stats[i]["error"] so the caller can show the user the
+        # actual exception (instead of a canned "OOM / NSFW / etc"
+        # guess that hid e.g. diffusers API drift or model path errors).
+        self._last_error: str | None = None
 
     def cleanup(self) -> None:
         if self._pipeline is None:
@@ -303,7 +308,12 @@ class ZImageTurboGenerator:
         try:
             import torch
             from diffusers import ZImagePipeline
-        except Exception:
+        except Exception as e:
+            self._last_error = (
+                f"import failed: {type(e).__name__}: {e!s}. "
+                "Run `pip install -r requirements-diffuser.txt` in the "
+                "Agent_learning venv."
+            )
             return False
 
         # Pick the best available device. Z-Image-Turbo's authors
@@ -325,6 +335,11 @@ class ZImageTurboGenerator:
             # NaN→0 in cast). fp32 works at ~20s/image on M-series.
             dtype = torch.float32
         else:
+            self._last_error = (
+                "no CUDA and no MPS device available — torch sees "
+                "neither. Z-Image-Turbo on CPU is not supported "
+                "(would be hours per image)."
+            )
             return False
 
         try:
@@ -336,14 +351,27 @@ class ZImageTurboGenerator:
             self._pipeline.to(device)
             self._device = device
             return True
-        except Exception:
+        except Exception as e:
+            import traceback as _tb
+            self._last_error = (
+                f"pipeline load failed at {self.model_path}: "
+                f"{type(e).__name__}: {e!s} | "
+                f"trace: {_tb.format_exc().splitlines()[-3:]}"
+            )
             self._pipeline = None
             self._device = None
             return False
 
     def generate(self, prompt: str) -> str | None:
         """Run inference and save a 768×768 PNG to a temp file. Returns
-        the absolute path, or None on failure (caller skips that asset)."""
+        the absolute path, or None on failure (caller skips that asset).
+        On None, `self._last_error` carries the real exception or "
+        diffuser returned None (no images in pipeline output)" — read
+        it via getattr to keep generator API stable for callers that
+        don't care."""
+        # Clear stale error from a previous successful call so a subsequent
+        # success leaves _last_error None.
+        self._last_error = None
         if not self._lazy_init():
             return None
         try:
@@ -353,19 +381,41 @@ class ZImageTurboGenerator:
             # the same device as the pipeline; mismatched devices throw
             # `RuntimeError: Expected all tensors to be on the same device`.
             gen = torch.Generator(self._device or "cpu").manual_seed(42)
-            image = self._pipeline(
+            result = self._pipeline(
                 prompt=prompt,
                 height=768,
                 width=768,
                 num_inference_steps=9,   # 8 actual DiT forwards in turbo mode
                 guidance_scale=0.0,      # turbo: guidance must be 0
                 generator=gen,
-            ).images[0]
+            )
+            # Some pipelines return a result with `.images = []` when an
+            # internal safety/NSFW checker rejected the output, or when
+            # the result struct shape is different from what we expect.
+            # Distinguish empty-images from a real exception so the user
+            # knows whether it's a content filter or a code path.
+            images = getattr(result, "images", None)
+            if not images:
+                self._last_error = (
+                    "pipeline returned no images (empty .images list). "
+                    "Likely an internal NSFW/safety filter, OR a "
+                    "diffusers API drift where the result attribute "
+                    "name changed. Inspect the result object with "
+                    f"type={type(result).__name__}, "
+                    f"keys={list(getattr(result, '__dict__', {}).keys())}."
+                )
+                return None
+            image = images[0]
             f = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
             f.close()
             image.save(f.name, format="PNG")
             return f.name
-        except Exception:
+        except Exception as e:
+            import traceback as _tb
+            self._last_error = (
+                f"{type(e).__name__}: {e!s} | "
+                f"trace: {_tb.format_exc().splitlines()[-3:]}"
+            )
             return None
 
 
@@ -469,7 +519,18 @@ def generate_assets(
         # Cache miss — generate.
         gen_path = _safe_generate(image_generator, prompt)
         if gen_path is None:
-            stat["error"] = "diffuser returned None (OOM / NSFW filter / etc)"
+            # Pull the real error from the generator (set by generate()
+            # or _lazy_init()) so the user sees the actual cause —
+            # import error, model path miss, fp16 NaN, real NSFW
+            # filter, or empty result struct — instead of a one-size-
+            # fits-all canned message.
+            real_err = getattr(image_generator, "_last_error", None)
+            stat["error"] = (
+                f"diffuser failed: {real_err}" if real_err else
+                "diffuser returned None (no exception captured — check "
+                "generator's _last_error attribute)"
+            )
+            stat["gen_seconds"] = round(time.time() - t0, 3)
             asset_stats.append(stat)
             continue
         try:
@@ -512,10 +573,23 @@ def generate_assets(
 
 def _safe_generate(gen: Any, prompt: str) -> str | None:
     """Wrap ImageGenerator.generate(prompt) so a single failure (OOM,
-    NSFW filter, network) doesn't poison the whole batch."""
+    NSFW filter, network) doesn't poison the whole batch.
+
+    On exception, stamps `gen._last_error` with the real traceback so
+    the caller can surface it via `last_stats[i]["error"]` instead of
+    a canned guess.
+    """
     try:
         return gen.generate(prompt)
-    except Exception:
+    except Exception as e:
+        import traceback as _tb
+        try:
+            gen._last_error = (
+                f"_safe_generate caught {type(e).__name__}: {e!s} | "
+                f"trace: {_tb.format_exc().splitlines()[-3:]}"
+            )
+        except Exception:
+            pass
         return None
 
 

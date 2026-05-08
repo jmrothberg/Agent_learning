@@ -1681,6 +1681,35 @@ class GameAgent:
                             f"{session_assets_dir}",
                             {"assets": {n: str(p) for n, p in self._session_assets.items()}},
                         ))
+                    # When we asked for assets but produced fewer than
+                    # requested, surface the per-asset error reasons as
+                    # info events so the .log mirror picks them up
+                    # (status panel alone is too easy to miss). Each
+                    # failure gets one line so the user sees the actual
+                    # diffuser error — fp16 NaN, model path miss,
+                    # NSFW filter, etc — instead of just "0/N generated".
+                    if len(self._session_assets) < len(asset_specs):
+                        failed = [
+                            s for s in per_asset
+                            if isinstance(s, dict) and s.get("error")
+                        ]
+                        if failed:
+                            yield self._record(AgentEvent(
+                                "info",
+                                f"asset gen: {len(failed)}/{len(asset_specs)} "
+                                f"failed — see per-asset reasons below"
+                            ))
+                            for s in failed:
+                                name = s.get("name", "?")
+                                err = s.get("error", "(no reason captured)")
+                                # Truncate so a giant traceback doesn't
+                                # blow up the log line — the trace JSONL
+                                # has the full untruncated error.
+                                err_line = str(err)[:400]
+                                yield self._record(AgentEvent(
+                                    "info",
+                                    f"  - {name}: {err_line}"
+                                ))
 
             # ---- seed file OR memory skeleton for the first build ----------
             if self.seed_file is not None:
