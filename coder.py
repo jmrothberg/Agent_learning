@@ -100,6 +100,10 @@ def _print_event(ev: AgentEvent) -> None:
     elif ev.kind == "plan":
         # Plan tokens already streamed via on_token; no-op here.
         pass
+    elif ev.kind == "await_user":
+        # Step-mode pause banner. Actual stdin read happens in the event
+        # consumer below so it doesn't block the streaming printer here.
+        print(f"\n⏸  {ev.text}", flush=True)
 
 
 async def _run(
@@ -113,6 +117,8 @@ async def _run(
     headless: bool,
     open_when_done: bool,
     seed_file: Path | None,
+    step: bool = False,
+    model_class: str = "auto",
 ) -> int:
     browser = LiveBrowser(viewport=(800, 600), run_seconds=3.0, headless=headless)
     try:
@@ -139,6 +145,9 @@ async def _run(
         # Real sessions feed the offline learner; v1 produces the
         # rich traces it needs.
         prompt_version="v1",
+        # todo #6 — mid-tier prompt trim. "auto" infers from model
+        # tag; pass --model-class mid|large to override.
+        model_class=model_class,
     )
 
     # Stream tokens to stdout, one chunk at a time. Newlines flush.
@@ -146,13 +155,40 @@ async def _run(
         sys.stdout.write(piece)
         sys.stdout.flush()
     agent.set_token_callback(on_token)
+    # Step-mode (Stop-Losing-To-OneShot todo #1): pause after each iter
+    # and read stdin before continuing. Off by default — autonomous
+    # behavior is unchanged unless --step is passed.
+    if step:
+        agent.set_step_mode(True)
 
-    print(f"== Coding Box CLI · model={model} · headless={headless} · best-of-N={best_of_n}")
+    print(
+        f"== Coding Box CLI · model={model} · headless={headless} · "
+        f"best-of-N={best_of_n} · step={step}"
+    )
     print(f"== Goal: {goal}\n")
     rc = 0
     try:
         async for ev in agent.run(goal):
             _print_event(ev)
+            # Step-mode: when the agent emits await_user it has parked
+            # in an asyncio.sleep loop waiting for either
+            # signal_step_continue() or new feedback. Read one line
+            # from stdin in a thread so the asyncio loop keeps ticking,
+            # then either signal continue (empty) or queue feedback.
+            if ev.kind == "await_user":
+                loop = asyncio.get_running_loop()
+                try:
+                    line = await loop.run_in_executor(
+                        None, input,
+                        "[step-mode] Enter to continue, or type feedback: ",
+                    )
+                except EOFError:
+                    line = ""
+                line = (line or "").strip()
+                if line:
+                    agent.add_user_feedback(line)
+                else:
+                    agent.signal_step_continue()
     except KeyboardInterrupt:
         print("\n^C — stopping.", file=sys.stderr)
         rc = 130
@@ -204,6 +240,25 @@ def main() -> int:
              "ADAPT it to your goal via patches instead of generating from "
              "scratch (memory skeleton is skipped).",
     )
+    # Step-mode (Stop-Losing-To-OneShot todo #1): pause between iters.
+    p.add_argument(
+        "--step",
+        action="store_true",
+        help="Step-mode: pause after each iteration and wait for stdin "
+             "input (Enter to continue, or type feedback) before the next "
+             "model turn. Use to manually verify each iter on mid-tier "
+             "models that the autonomous harness can't fully grade.",
+    )
+    # Model-class override (Stop-Losing-To-OneShot todo #6).
+    p.add_argument(
+        "--model-class",
+        choices=["auto", "mid", "large"],
+        default="auto",
+        help="Override prompt-size trim. 'auto' (default) infers from "
+             "model tag; 'mid' drops <anti-patterns> and tightens the "
+             "playbook plan budget for 27B-class local models; 'large' "
+             "keeps the full prompt unchanged.",
+    )
     args = p.parse_args()
 
     seed_path: Path | None = None
@@ -224,6 +279,8 @@ def main() -> int:
         headless=args.headless,
         open_when_done=args.open,
         seed_file=seed_path,
+        step=args.step,
+        model_class=args.model_class,
     ))
 
 

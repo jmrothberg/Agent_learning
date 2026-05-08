@@ -31,6 +31,75 @@ _MAX_MSG_LEN = 240      # truncate each line to this many chars
 _MAX_BODY_TEXT = 200    # tiny snippet of body text
 
 
+# Stop-Losing-To-OneShot todo #2 — criteria coverage helper.
+# Stop-words drop generic prose ("the player should be able to move")
+# and keep meaningful tokens ("rotate", "thrust", "shoot"). Genre-free:
+# we never compile a list of subject matter; we just remove function
+# words and short tokens. Matches a probe to a criterion when at least
+# one meaningful word appears in BOTH (the probe's `name` or `expr` and
+# the criterion line). Conservative: a missing match flags the line,
+# which biases toward asking the model to add probes.
+_COVERAGE_STOPWORDS = frozenset({
+    "the", "and", "that", "this", "with", "from", "into", "onto", "for",
+    "are", "was", "were", "have", "has", "had", "been", "being", "must",
+    "should", "could", "would", "will", "shall", "may", "might", "can",
+    "do", "does", "did", "done", "is", "be", "an", "at", "by", "on",
+    "in", "of", "to", "or", "no", "if", "as", "it", "its", "after",
+    "when", "while", "than", "then", "but", "all", "any", "some",
+    "press", "click", "type", "key", "keys", "test", "edge", "stress",
+    "basic", "case", "value", "values", "true", "false", "render",
+    "renders", "rendered", "show", "shown", "user", "game",
+})
+# Underscores are word boundaries (so 'ship_rotates_left' contributes
+# 'ship', 'rotates', 'left' to the bag of words rather than a single
+# compound token that almost never matches a criterion line).
+_COVERAGE_WORD_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9]*")
+
+
+def _coverage_words(text: str) -> set[str]:
+    """Return lowercased meaningful tokens (>=4 chars, non-stop)."""
+    if not text:
+        return set()
+    return {
+        w for w in (m.group(0).lower() for m in _COVERAGE_WORD_RE.finditer(text))
+        if len(w) >= 4 and w not in _COVERAGE_STOPWORDS
+    }
+
+
+def _criteria_coverage_gaps(criteria_text: str, probes: list[dict]) -> list[str]:
+    """For each non-empty criterion line, return the line if no probe's
+    name+expr shares any meaningful word with it. Generic, behavioral,
+    no genre awareness. Only used when both criteria and probes are
+    present — empty inputs short-circuit to no gaps reported."""
+    if not criteria_text or not probes:
+        return []
+    probe_words: set[str] = set()
+    for p in probes:
+        probe_words |= _coverage_words(str(p.get("name") or ""))
+        probe_words |= _coverage_words(str(p.get("expr") or ""))
+    if not probe_words:
+        return []
+    uncovered: list[str] = []
+    for raw in criteria_text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or line.startswith("//"):
+            continue
+        words = _coverage_words(line)
+        if not words:
+            continue
+        overlap = words & probe_words
+        # Existence-only probes ("ship_exists", "asteroids_exist")
+        # typically share exactly one noun with a behavioral criterion
+        # ("ship rotates with arrows; asteroids drift"). Require >=2
+        # overlapping tokens for criteria with >=3 meaningful words so
+        # an existence probe can't satisfy a multi-verb claim by accident.
+        # Terse criteria (1-2 tokens) keep the lenient >=1 rule.
+        threshold = 2 if len(words) >= 3 else 1
+        if len(overlap) < threshold:
+            uncovered.append(line[:140])
+    return uncovered
+
+
 def _truncate(s: str, n: int) -> str:
     """Truncate long strings with a clear marker so the model knows it was cut."""
     if len(s) <= n:
@@ -925,6 +994,7 @@ class LiveBrowser:
         *,
         probes: list[dict] | None = None,
         screenshot_before_path: str | Path | None = None,
+        criteria: str | None = None,
     ) -> dict[str, Any]:
         """Navigate to the file, let it run, return the report.
 
@@ -1153,6 +1223,23 @@ class LiveBrowser:
                 "Your Phase A acceptance criterion is unmet; fix the "
                 "game so it evaluates truthy."
             )
+        # Stop-Losing-To-OneShot todo #2 — criteria/probe coverage gate.
+        # The model authors its own <probes>; mid-tier models often write
+        # existence-only probes (`!!player`) that pass even when the
+        # promised behavior is broken. Flag any <criteria> line whose
+        # meaningful words do not appear in any probe's name/expr — the
+        # model must add a probe that actually tests it. Genre-free:
+        # uses simple word overlap, no semantic parsing.
+        coverage_gaps = _criteria_coverage_gaps(criteria or "", probes or [])
+        if coverage_gaps:
+            report["criteria_uncovered"] = coverage_gaps
+            report["soft_warnings"].append(
+                "PROBE COVERAGE GAP: the following <criteria> lines have no "
+                "<probes> entry whose name/expr mentions them — your test "
+                "list may be passing without actually testing what was "
+                "promised. Add or revise probes to cover each:\n  - "
+                + "\n  - ".join(coverage_gaps)
+            )
         # ok must reflect the fresh soft_warnings count after we appended.
         report["ok"] = len(report["errors"]) == 0 and len(report["soft_warnings"]) == 0
         return report
@@ -1194,6 +1281,19 @@ class LiveBrowser:
           2. We use a ~32x32 downsampled hash of the FULL canvas instead of
              nine corner pixels, so slowly-moving objects in the middle of the
              playfield register as a change.
+
+        Stop-Losing-To-OneShot todo #2 — ambient baseline + gameState delta.
+        Games with continuous animation (asteroids drifting, particles,
+        scrolling parallax) made the old before/after canvas-hash test
+        ALWAYS report change → false-positive "TEST OK" on broken
+        controls. We now:
+          (a) take an ambient baseline (two hashes 250ms apart, no key
+              held) and capture window.gameState if exposed;
+          (b) for each held key, prefer a `gameState` numeric-leaf delta
+              that did NOT change in ambient (input-attributable; works
+              even when the canvas is also drifting), and only fall back
+              to canvas-hash change when ambient was stable.
+        Generic and behavioral — works for any HTML/JS game.
         """
         import asyncio
 
@@ -1214,14 +1314,86 @@ class LiveBrowser:
         except Exception:
             pass
 
+        # Flatten window.gameState into a {dotted-path: number} map of
+        # numeric leaves, depth-capped and fanout-capped so giant entity
+        # arrays don't explode the snapshot. Returns null when gameState
+        # is not exposed — input-test then falls back to canvas hash only.
+        _GAMESTATE_SNAPSHOT_JS = """
+        () => {
+            const gs = window.gameState;
+            if (gs == null || typeof gs !== 'object') return null;
+            const out = {};
+            const visit = (obj, path, depth) => {
+                if (depth > 4 || obj == null) return;
+                if (typeof obj === 'number' && isFinite(obj)) { out[path] = obj; return; }
+                if (typeof obj === 'boolean') { out[path] = obj ? 1 : 0; return; }
+                if (typeof obj !== 'object') return;
+                const ks = Array.isArray(obj)
+                    ? obj.slice(0, 32).map((_, i) => String(i))
+                    : Object.keys(obj).slice(0, 64);
+                for (const k of ks) {
+                    try { visit(obj[k], path ? path + '.' + k : k, depth + 1); }
+                    catch (e) { /* getters etc */ }
+                }
+            };
+            visit(gs, '', 0);
+            // Also surface array lengths so "bullets fired" registers as a delta.
+            const lenVisit = (obj, path, depth) => {
+                if (depth > 4 || obj == null || typeof obj !== 'object') return;
+                if (Array.isArray(obj)) { out[(path || '_root') + '.length'] = obj.length; return; }
+                const ks = Object.keys(obj).slice(0, 64);
+                for (const k of ks) {
+                    try { lenVisit(obj[k], path ? path + '.' + k : k, depth + 1); }
+                    catch (e) {}
+                }
+            };
+            lenVisit(gs, '', 0);
+            return out;
+        }
+        """
+
+        def _gs_changed_leaves(before: Any, after: Any) -> set[str]:
+            """Set of leaf paths whose value differs (epsilon for floats)
+            or that appeared/disappeared between the two snapshots."""
+            if not isinstance(before, dict) or not isinstance(after, dict):
+                return set()
+            EPS = 1e-3
+            changed: set[str] = set()
+            for k, b in before.items():
+                a = after.get(k)
+                if a is None and k not in after:
+                    changed.add(k)
+                    continue
+                if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+                    if abs(float(a) - float(b)) > EPS:
+                        changed.add(k)
+            for k in after:
+                if k not in before:
+                    changed.add(k)
+            return changed
+
+        # ---- ambient baseline (no key held) -------------------------------
+        ambient_a = await self._safe_eval(_CANVAS_HASH_JS)
+        ambient_gs_a = await self._safe_eval(_GAMESTATE_SNAPSHOT_JS)
+        await asyncio.sleep(0.25)
+        ambient_b = await self._safe_eval(_CANVAS_HASH_JS)
+        ambient_gs_b = await self._safe_eval(_GAMESTATE_SNAPSHOT_JS)
+        ambient_canvas_changed = bool(
+            ambient_a is not None and ambient_b is not None and ambient_a != ambient_b
+        )
+        ambient_gs_changes = _gs_changed_leaves(ambient_gs_a, ambient_gs_b)
+        has_gamestate = ambient_gs_a is not None
+
         for k in keys:
             before = await self._safe_eval(_CANVAS_HASH_JS)
+            before_gs = await self._safe_eval(_GAMESTATE_SNAPSHOT_JS)
             if before is None:
                 return {"ran": False, "reason": "canvas not sampleable", "keys_tried": tried}
             try:
                 await self._page.keyboard.down(k)
                 await asyncio.sleep(0.25)  # hold long enough for thrust to move ship
                 after_held = await self._safe_eval(_CANVAS_HASH_JS)
+                after_gs = await self._safe_eval(_GAMESTATE_SNAPSHOT_JS)
                 await self._page.keyboard.up(k)
             except Exception:
                 continue
@@ -1229,8 +1401,23 @@ class LiveBrowser:
             # Wait one more frame for any post-release tween / momentum.
             await asyncio.sleep(0.05)
             after_release = await self._safe_eval(_CANVAS_HASH_JS)
-            if (after_held is not None and after_held != before) or \
-               (after_release is not None and after_release != before):
+
+            # Decide responsiveness with the strongest available signal.
+            # (1) gameState input-only delta: leaves that changed during
+            # the held window but did NOT change during the ambient
+            # window are attributable to the key press.
+            input_only_leaves: set[str] = set()
+            if has_gamestate:
+                held_changes = _gs_changed_leaves(before_gs, after_gs)
+                input_only_leaves = held_changes - ambient_gs_changes
+            # (2) canvas-hash fallback: only credit when ambient was
+            # stable (so the held-window change was input-induced).
+            canvas_input_changed = (
+                (after_held is not None and after_held != before)
+                or (after_release is not None and after_release != before)
+            ) and not ambient_canvas_changed
+
+            if input_only_leaves or canvas_input_changed:
                 any_change = True
                 first_responsive_key = k
                 break
@@ -1240,6 +1427,9 @@ class LiveBrowser:
             "any_change": any_change,
             "keys_tried": tried,
             "first_responsive_key": first_responsive_key,
+            "ambient_canvas_motion": ambient_canvas_changed,
+            "ambient_gs_motion": bool(ambient_gs_changes),
+            "had_gamestate": has_gamestate,
         }
 
     async def show_status(self, title: str, message: str = "") -> None:

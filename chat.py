@@ -43,6 +43,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -356,12 +357,49 @@ def _running_models_via_cli() -> tuple[list[str], str | None]:
 # blacklisted without touching the rest of the resolver.
 _KNOWN_BROKEN_TAGS: set[str] = set()
 
+# Tags that are clearly NOT chat models — diffusers (Z-Image-Turbo,
+# Stable Diffusion), embedding models, etc. Excluded from auto-pick in
+# both /api/ps and /api/tags paths because Ollama lists them alongside
+# real chat tags and the resolver would otherwise grab whichever is
+# freshest by expires_at. The user can still force one via
+# OLLAMA_MODEL=<tag> if they really mean it. Match is case-insensitive
+# substring on the tag, so `x/z-image-turbo:latest` and
+# `stabilityai/stable-diffusion-3:latest` are both filtered.
+_NON_CHAT_TAG_FRAGMENTS: tuple[str, ...] = (
+    "z-image",          # Z-Image-Turbo (used in-process via diffusers)
+    "stable-diffusion",
+    "sdxl",
+    "flux",             # Black Forest Labs FLUX — image gen
+    "embed",            # nomic-embed-text, bge-*, etc.
+    "embedding",
+    "minilm",           # sentence-transformers / embedding models
+    "bge-",
+    "rerank",           # cross-encoder rerankers
+    "whisper",          # speech-to-text
+    "tts-",             # text-to-speech
+)
+
+
+def _is_chat_capable_tag(name: str) -> bool:
+    """True if the tag is plausibly a chat model. False for known
+    image / embed / speech model families. Defensive: returns True for
+    unknown tags so we don't accidentally exclude a working chat
+    model — only excludes tags we've seen cause `does not support
+    chat` (status code: 400) responses."""
+    n = (name or "").lower()
+    return not any(frag in n for frag in _NON_CHAT_TAG_FRAGMENTS)
+
 
 def _pick_first_workable(names: list[str]) -> str | None:
-    """Return the first installed model that isn't in the broken blacklist."""
+    """Return the first installed model that's chat-capable AND not in
+    the broken blacklist. Filters out diffusers / embed / etc. so a
+    fresh launch with no chat model loaded doesn't grab Z-Image-Turbo."""
     for n in names:
-        if n not in _KNOWN_BROKEN_TAGS:
-            return n
+        if n in _KNOWN_BROKEN_TAGS:
+            continue
+        if not _is_chat_capable_tag(n):
+            continue
+        return n
     return None
 
 
@@ -438,14 +476,26 @@ def resolve_chat_model(fallback: str) -> tuple[str, str]:
         # Sort by expires_at descending — ISO-8601 strings sort lexically the
         # right way. Ties (or missing values) fall back to ps order.
         running.sort(key=lambda m: m.get("expires_at") or "", reverse=True)
-        chosen = running[0]["name"]
-        names = [m["name"] for m in running]
-        if len(names) == 1:
-            return chosen, f"loaded in ollama (/api/ps): {chosen!r}"
-        return chosen, (
-            f"loaded in ollama: {names} — picking most-recently-used "
-            f"{chosen!r} (latest expires_at)"
-        )
+        # Drop diffusers / embed / etc. before picking the freshest. After
+        # in-process Z-Image-Turbo loads its weights via the Ollama-pulled
+        # `x/z-image-turbo:latest` tag, that tag becomes the most-recently-
+        # used entry in /api/ps; without this filter the next /new session
+        # would try to chat with it and Ollama returns 400.
+        chat_running = [m for m in running if _is_chat_capable_tag(m["name"])]
+        if chat_running:
+            chosen = chat_running[0]["name"]
+            names = [m["name"] for m in chat_running]
+            skipped = [m["name"] for m in running if not _is_chat_capable_tag(m["name"])]
+            tail = f" (skipped non-chat: {skipped})" if skipped else ""
+            if len(names) == 1:
+                return chosen, f"loaded in ollama (/api/ps): {chosen!r}{tail}"
+            return chosen, (
+                f"loaded in ollama: {names} — picking most-recently-used "
+                f"{chosen!r} (latest expires_at){tail}"
+            )
+        # All running models were filtered out as non-chat — fall through
+        # to /api/tags so we can pick an installed-but-not-loaded chat
+        # model. Don't return an unusable tag.
 
     installed, err = _installed_models_via_http()
     if installed:
@@ -577,6 +627,21 @@ class CodingBoxApp(App):
         # Per-session paths assigned in _start_session. None until then.
         self._out_path: Path | None = None
         self._best_path: Path | None = None
+        self._assets_dir: Path | None = None
+        # Status-panel state — kept here so _update_status() can render
+        # without re-derived state. Reset in _new_session via _reset_status_state.
+        self._activity_label: str = ""        # what's happening right now
+        self._activity_started_at: float = 0.0  # monotonic; for "Ns" age
+        self._stream_tokens: int = 0          # tokens this stream
+        self._stream_started_at: float = 0.0  # monotonic; for tok/s
+        self._last_token_at: float = 0.0      # monotonic; for stall age
+        self._is_streaming: bool = False
+        self._assets_summary: str = ""        # sticky summary of last batch
+        self._streak_clean: int = 0
+        self._streak_min: int = 2
+        self._streak_stuck: int = 0
+        # Trace JSONL path for the current session. Surfaced in status.
+        self._trace_path: Path | None = None
         # True between session-end and session-start. Used so feedback typed
         # after <done/> automatically triggers a continuation extension
         # instead of being silently queued forever.
@@ -609,6 +674,12 @@ class CodingBoxApp(App):
         self.title = "JMR's Coding Box"
         self.sub_title = "type your game idea below, then Enter"
         self._update_status()
+        # Periodic refresh so the activity line ages naturally — tok/s,
+        # "last token Ns ago", and the pre-first-token wait counter all
+        # need to advance even when no new event arrives. 1s cadence is
+        # cheap (Static.update diffs Rich content) and is what makes a
+        # stalled stream visible without a fresh event.
+        self.set_interval(1.0, self._tick_status)
         # Show what model we'll use when the user submits a goal. One call,
         # one line. Override with OLLAMA_MODEL env var if you want.
         preview_model, preview_src = resolve_chat_model(MODEL)
@@ -730,6 +801,13 @@ class CodingBoxApp(App):
         # Called from inside the agent's async loop (same event loop as the
         # TUI), so this is safe without explicit thread-marshaling.
         self._stream_buf += piece
+        # Track token-rate stats so the status panel can display tok/s and
+        # detect a wedge (last_token_at growing without bound).
+        now = time.monotonic()
+        self._stream_tokens += 1
+        self._last_token_at = now
+        if self._stream_started_at == 0.0:
+            self._stream_started_at = now
         # Flush at any newline boundary so the user sees lines as they arrive.
         if "\n" in self._stream_buf:
             *complete, self._stream_buf = self._stream_buf.split("\n")
@@ -748,25 +826,82 @@ class CodingBoxApp(App):
     def _update_status(self, extra: str = "") -> None:
         """Render the right-hand status panel.
 
-        The panel always shows phase / iteration / model / goal. When
-        feedback has been typed but not yet drained into a user turn,
-        a "Queued" section appears beneath the goal listing each queued
-        message; entries vanish from the panel the moment the agent
-        consumes them at the next user-turn boundary. Visible feedback
-        is the most reliable way for the user to see that their typing
-        landed AND when it gets applied.
+        Sections (in order):
+          1. Activity — what's happening right now (streaming / assets /
+             browser / idle), with tok/s and stall-age while streaming.
+          2. Iteration — phase + clean-streak + queued user feedback.
+          3. Assets — sticky summary of the most recent generation batch
+             (paths, per-asset cache hits, generation times).
+          4. Files — paths to game.html, best.html, trace JSONL, assets
+             dir, plain-text log mirror. Always visible so the user
+             knows what to `cat` / share.
+          5. Last test (`extra`) — full report shown when a test event
+             fires; passed in by the caller.
         """
-        body = (
-            f"[b]Phase:[/b] {self._phase_label}\n"
-            f"[b]Iteration:[/b] {self._iteration_label}\n"
-        )
-        if self._session_model:
-            body += f"[b]Model:[/b] {self._session_model}\n"
-        body += f"[b]Goal:[/b] {self._goal or '—'}\n"
+        body = self._render_activity_line()
+        body += self._render_iteration_block()
+        body += self._render_assets_block()
+        body += self._render_files_block()
+        if extra:
+            body += "\n" + extra
+        self.query_one("#status-body", Static).update(body)
 
-        # Queued user input — pending until the agent drains it. Direct
-        # attribute access is fine; chat.py already pokes _pending_feedback
-        # in on_input_submitted to print the running count.
+    def _render_activity_line(self) -> str:
+        """Top line: the heartbeat. Always rendered, even when idle."""
+        now = time.monotonic()
+        if self._is_streaming:
+            elapsed = max(0.001, now - self._stream_started_at) if self._stream_started_at else 0.001
+            tok_per_s = self._stream_tokens / elapsed if elapsed > 0 else 0.0
+            since_last = now - self._last_token_at if self._last_token_at else 0.0
+            # Stall threshold: 30s without a token while streaming = warn.
+            stalled = self._stream_tokens > 0 and since_last > 30.0
+            label = self._activity_label or "streaming reply"
+            if self._stream_tokens == 0:
+                # Pre-first-token: show how long we've been waiting. This
+                # is the case the user complained about — Ollama not
+                # responding looks identical to "thinking" without this.
+                wait = now - self._stream_started_at if self._stream_started_at else 0.0
+                if wait > 30.0:
+                    return (
+                        f"[bold yellow]Activity:[/bold yellow] {label} — "
+                        f"[red]waiting {wait:.0f}s for first token[/red]\n"
+                    )
+                return (
+                    f"[bold yellow]Activity:[/bold yellow] {label} — "
+                    f"[dim]waiting for first token ({wait:.0f}s)[/dim]\n"
+                )
+            tag = "[red]STALLED[/red]" if stalled else "[green]live[/green]"
+            return (
+                f"[bold yellow]Activity:[/bold yellow] {label} — "
+                f"{self._stream_tokens:,} tok, {tok_per_s:.1f} tok/s, "
+                f"last {since_last:.1f}s ago {tag}\n"
+            )
+        if self._activity_label:
+            age = now - self._activity_started_at if self._activity_started_at else 0.0
+            return (
+                f"[bold yellow]Activity:[/bold yellow] {self._activity_label} "
+                f"[dim]({age:.0f}s)[/dim]\n"
+            )
+        return "[bold yellow]Activity:[/bold yellow] [dim]idle[/dim]\n"
+
+    def _render_iteration_block(self) -> str:
+        """Phase / iteration / streak / model / goal / queued feedback."""
+        out = (
+            f"[b]Phase:[/b] {self._phase_label}\n"
+            f"[b]Iteration:[/b] {self._iteration_label}"
+        )
+        if self._streak_clean or self._streak_stuck:
+            out += (
+                f" [dim](streak {self._streak_clean}/"
+                f"{self._streak_min} clean"
+            )
+            if self._streak_stuck:
+                out += f", {self._streak_stuck} stuck"
+            out += ")[/dim]"
+        out += "\n"
+        if self._session_model:
+            out += f"[b]Model:[/b] {self._session_model}\n"
+        out += f"[b]Goal:[/b] {self._goal or '—'}\n"
         if self.agent is not None:
             pending_fb = list(getattr(self.agent, "_pending_feedback", []) or [])
             pending_ans = getattr(self.agent, "_pending_answer", None)
@@ -779,18 +914,39 @@ class CodingBoxApp(App):
                 preview = fb[:80] + ("…" if len(fb) > 80 else "")
                 queue_lines.append(f"  [blue]{i}.[/blue] {_esc(preview)}")
             if queue_lines:
-                body += f"\n[b]Queued ({len(queue_lines)}):[/b]\n"
-                body += "\n".join(queue_lines) + "\n"
-                body += "[dim]Applied at the next user-turn boundary.[/dim]\n"
+                out += f"\n[b]Queued ({len(queue_lines)}):[/b]\n"
+                out += "\n".join(queue_lines) + "\n"
+                out += "[dim]Applied at the next user-turn boundary.[/dim]\n"
+        return out
 
-        # Show the FULL log path persistently so the user always knows what
-        # file to `cat` / share when something goes wrong.
+    def _render_assets_block(self) -> str:
+        """Sticky multi-line summary of the most recent asset batch.
+        Empty when no assets have been generated this session."""
+        if not self._assets_summary:
+            return ""
+        return f"\n{self._assets_summary}\n"
+
+    def _render_files_block(self) -> str:
+        """Per-session file paths. Always shown when available so the
+        user can `cat` / inspect / share without scrolling logs."""
+        rows: list[str] = []
+        if self._out_path is not None:
+            rows.append(f"  [dim]game[/dim]    {self._out_path}")
+        if self._best_path is not None and self._best_path.exists():
+            rows.append(f"  [dim]best[/dim]    {self._best_path}")
+        if self._trace_path is not None:
+            rows.append(f"  [dim]trace[/dim]   {self._trace_path}")
+        if self._assets_dir is not None and self._assets_dir.exists():
+            rows.append(f"  [dim]assets[/dim]  {self._assets_dir}")
         if self._log_file_path is not None:
-            body += f"\n[b]Log:[/b] [dim]{self._log_file_path}[/dim]\n"
-            body += "[dim]Ctrl+L to reprint paths[/dim]\n"
-        if extra:
-            body += "\n" + extra
-        self.query_one("#status-body", Static).update(body)
+            rows.append(f"  [dim]log[/dim]     {self._log_file_path}")
+        if not rows:
+            return ""
+        return (
+            "\n[b]Files:[/b]\n"
+            + "\n".join(rows)
+            + "\n[dim]Ctrl+L to reprint paths[/dim]\n"
+        )
 
     # ----------------------------- actions --------------------------------
 
@@ -839,6 +995,23 @@ class CodingBoxApp(App):
         """
         text = (message.value or "").strip()
         message.input.value = ""
+
+        # Step-mode (Stop-Losing-To-OneShot todo #1): when the agent has
+        # paused between iters, empty Enter means "continue" and any
+        # non-empty text falls through to the normal feedback path
+        # (which also unblocks the agent-side wait via
+        # has_pending_user_input becoming True). Either way we exit
+        # step-state so the next event resets routing.
+        if self._awaiting_kind == "step":
+            self._awaiting_kind = "feedback"
+            message.input.placeholder = "feedback · 'done' or Ctrl+D to ship · /help"
+            if not text:
+                if self.agent is not None:
+                    self.agent.signal_step_continue()
+                    self._log_info("[dim]→ continuing iteration[/dim]")
+                return
+            # Non-empty: fall through to the regular dispatch below.
+
         if not text:
             return
 
@@ -943,6 +1116,8 @@ class CodingBoxApp(App):
                 self._cmd_reset()
             elif cmd == "status":
                 self._cmd_status()
+            elif cmd == "wait":
+                self._cmd_toggle_wait(arg)
             else:
                 self._log_info(f"unknown command /{cmd} — type /help")
         except Exception as e:
@@ -974,6 +1149,7 @@ class CodingBoxApp(App):
             "  [b]/log[/b]                     print all session artifact paths (= Ctrl+L; also /paths, /files)",
             "  [b]/clear[/b]                   clear the agent log pane (does not affect staged state)",
             "  [b]/status[/b]                  print model, phase, iteration, paths, what's staged",
+            "  [b]/wait[/b] [on|off]            toggle step-mode: pause after each iter; Enter or feedback to continue",
             "  [b]/quit[/b]                    quit (= Ctrl+Q)",
             "",
             "[bold cyan]── sticky staging ──[/bold cyan]",
@@ -1140,6 +1316,11 @@ class CodingBoxApp(App):
         )
 
     def _cmd_status(self) -> None:
+        # Step-mode shows up here so users can confirm whether the
+        # agent will pause between iters or run continuously.
+        step_label = "—"
+        if self.agent is not None:
+            step_label = "ON" if getattr(self.agent, "_step_mode", False) else "off"
         lines = [
             "[bold cyan]── status ──[/bold cyan]",
             f"  model (active):    {_esc(self._session_model or '—')}",
@@ -1148,6 +1329,7 @@ class CodingBoxApp(App):
             f"  phase:             {_esc(self._phase_label)}",
             f"  iteration:         {_esc(self._iteration_label)}",
             f"  max iters:         {self._max_iters}",
+            f"  step-mode (/wait): {step_label}",
             f"  staged seed:       {_esc(str(self._next_seed) if self._next_seed else '—')}",
             f"  session done:      {self._session_done}",
             f"  game file:         {self._out_path or '—'}",
@@ -1155,6 +1337,36 @@ class CodingBoxApp(App):
         ]
         for line in lines:
             self._log(line)
+
+    def _cmd_toggle_wait(self, arg: str) -> None:
+        """/wait — toggle step-mode (pause after each iter and wait for
+        explicit user input before continuing). /wait on or /wait off
+        for explicit set. Stop-Losing-To-OneShot todo #1: makes the user
+        the verifier between iters, the strongest defense against
+        'iter 2 wrecks iter 1' for mid-tier models."""
+        if self.agent is None:
+            self._log_info(
+                "no active session — start one and try /wait again "
+                "(it applies once an agent is running)"
+            )
+            return
+        arg_lc = arg.strip().lower()
+        if arg_lc in ("on", "true", "1"):
+            new_state = True
+        elif arg_lc in ("off", "false", "0"):
+            new_state = False
+        else:
+            new_state = not getattr(self.agent, "_step_mode", False)
+        self.agent.set_step_mode(new_state)
+        if new_state:
+            self._log_info(
+                "[yellow]step-mode ON[/yellow] — agent will pause after each "
+                "iter. Press Enter to continue, or type feedback to inject "
+                "before the next turn."
+            )
+        else:
+            self._log_info("step-mode off — agent will run iterations continuously.")
+        self._update_status()
 
     # ----------------------------- session --------------------------------
 
@@ -1234,10 +1446,41 @@ class CodingBoxApp(App):
         )
         self.agent.set_token_callback(self._emit_token)
 
+        # Surface per-session paths in the status panel. The agent owns
+        # the canonical paths; we mirror them here so the panel stays
+        # accurate even if the user typed /open or /new mid-flight.
+        self._trace_path = self.agent.trace_path
+        self._assets_dir = self._out_path.parent / f"{basename}_assets"
+        # Reset rolling status state for the new session — sticky values
+        # from a prior session would mislead the user about THIS one.
+        self._reset_status_state()
+
         self._open_log_mirror(basename)
 
         # Spawn the agent loop as a background task so the TUI stays responsive.
         self.run_worker(self._consume_events(goal, continuation=False), exclusive=True)
+
+    def _reset_status_state(self) -> None:
+        """Clear rolling status fields between sessions."""
+        self._activity_label = ""
+        self._activity_started_at = 0.0
+        self._stream_tokens = 0
+        self._stream_started_at = 0.0
+        self._last_token_at = 0.0
+        self._is_streaming = False
+        self._assets_summary = ""
+        self._streak_clean = 0
+        self._streak_stuck = 0
+
+    def _tick_status(self) -> None:
+        """Periodic refresh of the status panel — only repaints when
+        there's something time-sensitive to update (active stream,
+        non-idle activity). Idle UI doesn't need re-renders."""
+        if self._is_streaming or self._activity_label:
+            try:
+                self._update_status()
+            except Exception:
+                pass
 
     async def _extend_session(self, feedback: str) -> None:
         """Continuation: re-run the agent on the existing file with new feedback.
@@ -1433,6 +1676,98 @@ class CodingBoxApp(App):
 
         elif ev.kind == "info":
             self._log_info(text_safe)
+
+        elif ev.kind == "await_user":
+            # Step-mode pause (Stop-Losing-To-OneShot todo #1). Switch
+            # the input box into "step" routing — empty Enter signals
+            # the agent to continue; non-empty falls through to the
+            # normal feedback path which also unblocks the wait.
+            self._awaiting_kind = "step"
+            self._log(f"\n[bold magenta]\u23f8[/bold magenta]  [bold]{text_safe}[/bold]")
+            inp = self.query_one("#user-input", Input)
+            inp.placeholder = "step-mode · Enter to continue, or type feedback"
+            inp.focus()
+
+        elif ev.kind == "activity":
+            # ev.text is the state name: streaming | generating_assets |
+            # browser | idle. ev.data may carry a human-readable "label".
+            state = ev.text or ""
+            label = (ev.data or {}).get("label", "")
+            now = time.monotonic()
+            if state == "idle":
+                self._activity_label = ""
+                self._activity_started_at = 0.0
+                self._is_streaming = False
+            else:
+                self._activity_label = label or state.replace("_", " ")
+                self._activity_started_at = now
+                if state == "streaming":
+                    # New stream begins; clear per-stream counters so
+                    # tok/s reflects this stream only, not last one.
+                    self._is_streaming = True
+                    self._stream_tokens = 0
+                    self._stream_started_at = now
+                    self._last_token_at = 0.0
+                else:
+                    self._is_streaming = False
+            self._update_status()
+
+        elif ev.kind == "assets":
+            self._assets_summary = self._format_assets_summary(ev.data or {})
+            session_dir = (ev.data or {}).get("session_dir")
+            if session_dir:
+                try:
+                    self._assets_dir = Path(session_dir)
+                except Exception:
+                    pass
+            produced = (ev.data or {}).get("produced", 0)
+            requested = (ev.data or {}).get("requested", 0)
+            self._log_info(
+                f"[green]assets:[/green] {produced}/{requested} generated"
+                + (f" at [b]{session_dir}[/b]" if session_dir else "")
+            )
+            self._update_status()
+
+        elif ev.kind == "streak":
+            self._streak_clean = int((ev.data or {}).get("consecutive_clean_iters", 0))
+            self._streak_stuck = int((ev.data or {}).get("stuck_streak", 0))
+            self._streak_min = int((ev.data or {}).get("min_to_ship", 2))
+            self._update_status()
+
+    def _format_assets_summary(self, data: dict) -> str:
+        """Render the structured per-asset stats from an `assets` event
+        into a few lines for the status panel. Truncates the per-asset
+        list to 6 entries with a "+N more" suffix to keep the panel
+        scannable even on big batches."""
+        requested = data.get("requested", 0)
+        produced = data.get("produced", 0)
+        session_dir = data.get("session_dir") or ""
+        per_asset = list(data.get("per_asset") or [])
+        head = f"[b]Assets:[/b] {produced}/{requested} generated"
+        if session_dir:
+            head += f" -> [dim]{session_dir}[/dim]"
+        rows: list[str] = []
+        for stat in per_asset[:6]:
+            if not isinstance(stat, dict):
+                continue
+            name = str(stat.get("name", "?"))[:32]
+            cache = "cached" if stat.get("cache_hit") else "fresh "
+            secs = stat.get("gen_seconds")
+            secs_str = f"{secs:5.1f}s" if isinstance(secs, (int, float)) else "  -  "
+            err = stat.get("error")
+            if err:
+                rows.append(f"  - {name:<20} [red]error[/red] {_esc(str(err)[:40])}")
+                continue
+            extra = ""
+            alpha = stat.get("alpha_pixel_ratio")
+            if isinstance(alpha, (int, float)):
+                extra = f"  alpha={alpha:.2f}"
+            rows.append(f"  - {name:<20} {cache} {secs_str}{extra}")
+        if len(per_asset) > 6:
+            rows.append(f"  [dim]+{len(per_asset) - 6} more[/dim]")
+        if rows:
+            return head + "\n" + "\n".join(rows)
+        return head
 
     # ----------------------------- shutdown -------------------------------
 

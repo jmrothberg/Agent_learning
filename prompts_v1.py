@@ -333,6 +333,7 @@ def build_system_prompt(
     goal: str,
     *,
     formats: list[FormatSpec] | None = None,
+    model_class: str = "auto",
 ) -> str:
     """Assemble the system prompt from per-format specs (pi-mono style).
 
@@ -341,6 +342,13 @@ def build_system_prompt(
 
     `formats` defaults to ALL_FORMATS. Pass a subset to disable specific
     output tags (e.g. drop QUESTION_FORMAT for unattended runs).
+
+    `model_class` (Stop-Losing-To-OneShot todo #6): "mid" trims the
+    <anti-patterns> block. Mid-tier models (qwen3.6:27b, gpt-oss:20b
+    class) sometimes treat anti-patterns as features-to-add by mistake;
+    dropping the block surfaces the goal earlier in attention and frees
+    ~600-1000 chars of context. "large" / "auto" (default) keeps the
+    full prompt unchanged.
     """
     fmts = formats if formats is not None else ALL_FORMATS
 
@@ -354,6 +362,12 @@ def build_system_prompt(
 
     hard_rules_block = _bulleted(HARD_RULES)
     anti_patterns_block = _bulleted(ANTI_PATTERNS)
+    # Mid-tier trim: drop the <anti-patterns> block entirely. The
+    # <hard-rules> block above already covers the highest-priority
+    # invariants; ANTI_PATTERNS is largely "don't do X" cautionary
+    # detail that 27B-class models tend to enumerate AT us in <notes>
+    # instead of internalizing.
+    skip_anti_patterns = (model_class == "mid")
 
     return f"""<role>
 Act as an expert HTML5 game and UI engineer. You ship single-file HTML
@@ -429,11 +443,11 @@ Per-format rules (apply when you use the named tag):
 {hard_rules_block}
 </hard-rules>
 
-<anti-patterns>
+{"" if skip_anti_patterns else f'''<anti-patterns>
 ULTRA IMPORTANT — never do these. They have caused failed runs:
 
 {anti_patterns_block}
-</anti-patterns>
+</anti-patterns>'''}
 
 <iteration-policy>
 WORKING > PERFECT. Read this twice.
@@ -816,10 +830,18 @@ def seed_build_instruction(
 # from the actual error report so the model sees the role/format reminder
 # right before its turn.
 PATCH_REMINDER = (
+    # Stop-Losing-To-OneShot todo #5 — relaxed for mid-tier models that
+    # naturally rewrite. Auto-revert (todo #4) catches any rewrite that
+    # regresses probes / introduces page errors, so a full <html_file>
+    # is now safe; punishing it was a tax we no longer need to collect.
     "Reply with <patch> SEARCH/REPLACE blocks against the file currently "
-    "saved on disk (shown above). Do NOT re-emit the whole file. Aim for "
-    "the SMALLEST possible patches that fix every ERROR and ISSUE. Always "
-    "include a <notes> tag explaining what each patch does."
+    "saved on disk (shown above) when the change is local. For structural "
+    "changes that patches cannot cleanly express, send a complete "
+    "<html_file> — the harness auto-reverts any iter that regresses on "
+    "probes / page-errors / criteria coverage, so a rewrite that loses "
+    "something will be rolled back. Aim for the SMALLEST footprint that "
+    "fixes every ERROR and ISSUE. Always include a <notes> tag explaining "
+    "what changed."
 )
 
 
@@ -917,13 +939,18 @@ def fix_instruction(
 
 
 def post_clean_instruction(report_text: str) -> str:
+    # Stop-Losing-To-OneShot todo #5 — allow full <html_file> rewrites
+    # when truly structural. Auto-revert defends against rewrites that
+    # regress, but the goal here remains "ship". <done/> is the
+    # strongly-preferred answer; code only if you have a concrete win.
     return (
         f"{report_text}\n\n"
         "No errors. The game works. STRONGLY prefer ending with "
         "<done/>.\n"
-        "Only send a <patch> if you have ONE small concrete improvement "
-        "and are confident it will not regress. Do NOT make sweeping "
-        "rewrites."
+        "Only send code if you have ONE small concrete improvement and are "
+        "confident it will not regress. A targeted <patch> is best; for "
+        "structural improvements only, a complete <html_file> is acceptable "
+        "(auto-revert will roll back any version that regresses)."
     )
 
 

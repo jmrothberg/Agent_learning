@@ -190,7 +190,7 @@ _STRUCTURED_PRUNE_THRESHOLD = 14
 
 @dataclass
 class AgentEvent:
-    kind: str           # phase | token | plan | code | test | question | done | error | info | diagnose | patch | best_of_n | memory
+    kind: str           # phase | token | plan | code | test | question | done | error | info | diagnose | patch | best_of_n | memory | activity | assets | streak
     text: str = ""
     data: dict = field(default_factory=dict)
 
@@ -273,6 +273,13 @@ class GameAgent:
         # the FIRST iter only — gated on a complexity heuristic so
         # simple goals stay one-shot.
         use_architect_split: bool = False,
+        # Stop-Losing-To-OneShot todo #6 — model class controls
+        # prompt-size + retrieval-budget trims for mid-tier models.
+        # "auto" (default): substring-match `model` against a small
+        # known-mid table (qwen3.6:27b, qwen3.6:14b, gpt-oss:20b);
+        # anything else is treated as "large". Pass an explicit
+        # "mid"/"large" to override classification.
+        model_class: str = "auto",
     ):
         self.model = model
         self.out_path = Path(out_path)
@@ -288,6 +295,18 @@ class GameAgent:
         self._pending_feedback: list[str] = []
         self._pending_answer: str | None = None
         self._user_force_done = False
+        # Step-mode (Stop-Losing-To-OneShot todo #1): when True, the iter
+        # loop pauses BETWEEN iterations and waits for explicit user input
+        # before querying the model again. Strictly stronger than any
+        # harness check for mid-tier models — the user becomes the
+        # verifier between iters. Toggled via /wait (chat.py) or --step
+        # (coder.py). Off by default; existing autonomous behavior is
+        # preserved when the flag stays False.
+        self._step_mode: bool = False
+        # Released by signal_step_continue() to unblock a step-mode wait
+        # without adding any user feedback. add_user_feedback also
+        # unblocks (via has_pending_user_input becoming True).
+        self._step_continue: bool = False
 
         # All per-session artifact paths share the out_path stem so a session
         # named e.g. "asteroids_20260503_175727.html" produces matching
@@ -303,6 +322,16 @@ class GameAgent:
         self.best_path: Path = out_dir / f"{basename}.best.html"
         self.conversation_path: Path = out_dir / "traces" / f"{basename}.conversation.md"
         self._previous_report_ok: bool | None = None
+        # Stop-Losing-To-OneShot todo #3 — track the full previous report
+        # so the <done/> gate can ask richer questions than just "ok?".
+        # Specifically: criteria_uncovered (todo #2 coverage check),
+        # page_errors, and per-probe ok. None until the first iter ran.
+        self._previous_report: dict | None = None
+        # Stop-Losing-To-OneShot todo #4 — auto-revert grants bonus iters
+        # (capped per run) so a regression that gets auto-rolled back
+        # doesn't punish the user's max_iters budget. Reset to 0 at the
+        # top of each run().
+        self._iter_budget_bonus: int = 0
         # A2 — streak of consecutive clean iterations. <done/> is only
         # honored when streak >= 2, so the model can't ship after a
         # single passing iter. Resets to 0 on any failed test, including
@@ -334,6 +363,13 @@ class GameAgent:
         self._use_vlm_critique = bool(use_vlm_critique)
         self._use_double_screenshot = bool(use_double_screenshot)
         self._use_architect_split = bool(use_architect_split)
+        # todo #6 — resolve "auto" via simple substring-match. Adding a
+        # name to _MID_MODEL_TAGS is a one-line opt-in for new families.
+        self._model_class: str = (
+            model_class if model_class in ("mid", "large")
+            else self._classify_model(model)
+        )
+        self._trace({"kind": "model_class_resolved", "model": model, "model_class": self._model_class})
         # Most-recent before/after screenshot bytes for the VLM. Filled
         # by the verifier on each iter; consumed by `_stream`.
         self._last_screenshot_before: bytes | None = None
@@ -367,6 +403,33 @@ class GameAgent:
         # Resolved asset paths from Phase A (name → absolute path); used
         # by the first-build prompt assembler.
         self._session_assets: dict[str, Path] = {}
+
+    # Stop-Losing-To-OneShot todo #6 — explicit known-mid table.
+    # Open-domain rule: this is about output capacity (parameter count
+    # and verbosity), not subject matter — same exception we already
+    # apply for `_detect_art_intent` modality keywords. Add to the
+    # table when a new mid-tier family ships; defaults to "large" for
+    # any unrecognized tag.
+    _MID_MODEL_TAGS = (
+        "qwen3.6:27b", "qwen3.6:14b", "qwen3:27b", "qwen3:14b",
+        "gpt-oss:20b", "gpt-oss:7b", "gpt-oss:13b",
+        "llama3:8b", "llama3:13b", "llama3.1:8b", "llama3.2:8b",
+        "mistral:7b", "mistral:12b", "phi3:14b",
+    )
+
+    @classmethod
+    def _classify_model(cls, model: str) -> str:
+        """Return 'mid' or 'large' based on a substring match against
+        _MID_MODEL_TAGS. Open-domain default is 'large' so the trim is
+        opt-in by name; misclassification only costs context size, not
+        correctness."""
+        if not model:
+            return "large"
+        m = model.lower()
+        for tag in cls._MID_MODEL_TAGS:
+            if tag in m:
+                return "mid"
+        return "large"
 
     @staticmethod
     def _load_prompt_module(version: str):
@@ -427,6 +490,14 @@ class GameAgent:
             if stage == "plan":
                 k = self._playbook_top_k + self._PLAN_STAGE_TOP_K_BONUS
                 budget = self._PLAN_STAGE_CHAR_BUDGET
+                # Stop-Losing-To-OneShot todo #6 — mid-tier models lose
+                # focus when the playbook bloats the planning context;
+                # collapse the plan-stage budget to match code-stage so
+                # the goal stays prominent. The retrieval still fetches
+                # k+bonus bullets (more diversity) — only the rendered
+                # char budget is tightened.
+                if self._model_class == "mid":
+                    budget = self._CODE_STAGE_CHAR_BUDGET
                 # Plan stage advertises breadth: top-3 full + the rest as
                 # ID-only index. Model emits <lookup_bullet> if it wants
                 # the body of any indexed entry. Pi-mono "skills" pattern.
@@ -523,6 +594,22 @@ class GameAgent:
 
     def request_done(self) -> None:
         self._user_force_done = True
+
+    # Step-mode controls (Stop-Losing-To-OneShot todo #1).
+    def set_step_mode(self, on: bool) -> None:
+        """Turn step-mode on/off. When on, the iter loop pauses after
+        each iteration boundary and waits for explicit user input before
+        querying the model again. Drivers wake the wait by either
+        signal_step_continue() (no feedback) or add_user_feedback() (the
+        existing path)."""
+        self._step_mode = bool(on)
+        self._trace({"kind": "step_mode_set", "on": self._step_mode})
+
+    def signal_step_continue(self) -> None:
+        """Release the current step-mode wait without adding feedback.
+        No-op when no wait is active."""
+        self._step_continue = True
+        self._trace({"kind": "step_continue_signal"})
 
     def set_token_callback(self, cb) -> None:
         self._token_cb = cb
@@ -1027,6 +1114,9 @@ class GameAgent:
                 report = await self.browser.load_and_test(
                     tmp_path, screenshot_path=None,
                     probes=self._probes or None,
+                    # todo #2: pass criteria so the harness can flag
+                    # coverage gaps even on best-of-N candidate scoring.
+                    criteria=self._criteria or None,
                 )
                 extra["report_ok"] = report.get("ok", False)
                 extra["report_summary"] = format_report_for_model(report)[:400]
@@ -1360,7 +1450,16 @@ class GameAgent:
             # them up. Appended INSIDE the system message rather than as
             # a separate user turn — keeps it ambient instead of
             # interactive.
-            sys_prompt = self._p.SYSTEM_PROMPT.replace("{goal}", goal)
+            # Stop-Losing-To-OneShot todo #6 — when the active prompt
+            # module exposes build_system_prompt (v1+), pass model_class
+            # so mid-tier models get a trimmed prompt. v0 falls back
+            # to the static SYSTEM_PROMPT constant unchanged.
+            if hasattr(self._p, "build_system_prompt"):
+                sys_prompt = self._p.build_system_prompt(
+                    goal, model_class=self._model_class,
+                )
+            else:
+                sys_prompt = self._p.SYSTEM_PROMPT.replace("{goal}", goal)
             cfg_text, cfg_sources = _read_project_config(Path.cwd())
             if not cfg_text:
                 cfg_text, cfg_sources = _read_project_config(self.out_path.parent.parent)
@@ -1422,11 +1521,14 @@ class GameAgent:
 
             # ---- PHASE A: planning ------------------------------------------
             yield self._record(AgentEvent("phase", "planning"))
+            yield self._record(AgentEvent("activity", "streaming", {"label": "planning reply"}))
             try:
                 plan_reply = await self._stream(self._token_cb_wrapper)
             except Exception as e:
+                yield self._record(AgentEvent("activity", "idle"))
                 yield self._record(AgentEvent("error", f"Ollama call failed during planning: {e}"))
                 return
+            yield self._record(AgentEvent("activity", "idle"))
             self._messages.append({"role": "assistant", "content": plan_reply})
             self._extract_and_queue_lookups(plan_reply)
             self._dump_conversation()
@@ -1467,11 +1569,17 @@ class GameAgent:
                         "Thanks. Now produce the <plan> per the original instructions."
                     ),
                 })
+                yield self._record(AgentEvent(
+                    "activity", "streaming",
+                    {"label": "streaming plan after question"},
+                ))
                 try:
                     plan_reply = await self._stream(self._token_cb_wrapper)
                 except Exception as e:
+                    yield self._record(AgentEvent("activity", "idle"))
                     yield self._record(AgentEvent("error", f"Ollama call failed: {e}"))
                     return
+                yield self._record(AgentEvent("activity", "idle"))
                 self._messages.append({"role": "assistant", "content": plan_reply})
                 self._extract_and_queue_lookups(plan_reply)
                 self._dump_conversation()
@@ -1491,6 +1599,14 @@ class GameAgent:
                     "loading Z-Image-Turbo (first call only, ~30-60s)…",
                     {"assets_requested": [s["name"] for s in asset_specs]},
                 ))
+                yield self._record(AgentEvent(
+                    "activity", "generating_assets",
+                    {
+                        "label": "generating sprites",
+                        "requested": len(asset_specs),
+                        "produced": 0,
+                    },
+                ))
                 if self._asset_generator is None:
                     # asyncio.to_thread keeps the TUI responsive during
                     # the (slow) first-load of the diffusion pipeline.
@@ -1498,6 +1614,7 @@ class GameAgent:
                         try_load_image_generator,
                     )
                 if self._asset_generator is None:
+                    yield self._record(AgentEvent("activity", "idle"))
                     yield self._record(AgentEvent(
                         "info",
                         "Z-Image-Turbo not reachable (no CUDA / no diffusers / "
@@ -1517,6 +1634,7 @@ class GameAgent:
                             image_generator=self._asset_generator,
                         )
                     except Exception as e:
+                        yield self._record(AgentEvent("activity", "idle"))
                         yield self._record(AgentEvent(
                             "info",
                             f"asset generation crashed: {e!r} — proceeding without."
@@ -1540,6 +1658,21 @@ class GameAgent:
                         "session_dir": str(session_assets_dir),
                         "per_asset": per_asset,
                     })
+                    # Always emit the structured assets event (even on 0
+                    # produced) so the TUI can show "0/N generated" with
+                    # paths and per-asset error reasons.
+                    yield self._record(AgentEvent(
+                        "assets",
+                        f"{len(self._session_assets)}/{len(asset_specs)} generated",
+                        {
+                            "requested": len(asset_specs),
+                            "produced": len(self._session_assets),
+                            "session_dir": str(session_assets_dir),
+                            "paths": {n: str(p) for n, p in self._session_assets.items()},
+                            "per_asset": per_asset,
+                        },
+                    ))
+                    yield self._record(AgentEvent("activity", "idle"))
                     if self._session_assets:
                         yield self._record(AgentEvent(
                             "info",
@@ -1666,9 +1799,14 @@ class GameAgent:
                             "the seed code."
                         ),
                     })
+                    yield self._record(AgentEvent(
+                        "activity", "streaming",
+                        {"label": "streaming architect note"},
+                    ))
                     try:
                         arch_reply = await self._stream(self._token_cb_wrapper)
                     except Exception as e:
+                        yield self._record(AgentEvent("activity", "idle"))
                         yield self._record(AgentEvent(
                             "info", f"architect call failed, continuing single-shot: {e}",
                         ))
@@ -1677,6 +1815,7 @@ class GameAgent:
                         if self._messages and self._messages[-1].get("role") == "user":
                             self._messages.pop()
                     else:
+                        yield self._record(AgentEvent("activity", "idle"))
                         self._messages.append({"role": "assistant", "content": arch_reply})
                         m = re.search(r"<architect>\s*(.*?)\s*</architect>",
                                       arch_reply, re.DOTALL | re.IGNORECASE)
@@ -1719,8 +1858,45 @@ class GameAgent:
         # so they see "extension 1/N" instead of confusing "iteration 4/9".
         start_iter = self._snapshot_n + 1 if continuation else 1
         end_iter = start_iter + self.max_iters - 1
+        # Stop-Losing-To-OneShot todo #4 — auto-revert can grant bonus
+        # iters (each revert += 1, capped at max_iters/2) so the user's
+        # budget isn't burned by reverted regressions. range() upper
+        # bound is the hard cap; the in-loop early break gates each
+        # bonus iter on a revert having actually happened.
+        self._iter_budget_bonus = 0
+        revert_bonus_cap = max(1, self.max_iters // 2)
+        hard_max = end_iter + revert_bonus_cap
 
-        for iteration in range(start_iter, end_iter + 1):
+        for iteration in range(start_iter, hard_max + 1):
+            if iteration > end_iter + self._iter_budget_bonus:
+                break
+            # Step-mode pause (Stop-Losing-To-OneShot todo #1): between
+            # iterations, wait for explicit user go-ahead so the user can
+            # verify the just-completed iter before the model runs again.
+            # First iter is exempt (no prior result to inspect yet). The
+            # next-user message is ALREADY appended at the end of the
+            # previous iter; if the user types feedback during the pause
+            # we pop that message and re-append with the feedback banner
+            # prepended via _flush_user_injections so the model sees it
+            # before the report-driven base prompt.
+            if self._step_mode and iteration > start_iter:
+                yield self._record(AgentEvent(
+                    "await_user",
+                    f"step-mode: iter {iteration - 1} complete — "
+                    "Enter to continue, or type feedback",
+                    {"just_finished_iter": iteration - 1},
+                ))
+                while not self._step_continue and not self.has_pending_user_input():
+                    await asyncio.sleep(0.1)
+                if self.has_pending_user_input():
+                    if self._messages and self._messages[-1].get("role") == "user":
+                        base = self._messages.pop()["content"]
+                        self._messages.append({
+                            "role": "user",
+                            "content": self._flush_user_injections(base),
+                        })
+                self._step_continue = False  # consume signal
+
             self._last_iter_run = iteration
             if continuation:
                 rel = iteration - start_iter + 1
@@ -1766,10 +1942,16 @@ class GameAgent:
                     reply_prefill = ""
                     if self._use_prefill and self._fix_mode:
                         reply_prefill = "<diagnose>\n"
+                    yield self._record(AgentEvent(
+                        "activity", "streaming",
+                        {"label": f"streaming iter {iteration} reply"},
+                    ))
                     reply = await self._stream(
                         self._token_cb_wrapper, prefill=reply_prefill,
                     )
+                    yield self._record(AgentEvent("activity", "idle"))
             except Exception as e:
+                yield self._record(AgentEvent("activity", "idle"))
                 yield self._record(AgentEvent("error", f"Ollama call failed: {e}"))
                 return
 
@@ -1826,12 +2008,41 @@ class GameAgent:
             streak_ok = (
                 self._consecutive_clean_iters >= self._min_clean_streak_to_ship
             )
+            # Stop-Losing-To-OneShot todo #3 — defend iter 1.
+            # Mid-tier models often produce a working build on iter 1
+            # then degrade it during the polish-encouraging clean-streak
+            # gate. When the previous iter was honestly-clean (criteria
+            # fully covered, no page errors, all model probes passed),
+            # one clean iter is enough; the streak gate becomes
+            # unnecessary tax, not insurance. Two clean iters is still
+            # required when the harness signal is weaker (uncovered
+            # criteria — coverage check still complains, or any probe
+            # failed — soft_warning still appended; either case sets
+            # `report["ok"]=False` so we never reach this branch).
+            prev = self._previous_report or {}
+            criteria_covered = not bool(prev.get("criteria_uncovered"))
+            no_page_errors = not bool(prev.get("page_errors"))
+            probes_all_passed = all(
+                bool(p.get("ok"))
+                for p in (prev.get("probes") or [])
+            )
+            single_clean_ship_ok = (
+                self._consecutive_clean_iters >= 1
+                and self._previous_report_ok is True
+                and criteria_covered
+                and no_page_errors
+                and probes_all_passed
+            )
+            ship_ready = (
+                awaiting_confirm
+                or (self._previous_report_ok is True and streak_ok)
+                or single_clean_ship_ok
+            )
             if (
                 said_done_or_confirm
                 and html_in_reply is None
                 and not patches_in_reply
-                and (awaiting_confirm
-                     or (self._previous_report_ok is True and streak_ok))
+                and ship_ready
             ):
                 if self.has_pending_user_input():
                     yield self._record(AgentEvent(
@@ -1847,14 +2058,47 @@ class GameAgent:
                         ),
                     })
                     continue
-                reason = (
-                    "Model confirmed after self-critique."
-                    if awaiting_confirm
-                    else "Model declared done after a clean run."
-                )
+                if single_clean_ship_ok and not (awaiting_confirm or streak_ok):
+                    reason = (
+                        "Model declared done after a clean iter with "
+                        "covered criteria, no page errors, all probes passed."
+                    )
+                else:
+                    reason = (
+                        "Model confirmed after self-critique."
+                        if awaiting_confirm
+                        else "Model declared done after a clean run."
+                    )
                 yield self._record(AgentEvent("done", reason))
                 self._record_session_outcome(ok=True)
                 return
+            # Stop-Losing-To-OneShot todo #3 (continued) — when the model
+            # said done/confirm with no new code AND the previous iter
+            # WAS clean but the gate refuses to ship (streak too short
+            # AND coverage/probes weren't strong enough for the single-
+            # clean shortcut), route into Phase C self-critique instead
+            # of emitting "no usable code". The streak gate's whole
+            # purpose is "second independent pass" — use the model's
+            # <done/> as the trigger to enter that pass rather than as
+            # an error. Also fixes the iter-2 deadlock from the
+            # asteroids log (game-os-asteroids-vector-graph_20260507_).
+            if (
+                said_done_or_confirm
+                and html_in_reply is None
+                and not patches_in_reply
+                and self._previous_report_ok is True
+                and not awaiting_confirm
+            ):
+                yield self._record(AgentEvent("phase", "self-critique"))
+                awaiting_confirm = True
+                self._messages.append({
+                    "role": "user",
+                    "content": self._flush_user_injections(
+                        self._p.CRITIQUE_INSTRUCTION
+                    ),
+                })
+                self._fix_mode = False
+                continue
 
             # ---- materialize: patches OR full file --------------------
             new_html, materialize_msg = await self._materialize(reply)
@@ -1999,6 +2243,7 @@ class GameAgent:
                     "content": self._flush_user_injections(next_user),
                 })
                 self._previous_report_ok = False
+                self._previous_report = fake_report  # todo #3 — full report
                 continue
 
             # ---- run the test ------------------------------------------
@@ -2007,13 +2252,22 @@ class GameAgent:
                 if (snap_path and self._use_double_screenshot)
                 else None
             )
+            yield self._record(AgentEvent(
+                "activity", "browser",
+                {"label": f"loading iter {iteration} in Chromium"},
+            ))
             try:
                 report = await self.browser.load_and_test(
                     self.out_path, screenshot_path=shot_path,
                     screenshot_before_path=shot_before_path,
                     probes=self._probes or None,
+                    # todo #2: pass criteria so the harness can flag
+                    # coverage gaps as a soft_warning (forces the model
+                    # to add probes that actually test what it promised).
+                    criteria=self._criteria or None,
                 )
             except Exception as e:
+                yield self._record(AgentEvent("activity", "idle"))
                 yield self._record(AgentEvent("info", f"browser harness crashed: {e}"))
                 self._messages.append({
                     "role": "user",
@@ -2024,6 +2278,7 @@ class GameAgent:
                 })
                 continue
 
+            yield self._record(AgentEvent("activity", "idle"))
             report_text = format_report_for_model(report)
             self._last_report_summary = report_text
             yield self._record(AgentEvent("test", report_text, report))
@@ -2046,6 +2301,90 @@ class GameAgent:
                 except Exception:
                     self._last_screenshot_before = None
 
+            # Stop-Losing-To-OneShot todo #4 — auto-revert on regression.
+            # Mid-tier models often "polish" a working build into a worse
+            # one. When the previous iter passed but this iter introduced
+            # NEW page errors, FEWER probes passing, or NEW criteria-
+            # coverage gaps (relative to the last working report), drop
+            # this iter's HTML, restore .best.html on disk, and ask the
+            # model for a minimal patch. The revert grants one bonus iter
+            # (capped) so the user's max_iters isn't punished by the
+            # rollback. Generic and behavioral — operates only on harness
+            # signals, no genre awareness needed.
+            prev = self._previous_report or {}
+            prev_ok = self._previous_report_ok is True
+            current_ok = bool(report.get("ok"))
+            if (
+                prev_ok
+                and not current_ok
+                and self._iter_budget_bonus < revert_bonus_cap
+            ):
+                prev_probes = prev.get("probes") or []
+                cur_probes = report.get("probes") or []
+                prev_passing = sum(1 for p in prev_probes if p.get("ok"))
+                cur_passing = sum(1 for p in cur_probes if p.get("ok"))
+                new_page_errors = (
+                    len(report.get("page_errors") or [])
+                    > len(prev.get("page_errors") or [])
+                )
+                fewer_probes = (cur_passing < prev_passing)
+                new_coverage_gaps = (
+                    bool(report.get("criteria_uncovered"))
+                    and not bool(prev.get("criteria_uncovered"))
+                )
+                if new_page_errors or fewer_probes or new_coverage_gaps:
+                    best_html = self._read_best_or_empty()
+                    if best_html:
+                        try:
+                            self.out_path.write_text(best_html, encoding="utf-8")
+                        except Exception:
+                            pass
+                        self._current_file = best_html
+                        self._iter_budget_bonus += 1
+                        problems: list[str] = []
+                        if new_page_errors:
+                            problems.append("new uncaught page errors")
+                        if fewer_probes:
+                            problems.append(
+                                f"only {cur_passing}/{len(cur_probes)} probes pass "
+                                f"now (was {prev_passing}/{len(prev_probes)})"
+                            )
+                        if new_coverage_gaps:
+                            problems.append(
+                                "a previously-covered criterion is no longer covered"
+                            )
+                        problems_str = "; ".join(problems)
+                        yield self._record(AgentEvent(
+                            "info",
+                            f"REGRESSION on iter {iteration}: {problems_str} — "
+                            f"auto-reverted to last working file. "
+                            f"Bonus iter granted (count: {self._iter_budget_bonus}).",
+                            {
+                                "iter": iteration,
+                                "problems": problems,
+                                "bonus_used": self._iter_budget_bonus,
+                                "bonus_cap": revert_bonus_cap,
+                            },
+                        ))
+                        self._messages.append({
+                            "role": "user",
+                            "content": self._flush_user_injections(
+                                "REGRESSION DETECTED: your last change degraded the "
+                                f"working build ({problems_str}). The harness has "
+                                "auto-reverted the file on disk to the previous "
+                                "working version. Send a MINIMAL <patch> that "
+                                "addresses only the original feedback without "
+                                "breaking what already worked. If you cannot make a "
+                                "small change without regressing, send <done/> to "
+                                "ship the working version as-is."
+                            ),
+                        })
+                        self._fix_mode = True
+                        # Skip streak/playbook/save_best below so revert state
+                        # is identical to "this iter didn't happen for streak
+                        # purposes". _previous_report* stays unchanged.
+                        continue
+
             said_done = bool(_DONE_RE.search(reply))
             regressed = (self._previous_report_ok is True) and (not report["ok"])
 
@@ -2064,6 +2403,14 @@ class GameAgent:
                 "stuck_streak": self._stuck_streak,
                 "min_to_ship": self._min_clean_streak_to_ship,
             })
+            yield self._record(AgentEvent(
+                "streak", "",
+                {
+                    "consecutive_clean_iters": self._consecutive_clean_iters,
+                    "stuck_streak": self._stuck_streak,
+                    "min_to_ship": self._min_clean_streak_to_ship,
+                },
+            ))
 
             # Online playbook counter feedback. Off by default (tune
             # baselines should not write back). When on:
@@ -2140,6 +2487,7 @@ class GameAgent:
                     "content": self._flush_user_injections(next_user),
                 })
                 self._previous_report_ok = report["ok"]
+                self._previous_report = report  # todo #3 — full report
                 self._fix_mode = True
                 continue
 
@@ -2177,6 +2525,7 @@ class GameAgent:
                     "content": self._flush_user_injections(critique_msg),
                 })
                 self._previous_report_ok = report["ok"]
+                self._previous_report = report  # todo #3 — full report
                 self._fix_mode = False
                 continue
 
@@ -2208,6 +2557,7 @@ class GameAgent:
                 "content": self._flush_user_injections(next_user),
             })
             self._previous_report_ok = report["ok"]
+            self._previous_report = report  # todo #3 — full report
 
         # ---- iteration cap reached ------------------------------------
         if self.has_pending_user_input():
@@ -2221,8 +2571,13 @@ class GameAgent:
                     "One last turn: address it with a <patch> against the current file."
                 ),
             })
+            yield self._record(AgentEvent(
+                "activity", "streaming",
+                {"label": "streaming bonus turn (cap reached)"},
+            ))
             try:
                 reply = await self._stream(self._token_cb_wrapper)
+                yield self._record(AgentEvent("activity", "idle"))
                 self._messages.append({"role": "assistant", "content": reply})
                 self._extract_and_queue_lookups(reply)
                 self._dump_conversation()
@@ -2241,6 +2596,7 @@ class GameAgent:
                         {"size": len(new_html), "materialize": materialize_msg},
                     ))
             except Exception as e:
+                yield self._record(AgentEvent("activity", "idle"))
                 yield self._record(AgentEvent("error", f"Final feedback turn failed: {e}"))
 
         yield self._record(AgentEvent(

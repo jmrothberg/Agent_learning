@@ -52,13 +52,14 @@ _DEFAULT_TARGET_SIZE = 128
 #
 # Search order — first existing directory wins:
 #   1. $DIFFUSION_MODELS_DIR env var (preferred override)
-#   2. ~/Models_Diffusers      (this user's Linux layout)
-#   3. ~/Diffusion_Models      (this user's macOS layout)
-#   4. /home/jonathan/Models_Diffusers   (legacy, kept so existing
+#   2. Platform default bases (see _default_model_search_dirs):
+#      macOS checks ~/Diffusion_Models before ~/Models_Diffusers; others
+#      keep Linux-first order.
+#   3. /home/jonathan/Models_Diffusers   (legacy, kept so existing
 #                                         setups don't break on update)
-#   5. ./models_diffusers      (repo-relative — for portability when
+#   4. ./models_diffusers      (repo-relative — for portability when
 #                               cloning fresh on a new machine)
-#   6. HuggingFace fallback: `Tongyi-MAI/Z-Image-Turbo` is downloaded
+#   5. HuggingFace fallback: `Tongyi-MAI/Z-Image-Turbo` is downloaded
 #      to ~/.cache/huggingface/hub/ on first run if no local path
 #      matches — no manual download needed.
 #
@@ -71,11 +72,18 @@ import os as _os
 def _default_model_search_dirs() -> list[str]:
     """Build the search list at import time. `~` is expanded so the
     list is concrete absolute paths plus one relative entry.
+
+    On macOS, ~/Diffusion_Models is tried before ~/Models_Diffusers so
+    the usual Mac tree wins without DIFFUSION_MODELS_DIR.
     """
     home = _os.path.expanduser("~")
-    return [
-        _os.path.join(home, "Models_Diffusers"),
-        _os.path.join(home, "Diffusion_Models"),
+    diffusion_models = _os.path.join(home, "Diffusion_Models")
+    models_diffusers = _os.path.join(home, "Models_Diffusers")
+    if sys.platform == "darwin":
+        home_bases = [diffusion_models, models_diffusers]
+    else:
+        home_bases = [models_diffusers, diffusion_models]
+    return home_bases + [
         "/home/jonathan/Models_Diffusers",
         "./models_diffusers",
     ]
@@ -312,7 +320,10 @@ class ZImageTurboGenerator:
             and torch.backends.mps.is_available()
         ):
             device = "mps"
-            dtype = torch.float16    # MPS bf16 support is uneven
+            # fp16 on MPS produces NaN for Z-Image-Turbo (verified
+            # 2026-05-07: every output was 100% transparent because
+            # NaN→0 in cast). fp32 works at ~20s/image on M-series.
+            dtype = torch.float32
         else:
             return False
 
