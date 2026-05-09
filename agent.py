@@ -1135,6 +1135,28 @@ class GameAgent:
                     "tail": hb_state["tail"][-_STREAM_HEARTBEAT_TAIL_CHARS:],
                 })
 
+        # Backend-reported pre-token progress (today only MLX surfaces
+        # it — parsed from mlx_lm.server's SSE keepalive frames during
+        # prompt processing). We trace it AND stash on the agent so
+        # `chat.py`'s status panel can render "prompt eval N/M" instead
+        # of a bare "waiting Ns" during the long pre-token wait.
+        # Resets on every _stream call so stale progress from a prior
+        # turn doesn't render forever.
+        self._stream_progress_stage: str | None = None
+        self._stream_progress_current: int = 0
+        self._stream_progress_total: int = 0
+
+        def _on_progress(stage: str, current: int, total: int) -> None:
+            self._stream_progress_stage = stage
+            self._stream_progress_current = current
+            self._stream_progress_total = total
+            self._trace({
+                "kind": "stream_progress",
+                "stage": stage,
+                "current": current,
+                "total": total,
+            })
+
         try:
             result = await self._backend.stream_chat(
                 self._messages,
@@ -1149,6 +1171,7 @@ class GameAgent:
                     "tokens_before_stall": r.tokens,
                     "duration_s": r.duration_s,
                 }),
+                on_progress=_on_progress,
             )
         finally:
             # Always remove our prefill scaffolding before returning so
@@ -1163,6 +1186,7 @@ class GameAgent:
             "duration_s": round(result.duration_s, 2),
             "stalled": result.stalled,
             "looped": result.looped,
+            "crashed": result.crashed,
             "len": len(result.text),
             # Backend-reported BPE counts when available. `tokens` above is
             # streaming chunk count; these are the real cost numbers used
@@ -1171,6 +1195,26 @@ class GameAgent:
             "prompt_tokens": result.prompt_tokens,
             "completion_tokens": result.completion_tokens,
         })
+        if result.crashed:
+            # mlx_lm.server's generate thread died mid-flight (Metal
+            # wired-memory limit, OOM, segfault). HTTP layer is still
+            # answering /v1/models, but the loaded model can't generate
+            # anything. Surface the specific recovery hint instead of
+            # the generic stall message — saves the user from digging
+            # through mlx_lm.server's stderr in another terminal.
+            self._record(AgentEvent(
+                "error",
+                "[red]mlx_lm.server crashed mid-generation[/red] — almost "
+                "always Metal wired-memory exhaustion. Recover with:\n"
+                "  1. [b]pkill -f mlx_lm.server[/b]\n"
+                "  2. [b]sudo sysctl iogpu.wired_limit_mb=$N[/b] "
+                "(see README §MLX memory limit on Apple Silicon)\n"
+                "  3. relaunch [b]mlx_lm.server[/b] and try again",
+                {
+                    "tokens_at_crash": result.tokens,
+                    "duration_s": round(result.duration_s, 2),
+                },
+            ))
         if result.looped:
             # Visible to the user via the agent log so they understand why
             # the stream cut off mid-output. Trim trailing whitespace from

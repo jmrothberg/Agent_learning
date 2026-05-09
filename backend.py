@@ -101,7 +101,14 @@ class Backend(ABC):
         overall_seconds: float = 600.0,
         max_retries: int = 1,
         on_stall: Callable[[StreamResult, int], None] | None = None,
+        on_progress: Callable[[str, int, int], None] | None = None,
     ) -> StreamResult:
+        # `on_progress(stage, current, total)` is fired during the
+        # pre-token phase when the backend exposes progress. Today only
+        # MLX (parsed from mlx_lm.server's SSE keepalive frames):
+        #   stage="prompt_eval", current=N, total=M
+        # Ollama ignores the parameter — its API doesn't expose
+        # prompt-processing progress mid-stream. Optional everywhere.
         ...
 
     @abstractmethod
@@ -207,7 +214,12 @@ class OllamaBackend(Backend):
         overall_seconds: float = 600.0,
         max_retries: int = 1,
         on_stall: Callable[[StreamResult, int], None] | None = None,
+        on_progress: Callable[[str, int, int], None] | None = None,
     ) -> StreamResult:
+        # `on_progress` is accepted for API symmetry with MLX, but
+        # Ollama's /api/chat doesn't expose prompt-eval progress
+        # mid-stream — the daemon stays silent until the first content
+        # token. Caller's heartbeat trace covers the visibility gap.
         return await stream_chat_with_retry(
             self._client,
             self.info.model,
@@ -243,6 +255,18 @@ _MLX_OPTION_KEYS: tuple[str, ...] = (
     "seed", "max_tokens",
 )
 
+# Match the progress field inside an SSE "comment" frame. mlx_lm.server
+# emits these during prompt processing, in either of two formats across
+# versions:
+#   "data: : keepalive 50/200"
+#   "data: : Prompt processing progress: 50/200"
+# Either way we extract (current, total) so the agent can show progress
+# AND detect post-eval crashes (see _stream_once).
+_MLX_PROGRESS_RE = re.compile(
+    r"(?:keepalive|Prompt processing progress)[:\s]+(\d+)\s*/\s*(\d+)",
+    re.IGNORECASE,
+)
+
 
 class MLXBackend(Backend):
     """Talks to `mlx_lm.server` via its OpenAI-compatible HTTP API."""
@@ -263,6 +287,7 @@ class MLXBackend(Backend):
         overall_seconds: float = 600.0,
         max_retries: int = 1,
         on_stall: Callable[[StreamResult, int], None] | None = None,
+        on_progress: Callable[[str, int, int], None] | None = None,
     ) -> StreamResult:
         last: StreamResult | None = None
         for attempt in range(max_retries + 1):
@@ -272,8 +297,16 @@ class MLXBackend(Backend):
                 options=options,
                 stall_seconds=stall_seconds,
                 overall_seconds=overall_seconds,
+                on_progress=on_progress,
             )
             last = result
+            # crashed=True means the generate thread inside mlx_lm.server
+            # died (Metal limit, OOM, …). Retrying against the same
+            # poisoned process won't help; abort immediately so the
+            # agent can surface the recovery message instead of waiting
+            # max_retries × stall_seconds for nothing.
+            if result.crashed:
+                return result
             if not result.stalled:
                 return result
             if on_stall is not None:
@@ -294,6 +327,7 @@ class MLXBackend(Backend):
         options: dict[str, Any] | None,
         stall_seconds: float,
         overall_seconds: float,
+        on_progress: Callable[[str, int, int], None] | None = None,
     ) -> StreamResult:
         opts = dict(options or {})
         body: dict[str, Any] = {
@@ -318,12 +352,25 @@ class MLXBackend(Backend):
         n_tokens = 0
         stalled = False
         looped = False
+        crashed = False
         stall_at: int | None = None
         prompt_tokens: int | None = None
         completion_tokens: int | None = None
         # Shared repetition detector — same class both backends use, so
         # tuning happens in exactly one place (ollama_io.RepetitionDetector).
         repeat = RepetitionDetector()
+        # Prompt-eval bookkeeping (Part 1+2 of MLX-on-Mac robustness).
+        # When mlx_lm.server emits a "Prompt processing progress: N/N"
+        # SSE keepalive (current == total), prompt eval is done. After
+        # that, we expect content tokens to start flowing within
+        # _MLX_GENERATION_KICKOFF_SECONDS. If they don't, the generate
+        # thread inside mlx_lm.server has almost certainly crashed —
+        # most commonly Metal `[metal::malloc] Resource limit exceeded`
+        # — and the HTTP layer just keeps the connection open with
+        # nothing to send. Surface that explicitly instead of waiting
+        # the full stall budget for a generic timeout.
+        prompt_eval_done_at: float | None = None
+        _MLX_GENERATION_KICKOFF_SECONDS = 30.0
 
         try:
             async with httpx.AsyncClient(base_url=self.info.endpoint, timeout=None) as client:
@@ -352,6 +399,22 @@ class MLXBackend(Backend):
                             stall_at = n_tokens
                             break
 
+                        # Crash check: prompt eval finished but no tokens
+                        # have arrived in the kickoff window. Almost
+                        # always means mlx_lm.server's generate thread
+                        # died (Metal limit, OOM). Walk this on every
+                        # iteration of the loop, not just on lines we
+                        # parsed, so a long silence after eval is caught.
+                        if (
+                            prompt_eval_done_at is not None
+                            and n_tokens == 0
+                            and time.monotonic() - prompt_eval_done_at
+                                > _MLX_GENERATION_KICKOFF_SECONDS
+                        ):
+                            crashed = True
+                            stall_at = 0
+                            break
+
                         if not line:
                             continue
                         if not line.startswith("data:"):
@@ -361,10 +424,29 @@ class MLXBackend(Backend):
                             continue
                         if payload == "[DONE]":
                             break
-                        # SSE "comment" frames (mlx_lm.server uses these
-                        # for prompt-processing keepalives like
-                        # "data: : keepalive 50/200").
+                        # SSE "comment" frames. mlx_lm.server uses these
+                        # to report prompt-processing progress while it
+                        # ingests the input prompt — useful both for the
+                        # user (a 6000-token prompt is otherwise a
+                        # silent ~30-90s wait) AND for crash detection
+                        # (see prompt_eval_done_at above).
+                        #
+                        # Format we accept:
+                        #   ": keepalive 50/200"
+                        #   ": Prompt processing progress: 50/200"
+                        # Either form gives us (current, total). When
+                        # current == total, prompt eval is done.
                         if payload.startswith(":"):
+                            m = _MLX_PROGRESS_RE.search(payload)
+                            if m:
+                                cur, tot = int(m.group(1)), int(m.group(2))
+                                if on_progress is not None:
+                                    try:
+                                        on_progress("prompt_eval", cur, tot)
+                                    except Exception:
+                                        pass
+                                if cur >= tot and prompt_eval_done_at is None:
+                                    prompt_eval_done_at = time.monotonic()
                             continue
                         try:
                             chunk = json.loads(payload)
@@ -410,15 +492,25 @@ class MLXBackend(Backend):
             if stall_at is None:
                 stall_at = n_tokens
 
+        # If the per-line stall watchdog fired AFTER prompt eval finished
+        # but BEFORE any content tokens, that's also a server-side crash
+        # — the kickoff-window check above caught it earlier on most
+        # paths, but a long stall_seconds value (e.g. 90s) means the
+        # main aiter timeout could fire before the kickoff window
+        # check runs. Promote stall→crash for that exact pattern.
+        if stalled and not crashed and prompt_eval_done_at is not None and n_tokens == 0:
+            crashed = True
+
         return StreamResult(
             text="".join(parts),
             tokens=n_tokens,
             duration_s=time.monotonic() - started,
-            stalled=stalled or looped,
+            stalled=stalled or looped or crashed,
             stall_at_token=stall_at,
             looped=looped,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            crashed=crashed,
         )
 
     async def is_vlm(self) -> bool:

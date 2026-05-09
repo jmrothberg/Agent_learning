@@ -273,4 +273,37 @@ if [ "$WITH_GPU" = "on" ]; then
 EOF
 fi
 
+# --- macOS / Apple Silicon: MLX wired-memory hint --------------------------
+# `mlx_lm.server`'s default Metal allocator cap (`iogpu.wired_limit_mb`) is
+# typically ~75% of physical RAM. On big models with long context the
+# weights + KV cache can exceed it; the generate thread then dies with
+# `[metal::malloc] Resource limit (...) exceeded.` and the HTTP layer
+# silently keeps responding to /v1/models with no tokens flowing. Show a
+# RAM-aware suggested override here so the user can sysctl it before
+# starting mlx_lm.server. We don't run sudo for them — the value persists
+# only until reboot, so the user is already going to redo it after every
+# reboot, and surfacing the command is just as good.
+if [ "$PLATFORM" = "macos" ] && command -v sysctl >/dev/null 2>&1; then
+    RAM_BYTES=$(sysctl -n hw.memsize 2>/dev/null || echo 0)
+    if [ "$RAM_BYTES" -gt 0 ]; then
+        # MB = bytes / 1024 / 1024.   Recommended cap = RAM_MB - 16384
+        # (leave 16 GB for the OS + apps). Use bash arithmetic so no
+        # awk/python dependency creeps in.
+        RAM_MB=$(( RAM_BYTES / 1024 / 1024 ))
+        REC_LIMIT_MB=$(( RAM_MB - 16384 ))
+        if [ "$REC_LIMIT_MB" -lt 16384 ]; then
+            REC_LIMIT_MB=$REC_LIMIT_MB
+        fi
+        # Display total in human-friendly GB, rounded to 1 decimal.
+        RAM_GB=$(( (RAM_MB + 512) / 1024 ))
+        cat <<EOF
+   MLX on Apple Silicon — raise the Metal wired-memory cap before
+   starting mlx_lm.server (per-boot; needs sudo):
+     sudo sysctl iogpu.wired_limit_mb=${REC_LIMIT_MB}    # for your ${RAM_GB} GB Mac
+   See README §MLX memory limit on Apple Silicon for why and how to persist.
+
+EOF
+    fi
+fi
+
 echo "   Setup complete."

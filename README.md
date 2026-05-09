@@ -100,6 +100,66 @@ but the running model’s prompts omit that block until v1+.)
   `file://` URLs. Only run models and seeds you trust; treat generated
   games like untrusted web pages if you re-host them.
 
+### MLX memory limit on Apple Silicon
+
+Apple Silicon Macs cap how much unified memory a single GPU process
+(e.g. `mlx_lm.server`) is allowed to wire for Metal — it's not your full
+physical RAM. The cap is `iogpu.wired_limit_mb`, default ≈ 75 % of
+total RAM. **Big models with long context routinely cross it**, and when
+that happens the next allocation throws
+
+```
+RuntimeError: [metal::malloc] Resource limit (NNNNNN) exceeded.
+```
+
+inside `mlx_lm.server`'s generate thread. The thread dies; the HTTP
+layer keeps answering `GET /v1/models` with `200 OK`; our backend opens
+the SSE stream, sees prompt-eval finish, then receives **zero** content
+tokens. As of this commit the agent detects that exact pattern within
+~30 s of prompt-eval completion and surfaces a clear recovery hint
+([backend.py:_stream_once](backend.py), `crashed=True` in `StreamResult`).
+
+**Set the cap before launching `mlx_lm.server`** (per-boot; sudo):
+
+```bash
+# Suggested formula: physical RAM (MB) − 16 GB headroom for OS + apps.
+sudo sysctl iogpu.wired_limit_mb=$(( $(sysctl -n hw.memsize) / 1048576 - 16384 ))
+
+# Examples:
+sudo sysctl iogpu.wired_limit_mb=496000   # 512 GB Mac Studio
+sudo sysctl iogpu.wired_limit_mb=176000   # 192 GB Mac Studio
+sudo sysctl iogpu.wired_limit_mb=112000   #  128 GB
+sudo sysctl iogpu.wired_limit_mb=48000    #  64 GB
+```
+
+`./scripts/setup.sh` reads `hw.memsize` and prints the right command for
+your machine in its final banner; just paste-and-run.
+
+**To persist across reboots**, drop a file into `/etc/sysctl.d/`:
+
+```bash
+echo 'iogpu.wired_limit_mb=496000' | sudo tee /etc/sysctl.d/50-mlx.conf
+```
+
+(macOS reads `/etc/sysctl.conf` at boot; some installs use
+`/etc/sysctl.d/`. Check with `man sysctl.conf` on your version.)
+
+**If `mlx_lm.server` already crashed once**, you must restart it — the
+poisoned process is wedged for the rest of its lifetime even if you raise
+the cap afterwards:
+
+```bash
+pkill -f mlx_lm.server
+# raise the cap
+sudo sysctl iogpu.wired_limit_mb=496000
+# relaunch
+mlx_lm.server --model mlx-community/Qwen2.5-Coder-32B-Instruct-4bit --port 8080
+```
+
+This concern is **macOS-only**. Linux/CUDA hosts don't have an
+equivalent cap — `nvidia-smi` shows the full GPU VRAM available to MLX-
+or-PyTorch, no sysctl required.
+
 ---
 
 ## How a small model writes big code

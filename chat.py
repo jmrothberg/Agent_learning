@@ -733,6 +733,19 @@ class CodingBoxApp(App):
                 f"Will use [b]{preview.name.upper()}[/b] · "
                 f"[b]{_esc(preview.model)}[/b] [dim]({_esc(preview.source)})[/dim]"
             )
+            # MLX-on-Mac caveat — when the resolved backend is MLX, print
+            # a one-line reminder about Apple Silicon's Metal wired-memory
+            # cap. Big models + long context routinely cross the default
+            # cap and crash mlx_lm.server's generate thread mid-stream;
+            # the README has the sysctl + recovery steps. Cheap; only
+            # fires when MLX is actually selected.
+            import sys as _sys
+            if preview.name == "mlx" and _sys.platform == "darwin":
+                self._log_info(
+                    "[dim]MLX tip: if a stream hangs after prompt eval, "
+                    "raise the Metal cap via [b]sudo sysctl iogpu.wired_limit_mb=$N[/b] "
+                    "(README §MLX memory limit on Apple Silicon).[/dim]"
+                )
         except RuntimeError as e:
             self._log_error(str(e))
         if _KNOWN_BROKEN_TAGS:
@@ -914,6 +927,19 @@ class CodingBoxApp(App):
                 # is the case the user complained about — Ollama not
                 # responding looks identical to "thinking" without this.
                 wait = now - self._stream_started_at if self._stream_started_at else 0.0
+                # MLX path: if mlx_lm.server is feeding us prompt-eval
+                # progress (see backend.MLXBackend._stream_once), show
+                # that instead of a generic wait counter — turns the
+                # 6358-token blank wait into "prompt eval 6358/6358".
+                progress_total = getattr(self.agent, "_stream_progress_total", 0) or 0
+                progress_current = getattr(self.agent, "_stream_progress_current", 0) or 0
+                if progress_total > 0:
+                    pct = (100.0 * progress_current / progress_total) if progress_total else 0.0
+                    return (
+                        f"[bold yellow]Activity:[/bold yellow] {label} — "
+                        f"[cyan]prompt eval {progress_current:,}/{progress_total:,} "
+                        f"({pct:.0f}%)[/cyan] [dim]— {wait:.0f}s[/dim]\n"
+                    )
                 if wait > 30.0:
                     return (
                         f"[bold yellow]Activity:[/bold yellow] {label} — "

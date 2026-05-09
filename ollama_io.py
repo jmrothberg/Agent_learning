@@ -182,6 +182,14 @@ class StreamResult:
     # streaming chunks). Often differs from chunk count — kept distinct so
     # the chunk count stays meaningful for stall diagnostics.
     completion_tokens: int | None = None
+    # True when we detected a server-side crash mid-generation: the
+    # mlx_lm.server scenario where prompt-eval finished (we got a
+    # `Prompt processing progress: N/N` keepalive) but the generate
+    # thread died before any content tokens came back. Distinct from
+    # `stalled` so the agent can surface a specific recovery message
+    # (raise iogpu.wired_limit_mb, restart server) instead of a
+    # generic timeout.
+    crashed: bool = False
 
 
 async def stream_chat(
