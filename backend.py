@@ -13,15 +13,15 @@ and CLI never have to know which daemon they are talking to:
     detector as the Ollama path so a wedged MLX stream is detected the
     same way a wedged Ollama stream is.
 
-`detect_backend()` probes both daemons at session start. The picking
-rule (per user decision):
+`detect_backend()` picks an LLM daemon at session start. The rule:
 
-  1. Honor `LLM_BACKEND=ollama|mlx` if set.
-  2. If both have a model loaded → MLX wins (faster on Apple Silicon).
-  3. If exactly one has a model loaded → that one.
-  4. If neither has a model loaded but Ollama is reachable → Ollama
-     with /api/tags fallback (matches today's behavior).
-  5. Otherwise raise.
+  1. Honor `LLM_BACKEND=ollama|mlx|auto` when set (CLI `--backend` counts too).
+  2. On macOS (`darwin`), if neither env nor argument picks a backend,
+     default to **MLX** (Apple GPU). Linux and others default to `auto`.
+  3. With preference `auto`: probe both; MLX wins ties; if exactly one
+     has a loaded model → that one; if neither loaded but Ollama is up →
+     /api/tags fallback; else raise.
+  4. With preference `mlx` or `ollama`: force that daemon or raise.
 
 For MLX, "what's loaded" is read from the running `mlx_lm.server`
 process's `--model` arg (mirrors how `ollama ps` works), falling back
@@ -36,6 +36,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -544,14 +545,21 @@ def _strip_ollama_only_fields(messages: list[dict]) -> list[dict]:
 
 
 def detect_backend(prefer: str | None = None) -> BackendInfo:
-    """Probe both daemons and decide which to use.
+    """Resolve which LLM daemon to use.
 
-    `prefer` overrides the LLM_BACKEND env var. Accepts:
-      "auto" | None — probe both, MLX wins ties (per user decision).
+    Resolution order: non-empty ``prefer`` argument, else ``LLM_BACKEND`` env,
+    else platform default (``mlx`` on macOS, ``auto`` on other platforms).
+
+    Effective preference string:
+      "auto"        — probe both; MLX wins ties; Ollama fallback if neither loaded.
       "ollama"      — force Ollama; raise if unreachable.
       "mlx"         — force MLX; raise if unreachable.
+
+    Set ``LLM_BACKEND=auto`` on a Mac (or pass ``prefer=\"auto\"``) to probe
+    both daemons instead of defaulting to MLX.
     """
-    prefer = (prefer or os.environ.get("LLM_BACKEND") or "auto").strip().lower()
+    default_pref = "mlx" if sys.platform == "darwin" else "auto"
+    prefer = (prefer or os.environ.get("LLM_BACKEND") or default_pref).strip().lower()
 
     if prefer == "ollama":
         info = _try_ollama_with_loaded() or _ollama_full_fallback()
@@ -567,8 +575,9 @@ def detect_backend(prefer: str | None = None) -> BackendInfo:
         if info is None:
             endpoint = _mlx_endpoint()
             raise RuntimeError(
-                f"LLM_BACKEND=mlx but mlx_lm.server is not reachable at {endpoint}. "
-                "Start it with: mlx_lm.server --model <hf-id> --port 8080"
+                f"MLX backend selected but mlx_lm.server is not reachable at {endpoint}. "
+                "Start it with: mlx_lm.server --model "
+                "/Users/jonathanrothberg_1/MLX_Models/Qwen3.6-27B-mxfp8 --port 8080"
             )
         return info
 
@@ -586,7 +595,8 @@ def detect_backend(prefer: str | None = None) -> BackendInfo:
     raise RuntimeError(
         "No LLM backend reachable. Start either:\n"
         "  • Ollama:           `ollama run <model>`  (port 11434)\n"
-        "  • mlx_lm.server:    `mlx_lm.server --model <hf-id> --port 8080`"
+        "  • mlx_lm.server:    `mlx_lm.server --model "
+        "/Users/jonathanrothberg_1/MLX_Models/Qwen3.6-27B-mxfp8 --port 8080`"
     )
 
 

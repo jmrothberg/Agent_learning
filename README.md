@@ -78,10 +78,14 @@ but the running model’s prompts omit that block until v1+.)
 - **Python 3.10+**, macOS or Linux Ubuntu (the platforms `scripts/setup.sh`
   is tested on). Older Pythons miss async features the agent relies on.
 - **A local LLM daemon** — either Ollama (`ollama serve` with at least one
-  pulled model) or `mlx_lm.server` on Apple Silicon. The agent auto-detects
-  whichever is loaded; if both are loaded, MLX wins (faster on M-series).
-  Set `OLLAMA_HOST` / `MLX_HOST` if either daemon is on a non-default
-  address.
+  pulled model) or `mlx_lm.server` on Apple Silicon (install via
+  `requirements-mlx.txt` / `./scripts/setup.sh`). On macOS the agent **defaults
+  to MLX** when `LLM_BACKEND` is unset; use `LLM_BACKEND=auto` to probe Ollama too.
+  Set `OLLAMA_HOST` / `MLX_HOST` if either daemon is on a non-default address.
+- **Playwright Chromium** — not installed by `pip` alone; `./scripts/setup.sh`
+  runs `playwright install chromium`. If launch fails with “Executable doesn't exist”,
+  your environment may set `PLAYWRIGHT_BROWSERS_PATH` to a stale dir — run
+  `env -u PLAYWRIGHT_BROWSERS_PATH .venv/bin/python -m playwright install chromium`.
 - **A display for `chat.py`** — the TUI launches a **visible** Chromium
   window beside the terminal. SSH-only / CI hosts should use
   `coder.py --headless` instead.
@@ -91,11 +95,12 @@ but the running model’s prompts omit that block until v1+.)
   ```bash
   ollama run --ctx-size 32768 qwen3.6:35b
   ```
-- **Optional sprite + sound generation** — `./scripts/setup.sh` (no flags)
-  installs both pipelines. Sprites use Z-Image-Turbo (no license gate);
-  sounds use Stable Audio Open (one-time HF license accept + login — see
-  [Quick start](#quick-start)). Skip with `--no-gpu` if you don't have a
-  GPU; the agent falls back to procedural drawing and silent games.
+- **Sprite + sound generation (GPU)** — **`./scripts/setup.sh` with no flags**
+  installs the full stack by default (torch/MPS or CUDA + diffusers).
+  Sprites use Z-Image-Turbo (no license gate); sounds use Stable Audio Open
+  (one-time HF license accept + login — see [Quick start](#quick-start)).
+  Use **`--no-gpu`** only if you **deliberately** want to skip that stack
+  (~5 GB saved — no Z-Image / Stable Audio from the pipeline).
 - **Trust** — the model writes HTML/JS that runs in a real browser from
   `file://` URLs. Only run models and seeds you trust; treat generated
   games like untrusted web pages if you re-host them.
@@ -153,7 +158,7 @@ pkill -f mlx_lm.server
 # raise the cap
 sudo sysctl iogpu.wired_limit_mb=496000
 # relaunch
-mlx_lm.server --model mlx-community/Qwen2.5-Coder-32B-Instruct-4bit --port 8080
+mlx_lm.server --model /Users/jonathanrothberg_1/MLX_Models/Qwen3.6-27B-mxfp8 --port 8080
 ```
 
 This concern is **macOS-only**. Linux/CUDA hosts don't have an
@@ -692,7 +697,7 @@ paths, so feedback like *"use the music you generated"* survives
 |                          | Linux + NVIDIA / macOS Apple Silicon         | No GPU         |
 | ------------------------ | -------------------------------------------- | -------------- |
 | **Hardware**             | NVIDIA ≥10 GB VRAM, or Apple Silicon ≥16 GB | n/a            |
-| **Install**              | `./scripts/setup.sh` (audio + sprites in one step) | `--no-gpu` |
+| **Install**              | `./scripts/setup.sh` (GPU stack + audio + sprites) | `./scripts/setup.sh --no-gpu` (escape hatch only) |
 | **License gate**         | One-time: accept on HF, then `huggingface-cli login` | n/a    |
 | **Model weights (~5 GB)**| auto-downloaded to `~/.cache/huggingface/hub/` on first `<sounds>` use | n/a |
 | **First-run cost**       | ~30 s pipeline load + ~3-8 s/sec of audio   | n/a            |
@@ -1175,24 +1180,24 @@ The setup script (idempotent — safe to re-run any time):
 1. Verifies `python3 >= 3.10`.
 2. Creates `.venv/` (or repairs a stale one if the repo was moved).
 3. Installs `requirements.txt` (core: ollama, playwright, textual, pytest, …).
-4. Runs `playwright install chromium`.
-5. Installs the GPU stack via `./scripts/install_diffuser.sh` — torch +
+4. On **Apple Silicon**, installs `requirements-mlx.txt` (`mlx-lm`) unless `--no-mlx-tools`.
+5. Runs `playwright install chromium` with `PLAYWRIGHT_BROWSERS_PATH` unset (normal OS cache).
+6. Installs the GPU stack via `./scripts/install_diffuser.sh` — torch +
    diffusers + transformers + accelerate + safetensors + soundfile +
    torchsde — and layers `requirements-diffuser.txt` on top. **This
    single step enables BOTH sprite generation (Z-Image-Turbo) and sound
    generation (Stable Audio Open).**
-6. Runs the 170-test pure-function suite as a sanity check.
-7. Prints a next-steps banner with Ollama / MLX / HF-gated-model hints.
+7. Runs the pure-function pytest suite (~190 tests) as a sanity check.
+8. Prints a next-steps banner with Ollama / MLX / HF-gated-model hints.
 
 Useful flags:
 
 ```bash
-./scripts/setup.sh --no-gpu          # core only — no torch/diffusers/audio
-                                     # (agent runs fine without them)
 ./scripts/setup.sh --recreate-venv   # nuke .venv and start fresh
-./scripts/setup.sh --skip-playwright # for headless servers without a
-                                     # display (use coder.py --headless)
+./scripts/setup.sh --no-mlx-tools    # Apple Silicon but Ollama-only — skip mlx-lm pip install
+./scripts/setup.sh --skip-playwright # headless servers without a display (coder.py --headless)
 ./scripts/setup.sh --skip-tests
+./scripts/setup.sh --no-gpu          # ONLY without CUDA/MPS — skips torch/diffusers (~5 GB)
 ./scripts/setup.sh -h
 ```
 
@@ -1205,7 +1210,7 @@ ollama list
 ollama run --ctx-size 32768 qwen3.6:35b   # warm at 32K to skip reload
 
 # OR use MLX on Apple Silicon (often faster than Ollama):
-mlx_lm.server --model mlx-community/Qwen2.5-Coder-32B-Instruct-4bit --port 8080
+mlx_lm.server --model /Users/jonathanrothberg_1/MLX_Models/Qwen3.6-27B-mxfp8 --port 8080
 
 # Run the agent:
 .venv/bin/python chat.py                    # TUI (recommended)
@@ -1244,7 +1249,7 @@ machines without a display (`--headless`).
 
 | Flag | Default | Meaning |
 | ---- | ------- | ------- |
-| `--model` | env `OLLAMA_MODEL` or `coder.MODEL` | Ollama model tag |
+| `--model` | backend detection | Override model id (Ollama tag or MLX path/HF id) |
 | `--max-iters` | `6` | Cap plan/build iterations |
 | `--out` | unique `games/<slug>_<timestamp>.html` | Output HTML path |
 | `--best-of-n` | `1` | Sample N candidate fixes per failed iteration |
@@ -1658,22 +1663,29 @@ If you want the *single highest-ROI next step* per axis:
 
 ## Dependencies
 
-Two requirements files; `./scripts/setup.sh` installs both unless
-`--no-gpu` is passed.
+Three pip requirement files; `./scripts/setup.sh` installs them as follows:
 
-**`requirements.txt`** — always installed. Pure-Python deps the agent
-needs to run at all:
+| File | When |
+|------|------|
+| **`requirements.txt`** | Always — agent runtime (playwright **Python** package only; browser bundle is separate). |
+| **`requirements-mlx.txt`** | **macOS arm64** by default (`mlx-lm` → `mlx_lm.server`). Skipped with `--no-mlx-tools`. Optional manual install on other platforms if you run MLX. |
+| **`requirements-diffuser.txt`** | After `./scripts/install_diffuser.sh` inside setup, unless `--no-gpu`. |
+
+**`requirements.txt`** — pure-Python deps the agent needs to run at all:
 
 - `ollama` — Python client for the local Ollama daemon (also used by
   `learner.py reflect` / `apply` to call the Reflector; default model
   set in `learner.py` and overridable with `--model`)
 - `httpx` — used by `backend.MLXBackend` to talk to `mlx_lm.server` over
   SSE (Apple Silicon path)
-- `playwright` — real Chromium for game testing
+- `playwright` — Python wrapper; **you still need** `playwright install chromium` (done by `setup.sh`)
 - `textual` — the TUI framework
 - `pillow` — used by `assets.py` for sprite resize/save
 - `rich` — markup + escape helpers used by the TUI mirror layer
 - `pytest` — test runner; setup.sh's verification step runs the suite
+
+**`requirements-mlx.txt`** — `mlx-lm` so `mlx_lm.server` is available in `.venv`
+on Apple Silicon.
 
 **`requirements-diffuser.txt`** — only installed when GPU stack is
 enabled. Powers BOTH sprite (`assets.py`) and sound (`sounds.py`)

@@ -2,15 +2,16 @@
 #
 # One-shot setup for Agent_learning on a fresh machine.
 #
-#   ./scripts/setup.sh                   # sensible defaults (auto-detect GPU)
-#   ./scripts/setup.sh --no-gpu          # core only, no torch/diffusers (no
-#                                        #   sprites, no audio gen)
+#   ./scripts/setup.sh                   # DEFAULT: core + Chromium + mlx-lm (arm64 Mac)
+#                                        #         + FULL GPU stack (torch/diffusers/sprites/audio)
+#   ./scripts/setup.sh --no-gpu          # rare: skip torch/diffusers (no Z-Image / Stable Audio)
 #   ./scripts/setup.sh --recreate-venv   # nuke .venv and start over (use this
 #                                        #   if the venv was created in a
 #                                        #   different directory and the
 #                                        #   interpreter shim is now stale)
 #   ./scripts/setup.sh --skip-playwright # skip `playwright install chromium`
 #   ./scripts/setup.sh --skip-tests      # skip the pytest verification step
+#   ./scripts/setup.sh --no-mlx-tools    # Apple Silicon: skip mlx-lm pip install
 #   ./scripts/setup.sh -h | --help
 #
 # What this script does, in order:
@@ -18,18 +19,21 @@
 #   2. Create or reuse `.venv/` in the repo root.
 #   3. `pip install -r requirements.txt` (core: ollama client, playwright,
 #      textual, pytest, etc).
-#   4. `playwright install chromium` (the browser the harness drives).
-#   5. Optional GPU stack — `./scripts/install_diffuser.sh` (torch +
+#   4. On macOS arm64 (unless --no-mlx-tools): `pip install -r requirements-mlx.txt`
+#      so `mlx_lm.server` is available for the MLX backend.
+#   5. `env -u PLAYWRIGHT_BROWSERS_PATH playwright install chromium` — browser
+#      cache goes to ~/Library/Caches/ms-playwright (Mac) or ~/.cache/ms-playwright.
+#   6. GPU stack (DEFAULT on macOS/Linux) — `./scripts/install_diffuser.sh` (torch +
 #      diffusers + transformers + accelerate + safetensors + soundfile).
 #      Enables BOTH sprite generation (Z-Image-Turbo) and sound generation
 #      (Stable Audio Open). On Apple Silicon uses MPS; on Linux+NVIDIA
-#      uses CUDA via the appropriate torch nightly.
-#   6. Run the pytest suite end-to-end as a sanity check (170 tests, < 1 s).
-#   7. Print a next-steps banner with the gated-model + Ollama hints.
+#      uses CUDA via the appropriate torch nightly. Omit with `--no-gpu`.
+#   7. Run the pytest suite end-to-end as a sanity check (~190 tests, < 20 s).
+#   8. Print a next-steps banner with MLX / Ollama / HF-gated-model hints.
 #
 # Idempotent: re-running on a healthy install is a no-op (~5 seconds).
 # Cross-platform: tested on macOS (Apple Silicon + MPS) and Ubuntu Linux
-# (with NVIDIA + CUDA, or CPU-only if --no-gpu).
+# (with NVIDIA + CUDA; Apple Silicon + MPS; use --no-gpu only when neither applies).
 
 set -euo pipefail
 
@@ -44,9 +48,10 @@ WITH_GPU="auto"
 SKIP_PLAYWRIGHT=0
 SKIP_TESTS=0
 RECREATE_VENV=0
+MLX_TOOLS_SKIP=0
 
 usage() {
-    sed -n '2,18p' "$0"
+    sed -n '2,16p' "$0"
     exit "${1:-0}"
 }
 
@@ -57,6 +62,7 @@ for arg in "$@"; do
         --skip-playwright)    SKIP_PLAYWRIGHT=1 ;;
         --skip-tests)         SKIP_TESTS=1 ;;
         --recreate-venv)      RECREATE_VENV=1 ;;
+        --no-mlx-tools)       MLX_TOOLS_SKIP=1 ;;
         -h|--help)            usage 0 ;;
         *)                    echo "unknown flag: $arg" >&2; usage 1 ;;
     esac
@@ -64,7 +70,7 @@ done
 
 # --- helpers ---------------------------------------------------------------
 
-# Pretty step header. `step "1/7" "Description"` prints a numbered banner
+# Pretty step header. `step "1/8" "Description"` prints a numbered banner
 # so the user can follow which phase is in flight.
 step() {
     printf '\n\033[1;36m[%s] %s\033[0m\n' "$1" "$2"
@@ -101,16 +107,22 @@ if [ "$WITH_GPU" = "auto" ]; then
     esac
 fi
 
+MLX_TOOLS=0
+if [ "$PLATFORM" = "macos" ] && [ "$(uname -m)" = "arm64" ] && [ "$MLX_TOOLS_SKIP" -eq 0 ]; then
+    MLX_TOOLS=1
+fi
+
 echo "Agent_learning setup"
 echo "  repo:       $ROOT"
 echo "  platform:   $PLATFORM ($OS)"
 echo "  GPU stack:  $WITH_GPU"
+echo "  mlx-lm:     $([ $MLX_TOOLS -eq 1 ] && echo on || echo off)"
 echo "  playwright: $([ $SKIP_PLAYWRIGHT -eq 0 ] && echo on || echo skipped)"
 echo "  tests:      $([ $SKIP_TESTS -eq 0 ] && echo on || echo skipped)"
 
 # --- 1. python check -------------------------------------------------------
 
-step "1/7" "Python 3.10+ check"
+step "1/8" "Python 3.10+ check"
 
 if ! command -v python3 >/dev/null 2>&1; then
     if [ "$PLATFORM" = "linux" ]; then
@@ -130,7 +142,7 @@ ok "python3 $PY_VER at $(command -v python3)"
 
 # --- 2. venv ---------------------------------------------------------------
 
-step "2/7" "Virtual environment (.venv/)"
+step "2/8" "Virtual environment (.venv/)"
 
 VENV_PY=".venv/bin/python"
 VENV_PIP=".venv/bin/pip"
@@ -179,31 +191,39 @@ ok "pip upgraded"
 
 # --- 3. core deps ----------------------------------------------------------
 
-step "3/7" "Core Python deps (requirements.txt)"
+step "3/8" "Core Python deps (requirements.txt)"
 
 "$VENV_PIP" install -r requirements.txt
 ok "core deps installed"
 
-# --- 4. playwright ---------------------------------------------------------
+# --- 4. mlx-lm (Apple Silicon arm64) ---------------------------------------
 
-step "4/7" "Playwright Chromium"
+step "4/8" "MLX server package (requirements-mlx.txt)"
+
+if [ $MLX_TOOLS -eq 1 ]; then
+    "$VENV_PIP" install -r requirements-mlx.txt
+    ok "mlx-lm installed (mlx_lm.server CLI in this venv)"
+fi
+
+# --- 5. playwright ---------------------------------------------------------
+
+step "5/8" "Playwright Chromium"
 
 if [ $SKIP_PLAYWRIGHT -eq 1 ]; then
-    warn "skipped (--skip-playwright). chat.py / coder.py will fail until you run: $VENV_PY -m playwright install chromium"
+    warn "skipped (--skip-playwright). Run when ready: env -u PLAYWRIGHT_BROWSERS_PATH $VENV_PY -m playwright install chromium"
 else
-    # `playwright install chromium` is itself idempotent — it skips download
-    # if the browser is already cached at ~/.cache/ms-playwright on Linux
-    # or ~/Library/Caches/ms-playwright on macOS.
-    "$VENV_PY" -m playwright install chromium
+    # IDE sandboxes sometimes set PLAYWRIGHT_BROWSERS_PATH to a temp dir;
+    # unset so browsers land in the normal OS cache (~/Library/Caches/… on Mac).
+    env -u PLAYWRIGHT_BROWSERS_PATH "$VENV_PY" -m playwright install chromium
     ok "Chromium ready"
 fi
 
-# --- 5. optional GPU stack -------------------------------------------------
+# --- 6. optional GPU stack -------------------------------------------------
 
-step "5/7" "GPU stack (torch + diffusers + soundfile)"
+step "6/8" "GPU stack — torch + diffusers + sprites + audio (skip with --no-gpu)"
 
 if [ "$WITH_GPU" = "off" ]; then
-    warn "skipped (--no-gpu). Sprite + sound generation will be unavailable; agent runs fine without them."
+    warn "skipped (--no-gpu). No Z-Image / Stable Audio — sprite + sound generation unavailable."
 else
     # install_diffuser.sh:
     #   - picks the right torch wheel index for the platform
@@ -217,9 +237,9 @@ else
     ok "GPU stack installed"
 fi
 
-# --- 6. tests --------------------------------------------------------------
+# --- 7. tests --------------------------------------------------------------
 
-step "6/7" "Test suite (pytest)"
+step "7/8" "Test suite (pytest)"
 
 if [ $SKIP_TESTS -eq 1 ]; then
     warn "skipped (--skip-tests)"
@@ -228,9 +248,9 @@ else
     ok "all tests passed"
 fi
 
-# --- 7. next steps ---------------------------------------------------------
+# --- 8. next steps ---------------------------------------------------------
 
-step "7/7" "Next steps"
+step "8/8" "Next steps"
 
 cat <<EOF
 
@@ -245,7 +265,7 @@ cat <<EOF
      ollama run --ctx-size 32768 qwen3.6:35b
 
    Or use MLX on Apple Silicon (often faster than Ollama):
-     mlx_lm.server --model mlx-community/Qwen2.5-Coder-32B-Instruct-4bit --port 8080
+     mlx_lm.server --model /Users/jonathanrothberg_1/MLX_Models/Qwen3.6-27B-mxfp8 --port 8080
 
    Run it:
      .venv/bin/python chat.py                        # TUI (recommended)

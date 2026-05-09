@@ -1,7 +1,25 @@
 # Python deps for the coding-box agent.
-# After `pip install -r requirements.txt` you ALSO need:
-#   playwright install chromium
-# (that downloads the headless browser the agent uses to test games)
+#
+# QUICK PATH (recommended — GPU stack ON by default):
+#   ./scripts/setup.sh
+#   # core + Chromium + mlx-lm (arm64 Mac) + torch/diffusers + sprites/audio + pytest
+#
+# Rare escape hatch (no GPU hardware / CI disk crunch): ./scripts/setup.sh --no-gpu
+#
+# MANUAL PATH:
+#   python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+#   # Chromium bundle (required for chat.py / coder.py verification):
+#   env -u PLAYWRIGHT_BROWSERS_PATH .venv/bin/python -m playwright install chromium
+#   # PLAYWRIGHT_BROWSERS_PATH: some IDEs point this at a sandbox; unset avoids a
+#   # broken "Executable doesn't exist" launch. setup.sh does this automatically.
+#
+# RELATED FILES (not merged here on purpose):
+#   requirements-mlx.txt      — mlx_lm.server on Apple Silicon (optional elsewhere)
+#   requirements-diffuser.txt — sprites + Stable Audio (after install_diffuser.sh)
+#
+# OUTSIDE PIP:
+#   • Ollama app + at least one pulled model  OR  mlx_lm.server (see requirements-mlx.txt)
+#   • Display for chat.py visible Chromium (use coder.py --headless if none)
 
 ollama>=0.3.0
 httpx>=0.27.0
@@ -14,9 +32,5 @@ rich>=13.0.0
 pytest>=7.0.0
 
 # OPTIONAL — Z-Image-Turbo sprite generation (assets.py).
-# These are NOT auto-installed because the GPU stack is ~5GB and most
-# sessions don't need it. Install once if you want the agent to
-# generate PNG sprites via <assets> in Phase A:
-#   ./scripts/install_diffuser.sh
-# or manually:
+# Not in this file — GPU stack ~5GB. Use ./scripts/install_diffuser.sh or:
 #   pip install -r requirements-diffuser.txt

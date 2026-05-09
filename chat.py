@@ -17,16 +17,18 @@ The actual playable game opens in a real Chromium window beside the terminal
 (LiveBrowser, headless=False). You arrange the windows side by side.
 
 Model selection (when you press Enter on your game idea):
-  1. backend.detect_backend() probes both daemons:
-       Ollama (port 11434) — auto-picks the loaded model from /api/ps,
-       respecting OLLAMA_MODEL / CHAT_OLLAMA_MODEL env overrides.
-       mlx_lm.server (port 8080) — auto-picks the model from the running
-       process's `--model` arg, falling back to /v1/models. Override
-       with MLX_MODEL env var.
-  2. If both daemons have a loaded model, MLX wins (faster on Apple Silicon).
-     Force one with LLM_BACKEND=ollama / LLM_BACKEND=mlx, or use the
-     /backend slash command in the TUI.
-  3. If neither is loaded, falls back to first installed Ollama tag.
+  1. backend.detect_backend() defaults to MLX on macOS (Apple GPU) unless
+     you set LLM_BACKEND or use /backend. Otherwise it follows the same
+     rules as coder.py --backend.
+       Ollama (port 11434) — loaded model from /api/ps, or OLLAMA_MODEL /
+       CHAT_OLLAMA_MODEL overrides.
+       mlx_lm.server (port 8080) — model from the server's `--model` arg,
+       falling back to /v1/models; MLX_MODEL env overrides.
+  2. With LLM_BACKEND=auto (or explicit --backend auto), if both daemons
+     have a loaded model, MLX wins. Force one with LLM_BACKEND=ollama /
+     LLM_BACKEND=mlx or /backend in the TUI.
+  3. In full auto-probe mode only: if neither daemon has a model loaded
+     but Ollama is reachable, falls back to first installed Ollama tag.
 
 Workflow:
   1. App launches, asks "What game do you want to build?".
@@ -1332,7 +1334,8 @@ class CodingBoxApp(App):
         if not listing:
             self._log_error(
                 "no LLM backend reachable — start ollama (`ollama run <model>`) "
-                "or mlx_lm.server (`mlx_lm.server --model <hf-id> --port 8080`)"
+                "or mlx_lm.server (`mlx_lm.server --model "
+                "/Users/jonathanrothberg_1/MLX_Models/Qwen3.6-27B-mxfp8 --port 8080`)"
             )
             return
 
@@ -1497,7 +1500,8 @@ class CodingBoxApp(App):
         )
         self._log(
             "[dim]Or:  pkill -f mlx_lm.server   "
-            "(restart it with `mlx_lm.server --model <hf-id> --port 8080` "
+            "(restart it with `mlx_lm.server --model "
+            "/Users/jonathanrothberg_1/MLX_Models/Qwen3.6-27B-mxfp8 --port 8080` "
             "when you want MLX back)[/dim]"
         )
 

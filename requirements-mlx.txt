@@ -1,0 +1,7 @@
+# Apple Silicon — ships `mlx_lm.server` (HTTP API that backend.MLXBackend uses).
+# Automatic: ./scripts/setup.sh installs this on macOS arm64 unless --no-mlx-tools.
+# Manual (same venv):  .venv/bin/pip install -r requirements-mlx.txt
+#
+# Not pulled into requirements.txt so Linux/Ollama-only installs stay lean.
+
+mlx-lm>=0.21.0

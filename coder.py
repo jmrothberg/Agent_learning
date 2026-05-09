@@ -5,12 +5,13 @@ Usage:
     python coder.py "snake" --max-iters 4 --best-of-n 1 --headless
 
 Optional flags:
-    --backend BACKEND   Pick LLM daemon: auto (default) | ollama | mlx.
-                        'auto' probes both; if both have a model loaded,
-                        MLX wins. Can also be set via LLM_BACKEND env.
+    --backend BACKEND   Pick LLM daemon: mlx (default on macOS) | auto |
+                        ollama. Default follows LLM_BACKEND if set, else
+                        MLX on Mac else auto. 'auto' probes both; MLX wins
+                        ties when both have a model loaded.
     --model NAME        Override the model id resolved by backend detection.
-                        (Ollama tag like 'qwen3.6:27b', or MLX HF id like
-                        'mlx-community/Qwen2.5-Coder-32B-Instruct-4bit'.)
+                        (Ollama tag like 'qwen3.6:27b', or MLX local/HF path like
+                        '/Users/jonathanrothberg_1/MLX_Models/Qwen3.6-27B-mxfp8'.)
     --max-iters N       Cap iterations (default 6)
     --out PATH          Where to save the final game (default games/game.html)
     --best-of-n N       Sample N candidates per fix turn (default 2)
@@ -229,23 +230,24 @@ async def _run(
 
 def main() -> int:
     p = argparse.ArgumentParser(
-        description="Coding-box CLI driver (auto-detects Ollama or MLX)."
+        description="Coding-box CLI driver (defaults to MLX on macOS, else auto)."
     )
     p.add_argument("goal", help="What game to build, in plain English.")
     p.add_argument(
         "--backend",
         choices=["auto", "ollama", "mlx"],
-        default=os.environ.get("LLM_BACKEND", "auto"),
-        help="LLM daemon to use. 'auto' probes both and prefers whichever "
-             "has a model loaded (MLX wins ties on Apple Silicon). "
-             "Override LLM_BACKEND env if set.",
+        default=os.environ.get("LLM_BACKEND")
+        or ("mlx" if sys.platform == "darwin" else "auto"),
+        help="LLM daemon. Default: LLM_BACKEND env if set, else mlx on macOS "
+             "else auto. 'auto' probes both (MLX wins ties).",
     )
     p.add_argument(
         "--model",
         default=None,
         help="Override the model id resolved by backend detection. "
              "Ollama tag (e.g. 'qwen3.6:27b') or MLX HF id "
-             "(e.g. 'mlx-community/Qwen2.5-Coder-32B-Instruct-4bit'). "
+             "(e.g. local dir '/Users/jonathanrothberg_1/MLX_Models/Qwen3.6-27B-mxfp8' "
+             "or an HF model id). "
              "When omitted, backend.detect_backend picks for you.",
     )
     p.add_argument("--max-iters", type=int, default=6)
