@@ -31,6 +31,6 @@ rich>=13.0.0
 # the pure-function suites under tests/. Lightweight; ~1 MB.
 pytest>=7.0.0
 
-# OPTIONAL — Z-Image-Turbo sprite generation (assets.py).
-# Not in this file — GPU stack ~5GB. Use ./scripts/install_diffuser.sh or:
-#   pip install -r requirements-diffuser.txt
+# OPTIONAL — GPU stack (~5 GB): Z-Image sprites + Stable Audio sounds.
+# Run ./scripts/install_diffuser.sh — it installs torch/diffusers AND ends with
+# `pip install -r requirements-diffuser.txt` (soundfile, torchsde).

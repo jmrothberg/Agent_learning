@@ -23,11 +23,10 @@
 #      so `mlx_lm.server` is available for the MLX backend.
 #   5. `env -u PLAYWRIGHT_BROWSERS_PATH playwright install chromium` — browser
 #      cache goes to ~/Library/Caches/ms-playwright (Mac) or ~/.cache/ms-playwright.
-#   6. GPU stack (DEFAULT on macOS/Linux) — `./scripts/install_diffuser.sh` (torch +
-#      diffusers + transformers + accelerate + safetensors + soundfile).
-#      Enables BOTH sprite generation (Z-Image-Turbo) and sound generation
-#      (Stable Audio Open). On Apple Silicon uses MPS; on Linux+NVIDIA
-#      uses CUDA via the appropriate torch nightly. Omit with `--no-gpu`.
+#   6. GPU stack — `./scripts/install_diffuser.sh` installs torch + diffusers git +
+#      transformers AND layers `requirements-diffuser.txt` (soundfile, torchsde)
+#      in one script — Z-Image sprites + Stable Audio pip deps together.
+#      Omit with `--no-gpu`.
 #   7. Run the pytest suite end-to-end as a sanity check (~190 tests, < 20 s).
 #   8. Print a next-steps banner with MLX / Ollama / HF-gated-model hints.
 #
@@ -225,16 +224,10 @@ step "6/8" "GPU stack — torch + diffusers + sprites + audio (skip with --no-gp
 if [ "$WITH_GPU" = "off" ]; then
     warn "skipped (--no-gpu). No Z-Image / Stable Audio — sprite + sound generation unavailable."
 else
-    # install_diffuser.sh:
-    #   - picks the right torch wheel index for the platform
-    #   - installs diffusers from git HEAD (Z-Image-Turbo support)
-    #   - installs transformers + accelerate + safetensors + pillow
-    # We then layer requirements-diffuser.txt on top, which adds soundfile
-    # (the OGG encoder used by sounds.py) and re-asserts the upper-bound
-    # versions for transformers / accelerate / safetensors.
+    # One script: torch + diffusers + transformers + requirements-diffuser.txt
+    # (soundfile, torchsde) — sprites AND Stable Audio Open deps together.
     bash ./scripts/install_diffuser.sh
-    "$VENV_PIP" install -r requirements-diffuser.txt
-    ok "GPU stack installed"
+    ok "GPU stack installed (sprites + sound pip deps)"
 fi
 
 # --- 7. tests --------------------------------------------------------------

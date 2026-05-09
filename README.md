@@ -564,14 +564,10 @@ The script:
 3. Installs diffusers from **git HEAD** — `ZImagePipeline` and
    `StableAudioPipeline` updates land in HEAD before tagged releases.
 4. Installs transformers + accelerate + safetensors + pillow.
-5. Verifies CUDA / MPS, imports `ZImagePipeline`, calls
-   `assets.try_load_image_generator()` — must return a real
-   `ZImageTurboGenerator` (not `None`) for the install to count.
-
-`setup.sh` then layers `requirements-diffuser.txt` on top, which adds
-`soundfile` (OGG encoder) and `torchsde` (Stable Audio Open's
-scheduler dep). If you ran `install_diffuser.sh` directly, do that
-layering yourself: `.venv/bin/pip install -r requirements-diffuser.txt`.
+5. **`pip install -r requirements-diffuser.txt`** — `soundfile`, `torchsde`,
+   and pins for Stable Audio (`<sounds>`); `./scripts/setup.sh` gets these via this same script (no extra pip step).
+6. Verifies CUDA / MPS, imports `ZImagePipeline`, **`StableAudioPipeline`**,
+   **`soundfile` / `torchsde`**, and runs `assets.try_load_image_generator()`.
 
 If you have an older NVIDIA GPU that needs CUDA 12.x:
 
@@ -1182,11 +1178,10 @@ The setup script (idempotent — safe to re-run any time):
 3. Installs `requirements.txt` (core: ollama, playwright, textual, pytest, …).
 4. On **Apple Silicon**, installs `requirements-mlx.txt` (`mlx-lm`) unless `--no-mlx-tools`.
 5. Runs `playwright install chromium` with `PLAYWRIGHT_BROWSERS_PATH` unset (normal OS cache).
-6. Installs the GPU stack via `./scripts/install_diffuser.sh` — torch +
-   diffusers + transformers + accelerate + safetensors + soundfile +
-   torchsde — and layers `requirements-diffuser.txt` on top. **This
-   single step enables BOTH sprite generation (Z-Image-Turbo) and sound
-   generation (Stable Audio Open).**
+6. Installs the full diffusion stack via **`./scripts/install_diffuser.sh`** (one invocation):
+   torch, diffusers (git), transformers stack, then **`requirements-diffuser.txt`**
+   (**soundfile**, **torchsde**) — sprites + Stable Audio **pip** deps together.
+   (**HF weights** still download on first `<assets>` / `<sounds>`; Stable Audio is gated.)
 7. Runs the pure-function pytest suite (~190 tests) as a sanity check.
 8. Prints a next-steps banner with Ollama / MLX / HF-gated-model hints.
 
@@ -1669,7 +1664,7 @@ Three pip requirement files; `./scripts/setup.sh` installs them as follows:
 |------|------|
 | **`requirements.txt`** | Always — agent runtime (playwright **Python** package only; browser bundle is separate). |
 | **`requirements-mlx.txt`** | **macOS arm64** by default (`mlx-lm` → `mlx_lm.server`). Skipped with `--no-mlx-tools`. Optional manual install on other platforms if you run MLX. |
-| **`requirements-diffuser.txt`** | After `./scripts/install_diffuser.sh` inside setup, unless `--no-gpu`. |
+| **`requirements-diffuser.txt`** | Installed automatically as the **last step inside** `./scripts/install_diffuser.sh` (`setup.sh` does not pip it separately). Skipped only with `--no-gpu`. |
 
 **`requirements.txt`** — pure-Python deps the agent needs to run at all:
 
@@ -1687,8 +1682,8 @@ Three pip requirement files; `./scripts/setup.sh` installs them as follows:
 **`requirements-mlx.txt`** — `mlx-lm` so `mlx_lm.server` is available in `.venv`
 on Apple Silicon.
 
-**`requirements-diffuser.txt`** — only installed when GPU stack is
-enabled. Powers BOTH sprite (`assets.py`) and sound (`sounds.py`)
+**`requirements-diffuser.txt`** — **`./scripts/install_diffuser.sh` pip-installs this file as its final step**
+(so sprites + Stable Audio extras ship in one script when GPU stack is enabled). Powers BOTH sprite (`assets.py`) and sound (`sounds.py`)
 generation:
 
 - `transformers`, `accelerate`, `safetensors` — diffusers' transitive
@@ -1701,9 +1696,8 @@ generation:
   [Generated sounds](#generated-sounds--stable-audio-open-no-server)
   section.
 
-Torch + diffusers themselves are installed by `scripts/install_diffuser.sh`
-(picks the right wheel index per platform: cu130 nightly on Linux, the
-MPS-capable nightly on macOS).
+Torch + diffusers themselves are installed by `scripts/install_diffuser.sh`,
+which ends by layering **`requirements-diffuser.txt`** (same script — cu130 nightly on Linux, MPS nightly wheel on macOS).
 
 `tune.py` / `learner.py` have no extra pip dependencies.
 

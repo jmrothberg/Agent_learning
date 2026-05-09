@@ -1,18 +1,15 @@
 #!/usr/bin/env bash
-# Install the optional Z-Image-Turbo sprite-generation GPU stack into
-# Agent_learning/.venv. Cross-platform: detects Linux (CUDA) vs macOS
-# (MPS) vs other (CPU — not recommended for Z-Image-Turbo) and picks
-# the right torch wheel index.
+# Install the full diffusion GPU stack into Agent_learning/.venv:
+#   • Z-Image-Turbo sprites (<assets>)  — torch + diffusers git + transformers…
+#   • Stable Audio Open (<sounds>)      — layers requirements-diffuser.txt
+#     (soundfile, torchsde, pinned transformers/accelerate/safetensors)
 #
-# Re-uses pip's wheel cache so if you already have these versions
-# elsewhere on this machine, it's fast.
+# Cross-platform: Linux (CUDA) vs macOS (MPS) vs other (CPU — slow).
+# `./scripts/setup.sh` calls this once; you can also run this script alone
+# after creating `.venv`.
 #
-# After this completes, sessions whose Phase A includes an <assets>
-# block will generate real PNG sprites in-process (no server) and
-# inject the paths into the first-build prompt.
-#
-# Skip this if you don't have a GPU — the agent runs fine without it,
-# falling back to procedural ctx.fillRect drawing.
+# Model weights are NOT downloaded here — first <assets>/<sounds> pull from
+# HF (Stable Audio needs license accept + huggingface-cli login).
 
 set -euo pipefail
 
@@ -66,20 +63,24 @@ echo "Platform: $PLATFORM_LABEL"
 echo "          $DEVICE_NOTE"
 echo
 
-echo "[1/3] Installing torch + torchvision + torchaudio …"
+echo "[1/4] Installing torch + torchvision + torchaudio …"
 # shellcheck disable=SC2086
 $PIP install $TORCH_INDEX_FLAGS torch torchvision torchaudio
 
 echo
-echo "[2/3] Installing diffusers from git HEAD (needed for ZImagePipeline) …"
+echo "[2/4] Installing diffusers from git HEAD (needed for ZImagePipeline + Stable Audio) …"
 $PIP install --upgrade git+https://github.com/huggingface/diffusers
 
 echo
-echo "[3/3] Installing transformers / accelerate / safetensors / pillow …"
+echo "[3/4] Installing transformers / accelerate / safetensors / pillow …"
 $PIP install --upgrade transformers accelerate safetensors pillow
 
 echo
-echo "Verifying GPU + diffusers + ZImagePipeline are wired up …"
+echo "[4/4] Layering requirements-diffuser.txt (soundfile, torchsde, version pins) …"
+$PIP install -r requirements-diffuser.txt
+
+echo
+echo "Verifying GPU + diffusers + sprites + audio Python deps …"
 $PY - <<'PY'
 import importlib.util as iu
 ok_torch = iu.find_spec("torch") is not None
@@ -107,6 +108,14 @@ if ok_diffusers:
         print(f"  ZImagePipeline class:   importable ✓")
     except Exception as e:
         print(f"  ZImagePipeline class:   IMPORT FAILED — {e!r}")
+    try:
+        from diffusers import StableAudioPipeline  # noqa: F401
+        print(f"  StableAudioPipeline:    importable ✓")
+    except Exception as e:
+        print(f"  StableAudioPipeline:    IMPORT FAILED — {e!r}")
+for mod in ("soundfile", "torchsde"):
+    ok = iu.find_spec(mod) is not None
+    print(f"  {mod + ':':24} {'✓' if ok else 'MISSING'}")
 PY
 
 echo

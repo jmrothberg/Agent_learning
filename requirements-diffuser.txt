@@ -1,6 +1,8 @@
-# Optional GPU stack for Z-Image-Turbo sprite generation (assets.py).
-# Install with:  ./scripts/install_diffuser.sh   (recommended — handles
-# the torch nightly + diffusers git HEAD that Z-Image-Turbo requires).
+# GPU extras layered AFTER scripts/install_diffuser.sh installs torch + diffusers.
+# That script runs `pip install -r requirements-diffuser.txt` as its final step
+# (soundfile, torchsde for Stable Audio; pins transformers/accelerate/safetensors).
+#
+# Optional GPU stack for Z-Image-Turbo (assets.py) + Stable Audio Open (sounds.py).
 #
 # IMPORTANT: this file does NOT pin torch / diffusers because the
 # correct flavor depends on your CUDA version. The install script
@@ -9,7 +11,7 @@
 # tagged release). The lines below are the *plain* deps that come
 # from PyPI normally.
 #
-# Manual install path (won't get Z-Image-Turbo support):
+# Manual-only pip path if torch/diffusers are already installed:
 #   .venv/bin/pip install -r requirements-diffuser.txt
 #
 # After install, the FIRST <assets> request in a session will:

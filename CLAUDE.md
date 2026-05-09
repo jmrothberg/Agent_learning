@@ -28,9 +28,8 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 .venv/bin/pip install -r requirements-mlx.txt   # Apple Silicon MLX server only
 env -u PLAYWRIGHT_BROWSERS_PATH .venv/bin/python -m playwright install chromium
-./scripts/install_diffuser.sh                   # torch + diffusers — required for <assets>/<sounds>
+./scripts/install_diffuser.sh                   # torch + diffusers + requirements-diffuser.txt (sprites + sound deps)
 TORCH_CUDA=121 ./scripts/install_diffuser.sh    # older NVIDIA only
-.venv/bin/pip install -r requirements-diffuser.txt
 
 # Rare: no CUDA/MPS host — skips torch/diffusers (~5 GB saved): ./scripts/setup.sh --no-gpu
 
