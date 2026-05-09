@@ -4,8 +4,9 @@ self-contained Stable Audio Open loader. Used to verify the install
 works end-to-end. Saves the audio into games/_smoke/ and prints the
 absolute paths on success.
 
-Run after `pip install -r requirements-diffuser.txt` (which now
-includes soundfile alongside the existing diffusers/torch deps).
+Run after GPU setup (`./scripts/install_diffuser.sh`). Hub weights usually
+land in ~/.cache/huggingface/hub/ without a login prompt; see README only
+if download returns 403/401.
 """
 
 from __future__ import annotations

@@ -8,8 +8,8 @@
 # `./scripts/setup.sh` calls this once; you can also run this script alone
 # after creating `.venv`.
 #
-# Model weights are NOT downloaded here — first <assets>/<sounds> pull from
-# HF (Stable Audio needs license accept + huggingface-cli login).
+# Model weights are NOT downloaded here — they populate ~/.cache/huggingface/hub/
+# on first <assets>/<sounds> or scripts/_smoke_*.py (login rarely needed; README if 403).
 
 set -euo pipefail
 

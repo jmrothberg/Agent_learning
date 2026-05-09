@@ -81,24 +81,26 @@ _MIN_DURATION_S = 0.2
 #   2. $DIFFUSION_MODELS_DIR/audio    (so the existing image override
 #                                      naturally extends to audio)
 #   3. Platform default bases (mirror of assets.py — see
-#      _default_model_search_dirs)
-#   4. HuggingFace fallback: `stabilityai/stable-audio-open-small` is
-#      downloaded to ~/.cache/huggingface/hub/ on first run if no
-#      local path matches.
+#      _default_model_search_dirs): ~/.Diffusion_Models (hidden) before
+#      ~/Diffusion_Models, etc.
+#   4. HuggingFace fallback: `stabilityai/stable-audio-open-1.0` is
+#      downloaded to ~/.cache/huggingface/hub/ on first run if no local
+#      path matches (gated — HF login required).
 
 
 def _default_model_search_dirs() -> list[str]:
-    """Build the search list at import time. Mirrors assets.py — Mac-
-    first ordering on darwin, Linux-first elsewhere — so the user's
-    ~/Diffusion_Models or ~/Models_Diffusers tree is automatically
-    found when AUDIO_MODELS_DIR is unset."""
+    """Build the search list at import time. Mirrors assets.py — hidden
+    ~/.Diffusion_Models / ~/.Models_Diffusers before visible siblings;
+    Mac-first vs Linux-first ordering matches sprites."""
     home = _os.path.expanduser("~")
+    dot_dm = _os.path.join(home, ".Diffusion_Models")
+    dot_md = _os.path.join(home, ".Models_Diffusers")
     diffusion_models = _os.path.join(home, "Diffusion_Models")
     models_diffusers = _os.path.join(home, "Models_Diffusers")
     if sys.platform == "darwin":
-        home_bases = [diffusion_models, models_diffusers]
+        home_bases = [dot_dm, diffusion_models, dot_md, models_diffusers]
     else:
-        home_bases = [models_diffusers, diffusion_models]
+        home_bases = [dot_md, models_diffusers, dot_dm, diffusion_models]
     return home_bases + [
         "/home/jonathan/Models_Diffusers",
         "./models_diffusers",

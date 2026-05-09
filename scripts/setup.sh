@@ -28,7 +28,7 @@
 #      in one script — Z-Image sprites + Stable Audio pip deps together.
 #      Omit with `--no-gpu`.
 #   7. Run the pytest suite end-to-end as a sanity check (~190 tests, < 20 s).
-#   8. Print a next-steps banner with MLX / Ollama / HF-gated-model hints.
+#   8. Print MLX / Ollama next-steps + HF download recovery (only if 403/401).
 #
 # Idempotent: re-running on a healthy install is a no-op (~5 seconds).
 # Cross-platform: tested on macOS (Apple Silicon + MPS) and Ubuntu Linux
@@ -268,20 +268,17 @@ EOF
 
 if [ "$WITH_GPU" = "on" ]; then
     cat <<'EOF'
-   GENERATED ASSETS — sprite art (Z-Image-Turbo, ~5 GB):
-     Auto-downloads from HuggingFace on first <assets> request. No license
-     gating. Smoke-test with:
+   GENERATED ASSETS — Z-Image-Turbo (~5 GB into ~/.cache/huggingface/hub/ typically):
+     Usually no login prompt on first <assets> or smoke run.
        .venv/bin/python scripts/_smoke_doom.py
 
-   GENERATED SOUNDS — Stable Audio Open 1.0 (~5 GB):
-     Gated model. Two one-time steps before the first <sounds> request:
-       1. Accept the license at:
-            https://huggingface.co/stabilityai/stable-audio-open-1.0
-       2. Authenticate the CLI so diffusers can download:
-            .venv/bin/python -m huggingface_hub.commands.huggingface_cli login
-            # (or: export HF_TOKEN=hf_xxxxxxxxxxxx)
-     Smoke-test with:
+   GENERATED SOUNDS — Stable Audio Open 1.0 (~9 GB cache typical):
+     Same pattern — downloads on first <sounds> or smoke; often no password asked.
        .venv/bin/python scripts/_smoke_audio.py
+     Only if download fails with 403/401:
+       • https://huggingface.co/stabilityai/stable-audio-open-1.0 — agree if prompted
+       • .venv/bin/python -m huggingface_hub.commands.huggingface_cli login
+         (or export HF_TOKEN=hf_…)
 
 EOF
 fi

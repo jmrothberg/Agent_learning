@@ -97,8 +97,11 @@ but the running model’s prompts omit that block until v1+.)
   ```
 - **Sprite + sound generation (GPU)** — **`./scripts/setup.sh` with no flags**
   installs the full stack by default (torch/MPS or CUDA + diffusers).
-  Sprites use Z-Image-Turbo (no license gate); sounds use Stable Audio Open
-  (one-time HF license accept + login — see [Quick start](#quick-start)).
+  Sprites use Z-Image-Turbo (public HF repo — usually downloads with no login).
+  Sounds use Stable Audio Open — **often** the same: weights land in
+  `~/.cache/huggingface/hub/` without prompting if you're already authenticated
+  (`huggingface-cli login` from another tool, or `HF_TOKEN` in your environment).
+  **Only if** you get **403/401** on download, see [HF troubleshooting](#hugging-face-login-only-if-downloads-fail).
   Use **`--no-gpu`** only if you **deliberately** want to skip that stack
   (~5 GB saved — no Z-Image / Stable Audio from the pipeline).
 - **Trust** — the model writes HTML/JS that runs in a real browser from
@@ -621,12 +624,13 @@ following paths and uses the first one that exists:
 
 | Order | Path                                | Note                                      |
 | :---: | ----------------------------------- | ----------------------------------------- |
-| 1     | `$DIFFUSION_MODELS_DIR/Z-Image-Turbo/` | **Recommended override** — set this once |
-| 2     | `~/Models_Diffusers/Z-Image-Turbo/` | Linux convention                          |
-| 3     | `~/Diffusion_Models/Z-Image-Turbo/` | macOS convention                          |
-| 4     | `/home/jonathan/Models_Diffusers/Z-Image-Turbo/` | Legacy, kept for compat       |
-| 5     | `./models_diffusers/Z-Image-Turbo/` | Repo-relative — for portability           |
-| 6     | **HuggingFace fallback** `Tongyi-MAI/Z-Image-Turbo` | Auto-downloaded on first use to `~/.cache/huggingface/hub/`. Honors `HF_HOME` if set. |
+| 1     | `$DIFFUSION_MODELS_DIR/Z-Image-Turbo/` (or `Tongyi-MAI_Z-Image-Turbo/`) | **Recommended override** |
+| 2–5   | Home bases — **dot-folders first**: `~/.Diffusion_Models/`, `~/Diffusion_Models/`, then `~/.Models_Diffusers/`, `~/Models_Diffusers/` on macOS (Linux tries the *Models_Diffusers* pair first). Same subfolder names as above. |
+| —     | `/home/jonathan/Models_Diffusers/Z-Image-Turbo/` | Legacy, kept for compat       |
+| —     | `./models_diffusers/Z-Image-Turbo/` | Repo-relative — for portability           |
+| last  | **HuggingFace** `Tongyi-MAI/Z-Image-Turbo` | Auto-download on first use → `~/.cache/huggingface/hub/` (`HF_HOME` honored). |
+
+**Stable Audio weights** use the **same home bases** (hidden first). Expected checkpoint dir: **`stable-audio-open-1.0`** (or `audio/stable-audio-open-1.0`) under those roots, or **`$AUDIO_MODELS_DIR`**, or **`$DIFFUSION_MODELS_DIR/audio/`**. If missing, diffusers pulls **`stabilityai/stable-audio-open-1.0`** into the HF cache (often silent; if you get **403/401**, see [HF troubleshooting](#hugging-face-login-only-if-downloads-fail)). **Game output OGGs** are always written under **`games/<session>_sounds/`** — only the **model checkpoint** lives in the paths above.
 
 To use a custom location (e.g. an external SSD), add to your shell rc:
 
@@ -694,7 +698,7 @@ paths, so feedback like *"use the music you generated"* survives
 | ------------------------ | -------------------------------------------- | -------------- |
 | **Hardware**             | NVIDIA ≥10 GB VRAM, or Apple Silicon ≥16 GB | n/a            |
 | **Install**              | `./scripts/setup.sh` (GPU stack + audio + sprites) | `./scripts/setup.sh --no-gpu` (escape hatch only) |
-| **License gate**         | One-time: accept on HF, then `huggingface-cli login` | n/a    |
+| **HF auth**              | Usually **none** — weights cache under `~/.cache/huggingface/hub/`. If Stable Audio fails with **403/401**, accept the license on the HF model page + `huggingface-cli login` or `export HF_TOKEN=…` | n/a |
 | **Model weights (~5 GB)**| auto-downloaded to `~/.cache/huggingface/hub/` on first `<sounds>` use | n/a |
 | **First-run cost**       | ~30 s pipeline load + ~3-8 s/sec of audio   | n/a            |
 | **Subsequent runs**      | cache hits = free hard-link                  | n/a            |
@@ -1181,9 +1185,9 @@ The setup script (idempotent — safe to re-run any time):
 6. Installs the full diffusion stack via **`./scripts/install_diffuser.sh`** (one invocation):
    torch, diffusers (git), transformers stack, then **`requirements-diffuser.txt`**
    (**soundfile**, **torchsde**) — sprites + Stable Audio **pip** deps together.
-   (**HF weights** still download on first `<assets>` / `<sounds>`; Stable Audio is gated.)
+   (**HF weights** download on first `<assets>` / `<sounds>` or smoke scripts into the hub cache; interactive login is uncommon.)
 7. Runs the pure-function pytest suite (~190 tests) as a sanity check.
-8. Prints a next-steps banner with Ollama / MLX / HF-gated-model hints.
+8. Prints MLX / Ollama next-steps (plus optional HF recovery hints).
 
 Useful flags:
 
@@ -1212,28 +1216,30 @@ mlx_lm.server --model /Users/jonathanrothberg_1/MLX_Models/Qwen3.6-27B-mxfp8 --p
 .venv/bin/python coder.py "build snake"     # one-shot CLI
 ```
 
-### One-time HF setup for sound generation (gated model)
+### Hugging Face login (only if downloads fail)
 
-`<sounds>` uses Stability's Stable Audio Open 1.0, which is gated:
+Weights for sprites and sounds normally download **automatically** into `~/.cache/huggingface/hub/` the first time you run `<assets>` / `<sounds>` or the smoke scripts below. **You often will not be prompted** for a Hugging Face password — e.g. you're already logged in from another project, or `HF_TOKEN` is set in your shell.
 
-1. Visit [stabilityai/stable-audio-open-1.0](https://huggingface.co/stabilityai/stable-audio-open-1.0)
-   while signed in and click "Agree and access" (free, non-commercial).
-2. Generate a read token at <https://huggingface.co/settings/tokens>.
-3. Authenticate the CLI so diffusers can download:
+If Stable Audio (or another repo) returns **403** / **401**:
+
+1. Sign in at Hugging Face, open [stabilityai/stable-audio-open-1.0](https://huggingface.co/stabilityai/stable-audio-open-1.0), and agree to terms if the page asks.
+2. Create a read token at <https://huggingface.co/settings/tokens> if you need one.
+3. In this repo's venv:
    ```bash
    .venv/bin/python -m huggingface_hub.commands.huggingface_cli login
-   # or set: export HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxxxxxx
+   # or: export HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxxxxxx
    ```
 
-Smoke-test sprites + sounds end-to-end before a real session:
+### Smoke-test sprites + sounds (do this right after setup)
 
 ```bash
-.venv/bin/python scripts/_smoke_doom.py    # generates one PNG
-.venv/bin/python scripts/_smoke_audio.py   # generates three OGGs
+.venv/bin/python scripts/_smoke_doom.py    # one PNG — exercises Z-Image cache
+.venv/bin/python scripts/_smoke_audio.py   # three OGGs — exercises Stable Audio cache
 ```
 
-Sprites are not gated — Z-Image-Turbo auto-downloads from HF on first
-`<assets>` request without any login step.
+If both complete, HF setup is done unless you later hit an auth error.
+
+Z-Image-Turbo is a **public** HF model. Stable Audio may enforce agreement only when the hub requires it for your account.
 
 ---
 

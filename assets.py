@@ -53,8 +53,9 @@ _DEFAULT_TARGET_SIZE = 128
 # Search order — first existing directory wins:
 #   1. $DIFFUSION_MODELS_DIR env var (preferred override)
 #   2. Platform default bases (see _default_model_search_dirs):
-#      macOS checks ~/Diffusion_Models before ~/Models_Diffusers; others
-#      keep Linux-first order.
+#      Hidden ~/.Diffusion_Models and ~/.Models_Diffusers are tried before
+#      visible ~/Diffusion_Models / ~/Models_Diffusers.
+#      macOS checks Diffusion_Models* before Models_Diffusers*; Linux the opposite.
 #   3. /home/jonathan/Models_Diffusers   (legacy, kept so existing
 #                                         setups don't break on update)
 #   4. ./models_diffusers      (repo-relative — for portability when
@@ -73,16 +74,21 @@ def _default_model_search_dirs() -> list[str]:
     """Build the search list at import time. `~` is expanded so the
     list is concrete absolute paths plus one relative entry.
 
-    On macOS, ~/Diffusion_Models is tried before ~/Models_Diffusers so
-    the usual Mac tree wins without DIFFUSION_MODELS_DIR.
+    Hidden ``~/.Diffusion_Models`` / ``~/.Models_Diffusers`` are tried
+    before visible siblings so dot-prefixed weight trees win first.
+
+    On macOS, Diffusion_Models* precedes Models_Diffusers*; Linux uses
+    the opposite preference.
     """
     home = _os.path.expanduser("~")
+    dot_dm = _os.path.join(home, ".Diffusion_Models")
+    dot_md = _os.path.join(home, ".Models_Diffusers")
     diffusion_models = _os.path.join(home, "Diffusion_Models")
     models_diffusers = _os.path.join(home, "Models_Diffusers")
     if sys.platform == "darwin":
-        home_bases = [diffusion_models, models_diffusers]
+        home_bases = [dot_dm, diffusion_models, dot_md, models_diffusers]
     else:
-        home_bases = [models_diffusers, diffusion_models]
+        home_bases = [dot_md, models_diffusers, dot_dm, diffusion_models]
     return home_bases + [
         "/home/jonathan/Models_Diffusers",
         "./models_diffusers",

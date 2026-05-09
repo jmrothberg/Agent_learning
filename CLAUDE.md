@@ -77,7 +77,7 @@ python learner.py apply games/traces/             # propose AND write to playboo
 - `MLX_MODEL` — explicit MLX model id override (else: `--model X` arg of running `mlx_lm.server`, then `/v1/models[0]`)
 - `MLX_HOST` — non-default mlx_lm.server address (default `http://127.0.0.1:8080`)
 - `CODING_BOX_NUM_CTX` — Ollama context window (default 32768; supports 128K+ on most local models). MLX has no equivalent; uses model native context.
-- `DIFFUSION_MODELS_DIR` — override Z-Image-Turbo weights search path (Linux: `~/Models_Diffusers`, Mac: `~/Diffusion_Models`, then HuggingFace fallback)
+- `DIFFUSION_MODELS_DIR` — root override for weights search (sprites + sounds layout); hidden **`~/.Diffusion_Models`** / **`~/.Models_Diffusers`** are tried before visible `~/…` siblings; HuggingFace cache fallback if absent.
 - `TORCH_CUDA` — CUDA version for `install_diffuser.sh` (`130` default, `121`/`124` for older GPUs)
 
 ---
