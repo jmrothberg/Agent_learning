@@ -222,12 +222,23 @@ def _parse_param_billions(p: str) -> float:
         return 0.0
 
 
+_PARAM_SIZE_IN_NAME_RE = re.compile(
+    r"(?<![A-Za-z0-9.])(\d+(?:\.\d+)?)\s*B(?![a-z0-9])",
+    re.IGNORECASE,
+)
+
+
 def _model_param_size(model: str) -> str:
     """Best-effort parameter_size string for a model (e.g. '36.0B').
 
     Tries /api/ps first (loaded models, fast). Falls back to ollama.show()
     (works for installed-but-not-loaded models — that's the common case
-    when the user hasn't run the model yet). Returns '' if both fail.
+    when the user hasn't run the model yet). For MLX-served models Ollama
+    knows nothing, so as a last resort we scan the model name/path for a
+    "<n>B" token (e.g. 'Qwen3.6-27B-mxfp8' -> '27B'). Without this,
+    timeouts default to small-model values and the MLX stream watchdog
+    kills big-prompt requests before the first token arrives.
+    Returns '' if all paths fail.
     """
     for m in _running_models_with_meta():
         if m["name"] == model and m.get("parameter_size"):
@@ -236,35 +247,45 @@ def _model_param_size(model: str) -> str:
         info = ollama.show(model=model)
         details = getattr(info, "details", None)
         if details is not None:
-            return (getattr(details, "parameter_size", "") or "").strip()
+            size = (getattr(details, "parameter_size", "") or "").strip()
+            if size:
+                return size
     except Exception:
         pass
+    matches = _PARAM_SIZE_IN_NAME_RE.findall(model or "")
+    if matches:
+        return f"{max(float(m) for m in matches)}B"
     return ""
 
 
 def resolve_session_timeouts(model: str) -> tuple[float, float]:
     """Pick (stall_seconds, overall_seconds) for a given model.
 
-    Scaling is by parameter count (queried from /api/ps then /api/show).
-    Larger models take longer per token AND tend to write more verbose
-    output, so we bump BOTH timeouts:
+    Scaling is by parameter count (queried from /api/ps then /api/show,
+    or parsed from the model name for MLX). Larger models take longer
+    per token AND tend to write more verbose output, so we bump BOTH
+    timeouts:
 
         params      stall    overall
         ─────────   ─────    ───────
         ≤ 13B       60       600    (small/fast, default-ish)
-        14–25B      90       900    (gpt-oss 20B ballpark)
-        26–40B      150      1800   (qwen3.6:35b — Space Invaders takes 25+ min)
-        > 40B       240      2700   (70B class)
+        14–25B      90       1200   (gpt-oss 20B ballpark)
+        26–40B      900      3600   (27B/35B MLX — first-token can be
+                                     15 min on big Doom-class prompts;
+                                     mlx_lm.server keepalives are not
+                                     reliably sub-stall during heavy
+                                     prompt processing)
+        > 40B       1200     5400   (70B class)
 
     These are wall-clock budgets PER STREAM, not total session.
     """
     b = _parse_param_billions(_model_param_size(model))
     if b > 40:
-        return 240.0, 2700.0
+        return 1200.0, 5400.0
     if b > 25:
-        return 150.0, 1800.0
+        return 900.0, 3600.0
     if b > 13:
-        return 90.0, 900.0
+        return 90.0, 1200.0
     # Default / unknown: err small so we detect a true wedge fast.
     return 60.0, 600.0
 
