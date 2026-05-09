@@ -75,35 +75,30 @@ but the running model’s prompts omit that block until v1+.)
 
 ## Prerequisites
 
-- **Python 3.10+** recommended (async stack, typing, pathlib).
-- **Ollama** running locally (`ollama serve`) with at least one pulled model.
-- **Playwright Chromium**: after `pip install -r requirements.txt`, run  
-  `playwright install chromium`.
-- **Display for `chat.py`**: the default TUI launches a **visible** Chromium
-  window. You need a working desktop/Wayland/X11 session (or X forwarding
-  that Playwright can use). For SSH-only or CI machines, use  
-  `coder.py --headless` instead of the TUI.
-- **`OLLAMA_HOST`**: if your daemon is not on the default address, set this
-  before launching (the Python client and HTTP fallbacks respect it).
-- **Context window**: the agent uses `num_ctx=32768` by default — qwen3.6 /
-  gpt-oss support 128K natively, and 32K covers planning + first build +
-  several feedback turns before structured compaction kicks in. Override
-  with `CODING_BOX_NUM_CTX=65536` (or any size your GPU supports) before
-  launching, or pass `--num-ctx N` to `coder.py`. To avoid a model reload
-  on the first call, **preload your model at the matching size**:
+- **Python 3.10+**, macOS or Linux Ubuntu (the platforms `scripts/setup.sh`
+  is tested on). Older Pythons miss async features the agent relies on.
+- **A local LLM daemon** — either Ollama (`ollama serve` with at least one
+  pulled model) or `mlx_lm.server` on Apple Silicon. The agent auto-detects
+  whichever is loaded; if both are loaded, MLX wins (faster on M-series).
+  Set `OLLAMA_HOST` / `MLX_HOST` if either daemon is on a non-default
+  address.
+- **A display for `chat.py`** — the TUI launches a **visible** Chromium
+  window beside the terminal. SSH-only / CI hosts should use
+  `coder.py --headless` instead.
+- **Context window** — defaults to `num_ctx=32768`, plenty for planning +
+  first build + several feedback turns. Bigger via `CODING_BOX_NUM_CTX` /
+  `--num-ctx`. Pre-warm the model at the matching size to skip a reload:
   ```bash
   ollama run --ctx-size 32768 qwen3.6:35b
   ```
-- **Optional sprite generation**: the agent can emit `<assets>` blocks
-  in Phase A and the harness will run Z-Image-Turbo locally to mint PNG
-  sprites the game uses via `<img>` / `drawImage()`. See [Generated
-  sprites](#generated-sprites--z-image-turbo-no-server) for the one-line
-  install (`./scripts/install_diffuser.sh`). Skip if you don't have a
-  GPU — the agent runs fine without it, falling back to procedural
-  canvas drawing.
-- **Trust**: the model writes HTML/JS that is executed in a real browser from
-  `file://` URLs. Only run models and seeds you trust; treat generated games
-  like untrusted web pages if you re-host them.
+- **Optional sprite + sound generation** — `./scripts/setup.sh` (no flags)
+  installs both pipelines. Sprites use Z-Image-Turbo (no license gate);
+  sounds use Stable Audio Open (one-time HF license accept + login — see
+  [Quick start](#quick-start)). Skip with `--no-gpu` if you don't have a
+  GPU; the agent falls back to procedural drawing and silent games.
+- **Trust** — the model writes HTML/JS that runs in a real browser from
+  `file://` URLs. Only run models and seeds you trust; treat generated
+  games like untrusted web pages if you re-host them.
 
 ---
 
@@ -484,6 +479,11 @@ runtime and uses `float16` instead of `bfloat16` (MPS bf16 is uneven).
 
 ### Setup — one command
 
+The canonical entry is `./scripts/setup.sh` (see [Quick start](#quick-start)),
+which installs both sprite + sound pipelines along with the rest of the
+agent. Internally it calls `scripts/install_diffuser.sh`, which you can
+also run directly when you only want to refresh the GPU stack:
+
 ```bash
 ./scripts/install_diffuser.sh         # Linux: cu130 nightly torch
                                        # macOS: nightly w/ MPS
@@ -491,18 +491,22 @@ runtime and uses `float16` instead of `bfloat16` (MPS bf16 is uneven).
 ```
 
 The script:
-1. Detects your platform via `uname -s` and picks the right torch
-   index URL (`download.pytorch.org/whl/nightly/cu130` on Linux,
-   `…/whl/nightly/cpu` on macOS — that's the wheel that includes
-   MPS support).
+1. Detects your platform via `uname -s` and picks the right torch index
+   URL (`download.pytorch.org/whl/nightly/cu130` on Linux,
+   `…/whl/nightly/cpu` on macOS — that's the wheel that includes MPS
+   support).
 2. Installs torch + torchvision + torchaudio.
-3. Installs diffusers from **git HEAD** — `ZImagePipeline` only landed
-   recently, no tagged release has it yet.
-4. Installs transformers + accelerate + safetensors + pillow (the
-   plain pip-pinnable deps — see `requirements-diffuser.txt`).
+3. Installs diffusers from **git HEAD** — `ZImagePipeline` and
+   `StableAudioPipeline` updates land in HEAD before tagged releases.
+4. Installs transformers + accelerate + safetensors + pillow.
 5. Verifies CUDA / MPS, imports `ZImagePipeline`, calls
    `assets.try_load_image_generator()` — must return a real
    `ZImageTurboGenerator` (not `None`) for the install to count.
+
+`setup.sh` then layers `requirements-diffuser.txt` on top, which adds
+`soundfile` (OGG encoder) and `torchsde` (Stable Audio Open's
+scheduler dep). If you ran `install_diffuser.sh` directly, do that
+layering yourself: `.venv/bin/pip install -r requirements-diffuser.txt`.
 
 If you have an older NVIDIA GPU that needs CUDA 12.x:
 
@@ -511,11 +515,12 @@ TORCH_CUDA=121 ./scripts/install_diffuser.sh
 TORCH_CUDA=124 ./scripts/install_diffuser.sh
 ```
 
-After install, **smoke-test the pipeline end-to-end** before running a
-real session:
+After install, **smoke-test both pipelines end-to-end** before running
+a real session:
 
 ```bash
-.venv/bin/python scripts/_smoke_doom.py
+.venv/bin/python scripts/_smoke_doom.py     # one PNG via Z-Image-Turbo
+.venv/bin/python scripts/_smoke_audio.py    # three OGGs via Stable Audio Open
 ```
 
 This generates a single 256×256 PNG from the prompt *"doom video game
@@ -574,6 +579,80 @@ Skip every step above and the agent still works — it just won't have
 sprites. **Skip `<assets>` for DOM-only games** (todo list,
 calculator, tic-tac-toe); the format spec instructs the model to emit
 `<assets>` only when sprite art would help.
+
+### Generated sounds — Stable Audio Open, no server
+
+A direct parallel to the sprite pipeline above, but for short audio
+clips. Most arcade games feel cheaper without sound; the agent can now
+request SFX and looping background music in Phase A alongside `<plan>`,
+`<criteria>`, `<probes>`, and `<assets>`:
+
+```xml
+<sounds>
+[
+  {"name": "laser",     "prompt": "short retro arcade laser shot, 8-bit synth blip", "duration": 0.4},
+  {"name": "explosion", "prompt": "short pixelated explosion, 8-bit boom",            "duration": 0.8},
+  {"name": "music",     "prompt": "loopable 8-bit chiptune background, 90 bpm",       "duration": 12.0, "loop": true}
+]
+</sounds>
+```
+
+The harness:
+
+1. Calls `sounds.try_load_audio_generator()` which constructs a
+   `StableAudioGenerator` (vendored shape, mirrors `assets.py`). Pure
+   Python `import` chain; same process as `chat.py`, same GPU.
+2. Lazy-loads **Stable Audio Open 1.0** weights once per session
+   (~30-60 s on first `<sounds>` request; ~3-8 s per second of audio
+   after on Apple Silicon MPS, faster on CUDA). Pipeline never loads
+   on sessions that don't request sound, so the cost is opt-in per turn.
+3. Generates each missing OGG via `diffusers.StableAudioPipeline` at
+   the model's native 44.1 kHz, encodes to OGG-Vorbis via `soundfile`.
+   `duration` is clamped to [0.2 s, 12.0 s] per sound; `loop: true`
+   marks a clip for `<audio loop>` use in the loader.
+4. Caches by `sha256(model_id, normalized_prompt, duration)` so
+   repeated prompts across sessions are free.
+5. Saves OGGs into `games/<slug>_<ts>_sounds/<name>.ogg`, hard-linked
+   from the cache.
+6. Prepends a `GENERATED SOUNDS` block to the first-build prompt
+   listing each `name → ./<rel-path>` plus a complete `new Audio(...)`
+   loader pattern (cloneNode for overlap-safe SFX; user-gesture unlock
+   so browsers actually play audio).
+
+A goal-keyword detector (`prompts_v1._detect_audio_intent`) escalates
+`<sounds>` from "expected" to **AUDIO INTENT DETECTED — required this
+turn** when words like `sound`, `audio`, `music`, `sfx`, `chiptune`
+appear in the user's goal. Genre-free per the project rule — only
+words about output character, never subject matter.
+
+Compaction's state-anchor message preserves sound paths alongside asset
+paths, so feedback like *"use the music you generated"* survives
+30+-turn sessions.
+
+|                          | Linux + NVIDIA / macOS Apple Silicon         | No GPU         |
+| ------------------------ | -------------------------------------------- | -------------- |
+| **Hardware**             | NVIDIA ≥10 GB VRAM, or Apple Silicon ≥16 GB | n/a            |
+| **Install**              | `./scripts/setup.sh` (audio + sprites in one step) | `--no-gpu` |
+| **License gate**         | One-time: accept on HF, then `huggingface-cli login` | n/a    |
+| **Model weights (~5 GB)**| auto-downloaded to `~/.cache/huggingface/hub/` on first `<sounds>` use | n/a |
+| **First-run cost**       | ~30 s pipeline load + ~3-8 s/sec of audio   | n/a            |
+| **Subsequent runs**      | cache hits = free hard-link                  | n/a            |
+| **When unavailable**     | `try_load_audio_generator()` returns `None` silently → agent logs *"Stable Audio Open not reachable, shipping silent game"* and the session continues exactly as before. | same |
+
+#### Known issue: torchsde infinite recursion (handled)
+
+Stable Audio Open's default scheduler
+(`CosineDPMSolverMultistepScheduler`) uses `torchsde` for SDE noise.
+On every step, float-precision drift makes the requested midway value
+land ~1e-5 outside the Brownian interval bounds; `torchsde._Interval._split`
+bisects the gap and recurses forever, never reaching the unreachable
+target — `RecursionError` regardless of `sys.setrecursionlimit`. We
+monkey-patch `_Interval._split` in `sounds.StableAudioGenerator._lazy_init`
+to clamp `midway` to `[_start, _end]` before bisecting; out-of-bounds
+queries get a single non-recursive `_split_exact` at the boundary.
+Audio output is unaffected because `BrownianInterval.__call__` already
+clamps the requested time to the interval before any of this fires.
+Idempotent and process-local; only fires when audio is actually used.
 
 ### Roadmap items also shipped on this branch
 
@@ -1023,27 +1102,78 @@ runs.
 
 ## Quick start
 
+**One command, clean clone → working agent (macOS or Ubuntu Linux):**
+
 ```bash
-# 1. clone & enter
 git clone https://github.com/jmrothberg/Agent_learning.git
 cd Agent_learning
-
-# 2. python venv
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-playwright install chromium
-
-# 3. make sure ollama is running and you have a model installed
-ollama serve &      # in a separate terminal if not already running
-ollama list         # confirm at least one usable tag
-
-# 4. interactive TUI (recommended)
-.venv/bin/python chat.py
-
-# 5. or one-shot CLI
-.venv/bin/python coder.py "build me a simple snake game"
+./scripts/setup.sh
 ```
+
+The setup script (idempotent — safe to re-run any time):
+
+1. Verifies `python3 >= 3.10`.
+2. Creates `.venv/` (or repairs a stale one if the repo was moved).
+3. Installs `requirements.txt` (core: ollama, playwright, textual, pytest, …).
+4. Runs `playwright install chromium`.
+5. Installs the GPU stack via `./scripts/install_diffuser.sh` — torch +
+   diffusers + transformers + accelerate + safetensors + soundfile +
+   torchsde — and layers `requirements-diffuser.txt` on top. **This
+   single step enables BOTH sprite generation (Z-Image-Turbo) and sound
+   generation (Stable Audio Open).**
+6. Runs the 170-test pure-function suite as a sanity check.
+7. Prints a next-steps banner with Ollama / MLX / HF-gated-model hints.
+
+Useful flags:
+
+```bash
+./scripts/setup.sh --no-gpu          # core only — no torch/diffusers/audio
+                                     # (agent runs fine without them)
+./scripts/setup.sh --recreate-venv   # nuke .venv and start fresh
+./scripts/setup.sh --skip-playwright # for headless servers without a
+                                     # display (use coder.py --headless)
+./scripts/setup.sh --skip-tests
+./scripts/setup.sh -h
+```
+
+After setup, point the agent at a local LLM and start a session:
+
+```bash
+# Make sure Ollama is running with at least one model:
+ollama serve &
+ollama list
+ollama run --ctx-size 32768 qwen3.6:35b   # warm at 32K to skip reload
+
+# OR use MLX on Apple Silicon (often faster than Ollama):
+mlx_lm.server --model mlx-community/Qwen2.5-Coder-32B-Instruct-4bit --port 8080
+
+# Run the agent:
+.venv/bin/python chat.py                    # TUI (recommended)
+.venv/bin/python coder.py "build snake"     # one-shot CLI
+```
+
+### One-time HF setup for sound generation (gated model)
+
+`<sounds>` uses Stability's Stable Audio Open 1.0, which is gated:
+
+1. Visit [stabilityai/stable-audio-open-1.0](https://huggingface.co/stabilityai/stable-audio-open-1.0)
+   while signed in and click "Agree and access" (free, non-commercial).
+2. Generate a read token at <https://huggingface.co/settings/tokens>.
+3. Authenticate the CLI so diffusers can download:
+   ```bash
+   .venv/bin/python -m huggingface_hub.commands.huggingface_cli login
+   # or set: export HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxxxxxx
+   ```
+
+Smoke-test sprites + sounds end-to-end before a real session:
+
+```bash
+.venv/bin/python scripts/_smoke_doom.py    # generates one PNG
+.venv/bin/python scripts/_smoke_audio.py   # generates three OGGs
+```
+
+Sprites are not gated — Z-Image-Turbo auto-downloads from HF on first
+`<assets>` request without any login step.
 
 ---
 
@@ -1468,16 +1598,42 @@ If you want the *single highest-ROI next step* per axis:
 
 ## Dependencies
 
-See `requirements.txt`. Key packages:
+Two requirements files; `./scripts/setup.sh` installs both unless
+`--no-gpu` is passed.
 
-- `ollama` — python client for the local Ollama daemon (also used by
-  `learner.py reflect` / `apply` to call the Reflector; default model is
+**`requirements.txt`** — always installed. Pure-Python deps the agent
+needs to run at all:
+
+- `ollama` — Python client for the local Ollama daemon (also used by
+  `learner.py reflect` / `apply` to call the Reflector; default model
   set in `learner.py` and overridable with `--model`)
+- `httpx` — used by `backend.MLXBackend` to talk to `mlx_lm.server` over
+  SSE (Apple Silicon path)
 - `playwright` — real Chromium for game testing
 - `textual` — the TUI framework
+- `pillow` — used by `assets.py` for sprite resize/save
 - `rich` — markup + escape helpers used by the TUI mirror layer
+- `pytest` — test runner; setup.sh's verification step runs the suite
 
-`tune.py` / `learner.py` have no extra pip dependencies beyond the above.
+**`requirements-diffuser.txt`** — only installed when GPU stack is
+enabled. Powers BOTH sprite (`assets.py`) and sound (`sounds.py`)
+generation:
+
+- `transformers`, `accelerate`, `safetensors` — diffusers' transitive
+  deps (also pulled by torch via `install_diffuser.sh`)
+- `soundfile` — libsndfile bindings used by `sounds.py` to encode
+  Stable Audio Open output as OGG-Vorbis
+- `torchsde` — required by Stable Audio Open's default scheduler
+  (`CosineDPMSolverMultistepScheduler`); we monkey-patch its
+  `_Interval._split` to fix an infinite-recursion bug — see the
+  [Generated sounds](#generated-sounds--stable-audio-open-no-server)
+  section.
+
+Torch + diffusers themselves are installed by `scripts/install_diffuser.sh`
+(picks the right wheel index per platform: cu130 nightly on Linux, the
+MPS-capable nightly on macOS).
+
+`tune.py` / `learner.py` have no extra pip dependencies.
 
 ---
 

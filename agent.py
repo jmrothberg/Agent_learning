@@ -58,6 +58,12 @@ from assets import (
     render_asset_paths_block,
     try_load_image_generator,
 )
+from sounds import (
+    generate_sounds,
+    parse_sounds_block,
+    render_sound_paths_block,
+    try_load_audio_generator,
+)
 from backend import Backend, BackendInfo, make_backend
 from memory import (
     CANVAS_SKELETON_V2,
@@ -422,6 +428,15 @@ class GameAgent:
         # Resolved asset paths from Phase A (name → absolute path); used
         # by the first-build prompt assembler.
         self._session_assets: dict[str, Path] = {}
+        # Same lazy-load pattern for Stable Audio Open. Only loaded when
+        # the model emits a <sounds> block in Phase A.
+        self._sound_generator: Any = None
+        # Resolved sound paths (name → absolute path) and the subset
+        # that was declared loop=true. The loop set is preserved
+        # separately so render_sound_paths_block can mark them in the
+        # injected loader pattern.
+        self._session_sounds: dict[str, Path] = {}
+        self._session_looping: set[str] = set()
 
     # Read-through to the resolved backend's model id. Existing call sites
     # (trace metadata, conversation dump, memory.record_outcome, ...) used
@@ -847,6 +862,28 @@ class GameAgent:
             )
             lines += asset_lines + [""]
 
+        # Generated sounds — same rationale as assets above. Compaction
+        # would otherwise drop the OGG paths and the model would forget
+        # they exist, shipping a silent game on later iterations.
+        if self._session_sounds:
+            html_dir = self.out_path.resolve().parent
+            sound_lines: list[str] = ["## Generated sounds (USE these — silent games are a regression)"]
+            for name, path in self._session_sounds.items():
+                try:
+                    rel = Path(path).resolve().relative_to(html_dir)
+                except ValueError:
+                    rel = path
+                loop_tag = " (looping)" if name in self._session_looping else ""
+                sound_lines.append(f"- {name}: ./{rel}{loop_tag}")
+            sound_lines.append(
+                "Load via `new Audio('./<name>.ogg')`; play SFX with "
+                "`audio.cloneNode().play()` (overlap-safe), looping "
+                "music with `audio.loop=true; audio.play()`. Browsers "
+                "require a user gesture before audio plays — unlock on "
+                "first keydown / pointerdown."
+            )
+            lines += sound_lines + [""]
+
         # Critical context — preserved across compaction so the model
         # never forgets the truth-source contract.
         lines += [
@@ -1054,10 +1091,54 @@ class GameAgent:
         )
         self._trace({"kind": "stream_start", "temperature": temp, "fix_mode": self._fix_mode})
 
+        # Heartbeat wrapper around the caller's on_token. Every
+        # _STREAM_HEARTBEAT_SECONDS of wall clock, we trace a
+        # `stream_heartbeat` event carrying token count, tok/s, and the
+        # last ~120 chars of the stream. This makes a long stream
+        # visible in the .log / .jsonl as it runs — without this, a
+        # 25-minute degenerate generation looks identical to a healthy
+        # stream that's writing to a different file (the user-facing
+        # symptom that motivated this change). Cheap: at most one
+        # trace event every 30 seconds.
+        import time as _time
+        hb_state = {
+            "started": _time.monotonic(),
+            "last_hb": _time.monotonic(),
+            "tokens": 0,
+            "tail": "",
+        }
+        _STREAM_HEARTBEAT_SECONDS = 30.0
+        _STREAM_HEARTBEAT_TAIL_CHARS = 120
+
+        def _heartbeat_on_token(piece: str) -> None:
+            if on_token is not None:
+                try:
+                    on_token(piece)
+                except Exception:
+                    pass
+            hb_state["tokens"] += 1
+            # Maintain a small tail buffer; cheap O(1) amortized.
+            tail = hb_state["tail"] + piece
+            if len(tail) > _STREAM_HEARTBEAT_TAIL_CHARS * 2:
+                tail = tail[-_STREAM_HEARTBEAT_TAIL_CHARS * 2:]
+            hb_state["tail"] = tail
+            now = _time.monotonic()
+            if now - hb_state["last_hb"] >= _STREAM_HEARTBEAT_SECONDS:
+                hb_state["last_hb"] = now
+                elapsed = now - hb_state["started"]
+                tok_per_s = hb_state["tokens"] / elapsed if elapsed > 0 else 0.0
+                self._trace({
+                    "kind": "stream_heartbeat",
+                    "tokens": hb_state["tokens"],
+                    "elapsed_s": round(elapsed, 1),
+                    "tok_per_s": round(tok_per_s, 2),
+                    "tail": hb_state["tail"][-_STREAM_HEARTBEAT_TAIL_CHARS:],
+                })
+
         try:
             result = await self._backend.stream_chat(
                 self._messages,
-                on_token=on_token,
+                on_token=_heartbeat_on_token,
                 options={"temperature": temp, "num_ctx": self.num_ctx},
                 stall_seconds=self.stall_seconds,
                 overall_seconds=self.overall_seconds,
@@ -1083,6 +1164,12 @@ class GameAgent:
             "stalled": result.stalled,
             "looped": result.looped,
             "len": len(result.text),
+            # Backend-reported BPE counts when available. `tokens` above is
+            # streaming chunk count; these are the real cost numbers used
+            # to chart prompt size over a session and to spot when the
+            # inlined-file truth source has bloated the input.
+            "prompt_tokens": result.prompt_tokens,
+            "completion_tokens": result.completion_tokens,
         })
         if result.looped:
             # Visible to the user via the agent log so they understand why
@@ -1736,6 +1823,117 @@ class GameAgent:
                                     f"  - {name}: {err_line}"
                                 ))
 
+            # ---- Phase A → first-build: optional sound generation ----------
+            # Mirrors the asset block above. If the model emitted <sounds>
+            # AND Stable Audio Open is reachable, generate OGGs and
+            # collect their paths. Both halves are optional: silent plans
+            # skip everything; reachable-but-no-GPU systems log and skip;
+            # individual failures don't abort the batch.
+            sound_specs = parse_sounds_block(plan_reply)
+            if sound_specs:
+                yield self._record(AgentEvent(
+                    "info",
+                    f"plan requested {len(sound_specs)} sound(s); "
+                    "loading Stable Audio Open (first call only, ~30-60s)…",
+                    {"sounds_requested": [s["name"] for s in sound_specs]},
+                ))
+                yield self._record(AgentEvent(
+                    "activity", "generating_sounds",
+                    {
+                        "label": "generating sounds",
+                        "requested": len(sound_specs),
+                        "produced": 0,
+                    },
+                ))
+                if self._sound_generator is None:
+                    self._sound_generator = await asyncio.to_thread(
+                        try_load_audio_generator,
+                    )
+                if self._sound_generator is None:
+                    yield self._record(AgentEvent("activity", "idle"))
+                    yield self._record(AgentEvent(
+                        "info",
+                        "Stable Audio Open not reachable (no CUDA / no MPS / "
+                        "diffusers or soundfile missing) — proceeding "
+                        "without audio, model will ship a silent game."
+                    ))
+                else:
+                    session_sounds_dir = (
+                        self.out_path.parent / f"{self._session_id}_sounds"
+                    )
+                    try:
+                        self._session_sounds = await asyncio.to_thread(
+                            generate_sounds,
+                            sound_specs,
+                            session_sounds_dir,
+                            audio_generator=self._sound_generator,
+                        )
+                    except Exception as e:
+                        yield self._record(AgentEvent("activity", "idle"))
+                        yield self._record(AgentEvent(
+                            "info",
+                            f"sound generation crashed: {e!r} — proceeding without."
+                        ))
+                        self._session_sounds = {}
+                    # Track which produced names were declared with
+                    # loop=true so the loader pattern can mark them.
+                    self._session_looping = {
+                        str(s.get("name", "")).strip()
+                        for s in sound_specs if s.get("loop")
+                    } & set(self._session_sounds.keys())
+                    per_sound = getattr(
+                        self._sound_generator, "last_stats", None,
+                    ) or []
+                    self._trace({
+                        "kind": "sounds_generated",
+                        "requested": len(sound_specs),
+                        "produced": len(self._session_sounds),
+                        "names": list(self._session_sounds.keys()),
+                        "looping": sorted(self._session_looping),
+                        "session_dir": str(session_sounds_dir),
+                        "per_sound": per_sound,
+                    })
+                    yield self._record(AgentEvent(
+                        "sounds",
+                        f"{len(self._session_sounds)}/{len(sound_specs)} generated",
+                        {
+                            "requested": len(sound_specs),
+                            "produced": len(self._session_sounds),
+                            "session_dir": str(session_sounds_dir),
+                            "paths": {n: str(p) for n, p in self._session_sounds.items()},
+                            "looping": sorted(self._session_looping),
+                            "per_sound": per_sound,
+                        },
+                    ))
+                    yield self._record(AgentEvent("activity", "idle"))
+                    if self._session_sounds:
+                        yield self._record(AgentEvent(
+                            "info",
+                            f"generated {len(self._session_sounds)}/"
+                            f"{len(sound_specs)} sounds at "
+                            f"{session_sounds_dir}",
+                            {"sounds": {n: str(p) for n, p in self._session_sounds.items()}},
+                        ))
+                    if len(self._session_sounds) < len(sound_specs):
+                        failed = [
+                            s for s in per_sound
+                            if isinstance(s, dict) and s.get("error")
+                        ]
+                        if failed:
+                            yield self._record(AgentEvent(
+                                "info",
+                                f"sound gen: {len(failed)}/{len(sound_specs)} "
+                                f"failed — see per-sound reasons below"
+                            ))
+                            for s in failed:
+                                name = s.get("name", "?")
+                                err = s.get("error", "(no reason captured)")
+                                err_line = str(err)[:400]
+                                yield self._record(AgentEvent(
+                                    "info",
+                                    f"  - {name}: {err_line}"
+                                ))
+
             # ---- seed file OR memory skeleton for the first build ----------
             if self.seed_file is not None:
                 # User explicitly handed us a starting file. Skip memory
@@ -1774,8 +1972,13 @@ class GameAgent:
                 asset_block = render_asset_paths_block(
                     self._session_assets, self.out_path,
                 )
-                if asset_block:
-                    build_msg = asset_block + "\n\n" + build_msg
+                sound_block = render_sound_paths_block(
+                    self._session_sounds, self.out_path,
+                    looping_names=self._session_looping,
+                )
+                prelude = "\n\n".join(b for b in (asset_block, sound_block) if b)
+                if prelude:
+                    build_msg = prelude + "\n\n" + build_msg
                 self._messages.append({
                     "role": "user",
                     "content": self._flush_user_injections(build_msg),
@@ -1897,8 +2100,13 @@ class GameAgent:
                 asset_block = render_asset_paths_block(
                     self._session_assets, self.out_path,
                 )
-                if asset_block:
-                    build_msg = asset_block + "\n\n" + build_msg
+                sound_block = render_sound_paths_block(
+                    self._session_sounds, self.out_path,
+                    looping_names=self._session_looping,
+                )
+                prelude = "\n\n".join(b for b in (asset_block, sound_block) if b)
+                if prelude:
+                    build_msg = prelude + "\n\n" + build_msg
                 self._messages.append({
                     "role": "user",
                     "content": self._flush_user_injections(build_msg),

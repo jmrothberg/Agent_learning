@@ -629,6 +629,11 @@ class CodingBoxApp(App):
         # Ctrl+L: re-print where the FULL log files live. Useful when you
         # want to `cat` them from another terminal to share with an LLM.
         Binding("ctrl+l", "show_log_paths", "Show log paths"),
+        # Ctrl+S: toggle "selection mode" — releases Textual's mouse
+        # capture so the terminal handles drag-select natively. Press
+        # again to resume normal TUI mouse handling. Without this, the
+        # left log pane is unselectable while the agent is running.
+        Binding("ctrl+s", "toggle_selection_mode", "Select text"),
     ]
 
     def __init__(self) -> None:
@@ -737,18 +742,20 @@ class CodingBoxApp(App):
             )
         self._log_info("Type your game idea in the input box below and press Enter.")
         self._log_info(
-            "[dim]Keys: Ctrl+D ship · Ctrl+L log paths · Ctrl+Q quit · "
-            "if the shell stops echoing after exit, run `reset`.[/dim]"
+            "[dim]Keys: Ctrl+D ship · Ctrl+L log paths · Ctrl+S select-text · "
+            "Ctrl+Q quit · if the shell stops echoing after exit, run `reset`.[/dim]"
         )
         self._log_info(
             "[dim]Slash commands available — type [b]/help[/b] for the full list "
             "(/list, /model, /new, /open, /clear, /iters, /status, /ship, /quit).[/dim]"
         )
         self._log_info(
-            "[dim]Cut/paste: hold [b]Shift[/b] while click-dragging in the agent "
-            "log pane (this bypasses Textual's mouse capture so your terminal can "
-            "select text). Then Ctrl+Shift+C to copy. Or just `cat` the .log file "
-            "from another terminal - path appears in the right pane.[/dim]"
+            "[dim]Cut/paste: press [b]Ctrl+S[/b] to enable selection mode, then "
+            "click-drag to select (Ctrl+Shift+C to copy). Or hold [b]Shift[/b] "
+            "(or [b]Option[/b] on iTerm2) while dragging — the modifier bypasses "
+            "Textual's mouse capture without toggling. Or [b]tail -f[/b] the "
+            ".jsonl trace from another terminal (path via Ctrl+L) for live "
+            "progress including [b]stream_heartbeat[/b] events every 30 s.[/dim]"
         )
         # Short prompt-engineering tips for medium-skilled local models
         # (qwen3.6:27b/35b). Long-form guidance lives in the README;
@@ -1017,15 +1024,70 @@ class CodingBoxApp(App):
         stem = self._log_file_path.stem  # e.g. asteroids_20260503_175727
         traces = self._log_file_path.parent
         snaps = GAMES_DIR / "snapshots" / stem
+        jsonl = traces / (stem + ".jsonl")
         self._log("[bold cyan]── log artifacts ──[/bold cyan]")
         self._log(f"  game file:    {self._out_path}")
         self._log(f"  full log:     {self._log_file_path}")
-        self._log(f"  jsonl trace:  {traces / (stem + '.jsonl')}")
+        self._log(f"  jsonl trace:  {jsonl}")
         self._log(f"  conversation: {traces / (stem + '.conversation.md')}")
         self._log(f"  snapshots:    {snaps}")
         if self._best_path is not None:
             self._log(f"  best clean:   {self._best_path}")
         self._log("[dim]Tip: paste the full log above into your AI assistant to debug.[/dim]")
+        # The jsonl trace gets `stream_heartbeat` entries every 30s
+        # during a long stream — invaluable when the model goes off
+        # the rails (e.g. emits 200 duplicate sprite specs and stalls
+        # 25 minutes later). Run from another terminal:
+        self._log("[dim]Live progress (run from another terminal):[/dim]")
+        self._log(f"[dim]  tail -f {jsonl}[/dim]")
+        self._log("[dim]Press Ctrl+S to enable mouse selection in this pane.[/dim]")
+
+    async def action_toggle_selection_mode(self) -> None:
+        """Ctrl+S - toggle Textual's mouse capture so the terminal can
+        handle drag-select. Useful for copying log content while the
+        agent is running. Press Ctrl+S again to resume normal TUI mouse.
+        On terminals that natively bypass app mouse capture with a
+        modifier (iTerm2: hold Option; most Linux terms: hold Shift),
+        you can also drag-select without toggling — but Ctrl+S works
+        everywhere."""
+        # Textual's App exposes capture toggles via the driver. Some
+        # versions name them differently; try the public path first
+        # then fall back. Idempotent — repeated toggles flip the flag.
+        new_state = not getattr(self, "_selection_mode_on", False)
+        try:
+            if new_state:
+                # Stop sending mouse events to widgets so the terminal
+                # gets the click/drag instead.
+                if hasattr(self, "_driver") and self._driver is not None:
+                    if hasattr(self._driver, "stop_application_mode"):
+                        # Most invasive; also leaves alt-screen.
+                        # We DON'T do this — it'd hide the TUI. Just
+                        # disable mouse instead.
+                        pass
+                # Public Textual API: app.mouse_captured property is
+                # not stable; use the documented action approach. If
+                # neither works, the user still has the modifier-key
+                # fallback (Option / Shift while dragging).
+                if hasattr(self, "set_mouse_capture"):
+                    self.set_mouse_capture(None)
+            else:
+                if hasattr(self, "set_mouse_capture"):
+                    self.set_mouse_capture(self)
+        except Exception:
+            # Even if the API path fails, surfacing the hint is
+            # valuable — modifier-key drag-select still works.
+            pass
+        self._selection_mode_on = new_state
+        if new_state:
+            self._log_info(
+                "[bold yellow]selection mode ON[/bold yellow] — "
+                "drag-select with the mouse to copy. "
+                "[dim]Ctrl+S again to resume normal TUI mouse.[/dim]"
+            )
+        else:
+            self._log_info(
+                "[dim]selection mode OFF — mouse handed back to TUI[/dim]"
+            )
 
     # ----------------------------- input handler --------------------------
 

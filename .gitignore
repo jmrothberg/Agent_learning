@@ -24,6 +24,9 @@ games/tune/
 games/_asset_cache/
 games/_smoke/
 games/*_assets/
+# Sound-pipeline artifacts (OGGs are 5-50KB each; cache grows over time)
+games/_sound_cache/
+games/*_sounds/
 
 # Editor / OS noise
 .vscode/

@@ -110,6 +110,11 @@ rm -f games/memory/mistakes.jsonl
 find games -maxdepth 1 -mindepth 1 -type d -name "*_assets" \
     -not -name "_asset_cache" -exec rm -rf {} +
 
+# Per-session sound dirs (games/<slug>_<ts>_sounds/). Same logic — the
+# shared cache at games/_sound_cache/ stays so re-runs hit it.
+find games -maxdepth 1 -mindepth 1 -type d -name "*_sounds" \
+    -not -name "_sound_cache" -exec rm -rf {} +
+
 # Tune-battery runs: drop subdirs, keep battery.jsonl test definitions.
 if [ -d games/tune ]; then
     find games/tune -maxdepth 1 -mindepth 1 -type d -exec rm -rf {} +

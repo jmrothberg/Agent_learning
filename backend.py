@@ -48,11 +48,8 @@ import ollama
 
 from ollama_io import (
     Candidate,
+    RepetitionDetector,
     StreamResult,
-    _REPEAT_LINE_MAX_LEN,
-    _REPEAT_MAX_UNIQUE,
-    _REPEAT_MIN_LINES,
-    _REPEAT_WINDOW_LINES,
     stream_chat_with_retry,
 )
 
@@ -303,6 +300,10 @@ class MLXBackend(Backend):
             "model": self.info.model,
             "messages": _strip_ollama_only_fields(messages),
             "stream": True,
+            # Ask mlx_lm.server to emit a final SSE frame carrying token
+            # counts in `usage` (OpenAI-compatible). Without this we have
+            # no input-token visibility on the MLX path.
+            "stream_options": {"include_usage": True},
         }
         # Carry agent-controlled sampler params through to mlx_lm.server.
         for key in _MLX_OPTION_KEYS:
@@ -318,8 +319,11 @@ class MLXBackend(Backend):
         stalled = False
         looped = False
         stall_at: int | None = None
-        line_buf = ""
-        recent_lines: list[str] = []
+        prompt_tokens: int | None = None
+        completion_tokens: int | None = None
+        # Shared repetition detector — same class both backends use, so
+        # tuning happens in exactly one place (ollama_io.RepetitionDetector).
+        repeat = RepetitionDetector()
 
         try:
             async with httpx.AsyncClient(base_url=self.info.endpoint, timeout=None) as client:
@@ -366,6 +370,17 @@ class MLXBackend(Backend):
                             chunk = json.loads(payload)
                         except json.JSONDecodeError:
                             continue
+                        # Final usage frame (when include_usage=True): the
+                        # OpenAI spec sends choices=[] with usage populated.
+                        # Capture before the choices-empty skip below.
+                        usage = chunk.get("usage")
+                        if isinstance(usage, dict):
+                            pt = usage.get("prompt_tokens")
+                            ct = usage.get("completion_tokens")
+                            if isinstance(pt, int):
+                                prompt_tokens = pt
+                            if isinstance(ct, int):
+                                completion_tokens = ct
                         choices = chunk.get("choices") or []
                         if not choices:
                             continue
@@ -383,25 +398,13 @@ class MLXBackend(Backend):
                             except Exception:
                                 pass
 
-                        # Same repetition detector as ollama_io.stream_chat
-                        # so a wedged MLX stream is caught the same way.
-                        line_buf += piece
-                        if "\n" in line_buf:
-                            *complete, line_buf = line_buf.split("\n")
-                            for ln in complete:
-                                s = ln.strip()
-                                if not s or len(s) > _REPEAT_LINE_MAX_LEN:
-                                    continue
-                                recent_lines.append(s)
-                                if len(recent_lines) > _REPEAT_WINDOW_LINES:
-                                    recent_lines.pop(0)
-                            if (
-                                len(recent_lines) >= _REPEAT_MIN_LINES
-                                and len(set(recent_lines)) <= _REPEAT_MAX_UNIQUE
-                            ):
-                                looped = True
-                                stall_at = n_tokens
-                                break
+                        # Shared repetition detector — see ollama_io.RepetitionDetector
+                        # for the two-window strategy. Identical behavior on
+                        # both backends.
+                        if repeat.feed(piece):
+                            looped = True
+                            stall_at = n_tokens
+                            break
         except (httpx.HTTPError, OSError):
             stalled = True
             if stall_at is None:
@@ -414,6 +417,8 @@ class MLXBackend(Backend):
             stalled=stalled or looped,
             stall_at_token=stall_at,
             looped=looped,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
         )
 
     async def is_vlm(self) -> bool:

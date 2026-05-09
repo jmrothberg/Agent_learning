@@ -102,6 +102,40 @@ PROBES_FORMAT = FormatSpec(
     ],
 )
 
+SOUNDS_FORMAT = FormatSpec(
+    name="<sounds>",
+    snippet=(
+        "<sounds>[{name,prompt,duration?,loop?}, ...]</sounds>  Phase A — "
+        "request generated OGG audio for SFX and looping music."
+    ),
+    guidelines=[
+        "EMIT <sounds> when the goal mentions sound, audio, music, SFX, "
+        "or has player-perceptible events (firing, hits, pickups, "
+        "explosions, jumps). The harness runs Stable Audio Open locally "
+        "and returns OGG paths in your first-build prompt; load each "
+        "via `new Audio(path)` and play with `.play()` (browser auto-"
+        "play rules require a user gesture first; use the loader "
+        "pattern injected in the first-build prompt).",
+        "Each entry is {name, prompt, duration?, loop?}. `duration` is "
+        "seconds (default 1.0; capped at 12.0). For SFX use 0.2-1.5 s; "
+        "for looping background music use 8-12 s with `\"loop\": true` "
+        "so <audio loop> can repeat it without seam clicks.",
+        "Prompts should be SHORT and audio-descriptive: \"short retro "
+        "arcade laser shot, 8-bit synth blip\", \"short pixelated "
+        "explosion, 8-bit boom\", \"loopable chiptune background, 90 "
+        "bpm, upbeat\". Prefer 8-bit / chiptune / synth descriptors for "
+        "arcade games; foley descriptors (footsteps on gravel, metal "
+        "clang) work for realistic games.",
+        "SKIP <sounds> for pure-DOM apps where audio adds nothing — "
+        "calculators, color pickers, todo lists. Otherwise, default to "
+        "EMITTING it: silent games feel cheaper than the same game "
+        "with audio.",
+        "When the harness returns no sound paths in the first-build "
+        "prompt, the audio diffuser was not reachable on this machine; "
+        "only THEN ship a silent game.",
+    ],
+)
+
 ASSETS_FORMAT = FormatSpec(
     name="<assets>",
     snippet=(
@@ -260,6 +294,7 @@ ALL_FORMATS: list[FormatSpec] = [
     CRITERIA_FORMAT,
     PROBES_FORMAT,
     ASSETS_FORMAT,
+    SOUNDS_FORMAT,
     HTML_FORMAT,
     PATCH_FORMAT,
     DIAGNOSE_FORMAT,
@@ -524,6 +559,45 @@ _3D_KEYWORDS = frozenset({
 })
 
 
+# Modality keywords that signal the goal needs generated AUDIO. Genre-
+# free per the project rule — these all describe rendering shape (sound
+# events, music, sfx) rather than subject matter. When any appears in
+# the goal, plan_instruction() escalates the <sounds> directive to
+# REQUIRED so smaller models don't politely skip the audio pipeline.
+_AUDIO_KEYWORDS = frozenset({
+    "sound", "sounds", "audio", "music", "sfx",
+    "chiptune", "soundtrack", "soundeffect", "soundeffects",
+    "noise", "noisy", "noises",
+    "beep", "beeps", "boom", "blip",
+    "loud", "silent",   # "silent" included so "make it not silent" works
+    "soundscape", "ambient",
+    "score",            # ambiguous (could mean game-score) — kept; cheap miss
+})
+
+
+def _detect_audio_intent(goal: str) -> list[str]:
+    """Return a list of audio-modality keywords found in `goal`. Empty
+    list means no intent detected; non-empty triggers a stronger
+    <sounds> directive in the planning prompt.
+
+    Same tokenization shape as `_detect_art_intent`: lowercased word
+    splitting, no genre lookup, no NER. The match list is surfaced
+    back into the prompt so the model can see exactly which words
+    triggered the escalation.
+    """
+    if not goal:
+        return []
+    import re
+    words = re.findall(r"[a-zA-Z]+", goal.lower())
+    seen: set[str] = set()
+    out: list[str] = []
+    for w in words:
+        if w in _AUDIO_KEYWORDS and w not in seen:
+            seen.add(w)
+            out.append(w)
+    return out
+
+
 def _detect_3d_intent(goal: str) -> list[str]:
     """Return a list of 3D-modality keywords found in `goal`. Empty list
     means the goal is plain 2D / DOM-only and needs no 3D nudge.
@@ -644,7 +718,24 @@ def plan_instruction(*, reference_block: str = "", goal: str = "") -> str:
             "use the library.\n"
         )
 
-    body = PLAN_INSTRUCTION + art_nudge + threed_nudge
+    audio_keywords = _detect_audio_intent(goal)
+    audio_nudge = ""
+    if audio_keywords:
+        kws = ", ".join(repr(k) for k in audio_keywords)
+        audio_nudge = (
+            "\n\nAUDIO INTENT DETECTED — your goal mentions "
+            f"{kws}. The user EXPLICITLY wants generated audio. You MUST "
+            "emit a <sounds> block this turn with one entry per "
+            "discrete audible event the player will hear (firing, hits, "
+            "pickups, explosions, jumps, level-clear) plus optionally a "
+            "looping music track. Skipping <sounds> and shipping a "
+            "silent game IS A FAILURE for this goal — the user will "
+            "notice. ULTRA IMPORTANT: do not omit <sounds>; do not "
+            "assume the audio diffuser is unavailable (the harness will "
+            "tell you if it is).\n"
+        )
+
+    body = PLAN_INSTRUCTION + art_nudge + threed_nudge + audio_nudge
 
     if not reference_block:
         return body
@@ -727,6 +818,28 @@ SKIP <assets> ONLY for pure-DOM apps where text + emojis suffice (todo
 lists, calculators, tic-tac-toe, color pickers). If the canvas has any
 rendered entity with visual character, EMIT <assets> — do NOT decide
 pre-emptively that procedural ctx.fillRect drawing is "good enough".
+
+EXPECTED ALSO — emit a <sounds> block whenever the game has audible
+events the player will hear (firing, hits, pickups, explosions, jumps)
+or could benefit from a looping background track. Most arcade /
+shooter / platformer games qualify.
+
+<sounds>
+[
+  {"name": "laser",     "prompt": "short retro arcade laser shot, 8-bit synth blip", "duration": 0.4},
+  {"name": "explosion", "prompt": "short pixelated explosion, 8-bit boom",            "duration": 0.8},
+  {"name": "music",     "prompt": "loopable 8-bit chiptune background, 90 bpm",       "duration": 12.0, "loop": true}
+]
+</sounds>
+
+The harness runs Stable Audio Open locally and saves OGGs next to your
+HTML file. Their paths come back in the first-build prompt with a
+loader pattern; use `new Audio(path)` and play on the relevant events.
+Browsers require a user gesture before audio plays — the loader pattern
+already handles that (first keydown / pointerdown unlocks audio).
+
+SKIP <sounds> for pure-DOM apps where audio adds nothing (calculators,
+color pickers). Otherwise, prefer EMITTING — silent games feel cheap.
 
 No <html_file> yet. No prose outside tags.
 """
@@ -955,16 +1068,35 @@ def post_clean_instruction(report_text: str) -> str:
 
 
 def patch_retry_instruction(failures: list, current_file: str) -> str:
-    bullets = "\n".join(
-        f"  - patch #{i+1}: {reason}" for (i, _p, reason) in failures
-    )
+    """Re-prompt after one or more <patch> blocks failed to apply.
+
+    For each failure, we attach an "anchor" — the small region of the
+    current file the model was probably aiming at. The typical 27B-class
+    failure is "model copied an old version of a line that's since been
+    edited"; showing the actual lines (with line numbers, ▸ marker on
+    the closest hit) is far more useful than the bare reason string.
+    Anchor lookup is best-effort; when it returns None the bullet just
+    carries the reason as before.
+    """
+    from patches import find_anchor  # local import: avoid cycle at module load
+
+    bullets: list[str] = []
+    for (i, p, reason) in failures:
+        line = f"  - patch #{i+1}: {reason}"
+        anchor = find_anchor(current_file, getattr(p, "search", "") or "")
+        if anchor:
+            line += "\n    nearest match in current file:\n"
+            line += "\n".join(f"      {ln}" for ln in anchor.splitlines())
+        bullets.append(line)
+    bullets_block = "\n".join(bullets)
     return (
         "Some of your <patch> blocks did not apply because the SEARCH "
         "text was not found verbatim in the file. The CURRENT FILE "
         "below is the truth — match it character-for-character:\n\n"
-        f"{bullets}\n\n"
-        "Re-send corrected <patch> blocks. Do NOT change anything "
-        "unrelated to the fix.\n\n"
+        f"{bullets_block}\n\n"
+        "Re-send corrected <patch> blocks against the file as it ACTUALLY "
+        "is now (line numbers above are 1-based; '>' marks the closest hit). "
+        "Do NOT change anything unrelated to the fix.\n\n"
         "```html\n"
         f"{current_file}\n"
         "```"

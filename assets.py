@@ -175,6 +175,12 @@ def parse_assets_block(reply: str) -> list[dict]:
     if not isinstance(obj, list):
         return []
     out: list[dict] = []
+    # Dedupe by (normalized prompt, size). Catches the failure mode where
+    # the model spams numbered variants of the same template — e.g. 200×
+    # `{"name":"minimap_compiler<N>", "prompt":"green computer","size":"16x16"}`.
+    # Without this, `generate_assets` would burn 200 GPU calls (or hit
+    # _MAX_ASSETS_PER_TURN at 8 and silently truncate, masking the bug).
+    seen_keys: set[tuple[str, tuple[int, int]]] = set()
     for i, item in enumerate(obj):
         if not isinstance(item, dict):
             continue
@@ -186,6 +192,14 @@ def parse_assets_block(reply: str) -> list[dict]:
             size = _parse_size(item.get("size", _DEFAULT_TARGET_SIZE))
         except Exception:
             size = (_DEFAULT_TARGET_SIZE, _DEFAULT_TARGET_SIZE)
+        # Normalize prompt the same way the cache key does, so trivial
+        # whitespace / case differences don't create duplicate entries
+        # that would all map to the same cached PNG anyway.
+        norm_prompt = " ".join(prompt.lower().split())
+        key = (norm_prompt, size)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
         out.append({"name": name, "prompt": prompt, "size": size})
         if len(out) >= _MAX_ASSETS_PER_TURN:
             break

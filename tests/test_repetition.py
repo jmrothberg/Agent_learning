@@ -1,0 +1,255 @@
+"""Tests for the mid-stream repetition detector and asset/sound parser
+dedupe.
+
+Both layers protect against the same family of bug: a local model
+entering a degenerate state where it emits ~200 lines of near-duplicate
+output before the stall watchdog fires. The original detector watched
+only short lines (≤ 80 chars) with exact match, which let through
+templated long-line loops like:
+
+    {"name":"asset_1",  "prompt":"green computer", "size":"16x16"},
+    {"name":"asset_2",  "prompt":"green computer", "size":"16x16"},
+    ...
+    {"name":"asset_208","prompt":"green computer", "size":"16x16"},
+
+The fix has two layers:
+  1. `RepetitionDetector` (in ollama_io) runs two windows — short-line
+     exact-match AND all-line digit-stripped — so numbered template
+     loops are caught by the second window. The class is SHARED by
+     both the Ollama and MLX streams, so tuning lives in one place.
+  2. `parse_assets_block` / `parse_sounds_block` dedupe by
+     (normalized_prompt, size) so even if the loop slipped past the
+     stream detector, generation is still bounded.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+import assets  # noqa: E402
+import ollama_io  # noqa: E402
+import sounds  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Stream-level: _normalize_line_for_repeat
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_collapses_trailing_numeric_suffix():
+    a = ollama_io._normalize_line_for_repeat(
+        '{"name":"minimap_compiler179","prompt":"green computer","size":"16x16"},'
+    )
+    b = ollama_io._normalize_line_for_repeat(
+        '{"name":"minimap_compiler208","prompt":"green computer","size":"16x16"},'
+    )
+    assert a == b, "numbered variants must hash to the same bucket"
+
+
+def test_normalize_preserves_distinct_alphabetic_content():
+    """`const score = 0;` and `const lives = 0;` differ in identifier;
+    digit-stripping alone shouldn't conflate them — that would cause
+    false-positive loop detection on real code."""
+    a = ollama_io._normalize_line_for_repeat("const score = 0;")
+    b = ollama_io._normalize_line_for_repeat("const lives = 0;")
+    assert a != b
+
+
+def test_normalize_strips_inner_digits_in_size_suffix():
+    """An attacker / lazy model emitting `16x16`, `32x32`, `64x64`
+    suffixes on otherwise identical templated lines should still be
+    detected — the size variation is incidental, not meaningful."""
+    a = ollama_io._normalize_line_for_repeat('{"name":"x","size":"16x16"},')
+    b = ollama_io._normalize_line_for_repeat('{"name":"x","size":"32x32"},')
+    # After stripping all digits, both reduce to the same shape:
+    assert a == b
+
+
+def test_normalize_handles_blank_and_whitespace():
+    assert ollama_io._normalize_line_for_repeat("") == ""
+    assert ollama_io._normalize_line_for_repeat("   \t  ") == ""
+    # Surrounding whitespace doesn't matter.
+    assert (
+        ollama_io._normalize_line_for_repeat("  foo  ")
+        == ollama_io._normalize_line_for_repeat("foo")
+    )
+
+
+# ---------------------------------------------------------------------------
+# RepetitionDetector — the shared class used by BOTH backends. These tests
+# pin its behavior directly so we don't rely on the Ollama or MLX wrappers
+# to assert correctness. If the user is on MLX (most Macs) and sees a model
+# go off the rails, this is the code that catches it.
+# ---------------------------------------------------------------------------
+
+
+def test_detector_catches_short_line_loop():
+    """Original failure shape: `</body></html>\\n</html_file>\\n` × N.
+    Lines are short and exactly identical — Window 1 catches them."""
+    d = ollama_io.RepetitionDetector()
+    fired = False
+    for _ in range(50):
+        if d.feed("</body></html>\n</html_file>\n"):
+            fired = True
+            break
+    assert fired
+
+
+def test_detector_catches_long_line_numbered_template_loop():
+    """The bug that motivated this rewrite: 200+ JSON entries, each ~155
+    chars, identical except for a numeric suffix. Window 2 (digit-
+    stripped) catches them; Window 1 wouldn't (lines are too long
+    AND they're all distinct strings before normalization)."""
+    d = ollama_io.RepetitionDetector()
+    fired_at = None
+    for i in range(1, 100):
+        line = (
+            '{"name":"minimap_compiler' + str(i) +
+            '","prompt":"pixel-art green computer for minimap '
+            'compiler room marker, transparent background","size":"16x16"},\n'
+        )
+        if d.feed(line):
+            fired_at = i
+            break
+    # Should fire by the time the digit-stripped window has 12 entries
+    # (well before 100 iterations).
+    assert fired_at is not None
+    assert fired_at < 30
+
+
+def test_detector_does_not_false_positive_on_real_code():
+    """A short healthy stream of distinct lines must NOT trip the
+    detector. We feed lines from a fictitious but realistic Snake game
+    and assert the detector stays quiet."""
+    d = ollama_io.RepetitionDetector()
+    snippets = [
+        "<!DOCTYPE html>\n",
+        "<html>\n",
+        "<head><title>Snake</title></head>\n",
+        "<body>\n",
+        "<canvas id='cvs' width='800' height='600'></canvas>\n",
+        "<script>\n",
+        "const cvs = document.getElementById('cvs');\n",
+        "const ctx = cvs.getContext('2d');\n",
+        "let snake = [{x: 10, y: 10}];\n",
+        "let dir = {x: 1, y: 0};\n",
+        "let food = {x: 15, y: 15};\n",
+        "let score = 0;\n",
+        "function update() {\n",
+        "  const head = {x: snake[0].x + dir.x, y: snake[0].y + dir.y};\n",
+        "  snake.unshift(head);\n",
+        "  if (head.x === food.x && head.y === food.y) {\n",
+        "    score += 1;\n",
+        "    food = {x: Math.floor(Math.random()*40), y: Math.floor(Math.random()*30)};\n",
+        "  } else {\n",
+        "    snake.pop();\n",
+        "  }\n",
+        "}\n",
+        "requestAnimationFrame(update);\n",
+    ]
+    for s in snippets:
+        assert not d.feed(s), f"false positive on real code at: {s!r}"
+
+
+def test_detector_state_is_per_instance():
+    """Constructing a new detector resets state — so a wedged previous
+    stream can't poison the next one."""
+    d1 = ollama_io.RepetitionDetector()
+    for _ in range(50):
+        d1.feed("dup\n")
+    # d1 has fired by now; verify a fresh instance is clean.
+    d2 = ollama_io.RepetitionDetector()
+    assert not d2.feed("alpha\n")
+    assert not d2.feed("beta\n")
+
+
+# ---------------------------------------------------------------------------
+# parse_assets_block — dedupe
+# ---------------------------------------------------------------------------
+
+
+def test_parse_assets_block_dedupes_numbered_template_loop():
+    """Reproduces the failure mode that motivated this fix: 200+ entries
+    that all describe the same sprite, only differing in a numbered
+    `name` field. After dedupe the parser returns ONE entry, not 200,
+    so generate_assets makes one GPU call instead of being hit with the
+    `_MAX_ASSETS_PER_TURN` cap silently."""
+    items = ",\n".join(
+        f'{{"name":"minimap_compiler{i}","prompt":"green computer for minimap","size":"16x16"}}'
+        for i in range(1, 201)
+    )
+    reply = f"<assets>\n[\n{items}\n]\n</assets>"
+    out = assets.parse_assets_block(reply)
+    assert len(out) == 1
+    assert out[0]["prompt"] == "green computer for minimap"
+    assert out[0]["size"] == (16, 16)
+
+
+def test_parse_assets_block_keeps_distinct_prompts():
+    """Healthy plans with several distinct sprites must NOT be deduped."""
+    reply = (
+        "<assets>"
+        '[{"name":"ship",     "prompt":"pixel-art spaceship",  "size":"64x64"},'
+        ' {"name":"asteroid", "prompt":"grey rocky asteroid",  "size":"64x64"},'
+        ' {"name":"explosion","prompt":"orange explosion",     "size":"96x96"}]'
+        "</assets>"
+    )
+    out = assets.parse_assets_block(reply)
+    assert len(out) == 3
+    assert {a["name"] for a in out} == {"ship", "asteroid", "explosion"}
+
+
+def test_parse_assets_block_dedupes_case_and_whitespace_variants():
+    """Cache key already normalizes; dedupe must use the same shape so
+    `Pixel Spaceship` and `pixel  spaceship  ` don't both generate."""
+    reply = (
+        "<assets>"
+        '[{"name":"a","prompt":"Pixel Spaceship","size":"64x64"},'
+        ' {"name":"b","prompt":"pixel  spaceship","size":"64x64"}]'
+        "</assets>"
+    )
+    out = assets.parse_assets_block(reply)
+    assert len(out) == 1
+
+
+def test_parse_assets_block_dedupe_respects_size():
+    """Same prompt at different sizes is not the same asset — both
+    legitimately need separate generation."""
+    reply = (
+        "<assets>"
+        '[{"name":"small","prompt":"pixel ship","size":"32x32"},'
+        ' {"name":"big",  "prompt":"pixel ship","size":"128x128"}]'
+        "</assets>"
+    )
+    out = assets.parse_assets_block(reply)
+    assert len(out) == 2
+
+
+# ---------------------------------------------------------------------------
+# parse_sounds_block — dedupe (mirror of assets)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_sounds_block_dedupes_numbered_template_loop():
+    items = ",\n".join(
+        f'{{"name":"laser_{i}","prompt":"short retro arcade laser","duration":0.4}}'
+        for i in range(1, 51)
+    )
+    reply = f"<sounds>[\n{items}\n]</sounds>"
+    out = sounds.parse_sounds_block(reply)
+    assert len(out) == 1
+
+
+def test_parse_sounds_block_dedupe_respects_duration_and_loop():
+    """A short SFX and a long loop with the same prompt are different."""
+    reply = (
+        "<sounds>"
+        '[{"name":"a","prompt":"chiptune","duration":0.5,"loop":false},'
+        ' {"name":"b","prompt":"chiptune","duration":12.0,"loop":true}]'
+        "</sounds>"
+    )
+    out = sounds.parse_sounds_block(reply)
+    assert len(out) == 2

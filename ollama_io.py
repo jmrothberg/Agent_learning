@@ -43,20 +43,121 @@ class StreamStalled(RuntimeError):
 
 
 # Mid-stream repetition detector tunables. Local LLMs (qwen3.6, gpt-oss)
-# occasionally enter a "looping" state where they emit the same 1-2 short
-# lines forever — see games/traces/missile-command_20260505_224321.log for
-# 400+ lines of `</body></html>\n</html_file>\n`. The stall watchdog never
-# fires because tokens ARE flowing. We watch a sliding window of recent
-# completed lines: if it fills with very few unique values, we abort.
+# occasionally enter a "looping" state where they emit the same lines
+# forever. Two distinct failure shapes we have to catch:
 #
-# Defaults are conservative — a real long file (Space Invaders) emits
-# thousands of unique lines, so even after 30 lines a healthy stream
-# averages 25+ unique values in the window.
+#   (A) SHORT-LINE LOOP — `</body></html>\n</html_file>\n` × 400. See
+#       games/traces/missile-command_20260505_224321.log. Tight repetition,
+#       short lines, easy to spot: the unique-count over the window
+#       collapses to 1-2 in a few seconds.
+#
+#   (B) NEAR-DUPLICATE LONG-LINE LOOP — 200+ lines of
+#       `{"name":"minimap_compiler<N>","prompt":"…","size":"16x16"},`
+#       where every line differs only in a small numeric suffix. See
+#       games/traces/a-first-person-shooter_20260509_134453.log: the
+#       model burned 9906 tokens / 25 minutes before the stall watchdog
+#       finally fired. Short-line detector misses these because each line
+#       is ~155 chars and unique by exact string. We catch them with a
+#       NORMALIZED hash that strips trailing digits / whitespace so the
+#       per-line numeric variant collapses to one bucket.
+#
+# A real long file (Space Invaders, Asteroids) emits thousands of unique
+# lines even after normalization, so 25+ unique values in a 30-line
+# window is the floor a healthy stream comfortably clears.
 _REPEAT_WINDOW_LINES = 30
 _REPEAT_MIN_LINES = 12      # need this many lines before we even consider
-_REPEAT_MAX_UNIQUE = 2      # window collapses to ≤2 unique lines = looping
-_REPEAT_LINE_MAX_LEN = 80   # only count short-line repetition (long lines
-                            # rarely loop; short ones often do)
+_REPEAT_MAX_UNIQUE = 2      # window collapses to ≤2 unique values = looping
+_REPEAT_LINE_MAX_LEN = 80   # short-line detector only watches lines ≤ 80 chars
+                            # (long-line variants are caught by the
+                            # normalized detector below)
+
+
+# Strip trailing digits / underscored numeric suffixes / whitespace from a
+# line so near-duplicates collapse to a single bucket. Examples:
+#   `{"name":"minimap_compiler179","prompt":"…"},`     →
+#   `{"name":"minimap_compiler","prompt":"…"},`
+#   `      'p_47',`                                    →  `'p',`
+#   `<patch>id="enemy42">`                             →  `<patch>id="enemy">`
+# We only collapse digit runs; alphabetic content stays exact so legitimate
+# lines like `const score = 0;` and `const lives = 0;` are still distinct.
+import re as _re
+_DIGIT_RUN_RE = _re.compile(r"\d+")
+
+
+def _normalize_line_for_repeat(s: str) -> str:
+    """Bucket near-duplicate lines so a model spamming numbered variants
+    of the same template (asset_1, asset_2, …) collapses to one entry."""
+    return _DIGIT_RUN_RE.sub("", s).strip()
+
+
+class RepetitionDetector:
+    """Streaming repetition detector shared by both backends.
+
+    Why a class instead of inline loops in each backend: the detection
+    logic was duplicated across `ollama_io.stream_chat` (Ollama) and
+    `backend.MLXBackend._stream_once` (MLX). Two copies = two places to
+    keep in sync the next time we tune thresholds or add a third
+    detector. Whichever backend the user happens to be running, the
+    behavior is now byte-for-byte identical.
+
+    Usage:
+        detector = RepetitionDetector()
+        for piece in stream:
+            if detector.feed(piece):
+                # model is looping; abort
+                break
+
+    State is per-instance — construct one per stream. The two windows
+    use the same `_REPEAT_*` thresholds defined at module top.
+    """
+
+    __slots__ = ("_line_buf", "_recent_lines", "_recent_lines_norm")
+
+    def __init__(self) -> None:
+        self._line_buf = ""
+        # Window 1: short-line exact-match. Catches the
+        # `</body></html>` × 400 case from the missile-command trace.
+        self._recent_lines: list[str] = []
+        # Window 2: ALL lines, digit-stripped. Catches the
+        # numbered-template loop (asset_1, asset_2, …) from the
+        # first-person-shooter trace.
+        self._recent_lines_norm: list[str] = []
+
+    def feed(self, piece: str) -> bool:
+        """Append `piece` to the internal line buffer; on every newline,
+        update both windows and check thresholds. Returns True when
+        either window's unique-count has collapsed to ≤
+        `_REPEAT_MAX_UNIQUE` after at least `_REPEAT_MIN_LINES` entries
+        — i.e., the model is looping and the caller should abort.
+        """
+        self._line_buf += piece
+        if "\n" not in self._line_buf:
+            return False
+        *complete, self._line_buf = self._line_buf.split("\n")
+        for ln in complete:
+            s = ln.strip()
+            if not s:
+                continue
+            if len(s) <= _REPEAT_LINE_MAX_LEN:
+                self._recent_lines.append(s)
+                if len(self._recent_lines) > _REPEAT_WINDOW_LINES:
+                    self._recent_lines.pop(0)
+            norm = _normalize_line_for_repeat(s)
+            if norm:
+                self._recent_lines_norm.append(norm)
+                if len(self._recent_lines_norm) > _REPEAT_WINDOW_LINES:
+                    self._recent_lines_norm.pop(0)
+        if (
+            len(self._recent_lines) >= _REPEAT_MIN_LINES
+            and len(set(self._recent_lines)) <= _REPEAT_MAX_UNIQUE
+        ):
+            return True
+        if (
+            len(self._recent_lines_norm) >= _REPEAT_MIN_LINES
+            and len(set(self._recent_lines_norm)) <= _REPEAT_MAX_UNIQUE
+        ):
+            return True
+        return False
 
 
 @dataclass
@@ -71,6 +172,16 @@ class StreamResult:
     # True when we aborted because the model entered a repetition loop
     # (distinct from a true stall). Caller can log this differently.
     looped: bool = False
+    # BPE prompt tokens, captured from the backend's final chunk (Ollama:
+    # `prompt_eval_count`; MLX: `usage.prompt_tokens`). None if the backend
+    # didn't surface it (e.g. early stall before the final frame). This is
+    # the only way to see how much we're paying for the inlined-file truth
+    # source on every fix turn.
+    prompt_tokens: int | None = None
+    # BPE completion tokens from the backend (vs. `tokens`, which counts
+    # streaming chunks). Often differs from chunk count — kept distinct so
+    # the chunk count stays meaningful for stall diagnostics.
+    completion_tokens: int | None = None
 
 
 async def stream_chat(
@@ -101,11 +212,11 @@ async def stream_chat(
     stalled = False
     looped = False
     stall_at: int | None = None
-    # Sliding window of completed-line strings, used by the repetition
-    # detector. We assemble lines from the streaming pieces (each chunk
-    # may be a partial line or several lines).
-    line_buf = ""
-    recent_lines: list[str] = []
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    # Shared repetition detector used by both backends — see
+    # `RepetitionDetector` for the two-window strategy and rationale.
+    repeat = RepetitionDetector()
 
     # ollama.AsyncClient.chat returns an async iterator of dicts. We pull
     # .__aiter__() so we can wrap each .__anext__() in asyncio.wait_for.
@@ -132,6 +243,17 @@ async def stream_chat(
                 stall_at = n_tokens
                 break
 
+            # Final Ollama chunk carries token counts in `prompt_eval_count`
+            # and `eval_count` plus done=True. The piece is usually empty
+            # on that frame, so capture before the empty-piece skip below.
+            if chunk.get("done"):
+                pec = chunk.get("prompt_eval_count")
+                ec = chunk.get("eval_count")
+                if isinstance(pec, int):
+                    prompt_tokens = pec
+                if isinstance(ec, int):
+                    completion_tokens = ec
+
             piece = chunk.get("message", {}).get("content", "") or ""
             if not piece:
                 continue
@@ -145,28 +267,10 @@ async def stream_chat(
                     pass
 
             # ---- repetition detector --------------------------------
-            # Build complete-line strings from the piece stream, push
-            # them into the window, and check for a stuck loop. We only
-            # examine SHORT lines (long ones — like full HTML lines —
-            # are nearly always unique even in healthy output). Skip
-            # blank lines so trailing newlines don't poison the window.
-            line_buf += piece
-            if "\n" in line_buf:
-                *complete, line_buf = line_buf.split("\n")
-                for ln in complete:
-                    s = ln.strip()
-                    if not s or len(s) > _REPEAT_LINE_MAX_LEN:
-                        continue
-                    recent_lines.append(s)
-                    if len(recent_lines) > _REPEAT_WINDOW_LINES:
-                        recent_lines.pop(0)
-                if (
-                    len(recent_lines) >= _REPEAT_MIN_LINES
-                    and len(set(recent_lines)) <= _REPEAT_MAX_UNIQUE
-                ):
-                    looped = True
-                    stall_at = n_tokens
-                    break
+            if repeat.feed(piece):
+                looped = True
+                stall_at = n_tokens
+                break
     finally:
         # Best-effort close in both branches. Ollama's AsyncStream exposes
         # .aclose() in newer versions; older versions don't, hence the guard.
@@ -187,6 +291,8 @@ async def stream_chat(
         stalled=stalled or looped,
         stall_at_token=stall_at,
         looped=looped,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
     )
 
 

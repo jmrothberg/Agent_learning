@@ -24,7 +24,47 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import patches  # noqa: E402
-from patches import Patch, apply_patches, extract_patches, repair_reply  # noqa: E402
+from patches import Patch, apply_patches, extract_patches, find_anchor, repair_reply  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# find_anchor — used by the patch retry prompt to show the model the
+# region of the file it was probably aiming at when its SEARCH didn't
+# match. The most useful failure mode to fix is "model edited from a
+# stale copy of the line."
+# ---------------------------------------------------------------------------
+
+
+def test_find_anchor_returns_window_around_longest_matching_line():
+    source = "\n".join([
+        "function foo() {",
+        "  const x = 1;",
+        "  const y = computeWidget(x);",
+        "  return y * 2;",
+        "}",
+    ])
+    # The model's SEARCH copied a stale version of line 3 — but line 4
+    # is unchanged, so we anchor on it.
+    search = "\n".join([
+        "  const y = oldCompute(x);",
+        "  return y * 2;",
+    ])
+    anchor = find_anchor(source, search, ctx_lines=1)
+    assert anchor is not None
+    assert "return y * 2" in anchor
+    # The closest hit gets the > marker.
+    assert ">" in anchor
+
+
+def test_find_anchor_returns_none_when_search_is_alien():
+    source = "alpha\nbeta\ngamma\n"
+    # No line of SEARCH appears in source; nothing to anchor on.
+    assert find_anchor(source, "completely_unrelated_token_xyzzy") is None
+
+
+def test_find_anchor_handles_empty_inputs():
+    assert find_anchor("", "anything") is None
+    assert find_anchor("anything", "") is None
 
 
 # ---------------------------------------------------------------------------

@@ -4,11 +4,14 @@
 # (that downloads the headless browser the agent uses to test games)
 
 ollama>=0.3.0
-httpx>=0.27.0           # used by backend.MLXBackend to talk to mlx_lm.server (SSE)
+httpx>=0.27.0
 playwright>=1.40.0
 textual>=0.50.0
-pillow>=10.0.0          # used by assets.py for sprite resize/save
-rich>=13.0.0            # textual's transitive dep, listed for clarity
+pillow>=10.0.0
+rich>=13.0.0
+# Test runner — used by scripts/setup.sh to verify the install and by
+# the pure-function suites under tests/. Lightweight; ~1 MB.
+pytest>=7.0.0
 
 # OPTIONAL — Z-Image-Turbo sprite generation (assets.py).
 # These are NOT auto-installed because the GPU stack is ~5GB and most

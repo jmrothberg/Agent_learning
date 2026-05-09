@@ -259,6 +259,42 @@ class PatchResult:
     failed: list[tuple[int, Patch, str]]  # (index, patch, reason) for each failure
 
 
+def find_anchor(source: str, search: str, *, ctx_lines: int = 4) -> str | None:
+    """Best-effort "where did the model probably mean?" excerpt.
+
+    When a patch SEARCH doesn't match, the typical 27B-model failure is
+    "model copied an old version of the line that's since been edited."
+    A correction turn needs to show the model what the file ACTUALLY
+    says near where it was aiming. We find the longest non-trivial line
+    from the SEARCH that appears in the source and return ±ctx_lines
+    around it.
+
+    Returns None when no useful anchor exists (no SEARCH line ≥8 chars
+    appears in source — the patch was wildly wrong).
+    """
+    if not source or not search:
+        return None
+    src_lines = source.splitlines()
+    src_norm = [_normalize_chars(ln) for ln in src_lines]
+    candidates = [ln.strip() for ln in search.splitlines() if len(ln.strip()) >= 8]
+    candidates.sort(key=len, reverse=True)
+    for cand in candidates:
+        cnorm = _normalize_chars(cand)
+        for i, sn in enumerate(src_norm):
+            if cnorm in sn:
+                lo = max(0, i - ctx_lines)
+                hi = min(len(src_lines), i + ctx_lines + 1)
+                # Prefix line numbers (1-based) to make the excerpt useful
+                # to the model as a positional hint.
+                width = len(str(hi))
+                out = []
+                for j in range(lo, hi):
+                    marker = ">" if j == i else " "
+                    out.append(f"{marker} {str(j + 1).rjust(width)} | {src_lines[j]}")
+                return "\n".join(out)
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Extraction
 # ---------------------------------------------------------------------------
