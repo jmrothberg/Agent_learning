@@ -137,9 +137,16 @@ if size < 30_000:
 print("OK: deepseek_v4.py contains PR #1192 features")
 PY
 
-ok "DeepSeek-V4 Flash/Pro should now load. Start the server normally:"
-echo "     mlx_lm.server --model /path/to/DeepSeek-V4-Flash-... --port 8080"
-echo "  Or in chat.py:  /list  →  /launch <N>"
+ok "DeepSeek-V4 Flash/Pro should now load."
+echo
+warn "V4 has a separate runtime bug — start the server with --prefill-step-size 512"
+warn "to avoid the cubic-attention blow-up on prompts > ~1.3K tokens. Recommended:"
+echo
+echo "     ./scripts/mlx_v4_server.sh"
+echo "        # auto-detects your V4 model under ~/MLX_Models, passes the right flag"
+echo
+echo "  Or manually:"
+echo "     mlx_lm.server --model /path/to/V4-model --port 8080 --prefill-step-size 512"
 echo
 info "to switch back to upstream stable later:"
 echo "     ./scripts/install_mlx_v4_fix.sh --rollback"

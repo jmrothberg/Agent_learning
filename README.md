@@ -225,6 +225,39 @@ those load through their own `mlx_lm/models/<name>.py` files which are
 unchanged. Skip the patch if you don't plan to run V4 Flash or Pro; the
 other ~300 MLX-community model conversions all work on stock 0.31.3.
 
+**Critical runtime flag for V4** — even with the install patched, V4 has
+a separate runtime bug: its Indexer attention path materializes a single
+Metal buffer of size `O(L² × k)` during prefill, where `L` is the prefill
+chunk length and `k` saturates at 512. At the default
+`--prefill-step-size 2048` this single allocation crosses the per-process
+Metal cap (~487 GB on a 512 GB Mac) the moment any prompt is more than
+~1.3K tokens, and the generate thread dies with
+`[metal::malloc] Resource limit (NNN) exceeded`. The fix is to chunk
+prefill into smaller pieces:
+
+```bash
+mlx_lm.server \
+  --model /path/to/your/DeepSeek-V4-Flash-... \
+  --port 8080 \
+  --prefill-step-size 512
+```
+
+A wrapper script handles this for you — auto-detects whichever V4 model
+lives under `~/MLX_Models` (or `$MLX_MODELS_DIR`) by looking for
+`config.json` with `model_type: "deepseek_v4"` and passes the right
+flag. Cross-machine; no hardcoded quant names.
+
+```bash
+./scripts/mlx_v4_server.sh                     # auto-pick first V4 model
+./scripts/mlx_v4_server.sh /path/to/V4-model   # explicit
+```
+
+Tracking the upstream cubic-attention bug: see PR #1192's review thread
+for the `(L, k, GB)` table that documents the blow-up. Once a fix lands
+upstream the flag becomes optional and
+`./scripts/install_mlx_v4_fix.sh --rollback` will pick up the upstream
+fix.
+
 ---
 
 ## How a small model writes big code
