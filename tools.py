@@ -67,6 +67,31 @@ def _coverage_words(text: str) -> set[str]:
     }
 
 
+def _slugify_criterion(text: str) -> str:
+    """Compact identifier-safe slug for a criterion line, used as the
+    suffix of a synthetic coverage-gap probe name. Keeps the slug short
+    (≤32 chars) and limited to lowercase ASCII / digit / underscore so
+    downstream regex matching (the agent's Phase B re-parse) can rely
+    on it. Drops the leading category label `Basic:` / `Edge:` /
+    `Stress:` if present so the slug describes the criterion itself.
+    """
+    s = (text or "").strip()
+    # Strip leading category label like "Basic:", "Edge:", "Stress:".
+    if ":" in s:
+        head, rest = s.split(":", 1)
+        if 2 <= len(head.strip()) <= 12 and head.strip().isalpha():
+            s = rest.strip()
+    out: list[str] = []
+    for ch in s.lower():
+        if ch.isalnum():
+            out.append(ch)
+        elif out and out[-1] != "_":
+            out.append("_")
+        if len(out) >= 32:
+            break
+    return ("".join(out).strip("_")) or "criterion"
+
+
 def _criteria_coverage_gaps(criteria_text: str, probes: list[dict]) -> list[str]:
     """For each non-empty criterion line, return the line if no probe's
     name+expr shares any meaningful word with it. Generic, behavioral,
@@ -1381,13 +1406,40 @@ class LiveBrowser:
         coverage_gaps = _criteria_coverage_gaps(criteria or "", probes or [])
         if coverage_gaps:
             report["criteria_uncovered"] = coverage_gaps
-            report["soft_warnings"].append(
-                "PROBE COVERAGE GAP: the following <criteria> lines have no "
-                "<probes> entry whose name/expr mentions them — your test "
-                "list may be passing without actually testing what was "
-                "promised. Add or revise probes to cover each:\n  - "
-                + "\n  - ".join(coverage_gaps)
-            )
+            # Synthesize a failing probe per gap so the coverage hole shows
+            # up in the same probe_errors list the model already responds
+            # to. Local LLMs ignore "soft_warnings" but fix failing probes
+            # — proven across the asteroid trace, where the soft-warning
+            # form was visible for 4 iters and never addressed. The
+            # synthetic probes carry name `coverage_gap__<slug>` so the
+            # agent's Phase B re-parse can detect closure (model emits a
+            # new <probes> block whose entries reference the gap → agent
+            # replaces self._probes with the new set).
+            for gap in coverage_gaps:
+                slug = _slugify_criterion(gap)
+                probe_results.append({
+                    "name": f"coverage_gap__{slug}",
+                    "expr": "false  /* synthetic - no model-authored probe for this criterion */",
+                    "ok": False,
+                    "err": (
+                        f"criterion has no probe: {gap[:160]}. "
+                        f"Add a <probes> entry whose name OR expr "
+                        f"references this criterion. To add one, emit a "
+                        f"new complete <probes>...</probes> block in your "
+                        f"next reply — the agent re-parses it when a "
+                        f"coverage_gap__* probe is failing."
+                    ),
+                    "synthetic": True,
+                })
+            # Make sure report["probes"] and report["probe_errors"] reflect
+            # the just-appended synthetic entries — they were built earlier
+            # in this method, so we refresh them here.
+            report["probes"] = probe_results
+            report["probe_errors"] = [
+                f"{p.get('name','?')}: {p.get('err','')[:160]}"
+                for p in probe_results
+                if not p.get("ok") and p.get("err")
+            ]
         # ok must reflect the fresh soft_warnings count after we appended.
         report["ok"] = len(report["errors"]) == 0 and len(report["soft_warnings"]) == 0
         return report

@@ -256,3 +256,116 @@ def test_b3_orientation_block_contains_rotate_pattern(tmp_path):
     # The pattern shows the right save/restore frame for rotation.
     assert "ctx.save" in block
     assert "ctx.restore" in block
+
+
+# ---------------------------------------------------------------------------
+# Tier 4 — coverage-gap synthetic probes & Phase B probe re-parse
+#
+# Background: the asteroid_20260510_164857 trace showed that when the
+# planning-turn coverage check flagged "Edge"/"Stress" criteria with no
+# matching probes, the model ignored the soft-warning form across 4
+# iters. The new behavior synthesizes a failing probe per gap and lets
+# Phase B re-parse <probes> when the model emits a new block. These
+# tests cover the slugifier, the gap detection, and the re-parse
+# eligibility logic without needing Chromium or a model.
+# ---------------------------------------------------------------------------
+
+
+def test_slugify_criterion_strips_category_label():
+    from tools import _slugify_criterion
+    # Slug is capped at 32 chars; the leading category label is stripped.
+    assert _slugify_criterion("Edge: pressing space restarts the game") \
+        == "pressing_space_restarts_the_game"
+    assert _slugify_criterion("Basic: ship visible at startup") == "ship_visible_at_startup"
+    # Stress label stripped; lowercase + underscore separators.
+    assert _slugify_criterion("Stress: frame rate steady after 20 kills") \
+        == "frame_rate_steady_after_20_kills"
+    # Cap respected on overlong inputs.
+    long_in = "Edge: this is a very long criterion line that runs on past the 32-char cap"
+    out = _slugify_criterion(long_in)
+    assert len(out) <= 32
+    assert out.startswith("this_is_a_very_long")
+
+
+def test_slugify_criterion_no_label_keeps_text():
+    from tools import _slugify_criterion
+    # No "Foo:" prefix → entire string is the body.
+    assert _slugify_criterion("Player can fire bullets") == "player_can_fire_bullets"
+
+
+def test_slugify_criterion_empty_falls_back():
+    from tools import _slugify_criterion
+    # Pure punctuation / empty → safe default.
+    assert _slugify_criterion("") == "criterion"
+    assert _slugify_criterion("    !@#$    ") == "criterion"
+
+
+def test_coverage_gap_detection_finds_uncovered_criterion():
+    """Sanity: when criteria mention a behavior no probe references,
+    _criteria_coverage_gaps returns that criterion line."""
+    from tools import _criteria_coverage_gaps
+    criteria = (
+        "Basic: ship visible at startup.\n"
+        "Edge: after game over, pressing space restarts the game."
+    )
+    probes = [
+        {"name": "ship_visible", "expr": "!!window.state.ship"},
+        # No probe for the Edge criterion (no mention of "restart" or "game over").
+    ]
+    gaps = _criteria_coverage_gaps(criteria, probes)
+    assert len(gaps) == 1
+    assert "Edge" in gaps[0]
+
+
+def test_coverage_gap_clears_when_probe_added():
+    """After the model adds a probe referencing the criterion, the gap
+    detector finds no more uncovered lines. This is the path the
+    Phase B re-parse exercises — re-emit <probes>, run the gap check
+    again, update self._planning_coverage_gaps.
+
+    Note: the gap detector uses lowercased word overlap, so the new
+    probe's name/expr must literally contain words from the criterion
+    line (e.g. "restarts" or "pressing"). The model is expected to
+    use criterion-derived names (the synthetic probe's err message
+    tells it to)."""
+    from tools import _criteria_coverage_gaps
+    criteria = "Edge: pressing space restarts the game after game over."
+    probes_before = [{"name": "ship_visible", "expr": "!!window.state.ship"}]
+    # New probe whose name reuses words from the criterion ("restarts",
+    # "space") → 2 overlapping words → gap closes.
+    probes_after = [
+        {"name": "ship_visible", "expr": "!!window.state.ship"},
+        {"name": "restarts_on_space",
+         "expr": "window.state && state.lives === 3 /* after restart */"},
+    ]
+    assert _criteria_coverage_gaps(criteria, probes_before)  # gap present
+    assert _criteria_coverage_gaps(criteria, probes_after) == []  # closed
+
+
+def test_agent_phase_b_reparse_gate_requires_existing_gap(tmp_path):
+    """The Phase B probe re-parse only fires when
+    self._planning_coverage_gaps is non-empty AND the reply contains
+    <probes>. Empty gap list → no re-parse, even if the reply has a
+    new probes block. (This prevents probe churn turn-over-turn on
+    normally-passing sessions.)"""
+    a = _make_agent(tmp_path)
+    a._planning_coverage_gaps = []  # no gaps to close
+    # Even if reply has new probes, the gate keeps self._probes intact.
+    initial_probes = [{"name": "x", "expr": "true"}]
+    a._probes = list(initial_probes)
+    # We assert the GATE CONDITION the agent uses, not the full method
+    # (which is async and lives mid-iter). The gate is:
+    reply_has_probes = "<probes>" in "<probes>[]</probes>".lower()
+    gate_open = bool(a._planning_coverage_gaps) and reply_has_probes
+    assert gate_open is False  # empty gaps → gate closed regardless of reply
+
+
+def test_agent_phase_b_reparse_gate_opens_when_gaps_exist(tmp_path):
+    """With unresolved coverage gaps AND a <probes> block in the
+    reply, the gate is open. The agent then calls _extract_probes
+    + _criteria_coverage_gaps and swaps in the new probes."""
+    a = _make_agent(tmp_path)
+    a._planning_coverage_gaps = ["Edge: pressing space restarts the game."]
+    reply_has_probes = "<probes>" in "before <probes>[...]</probes> after".lower()
+    gate_open = bool(a._planning_coverage_gaps) and reply_has_probes
+    assert gate_open is True

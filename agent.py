@@ -1583,7 +1583,16 @@ class GameAgent:
         # Function-shaped chunks: `function foo(...) { ... }`,
         # `const foo = (...) => { ... }`, `foo() { ... }` (method).
         # Keep the regex simple — we match opening lines then balance braces.
-        chunks: list[tuple[int, str, str]] = []  # (score, header, body_with_header)
+        #
+        # We extract EVERY plausible function into `pool` (regardless of
+        # score) so the callee-promotion step below can pull in functions
+        # called by selected ones. `chunks` is the score>0 subset that
+        # enters the ranking. This matters when the model is debugging a
+        # symptom whose error signals don't name the buggy function
+        # (asteroid trace: input dead → no mention of update() → update()
+        # scored 0 → dropped → model spent 4 iters blind).
+        chunks: list[tuple[int, str, str]] = []  # (score, name, body_with_header)
+        pool: list[tuple[str, str]] = []          # (name, body_with_header) — ALL extracted
         for (_open, body, _close) in scripts:
             for m in re.finditer(
                 r"(?:function\s+([A-Za-z_$][\w$]*)|"
@@ -1619,6 +1628,7 @@ class GameAgent:
                 segment = body[start:end]
                 if len(segment) < 30 or len(segment) > 3500:
                     continue
+                pool.append((name, segment))
                 seg_ids = self._identifiers(segment)
                 hits = len(seg_ids & keyset)
                 # Always include functions whose NAME hits a key.
@@ -1631,6 +1641,51 @@ class GameAgent:
         if not chunks:
             return None
         chunks.sort(key=lambda t: -t[0])
+
+        # One-hop callee promotion: when a selected function calls another
+        # extracted function that didn't score on its own, pull the callee
+        # into the candidate list at a low score (1 — below genuine name/
+        # identifier hits, above the cut). This fixes the case where the
+        # error signals describe a symptom (`canvas didn't change`) rather
+        # than the buggy function's name, so the function with the bug
+        # never enters the slice.
+        all_names = {n for (n, _seg) in pool}
+        # Compute promotion target set from the existing top picks. We use
+        # all current chunks (not just the top-K) because the byte cap
+        # below may drop some — we want every potential selection to
+        # carry its callees in. Caller-of-callee scanning is bounded by
+        # the regex on each chunk's body, so it's cheap.
+        selected_names: set[str] = {n for (_s, n, _seg) in chunks}
+        called: set[str] = set()
+        # Pre-compile to avoid recompiling on every chunk.
+        callee_re = re.compile(r"\b([A-Za-z_$][\w$]*)\s*\(")
+        for (_s, _n, seg) in chunks:
+            for cm in callee_re.finditer(seg):
+                cn = cm.group(1)
+                if cn in all_names and cn not in selected_names:
+                    called.add(cn)
+        if called:
+            # Use a name → body map so we look each callee up once.
+            pool_map: dict[str, str] = {}
+            for (n, seg) in pool:
+                pool_map.setdefault(n, seg)  # first definition wins on duplicates
+            added = 0
+            for cn in called:
+                seg = pool_map.get(cn)
+                if seg is None:
+                    continue
+                chunks.append((1, cn, seg))
+                added += 1
+            if added:
+                # Trace this so we can see in jsonl when callee promotion
+                # rescued a function the symptom-based scoring missed.
+                self._trace({
+                    "kind": "focused_slice_callees_added",
+                    "callees": sorted(called),
+                    "count": added,
+                })
+                chunks.sort(key=lambda t: -t[0])
+
         kept: list[str] = []
         used = 0
         for (_score, name, seg) in chunks:
@@ -1638,7 +1693,10 @@ class GameAgent:
                 break
             kept.append(f"// --- function `{name}` (focused slice) ---\n{seg}")
             used += len(seg) + 60
-            if len(kept) >= 3:
+            # Cap raised from 3 → 5 to absorb 1–2 callee promotions
+            # without pushing out higher-signal functions. Byte cap
+            # (5000) still gates total size.
+            if len(kept) >= 5:
                 break
         if not kept:
             return None
@@ -2555,6 +2613,35 @@ class GameAgent:
                 "len": len(reply),
                 "preview": reply[:600],
             })
+
+            # ---- coverage-gap probe re-parse ---------------------------
+            # If planning detected uncovered criteria (the synthetic
+            # `coverage_gap__*` probes are still failing), and the model
+            # included a new <probes> block in this reply, swap it in
+            # before we run the test. Probes are otherwise immutable
+            # after Phase A — this is the one legitimate mid-session
+            # path, gated on an unresolved coverage gap so the model
+            # can't churn probes turn-over-turn.
+            if self._planning_coverage_gaps and "<probes>" in reply.lower():
+                new_probes = self._extract_probes(reply)
+                if new_probes:
+                    from tools import _criteria_coverage_gaps as _gaps_fn
+                    new_gaps = _gaps_fn(self._criteria or "", new_probes)
+                    self._trace({
+                        "kind": "probes_reparsed",
+                        "iteration": iteration,
+                        "old_count": len(self._probes),
+                        "new_count": len(new_probes),
+                        "remaining_gaps": new_gaps[:6],
+                    })
+                    yield self._record(AgentEvent(
+                        "info",
+                        f"probes re-emitted ({len(self._probes)} → "
+                        f"{len(new_probes)}); remaining coverage gaps: "
+                        f"{len(new_gaps)}",
+                    ))
+                    self._probes = new_probes
+                    self._planning_coverage_gaps = new_gaps[:6]
 
             # ---- diagnose extraction (logged + memory-keyed) -----------
             diag = self._extract_diagnose(reply)
