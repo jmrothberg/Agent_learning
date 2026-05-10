@@ -178,6 +178,37 @@ _LOOKUP_BULLET_RE = re.compile(
 _MAX_BULLET_LOOKUPS_PER_TURN = 5
 
 
+# Block-level bloat detector for full-rewrite paths. Local LLMs sometimes
+# duplicate a large literal (a maze 2D array, a tilemap, a const-table)
+# 3+ times within one response — the streaming detector in ollama_io
+# catches most cases live, but this is the materialize-time safety net.
+# Returns a short human-readable description of the duplication, or None.
+_BLOAT_BLOCK_LINES = 8       # 8 consecutive lines = one "block" hash
+_BLOAT_MIN_BLOCK_BYTES = 200 # skip whitespace-y blocks
+_BLOAT_MAX_REPEATS = 3       # > 3 identical blocks = bloat
+
+
+def _detect_block_bloat(text: str) -> str | None:
+    """Scan `text` for repeated N-line blocks. None if clean."""
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if len(lines) < _BLOAT_BLOCK_LINES * (_BLOAT_MAX_REPEATS + 1):
+        return None
+    counts: dict[int, int] = {}
+    for i in range(len(lines) - _BLOAT_BLOCK_LINES + 1):
+        block = "\n".join(lines[i:i + _BLOAT_BLOCK_LINES])
+        if len(block) < _BLOAT_MIN_BLOCK_BYTES:
+            continue
+        h = hash(block)
+        counts[h] = counts.get(h, 0) + 1
+        if counts[h] > _BLOAT_MAX_REPEATS:
+            sample = block.replace("\n", " ↵ ")[:160]
+            return (
+                f"the same {_BLOAT_BLOCK_LINES}-line block appears "
+                f"{counts[h]}+ times: '{sample}...'"
+            )
+    return None
+
+
 # Once the messages list has more turns than this, older turns get their
 # embedded code (<html_file> bodies, ```html fences) replaced with summaries
 # so context stays bounded. Tunable; the agent always passes the CURRENT
@@ -331,6 +362,16 @@ class GameAgent:
         self._pending_feedback: list[str] = []
         self._pending_answer: str | None = None
         self._user_force_done = False
+        # Criteria lines that no probe references — surfaced at Phase A
+        # parse so the gap is visible upfront. Empty when probes cover
+        # everything or when criteria/probes are missing.
+        self._planning_coverage_gaps: list[str] = []
+        # asyncio.Event that the MLX backend polls between tokens. Set by
+        # request_done() so Ctrl-D in the TUI actually stops mid-stream,
+        # not just at the next iter boundary. Created lazily on first use
+        # so the agent can be constructed outside a running event loop
+        # (some tests instantiate it that way).
+        self._stop_event: asyncio.Event | None = None
         # Step-mode (Stop-Losing-To-OneShot todo #1): when True, the iter
         # loop pauses BETWEEN iterations and waits for explicit user input
         # before querying the model again. Strictly stronger than any
@@ -636,6 +677,27 @@ class GameAgent:
 
     def request_done(self) -> None:
         self._user_force_done = True
+        # Signal the in-flight stream (if any) to stop now. The
+        # MLXBackend worker polls this between tokens; the next yield
+        # exits, stream_chat returns a partial result with stalled=True,
+        # and the iter-boundary check in run() ships best.html.
+        try:
+            ev = self._ensure_stop_event()
+            ev.set()
+        except RuntimeError:
+            # No running event loop yet — the flag above will be
+            # picked up at the next iter-boundary check anyway.
+            pass
+
+    def _ensure_stop_event(self) -> asyncio.Event:
+        """Lazily create the stop event on the running event loop.
+
+        Raises RuntimeError if there's no running loop (called from
+        outside an async context, e.g. an early TUI hook).
+        """
+        if self._stop_event is None:
+            self._stop_event = asyncio.Event()
+        return self._stop_event
 
     # Step-mode controls (Stop-Losing-To-OneShot todo #1).
     def set_step_mode(self, on: bool) -> None:
@@ -1171,6 +1233,7 @@ class GameAgent:
                     "duration_s": r.duration_s,
                 }),
                 on_progress=_on_progress,
+                cancel_event=self._ensure_stop_event(),
             )
         finally:
             # Always remove our prefill scaffolding before returning so
@@ -1294,6 +1357,7 @@ class GameAgent:
                 "candidate": i,
                 "msg": msg,
             }),
+            cancel_event=self._ensure_stop_event(),
         )
         return winner, all_cands
 
@@ -1351,6 +1415,20 @@ class GameAgent:
                     "Send <patch> SEARCH/REPLACE blocks instead. (Override: "
                     "AGENT_ALLOW_FULL_REWRITE=1 — only when patches truly "
                     "cannot express the structural change.)"
+                )
+            # Materialize-time bloat detector: even when the streaming
+            # repetition detector lets a reply through, scan the final
+            # HTML for duplicated blocks (typical: a maze 2D literal
+            # emitted 3+ times, or `const T=16;` repeated 50 times).
+            # Reject before writing to disk so the next user-turn names
+            # the suspected duplication.
+            bloat = _detect_block_bloat(html)
+            if bloat is not None:
+                return None, (
+                    f"<html_file> rejected: detected duplicated block "
+                    f"({bloat}). This typically means the model entered a "
+                    f"regeneration loop on a large literal. Replace inline "
+                    f"data with a seeded generator function and retry."
                 )
             return html, "full <html_file> rewrite"
 
@@ -1691,6 +1769,8 @@ class GameAgent:
                     return
             # Reset transient state so the loop runs again fresh.
             self._user_force_done = False
+            if self._stop_event is not None:
+                self._stop_event.clear()
             self._fix_mode = True
             self._previous_report_ok = True
             # Queue the new request as user feedback so _flush_user_injections
@@ -1876,6 +1956,27 @@ class GameAgent:
                         for p in probes
                     ],
                 })
+                # Planning-turn coverage check: surface criteria that no
+                # probe references so the model can see the gap on iter 1
+                # rather than only at the end. Local LLMs often skip
+                # writing a probe for a stress/behavioral criterion;
+                # naming the gap in the first build prompt helps them
+                # close it. We don't block the loop on this — the model
+                # may not recover gracefully — just inject a nudge.
+                if self._criteria:
+                    from tools import _criteria_coverage_gaps as _gaps_fn
+                    gaps = _gaps_fn(self._criteria, probes)
+                    if gaps:
+                        self._planning_coverage_gaps = gaps[:6]
+                        self._trace({
+                            "kind": "planning_coverage_gaps",
+                            "uncovered": self._planning_coverage_gaps,
+                        })
+                        yield self._record(AgentEvent(
+                            "info",
+                            "criteria without matching probes: "
+                            + "; ".join(self._planning_coverage_gaps),
+                        ))
 
             q = self._extract_question(plan_reply)
             if q is not None:
@@ -2342,6 +2443,21 @@ class GameAgent:
         for iteration in range(start_iter, hard_max + 1):
             if iteration > end_iter + self._iter_budget_bonus:
                 break
+            # User hard-stop: Ctrl-D in the TUI sets _user_force_done. Honor
+            # it at the top of every iteration so the agent never starts a
+            # new stream after the user asked to stop, even when probes
+            # haven't passed. Whatever's in best.html (or out_path) ships.
+            if self._user_force_done:
+                yield self._record(AgentEvent(
+                    "info", "user requested ship - exiting iteration loop",
+                ))
+                self._record_session_outcome(ok=self.best_path.exists())
+                yield self._record(AgentEvent(
+                    "done",
+                    "User-requested ship.",
+                    {"best_exists": self.best_path.exists()},
+                ))
+                return
             # Step-mode pause (Stop-Losing-To-OneShot todo #1): between
             # iterations, wait for explicit user go-ahead so the user can
             # verify the just-completed iter before the model runs again.
@@ -2967,21 +3083,22 @@ class GameAgent:
                 return
 
             if self._user_force_done and not report["ok"]:
-                # Build a normal fix prompt, but tell the model to ship now.
-                next_user = self._build_fix_prompt(
-                    report=report, regressed=regressed, partial_failed=partial_failed,
-                ) + (
-                    "\n\nNOTE: the user wants to SHIP NOW. Fix ONLY the errors above; "
-                    "do not add features or polish."
-                )
-                self._messages.append({
-                    "role": "user",
-                    "content": self._flush_user_injections(next_user),
-                })
-                self._previous_report_ok = report["ok"]
-                self._previous_report = report  # todo #3 — full report
-                self._fix_mode = True
-                continue
+                # Hard stop: probes failed but the user asked to ship.
+                # Don't loop another fix turn — exit with whatever we have.
+                # best.html is shipped if it exists (a prior iter passed);
+                # otherwise the current new_html is on disk at out_path.
+                best_exists = self.best_path.exists()
+                yield self._record(AgentEvent(
+                    "info",
+                    "user requested ship with failing probes - exiting with current build",
+                ))
+                self._record_session_outcome(ok=best_exists)
+                yield self._record(AgentEvent(
+                    "done",
+                    "User-requested ship (probes failed).",
+                    {"best_exists": best_exists, "report_ok": False},
+                ))
+                return
 
             # ---- self-critique on first clean+done ---------------------
             if report["ok"] and said_done and not awaiting_confirm:
@@ -3221,6 +3338,8 @@ class GameAgent:
         self._last_report_summary = ""
         self._pending_bullet_lookups = []
         self._user_force_done = False
+        if self._stop_event is not None:
+            self._stop_event.clear()
         self._step_continue = False
         self._last_screenshot_before = None
         self._last_screenshot_after = None

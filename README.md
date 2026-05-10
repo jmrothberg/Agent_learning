@@ -77,11 +77,18 @@ but the running model’s prompts omit that block until v1+.)
 
 - **Python 3.10+**, macOS or Linux Ubuntu (the platforms `scripts/setup.sh`
   is tested on). Older Pythons miss async features the agent relies on.
-- **A local LLM daemon** — either Ollama (`ollama serve` with at least one
-  pulled model) or `mlx_lm.server` on Apple Silicon (install via
-  `requirements-mlx.txt` / `./scripts/setup.sh`). On macOS the agent **defaults
-  to MLX** when `LLM_BACKEND` is unset; use `LLM_BACKEND=auto` to probe Ollama too.
-  Set `OLLAMA_HOST` / `MLX_HOST` if either daemon is on a non-default address.
+- **A local LLM** — either:
+  - **Ollama** (`ollama serve` with at least one pulled model), or
+  - **MLX in-process** on Apple Silicon. `mlx-lm` is loaded directly into the
+    agent's Python process — there is **no `mlx_lm.server`**, no HTTP, no
+    `MLX_HOST`. Resolution order: `MLX_MODEL=<path-or-id>`, else a single
+    auto-discovered model under `~/MLX_Models/` / `MLX_MODELS_DIR` / the HF
+    cache. Weights load on the first request (~30–60 s for a 27B mxfp8)
+    and stay resident in this process's GPU VRAM for the rest of the session.
+
+  On macOS the agent **defaults to MLX** when `LLM_BACKEND` is unset; use
+  `LLM_BACKEND=auto` to probe Ollama too. `OLLAMA_HOST` still applies for
+  non-default Ollama addresses.
 - **Playwright Chromium** — not installed by `pip` alone; `./scripts/setup.sh`
   runs `playwright install chromium`. If launch fails with “Executable doesn't exist”,
   your environment may set `PLAYWRIGHT_BROWSERS_PATH` to a stale dir — run
@@ -111,23 +118,22 @@ but the running model’s prompts omit that block until v1+.)
 ### MLX memory limit on Apple Silicon
 
 Apple Silicon Macs cap how much unified memory a single GPU process
-(e.g. `mlx_lm.server`) is allowed to wire for Metal — it's not your full
-physical RAM. The cap is `iogpu.wired_limit_mb`, default ≈ 75 % of
-total RAM. **Big models with long context routinely cross it**, and when
-that happens the next allocation throws
+is allowed to wire for Metal — it's not your full physical RAM. The cap
+is `iogpu.wired_limit_mb`, default ≈ 75 % of total RAM. **Big models
+with long context routinely cross it**, and when that happens the next
+Metal allocation throws
 
 ```
 RuntimeError: [metal::malloc] Resource limit (NNNNNN) exceeded.
 ```
 
-inside `mlx_lm.server`'s generate thread. The thread dies; the HTTP
-layer keeps answering `GET /v1/models` with `200 OK`; our backend opens
-the SSE stream, sees prompt-eval finish, then receives **zero** content
-tokens. As of this commit the agent detects that exact pattern within
-~30 s of prompt-eval completion and surfaces a clear recovery hint
-([backend.py:_stream_once](backend.py), `crashed=True` in `StreamResult`).
+inside whatever process is holding the model. Since this agent loads
+MLX **in-process** (see `backend.MLXBackend`), that exception bubbles
+up out of `mlx_lm.stream_generate`, gets caught by the agent's pipeline
+worker, and the result is returned with `crashed=True` — the TUI shows
+a recovery hint instead of a silent hang.
 
-**Set the cap before launching `mlx_lm.server`** (per-boot; sudo):
+**Set the cap before launching the agent** (per-boot; sudo):
 
 ```bash
 # Suggested formula: physical RAM (MB) − 16 GB headroom for OS + apps.
@@ -152,17 +158,24 @@ echo 'iogpu.wired_limit_mb=496000' | sudo tee /etc/sysctl.d/50-mlx.conf
 (macOS reads `/etc/sysctl.conf` at boot; some installs use
 `/etc/sysctl.d/`. Check with `man sysctl.conf` on your version.)
 
-**If `mlx_lm.server` already crashed once**, you must restart it — the
-poisoned process is wedged for the rest of its lifetime even if you raise
-the cap afterwards:
+**If MLX has already OOM'd once in the running TUI**, the Python
+process's Metal context is poisoned — every subsequent generation will
+fail the same way. Quit the TUI (`Ctrl+Q`), raise the cap, and relaunch:
 
 ```bash
-pkill -f mlx_lm.server
+# In the TUI: Ctrl+Q. Or from another shell:
+pkill -f "python.*chat.py"
 # raise the cap
 sudo sysctl iogpu.wired_limit_mb=496000
-# relaunch
-mlx_lm.server --model /Users/jonathanrothberg_1/MLX_Models/Qwen3.6-27B-mxfp8 --port 8080
+# relaunch (model loads in-process on first request)
+MLX_MODEL=~/MLX_Models/Qwen3.6-27B-mxfp8 .venv/bin/python chat.py
 ```
+
+You can also free the in-process MLX model mid-session without quitting:
+type **`/unload mlx`** in the TUI to drop the weights from VRAM (next
+generation will reload on first request). Useful when swapping models
+or recovering from a soft Metal error that didn't kill the whole
+context.
 
 This concern is **macOS-only**. Linux/CUDA hosts don't have an
 equivalent cap — `nvidia-smi` shows the full GPU VRAM available to MLX-
@@ -194,12 +207,14 @@ Until those land in a tagged release, install the PR heads with:
 ./scripts/install_mlx_v4_fix.sh
 ```
 
-The script auto-detects which Python owns your `mlx_lm.server` (different
+The script auto-detects which Python owns your `mlx_lm` install (different
 on every machine — python.org installer Python 3.11 here, Homebrew
 Python on someone else's Mac, conda elsewhere) by reading the shebang of
-the installed `mlx_lm.server` script, then `pip install --user --force-
-reinstall`s both PR heads into that same interpreter. No venv assumption,
-no hardcoded paths.
+the installed `mlx_lm.server` script (still ships with the package even
+though the agent no longer uses the server), then `pip install --user
+--force-reinstall`s both PR heads into that same interpreter. The
+in-process `from mlx_lm import load, stream_generate` calls pick up the
+patches automatically — no extra wiring.
 
 It verifies success by checking that `deepseek_v4.py` jumped from the
 broken ~16 KB stub to the ~50 KB+ full implementation and contains the
@@ -229,17 +244,19 @@ other ~300 MLX-community model conversions all work on stock 0.31.3.
 a separate runtime bug: its Indexer attention path materializes a single
 Metal buffer of size `O(L² × k)` during prefill, where `L` is the prefill
 chunk length and `k` saturates at 512. At the default
-`--prefill-step-size 2048` this single allocation crosses the per-process
+`prefill_step_size=2048` this single allocation crosses the per-process
 Metal cap (~487 GB on a 512 GB Mac) the moment any prompt is more than
-~1.3K tokens, and the generate thread dies with
-`[metal::malloc] Resource limit (NNN) exceeded`. The fix is to chunk
-prefill into smaller pieces:
+~1.3K tokens, and `stream_generate` dies with
+`[metal::malloc] Resource limit (NNN) exceeded`.
+
+The agent passes a safer **`prefill_step_size=1024`** by default to
+`mlx_lm.stream_generate` ([backend.py](backend.py), constant
+`_MLX_PREFILL_STEP_SIZE_DEFAULT`). Override per-machine with the
+`MLX_PREFILL_STEP_SIZE` env var if you want to experiment:
 
 ```bash
-mlx_lm.server \
-  --model /path/to/your/DeepSeek-V4-Flash-... \
-  --port 8080 \
-  --prefill-step-size 1024
+MLX_PREFILL_STEP_SIZE=512 .venv/bin/python chat.py   # paranoid
+MLX_PREFILL_STEP_SIZE=1280 .venv/bin/python chat.py  # last safe step
 ```
 
 `1024` is the documented safe-anywhere default per the PR reviewer's
@@ -252,19 +269,13 @@ higher. Going lower (`512`, `256`) is paranoid-safe and ~5–10% slower
 on prompts > 1K tokens; lower than that has no effect on shorter
 prompts.
 
-A wrapper script handles this for you — auto-detects whichever V4 model
-lives under `~/MLX_Models` (or `$MLX_MODELS_DIR`) by looking for
-`config.json` with `model_type: "deepseek_v4"` and passes the right
-flag. Cross-machine; no hardcoded quant names.
-
-```bash
-./scripts/mlx_v4_server.sh                     # auto-pick first V4 model
-./scripts/mlx_v4_server.sh /path/to/V4-model   # explicit
-```
+(The retired `scripts/mlx_v4_server.sh` wrapper that passed
+`--prefill-step-size 1024` to `mlx_lm.server` is no longer needed — the
+in-process backend handles it.)
 
 Tracking the upstream cubic-attention bug: see PR #1192's review thread
 for the `(L, k, GB)` table that documents the blow-up. Once a fix lands
-upstream the flag becomes optional and
+upstream the env var becomes optional and
 `./scripts/install_mlx_v4_fix.sh --rollback` will pick up the upstream
 fix.
 
@@ -1303,13 +1314,17 @@ Useful flags:
 After setup, point the agent at a local LLM and start a session:
 
 ```bash
-# Make sure Ollama is running with at least one model:
+# Either: Ollama with at least one model loaded.
 ollama serve &
 ollama list
 ollama run --ctx-size 32768 qwen3.6:35b   # warm at 32K to skip reload
 
-# OR use MLX on Apple Silicon (often faster than Ollama):
-mlx_lm.server --model /Users/jonathanrothberg_1/MLX_Models/Qwen3.6-27B-mxfp8 --port 8080
+# OR: MLX on Apple Silicon — loaded IN-PROCESS by the agent (no
+# mlx_lm.server, no port). Point MLX_MODEL at a downloaded model, or
+# place one under ~/MLX_Models/ so it's auto-discovered. First request
+# of a session pays a ~30-60s cold-load cost; the weights then stay
+# resident in this process's GPU VRAM for the rest of the session.
+export MLX_MODEL=~/MLX_Models/Qwen3.6-27B-mxfp8
 
 # Run the agent:
 .venv/bin/python chat.py                    # TUI (recommended)
@@ -1769,7 +1784,7 @@ Three pip requirement files; `./scripts/setup.sh` installs them as follows:
 | File | When |
 |------|------|
 | **`requirements.txt`** | Always — agent runtime (playwright **Python** package only; browser bundle is separate). |
-| **`requirements-mlx.txt`** | **macOS arm64** by default (`mlx-lm` → `mlx_lm.server`). Skipped with `--no-mlx-tools`. Optional manual install on other platforms if you run MLX. |
+| **`requirements-mlx.txt`** | **macOS arm64** by default (`mlx-lm` — used in-process by `backend.MLXBackend`; the `mlx_lm.server` CLI ships with the package but the agent does **not** call it). Skipped with `--no-mlx-tools`. |
 | **`requirements-diffuser.txt`** | Installed automatically as the **last step inside** `./scripts/install_diffuser.sh` (`setup.sh` does not pip it separately). Skipped only with `--no-gpu`. |
 
 **`requirements.txt`** — pure-Python deps the agent needs to run at all:
@@ -1777,16 +1792,16 @@ Three pip requirement files; `./scripts/setup.sh` installs them as follows:
 - `ollama` — Python client for the local Ollama daemon (also used by
   `learner.py reflect` / `apply` to call the Reflector; default model
   set in `learner.py` and overridable with `--model`)
-- `httpx` — used by `backend.MLXBackend` to talk to `mlx_lm.server` over
-  SSE (Apple Silicon path)
 - `playwright` — Python wrapper; **you still need** `playwright install chromium` (done by `setup.sh`)
 - `textual` — the TUI framework
 - `pillow` — used by `assets.py` for sprite resize/save
 - `rich` — markup + escape helpers used by the TUI mirror layer
 - `pytest` — test runner; setup.sh's verification step runs the suite
 
-**`requirements-mlx.txt`** — `mlx-lm` so `mlx_lm.server` is available in `.venv`
-on Apple Silicon.
+**`requirements-mlx.txt`** — `mlx-lm` on Apple Silicon. The agent
+imports `mlx_lm.load` and `mlx_lm.stream_generate` directly from this
+package and loads the model **in-process** (no separate server). See
+[`backend.MLXBackend`](backend.py).
 
 **`requirements-diffuser.txt`** — **`./scripts/install_diffuser.sh` pip-installs this file as its final step**
 (so sprites + Stable Audio extras ship in one script when GPU stack is enabled). Powers BOTH sprite (`assets.py`) and sound (`sounds.py`)

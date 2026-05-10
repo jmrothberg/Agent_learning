@@ -1,16 +1,16 @@
 """Unit tests for backend.detect_backend() — pure-function probes via mocks.
 
-The detection functions reach out to Ollama (urllib) and to MLX
-(urllib + `ps` subprocess). We stub all three so the test runs offline
-and deterministically. No real daemon required.
+The Ollama path still reaches out via urllib (/api/ps, /api/tags). The
+MLX path now resolves entirely locally: MLX_MODEL env, then a filesystem
+scan for downloaded models (no HTTP, no mlx_lm.server). We stub the
+relevant probes so the test runs offline and deterministically.
 """
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch  # noqa: F401 - retained for downstream test additions
 
 import pytest
 
@@ -20,7 +20,7 @@ import backend  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# Fakes for the three probes detect_backend uses.
+# Fakes for the probes detect_backend uses.
 # ---------------------------------------------------------------------------
 
 
@@ -38,10 +38,10 @@ def _fake_http(routes: dict[str, dict | None]):
     return fake
 
 
-def _fake_proc(model_arg: str | None):
-    """Returns a function suitable for monkey-patching backend._mlx_process_model_arg."""
-    def fake() -> str | None:
-        return model_arg
+def _fake_local_mlx(paths: list[str]):
+    """Returns a function suitable for monkey-patching backend.list_local_mlx_models."""
+    def fake() -> list[str]:
+        return list(paths)
     return fake
 
 
@@ -49,8 +49,25 @@ def _fake_proc(model_arg: str | None):
 def clear_env(monkeypatch):
     """Strip env vars that would otherwise short-circuit detection."""
     for key in ("OLLAMA_MODEL", "CHAT_OLLAMA_MODEL", "MLX_MODEL", "LLM_BACKEND",
-                "OLLAMA_HOST", "MLX_HOST"):
+                "OLLAMA_HOST"):
         monkeypatch.delenv(key, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def isolate_mlx_state():
+    """Ensure MLXBackend's class-level model cache doesn't leak across tests
+    (a previous test loading a fake path would otherwise show up in
+    list_mlx_inventory's "active" return)."""
+    prev_path = backend.MLXBackend._loaded_path
+    prev_model = backend.MLXBackend._loaded_model
+    prev_tok = backend.MLXBackend._loaded_tokenizer
+    backend.MLXBackend._loaded_path = None
+    backend.MLXBackend._loaded_model = None
+    backend.MLXBackend._loaded_tokenizer = None
+    yield
+    backend.MLXBackend._loaded_path = prev_path
+    backend.MLXBackend._loaded_model = prev_model
+    backend.MLXBackend._loaded_tokenizer = prev_tok
 
 
 # ---------------------------------------------------------------------------
@@ -59,7 +76,7 @@ def clear_env(monkeypatch):
 
 
 def test_only_ollama_loaded_picks_ollama(monkeypatch):
-    """Ollama up with a chat model loaded, MLX down → Ollama."""
+    """Ollama up with a chat model loaded, no local MLX models → Ollama."""
     monkeypatch.setattr(
         backend, "_http_get_json",
         _fake_http({
@@ -70,7 +87,7 @@ def test_only_ollama_loaded_picks_ollama(monkeypatch):
             }]},
         }),
     )
-    monkeypatch.setattr(backend, "_mlx_process_model_arg", _fake_proc(None))
+    monkeypatch.setattr(backend, "list_local_mlx_models", _fake_local_mlx([]))
 
     info = backend.detect_backend("auto")
     assert info.name == "ollama"
@@ -78,27 +95,23 @@ def test_only_ollama_loaded_picks_ollama(monkeypatch):
     assert "loaded in ollama" in info.source
 
 
-def test_only_mlx_loaded_picks_mlx(monkeypatch):
-    """MLX up with a model in /v1/models, Ollama down → MLX."""
+def test_only_mlx_local_picks_mlx(monkeypatch):
+    """A single local MLX model present, Ollama down → MLX."""
+    monkeypatch.setattr(backend, "_http_get_json", _fake_http({}))
     monkeypatch.setattr(
-        backend, "_http_get_json",
-        _fake_http({
-            "/v1/models": {"data": [{"id": "mlx-community/Qwen2.5-Coder-32B-Instruct-4bit"}]},
-        }),
-    )
-    monkeypatch.setattr(
-        backend, "_mlx_process_model_arg",
-        _fake_proc("mlx-community/Qwen2.5-Coder-32B-Instruct-4bit"),
+        backend, "list_local_mlx_models",
+        _fake_local_mlx(["/home/u/MLX_Models/Qwen3.6-27B-mxfp8"]),
     )
 
     info = backend.detect_backend("auto")
     assert info.name == "mlx"
-    assert info.model == "mlx-community/Qwen2.5-Coder-32B-Instruct-4bit"
-    assert "mlx_lm.server" in info.source
+    assert info.model == "/home/u/MLX_Models/Qwen3.6-27B-mxfp8"
+    assert "only local MLX" in info.source
+    assert info.endpoint == "in-process"
 
 
-def test_both_loaded_mlx_wins(monkeypatch):
-    """Both daemons reachable with loaded models → MLX wins (per user decision)."""
+def test_both_available_mlx_wins(monkeypatch):
+    """Ollama loaded AND a local MLX model present → MLX wins."""
     monkeypatch.setattr(
         backend, "_http_get_json",
         _fake_http({
@@ -106,12 +119,11 @@ def test_both_loaded_mlx_wins(monkeypatch):
                 "name": "qwen3.6:27b", "expires_at": "2030-01-01T00:00:00Z",
                 "details": {}, "context_length": 32768,
             }]},
-            "/v1/models": {"data": [{"id": "mlx-community/Llama-3-8B-Instruct-4bit"}]},
         }),
     )
     monkeypatch.setattr(
-        backend, "_mlx_process_model_arg",
-        _fake_proc("mlx-community/Llama-3-8B-Instruct-4bit"),
+        backend, "list_local_mlx_models",
+        _fake_local_mlx(["/m/Llama-3-8B-Instruct-4bit"]),
     )
 
     info = backend.detect_backend("auto")
@@ -119,7 +131,7 @@ def test_both_loaded_mlx_wins(monkeypatch):
 
 
 def test_llm_backend_env_forces_ollama(monkeypatch):
-    """LLM_BACKEND=ollama overrides MLX preference even when both loaded."""
+    """LLM_BACKEND=ollama overrides MLX preference even when MLX is available."""
     monkeypatch.setattr(
         backend, "_http_get_json",
         _fake_http({
@@ -127,12 +139,11 @@ def test_llm_backend_env_forces_ollama(monkeypatch):
                 "name": "qwen3.6:27b", "expires_at": "2030-01-01T00:00:00Z",
                 "details": {}, "context_length": 32768,
             }]},
-            "/v1/models": {"data": [{"id": "mlx-community/Foo"}]},
         }),
     )
     monkeypatch.setattr(
-        backend, "_mlx_process_model_arg",
-        _fake_proc("mlx-community/Foo"),
+        backend, "list_local_mlx_models",
+        _fake_local_mlx(["/m/Foo"]),
     )
     monkeypatch.setenv("LLM_BACKEND", "ollama")
 
@@ -140,60 +151,31 @@ def test_llm_backend_env_forces_ollama(monkeypatch):
     assert info.name == "ollama"
 
 
-def test_mlx_process_arg_resolves_model(monkeypatch):
-    """When the MLX server has --model X, that's the active model id."""
+def test_mlx_env_overrides_local_scan(monkeypatch):
+    """MLX_MODEL env wins over any local-disk scan results."""
+    monkeypatch.setattr(backend, "_http_get_json", _fake_http({}))
     monkeypatch.setattr(
-        backend, "_http_get_json",
-        _fake_http({
-            "/v1/models": {"data": [
-                {"id": "mlx-community/A"},
-                {"id": "mlx-community/B"},
-                {"id": "mlx-community/C"},
-            ]},
-        }),
+        backend, "list_local_mlx_models",
+        _fake_local_mlx(["/disk/SomeOther"]),
     )
+    monkeypatch.setenv("MLX_MODEL", "/explicit/path/Qwen-via-env")
+
+    info = backend.detect_backend("mlx")
+    assert info.model == "/explicit/path/Qwen-via-env"
+    assert "MLX_MODEL" in info.source
+
+
+def test_mlx_multiple_local_picks_first_with_warning(monkeypatch):
+    """Multiple local MLX models → pick first with a 'set MLX_MODEL' hint."""
+    monkeypatch.setattr(backend, "_http_get_json", _fake_http({}))
     monkeypatch.setattr(
-        backend, "_mlx_process_model_arg",
-        _fake_proc("mlx-community/B"),
+        backend, "list_local_mlx_models",
+        _fake_local_mlx(["/m/A", "/m/B", "/m/C"]),
     )
 
     info = backend.detect_backend("mlx")
-    assert info.model == "mlx-community/B"
-    assert "mlx_lm.server" in info.source
-
-
-def test_mlx_falls_back_to_first_v1_models(monkeypatch):
-    """No --model arg → use /v1/models[0] with a clearly-labeled source."""
-    monkeypatch.setattr(
-        backend, "_http_get_json",
-        _fake_http({
-            "/v1/models": {"data": [
-                {"id": "mlx-community/A"},
-                {"id": "mlx-community/B"},
-            ]},
-        }),
-    )
-    monkeypatch.setattr(backend, "_mlx_process_model_arg", _fake_proc(None))
-
-    info = backend.detect_backend("mlx")
-    assert info.model == "mlx-community/A"
-    assert "first of 2" in info.source
-
-
-def test_mlx_model_env_overrides_process(monkeypatch):
-    """MLX_MODEL env wins over the running process's --model arg."""
-    monkeypatch.setattr(
-        backend, "_http_get_json",
-        _fake_http({"/v1/models": {"data": [{"id": "mlx-community/Whatever"}]}}),
-    )
-    monkeypatch.setattr(
-        backend, "_mlx_process_model_arg",
-        _fake_proc("mlx-community/FromProcess"),
-    )
-    monkeypatch.setenv("MLX_MODEL", "mlx-community/FromEnv")
-
-    info = backend.detect_backend("mlx")
-    assert info.model == "mlx-community/FromEnv"
+    assert info.model == "/m/A"
+    assert "set MLX_MODEL" in info.source
 
 
 def test_ollama_model_env_overrides_loaded(monkeypatch):
@@ -207,7 +189,7 @@ def test_ollama_model_env_overrides_loaded(monkeypatch):
             }]},
         }),
     )
-    monkeypatch.setattr(backend, "_mlx_process_model_arg", _fake_proc(None))
+    monkeypatch.setattr(backend, "list_local_mlx_models", _fake_local_mlx([]))
     monkeypatch.setenv("OLLAMA_MODEL", "gpt-oss:latest")
 
     info = backend.detect_backend("auto")
@@ -217,20 +199,20 @@ def test_ollama_model_env_overrides_loaded(monkeypatch):
 
 
 def test_neither_reachable_raises(monkeypatch):
-    """No daemon up at all → RuntimeError with a useful hint."""
+    """No daemon up and no local MLX → RuntimeError with a useful hint."""
     monkeypatch.setattr(backend, "_http_get_json", _fake_http({}))
-    monkeypatch.setattr(backend, "_mlx_process_model_arg", _fake_proc(None))
+    monkeypatch.setattr(backend, "list_local_mlx_models", _fake_local_mlx([]))
 
     with pytest.raises(RuntimeError, match="No LLM backend reachable"):
         backend.detect_backend("auto")
 
 
-def test_force_mlx_when_unreachable_raises(monkeypatch):
-    """LLM_BACKEND=mlx but mlx_lm.server is down → clear error."""
+def test_force_mlx_when_no_model_raises(monkeypatch):
+    """LLM_BACKEND=mlx but no MLX_MODEL and no local scan → clear error."""
     monkeypatch.setattr(backend, "_http_get_json", _fake_http({}))
-    monkeypatch.setattr(backend, "_mlx_process_model_arg", _fake_proc(None))
+    monkeypatch.setattr(backend, "list_local_mlx_models", _fake_local_mlx([]))
 
-    with pytest.raises(RuntimeError, match="mlx_lm.server is not reachable"):
+    with pytest.raises(RuntimeError, match="no MLX model could be resolved"):
         backend.detect_backend("mlx")
 
 
@@ -247,7 +229,7 @@ def test_picks_freshest_ollama_by_expires_at(monkeypatch):
             ]},
         }),
     )
-    monkeypatch.setattr(backend, "_mlx_process_model_arg", _fake_proc(None))
+    monkeypatch.setattr(backend, "list_local_mlx_models", _fake_local_mlx([]))
 
     info = backend.detect_backend("ollama")
     assert info.model == "fresh:27b"
@@ -267,23 +249,20 @@ def test_filters_non_chat_tags(monkeypatch):
             ]},
         }),
     )
-    monkeypatch.setattr(backend, "_mlx_process_model_arg", _fake_proc(None))
+    monkeypatch.setattr(backend, "list_local_mlx_models", _fake_local_mlx([]))
 
     info = backend.detect_backend("ollama")
     assert info.model == "qwen3.6:27b"
 
 
-def test_mlx_process_regex_parses_command_line():
-    """Exercise _MLX_PROC_MODEL_RE against representative ps output lines."""
-    samples = [
-        ("/usr/bin/python -m mlx_lm.server --model mlx-community/Foo --port 8080",
-         "mlx-community/Foo"),
-        ("python mlx_lm.server --model=mlx-community/Bar-4bit --host 0.0.0.0",
-         "mlx-community/Bar-4bit"),
-        ("python -m mlx_lm.server --port 8080",  # no --model arg
-         None),
-    ]
-    for cmd, expected in samples:
-        m = backend._MLX_PROC_MODEL_RE.search(cmd)
-        got = m.group(1) if m else None
-        assert got == expected, f"{cmd!r} → {got!r}, expected {expected!r}"
+def test_mlx_local_filters_non_chat(monkeypatch):
+    """Local MLX scan must skip embedding/diffuser-shaped paths."""
+    monkeypatch.setattr(backend, "_http_get_json", _fake_http({}))
+    # First entry contains a non-chat fragment ("z-image"); should be skipped.
+    monkeypatch.setattr(
+        backend, "list_local_mlx_models",
+        _fake_local_mlx(["/m/z-image-turbo", "/m/Qwen3.6-27B-mxfp8"]),
+    )
+
+    info = backend.detect_backend("mlx")
+    assert info.model == "/m/Qwen3.6-27B-mxfp8"

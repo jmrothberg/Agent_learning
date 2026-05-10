@@ -80,6 +80,25 @@ if [ -z "$YES" ]; then
     esac
 fi
 
+# Order matters: wipe per-session asset/sound dirs FIRST so that if the
+# script is interrupted mid-run we don't leave orphaned _assets/_sounds
+# dirs without their matching .html. HTML and traces go last.
+
+# Per-session asset dirs (games/<slug>_<ts>_assets/). The shared cache
+# at games/_asset_cache/ stays — that's what makes re-runs free.
+find games -maxdepth 1 -mindepth 1 -type d -name "*_assets" \
+    -not -name "_asset_cache" -exec rm -rf {} +
+
+# Per-session sound dirs (games/<slug>_<ts>_sounds/). Same logic — the
+# shared cache at games/_sound_cache/ stays so re-runs hit it.
+find games -maxdepth 1 -mindepth 1 -type d -name "*_sounds" \
+    -not -name "_sound_cache" -exec rm -rf {} +
+
+# Sweep up any leftover empty dirs (failed asset generations leave
+# behind 0-byte session dirs even when no HTML was produced).
+find games -maxdepth 1 -mindepth 1 -type d \
+    \( -name "*_assets" -o -name "*_sounds" \) -empty -delete 2>/dev/null || true
+
 # Per-session HTML files (don't touch directory structure).
 rm -f games/*.html
 
@@ -104,16 +123,6 @@ fi
 
 # Mistakes: drop the file entirely (recreated on next session).
 rm -f games/memory/mistakes.jsonl
-
-# Per-session asset dirs (games/<slug>_<ts>_assets/). The shared cache
-# at games/_asset_cache/ stays — that's what makes re-runs free.
-find games -maxdepth 1 -mindepth 1 -type d -name "*_assets" \
-    -not -name "_asset_cache" -exec rm -rf {} +
-
-# Per-session sound dirs (games/<slug>_<ts>_sounds/). Same logic — the
-# shared cache at games/_sound_cache/ stays so re-runs hit it.
-find games -maxdepth 1 -mindepth 1 -type d -name "*_sounds" \
-    -not -name "_sound_cache" -exec rm -rf {} +
 
 # Tune-battery runs: drop subdirs, keep battery.jsonl test definitions.
 if [ -d games/tune ]; then

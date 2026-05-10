@@ -44,9 +44,18 @@ TORCH_CUDA=121 ./scripts/install_diffuser.sh    # older NVIDIA only
 .venv/bin/python coder.py "snake" --max-iters 4 --best-of-n 1 --headless
 
 # MLX backend (Apple Silicon — usually faster than Ollama at the same param count)
-mlx_lm.server --model /Users/jonathanrothberg_1/MLX_Models/Qwen3.6-27B-mxfp8 --port 8080
+# Runs IN-PROCESS — no separate mlx_lm.server, no HTTP, no broken pipes.
+# The model loads into this Python process's GPU VRAM on first request
+# (~30-60s cold for a 27B mxfp8). Resolution order:
+#   1. MLX_MODEL env var (path or HF id)
+#   2. Single local MLX model in ~/MLX_Models / HF cache (auto-discovered)
+MLX_MODEL=/Users/jonathanrothberg/MLX_Models/Qwen3.6-27B-mxfp8 .venv/bin/python coder.py "snake"
 .venv/bin/python coder.py "snake" --backend mlx   # explicit; macOS defaults to MLX anyway
 # Use LLM_BACKEND=auto (or --backend auto) to probe Ollama when MLX is down.
+# DeepSeek-V4 quirk: still apply ./scripts/install_mlx_v4_fix.sh (it patches
+# the installed mlx_lm package directly; in-process loads pick it up).
+# Per-machine prefill chunk override: MLX_PREFILL_STEP_SIZE=1024 (the
+# default; lower to 512 if you hit Metal OOM during prompt eval).
 
 # Tests (all pure-function, no model/Chromium calls; full suite ~12s)
 .venv/bin/python -m pytest tests/ -q
@@ -71,11 +80,12 @@ python learner.py apply games/traces/             # propose AND write to playboo
 ```
 
 **Env vars that matter:**
-- `LLM_BACKEND` — unset defaults to **`mlx` on macOS** (Apple GPU), else **`auto`**. Values: `auto` | `ollama` | `mlx`. `auto` probes both; if both have a model loaded, MLX wins (faster on Apple Silicon). Set `LLM_BACKEND=auto` on a Mac to allow Ollama-only fallback again.
+- `LLM_BACKEND` — unset defaults to **`mlx` on macOS** (Apple GPU), else **`auto`**. Values: `auto` | `ollama` | `mlx`. `auto` probes both; if a local MLX model is discoverable AND Ollama also has a model loaded, MLX wins. Set `LLM_BACKEND=auto` on a Mac to allow Ollama-only fallback again.
 - `OLLAMA_MODEL` / `CHAT_OLLAMA_MODEL` — explicit Ollama model override (else: detected from `/api/ps`, then first installed)
 - `OLLAMA_HOST` — non-default Ollama daemon address
-- `MLX_MODEL` — explicit MLX model id override (else: `--model X` arg of running `mlx_lm.server`, then `/v1/models[0]`)
-- `MLX_HOST` — non-default mlx_lm.server address (default `http://127.0.0.1:8080`)
+- `MLX_MODEL` — explicit MLX model path or HF id. Loaded in-process via `mlx_lm.load`. If unset, the backend scans `~/MLX_Models/` / `MLX_MODELS_DIR` / HF cache and picks a single discoverable chat model (multi-match → first, with a "set MLX_MODEL to override" hint in `info.source`).
+- `MLX_MODELS_DIR` — `:`-separated list of additional dirs to scan for downloaded MLX models. Defaults: `~/MLX_Models`, `~/Models_MLX`, `~/.cache/huggingface/hub`, `/opt/mlx_models`.
+- `MLX_PREFILL_STEP_SIZE` — chunk size for prompt eval (default `1024`, the safe-anywhere value for DeepSeek-V4 Flash/Pro per upstream PR). Drop to `512` if you hit Metal OOM mid-eval; raise to `2048` on small models if you want a few % more throughput.
 - `CODING_BOX_NUM_CTX` — Ollama context window (default 32768; supports 128K+ on most local models). MLX has no equivalent; uses model native context.
 - `DIFFUSION_MODELS_DIR` — root override for weights search (sprites + sounds layout); hidden **`~/.Diffusion_Models`** / **`~/.Models_Diffusers`** are tried before visible `~/…` siblings; HuggingFace cache fallback if absent.
 - `TORCH_CUDA` — CUDA version for `install_diffuser.sh` (`130` default, `121`/`124` for older GPUs)

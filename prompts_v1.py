@@ -326,6 +326,14 @@ HARD_RULES: list[str] = [
     "so the harness sees crashes instead of a silently frozen game.",
     "Never write to localStorage on first load without a feature-detect.",
     "Use device-pixel-ratio canvas scaling so HiDPI displays aren't blurry.",
+    "Grids, mazes, tilemaps, dungeons, level data: if the layout is larger "
+    "than 16 rows OR 16 columns, write a deterministic seeded generator "
+    "function (e.g. function buildMaze(w, h, seed){...}) instead of inlining "
+    "a literal 2D array. Inlining large literals causes local LLMs to fall "
+    "into token-repetition loops mid-stream — the harness will reject the "
+    "response and the work is wasted. Reset any module-level timer, "
+    "counter, or cooldown variable (e.g. lastFireTime, lastSpawnTime) "
+    "inside reset() so restart actually restarts.",
 ]
 
 ANTI_PATTERNS: list[str] = [

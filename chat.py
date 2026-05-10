@@ -22,8 +22,8 @@ Model selection (when you press Enter on your game idea):
      rules as coder.py --backend.
        Ollama (port 11434) — loaded model from /api/ps, or OLLAMA_MODEL /
        CHAT_OLLAMA_MODEL overrides.
-       mlx_lm.server (port 8080) — model from the server's `--model` arg,
-       falling back to /v1/models; MLX_MODEL env overrides.
+       MLX (in-process) — MLX_MODEL env, else single auto-discovered model
+       under ~/MLX_Models / HF cache. No mlx_lm.server, no HTTP.
   2. With LLM_BACKEND=auto (or explicit --backend auto), if both daemons
      have a loaded model, MLX wins. Force one with LLM_BACKEND=ollama /
      LLM_BACKEND=mlx or /backend in the TUI.
@@ -431,52 +431,6 @@ def _pick_first_workable(names: list[str]) -> str | None:
     return None
 
 
-def _running_models_all_sources() -> tuple[list[str], str, str]:
-    """Return (tags, how_we_got_them, diagnostic_if_empty).
-
-    We merge HTTP tries + CLI + Python client because IDE terminals often miss
-    `ollama` on PATH, and loopback host can differ from the shell that ran
-    `ollama run`.
-    """
-    diag_bits: list[str] = []
-
-    # 1) Official Python client (uses OLLAMA_HOST internally — same as httpx default)
-    try:
-        ps = ollama.ps()
-        rows = list(ps.models or [])
-        names_py: list[str] = []
-        for row in rows:
-            tag = (getattr(row, "name", None) or getattr(row, "model", None) or "").strip()
-            if tag:
-                names_py.append(tag)
-        if names_py:
-            return names_py, "ollama Python client ps()", ""
-    except Exception as e:
-        diag_bits.append(f"Python ollama.ps(): {e!r}")
-
-    # 2) Raw HTTP — try every loopback base (Ollama returns {"models":[...]})
-    for base in _ollama_ps_base_urls():
-        http_names, err = _running_models_via_http_one(base)
-        if err:
-            diag_bits.append(err)
-        if http_names:
-            return http_names, f"GET {base}/api/ps", ""
-
-    # 3) Subprocess `ollama ps` — full path to binary, not only PATH
-    cli_names, cli_err = _running_models_via_cli()
-    if cli_err:
-        diag_bits.append(cli_err)
-    if cli_names:
-        return cli_names, "`ollama ps` CLI (absolute path)", ""
-
-    hint = ""
-    if diag_bits:
-        hint = " | ".join(diag_bits[:4])
-        if len(hint) > 400:
-            hint = hint[:400] + "..."
-    return [], "no running models detected", hint
-
-
 def resolve_chat_model(fallback: str) -> tuple[str, str]:
     """Pick which Ollama tag chat.py should use.
 
@@ -747,18 +701,18 @@ class CodingBoxApp(App):
                 f"Will use [b]{preview.name.upper()}[/b] · "
                 f"[b]{_esc(preview.model)}[/b] [dim]({_esc(preview.source)})[/dim]"
             )
-            # MLX-on-Mac caveat — when the resolved backend is MLX, print
-            # a one-line reminder about Apple Silicon's Metal wired-memory
-            # cap. Big models + long context routinely cross the default
-            # cap and crash mlx_lm.server's generate thread mid-stream;
-            # the README has the sysctl + recovery steps. Cheap; only
-            # fires when MLX is actually selected.
+            # MLX-on-Mac caveat — Apple Silicon's Metal wired-memory cap.
+            # Big models + long context routinely cross the default cap
+            # and OOM mid-generation. README has the sysctl + recovery
+            # steps. Fires only when MLX is actually selected.
             import sys as _sys
             if preview.name == "mlx" and _sys.platform == "darwin":
                 self._log_info(
-                    "[dim]MLX tip: if a stream hangs after prompt eval, "
-                    "raise the Metal cap via [b]sudo sysctl iogpu.wired_limit_mb=$N[/b] "
-                    "(README §MLX memory limit on Apple Silicon).[/dim]"
+                    "[dim]MLX tip: model runs in-process. If prompt eval "
+                    "OOMs on a 27B+ model, raise the Metal cap via "
+                    "[b]sudo sysctl iogpu.wired_limit_mb=$N[/b] (README "
+                    "§MLX memory limit on Apple Silicon), or drop "
+                    "MLX_PREFILL_STEP_SIZE to 512.[/dim]"
                 )
         except RuntimeError as e:
             self._log_error(str(e))
@@ -941,12 +895,21 @@ class CodingBoxApp(App):
                 # is the case the user complained about — Ollama not
                 # responding looks identical to "thinking" without this.
                 wait = now - self._stream_started_at if self._stream_started_at else 0.0
-                # MLX path: if mlx_lm.server is feeding us prompt-eval
-                # progress (see backend.MLXBackend._stream_once), show
-                # that instead of a generic wait counter — turns the
+                # MLX path: if the in-process backend is feeding us
+                # prompt-eval progress (see backend.MLXBackend._stream_once),
+                # show that instead of a generic wait counter — turns the
                 # 6358-token blank wait into "prompt eval 6358/6358".
+                # Also handles the "mlx_load" stage which fires once on
+                # cold start while the weights stream into VRAM.
                 progress_total = getattr(self.agent, "_stream_progress_total", 0) or 0
                 progress_current = getattr(self.agent, "_stream_progress_current", 0) or 0
+                progress_stage = getattr(self.agent, "_stream_progress_stage", None)
+                if progress_stage == "mlx_load":
+                    return (
+                        f"[bold yellow]Activity:[/bold yellow] {label} — "
+                        f"[cyan]loading MLX weights into VRAM[/cyan] "
+                        f"[dim]— {wait:.0f}s (cold-start, ~30-60s)[/dim]\n"
+                    )
                 if progress_total > 0:
                     pct = (100.0 * progress_current / progress_total) if progress_total else 0.0
                     return (
@@ -1046,11 +1009,33 @@ class CodingBoxApp(App):
     # ----------------------------- actions --------------------------------
 
     async def action_ship_it(self) -> None:
-        """Ctrl+D - tell the agent the human is satisfied."""
+        """Ctrl+D - ship the current build.
+
+        Two-tap escalation:
+          1. First tap: graceful ship — request_done(), iter-boundary
+             check in agent.run() breaks out before the next stream.
+          2. Second tap within 2s: force quit the whole TUI. The current
+             stream may still be in-flight; Ctrl+Q (or this second tap)
+             is the user's emergency exit.
+        """
+        now = time.monotonic()
+        last = getattr(self, "_last_ship_request_at", 0.0) or 0.0
+        if last and (now - last) < 2.0:
+            self._log_info(
+                "[red]Second Ctrl+D within 2s — force-quitting.[/red] "
+                "(In-flight stream may take a moment to release the model.)"
+            )
+            self.exit()
+            return
+        self._last_ship_request_at = now
         if self.agent is None:
             return
         self.agent.request_done()
-        self._log_info("[yellow]Ship requested.[/yellow] Agent will finish current turn and exit.")
+        self._log_info(
+            "[yellow]Ship requested.[/yellow] Agent will break out at the next "
+            "iteration boundary (current stream finishes first). "
+            "[dim]Press Ctrl+D again within 2s to force-quit.[/dim]"
+        )
 
     async def action_quit_app(self) -> None:
         """Ctrl+Q — quit (browser cleanup happens in on_unmount)."""
@@ -1300,9 +1285,9 @@ class CodingBoxApp(App):
             "  [b]/help[/b]                    show this help (also /h, /?)",
             "  [b]/list[/b]                    unified Ollama + MLX list with numbers (also /models)",
             "  [b]/load <N|name>[/b]           pick model #N from /list (any backend) · STICKY across /new (also /model)",
-            "  [b]/launch <N|name|path>[/b]   start mlx_lm.server on an MLX model from /list (auto-stages it for next /new)",
+            "  [b]/launch <N|name|path>[/b]   stage an MLX model for next /new (loads in-process on first request)",
             "  [b]/backend <auto|ollama|mlx>[/b]  stage default backend when no specific model is staged",
-            "  [b]/unload [N|name|all|mlx][/b]  free VRAM · #N from /list · bare = active session · all = every Ollama (MLX untouched) · mlx = kill cmd",
+            "  [b]/unload [N|name|all|mlx][/b]  free VRAM · #N from /list · bare = active session · all = every Ollama · mlx = drop the in-process MLX model",
             "  [b]/seed <path>[/b]             stage a baseline .html (STICKY across /new) · /seed alone clears",
             "  [b]/iters <N>[/b]               set max iterations (sticky)",
             "  [b]/restarts <N>[/b]            independent full restarts when iter-1 score < 60 (sticky · default 2 · 1=off)",
@@ -1354,9 +1339,10 @@ class CodingBoxApp(App):
 
         if not listing:
             self._log_error(
-                "no LLM backend reachable — start ollama (`ollama run <model>`) "
-                "or mlx_lm.server (`mlx_lm.server --model "
-                "/Users/jonathanrothberg_1/MLX_Models/Qwen3.6-27B-mxfp8 --port 8080`)"
+                "no LLM backend reachable — start ollama "
+                "(`ollama run <model>`) or set MLX_MODEL / drop an MLX "
+                "model under ~/MLX_Models so the in-process backend can "
+                "find it"
             )
             return
 
@@ -1412,17 +1398,15 @@ class CodingBoxApp(App):
         """/unload [N|name|all|mlx] — free VRAM held by an LLM daemon.
 
           /unload                     unload the active session's model
-                                      (Ollama only — MLX has no API)
+                                      (Ollama API only — for MLX use /unload mlx)
           /unload <N>                 unload entry #N from /list (any backend)
           /unload <name>              unload by exact tag or substring match
           /unload all                 unload every model loaded in Ollama
-                                      (does NOT touch MLX — kill mlx_lm.server
-                                       manually for that)
-          /unload mlx                 print the kill command for mlx_lm.server
+                                      (does NOT touch MLX — use /unload mlx)
+          /unload mlx                 drop the in-process MLX model from VRAM
+                                      (next /new will reload on first request)
 
         Models stay installed on disk; only the VRAM allocation is released.
-        For MLX picks, prints the kill command (mlx_lm.server is
-        single-process-per-model — no API to evict).
         """
         norm = arg.strip()
         norm_lc = norm.lower()
@@ -1485,7 +1469,7 @@ class CodingBoxApp(App):
         listing = self._last_listing
         if not listing:
             self._log_error(
-                "no LLM backend reachable — start ollama or mlx_lm.server first"
+                "no LLM backend reachable — start ollama, or set MLX_MODEL / drop a model under ~/MLX_Models"
             )
             return None, None
 
@@ -1520,20 +1504,32 @@ class CodingBoxApp(App):
         self._log_info(f"{tag} {_esc(name)} — {_esc(msg)}")
 
     def _print_mlx_kill_hint(self) -> None:
-        pids = backend_mod.mlx_server_pids()
-        if not pids:
-            self._log_info("[dim]no mlx_lm.server process is running[/dim]")
+        """/unload mlx — MLX now runs in-process. Drop the cached model
+        from VRAM by clearing MLXBackend's class-level cache and
+        forcing a GC pass. Next /new will reload (or pick a different
+        model if MLX_MODEL changed)."""
+        loaded = backend_mod.MLXBackend._loaded_path
+        if not loaded:
+            self._log_info("[dim]no MLX model is currently loaded[/dim]")
             return
+        backend_mod.MLXBackend._loaded_model = None
+        backend_mod.MLXBackend._loaded_tokenizer = None
+        backend_mod.MLXBackend._loaded_path = None
+        import gc
+        gc.collect()
         self._log_info(
-            "[yellow]MLX has no programmatic unload[/yellow] — "
-            f"kill the server to free VRAM:  [b]kill {' '.join(str(p) for p in pids)}[/b]"
+            f"[green]✓[/green] released [b]{_esc(loaded)}[/b] from VRAM. "
+            "Next /new will reload on first request."
         )
-        self._log(
-            "[dim]Or:  pkill -f mlx_lm.server   "
-            "(restart it with `mlx_lm.server --model "
-            "/Users/jonathanrothberg_1/MLX_Models/Qwen3.6-27B-mxfp8 --port 8080` "
-            "when you want MLX back)[/dim]"
-        )
+        # Legacy hint for users still running the old mlx_lm.server.
+        pids = backend_mod.mlx_server_pids()
+        if pids:
+            self._log(
+                f"[dim]Also detected stale mlx_lm.server pid(s) "
+                f"{' '.join(str(p) for p in pids)} — those are no longer "
+                f"used; kill them with `pkill -f mlx_lm.server` to free "
+                f"server-side VRAM.[/dim]"
+            )
 
     def _cmd_set_backend(self, arg: str) -> None:
         """/backend [auto|ollama|mlx] — pick the LLM daemon for the next /new.
@@ -1600,7 +1596,7 @@ class CodingBoxApp(App):
         listing = self._last_listing
         if not listing:
             self._log_error(
-                "no LLM backend reachable — start ollama or mlx_lm.server first"
+                "no LLM backend reachable — start ollama, or set MLX_MODEL / drop a model under ~/MLX_Models"
             )
             return
 
@@ -1652,24 +1648,24 @@ class CodingBoxApp(App):
             "for next /new session [dim](current session keeps its model)[/dim]"
         )
 
-        # MLX-specific: warn if the staged model differs from the running
-        # mlx_lm.server's --model arg. The server CAN dynamic-swap on first
-        # request, but it's a 30-60s pause; the user should know.
+        # MLX-specific: warn if the staged model differs from the
+        # currently in-VRAM model. The in-process loader will swap on
+        # first request (~30-60s pause); the user should know.
         if chosen_backend == "mlx":
-            _, mlx_active = backend_mod.list_mlx_inventory()
+            mlx_active = backend_mod.MLXBackend._loaded_path
             if mlx_active is None:
                 self._log_info(
-                    "[yellow]heads-up:[/yellow] no mlx_lm.server is running. "
-                    f"Start one with: [b]mlx_lm.server --model {_esc(chosen_name)} "
-                    "--port 8080[/b]"
+                    f"[dim]MLX runs in-process; weights for "
+                    f"[b]{_esc(chosen_name)}[/b] will load on the first "
+                    f"request of /new (~30-60s the first time).[/dim]"
                 )
             elif mlx_active != chosen_name:
                 self._log_info(
-                    f"[yellow]heads-up:[/yellow] mlx_lm.server is currently running "
-                    f"[b]{_esc(mlx_active)}[/b]. The first request of /new will "
-                    "dynamic-swap to the staged model (~30-60s pause). To preload, "
-                    f"restart it: [b]pkill -f mlx_lm.server && "
-                    f"mlx_lm.server --model {_esc(chosen_name)} --port 8080[/b]"
+                    f"[yellow]heads-up:[/yellow] [b]{_esc(mlx_active)}[/b] "
+                    f"is currently loaded in VRAM. The first request of /new "
+                    f"will swap to the staged model (~30-60s pause). To "
+                    f"preload immediately, run [b]/unload mlx[/b] then "
+                    f"trigger a generation."
                 )
 
     async def _cmd_new(self, arg: str) -> None:
@@ -1724,36 +1720,21 @@ class CodingBoxApp(App):
         )
 
     def _cmd_launch_mlx(self, arg: str) -> None:
-        """/launch <N|name|path> — start mlx_lm.server on the chosen MLX
-        model in the background. Prints PID and log path; the next /new
-        will pick up the new server automatically.
+        """/launch <N|name|path> — stage an MLX model for the next /new.
 
-        Use this when /list shows an MLX model you have on disk but
-        mlx_lm.server isn't currently serving it. Typing the equivalent
-        shell command isn't required.
+        MLX now runs in-process (no separate mlx_lm.server). "Launching"
+        means selecting which model the in-process backend will load on
+        the next /new — the actual weight load happens lazily on the
+        first model interaction. To swap models mid-session, first run
+        /unload mlx to free the currently-loaded weights.
         """
-        import subprocess
-        import shutil
-        import time
-
         if not arg.strip():
             self._log_info(
-                "usage: /launch <N|name|path>  — picks an MLX entry from /list "
-                "and starts mlx_lm.server in the background"
+                "usage: /launch <N|name|path>  — pick an MLX entry from "
+                "/list to stage for the next /new (loads in-process)"
             )
             return
 
-        # First, see if mlx_lm is callable.
-        mlx_bin = shutil.which("mlx_lm.server")
-        python_bin = shutil.which("python") or sys.executable
-        if mlx_bin is None:
-            # Fall back to `python -m mlx_lm.server` — works in the venv
-            # even when the script wrapper isn't on PATH.
-            cmd_prefix = [python_bin, "-m", "mlx_lm.server"]
-        else:
-            cmd_prefix = [mlx_bin]
-
-        # Resolve the arg against /list. Reuse the same matcher /unload uses.
         backend_name, model_name = self._resolve_listing_arg(arg.strip())
         if model_name is None:
             return  # error already logged
@@ -1764,61 +1745,21 @@ class CodingBoxApp(App):
             )
             return
 
-        existing_pids = backend_mod.mlx_server_pids()
-        if existing_pids:
-            self._log_info(
-                f"[yellow]mlx_lm.server already running[/yellow] "
-                f"(pids: {' '.join(str(p) for p in existing_pids)}). "
-                "Stop it first with /unload mlx (which prints the kill cmd), "
-                "then re-run /launch."
-            )
-            return
-
-        # Resolve port. mlx_lm.server defaults to 8080; we use whatever the
-        # MLX_HOST env points to (port stripped from the URL).
-        endpoint = backend_mod.mlx_endpoint_url()
-        try:
-            port = int(endpoint.rsplit(":", 1)[-1].split("/", 1)[0])
-        except ValueError:
-            port = 8080
-
-        log_path = self._out_path.parent / "mlx_lm.server.log" if self._out_path \
-            else Path.cwd() / "mlx_lm.server.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        cmd = cmd_prefix + ["--model", model_name, "--port", str(port)]
-        self._log_info(
-            f"launching: [b]{' '.join(_esc(c) for c in cmd)}[/b]  "
-            f"[dim]→ {log_path}[/dim]"
-        )
-        try:
-            log_fh = open(log_path, "ab", buffering=0)
-            proc = subprocess.Popen(
-                cmd, stdout=log_fh, stderr=subprocess.STDOUT,
-                # Detach from the TUI's process group so Ctrl+C / TUI exit
-                # doesn't kill the server.
-                start_new_session=True,
-            )
-        except OSError as e:
-            self._log_error(f"could not launch mlx_lm.server: {e}")
-            return
-
-        # Stage the model + backend so the next /new uses it. Do this
-        # immediately — the server may take 30-60s to load weights, but
-        # the staging is correct now.
+        currently_loaded = backend_mod.MLXBackend._loaded_path
         self._next_backend = "mlx"
         self._next_model = model_name
-        self._log_info(
-            f"[green]✓[/green] mlx_lm.server pid={proc.pid} starting on "
-            f":{port} · staged for next /new · "
-            f"weight load takes ~30-60s; tail [dim]{log_path}[/dim] to watch"
+        msg = (
+            f"[green]✓[/green] staged MLX model [b]{_esc(model_name)}[/b] "
+            "for next /new"
         )
-        # One quick poll so the user sees if it dies on startup.
-        time.sleep(1.0)
-        if proc.poll() is not None:
-            self._log_error(
-                f"mlx_lm.server exited immediately (rc={proc.returncode}). "
-                f"Check {log_path} for the failure reason."
+        if currently_loaded and currently_loaded != model_name:
+            msg += (
+                f" · [yellow]note:[/yellow] [b]{_esc(currently_loaded)}[/b] "
+                f"is still resident in VRAM — run [b]/unload mlx[/b] before "
+                f"/new if you want to free it first (otherwise the in-process "
+                f"loader swaps weights at first request, ~30-60s)"
             )
+        self._log_info(msg)
 
     def _cmd_set_model_class(self, arg: str) -> None:
         """/model-class auto|small|mid|large — override the system-prompt

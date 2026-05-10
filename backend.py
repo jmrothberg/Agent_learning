@@ -5,28 +5,28 @@ and CLI never have to know which daemon they are talking to:
 
   * `OllamaBackend`  — thin wrapper around `ollama.AsyncClient` that
     delegates to the existing watchdog/retry helpers in `ollama_io.py`.
-    Behavior on the Ollama path is byte-for-byte unchanged.
 
-  * `MLXBackend`     — talks to `mlx_lm.server` over HTTP using its
-    OpenAI-compatible `/v1/chat/completions` endpoint with SSE streaming.
-    Reuses the same per-chunk stall watchdog and the same repetition
-    detector as the Ollama path so a wedged MLX stream is detected the
-    same way a wedged Ollama stream is.
+  * `MLXBackend`     — loads the MLX model in-process and streams via
+    `mlx_lm.stream_generate` directly. No HTTP, no `mlx_lm.server`,
+    no broken pipes. The model is held in a class-level cache so
+    subsequent requests reuse the loaded weights. Cancellation is
+    plumbed through a `threading.Event` that the worker thread checks
+    between tokens, so Ctrl-D in the TUI actually stops a mid-stream
+    call.
 
 `detect_backend()` picks an LLM daemon at session start. The rule:
 
   1. Honor `LLM_BACKEND=ollama|mlx|auto` when set (CLI `--backend` counts too).
   2. On macOS (`darwin`), if neither env nor argument picks a backend,
      default to **MLX** (Apple GPU). Linux and others default to `auto`.
-  3. With preference `auto`: probe both; MLX wins ties; if exactly one
-     has a loaded model → that one; if neither loaded but Ollama is up →
-     /api/tags fallback; else raise.
+  3. With preference `auto`: probe both; if MLX_MODEL is set or a single
+     local MLX model is discoverable → MLX. Otherwise check Ollama.
   4. With preference `mlx` or `ollama`: force that daemon or raise.
 
-For MLX, "what's loaded" is read from the running `mlx_lm.server`
-process's `--model` arg (mirrors how `ollama ps` works), falling back
-to `/v1/models[0]` when no `--model` flag was given. `MLX_MODEL=<id>`
-overrides.
+For MLX, "which model" comes from:
+  1. `MLX_MODEL` env var (explicit path or HF id)
+  2. The single MLX model found in `~/.MLX_Models/` (or HF cache)
+  3. Otherwise: raise — there's nothing to load.
 """
 
 from __future__ import annotations
@@ -37,6 +37,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -44,7 +45,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Iterable, Literal
 
-import httpx
 import ollama
 
 from ollama_io import (
@@ -103,13 +103,22 @@ class Backend(ABC):
         max_retries: int = 1,
         on_stall: Callable[[StreamResult, int], None] | None = None,
         on_progress: Callable[[str, int, int], None] | None = None,
+        cancel_event: asyncio.Event | None = None,
     ) -> StreamResult:
         # `on_progress(stage, current, total)` is fired during the
         # pre-token phase when the backend exposes progress. Today only
-        # MLX (parsed from mlx_lm.server's SSE keepalive frames):
+        # MLX surfaces it (mlx_lm's prompt_progress_callback):
         #   stage="prompt_eval", current=N, total=M
         # Ollama ignores the parameter — its API doesn't expose
-        # prompt-processing progress mid-stream. Optional everywhere.
+        # prompt-processing progress mid-stream.
+        #
+        # `cancel_event` (asyncio.Event) lets the caller request a
+        # mid-stream stop — set by the TUI when the user hits Ctrl-D so
+        # the agent doesn't have to wait until the current iter finishes.
+        # MLXBackend polls it between tokens. OllamaBackend currently
+        # accepts but does not act on it (the ollama Python client has
+        # its own retry/stall flow); a cancel still works by cancelling
+        # the consuming asyncio task.
         ...
 
     @abstractmethod
@@ -128,6 +137,7 @@ class Backend(ABC):
         scorer: Callable[[str], Awaitable[tuple[float, dict]]],
         on_progress: Callable[[int, str], None] | None = None,
         early_exit_score: float = 1.0,
+        cancel_event: asyncio.Event | None = None,
     ) -> tuple[Candidate, list[Candidate]]:
         """Sequential best-of-N with early exit. Backend-agnostic.
 
@@ -150,6 +160,8 @@ class Backend(ABC):
             opts["temperature"] = t
             if on_progress is not None:
                 on_progress(i, f"start (T={t})")
+            if cancel_event is not None and cancel_event.is_set():
+                break
             result = await self.stream_chat(
                 messages,
                 on_token=None,
@@ -157,6 +169,7 @@ class Backend(ABC):
                 stall_seconds=stall_seconds,
                 overall_seconds=overall_seconds,
                 max_retries=0,
+                cancel_event=cancel_event,
             )
             if on_progress is not None:
                 tag = "stalled" if result.stalled else f"{result.tokens} tok in {result.duration_s:.1f}s"
@@ -216,11 +229,13 @@ class OllamaBackend(Backend):
         max_retries: int = 1,
         on_stall: Callable[[StreamResult, int], None] | None = None,
         on_progress: Callable[[str, int, int], None] | None = None,
+        cancel_event: asyncio.Event | None = None,
     ) -> StreamResult:
-        # `on_progress` is accepted for API symmetry with MLX, but
-        # Ollama's /api/chat doesn't expose prompt-eval progress
-        # mid-stream — the daemon stays silent until the first content
-        # token. Caller's heartbeat trace covers the visibility gap.
+        # `on_progress` and `cancel_event` are accepted for API symmetry
+        # with MLXBackend. Ollama's /api/chat doesn't expose prompt-eval
+        # progress mid-stream; cancellation here propagates through
+        # task.cancel() — the ollama AsyncClient closes its socket and
+        # the call unwinds.
         return await stream_chat_with_retry(
             self._client,
             self.info.model,
@@ -248,35 +263,99 @@ class OllamaBackend(Backend):
 
 
 # MLX request fields we forward when present in the agent's `options` dict.
-# Anything else (including `num_ctx`) is silently dropped — mlx_lm.server
-# uses the model's native context, no equivalent knob.
+# Anything else (including `num_ctx`) is silently dropped — MLX uses the
+# model's native context, no equivalent knob.
 _MLX_OPTION_KEYS: tuple[str, ...] = (
     "temperature", "top_p", "top_k", "min_p",
-    "repetition_penalty", "repetition_context_size",
     "seed", "max_tokens",
 )
 
-# Match the progress field inside an SSE "comment" frame. mlx_lm.server
-# emits these during prompt processing, in either of two formats across
-# versions:
-#   "data: : keepalive 50/200"
-#   "data: : Prompt processing progress: 50/200"
-# Either way we extract (current, total) so the agent can show progress
-# AND detect post-eval crashes (see _stream_once).
-_MLX_PROGRESS_RE = re.compile(
-    r"(?:keepalive|Prompt processing progress)[:\s]+(\d+)\s*/\s*(\d+)",
-    re.IGNORECASE,
-)
+# DeepSeek-V4 Flash/Pro needs a small prefill chunk because its Indexer
+# attention path materializes O(L^2 * k) Metal buffers. 1024 is the
+# safe-anywhere default per the upstream PR reviewer; the (now-deleted)
+# scripts/mlx_v4_server.sh used the same value. Override via env if you
+# want to experiment.
+_MLX_PREFILL_STEP_SIZE_DEFAULT = 1024
 
 
 class MLXBackend(Backend):
-    """Talks to `mlx_lm.server` via its OpenAI-compatible HTTP API."""
+    """In-process MLX backend. Loads the model into this process's GPU
+    VRAM on first request and streams generations via
+    `mlx_lm.stream_generate`. No HTTP, no `mlx_lm.server`.
+
+    Model + tokenizer are held at the class level so subsequent
+    requests within a session reuse the loaded weights. A 27B mxfp8
+    model is ~15 GB; on Apple unified memory this coexists fine with
+    Z-Image-Turbo and Chromium on 64 GB+ Macs.
+
+    Cancellation: the worker thread that iterates `stream_generate`
+    checks a `threading.Event` between yields. When the agent's
+    `_stop_event` is set (Ctrl-D in the TUI), the next iteration
+    exits cleanly and `stream_chat` returns the partial result with
+    `stalled=True`. The asyncio caller can also be cancelled — that
+    raises `CancelledError` in `stream_chat`, which sets the worker
+    event and re-raises so the agent's run-loop can wind down.
+    """
+
+    # Class-level model cache. Switching MLX_MODEL between sessions
+    # frees the previous model first to keep VRAM bounded.
+    _loaded_model: Any = None
+    _loaded_tokenizer: Any = None
+    _loaded_path: str | None = None
+    _load_lock: asyncio.Lock | None = None
+    # All MLX work runs on this single dedicated thread. MLX/Metal
+    # binds GPU contexts to the calling thread; if we loaded the model
+    # on a worker from the asyncio default executor and then ran
+    # stream_generate on a different threading.Thread, Metal would
+    # segfault deep in Mtl/objc code (seen on macOS 26 + DeepSeek-V4).
+    # Pinning everything to one thread eliminates that class of crash.
+    _mlx_thread: Any = None  # concurrent.futures.ThreadPoolExecutor
 
     def __init__(self, info: BackendInfo) -> None:
         self.info = info
-        # No persistent client: each stream opens a fresh httpx.AsyncClient
-        # so cancellation cleanly closes connections. mlx_lm.server is
-        # local; connection setup is essentially free.
+
+    @classmethod
+    def _get_load_lock(cls) -> asyncio.Lock:
+        if cls._load_lock is None:
+            cls._load_lock = asyncio.Lock()
+        return cls._load_lock
+
+    @classmethod
+    def _get_mlx_executor(cls):
+        """Single-thread executor that owns the Metal context."""
+        if cls._mlx_thread is None:
+            from concurrent.futures import ThreadPoolExecutor
+            # Daemon=True so we don't block process exit on shutdown.
+            cls._mlx_thread = ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="mlx",
+            )
+        return cls._mlx_thread
+
+    @classmethod
+    def _load_sync(cls, path: str) -> tuple[Any, Any]:
+        """Blocking load. MUST run on the dedicated MLX thread (see
+        `_get_mlx_executor`) — Metal binds to the calling thread.
+        """
+        if cls._loaded_path == path and cls._loaded_model is not None:
+            return cls._loaded_model, cls._loaded_tokenizer
+        # If a different model was previously loaded, drop the
+        # reference so Python+MLX can reclaim memory before the new
+        # weights arrive.
+        if cls._loaded_model is not None:
+            cls._loaded_model = None
+            cls._loaded_tokenizer = None
+            cls._loaded_path = None
+            import gc
+            gc.collect()
+        # Defer the mlx_lm import so Ollama-only users don't pay its
+        # ~1-2 s cold-start cost.
+        from mlx_lm import load as _mlx_load  # type: ignore
+        model, tokenizer = _mlx_load(path)
+        cls._loaded_model = model
+        cls._loaded_tokenizer = tokenizer
+        cls._loaded_path = path
+        return model, tokenizer
 
     async def stream_chat(
         self,
@@ -289,36 +368,21 @@ class MLXBackend(Backend):
         max_retries: int = 1,
         on_stall: Callable[[StreamResult, int], None] | None = None,
         on_progress: Callable[[str, int, int], None] | None = None,
+        cancel_event: asyncio.Event | None = None,
     ) -> StreamResult:
-        last: StreamResult | None = None
-        for attempt in range(max_retries + 1):
-            result = await self._stream_once(
-                messages,
-                on_token=on_token,
-                options=options,
-                stall_seconds=stall_seconds,
-                overall_seconds=overall_seconds,
-                on_progress=on_progress,
-            )
-            last = result
-            # crashed=True means the generate thread inside mlx_lm.server
-            # died (Metal limit, OOM, …). Retrying against the same
-            # poisoned process won't help; abort immediately so the
-            # agent can surface the recovery message instead of waiting
-            # max_retries × stall_seconds for nothing.
-            if result.crashed:
-                return result
-            if not result.stalled:
-                return result
-            if on_stall is not None:
-                try:
-                    on_stall(result, attempt)
-                except Exception:
-                    pass
-            if attempt < max_retries:
-                await asyncio.sleep(2.0)
-        assert last is not None
-        return last
+        # max_retries is accepted for API symmetry with OllamaBackend
+        # but is a no-op in-process: retrying against the same loaded
+        # model with the same prompt produces the same result (modulo
+        # sampler temperature, which the caller controls).
+        return await self._stream_once(
+            messages,
+            on_token=on_token,
+            options=options,
+            stall_seconds=stall_seconds,
+            overall_seconds=overall_seconds,
+            on_progress=on_progress,
+            cancel_event=cancel_event,
+        )
 
     async def _stream_once(
         self,
@@ -329,214 +393,246 @@ class MLXBackend(Backend):
         stall_seconds: float,
         overall_seconds: float,
         on_progress: Callable[[str, int, int], None] | None = None,
+        cancel_event: asyncio.Event | None = None,
     ) -> StreamResult:
         opts = dict(options or {})
-        body: dict[str, Any] = {
-            "model": self.info.model,
-            "messages": _strip_ollama_only_fields(messages),
-            "stream": True,
-            # Ask mlx_lm.server to emit a final SSE frame carrying token
-            # counts in `usage` (OpenAI-compatible). Without this we have
-            # no input-token visibility on the MLX path.
-            "stream_options": {"include_usage": True},
-        }
-        # Carry agent-controlled sampler params through to mlx_lm.server.
-        for key in _MLX_OPTION_KEYS:
-            if key in opts:
-                body[key] = opts[key]
-        # Reasonable token ceiling so mlx_lm.server's 512 default doesn't
-        # truncate full HTML game files. Caller can lift it via options.
-        body.setdefault("max_tokens", 16384)
+        # Drop fields that mean nothing to MLX (e.g. num_ctx). Carry
+        # only the sampler knobs MLX understands.
+        sampler_opts = {k: opts[k] for k in _MLX_OPTION_KEYS if k in opts}
+        max_tokens = int(sampler_opts.get("max_tokens") or 16384)
+        temperature = float(sampler_opts.get("temperature") or 0.0)
+        top_p = float(sampler_opts.get("top_p") or 0.0)
+        top_k = int(sampler_opts.get("top_k") or 0)
+        min_p = float(sampler_opts.get("min_p") or 0.0)
+
+        prefill_step_size = int(
+            os.environ.get("MLX_PREFILL_STEP_SIZE")
+            or _MLX_PREFILL_STEP_SIZE_DEFAULT
+        )
 
         started = time.monotonic()
         parts: list[str] = []
         n_tokens = 0
         stalled = False
         looped = False
-        crashed = False
         stall_at: int | None = None
         prompt_tokens: int | None = None
         completion_tokens: int | None = None
-        # Shared repetition detector — same class both backends use, so
-        # tuning happens in exactly one place (ollama_io.RepetitionDetector).
+        # Shared repetition detector — same class both backends use.
         repeat = RepetitionDetector()
-        # Prompt-eval bookkeeping (Part 1+2 of MLX-on-Mac robustness).
-        # When mlx_lm.server emits a "Prompt processing progress: N/N"
-        # SSE keepalive (current == total), prompt eval is done. After
-        # that, we expect content tokens to start flowing within
-        # _MLX_GENERATION_KICKOFF_SECONDS. If they don't, the generate
-        # thread inside mlx_lm.server has almost certainly crashed —
-        # most commonly Metal `[metal::malloc] Resource limit exceeded`
-        # — and the HTTP layer just keeps the connection open with
-        # nothing to send. Surface that explicitly instead of waiting
-        # the full stall budget for a generic timeout.
-        prompt_eval_done_at: float | None = None
-        _MLX_GENERATION_KICKOFF_SECONDS = 30.0
+
+        needs_load = (
+            self._loaded_path != self.info.model
+            or self._loaded_model is None
+        )
+        if needs_load and on_progress is not None:
+            try:
+                # Visible signal so the TUI shows "loading MLX model"
+                # instead of a silent multi-second wait on first request.
+                on_progress("mlx_load", 0, 1)
+            except Exception:
+                pass
+
+        # asyncio <-> dedicated-MLX-thread bridge. Load + stream_generate
+        # both run on the same single-thread executor; the worker pushes
+        # tuples; the consumer below reads them with a per-item timeout.
+        loop = asyncio.get_running_loop()
+        q: asyncio.Queue = asyncio.Queue()
+        worker_cancel = threading.Event()
+
+        def _prompt_progress(cur: int, tot: int) -> None:
+            # Runs on the MLX thread. Hop back to the event loop.
+            if on_progress is not None:
+                loop.call_soon_threadsafe(
+                    lambda c=cur, t=tot: _safe_call(on_progress, "prompt_eval", c, t)
+                )
+
+        def _safe_call(fn: Callable, *args) -> None:
+            try:
+                fn(*args)
+            except Exception:
+                pass
+
+        # The full pipeline runs in one thread:
+        #   1. Load model+tokenizer if not cached.
+        #   2. Apply chat template.
+        #   3. Iterate stream_generate, pushing each delta to the queue.
+        # Doing everything here ensures the Metal context is bound to
+        # this single thread for the entire lifetime of the model.
+        info_model = self.info.model
+
+        def _pipeline() -> None:
+            try:
+                model, tokenizer = self._load_sync(info_model)
+                if needs_load:
+                    loop.call_soon_threadsafe(q.put_nowait, ("loaded", None, None, None))
+                # Build prompt via chat template. Falls back to a naive
+                # role/content concat if the tokenizer lacks the template
+                # (rare with modern Instruct models).
+                try:
+                    prompt = tokenizer.apply_chat_template(
+                        messages, tokenize=False, add_generation_prompt=True
+                    )
+                except Exception:
+                    prompt = "\n\n".join(
+                        f"{m.get('role', 'user')}: {m.get('content', '')}"
+                        for m in messages
+                    ) + "\n\nassistant:"
+
+                from mlx_lm.sample_utils import make_sampler  # type: ignore
+                sampler = make_sampler(
+                    temp=temperature, top_p=top_p, min_p=min_p, top_k=top_k,
+                )
+
+                from mlx_lm import stream_generate  # type: ignore
+                last_gen = None
+                for gen in stream_generate(
+                    model, tokenizer, prompt,
+                    max_tokens=max_tokens,
+                    sampler=sampler,
+                    prompt_progress_callback=_prompt_progress,
+                    prefill_step_size=prefill_step_size,
+                ):
+                    if worker_cancel.is_set():
+                        break
+                    last_gen = gen
+                    loop.call_soon_threadsafe(
+                        q.put_nowait, ("text", gen.text, gen.prompt_tokens, gen.generation_tokens)
+                    )
+                pt = getattr(last_gen, "prompt_tokens", None) if last_gen else None
+                ct = getattr(last_gen, "generation_tokens", None) if last_gen else None
+                loop.call_soon_threadsafe(q.put_nowait, ("done", None, pt, ct))
+            except BaseException as e:  # noqa: BLE001 - surface MLX errors too
+                loop.call_soon_threadsafe(q.put_nowait, ("error", e, None, None))
+
+        # Submit on the dedicated MLX executor (single thread).
+        # Future is awaited implicitly via the queue; we just need to
+        # kick it off here.
+        async with self._get_load_lock():
+            self._get_mlx_executor().submit(_pipeline)
+            # If a cold load is needed, drain the "loaded" sentinel
+            # before falling through to the read loop so the on_progress
+            # callback can flip the status panel back to "prompt eval".
+            if needs_load:
+                try:
+                    first = await asyncio.wait_for(q.get(), timeout=overall_seconds)
+                except asyncio.TimeoutError:
+                    worker_cancel.set()
+                    return StreamResult(
+                        text="", tokens=0,
+                        duration_s=time.monotonic() - started,
+                        stalled=True, looped=False, crashed=True,
+                        stall_at_token=None,
+                    )
+                kind = first[0]
+                if kind == "error":
+                    return StreamResult(
+                        text="", tokens=0,
+                        duration_s=time.monotonic() - started,
+                        stalled=True, looped=False, crashed=True,
+                        stall_at_token=None,
+                    )
+                if kind == "loaded":
+                    if on_progress is not None:
+                        try:
+                            on_progress("mlx_load", 1, 1)
+                        except Exception:
+                            pass
+                else:
+                    # Got tokens before a "loaded" sentinel — model was
+                    # already loaded (race with another stream_chat).
+                    # Push the item back for the main consumer.
+                    q.put_nowait(first)
 
         try:
-            async with httpx.AsyncClient(base_url=self.info.endpoint, timeout=None) as client:
-                async with client.stream(
-                    "POST",
-                    "/v1/chat/completions",
-                    json=body,
-                    headers={"accept": "text/event-stream"},
-                ) as response:
-                    response.raise_for_status()
-                    ait = response.aiter_lines().__aiter__()
-                    while True:
-                        try:
-                            line = await asyncio.wait_for(
-                                ait.__anext__(), timeout=stall_seconds
-                            )
-                        except StopAsyncIteration:
-                            break
-                        except asyncio.TimeoutError:
-                            stalled = True
-                            stall_at = n_tokens
-                            break
+            while True:
+                # Check the external cancel event (Ctrl-D). We also poll
+                # it via the per-item wait_for timeout below to avoid
+                # busy-looping on a slow stream.
+                if cancel_event is not None and cancel_event.is_set():
+                    worker_cancel.set()
+                    stalled = True
+                    stall_at = n_tokens
+                    break
+                try:
+                    item = await asyncio.wait_for(q.get(), timeout=min(stall_seconds, 5.0))
+                except asyncio.TimeoutError:
+                    # Either the model is stalled OR we just want to
+                    # poll the cancel event. If the cumulative time on
+                    # this stream is past stall_seconds, treat as stall.
+                    if time.monotonic() - started > stall_seconds and n_tokens == 0:
+                        stalled = True
+                        stall_at = 0
+                        worker_cancel.set()
+                        break
+                    continue
 
-                        if time.monotonic() - started > overall_seconds:
-                            stalled = True
-                            stall_at = n_tokens
-                            break
+                if time.monotonic() - started > overall_seconds:
+                    stalled = True
+                    stall_at = n_tokens
+                    worker_cancel.set()
+                    break
 
-                        # Crash check: prompt eval finished but no tokens
-                        # have arrived in the kickoff window. Almost
-                        # always means mlx_lm.server's generate thread
-                        # died (Metal limit, OOM). Walk this on every
-                        # iteration of the loop, not just on lines we
-                        # parsed, so a long silence after eval is caught.
-                        if (
-                            prompt_eval_done_at is not None
-                            and n_tokens == 0
-                            and time.monotonic() - prompt_eval_done_at
-                                > _MLX_GENERATION_KICKOFF_SECONDS
-                        ):
-                            crashed = True
-                            stall_at = 0
-                            break
-
-                        if not line:
-                            continue
-                        if not line.startswith("data:"):
-                            continue
-                        payload = line[len("data:"):].lstrip()
-                        if not payload:
-                            continue
-                        if payload == "[DONE]":
-                            break
-                        # SSE "comment" frames. mlx_lm.server uses these
-                        # to report prompt-processing progress while it
-                        # ingests the input prompt — useful both for the
-                        # user (a 6000-token prompt is otherwise a
-                        # silent ~30-90s wait) AND for crash detection
-                        # (see prompt_eval_done_at above).
-                        #
-                        # Format we accept:
-                        #   ": keepalive 50/200"
-                        #   ": Prompt processing progress: 50/200"
-                        # Either form gives us (current, total). When
-                        # current == total, prompt eval is done.
-                        if payload.startswith(":"):
-                            m = _MLX_PROGRESS_RE.search(payload)
-                            if m:
-                                cur, tot = int(m.group(1)), int(m.group(2))
-                                if on_progress is not None:
-                                    try:
-                                        on_progress("prompt_eval", cur, tot)
-                                    except Exception:
-                                        pass
-                                if cur >= tot and prompt_eval_done_at is None:
-                                    prompt_eval_done_at = time.monotonic()
-                            continue
-                        try:
-                            chunk = json.loads(payload)
-                        except json.JSONDecodeError:
-                            continue
-                        # Final usage frame (when include_usage=True): the
-                        # OpenAI spec sends choices=[] with usage populated.
-                        # Capture before the choices-empty skip below.
-                        usage = chunk.get("usage")
-                        if isinstance(usage, dict):
-                            pt = usage.get("prompt_tokens")
-                            ct = usage.get("completion_tokens")
-                            if isinstance(pt, int):
-                                prompt_tokens = pt
-                            if isinstance(ct, int):
-                                completion_tokens = ct
-                        choices = chunk.get("choices") or []
-                        if not choices:
-                            continue
-                        delta = choices[0].get("delta") or {}
-                        piece = delta.get("content") or ""
-                        if not piece:
-                            # Some servers send an empty delta as the
-                            # first frame to set role=assistant. Skip.
-                            continue
-                        parts.append(piece)
-                        n_tokens += 1
-                        if on_token is not None:
-                            try:
-                                on_token(piece)
-                            except Exception:
-                                pass
-
-                        # Shared repetition detector — see ollama_io.RepetitionDetector
-                        # for the two-window strategy. Identical behavior on
-                        # both backends.
-                        if repeat.feed(piece):
-                            looped = True
-                            stall_at = n_tokens
-                            break
-        except (httpx.HTTPError, OSError):
-            stalled = True
-            if stall_at is None:
-                stall_at = n_tokens
-
-        # If the per-line stall watchdog fired AFTER prompt eval finished
-        # but BEFORE any content tokens, that's also a server-side crash
-        # — the kickoff-window check above caught it earlier on most
-        # paths, but a long stall_seconds value (e.g. 90s) means the
-        # main aiter timeout could fire before the kickoff window
-        # check runs. Promote stall→crash for that exact pattern.
-        if stalled and not crashed and prompt_eval_done_at is not None and n_tokens == 0:
-            crashed = True
+                kind, payload, pt, ct = item
+                if kind == "error":
+                    worker_cancel.set()
+                    # If it's a hard MLX/Metal error, surface as crashed
+                    # so the agent can show the recovery message.
+                    crashed = True
+                    return StreamResult(
+                        text="".join(parts), tokens=n_tokens,
+                        duration_s=time.monotonic() - started,
+                        stalled=True, looped=False, crashed=True,
+                        stall_at_token=stall_at,
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                    )
+                if kind == "done":
+                    if isinstance(pt, int):
+                        prompt_tokens = pt
+                    if isinstance(ct, int):
+                        completion_tokens = ct
+                    break
+                # kind == "text"
+                piece = payload or ""
+                if isinstance(pt, int):
+                    prompt_tokens = pt
+                if isinstance(ct, int):
+                    completion_tokens = ct
+                if not piece:
+                    continue
+                parts.append(piece)
+                n_tokens += 1
+                if on_token is not None:
+                    _safe_call(on_token, piece)
+                if repeat.feed(piece):
+                    looped = True
+                    stall_at = n_tokens
+                    worker_cancel.set()
+                    break
+        except asyncio.CancelledError:
+            # Caller (agent's task) was cancelled. Stop the worker and
+            # re-raise so the agent's run-loop unwinds cleanly.
+            worker_cancel.set()
+            raise
 
         return StreamResult(
             text="".join(parts),
             tokens=n_tokens,
             duration_s=time.monotonic() - started,
-            stalled=stalled or looped or crashed,
+            stalled=stalled or looped,
             stall_at_token=stall_at,
             looped=looped,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
-            crashed=crashed,
+            crashed=False,
         )
 
     async def is_vlm(self) -> bool:
-        # mlx_lm.server's OpenAI-compatible API is text-only today; vision
-        # MLX models exist but the server doesn't expose image input the
-        # way ollama.show() lets us check capabilities. Treat as False so
-        # the agent keeps screenshots out of MLX prompts.
+        # In-process MLX path doesn't currently surface vision capability
+        # the way ollama.show() does. Keep screenshots out of MLX
+        # prompts so the agent doesn't send images the model can't see.
         return False
-
-
-def _strip_ollama_only_fields(messages: list[dict]) -> list[dict]:
-    """Remove fields Ollama uses that mlx_lm.server doesn't understand.
-
-    Today the only such field is `images` (Ollama's bytes-list shape for
-    vision). Returns a copy; the agent's stored history is untouched.
-    """
-    out: list[dict] = []
-    for m in messages:
-        if "images" in m:
-            mm = dict(m)
-            mm.pop("images", None)
-            out.append(mm)
-        else:
-            out.append(m)
-    return out
 
 
 # -----------------------------------------------------------------------------
@@ -573,11 +669,11 @@ def detect_backend(prefer: str | None = None) -> BackendInfo:
     if prefer == "mlx":
         info = _try_mlx()
         if info is None:
-            endpoint = _mlx_endpoint()
             raise RuntimeError(
-                f"MLX backend selected but mlx_lm.server is not reachable at {endpoint}. "
-                "Start it with: mlx_lm.server --model "
-                "/Users/jonathanrothberg_1/MLX_Models/Qwen3.6-27B-mxfp8 --port 8080"
+                "MLX backend selected but no MLX model could be resolved.\n"
+                "Set MLX_MODEL=<path-or-id> to point at a downloaded MLX "
+                "model, or place a model under ~/MLX_Models/ so it's "
+                "auto-discovered."
             )
         return info
 
@@ -593,10 +689,10 @@ def detect_backend(prefer: str | None = None) -> BackendInfo:
     if fallback is not None:
         return fallback
     raise RuntimeError(
-        "No LLM backend reachable. Start either:\n"
-        "  • Ollama:           `ollama run <model>`  (port 11434)\n"
-        "  • mlx_lm.server:    `mlx_lm.server --model "
-        "/Users/jonathanrothberg_1/MLX_Models/Qwen3.6-27B-mxfp8 --port 8080`"
+        "No LLM backend reachable. Either:\n"
+        "  • Start Ollama: `ollama run <model>`  (port 11434), or\n"
+        "  • Set MLX_MODEL=<path> to a local MLX model, or place one "
+        "under ~/MLX_Models/."
     )
 
 
@@ -768,97 +864,57 @@ def _ollama_full_fallback() -> BackendInfo | None:
 # -----------------------------------------------------------------------------
 
 
+_MLX_IN_PROCESS_ENDPOINT = "in-process"
+
+
 def _mlx_endpoint() -> str:
-    raw = (os.environ.get("MLX_HOST") or "").strip().rstrip("/")
-    if not raw:
-        return "http://127.0.0.1:8080"
-    if not raw.startswith("http"):
-        raw = "http://" + raw
-    return raw
+    """Pseudo-endpoint string for the in-process MLX backend.
+
+    Kept as a public function so callers / status displays that show
+    'where is the model running?' have something stable to print.
+    No HTTP is involved; the model lives in this Python process's
+    GPU VRAM.
+    """
+    return _MLX_IN_PROCESS_ENDPOINT
 
 
 def _try_mlx() -> BackendInfo | None:
-    """Return a BackendInfo if mlx_lm.server is reachable. None otherwise.
+    """Resolve which MLX model to load in-process. None if nothing usable.
 
-    Resolution order for the model id (per user decision):
-      1. MLX_MODEL env var.
-      2. `--model X` arg on the running mlx_lm.server process.
-      3. /v1/models[0] (only one MLX model in HF cache → unambiguous;
-         many → still pick the first, with a clearly-labeled source).
+    Resolution order:
+      1. MLX_MODEL env var (path or HF id).
+      2. Single locally-downloaded MLX model under MLX_MODELS_DIR /
+         ~/MLX_Models / HF cache (unambiguous).
+      3. First locally-downloaded MLX model (with a warning in source).
     """
-    endpoint = _mlx_endpoint()
-    data = _http_get_json(endpoint.rstrip("/") + "/v1/models", timeout=1.0)
-    if data is None:
-        return None
-    available = []
-    for m in (data.get("data") or []) if isinstance(data, dict) else []:
-        if isinstance(m, dict) and m.get("id"):
-            available.append(m["id"])
-
     env_model = (os.environ.get("MLX_MODEL") or "").strip()
     if env_model:
         return BackendInfo(
             name="mlx", model=env_model,
-            source="MLX_MODEL env",
-            endpoint=endpoint,
+            source=f"MLX_MODEL env: {env_model!r}",
+            endpoint=_MLX_IN_PROCESS_ENDPOINT,
         )
 
-    proc_model = _mlx_process_model_arg()
-    if proc_model:
+    local = list_local_mlx_models()
+    chat_local = [p for p in local if _is_chat_capable_tag(p)]
+    if len(chat_local) == 1:
+        path = chat_local[0]
         return BackendInfo(
-            name="mlx", model=proc_model,
-            source=f"mlx_lm.server --model {proc_model!r}",
-            endpoint=endpoint,
+            name="mlx", model=path,
+            source=f"only local MLX chat model: {os.path.basename(path)!r}",
+            endpoint=_MLX_IN_PROCESS_ENDPOINT,
         )
-
-    if len(available) == 1:
+    if chat_local:
+        path = chat_local[0]
         return BackendInfo(
-            name="mlx", model=available[0],
-            source=f"only MLX model in /v1/models: {available[0]!r}",
-            endpoint=endpoint,
-        )
-    if available:
-        return BackendInfo(
-            name="mlx", model=available[0],
+            name="mlx", model=path,
             source=(
-                f"first of {len(available)} in /v1/models: {available[0]!r} "
-                "(set MLX_MODEL or restart mlx_lm.server with --model to disambiguate)"
+                f"first of {len(chat_local)} local MLX models: "
+                f"{os.path.basename(path)!r} "
+                "(set MLX_MODEL to override)"
             ),
-            endpoint=endpoint,
+            endpoint=_MLX_IN_PROCESS_ENDPOINT,
         )
-    # Server is up but no models discovered — unusual; surface so caller
-    # can decide whether to error or fall back.
-    return None
-
-
-_MLX_PROC_MODEL_RE = re.compile(r"--model[=\s]+(\S+)")
-
-
-def _mlx_process_model_arg() -> str | None:
-    """Read `--model X` from the running mlx_lm.server process command line.
-
-    Mirrors `ollama ps` semantics — we want to know what's *actually*
-    running, not just what's in the HF cache. Returns None if no
-    mlx_lm.server process is found or if it was launched without
-    --model (i.e. loads on first request).
-    """
-    try:
-        r = subprocess.run(
-            ["ps", "-axo", "command"],
-            capture_output=True,
-            text=True,
-            timeout=2.0,
-        )
-    except (subprocess.TimeoutExpired, OSError):
-        return None
-    if r.returncode != 0:
-        return None
-    for line in r.stdout.splitlines():
-        if "mlx_lm.server" not in line and "mlx_lm/server.py" not in line:
-            continue
-        m = _MLX_PROC_MODEL_RE.search(line)
-        if m:
-            return m.group(1)
     return None
 
 
@@ -906,31 +962,13 @@ def unload_all_ollama_models(endpoint: str | None = None) -> list[tuple[str, boo
 
 
 def mlx_server_pids() -> list[int]:
-    """PIDs of running mlx_lm.server processes — for the /unload mlx hint.
+    """Always returns [] now that MLX runs in-process.
 
-    Returns empty list if `ps` is unavailable or no server is running.
+    Kept as a no-op shim for chat.py /unload-mlx surfaces; once those
+    surfaces are reworked for the in-process model this function can
+    be deleted.
     """
-    try:
-        r = subprocess.run(
-            ["ps", "-axo", "pid,command"],
-            capture_output=True, text=True, timeout=2.0,
-        )
-    except (subprocess.TimeoutExpired, OSError):
-        return []
-    if r.returncode != 0:
-        return []
-    pids: list[int] = []
-    for line in r.stdout.splitlines():
-        if "mlx_lm.server" not in line and "mlx_lm/server.py" not in line:
-            continue
-        parts = line.strip().split(None, 1)
-        if not parts:
-            continue
-        try:
-            pids.append(int(parts[0]))
-        except ValueError:
-            continue
-    return pids
+    return []
 
 
 def list_ollama_inventory() -> tuple[list[str], set[str]]:
@@ -956,42 +994,19 @@ def list_ollama_inventory() -> tuple[list[str], set[str]]:
 def list_mlx_inventory() -> tuple[list[str], str | None]:
     """(downloaded_chat_models, active_model_or_None) — for /list display.
 
-    "Active" = whatever `--model` arg the running server has, falling back
-    to the env-set MLX_MODEL when the server was launched without --model.
+    "Active" = whatever the in-process MLX backend has currently loaded
+    (MLXBackend._loaded_path), or the env-set MLX_MODEL if nothing's
+    loaded yet this session.
 
-    Source order, merged + deduped:
-      1. /v1/models on the running mlx_lm.server (if up).
-      2. Local disk scan of MLX_MODELS_DIR (or platform defaults). Picks
-         up models the user has downloaded but isn't currently serving —
-         so /list always shows everything they could launch.
-
-    Filters non-chat ids (FLUX, Z-Image, embedding models, ...) using the
-    same fragment list as the Ollama path. The active model is returned
-    as-is even if it would otherwise be filtered.
+    The list is built from a local disk scan of MLX_MODELS_DIR + the
+    platform defaults; the active model is appended even if it would
+    otherwise be filtered.
     """
-    active = _mlx_process_model_arg() or (os.environ.get("MLX_MODEL") or "").strip() or None
-    server_ids: list[str] = []
-    endpoint = _mlx_endpoint()
-    data = _http_get_json(endpoint.rstrip("/") + "/v1/models", timeout=1.0)
-    if isinstance(data, dict):
-        server_ids = [
-            m["id"] for m in (data.get("data") or [])
-            if isinstance(m, dict) and m.get("id")
-        ]
-
+    active = MLXBackend._loaded_path or (os.environ.get("MLX_MODEL") or "").strip() or None
     local_paths = list_local_mlx_models()
 
     merged: list[str] = []
     seen: set[str] = set()
-    # Server-reported ids first (these are what mlx_lm.server already
-    # knows by name; preserves /list ordering for the active session).
-    for sid in server_ids:
-        if sid not in seen and _is_chat_capable_tag(sid):
-            merged.append(sid)
-            seen.add(sid)
-    # Local disk scan next. We add the basename to seen as well so
-    # `~/MLX_Models/Qwen3.6-27B` doesn't appear alongside the bare
-    # `Qwen3.6-27B` already reported by /v1/models.
     for path in local_paths:
         base = os.path.basename(path)
         if path in seen or base in seen:
@@ -1005,8 +1020,6 @@ def list_mlx_inventory() -> tuple[list[str], str | None]:
         merged.append(path)
         seen.add(path)
         seen.add(base)
-    # Always include the active model even if filters dropped it (rare:
-    # user launched a non-chat tag explicitly).
     if active and active not in seen:
         merged.append(active)
     return merged, active
@@ -1105,7 +1118,10 @@ def list_local_mlx_models() -> list[str]:
 
 
 def mlx_endpoint_url() -> str:
-    """Public alias for the resolved mlx_lm.server endpoint URL."""
+    """Public alias for the MLX endpoint string. Returns "in-process" now
+    that MLX runs in this Python process — kept as a function so callers
+    that render an endpoint label have something stable to display.
+    """
     return _mlx_endpoint()
 
 

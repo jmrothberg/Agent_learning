@@ -71,6 +71,17 @@ _REPEAT_LINE_MAX_LEN = 80   # short-line detector only watches lines ≤ 80 char
                             # (long-line variants are caught by the
                             # normalized detector below)
 
+# Window 3 (BLOCK detector): catches the case where the model duplicates a
+# large structured literal (a maze 2D array, a tilemap, a const-table) 3+
+# times within one response. The line-based detectors above miss this
+# because the rows *inside* one block are individually unique; it's the
+# block AS A WHOLE that repeats. We hash an N-line sliding window and
+# count appearances. See games/traces (DOOM/FPS sessions) and the live
+# maze/broken-pipe failure observed 2026-05-10.
+_BLOCK_WINDOW_LINES = 8       # 8 consecutive lines form one "block hash"
+_BLOCK_MIN_BYTES = 200        # skip trivially short blocks (e.g. whitespace)
+_BLOCK_MAX_REPEATS = 3        # 3 identical blocks within one response → loop
+
 
 # Strip trailing digits / underscored numeric suffixes / whitespace from a
 # line so near-duplicates collapse to a single bucket. Examples:
@@ -111,7 +122,10 @@ class RepetitionDetector:
     use the same `_REPEAT_*` thresholds defined at module top.
     """
 
-    __slots__ = ("_line_buf", "_recent_lines", "_recent_lines_norm")
+    __slots__ = (
+        "_line_buf", "_recent_lines", "_recent_lines_norm",
+        "_all_lines", "_block_counts", "stall_reason",
+    )
 
     def __init__(self) -> None:
         self._line_buf = ""
@@ -122,6 +136,15 @@ class RepetitionDetector:
         # numbered-template loop (asset_1, asset_2, …) from the
         # first-person-shooter trace.
         self._recent_lines_norm: list[str] = []
+        # Window 3: rolling N-line sliding window for block-level
+        # duplication (maze/tilemap repetition). We accumulate all lines
+        # and hash the last `_BLOCK_WINDOW_LINES` after each new line.
+        self._all_lines: list[str] = []
+        self._block_counts: dict[str, int] = {}
+        # When feed() returns True the caller can read this to discriminate
+        # ("short_line_loop" / "near_dup_template_loop" / "inline_data_bloat")
+        # and customize the recovery message.
+        self.stall_reason: str | None = None
 
     def feed(self, piece: str) -> bool:
         """Append `piece` to the internal line buffer; on every newline,
@@ -147,15 +170,31 @@ class RepetitionDetector:
                 self._recent_lines_norm.append(norm)
                 if len(self._recent_lines_norm) > _REPEAT_WINDOW_LINES:
                     self._recent_lines_norm.pop(0)
+            # Window 3 (block-level): hash the trailing N lines as a
+            # single block. If we see the same block hash >
+            # _BLOCK_MAX_REPEATS times in one response, the model is
+            # duplicating a structured literal (maze/tilemap/const-table).
+            self._all_lines.append(s)
+            if len(self._all_lines) >= _BLOCK_WINDOW_LINES:
+                tail = self._all_lines[-_BLOCK_WINDOW_LINES:]
+                joined = "\n".join(tail)
+                if len(joined) >= _BLOCK_MIN_BYTES:
+                    h = hash(joined)
+                    self._block_counts[h] = self._block_counts.get(h, 0) + 1
+                    if self._block_counts[h] > _BLOCK_MAX_REPEATS:
+                        self.stall_reason = "inline_data_bloat"
+                        return True
         if (
             len(self._recent_lines) >= _REPEAT_MIN_LINES
             and len(set(self._recent_lines)) <= _REPEAT_MAX_UNIQUE
         ):
+            self.stall_reason = "short_line_loop"
             return True
         if (
             len(self._recent_lines_norm) >= _REPEAT_MIN_LINES
             and len(set(self._recent_lines_norm)) <= _REPEAT_MAX_UNIQUE
         ):
+            self.stall_reason = "near_dup_template_loop"
             return True
         return False
 

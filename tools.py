@@ -142,24 +142,49 @@ EventTarget.prototype.addEventListener = function(type, ...rest) {
 _CANVAS_HASH_JS = """
 () => {
     const c = document.querySelector('canvas');
-    if (!c) return null;
-    const ctx = c.getContext('2d', { willReadFrequently: true });
-    if (!ctx || c.width < 4 || c.height < 4) return null;
-    try {
-        const w = c.width, h = c.height;
-        const N = 32;
-        const out = [];
-        for (let iy = 0; iy < N; iy++) {
-            const y = ((iy + 0.5) * h / N) | 0;
-            for (let ix = 0; ix < N; ix++) {
-                const x = ((ix + 0.5) * w / N) | 0;
-                const d = ctx.getImageData(x, y, 1, 1).data;
-                // Pack into base36 so the resulting string stays compact.
-                out.push(((d[0] << 16) | (d[1] << 8) | d[2]).toString(36));
+    if (!c || c.width < 4 || c.height < 4) return null;
+    const N = 32;
+    const w = c.width, h = c.height;
+    // 2D context: getImageData per sample.
+    const ctx2d = c.getContext('2d', { willReadFrequently: true });
+    if (ctx2d) {
+        try {
+            const out = [];
+            for (let iy = 0; iy < N; iy++) {
+                const y = ((iy + 0.5) * h / N) | 0;
+                for (let ix = 0; ix < N; ix++) {
+                    const x = ((ix + 0.5) * w / N) | 0;
+                    const d = ctx2d.getImageData(x, y, 1, 1).data;
+                    out.push(((d[0] << 16) | (d[1] << 8) | d[2]).toString(36));
+                }
             }
-        }
-        return out.join(',');
-    } catch (e) { return null; }
+            return out.join(',');
+        } catch (e) { /* fall through to WebGL */ }
+    }
+    // WebGL context: read full backbuffer then sample at the same grid.
+    // gl.readPixels has to read the whole framebuffer once because the
+    // back-buffer is invalidated after a single readPixels call on most
+    // drivers. 32x32 samples = 1024 pixels, still tiny.
+    const gl = c.getContext('webgl2', { preserveDrawingBuffer: true })
+            || c.getContext('webgl', { preserveDrawingBuffer: true });
+    if (gl) {
+        try {
+            const buf = new Uint8Array(w * h * 4);
+            gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+            const out = [];
+            for (let iy = 0; iy < N; iy++) {
+                // WebGL Y is flipped relative to canvas Y.
+                const y = h - 1 - (((iy + 0.5) * h / N) | 0);
+                for (let ix = 0; ix < N; ix++) {
+                    const x = ((ix + 0.5) * w / N) | 0;
+                    const i = (y * w + x) * 4;
+                    out.push(((buf[i] << 16) | (buf[i+1] << 8) | buf[i+2]).toString(36));
+                }
+            }
+            return out.join(',');
+        } catch (e) { return null; }
+    }
+    return null;
 }
 """
 
@@ -183,26 +208,52 @@ _CANVAS_PROBE_JS = """
         raf_ran: !!window.__rafRan,
         blank: null,
         sampled_colors: null,
+        ctx_kind: null,  // "2d" | "webgl2" | "webgl" | null
     };
-    const ctx = c.getContext('2d', { willReadFrequently: true });
-    if (!ctx || c.width < 4 || c.height < 4) return out;
-    try {
-        const w = c.width, h = c.height;
-        const N = 32;
-        const colors = new Set();
-        for (let iy = 0; iy < N; iy++) {
-            const y = ((iy + 0.5) * h / N) | 0;
-            for (let ix = 0; ix < N; ix++) {
-                const x = ((ix + 0.5) * w / N) | 0;
-                const d = ctx.getImageData(x, y, 1, 1).data;
-                colors.add((d[0] << 16 | d[1] << 8 | d[2]) | 0);
-                if (colors.size > 4) break; // early-out: clearly not blank
+    if (c.width < 4 || c.height < 4) return out;
+    const N = 32;
+    const w = c.width, h = c.height;
+    // Pass 1: try 2D.
+    const ctx2d = c.getContext('2d', { willReadFrequently: true });
+    if (ctx2d) {
+        out.ctx_kind = "2d";
+        try {
+            const colors = new Set();
+            for (let iy = 0; iy < N; iy++) {
+                const y = ((iy + 0.5) * h / N) | 0;
+                for (let ix = 0; ix < N; ix++) {
+                    const x = ((ix + 0.5) * w / N) | 0;
+                    const d = ctx2d.getImageData(x, y, 1, 1).data;
+                    colors.add((d[0] << 16 | d[1] << 8 | d[2]) | 0);
+                }
             }
-            if (colors.size > 4) break;
-        }
-        out.sampled_colors = colors.size;
-        out.blank = colors.size <= 1;
-    } catch (e) { /* keep blank: null */ }
+            out.sampled_colors = colors.size;
+            out.blank = colors.size <= 1;
+            return out;
+        } catch (e) { /* fall through */ }
+    }
+    // Pass 2: WebGL. Reads full backbuffer (preserveDrawingBuffer required
+    // to survive past the implicit swap that follows a paint).
+    const gl = c.getContext('webgl2', { preserveDrawingBuffer: true })
+            || c.getContext('webgl', { preserveDrawingBuffer: true });
+    if (gl) {
+        out.ctx_kind = gl instanceof WebGL2RenderingContext ? "webgl2" : "webgl";
+        try {
+            const buf = new Uint8Array(w * h * 4);
+            gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+            const colors = new Set();
+            for (let iy = 0; iy < N; iy++) {
+                const y = h - 1 - (((iy + 0.5) * h / N) | 0);
+                for (let ix = 0; ix < N; ix++) {
+                    const x = ((ix + 0.5) * w / N) | 0;
+                    const i = (y * w + x) * 4;
+                    colors.add((buf[i] << 16 | buf[i+1] << 8 | buf[i+2]) | 0);
+                }
+            }
+            out.sampled_colors = colors.size;
+            out.blank = colors.size <= 1;
+        } catch (e) { /* keep blank: null */ }
+    }
     return out;
 }
 """
@@ -1258,6 +1309,31 @@ class LiveBrowser:
                 "samples 1s apart AND no key press changed anything either - "
                 "the game is frozen / stuck on one frame."
             )
+        # Low-color-diversity check: 1024 sample points across the canvas
+        # but only a handful of unique colors → game is barely rendering
+        # (typical: WebGL "Three.js stub" with one cube on solid bg, or a
+        # 2D canvas drawn once with a flat fill). The model can't game
+        # this because the threshold runs harness-side, not as a
+        # model-authored probe. Skip the check on tiny canvases (< 256
+        # pixels) where low diversity is legitimate, and on the input-
+        # responsive case where the canvas may be intentionally minimal
+        # before user input (drawing app, tic-tac-toe blank board).
+        if (canvas_info
+                and canvas_info.get("sampled_colors") is not None
+                and canvas_info.get("blank") is False
+                and canvas_info.get("raf_ran")
+                and canvas_info.get("width", 0) * canvas_info.get("height", 0) >= 256
+                and not input_responsive):
+            n_colors = int(canvas_info["sampled_colors"])
+            if n_colors < 8:
+                report["soft_warnings"].append(
+                    f"HEURISTIC: only {n_colors} unique colors across 1024 "
+                    f"canvas sample points - the scene is trivial (likely a "
+                    f"stub/placeholder, not a finished game). Real games "
+                    f"render at least 8-16 distinct colors even early in "
+                    f"the first frame. Add real sprites, varied geometry, "
+                    f"or proper textures."
+                )
         if input_dead:
             keys_str = ", ".join(input_test.get("keys_tried", []))
             # Don't double-fire if the page only has a button (no canvas
