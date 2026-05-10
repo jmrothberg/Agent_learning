@@ -342,30 +342,50 @@ def test_coverage_gap_clears_when_probe_added():
     assert _criteria_coverage_gaps(criteria, probes_after) == []  # closed
 
 
+def _phase_b_reparse_gate(agent, reply: str) -> bool:
+    """Inline copy of the Phase B re-parse gate from agent.py so we
+    can test the three conditions without running the full async
+    iter loop."""
+    reply_low = reply.lower()
+    has_code = ("<patch>" in reply_low) or ("<html_file>" in reply_low)
+    return bool(agent._planning_coverage_gaps) and ("<probes>" in reply_low) and has_code
+
+
 def test_agent_phase_b_reparse_gate_requires_existing_gap(tmp_path):
-    """The Phase B probe re-parse only fires when
-    self._planning_coverage_gaps is non-empty AND the reply contains
-    <probes>. Empty gap list → no re-parse, even if the reply has a
-    new probes block. (This prevents probe churn turn-over-turn on
-    normally-passing sessions.)"""
+    """No gaps → gate closed even when reply has probes AND code."""
     a = _make_agent(tmp_path)
     a._planning_coverage_gaps = []  # no gaps to close
-    # Even if reply has new probes, the gate keeps self._probes intact.
-    initial_probes = [{"name": "x", "expr": "true"}]
-    a._probes = list(initial_probes)
-    # We assert the GATE CONDITION the agent uses, not the full method
-    # (which is async and lives mid-iter). The gate is:
-    reply_has_probes = "<probes>" in "<probes>[]</probes>".lower()
-    gate_open = bool(a._planning_coverage_gaps) and reply_has_probes
-    assert gate_open is False  # empty gaps → gate closed regardless of reply
+    reply = "<probes>[]</probes>\n<patch>foo</patch>"
+    assert _phase_b_reparse_gate(a, reply) is False
 
 
-def test_agent_phase_b_reparse_gate_opens_when_gaps_exist(tmp_path):
-    """With unresolved coverage gaps AND a <probes> block in the
-    reply, the gate is open. The agent then calls _extract_probes
-    + _criteria_coverage_gaps and swaps in the new probes."""
+def test_agent_phase_b_reparse_gate_opens_when_gaps_and_code_present(tmp_path):
+    """Open: unresolved gaps + <probes> + <patch>. The 'doing real
+    work' condition is what we just added after the asteroid_173200
+    trace: the model has to emit usable code alongside the new
+    probes, not just echo the plan shape."""
     a = _make_agent(tmp_path)
     a._planning_coverage_gaps = ["Edge: pressing space restarts the game."]
-    reply_has_probes = "<probes>" in "before <probes>[...]</probes> after".lower()
-    gate_open = bool(a._planning_coverage_gaps) and reply_has_probes
-    assert gate_open is True
+    reply = "before <probes>[...]</probes>\n<patch>diff</patch> after"
+    assert _phase_b_reparse_gate(a, reply) is True
+
+    # html_file form also opens the gate.
+    reply2 = "<html_file><!doctype html>...</html_file>\n<probes>[...]</probes>"
+    assert _phase_b_reparse_gate(a, reply2) is True
+
+
+def test_agent_phase_b_reparse_gate_closed_when_no_code(tmp_path):
+    """The asteroid_173200 regression: gaps exist, reply has probes,
+    but ZERO code. Gate must STAY CLOSED — credit is reserved for
+    replies that move the loop forward."""
+    a = _make_agent(tmp_path)
+    a._planning_coverage_gaps = ["Edge: pressing space restarts the game."]
+    # Model emitted plan + probes + assets + sounds and no code.
+    reply = (
+        "<plan>...</plan>\n"
+        "<criteria>Edge: ...</criteria>\n"
+        "<probes>[{\"name\":\"x\",\"expr\":\"true\"}]</probes>\n"
+        "<assets>[]</assets>\n"
+        "<sounds>[]</sounds>"
+    )
+    assert _phase_b_reparse_gate(a, reply) is False

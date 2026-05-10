@@ -1423,11 +1423,14 @@ class LiveBrowser:
                     "ok": False,
                     "err": (
                         f"criterion has no probe: {gap[:160]}. "
-                        f"Add a <probes> entry whose name OR expr "
-                        f"references this criterion. To add one, emit a "
-                        f"new complete <probes>...</probes> block in your "
-                        f"next reply — the agent re-parses it when a "
-                        f"coverage_gap__* probe is failing."
+                        f"In your NEXT reply, keep doing your normal "
+                        f"fix work (<patch> or <html_file>) AND include "
+                        f"an updated <probes>...</probes> block that "
+                        f"adds one entry referencing this criterion "
+                        f"(name OR expr should share words with the "
+                        f"criterion text). The probes block is "
+                        f"re-parsed only when accompanied by code — "
+                        f"don't emit probes alone."
                     ),
                     "synthetic": True,
                 })

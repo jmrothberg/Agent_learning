@@ -2620,9 +2620,22 @@ class GameAgent:
             # included a new <probes> block in this reply, swap it in
             # before we run the test. Probes are otherwise immutable
             # after Phase A — this is the one legitimate mid-session
-            # path, gated on an unresolved coverage gap so the model
-            # can't churn probes turn-over-turn.
-            if self._planning_coverage_gaps and "<probes>" in reply.lower():
+            # path, gated on three conditions:
+            #   1. An unresolved coverage gap exists.
+            #   2. The reply contains a new <probes> block.
+            #   3. The reply ALSO contains usable code (<patch> or
+            #      <html_file>) — credit only when the model is doing
+            #      real work, not echoing the plan shape (DeepSeek-V4
+            #      regression observed in asteroid_20260510_173200 where
+            #      iter 1 emitted plan + probes + assets + sounds and
+            #      zero game code).
+            reply_low = reply.lower()
+            has_code = ("<patch>" in reply_low) or ("<html_file>" in reply_low)
+            if (
+                self._planning_coverage_gaps
+                and "<probes>" in reply_low
+                and has_code
+            ):
                 new_probes = self._extract_probes(reply)
                 if new_probes:
                     from tools import _criteria_coverage_gaps as _gaps_fn
