@@ -80,10 +80,11 @@ from memory import (
 from ollama_io import Candidate, StreamResult
 from patches import apply_patches, extract_patches
 
-# Prompt-module routing: v0 is the original prompts.py kept for backward
-# compatibility; v1+ are siblings (prompts_v1.py, prompts_v2.py, ...). The
-# agent picks one at construction time via the `prompt_version` argument.
-import prompts as _prompts_v0  # noqa: E402
+# Prompt-module routing: v1 is the production prompt module (`prompts_v1.py`).
+# v0 (`prompts.py`) was retired — it never grew the playbook / criteria /
+# probes machinery v1 ships with, and every live driver was passing
+# `prompt_version="v1"` already. Future revisions should add `prompts_v2.py`
+# alongside v1 and route via the `prompt_version` constructor argument.
 
 from tools import (
     LiveBrowser,
@@ -244,17 +245,18 @@ class GameAgent:
         # the baseline; the model is asked to ADAPT it (via patches) to
         # the user's goal rather than build from scratch.
         seed_file: str | Path | None = None,
-        # Which prompt module to load. "v0" = prompts.py (original);
-        # "v1", "v2", ... = prompts_vN.py (research-tuned variants). Falls
-        # back to v0 if the requested module isn't installed.
-        prompt_version: str = "v0",
+        # Which prompt module to load. "v1" = prompts_v1.py (production
+        # default). Future revisions should ship as prompts_v2.py /
+        # prompts_v3.py / etc. and pass `prompt_version="v2"`. The
+        # retired v0 (prompts.py) was deleted; passing "v0" or any
+        # missing module raises ImportError immediately.
+        prompt_version: str = "v1",
         # How to seed the first build. "retrieve" (default) = best-match
         # skeleton from past wins; "default" = always use the bundled
         # canvas_basic skeleton (good for tune mode — measures from-scratch
         # ability); "none" = no skeleton, model writes blank-slate.
         skeleton_mode: str = "retrieve",
-        # How many playbook bullets to inject per render. v1+ prompts use
-        # this; v0 ignores it.
+        # How many playbook bullets to inject per render.
         playbook_top_k: int = 6,
         # When True, increment helpful/harmful counters on the playbook
         # bullets that were active during each iteration based on the
@@ -284,13 +286,22 @@ class GameAgent:
         # the FIRST iter only — gated on a complexity heuristic so
         # simple goals stay one-shot.
         use_architect_split: bool = False,
-        # Stop-Losing-To-OneShot todo #6 — model class controls
-        # prompt-size + retrieval-budget trims for mid-tier models.
-        # "auto" (default): substring-match `model` against a small
-        # known-mid table (qwen3.6:27b, qwen3.6:14b, gpt-oss:20b);
-        # anything else is treated as "large". Pass an explicit
-        # "mid"/"large" to override classification.
+        # Prompt-size + retrieval-budget trim. "auto" (default) maps
+        # to "small" — the lean ~5 KB schema biased for mid-size local
+        # LLMs and one-shot strength on simple games. Pass "large"
+        # explicitly when running a frontier-tier model that can absorb
+        # the full schema. NEVER hardwire detection by model name —
+        # the user rotates models constantly.
         model_class: str = "auto",
+        # Stop-Losing-To-OneShot Track A: when iter 1 of a session
+        # ends with score < restart_score_threshold, throw the
+        # session away and restart from scratch. Up to restart_n
+        # total attempts. Best-by-score wins. Mid-size LLMs one-shot
+        # small games well — restarting beats polishing a stinker.
+        # restart_n=1 disables the wrapper (default keeps existing
+        # behavior so callers that don't opt in are unchanged).
+        restart_n: int = 1,
+        restart_score_threshold: float = 60.0,
     ):
         # Backend resolution. Legacy callers pass `model="..."` without
         # `backend=` (notably the unit-test fixtures that never stream);
@@ -391,7 +402,7 @@ class GameAgent:
         # todo #6 — resolve "auto" via simple substring-match. Adding a
         # name to _MID_MODEL_TAGS is a one-line opt-in for new families.
         self._model_class: str = (
-            model_class if model_class in ("mid", "large")
+            model_class if model_class in ("small", "mid", "large")
             else self._classify_model(model)
         )
         self._trace({"kind": "model_class_resolved", "model": model, "model_class": self._model_class})
@@ -437,6 +448,8 @@ class GameAgent:
         # injected loader pattern.
         self._session_sounds: dict[str, Path] = {}
         self._session_looping: set[str] = set()
+        self.restart_n: int = max(1, int(restart_n))
+        self.restart_score_threshold: float = float(restart_score_threshold)
 
     # Read-through to the resolved backend's model id. Existing call sites
     # (trace metadata, conversation dump, memory.record_outcome, ...) used
@@ -447,46 +460,32 @@ class GameAgent:
     def model(self) -> str:
         return self._backend.info.model
 
-    # Stop-Losing-To-OneShot todo #6 — explicit known-mid table.
-    # Open-domain rule: this is about output capacity (parameter count
-    # and verbosity), not subject matter — same exception we already
-    # apply for `_detect_art_intent` modality keywords. Add to the
-    # table when a new mid-tier family ships; defaults to "large" for
-    # any unrecognized tag.
-    _MID_MODEL_TAGS = (
-        "qwen3.6:27b", "qwen3.6:14b", "qwen3:27b", "qwen3:14b",
-        "gpt-oss:20b", "gpt-oss:7b", "gpt-oss:13b",
-        "llama3:8b", "llama3:13b", "llama3.1:8b", "llama3.2:8b",
-        "mistral:7b", "mistral:12b", "phi3:14b",
-    )
-
     @classmethod
     def _classify_model(cls, model: str) -> str:
-        """Return 'mid' or 'large' based on a substring match against
-        _MID_MODEL_TAGS. Open-domain default is 'large' so the trim is
-        opt-in by name; misclassification only costs context size, not
-        correctness."""
-        if not model:
-            return "large"
-        m = model.lower()
-        for tag in cls._MID_MODEL_TAGS:
-            if tag in m:
-                return "mid"
-        return "large"
+        """Default model class.
+
+        We deliberately do NOT inspect the model name. The user runs a
+        rotating set of mid-size local LLMs (~27B-class) — qwen3.6, the
+        next qwen, whatever ships next quarter — and a model-name table
+        would go stale every release. The class is "small" by default:
+        the lean ~5 KB system prompt + drop of the <assets>/<sounds>/
+        <lookup_bullet> pipelines, biased for one-shot strength on simple
+        games. Pass `model_class="large"` explicitly when running a
+        frontier-tier model that can absorb the full schema.
+        """
+        return "small"
 
     @staticmethod
     def _load_prompt_module(version: str):
-        """Resolve the prompt module for `version`. Falls back to v0 silently
-        if the requested module isn't importable, and traces the fallback so
-        misconfigured tune runs are visible.
+        """Resolve the prompt module for `version` (e.g. "v1" → prompts_v1).
+
+        v0 (`prompts.py`) was retired; only `prompts_v{N}.py` modules
+        are supported. An unknown version raises ImportError immediately
+        so misconfigured runs fail fast instead of silently using a
+        stale prompt set.
         """
-        if version == "v0" or not version:
-            return _prompts_v0
-        try:
-            import importlib
-            return importlib.import_module(f"prompts_{version}")
-        except Exception:
-            return _prompts_v0
+        import importlib
+        return importlib.import_module(f"prompts_{version}")
 
     # OpenCoder #1 — two-stage retrieval (broad-then-narrow). Plan stage
     # gets a wider, more permissive cut of the playbook (small models
@@ -539,7 +538,7 @@ class GameAgent:
                 # the goal stays prominent. The retrieval still fetches
                 # k+bonus bullets (more diversity) — only the rendered
                 # char budget is tightened.
-                if self._model_class == "mid":
+                if self._model_class in ("mid", "small"):
                     budget = self._CODE_STAGE_CHAR_BUDGET
                 # Plan stage advertises breadth: top-3 full + the rest as
                 # ID-only index. Model emits <lookup_bullet> if it wants
@@ -1331,6 +1330,28 @@ class GameAgent:
 
         html = self._extract_html(reply)
         if html is not None:
+            # Stop-Losing-To-OneShot: ban full <html_file> rewrites once
+            # a baseline exists. The DOOM trace burned 5 consecutive iters
+            # on truncated rewrites. Force the model into <patch> mode.
+            # Escape hatch: AGENT_ALLOW_FULL_REWRITE=1 lets the rare
+            # genuinely-structural rewrite through. dry_run is exempted
+            # so best-of-N candidate scoring still works on iter 1.
+            allow_rewrite = (
+                os.environ.get("AGENT_ALLOW_FULL_REWRITE", "0").lower()
+                in ("1", "true", "yes")
+            )
+            if (
+                not dry_run
+                and self._current_file
+                and self._snapshot_n >= 1
+                and not allow_rewrite
+            ):
+                return None, (
+                    "<html_file> rejected: a baseline file already exists. "
+                    "Send <patch> SEARCH/REPLACE blocks instead. (Override: "
+                    "AGENT_ALLOW_FULL_REWRITE=1 — only when patches truly "
+                    "cannot express the structural change.)"
+                )
             return html, "full <html_file> rewrite"
 
         return None, "no <patch> or <html_file> in reply"
@@ -1414,6 +1435,151 @@ class GameAgent:
     def _extract_diagnose(reply: str) -> str | None:
         m = _DIAGNOSE_RE.search(reply)
         return m.group(1).strip() if m else None
+
+    # Threshold above which we consider the current file too large to
+    # inject in full on every fix turn. Below this, full-file inject is
+    # cheap and removes any risk of the slice missing context.
+    _FULL_FILE_INJECT_LIMIT = 12_000
+
+    @staticmethod
+    def _identifiers(text: str) -> set[str]:
+        """Pull plausible identifier tokens from arbitrary text. Used to
+        bias the focused-slice toward the function bodies the model is
+        most likely to need to patch."""
+        if not text:
+            return set()
+        # Skip JS keywords + small/numeric tokens that aren't useful.
+        skip = {
+            "true", "false", "null", "undefined", "function", "return",
+            "const", "let", "var", "if", "else", "for", "while", "this",
+            "new", "void", "from", "with", "in", "of", "do", "try", "catch",
+            "throw", "break", "continue", "switch", "case", "default",
+            "Math", "console", "window", "document", "Object", "Array",
+            "true", "yes", "no",
+        }
+        out: set[str] = set()
+        for tok in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", text):
+            if tok in skip:
+                continue
+            out.add(tok)
+        return out
+
+    def _focused_slice(self, html: str, report: dict, criteria: str) -> str | None:
+        """Build a focused slice of the current file, biased toward the
+        functions / regions implicated by the failing probes, the
+        console/page errors, and the model's own <criteria>.
+
+        Returns None when slicing isn't worth it (file is small, or no
+        signals to focus on, or the slice would cover most of the file
+        anyway). Caller in that case sends the full file.
+
+        Stays genre-free: identifier matching is purely structural —
+        no hardcoded function names or game-type heuristics.
+        """
+        if not html or len(html) <= self._FULL_FILE_INJECT_LIMIT:
+            return None
+        # Collect failure signals.
+        sig_text_parts: list[str] = []
+        for k in ("errors", "console_errors", "page_errors", "soft_warnings"):
+            v = report.get(k) or []
+            if isinstance(v, list):
+                sig_text_parts.extend(str(x) for x in v)
+            else:
+                sig_text_parts.append(str(v))
+        for p in (report.get("probes") or []):
+            if not p.get("ok"):
+                sig_text_parts.append(str(p.get("expr", "")))
+                sig_text_parts.append(str(p.get("error", "")))
+        # Criteria identifiers protect against the asteroids regression:
+        # `vx = cos(angle)*speed` stays in scope even when the failing
+        # probe doesn't mention `vx` directly.
+        keyset = self._identifiers("\n".join(sig_text_parts)) | self._identifiers(criteria or "")
+        if not keyset:
+            return None
+
+        # Score each <script> body's function definitions.
+        scripts = re.findall(
+            r"(<script[^>]*>)(.*?)(</script>)",
+            html, re.DOTALL | re.IGNORECASE,
+        )
+        # Function-shaped chunks: `function foo(...) { ... }`,
+        # `const foo = (...) => { ... }`, `foo() { ... }` (method).
+        # Keep the regex simple — we match opening lines then balance braces.
+        chunks: list[tuple[int, str, str]] = []  # (score, header, body_with_header)
+        for (_open, body, _close) in scripts:
+            for m in re.finditer(
+                r"(?:function\s+([A-Za-z_$][\w$]*)|"
+                r"(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\(?[^)]*\)?\s*=>|"
+                r"([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{)",
+                body,
+            ):
+                name = m.group(1) or m.group(2) or m.group(3) or ""
+                # Skip control-flow keywords that the third pattern
+                # spuriously matches (`if (cond) { ... }`,
+                # `for (init; cond; step) { ... }` etc).
+                if not name or name in {
+                    "if", "else", "for", "while", "switch", "do",
+                    "try", "catch", "finally", "return", "throw",
+                }:
+                    continue
+                start = m.start()
+                # Find the opening `{` and balance to find the body end.
+                brace_at = body.find("{", start)
+                if brace_at < 0 or brace_at - start > 200:
+                    continue
+                depth = 0
+                end = brace_at
+                for i in range(brace_at, min(len(body), brace_at + 4000)):
+                    c = body[i]
+                    if c == "{":
+                        depth += 1
+                    elif c == "}":
+                        depth -= 1
+                        if depth == 0:
+                            end = i + 1
+                            break
+                segment = body[start:end]
+                if len(segment) < 30 or len(segment) > 3500:
+                    continue
+                seg_ids = self._identifiers(segment)
+                hits = len(seg_ids & keyset)
+                # Always include functions whose NAME hits a key.
+                if name in keyset:
+                    hits += 5
+                if hits == 0:
+                    continue
+                chunks.append((hits, name, segment))
+
+        if not chunks:
+            return None
+        chunks.sort(key=lambda t: -t[0])
+        kept: list[str] = []
+        used = 0
+        for (_score, name, seg) in chunks:
+            if used + len(seg) > 5000:
+                break
+            kept.append(f"// --- function `{name}` (focused slice) ---\n{seg}")
+            used += len(seg) + 60
+            if len(kept) >= 3:
+                break
+        if not kept:
+            return None
+        if used > len(html) * 0.6:
+            return None
+        return "\n\n".join(kept)
+
+    @staticmethod
+    def _diagnose_is_shotgun(diag: str) -> bool:
+        """Detect ranked-hypothesis shape: >=3 lines starting with `1.`,
+        `2)`, `(3)`, `- `, or `* ` patterns. Mid-size models default to
+        shotgun lists when the prompt allows it; the new fix_instruction
+        forbids them, but we keep this detector so we can both log the
+        violation and tighten the next user turn's reminder.
+        """
+        if not diag:
+            return False
+        list_re = re.compile(r"^\s*(?:[-*]|\(?[1-9][0-9]?\)?[.)])\s+\S", re.MULTILINE)
+        return len(list_re.findall(diag)) >= 3
 
     @staticmethod
     def _extract_notes(reply: str) -> str | None:
@@ -2009,7 +2175,7 @@ class GameAgent:
                 pb_block = self._retrieve_playbook_block(
                     goal, code=seed_html, stage="plan",
                 )
-                pb_kwargs = {"playbook_block": pb_block} if (pb_block and self._prompt_version != "v0") else {}
+                pb_kwargs = {"playbook_block": pb_block} if pb_block else {}
                 build_msg = self._p.seed_build_instruction(
                     seed_html, str(self.seed_file), **pb_kwargs,
                 )
@@ -2067,7 +2233,7 @@ class GameAgent:
                 pb_block = self._retrieve_playbook_block(
                     goal, code=skel.html, stage="plan",
                 )
-                pb_kwargs = {"playbook_block": pb_block} if (pb_block and self._prompt_version != "v0") else {}
+                pb_kwargs = {"playbook_block": pb_block} if pb_block else {}
 
                 # Optional architect step — produce an English design
                 # before code. Only fires on detected complex goals AND
@@ -2279,6 +2445,23 @@ class GameAgent:
             if diag:
                 self._last_diagnose = diag
                 yield self._record(AgentEvent("diagnose", diag))
+                # Shotgun-shape detector: flag when the model emitted a
+                # ranked-hypothesis list. We don't reject the turn (the
+                # patch may still be good); we just trace the violation
+                # so the offline learner can credit/blame this pattern,
+                # and surface an info event so the user sees it too.
+                if self._diagnose_is_shotgun(diag):
+                    self._trace({
+                        "kind": "diagnose_shotgun",
+                        "preview": diag[:240],
+                    })
+                    yield self._record(AgentEvent(
+                        "info",
+                        "format violation: <diagnose> emitted a ranked "
+                        "hypothesis list. The fix_instruction prompt "
+                        "asks for ONE root cause; this turn's patch "
+                        "will still be tried.",
+                    ))
 
             notes = self._extract_notes(reply)
             if notes:
@@ -2915,6 +3098,142 @@ class GameAgent:
         self._record_session_outcome(ok=self.best_path.exists())
         yield self._record(AgentEvent("done", "Iteration cap reached."))
 
+    async def run_with_restarts(
+        self,
+        goal: str,
+        *,
+        continuation: bool = False,
+    ) -> AsyncIterator[AgentEvent]:
+        """Wrap run() with restart-N: if iter 1 of attempt k produces a
+        score below `restart_score_threshold`, throw the session away
+        and try again from scratch. Up to `restart_n` total attempts.
+        Best-by-score wins.
+
+        Mid-size LLMs (qwen-coder 32B, deepseek-coder 33B class) one-shot
+        small games well; the agent's own multi-iter loop empirically
+        regresses them. Restart-N leans into one-shot strength: rather
+        than polish a bad start through 5 fix-turns, throw it away and
+        try again.
+
+        Z-Image asset cache (hash-keyed) is reused across restarts so we
+        don't pay for sprite generation N times. Browser is reused.
+
+        When restart_n=1 (default), this is a thin pass-through to run()
+        and existing callers see no behavior change. continuation=True
+        also passes through unchanged — restarts only make sense for
+        fresh sessions.
+        """
+        if continuation or self.restart_n <= 1:
+            async for ev in self.run(goal, continuation=continuation):
+                yield ev
+            return
+
+        attempts: list[tuple[float, int, Path]] = []  # (score, idx, snapshot_path)
+        canonical_best = self.best_path
+        for k in range(self.restart_n):
+            if k > 0:
+                self._reset_attempt_state()
+                yield self._record(AgentEvent(
+                    "phase", f"restart attempt {k+1}/{self.restart_n}",
+                ))
+            self._trace({
+                "kind": "restart_attempt_start",
+                "attempt_idx": k,
+                "restart_n": self.restart_n,
+            })
+            async for ev in self.run(goal):
+                yield ev
+            score = self._score_attempt()
+            attempt_snap = canonical_best.with_name(
+                f"{canonical_best.stem}.attempt_{k}.html"
+            )
+            try:
+                if canonical_best.exists():
+                    attempt_snap.write_text(
+                        canonical_best.read_text(encoding="utf-8"),
+                        encoding="utf-8",
+                    )
+                    attempts.append((score, k, attempt_snap))
+                else:
+                    attempts.append((score, k, canonical_best))
+            except Exception as e:
+                self._trace({"kind": "restart_snapshot_failed", "err": str(e)})
+                attempts.append((score, k, canonical_best))
+            self._trace({
+                "kind": "restart_attempt_end",
+                "attempt_idx": k,
+                "score": score,
+            })
+            yield self._record(AgentEvent(
+                "info",
+                f"restart attempt {k+1}/{self.restart_n}: score={score:.0f}",
+            ))
+            if score >= 100.0:
+                break
+            if k == 0 and score >= self.restart_score_threshold:
+                # iter-1 was close enough; prefer iterating in-place
+                # (which we just did) over restarting from a clean slate.
+                break
+
+        if not attempts:
+            return
+        attempts.sort(key=lambda t: -t[0])
+        best_score, best_idx, best_path = attempts[0]
+        self._trace({
+            "kind": "restart_winner",
+            "winner_idx": best_idx,
+            "winner_score": best_score,
+            "all": [(s, i) for (s, i, _p) in attempts],
+        })
+        # Install winner as canonical best.html (it may already be the
+        # current contents — this is a no-op in that case).
+        try:
+            if best_path != canonical_best and best_path.exists():
+                canonical_best.write_text(
+                    best_path.read_text(encoding="utf-8"),
+                    encoding="utf-8",
+                )
+        except Exception as e:
+            self._trace({"kind": "restart_install_failed", "err": str(e)})
+        yield self._record(AgentEvent(
+            "info",
+            f"restart winner: attempt {best_idx+1} score={best_score:.0f}",
+        ))
+
+    def _reset_attempt_state(self) -> None:
+        """Reset the per-attempt mutable state so a fresh restart begins
+        from a clean slate. Keeps cross-attempt resources (browser,
+        backend, memory, playbook, generated assets/sounds cache).
+        """
+        self._messages = []
+        self._previous_report_ok = None
+        self._previous_report = None
+        self._iter_budget_bonus = 0
+        self._consecutive_clean_iters = 0
+        self._snapshot_n = 0
+        self._fix_mode = False
+        self._last_diagnose = None
+        self._stuck_streak = 0
+        self._criteria = ""
+        self._probes = []
+        self._current_file = ""
+        self._last_iter_run = 0
+        self._last_report_summary = ""
+        self._pending_bullet_lookups = []
+        self._user_force_done = False
+        self._step_continue = False
+        self._last_screenshot_before = None
+        self._last_screenshot_after = None
+        self._active_bullet_ids = []
+
+    def _score_attempt(self) -> float:
+        """Score the just-finished attempt. Reuses tools.score_test_report
+        on the most recent test report; falls back to 0 when nothing
+        ran (e.g. crash before iter 1 produced a report)."""
+        if self._previous_report_ok is True:
+            return 100.0
+        return score_test_report(self._previous_report or {})
+
     # -- helpers ----------------------------------------------------------
 
     def _build_fix_prompt(
@@ -2962,26 +3281,37 @@ class GameAgent:
             self._goal, code=self._current_file, stage="code",
         )
         fix_kwargs: dict = {}
-        if pb_block and self._prompt_version != "v0":
+        if pb_block:
             fix_kwargs["playbook_block"] = pb_block
-        # Track stuck-streak so v1's fix prompt can switch to the
+        # Track stuck-streak so the fix prompt can switch to the
         # 5-7-causes reflection ladder after repeated failures.
-        if self._prompt_version != "v0":
-            fix_kwargs["stuck_streak"] = self._stuck_streak
+        fix_kwargs["stuck_streak"] = self._stuck_streak
         # Feed the model its own Phase-A acceptance criteria so each fix
         # is anchored to "what does the working game owe me?" instead of
-        # only "what does the report say is wrong?". Criteria are emitted
-        # by v1's PLAN_INSTRUCTION; v0 doesn't ask for them, so this is
-        # naturally a no-op there.
-        if self._prompt_version != "v0" and self._criteria:
+        # only "what does the report say is wrong?".
+        if self._criteria:
             fix_kwargs["criteria_block"] = self._criteria
+        # Build a focused slice when the file is large; falls back to
+        # full-file inject for small files (slice would lose context for
+        # marginal gain). The slice protects against context-pollution
+        # on long sessions where the file passes 12 KB.
         try:
-            fix = self._p.fix_instruction(
-                report_text, self._current_file, hints, **fix_kwargs,
+            slice_text = self._focused_slice(
+                self._current_file, report, self._criteria,
             )
-        except TypeError:
-            # v0's signature doesn't take playbook/stuck/criteria kwargs.
-            fix = self._p.fix_instruction(report_text, self._current_file, hints)
+        except Exception as e:
+            slice_text = None
+            self._trace({"kind": "focused_slice_failed", "err": str(e)})
+        if slice_text:
+            fix_kwargs["focused_slice"] = slice_text
+            self._trace({
+                "kind": "focused_slice_used",
+                "slice_bytes": len(slice_text),
+                "full_bytes": len(self._current_file),
+            })
+        fix = self._p.fix_instruction(
+            report_text, self._current_file, hints, **fix_kwargs,
+        )
         if partial_failed:
             fix += (
                 "\n\nNOTE: some of your previous patches did not apply. "
@@ -2993,11 +3323,15 @@ class GameAgent:
 
         format_anchor = (
             "REPLY FORMAT FOR THIS TURN — emit these tags IN THIS ORDER:\n"
-            "  1. <diagnose>...root cause in ≤2 sentences. Name the function or "
-            "variable. Required.</diagnose>\n"
-            "  2. one or more <patch>...SEARCH/REPLACE...</patch> blocks against "
-            "the current file (or, only if patches truly cannot express the "
-            "change, a single <html_file>...</html_file>).\n"
+            "  1. <diagnose>EXACTLY ONE root cause in ≤2 sentences. Name the "
+            "function or variable. Required. Do NOT enumerate hypotheses; "
+            "do NOT emit a numbered or bulleted list.</diagnose>\n"
+            "  2. ONE <patch>...SEARCH/REPLACE...</patch> block against the "
+            "current file (or, only if patches truly cannot express the "
+            "change AND a baseline does not yet exist OR you are explicitly "
+            "permitted, a single <html_file>...</html_file>). Multiple "
+            "patches in one reply are allowed only when they target the "
+            "same root cause.\n"
             "  3. <notes>one sentence</notes>\n\n"
             "EXAMPLE:\n"
             "<diagnose>The keyup handler is referencing `keys` instead of "
@@ -3032,6 +3366,35 @@ class GameAgent:
             })
         except Exception as e:
             self._trace({"kind": "outcome_record_failed", "err": str(e)})
+        # Close the playbook learning loop. Traces sit in trace_path.parent;
+        # learner.py reads them and merges deltas into playbook.jsonl so
+        # retrieval actually compounds across sessions. Default-on; opt
+        # out via LEARNER_AUTO_APPLY=0 (e.g. tune.py runs that don't want
+        # to mutate the shared playbook).
+        if os.environ.get("LEARNER_AUTO_APPLY", "1").lower() not in ("0", "false", "no"):
+            self._auto_apply_learner()
+
+    def _auto_apply_learner(self) -> None:
+        try:
+            import subprocess
+            import sys
+            traces_dir = self.trace_path.parent
+            learner_script = Path(__file__).parent / "learner.py"
+            if not learner_script.exists():
+                return
+            proc = subprocess.run(
+                [sys.executable, str(learner_script), "apply", str(traces_dir),
+                 "--tests", self._session_id],
+                capture_output=True, text=True, timeout=300, check=False,
+            )
+            self._trace({
+                "kind": "learner_auto_apply",
+                "rc": proc.returncode,
+                "stdout_tail": (proc.stdout or "")[-400:],
+                "stderr_tail": (proc.stderr or "")[-200:],
+            })
+        except Exception as e:
+            self._trace({"kind": "learner_auto_apply_failed", "err": str(e)})
 
     @staticmethod
     def _chunk_for_display(text: str, chunk: int = 120) -> list[str]:

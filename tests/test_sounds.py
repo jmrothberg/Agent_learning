@@ -121,10 +121,14 @@ def test_parse_sounds_block_empty_when_tag_absent():
 
 def test_render_sound_paths_block_includes_loop_flag(tmp_path):
     html_path = tmp_path / "game.html"
+    snd_dir = tmp_path / "g_sounds"
+    snd_dir.mkdir()
     paths = {
-        "laser": tmp_path / "g_sounds" / "laser.ogg",
-        "music": tmp_path / "g_sounds" / "music.ogg",
+        "laser": snd_dir / "laser.ogg",
+        "music": snd_dir / "music.ogg",
     }
+    for p in paths.values():
+        p.write_bytes(b"OggS\x00\x00")           # placeholder; filter only checks exists()
     block = sounds.render_sound_paths_block(
         paths, html_path, looping_names={"music"},
     )

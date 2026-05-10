@@ -222,13 +222,14 @@ PATCH_FORMAT = FormatSpec(
 DIAGNOSE_FORMAT = FormatSpec(
     name="<diagnose>",
     snippet=(
-        "<diagnose>...</diagnose>     Root cause in ≤2 sentences BEFORE "
-        "patches on a fix turn."
+        "<diagnose>...</diagnose>     ONE root cause in ≤2 sentences "
+        "BEFORE patches on a fix turn."
     ),
     guidelines=[
-        "Be concrete: name the function, the variable, or the missing "
-        "wiring. If multiple things are wrong, list the ONE that explains "
-        "the most failures.",
+        "Name EXACTLY ONE root cause: the function, the variable, or "
+        "the missing wiring responsible for the most failures. Do NOT "
+        "enumerate 5-7 hypotheses. Do NOT emit a numbered or bulleted "
+        "list of possibilities. ≤2 sentences total.",
     ],
 )
 
@@ -382,10 +383,27 @@ def build_system_prompt(
     <anti-patterns> block. Mid-tier models (qwen3.6:27b, gpt-oss:20b
     class) sometimes treat anti-patterns as features-to-add by mistake;
     dropping the block surfaces the goal earlier in attention and frees
-    ~600-1000 chars of context. "large" / "auto" (default) keeps the
-    full prompt unchanged.
+    ~600-1000 chars of context. "small" goes further: drops the
+    <assets>, <sounds>, <lookup_bullet> tags entirely (so the assets
+    pipeline is opt-out for the small-model class), collapses
+    <workflow> to a 4-line summary, and removes the
+    <reasoning-license> + <user-presence> blocks. Target ≤ 6 KB so
+    qwen2.5-coder-32B / deepseek-coder-33B class models can spend their
+    capacity on the game, not on the schema. "large" / "auto" (default)
+    keeps the full prompt unchanged.
     """
-    fmts = formats if formats is not None else ALL_FORMATS
+    is_small = (model_class == "small")
+    if formats is None:
+        if is_small:
+            # Drop sprite + sound generation pipelines and the on-demand
+            # playbook lookup mechanism. The model writes a self-contained
+            # game instead of orchestrating an asset pipeline.
+            _SMALL_DROP = {"<assets>", "<sounds>", "<lookup_bullet>"}
+            fmts = [f for f in ALL_FORMATS if f.name not in _SMALL_DROP]
+        else:
+            fmts = ALL_FORMATS
+    else:
+        fmts = formats
 
     output_tags = "\n".join(f"  {f.snippet}" for f in fmts)
 
@@ -401,27 +419,10 @@ def build_system_prompt(
     # <hard-rules> block above already covers the highest-priority
     # invariants; ANTI_PATTERNS is largely "don't do X" cautionary
     # detail that 27B-class models tend to enumerate AT us in <notes>
-    # instead of internalizing.
-    skip_anti_patterns = (model_class == "mid")
+    # instead of internalizing. Small-tier inherits the trim.
+    skip_anti_patterns = (model_class in ("mid", "small"))
 
-    return f"""<role>
-Act as an expert HTML5 game and UI engineer. You ship single-file HTML
-applications (HTML + CSS + JavaScript in ONE file) that work in real
-Chromium. You are diligent and tireless. You NEVER leave comments
-describing code without implementing it. You always COMPLETELY IMPLEMENT
-what the user asked for.
-</role>
-
-<objective>
-GOAL FROM THE USER:
-{goal}
-
-A real Chromium browser is going to load your file and run an automated
-test. You will see the test report. Iterate until it passes cleanly OR
-you and the user agree it is shipped.
-</objective>
-
-<workflow>
+    workflow_full = """<workflow>
 PHASE A — planning (1 turn). You output ONLY the tags below, no code:
   <plan>...</plan>            short design plan
   <criteria>...</criteria>    3 to 5 acceptance criteria covering basic,
@@ -449,7 +450,69 @@ PHASE C — self-critique (1 turn). When the run is clean and you say
 <done/>, the harness asks you to second-guess. Default reply is
 <confirm_done/>. Only emit <patch> if you can name a CONCRETE crash-class
 bug a real player would hit.
-</workflow>
+</workflow>"""
+    workflow_small = """<workflow>
+Phase A: emit <plan>, <criteria>, <probes>. No code.
+Phase B iter 1: emit one complete <html_file>.
+Phase B iter 2+: emit <patch> SEARCH/REPLACE blocks against the file on disk.
+Phase C: reply with <confirm_done/> unless a real player would hit a crash.
+</workflow>"""
+    workflow_block = workflow_small if is_small else workflow_full
+
+    iter_policy_full = """<iteration-policy>
+WORKING > PERFECT. Read this twice.
+
+  - Once a turn passes the test cleanly, that version is SACRED. Treat
+    it as the baseline. The harness saved it; do not throw it away.
+  - Never rewrite working code wholesale. Patch only. Make ONE focused
+    change at a time. After a clean turn, prefer ending with <done/>
+    over any further change.
+  - If you must change something post-clean, the change must be SMALL
+    and TARGETED. Use <notes> to name exactly the one thing you changed.
+  - A regression on a working game is the worst outcome — worse than
+    shipping with minor cosmetic flaws.
+  - Each iteration costs real wall-clock seconds. Combine fixes into one
+    multi-patch reply rather than spreading across turns.
+</iteration-policy>"""
+    iter_policy_small = """<iteration-policy>
+WORKING > PERFECT. After a clean turn, ship with <done/>. Patches only;
+ONE focused change per turn. No regressions on a working game.
+</iteration-policy>"""
+    iter_policy_block = iter_policy_small if is_small else iter_policy_full
+
+    extras_block = "" if is_small else """<reasoning-license>
+Your reasoning inside <plan>, <criteria>, and <diagnose> can be thorough
+— it's fine if it's long. Format compliance matters more than brevity in
+those tags. Outside tags, be brief: the parser ignores prose anyway.
+</reasoning-license>
+
+<user-presence>
+A REAL HUMAN is watching the Chromium window. They can type feedback at
+any time; if they do, it appears in your next user-turn message inside a
+loud fenced block prefixed with "USER FEEDBACK". That feedback OVERRIDES
+any plan or default behavior — address it explicitly the same turn.
+</user-presence>
+
+"""
+
+    return f"""<role>
+Act as an expert HTML5 game and UI engineer. You ship single-file HTML
+applications (HTML + CSS + JavaScript in ONE file) that work in real
+Chromium. You are diligent and tireless. You NEVER leave comments
+describing code without implementing it. You always COMPLETELY IMPLEMENT
+what the user asked for.
+</role>
+
+<objective>
+GOAL FROM THE USER:
+{goal}
+
+A real Chromium browser is going to load your file and run an automated
+test. You will see the test report. Iterate until it passes cleanly OR
+you and the user agree it is shipped.
+</objective>
+
+{workflow_block}
 
 <output-tags>
 Use these tags exactly. The parser reads tags only; prose outside tags is
@@ -484,36 +547,9 @@ ULTRA IMPORTANT — never do these. They have caused failed runs:
 {anti_patterns_block}
 </anti-patterns>'''}
 
-<iteration-policy>
-WORKING > PERFECT. Read this twice.
+{iter_policy_block}
 
-  - Once a turn passes the test cleanly, that version is SACRED. Treat
-    it as the baseline. The harness saved it; do not throw it away.
-  - Never rewrite working code wholesale. Patch only. Make ONE focused
-    change at a time. After a clean turn, prefer ending with <done/>
-    over any further change.
-  - If you must change something post-clean, the change must be SMALL
-    and TARGETED. Use <notes> to name exactly the one thing you changed.
-  - A regression on a working game is the worst outcome — worse than
-    shipping with minor cosmetic flaws.
-  - Each iteration costs real wall-clock seconds. Combine fixes into one
-    multi-patch reply rather than spreading across turns.
-</iteration-policy>
-
-<reasoning-license>
-Your reasoning inside <plan>, <criteria>, and <diagnose> can be thorough
-— it's fine if it's long. Format compliance matters more than brevity in
-those tags. Outside tags, be brief: the parser ignores prose anyway.
-</reasoning-license>
-
-<user-presence>
-A REAL HUMAN is watching the Chromium window. They can type feedback at
-any time; if they do, it appears in your next user-turn message inside a
-loud fenced block prefixed with "USER FEEDBACK". That feedback OVERRIDES
-any plan or default behavior — address it explicitly the same turn.
-</user-presence>
-
-The parser reads tags only. Anything outside tags is ignored. Now wait
+{extras_block}The parser reads tags only. Anything outside tags is ignored. Now wait
 for the harness's first user turn (planning) and respond with the right
 tags."""
 
@@ -990,16 +1026,22 @@ def fix_instruction(
     playbook_block: str = "",
     stuck_streak: int = 0,
     criteria_block: str = "",
+    focused_slice: str = "",
 ) -> str:
     """Combined diagnose + fix turn.
 
     `stuck_streak` is the count of consecutive failed iterations before
-    this one. When it's ≥ 2, we add the OpenHands "5-7 different
-    possible sources" reflection ladder before the fix — that is the
-    canonical small-model stuck-loop unblocker.
+    this one. When it's ≥ 2, the prompt forces the model to commit to
+    ONE root cause + ONE patch (no shotgun hypothesis lists).
 
     `playbook_block` is the rendered <playbook> retrieved against the
     current goal + file; when empty the section is omitted.
+
+    `focused_slice` (Stop-Losing-To-OneShot Track B): when the current
+    file is large and a relevance-scored slice has been built, send
+    that slice instead of the full file. The patch matcher applies
+    against the on-disk file — the model only needs the slice for
+    reasoning. Falls back to full file when empty.
     """
     hints = ""
     if mistakes_hints:
@@ -1029,11 +1071,34 @@ def fix_instruction(
     if stuck_streak >= 2:
         stuck = (
             "STUCK-LOOP CHECK — you've now had at least 2 failed "
-            "iterations on this issue. STEP BACK and reflect inside "
-            "<diagnose> on 5 to 7 DIFFERENT possible sources of the "
-            "problem (not 5 to 7 fixes — 5 to 7 hypotheses about what's "
-            "wrong). Rank them by likelihood. Then attack the single "
-            "highest-likelihood cause with this turn's <patch>.\n\n"
+            "iterations on this issue. STEP BACK and PICK ONE root "
+            "cause that explains the most failures. Inside <diagnose>, "
+            "name the SINGLE function or variable responsible in ≤2 "
+            "sentences — do NOT enumerate hypotheses, do NOT rank a "
+            "list of possibilities. Then send ONE focused <patch> for "
+            "that one cause. Multiple ranked hypotheses in <diagnose> "
+            "will be rejected.\n\n"
+        )
+    if focused_slice:
+        file_block = (
+            "FOCUSED SLICE OF THE CURRENT FILE (the regions implicated by "
+            "the failing report, biased by your own <criteria>). Patch "
+            "anchors will be matched against the FULL file on disk; this "
+            "slice is for reasoning. If the slice doesn't show what you "
+            "need, send a SEARCH/REPLACE block anyway — the matcher will "
+            "find it on disk.\n"
+            "```js\n"
+            f"{focused_slice}\n"
+            "```\n\n"
+        )
+    else:
+        file_block = (
+            "CURRENT FILE ON DISK (this is the SOURCE OF TRUTH — patch "
+            "against THIS exact text, character-for-character; earlier "
+            "turns' code may be stale):\n"
+            "```html\n"
+            f"{current_file}\n"
+            "```\n\n"
         )
     return (
         f"{report_text}\n\n"
@@ -1041,12 +1106,7 @@ def fix_instruction(
         f"{pb}"
         f"{crit}"
         f"{stuck}"
-        "CURRENT FILE ON DISK (this is the SOURCE OF TRUTH — patch "
-        "against THIS exact text, character-for-character; earlier "
-        "turns' code may be stale):\n"
-        "```html\n"
-        f"{current_file}\n"
-        "```\n\n"
+        f"{file_block}"
         f"{PATCH_REMINDER}"
     )
 

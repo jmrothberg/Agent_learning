@@ -777,6 +777,34 @@ def _link_or_copy(src: Path, dst: Path) -> None:
         pass
 
 
+def _filter_existing_assets(
+    asset_paths: dict[str, Path],
+) -> dict[str, Path]:
+    """Drop entries whose PNG isn't on disk so we never inject a path
+    the page will hit as ERR_FILE_NOT_FOUND. Floppy-birds trace burned
+    iterations chasing missing-file console errors that the model could
+    not fix because the corresponding code reference was correct.
+    """
+    kept: dict[str, Path] = {}
+    dropped: list[str] = []
+    for name, path in asset_paths.items():
+        try:
+            if Path(path).exists():
+                kept[name] = path
+            else:
+                dropped.append(name)
+        except Exception:
+            dropped.append(name)
+    if dropped:
+        print(
+            f"[assets] dropped {len(dropped)} missing PNG path(s) "
+            f"before injection: {', '.join(dropped[:5])}"
+            + ("…" if len(dropped) > 5 else ""),
+            flush=True,
+        )
+    return kept
+
+
 def render_asset_paths_block(
     asset_paths: dict[str, Path], session_html_path: Path | str,
 ) -> str:
@@ -793,6 +821,9 @@ def render_asset_paths_block(
     PNGs, the model treats the asset list as descriptive rather than
     actionable, and ships a bare procedural game.
     """
+    if not asset_paths:
+        return ""
+    asset_paths = _filter_existing_assets(asset_paths)
     if not asset_paths:
         return ""
     html_dir = Path(session_html_path).resolve().parent

@@ -959,26 +959,149 @@ def list_mlx_inventory() -> tuple[list[str], str | None]:
     "Active" = whatever `--model` arg the running server has, falling back
     to the env-set MLX_MODEL when the server was launched without --model.
 
+    Source order, merged + deduped:
+      1. /v1/models on the running mlx_lm.server (if up).
+      2. Local disk scan of MLX_MODELS_DIR (or platform defaults). Picks
+         up models the user has downloaded but isn't currently serving —
+         so /list always shows everything they could launch.
+
     Filters non-chat ids (FLUX, Z-Image, embedding models, ...) using the
     same fragment list as the Ollama path. The active model is returned
-    as-is even if it would otherwise be filtered, so the user always sees
-    what's actually loaded.
+    as-is even if it would otherwise be filtered.
     """
+    active = _mlx_process_model_arg() or (os.environ.get("MLX_MODEL") or "").strip() or None
+    server_ids: list[str] = []
     endpoint = _mlx_endpoint()
     data = _http_get_json(endpoint.rstrip("/") + "/v1/models", timeout=1.0)
-    if data is None:
-        return [], None
-    all_ids = [
-        m["id"] for m in (data.get("data") or [])
-        if isinstance(m, dict) and m.get("id")
+    if isinstance(data, dict):
+        server_ids = [
+            m["id"] for m in (data.get("data") or [])
+            if isinstance(m, dict) and m.get("id")
+        ]
+
+    local_paths = list_local_mlx_models()
+
+    merged: list[str] = []
+    seen: set[str] = set()
+    # Server-reported ids first (these are what mlx_lm.server already
+    # knows by name; preserves /list ordering for the active session).
+    for sid in server_ids:
+        if sid not in seen and _is_chat_capable_tag(sid):
+            merged.append(sid)
+            seen.add(sid)
+    # Local disk scan next. We add the basename to seen as well so
+    # `~/MLX_Models/Qwen3.6-27B` doesn't appear alongside the bare
+    # `Qwen3.6-27B` already reported by /v1/models.
+    for path in local_paths:
+        base = os.path.basename(path)
+        if path in seen or base in seen:
+            continue
+        # The chat-cap check has to look at the full path: HF cache
+        # layouts put the SHA in basename and the model id 2 levels up
+        # (`hub/models--<org>--<name>/snapshots/<sha>`), so checking
+        # only `base` would let embedding models slip through.
+        if not _is_chat_capable_tag(path):
+            continue
+        merged.append(path)
+        seen.add(path)
+        seen.add(base)
+    # Always include the active model even if filters dropped it (rare:
+    # user launched a non-chat tag explicitly).
+    if active and active not in seen:
+        merged.append(active)
+    return merged, active
+
+
+def _default_mlx_search_dirs() -> list[str]:
+    """Where to look for locally-downloaded MLX models.
+
+    Override per-machine via the MLX_MODELS_DIR env var (single path or
+    `:`-separated list). Defaults cover the common machine layouts the
+    user has used: `~/MLX_Models`, then HF cache.
+    """
+    home = os.path.expanduser("~")
+    return [
+        os.path.join(home, "MLX_Models"),
+        os.path.join(home, "Models_MLX"),
+        os.path.join(home, ".cache", "huggingface", "hub"),
+        "/opt/mlx_models",
     ]
-    active = _mlx_process_model_arg() or (os.environ.get("MLX_MODEL") or "").strip() or None
-    downloaded = [name for name in all_ids if _is_chat_capable_tag(name)]
-    # If the active server is on a "non-chat" id (rare — user explicitly
-    # started mlx_lm.server on it), surface it anyway so it's selectable.
-    if active and active not in downloaded and active in all_ids:
-        downloaded.append(active)
-    return downloaded, active
+
+
+def _is_mlx_model_dir(path: str) -> bool:
+    """A directory looks like an MLX model when it has config.json plus
+    at least one .safetensors file."""
+    try:
+        if not os.path.isfile(os.path.join(path, "config.json")):
+            return False
+        for name in os.listdir(path):
+            if name.endswith(".safetensors"):
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def _scan_mlx_models_dir(root: str) -> list[str]:
+    """Find downloaded MLX model directories under `root`.
+
+    Direct children that look like model dirs win. We also walk one
+    level into HF-cache style layouts (`models--org--name/snapshots/<sha>/`)
+    so the HF cache is covered without a separate scanner.
+    """
+    out: list[str] = []
+    if not root or not os.path.isdir(root):
+        return out
+    seen: set[str] = set()
+    try:
+        children = list(os.scandir(root))
+    except OSError:
+        return out
+    for entry in children:
+        if not entry.is_dir(follow_symlinks=False):
+            continue
+        if _is_mlx_model_dir(entry.path):
+            ap = os.path.abspath(entry.path)
+            if ap not in seen:
+                out.append(ap)
+                seen.add(ap)
+            continue
+        snapshots = os.path.join(entry.path, "snapshots")
+        if os.path.isdir(snapshots):
+            try:
+                for snap in os.scandir(snapshots):
+                    if snap.is_dir(follow_symlinks=False) and _is_mlx_model_dir(snap.path):
+                        ap = os.path.abspath(snap.path)
+                        if ap not in seen:
+                            out.append(ap)
+                            seen.add(ap)
+            except OSError:
+                pass
+    out.sort()
+    return out
+
+
+def list_local_mlx_models() -> list[str]:
+    """All locally-downloaded MLX model paths the user can launch.
+
+    Walks every entry in MLX_MODELS_DIR (env-overridable, `:`-separated)
+    plus the platform defaults from `_default_mlx_search_dirs`. Result
+    is a stable, deduped list of absolute directory paths suitable for
+    passing to `mlx_lm.server --model <path>`.
+    """
+    raw_env = (os.environ.get("MLX_MODELS_DIR") or "").strip()
+    roots: list[str] = []
+    if raw_env:
+        roots.extend(p.strip() for p in raw_env.split(":") if p.strip())
+    roots.extend(_default_mlx_search_dirs())
+    out: list[str] = []
+    seen: set[str] = set()
+    for r in roots:
+        for p in _scan_mlx_models_dir(os.path.expanduser(r)):
+            if p not in seen:
+                out.append(p)
+                seen.add(p)
+    return out
 
 
 def mlx_endpoint_url() -> str:

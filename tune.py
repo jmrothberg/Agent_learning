@@ -833,8 +833,9 @@ def main() -> int:
 
     pr = sub.add_parser("run", help="run the battery")
     pr.add_argument("--model", default=DEFAULT_MODEL)
-    pr.add_argument("--prompt-version", default="v0",
-                    help="which prompt to use; v0 = current prompts.py, v1+ = prompts_vN.py")
+    pr.add_argument("--prompt-version", default="v1",
+                    help="which prompt module to load; v1 = prompts_v1.py (default, and "
+                         "what chat.py / coder.py use). The retired v0 prompts.py was deleted.")
     pr.add_argument("--full", action="store_true",
                     help=f"full mode (max_iters={FULL_MAX_ITERS}, best_of_n={FULL_BEST_OF_N}); "
                          f"default is quick (iters={QUICK_MAX_ITERS}, bon={QUICK_BEST_OF_N})")

@@ -702,6 +702,18 @@ class CodingBoxApp(App):
         # /seed stages an existing HTML file as the baseline for the next
         # /new session. Cleared once consumed.
         self._next_seed: Path | None = None
+        # Stop-Losing-To-OneShot Track A — restart-N. The threshold gate
+        # makes 2 essentially free for simple games (they pass iter 1
+        # with score > 60 and never trigger a restart) while giving hard
+        # games (DOOM, pac-man) a second chance from a clean slate.
+        # /restarts <N> overrides per session.
+        self._restart_n: int = 2
+        self._restart_threshold: float = 60.0
+        # System-prompt trim level. None = "auto" → resolves to "small"
+        # in GameAgent (lean ~5 KB schema). Override via /model-class
+        # large when running a frontier-tier model. We do NOT inspect
+        # the model name — the user rotates local LLMs constantly.
+        self._model_class: str | None = None
 
     # ----------------------------- layout ---------------------------------
 
@@ -1260,6 +1272,12 @@ class CodingBoxApp(App):
                 self._cmd_status()
             elif cmd == "wait":
                 self._cmd_toggle_wait(arg)
+            elif cmd == "restarts":
+                self._cmd_set_restarts(arg)
+            elif cmd in ("model-class", "modelclass"):
+                self._cmd_set_model_class(arg)
+            elif cmd == "launch":
+                self._cmd_launch_mlx(arg)
             else:
                 self._log_info(f"unknown command /{cmd} — type /help")
         except Exception as e:
@@ -1282,10 +1300,13 @@ class CodingBoxApp(App):
             "  [b]/help[/b]                    show this help (also /h, /?)",
             "  [b]/list[/b]                    unified Ollama + MLX list with numbers (also /models)",
             "  [b]/load <N|name>[/b]           pick model #N from /list (any backend) · STICKY across /new (also /model)",
+            "  [b]/launch <N|name|path>[/b]   start mlx_lm.server on an MLX model from /list (auto-stages it for next /new)",
             "  [b]/backend <auto|ollama|mlx>[/b]  stage default backend when no specific model is staged",
             "  [b]/unload [N|name|all|mlx][/b]  free VRAM · #N from /list · bare = active session · all = every Ollama (MLX untouched) · mlx = kill cmd",
             "  [b]/seed <path>[/b]             stage a baseline .html (STICKY across /new) · /seed alone clears",
             "  [b]/iters <N>[/b]               set max iterations (sticky)",
+            "  [b]/restarts <N>[/b]            independent full restarts when iter-1 score < 60 (sticky · default 2 · 1=off)",
+            "  [b]/model-class <auto|small|mid|large>[/b]  override prompt-size trim (sticky · default 'small' = lean ~5KB)",
             "  [b]/reset[/b]                   wipe ALL staged state (seed + model + iters → defaults)",
             "  [b]/new <goal>[/b]              end current session, start a fresh one (uses staged seed/model)",
             "  [b]/ship[/b]                    ship current build (= Ctrl+D, or type 'done')",
@@ -1368,9 +1389,18 @@ class CodingBoxApp(App):
                 is_staged = name == self._next_model and staged_backend == "mlx"
             mark_active = "  [yellow]← active[/yellow]" if is_active else ""
             mark_staged = "  [magenta]← staged[/magenta]" if is_staged else ""
+            # Show MLX entries by short basename when they're disk paths
+            # (avoids screen-eating absolute paths for the common case).
+            # The full path is still what /load N picks for launching.
+            if b == "mlx" and "/" in name:
+                display = Path(name).name
+                hint = f"  [dim]({Path(name).parent})[/dim]"
+            else:
+                display = name
+                hint = ""
             self._log(
-                f"  [{i:>2}] [b]{tag}[/b] {loaded} {_esc(name)}"
-                f"{mark_active}{mark_staged}"
+                f"  [{i:>2}] [b]{tag}[/b] {loaded} {_esc(display)}"
+                f"{mark_active}{mark_staged}{hint}"
             )
         self._log(
             "[dim]Use [b]/load N[/b] (or /model N) to stage by number, or "
@@ -1675,6 +1705,141 @@ class CodingBoxApp(App):
             f"max iterations set to [b]{self._max_iters}[/b] for next session/extension"
         )
 
+    def _cmd_set_restarts(self, arg: str) -> None:
+        """/restarts N — when iter 1 of a session ends below the score
+        threshold (60/100), throw it away and try again from scratch up
+        to N total times. Best-by-score wins. Default 2 (cheap insurance
+        — simple games pass iter 1 and never restart; hard games get a
+        second clean attempt). Set to 1 to disable.
+        """
+        if not arg.isdigit() or int(arg) <= 0:
+            self._log_info(
+                f"usage: /restarts <positive int>  (current: {self._restart_n}). "
+                "Default 2; set to 1 to disable, 3+ for harder games."
+            )
+            return
+        self._restart_n = int(arg)
+        self._log_info(
+            f"restart-N set to [b]{self._restart_n}[/b] for next session"
+        )
+
+    def _cmd_launch_mlx(self, arg: str) -> None:
+        """/launch <N|name|path> — start mlx_lm.server on the chosen MLX
+        model in the background. Prints PID and log path; the next /new
+        will pick up the new server automatically.
+
+        Use this when /list shows an MLX model you have on disk but
+        mlx_lm.server isn't currently serving it. Typing the equivalent
+        shell command isn't required.
+        """
+        import subprocess
+        import shutil
+        import time
+
+        if not arg.strip():
+            self._log_info(
+                "usage: /launch <N|name|path>  — picks an MLX entry from /list "
+                "and starts mlx_lm.server in the background"
+            )
+            return
+
+        # First, see if mlx_lm is callable.
+        mlx_bin = shutil.which("mlx_lm.server")
+        python_bin = shutil.which("python") or sys.executable
+        if mlx_bin is None:
+            # Fall back to `python -m mlx_lm.server` — works in the venv
+            # even when the script wrapper isn't on PATH.
+            cmd_prefix = [python_bin, "-m", "mlx_lm.server"]
+        else:
+            cmd_prefix = [mlx_bin]
+
+        # Resolve the arg against /list. Reuse the same matcher /unload uses.
+        backend_name, model_name = self._resolve_listing_arg(arg.strip())
+        if model_name is None:
+            return  # error already logged
+        if backend_name != "mlx":
+            self._log_error(
+                f"{model_name!r} is an Ollama tag — /launch is for MLX. "
+                "Ollama loads on demand; just /load it and run /new."
+            )
+            return
+
+        existing_pids = backend_mod.mlx_server_pids()
+        if existing_pids:
+            self._log_info(
+                f"[yellow]mlx_lm.server already running[/yellow] "
+                f"(pids: {' '.join(str(p) for p in existing_pids)}). "
+                "Stop it first with /unload mlx (which prints the kill cmd), "
+                "then re-run /launch."
+            )
+            return
+
+        # Resolve port. mlx_lm.server defaults to 8080; we use whatever the
+        # MLX_HOST env points to (port stripped from the URL).
+        endpoint = backend_mod.mlx_endpoint_url()
+        try:
+            port = int(endpoint.rsplit(":", 1)[-1].split("/", 1)[0])
+        except ValueError:
+            port = 8080
+
+        log_path = self._out_path.parent / "mlx_lm.server.log" if self._out_path \
+            else Path.cwd() / "mlx_lm.server.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        cmd = cmd_prefix + ["--model", model_name, "--port", str(port)]
+        self._log_info(
+            f"launching: [b]{' '.join(_esc(c) for c in cmd)}[/b]  "
+            f"[dim]→ {log_path}[/dim]"
+        )
+        try:
+            log_fh = open(log_path, "ab", buffering=0)
+            proc = subprocess.Popen(
+                cmd, stdout=log_fh, stderr=subprocess.STDOUT,
+                # Detach from the TUI's process group so Ctrl+C / TUI exit
+                # doesn't kill the server.
+                start_new_session=True,
+            )
+        except OSError as e:
+            self._log_error(f"could not launch mlx_lm.server: {e}")
+            return
+
+        # Stage the model + backend so the next /new uses it. Do this
+        # immediately — the server may take 30-60s to load weights, but
+        # the staging is correct now.
+        self._next_backend = "mlx"
+        self._next_model = model_name
+        self._log_info(
+            f"[green]✓[/green] mlx_lm.server pid={proc.pid} starting on "
+            f":{port} · staged for next /new · "
+            f"weight load takes ~30-60s; tail [dim]{log_path}[/dim] to watch"
+        )
+        # One quick poll so the user sees if it dies on startup.
+        time.sleep(1.0)
+        if proc.poll() is not None:
+            self._log_error(
+                f"mlx_lm.server exited immediately (rc={proc.returncode}). "
+                f"Check {log_path} for the failure reason."
+            )
+
+    def _cmd_set_model_class(self, arg: str) -> None:
+        """/model-class auto|small|mid|large — override the system-prompt
+        trim. Default 'auto' = 'small' (lean ~5 KB schema, drops
+        <assets>/<sounds>/<lookup_bullet>) — biased for mid-size local
+        LLMs and one-shot strength. Pass 'large' only when running a
+        frontier-tier model. We never inspect model names.
+        """
+        choices = {"auto", "small", "mid", "large"}
+        a = (arg or "").strip().lower()
+        if a not in choices:
+            cur = self._model_class or "auto"
+            self._log_info(
+                f"usage: /model-class <auto|small|mid|large>  (current: {cur})"
+            )
+            return
+        self._model_class = None if a == "auto" else a
+        self._log_info(
+            f"model-class set to [b]{a}[/b] for next session"
+        )
+
     def _cmd_set_seed(self, arg: str) -> None:
         """/seed <path> stages an existing HTML file as the baseline for the
         next /new session. /seed with no argument clears the staged file.
@@ -1726,10 +1891,14 @@ class CodingBoxApp(App):
         had_model = self._next_model
         had_backend = self._next_backend
         had_iters = self._max_iters
+        had_restarts = self._restart_n
+        had_class = self._model_class
         self._next_seed = None
         self._next_model = None
         self._next_backend = None
         self._max_iters = 6
+        self._restart_n = 2
+        self._model_class = None
         bits: list[str] = []
         if had_seed is not None:
             bits.append(f"seed={had_seed}")
@@ -1739,6 +1908,10 @@ class CodingBoxApp(App):
             bits.append(f"backend={had_backend}")
         if had_iters != 6:
             bits.append(f"iters={had_iters}→6")
+        if had_restarts != 2:
+            bits.append(f"restarts={had_restarts}→2")
+        if had_class:
+            bits.append(f"model-class={had_class}→auto")
         if not bits:
             self._log_info("nothing to reset (no staged seed/model, iters at default)")
             return
@@ -1763,6 +1936,8 @@ class CodingBoxApp(App):
             f"  phase:             {_esc(self._phase_label)}",
             f"  iteration:         {_esc(self._iteration_label)}",
             f"  max iters:         {self._max_iters}",
+            f"  restart-N:         {self._restart_n if self._restart_n > 1 else '1 (off)'}",
+            f"  model-class:       {self._model_class or 'auto (= small, lean ~5KB schema)'}",
             f"  step-mode (/wait): {step_label}",
             f"  staged seed:       {_esc(str(self._next_seed) if self._next_seed else '—')}",
             f"  session done:      {self._session_done}",
@@ -1914,6 +2089,9 @@ class CodingBoxApp(App):
             # <probes>, stuck-loop ladder. Real sessions need this on
             # so the offline learner has rich traces to reflect over.
             prompt_version="v1",
+            model_class=self._model_class or "auto",
+            restart_n=self._restart_n,
+            restart_score_threshold=self._restart_threshold,
         )
         self.agent.set_token_callback(self._emit_token)
 
@@ -2049,7 +2227,7 @@ class CodingBoxApp(App):
         """Drain the AgentEvent stream and update widgets accordingly."""
         assert self.agent is not None
         try:
-            async for ev in self.agent.run(goal, continuation=continuation):
+            async for ev in self.agent.run_with_restarts(goal, continuation=continuation):
                 self._handle_event(ev)
         except Exception as e:
             # Include the FULL traceback so the .log file has enough info to

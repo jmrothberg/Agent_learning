@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import re
 import time
+from collections import Counter as _Counter
 from pathlib import Path
 from typing import Any
 
@@ -542,6 +543,66 @@ def run_micro_probes(html: str) -> dict[str, Any]:
         warnings.extend(api_warnings)
         stats["api_hallucinations"] = len(api_warnings)
 
+    # --- repetition-collapse loop --------------------------------------
+    # Mid-size models occasionally degenerate into token-repeat loops
+    # (e.g. `ENEMY_HISS_CHANCE_PER_SEC_ACTUAL_ACTUAL_ACTUAL...`) or emit
+    # the same line dozens of times before stalling. Catch it here so we
+    # surface a specific actionable error instead of forcing the user to
+    # decode a 200 KB stream-stall trace.
+    rep_warnings: list[str] = []
+    for (_attrs, body) in scripts:
+        if not body.strip():
+            continue
+        # Same line repeated > 10× verbatim (ignoring blank lines).
+        line_counts: dict[str, int] = {}
+        for ln in body.splitlines():
+            stripped = ln.strip()
+            if len(stripped) < 4:
+                continue
+            line_counts[stripped] = line_counts.get(stripped, 0) + 1
+        for ln, n in line_counts.items():
+            if n > 10:
+                rep_warnings.append(
+                    f"line repeated {n}× verbatim in <script>: "
+                    f"{ln[:80]!r}{'…' if len(ln) > 80 else ''}. "
+                    "This is a token-repeat loop — emit a focused "
+                    "<patch> instead of rewriting the whole file."
+                )
+                break  # one example per script body is enough
+        # Single 4+-char identifier appearing > 30× in one script body.
+        # Threshold is intentionally high so legit names like `ctx`/`x`/
+        # `i` don't trip; the failure pattern is identifier copies like
+        # `_ACTUAL_ACTUAL_ACTUAL_…`.
+        for tok, n in _Counter(re.findall(r"[A-Za-z_][A-Za-z0-9_]{3,}", body)).items():
+            if n > 30 and "_" in tok and tok.count("_") >= 2:
+                rep_warnings.append(
+                    f"identifier `{tok}` appears {n}× in one <script> "
+                    "body — almost certainly a repeat-loop degeneration. "
+                    "Restart the change with a small <patch>."
+                )
+                break
+        # Suffix-loop: a 5+-char substring repeated > 25× anywhere in
+        # the body. Catches the `_ACTUAL_ACTUAL_ACTUAL_…` family where
+        # each full identifier is unique (so the token counter above
+        # doesn't fire) but the suffix repeats.
+        if len(body) > 2000:
+            for substr in ("_ACTUAL", "_FINAL", "_REAL", "_TRUE"):
+                n = body.count(substr)
+                if n > 25:
+                    rep_warnings.append(
+                        f"suffix `{substr}` appears {n}× in one "
+                        "<script> body — token-repeat loop. Send a "
+                        "focused <patch>, not a rewrite."
+                    )
+                    break
+    if rep_warnings:
+        # Promote to errors only when 2+ scripts agree (very likely real).
+        if len(rep_warnings) >= 2:
+            errors.extend(rep_warnings[:3])
+        else:
+            warnings.extend(rep_warnings[:3])
+        stats["repetition_signals"] = len(rep_warnings)
+
     # --- elision sentinels ---------------------------------------------
     # Models occasionally slip "// ... rest of code unchanged ..." into
     # a patch even after we tell them not to. Catch it here so we don't
@@ -771,6 +832,17 @@ def score_test_report(report: dict[str, Any]) -> float:
     if probes:
         n_pass = sum(1 for p in probes if p.get("ok"))
         s += min(15, n_pass * 3)
+    # "Feels like a game" bonuses — differentiate "compiles + dark canvas"
+    # from "actually runs". These are deliberately small (max +9) so they
+    # don't overpower the structural signals above; their job is to break
+    # ties between candidates that are otherwise equivalent on errors /
+    # listeners / RAF.
+    if not (report.get("console_errors") or []):
+        s += 3                                  # genuinely silent console
+    if report.get("frozen_canvas") is False:
+        s += 3                                  # canvas is being repainted
+    if it.get("ran") and it.get("any_change") is True:
+        s += 3                                  # input_test caused real motion
     return max(0.0, min(100.0, s))
 
 

@@ -712,6 +712,31 @@ def _link_or_copy(src: Path, dst: Path) -> None:
         pass
 
 
+def _filter_existing_sounds(
+    sound_paths: dict[str, Path],
+) -> dict[str, Path]:
+    """Drop entries whose OGG isn't on disk so the page never gets
+    file:// paths to nonexistent audio."""
+    kept: dict[str, Path] = {}
+    dropped: list[str] = []
+    for name, path in sound_paths.items():
+        try:
+            if Path(path).exists():
+                kept[name] = path
+            else:
+                dropped.append(name)
+        except Exception:
+            dropped.append(name)
+    if dropped:
+        print(
+            f"[sounds] dropped {len(dropped)} missing OGG path(s) "
+            f"before injection: {', '.join(dropped[:5])}"
+            + ("…" if len(dropped) > 5 else ""),
+            flush=True,
+        )
+    return kept
+
+
 def render_sound_paths_block(
     sound_paths: dict[str, Path],
     session_html_path: Path | str,
@@ -734,6 +759,9 @@ def render_sound_paths_block(
     default to silent games when their training distribution didn't
     emphasize <audio> elements.
     """
+    if not sound_paths:
+        return ""
+    sound_paths = _filter_existing_sounds(sound_paths)
     if not sound_paths:
         return ""
     looping = set(looping_names or [])

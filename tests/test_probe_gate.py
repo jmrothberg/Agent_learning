@@ -240,11 +240,15 @@ def test_b2_sprite_procedural_mix_in_system_prompt():
 # ---------------------------------------------------------------------------
 
 
-def test_b3_orientation_block_contains_rotate_pattern():
+def test_b3_orientation_block_contains_rotate_pattern(tmp_path):
     import assets
+    asset_dir = tmp_path / "x_assets"
+    asset_dir.mkdir()
+    ship_png = asset_dir / "ship.png"
+    ship_png.write_bytes(b"\x89PNG\r\n\x1a\n")  # placeholder; filter only checks exists()
     block = assets.render_asset_paths_block(
-        {"ship": Path("/tmp/x_assets/ship.png")},
-        Path("/tmp/x.html"),
+        {"ship": ship_png},
+        tmp_path / "x.html",
     )
     assert "ORIENTATION" in block
     assert "ctx.rotate" in block

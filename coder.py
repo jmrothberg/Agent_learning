@@ -121,6 +121,8 @@ async def _run(
     seed_file: Path | None,
     step: bool = False,
     model_class: str = "auto",
+    restart_n: int = 1,
+    restart_threshold: float = 60.0,
 ) -> int:
     # Resolve which LLM daemon we'll talk to. --backend overrides the
     # LLM_BACKEND env. If --model was given, build a BackendInfo
@@ -167,6 +169,8 @@ async def _run(
         # todo #6 — mid-tier prompt trim. "auto" infers from model
         # tag; pass --model-class mid|large to override.
         model_class=model_class,
+        restart_n=restart_n,
+        restart_score_threshold=restart_threshold,
     )
 
     # Stream tokens to stdout, one chunk at a time. Newlines flush.
@@ -188,7 +192,7 @@ async def _run(
     print(f"== Goal: {goal}\n")
     rc = 0
     try:
-        async for ev in agent.run(goal):
+        async for ev in agent.run_with_restarts(goal):
             _print_event(ev)
             # Step-mode: when the agent emits await_user it has parked
             # in an asyncio.sleep loop waiting for either
@@ -290,12 +294,34 @@ def main() -> int:
     # Model-class override (Stop-Losing-To-OneShot todo #6).
     p.add_argument(
         "--model-class",
-        choices=["auto", "mid", "large"],
+        choices=["auto", "small", "mid", "large"],
         default="auto",
-        help="Override prompt-size trim. 'auto' (default) infers from "
-             "model tag; 'mid' drops <anti-patterns> and tightens the "
-             "playbook plan budget for 27B-class local models; 'large' "
-             "keeps the full prompt unchanged.",
+        help="System-prompt trim. 'auto' (default) = 'small': lean "
+             "~5 KB schema, drops <assets>/<sounds>/<lookup_bullet> — "
+             "biased for mid-size local LLMs and one-shot strength. "
+             "Pass 'large' only when running a frontier-tier model. "
+             "Model names are NEVER inspected.",
+    )
+    # Restart-N (Stop-Losing-To-OneShot Track A): when iter 1 ends with
+    # a low score, restart from scratch instead of polishing a stinker.
+    p.add_argument(
+        "--restart-n",
+        type=int,
+        default=2,
+        help="Independent full restarts. When iter 1 of a session "
+             "produces a score below --restart-threshold, throw it away "
+             "and try again from scratch (Z-Image asset cache is reused). "
+             "Best-by-score wins. Default 2 (simple games pass iter 1 "
+             "and never restart; hard games get a clean second attempt). "
+             "Set to 1 to disable.",
+    )
+    p.add_argument(
+        "--restart-threshold",
+        type=float,
+        default=60.0,
+        help="Score floor (0-100) below which iter 1 triggers a restart. "
+             "Default 60: 'applied but several errors' restarts; 'applied "
+             "and partial probes pass' continues iterating.",
     )
     args = p.parse_args()
 
@@ -320,6 +346,8 @@ def main() -> int:
         seed_file=seed_path,
         step=args.step,
         model_class=args.model_class,
+        restart_n=args.restart_n,
+        restart_threshold=args.restart_threshold,
     ))
 
 
