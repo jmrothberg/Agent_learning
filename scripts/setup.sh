@@ -260,6 +260,11 @@ cat <<EOF
    Or use MLX on Apple Silicon (often faster than Ollama):
      mlx_lm.server --model /Users/jonathanrothberg_1/MLX_Models/Qwen3.6-27B-mxfp8 --port 8080
 
+   Want to run DeepSeek-V4 Flash / Pro? mlx-lm 0.31.3 ships a broken stub.
+   Patch your existing mlx_lm install (auto-detects which Python owns it):
+     ./scripts/install_mlx_v4_fix.sh
+   See README §"DeepSeek-V4 on MLX" for details + rollback.
+
    Run it:
      .venv/bin/python chat.py                        # TUI (recommended)
      .venv/bin/python coder.py "build snake"          # one-shot CLI

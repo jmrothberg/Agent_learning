@@ -168,6 +168,63 @@ This concern is **macOS-only**. Linux/CUDA hosts don't have an
 equivalent cap — `nvidia-smi` shows the full GPU VRAM available to MLX-
 or-PyTorch, no sysctl required.
 
+### DeepSeek-V4 on MLX (mlx-lm 0.31.3 ships a broken V4 stub)
+
+mlx-lm 0.31.3 — the version on PyPI as of May 2026 — includes a
+**half-implemented `models/deepseek_v4.py`** that fails to load any
+public DeepSeek-V4 conversion (Flash or Pro, any quantization) with
+
+```
+ValueError: Received N parameters not in model:
+  lm_head.weight, model.embed_tokens.weight, ...
+```
+
+The file Apple shipped is missing the HyperConnection, Sinkhorn-Knopp
+manifold reduction, FP8 e4m3 block dequant, sliced `wo_a` MLA output
+projections, hash-routed early MoE, and `sqrtsoftplus` scoring that
+V4 actually uses. The complete implementation lives in two open PRs
+that haven't merged yet:
+
+- [ml-explore/mlx-lm PR #1192](https://github.com/ml-explore/mlx-lm/pull/1192) — "Add DeepSeek-v4 (Flash/Pro)" (+2192 lines)
+- [huggingface/transformers PR #45643](https://github.com/huggingface/transformers/pull/45643) — V4 tokenizer fixes (already merged on `main`; PR head still preferred per the mlx-lm PR description)
+
+Until those land in a tagged release, install the PR heads with:
+
+```bash
+./scripts/install_mlx_v4_fix.sh
+```
+
+The script auto-detects which Python owns your `mlx_lm.server` (different
+on every machine — python.org installer Python 3.11 here, Homebrew
+Python on someone else's Mac, conda elsewhere) by reading the shebang of
+the installed `mlx_lm.server` script, then `pip install --user --force-
+reinstall`s both PR heads into that same interpreter. No venv assumption,
+no hardcoded paths.
+
+It verifies success by checking that `deepseek_v4.py` jumped from the
+broken ~16 KB stub to the ~50 KB+ full implementation and contains the
+`HyperConnection` / `HyperHead` / `hc_expand` symbols only the PR ships.
+
+**When the upstream PRs merge** and a new mlx-lm release is on PyPI,
+roll forward to it (overwriting the git-installed PR heads):
+
+```bash
+./scripts/install_mlx_v4_fix.sh --rollback
+```
+
+That wraps `pip install --upgrade --force-reinstall mlx-lm transformers`
+into the same auto-detected Python. `--force-reinstall` is what makes it
+work even when the PR-head version string compares equal to the new
+PyPI release — useful because pre-merge branches don't always bump the
+version. From that point on, normal `pip install -U mlx-lm` keeps you
+current as new local models ship.
+
+This patch is **scoped to the V4 model class only**. It does not touch
+any other MLX architecture (Qwen, GLM, Gemma, MiniMax, Qwen3-MoE, etc.) —
+those load through their own `mlx_lm/models/<name>.py` files which are
+unchanged. Skip the patch if you don't plan to run V4 Flash or Pro; the
+other ~300 MLX-community model conversions all work on stock 0.31.3.
+
 ---
 
 ## How a small model writes big code
