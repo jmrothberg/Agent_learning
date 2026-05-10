@@ -239,8 +239,18 @@ prefill into smaller pieces:
 mlx_lm.server \
   --model /path/to/your/DeepSeek-V4-Flash-... \
   --port 8080 \
-  --prefill-step-size 512
+  --prefill-step-size 1024
 ```
+
+`1024` is the documented safe-anywhere default per the PR reviewer's
+`(L, k, GB)` table — the resulting 34 GB single buffer fits under
+Metal's ~86 GB per-buffer cap on every M-series Mac. The Metal cap is
+hardware-bound and **does NOT scale with total RAM**, so even on a
+512 GB Mac you can't push above ~1280 chunk size; chunk=1500 already
+overflows the per-buffer cap and crashes. There's no benefit to going
+higher. Going lower (`512`, `256`) is paranoid-safe and ~5–10% slower
+on prompts > 1K tokens; lower than that has no effect on shorter
+prompts.
 
 A wrapper script handles this for you — auto-detects whichever V4 model
 lives under `~/MLX_Models` (or `$MLX_MODELS_DIR`) by looking for

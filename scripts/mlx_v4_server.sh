@@ -6,12 +6,24 @@
 #   ./scripts/mlx_v4_server.sh <model_path>        # explicit path
 #
 # The only thing this script does that bare `mlx_lm.server` doesn't:
-# pass `--prefill-step-size 512`. Without that flag, V4 (Flash or Pro)
+# pass `--prefill-step-size 1024`. Without that flag, V4 (Flash or Pro)
 # blows up the moment any single prefill chunk exceeds ~1.3K tokens
 # because its Indexer attention path materializes a single Metal buffer
 # of size O(L^2 * k) — see PR ml-explore/mlx-lm#1192 review thread for
-# the cubic-growth analysis. With chunk = 512 you stay well under the
-# cliff regardless of prompt length.
+# the cubic-growth analysis. The PR reviewer's measured table:
+#
+#   L=1024  k=256   34 GB    works
+#   L=1280  k=320   67 GB    works (tight)
+#   L=1500  k=375  108 GB    crashes (Metal per-buffer cap ~86 GB)
+#   L=2048  k=512  275 GB    crashes
+#
+# Choosing 1024: the safe-anywhere default per the PR reviewer; at the
+# limit (34 GB) you keep ~5% more prefill throughput vs 512. The Metal
+# per-buffer cap is hardware (~86 GB on M-series), NOT total RAM, so
+# a 512 GB Mac doesn't get a higher safe ceiling than a 64 GB Mac.
+# Override with CHUNK env var if you want to experiment:
+#   CHUNK=512  ./scripts/mlx_v4_server.sh   # paranoid
+#   CHUNK=1280 ./scripts/mlx_v4_server.sh   # last documented-safe step
 #
 # Default port 8080 matches mlx_lm.server's default and what backend.py
 # probes when no MLX_HOST env is set. Override via the PORT env var.
@@ -19,6 +31,7 @@
 set -euo pipefail
 
 PORT="${PORT:-8080}"
+CHUNK="${CHUNK:-1024}"
 MLX_DIR="${MLX_MODELS_DIR:-$HOME/MLX_Models}"
 
 resolve_model() {
@@ -55,9 +68,9 @@ if [ ! -f "$MODEL/config.json" ]; then
 fi
 
 echo "→ starting mlx_lm.server on $MODEL"
-echo "  port=$PORT  prefill-step-size=512"
+echo "  port=$PORT  prefill-step-size=$CHUNK  (override with CHUNK env)"
 echo
 exec mlx_lm.server \
     --model "$MODEL" \
     --port "$PORT" \
-    --prefill-step-size 512
+    --prefill-step-size "$CHUNK"
