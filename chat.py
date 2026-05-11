@@ -944,6 +944,7 @@ class CodingBoxApp(App):
         body += self._render_iteration_block()
         body += self._render_assets_block()
         body += self._render_sounds_block()
+        body += self._render_playbook_block()
         body += self._render_files_block()
         if extra:
             body += "\n" + extra
@@ -1211,6 +1212,60 @@ class CodingBoxApp(App):
         if not self._sounds_summary:
             return ""
         return f"\n{self._sounds_summary}\n"
+
+    def _render_playbook_block(self) -> str:
+        """Show which playbook bullets are currently injected in prompts,
+        plus an honesty note about whether the writeback loop is live.
+
+        The user explicitly asked for this — without seeing what's being
+        injected, the playbook is invisible prompt bloat. Now they can
+        watch retrieval per-turn and decide whether the bullets are
+        helping or noise, and toggle the whole thing off with /playbook.
+        """
+        agent = getattr(self, "agent", None)
+        if agent is None:
+            return ""
+        if not getattr(agent, "_playbook_top_k", 0):
+            return "\n[b]Playbook:[/b] [dim]disabled[/dim]\n"
+        ids = list(getattr(agent, "_active_bullet_ids", []) or [])
+        if not ids:
+            return (
+                "\n[b]Playbook:[/b] [dim]none retrieved this turn[/dim]\n"
+            )
+        # Pull scores from the playbook so the user can see whether a
+        # bullet has accumulated any track record. All seed bullets are
+        # at score 0 until writeback runs — surface that honestly so the
+        # user knows they're looking at unvalidated rules.
+        try:
+            all_b = {b.id: b for b in agent._playbook.load_all()}
+        except Exception:
+            all_b = {}
+        writeback_on = bool(getattr(agent, "_playbook_writeback", False))
+        rows: list[str] = []
+        for bid in ids:
+            b = all_b.get(bid)
+            if b is None:
+                rows.append(f"  [dim]·[/dim] {bid} [dim](missing)[/dim]")
+                continue
+            sc = b.score()
+            if sc > 0:
+                tag = f"[green]+{sc}[/green]"
+            elif sc < 0:
+                tag = f"[red]{sc}[/red]"
+            else:
+                tag = "[dim]0[/dim]"
+            rows.append(f"  [dim]·[/dim] {bid} {tag}")
+        footer = (
+            "[dim]writeback ON — scores update on pass/stuck[/dim]"
+            if writeback_on
+            else "[yellow]writeback OFF — scores never update; "
+            "all bullets are unvalidated seeds[/yellow]"
+        )
+        return (
+            f"\n[b]Playbook:[/b] {len(ids)} injected\n"
+            + "\n".join(rows)
+            + f"\n{footer}\n[dim]/playbook off | on | toggle[/dim]\n"
+        )
 
     def _render_files_block(self) -> str:
         """Per-session file paths. Always shown when available so the
@@ -1498,6 +1553,8 @@ class CodingBoxApp(App):
                 self._cmd_status()
             elif cmd == "wait":
                 self._cmd_toggle_wait(arg)
+            elif cmd in ("playbook", "memory"):
+                self._cmd_toggle_playbook(arg)
             elif cmd == "restarts":
                 self._cmd_set_restarts(arg)
             elif cmd in ("model-class", "modelclass"):
@@ -1541,6 +1598,7 @@ class CodingBoxApp(App):
             "  [b]/clear[/b]                   clear the agent log pane (does not affect staged state)",
             "  [b]/status[/b]                  print model, phase, iteration, paths, what's staged",
             "  [b]/wait[/b] [on|off]            toggle step-mode: pause after each iter; Enter or feedback to continue",
+            "  [b]/playbook[/b] [on|off]        toggle playbook bullet injection (alias /memory) - A/B vs one-shot when iters feel worse than no agent",
             "  [b]/quit[/b]                    quit (= Ctrl+Q)",
             "",
             "[bold cyan]── sticky staging ──[/bold cyan]",
@@ -2161,6 +2219,58 @@ class CodingBoxApp(App):
         # Surface the new mode in the bottom bar immediately, not only
         # at the next iter-pause event.
         self._update_mode_bar()
+
+    def _cmd_toggle_playbook(self, arg: str) -> None:
+        """/playbook (or /memory) — toggle playbook injection.
+
+        The playbook injects rule-of-thumb bullets into each prompt at
+        plan + code stages. They retrieve by weighted Jaccard against
+        the goal; relevance matters less than precision of tags. If a
+        run is performing worse than one-shot without the agent, the
+        most likely culprit is the playbook injecting low-relevance
+        bullets that distract a mid-tier local model. Disable with
+        /playbook off and re-run the same goal to A/B compare.
+
+        Persists for the active session: flipping top-K to 0 stops
+        retrieval entirely on the current GameAgent. A future /new will
+        inherit the agent's defaults again unless you flip it before
+        the next start.
+        """
+        if self.agent is None:
+            self._log_info(
+                "no active session — playbook setting applies once an "
+                "agent is running. Start a session, then /playbook off "
+                "to A/B against one-shot."
+            )
+            return
+        arg_lc = arg.strip().lower()
+        currently_on = bool(getattr(self.agent, "_playbook_top_k", 0))
+        if arg_lc in ("off", "false", "0", "disable"):
+            new_on = False
+        elif arg_lc in ("on", "true", "1", "enable"):
+            new_on = True
+        else:
+            new_on = not currently_on
+        if new_on:
+            # Default the K back to 6 (the constructor default in
+            # GameAgent.__init__) so re-enabling matches a fresh run.
+            self.agent._playbook_top_k = 6
+            self._log_info(
+                "[green]playbook ON[/green] — bullets will inject on "
+                "the next prompt. Watch the [b]Playbook[/b] section in "
+                "the status panel to see what's being added."
+            )
+        else:
+            self.agent._playbook_top_k = 0
+            # Also clear the currently-active list so the status panel
+            # immediately reflects "none retrieved" instead of stale ids.
+            self.agent._active_bullet_ids = []
+            self._log_info(
+                "[yellow]playbook OFF[/yellow] — no bullets will inject "
+                "on subsequent prompts. Run the same goal with this off "
+                "and on to A/B whether it helps or hurts."
+            )
+        self._update_status()
 
     # ----------------------------- session --------------------------------
 
