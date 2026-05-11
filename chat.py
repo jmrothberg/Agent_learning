@@ -2409,13 +2409,16 @@ class CodingBoxApp(App):
             model_class=self._model_class or "auto",
             restart_n=self._restart_n,
             restart_score_threshold=self._restart_threshold,
-            # Update bullet helpful/harmful counters from real session
-            # outcomes. Was off by default historically (so frozen-
-            # playbook A/B baselines were comparable) but that meant
-            # NO session ever accumulated evidence on which bullets
-            # actually help vs hurt — verified by grepping the trace
-            # JSONLs: zero playbook_writeback events across all past
-            # sessions, all 31 seed bullets stuck at score=0.
+            # Playbook injection OFF by default — across 6 ON/OFF
+            # bench pairs on a 27B local model, OFF beat ON 5/6.
+            # The "kitchen sink" effect (8 bullets of advice at plan
+            # stage) hurt more than it helped. Users can /playbook on
+            # to enable; status panel shows the current state.
+            playbook_top_k=0,
+            # Writeback still on so that when the user enables the
+            # playbook (/playbook on), session outcomes update the
+            # counters. Safe even when top_k=0 — writeback only fires
+            # when bullets actually retrieved.
             playbook_writeback=True,
         )
         self.agent.set_token_callback(self._emit_token)

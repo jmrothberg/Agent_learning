@@ -127,7 +127,7 @@ async def _run(
     model_class: str = "auto",
     restart_n: int = 1,
     restart_threshold: float = 60.0,
-    no_playbook: bool = False,
+    playbook_on: bool = False,
     playbook_writeback: bool = True,
 ) -> int:
     # Resolve which LLM daemon we'll talk to. --backend overrides the
@@ -177,10 +177,10 @@ async def _run(
         model_class=model_class,
         restart_n=restart_n,
         restart_score_threshold=restart_threshold,
-        # K=0 disables retrieval entirely (cheaper than gating each
-        # retrieve() call). Writeback is on by default so live runs
-        # actually accumulate evidence on which bullets help vs hurt.
-        playbook_top_k=0 if no_playbook else 6,
+        # K=0 disables retrieval entirely. Default is OFF — opt in
+        # via --playbook. Writeback stays on so when the user does
+        # enable retrieval, outcomes update the counters.
+        playbook_top_k=6 if playbook_on else 0,
         playbook_writeback=playbook_writeback,
     )
 
@@ -273,11 +273,20 @@ def main() -> int:
              "(unique per run). Pass an explicit path to override.",
     )
     p.add_argument(
-        "--no-playbook",
+        "--playbook",
         action="store_true",
-        help="Disable playbook retrieval for this run. Use for A/B "
-             "benchmarking: same goal with and without bullet "
-             "injection to see whether the playbook helps or hurts.",
+        default=False,
+        help="Enable playbook bullet retrieval. OFF by default — "
+             "across 6 ON/OFF bench pairs on a 27B local model, OFF "
+             "beat ON 5/6 on short-loop runs. Pass --playbook to "
+             "re-enable.",
+    )
+    p.add_argument(
+        "--no-playbook",
+        action="store_false",
+        dest="playbook",
+        help="(legacy) Same as omitting --playbook now that off is "
+             "the default. Kept for back-compat with existing scripts.",
     )
     p.add_argument(
         "--playbook-writeback",
@@ -381,7 +390,7 @@ def main() -> int:
         model_class=args.model_class,
         restart_n=args.restart_n,
         restart_threshold=args.restart_threshold,
-        no_playbook=args.no_playbook,
+        playbook_on=args.playbook,
         playbook_writeback=args.playbook_writeback,
     ))
 

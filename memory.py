@@ -1197,7 +1197,15 @@ class Playbook:
             if union <= 0:
                 continue
             sim = inter / union
-            if sim <= 0:
+            # Noise floor: random matches (single shared common word
+            # like "canvas") cluster at sim < 0.02. Keep this floor
+            # low — bench traces show genre-fit bullets like
+            # snake-grid-tick scoring ~0.02 against "snake game with
+            # arrow keys", so a higher floor drops genuine matches.
+            # The bigger lever for noise is the playbook-off default
+            # in chat.py/coder.py; this is the second line of defense
+            # for users who opt back in via /playbook on.
+            if sim < 0.02:
                 continue
 
             # Quality multiplier: bounded ±10% of relevance.

@@ -2613,8 +2613,15 @@ class GameAgent:
                 }))
 
                 # First build with memory skeleton — plan stage (broad).
+                # First-build retrieval queries against goal ONLY.
+                # The skeleton is canvas_basic.html (generic) for every
+                # fresh build, so including it in the query drags in
+                # the same ~10 bullets every time regardless of goal —
+                # defeats goal-specific retrieval. User-supplied seed
+                # files go through a different code path that does
+                # include code.
                 pb_block = self._retrieve_playbook_block(
-                    goal, code=skel.html, stage="plan",
+                    goal, stage="plan",
                 )
                 pb_kwargs = {"playbook_block": pb_block} if pb_block else {}
 

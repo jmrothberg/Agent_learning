@@ -74,8 +74,9 @@ def run_one(goal: str, *, playbook_on: bool, max_iters: int, bench_dir: Path,
         # predictable. Live sessions still default to 1 restart.
         "--restart-n", "0",
     ]
-    if not playbook_on:
-        cmd.append("--no-playbook")
+    # coder.py defaults to playbook OFF; opt in for the ON arm.
+    if playbook_on:
+        cmd.append("--playbook")
     # Freeze writeback during benchmarking so the A and B arms don't
     # mutate the playbook differently while we're measuring.
     cmd.append("--no-playbook-writeback")
