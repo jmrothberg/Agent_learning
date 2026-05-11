@@ -2387,6 +2387,14 @@ class CodingBoxApp(App):
             model_class=self._model_class or "auto",
             restart_n=self._restart_n,
             restart_score_threshold=self._restart_threshold,
+            # Update bullet helpful/harmful counters from real session
+            # outcomes. Was off by default historically (so frozen-
+            # playbook A/B baselines were comparable) but that meant
+            # NO session ever accumulated evidence on which bullets
+            # actually help vs hurt — verified by grepping the trace
+            # JSONLs: zero playbook_writeback events across all past
+            # sessions, all 31 seed bullets stuck at score=0.
+            playbook_writeback=True,
         )
         self.agent.set_token_callback(self._emit_token)
 

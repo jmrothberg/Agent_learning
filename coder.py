@@ -127,6 +127,8 @@ async def _run(
     model_class: str = "auto",
     restart_n: int = 1,
     restart_threshold: float = 60.0,
+    no_playbook: bool = False,
+    playbook_writeback: bool = True,
 ) -> int:
     # Resolve which LLM daemon we'll talk to. --backend overrides the
     # LLM_BACKEND env. If --model was given, build a BackendInfo
@@ -175,6 +177,11 @@ async def _run(
         model_class=model_class,
         restart_n=restart_n,
         restart_score_threshold=restart_threshold,
+        # K=0 disables retrieval entirely (cheaper than gating each
+        # retrieve() call). Writeback is on by default so live runs
+        # actually accumulate evidence on which bullets help vs hurt.
+        playbook_top_k=0 if no_playbook else 6,
+        playbook_writeback=playbook_writeback,
     )
 
     # Stream tokens to stdout, one chunk at a time. Newlines flush.
@@ -265,6 +272,28 @@ def main() -> int:
         help="Output path. Default: games/<goal-slug>_<timestamp>.html "
              "(unique per run). Pass an explicit path to override.",
     )
+    p.add_argument(
+        "--no-playbook",
+        action="store_true",
+        help="Disable playbook retrieval for this run. Use for A/B "
+             "benchmarking: same goal with and without bullet "
+             "injection to see whether the playbook helps or hurts.",
+    )
+    p.add_argument(
+        "--playbook-writeback",
+        action="store_true",
+        default=True,
+        help="Update bullet helpful/harmful counters based on pass / "
+             "stuck-streak outcomes. ON by default — sessions teach "
+             "the playbook over time. Pass --no-playbook-writeback to "
+             "freeze scores (e.g. for tune-battery A/B baselines).",
+    )
+    p.add_argument(
+        "--no-playbook-writeback",
+        dest="playbook_writeback",
+        action="store_false",
+        help="Freeze playbook scores (for A/B baseline comparisons).",
+    )
     p.add_argument("--best-of-n", type=int, default=1,
                    help="Sample N candidates per fix, sequentially with early exit. "
                         "Default 1 (off). Set 2-3 to retry harder when local model is weak.")
@@ -352,6 +381,8 @@ def main() -> int:
         model_class=args.model_class,
         restart_n=args.restart_n,
         restart_threshold=args.restart_threshold,
+        no_playbook=args.no_playbook,
+        playbook_writeback=args.playbook_writeback,
     ))
 
 
