@@ -1047,6 +1047,28 @@ SEED_BULLETS: list[Bullet] = [
         ),
         tags=["seed", "patches", "rewrite", "preserve"],
     ),
+    Bullet(
+        id="place-entities-at-runtime",
+        content=(
+            "When a level uses a tile grid (maze, dungeon, room), PLACE "
+            "spawn/exit/enemies/pickups at runtime by SCANNING empty cells "
+            "in code — do not hand-verify coordinates in your reply. "
+            "Snippet: function pickEmpty(map){ while(true){ const "
+            "x=1+Math.floor(Math.random()*(W-2)), "
+            "y=1+Math.floor(Math.random()*(H-2)); if(map[y][x]===0) "
+            "return {x:x+0.5,y:y+0.5}; } }. The trap: enumerating "
+            "'(3.5, 9.5): row 9 col 3 = 1 (wall!)' in the reply or in "
+            "<think> burns thousands of tokens on validation the runtime "
+            "would do in microseconds, and often never reaches the "
+            "<html_file> tag at all. If the maze is fixed, also write "
+            "spawn/exit lookups as scans, not as literal coordinates."
+        ),
+        tags=[
+            "maze", "grid", "spawn", "placement", "level", "entity",
+            "tile", "dungeon", "tilemap", "enemy", "pickup",
+            "thinktag-thrash",
+        ],
+    ),
 ]
 
 
