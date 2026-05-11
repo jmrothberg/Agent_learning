@@ -38,6 +38,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+# Allow `import memory` when invoked from any cwd.
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
 
 
 @dataclass
