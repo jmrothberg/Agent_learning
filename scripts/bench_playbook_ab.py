@@ -68,6 +68,11 @@ def run_one(goal: str, *, playbook_on: bool, max_iters: int, bench_dir: Path,
         "--best-of-n", "1",
         "--headless",
         "--out", str(out_html),
+        # restart_n=1 default doubles bench time when iter 1 scores
+        # below 60. For benching, disable restarts so each arm is a
+        # single attempt — keeps A/B comparable and total time
+        # predictable. Live sessions still default to 1 restart.
+        "--restart-n", "0",
     ]
     if not playbook_on:
         cmd.append("--no-playbook")
