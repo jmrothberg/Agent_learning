@@ -3445,24 +3445,31 @@ class GameAgent:
             #   - pass + active bullets → helpful++ for each
             #   - 3rd+ consecutive failure + active bullets → harmful++
             if self._playbook_writeback and self._active_bullet_ids:
+                ids = list(self._active_bullet_ids)
+                delta_label: str | None = None
                 if report["ok"]:
-                    self._playbook.update_counters(
-                        list(self._active_bullet_ids), helpful_delta=1,
-                    )
-                    self._trace({
-                        "kind": "playbook_writeback",
-                        "ids": list(self._active_bullet_ids),
-                        "delta": "helpful+1",
-                    })
+                    self._playbook.update_counters(ids, helpful_delta=1)
+                    delta_label = "helpful+1"
                 elif self._stuck_streak >= 3:
-                    self._playbook.update_counters(
-                        list(self._active_bullet_ids), harmful_delta=1,
-                    )
+                    self._playbook.update_counters(ids, harmful_delta=1)
+                    delta_label = "harmful+1"
+                if delta_label is not None:
                     self._trace({
                         "kind": "playbook_writeback",
-                        "ids": list(self._active_bullet_ids),
-                        "delta": "harmful+1",
+                        "ids": ids,
+                        "delta": delta_label,
                     })
+                    # Surface to the TUI/log too — the user explicitly
+                    # asked to see what's happening to bullet scores.
+                    # Without this the only signal is in the JSONL
+                    # trace, which they have no reason to grep.
+                    yield self._record(AgentEvent(
+                        "memory",
+                        f"playbook {delta_label}: "
+                        + ", ".join(ids[:5])
+                        + (f" (+{len(ids)-5} more)" if len(ids) > 5 else ""),
+                        {"delta": delta_label, "ids": ids},
+                    ))
 
             # Save best.html on every clean iteration AND record the success
             # in memory so future similar goals can retrieve this code.

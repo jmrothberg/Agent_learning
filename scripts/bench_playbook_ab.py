@@ -167,7 +167,9 @@ def _format_table(outcomes: list[Outcome]) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--goals", default="snake game with arrow keys",
-                    help="comma-separated goals")
+                    help="goals separated by '|' (NOT comma — goal text "
+                         "commonly contains commas). Example: "
+                         "--goals 'snake game|pong with paddles'")
     ap.add_argument("--rounds", type=int, default=1)
     ap.add_argument("--max-iters", type=int, default=2)
     ap.add_argument("--timeout-s", type=float, default=420.0,
@@ -176,7 +178,7 @@ def main() -> int:
     ap.add_argument("--out-dir", default=None)
     args = ap.parse_args()
 
-    goals = [g.strip() for g in args.goals.split(",") if g.strip()]
+    goals = [g.strip() for g in args.goals.split("|") if g.strip()]
     bench_dir = Path(args.out_dir) if args.out_dir else \
         BENCH_DIR / datetime.now().strftime("%Y%m%d_%H%M%S")
     bench_dir.mkdir(parents=True, exist_ok=True)
