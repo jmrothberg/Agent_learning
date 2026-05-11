@@ -1555,6 +1555,8 @@ class CodingBoxApp(App):
                 self._cmd_toggle_wait(arg)
             elif cmd in ("playbook", "memory"):
                 self._cmd_toggle_playbook(arg)
+            elif cmd == "audit":
+                self._cmd_audit_playbook()
             elif cmd == "restarts":
                 self._cmd_set_restarts(arg)
             elif cmd in ("model-class", "modelclass"):
@@ -1599,6 +1601,7 @@ class CodingBoxApp(App):
             "  [b]/status[/b]                  print model, phase, iteration, paths, what's staged",
             "  [b]/wait[/b] [on|off]            toggle step-mode: pause after each iter; Enter or feedback to continue",
             "  [b]/playbook[/b] [on|off]        toggle playbook bullet injection (alias /memory) - A/B vs one-shot when iters feel worse than no agent",
+            "  [b]/audit[/b]                     print per-bullet earnings (fires, pass-rate, avg-iter) from trace history",
             "  [b]/quit[/b]                    quit (= Ctrl+Q)",
             "",
             "[bold cyan]── sticky staging ──[/bold cyan]",
@@ -2219,6 +2222,25 @@ class CodingBoxApp(App):
         # Surface the new mode in the bottom bar immediately, not only
         # at the next iter-pause event.
         self._update_mode_bar()
+
+    def _cmd_audit_playbook(self) -> None:
+        """/audit — shell out to scripts/audit_playbook.py and print
+        the table inline so the user can judge bullet earnings without
+        leaving the TUI."""
+        import subprocess
+        try:
+            out = subprocess.run(
+                [".venv/bin/python", "scripts/audit_playbook.py"],
+                capture_output=True, text=True, timeout=10,
+            )
+            text = (out.stdout or "").strip() or "(no output)"
+            self._log(f"[bold cyan]── playbook audit ──[/bold cyan]")
+            for line in text.splitlines():
+                self._log_raw(line)
+        except FileNotFoundError:
+            self._log_info("audit script not found — pull latest main")
+        except Exception as e:
+            self._log_info(f"audit failed: {e}")
 
     def _cmd_toggle_playbook(self, arg: str) -> None:
         """/playbook (or /memory) — toggle playbook injection.
