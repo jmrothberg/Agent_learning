@@ -843,6 +843,21 @@ window — either expose them (e.g. `window.state = state`) or use DOM /
 canvas-pixel checks instead. Aim for 3 to 5 probes that together check
 the criteria above. Keep each expr short.
 
+PROBE ROBUSTNESS — make probes test STRUCTURE, not specific
+positions or rendered details that change frame-to-frame:
+  - GOOD: `typeof window.state.x === 'number'` (the ball has a
+    coordinate)
+  - BAD:  testing a single pixel at canvas center for red — a moving
+    object isn't at center most frames; test fails the moment the
+    game animates correctly.
+  - GOOD: `document.getElementById('score').textContent.length > 0`
+    (the score is rendered)
+  - BAD:  requiring a function with an exact name like
+    `window.state.reset` — your own code may use `restart` or
+    `resetGame`; you'll fail your own probe.
+Test that the THING EXISTS and has the right SHAPE, not that the
+runtime is in a specific instantaneous state.
+
 EXPECTED — emit an <assets> block whenever the game has visual entities
 the player will see (sprites, characters, projectiles, terrain). Most
 canvas games qualify: shooters, platformers, RPGs, racers, adventures.
