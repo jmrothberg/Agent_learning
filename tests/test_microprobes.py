@@ -306,3 +306,62 @@ def test_api_allowlist_strips_strings_and_comments():
     r = run_micro_probes(html)
     assert r["ok"] is True
     assert r["stats"].get("api_hallucinations", 0) == 0
+
+
+# ---------------------------------------------------------------------------
+# Asset path existence check (added after the doom-game trace where the
+# 27B corrupted file paths and Chromium reported generic ERR_FILE_NOT_FOUND
+# with no URL).
+# ---------------------------------------------------------------------------
+
+
+def test_asset_path_missing_with_close_match(tmp_path):
+    """Path the model wrote is wrong; close match exists on disk."""
+    assets_dir = tmp_path / "game_assets"
+    assets_dir.mkdir()
+    (assets_dir / "wall_stone.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    out_path = tmp_path / "game.html"
+    html = _wrap(
+        "const ASSETS = {wall: './game_assets/wood_wall.png'};\n"
+        "const img = new Image(); img.src = ASSETS.wall;\n"
+    )
+    r = run_micro_probes(html, out_path=out_path)
+    misses = [w for w in r["warnings"] if "wood_wall.png" in w]
+    assert len(misses) == 1
+    assert "wall_stone.png" in misses[0]
+    assert r["stats"].get("missing_asset_paths") == 1
+
+
+def test_asset_path_existing_no_warning(tmp_path):
+    """Path matches a real file — no warning."""
+    assets_dir = tmp_path / "g_assets"
+    assets_dir.mkdir()
+    (assets_dir / "imp.png").write_bytes(b"PNG")
+    out_path = tmp_path / "game.html"
+    html = _wrap("const x = './g_assets/imp.png';\n")
+    r = run_micro_probes(html, out_path=out_path)
+    assert r["stats"].get("missing_asset_paths") is None
+    assert all("imp.png" not in w for w in r["warnings"])
+
+
+def test_asset_path_skips_when_out_path_absent(tmp_path):
+    """Without out_path, no filesystem check happens (back-compat)."""
+    html = _wrap("const x = './nonexistent/foo.png';\n")
+    r = run_micro_probes(html)
+    assert r["stats"].get("missing_asset_paths") is None
+
+
+def test_asset_path_skips_cdn_urls(tmp_path):
+    """Absolute https URLs are CDNs; ignore them."""
+    out_path = tmp_path / "game.html"
+    html = _wrap('const x = "https://cdn.example.com/img.png";\n')
+    r = run_micro_probes(html, out_path=out_path)
+    assert r["stats"].get("missing_asset_paths") is None
+
+
+def test_asset_path_skips_data_uris(tmp_path):
+    """data: URIs don't reference filesystem."""
+    out_path = tmp_path / "game.html"
+    html = _wrap('const x = "data:image/png;base64,iVBOR...";\n')
+    r = run_micro_probes(html, out_path=out_path)
+    assert r["stats"].get("missing_asset_paths") is None

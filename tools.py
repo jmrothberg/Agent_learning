@@ -501,7 +501,105 @@ def _bracket_imbalance(js: str) -> dict[str, int]:
     }
 
 
-def run_micro_probes(html: str) -> dict[str, Any]:
+_ASSET_REF_RE = re.compile(
+    # Match relative paths inside string literals (single or double quote
+    # or backtick). Examples we catch:
+    #   './foo_assets/wall.png', "./bar_sounds/shoot.ogg"
+    # We deliberately skip CDN URLs (https://...) and data: URIs.
+    # Path must end in a known media extension to avoid false positives
+    # on arbitrary string literals.
+    r"""['"`]\s*(\./[^'"`\s]+\.(?:png|jpe?g|gif|webp|svg|ogg|mp3|wav|m4a))\s*['"`]""",
+    re.IGNORECASE,
+)
+
+
+def _check_asset_paths(
+    html: str, out_path: "Path | None"
+) -> list[str]:
+    """Find relative asset paths in the HTML that reference files which
+    don't exist on disk. For each missing path, suggest the closest
+    real file using difflib.
+
+    Returns a list of warning strings (never errors — Chromium has the
+    final word; this is just a useful soft signal).
+
+    Bench traces from `first-person-shooter-doom-game_20260511_160924`
+    showed the 27B model corrupting paths in generated HTML: numeric
+    tokenizer artifacts (`20260511` → `20260_511`), inconsistent
+    underscores in slugs, file renames between attempts. Chromium
+    surfaced these as generic `Failed to load resource: net::
+    ERR_FILE_NOT_FOUND` lines with NO URL attached, so the model
+    couldn't fix them on the next turn. This check tells the model
+    EXACTLY which path missed and what the closest match is.
+    """
+    if out_path is None:
+        return []
+    try:
+        from pathlib import Path
+        out = Path(out_path)
+        base = out.parent
+        if not base.is_dir():
+            return []
+    except Exception:
+        return []
+
+    # Collect candidate files on disk under the session base dir
+    # (assets/, sounds/, anywhere ~2 levels deep). Stored as relative
+    # POSIX paths so suggestions are pasteable.
+    candidates: list[str] = []
+    try:
+        for ext in ("png", "jpg", "jpeg", "gif", "webp", "svg",
+                    "ogg", "mp3", "wav", "m4a"):
+            for p in base.rglob(f"*.{ext}"):
+                try:
+                    rel = p.relative_to(base).as_posix()
+                except Exception:
+                    continue
+                candidates.append("./" + rel)
+    except Exception:
+        return []
+
+    if not candidates:
+        return []  # nothing generated to compare against
+
+    import difflib
+    seen: set[str] = set()
+    out_warnings: list[str] = []
+    for m in _ASSET_REF_RE.finditer(html or ""):
+        ref = m.group(1)
+        if ref in seen:
+            continue
+        seen.add(ref)
+        full = base / ref[2:]  # strip leading "./"
+        try:
+            if full.is_file():
+                continue
+        except Exception:
+            continue
+        # Missing — find closest match by basename, then by full rel path.
+        suggestion: str | None = None
+        cand_basenames = [c.rsplit("/", 1)[-1] for c in candidates]
+        bn = ref.rsplit("/", 1)[-1]
+        close = difflib.get_close_matches(bn, cand_basenames, n=1, cutoff=0.5)
+        if close:
+            # Look up the full candidate path that ends with this basename.
+            for c in candidates:
+                if c.endswith("/" + close[0]):
+                    suggestion = c
+                    break
+        out_warnings.append(
+            f"asset reference {ref!r} does not exist on disk"
+            + (f"; did you mean {suggestion!r}?" if suggestion else
+               f" and no close match found among {len(candidates)} "
+               "generated files. Use one of the paths from the "
+               "GENERATED ASSETS block in the user-turn message verbatim.")
+        )
+    return out_warnings
+
+
+def run_micro_probes(
+    html: str, out_path: "Path | None" = None
+) -> dict[str, Any]:
     """Pre-Chromium structural sanity check.
 
     Report shape:
@@ -513,6 +611,10 @@ def run_micro_probes(html: str) -> dict[str, Any]:
     The agent uses this between materialize and Chromium: an `ok=False`
     report skips the browser round-trip and feeds errors back to the
     model on the next turn.
+
+    `out_path` is optional. When provided, asset-path checks scan for
+    relative file references in the HTML and flag any that don't exist
+    on disk — useful when the model corrupts generated asset paths.
     """
     errors: list[str] = []
     warnings: list[str] = []
@@ -699,6 +801,16 @@ def run_micro_probes(html: str) -> dict[str, Any]:
                 "shortcuts."
             )
             break
+
+    # --- asset path existence check ------------------------------------
+    # Catches model-corrupted file paths before Chromium does (which
+    # only reports ERR_FILE_NOT_FOUND without telling the model WHICH
+    # file). Soft warnings only — never errors.
+    if out_path is not None:
+        path_warnings = _check_asset_paths(html, out_path)
+        if path_warnings:
+            warnings.extend(path_warnings)
+            stats["missing_asset_paths"] = len(path_warnings)
 
     return {
         "ok": not errors,

@@ -3214,7 +3214,7 @@ class GameAgent:
             # unbalanced braces, and elision markers. Only ERRORS skip
             # the browser; warnings pass through and Chromium gets the
             # final word.
-            mp = run_micro_probes(new_html)
+            mp = run_micro_probes(new_html, out_path=self.out_path)
             self._trace({
                 "kind": "micro_probes",
                 "ok": mp.get("ok", False),
