@@ -57,6 +57,7 @@ from pathlib import Path
 import ollama
 from rich.markup import escape as _esc
 from rich.text import Text
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -65,6 +66,40 @@ from textual.widgets import Footer, Header, Input, RichLog, Static
 import backend as backend_mod
 from agent import AgentEvent, GameAgent
 from tools import LiveBrowser
+
+
+class MultilinePasteInput(Input):
+    """Single-line Input that accepts multi-line paste by flattening
+    newlines to spaces.
+
+    Textual's stock Input._on_paste does
+    `event.text.splitlines()[0]`, silently discarding everything after
+    the first newline. That's a real footgun when the user pastes a
+    multi-line game-design prompt: only the first line reaches the
+    agent. Override the paste handler so the full pasted text lands in
+    the field, with whitespace collapsed.
+
+    For the agent, newlines vs spaces in the goal text are
+    indistinguishable — the model receives the goal as part of a
+    user-turn string, so flattening is lossless. If you ever need true
+    multi-line semantics, swap Input for TextArea instead (different
+    submit ergonomics — Ctrl+Enter to submit, Enter inserts newline).
+    """
+
+    def _on_paste(self, event: events.Paste) -> None:  # type: ignore[override]
+        text = event.text or ""
+        # Collapse all runs of whitespace (including newlines and tabs)
+        # to a single space. Strip leading/trailing whitespace so a
+        # paste that starts with a blank line doesn't drop a leading
+        # space into the field at the cursor.
+        flat = " ".join(text.split())
+        if flat:
+            selection = self.selection
+            if selection.is_empty:
+                self.insert_text_at_cursor(flat)
+            else:
+                self.replace(flat, *selection)
+        event.stop()
 
 
 # Parent directory for all generated artifacts. Each session writes a unique
@@ -706,7 +741,9 @@ class CodingBoxApp(App):
                     yield Static("Status", id="status-title")
                     yield Static("", id="status-body")
         # Input row docked to the bottom. We start it empty with a goal prompt.
-        yield Input(placeholder="What game do you want to build?", id="user-input")
+        yield MultilinePasteInput(
+            placeholder="What game do you want to build?", id="user-input"
+        )
         # Single-row mode indicator just above the Footer. Tells the
         # user at a glance whether the agent is RUNNING or WAITING for
         # them. Sits in the same visual band as the binding hints so
@@ -1087,32 +1124,38 @@ class CodingBoxApp(App):
             bar = self.query_one("#mode-bar", Static)
         except Exception:
             return
+        # Sticky badges that don't depend on _awaiting_kind: step-mode
+        # is ON for the whole session once /wait toggles it, even while
+        # an iter is mid-stream. Selection mode is independent of the
+        # session. Both render as small prefix badges so the user can
+        # see the mode "in the bar with the commands" rather than only
+        # at iter-boundary pause prompts.
+        prefix_badges: list[str] = []
+        if getattr(self.agent, "_step_mode", False):
+            prefix_badges.append("[black on yellow] WAIT MODE [/]")
+        if getattr(self, "_selection_mode_on", False):
+            prefix_badges.append("[black on cyan] SELECT [/]")
+        badge_prefix = " ".join(prefix_badges) + (" " if prefix_badges else "")
+
         if self._awaiting_kind == "step":
-            bar.update(
+            body = (
                 "[bold red]WAITING (step):[/bold red] "
                 "press Enter to continue, or type feedback first"
             )
         elif self._awaiting_kind == "answer":
-            bar.update(
+            body = (
                 "[bold yellow]WAITING (answer):[/bold yellow] "
                 "type your reply to the model's question"
             )
         elif self._session_done and self._awaiting_kind == "goal":
-            bar.update(
-                "[dim]idle — type a new goal or /help[/dim]"
-            )
+            body = "[dim]idle — type a new goal or /help[/dim]"
         elif self._session_done:
-            bar.update(
-                "[dim]session ended — type feedback to extend, or /new[/dim]"
-            )
+            body = "[dim]session ended — type feedback to extend, or /new[/dim]"
         elif self._is_streaming:
-            bar.update(
-                "[bold green]RUNNING:[/bold green] streaming — feedback queues for next turn"
-            )
+            body = "[bold green]RUNNING:[/bold green] streaming — feedback queues for next turn"
         else:
-            bar.update(
-                "[bold green]RUNNING:[/bold green] feedback queues for next turn"
-            )
+            body = "[bold green]RUNNING:[/bold green] feedback queues for next turn"
+        bar.update(badge_prefix + body)
 
     def _format_ctx_row(self) -> str:
         """Compose the `Ctx: X / Y (Z%)` status row.
@@ -1255,51 +1298,61 @@ class CodingBoxApp(App):
         self._log("[dim]Press Ctrl+S to enable mouse selection in this pane.[/dim]")
 
     async def action_toggle_selection_mode(self) -> None:
-        """Ctrl+S - toggle Textual's mouse capture so the terminal can
+        """Ctrl+S - toggle Textual's mouse tracking so the terminal can
         handle drag-select. Useful for copying log content while the
         agent is running. Press Ctrl+S again to resume normal TUI mouse.
         On terminals that natively bypass app mouse capture with a
         modifier (iTerm2: hold Option; most Linux terms: hold Shift),
         you can also drag-select without toggling — but Ctrl+S works
         everywhere."""
-        # Textual's App exposes capture toggles via the driver. Some
-        # versions name them differently; try the public path first
-        # then fall back. Idempotent — repeated toggles flip the flag.
+        # The earlier `set_mouse_capture` approach was a no-op on
+        # Textual 8.x — that method doesn't exist, and `capture_mouse`
+        # only re-routes events between widgets; the terminal still
+        # consumes the mouse-tracking escape sequence, so drag-select
+        # never reached the terminal. The driver-level
+        # _enable_mouse_support / _disable_mouse_support pair emits the
+        # actual `CSI ?1000l` (off) / `CSI ?1000h` (on) sequences that
+        # toggle whether the terminal sees the mouse at all. Private
+        # API by underscore convention, but stable across recent
+        # Textual releases; guarded with hasattr so we degrade
+        # gracefully on future versions.
         new_state = not getattr(self, "_selection_mode_on", False)
+        driver = getattr(self, "_driver", None)
+        applied = False
         try:
             if new_state:
-                # Stop sending mouse events to widgets so the terminal
-                # gets the click/drag instead.
-                if hasattr(self, "_driver") and self._driver is not None:
-                    if hasattr(self._driver, "stop_application_mode"):
-                        # Most invasive; also leaves alt-screen.
-                        # We DON'T do this — it'd hide the TUI. Just
-                        # disable mouse instead.
-                        pass
-                # Public Textual API: app.mouse_captured property is
-                # not stable; use the documented action approach. If
-                # neither works, the user still has the modifier-key
-                # fallback (Option / Shift while dragging).
-                if hasattr(self, "set_mouse_capture"):
-                    self.set_mouse_capture(None)
+                if driver is not None and hasattr(driver, "_disable_mouse_support"):
+                    driver._disable_mouse_support()
+                    applied = True
             else:
-                if hasattr(self, "set_mouse_capture"):
-                    self.set_mouse_capture(self)
+                if driver is not None and hasattr(driver, "_enable_mouse_support"):
+                    driver._enable_mouse_support()
+                    applied = True
         except Exception:
             # Even if the API path fails, surfacing the hint is
             # valuable — modifier-key drag-select still works.
-            pass
+            applied = False
         self._selection_mode_on = new_state
         if new_state:
-            self._log_info(
-                "[bold yellow]selection mode ON[/bold yellow] — "
-                "drag-select with the mouse to copy. "
-                "[dim]Ctrl+S again to resume normal TUI mouse.[/dim]"
-            )
+            if applied:
+                self._log_info(
+                    "[bold yellow]selection mode ON[/bold yellow] — "
+                    "drag-select with the mouse to copy. "
+                    "[dim]Ctrl+S again to resume normal TUI mouse.[/dim]"
+                )
+            else:
+                # API path unavailable — fall back to the modifier hint.
+                self._log_info(
+                    "[yellow]selection toggle unavailable on this "
+                    "Textual build.[/yellow] Hold [b]Option[/b] (iTerm2) "
+                    "or [b]Shift[/b] (most Linux terms) while dragging "
+                    "to bypass mouse capture without toggling."
+                )
         else:
             self._log_info(
                 "[dim]selection mode OFF — mouse handed back to TUI[/dim]"
             )
+        self._update_mode_bar()
 
     # ----------------------------- input handler --------------------------
 
@@ -2105,6 +2158,9 @@ class CodingBoxApp(App):
         else:
             self._log_info("step-mode off — agent will run iterations continuously.")
         self._update_status()
+        # Surface the new mode in the bottom bar immediately, not only
+        # at the next iter-pause event.
+        self._update_mode_bar()
 
     # ----------------------------- session --------------------------------
 

@@ -197,6 +197,7 @@ _DIAGNOSE_RE = re.compile(r"<diagnose>\s*(.*?)\s*</diagnose>", re.DOTALL | re.IG
 _NOTES_RE = re.compile(r"<notes>\s*(.*?)\s*</notes>", re.DOTALL | re.IGNORECASE)
 _CRITERIA_RE = re.compile(r"<criteria>\s*(.*?)\s*</criteria>", re.DOTALL | re.IGNORECASE)
 _PROBES_RE = re.compile(r"<probes>\s*(.*?)\s*</probes>", re.DOTALL | re.IGNORECASE)
+_PLAN_OPEN_RE = re.compile(r"<plan\b", re.IGNORECASE)
 # Pi-mono "skills" pattern: <lookup_bullet>id</lookup_bullet> requests
 # the full body of a playbook bullet whose index-entry was inlined in
 # hybrid mode. Resolved + injected at the next user-turn boundary.
@@ -391,6 +392,12 @@ class GameAgent:
         self._pending_feedback: list[str] = []
         self._pending_answer: str | None = None
         self._user_force_done = False
+        # Plan-only loop detector: counts consecutive iterations where the
+        # model emitted <plan> but neither <patch> nor <html_file>. The
+        # "no usable code" fallback escalates the next user-turn prompt
+        # when this hits 2, and the loop-break message is sent at >=2.
+        # Resets to 0 whenever a reply successfully materializes code.
+        self._consecutive_plan_only: int = 0
         # Criteria lines that no probe references — surfaced at Phase A
         # parse so the gap is visible upfront. Empty when probes cover
         # everything or when criteria/probes are missing.
@@ -2474,10 +2481,16 @@ class GameAgent:
                 yield self._record(AgentEvent("question", q))
                 while self._pending_answer is None:
                     await asyncio.sleep(0.1)
+                # Planning phase: the question came BEFORE any build, so
+                # asking for <plan> next is correct. The build-phase
+                # handler has its own rewrite-vs-patch routing below.
                 self._messages.append({
                     "role": "user",
                     "content": self._flush_user_injections(
-                        "Thanks. Now produce the <plan> per the original instructions."
+                        "Your answer is recorded above. Now produce the "
+                        "<plan> per the original instructions. Do NOT ask "
+                        "another <question> this turn — the answer above "
+                        "is sufficient to plan."
                     ),
                 })
                 yield self._record(AgentEvent(
@@ -2922,11 +2935,31 @@ class GameAgent:
                 yield self._record(AgentEvent("question", q))
                 while self._pending_answer is None:
                     await asyncio.sleep(0.1)
+                # Tailor the post-answer prompt to whether there's already
+                # a working file: a continuation answer often means "throw
+                # out the old, rewrite". Spell out both options explicitly
+                # so the model doesn't fall into a plan-only loop while it
+                # tries to figure out which output tag applies.
+                has_existing = bool(self._current_file)
+                if has_existing:
+                    followup = (
+                        "Your answer is recorded above. Now produce CODE, "
+                        "not another <plan>. Choose exactly one:\n"
+                        "  - If your answer implies a major rewrite of the "
+                        "existing file, emit one complete <html_file>...</html_file>.\n"
+                        "  - Otherwise emit one or more <patch>...</patch> blocks "
+                        "against the current file.\n"
+                        "Do NOT re-emit <plan>, <criteria>, or <probes> this turn."
+                    )
+                else:
+                    followup = (
+                        "Your answer is recorded above. Now emit a complete "
+                        "<html_file>...</html_file> for the first build. Do "
+                        "NOT re-emit <plan>, <criteria>, or <probes>."
+                    )
                 self._messages.append({
                     "role": "user",
-                    "content": self._flush_user_injections(
-                        "Thanks. Continue building the game."
-                    ),
+                    "content": self._flush_user_injections(followup),
                 })
                 continue
 
@@ -3058,15 +3091,71 @@ class GameAgent:
                         ),
                     })
                 else:
+                    # Detect "plan-only" — the model emitted <plan> but no
+                    # code. This is the failure mode from the
+                    # model-8_20260511_111729 trace: after answering a
+                    # <question> the model kept re-emitting the same
+                    # <plan> indefinitely. Branch the fallback on whether
+                    # an existing file is present and on how many
+                    # consecutive plan-only turns we've seen.
+                    plan_only = bool(_PLAN_OPEN_RE.search(reply))
+                    if plan_only:
+                        self._consecutive_plan_only += 1
+                    else:
+                        self._consecutive_plan_only = 0
+                    self._trace({
+                        "kind": "no_usable_code",
+                        "plan_only": plan_only,
+                        "consecutive_plan_only": self._consecutive_plan_only,
+                        "has_existing_file": bool(self._current_file),
+                    })
+                    if self._consecutive_plan_only >= 2:
+                        # Hard loop-break: stronger directive, then reset
+                        # the counter so we don't escalate forever.
+                        fallback = (
+                            "LOOP DETECTED: you have emitted only <plan> for "
+                            f"{self._consecutive_plan_only} iterations with no "
+                            "code. This iteration MUST produce code, or the "
+                            "session will be aborted. Emit exactly one of:\n"
+                            "  - a complete <html_file>...</html_file> (for a "
+                            "full rewrite), or\n"
+                            "  - one or more <patch>...</patch> blocks (for "
+                            "incremental changes).\n"
+                            "Do NOT include <plan>, <criteria>, or <probes>."
+                        )
+                        self._consecutive_plan_only = 0
+                    elif plan_only and self._current_file:
+                        fallback = (
+                            "You already provided a <plan>. The user wants "
+                            "a full rewrite of the existing file. Stop "
+                            "re-emitting <plan>. Emit one complete "
+                            "<html_file>...</html_file> now containing the "
+                            "new game. Do NOT include <plan>, <criteria>, "
+                            "or <probes> in this reply."
+                        )
+                    elif plan_only:
+                        fallback = (
+                            "You provided a <plan> but no code. This is the "
+                            "first build, so emit one complete "
+                            "<html_file>...</html_file> now. Do NOT re-emit "
+                            "<plan>, <criteria>, or <probes>."
+                        )
+                    else:
+                        fallback = (
+                            "I could not find a <patch> or <html_file> block "
+                            "in your reply. If this is the first build, send "
+                            "a complete <html_file>. Otherwise send <patch> "
+                            "blocks."
+                        )
                     self._messages.append({
                         "role": "user",
-                        "content": self._flush_user_injections(
-                            "I could not find a <patch> or <html_file> block in your "
-                            "reply. If this is the first build, send a complete "
-                            "<html_file>. Otherwise send <patch> blocks."
-                        ),
+                        "content": self._flush_user_injections(fallback),
                     })
                 continue
+
+            # Code materialized — clear the plan-only loop counter so a
+            # later plan-only reply doesn't inherit a stale streak.
+            self._consecutive_plan_only = 0
 
             # Track partial-patch failures for the next prompt even on
             # successful materialize.
