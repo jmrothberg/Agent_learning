@@ -132,7 +132,16 @@ def audit(traces_dir: Path) -> tuple[list[BulletStats], list[SessionSummary]]:
         lambda: BulletStats(bid="?")
     )
     sessions: list[SessionSummary] = []
-    for trace in sorted(traces_dir.glob("*.jsonl")):
+    # Walk recursively so games/bench/<ts>/traces/*.jsonl gets included
+    # when traces_dir is games/traces. Top-level traces and bench
+    # sub-traces both count as "sessions" for earnings attribution.
+    candidates = list(sorted(traces_dir.glob("*.jsonl")))
+    if traces_dir.name == "traces":
+        bench_root = traces_dir.parent / "bench"
+        if bench_root.exists():
+            for sub in sorted(bench_root.glob("*/traces/*.jsonl")):
+                candidates.append(sub)
+    for trace in candidates:
         s = _scan_session(trace)
         if s is None:
             continue
