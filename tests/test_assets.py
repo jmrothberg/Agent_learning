@@ -285,6 +285,48 @@ def test_generate_caches_by_content(tmp_path: Path):
     assert out1["ship"].read_bytes() == out2["ship"].read_bytes()
 
 
+def test_cache_filenames_are_human_readable(tmp_path: Path):
+    """Cache files should land at `<name>__<hash6>.png` so a user can
+    `ls _asset_cache/` and recognize what's in there.
+
+    Regression guard: previously the cache used `<sha256[:32]>.png`,
+    which made the cache dir illegible.
+    """
+    specs = [{"name": "player_ship", "prompt": "cyan ship", "size": (64, 64)}]
+    gen = StubGenerator()
+    cache = tmp_path / "cache"
+    generate_assets(specs, tmp_path / "s", cache_dir=cache, image_generator=gen)
+    files = sorted(p.name for p in cache.iterdir())
+    assert len(files) == 1
+    fname = files[0]
+    assert fname.startswith("player_ship__"), fname
+    assert fname.endswith(".png"), fname
+    # exactly 6 hex chars between the `__` separator and `.png`
+    stem = fname[len("player_ship__"):-len(".png")]
+    assert len(stem) == 6 and all(c in "0123456789abcdef" for c in stem)
+
+
+def test_cache_same_name_different_prompts_coexist(tmp_path: Path):
+    """Two specs with the same `name` but different prompts must map to
+    distinct cache files (different content hash). Otherwise a later
+    session would silently reuse the wrong sprite."""
+    cache = tmp_path / "cache"
+    gen = StubGenerator()
+    generate_assets(
+        [{"name": "ship", "prompt": "silver ship", "size": (64, 64)}],
+        tmp_path / "a", cache_dir=cache, image_generator=gen,
+    )
+    generate_assets(
+        [{"name": "ship", "prompt": "red ship", "size": (64, 64)}],
+        tmp_path / "b", cache_dir=cache, image_generator=gen,
+    )
+    files = sorted(p.name for p in cache.iterdir())
+    # Both start with `ship__`, but with different hash6 suffixes.
+    assert len(files) == 2, files
+    assert all(f.startswith("ship__") for f in files)
+    assert files[0] != files[1]
+
+
 def test_generate_individual_failure_doesnt_kill_batch(tmp_path: Path):
     """If one asset fails to generate, the others still come back."""
     specs = [

@@ -166,3 +166,65 @@ def test_cache_key_is_normalization_stable():
     # Different duration → different key.
     c = sounds._cache_key("m", "loud boom", 1.0)
     assert a != c
+
+
+# ---------------------------------------------------------------------------
+# generate_sounds cache filename layout — human-readable
+# ---------------------------------------------------------------------------
+
+
+class _StubAudioGenerator:
+    """Writes a tiny placeholder .ogg per call. Matches the surface
+    used by generate_sounds (just a `.generate(prompt, duration_s)`
+    method returning a path). last_stats is populated for parity with
+    the real generator."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.last_stats: list[dict] = []
+
+    def generate(self, prompt: str, duration_s: float = 1.0) -> str | None:
+        import tempfile
+        self.calls.append(prompt)
+        f = tempfile.NamedTemporaryFile(suffix=".ogg", delete=False)
+        f.write(b"OggS\x00\x00")  # placeholder; downstream only cares about path/exists
+        f.close()
+        return f.name
+
+
+def test_cache_filenames_are_human_readable(tmp_path):
+    """Cache files should land at `<name>__<hash6>.ogg` so a user can
+    scan `_sound_cache/` and know what's in there."""
+    cache = tmp_path / "cache"
+    sounds.generate_sounds(
+        [{"name": "shoot", "prompt": "8-bit laser pew", "duration": 0.3, "loop": False}],
+        tmp_path / "s",
+        cache_dir=cache,
+        audio_generator=_StubAudioGenerator(),
+    )
+    files = sorted(p.name for p in cache.iterdir())
+    assert len(files) == 1
+    fname = files[0]
+    assert fname.startswith("shoot__"), fname
+    assert fname.endswith(".ogg"), fname
+    stem = fname[len("shoot__"):-len(".ogg")]
+    assert len(stem) == 6 and all(c in "0123456789abcdef" for c in stem)
+
+
+def test_cache_same_name_different_prompts_coexist_sounds(tmp_path):
+    """Same name + different prompts → two distinct cache files. Without
+    this, a later session would silently reuse the wrong audio."""
+    cache = tmp_path / "cache"
+    gen = _StubAudioGenerator()
+    sounds.generate_sounds(
+        [{"name": "explosion", "prompt": "small boom", "duration": 0.5, "loop": False}],
+        tmp_path / "a", cache_dir=cache, audio_generator=gen,
+    )
+    sounds.generate_sounds(
+        [{"name": "explosion", "prompt": "huge boom", "duration": 0.5, "loop": False}],
+        tmp_path / "b", cache_dir=cache, audio_generator=gen,
+    )
+    files = sorted(p.name for p in cache.iterdir())
+    assert len(files) == 2, files
+    assert all(f.startswith("explosion__") for f in files)
+    assert files[0] != files[1]

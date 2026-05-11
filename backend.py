@@ -755,6 +755,22 @@ def _http_get_json(url: str, timeout: float = 5.0) -> Any:
         return None
 
 
+def _http_post_json(url: str, payload: dict, timeout: float = 5.0) -> Any:
+    """POST a JSON body and return the parsed JSON response, or None on
+    any error. Mirrors `_http_get_json` semantics — best-effort, never
+    raises, returns None on URL / timeout / decode failures."""
+    try:
+        body = json.dumps(payload).encode()
+        req = urllib.request.Request(
+            url, data=body, method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode())
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
+        return None
+
+
 def _ollama_running_models(base: str) -> list[dict]:
     """List of models currently loaded at `base` (via /api/ps), with metadata."""
     data = _http_get_json(base.rstrip("/") + "/api/ps")
@@ -838,6 +854,30 @@ def _try_ollama_with_loaded() -> BackendInfo | None:
     return None
 
 
+def _ollama_show_context_length(base: str, model: str) -> int | None:
+    """Best-effort: pull the native context length from `/api/show`.
+
+    Ollama's show payload nests it under `model_info.<arch>.context_length`
+    where `<arch>` is e.g. `qwen2`, `llama`, `deepseek2`. We walk the
+    model_info dict and return the first key ending in `.context_length`.
+    Returns None on failure — caller treats absence as "unknown".
+    """
+    try:
+        url = base.rstrip("/") + "/api/show"
+        data = _http_post_json(url, {"name": model})
+        if not isinstance(data, dict):
+            return None
+        info = data.get("model_info") or {}
+        if not isinstance(info, dict):
+            return None
+        for k, v in info.items():
+            if isinstance(k, str) and k.endswith(".context_length") and isinstance(v, int):
+                return v
+    except Exception:
+        pass
+    return None
+
+
 def _ollama_full_fallback() -> BackendInfo | None:
     """When no model is LOADED — pick first installed chat-capable model.
 
@@ -854,6 +894,7 @@ def _ollama_full_fallback() -> BackendInfo | None:
                 name="ollama", model=chosen,
                 source=f"first installed (no model loaded): {chosen!r} of {chat_installed}",
                 endpoint=base,
+                context_length=_ollama_show_context_length(base, chosen),
             )
     # Daemon unreachable — nothing more to do.
     return None
@@ -878,6 +919,35 @@ def _mlx_endpoint() -> str:
     return _MLX_IN_PROCESS_ENDPOINT
 
 
+def _read_mlx_context_length(model_path: str) -> int | None:
+    """Pull the model's native context length from its config.json.
+
+    Tries common key names in order (`max_position_embeddings` for
+    Llama/Qwen, `max_seq_len` for some Mistral variants,
+    `model_max_length` as a tokenizer-fallback). Returns None when the
+    path isn't a local dir or the config lacks any of these keys —
+    the status panel hides the row in that case.
+
+    Best-effort: any exception swallowed (a malformed config shouldn't
+    break backend resolution).
+    """
+    if not model_path or not os.path.isdir(model_path):
+        return None
+    try:
+        cfg_path = os.path.join(model_path, "config.json")
+        if not os.path.isfile(cfg_path):
+            return None
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        for key in ("max_position_embeddings", "max_seq_len", "model_max_length"):
+            v = cfg.get(key)
+            if isinstance(v, int) and v > 0:
+                return v
+    except Exception:
+        pass
+    return None
+
+
 def _try_mlx() -> BackendInfo | None:
     """Resolve which MLX model to load in-process. None if nothing usable.
 
@@ -893,6 +963,7 @@ def _try_mlx() -> BackendInfo | None:
             name="mlx", model=env_model,
             source=f"MLX_MODEL env: {env_model!r}",
             endpoint=_MLX_IN_PROCESS_ENDPOINT,
+            context_length=_read_mlx_context_length(env_model),
         )
 
     local = list_local_mlx_models()
@@ -903,6 +974,7 @@ def _try_mlx() -> BackendInfo | None:
             name="mlx", model=path,
             source=f"only local MLX chat model: {os.path.basename(path)!r}",
             endpoint=_MLX_IN_PROCESS_ENDPOINT,
+            context_length=_read_mlx_context_length(path),
         )
     if chat_local:
         path = chat_local[0]
@@ -914,6 +986,7 @@ def _try_mlx() -> BackendInfo | None:
                 "(set MLX_MODEL to override)"
             ),
             endpoint=_MLX_IN_PROCESS_ENDPOINT,
+            context_length=_read_mlx_context_length(path),
         )
     return None
 

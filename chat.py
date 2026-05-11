@@ -563,6 +563,13 @@ class CodingBoxApp(App):
         padding: 0 0 1 0;
     }
 
+    #mode-bar {
+        height: 1;
+        dock: bottom;
+        padding: 0 1;
+        color: $accent;
+    }
+
     #input-row {
         height: 3;
         dock: bottom;
@@ -624,6 +631,25 @@ class CodingBoxApp(App):
         self._last_token_at: float = 0.0      # monotonic; for stall age
         self._is_streaming: bool = False
         self._assets_summary: str = ""        # sticky summary of last batch
+        # Sticky sounds summary — same pattern as assets. Populated from
+        # the `sounds` event payload; cleared on session reset. Looping
+        # entries surface a `(loop)` suffix in the rendered list.
+        self._sounds_summary: str = ""
+        self._sounds_dir: Path | None = None
+        # Probe pass/fail counts updated on each `test` event. None
+        # before any test fires — same display pattern as streak (the
+        # iteration line stays clean when there's nothing to report).
+        self._probes_passed: int | None = None
+        self._probes_total: int | None = None
+        # Sticky one-line preview of the most recent <diagnose> text.
+        # Helps the user see what the model is currently working on
+        # without scrolling the log. Truncated to ~140 chars at set time.
+        self._last_diagnose: str | None = None
+        # Context-window display. `_ctx_max` is read once at session
+        # start from BackendInfo.context_length (Ollama) or the MLX
+        # config.json. `_ctx_fill_chars` is recomputed each
+        # _update_status() tick by summing message lengths on the agent.
+        self._ctx_max: int | None = None
         self._streak_clean: int = 0
         self._streak_min: int = 2
         self._streak_stuck: int = 0
@@ -681,6 +707,11 @@ class CodingBoxApp(App):
                     yield Static("", id="status-body")
         # Input row docked to the bottom. We start it empty with a goal prompt.
         yield Input(placeholder="What game do you want to build?", id="user-input")
+        # Single-row mode indicator just above the Footer. Tells the
+        # user at a glance whether the agent is RUNNING or WAITING for
+        # them. Sits in the same visual band as the binding hints so
+        # both are scannable without moving the eye.
+        yield Static("", id="mode-bar")
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -875,10 +906,55 @@ class CodingBoxApp(App):
         body = self._render_activity_line()
         body += self._render_iteration_block()
         body += self._render_assets_block()
+        body += self._render_sounds_block()
         body += self._render_files_block()
         if extra:
             body += "\n" + extra
         self.query_one("#status-body", Static).update(body)
+        # Mode bar gets a free refresh on every status tick. It's a
+        # single-line Static update — cheap.
+        self._update_mode_bar()
+        # Persist a structured snapshot to the trace .jsonl so the
+        # right-hand panel is reconstructable from logs alone (de-duped
+        # inside agent.trace_status — successive ticks that don't
+        # change anything meaningful are skipped). Guarded because
+        # _update_status fires before the agent is wired during early
+        # init.
+        agent = getattr(self, "agent", None)
+        if agent is not None and hasattr(agent, "trace_status"):
+            try:
+                # Sample ctx fill in chars (cheap method on the agent).
+                # Token count derived in `_format_ctx_row`; trace stores
+                # the raw char count so future analyses can apply any
+                # tokenizer they like.
+                ctx_fill_chars = 0
+                if hasattr(agent, "_estimate_ctx_fill"):
+                    ctx_fill_chars = int(agent._estimate_ctx_fill())
+                agent.trace_status({
+                    "activity": self._activity_label or "idle",
+                    "is_streaming": bool(self._is_streaming),
+                    "phase": self._phase_label,
+                    "iteration": self._iteration_label,
+                    "streak_clean": int(self._streak_clean or 0),
+                    "streak_stuck": int(self._streak_stuck or 0),
+                    "probes_passed": self._probes_passed,
+                    "probes_total": self._probes_total,
+                    "last_diagnose": self._last_diagnose,
+                    "ctx_max": self._ctx_max,
+                    "ctx_fill_chars": ctx_fill_chars,
+                    "backend": getattr(agent, "_backend_label", None)
+                        or type(getattr(agent, "_backend", None)).__name__,
+                    "model": getattr(agent, "model", None),
+                    "goal": getattr(self, "_current_goal", None),
+                    "files": {
+                        "game": str(self._out_path) if self._out_path else None,
+                        "best": str(self._best_path) if self._best_path else None,
+                        "log": str(self._log_file_path) if self._log_file_path else None,
+                        "sounds": str(self._sounds_dir) if self._sounds_dir else None,
+                    },
+                })
+            except Exception:
+                pass
 
     def _render_activity_line(self) -> str:
         """Top line: the heartbeat. Always rendered, even when idle."""
@@ -941,7 +1017,7 @@ class CodingBoxApp(App):
         return "[bold yellow]Activity:[/bold yellow] [dim]idle[/dim]\n"
 
     def _render_iteration_block(self) -> str:
-        """Phase / iteration / streak / model / goal / queued feedback."""
+        """Phase / iteration / streak / probes / ctx / model / goal / queued."""
         out = (
             f"[b]Phase:[/b] {self._phase_label}\n"
             f"[b]Iteration:[/b] {self._iteration_label}"
@@ -954,12 +1030,31 @@ class CodingBoxApp(App):
             if self._streak_stuck:
                 out += f", {self._streak_stuck} stuck"
             out += ")[/dim]"
+        # Probe pass/fail counts, sticky after the first `test` event.
+        # Shows green when all probes pass; otherwise red/yellow accent
+        # so the user spots regressions at a glance.
+        if self._probes_total:
+            passed = self._probes_passed or 0
+            total = self._probes_total
+            if passed == total:
+                tag = f"[green]{passed}/{total} passed[/green]"
+            else:
+                tag = f"[yellow]{passed}/{total} passed[/yellow]"
+            out += f" — Probes: {tag}"
         out += "\n"
         if self._session_backend_info is not None:
             out += f"[b]Backend:[/b] {self._session_backend_info.name.upper()}\n"
         if self._session_model:
             out += f"[b]Model:[/b] {self._session_model}\n"
+        # Context window row: hide entirely when neither max nor a
+        # running agent is available (avoids a sad-looking "0 / 0" on
+        # backends that don't expose context_length).
+        ctx_row = self._format_ctx_row()
+        if ctx_row:
+            out += ctx_row
         out += f"[b]Goal:[/b] {self._goal or '—'}\n"
+        if self._last_diagnose:
+            out += f"[b]Last fix:[/b] [dim]{_esc(self._last_diagnose)}[/dim]\n"
         if self.agent is not None:
             pending_fb = list(getattr(self.agent, "_pending_feedback", []) or [])
             pending_ans = getattr(self.agent, "_pending_answer", None)
@@ -977,12 +1072,102 @@ class CodingBoxApp(App):
                 out += "[dim]Applied at the next user-turn boundary.[/dim]\n"
         return out
 
+    def _update_mode_bar(self) -> None:
+        """Refresh the single-line mode indicator above the Footer.
+
+        Spells out at-a-glance whether the agent is RUNNING (the
+        user can keep typing feedback, it queues for the next turn)
+        or WAITING for them (Enter to continue step-mode, or type an
+        answer to a model question). Idle = between sessions.
+
+        Cheap; called from `_update_status` and any event handler that
+        flips `_awaiting_kind` / `_session_done` / `_is_streaming`.
+        """
+        try:
+            bar = self.query_one("#mode-bar", Static)
+        except Exception:
+            return
+        if self._awaiting_kind == "step":
+            bar.update(
+                "[bold red]WAITING (step):[/bold red] "
+                "press Enter to continue, or type feedback first"
+            )
+        elif self._awaiting_kind == "answer":
+            bar.update(
+                "[bold yellow]WAITING (answer):[/bold yellow] "
+                "type your reply to the model's question"
+            )
+        elif self._session_done and self._awaiting_kind == "goal":
+            bar.update(
+                "[dim]idle — type a new goal or /help[/dim]"
+            )
+        elif self._session_done:
+            bar.update(
+                "[dim]session ended — type feedback to extend, or /new[/dim]"
+            )
+        elif self._is_streaming:
+            bar.update(
+                "[bold green]RUNNING:[/bold green] streaming — feedback queues for next turn"
+            )
+        else:
+            bar.update(
+                "[bold green]RUNNING:[/bold green] feedback queues for next turn"
+            )
+
+    def _format_ctx_row(self) -> str:
+        """Compose the `Ctx: X / Y (Z%)` status row.
+
+        Hidden when neither a max nor an active agent is available.
+        Max is read once at session start from BackendInfo.context_length
+        (Ollama populates this; MLX populates it via the new config.json
+        sniff in backend.py). Fill estimate sums message chars on the
+        agent and divides by 3.5 — middle ground between English prose
+        (~4 cpt) and dense code (~3 cpt). Approximate; flagged with a
+        yellow tint and `approx` label when above 80%.
+        """
+        if self._ctx_max is None and self.agent is None:
+            return ""
+        fill_chars = 0
+        try:
+            if self.agent is not None and hasattr(self.agent, "_estimate_ctx_fill"):
+                fill_chars = int(self.agent._estimate_ctx_fill())
+        except Exception:
+            fill_chars = 0
+        fill_tokens = int(fill_chars / 3.5) if fill_chars else 0
+        # If we have no max AND no fill, hide.
+        if self._ctx_max is None and fill_tokens == 0:
+            return ""
+        def _fmt(n: int) -> str:
+            if n >= 1_000_000:
+                return f"{n / 1_000_000:.1f}M"
+            if n >= 1000:
+                return f"{n / 1000:.1f}K"
+            return str(n)
+        if self._ctx_max is None:
+            return f"[b]Ctx:[/b] {_fmt(fill_tokens)} [dim](max unknown)[/dim]\n"
+        pct = (100.0 * fill_tokens / self._ctx_max) if self._ctx_max else 0.0
+        # Approx label kicks in above 80% to draw attention to the
+        # imprecision exactly where it matters most (you're about to
+        # blow context and want to know whether the estimate is solid).
+        suffix = f"({pct:.1f}%)" if pct < 80 else f"({pct:.0f}% approx)"
+        body = f"{_fmt(fill_tokens)} / {_fmt(self._ctx_max)}  {suffix}"
+        if pct >= 80:
+            body = f"[yellow]{body}[/yellow]"
+        return f"[b]Ctx:[/b] {body}\n"
+
     def _render_assets_block(self) -> str:
         """Sticky multi-line summary of the most recent asset batch.
         Empty when no assets have been generated this session."""
         if not self._assets_summary:
             return ""
         return f"\n{self._assets_summary}\n"
+
+    def _render_sounds_block(self) -> str:
+        """Sticky compact summary of the most recent sound batch.
+        Empty when no sounds have been generated this session."""
+        if not self._sounds_summary:
+            return ""
+        return f"\n{self._sounds_summary}\n"
 
     def _render_files_block(self) -> str:
         """Per-session file paths. Always shown when available so the
@@ -996,6 +1181,8 @@ class CodingBoxApp(App):
             rows.append(f"  [dim]trace[/dim]   {self._trace_path}")
         if self._assets_dir is not None and self._assets_dir.exists():
             rows.append(f"  [dim]assets[/dim]  {self._assets_dir}")
+        if self._sounds_dir is not None and self._sounds_dir.exists():
+            rows.append(f"  [dim]sounds[/dim]  {self._sounds_dir}")
         if self._log_file_path is not None:
             rows.append(f"  [dim]log[/dim]     {self._log_file_path}")
         if not rows:
@@ -1140,6 +1327,7 @@ class CodingBoxApp(App):
         if self._awaiting_kind == "step":
             self._awaiting_kind = "feedback"
             message.input.placeholder = "feedback · 'done' or Ctrl+D to ship · /help"
+            self._update_mode_bar()
             if not text:
                 if self.agent is not None:
                     self.agent.signal_step_continue()
@@ -2041,9 +2229,18 @@ class CodingBoxApp(App):
         # accurate even if the user typed /open or /new mid-flight.
         self._trace_path = self.agent.trace_path
         self._assets_dir = self._out_path.parent / f"{basename}_assets"
+        self._sounds_dir = self._out_path.parent / f"{basename}_sounds"
         # Reset rolling status state for the new session — sticky values
         # from a prior session would mislead the user about THIS one.
         self._reset_status_state()
+        # Stash the backend's reported context window for the new
+        # status row. None = backend didn't expose it; the row hides.
+        try:
+            backend = getattr(self.agent, "_backend", None)
+            info = getattr(backend, "info", None) if backend else None
+            self._ctx_max = getattr(info, "context_length", None) if info else None
+        except Exception:
+            self._ctx_max = None
 
         self._open_log_mirror(basename)
 
@@ -2059,6 +2256,12 @@ class CodingBoxApp(App):
         self._last_token_at = 0.0
         self._is_streaming = False
         self._assets_summary = ""
+        self._sounds_summary = ""
+        self._sounds_dir = None
+        self._probes_passed = None
+        self._probes_total = None
+        self._last_diagnose = None
+        self._ctx_max = None
         self._streak_clean = 0
         self._streak_stuck = 0
 
@@ -2239,6 +2442,15 @@ class CodingBoxApp(App):
             n_err = len(ev.data.get("errors", []))
             n_iss = len(ev.data.get("soft_warnings", []))
             self._log(f"{tag} ({n_err} error(s), {n_iss} issue(s))")
+            # Capture probe pass/fail counts for the iteration line. The
+            # agent's test event exposes `probes` as a list of
+            # {name, expr, ok, err, ...} dicts (see tools.py). Counting at
+            # consume-time keeps the UI insulated from payload-shape drift.
+            probes = ev.data.get("probes") or []
+            if isinstance(probes, list) and probes:
+                passed = sum(1 for p in probes if isinstance(p, dict) and p.get("ok"))
+                self._probes_passed = passed
+                self._probes_total = len(probes)
             # Also drop the full report into the right-hand status panel.
             self._update_status(extra=f"[b]Last test:[/b]\n{text_safe}")
 
@@ -2248,6 +2460,7 @@ class CodingBoxApp(App):
             inp = self.query_one("#user-input", Input)
             inp.placeholder = "type your answer and press Enter"
             inp.focus()
+            self._update_mode_bar()
 
         elif ev.kind == "done":
             self._log(f"\n[bold green]DONE[/bold green] - {text_safe}")
@@ -2267,6 +2480,18 @@ class CodingBoxApp(App):
         elif ev.kind == "info":
             self._log_info(text_safe)
 
+        elif ev.kind == "restart":
+            # Structured restart event (attempt comparison or winner).
+            # Render same as info but the data payload also lands in
+            # the trace .jsonl for offline filtering (`jq
+            # 'select(.event=="restart")' games/traces/<stem>.jsonl`).
+            self._log_info(text_safe)
+
+        elif ev.kind == "mlx_stall":
+            # Structured no-tokens-stall event. Render as an error in
+            # the TUI; the .jsonl data carries stall_seconds + iter.
+            self._log_error(text_safe)
+
         elif ev.kind == "await_user":
             # Step-mode pause (Stop-Losing-To-OneShot todo #1). Switch
             # the input box into "step" routing — empty Enter signals
@@ -2277,6 +2502,7 @@ class CodingBoxApp(App):
             inp = self.query_one("#user-input", Input)
             inp.placeholder = "step-mode · Enter to continue, or type feedback"
             inp.focus()
+            self._update_mode_bar()
 
         elif ev.kind == "activity":
             # ev.text is the state name: streaming | generating_assets |
@@ -2318,11 +2544,107 @@ class CodingBoxApp(App):
             )
             self._update_status()
 
+        elif ev.kind == "sounds":
+            # Parallel to the assets handler, but terser display — sound
+            # names are what you reference in feedback ("make shoot less
+            # harsh"); per-sound timing stays in .log / .jsonl.
+            self._sounds_summary = self._format_sounds_summary(ev.data or {})
+            session_dir = (ev.data or {}).get("session_dir")
+            if session_dir:
+                try:
+                    self._sounds_dir = Path(session_dir)
+                except Exception:
+                    pass
+            produced = (ev.data or {}).get("produced", 0)
+            requested = (ev.data or {}).get("requested", 0)
+            self._log_info(
+                f"[green]sounds:[/green] {produced}/{requested} generated"
+                + (f" at [b]{session_dir}[/b]" if session_dir else "")
+            )
+            self._update_status()
+
+        elif ev.kind == "diagnose":
+            # Sticky one-line preview of the model's most recent
+            # diagnosis. Helps the user see what failure mode the agent
+            # is currently chasing without scrolling the log scroll.
+            txt = (ev.text or "").strip()
+            if txt:
+                # Collapse internal whitespace so a multi-line diagnosis
+                # renders on one line in the status panel.
+                preview = " ".join(txt.split())
+                if len(preview) > 140:
+                    preview = preview[:137] + "…"
+                self._last_diagnose = preview
+            self._update_status()
+
         elif ev.kind == "streak":
             self._streak_clean = int((ev.data or {}).get("consecutive_clean_iters", 0))
             self._streak_stuck = int((ev.data or {}).get("stuck_streak", 0))
             self._streak_min = int((ev.data or {}).get("min_to_ship", 2))
             self._update_status()
+
+    def _format_sounds_summary(self, data: dict) -> str:
+        """Render a compact sticky summary for a `sounds` event.
+
+        Format mirrors the Assets block header but the list is just
+        a comma-joined name list — no per-sound timing rows. Looping
+        sounds get a `(loop)` suffix. Soft-wraps to a second line when
+        the joined names exceed ~80 chars; caps at ~12 names with
+        `(+N more)` to keep the panel scannable.
+
+        Failures collapse to a single red line rather than per-row
+        expansion (you can grep the `.log` for per-sound errors).
+        """
+        requested = data.get("requested", 0)
+        produced = data.get("produced", 0)
+        session_dir = data.get("session_dir") or ""
+        paths = data.get("paths") or {}
+        looping = set(data.get("looping") or [])
+        per_sound = list(data.get("per_sound") or [])
+
+        head = f"[b]Sounds:[/b] {produced}/{requested} generated"
+        if session_dir:
+            head += f" [dim]→ {session_dir}[/dim]"
+
+        # Build name list from the produced paths (ordering matches the
+        # agent's emission order). Cap at 12; rest as "(+N more)".
+        names = list(paths.keys())
+        max_show = 12
+        overflow = max(0, len(names) - max_show)
+        names = names[:max_show]
+        labeled = [
+            f"{n} (loop)" if n in looping else n
+            for n in names
+        ]
+        # Soft-wrap: chunk so each line stays under ~80 chars when joined.
+        rows: list[str] = []
+        line: list[str] = []
+        line_len = 0
+        for lbl in labeled:
+            add = len(lbl) + (2 if line else 0)  # ", " separator
+            if line and line_len + add > 80:
+                rows.append("  " + ", ".join(line))
+                line = [lbl]
+                line_len = len(lbl)
+            else:
+                line.append(lbl)
+                line_len += add
+        if line:
+            rows.append("  " + ", ".join(line))
+        if overflow:
+            rows.append(f"  [dim](+{overflow} more)[/dim]")
+
+        # Failure summary — collapsed one-liner.
+        failed = [
+            s for s in per_sound
+            if isinstance(s, dict) and s.get("error")
+        ]
+        if failed:
+            failed_names = ", ".join(str(s.get("name", "?"))[:24] for s in failed[:6])
+            extra = f" [+{len(failed)-6} more]" if len(failed) > 6 else ""
+            rows.append(f"  [red]{len(failed)} failed:[/red] {_esc(failed_names)}{extra}")
+
+        return head + ("\n" + "\n".join(rows) if rows else "")
 
     def _format_assets_summary(self, data: dict) -> str:
         """Render the structured per-asset stats from an `assets` event

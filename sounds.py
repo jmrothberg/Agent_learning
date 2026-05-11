@@ -133,7 +133,14 @@ _SOUNDS_OPEN_RE = re.compile(
 
 def _extract_sounds_body(reply: str) -> str | None:
     """Pull the body of a <sounds>...</sounds> block, tolerating a
-    missing closing tag. Returns None when nothing usable was found."""
+    missing closing tag. Returns None when nothing usable was found.
+
+    Reasoning prose stripped first — see assets._strip_thinking. Same
+    failure mode applies here: a reasoning model that mentions
+    `<sounds>` in its CoT prose would otherwise corrupt the parse.
+    """
+    from assets import _strip_thinking
+    reply = _strip_thinking(reply)
     m = _SOUNDS_RE.search(reply)
     if m:
         return m.group(1)
@@ -622,7 +629,10 @@ def generate_sounds(
         duration = float(spec.get("duration", _DEFAULT_DURATION_S))
         loop = bool(spec.get("loop", False))
         key = _cache_key(model_id, prompt, duration)
-        cache_path = cache_root / f"{key}.ogg"
+        # Human-readable cache filename — same pattern as assets.py.
+        # `<name>__<hash6>.ogg` keeps cache hits deterministic while
+        # making the cache dir scannable.
+        cache_path = cache_root / f"{name}__{key[:6]}.ogg"
         target_path = session_dir / f"{name}.ogg"
         stat: dict[str, Any] = {
             "name": name,

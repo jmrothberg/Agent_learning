@@ -216,6 +216,12 @@ def repair_reply(reply: str) -> str:
     Currently handles:
       * UTF-8 BOM at start
       * CRLF / bare-CR line endings (normalized to LF)
+      * Reasoning-model `</think>` prelude (everything up to the last
+        `</think>` is chain-of-thought, not the answer — without
+        stripping, a CoT that mentions `` `<patch>` `` in markdown
+        backticks corrupts the patch parser the same way assets/sounds
+        were corrupted in
+        games/traces/game-of-space-invaders-with-gr_20260511_093225).
 
     We do NOT touch the body of <patch> blocks here; per-patch repairs
     (fence stripping) happen after extraction so we don't accidentally
@@ -226,6 +232,9 @@ def repair_reply(reply: str) -> str:
     if reply.startswith(_BOM):
         reply = reply[1:]
     reply = _normalize_lines(reply)
+    idx = reply.rfind("</think>")
+    if idx >= 0:
+        reply = reply[idx + len("</think>"):]
     return reply
 
 

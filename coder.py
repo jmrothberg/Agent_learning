@@ -98,6 +98,10 @@ def _print_event(ev: AgentEvent) -> None:
         print(f"\n! ERROR: {ev.text}", flush=True)
     elif ev.kind == "info":
         print(f"  i {ev.text}", flush=True)
+    elif ev.kind == "restart":
+        print(f"  ↻ {ev.text}", flush=True)
+    elif ev.kind == "mlx_stall":
+        print(f"\n! STALL: {ev.text}", flush=True)
     elif ev.kind == "plan":
         # Plan tokens already streamed via on_token; no-op here.
         pass

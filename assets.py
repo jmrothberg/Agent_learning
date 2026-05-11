@@ -101,6 +101,29 @@ _HF_FALLBACK_MODEL_ID = "Tongyi-MAI/Z-Image-Turbo"
 # Cap so a chatty plan can't trigger 50 generations.
 _MAX_ASSETS_PER_TURN = 8
 
+def _strip_thinking(reply: str) -> str:
+    """Drop everything up to and including the LAST `</think>` tag.
+
+    Reasoning-mode models (Qwen3.6, DeepSeek-V3.x, etc.) stream their
+    chain-of-thought first, terminated by `</think>`. The CoT may
+    legitimately MENTION tag names in markdown backticks
+    (`` `<assets>` ``), and the greedy non-greedy regex below would
+    then match from the first <assets> in the prose all the way to
+    the real </assets>, capturing the thinking text as the body and
+    failing JSON parse — observed in
+    games/traces/game-of-space-invaders-with-gr_20260511_093225 where
+    13 asset specs + 10 sound specs were silently dropped.
+
+    Stripping at the LAST `</think>` is safe: if the model uses
+    multiple think segments, the real answer follows the last one. If
+    no `</think>` is present, return the reply unchanged.
+    """
+    idx = reply.rfind("</think>")
+    if idx < 0:
+        return reply
+    return reply[idx + len("</think>"):]
+
+
 _ASSETS_RE = re.compile(
     r"<assets>\s*(.*?)\s*</assets>", re.DOTALL | re.IGNORECASE,
 )
@@ -117,7 +140,11 @@ _ASSETS_OPEN_RE = re.compile(
 
 def _extract_assets_body(reply: str) -> str | None:
     """Pull the body of an <assets>...</assets> block, tolerating a
-    missing closing tag. Returns None when nothing usable was found."""
+    missing closing tag. Returns None when nothing usable was found.
+
+    Reasoning prose stripped first — see _strip_thinking docstring.
+    """
+    reply = _strip_thinking(reply)
     m = _ASSETS_RE.search(reply)
     if m:
         return m.group(1)
@@ -568,7 +595,13 @@ def generate_assets(
         prompt = spec["prompt"]
         size = spec["size"]
         key = _cache_key(model_id, prompt, size)
-        cache_path = cache_root / f"{key}.png"
+        # Cache filename: human-readable `<name>__<hash6>.png`. The
+        # 6-char hash slice keeps the cache deterministic (same prompt
+        # + size = same file = cache hit) while letting you scan
+        # _asset_cache/ visually. Old SHA32 filenames in existing
+        # caches become orphans and naturally regenerate under the
+        # new name on next request.
+        cache_path = cache_root / f"{name}__{key[:6]}.png"
         target_path = session_dir / f"{name}.png"
         stat: dict[str, Any] = {
             "name": name,

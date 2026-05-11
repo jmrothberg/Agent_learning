@@ -141,6 +141,35 @@ def _read_project_config(base_dir: Path) -> tuple[str, list[str]]:
     return ("\n\n".join(parts), sources)
 
 
+def _strip_thinking(reply: str) -> str:
+    """Drop everything up to and including the LAST `</think>` tag.
+
+    Reasoning-mode models (Qwen3.6, DeepSeek-V3.x, etc.) stream their
+    chain-of-thought first, terminated by `</think>`. The CoT may
+    legitimately MENTION tag names in markdown backticks
+    (`` `<assets>` ``, `` `<patch>` ``), and the greedy non-greedy tag
+    regexes below would otherwise match from the first occurrence in
+    the prose all the way to the real closing tag, capturing the
+    thinking text as the body and breaking parse — observed in
+    games/traces/game-of-space-invaders-with-gr_20260511_093225 where
+    13 asset specs + 10 sound specs were silently dropped because the
+    CoT mentioned `` `<assets>` `` in a checklist.
+
+    Stripping at the LAST `</think>` is safe: if the model uses
+    multiple think segments, the real answer follows the last one. If
+    no `</think>` is present, return the reply unchanged.
+
+    Mirrored in assets.py for the asset/sound parsers — those modules
+    can't import agent.py without a cycle.
+    """
+    if not reply:
+        return reply
+    idx = reply.rfind("</think>")
+    if idx < 0:
+        return reply
+    return reply[idx + len("</think>"):]
+
+
 _HTML_RE = re.compile(r"<html_file>\s*(.*?)\s*</html_file>", re.DOTALL | re.IGNORECASE)
 # Models that don't follow the <html_file> wrapper instruction often emit a
 # markdown ```html fence instead, or just a bare <!DOCTYPE html>...</html>
@@ -717,6 +746,48 @@ class GameAgent:
 
     def set_token_callback(self, cb) -> None:
         self._token_cb = cb
+
+    def _estimate_ctx_fill(self) -> int:
+        """Return the total character count across `_messages`.
+
+        Cheap to call repeatedly — the TUI hits this on every status
+        tick. Caller divides by a chars-per-token factor to get the
+        token estimate; we keep the conversion out of here so the agent
+        stays backend-agnostic.
+        """
+        total = 0
+        for msg in self._messages:
+            content = msg.get("content")
+            if isinstance(content, str):
+                total += len(content)
+        return total
+
+    def trace_status(self, snapshot: dict) -> None:
+        """Persist a TUI status-panel snapshot to the trace .jsonl.
+
+        Called by the TUI's _update_status hook. Snapshots are
+        deduped here by comparing against the last accepted payload —
+        successive updates that change nothing meaningful (e.g. token
+        counter ticks) are skipped to avoid trace bloat.
+
+        The recorded payload is whatever the caller provides; by
+        convention it mirrors the status panel keys: activity, phase,
+        iteration, total_iters, streak_clean, streak_stuck, backend,
+        model, goal, files. Best-effort: any exception is swallowed
+        so the TUI never crashes on a logging failure.
+        """
+        try:
+            sig_keys = (
+                "activity", "phase", "iteration", "total_iters",
+                "streak_clean", "streak_stuck", "backend", "model",
+            )
+            sig = tuple(snapshot.get(k) for k in sig_keys)
+            if sig == getattr(self, "_last_status_sig", None):
+                return
+            self._last_status_sig = sig
+            self._trace({"kind": "status_snapshot", **snapshot})
+        except Exception:
+            pass
 
     def _token_cb_wrapper(self, piece: str) -> None:
         if self._token_cb is not None:
@@ -1465,6 +1536,11 @@ class GameAgent:
 
     @staticmethod
     def _extract_html(reply: str) -> str | None:
+        reply = _strip_thinking(reply)
+        return GameAgent._extract_html_inner(reply)
+
+    @staticmethod
+    def _extract_html_inner(reply: str) -> str | None:
         """Pull a complete HTML game out of a model reply.
 
         We accept four formats so we never throw away a valid game just
@@ -1506,11 +1582,13 @@ class GameAgent:
 
     @staticmethod
     def _extract_question(reply: str) -> str | None:
+        reply = _strip_thinking(reply)
         m = _QUESTION_RE.search(reply)
         return m.group(1).strip() if m else None
 
     @staticmethod
     def _extract_diagnose(reply: str) -> str | None:
+        reply = _strip_thinking(reply)
         m = _DIAGNOSE_RE.search(reply)
         return m.group(1).strip() if m else None
 
@@ -1719,11 +1797,13 @@ class GameAgent:
 
     @staticmethod
     def _extract_notes(reply: str) -> str | None:
+        reply = _strip_thinking(reply)
         m = _NOTES_RE.search(reply)
         return m.group(1).strip() if m else None
 
     @staticmethod
     def _extract_criteria(reply: str) -> str | None:
+        reply = _strip_thinking(reply)
         m = _CRITERIA_RE.search(reply)
         return m.group(1).strip() if m else None
 
@@ -1762,6 +1842,7 @@ class GameAgent:
         JSON returns []; the agent shouldn't ever crash on a probe parse
         failure since universal probes still cover the basics.
         """
+        reply = _strip_thinking(reply)
         m = _PROBES_RE.search(reply)
         if not m:
             return []
@@ -1784,6 +1865,351 @@ class GameAgent:
                 elif isinstance(item, str):
                     out.append({"name": f"probe_{i}", "expr": item[:600]})
         return out[:8]   # cap so a chatty model can't bloat the verifier
+
+    @staticmethod
+    def _classify_stall(err_text: str) -> dict | None:
+        """Parse a stream-failure exception message for a no-tokens
+        stall signature. Returns a dict with stall_seconds if matched,
+        else None.
+
+        Model-agnostic: substring + regex over the message, no backend
+        identity check. The MLX backend produces:
+            "Model produced no tokens before stalling at 60.0s"
+        Future Ollama / other backends emitting similar text are
+        caught by the same matcher.
+        """
+        if not err_text or "no tokens" not in err_text:
+            return None
+        import re
+        m = re.search(r"stalling at\s+([0-9]+(?:\.[0-9]+)?)\s*s", err_text)
+        seconds = float(m.group(1)) if m else None
+        return {
+            "kind": "no_tokens_stall",
+            "stall_seconds": seconds,
+            "message_preview": err_text[:400],
+        }
+
+    async def _maybe_generate_assets_and_sounds(
+        self, reply: str, *, trigger: str,
+    ) -> AsyncIterator[AgentEvent]:
+        """Parse <assets>/<sounds> in a model reply and run the diffuser /
+        audio pipeline if either block is present.
+
+        Called from two sites:
+        - Phase A plan reply (initial generation).
+        - Any Phase B / Phase C reply (mid-session add when the model
+          emits a fresh <assets>/<sounds> block in response to user
+          feedback like "add proper sprites for the invaders").
+
+        `trigger` is stamped onto the trace events ("phase_a" |
+        "mid_session") so offline analysis can distinguish first-load
+        from mid-session adds.
+
+        Mid-session semantics: MERGE into self._session_assets /
+        self._session_sounds — never overwrite. New assets are
+        additive. After generation, push a freshly-rendered asset/sound
+        paths block into _pending_feedback so the next user turn shows
+        the new file paths to the model (mirrors the Phase A → first
+        build prelude path).
+
+        Per-asset success timing is logged here too — one info line per
+        sprite when count is small, summary line when >5 to avoid log
+        spam. Failure reasons are surfaced one-per-line either way.
+        """
+        asset_specs = parse_assets_block(reply)
+        sound_specs = parse_sounds_block(reply)
+        if not asset_specs and not sound_specs:
+            return
+
+        # Mid-session: capture pre-existing assets so the feedback block
+        # we synthesize at the end reflects only the *new* additions.
+        new_asset_paths: dict[str, Path] = {}
+        new_sound_paths: dict[str, Path] = {}
+        new_looping: set[str] = set()
+
+        if asset_specs:
+            yield self._record(AgentEvent(
+                "info",
+                f"{trigger}: requested {len(asset_specs)} asset(s); "
+                "loading Z-Image-Turbo (first call only, ~30-60s)…",
+                {
+                    "trigger": trigger,
+                    "assets_requested": [s["name"] for s in asset_specs],
+                },
+            ))
+            yield self._record(AgentEvent(
+                "activity", "generating_assets",
+                {
+                    "label": "generating sprites",
+                    "requested": len(asset_specs),
+                    "produced": 0,
+                },
+            ))
+            if self._asset_generator is None:
+                self._asset_generator = await asyncio.to_thread(
+                    try_load_image_generator,
+                )
+            if self._asset_generator is None:
+                yield self._record(AgentEvent("activity", "idle"))
+                yield self._record(AgentEvent(
+                    "info",
+                    "Z-Image-Turbo not reachable (no CUDA / no diffusers / "
+                    "Colossal_Cave/diffusion_manager.py missing) — "
+                    "proceeding without assets, model will draw "
+                    "procedurally."
+                ))
+            else:
+                session_assets_dir = (
+                    self.out_path.parent / f"{self._session_id}_assets"
+                )
+                try:
+                    produced = await asyncio.to_thread(
+                        generate_assets,
+                        asset_specs,
+                        session_assets_dir,
+                        image_generator=self._asset_generator,
+                    )
+                except Exception as e:
+                    yield self._record(AgentEvent("activity", "idle"))
+                    yield self._record(AgentEvent(
+                        "info",
+                        f"asset generation crashed: {e!r} — proceeding without."
+                    ))
+                    produced = {}
+                # Merge — mid-session adds extend, never overwrite.
+                # Same-name keys take the newer path (model re-rendered
+                # an existing asset on purpose).
+                new_asset_paths = dict(produced)
+                self._session_assets.update(produced)
+                per_asset = getattr(
+                    self._asset_generator, "last_stats", None,
+                ) or []
+                self._trace({
+                    "kind": "assets_generated",
+                    "trigger": trigger,
+                    "requested": len(asset_specs),
+                    "produced": len(produced),
+                    "names": list(produced.keys()),
+                    "session_dir": str(session_assets_dir),
+                    "per_asset": per_asset,
+                })
+                yield self._record(AgentEvent(
+                    "assets",
+                    f"{len(produced)}/{len(asset_specs)} generated",
+                    {
+                        "trigger": trigger,
+                        "requested": len(asset_specs),
+                        "produced": len(produced),
+                        "session_dir": str(session_assets_dir),
+                        "paths": {n: str(p) for n, p in produced.items()},
+                        "per_asset": per_asset,
+                    },
+                ))
+                yield self._record(AgentEvent("activity", "idle"))
+                if produced:
+                    yield self._record(AgentEvent(
+                        "info",
+                        f"generated {len(produced)}/"
+                        f"{len(asset_specs)} sprites at "
+                        f"{session_assets_dir}",
+                        {"assets": {n: str(p) for n, p in produced.items()}},
+                    ))
+                # Per-asset success timing: one line each when small,
+                # else a summary. Cache hits (gen_seconds≈0) called out.
+                ok_stats = [
+                    s for s in per_asset
+                    if isinstance(s, dict) and not s.get("error")
+                    and s.get("name") in produced
+                ]
+                if ok_stats:
+                    if len(ok_stats) <= 5:
+                        for s in ok_stats:
+                            secs = float(s.get("gen_seconds") or 0.0)
+                            cached = secs < 0.5  # heuristic; cache hits are <100ms
+                            tag = " (cached)" if cached else ""
+                            yield self._record(AgentEvent(
+                                "info",
+                                f"  asset {s.get('name','?')}: "
+                                f"{secs:.1f}s{tag}",
+                            ))
+                    else:
+                        total = sum(
+                            float(s.get("gen_seconds") or 0.0)
+                            for s in ok_stats
+                        )
+                        cached = sum(
+                            1 for s in ok_stats
+                            if float(s.get("gen_seconds") or 0.0) < 0.5
+                        )
+                        avg = total / max(1, len(ok_stats))
+                        yield self._record(AgentEvent(
+                            "info",
+                            f"asset gen: {len(ok_stats)}/{len(asset_specs)} "
+                            f"in {total:.1f}s (avg {avg:.1f}s/sprite, "
+                            f"{cached} cached)",
+                        ))
+                if len(produced) < len(asset_specs):
+                    failed = [
+                        s for s in per_asset
+                        if isinstance(s, dict) and s.get("error")
+                    ]
+                    if failed:
+                        yield self._record(AgentEvent(
+                            "info",
+                            f"asset gen: {len(failed)}/{len(asset_specs)} "
+                            f"failed — see per-asset reasons below"
+                        ))
+                        for s in failed:
+                            name = s.get("name", "?")
+                            err = s.get("error", "(no reason captured)")
+                            err_line = str(err)[:400]
+                            yield self._record(AgentEvent(
+                                "info",
+                                f"  - {name}: {err_line}"
+                            ))
+
+        if sound_specs:
+            yield self._record(AgentEvent(
+                "info",
+                f"{trigger}: requested {len(sound_specs)} sound(s); "
+                "loading Stable Audio Open (first call only, ~30-60s)…",
+                {
+                    "trigger": trigger,
+                    "sounds_requested": [s["name"] for s in sound_specs],
+                },
+            ))
+            yield self._record(AgentEvent(
+                "activity", "generating_sounds",
+                {
+                    "label": "generating sounds",
+                    "requested": len(sound_specs),
+                    "produced": 0,
+                },
+            ))
+            if self._sound_generator is None:
+                self._sound_generator = await asyncio.to_thread(
+                    try_load_audio_generator,
+                )
+            if self._sound_generator is None:
+                yield self._record(AgentEvent("activity", "idle"))
+                yield self._record(AgentEvent(
+                    "info",
+                    "Stable Audio Open not reachable (no CUDA / no MPS / "
+                    "diffusers or soundfile missing) — proceeding "
+                    "without audio, model will ship a silent game."
+                ))
+            else:
+                session_sounds_dir = (
+                    self.out_path.parent / f"{self._session_id}_sounds"
+                )
+                try:
+                    produced = await asyncio.to_thread(
+                        generate_sounds,
+                        sound_specs,
+                        session_sounds_dir,
+                        audio_generator=self._sound_generator,
+                    )
+                except Exception as e:
+                    yield self._record(AgentEvent("activity", "idle"))
+                    yield self._record(AgentEvent(
+                        "info",
+                        f"sound generation crashed: {e!r} — proceeding without."
+                    ))
+                    produced = {}
+                new_sound_paths = dict(produced)
+                self._session_sounds.update(produced)
+                # Recompute looping subset from the latest spec set
+                # combined with already-installed sounds.
+                new_looping = {
+                    str(s.get("name", "")).strip()
+                    for s in sound_specs if s.get("loop")
+                } & set(produced.keys())
+                self._session_looping |= new_looping
+                per_sound = getattr(
+                    self._sound_generator, "last_stats", None,
+                ) or []
+                self._trace({
+                    "kind": "sounds_generated",
+                    "trigger": trigger,
+                    "requested": len(sound_specs),
+                    "produced": len(produced),
+                    "names": list(produced.keys()),
+                    "looping": sorted(new_looping),
+                    "session_dir": str(session_sounds_dir),
+                    "per_sound": per_sound,
+                })
+                yield self._record(AgentEvent(
+                    "sounds",
+                    f"{len(produced)}/{len(sound_specs)} generated",
+                    {
+                        "trigger": trigger,
+                        "requested": len(sound_specs),
+                        "produced": len(produced),
+                        "session_dir": str(session_sounds_dir),
+                        "paths": {n: str(p) for n, p in produced.items()},
+                        "looping": sorted(new_looping),
+                        "per_sound": per_sound,
+                    },
+                ))
+                yield self._record(AgentEvent("activity", "idle"))
+                if produced:
+                    yield self._record(AgentEvent(
+                        "info",
+                        f"generated {len(produced)}/"
+                        f"{len(sound_specs)} sounds at "
+                        f"{session_sounds_dir}",
+                        {"sounds": {n: str(p) for n, p in produced.items()}},
+                    ))
+                if len(produced) < len(sound_specs):
+                    failed = [
+                        s for s in per_sound
+                        if isinstance(s, dict) and s.get("error")
+                    ]
+                    if failed:
+                        yield self._record(AgentEvent(
+                            "info",
+                            f"sound gen: {len(failed)}/{len(sound_specs)} "
+                            f"failed — see per-sound reasons below"
+                        ))
+                        for s in failed:
+                            name = s.get("name", "?")
+                            err = s.get("error", "(no reason captured)")
+                            err_line = str(err)[:400]
+                            yield self._record(AgentEvent(
+                                "info",
+                                f"  - {name}: {err_line}"
+                            ))
+
+        # Mid-session only: synthesize a feedback line that re-emits the
+        # asset/sound paths block, so the model's next user turn sees
+        # the new files via the existing _flush_user_injections channel.
+        # Phase A doesn't need this — the first-build assembler already
+        # renders these blocks inline.
+        if trigger == "mid_session" and (new_asset_paths or new_sound_paths):
+            blocks: list[str] = []
+            if new_asset_paths:
+                blocks.append(render_asset_paths_block(
+                    new_asset_paths, self.out_path,
+                ))
+            if new_sound_paths:
+                blocks.append(render_sound_paths_block(
+                    new_sound_paths, self.out_path,
+                    looping_names=new_looping,
+                ))
+            blocks = [b for b in blocks if b]
+            if blocks:
+                msg = (
+                    "Mid-session asset/sound additions — load these in "
+                    "your next patch and use them where appropriate. "
+                    "The files exist on disk now:\n\n"
+                    + "\n\n".join(blocks)
+                )
+                self._pending_feedback.append(msg)
+                self._trace({
+                    "kind": "midsession_asset_injection_queued",
+                    "asset_names": list(new_asset_paths.keys()),
+                    "sound_names": list(new_sound_paths.keys()),
+                })
 
     # -- main loop ----------------------------------------------------------
 
@@ -1980,10 +2406,17 @@ class GameAgent:
                 plan_reply = await self._stream(self._token_cb_wrapper)
             except Exception as e:
                 yield self._record(AgentEvent("activity", "idle"))
-                yield self._record(AgentEvent(
-                    "error",
-                    f"{self._backend.info.name.upper()} call failed during planning: {e}",
-                ))
+                err_msg = (
+                    f"{self._backend.info.name.upper()} call failed "
+                    f"during planning: {e}"
+                )
+                yield self._record(AgentEvent("error", err_msg))
+                stall = self._classify_stall(str(e))
+                if stall:
+                    yield self._record(AgentEvent(
+                        "mlx_stall", err_msg,
+                        {**stall, "phase": "planning"},
+                    ))
                 return
             yield self._record(AgentEvent("activity", "idle"))
             self._messages.append({"role": "assistant", "content": plan_reply})
@@ -2055,10 +2488,16 @@ class GameAgent:
                     plan_reply = await self._stream(self._token_cb_wrapper)
                 except Exception as e:
                     yield self._record(AgentEvent("activity", "idle"))
-                    yield self._record(AgentEvent(
-                        "error",
-                        f"{self._backend.info.name.upper()} call failed: {e}",
-                    ))
+                    err_msg = (
+                        f"{self._backend.info.name.upper()} call failed: {e}"
+                    )
+                    yield self._record(AgentEvent("error", err_msg))
+                    stall = self._classify_stall(str(e))
+                    if stall:
+                        yield self._record(AgentEvent(
+                            "mlx_stall", err_msg,
+                            {**stall, "phase": "planning_after_question"},
+                        ))
                     return
                 yield self._record(AgentEvent("activity", "idle"))
                 self._messages.append({"role": "assistant", "content": plan_reply})
@@ -2066,242 +2505,14 @@ class GameAgent:
                 self._dump_conversation()
                 yield self._record(AgentEvent("plan", plan_reply))
 
-            # ---- Phase A → first-build: optional asset generation ----------
-            # If the model emitted <assets> in its plan AND the local
-            # Z-Image-Turbo diffuser is reachable, generate sprites and
-            # collect their paths. Both halves are optional: no-asset
-            # plans skip everything; reachable-but-no-GPU systems log
-            # and skip; failures on individual assets don't abort.
-            asset_specs = parse_assets_block(plan_reply)
-            if asset_specs:
-                yield self._record(AgentEvent(
-                    "info",
-                    f"plan requested {len(asset_specs)} asset(s); "
-                    "loading Z-Image-Turbo (first call only, ~30-60s)…",
-                    {"assets_requested": [s["name"] for s in asset_specs]},
-                ))
-                yield self._record(AgentEvent(
-                    "activity", "generating_assets",
-                    {
-                        "label": "generating sprites",
-                        "requested": len(asset_specs),
-                        "produced": 0,
-                    },
-                ))
-                if self._asset_generator is None:
-                    # asyncio.to_thread keeps the TUI responsive during
-                    # the (slow) first-load of the diffusion pipeline.
-                    self._asset_generator = await asyncio.to_thread(
-                        try_load_image_generator,
-                    )
-                if self._asset_generator is None:
-                    yield self._record(AgentEvent("activity", "idle"))
-                    yield self._record(AgentEvent(
-                        "info",
-                        "Z-Image-Turbo not reachable (no CUDA / no diffusers / "
-                        "Colossal_Cave/diffusion_manager.py missing) — "
-                        "proceeding without assets, model will draw "
-                        "procedurally."
-                    ))
-                else:
-                    session_assets_dir = (
-                        self.out_path.parent / f"{self._session_id}_assets"
-                    )
-                    try:
-                        self._session_assets = await asyncio.to_thread(
-                            generate_assets,
-                            asset_specs,
-                            session_assets_dir,
-                            image_generator=self._asset_generator,
-                        )
-                    except Exception as e:
-                        yield self._record(AgentEvent("activity", "idle"))
-                        yield self._record(AgentEvent(
-                            "info",
-                            f"asset generation crashed: {e!r} — proceeding without."
-                        ))
-                        self._session_assets = {}
-                    # 2.2: pull per-asset stats (prompt, native_size,
-                    # bg_color, alpha_pixel_ratio, gen_seconds, errors)
-                    # off the generator instance — generate_assets
-                    # stashes them there. Lets the trace record exactly
-                    # which assets were cache hits vs fresh, what bg
-                    # color was detected, and how transparent the
-                    # chroma-key actually got.
-                    per_asset = getattr(
-                        self._asset_generator, "last_stats", None,
-                    ) or []
-                    self._trace({
-                        "kind": "assets_generated",
-                        "requested": len(asset_specs),
-                        "produced": len(self._session_assets),
-                        "names": list(self._session_assets.keys()),
-                        "session_dir": str(session_assets_dir),
-                        "per_asset": per_asset,
-                    })
-                    # Always emit the structured assets event (even on 0
-                    # produced) so the TUI can show "0/N generated" with
-                    # paths and per-asset error reasons.
-                    yield self._record(AgentEvent(
-                        "assets",
-                        f"{len(self._session_assets)}/{len(asset_specs)} generated",
-                        {
-                            "requested": len(asset_specs),
-                            "produced": len(self._session_assets),
-                            "session_dir": str(session_assets_dir),
-                            "paths": {n: str(p) for n, p in self._session_assets.items()},
-                            "per_asset": per_asset,
-                        },
-                    ))
-                    yield self._record(AgentEvent("activity", "idle"))
-                    if self._session_assets:
-                        yield self._record(AgentEvent(
-                            "info",
-                            f"generated {len(self._session_assets)}/"
-                            f"{len(asset_specs)} sprites at "
-                            f"{session_assets_dir}",
-                            {"assets": {n: str(p) for n, p in self._session_assets.items()}},
-                        ))
-                    # When we asked for assets but produced fewer than
-                    # requested, surface the per-asset error reasons as
-                    # info events so the .log mirror picks them up
-                    # (status panel alone is too easy to miss). Each
-                    # failure gets one line so the user sees the actual
-                    # diffuser error — fp16 NaN, model path miss,
-                    # NSFW filter, etc — instead of just "0/N generated".
-                    if len(self._session_assets) < len(asset_specs):
-                        failed = [
-                            s for s in per_asset
-                            if isinstance(s, dict) and s.get("error")
-                        ]
-                        if failed:
-                            yield self._record(AgentEvent(
-                                "info",
-                                f"asset gen: {len(failed)}/{len(asset_specs)} "
-                                f"failed — see per-asset reasons below"
-                            ))
-                            for s in failed:
-                                name = s.get("name", "?")
-                                err = s.get("error", "(no reason captured)")
-                                # Truncate so a giant traceback doesn't
-                                # blow up the log line — the trace JSONL
-                                # has the full untruncated error.
-                                err_line = str(err)[:400]
-                                yield self._record(AgentEvent(
-                                    "info",
-                                    f"  - {name}: {err_line}"
-                                ))
-
-            # ---- Phase A → first-build: optional sound generation ----------
-            # Mirrors the asset block above. If the model emitted <sounds>
-            # AND Stable Audio Open is reachable, generate OGGs and
-            # collect their paths. Both halves are optional: silent plans
-            # skip everything; reachable-but-no-GPU systems log and skip;
-            # individual failures don't abort the batch.
-            sound_specs = parse_sounds_block(plan_reply)
-            if sound_specs:
-                yield self._record(AgentEvent(
-                    "info",
-                    f"plan requested {len(sound_specs)} sound(s); "
-                    "loading Stable Audio Open (first call only, ~30-60s)…",
-                    {"sounds_requested": [s["name"] for s in sound_specs]},
-                ))
-                yield self._record(AgentEvent(
-                    "activity", "generating_sounds",
-                    {
-                        "label": "generating sounds",
-                        "requested": len(sound_specs),
-                        "produced": 0,
-                    },
-                ))
-                if self._sound_generator is None:
-                    self._sound_generator = await asyncio.to_thread(
-                        try_load_audio_generator,
-                    )
-                if self._sound_generator is None:
-                    yield self._record(AgentEvent("activity", "idle"))
-                    yield self._record(AgentEvent(
-                        "info",
-                        "Stable Audio Open not reachable (no CUDA / no MPS / "
-                        "diffusers or soundfile missing) — proceeding "
-                        "without audio, model will ship a silent game."
-                    ))
-                else:
-                    session_sounds_dir = (
-                        self.out_path.parent / f"{self._session_id}_sounds"
-                    )
-                    try:
-                        self._session_sounds = await asyncio.to_thread(
-                            generate_sounds,
-                            sound_specs,
-                            session_sounds_dir,
-                            audio_generator=self._sound_generator,
-                        )
-                    except Exception as e:
-                        yield self._record(AgentEvent("activity", "idle"))
-                        yield self._record(AgentEvent(
-                            "info",
-                            f"sound generation crashed: {e!r} — proceeding without."
-                        ))
-                        self._session_sounds = {}
-                    # Track which produced names were declared with
-                    # loop=true so the loader pattern can mark them.
-                    self._session_looping = {
-                        str(s.get("name", "")).strip()
-                        for s in sound_specs if s.get("loop")
-                    } & set(self._session_sounds.keys())
-                    per_sound = getattr(
-                        self._sound_generator, "last_stats", None,
-                    ) or []
-                    self._trace({
-                        "kind": "sounds_generated",
-                        "requested": len(sound_specs),
-                        "produced": len(self._session_sounds),
-                        "names": list(self._session_sounds.keys()),
-                        "looping": sorted(self._session_looping),
-                        "session_dir": str(session_sounds_dir),
-                        "per_sound": per_sound,
-                    })
-                    yield self._record(AgentEvent(
-                        "sounds",
-                        f"{len(self._session_sounds)}/{len(sound_specs)} generated",
-                        {
-                            "requested": len(sound_specs),
-                            "produced": len(self._session_sounds),
-                            "session_dir": str(session_sounds_dir),
-                            "paths": {n: str(p) for n, p in self._session_sounds.items()},
-                            "looping": sorted(self._session_looping),
-                            "per_sound": per_sound,
-                        },
-                    ))
-                    yield self._record(AgentEvent("activity", "idle"))
-                    if self._session_sounds:
-                        yield self._record(AgentEvent(
-                            "info",
-                            f"generated {len(self._session_sounds)}/"
-                            f"{len(sound_specs)} sounds at "
-                            f"{session_sounds_dir}",
-                            {"sounds": {n: str(p) for n, p in self._session_sounds.items()}},
-                        ))
-                    if len(self._session_sounds) < len(sound_specs):
-                        failed = [
-                            s for s in per_sound
-                            if isinstance(s, dict) and s.get("error")
-                        ]
-                        if failed:
-                            yield self._record(AgentEvent(
-                                "info",
-                                f"sound gen: {len(failed)}/{len(sound_specs)} "
-                                f"failed — see per-sound reasons below"
-                            ))
-                            for s in failed:
-                                name = s.get("name", "?")
-                                err = s.get("error", "(no reason captured)")
-                                err_line = str(err)[:400]
-                                yield self._record(AgentEvent(
-                                    "info",
-                                    f"  - {name}: {err_line}"
-                                ))
+            # ---- Phase A → first-build: optional asset + sound generation --
+            # Delegated to a shared helper so the same code path also
+            # runs mid-session when the model emits a fresh <assets>/
+            # <sounds> block in response to user feedback.
+            async for ev in self._maybe_generate_assets_and_sounds(
+                plan_reply, trigger="phase_a",
+            ):
+                yield ev
 
             # ---- seed file OR memory skeleton for the first build ----------
             if self.seed_file is not None:
@@ -2598,10 +2809,16 @@ class GameAgent:
                     yield self._record(AgentEvent("activity", "idle"))
             except Exception as e:
                 yield self._record(AgentEvent("activity", "idle"))
-                yield self._record(AgentEvent(
-                    "error",
-                    f"{self._backend.info.name.upper()} call failed: {e}",
-                ))
+                err_msg = (
+                    f"{self._backend.info.name.upper()} call failed: {e}"
+                )
+                yield self._record(AgentEvent("error", err_msg))
+                stall = self._classify_stall(str(e))
+                if stall:
+                    yield self._record(AgentEvent(
+                        "mlx_stall", err_msg,
+                        {**stall, "phase": "iterate", "iteration": iteration},
+                    ))
                 return
 
             self._messages.append({"role": "assistant", "content": reply})
@@ -2613,6 +2830,20 @@ class GameAgent:
                 "len": len(reply),
                 "preview": reply[:600],
             })
+
+            # ---- mid-session asset / sound generation ------------------
+            # If the model emitted a fresh <assets> or <sounds> block in
+            # this iteration's reply (typically in response to user
+            # feedback like "add proper sprites for the invaders"), run
+            # the diffuser / audio pipeline now. The helper merges into
+            # self._session_assets / self._session_sounds and queues a
+            # USER FEEDBACK injection so the next user turn shows the
+            # new file paths to the model. No-op when neither block is
+            # present, so the hot path stays free.
+            async for ev in self._maybe_generate_assets_and_sounds(
+                reply, trigger="mid_session",
+            ):
+                yield ev
 
             # ---- coverage-gap probe re-parse ---------------------------
             # If planning detected uncovered criteria (the synthetic
@@ -3295,6 +3526,14 @@ class GameAgent:
                     "iteration": self.max_iters + 1,
                     "len": len(reply),
                 })
+                # Mid-session asset/sound re-parse also applies on the
+                # bonus turn — the user's feedback that triggered this
+                # turn often says "add sprites" and the model's reply
+                # may include a fresh <assets> block.
+                async for ev in self._maybe_generate_assets_and_sounds(
+                    reply, trigger="mid_session",
+                ):
+                    yield ev
                 new_html, materialize_msg = await self._materialize(reply)
                 if new_html is not None:
                     self.out_path.write_text(new_html, encoding="utf-8")
@@ -3382,8 +3621,14 @@ class GameAgent:
                 "score": score,
             })
             yield self._record(AgentEvent(
-                "info",
+                "restart",
                 f"restart attempt {k+1}/{self.restart_n}: score={score:.0f}",
+                {
+                    "attempt": k + 1,
+                    "total": self.restart_n,
+                    "score": score,
+                    "winner": False,
+                },
             ))
             if score >= 100.0:
                 break
@@ -3413,8 +3658,18 @@ class GameAgent:
         except Exception as e:
             self._trace({"kind": "restart_install_failed", "err": str(e)})
         yield self._record(AgentEvent(
-            "info",
+            "restart",
             f"restart winner: attempt {best_idx+1} score={best_score:.0f}",
+            {
+                "attempt": best_idx + 1,
+                "total": self.restart_n,
+                "score": best_score,
+                "winner": True,
+                "all_scores": [
+                    {"attempt": i + 1, "score": s}
+                    for (s, i, _p) in attempts
+                ],
+            },
         ))
 
     def _reset_attempt_state(self) -> None:
