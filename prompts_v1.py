@@ -200,6 +200,13 @@ HTML_FORMAT = FormatSpec(
         "marker).",
         "Use <html_file> only when patches truly cannot express the "
         "change. Default to <patch> for everything after the first build.",
+        # Markdown-fence trap. Models trained with heavy markdown in their
+        # corpus reflexively close fenced code blocks even when no fence
+        # was opened — observed on DeepSeek-V4 in trace 20260512_153449,
+        # where a stray ``` truncated the HTML body before </script>.
+        "The <html_file> body is raw HTML, not a markdown code block. "
+        "Do NOT wrap it in ```html ... ``` fences — a stray closing ``` "
+        "inside the body will truncate your file at that point.",
     ],
 )
 
@@ -921,11 +928,57 @@ No <html_file> yet. No prose outside tags.
 # ===========================================================================
 
 
+# Generic seed-path scrubber. Past `won_<other_session>.html` skeletons
+# bake their own `_assets` / `_sounds` directory names into the JS as
+# concrete `const ASSET_DIR = './<session>_assets'` strings — and any
+# model (regardless of size or vendor) will copy those constants verbatim
+# into the new session's code, leaving every sprite and sound broken
+# because the referenced directory belongs to a different session. The
+# classic-doom 20260512_153449 trace caught DeepSeek-V4 doing exactly
+# this; the same failure shape is plausible on every other model.
+# Solution: rewrite the seed text so the broken paths can't leak. If we
+# know the current session's actual directory names, substitute them so
+# the seed remains copy-pasteable. Otherwise replace with an obviously-
+# wrong sentinel so a leaked copy fails loudly at asset-load time.
+import re as _re_seed
+_SEED_PATH_RE = _re_seed.compile(
+    r"""\./[A-Za-z0-9._\-]+_(?P<kind>assets|sounds)\b""",
+)
+
+
+def _scrub_seed_paths(
+    seed_html: str,
+    *,
+    current_asset_dir: str | None,
+    current_sound_dir: str | None,
+) -> str:
+    """Replace `./*_assets/` and `./*_sounds/` directory literals in a
+    retrieved seed skeleton. Returns the seed unchanged when no paths
+    are found.
+    """
+    if not seed_html:
+        return seed_html
+
+    def _sub(m: "_re_seed.Match[str]") -> str:
+        kind = m.group("kind")
+        if kind == "assets":
+            return f"./{current_asset_dir}" if current_asset_dir else (
+                "./STALE_PATH_USE_GENERATED_ASSETS_BLOCK_ABOVE_assets"
+            )
+        return f"./{current_sound_dir}" if current_sound_dir else (
+            "./STALE_PATH_USE_GENERATED_SOUNDS_BLOCK_ABOVE_sounds"
+        )
+
+    return _SEED_PATH_RE.sub(_sub, seed_html)
+
+
 def first_build_instruction(
     seed_html: str,
     seed_source: str | None = None,
     *,
     playbook_block: str = "",
+    current_asset_dir: str | None = None,
+    current_sound_dir: str | None = None,
 ) -> str:
     """First-build prompt. Includes the SEED CODE the model should start from.
 
@@ -933,7 +986,19 @@ def first_build_instruction(
     when empty the section is omitted. v1 is designed to take the
     playbook seriously — if a relevant bullet is provided, the model is
     explicitly told to apply it.
+
+    `current_asset_dir` / `current_sound_dir` are the basenames of the
+    current session's asset / sound directories (e.g.
+    `my-game_20260512_153449_assets`). When provided, the seed's stale
+    path literals are rewritten to point at the current session's dirs
+    so the seed remains copy-pasteable. When omitted, stale paths are
+    replaced with a self-describing sentinel that fails loudly at runtime.
     """
+    seed_html = _scrub_seed_paths(
+        seed_html,
+        current_asset_dir=current_asset_dir,
+        current_sound_dir=current_sound_dir,
+    )
     src = (
         "the bundled default skeleton"
         if not seed_source
@@ -1168,6 +1233,54 @@ def post_clean_instruction(report_text: str) -> str:
         "confident it will not regress. A targeted <patch> is best; for "
         "structural improvements only, a complete <html_file> is acceptable "
         "(auto-revert will roll back any version that regresses)."
+    )
+
+
+def truncation_recovery_instruction(
+    *,
+    report_text: str,
+    truncation_reason: str,
+    broken_size_bytes: int,
+) -> str:
+    """Short-form fix prompt for when the on-disk file is structurally
+    truncated (open <html>/<body>/<script> without matching close).
+
+    Critical: this prompt deliberately does NOT inline the broken file.
+    Patches against a truncated file can't anchor — the patch-target
+    lines aren't there yet — and inlining ~7K BPE tokens of broken
+    content has been measured (classic-doom 20260512_153449) to push
+    the prompt past what some MLX runtimes can serve in 60s, causing
+    a no-tokens stall on the next turn. The right move is a fresh
+    rewrite, and the agent's rewrite-gate is already open (the
+    degenerate-baseline carve-out treats truncated files as degenerate).
+
+    Model-agnostic: every LLM occasionally truncates output (max_tokens
+    cap, accidental markdown fence close, generation timeout, etc.).
+    """
+    return (
+        f"{report_text}\n\n"
+        f"================ TRUNCATION DETECTED ================\n"
+        f"Your previous reply produced an <html_file> that is "
+        f"STRUCTURALLY BROKEN: {truncation_reason}.\n"
+        f"Approximate file size on disk: {broken_size_bytes} bytes "
+        f"(truncated before completion).\n\n"
+        f"DO NOT try to patch the broken file — patches need anchor "
+        f"text that doesn't exist yet, and any anchor you guess will "
+        f"fail to apply.\n\n"
+        f"INSTEAD: emit ONE fresh, complete <html_file>...</html_file> "
+        f"from scratch. Include every section the previous attempt was "
+        f"trying to build (init, render loop, input handlers, asset "
+        f"loader call, IIFE close, </script></body></html>). The "
+        f"rewrite-rejection gate is open this turn.\n\n"
+        f"Reminders that protect against the same failure repeating:\n"
+        f"  - The <html_file> body is RAW HTML. Do NOT wrap it in "
+        f"markdown code fences. No ```html opener, no closing ``` "
+        f"before </html_file>.\n"
+        f"  - Emit the COMPLETE file. No elisions, no 'rest unchanged' "
+        f"markers.\n"
+        f"  - End with </script></body></html> immediately followed by "
+        f"</html_file>.\n"
+        f"=======================================================\n"
     )
 
 

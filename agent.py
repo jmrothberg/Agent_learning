@@ -218,19 +218,51 @@ _BLOAT_MIN_BLOCK_BYTES = 200 # skip whitespace-y blocks
 _BLOAT_MAX_REPEATS = 3       # > 3 identical blocks = bloat
 
 
+def _truncation_reason(html: str) -> str | None:
+    """Return a short human description if `html` looks structurally
+    truncated (an open tag with no close), else None.
+
+    Generic across models: the classic-doom 20260512_153449 trace
+    showed DeepSeek-V4 emit a stray ``` markdown fence inside an
+    `<html_file>` body and stop before the closing tags. Smaller
+    models hit the same shape when they run out of tokens. Either way
+    the resulting file has open-but-not-closed `<html>` / `<body>` /
+    `<script>` and the next fix turn should NOT inline it as a patch
+    truth source — there's nothing to anchor patches against.
+    """
+    if not html:
+        return None
+    low = html.lower()
+    # Single-tag opens (no attribute closing-bracket needed for opener
+    # detection beyond the `<tag` prefix). Each pair is (opener-needle,
+    # closer-needle, reason).
+    for opener, closer, reason in (
+        ("<html", "</html>", "unclosed <html>"),
+        ("<body", "</body>", "unclosed <body>"),
+        ("<script", "</script>", "unclosed <script>"),
+    ):
+        if opener in low and closer not in low:
+            return reason
+    return None
+
+
 def _is_degenerate_baseline(html: str) -> bool:
     """True when `html` looks like a placeholder skeleton rather than a
     real game: too small, OR no <canvas>, OR no <script>, OR a <script>
-    body containing only comments / placeholder markers.
+    body containing only comments / placeholder markers, OR structurally
+    truncated (open tag with no matching close).
 
     Used by `_materialize` to allow a full <html_file> rewrite when the
     on-disk baseline was the truncated output of a prior iter that hit
-    the model's max_tokens cap. Without this carve-out the agent forces
-    patch-mode against a file that has no real code to anchor to, and
-    every subsequent iter is wasted (see classic-doom trace
-    20260512_101944).
+    the model's max_tokens cap (classic-doom trace 20260512_101944) OR
+    that ended on a stray markdown fence inside the `<html_file>` body
+    (classic-doom trace 20260512_153449). Without this carve-out the
+    agent forces patch-mode against a file that has no real code to
+    anchor to, and every subsequent iter is wasted.
     """
     if not html or len(html) < 2048:
+        return True
+    if _truncation_reason(html) is not None:
         return True
     low = html.lower()
     if "<canvas" not in low or "<script" not in low:
@@ -2825,8 +2857,28 @@ class GameAgent:
                                 f"architect: {architect_note[:160]}",
                             ))
 
+                # Fix B (model-agnostic): pass the current session's
+                # asset/sound directory basenames so first_build_instruction
+                # can scrub stale `./<other_session>_assets` paths out of
+                # the retrieved seed skeleton. Without this, any model is
+                # liable to copy the seed's session-specific path literals
+                # verbatim (classic-doom 20260512_153449 caught this on
+                # DeepSeek-V4). Names derived from the first asset path in
+                # each map; if either map is empty we pass None and the
+                # scrubber substitutes a self-describing sentinel.
+                cur_asset_dir = None
+                if self._session_assets:
+                    any_asset = next(iter(self._session_assets.values()))
+                    cur_asset_dir = any_asset.parent.name
+                cur_sound_dir = None
+                if self._session_sounds:
+                    any_sound = next(iter(self._session_sounds.values()))
+                    cur_sound_dir = any_sound.parent.name
                 build_msg = self._p.first_build_instruction(
-                    skel.html, skel.source_goal, **pb_kwargs,
+                    skel.html, skel.source_goal,
+                    current_asset_dir=cur_asset_dir,
+                    current_sound_dir=cur_sound_dir,
+                    **pb_kwargs,
                 )
                 if architect_note:
                     build_msg = (
@@ -3990,11 +4042,15 @@ class GameAgent:
         """Construct the next user message after a test result.
 
         Branches:
-          - report ok  → post_clean (encourage <done/>)
-          - regressed  → revert prompt with last-good code inline
-          - failed     → diagnose-then-fix combined turn (with mistake hints
-                         and current file inline; VLM note appended if
-                         applicable)
+          - report ok           → post_clean (encourage <done/>)
+          - regressed           → revert prompt with last-good code inline
+          - structurally broken → truncation-recovery prompt that does
+                                  NOT inline the broken file (saves ~5-8K
+                                  BPE tokens of prompt and removes a
+                                  misleading "truth source")
+          - failed              → diagnose-then-fix combined turn (with
+                                  mistake hints and current file inline;
+                                  VLM note appended if applicable)
         """
         report_text = format_report_for_model(report)
 
@@ -4004,6 +4060,26 @@ class GameAgent:
         if regressed:
             best = self._read_best_or_empty()
             return self._p.regression_instruction(report_text, best)
+
+        # Fix C (model-agnostic): when the on-disk file is structurally
+        # truncated (open <html>/<body>/<script> without matching close),
+        # patches can't anchor — there's nothing to anchor against. Route
+        # through a short-form recovery prompt that asks for a fresh
+        # rewrite. The existing rewrite-gate already allows the rewrite
+        # through (degenerate-baseline carve-out, which we extended to
+        # include this truncation case).
+        trunc_reason = _truncation_reason(self._current_file)
+        if trunc_reason:
+            self._trace({
+                "kind": "truncation_recovery",
+                "reason": trunc_reason,
+                "broken_file_bytes": len(self._current_file),
+            })
+            return self._p.truncation_recovery_instruction(
+                report_text=report_text,
+                truncation_reason=trunc_reason,
+                broken_size_bytes=len(self._current_file),
+            )
 
         # Failed: combined diagnose+fix prompt with memory hints inline.
         sig = signature_for_report(report)

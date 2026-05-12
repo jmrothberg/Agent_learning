@@ -16,7 +16,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agent import _detect_block_bloat, _is_degenerate_baseline  # noqa: E402
+from agent import (  # noqa: E402
+    _detect_block_bloat,
+    _is_degenerate_baseline,
+    _truncation_reason,
+)
 from ollama_io import RepetitionDetector  # noqa: E402
 
 
@@ -238,3 +242,99 @@ def test_degenerate_baseline_script_only_comments():
     )
     assert len(html) > 4000
     assert _is_degenerate_baseline(html) is True
+
+
+# ---------------------------------------------------------------------------
+# _truncation_reason — generic across-models recognition of a stream
+# that ended before closing its outer HTML/body/script tags.
+#
+# Trace evidence: classic-doom-style 20260512_153449 (DeepSeek-V4-mxfp8)
+# emitted a stray ``` markdown-fence terminator inside the <html_file>
+# body, ending the actual HTML before </script></body></html>.
+# ---------------------------------------------------------------------------
+
+
+def _doom_trace_153449_body() -> str:
+    """Reconstruct the failure shape from the trace: open <html>, open
+    <body>, open <script>, but stream stops before any close. Real-game
+    sized so the size check in _is_degenerate_baseline can't short-circuit
+    on the small-file path."""
+    body = "\n".join([f"  const v{i} = {i};" for i in range(200)])
+    return (
+        "<!DOCTYPE html>\n"
+        "<html lang='en'><head><title>X</title></head>\n"
+        "<body>\n"
+        "<canvas id='c' width='800' height='600'></canvas>\n"
+        f"<script>\n{body}\n"
+        # No </script>, no </body>, no </html> — truncated mid-stream.
+    )
+
+
+def test_truncation_reason_detects_unclosed_html():
+    html = "<!DOCTYPE html><html lang='en'><body><canvas id='c'></canvas><script>const x=1;</script></body>"
+    assert _truncation_reason(html) == "unclosed <html>"
+
+
+def test_truncation_reason_detects_unclosed_body():
+    html = "<!DOCTYPE html><html><body><canvas id='c'></canvas><script>const x=1;</script></html>"
+    assert _truncation_reason(html) == "unclosed <body>"
+
+
+def test_truncation_reason_detects_unclosed_script():
+    html = "<!DOCTYPE html><html><body><canvas id='c'></canvas><script>const x=1;</body></html>"
+    assert _truncation_reason(html) == "unclosed <script>"
+
+
+def test_truncation_reason_returns_none_for_complete_file():
+    html = "<!DOCTYPE html><html><body><canvas id='c'></canvas><script>const x=1;</script></body></html>"
+    assert _truncation_reason(html) is None
+
+
+def test_truncation_reason_returns_none_for_empty_or_pure_text():
+    assert _truncation_reason("") is None
+    assert _truncation_reason(None) is None  # type: ignore[arg-type]
+    assert _truncation_reason("Just some plain text, no tags at all.") is None
+
+
+def test_truncation_reason_case_insensitive():
+    """Some models capitalize HTML tags. The check is case-insensitive."""
+    html = "<!DOCTYPE HTML><HTML><BODY><canvas id='c'></canvas><SCRIPT>const x=1;</SCRIPT></BODY>"
+    assert _truncation_reason(html) == "unclosed <html>"
+
+
+def test_doom_trace_153449_fixture_is_degenerate():
+    """The exact failure shape from the user's trace must be classified
+    as a degenerate baseline so the rewrite-gate carve-out kicks in.
+    The detector reports the outermost unclosed tag first (<html>),
+    which is the highest-leverage signal — even if <body> and <script>
+    are also unclosed, fixing the outermost matters for recovery."""
+    broken = _doom_trace_153449_body()
+    assert _truncation_reason(broken) == "unclosed <html>"
+    assert _is_degenerate_baseline(broken) is True
+
+
+def test_truncation_reports_outermost_first():
+    """Ordering: <html> takes priority over <body>, which takes priority
+    over <script>. The outermost open tag is the most useful recovery
+    signal."""
+    # Only <script> unclosed:
+    only_script = "<!DOCTYPE html><html><body><canvas></canvas><script>const x=1;</body></html>"
+    assert _truncation_reason(only_script) == "unclosed <script>"
+    # <body> and <script> unclosed but <html> closed (unusual but possible):
+    body_script = "<!DOCTYPE html><html><body><canvas></canvas><script>const x=1;</html>"
+    assert _truncation_reason(body_script) == "unclosed <body>"
+
+
+def test_real_game_with_close_tags_is_not_truncated():
+    """Regression guard: a complete game whose script body happens to
+    contain '<html' as a string literal (not a tag) must NOT be flagged
+    as truncated."""
+    html = (
+        "<!DOCTYPE html><html><body><canvas id='c'></canvas>"
+        "<script>"
+        "const note = '<html>';\n"
+        + ("const filler = 'x'.repeat(100);\n" * 80)
+        + "console.log(note);\n"
+        "</script></body></html>"
+    )
+    assert _truncation_reason(html) is None

@@ -49,3 +49,32 @@ def test_mid_model_prompt_keeps_assets_drops_anti_patterns():
     assert "<assets>" in p
     assert "<sounds>" in p
     assert "<anti-patterns>" not in p
+
+
+# ---------------------------------------------------------------------------
+# Fix A — <html_file> markdown-fence warning. Generic across-model
+# protection against the failure shape from classic-doom-style
+# 20260512_153449 where DeepSeek-V4 emitted a stray closing ``` inside
+# the <html_file> body.
+# ---------------------------------------------------------------------------
+
+
+def test_large_model_prompt_includes_markdown_fence_warning():
+    """The warning must reach reasoning-class models (where the failure
+    actually showed up). The HTML_FORMAT guideline is in the always-on
+    set, so it should be in every prompt size."""
+    p = build_system_prompt("doom-style first-person shooter", model_class="large")
+    assert "RAW HTML" in p or "raw HTML" in p, (
+        "markdown-fence warning missing from large-model system prompt"
+    )
+    # Specific phrasing that prohibits the failure pattern:
+    assert "markdown code fences" in p or "```html" in p
+
+
+def test_small_model_prompt_includes_markdown_fence_warning():
+    """Small models can also exhibit this if trained on markdown corpora.
+    The warning must survive the small-model trim path."""
+    p = build_system_prompt("snake game", model_class="small")
+    assert "RAW HTML" in p or "raw HTML" in p, (
+        "markdown-fence warning missing from small-model trimmed prompt"
+    )

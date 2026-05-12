@@ -269,3 +269,102 @@ def test_rewrite_rejected_when_no_feedback_drain(tmp_path):
     ))
     assert res is None
     assert "baseline file already exists" in msg
+
+
+# ---------------------------------------------------------------------------
+# Fix C — truncation-aware fix-turn routing
+#
+# When the on-disk file has open <html>/<body>/<script> with no matching
+# close, _build_fix_prompt must route through truncation_recovery_instruction
+# and NOT inline the broken file as truth source. The classic-doom
+# 20260512_153449 trace showed an iter-2 prompt of 34,137 BPE tokens —
+# of which ~7K was the broken iter-1 HTML — stall MLX at 60s with zero
+# output. Skipping the inline drops prompt size dramatically.
+# ---------------------------------------------------------------------------
+
+
+def _truncated_file() -> str:
+    """A 3 KB+ file that opens <html>/<body>/<script> but never closes
+    them — mirrors the classic-doom 20260512_153449 failure shape."""
+    body = "\n".join([f"  const v{i} = {i};" for i in range(160)])
+    return (
+        "<!DOCTYPE html>\n"
+        "<html lang='en'><head><title>FPS</title></head>\n"
+        "<body>\n<canvas id='c' width='800' height='600'></canvas>\n"
+        f"<script>(()=>{{\n{body}\n"
+        # truncated: no closing })(), </script>, </body>, </html>.
+    )
+
+
+def test_build_fix_prompt_routes_truncation_to_recovery(tmp_path):
+    """When the current file has open <script> with no close, the fix
+    prompt must use truncation_recovery wording and skip the file body."""
+    a = _make_agent(tmp_path)
+    a._current_file = _truncated_file()
+    fake_report = {
+        "ok": False,
+        "errors": ["<script> opened but never closed"],
+        "console_errors": [],
+        "page_errors": [],
+        "probe_errors": [],
+        "soft_warnings": [],
+        "warnings": [],
+        "logs": [],
+        "title": "X",
+        "canvas": None,
+        "input_listeners": {},
+        "input_test": None,
+        "frozen_canvas": None,
+        "body_chars": 0,
+        "body_sample": "",
+        "probes": [],
+    }
+    prompt = a._build_fix_prompt(
+        report=fake_report, regressed=False, partial_failed=[],
+    )
+    # The truncation-recovery wording is present.
+    assert "TRUNCATION DETECTED" in prompt
+    # The fixture has <html>, <body>, <script> all unclosed. _truncation_reason
+    # reports the outermost open tag first, which is the highest-leverage
+    # recovery signal — see test_truncation_reports_outermost_first.
+    assert "unclosed <html>" in prompt
+    # The broken file body is NOT inlined as truth source — the
+    # const-v0/v1/v159 sea would otherwise be visible.
+    assert "const v0" not in prompt
+    assert "const v159" not in prompt
+    # The fresh-rewrite directive is present.
+    assert "fresh, complete <html_file>" in prompt or "fresh complete <html_file>" in prompt
+
+
+def test_build_fix_prompt_normal_path_still_inlines_file(tmp_path):
+    """Regression guard: a complete (non-truncated) file must still go
+    through the normal fix_instruction path with the file inlined."""
+    a = _make_agent(tmp_path)
+    a._current_file = _real_baseline_html()
+    a._criteria = "Basic: works"
+    fake_report = {
+        "ok": False,
+        "errors": ["console.log('something went wrong')"],
+        "console_errors": ["console.log('something went wrong')"],
+        "page_errors": [],
+        "probe_errors": [],
+        "soft_warnings": [],
+        "warnings": [],
+        "logs": [],
+        "title": "X",
+        "canvas": {"width": 800, "height": 600, "blank": False, "raf_ran": True},
+        "input_listeners": {"total": 1, "document": 0, "window": 1, "body": 0, "other": 0},
+        "input_test": {"ran": False, "any_change": None, "keys_tried": []},
+        "frozen_canvas": False,
+        "body_chars": 100,
+        "body_sample": "...",
+        "probes": [],
+    }
+    prompt = a._build_fix_prompt(
+        report=fake_report, regressed=False, partial_failed=[],
+    )
+    assert "TRUNCATION DETECTED" not in prompt
+    # The normal fix-instruction inlines the current file somewhere.
+    # _real_baseline_html includes a distinctive `function draw() { /* real */ }`
+    # marker; assert it survives into the prompt.
+    assert "/* real */" in prompt
