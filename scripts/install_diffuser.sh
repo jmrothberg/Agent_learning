@@ -13,6 +13,15 @@
 
 set -euo pipefail
 
+# B3: img2img is an opt-out (--skip-img2img) — SD-Turbo weights are
+# small (~2 GB) and most game goals benefit from animation chaining.
+SKIP_IMG2IMG=0
+for arg in "$@"; do
+  case "$arg" in
+    --skip-img2img) SKIP_IMG2IMG=1 ;;
+  esac
+done
+
 cd "$(dirname "$0")/.."
 
 if [ ! -d ".venv" ]; then
@@ -113,10 +122,40 @@ if ok_diffusers:
         print(f"  StableAudioPipeline:    importable ✓")
     except Exception as e:
         print(f"  StableAudioPipeline:    IMPORT FAILED — {e!r}")
+    # B3: SD-Turbo img2img for animation-frame chaining.
+    try:
+        from diffusers import AutoPipelineForImage2Image  # noqa: F401
+        print(f"  AutoPipelineForImg2Img: importable ✓")
+    except Exception as e:
+        print(f"  AutoPipelineForImg2Img: IMPORT FAILED — {e!r}")
 for mod in ("soundfile", "torchsde"):
     ok = iu.find_spec(mod) is not None
     print(f"  {mod + ':':24} {'✓' if ok else 'MISSING'}")
 PY
+
+if [ "$SKIP_IMG2IMG" = "0" ]; then
+  echo
+  echo "[5/5] Pre-fetching SD-Turbo (~2 GB) for img2img animation chaining …"
+  echo "      (pass --skip-img2img to skip; the agent still works without it,"
+  echo "       but animation frames will be uncorrelated)"
+  $PY - <<'PY'
+try:
+    from huggingface_hub import snapshot_download
+    p = snapshot_download(
+        repo_id="stabilityai/sd-turbo",
+        allow_patterns=[
+            "*.json", "*.txt",
+            "scheduler/*", "tokenizer/*", "text_encoder/*",
+            "unet/diffusion_pytorch_model.safetensors",
+            "vae/diffusion_pytorch_model.safetensors",
+        ],
+    )
+    print(f"  ✓ SD-Turbo cached at {p}")
+except Exception as e:
+    print(f"  SD-Turbo download SKIPPED — {type(e).__name__}: {e!s}")
+    print(f"  (the agent will retry on first img2img request)")
+PY
+fi
 
 echo
 echo "Now running assets.try_load_image_generator() to confirm the loader is wired:"

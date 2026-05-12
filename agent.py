@@ -391,6 +391,15 @@ class GameAgent:
         self._messages: list[dict] = []
         self._pending_feedback: list[str] = []
         self._pending_answer: str | None = None
+        # A2: short coaching strings queued when the deliberation detector
+        # aborts the last stream or another agent-side guard wants the
+        # next user-turn to carry a one-shot corrective note. Drained
+        # by _flush_user_injections before any base message is appended.
+        self._pending_coaching: list[str] = []
+        # A5: track consecutive same-signature errors to drive runtime-
+        # state probe coaching.
+        self._last_mistake_sig: str | None = None
+        self._repeat_sig_streak: int = 0
         self._user_force_done = False
         # Plan-only loop detector: counts consecutive iterations where the
         # model emitted <plan> but neither <patch> nor <html_file>. The
@@ -1147,6 +1156,19 @@ class GameAgent:
             for block in self._pending_bullet_lookups:
                 parts.append(block)
             self._pending_bullet_lookups.clear()
+        # A2/A5: agent-queued coaching lines (deliberation guard recovery,
+        # repeat-error nudges). Rendered as a single high-priority block
+        # so the model sees them before the base instruction.
+        if self._pending_coaching:
+            joined = "\n- ".join(self._pending_coaching)
+            parts.append(
+                "================ AGENT COACHING ================\n"
+                f"- {joined}\n"
+                "================================================"
+            )
+            for c in self._pending_coaching:
+                self._trace({"kind": "coaching_injected", "text": c})
+            self._pending_coaching.clear()
         if base_message:
             parts.append(base_message)
 
@@ -1326,6 +1348,7 @@ class GameAgent:
             "duration_s": round(result.duration_s, 2),
             "stalled": result.stalled,
             "looped": result.looped,
+            "deliberated": result.deliberated,
             "crashed": result.crashed,
             "len": len(result.text),
             # Backend-reported BPE counts when available. `tokens` above is
@@ -1365,6 +1388,24 @@ class GameAgent:
                 f"the same 1-2 short lines on repeat after {result.tokens} tokens "
                 f"({result.duration_s:.0f}s). Aborted stream and kept partial output."
             ))
+        if result.deliberated:
+            # A2: smaller LLMs sometimes ramble pre-tag for thousands of
+            # tokens without ever emitting <patch> / <html_file>. We
+            # aborted; queue a coaching message so the next user turn
+            # tells the model to commit to one root cause + one patch.
+            self._record(AgentEvent(
+                "info",
+                f"[yellow]deliberation loop detected[/yellow] — {result.tokens} "
+                f"tokens of pre-tag reasoning with no <patch>/<html_file>. "
+                "Aborted stream; coaching the model to skip the essay."
+            ))
+            self._pending_coaching.append(
+                "Your last reply was pure reasoning prose with no output tag — "
+                "aborted by the deliberation guard. Do NOT think out loud this "
+                "turn. Emit ONE line inside <diagnose>...</diagnose> naming the "
+                "single line:variable responsible, then ONE <patch>...</patch> "
+                "or <html_file>...</html_file>. No preamble, no exploration."
+            )
         if result.stalled and not result.text.strip():
             raise RuntimeError(
                 f"Model produced no tokens before stalling at "
@@ -3583,6 +3624,31 @@ class GameAgent:
                 sig = signature_for_report(report)
                 if sig:
                     self._trace({"kind": "mistake_signature", "sig": sig})
+                    # A5: when the same error signature repeats, the model
+                    # is patching the wrong location. Nudge it to author a
+                    # runtime-state probe so the next test report SHOWS
+                    # the data it needs instead of the model guessing.
+                    if sig == self._last_mistake_sig:
+                        self._repeat_sig_streak += 1
+                    else:
+                        self._repeat_sig_streak = 1
+                    self._last_mistake_sig = sig
+                    if self._repeat_sig_streak >= 2:
+                        self._pending_coaching.append(
+                            "Same error signature for 2 iterations — your "
+                            "patches are missing the real cause. In this "
+                            "turn, AUTHOR a runtime-state probe inside "
+                            "<probes>...</probes> that captures the data "
+                            "you're missing (e.g. "
+                            "`name=\"alien_bullets_len\", expr=\"window.state && state.alienBullets.length\"` "
+                            "or `JSON.stringify(state.alienBullets.slice(0,3))`). "
+                            "The next test report will include the probe's "
+                            "value — letting you see runtime state directly "
+                            "instead of guessing from the stack trace."
+                        )
+            else:
+                self._last_mistake_sig = None
+                self._repeat_sig_streak = 0
 
             # ---- build next user turn ---------------------------------
             notice = self._consumed_feedback_summary()
@@ -3795,6 +3861,9 @@ class GameAgent:
         self._last_iter_run = 0
         self._last_report_summary = ""
         self._pending_bullet_lookups = []
+        self._pending_coaching = []
+        self._last_mistake_sig = None
+        self._repeat_sig_streak = 0
         self._user_force_done = False
         if self._stop_event is not None:
             self._stop_event.clear()

@@ -253,3 +253,78 @@ def test_parse_sounds_block_dedupe_respects_duration_and_loop():
     )
     out = sounds.parse_sounds_block(reply)
     assert len(out) == 2
+
+
+# ---------------------------------------------------------------------------
+# A2 — DeliberationDetector
+# ---------------------------------------------------------------------------
+
+
+def test_deliberation_detector_fires_after_threshold_with_no_tag():
+    """Unique-text rambling with no output tag must trip the detector
+    once the char budget is exhausted. This is the failure mode from
+    games/traces/game-of-space-invaders_20260512_084906: iter 2 burned
+    14k tokens of pure reasoning before being aborted by overall_seconds.
+    """
+    d = ollama_io.DeliberationDetector(threshold_chars=200)
+    fired = False
+    text = (
+        "Let me think about this. Wait, actually, hmm. "
+        "But what about the alien bullets array? "
+        "Maybe state.player is undefined. Let me reconsider. "
+        "Actually wait. But state.player should exist. Hmm. "
+        "Let me think again. Maybe the issue is somewhere else entirely."
+    )
+    # Feed one char at a time to simulate streaming.
+    for ch in text:
+        if d.feed(ch):
+            fired = True
+            break
+    assert fired, "no-tag rambling should trip after threshold_chars"
+    assert d.stall_reason == "deliberation_loop"
+
+
+def test_deliberation_detector_does_not_fire_when_tag_appears_early():
+    """Real productive replies start with <diagnose> or <patch> — the
+    detector must not fire if any output tag opener has appeared.
+    """
+    d = ollama_io.DeliberationDetector(threshold_chars=100)
+    text = "<diagnose>The alien bullets array is being mutated mid-loop.</diagnose>" + "x" * 500
+    for ch in text:
+        assert not d.feed(ch), f"tripped on legal output containing tag at len={len(d._buf)}"
+
+
+def test_deliberation_detector_does_not_fire_on_full_html_file():
+    """Phase B first build streams a full <html_file>...</html_file>;
+    that's hundreds of KB of text but always begins with a tag opener.
+    """
+    d = ollama_io.DeliberationDetector(threshold_chars=50)
+    payload = "<html_file>\n<!DOCTYPE html><html><body>" + "x" * 10000 + "</body></html>\n</html_file>"
+    for chunk in [payload[i:i + 17] for i in range(0, len(payload), 17)]:
+        assert not d.feed(chunk)
+
+
+def test_deliberation_detector_respects_disable_env(monkeypatch):
+    """DISABLE_DELIBERATION_DETECTOR=1 is the AB-flag hook so the bench
+    script can compare ON vs OFF arms without code edits."""
+    monkeypatch.setenv("DISABLE_DELIBERATION_DETECTOR", "1")
+    d = ollama_io.DeliberationDetector(threshold_chars=50)
+    for _ in range(200):
+        assert not d.feed("more reasoning, no tag, ")
+    assert d.stall_reason is None
+
+
+def test_deliberation_detector_catches_tag_split_across_pieces():
+    """When `<html_file>` arrives split across two stream pieces, the
+    detector must still recognize it — otherwise long replies that
+    happen to land a boundary mid-tag would trip the guard.
+    """
+    d = ollama_io.DeliberationDetector(threshold_chars=10000)
+    # Pump 270 chars of prose so the buffer is sticky, then half-tag.
+    for ch in "preamble " * 30:
+        d.feed(ch)
+    assert d.feed("<html_") is False
+    assert d.feed("file>") is False
+    # 'seen_tag' should now be latched True.
+    for _ in range(10000):
+        assert not d.feed("x")

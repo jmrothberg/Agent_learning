@@ -968,7 +968,14 @@ def test_html_file(path: str | Path, run_seconds: float = 3.0) -> dict[str, Any]
 
         browser.close()
 
-    return _build_report(errors, warnings, logs, title, canvas_info, listener_info, body_text)
+    report = _build_report(errors, warnings, logs, title, canvas_info, listener_info, body_text)
+    # A1: synchronous path doesn't separate page vs console errors, so just
+    # scan the union for stack frames into the file we just ran.
+    report["path"] = str(path)
+    report["crash_source_slices"] = extract_crash_source_slices(
+        list(errors), file_filter=path,
+    )
+    return report
 
 
 def score_test_report(report: dict[str, Any]) -> float:
@@ -1032,6 +1039,81 @@ def score_test_report(report: dict[str, Any]) -> float:
     if it.get("ran") and it.get("any_change") is True:
         s += 3                                  # input_test caused real motion
     return max(0.0, min(100.0, s))
+
+
+# A1: when a JS error names a file:LINE:COL, splice the actual source
+# region into the report so a 27B doesn't have to reverse-line-count
+# a 700-line file from a raw stack trace. Stops "let me think about
+# which .y access this could be" deliberation chains cold.
+_STACK_FRAME_RE = re.compile(r"file://(?P<path>[^\s:)]+):(?P<line>\d+):(?P<col>\d+)")
+
+
+def extract_crash_source_slices(
+    error_strs: list[str],
+    *,
+    file_filter: str | Path | None = None,
+    radius: int = 3,
+    max_slices: int = 2,
+) -> list[dict[str, Any]]:
+    """Parse `file://...:LINE:COL` frames out of each error string and read the
+    surrounding source lines from disk. Returns a list of dicts with `path`,
+    `line`, `col`, `snippet` (multi-line string with `>` on the offending line).
+    Dedups by (path, line) so a 5-deep stack trace doesn't produce 5 copies of
+    the same neighborhood. Cap at `max_slices` so a noisy multi-error report
+    doesn't blow up the prompt.
+    """
+    filter_resolved: str | None = None
+    if file_filter is not None:
+        try:
+            filter_resolved = str(Path(file_filter).resolve())
+        except Exception:
+            filter_resolved = str(file_filter)
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[str, int]] = set()
+    for err in error_strs:
+        if not err:
+            continue
+        for m in _STACK_FRAME_RE.finditer(err):
+            path_str = m.group("path")
+            try:
+                line_no = int(m.group("line"))
+                col_no = int(m.group("col"))
+            except ValueError:
+                continue
+            if filter_resolved:
+                try:
+                    cand_resolved = str(Path(path_str).resolve())
+                except Exception:
+                    cand_resolved = path_str
+                if cand_resolved != filter_resolved:
+                    continue
+            key = (path_str, line_no)
+            if key in seen:
+                continue
+            try:
+                src = Path(path_str).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            src_lines = src.splitlines()
+            if not src_lines or line_no < 1 or line_no > len(src_lines):
+                continue
+            lo = max(1, line_no - radius)
+            hi = min(len(src_lines), line_no + radius)
+            width = len(str(hi))
+            rendered = []
+            for i in range(lo, hi + 1):
+                arrow = ">" if i == line_no else " "
+                rendered.append(f"  {arrow} {i:>{width}}: {src_lines[i - 1]}")
+            seen.add(key)
+            out.append({
+                "path": path_str,
+                "line": line_no,
+                "col": col_no,
+                "snippet": "\n".join(rendered),
+            })
+            if len(out) >= max_slices:
+                return out
+    return out
 
 
 def format_report_for_model(report: dict[str, Any]) -> str:
@@ -1102,6 +1184,19 @@ def format_report_for_model(report: dict[str, Any]) -> str:
             lines.append("ERRORS (must fix):")
             for e in report["errors"]:
                 lines.append(f"  - {e}")
+        # A1: prepend source context. If the test runner already attached
+        # `crash_source_slices`, use those; otherwise compute on the fly so
+        # callers that bypass LiveBrowser (sync test path, unit tests) still
+        # benefit.
+        slices = report.get("crash_source_slices")
+        if slices is None:
+            slices = extract_crash_source_slices(
+                list(page_errs) + list(cons_errs),
+                file_filter=report.get("path"),
+            )
+        for sl in slices or []:
+            lines.append(f"SOURCE NEAR ERROR ({Path(sl['path']).name}:{sl['line']}):")
+            lines.append(sl["snippet"])
     if report.get("soft_warnings"):
         # Heuristic broken-but-no-exception findings. Listed as ISSUES so the
         # model treats them with the same urgency as real errors.
@@ -1418,6 +1513,15 @@ class LiveBrowser:
             for p in probe_results
             if not p.get("ok") and p.get("err")
         ]
+        # A1: precompute source slices once so format_report_for_model
+        # doesn't re-read the file on every render. file_filter biases the
+        # extractor to frames inside the current game file (deep frameworks
+        # in CDN scripts won't pollute the report).
+        report["path"] = str(path)
+        report["crash_source_slices"] = extract_crash_source_slices(
+            list(self._page_errors) + list(self._console_errors),
+            file_filter=path,
+        )
 
         # Promote the new findings into soft_warnings so they get the same
         # "must fix" treatment as RAF/blank in the report formatter.

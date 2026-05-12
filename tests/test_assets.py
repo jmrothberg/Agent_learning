@@ -392,3 +392,150 @@ def test_render_block_skips_rel_when_outside_html_dir(tmp_path: Path):
     block = render_asset_paths_block({"x": elsewhere}, html)
     assert "x:" in block
     assert "GENERATED ASSETS" in block
+
+
+# ---------------------------------------------------------------------------
+# B2 — img2img schema (from_image, strength) and topological ordering
+# ---------------------------------------------------------------------------
+
+
+def test_parse_preserves_from_image_and_strength():
+    reply = '''
+<assets>
+[
+  {"name": "alien1", "prompt": "8-bit alien legs together"},
+  {"name": "alien2", "prompt": "8-bit alien legs apart",
+   "from_image": "alien1", "strength": 0.4}
+]
+</assets>
+'''
+    out = parse_assets_block(reply)
+    assert len(out) == 2
+    assert "from_image" not in out[0]
+    assert out[1]["from_image"] == "alien1"
+    assert abs(out[1]["strength"] - 0.4) < 1e-9
+
+
+def test_parse_strength_clamps_and_defaults():
+    """Out-of-range strength gets clamped; missing strength defaults to 0.45."""
+    reply = '''
+<assets>
+[
+  {"name": "a", "prompt": "p1"},
+  {"name": "b", "prompt": "p2", "from_image": "a"},
+  {"name": "c", "prompt": "p3", "from_image": "a", "strength": 99.0},
+  {"name": "d", "prompt": "p4", "from_image": "a", "strength": -1.0}
+]
+</assets>
+'''
+    out = parse_assets_block(reply)
+    assert out[1]["strength"] == 0.45
+    assert out[2]["strength"] == 1.0
+    assert out[3]["strength"] == 0.05
+
+
+def test_topo_sort_places_parent_before_child():
+    """When the child is declared first, the topological sort must
+    reorder so the parent is generated before the child reads it."""
+    specs = [
+        {"name": "child", "prompt": "p2", "size": (128, 128), "from_image": "parent", "strength": 0.4},
+        {"name": "parent", "prompt": "p1", "size": (128, 128)},
+    ]
+    sorted_specs = assets._topo_sort_specs(specs)
+    names = [s["name"] for s in sorted_specs]
+    assert names.index("parent") < names.index("child")
+
+
+def test_topo_sort_handles_chain_of_three():
+    specs = [
+        {"name": "f3", "prompt": "p3", "size": (128, 128), "from_image": "f2", "strength": 0.4},
+        {"name": "f1", "prompt": "p1", "size": (128, 128)},
+        {"name": "f2", "prompt": "p2", "size": (128, 128), "from_image": "f1", "strength": 0.4},
+    ]
+    names = [s["name"] for s in assets._topo_sort_specs(specs)]
+    assert names == ["f1", "f2", "f3"]
+
+
+def test_topo_sort_cycle_falls_back_to_input_order():
+    """A cycle (a→b→a) is malformed input; don't loop forever, just
+    return the original list and let the per-spec code mark the missing
+    parents as errors."""
+    specs = [
+        {"name": "a", "prompt": "p", "size": (128, 128), "from_image": "b", "strength": 0.4},
+        {"name": "b", "prompt": "p", "size": (128, 128), "from_image": "a", "strength": 0.4},
+    ]
+    sorted_specs = assets._topo_sort_specs(specs)
+    assert len(sorted_specs) == 2  # didn't drop anything
+
+
+class Img2ImgStubGenerator:
+    """Test double for the SD-Turbo wrapper. Writes a 512×512 PNG whose
+    color is derived from BOTH the prompt and the init image so we can
+    verify the init was honored, not silently ignored.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, float]] = []
+        self._last_error: str | None = None
+
+    def generate(self, prompt: str, init_image_path: str,
+                 *, strength: float = 0.45, num_inference_steps: int = 2) -> str | None:
+        self.calls.append((prompt, init_image_path, strength))
+        from PIL import Image
+        init = Image.open(init_image_path).convert("RGB")
+        # Mix init avg color with prompt hash so the test can prove
+        # init_image actually contributed.
+        seed = sum(ord(c) for c in prompt) % 256
+        avg = init.resize((1, 1)).getpixel((0, 0))
+        out = ((avg[0] + seed) % 256, avg[1], avg[2])
+        f = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        f.close()
+        Image.new("RGB", (512, 512), out).save(f.name)
+        return f.name
+
+
+def test_generate_assets_chains_img2img(tmp_path):
+    """End-to-end: a 2-frame walk-cycle spec triggers img2img on frame 2
+    with frame 1 as init, producing two distinct files in session_dir."""
+    specs = [
+        {"name": "walk1", "prompt": "alien legs together", "size": (64, 64)},
+        {"name": "walk2", "prompt": "alien legs apart", "size": (64, 64),
+         "from_image": "walk1", "strength": 0.45},
+    ]
+    txt2img = StubGenerator()
+    i2i = Img2ImgStubGenerator()
+    session_dir = tmp_path / "session"
+    out = generate_assets(
+        specs, session_dir,
+        cache_dir=tmp_path / "cache",
+        image_generator=txt2img,
+        img2img_generator=i2i,
+    )
+    assert set(out.keys()) == {"walk1", "walk2"}
+    assert len(txt2img.calls) == 1, "frame 1 must use txt2img"
+    assert len(i2i.calls) == 1, "frame 2 must use img2img"
+    # Frame 2's init image was the freshly-generated frame 1 (assert by
+    # checking the path it received exists and is non-empty PNG).
+    init_used = i2i.calls[0][1]
+    assert Path(init_used).exists()
+    assert Path(init_used).stat().st_size > 100
+
+
+def test_generate_assets_falls_back_to_txt2img_when_img2img_missing(tmp_path):
+    """If img2img wrapper isn't available (None), the chained child
+    still generates via txt2img — no chain, but no asset is lost."""
+    specs = [
+        {"name": "walk1", "prompt": "alien legs together", "size": (64, 64)},
+        {"name": "walk2", "prompt": "alien legs apart", "size": (64, 64),
+         "from_image": "walk1", "strength": 0.45},
+    ]
+    txt2img = StubGenerator()
+    out = generate_assets(
+        specs, tmp_path / "session",
+        cache_dir=tmp_path / "cache",
+        image_generator=txt2img,
+        img2img_generator=None,
+    )
+    assert set(out.keys()) == {"walk1", "walk2"}
+    # Both frames went through txt2img — chain unavailable.
+    assert len(txt2img.calls) == 2

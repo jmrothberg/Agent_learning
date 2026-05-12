@@ -291,3 +291,95 @@ def test_24_taint_downgrade_logic_in_source():
     assert "downgraded" in src
     # The downgrade triggers on the taint phrases.
     assert "tainted" in src
+
+
+# ---------------------------------------------------------------------------
+# A1 — crash-site source slice (tools.extract_crash_source_slices)
+# ---------------------------------------------------------------------------
+
+
+def test_a1_extracts_source_line_with_arrow(tmp_path):
+    """The space-invaders failure mode: the report had a `file://...:482:7`
+    stack frame but no line content. With A1, the report carries the
+    actual offending source line so a smaller LLM can patch the right
+    spot without reverse-line-counting a 700-line file.
+    """
+    f = tmp_path / "game.html"
+    f.write_text(
+        "line1\n"
+        "line2\n"
+        "line3\n"
+        "line4\n"
+        "    b.y += ALIEN_BULLET_SPEED * dt;  // line5\n"
+        "line6\n"
+        "line7\n"
+        "line8\n"
+    )
+    err = (
+        "game crash: TypeError: Cannot read properties of undefined (reading 'y')\n"
+        f"    at update (file://{f}:5:7)\n"
+        "    at frame"
+    )
+    slices = tools.extract_crash_source_slices([err], file_filter=f)
+    assert len(slices) == 1
+    assert slices[0]["line"] == 5
+    assert ">" in slices[0]["snippet"]
+    assert "b.y += ALIEN_BULLET_SPEED" in slices[0]["snippet"]
+    assert "line4" in slices[0]["snippet"]  # context window includes neighbors
+
+
+def test_a1_dedup_same_path_line(tmp_path):
+    """A 5-deep stack trace that hits the same line repeatedly must not
+    produce 5 copies of the same snippet."""
+    f = tmp_path / "game.html"
+    f.write_text("a\nb\nc\nd\n")
+    err = (
+        f"E\n    at f (file://{f}:2:1)\n"
+        f"    at g (file://{f}:2:1)\n"
+        f"    at h (file://{f}:2:1)"
+    )
+    slices = tools.extract_crash_source_slices([err], file_filter=f)
+    assert len(slices) == 1
+
+
+def test_a1_respects_file_filter(tmp_path):
+    """Frames into CDN scripts or framework files (not the game file)
+    must be ignored when file_filter is provided — keeps the report focused
+    on the user's actual source."""
+    game = tmp_path / "game.html"
+    framework = tmp_path / "framework.js"
+    game.write_text("x\ny\nz\n")
+    framework.write_text("a\nb\nc\n")
+    err = (
+        f"E\n    at f (file://{framework}:2:1)\n"
+        f"    at g (file://{game}:1:1)"
+    )
+    slices = tools.extract_crash_source_slices([err], file_filter=game)
+    assert len(slices) == 1
+    assert slices[0]["line"] == 1
+
+
+def test_a1_renders_in_format_report():
+    """End-to-end: format_report_for_model emits the SOURCE NEAR ERROR
+    section when slices are attached."""
+    r = _stub_report()
+    r["page_errors"] = ["UNCAUGHT TypeError at file:///x.html:5:1"]
+    r["errors"] = list(r["page_errors"])
+    r["crash_source_slices"] = [{
+        "path": "/tmp/x.html",
+        "line": 5,
+        "col": 1,
+        "snippet": "    4: b\n  > 5: c.y\n    6: d",
+    }]
+    text = tools.format_report_for_model(r)
+    assert "SOURCE NEAR ERROR" in text
+    assert "x.html:5" in text
+    assert "c.y" in text
+
+
+def test_a1_no_slice_when_no_stack_frame():
+    """A console.error with no file URL must not produce a slice."""
+    slices = tools.extract_crash_source_slices(
+        ["plain log message with no stack frame here"]
+    )
+    assert slices == []

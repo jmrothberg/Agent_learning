@@ -165,6 +165,18 @@ ASSETS_FORMAT = FormatSpec(
         "Optional `size` is a string (\"64x64\", \"128x96\") or an int "
         "(square). Default 128 px square. Keep sprites small — 32–128 px "
         "is typical; over-large sprites blur when drawn small.",
+        "ANIMATION FRAMES: when you need a coherent sprite sequence "
+        "(walk cycle, attack windup, flap, idle bob), declare frame 1 "
+        "normally, then add `\"from_image\": \"<name-of-frame-1>\"` and "
+        "`\"strength\": 0.35-0.55` on subsequent frames. The harness "
+        "runs SD-Turbo img2img with the previous frame as the init "
+        "image, so frame 2 inherits frame 1's silhouette + palette and "
+        "only the pose changes. Without `from_image` each frame is an "
+        "independent txt2img and the result looks like two different "
+        "characters. Example: "
+        "{\"name\":\"alien_walk1\", \"prompt\":\"8-bit alien, legs together\"}, "
+        "{\"name\":\"alien_walk2\", \"prompt\":\"8-bit alien, legs apart\", "
+        "\"from_image\":\"alien_walk1\", \"strength\":0.45}.",
         "SKIP <assets> ONLY for pure-DOM apps where text + emojis are "
         "enough — todo lists, calculators, tic-tac-toe, color pickers. "
         "If the canvas has any rendered entity with visual character, "
@@ -1092,15 +1104,24 @@ def fix_instruction(
         )
     stuck = ""
     if stuck_streak >= 2:
+        # A3: brevity pressure without a rigid schema. An earlier draft
+        # required `LINE:N — VAR is TYPE because REASON` but that format
+        # only fits "X is undefined" bugs — control-flow bugs like
+        # "loop continues past splice" don't have a single misbehaving
+        # variable. Conversation.md from
+        # game-of-space-invaders_20260512_084906 shows the 27B writes
+        # good 2-sentence diagnoses on its own once the source slice
+        # (A1) is in the report. The deliberation guard (A2) handles
+        # the rambling-before-tags case independently.
         stuck = (
-            "STUCK-LOOP CHECK — you've now had at least 2 failed "
-            "iterations on this issue. STEP BACK and PICK ONE root "
-            "cause that explains the most failures. Inside <diagnose>, "
-            "name the SINGLE function or variable responsible in ≤2 "
-            "sentences — do NOT enumerate hypotheses, do NOT rank a "
-            "list of possibilities. Then send ONE focused <patch> for "
-            "that one cause. Multiple ranked hypotheses in <diagnose> "
-            "will be rejected.\n\n"
+            "STUCK-LOOP CHECK — you have ≥2 failed iterations on this "
+            "issue. The report above includes SOURCE NEAR ERROR with "
+            "the literal offending line. Inside <diagnose>: ONE root "
+            "cause in ≤2 sentences. Name the specific function or "
+            "variable or control-flow site responsible. Do NOT "
+            "enumerate hypotheses; do NOT emit a numbered or bulleted "
+            "list of possibilities. Then ONE <patch> targeting that "
+            "site. No prose before <diagnose>.\n\n"
         )
     if focused_slice:
         file_block = (

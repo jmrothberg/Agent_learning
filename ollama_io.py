@@ -199,6 +199,71 @@ class RepetitionDetector:
         return False
 
 
+# A2: smaller LLMs (qwen3.6:27b/35b on MLX) sometimes fall into a
+# "deliberation loop" — endless unique paragraphs of "Let me think...
+# wait... actually... hmm..." that never emit a recognized output tag.
+# RepetitionDetector misses this because each paragraph is unique by
+# string; the model isn't repeating, it's stalling on indecision. The
+# game-of-space-invaders_20260512_084906 trace shows iter 2 burning
+# 14,013 tokens / 13 min in this state.
+#
+# DeliberationDetector tracks "tokens-since-last-tag-opener" and trips
+# when the prefix grows past a budget without producing any of the
+# expected output tags. The agent's recovery path treats this as a
+# `deliberation_loop` stall reason and injects a coaching user-turn.
+#
+# Disable for AB testing via DISABLE_DELIBERATION_DETECTOR=1.
+_TAG_OPENER_RE = _re.compile(
+    r"<(?:plan|patch|html_file|diagnose|notes|criteria|probes|assets|sounds|"
+    r"done|confirm_done|lookup_bullet)\b|```(?:html|js)?\b|<!DOCTYPE\s+html\b|<html\b",
+    _re.IGNORECASE,
+)
+
+
+class DeliberationDetector:
+    """Abort a stream that has not produced any output-tag opener after
+    `threshold_chars` characters. Disabled if the env var
+    DISABLE_DELIBERATION_DETECTOR=1 is set.
+
+    Why character-count rather than token-count: streaming pieces from
+    Ollama/MLX vary wildly in size (sometimes one BPE token = 4 chars,
+    sometimes a single piece = a whole 60-char line). Char-count gives
+    a backend-agnostic budget. Empirically the qwen3.6:27b deliberation
+    chains produce ~4–5 chars per piece, so 6000 chars ≈ 1500 pieces.
+    """
+
+    __slots__ = ("_buf", "_seen_tag", "_threshold", "_disabled", "stall_reason")
+
+    def __init__(self, threshold_chars: int = 6000) -> None:
+        import os as _os
+        self._buf = ""
+        self._seen_tag = False
+        self._threshold = threshold_chars
+        self._disabled = _os.environ.get("DISABLE_DELIBERATION_DETECTOR") == "1"
+        self.stall_reason: str | None = None
+
+    def feed(self, piece: str) -> bool:
+        if self._disabled or self._seen_tag:
+            return False
+        # Trim buffer head before searching so memory stays bounded but
+        # a tag opener split across pieces still matches inside a
+        # rolling window. 4 KB tail is plenty (longest opener is ~14
+        # chars).
+        self._buf += piece
+        if len(self._buf) > 4096:
+            self._buf = self._buf[-2048:]
+        # A single regex scan over the trailing buffer catches both
+        # "tag arrives in one piece" and "tag split across pieces" with
+        # the same code path.
+        if _TAG_OPENER_RE.search(self._buf):
+            self._seen_tag = True
+            return False
+        if len(self._buf) >= self._threshold:
+            self.stall_reason = "deliberation_loop"
+            return True
+        return False
+
+
 @dataclass
 class StreamResult:
     """What stream_chat returns when it completes (or stalls)."""
@@ -229,6 +294,11 @@ class StreamResult:
     # (raise iogpu.wired_limit_mb, restart server) instead of a
     # generic timeout.
     crashed: bool = False
+    # A2: model produced `deliberation_threshold` chars of pure reasoning
+    # with no output tag (no <plan>, <patch>, <html_file>, ```html, etc).
+    # Folded into `stalled` for backward compatibility; standalone field
+    # lets the agent route to the coaching prompt instead of generic retry.
+    deliberated: bool = False
 
 
 async def stream_chat(
@@ -264,6 +334,10 @@ async def stream_chat(
     # Shared repetition detector used by both backends — see
     # `RepetitionDetector` for the two-window strategy and rationale.
     repeat = RepetitionDetector()
+    # A2: shared deliberation detector. Aborts streams that produce
+    # only reasoning paragraphs with no output tag for too long.
+    delib = DeliberationDetector()
+    deliberated = False
 
     # ollama.AsyncClient.chat returns an async iterator of dicts. We pull
     # .__aiter__() so we can wrap each .__anext__() in asyncio.wait_for.
@@ -318,6 +392,12 @@ async def stream_chat(
                 looped = True
                 stall_at = n_tokens
                 break
+
+            # ---- deliberation detector (A2) -------------------------
+            if delib.feed(piece):
+                deliberated = True
+                stall_at = n_tokens
+                break
     finally:
         # Best-effort close in both branches. Ollama's AsyncStream exposes
         # .aclose() in newer versions; older versions don't, hence the guard.
@@ -332,12 +412,14 @@ async def stream_chat(
         text="".join(parts),
         tokens=n_tokens,
         duration_s=time.monotonic() - started,
-        # `stalled` covers both the original stall semantics AND a
-        # repetition loop, so existing callers that only check `.stalled`
-        # still abort correctly. `looped` lets callers distinguish.
-        stalled=stalled or looped,
+        # `stalled` covers stall, repetition loop, AND deliberation loop
+        # for back-compat with callers that only check `.stalled`. Each
+        # specific cause is also exposed as its own boolean so the agent
+        # can route to a tailored recovery message.
+        stalled=stalled or looped or deliberated,
         stall_at_token=stall_at,
         looped=looped,
+        deliberated=deliberated,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
     )

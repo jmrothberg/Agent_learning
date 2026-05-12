@@ -49,6 +49,7 @@ import ollama
 
 from ollama_io import (
     Candidate,
+    DeliberationDetector,
     RepetitionDetector,
     StreamResult,
     stream_chat_with_retry,
@@ -420,6 +421,9 @@ class MLXBackend(Backend):
         completion_tokens: int | None = None
         # Shared repetition detector — same class both backends use.
         repeat = RepetitionDetector()
+        # A2: shared deliberation detector for unique-text reasoning loops.
+        delib = DeliberationDetector()
+        deliberated = False
 
         needs_load = (
             self._loaded_path != self.info.model
@@ -610,6 +614,11 @@ class MLXBackend(Backend):
                     stall_at = n_tokens
                     worker_cancel.set()
                     break
+                if delib.feed(piece):
+                    deliberated = True
+                    stall_at = n_tokens
+                    worker_cancel.set()
+                    break
         except asyncio.CancelledError:
             # Caller (agent's task) was cancelled. Stop the worker and
             # re-raise so the agent's run-loop unwinds cleanly.
@@ -620,9 +629,10 @@ class MLXBackend(Backend):
             text="".join(parts),
             tokens=n_tokens,
             duration_s=time.monotonic() - started,
-            stalled=stalled or looped,
+            stalled=stalled or looped or deliberated,
             stall_at_token=stall_at,
             looped=looped,
+            deliberated=deliberated,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             crashed=False,
