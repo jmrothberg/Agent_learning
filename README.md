@@ -637,6 +637,79 @@ The existing `image-load-race` playbook bullet (`memory.py:858`) tells
 the model to wait for `await img.decode()` before drawing; that
 contract holds whether sprites are model-generated or hand-supplied.
 
+### Animation frame chains — SD-Turbo img2img, optional
+
+The default sprite pipeline above generates each PNG independently from
+its text prompt. That's fine for a static ship or wall texture, but it
+breaks for **animation sequences** — two text-only generations of
+`"alien legs together"` and `"alien legs apart"` produce two *different
+characters*, not two poses of the same one.
+
+The agent has a second pipeline for this case: **SD-Turbo** (512×512,
+~2 GB weights, 1–4 step img2img), wired alongside Z-Image-Turbo. The
+model declares the chain in the `<assets>` block by adding a
+`from_image` field referencing a sibling asset, plus a `strength` in
+[0.05, 1.0] that controls how much the next frame can deviate from the
+init image:
+
+```xml
+<assets>
+[
+  {"name": "alien_walk1", "prompt": "8-bit pixel alien, legs together"},
+  {"name": "alien_walk2", "prompt": "8-bit pixel alien, legs apart",
+   "from_image": "alien_walk1", "strength": 0.45}
+]
+</assets>
+```
+
+The pipeline is:
+
+1. `parse_assets_block` (`assets.py:180`) preserves `from_image` /
+   `strength` on each spec; strength is clamped to `[0.05, 1.0]` and
+   defaults to `0.45` (preserves silhouette + palette, lets the prompt
+   move the pose).
+2. `_topo_sort_specs` (`assets.py:793`) orders the list so parents
+   generate before children. Cycles fall back to the original order.
+3. `generate_assets` (`assets.py:827`) only lazy-loads SD-Turbo when
+   at least one spec has `from_image`. Root frames go through
+   Z-Image-Turbo as usual; chained children route to
+   `Img2ImgGenerator.generate(prompt, init_image_path, strength=...)`
+   (`assets.py:522`), which wraps `diffusers.AutoPipelineForImage2Image`
+   from the `stabilityai/sd-turbo` repo.
+4. The cache key for chained frames includes the parent file's
+   `(size, mtime)` so regenerating the parent invalidates downstream
+   frames.
+
+If SD-Turbo isn't installed (or the chain fails for any reason — OOM,
+import error, NSFW filter), the agent silently **falls back to
+txt2img** for the dependent frame. The session continues; just without
+frame coherence.
+
+The model is taught about the schema by the always-on asset guideline
+in `prompts_v1.ASSETS_FORMAT.guidelines` (`prompts_v1.py:165–179`),
+which includes the walk-cycle example above. Words like
+`animation`, `walk cycle`, `frame`, `animated` in the user's goal
+make the model more likely to declare the chain.
+
+SD-Turbo cross-platform:
+
+| Platform | Dtype | Smoke test |
+| --- | --- | --- |
+| Linux + NVIDIA | fp16 | `.venv/bin/python scripts/_smoke_img2img.py` |
+| macOS + Apple Silicon | fp16 (MPS-stable, unlike Z-Image-Turbo which needs fp32) | same |
+| No GPU | refuses to load (CPU img2img is ~30 s/frame, not useful) | n/a |
+
+`scripts/_smoke_img2img.py` generates frame 1 (txt2img) then frame 2
+(img2img from frame 1 at strength 0.45), saves both to
+`games/_smoke/img2img/`, and prints a coarse luminance-similarity
+score (>0.55 = clearly the same character, <0.30 = unrelated).
+
+SD-Turbo weight locations follow the same resolution order as
+Z-Image-Turbo above — `$DIFFUSION_MODELS_DIR/sd-turbo/`, then the home
+bases (`~/.Diffusion_Models/sd-turbo/`, etc.), then HuggingFace cache.
+`scripts/install_diffuser.sh` pre-fetches the ~2 GB weights by default
+(opt out with `--skip-img2img`).
+
 ### What you need
 
 |                          | Linux + NVIDIA              | macOS (Apple Silicon)         | No GPU         |
