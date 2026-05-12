@@ -328,3 +328,98 @@ def test_deliberation_detector_catches_tag_split_across_pieces():
     # 'seen_tag' should now be latched True.
     for _ in range(10000):
         assert not d.feed("x")
+
+
+# ---------------------------------------------------------------------------
+# <think>-aware deliberation (classic-doom 20260512_111015 regression)
+#
+# The failure: iter 1 emitted 134,850 chars of reply, all of it inside a
+# never-closed <think> block, and the old detector latched on a literal
+# `<!DOCTYPE html>` the model had quoted in its reasoning prose. The
+# detector then sat silent through 32K+ more tokens of pure CoT.
+# ---------------------------------------------------------------------------
+
+
+def test_deliberation_inside_think_ignores_doctype_literal():
+    """Model writes `<!DOCTYPE html>` inside <think> — must NOT latch."""
+    d = ollama_io.DeliberationDetector(
+        threshold_chars=6000, think_threshold_chars=20000,
+    )
+    text = (
+        "<think>Let me plan the build. I'd start with `<!DOCTYPE html>` "
+        "then `<html lang='en'>` and a head with meta-viewport. "
+    )
+    for ch in text:
+        d.feed(ch)
+    assert d._think_depth == 1
+    assert d._seen_tag is False, (
+        "DOCTYPE/<html> inside <think> must not count as real output"
+    )
+
+
+def test_deliberation_inside_think_aborts_at_higher_threshold():
+    """The 134KB iter-1 disaster: model rambles inside <think> forever.
+    The detector must abort once the inside-think budget is exhausted.
+    """
+    d = ollama_io.DeliberationDetector(
+        threshold_chars=6000, think_threshold_chars=15000,
+    )
+    # Emit <think> opener then keep streaming reasoning prose with
+    # casual HTML mentions — old detector would have latched on the
+    # first `<html` and never aborted.
+    fired = False
+    chunks = ["<think>"]
+    for i in range(2000):
+        chunks.append(
+            f"step {i}: the spec says <!DOCTYPE html>\\n<html lang='en'>... "
+        )
+    for piece in chunks:
+        if d.feed(piece):
+            fired = True
+            break
+    assert fired, "must abort inside an unbounded <think> block"
+    assert d.stall_reason == "deliberation_loop"
+
+
+def test_deliberation_outside_think_latches_normally():
+    """Without any <think> wrapping, real output tags still latch the
+    same as before — no regression on non-reasoning models."""
+    d = ollama_io.DeliberationDetector(threshold_chars=6000)
+    # 500 chars of preamble (well under 6000) then a real <html_file>.
+    for _ in range(50):
+        d.feed("preamble preamble preamble ")
+    assert d.feed("<html_file>") is False
+    assert d._seen_tag is True
+
+
+def test_deliberation_after_think_close_latches_on_real_output():
+    """Model emits <think>...</think> then real output. Once depth
+    returns to 0, the detector resumes latching on opener tags."""
+    d = ollama_io.DeliberationDetector(
+        threshold_chars=6000, think_threshold_chars=20000,
+    )
+    d.feed("<think>some short reasoning</think>\n\n<patch>SEARCH/REPLACE</patch>")
+    assert d._think_depth == 0
+    assert d._seen_tag is True
+
+
+def test_deliberation_think_open_close_split_across_pieces():
+    """Streaming may split `</think>` mid-tag. Depth bookkeeping must
+    survive: piece1 = `<think>x</thi`, piece2 = `nk>`."""
+    d = ollama_io.DeliberationDetector(threshold_chars=6000)
+    d.feed("<think>x</thi")
+    assert d._think_depth == 1, "open seen, close not yet"
+    d.feed("nk>")
+    assert d._think_depth == 0, "close completed across boundary"
+
+
+def test_deliberation_doesnt_drop_below_zero_on_stray_close():
+    """A stray </think> with no matching open must clamp depth at 0,
+    not drop negative (which would let openers inside future <think>
+    blocks accidentally latch).
+    """
+    d = ollama_io.DeliberationDetector(threshold_chars=6000)
+    d.feed("</think>")
+    assert d._think_depth == 0
+    d.feed("<think>")
+    assert d._think_depth == 1

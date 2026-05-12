@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from agent import _detect_block_bloat  # noqa: E402
+from agent import _detect_block_bloat, _is_degenerate_baseline  # noqa: E402
 from ollama_io import RepetitionDetector  # noqa: E402
 
 
@@ -132,3 +132,109 @@ def test_repdetector_numbered_template_loop_still_works():
             break
     assert fired
     assert det.stall_reason == "near_dup_template_loop"
+
+
+# ---------------------------------------------------------------------------
+# _is_degenerate_baseline — recognizes a truncated skeleton on disk so
+# the agent allows a full <html_file> rewrite next iter instead of
+# forcing patch-mode against placeholder comments.
+#
+# The exact failure shape we're protecting against came from
+# games/traces/classic-doom-style-first-perso_20260512_101944: iter 1
+# hit the MLX 16384-token cap mid-stream, the harness wrote the 835-byte
+# placeholder-comment skeleton, and iter 2's correct full rewrite was
+# then rejected. With this detector iter 2 recovers.
+# ---------------------------------------------------------------------------
+
+
+_DOOM_SKELETON = """<!DOCTYPE html>
+<html>
+<head><style>/* Dark theme */</style></head>
+<body>
+  <canvas id="c"></canvas>
+  <script>
+    // Constants
+    // Asset/sound paths
+    // DOM refs
+    // Input handling
+    // Audio system
+    // Game loop (RAF)
+  </script>
+</body>
+</html>"""
+
+
+_REAL_GAME_STUB = """<!DOCTYPE html>
+<html>
+<head><style>body{margin:0}canvas{display:block}</style></head>
+<body>
+  <canvas id="c" width="800" height="600"></canvas>
+  <script>
+    const cvs = document.getElementById("c");
+    const ctx = cvs.getContext("2d");
+    const W = cvs.width, H = cvs.height;
+    const player = { x: W/2, y: H/2, hp: 100 };
+    function update(dt) {
+      player.x += 1;
+      if (player.x > W) player.x = 0;
+    }
+    function draw() {
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = '#0f0';
+      ctx.fillRect(player.x, player.y, 20, 20);
+    }
+    let last = performance.now();
+    function frame(now) {
+      const dt = (now - last) / 1000;
+      last = now;
+      try { update(dt); draw(); } catch (e) { console.error(e); }
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+  </script>
+</body>
+</html>"""
+
+
+def test_degenerate_baseline_detects_doom_skeleton():
+    """The exact 835-byte truncated placeholder from the classic-doom
+    trace must be classified as degenerate."""
+    assert _is_degenerate_baseline(_DOOM_SKELETON) is True
+
+
+def test_degenerate_baseline_passes_real_stub():
+    """A small but real working game must NOT be flagged as degenerate
+    — patches against it would still work."""
+    # Pad to clear the 2 KB size floor while keeping the same shape.
+    padded = _REAL_GAME_STUB.replace(
+        "function draw() {",
+        "function draw() {\n" + "      // real comment line " * 60,
+    )
+    assert len(padded) >= 2048
+    assert _is_degenerate_baseline(padded) is False
+
+
+def test_degenerate_baseline_empty_string():
+    """An empty string is degenerate (no baseline at all)."""
+    assert _is_degenerate_baseline("") is True
+    assert _is_degenerate_baseline(None) is True  # type: ignore[arg-type]
+
+
+def test_degenerate_baseline_no_canvas():
+    """A document with no <canvas> can't be a canvas-game baseline."""
+    html = "<!DOCTYPE html><html><body>" + ("x" * 3000) + "</body></html>"
+    assert _is_degenerate_baseline(html) is True
+
+
+def test_degenerate_baseline_script_only_comments():
+    """A 5 KB document whose script body is just comments must be
+    classified as degenerate — pads of `//`-comment placeholder lines
+    is exactly the truncation shape."""
+    body = "\n".join([f"    // section {i} placeholder" for i in range(200)])
+    html = (
+        "<!DOCTYPE html><html><body><canvas id='c'></canvas>"
+        f"<script>{body}</script></body></html>"
+    )
+    assert len(html) > 4000
+    assert _is_degenerate_baseline(html) is True

@@ -419,6 +419,23 @@ _CANVAS_ELT_METHODS = frozenset({
     # Generic Element methods worth keeping
     "appendchild", "removechild", "setattribute", "getattribute",
     "remove", "contains",
+    # Pointer Lock / Fullscreen — first-person games use both. The
+    # classic-doom 20260512_111015 trace flagged every single
+    # `cvs.requestPointerLock()` call as a hallucination across two
+    # extension sessions, and the model's mouse-look bug persisted
+    # plausibly because the harness kept saying the real API name was
+    # wrong. Pointer Lock is on Element since ~2020; canvases inherit
+    # it. Fullscreen the same.
+    "requestpointerlock", "exitpointerlock",
+    "requestfullscreen", "exitfullscreen",
+    "webkitrequestpointerlock", "webkitexitpointerlock",
+    "webkitrequestfullscreen", "webkitexitfullscreen",
+    "mozrequestpointerlock", "mozrequestfullscreen",
+    # Element / Selector API methods used in routing patterns
+    "matches", "closest", "getrootnode",
+    # Web Animations + ScrollIntoView — both legit, both occasionally
+    # used in games.
+    "animate", "scrollintoview",
 })
 
 # Map of (lowered receiver name) -> (allowlist set, friendly label).

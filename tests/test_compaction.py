@@ -180,3 +180,92 @@ def test_structured_summary_critical_context_always_present(tmp_path):
     s = a._build_structured_summary()
     assert "source of truth" in s
     assert "patch against" in s.lower()
+
+
+# ---------------------------------------------------------------------------
+# Fix #3 — one-shot <html_file> rewrite exemption after feedback drain
+#
+# Trace: classic-doom-style 20260512_111015 — user typed multi-issue
+# feedback ("gun + mouse + powerups + demons"), model wanted holistic
+# rewrite, agent rejected it on multiple consecutive extension turns
+# and the session ran out of iters.
+# ---------------------------------------------------------------------------
+
+
+def _real_baseline_html() -> str:
+    """A 3-KB syntactically-valid game file that is NOT degenerate
+    (passes _is_degenerate_baseline) so the rewrite-rejection branch
+    is actually exercised in the test rather than carved out by the
+    skeleton-detector."""
+    body = "; ".join(f"const v{i} = {i}" for i in range(120))
+    return (
+        "<!DOCTYPE html><html><head></head><body>"
+        "<canvas id='c' width='800' height='600'></canvas>"
+        f"<script>{body};\nfunction draw() {{ /* real */ }}\n"
+        "requestAnimationFrame(draw);</script>"
+        "</body></html>"
+    )
+
+
+def test_rewrite_exemption_armed_by_feedback_drain(tmp_path):
+    """Feeding pending_feedback through _flush_user_injections must set
+    the one-shot exemption flag."""
+    a = _make_agent(tmp_path)
+    assert a._allow_one_rewrite is False
+    a._pending_feedback.append("fix the mouse look")
+    a._flush_user_injections("next-turn message")
+    assert a._allow_one_rewrite is True
+
+
+def test_rewrite_exemption_not_armed_without_feedback(tmp_path):
+    """Calls to _flush_user_injections without feedback must NOT
+    spuriously arm the exemption — only fresh user feedback should."""
+    a = _make_agent(tmp_path)
+    a._flush_user_injections("regular turn message")
+    assert a._allow_one_rewrite is False
+
+
+def test_rewrite_exemption_consumed_after_one_attempt(tmp_path):
+    """First materialization after the exemption is armed must clear
+    the flag — even if the model later tries another rewrite in the
+    same extension, the second attempt must be rejected."""
+    import asyncio
+    a = _make_agent(tmp_path)
+    a._current_file = _real_baseline_html()
+    a._snapshot_n = 1
+    a._allow_one_rewrite = True
+    # Build a minimal `<html_file>` reply.
+    new_html = (
+        "<!DOCTYPE html><html><body><canvas id='c' width='800' height='600'>"
+        "</canvas><script>" + ("// real-code line\n" * 200) +
+        "</script></body></html>"
+    )
+    reply = f"<html_file>\n{new_html}\n</html_file>"
+    materialized, msg = asyncio.run(a._materialize(reply, dry_run=False))
+    assert materialized is not None, f"first rewrite must succeed (msg={msg})"
+    assert a._allow_one_rewrite is False, "flag must be consumed"
+    # Second rewrite attempt in the same extension must now be rejected.
+    second_html = new_html.replace("// real-code", "// second")
+    reply2 = f"<html_file>\n{second_html}\n</html_file>"
+    res2, msg2 = asyncio.run(a._materialize(reply2, dry_run=False))
+    assert res2 is None
+    assert "baseline file already exists" in msg2
+
+
+def test_rewrite_rejected_when_no_feedback_drain(tmp_path):
+    """Sanity: without feedback, a baseline-rewrite is still rejected
+    (the prior behavior is preserved on normal iter-by-iter flow)."""
+    import asyncio
+    a = _make_agent(tmp_path)
+    a._current_file = _real_baseline_html()
+    a._snapshot_n = 1
+    new_html = (
+        "<!DOCTYPE html><html><body><canvas id='c' width='800' height='600'>"
+        "</canvas><script>" + ("// other\n" * 200) +
+        "</script></body></html>"
+    )
+    res, msg = asyncio.run(a._materialize(
+        f"<html_file>\n{new_html}\n</html_file>", dry_run=False,
+    ))
+    assert res is None
+    assert "baseline file already exists" in msg

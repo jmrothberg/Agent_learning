@@ -400,7 +400,19 @@ class MLXBackend(Backend):
         # Drop fields that mean nothing to MLX (e.g. num_ctx). Carry
         # only the sampler knobs MLX understands.
         sampler_opts = {k: opts[k] for k in _MLX_OPTION_KEYS if k in opts}
-        max_tokens = int(sampler_opts.get("max_tokens") or 16384)
+        # Qwen3.6-27B has 262144 native context — the old 16384 cap
+        # truncated DOOM iter 1 mid-stream (trace
+        # classic-doom-style-first-perso_20260512_101944: completion_tokens
+        # landed exactly at 16384, file written was an 835-byte
+        # placeholder skeleton). Default raised to 131072 so a full
+        # raycaster + sprite loader fits in one reply. Per-machine
+        # override via MLX_MAX_TOKENS env var.
+        env_cap = os.environ.get("MLX_MAX_TOKENS", "").strip()
+        if env_cap.isdigit() and int(env_cap) > 0:
+            default_max = int(env_cap)
+        else:
+            default_max = 131072
+        max_tokens = int(sampler_opts.get("max_tokens") or default_max)
         temperature = float(sampler_opts.get("temperature") or 0.0)
         top_p = float(sampler_opts.get("top_p") or 0.0)
         top_k = int(sampler_opts.get("top_k") or 0)

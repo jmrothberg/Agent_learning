@@ -218,6 +218,38 @@ _BLOAT_MIN_BLOCK_BYTES = 200 # skip whitespace-y blocks
 _BLOAT_MAX_REPEATS = 3       # > 3 identical blocks = bloat
 
 
+def _is_degenerate_baseline(html: str) -> bool:
+    """True when `html` looks like a placeholder skeleton rather than a
+    real game: too small, OR no <canvas>, OR no <script>, OR a <script>
+    body containing only comments / placeholder markers.
+
+    Used by `_materialize` to allow a full <html_file> rewrite when the
+    on-disk baseline was the truncated output of a prior iter that hit
+    the model's max_tokens cap. Without this carve-out the agent forces
+    patch-mode against a file that has no real code to anchor to, and
+    every subsequent iter is wasted (see classic-doom trace
+    20260512_101944).
+    """
+    if not html or len(html) < 2048:
+        return True
+    low = html.lower()
+    if "<canvas" not in low or "<script" not in low:
+        return True
+    # Extract first <script>...</script> body and check whether it
+    # contains real code or just placeholder comments.
+    m = re.search(r"<script\b[^>]*>(.*?)</script\s*>", html, re.IGNORECASE | re.DOTALL)
+    if not m:
+        return True
+    body = m.group(1)
+    # Strip JS comments (line + block) and whitespace.
+    stripped = re.sub(r"//[^\n]*", "", body)
+    stripped = re.sub(r"/\*.*?\*/", "", stripped, flags=re.DOTALL)
+    stripped = stripped.strip()
+    # A real game's <script> body is ≥ 2 KB after stripping comments.
+    # The DOOM iter 1 placeholder stripped to ~0 bytes.
+    return len(stripped) < 512
+
+
 def _detect_block_bloat(text: str) -> str | None:
     """Scan `text` for repeated N-line blocks. None if clean."""
     lines = [ln for ln in text.splitlines() if ln.strip()]
@@ -285,12 +317,17 @@ class GameAgent:
         # first-person-shoo_20260506_222042). Bumped default to 32768
         # which fits the system prompt + plan + first-build with room
         # for several feedback iterations before structured compaction.
+        # Bumped 32768 → 65536 after the classic-doom trace
+        # (20260512_101944) showed iter 1 hitting an effective output
+        # cap of 16107 BPE tokens (32768 ctx - 16661 prompt) for a
+        # full raycaster. 65536 gives ~48 KB of output headroom on
+        # Ollama; MLX honors its own 262K native context anyway.
         # Override explicitly via constructor or via the
         # CODING_BOX_NUM_CTX env var if your model needs different.
         # Note: changing num_ctx between calls forces an Ollama model
         # reload — to avoid that, preload at the desired size with
-        # `ollama run --ctx-size 32768 <model>` before starting a session.
-        num_ctx: int = 32768,
+        # `ollama run --ctx-size 65536 <model>` before starting a session.
+        num_ctx: int = 65536,
         # 90s per-chunk inactivity. With 16K ctx + 20B model, time-to-first
         # token can be 20-40s on a fresh load; we want headroom but still
         # detect a true wedge promptly.
@@ -400,6 +437,15 @@ class GameAgent:
         # state probe coaching.
         self._last_mistake_sig: str | None = None
         self._repeat_sig_streak: int = 0
+        # Fix #3 (classic-doom 20260512_111015): on the FIRST turn after
+        # fresh user feedback is drained, exempt a single <html_file>
+        # rewrite from the snapshot_n>=1 rejection. Multi-issue feedback
+        # (gun + mouse + powerups + demons) is often easier to address
+        # holistically than as 4 fragile patches; that's exactly when
+        # the model wants a rewrite and the existing policy was burning
+        # iters rejecting it. Cleared after one materialization
+        # attempt — does NOT persist across extension turns.
+        self._allow_one_rewrite: bool = False
         self._user_force_done = False
         # Plan-only loop detector: counts consecutive iterations where the
         # model emitted <plan> but neither <patch> nor <html_file>. The
@@ -1149,6 +1195,13 @@ class GameAgent:
             for fb in self._pending_feedback:
                 self._trace({"kind": "feedback_injected", "text": fb})
             self._pending_feedback.clear()
+            # Fix #3: arm a one-shot <html_file> rewrite exemption for
+            # THIS turn only. The model often best addresses multi-issue
+            # feedback with a holistic rewrite; the rewrite-rejection
+            # gate is bypassed once, then re-armed only by another
+            # feedback drain.
+            self._allow_one_rewrite = True
+            self._trace({"kind": "rewrite_exemption_armed"})
         # Drain any <lookup_bullet> resolutions queued by the previous
         # assistant reply. These come BEFORE the base message so the
         # model sees them as fresh material before the iteration prompt.
@@ -1358,6 +1411,28 @@ class GameAgent:
             "prompt_tokens": result.prompt_tokens,
             "completion_tokens": result.completion_tokens,
         })
+        # Output-cap detection: when completion_tokens lands at the
+        # exact max_tokens default (Ollama: num_ctx-ish; MLX: 131072
+        # or MLX_MAX_TOKENS), the model was cut off mid-reply. The
+        # classic-doom trace 20260512_101944 hit this at 16384 and
+        # the agent's degenerate-baseline carve-out now recovers on
+        # the next iter. Surfacing the event so the user knows.
+        # The check fires when completion_tokens is "round" (power-of-2
+        # within typical caps) AND no closing </html_file> is present.
+        if (
+            result.completion_tokens
+            and result.completion_tokens in (16384, 32768, 65536, 131072)
+            and "</html_file>" not in result.text
+            and "<html_file>" in result.text
+        ):
+            self._record(AgentEvent(
+                "info",
+                f"[yellow]reply hit max_tokens cap[/yellow] at "
+                f"{result.completion_tokens} BPE tokens — output was "
+                "truncated mid-stream. Raise MLX_MAX_TOKENS or "
+                "CODING_BOX_NUM_CTX for next session. The agent will "
+                "allow a full <html_file> rewrite next iter."
+            ))
         if result.crashed:
             # mlx_lm.server's generate thread died mid-flight (Metal
             # wired-memory limit, OOM, segfault). HTTP layer is still
@@ -1523,11 +1598,33 @@ class GameAgent:
                 os.environ.get("AGENT_ALLOW_FULL_REWRITE", "0").lower()
                 in ("1", "true", "yes")
             )
+            # Degenerate-baseline carve-out (classic-doom trace
+            # 20260512_101944): iter 1 hit the MLX 16384-token cap and
+            # only an 835-byte placeholder-comment skeleton landed on
+            # disk. Iter 2 correctly diagnosed this and tried a full
+            # rewrite — but the snapshot_n>=1 check above rejected it,
+            # forcing patches against a file that had no real code to
+            # anchor to. Recognize a non-runnable baseline and let the
+            # rewrite through.
+            baseline_degenerate = _is_degenerate_baseline(self._current_file)
+            # Fix #3 (classic-doom 20260512_111015): one-shot exemption
+            # armed by a fresh user-feedback drain. Multi-issue feedback
+            # is what triggered the rewrite-rejection cascade in that
+            # trace; let the model choose rewrite over fragile patches
+            # for the first turn after feedback. Consume the flag once
+            # we've decided to honor it — even if the rewrite fails the
+            # bloat check below, we don't re-arm.
+            feedback_exempt = bool(self._allow_one_rewrite) and not dry_run
+            if feedback_exempt:
+                self._allow_one_rewrite = False
+                self._trace({"kind": "rewrite_exemption_consumed"})
             if (
                 not dry_run
                 and self._current_file
                 and self._snapshot_n >= 1
                 and not allow_rewrite
+                and not baseline_degenerate
+                and not feedback_exempt
             ):
                 return None, (
                     "<html_file> rejected: a baseline file already exists. "
@@ -3864,6 +3961,7 @@ class GameAgent:
         self._pending_coaching = []
         self._last_mistake_sig = None
         self._repeat_sig_streak = 0
+        self._allow_one_rewrite = False
         self._user_force_done = False
         if self._stop_event is not None:
             self._stop_event.clear()

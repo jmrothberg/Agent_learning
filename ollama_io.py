@@ -213,9 +213,22 @@ class RepetitionDetector:
 # `deliberation_loop` stall reason and injects a coaching user-turn.
 #
 # Disable for AB testing via DISABLE_DELIBERATION_DETECTOR=1.
+# Only the agent's official output tags count as a real "output has
+# begun" signal. Earlier versions of this regex also accepted bare
+# `<!DOCTYPE html>` and `<html>` literals so the model could deliver
+# raw HTML without the `<html_file>` wrapper — but those literals turn
+# up constantly inside reasoning prose ("I'd start with `<!DOCTYPE
+# html>`...") and falsely latched the detector on the classic-doom
+# 20260512_111015 trace, contributing to a 37-min iter-1 disaster.
+# Dropping them is a strict improvement: false-no-abort surface shrinks,
+# false-abort surface unchanged (the agent's materializer always
+# requires `<html_file>` wrapping anyway, so a raw-HTML reply would
+# fail to materialize regardless of whether the detector latches).
+# ` ```html ` fences are kept because they're how the model legitimately
+# delivers code in seed-build paths and rarely appear in reasoning prose.
 _TAG_OPENER_RE = _re.compile(
     r"<(?:plan|patch|html_file|diagnose|notes|criteria|probes|assets|sounds|"
-    r"done|confirm_done|lookup_bullet)\b|```(?:html|js)?\b|<!DOCTYPE\s+html\b|<html\b",
+    r"done|confirm_done|lookup_bullet)\b|```(?:html|js)?\b",
     _re.IGNORECASE,
 )
 
@@ -230,35 +243,101 @@ class DeliberationDetector:
     sometimes a single piece = a whole 60-char line). Char-count gives
     a backend-agnostic budget. Empirically the qwen3.6:27b deliberation
     chains produce ~4–5 chars per piece, so 6000 chars ≈ 1500 pieces.
+
+    <think>-awareness (from classic-doom-style 20260512_111015 trace):
+    a reasoning-mode model emits its chain-of-thought inside
+    <think>...</think> first. When the CoT mentions output-tag literals
+    in prose ("I'd write <!DOCTYPE html>\n<html lang='en'>..."), the
+    naive opener regex used to latch on those as if real output had
+    begun — and the detector then sat silent while the model burned
+    42096 BPE tokens / 37 wall-clock minutes producing zero usable code.
+    Fix: track open `<think>` count incrementally; while inside one,
+    skip the opener latch AND use a higher per-piece char budget
+    (`think_threshold_chars`) before aborting. Outside `<think>`, the
+    original 6000-char limit catches pre-tag rambling that isn't even
+    wrapped in a reasoning block.
     """
 
-    __slots__ = ("_buf", "_seen_tag", "_threshold", "_disabled", "stall_reason")
+    __slots__ = (
+        "_buf", "_total_chars", "_seen_tag", "_threshold", "_think_threshold",
+        "_disabled", "_think_depth", "_carry", "stall_reason",
+    )
 
-    def __init__(self, threshold_chars: int = 6000) -> None:
+    def __init__(
+        self,
+        threshold_chars: int = 6000,
+        *,
+        think_threshold_chars: int = 15000,
+    ) -> None:
         import os as _os
+        # `_buf` holds a trailing slice for tag-opener regex matching
+        # (bounded ≤ 4 KB). `_total_chars` is the cumulative count of
+        # chars seen and is what the abort threshold compares against —
+        # an earlier bug compared the abort against `len(_buf)`, which
+        # is bounded, so any threshold above the trim ceiling never
+        # fired. The classic-doom 20260512_111015 trace exposed this:
+        # default threshold 6000 vs buf cap 4096 = detector silent.
         self._buf = ""
+        self._total_chars = 0
         self._seen_tag = False
         self._threshold = threshold_chars
+        self._think_threshold = max(threshold_chars, think_threshold_chars)
         self._disabled = _os.environ.get("DISABLE_DELIBERATION_DETECTOR") == "1"
+        # <think>-open count minus </think>-close count. Strictly clamped
+        # at 0 below (a stray closing tag without a matching opener
+        # shouldn't drop us into "negative depth" where everything looks
+        # like real output).
+        self._think_depth = 0
+        # Last ~15 chars carried across feed() calls so a <think> tag
+        # split across pieces still matches (e.g. piece1 ends "<thi",
+        # piece2 starts "nk>x"). Longer than the longest tag we count
+        # ("</think>" = 8 chars).
+        self._carry = ""
         self.stall_reason: str | None = None
 
     def feed(self, piece: str) -> bool:
         if self._disabled or self._seen_tag:
+            # Even when latched on a real output tag, keep updating
+            # think_depth so a subsequent block this object reuses
+            # stays accurate. But since we early-return, depth-tracking
+            # is moot once latched — skip it.
             return False
-        # Trim buffer head before searching so memory stays bounded but
-        # a tag opener split across pieces still matches inside a
-        # rolling window. 4 KB tail is plenty (longest opener is ~14
-        # chars).
+        # --- update <think> depth incrementally ----------------------
+        # Tags may straddle the boundary between two streamed pieces
+        # (e.g. piece1 ends "<thi", piece2 starts "nk>"). We keep a
+        # ~15-char carry of the prior piece's tail so a boundary-tag
+        # gets matched. The trick: any tags already FULLY inside the
+        # carry were counted in the *previous* feed() call, so we
+        # subtract those out to avoid double-counting.
+        window = self._carry + piece
+        opens_window = window.count("<think>")
+        closes_window = window.count("</think>")
+        opens_carry = self._carry.count("<think>")
+        closes_carry = self._carry.count("</think>")
+        new_opens = opens_window - opens_carry
+        new_closes = closes_window - closes_carry
+        self._think_depth = max(0, self._think_depth + new_opens - new_closes)
+        # Carry must be long enough to span "</think>" (8 chars) boundary
+        # split — 15 gives generous safety without bounded growth.
+        self._carry = window[-15:]
+        # --- buffer trimming (memory bound) + cumulative counter -----
         self._buf += piece
+        self._total_chars += len(piece)
         if len(self._buf) > 4096:
             self._buf = self._buf[-2048:]
-        # A single regex scan over the trailing buffer catches both
-        # "tag arrives in one piece" and "tag split across pieces" with
-        # the same code path.
-        if _TAG_OPENER_RE.search(self._buf):
+        # --- latch check --------------------------------------------
+        # Only count opener literals when we're outside <think>. Inside
+        # <think> they're reasoning prose ("the spec says <!DOCTYPE html>
+        # is required") rather than real output.
+        if self._think_depth == 0 and _TAG_OPENER_RE.search(self._buf):
             self._seen_tag = True
             return False
-        if len(self._buf) >= self._threshold:
+        # --- abort check --------------------------------------------
+        # Compare against cumulative chars, NOT buffer size — the buf
+        # is trimmed at 4 KB and would never reach the higher
+        # inside-think threshold otherwise.
+        limit = self._think_threshold if self._think_depth > 0 else self._threshold
+        if self._total_chars >= limit:
             self.stall_reason = "deliberation_loop"
             return True
         return False

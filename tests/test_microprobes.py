@@ -365,3 +365,68 @@ def test_asset_path_skips_data_uris(tmp_path):
     html = _wrap('const x = "data:image/png;base64,iVBOR...";\n')
     r = run_micro_probes(html, out_path=out_path)
     assert r["stats"].get("missing_asset_paths") is None
+
+
+# ---------------------------------------------------------------------------
+# Canvas-element API allowlist (classic-doom 20260512_111015 regression)
+#
+# Every iter of that trace flagged `cvs.requestPointerLock()` as a
+# hallucination across two extension sessions, and the mouse-look bug
+# persisted plausibly because the harness kept disagreeing with the
+# correct API. requestPointerLock IS a real method on Element →
+# HTMLCanvasElement.
+# ---------------------------------------------------------------------------
+
+
+def test_canvas_request_pointer_lock_is_allowed():
+    html = _wrap(
+        "const cvs = document.getElementById('c');\n"
+        "cvs.addEventListener('click', () => cvs.requestPointerLock());\n"
+    )
+    r = run_micro_probes(html)
+    assert r["ok"] is True
+    assert r["stats"].get("api_hallucinations", 0) == 0, (
+        f"requestPointerLock incorrectly flagged: {r['warnings']}"
+    )
+
+
+def test_canvas_exit_pointer_lock_is_allowed():
+    html = _wrap(
+        "const cvs = document.getElementById('c');\n"
+        "cvs.exitPointerLock && cvs.exitPointerLock();\n"
+    )
+    r = run_micro_probes(html)
+    assert r["stats"].get("api_hallucinations", 0) == 0
+
+
+def test_canvas_request_fullscreen_is_allowed():
+    html = _wrap(
+        "const cvs = document.getElementById('c');\n"
+        "cvs.requestFullscreen();\n"
+    )
+    r = run_micro_probes(html)
+    assert r["stats"].get("api_hallucinations", 0) == 0
+
+
+def test_canvas_matches_and_closest_are_allowed():
+    """Element selector API methods used in event-routing patterns."""
+    html = _wrap(
+        "const cvs = document.getElementById('c');\n"
+        "if (cvs.matches('canvas')) console.log('ok');\n"
+        "const root = cvs.closest('body');\n"
+    )
+    r = run_micro_probes(html)
+    assert r["stats"].get("api_hallucinations", 0) == 0
+
+
+def test_canvas_truly_hallucinated_method_still_flagged():
+    """Regression guard: the allowlist additions must not be so broad
+    that a genuinely fake method slips through."""
+    html = _wrap(
+        "const cvs = document.getElementById('c');\n"
+        "cvs.drawScene();\n"  # not a real method
+    )
+    r = run_micro_probes(html)
+    assert r["stats"].get("api_hallucinations", 0) >= 1
+    assert any("drawScene" in w and "HTMLCanvasElement" in w
+               for w in r["warnings"])
