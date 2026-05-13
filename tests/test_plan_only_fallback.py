@@ -44,6 +44,30 @@ def test_first_strike_no_baseline_escalates_immediately():
     assert reset is False
 
 
+def test_first_strike_does_not_forbid_assets_reemission():
+    """Refinement from DK trace 20260513_153626 conversation.md:
+    the iter-1 user turn often stacks USER FEEDBACK + MEDIA-CHANGE
+    DIRECTIVE + the plan-only fallback. The MEDIA-CHANGE DIRECTIVE
+    explicitly invites <assets> re-emission for art-change feedback.
+
+    The first-strike coach must NOT forbid <assets> globally — that
+    would contradict the user's request when they've asked for a
+    sprite refresh. Plan/criteria/probes are session-fixed; assets
+    are not."""
+    text, _ = _fallback(plan_only=True, has_existing_file=False, streak=1)
+    low = text.lower()
+    # The prohibition list must NOT mention <assets>. The earlier
+    # draft of the coach had "Do NOT re-emit <plan>, <criteria>,
+    # <probes>, or <assets>"; the conversation.md from restart-2 of
+    # the DK trace caught this conflicting with the MEDIA-CHANGE
+    # DIRECTIVE in the same user turn.
+    assert "or <assets>" not in low
+    # And the coach should explicitly permit <assets> as an optional
+    # companion to the required <html_file>, so the model isn't
+    # confused by the apparent contradiction with the directive.
+    assert "may emit" in low and "<assets>" in low
+
+
 def test_first_strike_with_baseline_uses_soft_fallback():
     """When there's an existing file, the model may have a legitimate
     reason to re-emit <plan> (e.g. user asked for a redesign). Don't

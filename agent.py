@@ -927,12 +927,16 @@ class GameAgent:
         if plan_only and not has_existing_file:
             fallback = (
                 "BUILD PHASE — code emission is REQUIRED this turn. "
-                "Phase A already collected the plan, criteria, probes, "
-                "and assets; there is no baseline file on disk yet, so "
-                "the only legitimate output is a complete "
-                "<html_file>...</html_file> for the first build. Do "
-                "NOT re-emit <plan>, <criteria>, <probes>, or "
-                "<assets> — those were already accepted last turn. "
+                "Phase A already collected the plan, criteria, and "
+                "probes; there is no baseline file on disk yet, so "
+                "the iteration is meaningless without a complete "
+                "<html_file>...</html_file>. Do NOT re-emit <plan>, "
+                "<criteria>, or <probes> — those were already "
+                "accepted last turn and live in the session state. "
+                "If you also need to refine art per user feedback, "
+                "you MAY emit a small <assets> block alongside the "
+                "code (the mid-session regen pipeline will fulfill "
+                "it); but the <html_file> is required either way. "
                 "Emit the game's full HTML now."
             )
             return fallback, False
