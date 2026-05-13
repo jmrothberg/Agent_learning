@@ -2310,21 +2310,33 @@ class GameAgent:
     @staticmethod
     def _truncation_diagnosis(reply: str) -> str | None:
         """If the reply looks like an HTML game cut off mid-stream, describe
-        the truncation so the user knows it was a stall, not a model dud.
+        the truncation. Returns None when the reply contains a complete
+        document — even if some outer wrapper tags are missing.
 
-        Returns None if the reply doesn't look truncated (e.g. it was just a
-        plan or a chat response with no HTML attempt).
+        The key check is `</html>`. If `</html>` is present, the HTML
+        document itself is complete; a missing `</html_file>` or
+        `</body>` is a wrapper-syntax detail, not a real truncation.
+        DK trace 20260513_181731 burned an iter because the harness
+        emitted "TRUNCATED REPLY — missing </html_file>" on a reply
+        that contained a complete <!DOCTYPE html>...</html> body
+        — calling that a stall was wrong.
         """
         low = reply.lower()
         has_doctype = "<!doctype" in low
         has_html_open = "<html" in low
         if not (has_doctype or has_html_open):
             return None
+        # If the inner HTML document closed properly, the reply is
+        # NOT truncated. Missing outer tags (</html_file>, </body>)
+        # are wrapper artifacts the extractor handles. The script
+        # check stays — an open <script> with no </script> means a
+        # real cutoff that the extractor can't recover.
+        if "</html>" in low and ("</script>" in low or "<script" not in low):
+            return None
         ends = {
             "</html>": "</html>" in low,
             "</body>": "</body>" in low,
             "</script>": "</script>" in low or "<script" not in low,
-            "</html_file>": "</html_file>" in low or "<html_file>" not in low,
         }
         missing = [tag for tag, present in ends.items() if not present]
         if not missing:
@@ -2332,8 +2344,7 @@ class GameAgent:
         return (
             f"reply began an HTML document ({len(reply):,} bytes streamed) "
             f"but was cut off — missing closing tags: {missing}. "
-            f"Likely a stream stall mid-output. Consider a smaller goal, a "
-            f"smaller model, or `/iters 1` to re-roll."
+            f"Likely a stream stall mid-output."
         )
 
     @staticmethod
