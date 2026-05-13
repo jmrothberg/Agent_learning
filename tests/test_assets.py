@@ -118,11 +118,46 @@ def test_parse_drops_specs_missing_prompt():
 
 
 def test_parse_caps_at_max_per_turn():
+    """A request well over the cap is truncated to _MAX_ASSETS_PER_TURN.
+    Uses 2x the cap so the test stays correct if the cap moves again."""
+    cap = assets._MAX_ASSETS_PER_TURN
     reply = '<assets>' + str([
-        {"name": f"a{i}", "prompt": f"p{i}"} for i in range(20)
+        {"name": f"a{i}", "prompt": f"p{i}"} for i in range(cap * 2)
     ]).replace("'", '"') + '</assets>'
     out = parse_assets_block(reply)
-    assert len(out) == assets._MAX_ASSETS_PER_TURN
+    assert len(out) == cap
+
+
+def test_parse_with_meta_surfaces_dropped_names():
+    """The agent uses parse_assets_block_with_meta() to know which
+    asset names were dropped so it can coach the model. The DK trace
+    failure pattern: model asked for 14 sprites, harness silently
+    kept only the first 8, model's code referenced all 14, browser
+    404'd on the 6 dropped ones — and the model spent multiple iters
+    patching drawImage instead of asking for the missing assets."""
+    from assets import parse_assets_block_with_meta
+    cap = assets._MAX_ASSETS_PER_TURN
+    n = cap + 5
+    reply = '<assets>' + str([
+        {"name": f"sprite_{i}", "prompt": f"p{i}"} for i in range(n)
+    ]).replace("'", '"') + '</assets>'
+    specs, dropped = parse_assets_block_with_meta(reply)
+    assert len(specs) == cap
+    assert dropped == [f"sprite_{i}" for i in range(cap, n)]
+    # First cap names are kept, last 5 are dropped.
+    kept_names = {s["name"] for s in specs}
+    assert f"sprite_0" in kept_names
+    assert f"sprite_{cap - 1}" in kept_names
+    assert f"sprite_{cap}" not in kept_names
+
+
+def test_parse_with_meta_no_overflow_returns_empty_dropped():
+    """Happy path — request fits under cap, no dropped names."""
+    from assets import parse_assets_block_with_meta
+    reply = '<assets>[{"name":"a","prompt":"p"},{"name":"b","prompt":"q"}]</assets>'
+    specs, dropped = parse_assets_block_with_meta(reply)
+    assert len(specs) == 2
+    assert dropped == []
 
 
 def test_parse_malformed_json_returns_empty():

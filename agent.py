@@ -55,6 +55,7 @@ from typing import Any, AsyncIterator
 from assets import (
     generate_assets,
     parse_assets_block,
+    parse_assets_block_with_meta,
     render_asset_paths_block,
     try_load_image_generator,
 )
@@ -775,6 +776,17 @@ class GameAgent:
         # doesn't punish the user's max_iters budget. Reset to 0 at the
         # top of each run().
         self._iter_budget_bonus: int = 0
+        # Per-iter flag: was mid-session media regenerated this turn?
+        # Set inside _maybe_generate_assets_and_sounds when at least one
+        # asset or sound was successfully produced. Read after
+        # materialize to decide whether a "no usable code" turn was
+        # purely preparatory (model emitted <assets> but no code), in
+        # which case we grant a bonus iter rather than punishing the
+        # user's max_iters budget — the regen work is real progress.
+        # DK trace 20260513_153626 iter 3 burned a slot on assets-only
+        # emission and never got to use the new sprites in code; this
+        # flag prevents that loss. Reset at the top of every iter.
+        self._media_regenerated_this_iter: bool = False
         # A2 — streak of consecutive clean iterations. <done/> is only
         # honored when streak >= 2, so the model can't ship after a
         # single passing iter. Resets to 0 on any failed test, including
@@ -2001,10 +2013,38 @@ class GameAgent:
                 "or <html_file>...</html_file>. No preamble, no exploration."
             )
         if result.stalled and not result.text.strip():
+            # Backend-aware recovery hint. "num_ctx" is Ollama-specific;
+            # MLX has its own knobs (MLX_MAX_TOKENS, Metal wired-memory
+            # limit); cloud backends rarely zero-stall but if they do
+            # it's usually a rate-limit / connectivity issue. DK trace
+            # 20260513_153626 showed the generic message pointing at
+            # num_ctx during an MLX run, which is the wrong knob.
+            backend_name = (
+                getattr(self._backend, "info", None)
+                and self._backend.info.name
+            ) or "unknown"
+            if backend_name == "mlx":
+                hint = (
+                    "Try lowering MLX_MAX_TOKENS, raising "
+                    "iogpu.wired_limit_mb (Metal memory), or restarting "
+                    "the chat process to release stuck VRAM."
+                )
+            elif backend_name == "ollama":
+                hint = (
+                    f"Try a smaller context (num_ctx={self.num_ctx}) "
+                    "or restart `ollama serve`."
+                )
+            elif backend_name in ("openai", "anthropic"):
+                hint = (
+                    f"Check network / API key / rate limits — "
+                    f"{backend_name} should not zero-stall under normal "
+                    "load."
+                )
+            else:
+                hint = "Try a different model or restart the backend."
             raise RuntimeError(
                 f"Model produced no tokens before stalling at "
-                f"{self.stall_seconds}s. Try a smaller context (num_ctx={self.num_ctx}) "
-                "or different model."
+                f"{self.stall_seconds}s on backend={backend_name}. {hint}"
             )
         # Prepend the prefill so downstream parsers (regex for <plan>,
         # <diagnose>, etc.) match against the full intended output.
@@ -2098,7 +2138,25 @@ class GameAgent:
                 return None, "patch reply but no baseline file yet"
             res = apply_patches(base, patches)
             if res.applied == 0:
-                return None, f"all {len(patches)} patches failed to apply"
+                # Surface the FIRST per-patch reason in the materialize
+                # message so the user log shows WHY (the model already
+                # gets the full failure list via patch_retry_instruction).
+                # The DK trace 20260513_153626 hit a malformed-delimiter
+                # patch (extra `=======` line) and the user-visible log
+                # just said "all 1 patches failed to apply" — debugging
+                # required digging into the trace. Showing the reason
+                # inline turns it into a 5-second triage.
+                reason_tail = ""
+                if res.failed:
+                    first_reason = res.failed[0][2]
+                    # Trim to one line, cap so the log row stays tidy.
+                    one_line = first_reason.replace("\n", " ").strip()
+                    if len(one_line) > 200:
+                        one_line = one_line[:197] + "..."
+                    reason_tail = f" — {one_line}"
+                return None, (
+                    f"all {len(patches)} patches failed to apply{reason_tail}"
+                )
             if res.failed and not dry_run:
                 # Partial-apply: still write what landed, but the caller
                 # gets a non-empty failed list to retry on.
@@ -2580,10 +2638,46 @@ class GameAgent:
         sprite when count is small, summary line when >5 to avoid log
         spam. Failure reasons are surfaced one-per-line either way.
         """
-        asset_specs = parse_assets_block(reply)
+        asset_specs, dropped_asset_names = parse_assets_block_with_meta(reply)
         sound_specs = parse_sounds_block(reply)
         if not asset_specs and not sound_specs:
             return
+
+        # Asset overflow: model asked for more than _MAX_ASSETS_PER_TURN.
+        # Across four DK traces, this drove the dominant failure mode —
+        # the model requested 14 sprites, only the first 8 generated,
+        # the rest 404'd in the browser, and the model spent multiple
+        # iters patching drawImage symptoms. Surface the gap LOUDLY:
+        # trace event the user sees, AND coach the model next turn so
+        # it knows to split the request or use img2img chaining.
+        if dropped_asset_names:
+            self._trace({
+                "kind": "asset_overflow",
+                "requested": len(asset_specs) + len(dropped_asset_names),
+                "generated_cap": len(asset_specs),
+                "dropped": dropped_asset_names,
+            })
+            yield self._record(AgentEvent(
+                "info",
+                f"[yellow]asset overflow[/yellow] — you requested "
+                f"{len(asset_specs) + len(dropped_asset_names)} sprites "
+                f"but the per-turn cap is {len(asset_specs)}. Dropped: "
+                f"{', '.join(dropped_asset_names)}. Coaching the model to "
+                "request the rest in a follow-up turn."
+            ))
+            self._pending_coaching.append(
+                "Your <assets> block requested "
+                f"{len(asset_specs) + len(dropped_asset_names)} sprites but "
+                f"the harness only generates up to {len(asset_specs)} per "
+                "turn. These were DROPPED and will not exist on disk: "
+                f"{', '.join(dropped_asset_names)}. To fix: either (a) emit "
+                "another <assets> block on a later turn with just the "
+                "missing names — the agent will fulfill it mid-session — "
+                "or (b) use `from_image` chaining (one base sprite + N "
+                "img2img variants) so multiple animation frames cost a "
+                "single base generation. Do NOT reference dropped names in "
+                "the code until they've been generated."
+            )
 
         # Mid-session: capture pre-existing assets so the feedback block
         # we synthesize at the end reflects only the *new* additions.
@@ -2858,6 +2952,10 @@ class GameAgent:
         # Phase A doesn't need this — the first-build assembler already
         # renders these blocks inline.
         if trigger == "mid_session" and (new_asset_paths or new_sound_paths):
+            # Mark the iter as having done real preparatory work, so a
+            # follow-up "no usable code" outcome doesn't get charged
+            # against max_iters. See _media_regenerated_this_iter init.
+            self._media_regenerated_this_iter = True
             blocks: list[str] = []
             if new_asset_paths:
                 blocks.append(render_asset_paths_block(
@@ -3460,6 +3558,9 @@ class GameAgent:
         for iteration in range(start_iter, hard_max + 1):
             if iteration > end_iter + self._iter_budget_bonus:
                 break
+            # Reset per-iter flags so the media-only-bonus check sees
+            # only THIS iter's regen state.
+            self._media_regenerated_this_iter = False
             # User hard-stop: Ctrl-D in the TUI sets _user_force_done. Honor
             # it at the top of every iteration so the agent never starts a
             # new stream after the user asked to stop, even when probes
@@ -3815,6 +3916,32 @@ class GameAgent:
                     yield self._record(AgentEvent("error", f"TRUNCATED REPLY — {trunc}"))
                 else:
                     yield self._record(AgentEvent("info", f"no usable code: {materialize_msg}"))
+                # Bonus iter for media-only emission. When the model
+                # emitted <assets>/<sounds> (regen succeeded) but no
+                # code, the harness picked up real work even though
+                # this iter "failed" the code-output check. Don't
+                # charge the user's max_iters budget for preparatory
+                # work — the next iter is where the code emission
+                # actually happens. Shares the budget pool with the
+                # auto-revert bonus (cap = max_iters // 2).
+                if (
+                    self._media_regenerated_this_iter
+                    and self._current_file
+                    and self._iter_budget_bonus < revert_bonus_cap
+                ):
+                    self._iter_budget_bonus += 1
+                    self._trace({
+                        "kind": "media_only_bonus_iter",
+                        "iteration": iteration,
+                        "bonus_total": self._iter_budget_bonus,
+                    })
+                    yield self._record(AgentEvent(
+                        "info",
+                        f"[dim]media-regen this iter; granting +1 iter "
+                        f"(bonus total: {self._iter_budget_bonus}/"
+                        f"{revert_bonus_cap}) so the next turn can "
+                        "actually use the new assets.[/dim]"
+                    ))
                 # If the reply had patches but they failed to apply, give the
                 # model the specific failures + current file so it can retry.
                 if patches_in_reply and self._current_file:

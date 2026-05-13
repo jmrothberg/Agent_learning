@@ -105,8 +105,19 @@ _HF_FALLBACK_MODEL_ID = "Tongyi-MAI/Z-Image-Turbo"
 #   - exact same diffusers API on CUDA and MPS — Linux + Mac with one path
 _HF_IMG2IMG_FALLBACK_MODEL_ID = "stabilityai/sd-turbo"
 
-# Cap so a chatty plan can't trigger 50 generations.
-_MAX_ASSETS_PER_TURN = 8
+# Cap so a chatty plan can't trigger 50 generations. Bumped from 8
+# to 24 after four DK traces (20260513_*) all hit the same failure
+# mode: model requested 14 sprites (mario walk/jump/climb x6 + DK x3
+# + Pauline x2 + barrel/girder/ladder), only the first 8 were
+# generated, the rest were silently dropped. The truncated 6 then
+# returned net::ERR_FILE_NOT_FOUND in the browser, and the model
+# spent 2-3 iters patching drawImage symptoms before realizing
+# files were missing. The dedup-by-(prompt,size) check below already
+# protects against the spam pattern (200 numbered variants → 1
+# distinct entry), so the cap is purely a runaway guard. 24 covers
+# every real-game roster we've seen (DK = 14, Asteroids = 4,
+# Centipede = 12, Galaga = 18) with headroom.
+_MAX_ASSETS_PER_TURN = 24
 
 def _strip_thinking(reply: str) -> str:
     """Drop everything up to and including the LAST `</think>` tag.
@@ -198,12 +209,32 @@ def parse_assets_block(reply: str) -> list[dict]:
 
     Each returned dict has keys: name (str), prompt (str), size
     (tuple[int, int]). Specs missing name OR prompt are dropped.
+
+    Use `parse_assets_block_with_meta` if you also need the names of
+    entries dropped due to the per-turn cap — the agent uses that to
+    coach the model on the overflow instead of silently swallowing it.
+    """
+    specs, _dropped = parse_assets_block_with_meta(reply)
+    return specs
+
+
+def parse_assets_block_with_meta(reply: str) -> tuple[list[dict], list[str]]:
+    """Same as `parse_assets_block` but also returns the names of any
+    asset specs that were parsed-but-dropped due to `_MAX_ASSETS_PER_TURN`.
+
+    Why a separate API: the agent needs to tell the model (and the user)
+    when a plan asked for more assets than we'll generate, so the model
+    can either split the request across turns or use img2img chaining
+    to reduce sprite count. Previously silent — the model thought all
+    14 of its requested sprites would exist; only 8 did; the rest 404'd
+    in the browser and triggered a 3-iter debugging cascade (4 DK
+    traces with this exact pattern).
     """
     if not reply:
-        return []
+        return [], []
     body = _extract_assets_body(reply)
     if body is None:
-        return []
+        return [], []
     body = body.strip()
     body = re.sub(r"^```(?:json|JSON)?\s*\n", "", body)
     body = re.sub(r"\n?```$", "", body).strip()
@@ -213,13 +244,14 @@ def parse_assets_block(reply: str) -> list[dict]:
         # Truncated stream / trailing garbage — try repair.
         obj = _try_repair_truncated_json_list(body)
     if not isinstance(obj, list):
-        return []
+        return [], []
     out: list[dict] = []
+    dropped: list[str] = []
     # Dedupe by (normalized prompt, size). Catches the failure mode where
     # the model spams numbered variants of the same template — e.g. 200×
     # `{"name":"minimap_compiler<N>", "prompt":"green computer","size":"16x16"}`.
     # Without this, `generate_assets` would burn 200 GPU calls (or hit
-    # _MAX_ASSETS_PER_TURN at 8 and silently truncate, masking the bug).
+    # _MAX_ASSETS_PER_TURN and silently truncate, masking the bug).
     seen_keys: set[tuple[str, tuple[int, int]]] = set()
     for i, item in enumerate(obj):
         if not isinstance(item, dict):
@@ -255,10 +287,11 @@ def parse_assets_block(reply: str) -> list[dict]:
             except (TypeError, ValueError):
                 strength = 0.45
             spec["strength"] = max(0.05, min(1.0, strength))
-        out.append(spec)
         if len(out) >= _MAX_ASSETS_PER_TURN:
-            break
-    return out
+            dropped.append(name)
+            continue
+        out.append(spec)
+    return out, dropped
 
 
 def _parse_size(raw: Any) -> tuple[int, int]:
