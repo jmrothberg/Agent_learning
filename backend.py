@@ -413,18 +413,24 @@ class MLXBackend(Backend):
         sampler_opts = {k: opts[k] for k in _MLX_OPTION_KEYS if k in opts}
         # Output cap. Current generation of local MLX models — Qwen3.6,
         # DeepSeek V4, GLM 5.1, MiniMax M2 — all ship with 256K+ native
-        # context. The original 16384 ceiling truncated DOOM iter 1
-        # (classic-doom-style-first-perso_20260512_101944); 131072 was
-        # an interim bump; 262144 matches the model's native context
-        # so a multi-turn coding session never gets clipped by the
-        # harness's own ceiling. The model's own context window is
-        # still the upper bound — sampler_opts.max_tokens or
-        # MLX_MAX_TOKENS env override let smaller models clamp down.
+        # context, and the 16384 / 131072 caps in prior versions
+        # truncated full <html_file> rewrites mid-stream.
+        #
+        # Measured peak across the donkey-kong session that motivated
+        # the recent default bumps: 5 659 completion tokens. That's
+        # 4.3% of 131 K and 2.2% of 256 K. Real coding-game workloads
+        # don't come anywhere near either cap. The number's job is
+        # purely "don't be the bottleneck" — a runaway generation
+        # guard, not a working limit. 131 072 gives ~23x headroom
+        # over observed peaks, leaves room for unusually long full
+        # rewrites, and matches what the agent loop already chooses
+        # for its own truncation heuristic. Per-machine override via
+        # MLX_MAX_TOKENS env var when a model genuinely needs more.
         env_cap = os.environ.get("MLX_MAX_TOKENS", "").strip()
         if env_cap.isdigit() and int(env_cap) > 0:
             default_max = int(env_cap)
         else:
-            default_max = 262144
+            default_max = 131072
         max_tokens = int(sampler_opts.get("max_tokens") or default_max)
         temperature = float(sampler_opts.get("temperature") or 0.0)
         top_p = float(sampler_opts.get("top_p") or 0.0)
