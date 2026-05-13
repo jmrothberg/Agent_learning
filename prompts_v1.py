@@ -105,8 +105,10 @@ PROBES_FORMAT = FormatSpec(
 SOUNDS_FORMAT = FormatSpec(
     name="<sounds>",
     snippet=(
-        "<sounds>[{name,prompt,duration?,loop?}, ...]</sounds>  Phase A — "
-        "request generated OGG audio for SFX and looping music."
+        "<sounds>[{name,prompt,duration?,loop?}, ...]</sounds>  Request "
+        "generated OGG audio for SFX and looping music. Phase A for first "
+        "build; ALSO mid-session — same `name` as an existing sound "
+        "re-renders that OGG in place, no code edit."
     ),
     guidelines=[
         "EMIT <sounds> when the goal mentions sound, audio, music, SFX, "
@@ -116,6 +118,14 @@ SOUNDS_FORMAT = FormatSpec(
         "via `new Audio(path)` and play with `.play()` (browser auto-"
         "play rules require a user gesture first; use the loader "
         "pattern injected in the first-build prompt).",
+        "MID-SESSION RE-RENDER: when the user asks to change the SOUND of "
+        "an existing audio entry ('make the laser punchier', 'remake the "
+        "music', 'redo the explosion sfx'), emit <sounds>[{name:"
+        "<existing_name>, prompt:<new audio prompt>}]</sounds> — the "
+        "harness rebuilds that OGG in place (same key in `SOUNDS`, same "
+        "`new Audio(...)` call, no JS edit). Other sounds and the game "
+        "code stay untouched. To CHANGE a sound, re-render; to ADD a new "
+        "audio entry, emit a new name.",
         "Each entry is {name, prompt, duration?, loop?}. `duration` is "
         "seconds (default 1.0; capped at 12.0). For SFX use 0.2-1.5 s; "
         "for looping background music use 8-12 s with `\"loop\": true` "
@@ -139,8 +149,10 @@ SOUNDS_FORMAT = FormatSpec(
 ASSETS_FORMAT = FormatSpec(
     name="<assets>",
     snippet=(
-        "<assets>[{name,prompt,size?}, ...]</assets>  Phase A — request "
-        "generated PNG sprites for every visual entity in the game."
+        "<assets>[{name,prompt,size?}, ...]</assets>  Request generated "
+        "PNG sprites. Phase A for first build; ALSO mid-session — same "
+        "`name` as an existing asset re-renders that PNG in place, no "
+        "code edit."
     ),
     guidelines=[
         "EMIT <assets> for any canvas-rendered game with visual "
@@ -150,6 +162,17 @@ ASSETS_FORMAT = FormatSpec(
         "harness runs Z-Image-Turbo locally and the PNG paths come "
         "back in your first-build prompt; load each via `new Image()` "
         "+ `await img.decode()` (see playbook bullet image-load-race).",
+        "MID-SESSION RE-RENDER: when the user asks to change the LOOK of "
+        "an existing sprite ('make the tail rounder', 'redraw the "
+        "player', 'change the alien art'), emit <assets>[{name:"
+        "<existing_name>, prompt:<new visual prompt>}]</assets> — the "
+        "harness rebuilds that PNG in place (same key in `ASSETS`, same "
+        "drawSprite call, no JS edit). Other assets and the game code "
+        "stay untouched. Do NOT swap an existing drawSprite(name,…) "
+        "call for procedural ctx.* drawing in response to an art-change "
+        "request; that loses the sprite path and almost always "
+        "regresses. To CHANGE the look, re-render; to ADD a new "
+        "visual entity, emit a new name.",
         "MIX sprites and procedural drawing freely. Sprites are right "
         "for STATIC visual character (player, enemies, weapons, terrain "
         "tiles, pickups). Procedural drawing is right for DESTRUCTIBLE "

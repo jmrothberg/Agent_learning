@@ -319,6 +319,123 @@ _PRUNE_KEEP_RECENT_TURNS = 4
 _STRUCTURED_PRUNE_THRESHOLD = 14
 
 
+# Centipede trace 20260512_180020: user typed
+#   "only change the centipiede_tail no other asset or code,
+#    just that one asset no changes to the code"
+# and the model replied "I can't generate new image assets in this
+# environment - I can only modify the HTML file" — then rewrote a
+# drawSprite() call into procedural ctx.* code (regression).
+# The agent already supports mid-session asset re-render
+# (_maybe_generate_assets_and_sounds); the model just didn't know it.
+# These detectors light up the right path when art-change feedback
+# arrives: inject a directive pointing at <assets>, and DON'T arm the
+# one-shot <html_file> rewrite exemption when the user explicitly
+# locked the code (that exemption fueled the second-attempt regression
+# where the model "fixed" the asset by clobbering the sprite call).
+_CODE_LOCK_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # "no changes to the code", "no change to code"
+    re.compile(r"\bno\s+changes?\s+(?:to\s+)?(?:the\s+)?code\b", re.I),
+    # "no code changes"
+    re.compile(r"\bno\s+code\s+(?:change|edit|modification)s?\b", re.I),
+    # "no other code", "no other asset or code"
+    re.compile(r"\bno\s+other\s+\w+(?:\s+or\s+code)?\b.*\bcode\b", re.I),
+    # "don't change/touch/modify the code", "do not change code"
+    re.compile(
+        r"\b(?:don['’]?t|do\s+not)\s+(?:change|touch|modify|edit)"
+        r"\s+(?:the\s+|any\s+)?code\b",
+        re.I,
+    ),
+    # "without changing/touching/modifying the code"
+    re.compile(
+        r"\bwithout\s+(?:changing|touching|modifying|editing)\s+"
+        r"(?:the\s+)?code\b",
+        re.I,
+    ),
+    # "only/just (the/that/this) (one) asset|sprite|image|art|png"
+    re.compile(
+        r"\b(?:only|just)\s+(?:the\s+|that\s+|this\s+)?(?:one\s+)?"
+        r"(?:asset|sprite|image|art|png|graphic|picture|icon)s?\b",
+        re.I,
+    ),
+)
+
+_MEDIA_VERBS: tuple[str, ...] = (
+    "change", "swap", "replace", "redraw", "regenerate", "remake",
+    "redo", "redesign", "update", "make", "render", "rerender",
+    "rerecord", "rebuild",
+)
+_ART_NOUNS: tuple[str, ...] = (
+    "asset", "assets", "sprite", "sprites", "image", "images",
+    "png", "art", "graphic", "graphics", "picture", "pictures",
+    "icon", "icons", "appearance",
+)
+_SOUND_NOUNS: tuple[str, ...] = (
+    "sound", "sounds", "audio", "sfx", "music", "song",
+    "beep", "chime", "sample", "clip", "track", "ogg", "tune",
+    "soundtrack",
+)
+
+
+def _feedback_locks_code(text: str) -> bool:
+    """User explicitly forbade code changes for this turn.
+
+    Matches phrases like "no changes to the code", "only the asset",
+    "just that one sprite", "don't touch the code". Used to suppress
+    the one-shot <html_file> rewrite exemption that fresh feedback
+    would otherwise arm — when the user locked the code, the rewrite
+    license is exactly what we DON'T want.
+    """
+    return any(p.search(text) for p in _CODE_LOCK_PATTERNS)
+
+
+def _name_in_text(text_lower: str, names: list[str]) -> bool:
+    """Match a known asset/sound name in feedback, tolerating
+    underscores ↔ hyphens ↔ spaces (so "centipede tail" matches
+    "centipede_tail" and vice versa)."""
+    canon_text = re.sub(r"[\s\-]+", "_", text_lower)
+    for name in names:
+        n = (name or "").strip().lower()
+        if not n:
+            continue
+        canon_name = re.sub(r"[\s\-]+", "_", n)
+        if canon_name and canon_name in canon_text:
+            return True
+    return False
+
+
+def _feedback_is_art_change(text: str, asset_names: list[str]) -> bool:
+    """User feedback is asking to change visual art.
+
+    Heuristic: a known asset name appears in the text, OR text contains
+    an art-noun ("sprite", "image", "art", …) together with a media
+    verb ("change", "redraw", "make", …). Misses are safe (no directive
+    injected, regular flow proceeds). False positives are also safe —
+    the directive only advises the model to prefer <assets>.
+    """
+    lo = text.lower()
+    if _name_in_text(lo, asset_names):
+        return True
+    has_noun = any(re.search(rf"\b{re.escape(n)}\b", lo) for n in _ART_NOUNS)
+    has_verb = any(
+        re.search(rf"\b{re.escape(v)}\b", lo) for v in _MEDIA_VERBS
+    )
+    return has_noun and has_verb
+
+
+def _feedback_is_sound_change(text: str, sound_names: list[str]) -> bool:
+    """Same shape as `_feedback_is_art_change`, for `<sounds>`."""
+    lo = text.lower()
+    if _name_in_text(lo, sound_names):
+        return True
+    has_noun = any(
+        re.search(rf"\b{re.escape(n)}\b", lo) for n in _SOUND_NOUNS
+    )
+    has_verb = any(
+        re.search(rf"\b{re.escape(v)}\b", lo) for v in _MEDIA_VERBS
+    )
+    return has_noun and has_verb
+
+
 @dataclass
 class AgentEvent:
     kind: str           # phase | token | plan | code | test | question | done | error | info | diagnose | patch | best_of_n | memory | activity | assets | streak
@@ -1226,14 +1343,96 @@ class GameAgent:
             )
             for fb in self._pending_feedback:
                 self._trace({"kind": "feedback_injected", "text": fb})
+
+            # Detect intent BEFORE clearing the queue so we can shape the
+            # follow-up directives. Centipede trace 20260512_180020 is
+            # the motivating case.
+            asset_names = (
+                list(self._session_assets.keys())
+                if self._session_assets else []
+            )
+            sound_names = (
+                list(self._session_sounds.keys())
+                if self._session_sounds else []
+            )
+            locks_code = _feedback_locks_code(joined)
+            art_change = bool(asset_names) and _feedback_is_art_change(
+                joined, asset_names,
+            )
+            sound_change = bool(sound_names) and _feedback_is_sound_change(
+                joined, sound_names,
+            )
+
             self._pending_feedback.clear()
+
+            if (asset_names or sound_names) and (
+                art_change or sound_change or locks_code
+            ):
+                lines: list[str] = [
+                    "================ MEDIA-CHANGE DIRECTIVE ================",
+                    "The feedback above is about ART/SOUND, not code. The",
+                    "harness can regenerate any sprite or sound in place:",
+                    "emit a fresh block with the EXISTING name and a new",
+                    "prompt — no JS edit needed. The existing drawSprite()",
+                    "/ new Audio() call already in the file automatically",
+                    "picks up the regenerated file.",
+                ]
+                if asset_names:
+                    asset_list = ", ".join(sorted(asset_names))
+                    lines.extend([
+                        "",
+                        "Sprites — use <assets> to re-render:",
+                        "  <assets>[{\"name\":\"<existing_name>\","
+                        "\"prompt\":\"<new visual prompt>\"}]</assets>",
+                        f"  Existing asset names: {asset_list}",
+                    ])
+                if sound_names:
+                    sound_list = ", ".join(sorted(sound_names))
+                    lines.extend([
+                        "",
+                        "Sounds — use <sounds> to re-render:",
+                        "  <sounds>[{\"name\":\"<existing_name>\","
+                        "\"prompt\":\"<new audio prompt>\","
+                        "\"duration\":1.0}]</sounds>",
+                        f"  Existing sound names: {sound_list}",
+                    ])
+                lines.extend([
+                    "",
+                    "Do NOT swap an existing drawSprite(name,…) or",
+                    "new Audio(path) call for inline procedural code here —",
+                    "that loses the media path and regresses. If the user",
+                    "truly asked for code changes too, address those with a",
+                    "small <patch>.",
+                    "========================================================",
+                ])
+                parts.append("\n".join(lines))
+                self._trace({
+                    "kind": "media_change_directive_injected",
+                    "locks_code": locks_code,
+                    "art_change": art_change,
+                    "sound_change": sound_change,
+                    "asset_count": len(asset_names),
+                    "sound_count": len(sound_names),
+                })
+
             # Fix #3: arm a one-shot <html_file> rewrite exemption for
             # THIS turn only. The model often best addresses multi-issue
             # feedback with a holistic rewrite; the rewrite-rejection
             # gate is bypassed once, then re-armed only by another
-            # feedback drain.
-            self._allow_one_rewrite = True
-            self._trace({"kind": "rewrite_exemption_armed"})
+            # feedback drain. SUPPRESSED when the user explicitly locked
+            # the code ("no code changes", "only the asset", …) — that
+            # phrasing is the exact opposite of a license to rewrite,
+            # and the exemption fueled the second-attempt regression in
+            # centipede trace 20260512_180020 where the model "fixed"
+            # an asset by clobbering its drawSprite call.
+            if locks_code:
+                self._trace({
+                    "kind": "rewrite_exemption_suppressed",
+                    "reason": "code_locked",
+                })
+            else:
+                self._allow_one_rewrite = True
+                self._trace({"kind": "rewrite_exemption_armed"})
         # Drain any <lookup_bullet> resolutions queued by the previous
         # assistant reply. These come BEFORE the base message so the
         # model sees them as fresh material before the iteration prompt.

@@ -62,6 +62,7 @@ but the running model’s prompts omit that block until v1+.)
 - [Slash commands](#slash-commands)
 - [Keys](#keys)
 - [How feedback works](#how-feedback-works-this-is-the-important-bit)
+  - [Changing one asset (or sound) without touching the code](#changing-one-asset-or-one-sound-without-touching-the-code)
 - [Model selection](#model-selection)
 - [File layout](#file-layout-where-to-look-when-something-fails)
 - [How the loop works (in code)](#how-the-loop-works-in-code)
@@ -1639,6 +1640,91 @@ feedback and continues for one more turn instead of exiting.
 iteration loop in *continuation mode* — it skips planning + first-build,
 loads the existing file, and treats your feedback as the next fix
 prompt. No need to restart the TUI to add features.
+
+### Changing one asset (or one sound) without touching the code
+
+Sprites and sounds the agent generates can be **re-rendered in place**
+mid-session — same name, new visual/audio prompt, no JS edit. The
+trick is using language the agent recognizes as an art/sound change
+plus an explicit code-lock so the rewrite gate stays closed.
+
+**Recommended template:**
+
+```
+redraw the <name> asset as <new visual description>, no code changes
+remake the <name> sound  as <new audio description>, no code changes
+```
+
+Working variants (any of these phrasings hit the detector):
+
+- `redraw the player_ship asset as a pink heart with sparkles, only the asset`
+- `regenerate the centipede_tail — rounder, two animated legs, just that one asset`
+- `swap the mushroom sprite for a deep-red cap, taller, no code changes`
+- `remake the laser sound — deeper, punchier 8-bit, only the audio`
+- `redo the music track as a slow chiptune, just the sound`
+
+**Two ingredients matter:**
+
+1. **An art/sound verb** — `redraw`, `remake`, `regenerate`, `swap`,
+   `replace`, `redo`, `redesign`, `update`, `change`. Paired with an
+   art noun (`asset`, `sprite`, `image`, `art`, `png`) or a sound noun
+   (`sound`, `audio`, `sfx`, `music`, `clip`, `track`).
+2. **A code-lock phrase** — `no code changes`, `only the asset`,
+   `just that one sprite`, `don't touch the code`, `without changing
+   the code`. This both flags the asset-change intent AND suppresses
+   the one-shot `<html_file>` rewrite exemption that fresh feedback
+   would otherwise arm. Without it, the agent may decide to "improve"
+   surrounding code too.
+
+Naming the existing asset/sound (e.g. `player_ship`, `centipede_tail`)
+isn't required — the agent also detects generic phrasings like *"redraw
+the sprite"* — but it makes the directive land more precisely when you
+have several assets.
+
+**What happens under the hood:** [`agent._feedback_is_art_change` /
+`_feedback_is_sound_change`][_detectors] fire, [`_feedback_locks_code`][_locks]
+fires, and `_flush_user_injections` appends a `MEDIA-CHANGE DIRECTIVE`
+block to the next user turn listing every existing asset/sound name
+and steering the model toward `<assets>` / `<sounds>` re-render.
+[`_maybe_generate_assets_and_sounds`][_regen] merges the new file into
+the session dict, overwriting the PNG / OGG at the same path so the
+`drawSprite()` / `new Audio()` call already in the HTML picks it up
+with no code edit.
+
+[_detectors]: agent.py
+[_locks]:     agent.py
+[_regen]:     agent.py
+
+**Live-test evidence** (`scripts/live_test_asset_change.py`):
+
+```
+[backend] mlx model=DeepSeek-V4-Flash-mxfp8
+[user]    redraw the player_ship asset as a small pink heart with
+          white sparkles on a transparent background. Only the asset,
+          no code changes.
+[model]   <assets>[{"name":"player_ship","prompt":"small pink heart
+          with white sparkles on transparent background, pixel art,
+          64x64"}]</assets>
+[result]  PNG pre  sha8=7b6b2fcc  17028 B
+          PNG post sha8=25be7c2c  10183 B
+          PNG re-rendered? True
+          <patch> in reply?  False
+          <html_file>?       False
+          PASS
+```
+
+The stubbed sibling test (`scripts/demo_asset_change_feedback.py`) runs
+the same flow with mocked diffuser in ~1 s and is wired into the test
+suite — see `tests/test_asset_change_feedback.py`.
+
+**Origin:** [`games/traces/centipede-game-with-super-nice_20260512_180020.*`](games/traces/)
+captures the failure mode that drove this. The user typed
+`only change the centipiede_tail no other asset or code, just that one
+asset no changes to the code` and the model replied *"I can't generate
+new image assets in this environment — I can only modify the HTML
+file"*, then rewrote a `drawSprite()` call into procedural `ctx.*`
+code → regression → auto-revert. The harness already supported
+mid-session re-render; the prompt just didn't tell the model about it.
 
 ---
 
