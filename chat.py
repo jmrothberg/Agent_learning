@@ -78,7 +78,17 @@ except ImportError:
         )
 
 import ollama
-from rich.markup import escape as _esc
+def _esc(s: str) -> str:
+    """Escape text so it is safe to embed inside Rich/Textual markup.
+
+    Stricter than rich.markup.escape: that function only escapes balanced
+    [...] pairs (its regex requires a literal closing ']'), so a truncated
+    bracket like '[id*=hu' — which tools.format_report_for_model produces
+    via `probe.expr[:80]` — slips through and crashes Textual's strict
+    markup parser inside Static.update. Both Rich and Textual treat '\\['
+    as a literal '['; only '[' needs escaping (']' is harmless on its own).
+    """
+    return s.replace("\\", "\\\\").replace("[", "\\[")
 from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
@@ -122,6 +132,17 @@ class MultilinePasteInput(Input):
                 self.insert_text_at_cursor(flat)
             else:
                 self.replace(flat, *selection)
+        # prevent_default() is REQUIRED, not just event.stop().
+        # Textual's MessagePump dispatches _on_paste to every class in
+        # the MRO (textual/message_pump.py:_get_dispatch_methods walks
+        # the full chain), so without prevent_default the parent
+        # Input._on_paste ALSO runs after ours and inserts
+        # `event.text.splitlines()[0]` at the current cursor — which
+        # is right after the flat paste we just made. Net result:
+        # full paste + duplicate of the first line tacked on.
+        # event.stop() alone only blocks BUBBLING to ancestors; it
+        # doesn't stop the MRO walk on the same widget.
+        event.prevent_default()
         event.stop()
 
 
