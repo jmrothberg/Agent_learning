@@ -1,0 +1,89 @@
+"""Tests for the plan-only / no-usable-code fallback selection.
+
+Background: when the model emits a <plan> block but no code on iter 1
+of a fresh session (no baseline file on disk), the harness previously
+waited for a SECOND consecutive plan-only iter before escalating to
+the strong "MUST produce code" directive. With no baseline, the second
+strike is wasted by definition — there's nothing the model can
+legitimately be diagnosing yet, and Phase A already supplied the plan.
+One-strike escalation saves a full iter (~60-120s on local models).
+
+The asteroid_20260510_173200 and donkey-kong_20260513_153626 traces
+both showed reasoner-class models hitting exactly this pattern. The
+fix is generic — it gates on "no baseline" rather than the model
+name — so it benefits any model that defaults to "think more" when
+uncertain about phase boundaries.
+"""
+
+from agent import GameAgent
+
+
+def _fallback(plan_only: bool, has_existing_file: bool, streak: int):
+    """Call the static helper directly — it has no instance state."""
+    return GameAgent._no_usable_code_fallback(
+        plan_only=plan_only,
+        has_existing_file=has_existing_file,
+        consecutive_plan_only=streak,
+    )
+
+
+def test_first_strike_no_baseline_escalates_immediately():
+    """Iter 1 plan-only with no baseline file: the model must emit
+    code THIS turn. Strong-language fallback expected on streak=1."""
+    text, reset = _fallback(plan_only=True, has_existing_file=False, streak=1)
+    low = text.lower()
+    # Strong escalation markers — pick a couple of phrases unique to
+    # the no-baseline branch so the test rejects a soft fallback.
+    assert "build phase" in low or "required this turn" in low, (
+        f"expected escalation directive, got: {text!r}"
+    )
+    assert "html_file" in low
+    assert "do not re-emit" in low
+    # Streak does NOT reset on a first-strike escalation — a second
+    # strike would still need the LOOP DETECTED hard-break.
+    assert reset is False
+
+
+def test_first_strike_with_baseline_uses_soft_fallback():
+    """When there's an existing file, the model may have a legitimate
+    reason to re-emit <plan> (e.g. user asked for a redesign). Don't
+    escalate on the first strike here."""
+    text, reset = _fallback(plan_only=True, has_existing_file=True, streak=1)
+    low = text.lower()
+    # Soft fallback wording — no LOOP DETECTED, no BUILD PHASE.
+    assert "loop detected" not in low
+    assert "build phase" not in low
+    # Still tells the model to stop re-emitting plan.
+    assert "plan" in low and "html_file" in low
+    assert reset is False
+
+
+def test_second_strike_triggers_loop_break_and_resets():
+    """The existing 2-strike hard-break path is unchanged."""
+    text, reset = _fallback(plan_only=True, has_existing_file=True, streak=2)
+    low = text.lower()
+    assert "loop detected" in low
+    assert "must produce code" in low
+    # Counter resets so escalation doesn't stack on iter 3, 4, ...
+    assert reset is True
+
+
+def test_second_strike_no_baseline_also_triggers_loop_break():
+    """Streak >= 2 always trips the hard-break, regardless of baseline.
+    Defensive: the new one-strike rule means we'd usually never get
+    here on a no-baseline session, but if we do, escalate maximally."""
+    text, reset = _fallback(plan_only=True, has_existing_file=False, streak=2)
+    low = text.lower()
+    assert "loop detected" in low
+    assert reset is True
+
+
+def test_not_plan_only_returns_generic_reminder():
+    """No <plan>, no code at all — generic "send patches or html_file"
+    nudge. No streak reset, no escalation."""
+    text, reset = _fallback(plan_only=False, has_existing_file=True, streak=0)
+    low = text.lower()
+    assert "patch" in low and "html_file" in low
+    assert "loop detected" not in low
+    assert "build phase" not in low
+    assert reset is False

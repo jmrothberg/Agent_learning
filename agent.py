@@ -879,6 +879,81 @@ class GameAgent:
     def model(self) -> str:
         return self._backend.info.model
 
+    @staticmethod
+    def _no_usable_code_fallback(
+        *,
+        plan_only: bool,
+        has_existing_file: bool,
+        consecutive_plan_only: int,
+    ) -> tuple[str, bool]:
+        """Pick the fallback message + decide whether to reset the
+        plan-only streak counter.
+
+        Returns (fallback_text, should_reset_streak).
+
+        Branching:
+          1. `consecutive_plan_only >= 2` — hard loop-break with the
+             strongest directive. Counter is reset so escalation can't
+             stack forever. Handles the centipede/model-8 trace pattern
+             where the model re-emits <plan> indefinitely even with a
+             baseline file present.
+          2. `plan_only AND NOT has_existing_file` — escalate immediately
+             on the FIRST strike. With no baseline yet, code emission
+             isn't optional: Phase A already supplied the plan, and
+             repeating it on iter 1 is pure waste. Saves ~60-120s vs.
+             waiting for a second strike. The asteroid_20260510_173200
+             and DK 20260513_153626 traces both showed this exact
+             one-strike pattern on reasoner-class models.
+          3. `plan_only AND has_existing_file` — softer "stop re-
+             emitting plan, write the rewrite" message. The model may
+             have a legitimate reason (e.g. user asked for a redesign);
+             we don't want to escalate on the first strike here.
+          4. Default — no <plan>, no code: generic "send patches or
+             html_file" reminder.
+        """
+        if consecutive_plan_only >= 2:
+            fallback = (
+                "LOOP DETECTED: you have emitted only <plan> for "
+                f"{consecutive_plan_only} iterations with no "
+                "code. This iteration MUST produce code, or the "
+                "session will be aborted. Emit exactly one of:\n"
+                "  - a complete <html_file>...</html_file> (for a "
+                "full rewrite), or\n"
+                "  - one or more <patch>...</patch> blocks (for "
+                "incremental changes).\n"
+                "Do NOT include <plan>, <criteria>, or <probes>."
+            )
+            return fallback, True
+        if plan_only and not has_existing_file:
+            fallback = (
+                "BUILD PHASE — code emission is REQUIRED this turn. "
+                "Phase A already collected the plan, criteria, probes, "
+                "and assets; there is no baseline file on disk yet, so "
+                "the only legitimate output is a complete "
+                "<html_file>...</html_file> for the first build. Do "
+                "NOT re-emit <plan>, <criteria>, <probes>, or "
+                "<assets> — those were already accepted last turn. "
+                "Emit the game's full HTML now."
+            )
+            return fallback, False
+        if plan_only and has_existing_file:
+            fallback = (
+                "You already provided a <plan>. The user wants "
+                "a full rewrite of the existing file. Stop "
+                "re-emitting <plan>. Emit one complete "
+                "<html_file>...</html_file> now containing the "
+                "new game. Do NOT include <plan>, <criteria>, "
+                "or <probes> in this reply."
+            )
+            return fallback, False
+        fallback = (
+            "I could not find a <patch> or <html_file> block "
+            "in your reply. If this is the first build, send "
+            "a complete <html_file>. Otherwise send <patch> "
+            "blocks."
+        )
+        return fallback, False
+
     @classmethod
     def _classify_model(cls, model: str) -> str:
         """Default model class.
@@ -3971,44 +4046,15 @@ class GameAgent:
                         "consecutive_plan_only": self._consecutive_plan_only,
                         "has_existing_file": bool(self._current_file),
                     })
-                    if self._consecutive_plan_only >= 2:
-                        # Hard loop-break: stronger directive, then reset
-                        # the counter so we don't escalate forever.
-                        fallback = (
-                            "LOOP DETECTED: you have emitted only <plan> for "
-                            f"{self._consecutive_plan_only} iterations with no "
-                            "code. This iteration MUST produce code, or the "
-                            "session will be aborted. Emit exactly one of:\n"
-                            "  - a complete <html_file>...</html_file> (for a "
-                            "full rewrite), or\n"
-                            "  - one or more <patch>...</patch> blocks (for "
-                            "incremental changes).\n"
-                            "Do NOT include <plan>, <criteria>, or <probes>."
+                    fallback, reset_streak = (
+                        GameAgent._no_usable_code_fallback(
+                            plan_only=plan_only,
+                            has_existing_file=bool(self._current_file),
+                            consecutive_plan_only=self._consecutive_plan_only,
                         )
+                    )
+                    if reset_streak:
                         self._consecutive_plan_only = 0
-                    elif plan_only and self._current_file:
-                        fallback = (
-                            "You already provided a <plan>. The user wants "
-                            "a full rewrite of the existing file. Stop "
-                            "re-emitting <plan>. Emit one complete "
-                            "<html_file>...</html_file> now containing the "
-                            "new game. Do NOT include <plan>, <criteria>, "
-                            "or <probes> in this reply."
-                        )
-                    elif plan_only:
-                        fallback = (
-                            "You provided a <plan> but no code. This is the "
-                            "first build, so emit one complete "
-                            "<html_file>...</html_file> now. Do NOT re-emit "
-                            "<plan>, <criteria>, or <probes>."
-                        )
-                    else:
-                        fallback = (
-                            "I could not find a <patch> or <html_file> block "
-                            "in your reply. If this is the first build, send "
-                            "a complete <html_file>. Otherwise send <patch> "
-                            "blocks."
-                        )
                     self._messages.append({
                         "role": "user",
                         "content": self._flush_user_injections(fallback),
