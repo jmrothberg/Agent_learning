@@ -102,6 +102,88 @@ def test_scan_does_not_override_dir_when_prefixes_split(tmp_path: Path) -> None:
     assert adir is None
 
 
+def test_scan_picks_up_unreferenced_disk_assets(tmp_path: Path) -> None:
+    """Motivating case (donkey-kong session): the assets folder has
+    20+ PNGs from prior sessions (mario_idle, mario_walk1, dk_throw,
+    jumpman_jump, …) but the seed HTML only loads 5 (hero, barrel,
+    girder, ladder, princess). Without folder discovery, the model
+    re-invents names; with it, the model sees the full roster and
+    reuses what's there."""
+    seed_basename = "donkey_kong_20260512_201139"
+    seed = tmp_path / f"{seed_basename}.html"
+    assets_dir = tmp_path / f"{seed_basename}_assets"
+    _write_pngs(assets_dir, [
+        # Referenced in the seed HTML (currently wired up):
+        "hero.png", "barrel.png", "girder.png", "ladder.png", "princess.png",
+        # NOT referenced — sitting on disk from prior sessions:
+        "mario_idle.png", "mario_walk1.png", "mario_walk2.png",
+        "mario_climb1.png", "mario_climb2.png", "mario_jump.png",
+        "donkey_kong_idle.png", "donkey_kong_throw1.png",
+        "donkey_kong_throw2.png",
+        "jumpman_idle.png", "jumpman_run1.png", "jumpman_run2.png",
+    ])
+    seed.write_text(
+        '<script>const ASSETS={};const E=[["hero","hero.png"],'
+        '["barrel","barrel.png"],["girder","girder.png"],'
+        '["ladder","ladder.png"],["princess","princess.png"]];'
+        f'const AP="./{seed_basename}_assets/";</script>'
+    )
+    # Use a HTML scan that finds the 5 refs (they include the prefix
+    # in JS strings); plus folder scan adds the other 12.
+    seed_html = (
+        f'<script>const AP="./{seed_basename}_assets/";\n'
+        f'const HERO="./{seed_basename}_assets/hero.png";'
+        f'const BARREL="./{seed_basename}_assets/barrel.png";'
+        f'const GIRDER="./{seed_basename}_assets/girder.png";'
+        f'const LADDER="./{seed_basename}_assets/ladder.png";'
+        f'const PRINCESS="./{seed_basename}_assets/princess.png";'
+        '</script>'
+    )
+    a, _, _, _ = _scan_seed_media(seed_html, seed)
+    # All 17 PNGs (5 referenced + 12 unreferenced) must be in the roster.
+    expected = {
+        "hero", "barrel", "girder", "ladder", "princess",
+        "mario_idle", "mario_walk1", "mario_walk2",
+        "mario_climb1", "mario_climb2", "mario_jump",
+        "donkey_kong_idle", "donkey_kong_throw1", "donkey_kong_throw2",
+        "jumpman_idle", "jumpman_run1", "jumpman_run2",
+    }
+    assert set(a.keys()) == expected, (
+        f"missing assets: {expected - set(a.keys())}; "
+        f"extra: {set(a.keys()) - expected}"
+    )
+
+
+def test_scan_ignores_non_image_files_in_folder(tmp_path: Path) -> None:
+    """Folder may contain .DS_Store / .json / stray files; only
+    real images get rolled into the asset roster."""
+    seed_basename = "g_20260101"
+    seed = tmp_path / f"{seed_basename}.html"
+    seed.write_text("<html></html>")
+    adir = tmp_path / f"{seed_basename}_assets"
+    adir.mkdir()
+    (adir / "real.png").write_bytes(b"\x89PNG")
+    (adir / ".DS_Store").write_bytes(b"junk")
+    (adir / "manifest.json").write_text("{}")
+    (adir / "subdir").mkdir()  # nested dirs are skipped, not crawled
+
+    a, _, _, _ = _scan_seed_media("<html></html>", seed)
+    assert set(a.keys()) == {"real"}
+
+
+def test_scan_picks_up_unreferenced_sounds_in_folder(tmp_path: Path) -> None:
+    """Mirror of the asset case for the sounds folder."""
+    seed_basename = "g_20260101"
+    seed = tmp_path / f"{seed_basename}.html"
+    seed.write_text("<html></html>")
+    sdir = tmp_path / f"{seed_basename}_sounds"
+    sdir.mkdir()
+    for f in ("jump.ogg", "hit.ogg", "music.ogg", "win.ogg"):
+        (sdir / f).write_bytes(b"OggS")
+    _, s, _, _ = _scan_seed_media("<html></html>", seed)
+    assert set(s.keys()) == {"jump", "hit", "music", "win"}
+
+
 def test_scan_tolerates_leading_dot_slash_and_quoting(tmp_path: Path) -> None:
     seed = tmp_path / "q.html"
     d = tmp_path / "q_assets"

@@ -1141,6 +1141,43 @@ def diagnose_instruction(report_text: str, mistakes_hints: str = "") -> str:
     )
 
 
+def continuation_instruction(current_file: str) -> str:
+    """User-feedback turn after `<done/>` (or restart of a previously
+    finished session).
+
+    The motivating bug: the prior text just SAID "the file is unchanged
+    on disk" without including it, so the model was asked to write
+    patches blind. Patch-search text routinely hallucinated variable
+    names (e.g. `state.princessTimer` vs the file's actual
+    `state.princess.timer`) — a one-character whitespace/struct mismatch
+    is enough for SEARCH/REPLACE to fail. Worst case for weaker local
+    models, and especially worst case on restarts where compaction
+    may have already trimmed the file out of the message history.
+
+    The cure mirrors fix_instruction: include the full file inline as
+    the SOURCE OF TRUTH so patch anchors can be derived from it
+    directly. No diagnostic phase here — there's no failing report;
+    the user just typed feedback.
+    """
+    file_block = (
+        "CURRENT FILE ON DISK (this is the SOURCE OF TRUTH — patch "
+        "against THIS exact text, character-for-character; earlier "
+        "turns' code may be stale or absent from this prompt):\n"
+        "```html\n"
+        f"{current_file}\n"
+        "```\n\n"
+    )
+    return (
+        "CONTINUATION TURN: the user has new feedback above for the "
+        "game you previously shipped. The CURRENT FILE ON DISK block "
+        "below is the exact text on disk right now — patch against it "
+        "character-for-character. Reply with one or more <patch> "
+        "blocks that address the feedback. Use a full <html_file> "
+        "only if patches truly cannot express the change.\n\n"
+        f"{file_block}"
+    )
+
+
 def fix_instruction(
     report_text: str,
     current_file: str,

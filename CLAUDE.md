@@ -86,7 +86,9 @@ python learner.py apply games/traces/             # propose AND write to playboo
 - `MLX_MODEL` — explicit MLX model path or HF id. Loaded in-process via `mlx_lm.load`. If unset, the backend scans `~/MLX_Models/` / `MLX_MODELS_DIR` / HF cache and picks a single discoverable chat model (multi-match → first, with a "set MLX_MODEL to override" hint in `info.source`).
 - `MLX_MODELS_DIR` — `:`-separated list of additional dirs to scan for downloaded MLX models. Defaults: `~/MLX_Models`, `~/Models_MLX`, `~/.cache/huggingface/hub`, `/opt/mlx_models`.
 - `MLX_PREFILL_STEP_SIZE` — chunk size for prompt eval (default `1024`, the safe-anywhere value for DeepSeek-V4 Flash/Pro per upstream PR). Drop to `512` if you hit Metal OOM mid-eval; raise to `2048` on small models if you want a few % more throughput.
-- `CODING_BOX_NUM_CTX` — Ollama context window (default 32768; supports 128K+ on most local models). MLX has no equivalent; uses model native context.
+- `CODING_BOX_NUM_CTX` — Ollama context window (default **262144**, matching the native context of current local coding models — Qwen3.6, DeepSeek V4, GLM 5.1, MiniMax M2). Lower it if you OOM on tight-VRAM hardware (KV-cache scales linearly with ctx). Preload your Ollama model at this size with `ollama run --ctx-size 262144 <model>` to avoid a reload on first request.
+- `MLX_MAX_TOKENS` — MLX output cap (default **262144**). Same rationale; clamp down for smaller models that don't have the native context.
+- `ANTHROPIC_MAX_TOKENS` — Anthropic output cap (default 32768, the safe ceiling across Sonnet 4.6 / Opus 4.7). Override only if you hit per-model API limits.
 - `DIFFUSION_MODELS_DIR` — root override for weights search (sprites + sounds layout); hidden **`~/.Diffusion_Models`** / **`~/.Models_Diffusers`** are tried before visible `~/…` siblings; HuggingFace cache fallback if absent.
 - `TORCH_CUDA` — CUDA version for `install_diffuser.sh` (`130` default, `121`/`124` for older GPUs)
 

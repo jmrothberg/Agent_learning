@@ -15,7 +15,7 @@ Optional flags:
     --max-iters N       Cap iterations (default 6)
     --out PATH          Where to save the final game (default games/game.html)
     --best-of-n N       Sample N candidates per fix turn (default 2)
-    --num-ctx N         Ollama context window (default 32768; env CODING_BOX_NUM_CTX)
+    --num-ctx N         Ollama context window (default 262144; env CODING_BOX_NUM_CTX)
     --stall-seconds N   Per-chunk stream watchdog (default 60)
     --headless          Run Chromium headless (no visible window). Use this
                         for unattended runs and CI; the TUI uses visible.
@@ -322,13 +322,15 @@ def main() -> int:
                    help="Sample N candidates per fix, sequentially with early exit. "
                         "Default 1 (off). Set 2-3 to retry harder when local model is weak.")
     p.add_argument("--num-ctx", type=int,
-                   default=int(os.environ.get("CODING_BOX_NUM_CTX", "32768")),
-                   help="Ollama context window. Default 32768; qwen3.6 / "
-                        "gpt-oss support 128K+. Override with --num-ctx or "
-                        "CODING_BOX_NUM_CTX env var. Changing between calls "
-                        "forces an Ollama model reload — preload your model "
-                        "at this ctx size first with "
-                        "`ollama run --ctx-size 32768 <model>`.")
+                   default=int(os.environ.get("CODING_BOX_NUM_CTX", "262144")),
+                   help="Ollama context window. Default 262144 (matches the "
+                        "native context of current Qwen3.6 / DeepSeek V4 / "
+                        "GLM 5.1 / MiniMax M2). Override with --num-ctx or "
+                        "CODING_BOX_NUM_CTX env var (lower it if you're "
+                        "OOMing — KV-cache scales linearly with ctx). "
+                        "Changing between calls forces an Ollama model reload "
+                        "— preload your model at this ctx size first with "
+                        "`ollama run --ctx-size 262144 <model>`.")
     p.add_argument("--stall-seconds", type=float, default=90.0)
     p.add_argument("--headless", action="store_true", help="Run Chromium without a visible window.")
     p.add_argument("--open", action="store_true", help="Open final game in your browser.")

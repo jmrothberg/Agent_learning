@@ -378,6 +378,13 @@ class StreamResult:
     # Folded into `stalled` for backward compatibility; standalone field
     # lets the agent route to the coaching prompt instead of generic retry.
     deliberated: bool = False
+    # Cloud-only signal: the API capped the response at max_tokens
+    # (Anthropic stop_reason="max_tokens", OpenAI finish_reason="length").
+    # Distinct from a model that finished naturally; the model was cut
+    # off mid-emission and would have continued. Lets the agent route
+    # to a "your reply was capped, emit a smaller change" coach instead
+    # of treating it as a generic truncation. False on Ollama/MLX.
+    max_tokens_hit: bool = False
 
 
 async def stream_chat(

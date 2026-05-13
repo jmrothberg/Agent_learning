@@ -411,18 +411,20 @@ class MLXBackend(Backend):
         # Drop fields that mean nothing to MLX (e.g. num_ctx). Carry
         # only the sampler knobs MLX understands.
         sampler_opts = {k: opts[k] for k in _MLX_OPTION_KEYS if k in opts}
-        # Qwen3.6-27B has 262144 native context — the old 16384 cap
-        # truncated DOOM iter 1 mid-stream (trace
-        # classic-doom-style-first-perso_20260512_101944: completion_tokens
-        # landed exactly at 16384, file written was an 835-byte
-        # placeholder skeleton). Default raised to 131072 so a full
-        # raycaster + sprite loader fits in one reply. Per-machine
-        # override via MLX_MAX_TOKENS env var.
+        # Output cap. Current generation of local MLX models — Qwen3.6,
+        # DeepSeek V4, GLM 5.1, MiniMax M2 — all ship with 256K+ native
+        # context. The original 16384 ceiling truncated DOOM iter 1
+        # (classic-doom-style-first-perso_20260512_101944); 131072 was
+        # an interim bump; 262144 matches the model's native context
+        # so a multi-turn coding session never gets clipped by the
+        # harness's own ceiling. The model's own context window is
+        # still the upper bound — sampler_opts.max_tokens or
+        # MLX_MAX_TOKENS env override let smaller models clamp down.
         env_cap = os.environ.get("MLX_MAX_TOKENS", "").strip()
         if env_cap.isdigit() and int(env_cap) > 0:
             default_max = int(env_cap)
         else:
-            default_max = 131072
+            default_max = 262144
         max_tokens = int(sampler_opts.get("max_tokens") or default_max)
         temperature = float(sampler_opts.get("temperature") or 0.0)
         top_p = float(sampler_opts.get("top_p") or 0.0)
@@ -748,8 +750,11 @@ class OpenAIBackend(Backend):
         t0 = time.monotonic()
         cancelled = False
 
+        max_tokens_hit = False
+
         async def _run(call_params: dict[str, Any]) -> None:
             nonlocal tokens, prompt_tokens, completion_tokens, cancelled
+            nonlocal max_tokens_hit
             stream = await self._client.chat.completions.create(**call_params)
             async for chunk in stream:
                 if cancel_event is not None and cancel_event.is_set():
@@ -763,6 +768,14 @@ class OpenAIBackend(Backend):
                         tokens += 1
                         if on_token is not None:
                             on_token(piece)
+                    # OpenAI Chat Completions: finish_reason on the
+                    # final chunk's choice. "length" means we hit
+                    # max_completion_tokens; the model would have kept
+                    # going. Routed by the agent to a "your reply was
+                    # capped, emit a smaller change" coach.
+                    fr = getattr(chunk.choices[0], "finish_reason", None)
+                    if fr == "length":
+                        max_tokens_hit = True
                 usage = getattr(chunk, "usage", None)
                 if usage is not None:
                     prompt_tokens = getattr(usage, "prompt_tokens", None)
@@ -819,6 +832,7 @@ class OpenAIBackend(Backend):
             stalled=cancelled,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            max_tokens_hit=max_tokens_hit,
         )
 
     async def is_vlm(self) -> bool:
@@ -882,9 +896,26 @@ class AnthropicBackend(Backend):
         system_text = "\n\n".join(system_parts).strip() or None
 
         opts = dict(options or {})
-        # Anthropic max_tokens is REQUIRED. 8192 is a sane default for
-        # an agent turn that may emit a multi-KB <html_file>.
-        max_tok = int(opts.get("max_tokens") or 8192)
+        # Anthropic max_tokens is REQUIRED.
+        #
+        # 8192 was the original default — and the DK trace
+        # 20260513_135011 burned 3 consecutive iters (iter 1/2/3) on
+        # truncated <html_file> rewrites where Claude generated exactly
+        # 8192 completion tokens and got cut off mid-document. Iter 1
+        # was a 17,654-byte stream missing every closing tag.
+        # Sonnet 4.6 supports 64K output, Opus 4.7 supports 32K. 32768
+        # is the safe-everywhere ceiling for "write a full HTML game
+        # file in one go" and covers ~120 KB of output. Override via
+        # options["max_tokens"] or env ANTHROPIC_MAX_TOKENS for runs
+        # that need to push higher (Sonnet) or lower (rate-limit
+        # mitigation).
+        env_cap = os.environ.get("ANTHROPIC_MAX_TOKENS", "").strip()
+        try:
+            env_max = int(env_cap) if env_cap else 0
+        except ValueError:
+            env_max = 0
+        default_max = env_max if env_max > 0 else 32768
+        max_tok = int(opts.get("max_tokens") or default_max)
         kwargs: dict[str, Any] = {
             "model": self.info.model,
             "messages": msgs,
@@ -904,8 +935,11 @@ class AnthropicBackend(Backend):
         t0 = time.monotonic()
         cancelled = False
 
+        max_tokens_hit = False
+
         async def _run_anthropic(call_kwargs: dict[str, Any]) -> None:
             nonlocal tokens, prompt_tokens, completion_tokens, cancelled
+            nonlocal max_tokens_hit
             async with self._client.messages.stream(**call_kwargs) as stream:
                 async for piece in stream.text_stream:
                     if cancel_event is not None and cancel_event.is_set():
@@ -922,6 +956,14 @@ class AnthropicBackend(Backend):
                     if usage is not None:
                         prompt_tokens = getattr(usage, "input_tokens", None)
                         completion_tokens = getattr(usage, "output_tokens", None)
+                    # Capture the cut-by-API signal. The Anthropic SDK
+                    # exposes `stop_reason` on the final message; the
+                    # value "max_tokens" means we hit the cap and the
+                    # model would have kept going. Distinct from
+                    # "end_turn" (natural finish) or "stop_sequence".
+                    stop = getattr(final, "stop_reason", None)
+                    if stop == "max_tokens":
+                        max_tokens_hit = True
 
         try:
             await _run_anthropic(kwargs)
@@ -973,6 +1015,7 @@ class AnthropicBackend(Backend):
             stalled=cancelled,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            max_tokens_hit=max_tokens_hit,
         )
 
     async def is_vlm(self) -> bool:

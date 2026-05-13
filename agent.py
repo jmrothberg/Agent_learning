@@ -157,29 +157,49 @@ _SEED_SOUND_RE = re.compile(
 )
 
 
+_IMAGE_EXTS: frozenset[str] = frozenset(
+    {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+)
+_SOUND_EXTS: frozenset[str] = frozenset(
+    {".ogg", ".mp3", ".wav", ".m4a"}
+)
+
+
 def _scan_seed_media(
     seed_html: str, seed_path: Path,
 ) -> tuple[
     dict[str, Path], dict[str, Path], Path | None, Path | None,
 ]:
-    """Walk `seed_html` for media references that exist on disk next to
-    `seed_path`.
+    """Discover the seed's full media roster — both files referenced
+    in the HTML AND any other files sitting in the canonical media
+    folders on disk.
+
+    Why both: a prior session may have generated mario_idle, mario_jump,
+    donkey_kong_idle, etc. into `<basename>_assets/`, but the current
+    seed HTML only references hero.png + princess.png. If we only
+    looked at HTML refs, the model would re-invent fresh names instead
+    of reusing the rich existing art that's right there on disk. By
+    listing the FOLDER too, the model sees the complete roster in the
+    system summary and can choose to load whichever existing PNGs fit.
 
     Returns (asset_paths, sound_paths, assets_dir, sounds_dir):
-      - asset_paths / sound_paths: name (filename stem) → absolute Path
-      - assets_dir / sounds_dir: the single shared folder when ALL
-        references point at the same `<prefix>_assets` / `_sounds`;
-        None when multiple prefixes appeared (split-media case) so the
-        caller doesn't pick one arbitrarily.
+      - asset_paths / sound_paths: name (filename stem) → absolute Path,
+        union of HTML-referenced AND folder-resident files
+      - assets_dir / sounds_dir: kept for backwards compat with callers
+        that still inspect them; current agent code reads these values
+        but doesn't act on them (the canonical dir is derived from
+        _session_id instead).
 
-    Pure function — no side effects on the agent. Called from the seed
-    branch of run() to rehydrate `_session_assets` / `_session_sounds`.
+    Pure function — no side effects on the agent.
     """
     seed_dir = seed_path.parent.resolve()
     asset_paths: dict[str, Path] = {}
     sound_paths: dict[str, Path] = {}
     asset_dirs: set[Path] = set()
     sound_dirs: set[Path] = set()
+
+    # Pass 1 — HTML refs. These are what the seed code IS LOADING
+    # right now; the model should treat them as "currently wired up".
     for m in _SEED_ASSET_RE.finditer(seed_html):
         prefix, fname = m.group(1), m.group(2)
         adir = seed_dir / f"{prefix}_assets"
@@ -194,9 +214,39 @@ def _scan_seed_media(
         if full.exists():
             sound_paths[Path(fname).stem] = full.resolve()
             sound_dirs.add(sdir.resolve())
-    # Single consistent prefix → reuse it. Multiple prefixes → don't
-    # override; future generation will create a fresh basename-derived
-    # dir, which is the safest behavior under ambiguous seed history.
+
+    # Pass 2 — list the canonical media folders directly. The seed
+    # path here is already the canonical `games/<basename>.html`
+    # (chat.py resolves snapshots and .best.html before constructing
+    # the agent), so `<basename>_assets/` and `<basename>_sounds/`
+    # next to it are exactly the dirs we want to walk. Files not
+    # referenced in the HTML still get added to the roster so the
+    # model knows they're available to reload.
+    canonical_assets = seed_dir / f"{seed_path.stem}_assets"
+    canonical_sounds = seed_dir / f"{seed_path.stem}_sounds"
+    if canonical_assets.is_dir():
+        for f in canonical_assets.iterdir():
+            if not f.is_file():
+                continue
+            if f.suffix.lower() not in _IMAGE_EXTS:
+                continue
+            name = f.stem
+            if name not in asset_paths:
+                asset_paths[name] = f.resolve()
+        if canonical_assets.exists():
+            asset_dirs.add(canonical_assets.resolve())
+    if canonical_sounds.is_dir():
+        for f in canonical_sounds.iterdir():
+            if not f.is_file():
+                continue
+            if f.suffix.lower() not in _SOUND_EXTS:
+                continue
+            name = f.stem
+            if name not in sound_paths:
+                sound_paths[name] = f.resolve()
+        if canonical_sounds.exists():
+            sound_dirs.add(canonical_sounds.resolve())
+
     assets_dir = next(iter(asset_dirs)) if len(asset_dirs) == 1 else None
     sounds_dir = next(iter(sound_dirs)) if len(sound_dirs) == 1 else None
     return asset_paths, sound_paths, assets_dir, sounds_dir
@@ -527,17 +577,24 @@ class GameAgent:
         # first-person-shoo_20260506_222042). Bumped default to 32768
         # which fits the system prompt + plan + first-build with room
         # for several feedback iterations before structured compaction.
-        # Bumped 32768 → 65536 after the classic-doom trace
-        # (20260512_101944) showed iter 1 hitting an effective output
-        # cap of 16107 BPE tokens (32768 ctx - 16661 prompt) for a
-        # full raycaster. 65536 gives ~48 KB of output headroom on
-        # Ollama; MLX honors its own 262K native context anyway.
-        # Override explicitly via constructor or via the
-        # CODING_BOX_NUM_CTX env var if your model needs different.
+        # Ollama context window. Current-gen local coding models
+        # (Qwen3.6-27B, DeepSeek V4 Flash, GLM 5.1, MiniMax M2) all
+        # ship with 256K native context. The harness ceiling matches
+        # so a long multi-iter session — full HTML + history +
+        # focused slice + screenshots-as-text — never gets clipped
+        # by us before the model. Was 65536; the cap was leaving
+        # ~48 KB output headroom which iter 1 of a complex game
+        # could clear, but later iters with reply history accumulated
+        # would hit the wall (the original 16384 cap caused exactly
+        # this in classic-doom 20260512_101944).
+        # Memory cost note: Ollama KV-cache scales linearly with
+        # num_ctx — 256K on a 27B model is ~10 GB of VRAM, which is
+        # fine on a 64+ GB Mac but tight on a 32 GB laptop. Override
+        # downward via the CODING_BOX_NUM_CTX env var if you hit OOM.
         # Note: changing num_ctx between calls forces an Ollama model
         # reload — to avoid that, preload at the desired size with
-        # `ollama run --ctx-size 65536 <model>` before starting a session.
-        num_ctx: int = 65536,
+        # `ollama run --ctx-size 262144 <model>` before starting.
+        num_ctx: int = 262144,
         # 90s per-chunk inactivity. With 16K ctx + 20B model, time-to-first
         # token can be 20-40s on a fresh load; we want headroom but still
         # detect a true wedge promptly.
@@ -681,6 +738,14 @@ class GameAgent:
         # (coder.py). Off by default; existing autonomous behavior is
         # preserved when the flag stays False.
         self._step_mode: bool = False
+        # Auto-step-mode (DK trace 20260513_122154): when the first
+        # iter fails, the harness auto-arms /wait so the user can
+        # intervene before the cascade. Fires exactly once per session;
+        # `_step_auto_disabled` is set by set_step_mode(False) so a
+        # subsequent user `/wait off` permanently opts out of the auto-
+        # arm for the rest of the run.
+        self._auto_step_armed: bool = False
+        self._step_auto_disabled: bool = False
         # Released by signal_step_continue() to unblock a step-mode wait
         # without adding any user feedback. add_user_feedback also
         # unblocks (via has_pending_user_input becoming True).
@@ -1006,8 +1071,19 @@ class GameAgent:
         each iteration boundary and waits for explicit user input before
         querying the model again. Drivers wake the wait by either
         signal_step_continue() (no feedback) or add_user_feedback() (the
-        existing path)."""
-        self._step_mode = bool(on)
+        existing path).
+
+        Explicit user-driven /wait off also flips `_step_auto_disabled`
+        so the auto-arm logic doesn't immediately re-enable step-mode
+        after the next failed iter — once the user says "no thanks,"
+        we don't keep asking.
+        """
+        new = bool(on)
+        if self._step_mode and not new:
+            # Explicit disable — opt out of auto-arm for the rest of
+            # the session.
+            self._step_auto_disabled = True
+        self._step_mode = new
         self._trace({"kind": "step_mode_set", "on": self._step_mode})
 
     def signal_step_continue(self) -> None:
@@ -1015,6 +1091,105 @@ class GameAgent:
         No-op when no wait is active."""
         self._step_continue = True
         self._trace({"kind": "step_continue_signal"})
+
+    # -- asset-reference alignment scan ----------------------------------
+    #
+    # In the donkey-kong trace 20260513_122154 the model's Phase A
+    # produced 8 sprites but the iter-1 HTML referenced 14 by name. The
+    # 6 unbacked names produced net::ERR_FILE_NOT_FOUND on every load,
+    # and the model spent iters 3+4 patching drawImage symptoms instead
+    # of noticing the files weren't there. The scan compares names the
+    # HTML references vs. names actually generated, so the harness can
+    # tell the model exactly which assets need a mid-session regen
+    # BEFORE the browser test wastes another iter on the same symptom.
+
+    # Pattern catches:
+    #   ASSETS['name']  /  ASSETS["name"]   (subscript)
+    #   ASSETS.name                          (dot access)
+    # Captures the identifier as group 1.
+    _ASSET_SUBSCRIPT_RE = __import__("re").compile(
+        r"""ASSETS\s*\[\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]\s*\]"""
+    )
+    _ASSET_DOT_RE = __import__("re").compile(
+        r"""\bASSETS\.([A-Za-z_][A-Za-z0-9_]*)\b"""
+    )
+    # Loose path pattern: any '<anything>_assets/<name>.png' string
+    # literal. Catches inlined paths even without ASSETS[] indirection.
+    _ASSET_PATH_RE = __import__("re").compile(
+        r"""['"][^'"\s]*_assets/([A-Za-z_][A-Za-z0-9_]*)\.png['"]"""
+    )
+    # Array-of-string-names commonly named `assetList`, `asset_names`,
+    # `assetPaths`, `sprites`, etc., followed by a `[...]` literal of
+    # bare string identifiers. The DK trace failure used exactly this
+    # pattern — assetList = ['mario_idle', …] then mapped at runtime.
+    _ASSET_LIST_RE = __import__("re").compile(
+        r"""\b(?:assetList|asset_names|assetNames|spriteNames|spriteList)\s*=\s*\[([^\]]+)\]""",
+        __import__("re").IGNORECASE,
+    )
+    _ASSET_LIST_NAME_RE = __import__("re").compile(
+        r"""['"]([A-Za-z_][A-Za-z0-9_]*)['"]"""
+    )
+
+    @classmethod
+    def _scan_html_for_asset_refs(cls, html: str) -> set[str]:
+        """Return the set of asset *names* the HTML references.
+
+        Static analysis — fast, deterministic, no JS execution. Covers
+        the three patterns the model produces in practice:
+          1. ASSETS['name'] / ASSETS["name"] / ASSETS.name
+          2. Literal paths '<dir>_assets/<name>.png'
+          3. Array literals assigned to assetList / spriteNames / etc.
+        """
+        refs: set[str] = set()
+        for m in cls._ASSET_SUBSCRIPT_RE.finditer(html):
+            refs.add(m.group(1))
+        for m in cls._ASSET_DOT_RE.finditer(html):
+            refs.add(m.group(1))
+        for m in cls._ASSET_PATH_RE.finditer(html):
+            refs.add(m.group(1))
+        for m in cls._ASSET_LIST_RE.finditer(html):
+            for nm in cls._ASSET_LIST_NAME_RE.finditer(m.group(1)):
+                refs.add(nm.group(1))
+        return refs
+
+    def _check_asset_alignment(self, html: str) -> set[str]:
+        """Compare HTML asset references against generated files.
+
+        Returns the set of names that are REFERENCED but not present in
+        `self._session_assets`. When non-empty, queues a coaching
+        message naming the missing files so the next user turn tells
+        the model to either remove the references or emit an `<assets>`
+        block to request the gap (which the existing mid-session regen
+        pipeline will then fulfill).
+        """
+        refs = self._scan_html_for_asset_refs(html)
+        if not refs:
+            return set()
+        available = set(self._session_assets.keys())
+        missing = refs - available
+        if not missing:
+            return set()
+        self._trace({
+            "kind": "asset_alignment_gap",
+            "referenced": sorted(refs),
+            "available": sorted(available),
+            "missing": sorted(missing),
+        })
+        miss_list = ", ".join(sorted(missing))
+        avail_list = ", ".join(sorted(available)) or "(none)"
+        self._pending_coaching.append(
+            "Asset references don't match the files on disk. Your code "
+            f"references these names that were never generated: {miss_list}. "
+            f"Available assets: {avail_list}. The browser is returning "
+            "net::ERR_FILE_NOT_FOUND for the missing ones, not a drawImage "
+            "bug. To fix the root cause, EITHER (a) emit an `<assets>...</assets>` "
+            "block in this turn requesting the missing names — the harness "
+            "will regenerate them mid-session and your code will work as "
+            "written — OR (b) edit the code to only reference assets that "
+            "exist. Do NOT add more drawImage try/catch guards — those "
+            "hide the load failure, they don't fix it."
+        )
+        return missing
 
     def set_token_callback(self, cb) -> None:
         self._token_cb = cb
@@ -1491,6 +1666,20 @@ class GameAgent:
                     "kind": "rewrite_exemption_suppressed",
                     "reason": "code_locked",
                 })
+            elif self._repeat_sig_streak >= 2:
+                # The model has been failing on the same error twice in
+                # a row. Granting another full <html_file> rewrite when
+                # surgical patches haven't fixed the root cause just
+                # fuels regression (cf. DK trace 20260513_122154: 3
+                # consecutive 22-25 KB rewrites all hit the same
+                # ERR_FILE_NOT_FOUND). Force the model to send a
+                # focused <patch> this turn so it has to articulate
+                # what's actually different.
+                self._trace({
+                    "kind": "rewrite_exemption_suppressed",
+                    "reason": "repeat_signature",
+                    "streak": self._repeat_sig_streak,
+                })
             else:
                 self._allow_one_rewrite = True
                 self._trace({"kind": "rewrite_exemption_armed"})
@@ -1702,29 +1891,67 @@ class GameAgent:
             # inlined-file truth source has bloated the input.
             "prompt_tokens": result.prompt_tokens,
             "completion_tokens": result.completion_tokens,
+            "max_tokens_hit": result.max_tokens_hit,
         })
-        # Output-cap detection: when completion_tokens lands at the
-        # exact max_tokens default (Ollama: num_ctx-ish; MLX: 131072
-        # or MLX_MAX_TOKENS), the model was cut off mid-reply. The
-        # classic-doom trace 20260512_101944 hit this at 16384 and
-        # the agent's degenerate-baseline carve-out now recovers on
-        # the next iter. Surfacing the event so the user knows.
-        # The check fires when completion_tokens is "round" (power-of-2
-        # within typical caps) AND no closing </html_file> is present.
-        if (
+        # Output-cap detection.
+        #
+        # Two paths, preferring the explicit signal when available:
+        #   1. Cloud backends (Anthropic / OpenAI) populate
+        #      result.max_tokens_hit directly from stop_reason /
+        #      finish_reason. This is the exact signal — the model
+        #      would have continued.
+        #   2. Local backends (Ollama, MLX) don't expose a clean
+        #      "cut by cap" boolean, so we keep the legacy heuristic:
+        #      completion_tokens lands on a round power-of-2 cap AND
+        #      no </html_file> closer is present.
+        #
+        # Either path queues a coaching message so the NEXT user turn
+        # tells the model the cap was the failure cause and asks for a
+        # smaller emission. Without this, Claude in the DK trace
+        # 20260513_135011 spent iters 1/2/3 re-emitting truncated
+        # 17 KB <html_file> rewrites with no idea the API was clipping
+        # them.
+        cap_hit_explicit = bool(result.max_tokens_hit)
+        cap_hit_heuristic = bool(
             result.completion_tokens
-            and result.completion_tokens in (16384, 32768, 65536, 131072)
+            and result.completion_tokens in (
+                # Cloud-typical caps:
+                8192, 16384, 32768, 65536,
+                # Local-model native-context caps:
+                131072, 200000, 262144,
+            )
             and "</html_file>" not in result.text
             and "<html_file>" in result.text
-        ):
+        )
+        if cap_hit_explicit or cap_hit_heuristic:
+            ct = result.completion_tokens or 0
             self._record(AgentEvent(
                 "info",
                 f"[yellow]reply hit max_tokens cap[/yellow] at "
-                f"{result.completion_tokens} BPE tokens — output was "
-                "truncated mid-stream. Raise MLX_MAX_TOKENS or "
-                "CODING_BOX_NUM_CTX for next session. The agent will "
-                "allow a full <html_file> rewrite next iter."
+                f"{ct} BPE tokens — output was truncated mid-stream "
+                f"({'API stop_reason' if cap_hit_explicit else 'heuristic'}). "
+                "Coaching the model to emit a smaller change next turn."
             ))
+            # Queue an iter-1-of-the-recovery coaching message. The
+            # deliberation guard's _pending_coaching pipeline renders
+            # this in the next user turn just before the base
+            # instruction (agent.py:1557). The guidance is the same
+            # whichever signal fired — the cure (smaller output) is
+            # identical.
+            self._pending_coaching.append(
+                "Your previous reply was cut off by the model's max_tokens "
+                f"cap ({ct} BPE tokens emitted) before reaching the closing "
+                "</html_file> or </patch> tag. Re-emit a SMALLER change "
+                "this turn:\n"
+                "  - If you can express the change with `<patch>` blocks, "
+                "do that — they are typically 100-500 bytes each.\n"
+                "  - If a full rewrite is unavoidable, DROP every JS / CSS "
+                "comment, condense whitespace, and avoid duplicate helper "
+                "functions. The goal is a working file in fewer tokens, "
+                "not a polished one.\n"
+                "Do NOT re-emit the same long reply — it will hit the "
+                "same cap and produce another wasted iter."
+            )
         if result.crashed:
             # mlx_lm.server's generate thread died mid-flight (Metal
             # wired-memory limit, OOM, segfault). HTTP layer is still
@@ -2710,15 +2937,33 @@ class GameAgent:
             yield self._record(AgentEvent(
                 "info", f"continuing on existing file with new request: {goal[:160]}"
             ))
+            # Inline the actual file as CURRENT FILE ON DISK truth source.
+            # Without this, patch-search text routinely hallucinated
+            # variable names against a file the model couldn't see (e.g.
+            # donkey-kong trace 20260512_201139: model wrote a patch
+            # targeting `state.princessTimer` when the file actually has
+            # `state.princess.timer`). Worst on restarts where the
+            # message history starts empty. Mirrors fix_instruction's
+            # behavior on regular fix turns.
+            if hasattr(self._p, "continuation_instruction"):
+                cont_msg = self._p.continuation_instruction(self._current_file)
+            else:
+                # v0 prompt module — no helper; inline the same shape.
+                cont_msg = (
+                    "CONTINUATION TURN: the user has new feedback above. "
+                    "Patch against the CURRENT FILE ON DISK block below "
+                    "character-for-character.\n\n"
+                    "CURRENT FILE ON DISK:\n"
+                    "```html\n"
+                    f"{self._current_file}\n"
+                    "```\n\n"
+                    "Reply with one or more <patch> blocks. Use a full "
+                    "<html_file> only if patches truly cannot express "
+                    "the change."
+                )
             self._messages.append({
                 "role": "user",
-                "content": self._flush_user_injections(
-                    "CONTINUATION TURN: the user has new feedback above for the "
-                    "game you previously shipped. The current file is unchanged "
-                    "on disk. Reply with one or more <patch> blocks that address "
-                    "the feedback. Use a full <html_file> only if patches truly "
-                    "cannot express the change."
-                ),
+                "content": self._flush_user_injections(cont_msg),
             })
         else:
             # Open-domain research: try Wikipedia for the goal before
@@ -3691,6 +3936,20 @@ class GameAgent:
                 },
             ))
 
+            # ---- asset-reference alignment scan -------------------------
+            # Static check before Chromium load: do the asset names the
+            # HTML references actually have files on disk? In the
+            # donkey-kong trace 20260513_122154 this gap drove 3 wasted
+            # iters of "fix drawImage" patching. Coaching the model
+            # with the exact missing names lets it either emit a fresh
+            # <assets> block (mid-session regen fulfills it) or stop
+            # referencing names that don't exist.
+            try:
+                self._check_asset_alignment(new_html)
+            except Exception:
+                # Never let the scan crash the loop.
+                pass
+
             # ---- pre-Chromium micro-probes (OpenCoder #4) ---------------
             # Cheap structural sanity check before paying the ~3s Chromium
             # round-trip. Catches truncation, empty scripts, badly-
@@ -3800,6 +4059,39 @@ class GameAgent:
             report_text = format_report_for_model(report)
             self._last_report_summary = report_text
             yield self._record(AgentEvent("test", report_text, report))
+
+            # Auto-arm step-mode on the FIRST failing iter. Rationale
+            # (donkey-kong trace 20260513_122154): iter 2 burned 7 min
+            # writing a 22 KB file that loaded with ERR_FILE_NOT_FOUND
+            # on every sprite. The user only enabled /wait AFTER iter 3
+            # had also failed, so two more iters were wasted before the
+            # human could intervene. The natural intervention point is
+            # the very first non-clean iter — that's where the model
+            # most needs course correction and where it's cheapest to
+            # provide. Self-arms exactly once per session; user can
+            # /wait off to opt out for the rest of the run.
+            if (
+                not self._auto_step_armed
+                and not report.get("ok", False)
+                and not self._step_mode
+                and not getattr(self, "_step_auto_disabled", False)
+            ):
+                self._step_mode = True
+                self._auto_step_armed = True
+                self._trace({
+                    "kind": "step_mode_set",
+                    "on": True,
+                    "reason": "auto_armed_on_first_failure",
+                    "iteration": iteration,
+                })
+                yield self._record(AgentEvent(
+                    "info",
+                    f"[yellow]step-mode auto-armed[/yellow] — iter {iteration} "
+                    "test failed. The agent will pause after each iter so "
+                    "you can intervene before more iters are spent. Type "
+                    "`/wait off` to disable, or press Enter at the next "
+                    "pause to continue."
+                ))
 
             # Queue screenshot bytes for VLM attachment on next turn.
             if shot_path is not None and report.get("screenshot"):
@@ -4076,18 +4368,53 @@ class GameAgent:
                         self._repeat_sig_streak = 1
                     self._last_mistake_sig = sig
                     if self._repeat_sig_streak >= 2:
-                        self._pending_coaching.append(
-                            "Same error signature for 2 iterations — your "
-                            "patches are missing the real cause. In this "
-                            "turn, AUTHOR a runtime-state probe inside "
-                            "<probes>...</probes> that captures the data "
-                            "you're missing (e.g. "
-                            "`name=\"alien_bullets_len\", expr=\"window.state && state.alienBullets.length\"` "
-                            "or `JSON.stringify(state.alienBullets.slice(0,3))`). "
-                            "The next test report will include the probe's "
-                            "value — letting you see runtime state directly "
-                            "instead of guessing from the stack trace."
+                        # Tailor the coaching to the failure shape. For
+                        # asset-load signatures the runtime-probe advice
+                        # is irrelevant — the model needs to look at
+                        # paths, not state. The DK trace 20260513_122154
+                        # spent 3 iters patching drawImage because the
+                        # generic coaching pointed it at probes when
+                        # the bug was a missing file.
+                        sig_low = sig.lower()
+                        asset_hints = (
+                            "err_file_not_found",
+                            "failed to load resource",
+                            "naturalwidth",
+                            "broken state",
+                            "broken' state",
+                            "invalidstateerror",
                         )
+                        if any(h in sig_low for h in asset_hints):
+                            self._pending_coaching.append(
+                                "Same asset-load failure for 2 iterations — "
+                                "your patches keep guarding drawImage but the "
+                                "Image never loaded. The browser said "
+                                "net::ERR_FILE_NOT_FOUND or InvalidStateError "
+                                "because the FILE on disk does not exist at "
+                                "the path your code is requesting. Stop "
+                                "adding try/catch or .complete checks. "
+                                "Instead this turn: (a) compare every "
+                                "ASSETS[name] reference against the "
+                                "assets actually available in the GENERATED "
+                                "ASSETS block above, and (b) for any name "
+                                "that's referenced but not generated, emit "
+                                "an `<assets>` block requesting it OR remove "
+                                "the reference. The harness will regen the "
+                                "missing names mid-session."
+                            )
+                        else:
+                            self._pending_coaching.append(
+                                "Same error signature for 2 iterations — your "
+                                "patches are missing the real cause. In this "
+                                "turn, AUTHOR a runtime-state probe inside "
+                                "<probes>...</probes> that captures the data "
+                                "you're missing (e.g. "
+                                "`name=\"alien_bullets_len\", expr=\"window.state && state.alienBullets.length\"` "
+                                "or `JSON.stringify(state.alienBullets.slice(0,3))`). "
+                                "The next test report will include the probe's "
+                                "value — letting you see runtime state directly "
+                                "instead of guessing from the stack trace."
+                            )
             else:
                 self._last_mistake_sig = None
                 self._repeat_sig_streak = 0

@@ -97,9 +97,10 @@ but the running model’s prompts omit that block until v1+.)
 - **A display for `chat.py`** — the TUI launches a **visible** Chromium
   window beside the terminal. SSH-only / CI hosts should use
   `coder.py --headless` instead.
-- **Context window** — defaults to `num_ctx=32768`, plenty for planning +
-  first build + several feedback turns. Bigger via `CODING_BOX_NUM_CTX` /
-  `--num-ctx`. Pre-warm the model at the matching size to skip a reload:
+- **Context window** — defaults to `num_ctx=262144`, matching the native
+  context of current local coding models (Qwen3.6, DeepSeek V4, GLM 5.1,
+  MiniMax M2). Smaller via `CODING_BOX_NUM_CTX` / `--num-ctx` if you OOM
+  on tight VRAM. Pre-warm the model at the matching size to skip a reload:
   ```bash
   ollama run --ctx-size 32768 qwen3.6:35b
   ```
@@ -1443,7 +1444,7 @@ machines without a display (`--headless`).
 | `--max-iters` | `6` | Cap plan/build iterations |
 | `--out` | unique `games/<slug>_<timestamp>.html` | Output HTML path |
 | `--best-of-n` | `1` | Sample N candidate fixes per failed iteration |
-| `--num-ctx` | `32768` (env `CODING_BOX_NUM_CTX`) | Ollama context window. qwen3.6 / gpt-oss support 128K+; 32K covers planning + first build + several feedback turns before structured compaction. Changing between calls forces an Ollama model reload — preload at this size first with `ollama run --ctx-size 32768 <model>`. |
+| `--num-ctx` | `262144` (env `CODING_BOX_NUM_CTX`) | Ollama context window. Matches the native context of Qwen3.6 / DeepSeek V4 / GLM 5.1 / MiniMax M2 so the harness never clips before the model does. Lower it (e.g. `--num-ctx 65536`) if you OOM — KV-cache scales linearly with ctx. Changing between calls forces an Ollama model reload — preload at this size first with `ollama run --ctx-size 262144 <model>`. |
 | `--stall-seconds` | `90` | Per-chunk stream inactivity timeout |
 | `--headless` | off | Run Chromium without a visible window |
 | `--open` | off | Open the final HTML in the system browser |
