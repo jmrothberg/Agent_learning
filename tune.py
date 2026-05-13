@@ -60,21 +60,20 @@ QUICK_BEST_OF_N = 1
 FULL_MAX_ITERS = 4
 FULL_BEST_OF_N = 2
 
-# Model timeout scaling — mirrors chat.py:resolve_session_timeouts.
+# Model timeout scaling — delegates to chat.py:resolve_session_timeouts
+# so the battery uses the same fail-open scale as live runs. Previously
+# this had its own hardcoded substring table that drifted out of sync
+# and used the old 60s/90s defaults — which silently killed any
+# battery comparison that used a 27B+ MLX model on the small bracket.
 def _timeouts_for_model(model: str) -> tuple[float, float, int]:
-    """Return (stall_s, overall_s, num_ctx) appropriate for the model size.
+    """Return (stall_s, overall_s, num_ctx) for the model.
 
-    27B–35B band: 150s/1800s. 8192 ctx matches Ollama's default load size so
-    we don't force a model reload on every request.
+    8192 num_ctx matches Ollama's default load size so we don't force
+    a model reload on every request during battery runs.
     """
-    name = model.lower()
-    if any(x in name for x in ("70b", "72b", "405b")):
-        return 240.0, 2700.0, 8192
-    if any(x in name for x in ("27b", "32b", "35b", "36b")):
-        return 150.0, 1800.0, 8192
-    if any(x in name for x in ("13b", "14b", "20b", "22b")):
-        return 90.0, 900.0, 8192
-    return 60.0, 600.0, 8192
+    from chat import resolve_session_timeouts
+    stall_s, overall_s = resolve_session_timeouts(model)
+    return stall_s, overall_s, 8192
 
 
 # ---------------------------------------------------------------------------

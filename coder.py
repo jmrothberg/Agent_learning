@@ -162,6 +162,23 @@ async def _run(
         )
     backend_inst = backend_mod.make_backend(info)
 
+    # Resolve per-model timeouts. chat.py uses the same function and
+    # we should match — coder.py runs on the same models and the
+    # CLI default isn't enough for large MLX models (DK trace
+    # 20260513_173528: DeepSeek-V4-Flash needed 1500s, default was
+    # 300s). The CLI --stall-seconds overrides the resolved stall
+    # if explicitly raised; overall is taken straight from the
+    # resolver because there's no CLI flag for it.
+    from chat import resolve_session_timeouts
+    resolved_stall, resolved_overall = resolve_session_timeouts(info.model)
+    effective_stall = max(stall_seconds, resolved_stall)
+    effective_overall = max(resolved_overall, effective_stall * 3.0)
+    print(
+        f"timeouts: stall={effective_stall:.0f}s overall={effective_overall:.0f}s "
+        f"(model={info.model!r} auto-bracketed by resolve_session_timeouts)",
+        file=sys.stderr,
+    )
+
     browser = LiveBrowser(viewport=(800, 600), run_seconds=3.0, headless=headless)
     try:
         await browser.start()
@@ -181,7 +198,8 @@ async def _run(
         max_iters=max_iters,
         best_of_n=best_of_n,
         num_ctx=num_ctx,
-        stall_seconds=stall_seconds,
+        stall_seconds=effective_stall,
+        overall_seconds=effective_overall,
         seed_file=seed_file,
         # Default to v1 prompt: <playbook> + <criteria> + <probes>.
         # Real sessions feed the offline learner; v1 produces the
