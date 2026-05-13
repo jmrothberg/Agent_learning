@@ -93,7 +93,7 @@ from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Footer, Header, Input, RichLog, Static
 
 import backend as backend_mod
@@ -679,6 +679,16 @@ class CodingBoxApp(App):
         color: $accent;
         text-style: bold;
         padding: 0 0 1 0;
+        height: auto;
+    }
+
+    #status-scroll {
+        height: 1fr;
+        scrollbar-gutter: stable;
+    }
+
+    #status-body {
+        height: auto;
     }
 
     #mode-bar {
@@ -693,6 +703,33 @@ class CodingBoxApp(App):
         dock: bottom;
         border: round $accent;
         padding: 0 1;
+    }
+
+    #footer-row {
+        dock: bottom;
+        height: 1;
+        layout: horizontal;
+    }
+
+    /* Inside the row, override Footer's own dock so it lays out next
+       to the badge instead of detaching to the screen bottom. */
+    #footer-row Footer {
+        dock: initial;
+        width: 1fr;
+    }
+
+    #footer-badge {
+        width: auto;
+        height: 1;
+        padding: 0 1;
+        background: $warning;
+        color: black;
+        text-style: bold;
+        display: none;
+    }
+
+    #footer-badge.-on {
+        display: block;
     }
 
     Input {
@@ -771,6 +808,11 @@ class CodingBoxApp(App):
         self._streak_clean: int = 0
         self._streak_min: int = 2
         self._streak_stuck: int = 0
+        # Sticky test report. Set by the "test" event handler via
+        # _update_status(extra=...); persists across subsequent status
+        # ticks so it doesn't flash and disappear on the next 1Hz refresh.
+        # Replaced on each new test, cleared on session reset.
+        self._last_test_block: str = ""
         # Trace JSONL path for the current session. Surfaced in status.
         self._trace_path: Path | None = None
         # True between session-end and session-start. Used so feedback typed
@@ -822,7 +864,8 @@ class CodingBoxApp(App):
                 yield RichLog(id="log-pane", wrap=True, markup=True, highlight=False)
                 with Vertical(id="status-pane"):
                     yield Static("Status", id="status-title")
-                    yield Static("", id="status-body")
+                    with VerticalScroll(id="status-scroll"):
+                        yield Static("", id="status-body")
         # Input row docked to the bottom. We start it empty with a goal prompt.
         yield MultilinePasteInput(
             placeholder="What game do you want to build?", id="user-input"
@@ -832,7 +875,14 @@ class CodingBoxApp(App):
         # them. Sits in the same visual band as the binding hints so
         # both are scannable without moving the eye.
         yield Static("", id="mode-bar")
-        yield Footer()
+        # Bottom row: leading WAIT-mode badge + the standard Footer
+        # (key bindings). The badge is hidden by default and toggled on
+        # by `_update_mode_bar`. Putting it on the SAME row as Footer
+        # is intentional — when step-mode is on, the user needs that
+        # cue right where they look for the control commands.
+        with Horizontal(id="footer-row"):
+            yield Static("", id="footer-badge")
+            yield Footer()
 
     async def on_mount(self) -> None:
         self.title = "JMR's Coding Box"
@@ -1008,7 +1058,7 @@ class CodingBoxApp(App):
             self._log_raw(self._stream_buf)
         self._stream_buf = ""
 
-    def _update_status(self, extra: str = "") -> None:
+    def _update_status(self, extra: str | None = None) -> None:
         """Render the right-hand status panel.
 
         Sections (in order):
@@ -1020,17 +1070,22 @@ class CodingBoxApp(App):
           4. Files — paths to game.html, best.html, trace JSONL, assets
              dir, plain-text log mirror. Always visible so the user
              knows what to `cat` / share.
-          5. Last test (`extra`) — full report shown when a test event
-             fires; passed in by the caller.
+          5. Last test — full report from the most recent test event.
+             Sticky: callers pass `extra=` once when a new test fires;
+             subsequent status ticks (1Hz timer, other events) reuse the
+             stored block instead of wiping it. New test replaces it;
+             session reset clears it.
         """
+        if extra is not None:
+            self._last_test_block = extra
         body = self._render_activity_line()
         body += self._render_iteration_block()
         body += self._render_assets_block()
         body += self._render_sounds_block()
         body += self._render_playbook_block()
         body += self._render_files_block()
-        if extra:
-            body += "\n" + extra
+        if self._last_test_block:
+            body += "\n" + self._last_test_block
         self.query_one("#status-body", Static).update(body)
         # Mode bar gets a free refresh on every status tick. It's a
         # single-line Static update — cheap.
@@ -1167,6 +1222,25 @@ class CodingBoxApp(App):
             out += f"[b]Backend:[/b] {self._session_backend_info.name.upper()}\n"
         if self._session_model:
             out += f"[b]Model:[/b] {self._session_model}\n"
+        # Surface the staged-for-next-/new pair when it differs from the
+        # running session. /load and /backend only stage — the current
+        # session keeps its model — but the status panel used to be
+        # silent about staging, so users would /load claude, see
+        # "Backend: MLX", and think the swap had been lost.
+        cur_backend = (
+            self._session_backend_info.name if self._session_backend_info else None
+        )
+        staged_backend = self._next_backend
+        staged_model = self._next_model
+        differs_b = staged_backend is not None and staged_backend != cur_backend
+        differs_m = staged_model is not None and staged_model != self._session_model
+        if differs_b or differs_m:
+            label_b = (staged_backend or cur_backend or "auto").upper()
+            label_m = staged_model or self._session_model or "—"
+            out += (
+                f"[b]Staged for /new:[/b] [yellow]{label_b}[/yellow] · "
+                f"{_esc(label_m)}\n"
+            )
         # Context window row: hide entirely when neither max nor a
         # running agent is available (avoids a sad-looking "0 / 0" on
         # backends that don't expose context_length).
@@ -1215,11 +1289,24 @@ class CodingBoxApp(App):
         # see the mode "in the bar with the commands" rather than only
         # at iter-boundary pause prompts.
         prefix_badges: list[str] = []
-        if getattr(self.agent, "_step_mode", False):
+        step_on = bool(getattr(self.agent, "_step_mode", False))
+        if step_on:
             prefix_badges.append("[black on yellow] WAIT MODE [/]")
         if getattr(self, "_selection_mode_on", False):
             prefix_badges.append("[black on cyan] SELECT [/]")
         badge_prefix = " ".join(prefix_badges) + (" " if prefix_badges else "")
+        # Mirror the WAIT badge onto the Footer row so the user sees it
+        # right next to the keybinding hints, not just on the mode-bar
+        # one line above.
+        try:
+            footer_badge = self.query_one("#footer-badge", Static)
+            if step_on:
+                footer_badge.update("WAIT MODE")
+                footer_badge.add_class("-on")
+            else:
+                footer_badge.remove_class("-on")
+        except Exception:
+            pass
 
         if self._awaiting_kind == "step":
             body = (
@@ -2137,9 +2224,58 @@ class CodingBoxApp(App):
         self._next_backend = chosen_backend
         self._next_model = chosen_name
         backend_label = chosen_backend.upper()
+        # Hot-swap: if the user is paused between iters in /wait mode,
+        # rebuild the running session's backend in-place so the NEXT
+        # iter uses the new model. Without this, /load just stages for
+        # /new — which throws away the session's progress — and the
+        # user has to know to type /new again. With /wait pause as the
+        # signal, the swap stays scoped to "intentional, between-iter
+        # transitions" (we never swap mid-stream).
+        can_hotswap = (
+            self.agent is not None
+            and not self._session_done
+            and self._awaiting_kind == "step"
+        )
+        if can_hotswap:
+            try:
+                if chosen_backend == "mlx":
+                    endpoint = backend_mod.mlx_endpoint_url()
+                elif chosen_backend == "openai":
+                    endpoint = backend_mod.openai_endpoint_url()
+                elif chosen_backend == "anthropic":
+                    endpoint = backend_mod.anthropic_endpoint_url()
+                else:
+                    endpoint = backend_mod.ollama_endpoint_url()
+                new_info = backend_mod.BackendInfo(
+                    name=chosen_backend, model=chosen_name,
+                    source=f"/load hot-swap during /wait pause",
+                    endpoint=endpoint,
+                )
+                new_backend = backend_mod.make_backend(new_info)
+            except Exception as e:
+                self._log_error(f"hot-swap failed: {e}")
+                return
+            # Replace the running agent's backend. The agent reads
+            # self._backend.info.name lazily inside stream/best_of_n, so
+            # the next call will use the new one.
+            self.agent._backend = new_backend
+            self._session_backend = new_backend
+            self._session_backend_info = new_info
+            self._session_model = chosen_name
+            self.title = (
+                f"JMR's Coding Box — {new_info.name.upper()} · {chosen_name}"
+            )
+            self._log_info(
+                f"[green]switched current session to[/green] [b]{backend_label}[/b] "
+                f"· [b]{_esc(chosen_name)}[/b] "
+                f"[dim](hot-swap while /wait paused; next iter uses it)[/dim]"
+            )
+            self._update_status()
+            return
         self._log_info(
             f"staged [b]{backend_label}[/b] · [b]{_esc(chosen_name)}[/b] "
-            "for next /new session [dim](current session keeps its model)[/dim]"
+            "for next /new session [dim](current session keeps its model; "
+            "use /wait first to enable hot-swap)[/dim]"
         )
 
         # MLX-specific: warn if the staged model differs from the
@@ -2682,6 +2818,7 @@ class CodingBoxApp(App):
         self._ctx_max = None
         self._streak_clean = 0
         self._streak_stuck = 0
+        self._last_test_block = ""
 
     def _tick_status(self) -> None:
         """Periodic refresh of the status panel — only repaints when
@@ -2897,6 +3034,11 @@ class CodingBoxApp(App):
 
         elif ev.kind == "info":
             self._log_info(text_safe)
+            # Info events can carry state changes the user needs to see
+            # reflected in the bottom bar immediately — e.g. the agent
+            # auto-arming step-mode after a first iter failure. Cheap;
+            # Static.update diffs internally.
+            self._update_mode_bar()
 
         elif ev.kind == "restart":
             # Structured restart event (attempt comparison or winner).
