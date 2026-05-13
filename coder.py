@@ -16,7 +16,7 @@ Optional flags:
     --out PATH          Where to save the final game (default games/game.html)
     --best-of-n N       Sample N candidates per fix turn (default 2)
     --num-ctx N         Ollama context window (default 262144; env CODING_BOX_NUM_CTX)
-    --stall-seconds N   Per-chunk stream watchdog (default 60)
+    --stall-seconds N   Per-stream no-activity watchdog (default 300; fail-open floor)
     --headless          Run Chromium headless (no visible window). Use this
                         for unattended runs and CI; the TUI uses visible.
     --open              After finishing, open the result in your real browser.
@@ -331,7 +331,13 @@ def main() -> int:
                         "Changing between calls forces an Ollama model reload "
                         "— preload your model at this ctx size first with "
                         "`ollama run --ctx-size 262144 <model>`.")
-    p.add_argument("--stall-seconds", type=float, default=90.0)
+    p.add_argument("--stall-seconds", type=float, default=300.0,
+                   help="Per-stream no-activity stall budget (default 300s). "
+                        "Lifted from 90s — modern local coding models on "
+                        "multi-KB prompts can take minutes of prefill before "
+                        "the first generated token. The MLX watchdog is also "
+                        "activity-aware, so this is the post-progress quiet "
+                        "window, not the cold-start budget.")
     p.add_argument("--headless", action="store_true", help="Run Chromium without a visible window.")
     p.add_argument("--open", action="store_true", help="Open final game in your browser.")
     p.add_argument(

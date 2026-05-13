@@ -375,39 +375,150 @@ def _model_param_size(model: str) -> str:
     matches = _PARAM_SIZE_IN_NAME_RE.findall(model or "")
     if matches:
         return f"{max(float(m) for m in matches)}B"
+    # MLX models whose folder name doesn't carry "<n>B" (e.g.
+    # `DeepSeek-V4-Flash-mxfp8`) — read the model's `config.json`
+    # next to the weights. Most HF-style MLX checkpoints ship one.
+    # Without this, the stall-timeout scaler falls through to the
+    # small-model 60s default and 32B-class models on 17K-token
+    # prompts get killed mid-prefill (DK trace 20260513_173528).
+    try:
+        from pathlib import Path
+        p = Path(model or "")
+        if p.is_dir():
+            cfg_path = p / "config.json"
+            if cfg_path.is_file():
+                import json as _json
+                cfg = _json.loads(cfg_path.read_text())
+                # HF transformers configs sometimes expose
+                # `num_parameters` directly; otherwise estimate from
+                # the standard dims. Both produce a "<n>B"-shaped
+                # answer accurate to within a few percent — plenty
+                # for picking a timeout bracket.
+                n_params = cfg.get("num_parameters")
+                if not isinstance(n_params, (int, float)) or n_params <= 0:
+                    n_params = _estimate_params_from_config(cfg)
+                if n_params and n_params > 0:
+                    return f"{n_params / 1e9:.1f}B"
+    except Exception:
+        pass
     return ""
+
+
+def _estimate_params_from_config(cfg: dict) -> float:
+    """Rough TOTAL parameter count from a transformers-style config.json.
+
+    Returns total weights-in-memory size — what matters for prefill
+    time and timeout bracketing, NOT active-params-per-token. For a
+    256-expert MoE like DeepSeek-V4, the dense math underestimates by
+    ~50× because it ignores the expert pool that has to be on the
+    same accelerator.
+
+    Branches on architecture:
+      * Dense (no `n_routed_experts`): standard q+kv+o + 3-mat MLP +
+        embed/unembed.
+      * MoE: each transformer layer's FFN is replaced by
+        `n_routed_experts` copies of (gate + up + down) sized by
+        `moe_intermediate_size`, plus `n_shared_experts` copies
+        sharing the same shape. Attention block unchanged.
+
+    Accuracy target is bracket selection (≤13B / 14-25B / 26-40B /
+    >40B), so ±20% is fine. DeepSeek-V4 Flash with
+    `n_routed_experts=256, moe_intermediate_size=2048, h=4096, L=43`
+    lands at ~270 B with this estimator, correctly bracketing into
+    `>40B` for the 1500s stall budget.
+    """
+    try:
+        h = float(cfg.get("hidden_size") or 0)
+        L = float(cfg.get("num_hidden_layers") or 0)
+        v = float(cfg.get("vocab_size") or 0)
+        n_heads = float(cfg.get("num_attention_heads") or 32)
+        n_kv = float(cfg.get("num_key_value_heads") or n_heads)
+        if not (h > 0 and L > 0 and v > 0):
+            return 0.0
+        head_dim = h / max(1.0, n_heads)
+        # Attention block: Wq + Wk + Wv + Wo (Wk/Wv use head_dim×n_kv)
+        attn = (h * h) + 2 * (n_kv * head_dim * h) + (h * h)
+
+        # MLP: dense vs MoE.
+        n_routed = float(cfg.get("n_routed_experts") or 0)
+        if n_routed > 0:
+            # MoE path. Each expert is a standard 3-matrix
+            # gate/up/down with hidden_size→moe_intermediate_size→
+            # hidden_size. Total per layer = routed × 3 × h × ff_moe
+            # + shared × 3 × h × ff_shared.
+            ff_moe = float(cfg.get("moe_intermediate_size") or 0) or h * 4
+            n_shared = float(cfg.get("n_shared_experts") or 0)
+            ff_shared = float(cfg.get("intermediate_size") or ff_moe)
+            mlp_per_layer = (
+                n_routed * 3.0 * h * ff_moe
+                + n_shared * 3.0 * h * ff_shared
+            )
+            # Plus the small router projection (h × n_routed).
+            mlp_per_layer += h * n_routed
+        else:
+            # Dense path.
+            ff = float(cfg.get("intermediate_size") or 4 * h)
+            mlp_per_layer = 3.0 * h * ff
+
+        per_layer = attn + mlp_per_layer + 2 * h  # + layernorms (small)
+        embed = v * h
+        # Counted twice for input+output embed (often tied — close
+        # enough for bracket selection either way).
+        return embed + L * per_layer + embed
+    except Exception:
+        return 0.0
 
 
 def resolve_session_timeouts(model: str) -> tuple[float, float]:
     """Pick (stall_seconds, overall_seconds) for a given model.
 
-    Scaling is by parameter count (queried from /api/ps then /api/show,
-    or parsed from the model name for MLX). Larger models take longer
-    per token AND tend to write more verbose output, so we bump BOTH
-    timeouts:
+    Policy: FAIL OPEN. When the watchdog is uncertain, wait LONGER,
+    not shorter. The whole point of the watchdog is to catch true
+    hangs; catching one two minutes later is fine. Killing a healthy
+    prefill at 60s destroys the whole session.
+
+    The old policy did the opposite ("err small so we detect a true
+    wedge fast") and burned multiple DK-trace sessions on
+    DeepSeek-V4-Flash whose 17K-token prompt couldn't finish prefill
+    inside 60s. See DK trace 20260513_173528 iter 2 for the
+    canonical failure mode.
+
+    Scaling is by parameter count (queried from /api/ps then
+    /api/show, or parsed from the model name / config.json for
+    MLX). Larger models take longer per token AND tend to write
+    more verbose output, so we bump BOTH timeouts:
 
         params      stall    overall
         ─────────   ─────    ───────
-        ≤ 13B       60       600    (small/fast, default-ish)
-        14–25B      90       1200   (gpt-oss 20B ballpark)
-        26–40B      900      3600   (27B/35B MLX — first-token can be
-                                     15 min on big Doom-class prompts;
-                                     mlx_lm.server keepalives are not
-                                     reliably sub-stall during heavy
-                                     prompt processing)
-        > 40B       1200     5400   (70B class)
+        unknown/≤13B   300    1500   (5-minute floor — comfortably
+                                      covers cold-cache prefill on
+                                      20-30K-token prompts even on
+                                      slow hardware)
+        14–25B         600    2400
+        26–40B         900    3600
+        > 40B         1500    5400
 
     These are wall-clock budgets PER STREAM, not total session.
+
+    The MLXBackend stall watchdog is also activity-aware (prefill
+    progress callbacks reset the stall timer), so even an enormous
+    prompt that takes 10 minutes to prefill won't trip the budget
+    as long as MLX keeps reporting progress chunks. The numbers
+    here are the post-activity quiet window, not the cold-start
+    budget.
     """
     b = _parse_param_billions(_model_param_size(model))
     if b > 40:
-        return 1200.0, 5400.0
+        return 1500.0, 5400.0
     if b > 25:
         return 900.0, 3600.0
     if b > 13:
-        return 90.0, 1200.0
-    # Default / unknown: err small so we detect a true wedge fast.
-    return 60.0, 600.0
+        return 600.0, 2400.0
+    # Default / unknown: fail open — wait longer, not shorter. The
+    # activity-aware stall means a model making real prefill progress
+    # won't trip this anyway; the budget just has to be large enough
+    # to outlast any one quiet window between progress events.
+    return 300.0, 1500.0
 
 
 def _installed_models_via_http() -> tuple[list[str], str | None]:
@@ -2739,15 +2850,37 @@ class CodingBoxApp(App):
         basename = self._out_path.stem
         self._log_info(f"Game file: [b]{self._out_path}[/b]")
 
-        # Auto-bump streaming timeouts for larger models — qwen3.6:35b
-        # writing a full Space Invaders takes 25+ minutes per stream and
-        # the default 600s budget kills it mid-output every time.
+        # Auto-bump streaming timeouts for larger models. Policy is
+        # fail-open: small/unknown models get a 300s floor, large
+        # models scale up to 1500s — see resolve_session_timeouts.
         stall_s, overall_s = resolve_session_timeouts(model_name)
-        if overall_s > 600:
-            self._log_info(
-                f"[dim]large model detected — using stall={stall_s:.0f}s "
-                f"overall={overall_s:.0f}s per stream[/dim]"
-            )
+        param_size = _model_param_size(model_name)
+        param_b = _parse_param_billions(param_size)
+        if param_b > 40:
+            bracket = "xl"
+        elif param_b > 25:
+            bracket = "large"
+        elif param_b > 13:
+            bracket = "mid"
+        elif param_b > 0:
+            bracket = "small"
+        else:
+            bracket = "unknown"
+        self._log_info(
+            f"[dim]model size={param_size or '?'} ({bracket}) — "
+            f"stall={stall_s:.0f}s overall={overall_s:.0f}s per stream[/dim]"
+        )
+        # Trace emission is deferred until just after GameAgent is
+        # constructed — see the timeouts_resolved trace event below.
+        self._pending_timeout_trace = {
+            "kind": "timeouts_resolved",
+            "model": model_name,
+            "param_size": param_size,
+            "param_billions": param_b,
+            "bracket": bracket,
+            "stall_seconds": stall_s,
+            "overall_seconds": overall_s,
+        }
 
         self.agent = GameAgent(
             backend=self._session_backend,
@@ -2777,6 +2910,17 @@ class CodingBoxApp(App):
             playbook_writeback=True,
         )
         self.agent.set_token_callback(self._emit_token)
+
+        # Persist the resolved-timeouts info to the session trace now
+        # that the agent (and its _trace sink) exist. Lets future
+        # debugging answer "why did this session stall at Xs?" with
+        # a single `jq` against the .jsonl.
+        if getattr(self, "_pending_timeout_trace", None):
+            try:
+                self.agent._trace(self._pending_timeout_trace)
+            except Exception:
+                pass
+            self._pending_timeout_trace = None
 
         # Surface per-session paths in the status panel. The agent owns
         # the canonical paths; we mirror them here so the panel stays

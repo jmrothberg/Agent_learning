@@ -110,8 +110,8 @@ class Backend(ABC):
         *,
         on_token: Callable[[str], None] | None = None,
         options: dict[str, Any] | None = None,
-        stall_seconds: float = 90.0,
-        overall_seconds: float = 600.0,
+        stall_seconds: float = 300.0,
+        overall_seconds: float = 1500.0,
         max_retries: int = 1,
         on_stall: Callable[[StreamResult, int], None] | None = None,
         on_progress: Callable[[str, int, int], None] | None = None,
@@ -144,8 +144,8 @@ class Backend(ABC):
         n: int = 3,
         temperatures: Iterable[float] | None = None,
         options: dict[str, Any] | None = None,
-        stall_seconds: float = 90.0,
-        overall_seconds: float = 600.0,
+        stall_seconds: float = 300.0,
+        overall_seconds: float = 1500.0,
         scorer: Callable[[str], Awaitable[tuple[float, dict]]],
         on_progress: Callable[[int, str], None] | None = None,
         early_exit_score: float = 1.0,
@@ -236,8 +236,8 @@ class OllamaBackend(Backend):
         *,
         on_token: Callable[[str], None] | None = None,
         options: dict[str, Any] | None = None,
-        stall_seconds: float = 90.0,
-        overall_seconds: float = 600.0,
+        stall_seconds: float = 300.0,
+        overall_seconds: float = 1500.0,
         max_retries: int = 1,
         on_stall: Callable[[StreamResult, int], None] | None = None,
         on_progress: Callable[[str, int, int], None] | None = None,
@@ -375,8 +375,8 @@ class MLXBackend(Backend):
         *,
         on_token: Callable[[str], None] | None = None,
         options: dict[str, Any] | None = None,
-        stall_seconds: float = 90.0,
-        overall_seconds: float = 600.0,
+        stall_seconds: float = 300.0,
+        overall_seconds: float = 1500.0,
         max_retries: int = 1,
         on_stall: Callable[[StreamResult, int], None] | None = None,
         on_progress: Callable[[str, int, int], None] | None = None,
@@ -443,6 +443,17 @@ class MLXBackend(Backend):
         )
 
         started = time.monotonic()
+        # Last-activity timestamp for the stall watchdog. Bumped on
+        # EITHER (a) token emission, or (b) prefill progress
+        # (prompt_progress_callback firing). Old behavior measured
+        # stall purely as wall-clock since `started`, which killed
+        # streams during long prefills (DK trace 20260513_173528:
+        # 17K-token prompt on cold-loaded DeepSeek-V4 takes >60s
+        # to prefill before any generation token; the watchdog fired
+        # at exactly 60.00s with 0 tokens). MLX has been doing real
+        # work the whole time — the stall watchdog just couldn't see
+        # it.
+        last_activity_at = started
         parts: list[str] = []
         n_tokens = 0
         stalled = False
@@ -476,11 +487,21 @@ class MLXBackend(Backend):
         worker_cancel = threading.Event()
 
         def _prompt_progress(cur: int, tot: int) -> None:
-            # Runs on the MLX thread. Hop back to the event loop.
+            # Runs on the MLX thread. Hop back to the event loop AND
+            # bump last_activity_at so the stall watchdog knows the
+            # backend is still doing real prefill work — even with
+            # zero generated tokens. Without this, long prefills on
+            # big prompts trip the stall guard before generation can
+            # even start.
+            loop.call_soon_threadsafe(_bump_activity)
             if on_progress is not None:
                 loop.call_soon_threadsafe(
                     lambda c=cur, t=tot: _safe_call(on_progress, "prompt_eval", c, t)
                 )
+
+        def _bump_activity() -> None:
+            nonlocal last_activity_at
+            last_activity_at = time.monotonic()
 
         def _safe_call(fn: Callable, *args) -> None:
             try:
@@ -593,9 +614,15 @@ class MLXBackend(Backend):
                     item = await asyncio.wait_for(q.get(), timeout=min(stall_seconds, 5.0))
                 except asyncio.TimeoutError:
                     # Either the model is stalled OR we just want to
-                    # poll the cancel event. If the cumulative time on
-                    # this stream is past stall_seconds, treat as stall.
-                    if time.monotonic() - started > stall_seconds and n_tokens == 0:
+                    # poll the cancel event. Stall is measured from
+                    # the LAST activity (prefill progress or token
+                    # emission), not from stream start — so a slow
+                    # prefill on a big prompt isn't mistaken for a
+                    # hang.
+                    if (
+                        time.monotonic() - last_activity_at > stall_seconds
+                        and n_tokens == 0
+                    ):
                         stalled = True
                         stall_at = 0
                         worker_cancel.set()
@@ -638,6 +665,11 @@ class MLXBackend(Backend):
                     continue
                 parts.append(piece)
                 n_tokens += 1
+                # Token arrived → reset the no-activity stall window.
+                # Without this, a model that emits very slowly (a token
+                # every 30s) could still trip stall_seconds even though
+                # it's making real progress.
+                last_activity_at = time.monotonic()
                 if on_token is not None:
                     _safe_call(on_token, piece)
                 if repeat.feed(piece):
@@ -719,8 +751,8 @@ class OpenAIBackend(Backend):
         *,
         on_token: Callable[[str], None] | None = None,
         options: dict[str, Any] | None = None,
-        stall_seconds: float = 90.0,
-        overall_seconds: float = 600.0,
+        stall_seconds: float = 300.0,
+        overall_seconds: float = 1500.0,
         max_retries: int = 1,
         on_stall: Callable[[StreamResult, int], None] | None = None,
         on_progress: Callable[[str, int, int], None] | None = None,
@@ -878,8 +910,8 @@ class AnthropicBackend(Backend):
         *,
         on_token: Callable[[str], None] | None = None,
         options: dict[str, Any] | None = None,
-        stall_seconds: float = 90.0,
-        overall_seconds: float = 600.0,
+        stall_seconds: float = 300.0,
+        overall_seconds: float = 1500.0,
         max_retries: int = 1,
         on_stall: Callable[[StreamResult, int], None] | None = None,
         on_progress: Callable[[str, int, int], None] | None = None,
