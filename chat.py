@@ -54,6 +54,29 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+# Load .env from the project root BEFORE any backend code reads
+# os.environ. python-dotenv is import-light and the only side effect
+# is populating os.environ for THIS process (it never writes back to
+# disk or to the parent shell). The .env file is gitignored and chmod
+# 600 — see .gitignore + scripts/setup.sh.
+try:
+    from dotenv import load_dotenv
+    # override=True so a project-level .env wins over stale empty
+    # shell vars (e.g. an unset-but-exported ANTHROPIC_API_KEY= line
+    # in ~/.zshrc would otherwise block the load with override=False).
+    load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
+except ImportError:
+    # python-dotenv not installed — chat.py still works for users who
+    # export their keys directly in the shell. Print a quiet hint only
+    # if a .env exists but couldn't be loaded.
+    if (Path(__file__).resolve().parent / ".env").exists():
+        print(
+            "note: .env present but python-dotenv not installed; "
+            "run `.venv/bin/pip install python-dotenv` or export keys "
+            "manually in your shell.",
+            file=sys.stderr,
+        )
+
 import ollama
 from rich.markup import escape as _esc
 from rich.text import Text
@@ -146,6 +169,45 @@ def _slugify(text: str, max_len: int = 30) -> str:
     if len(s) > max_len:
         s = s[:max_len].rstrip("-") or "game"
     return s
+
+
+def _resolve_seed_target(seed: Path) -> Path:
+    """Map a seed path back to the canonical games/<basename>.html.
+
+    Three shapes need to normalize:
+      games/snake_x.html               → games/snake_x.html         (no-op)
+      games/snake_x.best.html          → games/snake_x.html         (drop .best)
+      games/snapshots/snake_x/iter_3.html → games/snake_x.html      (snapshot)
+
+    The seed's HTML CONTENT is still what gets loaded into out_path
+    by the agent's seed branch — we're only normalizing the PATH so
+    out_path.stem (and therefore agent._session_id) ends up as the
+    original game's basename. Every downstream artifact (assets
+    folder, sounds folder, traces, snapshots, .best.html) then keys
+    off that basename and reuses the original folders instead of
+    spawning siblings.
+
+    A seed shape we don't recognize (e.g. /seed ~/Downloads/foo.html)
+    falls through unchanged — there's no canonical pair to map it
+    onto, so the seed's own path is the basename source.
+    """
+    seed = Path(seed)
+    parent = seed.parent
+    stem = seed.stem
+
+    # Case 1: games/snapshots/<basename>/iter_*.html — strip both the
+    # snapshot subdir and the iter_* suffix. Only matches when the
+    # immediate grandparent is literally named "snapshots".
+    if parent.parent.name == "snapshots" and stem.startswith("iter_"):
+        basename = parent.name
+        return parent.parent.parent / f"{basename}.html"
+
+    # Case 2: games/<basename>.best.html — drop the .best suffix.
+    if stem.endswith(".best"):
+        return parent / f"{stem[:-len('.best')]}.html"
+
+    # Case 3: anything else — use as-is.
+    return seed
 
 
 def _ollama_ps_base_urls() -> list[str]:
@@ -1619,7 +1681,8 @@ class CodingBoxApp(App):
             "  [b]/list[/b]                    unified Ollama + MLX list with numbers (also /models)",
             "  [b]/load <N|name>[/b]           pick model #N from /list (any backend) · STICKY across /new (also /model)",
             "  [b]/launch <N|name|path>[/b]   stage an MLX model for next /new (loads in-process on first request)",
-            "  [b]/backend <auto|ollama|mlx>[/b]  stage default backend when no specific model is staged",
+            "  [b]/backend <auto|ollama|mlx|openai|anthropic>[/b]  stage default backend when no specific model is staged",
+            "                                  [dim]cloud backends require OPENAI_API_KEY / ANTHROPIC_API_KEY in shell env[/dim]",
             "  [b]/unload [N|name|all|mlx][/b]  free VRAM · #N from /list · bare = active session · all = every Ollama · mlx = drop the in-process MLX model",
             "  [b]/seed <path>[/b]             stage a baseline .html (STICKY across /new) · /seed alone clears",
             "  [b]/iters <N>[/b]               set max iterations (sticky)",
@@ -1664,6 +1727,17 @@ class CodingBoxApp(App):
         mlx_downloaded, _ = backend_mod.list_mlx_inventory()
         for name in mlx_downloaded:
             listing.append(("mlx", name))
+        # Cloud backends — only listed when the corresponding env-var
+        # key is set, so /list doesn't dangle picks that would fail
+        # immediately on /load. Keys are read fresh on every refresh so
+        # users who set them mid-session see entries appear on the next
+        # /list without restarting.
+        openai_models, _ = backend_mod.list_openai_inventory()
+        for name in openai_models:
+            listing.append(("openai", name))
+        anthropic_models, _ = backend_mod.list_anthropic_inventory()
+        for name in anthropic_models:
+            listing.append(("anthropic", name))
         self._last_listing = listing
         return listing
 
@@ -1683,8 +1757,9 @@ class CodingBoxApp(App):
 
         self._log("[bold cyan]── available models ──[/bold cyan]")
         self._log(
-            "[dim]  [O]/[M] = backend  ·  * = loaded right now  ·  "
-            "← active = this session  ·  ← staged = next /new[/dim]"
+            "[dim]  [O]llama / [M]LX / open[X]AI / [C]laude  ·  "
+            "* = loaded right now  ·  ← active = this session  ·  "
+            "← staged = next /new[/dim]"
         )
         # Track which model the next /new will resolve to so it gets the
         # ← staged marker even when the user hasn't typed /load yet.
@@ -1699,7 +1774,7 @@ class CodingBoxApp(App):
                     and name == self._session_model
                 )
                 is_staged = name == self._next_model and staged_backend == "ollama"
-            else:
+            elif b == "mlx":
                 tag = "M"
                 loaded = "*" if name == mlx_active else " "
                 is_active = (
@@ -1708,6 +1783,26 @@ class CodingBoxApp(App):
                     and name == self._session_model
                 )
                 is_staged = name == self._next_model and staged_backend == "mlx"
+            elif b == "openai":
+                tag = "X"  # openX-AI — X stands out vs O (Ollama)
+                # Cloud backends have no notion of "loaded in VRAM"; the
+                # asterisk slot stays blank.
+                loaded = " "
+                is_active = (
+                    self._session_backend_info is not None
+                    and self._session_backend_info.name == "openai"
+                    and name == self._session_model
+                )
+                is_staged = name == self._next_model and staged_backend == "openai"
+            else:  # anthropic
+                tag = "C"  # Claude
+                loaded = " "
+                is_active = (
+                    self._session_backend_info is not None
+                    and self._session_backend_info.name == "anthropic"
+                    and name == self._session_model
+                )
+                is_staged = name == self._next_model and staged_backend == "anthropic"
             mark_active = "  [yellow]← active[/yellow]" if is_active else ""
             mark_staged = "  [magenta]← staged[/magenta]" if is_staged else ""
             # Show MLX entries by short basename when they're disk paths
@@ -1789,6 +1884,13 @@ class CodingBoxApp(App):
             )
             self._print_mlx_kill_hint()
             return
+        if backend_name in ("openai", "anthropic"):
+            self._log_info(
+                f"[dim]{_esc(model_name)} is a cloud model "
+                f"({backend_name}); nothing to unload — no in-process "
+                "weights are held. The API key stays in your shell env.[/dim]"
+            )
+            return
         # Ollama tag — issue the unload.
         self._unload_ollama_named(model_name)
 
@@ -1867,11 +1969,18 @@ class CodingBoxApp(App):
             )
 
     def _cmd_set_backend(self, arg: str) -> None:
-        """/backend [auto|ollama|mlx] — pick the LLM daemon for the next /new.
+        """/backend [auto|ollama|mlx|openai|anthropic] — pick the LLM
+        host for the next /new.
 
         Sticky across /new, like /model. Bare /backend prints the current
         staged choice and what would resolve right now. Useful when both
-        Ollama and mlx_lm.server are running and you want to force one.
+        Ollama and mlx_lm.server are running and you want to force one,
+        or when you want to switch the active session to a cloud model.
+
+        Cloud backends (openai, anthropic) require the matching
+        API-key env var set in your shell — OPENAI_API_KEY or
+        ANTHROPIC_API_KEY. The TUI never reads keys from disk; the
+        SDK reads them directly from os.environ at request time.
         """
         norm = arg.strip().lower()
         if not norm:
@@ -1901,8 +2010,37 @@ class CodingBoxApp(App):
             self._next_backend = "mlx"
             self._log_info("backend → [b]mlx[/b] (sticky)")
             return
+        if norm in ("openai", "oai", "x", "gpt"):
+            if not os.environ.get("OPENAI_API_KEY"):
+                self._log_error(
+                    "OPENAI_API_KEY is not set — export it in your shell "
+                    "before /backend openai. Key text never enters this "
+                    "process; the SDK reads it from env."
+                )
+                return
+            self._next_backend = "openai"
+            self._log_info(
+                "backend → [b]openai[/b] (sticky) — "
+                "[yellow]cloud calls cost real money[/yellow]"
+            )
+            return
+        if norm in ("anthropic", "claude", "c"):
+            if not os.environ.get("ANTHROPIC_API_KEY"):
+                self._log_error(
+                    "ANTHROPIC_API_KEY is not set — export it in your shell "
+                    "before /backend anthropic. Key text never enters this "
+                    "process; the SDK reads it from env."
+                )
+                return
+            self._next_backend = "anthropic"
+            self._log_info(
+                "backend → [b]anthropic[/b] (sticky) — "
+                "[yellow]cloud calls cost real money[/yellow]"
+            )
+            return
         self._log_error(
-            f"unknown backend {arg!r} — pick one of: auto, ollama, mlx"
+            f"unknown backend {arg!r} — pick one of: "
+            "auto, ollama, mlx, openai, anthropic"
         )
 
     def _cmd_set_model(self, arg: str) -> None:
@@ -2358,14 +2496,18 @@ class CodingBoxApp(App):
         #   3. /backend <auto|ollama|mlx> → run detect_backend with the
         #      preference applied.
         # Clear with the bare /model and /backend commands.
-        if self._next_backend in ("ollama", "mlx") and self._next_model:
-            endpoint = (
-                backend_mod.mlx_endpoint_url() if self._next_backend == "mlx"
-                else backend_mod.ollama_endpoint_url()
-            )
+        if self._next_backend in ("ollama", "mlx", "openai", "anthropic") and self._next_model:
+            if self._next_backend == "mlx":
+                endpoint = backend_mod.mlx_endpoint_url()
+            elif self._next_backend == "openai":
+                endpoint = backend_mod.openai_endpoint_url()
+            elif self._next_backend == "anthropic":
+                endpoint = backend_mod.anthropic_endpoint_url()
+            else:
+                endpoint = backend_mod.ollama_endpoint_url()
             info = backend_mod.BackendInfo(
                 name=self._next_backend, model=self._next_model,
-                source=f"/{'load' if self._next_backend == 'mlx' else 'model'} staged (sticky)",
+                source=f"/load staged: {self._next_backend} (sticky)",
                 endpoint=endpoint,
             )
         elif self._next_model:
@@ -2397,25 +2539,48 @@ class CodingBoxApp(App):
         )
         self._update_status()
 
-        # Build a unique, meaningful basename for every session artifact:
-        # "<goal-slug>_<timestamp>". The agent derives trace/snapshots/best
-        # paths from out_path.stem, so they all share this basename.
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        basename = f"{_slugify(goal)}_{ts}"
-        GAMES_DIR.mkdir(parents=True, exist_ok=True)
-        self._out_path = GAMES_DIR / f"{basename}.html"
-        self._best_path = GAMES_DIR / f"{basename}.best.html"
-        self._log_info(f"Game file: [b]{self._out_path}[/b]")
-
         # Use the staged seed file (if any). Staging is STICKY — every /new
         # uses the same seed until you /seed (no arg) to clear or /seed
         # <other> to replace. Matches /model's sticky behavior.
         seed = self._next_seed
+        # Pick the working file. With a seed: REUSE the original game's
+        # canonical path (games/<basename>.html) so _session_id —
+        # derived from out_path.stem in agent.py — inherits the
+        # ORIGINAL basename. Every downstream artifact (assets dir,
+        # sounds dir, traces, snapshots, .best.html) then lives in the
+        # original folders. No new files, no new folders.
+        #
+        # The seed can be the canonical live file OR a snapshot like
+        # games/snapshots/<basename>/iter_05.html OR a .best.html
+        # sibling — _resolve_seed_target normalizes all three back to
+        # games/<basename>.html. The seed's HTML content is still
+        # what gets written into out_path; only the BASENAME is taken
+        # from the canonical path so _session_id is right.
+        GAMES_DIR.mkdir(parents=True, exist_ok=True)
         if seed is not None:
-            self._log_info(
-                f"using staged seed file (sticky): [b]{_esc(str(seed))}[/b] "
-                "[dim](/seed (no arg) to clear)[/dim]"
-            )
+            self._out_path = _resolve_seed_target(Path(seed))
+            self._best_path = self._out_path.with_suffix(".best.html")
+            if self._out_path.resolve() != Path(seed).resolve():
+                self._log_info(
+                    f"continuing seed via canonical path: "
+                    f"[b]{_esc(str(self._out_path))}[/b] "
+                    f"[dim](seed: {_esc(str(seed))})[/dim]"
+                )
+            else:
+                self._log_info(
+                    f"continuing seed in place: [b]{_esc(str(seed))}[/b] "
+                    "[dim](traces, snapshots, assets reuse the seed's "
+                    "basename — /seed (no arg) to clear)[/dim]"
+                )
+        else:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self._out_path = GAMES_DIR / f"{_slugify(goal)}_{ts}.html"
+            self._best_path = self._out_path.with_suffix(".best.html")
+        # Single source of truth for the basename downstream code uses —
+        # works for both seeded (canonical from _resolve_seed_target)
+        # and fresh paths.
+        basename = self._out_path.stem
+        self._log_info(f"Game file: [b]{self._out_path}[/b]")
 
         # Auto-bump streaming timeouts for larger models — qwen3.6:35b
         # writing a full Space Invaders takes 25+ minutes per stream and

@@ -141,6 +141,67 @@ def _read_project_config(base_dir: Path) -> tuple[str, list[str]]:
     return ("\n\n".join(parts), sources)
 
 
+# Asset/sound rehydration from a seed file. Lifts every
+# "./<prefix>_assets/<name>.<ext>" and "./<prefix>_sounds/<name>.<ext>"
+# reference out of the seed HTML and, if the file exists on disk next
+# to the seed, returns a name→path mapping. Tolerates straight or
+# escaped quotes and an optional leading "./". Designed to be robust to
+# whatever path style the model used when it first wrote the file.
+_SEED_ASSET_RE = re.compile(
+    r"""['"](?:\./)?([A-Za-z0-9_\-]+)_assets/([A-Za-z0-9_\-]+\.(?:png|jpg|jpeg|webp|gif))['"]""",
+    re.IGNORECASE,
+)
+_SEED_SOUND_RE = re.compile(
+    r"""['"](?:\./)?([A-Za-z0-9_\-]+)_sounds/([A-Za-z0-9_\-]+\.(?:ogg|mp3|wav|m4a))['"]""",
+    re.IGNORECASE,
+)
+
+
+def _scan_seed_media(
+    seed_html: str, seed_path: Path,
+) -> tuple[
+    dict[str, Path], dict[str, Path], Path | None, Path | None,
+]:
+    """Walk `seed_html` for media references that exist on disk next to
+    `seed_path`.
+
+    Returns (asset_paths, sound_paths, assets_dir, sounds_dir):
+      - asset_paths / sound_paths: name (filename stem) → absolute Path
+      - assets_dir / sounds_dir: the single shared folder when ALL
+        references point at the same `<prefix>_assets` / `_sounds`;
+        None when multiple prefixes appeared (split-media case) so the
+        caller doesn't pick one arbitrarily.
+
+    Pure function — no side effects on the agent. Called from the seed
+    branch of run() to rehydrate `_session_assets` / `_session_sounds`.
+    """
+    seed_dir = seed_path.parent.resolve()
+    asset_paths: dict[str, Path] = {}
+    sound_paths: dict[str, Path] = {}
+    asset_dirs: set[Path] = set()
+    sound_dirs: set[Path] = set()
+    for m in _SEED_ASSET_RE.finditer(seed_html):
+        prefix, fname = m.group(1), m.group(2)
+        adir = seed_dir / f"{prefix}_assets"
+        full = adir / fname
+        if full.exists():
+            asset_paths[Path(fname).stem] = full.resolve()
+            asset_dirs.add(adir.resolve())
+    for m in _SEED_SOUND_RE.finditer(seed_html):
+        prefix, fname = m.group(1), m.group(2)
+        sdir = seed_dir / f"{prefix}_sounds"
+        full = sdir / fname
+        if full.exists():
+            sound_paths[Path(fname).stem] = full.resolve()
+            sound_dirs.add(sdir.resolve())
+    # Single consistent prefix → reuse it. Multiple prefixes → don't
+    # override; future generation will create a fresh basename-derived
+    # dir, which is the safest behavior under ambiguous seed history.
+    assets_dir = next(iter(asset_dirs)) if len(asset_dirs) == 1 else None
+    sounds_dir = next(iter(sound_dirs)) if len(sound_dirs) == 1 else None
+    return asset_paths, sound_paths, assets_dir, sounds_dir
+
+
 def _strip_thinking(reply: str) -> str:
     """Drop everything up to and including the LAST `</think>` tag.
 
@@ -2335,6 +2396,12 @@ class GameAgent:
                     "procedurally."
                 ))
             else:
+                # Always derive the assets dir from _session_id. When the
+                # session was started from a seed (chat.py reuses the
+                # seed's path as out_path), _session_id IS the seed's
+                # basename, so generation merges into the seed's existing
+                # `<basename>_assets/` folder. Fresh sessions get a fresh
+                # folder. No override mechanism needed.
                 session_assets_dir = (
                     self.out_path.parent / f"{self._session_id}_assets"
                 )
@@ -2475,6 +2542,8 @@ class GameAgent:
                     "without audio, model will ship a silent game."
                 ))
             else:
+                # Mirror the asset path above: dir comes from _session_id,
+                # which already matches the seed's basename when seeded.
                 session_sounds_dir = (
                     self.out_path.parent / f"{self._session_id}_sounds"
                 )
@@ -2915,6 +2984,31 @@ class GameAgent:
                 # so a patch-only first reply has something to patch.
                 self.out_path.write_text(seed_html, encoding="utf-8")
                 self._current_file = seed_html
+                # Rehydrate media state from the seed before iteration 1.
+                # chat.py resolves seeds (including snapshots and
+                # .best.html siblings) back to games/<basename>.html
+                # before constructing this agent, so out_path is the
+                # canonical live game and out_path.parent is the games
+                # dir — which is exactly where <basename>_assets/ lives.
+                # Anchor the scan there (NOT at self.seed_file.parent,
+                # which for a snapshot seed would be the snapshots
+                # subdir and miss the assets folder one level up).
+                seed_assets, seed_sounds, _, _ = (
+                    _scan_seed_media(seed_html, self.out_path)
+                )
+                if seed_assets:
+                    self._session_assets.update(seed_assets)
+                if seed_sounds:
+                    self._session_sounds.update(seed_sounds)
+                if seed_assets or seed_sounds:
+                    yield self._record(AgentEvent("memory", (
+                        f"rehydrated from seed: "
+                        f"{len(seed_assets)} asset(s), "
+                        f"{len(seed_sounds)} sound(s)"
+                    ), {
+                        "seed_assets": {n: str(p) for n, p in seed_assets.items()},
+                        "seed_sounds": {n: str(p) for n, p in seed_sounds.items()},
+                    }))
                 yield self._record(AgentEvent("memory", (
                     f"using user-provided seed file: {self.seed_file} "
                     f"({len(seed_html)} bytes) — memory skeleton skipped"

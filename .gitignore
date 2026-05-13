@@ -36,3 +36,9 @@ games/*_sounds/
 
 # Claude harness internals (per-session settings, scheduled-task locks, etc.)
 .claude/
+
+# Local API keys for cloud backends (OpenAI, Anthropic). NEVER commit.
+# python-dotenv loads .env at chat.py / coder.py startup if present.
+.env
+.env.*
+!.env.example

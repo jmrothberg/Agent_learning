@@ -36,6 +36,21 @@ import webbrowser
 from datetime import datetime
 from pathlib import Path
 
+# Load .env (gitignored, chmod 600) so cloud-backend keys are visible
+# without manual shell export. Mirrors the loader in chat.py.
+try:
+    from dotenv import load_dotenv
+    # override=True so .env wins over empty/stale shell vars; matches chat.py.
+    load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
+except ImportError:
+    if (Path(__file__).resolve().parent / ".env").exists():
+        print(
+            "note: .env present but python-dotenv not installed; "
+            "run `.venv/bin/pip install python-dotenv` or export keys "
+            "manually in your shell.",
+            file=sys.stderr,
+        )
+
 import backend as backend_mod
 from agent import AgentEvent, GameAgent
 from tools import LiveBrowser

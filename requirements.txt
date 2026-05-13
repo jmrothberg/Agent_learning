@@ -30,6 +30,16 @@ rich>=13.0.0
 # Test runner — used by scripts/setup.sh to verify the install and by
 # the pure-function suites under tests/. Lightweight; ~1 MB.
 pytest>=7.0.0
+# Optional cloud backends — surface in /list when OPENAI_API_KEY /
+# ANTHROPIC_API_KEY is set in the shell env. Never read keys from disk
+# (see backend.OpenAIBackend / AnthropicBackend). Both SDKs are
+# import-light (~MB), so we include them in the core requirements;
+# /list silently hides cloud entries until a key is exported.
+openai>=1.50
+anthropic>=0.40
+# Loads .env (gitignored, chmod 600) at chat.py / coder.py startup so
+# OPENAI_API_KEY + ANTHROPIC_API_KEY work without manual shell export.
+python-dotenv>=1.0
 
 # OPTIONAL — GPU stack (~5 GB): Z-Image sprites + Stable Audio sounds.
 # Run ./scripts/install_diffuser.sh — it installs torch/diffusers AND ends with

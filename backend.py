@@ -80,15 +80,26 @@ def _is_chat_capable_tag(name: str) -> bool:
 class BackendInfo:
     """Resolved backend identity. What the TUI prints, what the agent uses."""
 
-    name: Literal["ollama", "mlx"]
+    name: Literal["ollama", "mlx", "openai", "anthropic"]
     model: str
     source: str               # human-readable provenance ("loaded in ollama (/api/ps): 'qwen3.6:27b'")
     endpoint: str             # base URL — "http://127.0.0.1:11434" or "http://127.0.0.1:8080"
     context_length: int | None = None
 
 
+# Cloud-backend defaults. The curated single-model-each shape keeps /list
+# tight; edit these constants (or add more entries to the inventory lists
+# below) to expose more variants. API keys are read from env at request
+# time — never from disk, never embedded in BackendInfo.
+_OPENAI_DEFAULT_MODEL = "gpt-5"
+_ANTHROPIC_DEFAULT_MODEL = "claude-opus-4-7"
+_OPENAI_MODELS: tuple[str, ...] = (_OPENAI_DEFAULT_MODEL,)
+_ANTHROPIC_MODELS: tuple[str, ...] = (_ANTHROPIC_DEFAULT_MODEL,)
+
+
 class Backend(ABC):
-    """Common interface implemented by OllamaBackend and MLXBackend."""
+    """Common interface implemented by OllamaBackend, MLXBackend,
+    OpenAIBackend, and AnthropicBackend."""
 
     info: BackendInfo
 
@@ -658,6 +669,324 @@ class MLXBackend(Backend):
 
 
 # -----------------------------------------------------------------------------
+# Cloud backends — OpenAI and Anthropic.
+#
+# Both read their API key from the environment at request time
+# (OPENAI_API_KEY, ANTHROPIC_API_KEY). The key never enters BackendInfo,
+# the trace log, or the message history. SDK calls also pull through
+# the standard SDK env vars (OPENAI_BASE_URL, ANTHROPIC_BASE_URL) so
+# proxies / Azure / Bedrock relays work without code changes.
+#
+# StreamResult fields populated:
+#   text / tokens (chunk count) / duration_s / stalled / prompt_tokens /
+#   completion_tokens.
+# The richer Ollama-specific fields (looped, deliberated, crashed) stay
+# False — those detectors live in ollama_io.py and don't translate.
+# -----------------------------------------------------------------------------
+
+
+class OpenAIBackend(Backend):
+    """OpenAI Chat Completions backend. Streaming, async."""
+
+    def __init__(self, info: BackendInfo) -> None:
+        self.info = info
+        try:
+            from openai import AsyncOpenAI
+        except ImportError as e:
+            raise RuntimeError(
+                "openai SDK not installed. Run: "
+                ".venv/bin/pip install 'openai>=1.50'"
+            ) from e
+        if not os.environ.get("OPENAI_API_KEY"):
+            raise RuntimeError(
+                "OPENAI_API_KEY is not set. Export it in your shell "
+                "(or 1Password / Keychain) before starting chat.py."
+            )
+        # The SDK reads OPENAI_API_KEY + OPENAI_BASE_URL automatically.
+        self._client = AsyncOpenAI()
+
+    async def stream_chat(
+        self,
+        messages: list[dict],
+        *,
+        on_token: Callable[[str], None] | None = None,
+        options: dict[str, Any] | None = None,
+        stall_seconds: float = 90.0,
+        overall_seconds: float = 600.0,
+        max_retries: int = 1,
+        on_stall: Callable[[StreamResult, int], None] | None = None,
+        on_progress: Callable[[str, int, int], None] | None = None,
+        cancel_event: asyncio.Event | None = None,
+    ) -> StreamResult:
+        opts = dict(options or {})
+        params: dict[str, Any] = {
+            "model": self.info.model,
+            "messages": messages,
+            "stream": True,
+            # include_usage gives us prompt/completion token counts in
+            # the final chunk so the right-hand status panel can show
+            # token spend (which is also $ spend for cloud backends).
+            "stream_options": {"include_usage": True},
+        }
+        if "max_tokens" in opts:
+            # GPT-5 and other reasoning-trained models prefer
+            # max_completion_tokens. The legacy max_tokens still works
+            # for non-reasoning models — try the new name first, fall
+            # back on TypeError.
+            params["max_completion_tokens"] = int(opts["max_tokens"])
+        if "temperature" in opts:
+            params["temperature"] = float(opts["temperature"])
+        if "top_p" in opts:
+            params["top_p"] = float(opts["top_p"])
+        if "seed" in opts:
+            params["seed"] = int(opts["seed"])
+
+        parts: list[str] = []
+        tokens = 0
+        prompt_tokens: int | None = None
+        completion_tokens: int | None = None
+        t0 = time.monotonic()
+        cancelled = False
+
+        async def _run(call_params: dict[str, Any]) -> None:
+            nonlocal tokens, prompt_tokens, completion_tokens, cancelled
+            stream = await self._client.chat.completions.create(**call_params)
+            async for chunk in stream:
+                if cancel_event is not None and cancel_event.is_set():
+                    cancelled = True
+                    break
+                if chunk.choices:
+                    delta = chunk.choices[0].delta
+                    piece = getattr(delta, "content", None)
+                    if piece:
+                        parts.append(piece)
+                        tokens += 1
+                        if on_token is not None:
+                            on_token(piece)
+                usage = getattr(chunk, "usage", None)
+                if usage is not None:
+                    prompt_tokens = getattr(usage, "prompt_tokens", None)
+                    completion_tokens = getattr(usage, "completion_tokens", None)
+
+        try:
+            await _run(params)
+        except TypeError as e:
+            # Older model API surface — retry without max_completion_tokens
+            # by swapping it back to the legacy max_tokens key.
+            if "max_completion_tokens" in params and "max_completion_tokens" in str(e):
+                params["max_tokens"] = params.pop("max_completion_tokens")
+                try:
+                    await _run(params)
+                except Exception as e2:
+                    print(
+                        f"openai stream_chat error: "
+                        f"{type(e2).__name__}: {e2}",
+                        file=sys.stderr,
+                    )
+                    return StreamResult(
+                        text="".join(parts),
+                        tokens=tokens,
+                        duration_s=time.monotonic() - t0,
+                        stalled=True,
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                    )
+            else:
+                raise
+        except Exception as e:
+            # Connection / auth / quota / timeout errors come through
+            # here. Surface the real exception class + message to
+            # stderr so callers can diagnose without enabling debug
+            # logging — 429 insufficient_quota is a billing fix, 401
+            # is a key fix, and a generic "stalled" hides both.
+            print(
+                f"openai stream_chat error: {type(e).__name__}: {e}",
+                file=sys.stderr,
+            )
+            return StreamResult(
+                text="".join(parts),
+                tokens=tokens,
+                duration_s=time.monotonic() - t0,
+                stalled=True,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
+
+        return StreamResult(
+            text="".join(parts),
+            tokens=tokens,
+            duration_s=time.monotonic() - t0,
+            stalled=cancelled,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        )
+
+    async def is_vlm(self) -> bool:
+        # GPT-4o / GPT-4.1 / GPT-5 all support vision input. The agent
+        # gates screenshot inclusion on this flag.
+        return True
+
+    async def close(self) -> None:
+        try:
+            await self._client.close()
+        except Exception:
+            pass
+
+
+class AnthropicBackend(Backend):
+    """Anthropic Messages backend. Streaming, async."""
+
+    def __init__(self, info: BackendInfo) -> None:
+        self.info = info
+        try:
+            from anthropic import AsyncAnthropic
+        except ImportError as e:
+            raise RuntimeError(
+                "anthropic SDK not installed. Run: "
+                ".venv/bin/pip install 'anthropic>=0.40'"
+            ) from e
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            raise RuntimeError(
+                "ANTHROPIC_API_KEY is not set. Export it in your shell "
+                "(or 1Password / Keychain) before starting chat.py."
+            )
+        self._client = AsyncAnthropic()
+
+    async def stream_chat(
+        self,
+        messages: list[dict],
+        *,
+        on_token: Callable[[str], None] | None = None,
+        options: dict[str, Any] | None = None,
+        stall_seconds: float = 90.0,
+        overall_seconds: float = 600.0,
+        max_retries: int = 1,
+        on_stall: Callable[[StreamResult, int], None] | None = None,
+        on_progress: Callable[[str, int, int], None] | None = None,
+        cancel_event: asyncio.Event | None = None,
+    ) -> StreamResult:
+        # Anthropic's API requires the system prompt as a separate
+        # parameter — strip it out of the messages array. Multiple
+        # system messages get concatenated (rare but possible after
+        # compaction).
+        system_parts: list[str] = []
+        msgs: list[dict] = []
+        for m in messages:
+            role = m.get("role")
+            content = m.get("content", "")
+            if role == "system":
+                if content:
+                    system_parts.append(content)
+            else:
+                msgs.append({"role": role, "content": content})
+        system_text = "\n\n".join(system_parts).strip() or None
+
+        opts = dict(options or {})
+        # Anthropic max_tokens is REQUIRED. 8192 is a sane default for
+        # an agent turn that may emit a multi-KB <html_file>.
+        max_tok = int(opts.get("max_tokens") or 8192)
+        kwargs: dict[str, Any] = {
+            "model": self.info.model,
+            "messages": msgs,
+            "max_tokens": max_tok,
+        }
+        if system_text:
+            kwargs["system"] = system_text
+        if "temperature" in opts:
+            kwargs["temperature"] = float(opts["temperature"])
+        if "top_p" in opts:
+            kwargs["top_p"] = float(opts["top_p"])
+
+        parts: list[str] = []
+        tokens = 0
+        prompt_tokens: int | None = None
+        completion_tokens: int | None = None
+        t0 = time.monotonic()
+        cancelled = False
+
+        async def _run_anthropic(call_kwargs: dict[str, Any]) -> None:
+            nonlocal tokens, prompt_tokens, completion_tokens, cancelled
+            async with self._client.messages.stream(**call_kwargs) as stream:
+                async for piece in stream.text_stream:
+                    if cancel_event is not None and cancel_event.is_set():
+                        cancelled = True
+                        break
+                    if piece:
+                        parts.append(piece)
+                        tokens += 1
+                        if on_token is not None:
+                            on_token(piece)
+                if not cancelled:
+                    final = await stream.get_final_message()
+                    usage = getattr(final, "usage", None)
+                    if usage is not None:
+                        prompt_tokens = getattr(usage, "input_tokens", None)
+                        completion_tokens = getattr(usage, "output_tokens", None)
+
+        try:
+            await _run_anthropic(kwargs)
+        except Exception as e:
+            # Some Claude models (Opus 4.x reasoning class) reject
+            # `temperature` with a 400 — auto-retry once with the
+            # parameter dropped before bubbling the error up.
+            msg = str(e).lower()
+            if "temperature" in msg and "temperature" in kwargs:
+                kwargs.pop("temperature", None)
+                try:
+                    parts.clear()
+                    tokens = 0
+                    await _run_anthropic(kwargs)
+                except Exception as e2:
+                    print(
+                        f"anthropic stream_chat error: "
+                        f"{type(e2).__name__}: {e2}",
+                        file=sys.stderr,
+                    )
+                    return StreamResult(
+                        text="".join(parts),
+                        tokens=tokens,
+                        duration_s=time.monotonic() - t0,
+                        stalled=True,
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                    )
+            else:
+                # Mirror OpenAIBackend: surface the real exception class +
+                # message so 429 / 401 / overload diagnoses bubble up.
+                print(
+                    f"anthropic stream_chat error: {type(e).__name__}: {e}",
+                    file=sys.stderr,
+                )
+                return StreamResult(
+                    text="".join(parts),
+                    tokens=tokens,
+                    duration_s=time.monotonic() - t0,
+                    stalled=True,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                )
+
+        return StreamResult(
+            text="".join(parts),
+            tokens=tokens,
+            duration_s=time.monotonic() - t0,
+            stalled=cancelled,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        )
+
+    async def is_vlm(self) -> bool:
+        # All Claude 4.x models accept images.
+        return True
+
+    async def close(self) -> None:
+        try:
+            await self._client.close()
+        except Exception:
+            pass
+
+
+# -----------------------------------------------------------------------------
 # Detection.
 # -----------------------------------------------------------------------------
 
@@ -699,6 +1028,32 @@ def detect_backend(prefer: str | None = None) -> BackendInfo:
             )
         return info
 
+    if prefer in ("openai", "oai"):
+        if not os.environ.get("OPENAI_API_KEY"):
+            raise RuntimeError(
+                "LLM_BACKEND=openai but OPENAI_API_KEY is not set. "
+                "Export it in your shell first."
+            )
+        return BackendInfo(
+            name="openai",
+            model=_OPENAI_DEFAULT_MODEL,
+            source="LLM_BACKEND=openai (OPENAI_API_KEY set)",
+            endpoint="https://api.openai.com",
+        )
+
+    if prefer in ("anthropic", "claude"):
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            raise RuntimeError(
+                "LLM_BACKEND=anthropic but ANTHROPIC_API_KEY is not set. "
+                "Export it in your shell first."
+            )
+        return BackendInfo(
+            name="anthropic",
+            model=_ANTHROPIC_DEFAULT_MODEL,
+            source="LLM_BACKEND=anthropic (ANTHROPIC_API_KEY set)",
+            endpoint="https://api.anthropic.com",
+        )
+
     # Auto: probe both, prefer whichever has a loaded model. MLX wins ties.
     mlx_info = _try_mlx()
     ollama_info = _try_ollama_with_loaded()
@@ -723,7 +1078,48 @@ def make_backend(info: BackendInfo) -> Backend:
         return OllamaBackend(info)
     if info.name == "mlx":
         return MLXBackend(info)
+    if info.name == "openai":
+        return OpenAIBackend(info)
+    if info.name == "anthropic":
+        return AnthropicBackend(info)
     raise ValueError(f"unknown backend: {info.name!r}")
+
+
+# Endpoint sentinels for cloud backends. The cloud SDKs ignore these —
+# the real base URL comes from OPENAI_BASE_URL / ANTHROPIC_BASE_URL env
+# vars if set, otherwise the SDK default. The string just keeps
+# BackendInfo's endpoint field non-empty so existing UI strings work.
+_OPENAI_ENDPOINT = "https://api.openai.com"
+_ANTHROPIC_ENDPOINT = "https://api.anthropic.com"
+
+
+def openai_endpoint_url() -> str:
+    return _OPENAI_ENDPOINT
+
+
+def anthropic_endpoint_url() -> str:
+    return _ANTHROPIC_ENDPOINT
+
+
+def list_openai_inventory() -> tuple[list[str], str | None]:
+    """(available_models, default_or_None) — for /list display.
+
+    Empty when OPENAI_API_KEY is not set, so the TUI hides the entries
+    instead of dangling unusable picks. The list is a curated constant
+    (edit _OPENAI_MODELS in this file to add more); we don't probe the
+    API just to populate /list — that would burn quota every time the
+    user typed it.
+    """
+    if not os.environ.get("OPENAI_API_KEY"):
+        return [], None
+    return list(_OPENAI_MODELS), _OPENAI_DEFAULT_MODEL
+
+
+def list_anthropic_inventory() -> tuple[list[str], str | None]:
+    """Mirror of list_openai_inventory for Anthropic / Claude."""
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        return [], None
+    return list(_ANTHROPIC_MODELS), _ANTHROPIC_DEFAULT_MODEL
 
 
 # -----------------------------------------------------------------------------
