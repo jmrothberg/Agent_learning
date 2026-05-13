@@ -596,21 +596,16 @@ class GameAgent:
         # reload — to avoid that, preload at the desired size with
         # `ollama run --ctx-size 262144 <model>` before starting.
         num_ctx: int = 262144,
-        # Per-stream stall budget (no-activity quiet window). Default
-        # is the FAIL-OPEN floor — modern local coding models on
-        # multi-KB prompts can take several minutes of prefill before
-        # the first generated token, so a tight default kills healthy
-        # sessions. chat.py:resolve_session_timeouts overrides upward
-        # for larger models. The MLXBackend watchdog is also activity-
-        # aware (prefill progress resets this timer), so this is the
-        # post-activity quiet window, not the cold-start budget. See
-        # DK trace 20260513_173528 for the failure this fixes.
-        stall_seconds: float = 300.0,
-        # Total wall-clock ceiling per stream. Lifted to match the
-        # generous floor — a small/unknown model that takes its full
-        # stall budget on prefill still needs headroom to actually
-        # generate. chat.py overrides per model size.
-        overall_seconds: float = 1500.0,
+        # Per-stream stall budget (no-activity quiet window) — single
+        # generous value for every model. Activity-aware MLX watchdog
+        # bumps this on prefill progress and every emitted token,
+        # so 10 minutes of *silence* is what trips it, not 10 minutes
+        # of compute. No model name parsing, no bracket table.
+        stall_seconds: float = 600.0,
+        # Hard ceiling per stream. 30 minutes covers any realistic
+        # generation including pathological MoE prefills + multi-KB
+        # html_file rewrites. Runaway generation is still bounded.
+        overall_seconds: float = 1800.0,
         memory_root: str | Path = "games/memory",
         # Optional path to an existing HTML file to start from. When set,
         # the agent skips memory-skeleton retrieval and uses this file as

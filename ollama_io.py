@@ -394,8 +394,8 @@ async def stream_chat(
     on_token: Callable[[str], None] | None = None,
     *,
     options: dict[str, Any] | None = None,
-    stall_seconds: float = 180.0,
-    overall_seconds: float = 1500.0,
+    stall_seconds: float = 600.0,
+    overall_seconds: float = 1800.0,
 ) -> StreamResult:
     """Stream a chat completion with a stall watchdog.
 
@@ -518,8 +518,8 @@ async def stream_chat_with_retry(
     on_token: Callable[[str], None] | None = None,
     *,
     options: dict[str, Any] | None = None,
-    stall_seconds: float = 180.0,
-    overall_seconds: float = 1500.0,
+    stall_seconds: float = 600.0,
+    overall_seconds: float = 1800.0,
     max_retries: int = 1,
     on_stall: Callable[[StreamResult, int], None] | None = None,
 ) -> StreamResult:
@@ -580,8 +580,8 @@ async def best_of_n(
     n: int = 3,
     temperatures: Iterable[float] | None = None,
     options: dict[str, Any] | None = None,
-    stall_seconds: float = 180.0,
-    overall_seconds: float = 1500.0,
+    stall_seconds: float = 600.0,
+    overall_seconds: float = 1800.0,
     scorer: Callable[[str], Awaitable[tuple[float, dict]]],
     on_progress: Callable[[int, str], None] | None = None,
     early_exit_score: float = 1.0,
