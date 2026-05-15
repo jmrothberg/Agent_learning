@@ -100,6 +100,89 @@ def _has_embedded_marker(text: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Patch-delta token-repetition detector
+# ---------------------------------------------------------------------------
+#
+# When a model's REPLACE block contains the same non-trivial line repeated
+# many times in a row, that's almost always a degenerate sampling loop, not
+# a legitimate edit. DK trace 20260514_104131 iter 3: the model emitted a
+# patch whose REPLACE added `}else{` × 11 consecutively. micro_probes
+# detected the pattern AFTER the patch had applied; the token-spam shipped
+# to disk and the next test ran on the broken file.
+#
+# This detector runs at apply time so we can reject the patch BEFORE writing
+# anything. Mirrors the shape of `_detect_block_bloat` in tools.py but
+# operates on the REPLACE delta only (not the full file), which keeps
+# legitimate switch-statement chains (`case X:` / `case Y:`) safe because
+# the lines are non-identical even though the structure looks repetitive.
+#
+# Defenses against false positives:
+#   - Minimum trimmed length 6 chars (skip lone `}`, `});`, `;`).
+#   - Skip pure-punctuation lines (closing braces, semicolons, commas).
+#   - Skip lines inside an unbalanced backtick region — template literals
+#     legally contain repeated identical lines (e.g. multi-line strings).
+
+_PUNCT_ONLY_RE = re.compile(r"^[\W_]+$")
+
+
+def _detect_replace_repetition(
+    replace_body: str,
+    *,
+    min_run: int = 3,
+    min_line_len: int = 6,
+) -> tuple[str, int] | None:
+    """Detect a run of ≥`min_run` consecutive identical non-trivial lines
+    in a patch REPLACE body.
+
+    Returns (line, count) for the largest run when one exists, None
+    otherwise. See module-level comment for defenses.
+    """
+    if not replace_body:
+        return None
+    lines = replace_body.splitlines()
+    if len(lines) < min_run:
+        return None
+
+    # Mark which lines fall inside an unbalanced backtick (template
+    # literal) region. Toggle on each line by parity of backtick count.
+    in_template: list[bool] = []
+    ticks_open = False
+    for ln in lines:
+        in_template.append(ticks_open)
+        if ln.count("`") % 2 == 1:
+            ticks_open = not ticks_open
+
+    def _trivial(stripped: str, idx: int) -> bool:
+        return (
+            len(stripped) < min_line_len
+            or bool(_PUNCT_ONLY_RE.match(stripped))
+            or in_template[idx]
+        )
+
+    best_line: str | None = None
+    best_count: int = 0
+    cur_line: str | None = None
+    cur_count: int = 0
+    for i, ln in enumerate(lines):
+        stripped = ln.strip()
+        if _trivial(stripped, i):
+            cur_line = None
+            cur_count = 0
+            continue
+        if stripped == cur_line:
+            cur_count += 1
+        else:
+            cur_line = stripped
+            cur_count = 1
+        if cur_count > best_count:
+            best_count = cur_count
+            best_line = cur_line
+    if best_count >= min_run and best_line is not None:
+        return (best_line, best_count)
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Char-preserving normalization (1:1 mapping, no length change)
 # ---------------------------------------------------------------------------
 #
@@ -181,6 +264,41 @@ _PATCH_INTERNAL_FENCE_RE = re.compile(
     re.MULTILINE,
 )
 
+# Outer ```language\n...\n``` fence whose body contains a real tag.
+# Local models (DeepSeek-V4, Qwen) sometimes wrap the entire <patch> or
+# <html_file> in a markdown code fence ("just to be safe"). The tag
+# regexes downstream don't care about surrounding context, BUT when the
+# fence body has its own internal ```fences they collide with the body
+# parsing and the patch fails to extract. The DK trace 20260513_185815
+# burned 7 turns on a fenced <patch>; strip it proactively here so the
+# downstream parser sees the same shape as a model that obeyed the
+# format directly.
+_OUTER_FENCE_RE = re.compile(
+    r"^[ \t]*```[a-zA-Z]*[ \t]*\n(.*?)\n[ \t]*```[ \t]*$",
+    re.DOTALL | re.MULTILINE,
+)
+
+
+def _strip_outer_fences_around_tags(reply: str) -> str:
+    """Remove ```...``` fences whose body contains <patch> or <html_file>.
+
+    Only strips a fence when its body REALLY contains one of our tags so
+    we don't damage fences in regular prose, in <plan> bodies, or in
+    pre-existing HTML inside <html_file> (the wrapper itself protects
+    its body).
+    """
+    if "```" not in reply or ("<patch>" not in reply.lower() and "<html_file>" not in reply.lower()):
+        return reply
+
+    def _maybe_strip(m: re.Match) -> str:
+        body = m.group(1)
+        low = body.lower()
+        if "<patch>" in low or "<html_file>" in low:
+            return body
+        return m.group(0)
+
+    return _OUTER_FENCE_RE.sub(_maybe_strip, reply)
+
 
 def _normalize_lines(s: str) -> str:
     """Normalize line endings to LF.
@@ -235,6 +353,7 @@ def repair_reply(reply: str) -> str:
     idx = reply.rfind("</think>")
     if idx >= 0:
         reply = reply[idx + len("</think>"):]
+    reply = _strip_outer_fences_around_tags(reply)
     return reply
 
 
@@ -492,6 +611,26 @@ def apply_patches(source: str, patches: list[Patch]) -> PatchResult:
             )))
             continue
 
+        # --- early reject: token-repetition loop in REPLACE body ------
+        # DK trace 20260514_104131 iter 3: REPLACE added `}else{` × 11
+        # consecutively; micro_probes caught it after-the-fact but the
+        # spam shipped. Block here so the patch never lands.
+        rep = _detect_replace_repetition(p.replace)
+        if rep is not None:
+            rep_line, rep_count = rep
+            snippet = (
+                (rep_line[:80] + "...") if len(rep_line) > 80 else rep_line
+            )
+            failed.append((i, p, (
+                f"patch REPLACE block contains the same line repeated "
+                f"{rep_count} times consecutively: {snippet!r}. This is "
+                "a token-repetition loop, not a legitimate edit. Re-emit "
+                "a focused patch with NO repeated lines; if you truly "
+                "need to repeat a construct, refactor into a loop or "
+                "helper function."
+            )))
+            continue
+
         # --- prepend (empty SEARCH) ----------------------------------
         if p.is_prepend:
             prepend_buf.append((i, p.replace))
@@ -561,3 +700,182 @@ def apply_patches(source: str, patches: list[Patch]) -> PatchResult:
         text = "".join(prefix_parts) + text
 
     return PatchResult(text=text, applied=applied, failed=failed)
+
+
+# ---------------------------------------------------------------------------
+# Format-failure classification
+# ---------------------------------------------------------------------------
+#
+# When `extract_patches` returns [] AND no <html_file> body could be pulled
+# from the reply, we want to tell the model WHY — generic "I could not find
+# a <patch> or <html_file> block" sends the model into a death-spiral on
+# the same broken shape (DK trace 20260513_185815: 7 consecutive rejections
+# on the same fenced-patch reply).
+#
+# `classify_format_failure` runs a series of detectors and returns the
+# first match. Order: most-specific first (fenced tag is more informative
+# than "no tags at all").
+
+
+@dataclass
+class FormatRejection:
+    """Structured reason why a model reply could not be materialized.
+
+    Returned by `classify_format_failure` when both <patch> and
+    <html_file> extraction fail. The caller (agent.py) translates this
+    into a specific user-turn hint instead of the generic fallback.
+    """
+
+    kind: str            # short tag — "tags_in_fence", "bare_markers", ...
+    hint: str            # one-line human-readable summary (for logs / UI)
+    detail: str          # multi-line model-facing message describing the fix
+
+
+# Standalone SEARCH/REPLACE markers (whole-line match required).
+_BARE_SEARCH_RE = re.compile(r"^[ \t]*<{5,}\s*SEARCH\s*$", re.MULTILINE | re.IGNORECASE)
+_BARE_REPLACE_RE = re.compile(r"^[ \t]*>{5,}\s*REPLACE\s*$", re.MULTILINE | re.IGNORECASE)
+# A `<html>...</html>` element NOT wrapped in <html_file>. Used to catch
+# the "model emitted bare HTML element with no doctype" variant.
+_BARE_HTML_RE = re.compile(r"<html\b[^>]*>", re.IGNORECASE)
+_BARE_HTML_CLOSE_RE = re.compile(r"</html\s*>", re.IGNORECASE)
+
+
+def classify_format_failure(reply: str) -> FormatRejection | None:
+    """Diagnose why a reply has no parseable <patch> / <html_file>.
+
+    Returns None when the reply doesn't look like a botched code-emission
+    attempt at all (e.g. pure prose, plan-only). The caller handles the
+    "no code emitted" case separately — this function only fires when
+    there's evidence the model TRIED to emit code but the shape was off.
+
+    Detectors, in priority order:
+      * tags_in_fence       — <patch>/<html_file> inside ``` fence
+      * bare_markers        — SEARCH/REPLACE markers without <patch> wrapper
+      * unclosed_patch      — <patch> with no </patch>
+      * unclosed_html_file  — <html_file> with no </html_file>
+      * wrong_tag_html      — <html>...</html> with no <html_file> wrapper
+      * wrong_tag_patches   — <patches> (plural) instead of <patch>
+    """
+    if not reply:
+        return None
+    low = reply.lower()
+
+    # 1. <patch> or <html_file> trapped inside a markdown fence. We check
+    # AFTER repair_reply has already stripped outer fences whose body
+    # contains a tag (so this fires only on shapes the proactive stripper
+    # couldn't fix — e.g. nested fences or fences with no closer).
+    for fm in re.finditer(r"```[a-zA-Z]*[ \t]*\n(.*?)(?:\n```|$)", reply, re.DOTALL):
+        body_low = fm.group(1).lower()
+        if "<patch>" in body_low or "<html_file>" in body_low:
+            return FormatRejection(
+                kind="tags_in_fence",
+                hint=(
+                    "Your <patch> / <html_file> block was inside a "
+                    "```markdown fence. Emit raw tags."
+                ),
+                detail=(
+                    "PARSE ERROR: I found a <patch> or <html_file> tag "
+                    "INSIDE a ```...``` markdown code fence. The harness "
+                    "parses raw tags only — fenced content is invisible "
+                    "to it. Re-emit the SAME tag with NO surrounding "
+                    "```fence```. Your reply should open with <patch> or "
+                    "<html_file> directly (after at most a <diagnose>...</diagnose> "
+                    "or <notes>...</notes> block)."
+                ),
+            )
+
+    # 2. Bare SEARCH/REPLACE markers — model wrote the body of a patch
+    # but forgot the <patch>...</patch> wrapper. Exclude the case where
+    # the wrapper exists but is the wrong tag name (`<patches>`) — that
+    # gets a more specific message below.
+    if (
+        _BARE_SEARCH_RE.search(reply)
+        and _BARE_REPLACE_RE.search(reply)
+        and "<patch>" not in low
+        and not re.search(r"<patches\b", reply, re.IGNORECASE)
+    ):
+        return FormatRejection(
+            kind="bare_markers",
+            hint=(
+                "You emitted SEARCH/REPLACE markers without the "
+                "<patch>...</patch> wrapper."
+            ),
+            detail=(
+                "PARSE ERROR: I see <<<<<<< SEARCH and >>>>>>> REPLACE "
+                "markers but no <patch>...</patch> wrapper around them. "
+                "Wrap the block:\n"
+                "<patch>\n<<<<<<< SEARCH\n... old lines ...\n=======\n"
+                "... new lines ...\n>>>>>>> REPLACE\n</patch>\n"
+                "One <patch> wrapper per SEARCH/REPLACE pair."
+            ),
+        )
+
+    # 3. <patch> opened but never closed. Could be a stream stall.
+    if "<patch>" in low and "</patch>" not in low:
+        return FormatRejection(
+            kind="unclosed_patch",
+            hint="Your <patch> block has no closing </patch>.",
+            detail=(
+                "PARSE ERROR: I see <patch> but no closing </patch>. "
+                "Either the reply was cut off mid-stream, or you "
+                "forgot the closing tag. Re-emit the COMPLETE <patch>"
+                "...</patch> block with the closing tag on its own line "
+                "after >>>>>>> REPLACE."
+            ),
+        )
+
+    # 4. <html_file> opened but never closed. The extractor already
+    # accepts this shape (variant 2/3 in _extract_html_inner), so this
+    # only fires when the extractor itself rejected — meaning no </html>
+    # was found either. Distinct from #3 because the fix is different.
+    if "<html_file>" in low and "</html_file>" not in low and "</html>" not in low:
+        return FormatRejection(
+            kind="unclosed_html_file",
+            hint="Your <html_file> block has no closing </html_file> or </html>.",
+            detail=(
+                "PARSE ERROR: I see <html_file> but no closing tag and "
+                "no </html> inside the body. The stream may have been "
+                "cut off. Re-emit the COMPLETE <html_file>...</html_file> "
+                "block, ending with </html></html_file> on the last lines."
+            ),
+        )
+
+    # 5. Bare <html>...</html> element with no <html_file> wrapper.
+    # The extractor's bare-doctype path (variant 5) catches docs that
+    # start with <!DOCTYPE>; this catches the no-doctype shape.
+    if (
+        "<html_file>" not in low
+        and "<patch>" not in low
+        and "<!doctype" not in low
+        and _BARE_HTML_RE.search(reply)
+        and _BARE_HTML_CLOSE_RE.search(reply)
+    ):
+        return FormatRejection(
+            kind="wrong_tag_html",
+            hint=(
+                "You used <html>...</html> instead of "
+                "<html_file>...</html_file>."
+            ),
+            detail=(
+                "PARSE ERROR: I see an <html>...</html> document but "
+                "no <html_file> wrapper. Wrap the COMPLETE HTML "
+                "document in <html_file>...</html_file> tags and "
+                "include a <!DOCTYPE html> directive on the first line "
+                "of the body."
+            ),
+        )
+
+    # 6. <patches> (plural) — common typo, also <patch:>, <Patches>, etc.
+    if re.search(r"<patches\b", reply, re.IGNORECASE) and "<patch>" not in low:
+        return FormatRejection(
+            kind="wrong_tag_patches",
+            hint="You used <patches> instead of <patch>.",
+            detail=(
+                "PARSE ERROR: I see <patches> (plural) but the tag is "
+                "<patch> (singular). Use one <patch>...</patch> block "
+                "per edit; multiple <patch> blocks per reply are "
+                "allowed and apply together."
+            ),
+        )
+
+    return None

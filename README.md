@@ -36,13 +36,13 @@ try to make them into one.
 > below.
 
 **Default interactive stack (`chat.py`, `coder.py`):** both construct
-`GameAgent` with **`prompt_version="v0"`** (classic `prompts.py`). The model
-does **not** receive the retrieved `<playbook>` block, `<criteria>`, or JSON
-`<probes>` on that path — those are **`prompts_v1.py`** features. Use
-`tune.py run --prompt-version v1`, or pass `prompt_version="v1"` when creating
-`GameAgent`, to exercise the full prompt + playbook injection described below.
-(Traces may still record `playbook_retrieved` on v0 for the offline learner,
-but the running model’s prompts omit that block until v1+.)
+`GameAgent` with **`prompt_version="v1"`** (the data-driven `prompts_v1.py`
+module — see [agent.py:710](agent.py), [chat.py:2772](chat.py), [coder.py:189](coder.py)).
+The full v1 stack is active by default: per-format guidelines, `<criteria>`
++ JSON `<probes>`, retrieved `<playbook>` block, the `<assets>` / `<sounds>`
+generation pipeline (large-class), and the verifier-feedback loops described
+below. The legacy `prompts.py` (v0) module was retired; pass `prompt_version`
+to `GameAgent` only if you've added a `prompts_v{N}.py` of your own.
 
 **Remote:** https://github.com/jmrothberg/Agent_learning/
 
@@ -584,6 +584,108 @@ On error, the agent skips the Chromium round-trip and feeds a structured
 report back to the model on the next turn — same shape as a real test
 report, with the title `(skipped browser — pre-flight failed)` so the
 trace is unambiguous.
+
+### Verifier-feedback loops — failures the harness used to swallow
+
+Two consecutive Donkey Kong runs (`games/traces/donkey-kong-arcade-clone-800x6_20260513_185815` and `games/traces/donkey-kong-game-animated-donk_20260514_104131`) exposed a category of failure the harness was eating quietly: the model produces something that *looks* finished, the harness rubber-stamps it, and the user gets a broken game with the agent insisting it shipped. The research evidence on non-SOTA local coding agents (Aider leaderboards, Agentless, Kimi-Dev, TACL 2024 / arXiv 2411.17501) all points the same direction: **external-verifier strength dominates self-critique for sub-70B models.** The upgrades below tighten that verifier edge — no free-form reflection critics, no "let the model judge itself," every fix lands in the harness→model signal path.
+
+**Parser self-correction (`patches.py`)**
+
+The 20260513 trace burned 7 consecutive turns when the model emitted a *valid* `<patch>` wrapped in a ```` ```html ```` markdown fence — the harness rejected it with a generic *"I could not find a `<patch>` or `<html_file>` block"* and the model retried the same shape every time. Two fixes:
+
+1. **Proactive fence stripping** in `repair_reply`: when a ` ``` ` fence body contains `<patch>` or `<html_file>`, the wrapper is removed before extraction. Unrelated fences (e.g. inside `<plan>` prose) are left intact — `_strip_outer_fences_around_tags` only fires when a real tag is inside.
+2. **Structured rejection classification** via `classify_format_failure(reply) → FormatRejection | None`. When extraction still fails, the classifier names *why*: `tags_in_fence`, `bare_markers` (SEARCH/REPLACE with no `<patch>` wrapper), `unclosed_patch`, `unclosed_html_file`, `wrong_tag_html` (model used `<html>...</html>` directly), `wrong_tag_patches` (plural). Each kind ships with a specific model-facing hint instead of the generic fallback.
+
+**Format-doctor subagent (`agent.py`)**
+
+On the second consecutive parse failure (`_format_stuck_streak == 2`), `_run_format_doctor` fires a single one-shot inference on the **same backend / same loaded model** with a fresh isolated message history — a narrow system prompt + the failed reply + the structured rejection, nothing else. If the doctor's output parses, it replaces the failed assistant message in the conversation and the iteration continues; if not, the next user turn carries a "stop trying `<patch>`, send a complete `<html_file>`" escalation. This is the only deepagents-style subagent in the loop, kept because its input is the external rejection signal (grounded), not free self-reflection (the failure mode for weak models).
+
+**Probe-quality classifier + first-build nudge (`agent.py`)**
+
+The 20260513 probes (`state_exists`, `player_exists`, `barrels_array`, `princess_exists`, `hud_visible`) were all structural-presence checks; a game that rendered a static HUD passed every one. The 20260514 probes were the same pattern in slightly different clothes (`barrels.length > 0`, `textContent.length > 0`, `toDataURL().length > 200`). `_classify_probes_dynamic(probes)` walks each probe's expression and tags it dynamic only when it contains an `await` / `setTimeout` / `requestAnimationFrame` / `performance.now`, a `getImageData` pixel read, or a numeric comparison against a non-zero threshold whose LHS isn't a `.length` / `.size` / `.width` / `.height` style structural property. When zero probes classify as dynamic, the first-build user message gets a directive showing three example dynamic shapes (timer-delta, state-delta, canvas-pixel-non-black).
+
+**Input-responsiveness probe synthesis (`tools.py`)**
+
+The 20260514 trace shipped with `Input test: FAIL — pressed [...] and canvas pixels never changed` and `ok=True` on the same report, because the harness saw a clickable element and downgraded the failure with `"Note: keyboard test produced no canvas change, but the page has clickable elements; treating as DOM-driven."` The model used that note as permission to ship. Fix:
+
+- `expects_game_controls(*texts)` — a tokenized keyword detector on the `<criteria>` text. Words like `arrow`, `wasd`, `key`, `press`, `move`, `climb`, `jump`, `fire` fire it; substrings inside other words don't (so "monkey" doesn't match "key"). Genre-free / game-agnostic — it describes input *modality*, not subject matter.
+- When the input test fails AND `expects_game_controls(criteria)`, the harness overrides the DOM-driven carve-out and synthesizes an `input_responsive` probe into `report["probes"]` with `ok=False`. The existing probe-failure gate then promotes it to a `PROBE FAILED [input_responsive]: ...` soft-warning, which the `ok` formula already catches. `<done/>` becomes unavailable until the input is actually wired.
+
+**Final-iteration test guarantee (`agent.py`)**
+
+The 20260513 trace's worst single failure: the final assistant turn shipped a correct full `<html_file>` that was never tested because the loop hit its `max_iters` budget while in the rejection branch. `_final_iter_test_if_needed()` runs at every exit path — user-force-done, `<done/>`+ok, and max-iters — and if the last materialized iter index is greater than the last tested iter index, one closing browser test runs against the current file. On pass it promotes the file to `best.html` if no baseline exists; on fail nothing is promoted. `_record_session_outcome` reads from this final test, so the session never ships a "passed" report that's actually based on a stale snapshot.
+
+**Subsystem-pointing coaching + iter-1 focused-slice biasing (`agent.py`)**
+
+Across all four recent DK-class traces, the `mistake_signature` literally encoded which subsystem was broken — `INPUT_DEAD` from `memory.signature_for_report` when the input test pressed every key and the canvas never changed, or `FROZEN` when the canvas drew once but never re-rendered. The model could *read* the failure (iter 3's reply preview started *"1. Input test FAIL: Pressing arrow keys doesn't change canvas pixels"*) but its patches kept editing the higher-level mechanic the user's complaint named (climb math, barrel physics) instead of the actual broken layer (`addEventListener` wiring). Existing coaching at `_repeat_sig_streak >= 2` said *"AUTHOR a runtime-state probe"* — too abstract for a 27B model already focused on the wrong code area.
+
+The fix has two halves, both routed through a new `_subsystem_hint(signature)` helper that maps signature substrings to `(name, identifier_tokens, fix_phrase)` tuples. Three entries today, each describing a SHAPE of failure (input wiring / draw-or-RAF / RAF-start) not a genre:
+
+| Signature shape | Identifier tokens | Fix phrase |
+|---|---|---|
+| `INPUT_DEAD` / *"Controls are not wired up"* | `addEventListener`, `keydown`, `keyup`, `KeyboardEvent`, `code`, `KEYMAP`, `keys` | "the keydown/keyup handler" |
+| `FROZEN` / *"did not change between two samples"* | `requestAnimationFrame`, `frame`, `render`, `draw`, `ctx` | "the frame/draw loop" |
+| *"canvas pixels are uniform"* / *"not rendering"* | `requestAnimationFrame`, `loadAssets`, `then`, `startGame`, `init` | "the RAF kick-off" |
+
+1. **Coaching becomes directive at `_repeat_sig_streak >= 2`**: when a hint matches the current signature, the queued coaching message names the subsystem ("Same INPUT failure for 2 iterations..."), lists the implicated identifiers, and tells the model to target `<patch>` SEARCH at the keydown/keyup handler OR send a focused `<html_file>` rewriting only that subsystem. Generic fallback preserved when no hint matches.
+
+2. **`_focused_slice` keyset biasing on iter 1**: when `self._last_mistake_sig` matches a hint, the slice constructor pulls the hint's identifier tokens into the keyset *in addition to* error-signal and criteria tokens. The slice the model sees in its iter-1 fix prompt now surfaces functions matching `addEventListener` / `keydown` / etc., not just the higher-level functions whose names appear in the failing report. This acts one iteration earlier than the streak-based coaching — the verifier signal is already there on iter 1 when input fails.
+
+Coverage: 9 unit tests in [tests/test_subsystem_hint.py](tests/test_subsystem_hint.py) including a pinned DK-trace-shaped HTML fixture confirming that without the hint the slice misses the input handler entirely, with the hint it surfaces.
+
+**Patch-delta token-repetition rejection (`patches.py`)**
+
+DK trace 20260514 iter 3 documented a different small-model degenerate sampling failure: the model emitted a `<patch>` whose REPLACE body added the line `}else{` 11 times consecutively. The existing `run_micro_probes` detector flagged the pattern AFTER the patch had applied — the token-spam had already shipped to disk and the next test ran on a poisoned file.
+
+`_detect_replace_repetition(replace_body)` in `patches.py` runs *at apply time* inside `apply_patches`'s per-patch loop, right after the existing `_has_embedded_marker` check. Returns `(line, count)` when ≥3 consecutive identical lines appear in the REPLACE body, with defenses against false positives:
+
+- **Trimmed length ≥ 6 chars** — skips lone `}`, `});`, `;` chains that are legitimate code structure.
+- **Pure-punctuation lines excluded** — `re.match(r"^[\W_]+$", line)` returns True → skip.
+- **Lines inside unbalanced backticks skipped** — template literals legally contain multi-line repeated content (banner strings, ASCII art, etc.).
+- **Requires consecutive identical lines** — switch statements with `case CMD_X:` / `case CMD_Y:` chains stay safe because the lines aren't identical even though the structure repeats.
+
+On trigger, the patch is rejected with a specific error naming the line and count (*"patch REPLACE block contains the same line repeated 11 times consecutively: `}else{` — token-repetition loop, not a legitimate edit"*). The existing `patch_retry_instruction` plumbing in `agent.py` delivers the rejection to the next model turn. Coverage: 15 unit tests in [tests/test_patch_replace_repetition.py](tests/test_patch_replace_repetition.py) including the literal DK `}else{` × 11 case and negatives for switch chains, lone braces, template literals, and short bodies.
+
+**Probe re-parse gate widening (`agent.py` + `prompts_v1.py`)**
+
+Phase A asks the model to author `<probes>` before it sees the seed file (on `/seed` sessions, the file isn't shown until Phase B). The 20260514 trace captures the failure mode: the model wrote `state.grid`, `state.player.onLadder`, `state.reset`, `#instructions` — none of which exist in the seed. Iter 1's report had 4/5 probes evaluating falsy forever. The model then re-emitted 5 corrected probes (3 dynamic) in its iter-1 reply that DID match the file shape — but the original coverage-gap-only gate dropped them, and iter 2's test re-ran the stale Phase-A probes.
+
+The gate now opens when ANY of:
+1. Phase-A coverage gaps exist (the original trigger — preserved).
+2. The prior iter's report had at least one probe failure (new — failing probes are evidence they may be wrong).
+3. The session was started with `/seed` AND this is iter 1 (new — the model just saw the file for the first time).
+
+Defensive: the new probe list must be at least as large as the current set, so a model can't shrink the probe surface to mask regressions. `seed_build_instruction` in `prompts_v1.py` now also explicitly tells the model *"your Phase A `<probes>` were written WITHOUT seeing this file. If any reference state property, function, or DOM element names that do NOT exist in the code below, RE-EMIT a corrected `<probes>` block alongside your patch."*
+
+**Listening fixes — five edges where signals were getting dropped (`agent.py`)**
+
+Trace `a-game-of-donkey-kong-all-char_20260514_175012` revealed five distinct places where a clear signal — from the user, from the harness, or from the model's own diagnose — was being ignored. Each fix tightens one edge:
+
+1. **Broadened `_CODE_LOCK_PATTERNS`** ([agent.py:448](agent.py)). The user typed *"this is trivial no other changes there"* at turn [03]. The previous patterns all required the literal word "code" or a specific media noun (asset/sprite/image/...) — *"no other changes"* slipped through, `rewrite_exemption_armed` fired anyway, and the model emitted a full `<html_file>` instead of the minimal swap the user asked for. Seven new patterns cover *"no other changes"*, *"this is trivial"* / *"trivial change/fix/swap"*, *"just/only swap|switch|rename|move|flip|toggle"*, *"leave the rest"*, *"nothing else"*. Defenses: bare *"just"* / *"only"* without a minimal-scope verb don't match; behavior-bug feedback doesn't accidentally lock unless it also expresses scope-lock intent.
+
+2. **Stuck-loop hard gate at `_repeat_sig_streak >= 3`** ([agent.py](agent.py)). The DK trace hit streak 3 on the INPUT subsystem; the model emitted patches anyway. There was no further escalation lever. Now: at streak ≥ 3 AND `_subsystem_hint` matches, `_force_question_subsystem` is set to the hint dict, and the next `_build_fix_prompt` call substitutes a `<question>`-only hard-gate prompt that lists three concrete options *(a) rewrite the keydown handler from scratch (b) ask for a specific approach (c) ship as-is with the known failure*. All other tags (`<patch>`, `<html_file>`, `<plan>`, `<diagnose>`) are blocked by prompt. Flag clears on consumption AND on any clean iter (so a session that's actually making progress never hits the gate). Pulls the human in to break the loop when the model can't translate the subsystem signal into a fix.
+
+3. **Diagnose-vs-patch subsystem-coherence note** ([agent.py](agent.py) `_diagnose_mentions_subsystem` + `_patches_touch_subsystem_idents`). Turn [08]'s `<diagnose>` named *"barrel drop threshold + procedural fallback coordinate bug"* — but the harness had been reporting INPUT failure for 3 iterations and the patches touched barrels/coords, not input handlers. The model talked itself out of fixing the implicated subsystem. New helpers scan the diagnose body (case-insensitive substring) and each patch's SEARCH+REPLACE text for the hint's identifier tokens. When BOTH are silent on the implicated subsystem, a coaching note is queued for the next turn: *"COHERENCE NOTE — the harness has been reporting INPUT failure but your last `<diagnose>` and patches did not mention any input code. Were you intentionally addressing a different bug?"* Light touch — doesn't reject the patch, doesn't block the iter.
+
+4. **Audit of subsystem-hint coaching path** (`tests/test_subsystem_hint.py` extended). Confirmed via regression test with the literal trace signature: `_subsystem_hint` correctly returns the input hint when given the trace's *"Controls are not wired up"* signature. The trace's `coaching_injected` event firing the generic fallback was because the trace pre-dated the Item 1a deploy; the code path is correct.
+
+5. **Exit-decision turn before silent loop end** ([agent.py](agent.py) `run()` exit path). The DK session ended with patches applied but no `<done/>` or `<confirm_done/>` — user got back a half-fixed game with no clear handoff signal. When the iter cap is reached with `_previous_report_ok is False` (and no `awaiting_confirm`, no pending user feedback, no force-ship), the agent now injects one final EXIT DECISION TURN prompt: the model MUST emit either `<done/>` + `<notes>...</notes>` (handoff summary: what works / what's broken / workaround) OR `<question>...</question>` (specific blocker). All other tags rejected by prompt. The final-iter test guarantee then runs against whatever's on disk, and `_record_session_outcome(ok=...)` reflects the actual report — the model's `<notes>` is advisory only, not load-bearing on the outcome.
+
+Coverage: 16 unit tests for the broadened code-lock patterns including the literal DK feedback text pin (`tests/test_feedback_code_lock.py`), 8 for the stuck hard-gate flag mechanics + prompt content (`tests/test_stuck_hard_gate.py`), 12 for the diagnose-patch coherence helpers (`tests/test_diagnose_patch_coherence.py`), 14 for the exit-decision turn gate + reply parsing + prompt content (`tests/test_exit_decision_turn.py`), plus one new regression test in `tests/test_subsystem_hint.py` pinning the literal trace signature.
+
+**Feedback-routing fix: behavior-bug detector (`agent.py`)**
+
+The same 20260514 trace exposed a parallel failure on the feedback side. When the user typed *"mario does not climb the ladder, even when below it and i push the key up, dont change anything else"*, the harness misclassified the feedback as an art/sound change because "mario" and "ladder" were registered asset names — the `_feedback_is_art_change` heuristic returned True on any asset-name match. The MEDIA-CHANGE DIRECTIVE then injected *"The feedback above is about ART/SOUND, not code"* into the next user turn, and the model dutifully emitted `<assets>` re-renders instead of fixing the climb bug. The .jsonl shows `media_change_directive_injected ... art_change: true` fired on 7+ consecutive feedback turns.
+
+`_feedback_is_behavior_bug(text)` adds a gate: when the feedback contains a negation paired with a behavior verb within a small window (*"does not climb"*, *"can't move"*, *"won't reset"*, *"doesn't respond"*), or an explicit complaint noun (*"bug"*, *"broken"*, *"crashing"*, *"frozen"*, *"stuck"*, *"glitching"*), the MEDIA-CHANGE DIRECTIVE is suppressed even if `_feedback_is_art_change` would otherwise fire. The `_BEHAVIOR_VERBS` set is genre-free — gameplay actions like `climb` / `move` / `jump` / `fire` / `roll` / `spawn` / `reset` — and intentionally EXCLUDES visual verbs (`look`, `appear`, `render`, `show`) so a legitimate art complaint like *"the dragon doesn't look right"* still routes to the art-change path. The suppression is traced as `media_change_directive_suppressed`.
+
+**Mutable `<todos>` artifact (`agent.py` + `prompts_v1.py`)**
+
+The one deepagents idea that survived the "no free reflection" filter. `<todos>...</todos>` is an optional checklist the model can rewrite each turn; the agent persists it to `games/traces/<session>.todos.md` and replays it in `_build_structured_summary` so compaction doesn't drop it. Encouraged-not-required: when the model doesn't use it, the universal probes / criteria still cover acceptance. Dropped from the small-class system prompt (`_SMALL_DROP`) so the 6 KB budget for sub-30B models holds.
+
+**Coverage**
+
+15 unit tests for `patches.py` format classification (`tests/test_format_rejection.py`), 15 for the probe-quality classifier including pinned regressions on both DK traces (`tests/test_probe_quality.py`), 15 for the patch-delta token-repetition detector including the literal DK `}else{ × 11` pin (`tests/test_patch_replace_repetition.py`), 16 for the broadened code-lock patterns with literal DK feedback text pin (`tests/test_feedback_code_lock.py`), 14 for the exit-decision turn gate + reply parsing + prompt content (`tests/test_exit_decision_turn.py`), 13 for the feedback behavior-bug detector with the literal DK feedback text pinned as a regression (`tests/test_feedback_behavior_bug.py`), 12 for the diagnose-vs-patch subsystem-coherence helpers (`tests/test_diagnose_patch_coherence.py`), 11 for the input-responsiveness keyword detector (`tests/test_input_responsive_synthesis.py`), 10 for the subsystem-hint helper + focused-slice biasing including the DK-20260514_175012 sig pin (`tests/test_subsystem_hint.py`), 9 for the widened probe re-parse gate including the DK-20260514 seed-session pin (`tests/test_probe_reparse_gate.py`), 8 for the stuck-loop hard-gate at streak≥3 (`tests/test_stuck_hard_gate.py`), 8 for the format-doctor early-escalation on looped streams (`tests/test_format_doctor_early_escalation.py`), 8 for the `<todos>` parser (`tests/test_todos_artifact.py`), 6 for the final-iter test guarantee (`tests/test_final_iter_test_guarantee.py`). All harness-side and pure-function — the full set runs in well under two seconds.
 
 ### Generated sprites — Z-Image-Turbo, no server
 
@@ -1549,6 +1651,7 @@ short ship phrase (`done`, `ok`, `looks good`, `lgtm`, `ship`, `perfect`,
 | `/new <goal>`        | end current session (must be done first), start a fresh one — uses staged seed/model  |
 | `/iters <N>`         | change `max_iters` for the next session/extension (also sticky)                       |
 | `/reset`             | wipe ALL staged state at once (seed + model + iters → defaults)                       |
+| `/wait [on\|off]`    | toggle step-mode: pause after each iter and wait for explicit input before continuing |
 | `/ship`              | ship now (= Ctrl+D, or just type `done`/`looks good`/`ship`)                          |
 | `/open`              | open the current `.html` in your default system browser                               |
 | `/log` (`/paths`)    | print game / log / jsonl / conversation / snapshots / best paths                      |
@@ -1583,6 +1686,69 @@ To clear:
 `/reset` doesn't touch the running session, the browser, or anything on disk —
 it just resets staging to defaults. Follow with `/new <goal>` to actually
 start a fresh session.
+
+### Small-model practical guide — getting the most out of a 27B local LLM
+
+This project assumes you're running a sub-30B local model (Qwen3.6-27B,
+DeepSeek-V4-flash, etc.). Frontier-tier models (Claude / GPT-5) tolerate
+more abstract guidance; small models reward concrete framing. A handful
+of pragmatic rules that make sessions land more often:
+
+- **`/seed <path>` vs `/new <goal>`.** Use `/seed games/<basename>.best.html`
+  + `/new <tweak goal>` when you want the model to *continue* an existing
+  game. Use `/new <goal>` alone for a fresh build. `/seed` is sticky, so
+  multiple `/new`s reuse the same baseline — good for "add boss enemy,
+  then add high-score table." Pick `.best.html` (last passing iter) over
+  `.html` (current working file, may be mid-fix). The seed mechanism
+  inlines the file in the first build prompt — keep it under ~12 KB if
+  you can; bigger seeds push iter-1 context past 30 KB for a 27B model.
+
+- **`/wait on` while debugging.** Toggles step-mode: the agent pauses
+  after each iter and waits for explicit input before continuing. Lets
+  you inspect the screenshot, type corrective feedback, or hit Enter to
+  let the next iter run. Indispensable when a session is converging
+  slowly. Auto-arms on the first failing iter; toggle off with `/wait
+  off` once you've stabilized.
+
+- **How to read the test report.** Two independent gates:
+  - `OK: True/False` — the harness's overall verdict. Driven by
+    page-errors + soft-warnings + probe failures.
+  - `Input test: PASS / FAIL` — a *separate* automated keypress test.
+    For game-shaped goals (criteria mention arrows / WASD / keys), an
+    `Input test: FAIL` synthesizes an `input_responsive` probe failure
+    that flips `OK: False`. For pure-DOM apps (calculator, color
+    picker), it's surfaced as a warning only.
+  - **`soft_warnings` block `<done/>`** even when `errors` is empty.
+    Anything in the `ISSUES (must fix):` block of the report counts.
+  - The `<criteria>` you wrote in Phase A are echoed back at each fix
+    turn so you can see what the model committed to verify.
+
+- **Writing effective feedback.** Phrase it like you'd report a bug:
+  - **Good**: *"player does not move left when I press ArrowLeft"* —
+    behavior verb (`move`) + negation (`does not`) + specific control
+    name. The behavior-bug detector ([agent.py](agent.py) `_feedback_is_behavior_bug`)
+    suppresses the MEDIA-CHANGE DIRECTIVE so the model routes to code,
+    not assets.
+  - **Risky**: *"fix mario"* — mentions an asset name with no verb
+    pair, can trigger MEDIA-CHANGE misrouting. Add a behavior verb +
+    negation, or describe what shouldn't be happening.
+  - **Avoid**: *"controls broken"* / *"doesn't work"* — too abstract.
+    Small models can't translate this into a specific fix. Name the
+    button, the expected behavior, what actually happens.
+  - **Lock the code when changing only art/sound**: *"redraw the
+    barrel sprite, don't change any code"* fires the `_feedback_locks_code`
+    detector and suppresses the one-shot rewrite exemption.
+
+- **When to expect /iters higher than 6.** The default is 6, sufficient
+  for ~70% of one-shot small-model sessions. Complex games (DK,
+  Pac-Man, Doom-style) want `/iters 10` or higher, plus `/restarts 2`
+  so the agent can throw away a bad start and re-roll.
+
+- **Don't chase one model on one game.** This project's standing rule:
+  if the agent can't ship a working game with one model, switch
+  models. Don't tune prompts or harness behavior for a single
+  model — defaults stay generic. Use `/list` to see what's loaded, `/model <N>`
+  to switch.
 
 ---
 
@@ -1901,7 +2067,14 @@ describe your next goal.
 | Can't select text in TUI          | hold `Shift` while click-dragging                                                      |
 | Feedback ignored                  | check the agent log for `>> APPLIED to this turn:` (fires at every user-turn boundary) AND the right-pane `Queued (N):` panel emptying. If the panel never empties, the agent isn't draining; if the APPLIED line shows up but the model's reply ignores it, the model is choosing not to act. Also see `<slug>_<ts>.jsonl` for `feedback_queued` / `feedback_injected` events. |
 | Feedback after done does nothing  | it should auto-extend; verify the bottom hint says "type feedback to extend"          |
-| Playbook / criteria never show up in traces | normal for **`chat.py`**: default is **`prompt_version=v0`**. Use `tune.py run --prompt-version v1` or pass `prompt_version="v1"` into `GameAgent` to exercise injected `<playbook>` + `<criteria>` / `<probes>`. |
+| Typed feedback re-renders assets instead of fixing code | The MEDIA-CHANGE DIRECTIVE misroutes when an asset name (e.g. `mario`, `ladder`) appears in your text. Re-type the feedback with both a behavior verb (`move`, `climb`, `jump`, `fire`, `roll`) AND a negation (`does not`, `can't`, `won't`) — e.g. `"mario does not climb"` instead of `"fix mario climb"`. The behavior-bug detector then suppresses the directive. Look in the .jsonl for `media_change_directive_suppressed` to confirm. |
+| Trivial-scope feedback got a full rewrite anyway | The model emitted `<html_file>` despite *"just swap X — no other changes"*. Phrasings that don't include the literal word "code" or a media noun used to slip the code-lock detector. Now broadened — *"this is trivial"*, *"no other changes"*, *"just swap/rename/move"*, *"leave the rest"*, *"nothing else"* all lock. If a rewrite still fires, check the .jsonl: `rewrite_exemption_armed` event should be ABSENT when your text matches one of those patterns. |
+| Agent loops on the same bug 3+ iterations | At `_repeat_sig_streak >= 3` AND the `mistake_signature` matches a known subsystem (input wiring, draw/RAF loop, RAF kick-off), the harness now forces a `<question>`-only hard-gate turn. The model emits a question with three concrete options *(rewrite from scratch / try a specific approach / ship as-is)* and waits for your answer. Look for `stuck_hard_gate_armed` and `stuck_hard_gate_prompt_built` events in the .jsonl. |
+| Session ended without `<done/>` or any signal | The iter loop used to fall out silently when the iter cap was reached on a failing build. Now an EXIT DECISION TURN fires forcing the model to either `<done/>` + `<notes>` (handoff summary) or `<question>` (specific blocker). Look for `exit_decision_turn_prompted` in the .jsonl. The final-iter test still runs against whatever ships. |
+| Diagnose names X but patches target Y | Light-touch warning: when the harness has been reporting a specific subsystem (e.g. INPUT) for ≥1 iter AND your `<diagnose>` and patches both ignore it, a `COHERENCE NOTE` appears in the next user turn naming the identifiers you missed (`addEventListener`, `keydown`, etc.). The note doesn't block the patch — it just asks whether you intentionally addressed a different bug. Look for `diagnose_patch_coherence_mismatch` in the .jsonl. |
+| Stream takes 10+ minutes, then aborts | `stream_done` event shows `looped=true` / `stalled=true`. A 27B model exhausted productive vocabulary on a complex fix and entered a token-repetition loop. The format-doctor escalates early on this signal (one strike, not two — see `format_doctor_early_escalation` in trace). You can interrupt with feedback or wait for the doctor to reformat. |
+| Seed session: iter-1 report shows 4/5 probes failing | Phase A probes were authored WITHOUT seeing the seed file (the model can't see it until Phase B). Probes reference state names that don't exist in the seed. The iter-1 build prompt invites a corrected `<probes>` block; the harness adopts it on iter 2 via the widened reparse gate. **Trust iter 2's report, not iter 1's**, on seeded sessions. |
+| Playbook / criteria never show up in traces | The agent runs `prompt_version="v1"` by default; if you've manually downgraded to a custom v0 or older module, the `<playbook>` block won't be rendered. Check `agent.py:710`, `chat.py:2772`, and `coder.py:189` — all default to v1. |
 
 ---
 

@@ -79,7 +79,7 @@ from memory import (
     signature_for_report,
 )
 from ollama_io import Candidate, StreamResult
-from patches import apply_patches, extract_patches
+from patches import FormatRejection, apply_patches, classify_format_failure, extract_patches
 
 # Prompt-module routing: v1 is the production prompt module (`prompts_v1.py`).
 # v0 (`prompts.py`) was retired — it never grew the playbook / criteria /
@@ -309,6 +309,7 @@ _DIAGNOSE_RE = re.compile(r"<diagnose>\s*(.*?)\s*</diagnose>", re.DOTALL | re.IG
 _NOTES_RE = re.compile(r"<notes>\s*(.*?)\s*</notes>", re.DOTALL | re.IGNORECASE)
 _CRITERIA_RE = re.compile(r"<criteria>\s*(.*?)\s*</criteria>", re.DOTALL | re.IGNORECASE)
 _PROBES_RE = re.compile(r"<probes>\s*(.*?)\s*</probes>", re.DOTALL | re.IGNORECASE)
+_TODOS_RE = re.compile(r"<todos>\s*(.*?)\s*</todos>", re.DOTALL | re.IGNORECASE)
 _PLAN_OPEN_RE = re.compile(r"<plan\b", re.IGNORECASE)
 # Pi-mono "skills" pattern: <lookup_bullet>id</lookup_bullet> requests
 # the full body of a playbook bullet whose index-entry was inlined in
@@ -469,6 +470,39 @@ _CODE_LOCK_PATTERNS: tuple[re.Pattern[str], ...] = (
         r"(?:asset|sprite|image|art|png|graphic|picture|icon)s?\b",
         re.I,
     ),
+    # Trace 20260514_175012 fix: user said "this is trivial no other
+    # changes there" but the existing patterns all required the
+    # literal word "code" or specific media nouns. None matched, the
+    # rewrite exemption armed, and the model emitted a full <html_file>
+    # rewrite instead of the minimal swap the user asked for. The
+    # patterns below catch common minimal-scope phrasings without
+    # requiring "code" or a media noun.
+    #
+    # "no other changes" / "no other changes there/please/needed"
+    re.compile(r"\bno\s+other\s+changes?\b", re.I),
+    # "this is trivial" / "trivial change|fix|swap" — minimal-scope intent
+    re.compile(
+        r"\btrivial\b.*\b(?:change|fix|swap|edit|update|tweak)\b", re.I,
+    ),
+    re.compile(
+        r"\b(?:change|fix|swap|edit|update|tweak)\b.*\btrivial\b", re.I,
+    ),
+    # "just swap|switch|rename|move|flip|toggle" — narrow-verb scope-lock
+    re.compile(
+        r"\bjust\s+(?:swap|switch|rename|move|flip|toggle|rewire|"
+        r"rebind|reassign)\b",
+        re.I,
+    ),
+    # "only swap|switch|rename|move|flip|toggle"
+    re.compile(
+        r"\bonly\s+(?:swap|switch|rename|move|flip|toggle|rewire|"
+        r"rebind|reassign)\b",
+        re.I,
+    ),
+    # "leave the rest (alone|as-is)" — explicit out-of-scope signal
+    re.compile(r"\bleave\s+(?:the\s+)?rest\b", re.I),
+    # "nothing else (changes|to change|to fix)"
+    re.compile(r"\bnothing\s+else\b", re.I),
 )
 
 _MEDIA_VERBS: tuple[str, ...] = (
@@ -498,6 +532,95 @@ def _feedback_locks_code(text: str) -> bool:
     license is exactly what we DON'T want.
     """
     return any(p.search(text) for p in _CODE_LOCK_PATTERNS)
+
+
+# Behavior verbs — gameplay actions a player or game object performs.
+# Used to detect "user is reporting a behavior bug" patterns like
+# "mario doesn't climb" / "barrels don't roll" / "nothing happens when
+# I press space". When fired, the MEDIA-CHANGE DIRECTIVE is suppressed
+# even if an asset name appears in the feedback (DK trace
+# 20260514_104131 burned 7 consecutive turns because "mario" + "ladder"
+# matched the art-change classifier and the model was told the
+# feedback was about ART/SOUND when the user was clearly reporting a
+# code bug).
+#
+# Genre-free / game-agnostic: every entry describes input or state
+# transitions, not subject matter. Visual verbs (look, appear, render,
+# show) are intentionally EXCLUDED so "the dragon doesn't look right"
+# still routes to the art-change path.
+_BEHAVIOR_VERBS: tuple[str, ...] = (
+    "climb", "climbs", "climbing", "climbed",
+    "move", "moves", "moving", "moved",
+    "jump", "jumps", "jumping", "jumped",
+    "run", "runs", "running",
+    "walk", "walks", "walking", "walked",
+    "fire", "fires", "firing", "fired",
+    "shoot", "shoots", "shooting", "shot",
+    "work", "works", "working", "worked",
+    "respond", "responds", "responding", "responded",
+    "react", "reacts", "reacting", "reacted",
+    "fall", "falls", "falling", "fell",
+    "fly", "flies", "flying", "flew",
+    "spawn", "spawns", "spawning", "spawned",
+    "reset", "resets", "resetting",
+    "restart", "restarts", "restarting", "restarted",
+    "trigger", "triggers", "triggering", "triggered",
+    "hit", "hits", "hitting",
+    "register", "registers", "registering", "registered",
+    "roll", "rolls", "rolling", "rolled",
+    "drop", "drops", "dropping", "dropped",
+    "happen", "happens", "happening", "happened",
+    "play", "plays", "playing", "played",
+    "load", "loads", "loading", "loaded",
+    "update", "updates", "updating", "updated",
+    "collide", "collides", "colliding", "collided",
+    "die", "dies", "dying", "died",
+    "score", "scores", "scoring", "scored",
+)
+_BEHAVIOR_VERB_ALT = "|".join(re.escape(v) for v in _BEHAVIOR_VERBS)
+_BEHAVIOR_BUG_NEGATION_RE = re.compile(
+    r"\b(?:doesn['’]?t|don['’]?t|didn['’]?t|can['’]?t|cannot|"
+    r"won['’]?t|wouldn['’]?t|isn['’]?t|aren['’]?t|never|"
+    r"nothing|unable\s+to|fails?\s+to|not)\s+"
+    r"(?:\w+\s+){0,3}"
+    rf"(?:{_BEHAVIOR_VERB_ALT})\b",
+    re.IGNORECASE,
+)
+_BEHAVIOR_BUG_COMPLAINT_RE = re.compile(
+    r"\b(?:bug|broken|crash(?:ing|ed|es)?|freez(?:ing|es)?|frozen|"
+    r"stuck|hang(?:ing|s|ed)?|glitch(?:ing|ed|es)?)\b",
+    re.IGNORECASE,
+)
+
+
+def _feedback_is_behavior_bug(text: str) -> bool:
+    """User is reporting a behavior / code bug — "X doesn't Y",
+    "nothing happens when …", "the game is broken / frozen / crashing".
+
+    DK trace 20260514_104131 fix: the existing art-change classifier
+    fires True whenever an asset name appears in feedback, which
+    misroutes "mario does not climb the ladder" as an ART/SOUND change
+    request (because "mario" and "ladder" are asset names). Detecting
+    behavior-bug language lets the directive injector suppress the
+    misrouting.
+
+    Patterns matched:
+      - negation + behavior verb within 3 words ("does not climb",
+        "won't reset", "isn't responding")
+      - explicit complaint nouns ("bug", "broken", "crashing",
+        "frozen", "stuck", "glitching")
+
+    Visual-only verbs (look, appear, render, show) are NOT in the
+    behavior-verb set, so "the dragon doesn't look right" stays on
+    the art-change path.
+    """
+    if not text:
+        return False
+    if _BEHAVIOR_BUG_COMPLAINT_RE.search(text):
+        return True
+    if _BEHAVIOR_BUG_NEGATION_RE.search(text):
+        return True
+    return False
 
 
 def _name_in_text(text_lower: str, names: list[str]) -> bool:
@@ -546,6 +669,94 @@ def _feedback_is_sound_change(text: str, sound_names: list[str]) -> bool:
         re.search(rf"\b{re.escape(v)}\b", lo) for v in _MEDIA_VERBS
     )
     return has_noun and has_verb
+
+
+# ---------------------------------------------------------------------------
+# Subsystem hints — map mistake_signature shapes to a code region the model
+# should look at. Used by (a) the coaching message at _repeat_sig_streak >= 2
+# and (b) the focused-slice keyset biaser. DK trace 20260514_104131 evidence:
+# 100% of recent sessions had signatures containing "INPUT_DEAD" / "Controls
+# are not wired up" AND the model's patches didn't touch any addEventListener
+# / keydown code — the verifier signal pointed to the input layer but the
+# model kept patching the higher-level mechanic the user named (climb math,
+# barrel physics, etc.). Existing coaching at _repeat_sig_streak >= 2 said
+# "AUTHOR a runtime-state probe" — too abstract for a 27B model already
+# focused on the wrong area.
+#
+# Genre-free / model-agnostic: each entry describes the SHAPE of a failure
+# (input wiring, frame/draw loop, RAF kick-off), not subject matter.
+# Asset-load is intentionally OMITTED here — the existing asset-specific
+# coaching branch handles that case (DK 20260513_122154 fix).
+# ---------------------------------------------------------------------------
+
+# (signature_substrings_lower, name, identifier_tokens, fix_phrase)
+_SUBSYSTEM_HINTS: tuple[
+    tuple[tuple[str, ...], str, tuple[str, ...], str], ...
+] = (
+    (
+        (
+            "input_dead",
+            "controls are not wired up",
+            "controls not wired",
+            "input handler is broken",
+        ),
+        "input",
+        (
+            "addEventListener", "keydown", "keyup", "KeyboardEvent",
+            "code", "KEYMAP", "keys",
+        ),
+        "the keydown/keyup handler (e.g. `window.addEventListener("
+        "'keydown', ...)` and the key-state map)",
+    ),
+    (
+        (
+            "frozen",
+            "did not change between two samples",
+            "canvas drew something but did not change",
+        ),
+        "draw_or_raf",
+        (
+            "requestAnimationFrame", "frame", "render", "draw", "ctx",
+        ),
+        "the frame/draw loop (the function called by "
+        "`requestAnimationFrame`)",
+    ),
+    (
+        (
+            "canvas pixels are uniform",
+            "not rendering",
+        ),
+        "raf_start",
+        (
+            "requestAnimationFrame", "loadAssets", "then",
+            "startGame", "init",
+        ),
+        "the RAF kick-off (e.g. `loadAssets().then(() => "
+        "requestAnimationFrame(frame))`)",
+    ),
+)
+
+
+def _subsystem_hint(signature: str) -> dict | None:
+    """Map a mistake_signature to a structured subsystem hint.
+
+    Returns dict {name, identifiers, fix_phrase} or None when no
+    entry matches. Callers use:
+      - `identifiers` to bias _focused_slice's keyset.
+      - `fix_phrase` to build a directive coaching message that names
+        the specific subsystem to patch this turn.
+    """
+    if not signature:
+        return None
+    low = signature.lower()
+    for substrings, name, identifiers, fix_phrase in _SUBSYSTEM_HINTS:
+        if any(sub in low for sub in substrings):
+            return {
+                "name": name,
+                "identifiers": identifiers,
+                "fix_phrase": fix_phrase,
+            }
+    return None
 
 
 @dataclass
@@ -705,6 +916,13 @@ class GameAgent:
         # A5: track consecutive same-signature errors to drive runtime-
         # state probe coaching.
         self._last_mistake_sig: str | None = None
+        # Hard-gate flag (Item 2, plan 20260514_175012): when
+        # _repeat_sig_streak hits 3 AND _subsystem_hint matches, this
+        # is set to the matching hint dict. The next user-turn
+        # assembly substitutes a <question>-only prompt and clears
+        # the flag. Reset to None whenever a clean iter resets the
+        # streak (see `_repeat_sig_streak = 0` sites).
+        self._force_question_subsystem: dict | None = None
         self._repeat_sig_streak: int = 0
         # Fix #3 (classic-doom 20260512_111015): on the FIRST turn after
         # fresh user feedback is drained, exempt a single <html_file>
@@ -815,6 +1033,40 @@ class GameAgent:
         self._p = self._load_prompt_module(prompt_version)
         self._last_diagnose: str | None = None
         self._stuck_streak: int = 0
+        # DK trace 20260513_185815 burned 7 consecutive turns on the same
+        # broken format (model emitted <patch> inside a markdown fence,
+        # harness rejected with generic "no <patch> or <html_file>" and
+        # the model retried the same shape). `_format_stuck_streak`
+        # counts consecutive turns where _materialize returned None
+        # without the model having emitted a parseable structure. At
+        # streak >= 2 we (a) escalate the prompt to require a full
+        # <html_file>, and (b) optionally invoke a format-doctor
+        # subagent (see _run_format_doctor). Reset to 0 on any
+        # successful materialize.
+        self._format_stuck_streak: int = 0
+        # Streaming-abort flags from the most recent _stream() call.
+        # Used by the format-rejection branch to escalate the doctor:
+        # a `looped` abort means the model was emitting the same 1-2
+        # short lines on repeat — strong evidence of confusion, fire
+        # the doctor at streak=1 instead of waiting for streak=2.
+        # DK trace 20260514_104131 post-seed iter 2 hit exactly this:
+        # repetition loop + bare_markers rejection, session ended
+        # before streak reached 2.
+        self._last_stream_looped: bool = False
+        self._last_stream_stalled: bool = False
+        self._last_stream_deliberated: bool = False
+        # Tracks the most recent iteration where _materialize wrote a
+        # file to disk vs the most recent iteration where the verifier
+        # ran. If they diverge at end-of-run we run one final test on
+        # the last shipped code (DK trace 20260513_185815 ended with
+        # correct code in Turn 14 that was never run because the loop
+        # hit its budget).
+        self._last_materialized_iter: int = 0
+        self._last_tested_iter: int = 0
+        # Most recent test report (full dict). Used by the end-of-run
+        # final-iter test guarantee to fold the late test into the
+        # outcome record.
+        self._last_test_report: dict | None = None
         self._use_prefill = bool(use_prefill)
         self._use_vlm_critique = bool(use_vlm_critique)
         self._use_double_screenshot = bool(use_double_screenshot)
@@ -838,6 +1090,23 @@ class GameAgent:
         # join the report. Empty list = no model probes (universal probes
         # still run).
         self._probes: list[dict] = []
+        # Classification of the most-recent probe set into structural-
+        # vs-dynamic. {"dynamic": [...], "structural": [...], "ratio":
+        # float}. Populated after Phase A; consumed when assembling
+        # the first-build user message to inject a nudge when zero
+        # probes verify dynamic behavior. DK trace 20260513_185815
+        # rationale (probes only checked structural presence; a static
+        # HUD passed all of them).
+        self._probe_quality: dict = {
+            "dynamic": [], "structural": [], "ratio": 0.0,
+        }
+        # <todos> artifact (deepagents-style): mutable plan checklist
+        # the model emits and rewrites each turn. Persisted to disk
+        # next to the trace, replayed via the state-anchor so it
+        # survives compaction. Empty until the model emits the first
+        # <todos> block; optional — universal probes / criteria still
+        # cover acceptance even when the model never uses it.
+        self._todos_text: str = ""
         self._token_cb = None
         self._goal: str = ""
         # Tracks the most recent test-report summary for memory.record_outcome.
@@ -886,6 +1155,8 @@ class GameAgent:
         plan_only: bool,
         has_existing_file: bool,
         consecutive_plan_only: int,
+        rejection: FormatRejection | None = None,
+        format_stuck_streak: int = 0,
     ) -> tuple[str, bool]:
         """Pick the fallback message + decide whether to reset the
         plan-only streak counter.
@@ -911,6 +1182,15 @@ class GameAgent:
              we don't want to escalate on the first strike here.
           4. Default — no <plan>, no code: generic "send patches or
              html_file" reminder.
+
+        When `rejection` is non-None the model emitted a structurally-
+        recognizable but malformed reply (e.g. <patch> inside a ```
+        fence). Prepend the rejection.detail to the chosen fallback so
+        the model sees WHY parsing failed. At `format_stuck_streak >= 2`
+        also append a hard "stop using <patch>, send full <html_file>"
+        escalation — the DK trace 20260513_185815 burned 7 turns on the
+        same broken shape because the generic fallback gave the model
+        no signal to change strategy.
         """
         if consecutive_plan_only >= 2:
             fallback = (
@@ -951,6 +1231,29 @@ class GameAgent:
                 "or <probes> in this reply."
             )
             return fallback, False
+        # Structured-rejection path: model emitted something tag-shaped
+        # but malformed. Surface the specific reason BEFORE the generic
+        # reminder so the model can pattern-match on what to change.
+        if rejection is not None:
+            parts = [rejection.detail]
+            if format_stuck_streak >= 2:
+                parts.append(
+                    "ESCALATION — format-stuck streak: "
+                    f"{format_stuck_streak} consecutive parse failures. "
+                    "Stop trying to send <patch> this turn. Send a "
+                    "complete <html_file>...</html_file> containing the "
+                    "full corrected file, with NO ```markdown``` fences "
+                    "anywhere around or inside the tag. Raw "
+                    "<html_file>...</html_file> as the first non-prose "
+                    "lines of your reply."
+                )
+            else:
+                parts.append(
+                    "Re-emit your fix as either ONE <patch>...</patch> "
+                    "block or a complete <html_file>...</html_file>. "
+                    "No markdown fences."
+                )
+            return "\n\n".join(parts), False
         fallback = (
             "I could not find a <patch> or <html_file> block "
             "in your reply. If this is the first build, send "
@@ -958,6 +1261,113 @@ class GameAgent:
             "blocks."
         )
         return fallback, False
+
+    def _probe_quality_nudge(self) -> str:
+        """Return a directive to add dynamic-behavior probes, or "".
+
+        Fires when every Phase-A probe is structural-only (no time-based
+        check, no numeric threshold, no canvas-pixel delta). Surfaces in
+        the first-build user message so the model can re-emit <probes>
+        with at least one dynamic check. Re-emission is allowed via the
+        existing `_planning_coverage_gaps` re-parse path in run() — no
+        extra plumbing needed.
+
+        Empty when probes are absent (universal probes will run instead)
+        or already include at least one dynamic check. Returns a short
+        block; the goal is a nudge, not a lecture.
+        """
+        pq = self._probe_quality
+        if not pq or pq.get("ratio", 0.0) > 0.0:
+            return ""
+        if not self._probes:
+            return ""
+        return (
+            "PROBE-QUALITY NUDGE: your Phase-A <probes> only verify "
+            "structural presence (e.g. `!!window.state`, "
+            "`typeof X === 'object'`). A game that renders a static "
+            "HUD will pass them all. In your reply, re-emit "
+            "<probes>[...]</probes> alongside the code, INCLUDING at "
+            "least 2 probes that verify dynamic behavior over time. "
+            "Example shapes:\n"
+            "  - `await new Promise(r => setTimeout(r, 500)); return "
+            "state.score >= 0 && state.frame > 30;` (RAF actually "
+            "firing)\n"
+            "  - `(()=>{const t0=performance.now(); return new Promise("
+            "r=>setTimeout(()=>r(state.player.x !== window.__x0 || "
+            "state.player.y !== window.__y0), 500));})();` (state delta "
+            "over 500 ms)\n"
+            "  - `(()=>{const c=document.querySelector('canvas'); "
+            "const g=c.getContext('2d'); const a=g.getImageData(0,0,"
+            "c.width,c.height).data; return a.some((v,i)=>i%4!==3 && "
+            "v!==0);})();` (canvas has non-black pixels — confirms "
+            "rendering)\n"
+            "Each new probe is a JSON object {\"name\": ..., \"expr\": "
+            "...}. Keep existing structural probes; ADD the dynamic "
+            "ones."
+        )
+
+    async def _run_format_doctor(
+        self, failed_reply: str, rejection: FormatRejection,
+    ) -> str | None:
+        """One-shot reformat pass on an unparseable reply.
+
+        Same backend / same loaded model, but a FRESH isolated message
+        history: the doctor sees only the failed reply + the structured
+        rejection, never the agent's full conversation. Output is the
+        reformatted reply (string) or None on any failure.
+
+        Grounded by external verifier signal (the parser rejection), not
+        free reflection — keeps it inside the "what works for weak local
+        models" envelope (TACL 2024 / arXiv 2411.17501: weak models
+        can't reliably self-critique without an external check).
+        """
+        # Build the narrow doctor prompt.
+        sys_prompt = (
+            "You are a format-doctor. Your ONE job is to reformat a "
+            "previous reply so the harness can parse it. You do not "
+            "judge the content. You do not refactor. You do not add or "
+            "remove logic. You output ONLY a corrected <patch>...</patch> "
+            "block OR a complete <html_file>...</html_file> block, "
+            "nothing else — no prose, no <plan>, no <notes>, no "
+            "markdown fences around the output tags. If the input "
+            "contained a <patch> body, preserve the SEARCH and REPLACE "
+            "text exactly; only fix the wrapping. If the input contained "
+            "a complete HTML document, wrap it in <html_file>...</html_file>."
+        )
+        user_msg = (
+            f"PARSER REJECTION: {rejection.detail}\n\n"
+            "PREVIOUS REPLY (unparseable):\n"
+            "================================\n"
+            f"{failed_reply}\n"
+            "================================\n\n"
+            "Re-emit the corrected output now. Output ONLY the "
+            "<patch>...</patch> or <html_file>...</html_file> tag and "
+            "its body — nothing before, nothing after, no fences."
+        )
+        messages = [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": user_msg},
+        ]
+        try:
+            result = await self._backend.stream_chat(
+                messages,
+                on_token=None,
+                options={"temperature": 0.1, "num_ctx": self.num_ctx},
+                stall_seconds=self.stall_seconds,
+                overall_seconds=self.overall_seconds,
+                max_retries=0,
+                cancel_event=self._ensure_stop_event(),
+            )
+            text = result.text or ""
+        except Exception as e:
+            self._trace({"kind": "format_doctor_error", "err": str(e)[:200]})
+            return None
+        self._trace({
+            "kind": "format_doctor_stream_done",
+            "len": len(text),
+            "preview": text[:300],
+        })
+        return text or None
 
     @classmethod
     def _classify_model(cls, model: str) -> str:
@@ -1555,6 +1965,17 @@ class GameAgent:
             )
             lines += sound_lines + [""]
 
+        # Mutable todos artifact (deepagents-style). Replayed across
+        # compaction so a long session doesn't lose track of "what's
+        # left to ship". Empty when the model never used the tag.
+        if self._todos_text:
+            lines += [
+                "## Open todos (your most recent <todos> snapshot — "
+                "re-emit and update it as items complete)",
+                self._todos_text[:1500],
+                "",
+            ]
+
         # Critical context — preserved across compaction so the model
         # never forgets the truth-source contract.
         lines += [
@@ -1690,11 +2111,31 @@ class GameAgent:
             sound_change = bool(sound_names) and _feedback_is_sound_change(
                 joined, sound_names,
             )
+            behavior_bug = _feedback_is_behavior_bug(joined)
 
             self._pending_feedback.clear()
 
-            if (asset_names or sound_names) and (
-                art_change or sound_change or locks_code
+            # DK trace 20260514_104131 fix: when the user is clearly
+            # reporting a behavior bug ("mario does not climb the
+            # ladder"), suppress the MEDIA-CHANGE DIRECTIVE — that
+            # directive tells the model "your feedback is about
+            # ART/SOUND, not code" and fires the model into emitting
+            # an <assets> re-render instead of fixing the code. The
+            # asset-name match in `_feedback_is_art_change` is a
+            # weak signal that needs an explicit suppressor when the
+            # feedback contains behavior-bug language.
+            if behavior_bug and (art_change or sound_change):
+                self._trace({
+                    "kind": "media_change_directive_suppressed",
+                    "reason": "behavior_bug",
+                    "art_change": art_change,
+                    "sound_change": sound_change,
+                })
+
+            if (
+                (asset_names or sound_names)
+                and (art_change or sound_change or locks_code)
+                and not behavior_bug
             ):
                 lines: list[str] = [
                     "================ MEDIA-CHANGE DIRECTIVE ================",
@@ -1968,6 +2409,13 @@ class GameAgent:
             if prefill_used and self._messages and self._messages[-1].get("role") == "assistant":
                 self._messages.pop()
 
+        # Stash the streaming-abort signals so callers (the format-
+        # rejection branch in run()) can consult them without
+        # re-plumbing every _stream() call. Cleared at the top of every
+        # _stream so a previous turn's signal doesn't leak.
+        self._last_stream_looped = bool(result.looped)
+        self._last_stream_stalled = bool(result.stalled)
+        self._last_stream_deliberated = bool(result.deliberated)
         self._trace({
             "kind": "stream_done",
             "tokens": result.tokens,
@@ -2463,6 +2911,21 @@ class GameAgent:
         # `vx = cos(angle)*speed` stays in scope even when the failing
         # probe doesn't mention `vx` directly.
         keyset = self._identifiers("\n".join(sig_text_parts)) | self._identifiers(criteria or "")
+        # Subsystem-hint biasing (DK trace 20260514_104131): when the
+        # most-recent mistake_signature implicates a specific code
+        # region (input handler, RAF loop, etc.), pull its identifier
+        # tokens into the keyset. The slice then surfaces functions
+        # in that region even when the error signals don't directly
+        # name them — so the model SEES the keydown handler on iter 1,
+        # not just the climb-math function the user's complaint named.
+        sig_hint = _subsystem_hint(getattr(self, "_last_mistake_sig", "") or "")
+        if sig_hint:
+            keyset = keyset | set(sig_hint["identifiers"])
+            self._trace({
+                "kind": "subsystem_hint_biased_slice",
+                "subsystem": sig_hint["name"],
+                "added_identifiers": list(sig_hint["identifiers"]),
+            })
         if not keyset:
             return None
 
@@ -2609,6 +3072,50 @@ class GameAgent:
         return len(list_re.findall(diag)) >= 3
 
     @staticmethod
+    def _diagnose_mentions_subsystem(
+        diagnose_text: str | None,
+        identifiers: tuple[str, ...] | list[str],
+    ) -> bool:
+        """True when the `<diagnose>` body contains ANY of the hint's
+        identifier tokens (case-insensitive substring match).
+
+        Used by the diagnose-vs-patch coherence check to detect when
+        the model's stated root cause ignores the subsystem the harness
+        has been flagging. DK trace 20260514_175012 turn [08]:
+        `<diagnose>` named "barrel drop threshold + procedural fallback
+        coordinate bug" while the harness had been reporting INPUT
+        failure for 3 iterations — the diagnose contained none of
+        addEventListener/keydown/KeyboardEvent/keys.
+        """
+        if not diagnose_text or not identifiers:
+            return False
+        low = diagnose_text.lower()
+        return any(i.lower() in low for i in identifiers)
+
+    @staticmethod
+    def _patches_touch_subsystem_idents(
+        patches_in_reply,
+        identifiers: tuple[str, ...] | list[str],
+    ) -> bool:
+        """True when ANY patch's SEARCH or REPLACE text contains ANY
+        of the hint's identifier tokens. Lowercase substring match
+        — the identifiers in `_SUBSYSTEM_HINTS` are short and mostly
+        unambiguous within JS code (`addEventListener`, `keydown`,
+        etc.). Scanning BOTH sides catches both:
+          - patches that touch existing input code (SEARCH matches),
+          - patches that ADD input wiring to a region without it
+            (REPLACE matches).
+        """
+        if not patches_in_reply or not identifiers:
+            return False
+        ident_set_low = [i.lower() for i in identifiers]
+        for p in patches_in_reply:
+            blob = ((p.search or "") + "\n" + (p.replace or "")).lower()
+            if any(i in blob for i in ident_set_low):
+                return True
+        return False
+
+    @staticmethod
     def _extract_notes(reply: str) -> str | None:
         reply = _strip_thinking(reply)
         m = _NOTES_RE.search(reply)
@@ -2646,6 +3153,132 @@ class GameAgent:
             return True
         return False
 
+    # Properties whose presence/size is established at init, NOT at
+    # runtime — comparisons against them aren't dynamic even when they
+    # use `>` / `<`. `state.barrels.length > 0` is "we spawned a
+    # barrel", which the game does on iter 1; `c.toDataURL().length >
+    # 200` is "the canvas has rendered SOMETHING", true the moment the
+    # HUD draws. Excluding these closes the DK trace 20260514_104131
+    # false-negative (5/5 'structural-with-floor' probes scored as
+    # 40% dynamic, nudge stayed silent on a game where gameplay never
+    # advanced).
+    _STRUCTURAL_NUMERIC_PROPS = (
+        "length", "size", "width", "height", "bytelength",
+        "innerwidth", "innerheight", "clientwidth", "clientheight",
+        "offsetwidth", "offsetheight",
+    )
+    _CMP_RE = re.compile(r"(\S+?)\s*([<>]=?)\s*(-?\d+)")
+    _CMP_REV_RE = re.compile(r"(-?\d+)\s*([<>]=?)\s*(\S+)")
+    # Probes that explicitly try to capture a time-delta — IIFE or
+    # ternary patterns that store a `t0` / `before` snapshot and
+    # compare later. Genuine dynamic checks; only fire when paired with
+    # an explicit time signal (await/setTimeout/etc.) so an `x !== 0`
+    # at init doesn't false-positive.
+
+    @staticmethod
+    def _is_dynamic_probe(expr: str) -> bool:
+        """True if `expr` verifies behavior over time, not just existence.
+
+        Heuristic (no LLM call — this is a regex problem, not a
+        reasoning problem; weak models can't reliably self-critique
+        their own probe list per TACL 2024 / arXiv 2411.17501).
+
+        Dynamic signals (each is sufficient):
+          - awaits or returns a Promise (`await`, `.then(`, `Promise.`)
+          - references a timer / clock (`setTimeout`, `setInterval`,
+            `requestAnimationFrame`, `performance.now`, `Date.now`)
+          - reads canvas state via getImageData (the resulting pixel
+            array is genuine runtime state, not a `.length` check)
+          - compares against a NON-ZERO numeric threshold AND the LHS
+            isn't a known structural property (.length / .size /
+            .width / .height etc.)
+
+        Structural-only (returns False):
+          - `!!window.state`, `typeof X === 'object'`
+          - `X.length > 0`, `X.length > 200`, `width > 0` (existence
+            with a floor; true at init for any rendered game)
+          - `state.player.x > 0` — at init most games have positive
+            starting coordinates; "non-zero" doesn't mean "moved"
+          - bare delta-marker identifiers (`prev`, `t0`, `lastFire`)
+            — too many false positives like `lastFireTime > 0` which
+            just means "fired at init"
+
+        DK trace 20260514_104131 pin: the five probes (`canvas_exists`,
+        `player_state`, `barrels_active`, `score_visible`,
+        `game_not_blank`) ALL classify as structural under this rule,
+        so the nudge fires.
+        """
+        if not expr:
+            return False
+        e = expr.strip()
+        low = e.lower()
+        # 1. Awaits / promises — only way a probe can actually wait.
+        if "await " in e or ".then(" in e or "promise." in low:
+            return True
+        # 2. Timers / clocks — the probe is taking a time-delta.
+        for tok in (
+            "settimeout", "setinterval", "requestanimationframe",
+            "performance.now", "date.now",
+        ):
+            if tok in low:
+                return True
+        # 3. Canvas pixel read — getImageData returns runtime state.
+        # Exclude `getImageData(...).data.length` (still a presence
+        # check on the returned typed array).
+        if "getimagedata" in low and ".data.length" not in low:
+            return True
+        # 4. Numeric comparison against a non-trivial threshold (|N| >=
+        # 1) where the LHS isn't a structural-presence property.
+        def _is_structural_lhs(lhs: str) -> bool:
+            low_lhs = lhs.lower()
+            for prop in GameAgent._STRUCTURAL_NUMERIC_PROPS:
+                if "." + prop in low_lhs:
+                    return True
+            return False
+
+        for m in GameAgent._CMP_RE.finditer(e):
+            lhs = m.group(1)
+            threshold = int(m.group(3))
+            if threshold == 0:
+                continue
+            if _is_structural_lhs(lhs):
+                continue
+            return True
+        for m in GameAgent._CMP_REV_RE.finditer(e):
+            rhs = m.group(3)
+            threshold = int(m.group(1))
+            if threshold == 0:
+                continue
+            if _is_structural_lhs(rhs):
+                continue
+            return True
+        return False
+
+    @staticmethod
+    def _classify_probes_dynamic(probes: list[dict]) -> dict:
+        """Bulk-classify probes into structural vs dynamic.
+
+        Returns {"dynamic": [names], "structural": [names], "ratio": float}
+        where ratio is dynamic_count / total (0.0 when probes is empty).
+        """
+        if not probes:
+            return {"dynamic": [], "structural": [], "ratio": 0.0}
+        dyn: list[str] = []
+        struct: list[str] = []
+        for p in probes:
+            name = str(p.get("name", "?"))
+            expr = str(p.get("expr", ""))
+            if GameAgent._is_dynamic_probe(expr):
+                dyn.append(name)
+            else:
+                struct.append(name)
+        total = len(dyn) + len(struct)
+        return {
+            "dynamic": dyn,
+            "structural": struct,
+            "ratio": (len(dyn) / total) if total else 0.0,
+        }
+
     @staticmethod
     def _extract_probes(reply: str) -> list[dict]:
         """Pull a JSON list-of-{name,expr} out of <probes>...</probes>.
@@ -2678,6 +3311,48 @@ class GameAgent:
                 elif isinstance(item, str):
                     out.append({"name": f"probe_{i}", "expr": item[:600]})
         return out[:8]   # cap so a chatty model can't bloat the verifier
+
+    @staticmethod
+    def _extract_todos(reply: str) -> str | None:
+        """Pull a <todos>...</todos> block out of a reply.
+
+        Returns the body text trimmed of leading/trailing whitespace,
+        or None when no block is present. The body is the literal
+        checklist as the model wrote it — we don't normalize the
+        `[ ]` / `[x]` markers because models use varied dialects
+        (`- [ ]`, `* [ ]`, `[ ]`) and forcing a single shape would
+        cost more parses than it saves.
+        """
+        reply = _strip_thinking(reply)
+        m = _TODOS_RE.search(reply)
+        if not m:
+            return None
+        body = m.group(1).strip()
+        return body or None
+
+    def _capture_todos(self, reply: str) -> None:
+        """If the reply contains a <todos> block, update in-memory
+        state and persist to disk. No-op when absent — the model
+        controls the cadence.
+        """
+        todos = self._extract_todos(reply)
+        if not todos:
+            return
+        # Cap at 6 KB so a runaway emission can't bloat the state-
+        # anchor (which is already char-budgeted by compaction).
+        todos = todos[:6000]
+        self._todos_text = todos
+        try:
+            path = self.trace_path.parent / f"{self._session_id}.todos.md"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(todos + "\n", encoding="utf-8")
+            self._trace({
+                "kind": "todos_captured",
+                "len": len(todos),
+                "path": str(path),
+            })
+        except Exception as e:
+            self._trace({"kind": "todos_write_failed", "err": str(e)})
 
     @staticmethod
     def _classify_stall(err_text: str) -> dict | None:
@@ -3300,6 +3975,7 @@ class GameAgent:
             yield self._record(AgentEvent("activity", "idle"))
             self._messages.append({"role": "assistant", "content": plan_reply})
             self._extract_and_queue_lookups(plan_reply)
+            self._capture_todos(plan_reply)
             self._dump_conversation()
             yield self._record(AgentEvent("plan", plan_reply))
             crit = self._extract_criteria(plan_reply)
@@ -3348,6 +4024,29 @@ class GameAgent:
                             + "; ".join(self._planning_coverage_gaps),
                         ))
 
+                # Probe-quality gate (DK trace 20260513_185815: all five
+                # probes — state_exists, player_exists, barrels_array,
+                # princess_exists, hud_visible — only checked structural
+                # presence; a game that rendered a static HUD would
+                # pass them all). Classify with the regex heuristic; if
+                # zero probes verify dynamic behavior, stash a nudge
+                # that gets injected into the first-build user message.
+                pq = self._classify_probes_dynamic(probes)
+                self._probe_quality = pq
+                self._trace({
+                    "kind": "probe_quality",
+                    "dynamic": pq["dynamic"],
+                    "structural": pq["structural"],
+                    "ratio": pq["ratio"],
+                })
+                if pq["ratio"] == 0.0 and probes:
+                    yield self._record(AgentEvent(
+                        "info",
+                        "all probes are structural-only (e.g. "
+                        "`!!window.x`) — nudging model to add "
+                        "dynamic-behavior probes.",
+                    ))
+
             q = self._extract_question(plan_reply)
             if q is not None:
                 yield self._record(AgentEvent("question", q))
@@ -3387,6 +4086,7 @@ class GameAgent:
                 yield self._record(AgentEvent("activity", "idle"))
                 self._messages.append({"role": "assistant", "content": plan_reply})
                 self._extract_and_queue_lookups(plan_reply)
+                self._capture_todos(plan_reply)
                 self._dump_conversation()
                 yield self._record(AgentEvent("plan", plan_reply))
 
@@ -3469,6 +4169,9 @@ class GameAgent:
                 prelude = "\n\n".join(b for b in (asset_block, sound_block) if b)
                 if prelude:
                     build_msg = prelude + "\n\n" + build_msg
+                probe_nudge = self._probe_quality_nudge()
+                if probe_nudge:
+                    build_msg = probe_nudge + "\n\n" + build_msg
                 self._messages.append({
                     "role": "user",
                     "content": self._flush_user_injections(build_msg),
@@ -3624,6 +4327,9 @@ class GameAgent:
                 prelude = "\n\n".join(b for b in (asset_block, sound_block) if b)
                 if prelude:
                     build_msg = prelude + "\n\n" + build_msg
+                probe_nudge = self._probe_quality_nudge()
+                if probe_nudge:
+                    build_msg = probe_nudge + "\n\n" + build_msg
                 self._messages.append({
                     "role": "user",
                     "content": self._flush_user_injections(build_msg),
@@ -3660,6 +4366,8 @@ class GameAgent:
                 yield self._record(AgentEvent(
                     "info", "user requested ship - exiting iteration loop",
                 ))
+                async for ev in self._final_iter_test_if_needed():
+                    yield ev
                 self._record_session_outcome(ok=self.best_path.exists())
                 yield self._record(AgentEvent(
                     "done",
@@ -3763,6 +4471,7 @@ class GameAgent:
 
             self._messages.append({"role": "assistant", "content": reply})
             self._extract_and_queue_lookups(reply)
+            self._capture_todos(reply)
             self._dump_conversation()
             self._trace({
                 "kind": "assistant_reply",
@@ -3786,29 +4495,51 @@ class GameAgent:
                 yield ev
 
             # ---- coverage-gap probe re-parse ---------------------------
-            # If planning detected uncovered criteria (the synthetic
-            # `coverage_gap__*` probes are still failing), and the model
-            # included a new <probes> block in this reply, swap it in
-            # before we run the test. Probes are otherwise immutable
-            # after Phase A — this is the one legitimate mid-session
-            # path, gated on three conditions:
-            #   1. An unresolved coverage gap exists.
-            #   2. The reply contains a new <probes> block.
-            #   3. The reply ALSO contains usable code (<patch> or
-            #      <html_file>) — credit only when the model is doing
-            #      real work, not echoing the plan shape (DeepSeek-V4
-            #      regression observed in asteroid_20260510_173200 where
-            #      iter 1 emitted plan + probes + assets + sounds and
-            #      zero game code).
+            # If the model emitted a fresh <probes> block alongside
+            # usable code, decide whether to adopt it. Probes are
+            # otherwise immutable after Phase A; this is the legitimate
+            # mid-session update path.
+            #
+            # Gate fires when ANY of:
+            #   (A) Phase-A coverage gap exists (the original trigger).
+            #   (B) The prior iter's report had probe failures.
+            #       Reason — DK trace 20260514_104131 post-seed:
+            #       model wrote Phase-A probes BLIND (no seed file
+            #       visible yet) referencing `state.grid`,
+            #       `state.player.onLadder`, `state.reset`, none of
+            #       which exist in the actual file. 4/5 of those
+            #       probes evaluate falsy forever. In iter 1 the
+            #       model re-emitted 5 corrected probes (3 dynamic)
+            #       that DO match the file shape — but the old
+            #       coverage-gaps-only gate dropped them. With this
+            #       branch, failing probes invite an update.
+            #   (C) Seed session, very first iter — the model just
+            #       saw the seed file for the first time and may
+            #       want to fix probes authored blind in Phase A.
+            #
+            # Defensive: the new probe list must have at least as many
+            # entries as the current set, so the model can't shrink
+            # the probe surface to mask regressions.
             reply_low = reply.lower()
             has_code = ("<patch>" in reply_low) or ("<html_file>" in reply_low)
+            prev_report = self._previous_report or {}
+            prev_probes = prev_report.get("probes") or []
+            prev_probe_failures = sum(
+                1 for p in prev_probes if not p.get("ok")
+            )
+            seed_iter1 = bool(self.seed_file) and iteration == start_iter
+            allow_probe_reparse = (
+                bool(self._planning_coverage_gaps)
+                or prev_probe_failures > 0
+                or seed_iter1
+            )
             if (
-                self._planning_coverage_gaps
+                allow_probe_reparse
                 and "<probes>" in reply_low
                 and has_code
             ):
                 new_probes = self._extract_probes(reply)
-                if new_probes:
+                if new_probes and len(new_probes) >= len(self._probes):
                     from tools import _criteria_coverage_gaps as _gaps_fn
                     new_gaps = _gaps_fn(self._criteria or "", new_probes)
                     self._trace({
@@ -3817,6 +4548,11 @@ class GameAgent:
                         "old_count": len(self._probes),
                         "new_count": len(new_probes),
                         "remaining_gaps": new_gaps[:6],
+                        "trigger": (
+                            "coverage_gap" if self._planning_coverage_gaps
+                            else "prev_probe_failures" if prev_probe_failures > 0
+                            else "seed_iter1"
+                        ),
                     })
                     yield self._record(AgentEvent(
                         "info",
@@ -3858,6 +4594,64 @@ class GameAgent:
             q = self._extract_question(reply)
             html_in_reply = self._extract_html(reply)
             patches_in_reply = extract_patches(reply)
+
+            # ---- diagnose-vs-patch subsystem-coherence note ------------
+            # DK trace 20260514_175012 turn [08]: model's <diagnose>
+            # named "barrel drop threshold + fallback coords" while
+            # the harness had reported INPUT failure (signature
+            # "Controls are not wired up") for 3 iterations. The
+            # patches in the same turn touched barrels/coords, not
+            # input handlers. Light touch: queue a coaching message
+            # for the next turn surfacing the mismatch. Doesn't
+            # reject the patch — the model may still have caught a
+            # real bug, and the test report will tell us either way.
+            #
+            # Conditions:
+            #   - a recent mistake_signature is set (i.e., we've had
+            #     at least one failing iter and the harness named a
+            #     subsystem),
+            #   - the model emitted patches this turn (we skip the
+            #     check on <html_file> replies — full rewrites might
+            #     legitimately touch input without the SEARCH/REPLACE
+            #     shape we scan),
+            #   - <diagnose> body and patches BOTH ignore the
+            #     subsystem identifiers.
+            if (
+                self._last_mistake_sig
+                and patches_in_reply
+                and diag is not None
+            ):
+                _hint = _subsystem_hint(self._last_mistake_sig)
+                if _hint:
+                    _idents = _hint["identifiers"]
+                    if (
+                        not self._diagnose_mentions_subsystem(diag, _idents)
+                        and not self._patches_touch_subsystem_idents(
+                            patches_in_reply, _idents,
+                        )
+                    ):
+                        _idents_text = ", ".join(
+                            f"`{i}`" for i in list(_idents)[:5]
+                        )
+                        self._pending_coaching.append(
+                            f"COHERENCE NOTE — the harness has been "
+                            f"reporting a {_hint['name'].upper()} "
+                            "failure (signature: "
+                            f"'{self._last_mistake_sig[:120]}'), but "
+                            "your last <diagnose> and patches did "
+                            "not mention or target any "
+                            f"{_hint['name']} code "
+                            f"({_idents_text}). Were you "
+                            "intentionally addressing a different "
+                            "bug, or did you miss this issue? If "
+                            "the harness signal is real, target "
+                            f"your next <patch> at {_hint['fix_phrase']}."
+                        )
+                        self._trace({
+                            "kind": "diagnose_patch_coherence_mismatch",
+                            "subsystem": _hint["name"],
+                            "signature_preview": self._last_mistake_sig[:120],
+                        })
             if q is not None and html_in_reply is None and not patches_in_reply:
                 yield self._record(AgentEvent("question", q))
                 while self._pending_answer is None:
@@ -4001,6 +4795,88 @@ class GameAgent:
 
             # ---- materialize: patches OR full file --------------------
             new_html, materialize_msg = await self._materialize(reply)
+
+            # Format-self-correction (DK trace 20260513_185815): when
+            # materialize fails AND the failure looks like a malformed
+            # shape (not just no-code-at-all), classify and — at streak
+            # >= 2 — invoke an isolated-context format-doctor subagent
+            # to reformat. Same model, fresh chat, narrow context.
+            format_rejection: FormatRejection | None = None
+            if new_html is None and not patches_in_reply:
+                format_rejection = classify_format_failure(reply)
+                if format_rejection is not None:
+                    self._format_stuck_streak += 1
+                    self._trace({
+                        "kind": "format_rejection",
+                        "rejection_kind": format_rejection.kind,
+                        "streak": self._format_stuck_streak,
+                        "iteration": iteration,
+                    })
+                    # Doctor invocation: normally streak == 2 (one
+                    # bad reply may be a fluke). EARLY ESCALATION at
+                    # streak == 1 when the stream was aborted as a
+                    # repetition-loop OR stalled — those signals say
+                    # the model was confused mid-emit; a second strike
+                    # is wasted compute. DK trace 20260514_104131 hit
+                    # this: post-seed iter 2 looped after 12706 tokens
+                    # and emitted bare SEARCH/REPLACE markers; the
+                    # session ended at streak=1 with no doctor call.
+                    looped_or_stalled = (
+                        self._last_stream_looped or self._last_stream_stalled
+                    )
+                    invoke_doctor = (
+                        self._format_stuck_streak == 2
+                        or (
+                            self._format_stuck_streak == 1
+                            and looped_or_stalled
+                        )
+                    )
+                    if invoke_doctor:
+                        if looped_or_stalled and self._format_stuck_streak == 1:
+                            self._trace({
+                                "kind": "format_doctor_early_escalation",
+                                "looped": self._last_stream_looped,
+                                "stalled": self._last_stream_stalled,
+                                "iteration": iteration,
+                            })
+                        doctor_reply = await self._run_format_doctor(
+                            reply, format_rejection,
+                        )
+                        if doctor_reply:
+                            d_html, _d_msg = await self._materialize(
+                                doctor_reply, dry_run=True,
+                            )
+                            if d_html is not None:
+                                yield self._record(AgentEvent(
+                                    "info",
+                                    "[format-doctor] reformatted "
+                                    f"unparseable reply "
+                                    f"({format_rejection.kind}); using "
+                                    "the corrected version this iter.",
+                                ))
+                                self._trace({
+                                    "kind": "format_doctor_recovered",
+                                    "rejection_kind": format_rejection.kind,
+                                    "iteration": iteration,
+                                })
+                                # Replace the failed assistant reply in
+                                # the conversation so subsequent turns
+                                # see the parseable shape — avoids the
+                                # model self-correcting backwards.
+                                if (
+                                    self._messages
+                                    and self._messages[-1].get("role") == "assistant"
+                                ):
+                                    self._messages[-1] = {
+                                        "role": "assistant",
+                                        "content": doctor_reply,
+                                    }
+                                reply = doctor_reply
+                                patches_in_reply = extract_patches(reply)
+                                new_html, materialize_msg = (
+                                    await self._materialize(reply)
+                                )
+                                self._format_stuck_streak = 0
             if new_html is None:
                 trunc = self._truncation_diagnosis(reply)
                 if trunc:
@@ -4067,6 +4943,8 @@ class GameAgent:
                             plan_only=plan_only,
                             has_existing_file=bool(self._current_file),
                             consecutive_plan_only=self._consecutive_plan_only,
+                            rejection=format_rejection,
+                            format_stuck_streak=self._format_stuck_streak,
                         )
                     )
                     if reset_streak:
@@ -4078,8 +4956,13 @@ class GameAgent:
                 continue
 
             # Code materialized — clear the plan-only loop counter so a
-            # later plan-only reply doesn't inherit a stale streak.
+            # later plan-only reply doesn't inherit a stale streak. Also
+            # clear the format-stuck streak: a successful parse means
+            # whatever shape the model picked just worked, regardless
+            # of what came before.
             self._consecutive_plan_only = 0
+            self._format_stuck_streak = 0
+            self._last_materialized_iter = iteration
 
             # Track partial-patch failures for the next prompt even on
             # successful materialize.
@@ -4247,6 +5130,8 @@ class GameAgent:
             yield self._record(AgentEvent("activity", "idle"))
             report_text = format_report_for_model(report)
             self._last_report_summary = report_text
+            self._last_test_report = report
+            self._last_tested_iter = iteration
             yield self._record(AgentEvent("test", report_text, report))
 
             # Auto-arm step-mode on the FIRST failing iter. Rationale
@@ -4485,6 +5370,8 @@ class GameAgent:
                 # Don't loop another fix turn — exit with whatever we have.
                 # best.html is shipped if it exists (a prior iter passed);
                 # otherwise the current new_html is on disk at out_path.
+                async for ev in self._final_iter_test_if_needed():
+                    yield ev
                 best_exists = self.best_path.exists()
                 yield self._record(AgentEvent(
                     "info",
@@ -4592,21 +5479,76 @@ class GameAgent:
                                 "missing names mid-session."
                             )
                         else:
-                            self._pending_coaching.append(
-                                "Same error signature for 2 iterations — your "
-                                "patches are missing the real cause. In this "
-                                "turn, AUTHOR a runtime-state probe inside "
-                                "<probes>...</probes> that captures the data "
-                                "you're missing (e.g. "
-                                "`name=\"alien_bullets_len\", expr=\"window.state && state.alienBullets.length\"` "
-                                "or `JSON.stringify(state.alienBullets.slice(0,3))`). "
-                                "The next test report will include the probe's "
-                                "value — letting you see runtime state directly "
-                                "instead of guessing from the stack trace."
-                            )
+                            # Subsystem-pointing coaching (DK 20260514_104131
+                            # fix): when the signature implicates a specific
+                            # code region (input wiring, frame loop, RAF
+                            # kickoff), tell the model EXACTLY which code
+                            # area to look at. 27B models follow directive
+                            # ("edit the keydown handler") more reliably
+                            # than abstract ("author a probe"). Generic
+                            # fallback preserved when no hint matches.
+                            sub_hint = _subsystem_hint(sig)
+                            if sub_hint:
+                                idents = ", ".join(
+                                    f"`{i}`" for i in sub_hint["identifiers"][:6]
+                                )
+                                self._pending_coaching.append(
+                                    f"Same {sub_hint['name'].upper()} "
+                                    f"failure for {self._repeat_sig_streak} "
+                                    "iterations — the harness keeps "
+                                    "reporting the same broken subsystem and "
+                                    "your patches keep targeting unrelated "
+                                    "code. Signature: "
+                                    f"'{sig[:140]}'. The implicated region "
+                                    f"matches identifiers: {idents}. THIS "
+                                    "TURN: emit a <patch> whose SEARCH "
+                                    f"targets {sub_hint['fix_phrase']}, OR "
+                                    "a focused <html_file> rewriting only "
+                                    "that subsystem. Stop patching the "
+                                    "higher-level mechanic — the bug is "
+                                    "upstream of where you've been editing."
+                                )
+                                self._trace({
+                                    "kind": "subsystem_hint_coaching",
+                                    "subsystem": sub_hint["name"],
+                                    "streak": self._repeat_sig_streak,
+                                })
+                                # Stuck-loop HARD GATE (Item 2, plan
+                                # 20260514_175012): at streak >= 3 the
+                                # model has had two iterations of
+                                # directive coaching and ignored it.
+                                # Force a <question> to the user this
+                                # turn — block any other output format.
+                                # Pulling the human in is the most
+                                # reliable way to break the loop when
+                                # the model can't translate the
+                                # subsystem signal into a real fix.
+                                if self._repeat_sig_streak >= 3:
+                                    self._force_question_subsystem = sub_hint
+                                    self._trace({
+                                        "kind": "stuck_hard_gate_armed",
+                                        "subsystem": sub_hint["name"],
+                                        "streak": self._repeat_sig_streak,
+                                    })
+                            else:
+                                self._pending_coaching.append(
+                                    "Same error signature for 2 iterations — your "
+                                    "patches are missing the real cause. In this "
+                                    "turn, AUTHOR a runtime-state probe inside "
+                                    "<probes>...</probes> that captures the data "
+                                    "you're missing (e.g. "
+                                    "`name=\"alien_bullets_len\", expr=\"window.state && state.alienBullets.length\"` "
+                                    "or `JSON.stringify(state.alienBullets.slice(0,3))`). "
+                                    "The next test report will include the probe's "
+                                    "value — letting you see runtime state directly "
+                                    "instead of guessing from the stack trace."
+                                )
             else:
                 self._last_mistake_sig = None
                 self._repeat_sig_streak = 0
+                # A clean iter dissolves any armed hard-gate (the model
+                # made progress on its own; no need to force a question).
+                self._force_question_subsystem = None
 
             # ---- build next user turn ---------------------------------
             notice = self._consumed_feedback_summary()
@@ -4674,9 +5616,114 @@ class GameAgent:
                 yield self._record(AgentEvent("activity", "idle"))
                 yield self._record(AgentEvent("error", f"Final feedback turn failed: {e}"))
 
+        # ---- Item 5: exit-decision turn before silent loop end ------
+        # DK trace 20260514_175012 ended with patches emitted but no
+        # <done/> / <confirm_done/> — the user got back a half-fixed
+        # game and no clear signal whether the agent had given up or
+        # was waiting. Force one final ship-or-ask decision when:
+        #   - last test failed
+        #   - awaiting_confirm is False (no in-flight done/confirm cycle)
+        #   - no pending user feedback (the bonus-turn branch above
+        #     already handled that case)
+        #   - user didn't force-ship
+        if (
+            self._previous_report_ok is False
+            and not awaiting_confirm
+            and not self.has_pending_user_input()
+            and not self._user_force_done
+        ):
+            yield self._record(AgentEvent(
+                "info",
+                "iter cap reached with failing build — asking the "
+                "model to ship-or-ask before exiting silently.",
+            ))
+            exit_prompt = (
+                "EXIT DECISION TURN — the iteration cap has been "
+                "reached and the last test was not clean. THIS TURN "
+                "you MUST emit EXACTLY ONE of the following:\n\n"
+                "  1. <done/> followed by <notes>...</notes> — ship "
+                "the current build as-is. Your <notes> should name "
+                "(a) what works, (b) what's still broken, (c) any "
+                "workaround the user can use. The harness will run "
+                "one final verification against the file on disk and "
+                "record the outcome. Use this when you've made some "
+                "progress but can't fix everything in the remaining "
+                "budget.\n\n"
+                "  2. <question>...</question> — pause and ask the "
+                "user a specific question. Use this when you "
+                "genuinely don't know how to proceed and a one-line "
+                "answer would unblock you. Be concrete; name the "
+                "specific decision.\n\n"
+                "Do NOT emit <patch>, <html_file>, <plan>, "
+                "<diagnose>, or any other tag this turn. The "
+                "session ends after this reply."
+            )
+            self._messages.append({
+                "role": "user",
+                "content": self._flush_user_injections(exit_prompt),
+            })
+            self._trace({"kind": "exit_decision_turn_prompted"})
+            yield self._record(AgentEvent(
+                "activity", "streaming",
+                {"label": "streaming exit-decision turn"},
+            ))
+            try:
+                exit_reply = await self._stream(self._token_cb_wrapper)
+                yield self._record(AgentEvent("activity", "idle"))
+                self._messages.append({
+                    "role": "assistant", "content": exit_reply,
+                })
+                self._dump_conversation()
+                self._trace({
+                    "kind": "exit_decision_reply",
+                    "len": len(exit_reply),
+                    "preview": exit_reply[:300],
+                })
+                # Capture <notes> for the trace + UI; the actual ship
+                # decision is reflected in the final-iter test below.
+                if _DONE_RE.search(exit_reply):
+                    notes = self._extract_notes(exit_reply)
+                    if notes:
+                        yield self._record(AgentEvent(
+                            "info",
+                            f"exit notes (model's handoff summary): "
+                            f"{notes[:400]}",
+                        ))
+                    self._trace({"kind": "exit_decision_done"})
+                # Handle <question>: surface to user, wait for one
+                # answer, then exit. The session ends regardless of
+                # what the user types — this is a "what blocker?"
+                # ask, not a new iter.
+                q = self._extract_question(exit_reply)
+                if q is not None:
+                    yield self._record(AgentEvent("question", q))
+                    while (
+                        self._pending_answer is None
+                        and not self._user_force_done
+                    ):
+                        await asyncio.sleep(0.1)
+                    if self._pending_answer is not None:
+                        yield self._record(AgentEvent(
+                            "info",
+                            "user answered the exit question; "
+                            "session ending — start /new with the "
+                            "answer in mind to continue.",
+                        ))
+                        self._pending_answer = None  # consume
+                    self._trace({"kind": "exit_decision_question"})
+            except Exception as e:
+                yield self._record(AgentEvent(
+                    "activity", "idle",
+                ))
+                yield self._record(AgentEvent(
+                    "error", f"exit-decision turn failed: {e}",
+                ))
+
         yield self._record(AgentEvent(
             "info", f"reached max iterations ({self.max_iters}) - stopping"
         ))
+        async for ev in self._final_iter_test_if_needed():
+            yield ev
         # Outcome: ok if best.html exists (we passed at least once).
         self._record_session_outcome(ok=self.best_path.exists())
         yield self._record(AgentEvent("done", "Iteration cap reached."))
@@ -4822,6 +5869,7 @@ class GameAgent:
         self._pending_coaching = []
         self._last_mistake_sig = None
         self._repeat_sig_streak = 0
+        self._force_question_subsystem = None
         self._allow_one_rewrite = False
         self._user_force_done = False
         if self._stop_event is not None:
@@ -4851,6 +5899,9 @@ class GameAgent:
         """Construct the next user message after a test result.
 
         Branches:
+          - **stuck hard-gate** → force <question>-only turn when the
+                                  same subsystem has failed 3+ times
+                                  (Item 2, plan 20260514_175012)
           - report ok           → post_clean (encourage <done/>)
           - regressed           → revert prompt with last-good code inline
           - structurally broken → truncation-recovery prompt that does
@@ -4861,6 +5912,43 @@ class GameAgent:
                                   mistake hints and current file inline;
                                   VLM note appended if applicable)
         """
+        # Hard-gate check — fires before any other branch. When the
+        # subsystem-hint coaching has been ignored for 3 iterations
+        # in a row, force the model into <question>-only mode this
+        # turn. Pulls the human in to break the loop. Flag is set in
+        # the streak-handling branch and cleared here on consumption.
+        if self._force_question_subsystem is not None:
+            hint = self._force_question_subsystem
+            self._force_question_subsystem = None  # consume once
+            idents = ", ".join(f"`{i}`" for i in hint["identifiers"][:5])
+            self._trace({
+                "kind": "stuck_hard_gate_prompt_built",
+                "subsystem": hint["name"],
+            })
+            return (
+                "STUCK-LOOP HARD GATE — the harness has reported the "
+                f"same {hint['name'].upper()} failure for "
+                f"{self._repeat_sig_streak} consecutive iterations and "
+                "your patches haven't addressed it. The implicated "
+                f"region matches identifiers: {idents}.\n\n"
+                "THIS TURN you MUST emit exactly ONE "
+                "<question>...</question> tag asking the user one of "
+                "the following (pick the one that best matches your "
+                "uncertainty):\n"
+                f"  (a) \"Should I rewrite {hint['fix_phrase']} from "
+                "scratch?\"\n"
+                "  (b) \"Is there a specific approach you want me to "
+                f"try for the {hint['name']} subsystem?\"\n"
+                "  (c) \"Do you want to ship the partial game as-is "
+                "and accept the known failure?\"\n\n"
+                "Do NOT emit <patch>, <html_file>, <plan>, "
+                "<diagnose>, or any other tag this turn. The "
+                "session will resume after the user answers. The "
+                "most recent test report (for context — do NOT "
+                "act on it this turn):\n\n"
+                f"{format_report_for_model(report)}"
+            )
+
         report_text = format_report_for_model(report)
 
         if report["ok"]:
@@ -4975,6 +6063,70 @@ class GameAgent:
             "<notes>Fixed broken keyup so movement keys release.</notes>\n\n"
         )
         return format_anchor + fix
+
+    async def _final_iter_test_if_needed(
+        self,
+    ) -> AsyncIterator[AgentEvent]:
+        """If the last materialized file was never tested, run one final
+        test before recording the session outcome.
+
+        DK trace 20260513_185815 ended with Turn 14 containing a correct
+        full <html_file> that was NEVER run because the loop hit its
+        max_iters / format-stuck budget. The user reported "no game
+        graphics" because what got tested was the broken first build,
+        not the final code. Closing this gap is a one-time deterministic
+        check at every exit point; saves a session that would otherwise
+        ship a stale best.html or an empty out_path.
+
+        Side effects (on success only):
+          - Updates self._last_test_report / _last_report_summary
+          - If the test passes AND a baseline isn't already saved,
+            promotes the file to best.html so _record_session_outcome
+            reports ok=True.
+        Yields AgentEvent('test', ...) so the UI shows the result.
+        """
+        if not self._last_materialized_iter:
+            return
+        if self._last_tested_iter >= self._last_materialized_iter:
+            return
+        if not self._current_file:
+            return
+        try:
+            self.out_path.write_text(self._current_file, encoding="utf-8")
+        except Exception as e:
+            self._trace({"kind": "final_iter_test_write_failed", "err": str(e)})
+            return
+        yield self._record(AgentEvent(
+            "info",
+            f"[final-test] last shipped code (iter "
+            f"{self._last_materialized_iter}) was never tested — running "
+            "one closing verification.",
+        ))
+        try:
+            report = await self.browser.load_and_test(
+                self.out_path,
+                screenshot_path=None,
+                screenshot_before_path=None,
+                probes=self._probes or None,
+                criteria=self._criteria or None,
+            )
+        except Exception as e:
+            yield self._record(AgentEvent(
+                "info", f"[final-test] browser harness crashed: {e}",
+            ))
+            return
+        report_text = format_report_for_model(report)
+        self._last_report_summary = report_text
+        self._last_test_report = report
+        self._last_tested_iter = self._last_materialized_iter
+        yield self._record(AgentEvent("test", report_text, report))
+        if report.get("ok"):
+            if not self.best_path.exists():
+                self._save_best(self._current_file)
+            self._trace({
+                "kind": "final_iter_test_passed",
+                "iteration": self._last_materialized_iter,
+            })
 
     def _record_session_outcome(self, ok: bool) -> None:
         try:

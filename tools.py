@@ -67,6 +67,56 @@ def _coverage_words(text: str) -> set[str]:
     }
 
 
+# Words in <criteria>, <plan>, or the goal text that signal the game
+# expects keyboard / pointer input. When ANY of these appear, an
+# input_test FAIL should be a hard signal (controls not wired), NOT
+# auto-rationalized as "DOM-driven". DK trace 20260514_104131 shipped
+# a game whose <criteria> said "ArrowRight moves the player right" and
+# "climb ladders with ArrowUp/ArrowDown" while keyboard input was
+# silently broken; the harness still reported `ok=True` because the
+# page had a clickable restart button, which triggered the
+# "treating as DOM-driven" carve-out.
+#
+# Model-agnostic, game-agnostic: describes input MODALITY, not subject
+# matter or genre. Calculators / todo lists / drawing apps avoid these
+# words and keep the existing DOM-driven carve-out.
+_GAME_CONTROL_KEYWORDS = frozenset({
+    "arrow", "arrows",
+    "arrowleft", "arrowright", "arrowup", "arrowdown",
+    "wasd", "key", "keys", "keyboard", "keypress",
+    "press", "pressed", "control", "controls", "controller",
+    "joystick", "gamepad",
+    "move", "moves", "movement", "moving",
+    "walk", "walks", "walking",
+    "run", "runs", "running",
+    "climb", "climbs", "climbing",
+    "jump", "jumps", "jumping",
+    "shoot", "shoots", "shooting",
+    "fire", "fires", "firing",
+    "spacebar", "space",
+    "dpad", "stick", "thumbstick",
+})
+
+
+def expects_game_controls(*texts: str) -> bool:
+    """True when any of the supplied texts mention keyboard / pointer
+    controls. Used by load_and_test to decide whether an input_test
+    failure should be a hard signal or a soft DOM-driven warning.
+
+    Tokenizes on word boundaries so substrings inside other words
+    (e.g. "monkey" matching "key") don't false-positive. Case-
+    insensitive.
+    """
+    pattern = re.compile(r"[a-zA-Z]+")
+    for text in texts:
+        if not text:
+            continue
+        for m in pattern.finditer(text):
+            if m.group(0).lower() in _GAME_CONTROL_KEYWORDS:
+                return True
+    return False
+
+
 def _slugify_criterion(text: str) -> str:
     """Compact identifier-safe slug for a criterion line, used as the
     suffix of a synthetic coverage-gap probe name. Keeps the slug short
@@ -1599,11 +1649,41 @@ class LiveBrowser:
             has_clickable = await self._safe_eval(
                 "document.querySelectorAll('button, [onclick]').length > 0"
             )
-            if not has_clickable:
+            # DK trace 20260514_104131 fix: when criteria explicitly
+            # mention keyboard / pointer controls, override the
+            # "treating as DOM-driven" carve-out — the game promised
+            # input and the input is broken, regardless of whether a
+            # restart button happens to exist.
+            controls_expected = expects_game_controls(criteria or "")
+            if not has_clickable or controls_expected:
                 report["soft_warnings"].append(
                     f"HEURISTIC: pressed {keys_str} - canvas pixels never changed. "
                     "Controls are not wired up (or input handler is broken)."
                 )
+                # Synthesize an `input_responsive` probe entry so the
+                # failure also surfaces in the per-probe display (model
+                # can't rationalize it as "just a warning"). The
+                # existing probe-failure gate below promotes it to a
+                # second PROBE FAILED soft_warning, which the `ok`
+                # formula already catches. Only fires when controls are
+                # affirmatively expected — for genuinely DOM-driven
+                # pages we still want the lighter signal.
+                if controls_expected:
+                    probe_results.append({
+                        "name": "input_responsive",
+                        "expr": (
+                            "(harness) keyboard input must produce a "
+                            "visible canvas change"
+                        ),
+                        "ok": False,
+                        "err": (
+                            f"pressed {keys_str} and canvas pixels "
+                            f"never changed — controls promised in "
+                            f"<criteria> but not wired. Confirm the "
+                            f"key handler runs and updates state."
+                        ),
+                        "synthetic": True,
+                    })
             else:
                 report["warnings"].append(
                     "Note: keyboard test produced no canvas change, but the "

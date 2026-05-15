@@ -311,6 +311,24 @@ CONFIRM_DONE_FORMAT = FormatSpec(
     ),
 )
 
+TODOS_FORMAT = FormatSpec(
+    name="<todos>",
+    snippet=(
+        "<todos>...</todos>           Mutable checklist of remaining work "
+        "(append `[ ]` / `[x]` lines; update each turn)."
+    ),
+    guidelines=[
+        "Optional but encouraged: maintain a <todos>...</todos> "
+        "checklist that mirrors what's left to ship. One item per "
+        "line, prefixed with `[ ]` (open) or `[x]` (done). Re-emit "
+        "the FULL list each turn — the harness persists it to disk "
+        "and replays it across compaction so it survives long "
+        "sessions. Keep items concrete and small (\"wire space-bar "
+        "to fire\", \"reset lastFireTime in reset()\"). When all items "
+        "are `[x]` and the test passes, ship with <done/>.",
+    ],
+)
+
 LOOKUP_BULLET_FORMAT = FormatSpec(
     name="<lookup_bullet>",
     snippet=(
@@ -342,6 +360,7 @@ ALL_FORMATS: list[FormatSpec] = [
     PATCH_FORMAT,
     DIAGNOSE_FORMAT,
     NOTES_FORMAT,
+    TODOS_FORMAT,
     QUESTION_FORMAT,
     LOOKUP_BULLET_FORMAT,
     DONE_FORMAT,
@@ -448,7 +467,7 @@ def build_system_prompt(
             # Drop sprite + sound generation pipelines and the on-demand
             # playbook lookup mechanism. The model writes a self-contained
             # game instead of orchestrating an asset pipeline.
-            _SMALL_DROP = {"<assets>", "<sounds>", "<lookup_bullet>"}
+            _SMALL_DROP = {"<assets>", "<sounds>", "<lookup_bullet>", "<todos>"}
             fmts = [f for f in ALL_FORMATS if f.name not in _SMALL_DROP]
         else:
             fmts = ALL_FORMATS
@@ -1086,6 +1105,19 @@ def seed_build_instruction(
         "preserve the user's structure. Send a complete <html_file> "
         "ONLY if the goal genuinely requires structural changes patches "
         "can't reasonably express.\n\n"
+        # DK trace 20260514_104131 fix: in /seed sessions the Phase-A
+        # probes were authored BEFORE the model could see the file, so
+        # 4/5 referenced state property names (`state.grid`,
+        # `state.player.onLadder`, `state.reset`) that don't exist in
+        # the seed. Invite a corrected probe list this turn — the
+        # harness's iter-1 probe-reparse gate accepts a fresh
+        # <probes>...</probes> block on seed iter 1.
+        "Your Phase A <probes> were written WITHOUT seeing this file. "
+        "If any probe expression references a state property, function, "
+        "or DOM element name that does NOT exist in the code below, "
+        "RE-EMIT a corrected <probes>...</probes> block alongside your "
+        "patch — the harness will adopt the new probes for the "
+        "iterations that follow.\n\n"
         "Always include a <notes> tag describing what each patch does.\n\n"
         "EXISTING FILE:\n"
         "```html\n"
