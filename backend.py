@@ -71,6 +71,100 @@ def _is_chat_capable_tag(name: str) -> bool:
     return not any(frag in n for frag in _NON_CHAT_TAG_FRAGMENTS)
 
 
+# Vision-Language Model (VLM) name patterns (Item 4 in chat.py /list).
+# A VLM can accept image input alongside text — Claude / GPT can do this
+# via API, and several open-weight model families ship VLM variants
+# (Qwen-VL, LLaVA, DeepSeek-VL, MiniCPM-V, Pixtral, etc.).
+#
+# Why this matters: the agent's VLM-critique path (chat.py /vlm,
+# agent.use_vlm_critique) sends the latest game screenshot to the model
+# so it can SEE the rendered output and adjust on visual evidence
+# (e.g. "the player sprite isn't visible because Mario was drawn off-
+# canvas"). For text-only models that path is a no-op — they can't read
+# images. Showing the modality in /list lets the user pick the right
+# tool for the job: text-only model for a small/fast iter, VLM when a
+# visual bug needs eyes.
+#
+# We classify by NAME (substring match, case-insensitive) — not by
+# probing the model with a test image, which would be expensive. The
+# agent still does a real probe via `_detect_vlm` at session start;
+# this name-based classifier is purely for the /list UI and may miss
+# variants we haven't catalogued. When the name doesn't match either
+# bucket we return "text" (the safe default — most models are
+# text-only and the runtime probe will detect the rare VLM that
+# slipped through the catalog).
+#
+# Adding a new VLM family: drop one or more substring patterns into
+# `_VLM_NAME_SUBSTRINGS`. Be specific enough that ordinary text-only
+# coding models don't accidentally match — e.g. don't add bare "vision"
+# without a unique surrounding token.
+
+# Substrings that, when present in the model NAME, indicate VLM.
+# Cross-checked against the model families shipped on HuggingFace as
+# of 2026-Q2. Patterns are matched case-insensitive against the full
+# tag (Ollama) or path basename (MLX).
+_VLM_NAME_SUBSTRINGS: tuple[str, ...] = (
+    # Alibaba Qwen family
+    "qwen-vl", "qwen2-vl", "qwen2.5-vl", "qwen3-vl", "qwen3.6-vl",
+    "qwen-omni", "qwen2.5-omni", "qwen3-omni",
+    # LLaVA family
+    "llava", "bakllava",
+    # DeepSeek vision
+    "deepseek-vl",
+    # OpenGVLab InternVL
+    "internvl",
+    # MiniCPM vision
+    "minicpm-v", "minicpm-llama3-v",
+    # Mistral / Pixtral
+    "pixtral",
+    # Google Gemma 3 (multimodal) — gemma3 family
+    "gemma3", "gemma-3",
+    # PaLI / SigLIP-based
+    "pali", "paligemma",
+    # CogVLM family
+    "cogvlm", "cogagent",
+    # Bunny (small VLM)
+    "bunny-v",
+    # Moondream
+    "moondream",
+    # HuggingFace M4 Idefics
+    "idefics",
+    # Florence-2
+    "florence-2",
+    # mPLUG-Owl
+    "mplug-owl",
+    # Microsoft Phi multimodal
+    "phi-3-vision", "phi-3.5-vision", "phi-4-multimodal",
+    # Cloud VLMs (Anthropic / OpenAI) — all current Claude / GPT-4o
+    # / o-series models accept images via API. Match generously: any
+    # gpt-4o*, gpt-5*, claude-*, claude-opus*, claude-sonnet* matches.
+    "gpt-4o", "gpt-4.1", "gpt-5", "o1-", "o3-", "o4-",
+    "claude-3", "claude-4", "claude-opus", "claude-sonnet",
+    "claude-haiku-3", "claude-haiku-4",
+)
+
+
+def classify_model_modality(name: str | None) -> str:
+    """Return "vlm" if the model NAME is a known Vision-Language Model
+    pattern, else "text". Case-insensitive substring match.
+
+    The classification is NAME-based only and may miss novel VLM
+    families we haven't catalogued. Callers that need a definitive
+    answer (e.g., the agent's runtime VLM-critique path) should
+    additionally probe the live model — see `GameAgent._detect_vlm`.
+    The /list TUI uses this name classifier to label rows with a
+    `[VLM]` or `[text]` badge so the user can pick the right model
+    without probing first.
+    """
+    if not name:
+        return "text"
+    low = name.lower()
+    for sub in _VLM_NAME_SUBSTRINGS:
+        if sub in low:
+            return "vlm"
+    return "text"
+
+
 # -----------------------------------------------------------------------------
 # Public types.
 # -----------------------------------------------------------------------------

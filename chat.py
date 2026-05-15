@@ -1081,6 +1081,7 @@ class CodingBoxApp(App):
         if extra is not None:
             self._last_test_block = extra
         body = self._render_activity_line()
+        body += self._render_mode_row()
         body += self._render_iteration_block()
         body += self._render_assets_block()
         body += self._render_sounds_block()
@@ -1194,6 +1195,50 @@ class CodingBoxApp(App):
             )
         return "[bold yellow]Activity:[/bold yellow] [dim]idle[/dim]\n"
 
+    def _render_mode_row(self) -> str:
+        """Render the colored Mode row in the right-hand status panel.
+
+        Item 5 (request 2026-05-15): the user wants explicit visual
+        feedback for the `/wait` step-mode state. Previously the only
+        signal was a black-on-yellow "WAIT MODE" badge in the bottom
+        mode-bar — visible only when step-mode was ON, invisible when
+        off (the user had to remember which state they last toggled).
+        The status panel now always renders a colored Mode line:
+
+          - step-mode ON:  black-on-yellow "WAIT" badge — pause-after-iter
+          - step-mode OFF: green "AUTO" — continuous run
+
+        VLM models also get a small badge here when the active session's
+        model is image-capable (the agent's runtime _detect_vlm latched
+        positive). Lets the user know at a glance whether the model can
+        consume screenshots for visual debugging or is text-only.
+        """
+        step_on = bool(getattr(self.agent, "_step_mode", False))
+        if step_on:
+            mode_badge = (
+                "[black on yellow] WAIT [/]  "
+                "[yellow]pause after each iter — Enter or feedback to continue[/yellow]"
+            )
+        else:
+            mode_badge = (
+                "[black on green] AUTO [/]  "
+                "[green dim]continuous run — /wait on to pause per-iter[/green dim]"
+            )
+        # VLM hint — agent's runtime probe sets self.agent._is_vlm to
+        # True/False after the first stream call. None = unknown (not
+        # probed yet). When True, the model can read screenshots
+        # (which the VLM-critique path attaches to feedback turns when
+        # /vlm is enabled). Mention it so the user knows their model
+        # can be helped by visual feedback.
+        is_vlm = getattr(self.agent, "_is_vlm", None)
+        if is_vlm is True:
+            vlm_hint = "  [magenta]\\[VLM][/magenta]"
+        elif is_vlm is False:
+            vlm_hint = "  [dim]\\[text-only][/dim]"
+        else:
+            vlm_hint = ""  # unprobed — stay silent
+        return f"[bold]Mode:[/bold] {mode_badge}{vlm_hint}\n"
+
     def _render_iteration_block(self) -> str:
         """Phase / iteration / streak / probes / ctx / model / goal / queued."""
         out = (
@@ -1290,10 +1335,17 @@ class CodingBoxApp(App):
         # session. Both render as small prefix badges so the user can
         # see the mode "in the bar with the commands" rather than only
         # at iter-boundary pause prompts.
+        #
+        # Item 5: also show an AUTO-mode badge when step-mode is OFF,
+        # so the user always sees which mode is active rather than
+        # inferring from absence-of-badge. Yellow = WAIT (pause per
+        # iter); green-dim = AUTO (continuous).
         prefix_badges: list[str] = []
         step_on = bool(getattr(self.agent, "_step_mode", False))
         if step_on:
             prefix_badges.append("[black on yellow] WAIT MODE [/]")
+        else:
+            prefix_badges.append("[black on green] AUTO [/]")
         if getattr(self, "_selection_mode_on", False):
             prefix_badges.append("[black on cyan] SELECT [/]")
         badge_prefix = " ".join(prefix_badges) + (" " if prefix_badges else "")
@@ -1869,7 +1921,9 @@ class CodingBoxApp(App):
         self._log(
             "[dim]  [O]llama / [M]LX / open[X]AI / [C]laude  ·  "
             "* = loaded right now  ·  ← active = this session  ·  "
-            "← staged = next /new[/dim]"
+            "← staged = next /new  ·  "
+            "[magenta]VLM[/magenta] = can read screenshots (vision-language) · "
+            "[dim]text[/dim] = text-only[/dim]"
         )
         # Track which model the next /new will resolve to so it gets the
         # ← staged marker even when the user hasn't typed /load yet.
@@ -1924,9 +1978,25 @@ class CodingBoxApp(App):
             else:
                 display = name
                 hint = ""
+            # Item 4: VLM/text modality badge. Computed name-based via
+            # backend.classify_model_modality — VLM models can read
+            # screenshots (the agent's _detect_vlm runtime probe + the
+            # /vlm critique path). For text-only models the badge is
+            # a dim "[text]"; for VLMs a colored "[VLM]" so the user
+            # spots them at a glance. Cloud backends (openai, anthropic)
+            # match the table for current GPT-4o / Claude families.
+            #
+            # NOTE: name-based classifier may miss novel VLM families.
+            # The runtime probe in GameAgent is the authoritative
+            # source — this badge is a hint for the model-picker UI.
+            modality = backend_mod.classify_model_modality(name)
+            if modality == "vlm":
+                badge = " [magenta]\\[VLM][/magenta]"
+            else:
+                badge = " [dim]\\[text][/dim]"
             self._log(
                 f"  [{i:>2}] [b]{tag}[/b] {loaded} {_esc(display)}"
-                f"{mark_active}{mark_staged}{hint}"
+                f"{badge}{mark_active}{mark_staged}{hint}"
             )
         self._log(
             "[dim]Use [b]/load N[/b] (or /model N) to stage by number, or "
@@ -3230,7 +3300,21 @@ class CodingBoxApp(App):
         """Render the structured per-asset stats from an `assets` event
         into a few lines for the status panel. Truncates the per-asset
         list to 6 entries with a "+N more" suffix to keep the panel
-        scannable even on big batches."""
+        scannable even on big batches.
+
+        Item 6 (request 2026-05-15): the user asked for a clear visual
+        marker showing whether each generated image is:
+          - txt2img (text-prompt only — most assets)
+          - img2img (animation frame chained from a prior asset via
+            `from_image` — e.g. mario_walk2 from mario_walk1 for a
+            walk-cycle frame pair)
+
+        The pipeline tracks this distinction in the per-asset stat dict
+        (`from_image` field set when img2img). We surface it as a small
+        colored badge so the user can visually verify that animation
+        chains rendered correctly (a img2img-chain failure usually
+        shows up as a child frame that looks unrelated to its parent).
+        """
         requested = data.get("requested", 0)
         produced = data.get("produced", 0)
         session_dir = data.get("session_dir") or ""
@@ -3254,7 +3338,29 @@ class CodingBoxApp(App):
             alpha = stat.get("alpha_pixel_ratio")
             if isinstance(alpha, (int, float)):
                 extra = f"  alpha={alpha:.2f}"
-            rows.append(f"  - {name:<20} {cache} {secs_str}{extra}")
+            # Source badge — Item 6. `from_image` field in the stat
+            # dict (set by assets.py:929-961) names the PARENT asset
+            # this one was chained from via img2img. Absent / None =
+            # plain txt2img.
+            from_image = stat.get("from_image")
+            if from_image:
+                # img2img animation chain — show source asset name.
+                # Truncate to keep the row scannable.
+                parent = str(from_image)[:18]
+                src = f"  [cyan]img2img←{_esc(parent)}[/cyan]"
+            else:
+                # Plain text-prompt generation. Dim so the eye is drawn
+                # to the chained-frame entries.
+                src = "  [dim]txt2img[/dim]"
+            # If img2img fell back to txt2img (parent failed to
+            # render), assets.py sets fallback_to_txt2img=True. Make
+            # that visible because the asset's visual identity may
+            # diverge from its intended parent.
+            if stat.get("fallback_to_txt2img"):
+                src = "  [yellow]txt2img (img2img fallback)[/yellow]"
+            rows.append(
+                f"  - {name:<20} {cache} {secs_str}{src}{extra}"
+            )
         if len(per_asset) > 6:
             rows.append(f"  [dim]+{len(per_asset) - 6} more[/dim]")
         if rows:

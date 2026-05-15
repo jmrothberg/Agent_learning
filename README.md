@@ -657,6 +657,24 @@ The gate now opens when ANY of:
 
 Defensive: the new probe list must be at least as large as the current set, so a model can't shrink the probe surface to mask regressions. `seed_build_instruction` in `prompts_v1.py` now also explicitly tells the model *"your Phase A `<probes>` were written WITHOUT seeing this file. If any reference state property, function, or DOM element names that do NOT exist in the code below, RE-EMIT a corrected `<probes>` block alongside your patch."*
 
+**Small-LLM safety net — six fixes from the 20260514_214747 trace**
+
+A Donkey Kong session run with a 27B local model (Qwen3.6-27B-mxfp8) exposed two clean harness gaps and three UI clarity gaps. The model hit two full deliberation loops (turns 04 and 08, each ~1000 lines of `<think>` prose with no code emission), one of which destroyed the on-disk baseline by emitting a 374-byte pseudocode skeleton inside `<html_file>` tags. The `Input test: FAIL` diagnostic was misleading because it claimed "controls are not wired up" even though `Input listeners: total=5` was logged in the same report. And the user couldn't tell at a glance whether the active model could read screenshots (VLM) or whether `/wait` step-mode was on or off.
+
+1. **Skeleton-payload rejection** ([agent.py](agent.py) `_detect_skeleton_payload`). The trace's iter 3 emitted an `<html_file>` whose JS body was 374 bytes of `// Asset loading` / `// Sound loading` comment-headers with `function loadAssets() { ... }` placeholder bodies. The harness wrote that to disk as the baseline; iter 4 had no real code to patch against and the model spent another deliberation loop trying to rebuild. The new detector trips when ALL FOUR conditions hold: (a) total HTML < 4 KB, (b) `<script>` body shorter than 800 bytes after stripping comments and whitespace, (c) at most 2 function definitions, (d) a placeholder marker (`{ ... }`, `// ...`, `// TODO`, `// stub`). Rejection fires inside `_materialize` before disk write, preserving the prior real baseline. Specific error tells the model to "emit the COMPLETE implementation this turn — every function body fully written, no `{ ... }` placeholders" or fall back to `<question>`.
+
+2. **Tighter deliberation guard** ([ollama_io.py](ollama_io.py) `DeliberationDetector`). Defaults were 6000 chars outside `<think>` and 15000 inside. The trace's two deliberation loops were caught but only after ~200 lines of pure reasoning — minutes of wall-clock per stuck iter. Tightened to 4000 / 8000. False-positive risk on legitimate complex reasoning stays low because the tag-opener regex matches any output-tag start (including ```` ```html ```` / ```` ```js ```` fences in seed builds), so a model that's about to emit code latches well before the threshold.
+
+3. **Better `Input test: FAIL` diagnostic** ([tools.py](tools.py)). Previous message said *"Controls are not wired up (or input handler is broken)"* regardless of listener count. The trace's iter 2 had `Input listeners: total=5 (win=5)` AND `RAF ran: True` AND canvas was not blank — the wiring DID exist; the model's keydown handler was firing, the issue was downstream (closure-scope mismatch between the handler's `keys` object and the one `updatePlayer` / `draw()` read). New diagnostic branches on `(listeners_present AND raf_ran AND canvas_not_blank)` and points at the actual layers to check: `keys`-object scope, `e.code` vs `e.key`, RAF-before-listener ordering, `update()` early-return on game-state flags. The `input_responsive` synthetic probe carries the same matched diagnostic.
+
+4. **VLM / text-only badge in `/list`** ([backend.py](backend.py) `classify_model_modality` + [chat.py](chat.py)). Vision-Language Models can consume screenshots — the agent's `_detect_vlm` probe and the VLM-critique path attach the current canvas to feedback turns so the model can SEE what it just shipped. For a text-only model that path is a no-op. The new classifier substring-matches the model name against a catalog of known VLM families (Qwen-VL, LLaVA, DeepSeek-VL, MiniCPM-V, Pixtral, Gemma 3, Phi-vision, MoonDream, plus all current Claude / GPT-4o variants). `/list` now shows `[VLM]` (magenta) or `[text]` (dim) next to each row. Name-based only; the runtime probe is still authoritative for the active session, but the badge lets the user pick the right model up-front. Add new VLM families by extending `_VLM_NAME_SUBSTRINGS`.
+
+5. **Mode row in status panel** ([chat.py](chat.py) `_render_mode_row`). The previous mode-bar showed a yellow `WAIT MODE` badge when step-mode was ON and nothing when OFF — the user had to remember the toggle state. The new status panel renders an explicit colored Mode line at the top of the right-hand panel that shows BOTH states: black-on-yellow `WAIT` when step-mode is on (with descriptive text "pause after each iter — Enter or feedback to continue"), black-on-green `AUTO` when off ("continuous run — /wait on to pause per-iter"). The bottom mode-bar got the same dual-state treatment (`AUTO` green badge added). A VLM hint also rides on the Mode line — `[VLM]` if the active session model is image-capable, `[text-only]` if not — so the user knows whether attaching `/vlm` screenshots will help.
+
+6. **Image-source marker in status assets block** ([chat.py](chat.py) `_format_assets_summary`). Each generated sprite is either txt2img (text prompt only) or img2img chained from a parent sprite (the `from_image` field in `<assets>` specs — used for animation walk-cycles, attack frames, etc., where SD-Turbo img2img preserves the parent's silhouette + palette). The status panel now shows a per-asset badge: dim `[txt2img]` for plain text-prompt generation, cyan `[img2img←<parent_name>]` for chained frames, yellow `[txt2img (img2img fallback)]` when img2img failed and the asset fell back to txt2img (which usually means the child won't visually match the parent). Helps the user spot animation-chain failures at a glance.
+
+Coverage: 9 unit tests for the skeleton detector with the literal DK 374-byte fixture pinned ([tests/test_skeleton_payload.py](tests/test_skeleton_payload.py)), 19 for the VLM classifier across Qwen / LLaVA / DeepSeek / Claude / GPT-4o families plus negative cases for text-only models ([tests/test_vlm_classifier.py](tests/test_vlm_classifier.py)), 6 for the deliberation-threshold pins including tag-opener-latch and env-var-disable ([tests/test_deliberation_thresholds.py](tests/test_deliberation_thresholds.py)).
+
 **Listening fixes — five edges where signals were getting dropped (`agent.py`)**
 
 Trace `a-game-of-donkey-kong-all-char_20260514_175012` revealed five distinct places where a clear signal — from the user, from the harness, or from the model's own diagnose — was being ignored. Each fix tightens one edge:
@@ -685,7 +703,7 @@ The one deepagents idea that survived the "no free reflection" filter. `<todos>.
 
 **Coverage**
 
-15 unit tests for `patches.py` format classification (`tests/test_format_rejection.py`), 15 for the probe-quality classifier including pinned regressions on both DK traces (`tests/test_probe_quality.py`), 15 for the patch-delta token-repetition detector including the literal DK `}else{ × 11` pin (`tests/test_patch_replace_repetition.py`), 16 for the broadened code-lock patterns with literal DK feedback text pin (`tests/test_feedback_code_lock.py`), 14 for the exit-decision turn gate + reply parsing + prompt content (`tests/test_exit_decision_turn.py`), 13 for the feedback behavior-bug detector with the literal DK feedback text pinned as a regression (`tests/test_feedback_behavior_bug.py`), 12 for the diagnose-vs-patch subsystem-coherence helpers (`tests/test_diagnose_patch_coherence.py`), 11 for the input-responsiveness keyword detector (`tests/test_input_responsive_synthesis.py`), 10 for the subsystem-hint helper + focused-slice biasing including the DK-20260514_175012 sig pin (`tests/test_subsystem_hint.py`), 9 for the widened probe re-parse gate including the DK-20260514 seed-session pin (`tests/test_probe_reparse_gate.py`), 8 for the stuck-loop hard-gate at streak≥3 (`tests/test_stuck_hard_gate.py`), 8 for the format-doctor early-escalation on looped streams (`tests/test_format_doctor_early_escalation.py`), 8 for the `<todos>` parser (`tests/test_todos_artifact.py`), 6 for the final-iter test guarantee (`tests/test_final_iter_test_guarantee.py`). All harness-side and pure-function — the full set runs in well under two seconds.
+19 unit tests for the VLM/text model-modality classifier across Qwen, LLaVA, DeepSeek, Claude and GPT-4o families (`tests/test_vlm_classifier.py`), 15 for `patches.py` format classification (`tests/test_format_rejection.py`), 15 for the probe-quality classifier including pinned regressions on both DK traces (`tests/test_probe_quality.py`), 15 for the patch-delta token-repetition detector including the literal DK `}else{ × 11` pin (`tests/test_patch_replace_repetition.py`), 16 for the broadened code-lock patterns with literal DK feedback text pin (`tests/test_feedback_code_lock.py`), 14 for the exit-decision turn gate + reply parsing + prompt content (`tests/test_exit_decision_turn.py`), 13 for the feedback behavior-bug detector with the literal DK feedback text pinned as a regression (`tests/test_feedback_behavior_bug.py`), 12 for the diagnose-vs-patch subsystem-coherence helpers (`tests/test_diagnose_patch_coherence.py`), 11 for the input-responsiveness keyword detector (`tests/test_input_responsive_synthesis.py`), 10 for the subsystem-hint helper + focused-slice biasing including the DK-20260514_175012 sig pin (`tests/test_subsystem_hint.py`), 9 for the widened probe re-parse gate including the DK-20260514 seed-session pin (`tests/test_probe_reparse_gate.py`), 9 for the skeleton-payload detector with the literal DK-20260514_214747 374-byte pin (`tests/test_skeleton_payload.py`), 8 for the stuck-loop hard-gate at streak≥3 (`tests/test_stuck_hard_gate.py`), 8 for the format-doctor early-escalation on looped streams (`tests/test_format_doctor_early_escalation.py`), 8 for the `<todos>` parser (`tests/test_todos_artifact.py`), 6 for the deliberation-guard threshold pins + tag-latch + env-disable (`tests/test_deliberation_thresholds.py`), 6 for the final-iter test guarantee (`tests/test_final_iter_test_guarantee.py`). All harness-side and pure-function — the full set runs in well under two seconds.
 
 ### Generated sprites — Z-Image-Turbo, no server
 
@@ -2072,6 +2090,11 @@ describe your next goal.
 | Agent loops on the same bug 3+ iterations | At `_repeat_sig_streak >= 3` AND the `mistake_signature` matches a known subsystem (input wiring, draw/RAF loop, RAF kick-off), the harness now forces a `<question>`-only hard-gate turn. The model emits a question with three concrete options *(rewrite from scratch / try a specific approach / ship as-is)* and waits for your answer. Look for `stuck_hard_gate_armed` and `stuck_hard_gate_prompt_built` events in the .jsonl. |
 | Session ended without `<done/>` or any signal | The iter loop used to fall out silently when the iter cap was reached on a failing build. Now an EXIT DECISION TURN fires forcing the model to either `<done/>` + `<notes>` (handoff summary) or `<question>` (specific blocker). Look for `exit_decision_turn_prompted` in the .jsonl. The final-iter test still runs against whatever ships. |
 | Diagnose names X but patches target Y | Light-touch warning: when the harness has been reporting a specific subsystem (e.g. INPUT) for ≥1 iter AND your `<diagnose>` and patches both ignore it, a `COHERENCE NOTE` appears in the next user turn naming the identifiers you missed (`addEventListener`, `keydown`, etc.). The note doesn't block the patch — it just asks whether you intentionally addressed a different bug. Look for `diagnose_patch_coherence_mismatch` in the .jsonl. |
+| Model emitted `<html_file>` as pseudocode skeleton (374 bytes, `// Asset loading` headers) | The new `_detect_skeleton_payload` check rejects this at materialize time so the prior real baseline isn't destroyed. Look for `<html_file> rejected: body looks like a pseudocode skeleton` in the test event. If this fires repeatedly, the model is at its working-memory ceiling — try a larger model or simplify the goal. |
+| Stream takes 5-10 min on a 27B local model with no code emitted | Deliberation loop. The new tighter thresholds (4K outside `<think>`, 8K inside) abort earlier with `result.deliberated=true`. The agent's pending-coaching path then nudges the model to "commit to one root cause + one patch" on the next turn. |
+| Can't tell if `/wait` step-mode is on or off | Look at the top of the status panel — explicit colored Mode row shows yellow `WAIT` when step-mode is on (pause per iter), green `AUTO` when off (continuous). Same dual-state badge in the bottom mode-bar. |
+| Can't tell if active model can read screenshots | Mode row in the status panel shows `[VLM]` (magenta) or `[text-only]` (dim) once the agent's `_detect_vlm` probe completes (after the first stream call). `/list` shows the same badge for every installed model based on name patterns. VLM models help when you need visual feedback on what rendered (the `/vlm` critique path attaches screenshots to feedback turns). |
+| Generated sprite doesn't match the rest of an animation chain | The status assets block now shows `[img2img←<parent>]` (cyan) for chained frames vs `[txt2img]` (dim) for plain text-prompt generation. `[txt2img (img2img fallback)]` (yellow) means the chain broke and the child rendered standalone — that's why it doesn't match its siblings. Re-emit the parent with a fresh prompt or change the chain's `strength` value. |
 | Stream takes 10+ minutes, then aborts | `stream_done` event shows `looped=true` / `stalled=true`. A 27B model exhausted productive vocabulary on a complex fix and entered a token-repetition loop. The format-doctor escalates early on this signal (one strike, not two — see `format_doctor_early_escalation` in trace). You can interrupt with feedback or wait for the doctor to reformat. |
 | Seed session: iter-1 report shows 4/5 probes failing | Phase A probes were authored WITHOUT seeing the seed file (the model can't see it until Phase B). Probes reference state names that don't exist in the seed. The iter-1 build prompt invites a corrected `<probes>` block; the harness adopts it on iter 2 via the widened reparse gate. **Trust iter 2's report, not iter 1's**, on seeded sessions. |
 | Playbook / criteria never show up in traces | The agent runs `prompt_version="v1"` by default; if you've manually downgraded to a custom v0 or older module, the `<playbook>` block won't be rendered. Check `agent.py:710`, `chat.py:2772`, and `coder.py:189` — all default to v1. |
@@ -2107,6 +2130,178 @@ If you want the *single highest-ROI next step* per axis:
 - **Token efficiency / safety on long sessions:** streaming patch validation.
 - **UX for interactive use:** diff preview before patch apply.
 - **Hardening:** sandboxed `file://` loading.
+
+---
+
+## Notes for future contributors (LLMs and humans)
+
+A lot of this codebase grew out of evidence-driven trace diagnosis. If
+you're an LLM picking this up to help improve the agent, read this section
+first — it tells you the invariants, the standing rules, the patterns you
+should follow, and the places where past edits have learned hard lessons.
+
+### Standing rules (these have evidence behind them — don't break them silently)
+
+1. **Model-agnostic.** No code path branches on a specific model name.
+   The user rotates local models constantly (Qwen3.6, DeepSeek-V4-flash,
+   the next thing next quarter). Tune the agent — prompts, retrieval,
+   verifier signals, harness gates — never the model. The only model-
+   shape signal we accept is a coarse class (`small` / `mid` / `large`)
+   which the user sets explicitly via `/model-class`.
+   - Memory rule: `~/.claude/projects/-Users-jonathanrothberg-Agent-learning/memory/feedback_model_agnostic.md`.
+
+2. **Genre-free.** No code path mentions a specific game (asteroids,
+   snake, DK, Doom) by name. The harness is open-domain HTML/JS;
+   retrieval, probes, skeletons, hint tables stay genre-free. Modality
+   keyword detectors (`_detect_art_intent`, `_detect_3d_intent`,
+   `_SUBSYSTEM_HINTS`) describe rendering SHAPES — `input`, `draw`,
+   `raf_start`, `assets` — not subject matter.
+
+3. **Diagnose before propose.** When given a trace and asked "why did
+   this fail?", the first response is evidence-based analysis quoting
+   turn numbers, event kinds, byte counts. Don't pivot to fixes before
+   the diagnosis lands.
+   - Memory rule: `feedback_diagnose_before_propose.md`.
+
+4. **Pace between chunks when non-auto.** When auto-mode is off, finish
+   one item fully (code + tests + run pytest), then stop and check in.
+   "First X, then Y" means stop between X and Y, even when both are
+   pre-approved.
+
+### Architecture at a glance
+
+```
+chat.py              Textual TUI (default entry point)
+coder.py             headless CLI driver
+agent.py             GameAgent — the core loop (planning, build, iterate,
+                     critique). Most verifier-feedback logic lives here.
+backend.py           LLM backends: Ollama, MLX (in-process), Anthropic,
+                     OpenAI. `detect_backend()` auto-selects.
+ollama_io.py         Shared streaming code path used by all backends —
+                     stall watchdog, repetition detector, deliberation
+                     guard.
+tools.py             Chromium harness. `LiveBrowser.load_and_test`
+                     runs the game and returns the test report.
+                     Universal probes + game-control keyword detection.
+patches.py           SEARCH/REPLACE patch engine. Char-preserving
+                     fuzzy match cascade. Token-repetition rejection.
+                     Format-failure classification.
+prompts_v1.py        Per-format guidelines, pi-mono FormatSpec pattern.
+                     `build_system_prompt(goal, model_class=...)`.
+memory.py            Mistakes (signature-keyed) + playbook (compounding
+                     rules-of-thumb). Quality-ranked, deduped retrieval.
+assets.py            In-process Z-Image-Turbo sprite generator.
+sounds.py            In-process Stable Audio Open sound generator.
+learner.py           Offline Reflector + Curator over trace files.
+tune.py              A/B battery for prompt/playbook changes.
+research.py          Wikipedia-grounded planning context.
+```
+
+The agent loop is async + event-driven. `GameAgent.run(goal)` is an
+`AsyncIterator[AgentEvent]`. Drivers consume the event stream. Three
+phases: Phase A (planning, 1 turn), Phase B (build/iterate up to
+`max_iters`), Phase C (self-critique on first clean `<done/>`).
+
+### How to add a new verifier-feedback fix (the dominant pattern in this codebase)
+
+Almost every fix in the "Verifier-feedback loops" section of this README
+follows the same pattern. Future improvements will too. The recipe:
+
+1. **Find the trace evidence.** Open the `.jsonl` file from a failing
+   session in `games/traces/`. Look for the event kinds: `mistake_signature`,
+   `stream_done` (with `looped`/`stalled`/`deliberated`/`crashed`/
+   `max_tokens_hit`), `format_rejection`, `media_change_directive_*`,
+   `probe_quality`, `coaching_injected`, `code_snapshot`, etc. Quote
+   timestamps + turn numbers in your fix's comment.
+2. **Write the helper as a module-level function with a thorough
+   docstring.** Examples: `_subsystem_hint`, `_feedback_is_behavior_bug`,
+   `_detect_skeleton_payload`, `classify_model_modality`. Each docstring
+   cites the trace, names the failure mode, lists the defenses against
+   false positives.
+3. **Wire it in at the right site.** Most live in `agent.py` (per-iter
+   loop, materialize path, fix-prompt assembly), `tools.py` (test report
+   construction), or `patches.py` (apply-patches per-patch loop).
+4. **Trace a structured event** for the new mechanism so it's observable
+   in the `.jsonl`. Pattern: `self._trace({"kind": "your_event_kind",
+   "field1": ..., ...})`. The .jsonl is the source of truth for
+   post-mortem analysis; if an event isn't traced, future LLMs can't
+   reason about it.
+5. **Write pure-function tests.** Pin the literal trace data as a
+   regression. Threshold constants get their own pin test. New tests
+   go in `tests/test_<feature>.py`. The full suite must run in <2s.
+6. **Document in the README.** Add an entry under "Verifier-feedback
+   loops" or "Listening fixes" with the trace citation, the
+   before/after behavior, and a one-line summary of the test coverage.
+   Bump the test-count summary at the bottom of that section.
+
+### Hint tables to extend (no architectural changes needed)
+
+These are the most common "add new entries" tasks. Each is a single
+data-only change — no logic refactor.
+
+- **VLM model families:** `_VLM_NAME_SUBSTRINGS` in `backend.py`. Add
+  case-insensitive substring patterns for the model name (e.g. a new
+  Qwen vision variant). The `/list` UI auto-picks up the label.
+- **Subsystem hints (mistake_signature → code-region pointer):**
+  `_SUBSYSTEM_HINTS` in `agent.py`. Each entry is
+  `(signature_substrings, name, identifier_tokens, fix_phrase)`. Used
+  by Item 1a coaching + Item 1b focused-slice biasing.
+- **Code-lock patterns (user feedback that means "minimal scope"):**
+  `_CODE_LOCK_PATTERNS` in `agent.py`. New regex patterns add
+  recognized phrasings without breaking existing ones.
+- **Game-control keywords (criteria text → input-test should be hard
+  signal):** `_GAME_CONTROL_KEYWORDS` in `tools.py`. New verbs / control
+  surfaces (joystick, gamepad, etc.).
+- **Behavior verbs (feedback shape → suppress MEDIA-CHANGE):**
+  `_BEHAVIOR_VERBS` in `agent.py`. Gameplay verbs only — visual verbs
+  like `look`, `appear`, `render` stay out so visual complaints route
+  to the art-change path.
+- **Format-failure classifiers (model emitted code in a shape the
+  parser missed):** `classify_format_failure` in `patches.py`.
+  Currently handles 6 shapes; add new ones as new failure modes
+  appear in traces.
+
+### Tests are documentation
+
+Many regression tests pin the literal trace fixture that motivated
+their fix. When you change behavior, update the test AND add a comment
+explaining why the new behavior is correct. Examples to study:
+
+- `test_subsystem_hint.py::test_literal_trace_20260514_175012_signature_matches_input`
+- `test_feedback_code_lock.py::test_dk_trace_20260514_175012_user_text_locks_code`
+- `test_skeleton_payload.py::test_dk_trace_374byte_skeleton_triggers_detector`
+- `test_patch_replace_repetition.py::test_dk_else_brace_11x_triggers`
+
+These tests are the closest thing to a regression contract. If a
+"clever simplification" makes one of them fail, the simplification
+probably re-introduces the bug it was meant to prevent.
+
+### What NOT to do (lessons from past edits being reverted)
+
+- **Don't propose fixes before doing the diagnosis.** The user calls
+  this out; memory has the rule. When given a trace, the first
+  response is evidence-based analysis.
+- **Don't blast through pre-approved sequences in non-auto mode.**
+  Pace between chunks; check in after each.
+- **Don't add hidden behavior changes to existing helpers.** New
+  behavior gets a new helper. Existing helpers are pinned by tests.
+- **Don't tune for a specific model.** If a single trace shows a
+  failure on Qwen but the same agent code works on DeepSeek, the fix
+  should be model-agnostic — broaden a pattern, tighten a threshold,
+  add a fallback. Never `if model_name == ...`.
+- **Don't skip the trace citation in the code comment.** Future
+  contributors (LLM or human) need to know which trace this fix
+  came from so they can verify the regression test if the trace gets
+  archived.
+
+### Where the standing rules live
+
+- `~/.claude/projects/-Users-jonathanrothberg-Agent-learning/memory/MEMORY.md`
+  is the index. Each rule is a small markdown file. The agent reads
+  this directory at session start and uses it to ground decisions.
+- `CLAUDE.md` (in the repo root) is the operational summary the agent
+  injects into the model's system prompt as `<project-context>`. Read
+  it for the env-var matrix and common-commands quick reference.
 
 ---
 

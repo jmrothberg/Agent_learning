@@ -395,6 +395,108 @@ def _is_degenerate_baseline(html: str) -> bool:
     return len(stripped) < 512
 
 
+def _detect_skeleton_payload(html: str) -> str | None:
+    """Detect a `<html_file>` body that's a pseudocode placeholder, not
+    real game code. Returns a human-readable reason string when the
+    body looks like a skeleton, or None when it looks legitimate.
+
+    Trace evidence — `build-a-donkey-kong-clone-in-o_20260514_214747`
+    iter 3 (turn 10): the model emitted an `<html_file>` whose JS
+    body was almost entirely pseudocode comment-headers like::
+
+        (function() {
+          "use strict";
+          // Canvas setup
+          const cvs = document.getElementById("c");
+          // ...
+          // Asset loading
+          const ASSETS = {};
+          async function loadAssets() { ... }
+          // Sound loading
+          const SOUNDS = {};
+          function loadSounds() { ... }
+          // ...
+
+    The placeholder `{ ... }` bodies parse as valid JS (an object with
+    a single `...` would be a spread but here it's not even that — it
+    just lands in the DOM as a 374-byte stub). The harness wrote that
+    to disk as the baseline, and the next iter had nothing real to
+    patch against. The model then hit the deliberation guard again
+    trying to rebuild from scratch. This rejects at materialize time
+    so the prior real baseline is preserved.
+
+    Heuristic (all four must hold):
+      1. Total HTML byte size below `_SKELETON_MAX_BYTES`.
+      2. First `<script>` body, stripped of JS comments and
+         whitespace, is shorter than `_SKELETON_MIN_BODY_BYTES`.
+      3. The stripped body contains at most a tiny handful of
+         function-like definitions (`function NAME(` or `const NAME = `
+         lambda forms). Real games have many.
+      4. The stripped body contains a placeholder ellipsis (` { ... }`
+         or `// ...`) that's the model's "fill this in later" marker.
+
+    The combination of #1 + #2 + #3 is the strong signal; #4 is a
+    safety check so we don't false-positive on a tiny legitimate game
+    (e.g. a one-liner toy). All four make a false positive on real
+    code virtually impossible.
+
+    Sibling of `_is_degenerate_baseline` — that function tests EXISTING
+    on-disk files to allow rewrite carve-outs; this one tests an
+    INCOMING `<html_file>` body to reject the write.
+    """
+    if not html:
+        return None
+    if len(html) > _SKELETON_MAX_BYTES:
+        return None  # Too big to be a skeleton.
+    m = re.search(r"<script\b[^>]*>(.*?)</script\s*>", html, re.IGNORECASE | re.DOTALL)
+    if not m:
+        # No <script> = either DOM-only app (legitimate; skip) or
+        # malformed (other detectors catch it).
+        return None
+    body = m.group(1)
+    # Strip JS comments (line + block) and condense whitespace so we
+    # measure the volume of REAL CODE, not the model's commentary.
+    stripped = re.sub(r"//[^\n]*", "", body)
+    stripped = re.sub(r"/\*.*?\*/", "", stripped, flags=re.DOTALL)
+    stripped = re.sub(r"\s+", " ", stripped).strip()
+    if len(stripped) >= _SKELETON_MIN_BODY_BYTES:
+        return None  # Real code present.
+    # Count function-shape definitions in the stripped body.
+    fn_count = len(re.findall(
+        r"\bfunction\s+[A-Za-z_$][\w$]*\s*\(", stripped,
+    )) + len(re.findall(
+        r"\b(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=\s*(?:async\s*)?"
+        r"(?:function|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)",
+        stripped,
+    ))
+    if fn_count > 2:
+        return None  # Real game has multiple functions; skip.
+    # Placeholder ellipsis markers — the model literally wrote "..."
+    # where code should be. Check the ORIGINAL body (not stripped)
+    # because the markers often live inside `{ ... }` placeholders.
+    placeholder = bool(
+        re.search(r"\{\s*\.\.\.\s*\}", body)
+        or re.search(r"//\s*\.\.\.", body)
+        or re.search(r"//\s*(?:rest|existing|TODO|stub|placeholder)", body, re.I)
+    )
+    if not placeholder:
+        return None
+    # All four conditions held → skeleton.
+    return (
+        f"<script> body is {len(stripped)} chars of code after "
+        f"stripping comments, with only {fn_count} function "
+        "definition(s) and `{ ... }` / `// ...` placeholder markers — "
+        "looks like a pseudocode outline, not a real game"
+    )
+
+
+# Skeleton-payload thresholds (Item 1, plan 20260514). Pulled out as
+# named constants so the regression test pins them and a future
+# refactor doesn't drift them silently.
+_SKELETON_MAX_BYTES = 4_000        # body cap; 374-byte DK trace fits easily
+_SKELETON_MIN_BODY_BYTES = 800     # post-comment-strip JS volume below this is suspicious
+
+
 def _detect_block_bloat(text: str) -> str | None:
     """Scan `text` for repeated N-line blocks. None if clean."""
     lines = [ln for ln in text.splitlines() if ln.strip()]
@@ -2750,6 +2852,29 @@ class GameAgent:
                     f"({bloat}). This typically means the model entered a "
                     f"regeneration loop on a large literal. Replace inline "
                     f"data with a seeded generator function and retry."
+                )
+            # Skeleton-payload detector (Item 1, trace
+            # build-a-donkey-kong-clone-in-o_20260514_214747 iter 3):
+            # the model emitted a 374-byte `<html_file>` body whose JS
+            # was pseudocode comment-headers (`// Asset loading`,
+            # `// Sound loading`, …) plus `{ ... }` placeholders, and
+            # the harness wrote that to disk as the baseline. The
+            # NEXT iter then had no real code to patch against and
+            # the model burned another deliberation loop trying to
+            # rebuild. Reject BEFORE writing so the prior real
+            # baseline (if any) is preserved.
+            skeleton = _detect_skeleton_payload(html)
+            if skeleton is not None:
+                return None, (
+                    f"<html_file> rejected: body looks like a "
+                    f"pseudocode skeleton, not a real game "
+                    f"({skeleton}). Emit the COMPLETE implementation "
+                    "this turn — every function body fully written, "
+                    "no `{ ... }` placeholders, no `// Asset loading` "
+                    "comment-headers without code beneath them. If "
+                    "you cannot fit the whole file in one reply, "
+                    "send a `<question>` to ask the user how to "
+                    "narrow scope instead of shipping a stub."
                 )
             return html, "full <html_file> rewrite"
 

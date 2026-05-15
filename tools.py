@@ -1655,11 +1655,58 @@ class LiveBrowser:
             # input and the input is broken, regardless of whether a
             # restart button happens to exist.
             controls_expected = expects_game_controls(criteria or "")
+            # Item 3, trace build-a-donkey-kong-clone-in-o_20260514_214747:
+            # the model's code had window.addEventListener + e.code +
+            # e.preventDefault, and report showed `Input listeners:
+            # total=5 (win=5)` — listeners WERE registered, RAF ran,
+            # canvas was not blank. But the input_test still failed,
+            # and the prior message ("Controls are not wired up") was
+            # misleading because controls ARE wired. The actual cause
+            # is downstream: handler writes to a `keys` object that
+            # draw() doesn't read (closure-scope mismatch), or draw()
+            # reads from a stale snapshot, or RAF is started before
+            # the listener is registered. Branch the message so the
+            # model sees a precise diagnostic instead of a wrong one.
+            listeners_present = (
+                bool(listener_info)
+                and listener_info.get("total", 0) > 0
+            )
+            raf_ran = bool(canvas_info and canvas_info.get("raf_ran"))
+            handler_present_but_no_visible_change = (
+                listeners_present and raf_ran
+                and canvas_info and canvas_info.get("blank") is False
+            )
             if not has_clickable or controls_expected:
-                report["soft_warnings"].append(
-                    f"HEURISTIC: pressed {keys_str} - canvas pixels never changed. "
-                    "Controls are not wired up (or input handler is broken)."
-                )
+                if handler_present_but_no_visible_change:
+                    # Listeners + RAF + non-blank canvas, but keys
+                    # don't move pixels: the wiring exists, the bug
+                    # is in the data flow between handler and draw().
+                    report["soft_warnings"].append(
+                        f"HEURISTIC: pressed {keys_str} - "
+                        f"{listener_info.get('total', 0)} key listener(s) "
+                        "registered on window AND the RAF loop is "
+                        "rendering, but pressing keys did not produce "
+                        "any visible pixel change. The wiring exists "
+                        "but the data flow between your keydown "
+                        "handler and your draw() is broken. CHECK: "
+                        "(1) your keydown handler writes to the SAME "
+                        "`keys` object that updatePlayer/draw() reads "
+                        "from (closure-scope mismatch is the #1 cause "
+                        "on small models); (2) you use `e.code` (not "
+                        "`e.key`) so layout-dependent values like "
+                        "'ArrowLeft' actually match your KEYMAP; "
+                        "(3) RAF is started AFTER the listener is "
+                        "registered so the first frame can read "
+                        "state set by held keys; (4) update() is "
+                        "actually being called (no early-return on "
+                        "state.over=true at startup)."
+                    )
+                else:
+                    # Listeners absent or RAF dead → original message.
+                    report["soft_warnings"].append(
+                        f"HEURISTIC: pressed {keys_str} - canvas pixels never changed. "
+                        "Controls are not wired up (or input handler is broken)."
+                    )
                 # Synthesize an `input_responsive` probe entry so the
                 # failure also surfaces in the per-probe display (model
                 # can't rationalize it as "just a warning"). The
@@ -1669,6 +1716,24 @@ class LiveBrowser:
                 # affirmatively expected — for genuinely DOM-driven
                 # pages we still want the lighter signal.
                 if controls_expected:
+                    if handler_present_but_no_visible_change:
+                        probe_err = (
+                            f"pressed {keys_str}; "
+                            f"{listener_info.get('total', 0)} listener(s) "
+                            "registered AND RAF is rendering, but keys "
+                            "do not produce visible state change. "
+                            "Verify your keydown handler writes to the "
+                            "same `keys` object draw() reads (closure-"
+                            "scope mismatch), and that update() runs "
+                            "(no early-return on game-state flags)."
+                        )
+                    else:
+                        probe_err = (
+                            f"pressed {keys_str} and canvas pixels "
+                            f"never changed — controls promised in "
+                            f"<criteria> but not wired. Confirm the "
+                            f"key handler runs and updates state."
+                        )
                     probe_results.append({
                         "name": "input_responsive",
                         "expr": (
@@ -1676,12 +1741,7 @@ class LiveBrowser:
                             "visible canvas change"
                         ),
                         "ok": False,
-                        "err": (
-                            f"pressed {keys_str} and canvas pixels "
-                            f"never changed — controls promised in "
-                            f"<criteria> but not wired. Confirm the "
-                            f"key handler runs and updates state."
-                        ),
+                        "err": probe_err,
                         "synthetic": True,
                     })
             else:

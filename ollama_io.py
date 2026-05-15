@@ -265,9 +265,22 @@ class DeliberationDetector:
 
     def __init__(
         self,
-        threshold_chars: int = 6000,
+        # Item 2, trace build-a-donkey-kong-clone-in-o_20260514_214747:
+        # tightened from 6000 → 4000 chars (outside <think>) and
+        # 15000 → 8000 chars (inside <think>). The DK trace's iter 1
+        # and iter 3 both spent 1000+ lines of <think> reasoning
+        # before emitting code — the old 15K think-threshold caught
+        # them but only after ~200 lines of pure deliberation. With
+        # 8K, abort fires at ~100 lines, saving 5-10 minutes of
+        # wall-clock time per stuck iter. False-positive risk on
+        # legitimately complex problems is low because the
+        # _TAG_OPENER_RE matches the moment ANY output tag begins
+        # (including ```html or ```js fences in seed builds), so
+        # any model that's actually about to emit code latches
+        # before the threshold trips.
+        threshold_chars: int = 4000,
         *,
-        think_threshold_chars: int = 15000,
+        think_threshold_chars: int = 8000,
     ) -> None:
         import os as _os
         # `_buf` holds a trailing slice for tag-opener regex matching
