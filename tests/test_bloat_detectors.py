@@ -30,11 +30,25 @@ from ollama_io import RepetitionDetector  # noqa: E402
 
 
 def _maze_block(seed: int) -> str:
-    """Plausible-looking 8-line maze chunk that's also >200 bytes."""
-    rows = [
-        f"  [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],  // s={seed}",
-    ] * 8
-    return "\n".join(rows)
+    """Plausible-looking 8-line maze chunk that's also >200 bytes.
+
+    Uses 8 *varied* row signatures so the adjacency detector (window 4)
+    doesn't fire prematurely — we want this block to exercise window 3
+    (block-level dup), not the per-line detectors. Variation is by
+    non-digit characters because window 2's digit-stripping would
+    collapse digit-only variation back to identical forms.
+    """
+    patterns = [
+        f"  const wallRowA = [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]; // s={seed}",
+        "  const openRowB = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0];",
+        "  const passC1   = [1,0,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,0,1];",
+        "  const passD2   = [1,0,1,0,0,0,0,0,0,1,0,1,0,0,0,0,0,0,0,0,1,0,1,0,0,0,0,0,0,1,0,1];",
+        "  const ladE3    = [1,0,1,0,1,1,1,1,0,1,0,1,0,1,1,1,1,1,1,0,1,0,1,0,1,1,1,1,0,1,0,1];",
+        "  const corrF4   = [1,0,1,0,1,0,0,1,0,1,0,1,0,1,0,0,0,0,1,0,1,0,1,0,1,0,0,1,0,1,0,1];",
+        "  const exitG5   = [1,0,0,0,1,0,0,1,0,0,0,1,0,1,0,1,1,0,1,0,0,0,1,0,1,0,0,1,0,0,0,1];",
+        "  const wallRowH = [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1];",
+    ]
+    return "\n".join(patterns)
 
 
 def test_clean_html_returns_none():
@@ -115,11 +129,16 @@ def test_repdetector_maze_block_dup_triggers():
 
 
 def test_repdetector_short_line_loop_still_works():
-    """The original short-line detector (window 1) still fires."""
+    """Window 1 (short-line exact-match) catches the alternating-two-lines
+    case. Feed two distinct short lines back-to-back so adjacency
+    (window 4) doesn't fire first — the window-1 trigger needs the
+    short-line set to collapse to ≤ 2 unique values across ≥ 12
+    entries."""
     det = RepetitionDetector()
     fired = False
-    for _ in range(40):
-        if det.feed("</body></html>\n"):
+    pair = ["</body></html>\n", "</html>\n"]
+    for i in range(40):
+        if det.feed(pair[i % 2]):
             fired = True
             break
     assert fired
@@ -127,15 +146,37 @@ def test_repdetector_short_line_loop_still_works():
 
 
 def test_repdetector_numbered_template_loop_still_works():
-    """Window 2 (digit-stripped) catches numbered template variants."""
+    """Window 2 (digit-stripped) catches numbered template variants.
+    Alternate prefix words so the lines aren't byte-identical (which
+    would fire adjacency / window 1) — only the digit-stripped form
+    collapses to ≤ 2 unique values."""
     det = RepetitionDetector()
     fired = False
+    prefixes = ["asset", "prop"]
     for i in range(40):
-        if det.feed(f'  {{"name":"asset_{i}","prompt":"foo"}}\n'):
+        p = prefixes[i % 2]
+        if det.feed(f'  {{"name":"{p}_{i}","prompt":"foo"}}\n'):
             fired = True
             break
     assert fired
     assert det.stall_reason == "near_dup_template_loop"
+
+
+def test_repdetector_adjacent_line_spam_triggers():
+    """Window 4 (adjacency): 4 identical consecutive lines fire
+    immediately, well before windows 1/2 would. This is the
+    donkey-kong p.onGirder = false / p.onLadder = false repetition
+    shape that previously needed ≥ 12 lines to abort."""
+    det = RepetitionDetector()
+    fired_at: int | None = None
+    for i in range(20):
+        if det.feed("p.onGirder = false;\n"):
+            fired_at = i
+            break
+    assert fired_at is not None
+    assert fired_at <= 4, f"adjacency should fire by line 4, got line {fired_at}"
+    assert det.stall_reason == "adjacent_line_spam"
+    assert det.loop_line == "p.onGirder = false;"
 
 
 # ---------------------------------------------------------------------------

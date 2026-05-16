@@ -750,6 +750,137 @@ def cmd_why(args) -> int:
     return 0
 
 
+async def cmd_validate_bullet(args) -> int:
+    """A/B-test ONE playbook bullet by running the battery twice with
+    the bullet's retrieval-score toggled. Reports the delta and a
+    verdict.
+
+    Procedure:
+      1. Snapshot the bullet's current `helpful`/`harmful` counters.
+      2. Run the battery with the bullet AS-IS (treatment).
+      3. Force-downgrade the bullet (`harmful=999`) so the
+         `1 + 0.10·tanh(score/5)` quality multiplier flips negative
+         and code-stage retrieval drops it. Run the battery again
+         (control).
+      4. Restore the original counters.
+      5. Diff the two manifests; emit a verdict (helps / neutral /
+         harms).
+
+    A bullet that does not improve iters-to-clean and does not improve
+    pass count is at best neutral. The Reflector's auto-proposals
+    (learner.detect_failure_shapes) can be gated on this verdict
+    before they get full retrieval weight — the README thesis 'an
+    agent that learns from every session' becomes 'an agent that
+    learns AND validates from every session.'
+    """
+    from memory import Playbook  # local import: keeps top-level lean
+
+    pb_root = (
+        Path(args.playbook_root) if args.playbook_root
+        else (Path(__file__).resolve().parent / "games" / "memory")
+    )
+    pb = Playbook(root=pb_root)
+    pb.ensure()
+    all_bullets = pb.load_all()
+    target = next((b for b in all_bullets if b.id == args.id), None)
+    if target is None:
+        print(f"no bullet with id={args.id!r} in {pb.path}", file=sys.stderr)
+        return 2
+
+    print(f"validating bullet: {args.id}")
+    print(f"  current counters: helpful={target.helpful}  harmful={target.harmful}")
+    saved_helpful, saved_harmful = target.helpful, target.harmful
+    tests_arg = args.tests or "asteroids"
+
+    # Build the args shape cmd_run expects (it reads attrs on the
+    # Namespace). Reuse current model / prompt-version / iter caps.
+    def _make_run_args(run_id: str) -> argparse.Namespace:
+        return argparse.Namespace(
+            model=args.model,
+            prompt_version=args.prompt_version,
+            full=False,
+            max_iters=args.max_iters,
+            best_of_n=args.best_of_n,
+            tests=tests_arg,
+            battery=None,
+            run_id=run_id,
+            headless=True,
+            skeleton_mode="default",
+            memory_root=str(pb_root),
+            auto_learn=False,
+            learn_shared=False,
+            reflector_model=None,
+            features="",
+        )
+
+    treatment_id = f"validate_{args.id}_treatment"
+    control_id = f"validate_{args.id}_control"
+
+    try:
+        # Step 1: treatment (bullet retrieves normally).
+        print()
+        print(f"[1/2] treatment run (bullet enabled) → {treatment_id}")
+        await cmd_run(_make_run_args(treatment_id))
+
+        # Step 2: control (bullet downgraded so retrieval drops it).
+        print()
+        print(f"[2/2] control run (bullet downgraded) → {control_id}")
+        pb.update_counters(
+            [args.id], helpful_delta=0, harmful_delta=999,
+        )
+        await cmd_run(_make_run_args(control_id))
+    finally:
+        # Always restore the original counters even on crash.
+        post = next((b for b in pb.load_all() if b.id == args.id), None)
+        if post is not None:
+            pb.update_counters(
+                [args.id],
+                helpful_delta=saved_helpful - post.helpful,
+                harmful_delta=saved_harmful - post.harmful,
+            )
+        print(f"\nrestored {args.id} counters: helpful={saved_helpful}  "
+              f"harmful={saved_harmful}")
+
+    # Step 3: load manifests and report.
+    t_run = _resolve_run(treatment_id)
+    c_run = _resolve_run(control_id)
+    if t_run is None or c_run is None:
+        print("could not resolve one of the run dirs", file=sys.stderr)
+        return 2
+    tm = _read_manifest(t_run)
+    cm = _read_manifest(c_run)
+    if tm is None or cm is None:
+        print("missing manifest.json", file=sys.stderr)
+        return 2
+    t_pass = tm["pass_count"]
+    c_pass = cm["pass_count"]
+    delta = t_pass - c_pass
+
+    print()
+    print("== verdict ==")
+    print(f"  treatment (bullet ON):  pass {t_pass}/{tm['test_count']}")
+    print(f"  control   (bullet OFF): pass {c_pass}/{cm['test_count']}")
+    print(f"  Δ pass: {delta:+d}")
+    if delta > 0:
+        verdict = "HELPS — bullet should keep current weight."
+    elif delta == 0:
+        verdict = (
+            "NEUTRAL — bullet had no measurable effect on this slice. "
+            "Consider broadening the test set, or downgrading if you "
+            "want only validated bullets in the playbook."
+        )
+    else:
+        verdict = (
+            "HARMS — bullet regressed pass rate. Recommend setting "
+            f"`harmful` ≥ 5 on {args.id} so the code-stage retrieval "
+            "drops it."
+        )
+    print(f"  {verdict}")
+    print()
+    print(f"  full diff: python tune.py diff {control_id} {treatment_id}")
+    return 0
+
+
 def cmd_diff(args) -> int:
     a = _resolve_run(args.run_a)
     b = _resolve_run(args.run_b)
@@ -896,6 +1027,25 @@ def main() -> int:
                      help="playbook dir (default: run's isolated _memory, "
                           "fallback to project games/memory)")
 
+    pv = sub.add_parser(
+        "validate-bullet",
+        help="A/B-test one playbook bullet by running the battery "
+             "twice with the bullet's retrieval-score toggled and "
+             "printing the pass-rate delta.",
+    )
+    pv.add_argument("--id", required=True,
+                    help="bullet id to validate (must exist in playbook)")
+    pv.add_argument("--tests", default="asteroids",
+                    help="comma-separated test slugs to run for the A/B "
+                         "(default: asteroids, the canonical regression "
+                         "check)")
+    pv.add_argument("--model", default=DEFAULT_MODEL)
+    pv.add_argument("--prompt-version", default="v1")
+    pv.add_argument("--max-iters", type=int, default=None)
+    pv.add_argument("--best-of-n", type=int, default=None)
+    pv.add_argument("--playbook-root", default=None,
+                    help="playbook dir (default: project games/memory)")
+
     args = p.parse_args()
 
     if args.cmd == "run":
@@ -910,6 +1060,8 @@ def main() -> int:
         return cmd_why(args)
     if args.cmd == "analyze":
         return cmd_analyze(args)
+    if args.cmd == "validate-bullet":
+        return asyncio.run(cmd_validate_bullet(args))
     return 2
 
 

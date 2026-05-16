@@ -504,6 +504,182 @@ def curate(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Deterministic trace-shape detectors (no LLM call)
+# ---------------------------------------------------------------------------
+#
+# Some failure shapes are unambiguous in the trace bytes — a token-
+# repetition loop on `flag = false;` assignments, or a `console.error`
+# saying `Identifier '<name>' has already been declared`. Asking the
+# Reflector LLM to "notice" these shapes wastes a request and depends on
+# the LLM having a stable mental model of what the harness already
+# detected. Better: scan the raw rows ourselves and emit deterministic
+# proposals BEFORE the LLM Reflector runs.
+#
+# These detectors are the "every-trace teaches the playbook" path. They
+# encode the failure shapes from donkey-kong traces 20260516_124628
+# (concatenated drafts → duplicate `const` declarations) and
+# 20260516_142445 (dead state-reset block → adjacent-line spam).
+
+# Regexes for the two shapes we currently detect.
+_DUP_DECL_ERR_RE = re.compile(
+    r"Identifier\s+['\"`]?(\w+)['\"`]?\s+has already been declared",
+    re.IGNORECASE,
+)
+# An assignment-style line we'd expect to see repeated when the model
+# emits a dead state-reset block (`p.onGirder = false;` shape).
+_FLAG_ASSIGN_RE = re.compile(
+    r"^[\w.\[\]]+\s*=\s*(?:false|true|null|0|undefined)\s*;?\s*$",
+)
+
+
+def detect_failure_shapes(trace_path: Path) -> list[dict]:
+    """Scan a trace for failure shapes that always map to the same
+    playbook bullet, and emit deterministic new_bullets proposals.
+
+    Each returned dict matches the Reflector's `new_bullets` schema so
+    the Curator can merge it with LLM-proposed deltas without extra
+    plumbing. The Curator's existing dedup-by-id (and idempotent
+    counter logic) handles "this bullet already exists" → no-op.
+
+    Two detectors today:
+
+    1. Adjacent-line spam on flag-assignment lines. Trigger:
+       `stream_done` with `looped=True` AND `loop_kind` in
+       {"adjacent_line_spam", "short_line_loop"} AND the captured
+       `loop_line` looks like an assignment to a literal. This is the
+       donkey-kong 20260516_142445 shape exactly.
+
+    2. Duplicate top-level declaration. Trigger: any `console_error`
+       text matches "Identifier 'X' has already been declared". This is
+       the donkey-kong 20260516_124628 shape (concatenated drafts).
+    """
+    out: list[dict] = []
+    rows = _safe_load_jsonl(trace_path)
+    if not rows:
+        return out
+
+    fired_dead_state = False
+    fired_dup_decl = False
+    # Pending state for the legacy-trace fallback (pre-A1 traces don't
+    # carry `loop_kind` / `loop_line`). When we see a `looped=True`
+    # `stream_done` immediately followed by a `format_rejection` whose
+    # kind is `unclosed_html_file`, that's the same failure shape the
+    # adjacency detector now captures — fire the bullet on the
+    # combination instead.
+    pending_loop_no_metadata = False
+
+    for r in rows:
+        kind = r.get("kind") or ""
+
+        # Detector 1: dead-state-reset block.
+        if kind == "stream_done" and not fired_dead_state:
+            looped = bool(r.get("looped"))
+            if looped:
+                loop_kind = r.get("loop_kind") or ""
+                loop_line = (r.get("loop_line") or "").strip()
+                if not loop_kind and not loop_line:
+                    # Legacy trace: arm the unclosed-html-file
+                    # confirmation below.
+                    pending_loop_no_metadata = True
+                if (
+                    loop_kind in ("adjacent_line_spam", "short_line_loop")
+                    and loop_line
+                    and _FLAG_ASSIGN_RE.match(loop_line)
+                ):
+                    out.append({
+                        "id": "no-dead-state-reset-fallthrough",
+                        "tags": [
+                            "code-quality", "anti-pattern",
+                            "token-loop", "control-flow",
+                        ],
+                        "content": (
+                            "When a state branch's only effect is to "
+                            "re-clear flags that were already cleared "
+                            "upstream, DELETE the branch entirely. Do "
+                            "NOT pad it with redundant assignments like "
+                            "`flag = false; flag = false;`. Adjacent "
+                            "identical assignments are a well-known "
+                            "token-repetition-loop trigger for local "
+                            "LLMs (qwen3.6, DeepSeek-V4) and will cause "
+                            "the streaming RepetitionDetector to abort "
+                            "the reply mid-emit, leaving an unclosed "
+                            "<html_file>."
+                        ),
+                    })
+                    fired_dead_state = True
+
+        # Legacy-trace confirmation: `format_rejection.rejection_kind=
+        # unclosed_html_file` immediately after a `looped` `stream_done`
+        # is the same shape, even without `loop_kind`/`loop_line`.
+        if (
+            kind == "format_rejection"
+            and pending_loop_no_metadata
+            and not fired_dead_state
+        ):
+            rk = r.get("rejection_kind") or ""
+            if rk == "unclosed_html_file":
+                out.append({
+                    "id": "no-dead-state-reset-fallthrough",
+                    "tags": [
+                        "code-quality", "anti-pattern",
+                        "token-loop", "control-flow",
+                    ],
+                    "content": (
+                        "When a state branch's only effect is to "
+                        "re-clear flags that were already cleared "
+                        "upstream, DELETE the branch entirely. Do "
+                        "NOT pad it with redundant assignments like "
+                        "`flag = false; flag = false;`. Adjacent "
+                        "identical assignments are a well-known "
+                        "token-repetition-loop trigger for local "
+                        "LLMs (qwen3.6, DeepSeek-V4) and will cause "
+                        "the streaming RepetitionDetector to abort "
+                        "the reply mid-emit, leaving an unclosed "
+                        "<html_file>."
+                    ),
+                })
+                fired_dead_state = True
+                pending_loop_no_metadata = False
+
+        # Detector 2: concatenated drafts → duplicate top-level decl.
+        # `test` events carry the console error list; we also accept
+        # the raw event:test payload's data.errors field.
+        if kind == "event" and r.get("event") == "test":
+            data = r.get("data") or {}
+            for err in (data.get("errors") or []):
+                if _DUP_DECL_ERR_RE.search(str(err)):
+                    if not fired_dup_decl:
+                        out.append({
+                            "id": "no-concatenated-drafts",
+                            "tags": [
+                                "code-quality", "anti-pattern",
+                                "rewrite", "syntax",
+                            ],
+                            "content": (
+                                "When you rewrite an `<html_file>` body, "
+                                "delete the previous draft COMPLETELY. "
+                                "Duplicate top-level `const` / `let` / "
+                                "`function` declarations at the same "
+                                "scope crash the script with "
+                                "`Identifier '<name>' has already been "
+                                "declared`. The micro-probe catches "
+                                "this pre-Chromium, but the iter is "
+                                "still wasted — emit ONE complete body "
+                                "per turn, not a concatenation of "
+                                "first-and-second drafts."
+                            ),
+                        })
+                        fired_dup_decl = True
+                    break
+
+        # Early exit: both fired, nothing more to find.
+        if fired_dead_state and fired_dup_decl:
+            break
+
+    return out
+
+
 async def cmd_reflect(args) -> int:
     return await _run_reflect_apply(args, apply=False)
 
@@ -551,10 +727,23 @@ async def _run_reflect_apply(args, *, apply: bool) -> int:
         print(f"[{i}/{len(sessions)}] {s.session_id}  goal={s.goal[:50]!r}  "
               f"{'OK' if s.final_ok else 'FAIL'}")
         prop = await reflect_one(s, existing, backend=bk)
+        # Deterministic trace-shape detectors run BEFORE merging into
+        # the proposal so their findings get the same Curator dedup
+        # treatment. The LLM Reflector still runs (it catches shapes
+        # we haven't hardcoded yet), but obvious patterns no longer
+        # depend on the LLM noticing them.
+        shape_bullets = detect_failure_shapes(s.trace_path)
+        if shape_bullets:
+            prop.setdefault("new_bullets", []).extend(shape_bullets)
+            prop.setdefault("observations", []).extend(
+                [f"shape-detector: {b['id']}" for b in shape_bullets]
+            )
         n_new = len(prop.get("new_bullets") or [])
         n_cu = len(prop.get("counter_updates") or [])
         n_obs = len(prop.get("observations") or [])
-        print(f"     → obs={n_obs}  new={n_new}  counters={n_cu}")
+        n_shape = len(shape_bullets)
+        suffix = f" (+{n_shape} from shape-detectors)" if n_shape else ""
+        print(f"     → obs={n_obs}  new={n_new}  counters={n_cu}{suffix}")
         proposals.append(prop)
 
     log = curate(proposals, playbook, apply=apply,

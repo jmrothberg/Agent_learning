@@ -328,6 +328,13 @@ _CRITERIA_RE = re.compile(r"<criteria>\s*(.*?)\s*</criteria>", re.DOTALL | re.IG
 _PROBES_RE = re.compile(r"<probes>\s*(.*?)\s*</probes>", re.DOTALL | re.IGNORECASE)
 _TODOS_RE = re.compile(r"<todos>\s*(.*?)\s*</todos>", re.DOTALL | re.IGNORECASE)
 _PLAN_OPEN_RE = re.compile(r"<plan\b", re.IGNORECASE)
+# Phase-A signals re-emitted in a build/iter turn instead of code.
+# Used in the no-usable-code fallback to route to probes-only / media-only
+# coaching that names the shape back to the model (donkey-kong traces
+# 20260516_124628 iter 1, 20260516_142445 iter 1).
+_PROBES_OPEN_RE = re.compile(r"<probes\b", re.IGNORECASE)
+_ASSETS_OPEN_RE = re.compile(r"<assets\b", re.IGNORECASE)
+_SOUNDS_OPEN_RE = re.compile(r"<sounds\b", re.IGNORECASE)
 # Pi-mono "skills" pattern: <lookup_bullet>id</lookup_bullet> requests
 # the full body of a playbook bullet whose index-entry was inlined in
 # hybrid mode. Resolved + injected at the next user-turn boundary.
@@ -1204,6 +1211,17 @@ class GameAgent:
         self._last_stream_looped: bool = False
         self._last_stream_stalled: bool = False
         self._last_stream_deliberated: bool = False
+        # When the previous stream looped, which RepetitionDetector window
+        # fired and (if captured) what line was looping. Surfaced in the
+        # format-rejection fallback so coaching can name the failure shape
+        # back to the model (donkey-kong 20260516_142445 iter 1).
+        self._last_stream_loop_kind: str | None = None
+        self._last_stream_loop_line: str | None = None
+        # Probe-sanity lint findings (tautological / unassigned-property
+        # reads). Refreshed each iter; surfaced into the diagnose-then-
+        # fix prompt when the iter fails. Empty list when probes are
+        # healthy. See _lint_probes / _probes_referencing_unassigned_props.
+        self._probe_lint_findings: list[dict] = []
         # Tracked separately from `stalled` (which the backend sets on
         # crash too). Format-doctor early-escalation reads this so it
         # doesn't burn another stream trying to "reformat" 30+ KB of
@@ -1341,6 +1359,11 @@ class GameAgent:
         consecutive_plan_only: int,
         rejection: FormatRejection | None = None,
         format_stuck_streak: int = 0,
+        probes_only: bool = False,
+        media_only: bool = False,
+        prior_stream_looped: bool = False,
+        prior_loop_kind: str | None = None,
+        prior_loop_line: str | None = None,
     ) -> tuple[str, bool]:
         """Pick the fallback message + decide whether to reset the
         plan-only streak counter.
@@ -1413,6 +1436,82 @@ class GameAgent:
                 "<html_file>...</html_file> now containing the "
                 "new game. Do NOT include <plan>, <criteria>, "
                 "or <probes> in this reply."
+            )
+            return fallback, False
+        # Probes-only / media-only: the model re-emitted Phase-A signals
+        # (<probes>, <assets>, <sounds>) without any <html_file> or
+        # <patch>. Observed in donkey-kong traces 20260516_124628 iter 1
+        # (probes-only) and 20260516_142445 iter 1 (probes preamble +
+        # later <html_file>). The generic fallback below leaves the
+        # model guessing why the turn was rejected; this one names the
+        # specific shape so the next turn skips the redundant block.
+        if probes_only or media_only:
+            tag_name = "<probes>" if probes_only else "<assets> / <sounds>"
+            fallback = (
+                f"You emitted {tag_name} but no <html_file> or <patch> "
+                "this turn. Iter 1 must produce the first build, and on "
+                "any iter after that a code-changing tag is required. "
+                "The probes / assets / sounds from Phase A are still in "
+                "force — re-emitting them here is not needed. Emit a "
+                "complete <html_file>...</html_file> now (or one or more "
+                "<patch> blocks if a baseline file already exists). "
+                "Do NOT include <probes>, <assets>, or <sounds> in this "
+                "reply unless you are intentionally adding to them; "
+                "they live in session state."
+            )
+            return fallback, False
+        # Repetition-loop + unclosed <html_file>: the most common
+        # sequence is "model entered a token loop inside a code block, the
+        # RepetitionDetector aborted the stream mid-emit, and the parser
+        # rejected the partial reply as `unclosed_html_file`." Surfacing
+        # this combination prescriptively lets the model recover without
+        # blindly re-issuing the same draft. Observed in donkey-kong
+        # trace 20260516_142445 iter 1 (16+ `p.onGirder = false;` repeats
+        # in a dead state-reset block). Without this branch the model
+        # sees a generic "your tags were malformed" and has no signal
+        # about WHAT broke.
+        if (
+            prior_stream_looped
+            and rejection is not None
+            and rejection.kind in ("unclosed_html_file", "unclosed_patch")
+        ):
+            kind_label = (
+                "an `<html_file>`"
+                if rejection.kind == "unclosed_html_file"
+                else "a `<patch>`"
+            )
+            loop_shape = {
+                "adjacent_line_spam": "the same line N times in a row",
+                "short_line_loop": "the same 1-2 short lines cycling",
+                "near_dup_template_loop": "near-duplicate template lines",
+                "inline_data_bloat": "an 8-line block duplicated 3+ times",
+            }.get(prior_loop_kind or "", "the same content on repeat")
+            line_clue = ""
+            if prior_loop_line:
+                # Truncate long lines so the coaching stays small.
+                clue = prior_loop_line[:80]
+                if len(prior_loop_line) > 80:
+                    clue += "…"
+                line_clue = (
+                    f" The repeated content was: `{clue}`."
+                )
+            fallback = (
+                f"Your previous reply hit a token-repetition loop and the "
+                f"stream was aborted, so {kind_label} block has no closing "
+                f"tag. The loop shape was: {loop_shape}.{line_clue}\n\n"
+                "DO NOT re-emit the same draft — the section that was "
+                "looping is the root cause; restarting will hit the same "
+                "wall. Instead, choose ONE:\n"
+                "  - emit a `<question>` describing what you were trying "
+                "to compute when the loop started (preferred when you're "
+                "unsure how to proceed without the dead branch), OR\n"
+                "  - emit a smaller `<html_file>...</html_file>` that "
+                "OMITS the branch that was looping. If it was a "
+                "fall-through state-reset block where every flag was "
+                "already cleared upstream, delete the block entirely — "
+                "don't pad with redundant `flag = false; flag = false;` "
+                "statements (those are a known token-loop trigger).\n\n"
+                "Whichever you choose, keep this turn SHORT."
             )
             return fallback, False
         # Structured-rejection path: model emitted something tag-shaped
@@ -2852,6 +2951,12 @@ class GameAgent:
         self._last_stream_stalled = bool(result.stalled)
         self._last_stream_deliberated = bool(result.deliberated)
         self._last_stream_crashed = bool(result.crashed)
+        self._last_stream_loop_kind = (
+            getattr(result, "loop_kind", None) if result.looped else None
+        )
+        self._last_stream_loop_line = (
+            getattr(result, "loop_line", None) if result.looped else None
+        )
         self._trace({
             "kind": "stream_done",
             "tokens": result.tokens,
@@ -3757,6 +3862,158 @@ class GameAgent:
             "ratio": (len(dyn) / total) if total else 0.0,
         }
 
+    # Pattern 1: probe binds a local `const x0 = …` (or `let`/`var`), then
+    # immediately returns a literal `true`/`false` without ever reading
+    # x0 again. The temp binding is wasted; the probe is tautological.
+    # Donkey-kong trace 20260516_142445 iter 1 `mario_moves`:
+    #   `(()=>{const x0=s.player.x; setTimeout(()=>{}, 100); return true;})()`
+    # Pattern 2: probe asserts `typeof obj.NAME === 'undefined'` (or the
+    # short form `obj.NAME === undefined`) and returns false on that
+    # path, but `obj.NAME` is never assigned anywhere in the game body.
+    # That check is permanently true → probe always returns false →
+    # zero signal. Donkey-kong trace 20260516_124628 iter 1 `barrels_move`:
+    #   `if (typeof b.x0 === 'undefined') return false; …`  (b.x0 is
+    #   never assigned).
+    # The undefined-property check needs the on-disk HTML, so it runs
+    # later — at materialize time, not at probe-parse time. The
+    # tautological-temp check is purely structural and runs immediately.
+    # Match: `const NAME = …;` followed (eventually) by `return <literal>`.
+    # The `.*?` is lazy so we don't span over an outer return that
+    # belongs to a different function body. We accept newlines (DOTALL)
+    # and braces inside (e.g. an inner `setTimeout(()=>{})`) because
+    # the "is the temp dead?" check below uses `expr.count(temp_name)`
+    # to confirm the binding is actually unused.
+    _PROBE_TAUTOLOGY_RE = re.compile(
+        r"(?:const|let|var)\s+(\w+)\s*=\s*[^;]+;"
+        r".*?return\s+(?:true|false|0|1)\s*;",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    @staticmethod
+    def _lint_probes(probes: list[dict]) -> list[dict]:
+        """Return a list of `{name, kind, message}` lint findings for
+        probes that pass JSON parse but are structurally tautological.
+
+        Catches the donkey-kong 20260516_142445 `mario_moves` shape —
+        the probe binds a `const x0` then returns `true` without ever
+        comparing against x0. The setTimeout callback is empty, so the
+        probe provides no behavioral signal.
+        """
+        findings: list[dict] = []
+        for p in probes:
+            name = str(p.get("name", "?"))
+            expr = str(p.get("expr", ""))
+            if not expr:
+                continue
+            m = GameAgent._PROBE_TAUTOLOGY_RE.search(expr)
+            if m:
+                temp_name = m.group(1)
+                # Confirm the temp is referenced ONLY in its declaration:
+                # split on the temp name; if there's only one occurrence
+                # left after stripping the decl prefix, the temp is dead.
+                if expr.count(temp_name) <= 1:
+                    findings.append({
+                        "name": name,
+                        "kind": "tautological_constant_return",
+                        "message": (
+                            f"probe `{name}` binds `{temp_name}` but "
+                            f"never reads it again before returning a "
+                            f"constant — the probe always returns the "
+                            f"same value regardless of game behavior."
+                        ),
+                    })
+        return findings
+
+    @staticmethod
+    def _probes_referencing_unassigned_props(
+        probes: list[dict], html: str,
+    ) -> list[dict]:
+        """For each probe, find `obj.PROP` accesses where PROP is never
+        assigned anywhere in `html`. Returns the same `{name, kind,
+        message}` shape as `_lint_probes`.
+
+        Catches the donkey-kong 20260516_124628 `barrels_move` shape:
+        the probe gates on `b.x0` but the game code never sets `b.x0`,
+        so the probe trivially returns false. The check is permissive —
+        only properties that look like real game-state names (≥ 2 chars,
+        not a reserved word, not a built-in property) are checked, to
+        avoid flagging legitimate property reads on DOM / built-in
+        objects.
+        """
+        if not probes or not html:
+            return []
+        # Cheap negation: skip if the HTML body is too small to contain
+        # any real game state. The check below assumes a parseable script.
+        if "<script" not in html.lower():
+            return []
+        findings: list[dict] = []
+        # Properties to never flag: DOM, canvas, common built-ins. If a
+        # probe accesses `c.width` and the HTML never says `c.width = X`,
+        # that's fine — `width` is a DOM property of the canvas element.
+        _IGNORE = {
+            "length", "size", "width", "height", "x", "y", "left", "top",
+            "right", "bottom", "data", "value", "textContent",
+            "innerText", "innerHTML", "style", "className", "id", "name",
+            "parent", "child", "next", "prev", "node", "type", "kind",
+        }
+        # Extract candidate property *accesses* (not method *calls*).
+        # Negative lookahead `(?!\s*\()` skips `obj.method(args)` —
+        # methods aren't assignable state, so flagging them as
+        # "unassigned" produces false positives (e.g. `obj.toString`,
+        # `document.querySelector`). Method-call hallucinations are
+        # caught by the separate API-allowlist micro-probe in tools.py.
+        prop_re = re.compile(
+            r"\b\w+\.([A-Za-z_$][\w$]*)\b(?!\s*\()"
+        )
+        # Build the assignment set ONCE per HTML — assignments look like
+        # `obj.prop =`, `obj.prop +=`, `obj.prop:` (object literal),
+        # `prop:` inside object literals at all depths.
+        # Conservatively, scan for both patterns.
+        assigned: set[str] = set()
+        for m in re.finditer(
+            r"\.([A-Za-z_$][\w$]*)\s*(?:=|\+=|-=|\*=|/=)(?!=)",
+            html,
+        ):
+            assigned.add(m.group(1))
+        # Object-literal entries: `name:` at line start or after `,` /
+        # `{` / `(`. This is a loose match (catches some non-assignments
+        # like ternary labels) which is FINE — false negatives (skipping
+        # a real warning) are cheaper than false positives.
+        for m in re.finditer(
+            r"(?:[,{(\n]\s*|^\s*)([A-Za-z_$][\w$]*)\s*:",
+            html,
+        ):
+            assigned.add(m.group(1))
+        for p in probes:
+            name = str(p.get("name", "?"))
+            expr = str(p.get("expr", ""))
+            if not expr:
+                continue
+            missing: set[str] = set()
+            for m in prop_re.finditer(expr):
+                prop = m.group(1)
+                if prop in _IGNORE or prop.startswith("_"):
+                    continue
+                # The probe accesses obj.prop; if `prop` is never
+                # assigned anywhere in the file, flag it.
+                if prop not in assigned:
+                    missing.add(prop)
+            if missing:
+                sample = ", ".join(f"`{p}`" for p in sorted(missing)[:3])
+                findings.append({
+                    "name": name,
+                    "kind": "unassigned_property_read",
+                    "message": (
+                        f"probe `{name}` reads {sample} but the game "
+                        f"code never assigns those properties — the "
+                        f"probe will trivially fail (or short-circuit "
+                        f"return) regardless of game behavior. Either "
+                        f"fix the probe to read a real game-state "
+                        f"property, or add the assignment to the game."
+                    ),
+                })
+        return findings
+
     @staticmethod
     def _extract_probes(reply: str) -> list[dict]:
         """Pull a JSON list-of-{name,expr} out of <probes>...</probes>.
@@ -4524,6 +4781,23 @@ class GameAgent:
                         "`!!window.x`) — nudging model to add "
                         "dynamic-behavior probes.",
                     ))
+                # Static probe-sanity lint: catches tautological probes
+                # that bind a temp and discard it before returning a
+                # constant. The undefined-property check runs later (it
+                # needs the on-disk HTML). Donkey-kong trace
+                # 20260516_142445 `mario_moves` is the canonical case.
+                taut_findings = GameAgent._lint_probes(probes)
+                self._probe_lint_findings = list(taut_findings)
+                if taut_findings:
+                    self._trace({
+                        "kind": "probe_lint",
+                        "findings": taut_findings,
+                    })
+                    for f in taut_findings:
+                        yield self._record(AgentEvent(
+                            "info",
+                            f"[yellow]probe lint[/yellow] {f['message']}",
+                        ))
 
             q = self._extract_question(plan_reply)
             if q is not None:
@@ -5426,9 +5700,24 @@ class GameAgent:
                         self._consecutive_plan_only += 1
                     else:
                         self._consecutive_plan_only = 0
+                    # Detect probes-only / media-only re-emissions so the
+                    # fallback can name the specific failure shape.
+                    has_probes = bool(_PROBES_OPEN_RE.search(reply))
+                    has_assets = bool(_ASSETS_OPEN_RE.search(reply))
+                    has_sounds = bool(_SOUNDS_OPEN_RE.search(reply))
+                    probes_only = (
+                        has_probes and not has_assets and not has_sounds
+                        and not plan_only
+                    )
+                    media_only = (
+                        (has_assets or has_sounds) and not has_probes
+                        and not plan_only
+                    )
                     self._trace({
                         "kind": "no_usable_code",
                         "plan_only": plan_only,
+                        "probes_only": probes_only,
+                        "media_only": media_only,
                         "consecutive_plan_only": self._consecutive_plan_only,
                         "has_existing_file": bool(self._current_file),
                     })
@@ -5439,6 +5728,11 @@ class GameAgent:
                             consecutive_plan_only=self._consecutive_plan_only,
                             rejection=format_rejection,
                             format_stuck_streak=self._format_stuck_streak,
+                            probes_only=probes_only,
+                            media_only=media_only,
+                            prior_stream_looped=self._last_stream_looped,
+                            prior_loop_kind=self._last_stream_loop_kind,
+                            prior_loop_line=self._last_stream_loop_line,
                         )
                     )
                     if reset_streak:
@@ -5464,6 +5758,31 @@ class GameAgent:
             if patches_in_reply and self._current_file:
                 res = apply_patches(self._current_file, patches_in_reply)
                 partial_failed = res.failed
+
+            # Probe-sanity lint pass 2: now that we have the on-disk
+            # HTML, check whether any probe reads `obj.prop` for a
+            # property the game never assigns. Surfaces a soft warning
+            # (one info event per finding) that flows into the next
+            # diagnose-then-fix prompt via the test report. Donkey-kong
+            # trace 20260516_124628 `barrels_move` is the canonical case
+            # — gated on `b.x0` which no iter ever assigned.
+            if self._probes:
+                unassigned = GameAgent._probes_referencing_unassigned_props(
+                    self._probes, new_html,
+                )
+                if unassigned:
+                    # Combine with the tautological findings from Phase A;
+                    # both flow to the model the same way.
+                    self._probe_lint_findings = (
+                        [f for f in self._probe_lint_findings
+                         if f.get("kind") != "unassigned_property_read"]
+                        + unassigned
+                    )
+                    self._trace({
+                        "kind": "probe_lint_postbuild",
+                        "iteration": iteration,
+                        "findings": unassigned,
+                    })
 
             # Save + per-iter snapshot
             self.out_path.write_text(new_html, encoding="utf-8")
@@ -6607,6 +6926,18 @@ class GameAgent:
                 "\n\nNOTE: some of your previous patches did not apply. "
                 "When fixing this turn, also re-send corrected versions of:\n"
                 + "\n".join(f"  - {reason}" for (_i, _p, reason) in partial_failed)
+            )
+        # Probe-sanity findings: surface tautological-probe or
+        # unassigned-property warnings so the model can fix the probes
+        # alongside the code. Without this the model often "fixes" the
+        # gameplay only to find the probe still false-fails.
+        if self._probe_lint_findings:
+            fix += "\n\nPROBE LINT — these probes look broken:\n" + "\n".join(
+                f"  - {f['message']}" for f in self._probe_lint_findings
+            ) + (
+                "\nRe-emit `<probes>[...]</probes>` alongside your patch "
+                "this turn, rewriting the flagged probes so they actually "
+                "test the behavior they claim to test."
             )
         if self._is_vlm and self._next_image_bytes:
             fix += "\n\n" + self._p.VLM_REVIEW_NOTE

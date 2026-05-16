@@ -204,6 +204,71 @@ def test_existing_code_marker_errors():
     assert r["ok"] is False
 
 
+def test_dotted_elision_marker_errors():
+    """Donkey-kong trace 20260516_124628 iter 2 shipped
+    `// ...rest of seed code stays same...` past the detector because
+    the previous literal-list match looked for `// rest of` (space) and
+    the model emitted `// ...rest of` (no space, ellipsis glued). The
+    regex variant now catches this dotted shape."""
+    html = _wrap(
+        "function init(){}\n  // ...rest of seed code stays same...\nfunction draw(){}"
+    )
+    r = run_micro_probes(html)
+    assert r["ok"] is False
+    assert any("elision" in e.lower() for e in r["errors"]), r["errors"]
+
+
+def test_dotted_elision_rest_unchanged_variant():
+    """Same regex catches the `// .. rest unchanged` form too."""
+    html = _wrap("var x = 1;\n// .. rest unchanged\nvar y = 2;")
+    r = run_micro_probes(html)
+    assert r["ok"] is False
+    assert any("elision" in e.lower() for e in r["errors"]), r["errors"]
+
+
+def test_duplicate_top_level_const_detected():
+    """Donkey-kong trace 20260516_124628 iter 2 had `const ctx`,
+    `const state`, and `function buildLevels` each declared twice
+    inside the IIFE — the concatenated-two-drafts shape. Chromium
+    catches it post-load; this micro-probe catches it pre-Chromium and
+    names the duplicated identifier(s) so the model can fix it in one
+    turn."""
+    html = _wrap(
+        "(() => {\n"
+        "  const ctx = canvas.getContext('2d');\n"
+        "  const state = { score: 0 };\n"
+        "  function buildLevels() { return []; }\n"
+        "  // ... draft 1 ends here, draft 2 starts below ...\n"
+        "  const ctx = canvas.getContext('2d');\n"
+        "  const state = { score: 0 };\n"
+        "  function buildLevels() { return []; }\n"
+        "})();"
+    )
+    r = run_micro_probes(html)
+    assert r["ok"] is False
+    err_blob = "\n".join(r["errors"]).lower()
+    assert "duplicate top-level declaration" in err_blob, r["errors"]
+    # The error names the actual duplicated identifiers.
+    assert "ctx" in err_blob and "state" in err_blob, r["errors"]
+
+
+def test_duplicate_const_inside_nested_function_allowed():
+    """Shadowing in nested scopes is legal JS; the probe only flags
+    duplicates at the IIFE / top level. Without this guard the probe
+    would false-positive on the common `for (const x of …)` pattern
+    used inside multiple sibling functions."""
+    html = _wrap(
+        "(() => {\n"
+        "  function a() { const x = 1; return x; }\n"
+        "  function b() { const x = 2; return x; }\n"
+        "  a(); b();\n"
+        "})();"
+    )
+    r = run_micro_probes(html)
+    err_blob = "\n".join(r.get("errors", [])).lower()
+    assert "duplicate top-level declaration" not in err_blob, r["errors"]
+
+
 # ---------------------------------------------------------------------------
 # Formatter
 # ---------------------------------------------------------------------------

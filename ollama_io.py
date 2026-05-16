@@ -82,6 +82,16 @@ _BLOCK_WINDOW_LINES = 8       # 8 consecutive lines form one "block hash"
 _BLOCK_MIN_BYTES = 200        # skip trivially short blocks (e.g. whitespace)
 _BLOCK_MAX_REPEATS = 3        # 3 identical blocks within one response → loop
 
+# Window 4 (ADJACENT spam): catches the dead-state-reset block failure
+# observed in donkey-kong-game-matching-orig_20260516_142445 iter 1,
+# where the model emitted `p.onGirder = false; p.onLadder = false;`
+# alternating ~16 times. Windows 1/2 above already catch this but only
+# after _REPEAT_MIN_LINES=12 entries. Adjacency is a strictly stronger
+# signal — N IDENTICAL consecutive lines means the model is stuck right
+# now, not just "the window happens to be low-cardinality." Fires at 4
+# entries, ~3× faster than Window 1 for the donkey-kong shape.
+_ADJACENT_SPAM_REPEATS = 4    # 4 identical consecutive normalized lines
+
 
 # Strip trailing digits / underscored numeric suffixes / whitespace from a
 # line so near-duplicates collapse to a single bucket. Examples:
@@ -125,6 +135,7 @@ class RepetitionDetector:
     __slots__ = (
         "_line_buf", "_recent_lines", "_recent_lines_norm",
         "_all_lines", "_block_counts", "stall_reason",
+        "_adjacent_tail", "loop_line",
     )
 
     def __init__(self) -> None:
@@ -141,10 +152,18 @@ class RepetitionDetector:
         # and hash the last `_BLOCK_WINDOW_LINES` after each new line.
         self._all_lines: list[str] = []
         self._block_counts: dict[str, int] = {}
+        # Window 4: last _ADJACENT_SPAM_REPEATS normalized lines as a
+        # tiny ring. When all entries are the same non-empty string the
+        # model is stuck emitting one statement on repeat. Strictly
+        # tighter than Window 1.
+        self._adjacent_tail: list[str] = []
         # When feed() returns True the caller can read this to discriminate
-        # ("short_line_loop" / "near_dup_template_loop" / "inline_data_bloat")
-        # and customize the recovery message.
+        # ("short_line_loop" / "near_dup_template_loop" / "inline_data_bloat"
+        # / "adjacent_line_spam") and customize the recovery message.
         self.stall_reason: str | None = None
+        # The actual repeated line (normalized) — surfaced in coaching so
+        # the model can see *what* it was looping on.
+        self.loop_line: str | None = None
 
     def feed(self, piece: str) -> bool:
         """Append `piece` to the internal line buffer; on every newline,
@@ -170,6 +189,18 @@ class RepetitionDetector:
                 self._recent_lines_norm.append(norm)
                 if len(self._recent_lines_norm) > _REPEAT_WINDOW_LINES:
                     self._recent_lines_norm.pop(0)
+                # Window 4 (adjacency): keep just the last N normalized
+                # lines. If they're all identical the model is stuck.
+                self._adjacent_tail.append(norm)
+                if len(self._adjacent_tail) > _ADJACENT_SPAM_REPEATS:
+                    self._adjacent_tail.pop(0)
+                if (
+                    len(self._adjacent_tail) == _ADJACENT_SPAM_REPEATS
+                    and len(set(self._adjacent_tail)) == 1
+                ):
+                    self.stall_reason = "adjacent_line_spam"
+                    self.loop_line = self._adjacent_tail[0]
+                    return True
             # Window 3 (block-level): hash the trailing N lines as a
             # single block. If we see the same block hash >
             # _BLOCK_MAX_REPEATS times in one response, the model is
@@ -189,12 +220,17 @@ class RepetitionDetector:
             and len(set(self._recent_lines)) <= _REPEAT_MAX_UNIQUE
         ):
             self.stall_reason = "short_line_loop"
+            # Most-frequent line in the window — what the model is stuck on.
+            from collections import Counter
+            self.loop_line = Counter(self._recent_lines).most_common(1)[0][0]
             return True
         if (
             len(self._recent_lines_norm) >= _REPEAT_MIN_LINES
             and len(set(self._recent_lines_norm)) <= _REPEAT_MAX_UNIQUE
         ):
             self.stall_reason = "near_dup_template_loop"
+            from collections import Counter
+            self.loop_line = Counter(self._recent_lines_norm).most_common(1)[0][0]
             return True
         return False
 
@@ -403,6 +439,16 @@ class StreamResult:
     # to a "your reply was capped, emit a smaller change" coach instead
     # of treating it as a generic truncation. False on Ollama/MLX.
     max_tokens_hit: bool = False
+    # When `looped=True`, which RepetitionDetector window fired:
+    # "short_line_loop" / "near_dup_template_loop" / "inline_data_bloat"
+    # / "adjacent_line_spam". Used by the recovery coach in agent.py to
+    # name the failure shape back to the model.
+    loop_kind: str | None = None
+    # When `looped=True`, the actual line the model was repeating
+    # (normalized). Surfaces in coaching so the model sees *what* it
+    # was stuck on instead of just "your reply was aborted." None when
+    # the detector didn't capture one (older code paths).
+    loop_line: str | None = None
 
 
 async def stream_chat(
@@ -526,6 +572,8 @@ async def stream_chat(
         deliberated=deliberated,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
+        loop_kind=repeat.stall_reason if looped else None,
+        loop_line=repeat.loop_line if looped else None,
     )
 
 

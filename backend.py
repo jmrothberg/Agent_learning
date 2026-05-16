@@ -1088,6 +1088,8 @@ class MLXBackend(Backend):
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             crashed=False,
+            loop_kind=repeat.stall_reason if looped else None,
+            loop_line=repeat.loop_line if looped else None,
         )
 
     async def is_vlm(self) -> bool:

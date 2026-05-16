@@ -876,6 +876,67 @@ def run_micro_probes(
                 "will confirm)."
             )
 
+    # --- duplicate top-level declarations -----------------------------
+    # Catches the "concatenated two drafts" failure mode where the model
+    # writes a first draft, starts over partway through, and emits a
+    # second draft below the first WITHOUT deleting it. Result: duplicate
+    # `const NAME = …` / `function NAME(…)` declarations at the same
+    # scope, which Chromium correctly rejects with "Identifier '<name>'
+    # has already been declared." Observed in donkey-kong trace
+    # 20260516_124628 iter 2 (duplicate `const ctx`, `const state`,
+    # `function buildLevels`) — Chromium reported the issue, but only
+    # after a 3-second browser load. This probe catches it pre-Chromium
+    # and tells the model EXACTLY which name is duplicated so the next
+    # turn can target the right delete.
+    _DECL_RE = re.compile(
+        r"^(?P<indent>[ \t]*)(?P<kind>const|let|function)\s+"
+        r"(?P<name>[A-Za-z_$][\w$]*)\b"
+    )
+    dup_names: list[str] = []
+    for (_attrs, body) in scripts:
+        if not body.strip():
+            continue
+        stripped = _strip_js_noise(body)
+        depth = 0
+        # Names declared at depth ≤ 1. Depth 0 is the bare script body;
+        # depth 1 is "inside the IIFE wrapper that most agent games use"
+        # — `(() => { ... })()`. Nested function bodies live at depth ≥ 2
+        # and are excluded because shadowing there is legal.
+        seen: dict[str, int] = {}
+        for raw_line in stripped.splitlines():
+            line = raw_line.rstrip()
+            # Track brace depth BEFORE matching this line so a declaration
+            # on the same line as an opening `{` is still attributed to
+            # the enclosing scope.
+            opens = line.count("{")
+            closes = line.count("}")
+            if depth <= 1:
+                m = _DECL_RE.match(line)
+                if m:
+                    name = m.group("name")
+                    seen[name] = seen.get(name, 0) + 1
+            depth += opens - closes
+            if depth < 0:
+                # Unbalanced; bail out — bracket-imbalance probe already
+                # reported this. Counting from negative depth would
+                # produce noise.
+                break
+        for name, count in seen.items():
+            if count >= 2:
+                dup_names.append(name)
+    if dup_names:
+        # De-dup the message across multiple scripts; keep order stable.
+        seen_msg: set[str] = set()
+        unique = [n for n in dup_names if not (n in seen_msg or seen_msg.add(n))]
+        sample = ", ".join(f"`{n}`" for n in unique[:5])
+        errors.append(
+            f"duplicate top-level declaration(s) in <script>: {sample} "
+            "declared 2+ times at the same scope — looks like two drafts "
+            "got concatenated. Re-emit with one body; delete the older "
+            "duplicate."
+        )
+        stats["duplicate_declarations"] = unique
+
     # --- API allowlist (hallucinated method calls) --------------------
     # Scan inline scripts for `<known-receiver>.<method>(` patterns where
     # the method is not on the canonical allowlist for that receiver
@@ -962,7 +1023,12 @@ def run_micro_probes(
     # --- elision sentinels ---------------------------------------------
     # Models occasionally slip "// ... rest of code unchanged ..." into
     # a patch even after we tell them not to. Catch it here so we don't
-    # ship a half-implemented file.
+    # ship a half-implemented file. The regex tolerates dotted variants
+    # ("// ...rest of", "// .. rest of seed code stays same") which the
+    # plain-substring list missed — donkey-kong trace 20260516_124628
+    # iter 2 shipped "// ...rest of seed code stays same..." past the
+    # detector because the literal had a space between "//" and "rest"
+    # while the model emitted "// ..." (no space) instead.
     elision_markers = [
         "// ... rest unchanged",
         "// ... rest of code",
@@ -971,14 +1037,25 @@ def run_micro_probes(
         "/* existing code */",
         "<- leave original",
     ]
+    matched_marker: str | None = None
     for m in elision_markers:
         if m.lower() in low:
-            errors.append(
-                f"elision marker found in source: {m!r} — the file is "
-                "incomplete. Re-emit the patch with the EXACT lines, no "
-                "shortcuts."
-            )
+            matched_marker = m
             break
+    if matched_marker is None:
+        m_re = re.search(
+            r"//\s*\.{2,}\s*rest\b\s+(?:of|unchanged)",
+            html,
+            re.IGNORECASE,
+        )
+        if m_re:
+            matched_marker = m_re.group(0)
+    if matched_marker is not None:
+        errors.append(
+            f"elision marker found in source: {matched_marker!r} — the file is "
+            "incomplete. Re-emit the patch with the EXACT lines, no "
+            "shortcuts."
+        )
 
     # --- asset path existence check ------------------------------------
     # Catches model-corrupted file paths before Chromium does (which
@@ -1403,20 +1480,21 @@ def format_report_for_model(report: dict[str, Any]) -> str:
         f"(doc={li.get('document', 0)}, win={li.get('window', 0)}, "
         f"body={li.get('body', 0)}, other={li.get('other', 0)})"
     )
-    # New: results of the auto-input smoke test. Tells the model whether
-    # the game actually responded to keys, not just whether listeners exist.
+    # Auto-input smoke test. With the gameplay-state-global fix
+    # (2026-05-16), the harness now samples window.state (the
+    # documented convention) and names exactly which fields moved on
+    # which key. PASS reads like "ArrowRight→[player.x, player.facing];
+    # Space→[bullets.length]" — names the wiring path that works. FAIL
+    # distinguishes "state exposed but no field moved" (data-flow bug
+    # downstream of the listener) from "no state global at all" (the
+    # game never exposed window.state — your probes can't run).
     it = report.get("input_test") or {}
     if it.get("ran"):
+        summary = it.get("summary") or ""
         if it.get("any_change"):
-            lines.append(
-                f"Input test: PASS — pressed keys, canvas changed on "
-                f"{it.get('first_responsive_key')!r}."
-            )
+            lines.append(f"Input test: PASS — {summary}")
         else:
-            lines.append(
-                f"Input test: FAIL — pressed {it.get('keys_tried', [])} "
-                "and canvas pixels never changed."
-            )
+            lines.append(f"Input test: FAIL — {summary}")
     # New: did the canvas freeze (drawing same frame) between two samples?
     fz = report.get("frozen_canvas")
     if fz is True:
@@ -2086,14 +2164,32 @@ class LiveBrowser:
         except Exception:
             pass
 
-        # Flatten window.gameState into a {dotted-path: number} map of
-        # numeric leaves, depth-capped and fanout-capped so giant entity
-        # arrays don't explode the snapshot. Returns null when gameState
-        # is not exposed — input-test then falls back to canvas hash only.
+        # Flatten the game's exposed state into a {dotted-path: number}
+        # map of numeric leaves, depth-capped and fanout-capped so giant
+        # entity arrays don't explode the snapshot. Returns null when
+        # nothing is exposed — input-test then falls back to canvas hash
+        # only.
+        #
+        # NAME-MATCHING BUG FIX (2026-05-16): for the entire history of
+        # this code, the snapshot looked at `window.gameState` while the
+        # system prompt and all won-skeletons expose `window.state`. The
+        # net effect was that the gameplay verification path was BLIND
+        # to the actual state of agent-generated games and silently
+        # fell back to canvas-hash (which is degenerate for any auto-
+        # animating game). This is the single biggest reason "input
+        # smoke test passed" did not correlate with "controls work."
+        # Now we walk a small ordered list of plausible globals and
+        # take the first that's an object. `state` is the documented
+        # convention; the others are back-compat.
         _GAMESTATE_SNAPSHOT_JS = """
         () => {
-            const gs = window.gameState;
-            if (gs == null || typeof gs !== 'object') return null;
+            const candidates = ['state', 'gameState', 'game', 'GAME', 'world'];
+            let gs = null;
+            for (const name of candidates) {
+                const v = window[name];
+                if (v != null && typeof v === 'object') { gs = v; break; }
+            }
+            if (gs == null) return null;
             const out = {};
             const visit = (obj, path, depth) => {
                 if (depth > 4 || obj == null) return;
@@ -2156,6 +2252,13 @@ class LiveBrowser:
         ambient_gs_changes = _gs_changed_leaves(ambient_gs_a, ambient_gs_b)
         has_gamestate = ambient_gs_a is not None
 
+        # Track WHICH state fields move on WHICH key — names the
+        # exact wiring path that works, so the report can say
+        # "ArrowRight → state.player.x changed" instead of just
+        # "input test passed." When nothing moves we get the dual:
+        # "ArrowRight: zero numeric fields on window.state changed."
+        responsive_evidence: dict[str, list[str]] = {}
+
         for k in keys:
             before = await self._safe_eval(_CANVAS_HASH_JS)
             before_gs = await self._safe_eval(_GAMESTATE_SNAPSHOT_JS)
@@ -2175,7 +2278,7 @@ class LiveBrowser:
             after_release = await self._safe_eval(_CANVAS_HASH_JS)
 
             # Decide responsiveness with the strongest available signal.
-            # (1) gameState input-only delta: leaves that changed during
+            # (1) state input-only delta: leaves that changed during
             # the held window but did NOT change during the ambient
             # window are attributable to the key press.
             input_only_leaves: set[str] = set()
@@ -2189,16 +2292,49 @@ class LiveBrowser:
                 or (after_release is not None and after_release != before)
             ) and not ambient_canvas_changed
 
-            if input_only_leaves or canvas_input_changed:
+            if input_only_leaves:
+                # Sort + cap so the report stays bounded.
+                responsive_evidence[k] = sorted(input_only_leaves)[:5]
                 any_change = True
-                first_responsive_key = k
-                break
+                if first_responsive_key is None:
+                    first_responsive_key = k
+                # Don't break — collect evidence for ALL keys that
+                # work so the report can name which control wires
+                # which field. Cheap; ~250ms per key, bounded.
+            elif canvas_input_changed:
+                responsive_evidence[k] = ["<canvas-pixel-change>"]
+                any_change = True
+                if first_responsive_key is None:
+                    first_responsive_key = k
+
+        # Concise summary line for the report. Two shapes:
+        #   PASS — "ArrowRight→[player.x, player.facing], Space→[bullets.length]"
+        #   FAIL — "had window.state but zero fields moved across [keys]"
+        if any_change:
+            parts = []
+            for k, leaves in responsive_evidence.items():
+                parts.append(f"{k}→[{', '.join(leaves)}]")
+            summary = "; ".join(parts[:4])
+        elif has_gamestate:
+            summary = (
+                f"window.state IS exposed but zero numeric fields "
+                f"changed across {tried} — the listeners may be wired "
+                f"but the data flow into state is broken."
+            )
+        else:
+            summary = (
+                f"no game state global exposed (tried "
+                f"window.state/.gameState/.game) AND canvas pixels did "
+                f"not change for {tried}."
+            )
 
         return {
             "ran": True,
             "any_change": any_change,
             "keys_tried": tried,
             "first_responsive_key": first_responsive_key,
+            "responsive_evidence": responsive_evidence,
+            "summary": summary,
             "ambient_canvas_motion": ambient_canvas_changed,
             "ambient_gs_motion": bool(ambient_gs_changes),
             "had_gamestate": has_gamestate,

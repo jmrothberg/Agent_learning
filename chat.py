@@ -1789,6 +1789,8 @@ class CodingBoxApp(App):
                 self._cmd_launch_mlx(arg)
             elif cmd == "check":
                 await self._cmd_check(arg)
+            elif cmd == "ref":
+                self._cmd_attach_ref_image(arg)
             else:
                 self._log_info(f"unknown command /{cmd} — type /help")
         except Exception as e:
@@ -1862,10 +1864,14 @@ class CodingBoxApp(App):
             "  [b]/wait[/b] [on|off]            toggle step-mode: pause after each iter; Enter or feedback to continue",
             "  [b]/playbook[/b] [on|off]        toggle playbook bullet injection (alias /memory) - A/B vs one-shot when iters feel worse than no agent",
             "  [b]/audit[/b]                     print per-bullet earnings (fires, pass-rate, avg-iter) from trace history",
-            "  [b]/check with <model>[/b]       look at the latest screenshot with a vision model · YOU pick when · costs ~1 API call",
-            "                                  [dim]e.g. /check with claude   /check with claude-opus-4-7   /check with sonnet[/dim]",
-            "                                  [dim](Claude / Anthropic only for now; needs ANTHROPIC_API_KEY)[/dim]",
+            "  [b]/check[/b] [with <model>]    look at the latest screenshot with a vision model · YOU pick when",
+            "                                  [dim]bare /check uses your active session model if it's a VLM (no API cost)[/dim]",
+            "                                  [dim]cloud: /check with claude   /check with gpt-5   (needs API key for that vendor)[/dim]",
+            "                                  [dim]local: /check with qwen3.6   (substring-match against your MLX VLMs)[/dim]",
             "                                  [dim]model says 'progress: yes/no/unclear' + what's still visibly wrong; not auto-injected[/dim]",
+            "  [b]/ref <path>[/b]              attach a reference image (PNG/JPEG/WebP) to the NEXT user turn",
+            "                                  [dim]VLM-only — say 'make the game look like this' on the next line[/dim]",
+            "                                  [dim]drag a file from Finder into the terminal to fill in the path[/dim]",
             "  [b]/quit[/b]                    quit (= Ctrl+Q)",
             "",
             "[bold cyan]── sticky staging ──[/bold cyan]",
@@ -2420,6 +2426,87 @@ class CodingBoxApp(App):
         except Exception as e:
             self._log_error(f"could not open browser: {e}")
 
+    def _cmd_attach_ref_image(self, arg: str) -> None:
+        """/ref <path> — attach a reference image to the NEXT user turn.
+
+        Use case: "make the game look like this." The image is loaded
+        from disk, validated as PNG/JPEG/WebP, and stashed on the agent
+        as `_next_image_bytes`. When the next user message goes out
+        AND the active model is a VLM, the existing image-attachment
+        path ([agent.py:_stream](agent.py) ~line 2785) will pair them.
+
+        Notes:
+          - This only works when the active model is a VLM. On a
+            text-only model the image is dropped and the user sees a
+            warning.
+          - Pasting binary into a terminal Input field isn't possible —
+            the user provides a path (drag the file from Finder into
+            the terminal, or copy a path via Cmd+Option+C).
+          - The image clears after one use (single-shot). Re-run /ref
+            for each turn that needs a reference.
+        """
+        if self.agent is None:
+            self._log_error("/ref needs an active agent — start a session first with /new <goal>")
+            return
+        path_str = (arg or "").strip().strip('"\'')
+        if not path_str:
+            self._log_info(
+                "usage: /ref <path/to/image.png>  "
+                "(then type 'make the game look like this' on the next line)"
+            )
+            return
+        path = Path(path_str).expanduser()
+        if not path.exists():
+            self._log_error(f"/ref: file not found: {path}")
+            return
+        if not path.is_file():
+            self._log_error(f"/ref: not a regular file: {path}")
+            return
+        try:
+            data = path.read_bytes()
+        except Exception as e:
+            self._log_error(f"/ref: could not read file: {e}")
+            return
+        # Cheap magic-byte sniff. PNG = 89 50 4E 47, JPEG = FF D8 FF,
+        # WebP = "RIFF....WEBP". Reject anything else so we don't
+        # waste a VLM turn on a corrupt or non-image file.
+        head = data[:12]
+        is_png = head.startswith(b"\x89PNG\r\n\x1a\n")
+        is_jpeg = head.startswith(b"\xff\xd8\xff")
+        is_webp = head[:4] == b"RIFF" and head[8:12] == b"WEBP"
+        if not (is_png or is_jpeg or is_webp):
+            self._log_error(
+                f"/ref: {path.name} is not PNG / JPEG / WebP (got "
+                f"magic bytes {head[:4].hex()}). Convert and retry."
+            )
+            return
+        # Cap at 4 MB so a 50 MB scan doesn't blow up the prompt
+        # tokens (the backend will resize, but the bytes still travel
+        # through the chat-template render).
+        if len(data) > 4 * 1024 * 1024:
+            self._log_error(
+                f"/ref: {path.name} is {len(data) // 1024} KB — too large "
+                "(cap is 4 MB). Resize to ~1024px max and retry."
+            )
+            return
+        # Attach. The agent's _stream path handles the rest.
+        self.agent._next_image_bytes = data
+        # Surface a hint if the active model is text-only — the bytes
+        # will be silently dropped otherwise.
+        is_vlm = bool(getattr(self.agent, "_is_vlm", False))
+        vlm_hint = (
+            "" if is_vlm
+            else " [yellow](active model is text-only — image will be dropped; "
+                 "/load a VLM first)[/yellow]"
+        )
+        kind = (
+            "PNG" if is_png else ("JPEG" if is_jpeg else "WebP")
+        )
+        self._log_info(
+            f"/ref: attached {path.name} ({kind}, {len(data) // 1024} KB) "
+            f"to the next user turn.{vlm_hint}"
+        )
+
     def _cmd_set_iters(self, arg: str) -> None:
         if not arg.isdigit() or int(arg) <= 0:
             self._log_info(f"usage: /iters <positive int>  (current: {self._max_iters})")
@@ -2490,7 +2577,7 @@ class CodingBoxApp(App):
         self._log_info(msg)
 
     async def _cmd_check(self, arg: str) -> None:
-        """/check with <model> — explicit, on-demand visual progress check.
+        """/check [with <model>] — explicit, on-demand visual progress check.
 
         Looks at the most recent screenshot of your game with a vision
         model and answers two things: did the last iteration make
@@ -2505,69 +2592,129 @@ class CodingBoxApp(App):
         Copy/paste it yourself if you want the building model to act
         on it.
 
-        Currently Claude / Anthropic only (needs ANTHROPIC_API_KEY).
+        Vendor routing (any vision-capable model works):
+          - `claude` / `sonnet` / `opus` / `haiku` / `claude-*` →
+            Anthropic (needs ANTHROPIC_API_KEY)
+          - `gpt` / `gpt-5` / `gpt-4o` / `o3` / `o4-mini` →
+            OpenAI (needs OPENAI_API_KEY)
+          - anything else → resolved against your local MLX VLMs
+        With no `with <model>` argument, uses the active session model
+        IF it's a VLM (so a local-VLM session can just type `/check`).
         """
-        if not arg or not arg.lower().startswith("with "):
-            self._log_info("usage: /check with <model>")
-            self._log_info(
-                "  e.g. /check with claude   (shorthand → claude-sonnet-4-6)"
-            )
-            self._log_info("       /check with claude-opus-4-7")
-            self._log_info("       /check with claude-haiku-4-5")
-            self._log_info(
-                "Calls the specified vision model ONCE on the latest "
-                "screenshot. ~1 API call. Verdict is printed; not "
-                "injected into the next turn."
-            )
-            return
-        model = arg[5:].strip()
+        # Parse the argument. Three shapes:
+        #   (no arg)          → use active session model if VLM
+        #   "with <model>"    → explicit selection
+        #   "<model>"         → tolerated shorthand, same as "with ..."
+        agent = getattr(self, "agent", None)
+        if not arg:
+            # No arg: prefer the active session model when it's a VLM.
+            # Falls back to a usage hint when there's nothing usable.
+            if agent is not None and bool(getattr(agent, "_is_vlm", False)):
+                model = getattr(agent, "model", None) or ""
+                if not model:
+                    self._log_info(
+                        "usage: /check [with <model>]   (no active model)"
+                    )
+                    return
+                self._log_info(
+                    f"[magenta]/check[/magenta] using active session "
+                    f"VLM: [b]{_esc(model)}[/b]"
+                )
+            else:
+                self._log_info("usage: /check with <model>")
+                self._log_info(
+                    "  cloud:  /check with claude   /check with gpt-5"
+                )
+                self._log_info(
+                    "  local:  /check with <name-substring-of-an-MLX-VLM>"
+                )
+                self._log_info(
+                    "  bare:   /check   (uses your active session model "
+                    "when it's a VLM)"
+                )
+                return
+        else:
+            # Accept both `with <model>` and bare `<model>` shorthand.
+            stripped = arg.strip()
+            if stripped.lower().startswith("with "):
+                model = stripped[5:].strip()
+            else:
+                model = stripped
         aliases = {
             "claude": "claude-sonnet-4-6",
             "sonnet": "claude-sonnet-4-6",
             "opus": "claude-opus-4-7",
             "haiku": "claude-haiku-4-5",
+            "gpt": "gpt-5",
+            "openai": "gpt-5",
+            "gpt5": "gpt-5",
+            "gpt-5-mini": "gpt-5-mini",
+            "gpt5-mini": "gpt-5-mini",
         }
         model = aliases.get(model.lower(), model)
-        low = model.lower()
-        is_cloud_claude = (
-            low.startswith("claude-") or low.startswith("claude")
-        )
-        # Local MLX VLM path — added 2026-05-15. Any non-cloud name
-        # routes through `vision_judge._resolve_local_mlx_vlm`, which
-        # scans `~/MLX_Models` etc. and requires the resolved model
-        # to classify as a VLM. So `/check with qwen3.6` hits your
-        # local Qwen3.6-27B VLM via mlx_vlm — no Anthropic call, no
-        # cost, fully on-device.
-        if is_cloud_claude:
+        # Vendor routing — explicit and ordered. Anything not matched
+        # falls through to the local-MLX-VLM resolver.
+        try:
+            from vision_judge import _cloud_vendor, _resolve_local_mlx_vlm
+        except Exception as e:
+            self._log_error(f"/check: vision_judge unavailable — {e}")
+            return
+        vendor = _cloud_vendor(model)
+        if vendor == "anthropic":
             if not os.environ.get("ANTHROPIC_API_KEY"):
                 self._log_error(
                     "/check: ANTHROPIC_API_KEY not set. Add it to .env "
-                    "or your shell env."
+                    "or your shell env, OR use a local VLM "
+                    "([b]/check with <name>[/b] — run /list and look "
+                    "for [magenta]\\[VLM][/magenta]), OR use OpenAI "
+                    "([b]/check with gpt-5[/b]) if OPENAI_API_KEY is set."
+                )
+                return
+        elif vendor == "openai":
+            if not os.environ.get("OPENAI_API_KEY"):
+                self._log_error(
+                    "/check: OPENAI_API_KEY not set. Add it to .env "
+                    "or your shell env, OR use a local VLM "
+                    "([b]/check with <name>[/b] — run /list and look "
+                    "for [magenta]\\[VLM][/magenta]), OR use Anthropic "
+                    "([b]/check with claude[/b]) if ANTHROPIC_API_KEY "
+                    "is set."
                 )
                 return
         else:
-            # Verify the local resolver finds a VLM match. If not,
-            # bail with a clear message instead of silently going to
-            # Anthropic.
-            try:
-                from vision_judge import _resolve_local_mlx_vlm
-            except Exception as e:
-                self._log_error(f"/check: vision_judge unavailable — {e}")
-                return
-            resolved = _resolve_local_mlx_vlm(model)
-            if resolved is None:
-                self._log_error(
-                    f"/check: no local VLM matched {_esc(model)!r}. "
-                    "Available VLMs: run /list and look for [VLM]. "
-                    "Cloud models: prefix with claude (e.g. "
-                    "[b]/check with claude[/b])."
-                )
-                return
-            self._log_info(
-                f"[magenta]/check[/magenta] resolved local VLM: "
-                f"[b]{_esc(resolved)}[/b]"
+            # Local-MLX-VLM resolver. If the user typed the EXACT name
+            # of the active session model and it's a VLM, accept it
+            # verbatim (covers the case where the user wants to use
+            # their currently-loaded VLM by full name).
+            active_model = (
+                getattr(agent, "model", None) if agent is not None else None
             )
-            model = resolved  # vision_judge picks the path back up
+            if (
+                active_model
+                and model == active_model
+                and bool(getattr(agent, "_is_vlm", False))
+            ):
+                self._log_info(
+                    f"[magenta]/check[/magenta] using active session "
+                    f"VLM: [b]{_esc(model)}[/b]"
+                )
+            else:
+                resolved = _resolve_local_mlx_vlm(model)
+                if resolved is None:
+                    self._log_error(
+                        f"/check: {_esc(model)!r} didn't match a cloud "
+                        "vendor (claude / gpt / o*) or any local MLX "
+                        "VLM. Run /list to see local VLMs (look for "
+                        "[magenta]\\[VLM][/magenta]). Cloud examples: "
+                        "[b]/check with claude[/b]  or  "
+                        "[b]/check with gpt-5[/b]."
+                    )
+                    return
+                self._log_info(
+                    f"[magenta]/check[/magenta] resolved local VLM: "
+                    f"[b]{_esc(resolved)}[/b]"
+                )
+                model = resolved  # vision_judge picks the path back up
         agent = getattr(self, "agent", None)
         if agent is None:
             self._log_error(

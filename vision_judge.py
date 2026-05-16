@@ -239,6 +239,65 @@ async def _anthropic_judge(
     )
 
 
+async def _openai_judge(
+    *,
+    goal: str,
+    current_png: bytes,
+    previous_png: bytes | None,
+    model: str,
+) -> VisionVerdict:
+    """One-shot vision call against OpenAI. Caller wraps with timeout +
+    try/except, so this can raise freely.
+
+    Added so `/check with gpt-5` (or any GPT-4o / GPT-4.1-vision / o*
+    reasoning model with vision) works without going through the
+    Anthropic path. Uses the modern Responses API style — vision
+    content is `{"type": "input_image", "image_url": "data:image/png;
+    base64,…"}` instead of Anthropic's `{"type":"image","source":
+    {"type":"base64","data":…}}` shape. Same VisionVerdict output so
+    the caller doesn't branch on provider.
+    """
+    try:
+        from openai import AsyncOpenAI
+    except ImportError as e:
+        raise RuntimeError(
+            "openai SDK not installed (pip install 'openai>=1.0')"
+        ) from e
+    if not os.environ.get("OPENAI_API_KEY"):
+        raise RuntimeError("OPENAI_API_KEY not set")
+    client = AsyncOpenAI()
+    import base64
+    content: list[dict] = []
+    if previous_png is not None:
+        b64 = base64.b64encode(previous_png).decode("ascii")
+        content.append({
+            "type": "input_image",
+            "image_url": f"data:image/png;base64,{b64}",
+        })
+    b64 = base64.b64encode(current_png).decode("ascii")
+    content.append({
+        "type": "input_image",
+        "image_url": f"data:image/png;base64,{b64}",
+    })
+    content.append({
+        "type": "input_text",
+        "text": _judge_prompt(goal, previous_png is not None),
+    })
+    resp = await client.responses.create(
+        model=model,
+        input=[{"role": "user", "content": content}],
+        max_output_tokens=_JUDGE_MAX_TOKENS,
+    )
+    raw = (resp.output_text or "").strip()
+    progress, note = _parse(raw)
+    return VisionVerdict(
+        progress=progress, note=note, raw=raw, model=model,
+        image_count=(2 if previous_png is not None else 1),
+        prompt_chars=len(_judge_prompt(goal, previous_png is not None)),
+        result_chars=len(raw),
+    )
+
+
 # ---- Local MLX VLM path (added 2026-05-15) ---------------------------
 # When the user types `/check with <local-vlm>`, the model name is the
 # MLX path or substring of one (e.g. "qwen3.6-27b" or
@@ -390,6 +449,28 @@ def _looks_like_local_mlx(model: str) -> bool:
     return True
 
 
+def _cloud_vendor(model: str) -> str | None:
+    """Map a model name to its cloud vendor, or None if local.
+
+    Used by `judge_visual_progress` to pick the right cloud helper.
+    Kept distinct from `_looks_like_local_mlx` (which only returns
+    bool) so the routing is explicit and adding a new vendor is one
+    line, not a tangle of negations.
+    """
+    low = model.lower()
+    if low.startswith("claude") or low.startswith("anthropic"):
+        return "anthropic"
+    if (
+        low.startswith("gpt")
+        or low.startswith("openai")
+        or low.startswith("o1-")
+        or low.startswith("o3-")
+        or low.startswith("o4-")
+    ):
+        return "openai"
+    return None
+
+
 async def judge_visual_progress(
     *,
     goal: str,
@@ -434,10 +515,19 @@ async def judge_visual_progress(
         except Exception:
             return None
 
-    # Cloud path (default — Anthropic).
+    # Cloud path — vendor-routed.
+    vendor = _cloud_vendor(use_model)
+    if vendor == "openai":
+        helper = _openai_judge
+    else:
+        # Default to Anthropic for legacy reasons (any model name we
+        # don't recognize as OpenAI/local routes here). Includes
+        # `claude-*` and `anthropic-*` plus any future cloud vendor
+        # that gets added before we wire its helper.
+        helper = _anthropic_judge
     try:
         return await asyncio.wait_for(
-            _anthropic_judge(
+            helper(
                 goal=goal,
                 current_png=current_png,
                 previous_png=previous_png,
