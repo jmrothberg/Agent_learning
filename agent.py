@@ -106,6 +106,23 @@ _PROJECT_CONFIG_FILES = ("AGENTS.md", "CLAUDE.md")
 _PROJECT_CONFIG_MAX_CHARS = 6000
 
 
+def _png_dims(png_bytes: bytes) -> tuple[int, int] | None:
+    """Read width/height from the PNG IHDR chunk without decoding the
+    image. Returns None if the bytes aren't a valid PNG. Used by the
+    image_attached trace event so the log says EXACTLY what dimensions
+    of screenshot the model received."""
+    if not png_bytes or len(png_bytes) < 24:
+        return None
+    if png_bytes[:8] != b"\x89PNG\r\n\x1a\n":
+        return None
+    try:
+        import struct
+        w, h = struct.unpack(">II", png_bytes[16:24])
+        return (int(w), int(h))
+    except Exception:
+        return None
+
+
 def _read_project_config(base_dir: Path) -> tuple[str, list[str]]:
     """Read AGENTS.md / CLAUDE.md (in that order) from `base_dir`.
 
@@ -1220,6 +1237,12 @@ class GameAgent:
         # by the verifier on each iter; consumed by `_stream`.
         self._last_screenshot_before: bytes | None = None
         self._last_screenshot_after: bytes | None = None
+        # Sibling path strings so the image_attached trace event can say
+        # WHICH screenshot file was sent to the model. Without these the
+        # trace shows bytes/dims only and you can't correlate to a file
+        # on disk to inspect.
+        self._last_screenshot_before_path: str | None = None
+        self._last_screenshot_after_path: str | None = None
         # Last screenshot fed to the vision-progress judge — kept so the
         # NEXT iter's judge call can compare "current vs previous" and
         # judge whether real visible progress happened. Independent from
@@ -2570,6 +2593,19 @@ class GameAgent:
             })
             return
         delta = self._last_screenshot_delta
+        # Log the raw model reply (truncated) alongside the parsed
+        # fields. Parsing can fail silently (model emits a verdict in
+        # a shape that doesn't match the PROGRESS:/MISSING: regex) and
+        # without the raw text we cannot tell whether the judge saw
+        # the screenshot at all — diagnosed 2026-05-16 from a session
+        # where `progress: null` showed up on every iter and there was
+        # no way to know why.
+        raw_excerpt = (verdict.raw or "")[:500]
+        parse_failed = verdict.progress is None and not verdict.note
+        # `image_count == 0` here would mean the judge call itself
+        # got no PNG — a more fundamental failure than parse_failed.
+        # Surface both flags so the user can grep one event and know
+        # exactly which layer broke.
         self._trace({
             "kind": "vision_judge",
             "iteration": iteration,
@@ -2577,6 +2613,11 @@ class GameAgent:
             "note": verdict.note,
             "model": verdict.model,
             "screenshot_delta": delta,
+            "raw": raw_excerpt,
+            "parse_failed": parse_failed,
+            "image_count": verdict.image_count,
+            "prompt_chars": verdict.prompt_chars,
+            "result_chars": verdict.result_chars,
         })
         # Stash the last verdict so it survives compaction and can be
         # surfaced in the state-anchor summary (item 8). The text
@@ -2663,21 +2704,40 @@ class GameAgent:
             # Multi-image attach: prefer the before/after pair when the
             # double-screenshot feature is on and both are present.
             imgs: list[bytes] = []
+            sources: list[str] = []
             if self._use_double_screenshot:
                 if self._last_screenshot_before:
                     imgs.append(self._last_screenshot_before)
+                    sources.append(self._last_screenshot_before_path or "<before>")
                 if self._last_screenshot_after:
                     imgs.append(self._last_screenshot_after)
+                    sources.append(self._last_screenshot_after_path or "<after>")
             elif self._next_image_bytes:
                 imgs.append(self._next_image_bytes)
+                sources.append(self._last_screenshot_after_path or "<queued>")
             if imgs:
                 self._messages[-1]["images"] = imgs
                 self._trace({
                     "kind": "image_attached",
+                    "iteration": self._snapshot_n,
                     "count": len(imgs),
                     "bytes": sum(len(b) for b in imgs),
+                    "sources": sources,
+                    "dims": [_png_dims(b) for b in imgs],
+                    "model_is_vlm": True,
                 })
                 self._next_image_bytes = None
+            else:
+                # VLM model but nothing to attach this turn — usually
+                # the first turn (no screenshot yet) or a critique turn
+                # without double-screenshot enabled. Logging this makes
+                # "is the model getting eyes on the game" grep-answerable.
+                self._trace({
+                    "kind": "image_skipped",
+                    "iteration": self._snapshot_n,
+                    "reason": "no screenshot bytes queued",
+                    "model_is_vlm": True,
+                })
 
         # Optional Continue.dev-style assistant prefill. Only applied
         # when feature is on AND `prefill` is provided. We insert a
@@ -5606,17 +5666,21 @@ class GameAgent:
             # the vision-progress judge can compare current vs. previous
             # even when the building model is text-only.
             after_bytes: bytes | None = None
+            after_path: str | None = None
             if shot_path is not None and report.get("screenshot"):
+                after_path = str(report["screenshot"])
                 try:
-                    after_bytes = Path(report["screenshot"]).read_bytes()
+                    after_bytes = Path(after_path).read_bytes()
                 except Exception:
                     after_bytes = None
                 if self._is_vlm is not False:
                     self._next_image_bytes = after_bytes
                     self._last_screenshot_after = after_bytes
+                    self._last_screenshot_after_path = after_path if after_bytes else None
                 elif after_bytes is None:
                     self._next_image_bytes = None
                     self._last_screenshot_after = None
+                    self._last_screenshot_after_path = None
 
             # Compute the screenshot delta BEFORE the vision judge runs
             # — the judge rotates `_prev_judge_png` to the current frame
@@ -5650,11 +5714,12 @@ class GameAgent:
                     })
             if self._use_double_screenshot and report.get("screenshot_before"):
                 try:
-                    self._last_screenshot_before = Path(
-                        report["screenshot_before"]
-                    ).read_bytes()
+                    before_path = str(report["screenshot_before"])
+                    self._last_screenshot_before = Path(before_path).read_bytes()
+                    self._last_screenshot_before_path = before_path
                 except Exception:
                     self._last_screenshot_before = None
+                    self._last_screenshot_before_path = None
 
             # Stop-Losing-To-OneShot todo #4 — auto-revert on regression.
             # Mid-tier models often "polish" a working build into a worse

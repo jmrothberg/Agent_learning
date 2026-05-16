@@ -52,6 +52,9 @@ class VisionVerdict:
     note: str               # one-sentence "what's still missing"
     raw: str                # full model reply (kept for trace + debugging)
     model: str              # which model produced the verdict
+    image_count: int = 0    # how many PNGs we shipped to the VLM this call
+    prompt_chars: int = 0   # length of the templated text prompt
+    result_chars: int = 0   # length of the raw model reply (pre-parse)
 
 
 def is_enabled() -> bool:
@@ -89,23 +92,94 @@ def _judge_prompt(goal: str, has_prev: bool) -> str:
 
 
 def _parse(raw: str) -> tuple[bool | None, str]:
-    """Pull PROGRESS and MISSING out of the model reply. Tolerant of
-    minor whitespace/case variation."""
+    """Pull PROGRESS and MISSING out of the model reply.
+
+    The judge prompt asks the model to answer in a strict
+    `PROGRESS: yes|no|unclear` + `MISSING: <one line>` format, but
+    local VLMs (Qwen3.6, Llava, etc.) frequently emit free prose
+    that ignores the format. This parser falls back through several
+    shapes so a useful verdict still lands when the model is loose.
+
+    Returns (progress, note). progress=None means we couldn't tell
+    from the reply. note="" means we found no actionable description
+    of what's still wrong.
+    """
     progress: bool | None = None
     note = ""
-    m = re.search(r"PROGRESS\s*:\s*(\w+)", raw, re.IGNORECASE)
+    if not raw:
+        return progress, note
+    text = raw.strip()
+
+    # Tier 1: strict labeled format.
+    m = re.search(r"PROGRESS\s*:\s*(\w+)", text, re.IGNORECASE)
     if m:
         v = m.group(1).strip().lower()
-        if v == "yes":
+        if v in {"yes", "true", "progress"}:
             progress = True
-        elif v == "no":
+        elif v in {"no", "false", "regression", "worse"}:
             progress = False
-        # "unclear" stays None
-    m = re.search(r"MISSING\s*:\s*(.+?)(?:\n|$)", raw, re.IGNORECASE | re.DOTALL)
+        # "unclear" / "maybe" / "partial" stay None
+
+    # Tier 2: bare yes/no/unclear on its own line.
+    if progress is None:
+        for line in text.splitlines():
+            tok = line.strip().rstrip(".!,").lower()
+            if tok in {"yes", "y", "progress", "better", "closer"}:
+                progress = True
+                break
+            if tok in {"no", "n", "regression", "worse", "not closer"}:
+                progress = False
+                break
+            if tok in {"unclear", "maybe", "partial", "uncertain"}:
+                # explicit unclear — leave as None but stop scanning
+                break
+
+    # Tier 3: prose-pattern hints. Last resort because false positives
+    # are easier here. Only fires if the text is short enough that the
+    # phrase is likely the verdict itself, not a discussion.
+    if progress is None and len(text) < 500:
+        low = text.lower()
+        positive_hints = (
+            "made progress", "making progress", "is closer",
+            "looks closer", "moved closer", "better than", "improvement",
+        )
+        negative_hints = (
+            "no progress", "not closer", "did not", "didn't", "regressed",
+            "worse than", "regression", "broken",
+        )
+        pos = any(h in low for h in positive_hints)
+        neg = any(h in low for h in negative_hints)
+        if pos and not neg:
+            progress = True
+        elif neg and not pos:
+            progress = False
+
+    # MISSING note: strict prefix first.
+    m = re.search(r"MISSING\s*:\s*(.+?)(?:\n\n|\n[A-Z]{2,}\s*:|$)",
+                  text, re.IGNORECASE | re.DOTALL)
     if m:
         note = m.group(1).strip()
-        # Collapse internal whitespace.
-        note = re.sub(r"\s+", " ", note)
+    else:
+        # Fallback: take the last non-empty line. Local VLMs often
+        # bury the actionable hint at the end of free prose.
+        for line in reversed(text.splitlines()):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            # Skip lines that ARE the progress verdict itself.
+            if re.match(r"^\s*(yes|no|unclear|true|false)\b",
+                        stripped, re.IGNORECASE):
+                continue
+            if re.match(r"^\s*PROGRESS\s*:", stripped, re.IGNORECASE):
+                continue
+            note = stripped
+            break
+
+    # Collapse whitespace and drop the literal "nothing obvious"
+    # sentinel — the agent loop treats that as "no coaching needed".
+    note = re.sub(r"\s+", " ", note).strip()
+    if note.lower().strip(".") == "nothing obvious":
+        note = "nothing obvious"
     return progress, note
 
 
@@ -157,7 +231,12 @@ async def _anthropic_judge(
             parts.append(getattr(block, "text", "") or "")
     raw = "".join(parts).strip()
     progress, note = _parse(raw)
-    return VisionVerdict(progress=progress, note=note, raw=raw, model=model)
+    return VisionVerdict(
+        progress=progress, note=note, raw=raw, model=model,
+        image_count=(2 if previous_png is not None else 1),
+        prompt_chars=len(_judge_prompt(goal, previous_png is not None)),
+        result_chars=len(raw),
+    )
 
 
 # ---- Local MLX VLM path (added 2026-05-15) ---------------------------
@@ -263,6 +342,9 @@ def _mlx_vlm_judge_sync(
         progress, note = _parse(raw)
         return VisionVerdict(
             progress=progress, note=note, raw=raw, model=model_path,
+            image_count=len(image_paths),
+            prompt_chars=len(templated) if isinstance(templated, str) else 0,
+            result_chars=len(raw),
         )
     finally:
         # Best-effort cleanup of temp images. If it fails the OS will
