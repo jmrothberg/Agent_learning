@@ -66,6 +66,16 @@ _tanh = math.tanh
 #                     you want to test "what if every game starts from
 #                     a near-bug-free scaffold?".
 DEFAULT_SKELETON_NAME = "canvas_basic.html"
+# Below this Jaccard similarity, a past-win skeleton is more likely to
+# bias the model toward the wrong structure than to provide a useful
+# starting point (see 2026-05-15 DK trace where sim=0.23 forced a
+# DK-arcade scaffold onto a DK-with-ramps goal and burned 6 iters).
+# Hits below this threshold fall through to the bundled empty
+# `canvas_basic.html` template — the model builds clean rather than
+# fighting a mismatched scaffold. 0.3 leaves real overlap matches
+# (shared mechanic words) untouched while filtering coincidental
+# token bleed.
+_SKELETON_MIN_SIM = 0.3
 CANVAS_SKELETON_V2_NAME = "canvas_basic_v2.html"
 DEFAULT_SKELETON = """<!DOCTYPE html>
 <html lang="en"><head>
@@ -523,6 +533,31 @@ class GameMemory:
                 best = hit
 
         if best is not None:
+            # Low-similarity past-win skeletons hurt more than help (the
+            # "KEEP its structure" instruction in prompts_v1 forces a
+            # bad scaffold on a mismatched goal). If the winner is a
+            # past-win match below the threshold, fall back to the
+            # bundled empty template — the model builds fresh instead
+            # of fighting wrong structure. Manually-added skeletons
+            # (score=0.05, no sidecar) also fall through; the default
+            # itself (score=0.0, name match) is exempt so it can still
+            # win when it IS the best.
+            below_threshold = (
+                best.source_goal is not None
+                and best.score < _SKELETON_MIN_SIM
+            )
+            if below_threshold:
+                default_path = self.skeletons_dir / DEFAULT_SKELETON_NAME
+                try:
+                    default_html = default_path.read_text(encoding="utf-8")
+                except Exception:
+                    default_html = DEFAULT_SKELETON
+                return SkeletonHit(
+                    name=DEFAULT_SKELETON_NAME,
+                    html=default_html,
+                    score=0.0,
+                    source_goal=None,
+                )
             return best
         # Fully empty memory dir — return DEFAULT_SKELETON in-memory.
         return SkeletonHit(

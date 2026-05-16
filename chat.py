@@ -1787,6 +1787,8 @@ class CodingBoxApp(App):
                 self._cmd_set_model_class(arg)
             elif cmd == "launch":
                 self._cmd_launch_mlx(arg)
+            elif cmd == "check":
+                await self._cmd_check(arg)
             else:
                 self._log_info(f"unknown command /{cmd} — type /help")
         except Exception as e:
@@ -1860,6 +1862,10 @@ class CodingBoxApp(App):
             "  [b]/wait[/b] [on|off]            toggle step-mode: pause after each iter; Enter or feedback to continue",
             "  [b]/playbook[/b] [on|off]        toggle playbook bullet injection (alias /memory) - A/B vs one-shot when iters feel worse than no agent",
             "  [b]/audit[/b]                     print per-bullet earnings (fires, pass-rate, avg-iter) from trace history",
+            "  [b]/check with <model>[/b]       look at the latest screenshot with a vision model · YOU pick when · costs ~1 API call",
+            "                                  [dim]e.g. /check with claude   /check with claude-opus-4-7   /check with sonnet[/dim]",
+            "                                  [dim](Claude / Anthropic only for now; needs ANTHROPIC_API_KEY)[/dim]",
+            "                                  [dim]model says 'progress: yes/no/unclear' + what's still visibly wrong; not auto-injected[/dim]",
             "  [b]/quit[/b]                    quit (= Ctrl+Q)",
             "",
             "[bold cyan]── sticky staging ──[/bold cyan]",
@@ -2296,17 +2302,28 @@ class CodingBoxApp(App):
         self._next_backend = chosen_backend
         self._next_model = chosen_name
         backend_label = chosen_backend.upper()
-        # Hot-swap: if the user is paused between iters in /wait mode,
-        # rebuild the running session's backend in-place so the NEXT
-        # iter uses the new model. Without this, /load just stages for
-        # /new — which throws away the session's progress — and the
-        # user has to know to type /new again. With /wait pause as the
-        # signal, the swap stays scoped to "intentional, between-iter
-        # transitions" (we never swap mid-stream).
+        # Hot-swap: when an active session exists, ALWAYS apply the
+        # swap to that session (not just to the next /new). The user
+        # typed /model — they mean now, not "next time you start over".
+        #
+        # Safe even mid-stream: the running stream_chat call has the
+        # old backend bound on its async stack and finishes on the old
+        # model; only the NEXT call reads `self._backend` and picks up
+        # the new one. So at worst, the current iter finishes on the
+        # old model and iter N+1 onward uses the new one — never a
+        # half-and-half mid-stream switch.
+        #
+        # Before 2026-05-15 we gated this on `_awaiting_kind == "step"`
+        # (i.e. only swap when the user was paused in /wait mode).
+        # That confused users who typed /model mid-session and got a
+        # silent "staged for next /new" instead of an actual switch.
+        # The Space Invaders trace from that day was the smoking gun:
+        # the local model was failing, user typed /model 12 to swap to
+        # Qwen3.6-27B; the agent staged instead of swapping; the
+        # failing model kept failing for two more iters.
         can_hotswap = (
             self.agent is not None
             and not self._session_done
-            and self._awaiting_kind == "step"
         )
         if can_hotswap:
             try:
@@ -2337,17 +2354,26 @@ class CodingBoxApp(App):
             self.title = (
                 f"JMR's Coding Box — {new_info.name.upper()} · {chosen_name}"
             )
-            self._log_info(
-                f"[green]switched current session to[/green] [b]{backend_label}[/b] "
-                f"· [b]{_esc(chosen_name)}[/b] "
-                f"[dim](hot-swap while /wait paused; next iter uses it)[/dim]"
-            )
+            if self._is_streaming:
+                # Mid-stream swap: in-flight call finishes on the old
+                # model, next call uses the new one. Tell the user.
+                self._log_info(
+                    f"[green]switched current session to[/green] "
+                    f"[b]{backend_label}[/b] · [b]{_esc(chosen_name)}[/b] "
+                    f"[dim](mid-stream — current iter finishes on the OLD "
+                    f"model; next iter uses the new one)[/dim]"
+                )
+            else:
+                self._log_info(
+                    f"[green]switched current session to[/green] "
+                    f"[b]{backend_label}[/b] · [b]{_esc(chosen_name)}[/b] "
+                    f"[dim](next iter uses it)[/dim]"
+                )
             self._update_status()
             return
         self._log_info(
             f"staged [b]{backend_label}[/b] · [b]{_esc(chosen_name)}[/b] "
-            "for next /new session [dim](current session keeps its model; "
-            "use /wait first to enable hot-swap)[/dim]"
+            "for next /new session [dim](no active session to hot-swap)[/dim]"
         )
 
         # MLX-specific: warn if the staged model differs from the
@@ -2462,6 +2488,141 @@ class CodingBoxApp(App):
                 f"loader swaps weights at first request, ~30-60s)"
             )
         self._log_info(msg)
+
+    async def _cmd_check(self, arg: str) -> None:
+        """/check with <model> — explicit, on-demand visual progress check.
+
+        Looks at the most recent screenshot of your game with a vision
+        model and answers two things: did the last iteration make
+        VISIBLE progress toward your goal, and what's still visibly
+        wrong. This is the "third signal" the harness otherwise lacks
+        (probes only check structure, not whether the game LOOKS like
+        what you asked for).
+
+        EXPLICIT BY DESIGN. Calls a paid API exactly when you type the
+        command — never automatic, never on every iter. The verdict is
+        printed for you to read; not auto-injected into the next turn.
+        Copy/paste it yourself if you want the building model to act
+        on it.
+
+        Currently Claude / Anthropic only (needs ANTHROPIC_API_KEY).
+        """
+        if not arg or not arg.lower().startswith("with "):
+            self._log_info("usage: /check with <model>")
+            self._log_info(
+                "  e.g. /check with claude   (shorthand → claude-sonnet-4-6)"
+            )
+            self._log_info("       /check with claude-opus-4-7")
+            self._log_info("       /check with claude-haiku-4-5")
+            self._log_info(
+                "Calls the specified vision model ONCE on the latest "
+                "screenshot. ~1 API call. Verdict is printed; not "
+                "injected into the next turn."
+            )
+            return
+        model = arg[5:].strip()
+        aliases = {
+            "claude": "claude-sonnet-4-6",
+            "sonnet": "claude-sonnet-4-6",
+            "opus": "claude-opus-4-7",
+            "haiku": "claude-haiku-4-5",
+        }
+        model = aliases.get(model.lower(), model)
+        low = model.lower()
+        is_cloud_claude = (
+            low.startswith("claude-") or low.startswith("claude")
+        )
+        # Local MLX VLM path — added 2026-05-15. Any non-cloud name
+        # routes through `vision_judge._resolve_local_mlx_vlm`, which
+        # scans `~/MLX_Models` etc. and requires the resolved model
+        # to classify as a VLM. So `/check with qwen3.6` hits your
+        # local Qwen3.6-27B VLM via mlx_vlm — no Anthropic call, no
+        # cost, fully on-device.
+        if is_cloud_claude:
+            if not os.environ.get("ANTHROPIC_API_KEY"):
+                self._log_error(
+                    "/check: ANTHROPIC_API_KEY not set. Add it to .env "
+                    "or your shell env."
+                )
+                return
+        else:
+            # Verify the local resolver finds a VLM match. If not,
+            # bail with a clear message instead of silently going to
+            # Anthropic.
+            try:
+                from vision_judge import _resolve_local_mlx_vlm
+            except Exception as e:
+                self._log_error(f"/check: vision_judge unavailable — {e}")
+                return
+            resolved = _resolve_local_mlx_vlm(model)
+            if resolved is None:
+                self._log_error(
+                    f"/check: no local VLM matched {_esc(model)!r}. "
+                    "Available VLMs: run /list and look for [VLM]. "
+                    "Cloud models: prefix with claude (e.g. "
+                    "[b]/check with claude[/b])."
+                )
+                return
+            self._log_info(
+                f"[magenta]/check[/magenta] resolved local VLM: "
+                f"[b]{_esc(resolved)}[/b]"
+            )
+            model = resolved  # vision_judge picks the path back up
+        agent = getattr(self, "agent", None)
+        if agent is None:
+            self._log_error(
+                "/check needs an active agent — start a session first "
+                "with /new <goal>."
+            )
+            return
+        png = (
+            getattr(agent, "_last_screenshot_after", None)
+            or getattr(agent, "_prev_judge_png", None)
+        )
+        if not png:
+            self._log_error(
+                "/check: no screenshot yet. Run at least one iteration "
+                "first so there's something to look at."
+            )
+            return
+        goal = getattr(agent, "_goal", None)
+        if not goal:
+            self._log_error(
+                "/check: no active goal. Start a session with /new <goal>."
+            )
+            return
+        self._log_info(
+            f"[magenta]/check[/magenta] calling [b]{_esc(model)}[/b] (one API call)…"
+        )
+        try:
+            from vision_judge import judge_visual_progress
+        except Exception as e:
+            self._log_error(f"/check: vision_judge unavailable — {e}")
+            return
+        verdict = await judge_visual_progress(
+            goal=goal,
+            current_png=png,
+            previous_png=None,
+            model=model,
+        )
+        if verdict is None:
+            self._log_error(
+                "/check: model returned nothing (API down, timeout, or "
+                "rejected). No state was changed."
+            )
+            return
+        if verdict.progress is True:
+            prog = "[green]progress[/green]"
+        elif verdict.progress is False:
+            prog = "[red]no progress[/red]"
+        else:
+            prog = "[yellow]unclear[/yellow]"
+        self._log(f"[magenta]{_esc(model)}:[/magenta] {prog}")
+        self._log(f"  missing: {_esc(verdict.note) if verdict.note else '(no note)'}")
+        self._log_info(
+            "(verdict NOT auto-injected — type what you want into the "
+            "next message yourself if you want the model to act on it)"
+        )
 
     def _cmd_set_model_class(self, arg: str) -> None:
         """/model-class auto|small|mid|large — override the system-prompt

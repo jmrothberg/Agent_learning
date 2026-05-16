@@ -139,14 +139,11 @@ PY
 
 ok "DeepSeek-V4 Flash/Pro should now load."
 echo
-warn "V4 has a separate runtime bug — start the server with --prefill-step-size 512"
-warn "to avoid the cubic-attention blow-up on prompts > ~1.3K tokens. Recommended:"
-echo
-echo "     ./scripts/mlx_v4_server.sh"
-echo "        # auto-detects your V4 model under ~/MLX_Models, passes the right flag"
-echo
-echo "  Or manually:"
-echo "     mlx_lm.server --model /path/to/V4-model --port 8080 --prefill-step-size 512"
+info "V4 has a separate runtime bug (cubic-attention blow-up on prompts > ~1.3K"
+info "tokens). The agent's in-process MLX backend handles it automatically:"
+info "  - Flash auto-uses prefill chunk 512"
+info "  - Pro/everything-else uses 1024"
+info "Override per-machine with the env var MLX_PREFILL_STEP_SIZE if needed."
 echo
 info "to switch back to upstream stable later:"
 echo "     ./scripts/install_mlx_v4_fix.sh --rollback"

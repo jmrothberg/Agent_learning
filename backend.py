@@ -107,6 +107,16 @@ _VLM_NAME_SUBSTRINGS: tuple[str, ...] = (
     # Alibaba Qwen family
     "qwen-vl", "qwen2-vl", "qwen2.5-vl", "qwen3-vl", "qwen3.6-vl",
     "qwen-omni", "qwen2.5-omni", "qwen3-omni",
+    # 2026-05-15 user correction: Qwen3.6 unified vision into the
+    # base 27B (and 7B etc.), dropping the "-VL" suffix that earlier
+    # Qwen families used. The base `Qwen3.6-27B` from Alibaba ships
+    # as a VLM out of the box — see HF model card for
+    # mlx-community/Qwen3.6-27B-bf16 (pipeline_tag: image-text-to-text,
+    # library: mlx-vlm). Match the family prefix so any quant
+    # (-bf16, -mxfp8, -8bit, etc.) is correctly labeled. Earlier Qwen3
+    # (without ".6") was NOT unified — keep that prefix OUT of this
+    # list so plain Qwen3-30B etc. stay labeled text-only.
+    "qwen3.6-27b", "qwen3.6-7b", "qwen3.6-72b", "qwen3.6-235b",
     # LLaVA family
     "llava", "bakllava",
     # DeepSeek vision
@@ -376,12 +386,34 @@ _MLX_OPTION_KEYS: tuple[str, ...] = (
     "seed", "max_tokens",
 )
 
-# DeepSeek-V4 Flash/Pro needs a small prefill chunk because its Indexer
-# attention path materializes O(L^2 * k) Metal buffers. 1024 is the
-# safe-anywhere default per the upstream PR reviewer; the (now-deleted)
-# scripts/mlx_v4_server.sh used the same value. Override via env if you
-# want to experiment.
+# DeepSeek-V4 Flash needs an even smaller prefill chunk than Pro
+# because its Indexer attention path materializes O(L^2 * k) Metal
+# buffers per chunk and crashes mid-stream at chunk_size > 512
+# (observed 2026-05-15 DK trace: 11K-token generation crashed after
+# a 12K-prompt prefill at chunk_size 1024). General default stays at
+# 1024 for everything else; Flash auto-downshifts via
+# `_resolve_prefill_step_size`. Env MLX_PREFILL_STEP_SIZE always wins.
+# (The earlier `scripts/mlx_v4_server.sh` wrapper that passed this
+# flag to the separate HTTP server has been removed — MLX runs
+# in-process now, so the flag is applied here directly.)
 _MLX_PREFILL_STEP_SIZE_DEFAULT = 1024
+_MLX_PREFILL_STEP_SIZE_FLASH = 512
+
+
+def _resolve_prefill_step_size(model_path: str) -> int:
+    """Pick the prefill chunk size for `model_path`.
+
+    Env override (`MLX_PREFILL_STEP_SIZE`) wins. Otherwise, model
+    names containing 'flash' (case-insensitive) get 512 — empirically
+    required for DeepSeek-V4 Flash; safe for any other model that
+    happens to share the substring. Everything else gets 1024.
+    """
+    env_val = (os.environ.get("MLX_PREFILL_STEP_SIZE") or "").strip()
+    if env_val.isdigit() and int(env_val) > 0:
+        return int(env_val)
+    if "flash" in (model_path or "").lower():
+        return _MLX_PREFILL_STEP_SIZE_FLASH
+    return _MLX_PREFILL_STEP_SIZE_DEFAULT
 
 
 class MLXBackend(Backend):
@@ -405,9 +437,20 @@ class MLXBackend(Backend):
 
     # Class-level model cache. Switching MLX_MODEL between sessions
     # frees the previous model first to keep VRAM bounded.
+    #
+    # Two slots: text-only models load via `mlx_lm` and use
+    # (_loaded_model, _loaded_tokenizer); VLM models load via
+    # `mlx_vlm` and use (_loaded_vlm_model, _loaded_vlm_processor,
+    # _loaded_vlm_config). Only one slot at a time should hold
+    # weights for any given path — `_load_sync` and `_load_vlm_sync`
+    # both null the OTHER slot on a new load to keep VRAM bounded.
     _loaded_model: Any = None
     _loaded_tokenizer: Any = None
     _loaded_path: str | None = None
+    _loaded_vlm_model: Any = None
+    _loaded_vlm_processor: Any = None
+    _loaded_vlm_config: Any = None
+    _loaded_vlm_path: str | None = None
     _load_lock: asyncio.Lock | None = None
     # All MLX work runs on this single dedicated thread. MLX/Metal
     # binds GPU contexts to the calling thread; if we loaded the model
@@ -439,6 +482,46 @@ class MLXBackend(Backend):
         return cls._mlx_thread
 
     @classmethod
+    def _drop_after_crash(cls) -> None:
+        """Free GPU state after the MLX worker raised mid-stream.
+
+        Nulls the cached model/tokenizer references and queues a
+        `mlx.core.metal.clear_cache()` on the MLX thread so the next
+        stream re-enters the load path with a clean Metal context.
+        Without this, a single crash made the rest of the session
+        unusable until the user killed and restarted chat.py (the
+        process-wide Metal allocator was full of dead tensors).
+
+        Safe to call from any thread — only touches Python refs here
+        and schedules the actual Metal work back onto the MLX thread.
+        """
+        cls._loaded_model = None
+        cls._loaded_tokenizer = None
+        cls._loaded_path = None
+        cls._loaded_vlm_model = None
+        cls._loaded_vlm_processor = None
+        cls._loaded_vlm_config = None
+        cls._loaded_vlm_path = None
+        import gc
+        gc.collect()
+
+        def _clear_on_mlx_thread() -> None:
+            try:
+                import mlx.core as mx  # type: ignore
+                metal = getattr(mx, "metal", None)
+                if metal is not None and hasattr(metal, "clear_cache"):
+                    metal.clear_cache()
+            except Exception:
+                pass
+            import gc as _gc
+            _gc.collect()
+
+        try:
+            cls._get_mlx_executor().submit(_clear_on_mlx_thread)
+        except Exception:
+            pass
+
+    @classmethod
     def _load_sync(cls, path: str) -> tuple[Any, Any]:
         """Blocking load. MUST run on the dedicated MLX thread (see
         `_get_mlx_executor`) — Metal binds to the calling thread.
@@ -461,7 +544,57 @@ class MLXBackend(Backend):
         cls._loaded_model = model
         cls._loaded_tokenizer = tokenizer
         cls._loaded_path = path
+        # Free the VLM slot if it's holding a different model — only
+        # one model should be in VRAM at a time.
+        if cls._loaded_vlm_model is not None and cls._loaded_vlm_path != path:
+            cls._loaded_vlm_model = None
+            cls._loaded_vlm_processor = None
+            cls._loaded_vlm_config = None
+            cls._loaded_vlm_path = None
+            import gc as _gc
+            _gc.collect()
         return model, tokenizer
+
+    @classmethod
+    def _load_vlm_sync(cls, path: str) -> tuple[Any, Any, Any]:
+        """Blocking load via `mlx_vlm`. Returns (model, processor, config).
+        MUST run on the dedicated MLX thread.
+
+        Used when the model NAME classifies as a VLM (e.g. Qwen3.6-27B,
+        LLaVA, MiniCPM-V). The mlx_vlm pipeline loads BOTH the language
+        model and the vision tower — same files on disk as the mlx_lm
+        load, different python objects, different VRAM footprint.
+        """
+        if (
+            cls._loaded_vlm_path == path
+            and cls._loaded_vlm_model is not None
+        ):
+            return (
+                cls._loaded_vlm_model,
+                cls._loaded_vlm_processor,
+                cls._loaded_vlm_config,
+            )
+        # Free either slot if it holds a different (or any) model.
+        if cls._loaded_vlm_model is not None:
+            cls._loaded_vlm_model = None
+            cls._loaded_vlm_processor = None
+            cls._loaded_vlm_config = None
+            cls._loaded_vlm_path = None
+        if cls._loaded_model is not None and cls._loaded_path != path:
+            cls._loaded_model = None
+            cls._loaded_tokenizer = None
+            cls._loaded_path = None
+        import gc as _gc
+        _gc.collect()
+        from mlx_vlm import load as _vlm_load  # type: ignore
+        from mlx_vlm.utils import load_config as _vlm_load_config  # type: ignore
+        model, processor = _vlm_load(path)
+        config = _vlm_load_config(path)
+        cls._loaded_vlm_model = model
+        cls._loaded_vlm_processor = processor
+        cls._loaded_vlm_config = config
+        cls._loaded_vlm_path = path
+        return model, processor, config
 
     async def stream_chat(
         self,
@@ -531,10 +664,7 @@ class MLXBackend(Backend):
         top_k = int(sampler_opts.get("top_k") or 0)
         min_p = float(sampler_opts.get("min_p") or 0.0)
 
-        prefill_step_size = int(
-            os.environ.get("MLX_PREFILL_STEP_SIZE")
-            or _MLX_PREFILL_STEP_SIZE_DEFAULT
-        )
+        prefill_step_size = _resolve_prefill_step_size(self.info.model)
 
         started = time.monotonic()
         # Last-activity timestamp for the stall watchdog. Bumped on
@@ -561,9 +691,35 @@ class MLXBackend(Backend):
         delib = DeliberationDetector()
         deliberated = False
 
+        # Route decision: VLM models (Qwen3.6-27B, LLaVA, MiniCPM-V,
+        # etc.) go through `mlx_vlm` so the agent can pass screenshot
+        # bytes per-iter. Text-only goes through `mlx_lm` as before.
+        # `mlx_vlm` must be importable; if it's not installed but the
+        # name classifies as VLM, fall back to text-only mode so the
+        # session still works (with images silently dropped — same
+        # behavior as before 2026-05-15).
+        is_vlm_model = classify_model_modality(self.info.model) == "vlm"
+        if is_vlm_model:
+            try:
+                import mlx_vlm  # noqa: F401
+            except ImportError:
+                is_vlm_model = False
+        # Track separately so the load-check below picks the right slot.
         needs_load = (
-            self._loaded_path != self.info.model
-            or self._loaded_model is None
+            (
+                is_vlm_model
+                and (
+                    self._loaded_vlm_path != self.info.model
+                    or self._loaded_vlm_model is None
+                )
+            )
+            or (
+                not is_vlm_model
+                and (
+                    self._loaded_path != self.info.model
+                    or self._loaded_model is None
+                )
+            )
         )
         if needs_load and on_progress is not None:
             try:
@@ -611,7 +767,28 @@ class MLXBackend(Backend):
         # this single thread for the entire lifetime of the model.
         info_model = self.info.model
 
-        def _pipeline() -> None:
+        # Strip "images" from each message before chat-template
+        # rendering — chat templates expect string content. We also
+        # collect the bytes here so the VLM pipeline can write them
+        # to temp files. The "images" key is what `agent._stream`
+        # sets when attaching a screenshot to a turn.
+        def _split_images(msgs: list[dict]) -> tuple[list[dict], list[bytes]]:
+            cleaned: list[dict] = []
+            images: list[bytes] = []
+            for m in msgs:
+                imgs = m.get("images") if isinstance(m, dict) else None
+                if imgs:
+                    images.extend(b for b in imgs if isinstance(b, (bytes, bytearray)))
+                # Keep only text-template-safe keys.
+                cleaned.append({
+                    k: v for k, v in m.items()
+                    if k in ("role", "content")
+                })
+            return cleaned, images
+
+        cleaned_messages, image_bytes_list = _split_images(messages)
+
+        def _pipeline_textonly() -> None:
             try:
                 model, tokenizer = self._load_sync(info_model)
                 if needs_load:
@@ -621,12 +798,12 @@ class MLXBackend(Backend):
                 # (rare with modern Instruct models).
                 try:
                     prompt = tokenizer.apply_chat_template(
-                        messages, tokenize=False, add_generation_prompt=True
+                        cleaned_messages, tokenize=False, add_generation_prompt=True
                     )
                 except Exception:
                     prompt = "\n\n".join(
                         f"{m.get('role', 'user')}: {m.get('content', '')}"
-                        for m in messages
+                        for m in cleaned_messages
                     ) + "\n\nassistant:"
 
                 from mlx_lm.sample_utils import make_sampler  # type: ignore
@@ -653,7 +830,111 @@ class MLXBackend(Backend):
                 ct = getattr(last_gen, "generation_tokens", None) if last_gen else None
                 loop.call_soon_threadsafe(q.put_nowait, ("done", None, pt, ct))
             except BaseException as e:  # noqa: BLE001 - surface MLX errors too
-                loop.call_soon_threadsafe(q.put_nowait, ("error", e, None, None))
+                # Format the exception ON this thread — the consumer
+                # is in asyncio land and doesn't have the live frame.
+                # `format_exception_only` works for BaseException
+                # subclasses (MemoryError, Metal RuntimeError, ...).
+                import traceback as _tb
+                err_text = "".join(
+                    _tb.format_exception_only(type(e), e)
+                ).strip() or repr(e)
+                loop.call_soon_threadsafe(
+                    q.put_nowait, ("error", err_text, None, None)
+                )
+
+        def _pipeline_vlm() -> None:
+            """VLM streaming via mlx_vlm. Writes any attached image
+            bytes to temp files; passes their paths to mlx_vlm's
+            `stream_generate` alongside the text prompt. Same queue +
+            cancel + error-text plumbing as the text-only path.
+            """
+            import tempfile
+            from pathlib import Path as _Path
+            tmp_dir = tempfile.mkdtemp(prefix="mlx_vlm_chat_")
+            image_paths: list[str] = []
+            try:
+                model, processor, config = self._load_vlm_sync(info_model)
+                if needs_load:
+                    loop.call_soon_threadsafe(q.put_nowait, ("loaded", None, None, None))
+                # Write image bytes to temp PNGs.
+                for i, img in enumerate(image_bytes_list):
+                    p = _Path(tmp_dir) / f"img_{i:02d}.png"
+                    p.write_bytes(img)
+                    image_paths.append(str(p))
+
+                # Build prompt via mlx_vlm's chat-template helper.
+                # It needs num_images so the right number of <image>
+                # placeholders are inserted in the prompt.
+                from mlx_vlm.prompt_utils import (  # type: ignore
+                    apply_chat_template as _vlm_template,
+                )
+                try:
+                    prompt = _vlm_template(
+                        processor, config, cleaned_messages,
+                        num_images=len(image_paths),
+                    )
+                except Exception:
+                    # Same naive fallback as text-only.
+                    prompt = "\n\n".join(
+                        f"{m.get('role', 'user')}: {m.get('content', '')}"
+                        for m in cleaned_messages
+                    ) + "\n\nassistant:"
+
+                from mlx_vlm import stream_generate as _vlm_stream  # type: ignore
+                # mlx_vlm.stream_generate doesn't take a `sampler` like
+                # mlx_lm; sampling kwargs pass through directly.
+                kwargs: dict[str, Any] = {
+                    "max_tokens": max_tokens,
+                    "prefill_step_size": prefill_step_size,
+                }
+                if temperature > 0:
+                    kwargs["temperature"] = temperature
+                if top_p > 0:
+                    kwargs["top_p"] = top_p
+                # Pass image arg only when present — mlx_vlm handles
+                # text-only prompts cleanly when image=None.
+                image_arg: Any = None
+                if image_paths:
+                    image_arg = image_paths if len(image_paths) > 1 else image_paths[0]
+
+                last_gen = None
+                for gen in _vlm_stream(
+                    model, processor, prompt,
+                    image=image_arg,
+                    **kwargs,
+                ):
+                    if worker_cancel.is_set():
+                        break
+                    last_gen = gen
+                    pt = getattr(gen, "prompt_tokens", None)
+                    ct = getattr(gen, "generation_tokens", None)
+                    loop.call_soon_threadsafe(
+                        q.put_nowait, ("text", gen.text, pt, ct)
+                    )
+                pt = getattr(last_gen, "prompt_tokens", None) if last_gen else None
+                ct = getattr(last_gen, "generation_tokens", None) if last_gen else None
+                loop.call_soon_threadsafe(q.put_nowait, ("done", None, pt, ct))
+            except BaseException as e:  # noqa: BLE001
+                import traceback as _tb
+                err_text = "".join(
+                    _tb.format_exception_only(type(e), e)
+                ).strip() or repr(e)
+                loop.call_soon_threadsafe(
+                    q.put_nowait, ("error", err_text, None, None)
+                )
+            finally:
+                # Best-effort temp-dir cleanup.
+                try:
+                    for p in image_paths:
+                        try:
+                            _Path(p).unlink()
+                        except Exception:
+                            pass
+                    _Path(tmp_dir).rmdir()
+                except Exception:
+                    pass
+
+        _pipeline = _pipeline_vlm if is_vlm_model else _pipeline_textonly
 
         # Submit on the dedicated MLX executor (single thread).
         # Future is awaited implicitly via the queue; we just need to
@@ -668,19 +949,28 @@ class MLXBackend(Backend):
                     first = await asyncio.wait_for(q.get(), timeout=overall_seconds)
                 except asyncio.TimeoutError:
                     worker_cancel.set()
+                    self._drop_after_crash()
                     return StreamResult(
                         text="", tokens=0,
                         duration_s=time.monotonic() - started,
                         stalled=True, looped=False, crashed=True,
                         stall_at_token=None,
+                        error_message=(
+                            f"MLX cold-load did not return within "
+                            f"{overall_seconds:.0f}s. Model never finished "
+                            "loading into Metal."
+                        ),
                     )
                 kind = first[0]
                 if kind == "error":
+                    err_payload = first[1] if isinstance(first[1], str) else None
+                    self._drop_after_crash()
                     return StreamResult(
                         text="", tokens=0,
                         duration_s=time.monotonic() - started,
                         stalled=True, looped=False, crashed=True,
                         stall_at_token=None,
+                        error_message=err_payload,
                     )
                 if kind == "loaded":
                     if on_progress is not None:
@@ -732,9 +1022,13 @@ class MLXBackend(Backend):
                 kind, payload, pt, ct = item
                 if kind == "error":
                     worker_cancel.set()
-                    # If it's a hard MLX/Metal error, surface as crashed
-                    # so the agent can show the recovery message.
+                    # Hard MLX/Metal error mid-stream. Surface the real
+                    # exception text (worker formatted it at the catch
+                    # site) and free GPU state so the next stream
+                    # doesn't inherit a stuck Metal allocator.
                     crashed = True
+                    err_payload = payload if isinstance(payload, str) else None
+                    self._drop_after_crash()
                     return StreamResult(
                         text="".join(parts), tokens=n_tokens,
                         duration_s=time.monotonic() - started,
@@ -742,6 +1036,7 @@ class MLXBackend(Backend):
                         stall_at_token=stall_at,
                         prompt_tokens=prompt_tokens,
                         completion_tokens=completion_tokens,
+                        error_message=err_payload,
                     )
                 if kind == "done":
                     if isinstance(pt, int):
@@ -796,10 +1091,23 @@ class MLXBackend(Backend):
         )
 
     async def is_vlm(self) -> bool:
-        # In-process MLX path doesn't currently surface vision capability
-        # the way ollama.show() does. Keep screenshots out of MLX
-        # prompts so the agent doesn't send images the model can't see.
-        return False
+        """True when (a) the model name classifies as a VLM AND (b)
+        `mlx_vlm` is installed so we can actually serve images to it.
+
+        Until 2026-05-15 this returned False unconditionally — the
+        MLX stream path only knew about `mlx_lm` (text-only), so
+        even if a user loaded a VLM, attached images would be
+        silently dropped. Now `stream_chat` routes VLM models
+        through `mlx_vlm.stream_generate` with images, so we can
+        honestly advertise the capability.
+        """
+        if classify_model_modality(self.info.model) != "vlm":
+            return False
+        try:
+            import mlx_vlm  # noqa: F401
+        except ImportError:
+            return False
+        return True
 
 
 # -----------------------------------------------------------------------------
@@ -1689,6 +1997,31 @@ def list_mlx_inventory() -> tuple[list[str], str | None]:
     if active and active not in seen:
         merged.append(active)
     return merged, active
+
+
+def discover_local_vlm() -> str | None:
+    """First locally-downloaded MLX model whose name classifies as VLM.
+
+    Used by GameAgent to auto-enable the vision_judge visual-progress
+    check when a vision-capable model is available on disk — keeps the
+    judge entirely local (no Anthropic fallback). Returns None when no
+    local VLM is found; callers must treat None as "no signal", not as
+    an error.
+    """
+    downloaded, _active = list_mlx_inventory()
+    for entry in downloaded:
+        base = entry.split("/")[-1] if "/" in entry else entry
+        if classify_model_modality(base) == "vlm":
+            return entry
+    # Also scan dirs that list_mlx_inventory's _is_chat_capable_tag may
+    # filter out — some VLM packagings don't ship a chat template marker
+    # in the path. Fall through to a direct scan of the same dirs.
+    for root in _default_mlx_search_dirs():
+        for path in _scan_mlx_models_dir(root):
+            base = path.split("/")[-1] if "/" in path else path
+            if classify_model_modality(base) == "vlm":
+                return path
+    return None
 
 
 def _default_mlx_search_dirs() -> list[str]:

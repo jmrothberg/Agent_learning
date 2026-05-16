@@ -164,7 +164,15 @@ def test_case_insensitive():
 def test_mlx_path_form_also_matches():
     """MLX models can be passed as full disk paths; classifier should
     still match on the basename."""
+    # Qwen3.6 family unified vision into the base 27B — see
+    # mlx-community/Qwen3.6-27B-bf16 HF card (pipeline_tag:
+    # image-text-to-text). Earlier this test asserted "text" for
+    # this path; that was wrong and the user caught it 2026-05-15.
     path = "/Users/jmr/MLX_Models/Qwen3.6-27B-mxfp8"
-    assert classify_model_modality(path) == "text"
+    assert classify_model_modality(path) == "vlm"
     path = "/opt/mlx/qwen2.5-vl-7b-mxfp4"
     assert classify_model_modality(path) == "vlm"
+    # Plain Qwen3 (no .6) is still text-only — keep the false-positive
+    # guard so the name-prefix check doesn't bleed beyond the 3.6 family.
+    path = "/Users/jmr/MLX_Models/Qwen3-30B-A3B-8bit"
+    assert classify_model_modality(path) == "text"

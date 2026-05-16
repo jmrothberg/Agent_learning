@@ -614,6 +614,7 @@ def generate_sounds(
         cache_root = Path(cache_dir)
     cache_root.mkdir(parents=True, exist_ok=True)
 
+    _caller_provided_generator = audio_generator is not None
     if audio_generator is None:
         audio_generator = try_load_audio_generator(model_id)
     if audio_generator is None:
@@ -621,6 +622,16 @@ def generate_sounds(
 
     out: dict[str, Path] = {}
     sound_stats: list[dict[str, Any]] = []
+    # Cross-session library — mirrors assets.py. Same hermetic-test
+    # opt-out: only activate the library when the caller didn't pass
+    # an explicit `cache_dir` (production never does).
+    library: Any = None
+    if cache_dir is None and not _caller_provided_generator:
+        try:
+            from asset_library import AssetLibrary
+            library = AssetLibrary()
+        except Exception:
+            library = None
     for spec in specs:
         import time
         t0 = time.time()
@@ -649,6 +660,29 @@ def generate_sounds(
             stat["gen_seconds"] = round(time.time() - t0, 3)
             sound_stats.append(stat)
             continue
+        # Cross-session library lookup before paying the GPU.
+        if library is not None:
+            try:
+                hit = library.retrieve(
+                    prompt=prompt,
+                    modality="sound",
+                    size_or_duration=duration,
+                )
+            except Exception:
+                hit = None
+            if hit is not None:
+                try:
+                    _link_or_copy(hit.absolute_path, target_path)
+                    _link_or_copy(hit.absolute_path, cache_path)
+                    library.touch(hit.entry.id)
+                    out[name] = target_path.resolve()
+                    stat["library_hit"] = True
+                    stat["library_score"] = round(hit.score, 3)
+                    stat["gen_seconds"] = round(time.time() - t0, 3)
+                    sound_stats.append(stat)
+                    continue
+                except Exception:
+                    pass
         gen_path = _safe_generate(audio_generator, prompt, duration)
         if gen_path is None:
             real_err = getattr(audio_generator, "_last_error", None)
@@ -667,6 +701,17 @@ def generate_sounds(
             _link_or_copy(cache_path, target_path)
             out[name] = target_path.resolve()
             stat["bytes"] = target_path.stat().st_size
+            if library is not None:
+                try:
+                    library.admit(
+                        prompt=prompt,
+                        modality="sound",
+                        size_or_duration=duration,
+                        source_path=target_path,
+                    )
+                    stat["library_admitted"] = True
+                except Exception:
+                    pass
         except Exception as e:
             stat["error"] = f"{type(e).__name__}: {str(e)[:120]}"
         finally:

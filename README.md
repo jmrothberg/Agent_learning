@@ -271,10 +271,6 @@ higher. Going lower (`512`, `256`) is paranoid-safe and ~5–10% slower
 on prompts > 1K tokens; lower than that has no effect on shorter
 prompts.
 
-(The retired `scripts/mlx_v4_server.sh` wrapper that passed
-`--prefill-step-size 1024` to `mlx_lm.server` is no longer needed — the
-in-process backend handles it.)
-
 Tracking the upstream cubic-attention bug: see PR #1192's review thread
 for the `(L, k, GB)` table that documents the blow-up. Once a fix lands
 upstream the env var becomes optional and

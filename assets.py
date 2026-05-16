@@ -895,6 +895,11 @@ def generate_assets(
         cache_root = Path(cache_dir)
     cache_root.mkdir(parents=True, exist_ok=True)
 
+    # Tests inject a stub `image_generator` to bypass the heavy
+    # diffusers stack; that's our signal to also bypass the shared
+    # cross-session library (which would otherwise leak production
+    # state into hermetic tests).
+    _caller_provided_generator = image_generator is not None
     if image_generator is None:
         image_generator = try_load_image_generator(model_id)
     if image_generator is None:
@@ -920,6 +925,21 @@ def generate_assets(
     # after the call. Using an attribute on the generator instance so
     # the function signature stays backward-compatible.
     asset_stats: list[dict[str, Any]] = []
+    # Cross-session asset library: lazily-instantiated, lets sessions
+    # reuse semantically-similar sprites from prior wins without paying
+    # the GPU cost again. Library lookups are skipped for img2img
+    # children (they depend on a session-local parent that doesn't
+    # exist in the library yet). We only enable the library when the
+    # caller did NOT pass an explicit `cache_dir` — that's the test
+    # opt-out signal: tests want hermetic state, production uses the
+    # default cache_dir and gets the shared library too.
+    library: Any = None
+    if cache_dir is None and not _caller_provided_generator:
+        try:
+            from asset_library import AssetLibrary
+            library = AssetLibrary()
+        except Exception:
+            library = None
     for spec in specs:
         import time
         t0 = time.time()
@@ -966,6 +986,35 @@ def generate_assets(
             stat["gen_seconds"] = round(time.time() - t0, 3)
             asset_stats.append(stat)
             continue
+        # Cross-session library lookup — only for root assets (img2img
+        # children depend on session-local parents). Returns the path
+        # of a semantically-similar prior-session asset, or None.
+        if library is not None and not from_image:
+            try:
+                hit = library.retrieve(
+                    prompt=prompt,
+                    modality="sprite",
+                    size_or_duration=size,
+                )
+            except Exception:
+                hit = None
+            if hit is not None:
+                try:
+                    _link_or_copy(hit.absolute_path, target_path)
+                    # Also seed the per-project _asset_cache so the
+                    # in-session exact cache benefits too.
+                    _link_or_copy(hit.absolute_path, cache_path)
+                    library.touch(hit.entry.id)
+                    out[name] = target_path.resolve()
+                    stat["library_hit"] = True
+                    stat["library_score"] = round(hit.score, 3)
+                    stat["library_source_prompt"] = hit.entry.prompt[:80]
+                    stat["gen_seconds"] = round(time.time() - t0, 3)
+                    asset_stats.append(stat)
+                    continue
+                except Exception:
+                    # Fall through to generation on copy failures.
+                    pass
         # Cache miss — generate. img2img path when from_image resolves;
         # txt2img otherwise.
         gen_path: str | None = None
@@ -1026,6 +1075,20 @@ def generate_assets(
                 keyed.save(cache_path, format="PNG")
             _link_or_copy(cache_path, target_path)
             out[name] = target_path.resolve()
+            # Admit root-prompt sprites to the cross-session library.
+            # We skip img2img children because their value is tied to a
+            # session-specific parent that isn't admitted.
+            if library is not None and not from_image:
+                try:
+                    library.admit(
+                        prompt=prompt,
+                        modality="sprite",
+                        size_or_duration=size,
+                        source_path=target_path,
+                    )
+                    stat["library_admitted"] = True
+                except Exception:
+                    pass
         except Exception as e:
             stat["error"] = f"{type(e).__name__}: {str(e)[:120]}"
         finally:

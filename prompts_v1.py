@@ -136,6 +136,19 @@ SOUNDS_FORMAT = FormatSpec(
         "bpm, upbeat\". Prefer 8-bit / chiptune / synth descriptors for "
         "arcade games; foley descriptors (footsteps on gravel, metal "
         "clang) work for realistic games.",
+        "STOCK SOUNDS: the cross-session asset library may already "
+        "contain a generic SFX for `jump`, `pickup`, `hit`, `win`, "
+        "`lose`, `click`, `laser`, and `explosion` (see "
+        "`scripts/build_stock_sounds.py` for prompts). Request these "
+        "by the same `name` and the harness will serve the cached OGG "
+        "for free (zero generation time). Override by passing your own "
+        "prompt for that name — the library will return a hit only if "
+        "your prompt tokens overlap the stock prompt enough.",
+        "Audio probes: every Audio play() is auto-recorded into "
+        "`window.__audioEvents` ({t,src,kind}). In <probes>, assert "
+        ".length>0 (or that it grew after a dispatched event via "
+        "setTimeout+Promise) to gate audio actually firing — a "
+        "silent-but-loaded <audio> otherwise still 'passes'.",
         "SKIP <sounds> for pure-DOM apps where audio adds nothing — "
         "calculators, color pickers, todo lists. Otherwise, default to "
         "EMITTING it: silent games feel cheaper than the same game "
@@ -1041,11 +1054,35 @@ def first_build_instruction(
         current_asset_dir=current_asset_dir,
         current_sound_dir=current_sound_dir,
     )
-    src = (
-        "the bundled default skeleton"
-        if not seed_source
-        else f"a similar past game ({seed_source})"
-    )
+    # Frame the seed differently depending on its provenance. The
+    # bundled default (canvas_basic) is just plumbing — safe to follow
+    # closely. A past session is NOT a quality guarantee — those files
+    # are saved when STRUCTURAL probes pass and the model said done,
+    # which does not mean the game worked. Telling the model to "KEEP
+    # its structure" against a buggy past session was actively harmful
+    # (2026-05-15 user pushback: "if they could mislead, fix that").
+    if not seed_source:
+        seed_framing = (
+            "Start from the SEED CODE below — it is the bundled empty "
+            "scaffold (canvas + DPR scaling, RAF loop with delta-time, "
+            "input map, score HUD, pause, game-over modal). It has no "
+            "game logic of its own. Use as much or as little of it as "
+            "fits your goal; the boilerplate is safe to keep."
+        )
+    else:
+        seed_framing = (
+            "REFERENCE ONLY — the SEED CODE below is from a similar "
+            f"past session ({seed_source}). It was saved because "
+            "structural probes passed and the model declared done, "
+            "NOT because the game worked correctly — past sessions "
+            "routinely contain real bugs (broken collisions, wrong "
+            "physics, missing mechanics). DO NOT preserve its "
+            "structure or copy its logic blindly. Treat it as one "
+            "example of the surrounding boilerplate (canvas + DPR + "
+            "RAF + input + HUD) and write fresh game code that "
+            "actually meets the goal. If anything in the seed "
+            "conflicts with the goal, ignore it."
+        )
     pb = ""
     if playbook_block:
         pb = (
@@ -1058,12 +1095,7 @@ def first_build_instruction(
     return (
         "Plan accepted. Now write the FIRST version of the game.\n\n"
         f"{pb}"
-        f"Start from the SEED CODE below — it comes from {src} and "
-        "already has canvas + DPR scaling, RAF loop with delta-time, "
-        "input map, score HUD, pause, and a game-over modal. For "
-        "animated games (snake, asteroids, platformer, etc.) KEEP its "
-        "structure; replace only the update / draw bodies and any "
-        "globals you need to add.\n\n"
+        f"{seed_framing}\n\n"
         "For DOM-driven goals where a canvas would be silly (todo list, "
         "tic-tac-toe, calculator, drawing app) you MAY remove the canvas "
         "and RAF loop and use HTML elements instead. In that case keep "

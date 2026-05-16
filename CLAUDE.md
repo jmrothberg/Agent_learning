@@ -54,8 +54,9 @@ MLX_MODEL=/Users/jonathanrothberg/MLX_Models/Qwen3.6-27B-mxfp8 .venv/bin/python 
 # Use LLM_BACKEND=auto (or --backend auto) to probe Ollama when MLX is down.
 # DeepSeek-V4 quirk: still apply ./scripts/install_mlx_v4_fix.sh (it patches
 # the installed mlx_lm package directly; in-process loads pick it up).
-# Per-machine prefill chunk override: MLX_PREFILL_STEP_SIZE=1024 (the
-# default; lower to 512 if you hit Metal OOM during prompt eval).
+# Per-machine prefill chunk override: MLX_PREFILL_STEP_SIZE=N. Defaults
+# auto-resolve from the model path: 512 if "flash" is in the name
+# (DeepSeek-V4 Flash crashes mid-generation at >512), else 1024.
 
 # Tests (all pure-function, no model/Chromium calls; full suite ~12s)
 .venv/bin/python -m pytest tests/ -q
@@ -85,7 +86,7 @@ python learner.py apply games/traces/             # propose AND write to playboo
 - `OLLAMA_HOST` — non-default Ollama daemon address
 - `MLX_MODEL` — explicit MLX model path or HF id. Loaded in-process via `mlx_lm.load`. If unset, the backend scans `~/MLX_Models/` / `MLX_MODELS_DIR` / HF cache and picks a single discoverable chat model (multi-match → first, with a "set MLX_MODEL to override" hint in `info.source`).
 - `MLX_MODELS_DIR` — `:`-separated list of additional dirs to scan for downloaded MLX models. Defaults: `~/MLX_Models`, `~/Models_MLX`, `~/.cache/huggingface/hub`, `/opt/mlx_models`.
-- `MLX_PREFILL_STEP_SIZE` — chunk size for prompt eval (default `1024`, the safe-anywhere value for DeepSeek-V4 Flash/Pro per upstream PR). Drop to `512` if you hit Metal OOM mid-eval; raise to `2048` on small models if you want a few % more throughput.
+- `MLX_PREFILL_STEP_SIZE` — chunk size for prompt eval. Per-model defaults applied automatically: **512** if the model path contains `flash` (DeepSeek-V4 Flash crashes mid-generation at >512 — observed 2026-05-15 DK trace), else **1024**. Env override always wins. Raise to `2048` on small models if you want a few % more throughput.
 - `CODING_BOX_NUM_CTX` — Ollama context window (default **262144**, matching the native context of current local coding models — Qwen3.6, DeepSeek V4, GLM 5.1, MiniMax M2). Lower it if you OOM on tight-VRAM hardware (KV-cache scales linearly with ctx). Preload your Ollama model at this size with `ollama run --ctx-size 262144 <model>` to avoid a reload on first request.
 - `MLX_MAX_TOKENS` — MLX output cap (default **131072**). Sized as a runaway-generation guard, not a working limit — measured peak across observed sessions is ~5.7K completion tokens, so 131K gives ~23× headroom. Raise it (e.g. 262144) only if a future model genuinely needs more output per turn.
 - `ANTHROPIC_MAX_TOKENS` — Anthropic output cap (default 32768, the safe ceiling across Sonnet 4.6 / Opus 4.7). Override only if you hit per-model API limits.

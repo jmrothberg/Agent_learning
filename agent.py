@@ -611,11 +611,34 @@ _MEDIA_VERBS: tuple[str, ...] = (
     "change", "swap", "replace", "redraw", "regenerate", "remake",
     "redo", "redesign", "update", "make", "render", "rerender",
     "rerecord", "rebuild",
+    # Added 2026-05-15: user said "fix the images" / "fix the
+    # animations" and got a CODE rewrite instead of sprite regen.
+    # "fix" alone is too generic to route on, but the gate also
+    # requires an art noun (see _feedback_is_art_change), so
+    # "fix the keyboard handler" still correctly stays in code-fix
+    # mode (no art noun → no MEDIA-CHANGE).
+    "fix", "improve",
 )
 _ART_NOUNS: tuple[str, ...] = (
     "asset", "assets", "sprite", "sprites", "image", "images",
     "png", "art", "graphic", "graphics", "picture", "pictures",
     "icon", "icons", "appearance",
+    # Added 2026-05-15: in user vocabulary, "animation" / "animations"
+    # = "the moving picture on screen" = the sprite. Missing this
+    # caused MEDIA-CHANGE to never fire for "replace the animations"
+    # / "fix the annimations", routing the request to <patch> (code
+    # change) when the user explicitly wanted sprite regeneration.
+    # "annimation" with the extra 'n' is the user's persistent typo —
+    # listed so detection is robust to that misspelling. "frame" /
+    # "frames" cover "redo the run frames" / "the walk frames look
+    # wrong" phrasings; behavior_bug still suppresses MEDIA-CHANGE
+    # for phrases like "frames are stuttering" because that hits the
+    # bug-complaint regex first.
+    "animation", "animations",
+    "annimation", "annimations",
+    "anim", "anims",
+    "frame", "frames",
+    "spritesheet", "spritesheets",
 )
 _SOUND_NOUNS: tuple[str, ...] = (
     "sound", "sounds", "audio", "sfx", "music", "song",
@@ -1009,6 +1032,13 @@ class GameAgent:
         self.seed_file: Path | None = Path(seed_file) if seed_file else None
         self._messages: list[dict] = []
         self._pending_feedback: list[str] = []
+        # Set by `_flush_user_injections` when the user locks the turn
+        # ("no code changes", "only X"). The fix-mode prompt reads this
+        # and suppresses the failing-test "fix these" framing so the
+        # local model isn't asked to balance "ignore test failures" vs.
+        # "fix these test failures" in the same prompt (DK trace
+        # 2026-05-15). Self-clears after each fix-prompt build.
+        self._scoped_change_active: bool = False
         self._pending_answer: str | None = None
         # A2: short coaching strings queued when the deliberation detector
         # aborts the last stream or another agent-side guard wants the
@@ -1157,6 +1187,12 @@ class GameAgent:
         self._last_stream_looped: bool = False
         self._last_stream_stalled: bool = False
         self._last_stream_deliberated: bool = False
+        # Tracked separately from `stalled` (which the backend sets on
+        # crash too). Format-doctor early-escalation reads this so it
+        # doesn't burn another stream trying to "reformat" 30+ KB of
+        # mid-stream-crash wreckage. The fix is to start the next iter
+        # fresh, not to coax the doctor through the same context.
+        self._last_stream_crashed: bool = False
         # Tracks the most recent iteration where _materialize wrote a
         # file to disk vs the most recent iteration where the verifier
         # ran. If they diverge at end-of-run we run one final test on
@@ -1184,6 +1220,29 @@ class GameAgent:
         # by the verifier on each iter; consumed by `_stream`.
         self._last_screenshot_before: bytes | None = None
         self._last_screenshot_after: bytes | None = None
+        # Last screenshot fed to the vision-progress judge — kept so the
+        # NEXT iter's judge call can compare "current vs previous" and
+        # judge whether real visible progress happened. Independent from
+        # `_last_screenshot_after` (which is for VLM critique attachment
+        # and gated on `_is_vlm`); this one runs out-of-band regardless.
+        self._prev_judge_png: bytes | None = None
+        # Resolved local MLX-VLM path for the visual-progress judge.
+        # Populated lazily on first `_run_vision_judge` call. None means
+        # "no local VLM discovered" — we then skip the judge rather than
+        # silently calling a cloud model (the user's "never silent cloud
+        # calls" rule). Set to the sentinel "" to mean "scanned, none
+        # found" so we don't rescan every iter.
+        self._local_vlm_path: str | None = None
+        # Per-iter screenshot delta against previous iter (mean abs pixel
+        # diff, 0..1). Stashed for the loop's regression detector.
+        self._last_screenshot_delta: float | None = None
+        # Last vision-judge verdict — preserved across compaction so the
+        # state-anchor summary can still tell the model "as of iter N
+        # the game looked like <note>". Surface, not signal: this is a
+        # one-line hint, not a structural assertion.
+        self._last_vision_verdict_iter: int | None = None
+        self._last_vision_verdict_progress: bool | None = None
+        self._last_vision_verdict_note: str = ""
         # Acceptance criteria the model emitted during Phase A — fed back
         # into fix prompts so the model self-checks against its own bar.
         self._criteria: str = ""
@@ -2067,6 +2126,25 @@ class GameAgent:
             )
             lines += sound_lines + [""]
 
+        # Last vision-judge verdict — preserved through compaction so
+        # the model still knows what the game LOOKED like at the most
+        # recent visual check, not just what its probes said. Cheap
+        # one-liner; the full screenshot is re-attached on the next
+        # VLM-capable turn via _last_screenshot_after.
+        if self._last_vision_verdict_iter is not None and self._last_vision_verdict_note:
+            prog = self._last_vision_verdict_progress
+            tag = (
+                "made visible progress" if prog is True
+                else ("did NOT make visible progress" if prog is False
+                      else "progress unclear")
+            )
+            lines += [
+                "## Visual state at last judge",
+                f"- iter {self._last_vision_verdict_iter}: {tag}.",
+                f"- still missing/wrong: {self._last_vision_verdict_note}",
+                "",
+            ]
+
         # Mutable todos artifact (deepagents-style). Replayed across
         # compaction so a long session doesn't lose track of "what's
         # left to ship". Empty when the model never used the tag.
@@ -2234,9 +2312,19 @@ class GameAgent:
                     "sound_change": sound_change,
                 })
 
+            # MEDIA-CHANGE DIRECTIVE — fires only when the feedback
+            # carries INDEPENDENT art/sound semantics (asset/sprite/sound
+            # vocabulary). The old gate also fired on `locks_code` alone,
+            # which mis-routed any "no code changes" feedback to the art
+            # path even when the user really wanted a code-side tweak
+            # (DK trace 2026-05-15 iter 3: "make 4x larger, no code
+            # changes" routed to <assets> regeneration instead of a
+            # drawImage size patch — same regenerated PNGs at the same
+            # canvas size achieve nothing visible). The new SCOPED-CHANGE
+            # block below handles the code-lock case directly.
             if (
                 (asset_names or sound_names)
-                and (art_change or sound_change or locks_code)
+                and (art_change or sound_change)
                 and not behavior_bug
             ):
                 lines: list[str] = [
@@ -2286,16 +2374,82 @@ class GameAgent:
                     "sound_count": len(sound_names),
                 })
 
-            # Fix #3: arm a one-shot <html_file> rewrite exemption for
-            # THIS turn only. The model often best addresses multi-issue
-            # feedback with a holistic rewrite; the rewrite-rejection
-            # gate is bypassed once, then re-armed only by another
-            # feedback drain. SUPPRESSED when the user explicitly locked
-            # the code ("no code changes", "only the asset", …) — that
-            # phrasing is the exact opposite of a license to rewrite,
-            # and the exemption fueled the second-attempt regression in
-            # centipede trace 20260512_180020 where the model "fixed"
-            # an asset by clobbering its drawSprite call.
+            # SCOPED-CHANGE DIRECTIVE — fires whenever the user locked
+            # the turn ("no code changes", "only X", "leave the rest").
+            # Sits ABOVE rewrite-exemption gating and the downstream
+            # fix-mode test-failure framing (which is also suppressed
+            # for this turn — see `_scoped_change_active` flag below).
+            #
+            # Why it exists: 2026-05-15 DK trace iter 3. User said "make
+            # 4x larger, DO NOT change other code, no code changes". The
+            # agent dutifully added the user's text with HIGHEST PRIORITY
+            # framing, then in the same prompt also injected the prior
+            # iter's failing-probes block, the (mis-routed) MEDIA-CHANGE
+            # DIRECTIVE, and standard fix-mode coaching. The 27B local
+            # model tried to satisfy all four directives, shipped a 2x
+            # scale + four unrelated "fixes", and the user typed back
+            # "YOU DIDNT LISTEN". A frontier model can balance contra-
+            # dictory prompts; a local model cannot. The fix is to stop
+            # contradicting ourselves in the same prompt.
+            if locks_code:
+                scoped_lines = [
+                    "================ SCOPED-CHANGE DIRECTIVE ================",
+                    "The user scoped this turn — address ONLY what is in",
+                    "the USER FEEDBACK block above.",
+                    "",
+                    "Routing the request:",
+                    "  - If the user wants the SPRITES TO LOOK DIFFERENT",
+                    "    (different style, pose, color, etc.) — emit",
+                    "    <assets> ONLY with the existing names + a new",
+                    "    prompt. No <patch>, no <html_file>.",
+                    "  - If the user wants the SPRITES TO BE A DIFFERENT",
+                    "    SIZE on screen ('4x larger', 'smaller', 'half'",
+                    "    'half the size') — emit ONE small <patch> that",
+                    "    ONLY changes the drawImage width and height",
+                    "    arguments. Do not touch any other function,",
+                    "    constant, or variable. No <assets> needed.",
+                    "  - If the user wants new BEHAVIOR (different speed,",
+                    "    new key binding, new rule) — emit ONE small",
+                    "    <patch> that ONLY changes the relevant value or",
+                    "    branch. Nothing else.",
+                    "",
+                    "HARD RULES for this turn:",
+                    "  - Do NOT fix unrelated test failures from the",
+                    "    previous iter. The user told you to ignore them",
+                    "    this turn.",
+                    "  - Do NOT clean up code you think looks suspicious.",
+                    "  - Do NOT refactor, rename, or 'improve' anything",
+                    "    not named by the user.",
+                    "  - Do NOT emit a full <html_file>; use one tight",
+                    "    <patch>.",
+                    "  - If the user says 'Nx larger' or 'Nx smaller',",
+                    "    the changed numbers in your <patch> must be",
+                    "    EXACTLY that factor of the originals. Not",
+                    "    'close enough', not 'approximately'.",
+                    "  - If you cannot satisfy the user's request",
+                    "    without a code change but they said 'no code",
+                    "    changes', make the MINIMAL code edit that",
+                    "    achieves the intent and nothing else.",
+                    "=========================================================",
+                ]
+                parts.append("\n".join(scoped_lines))
+                self._trace({
+                    "kind": "scoped_change_directive_injected",
+                    "art_change": art_change,
+                    "sound_change": sound_change,
+                })
+                # Flag consumed by the fix-mode prompt builder to drop
+                # the "fix these failing probes" framing for this turn.
+                # Cleared after one fix-mode build cycle (caller resets).
+                self._scoped_change_active = True
+
+            # Rewrite-exemption gating — unchanged from before, just
+            # moved below SCOPED-CHANGE so the order in the prompt is:
+            # USER FEEDBACK → (MEDIA-CHANGE if applicable) → SCOPED-CHANGE
+            # → other context. SUPPRESSED when the user locked the code,
+            # because granting a full <html_file> rewrite while telling
+            # the model "don't change other code" is the exact contra-
+            # diction we're trying to eliminate.
             if locks_code:
                 self._trace({
                     "kind": "rewrite_exemption_suppressed",
@@ -2361,6 +2515,125 @@ class GameAgent:
 
     async def _detect_vlm(self) -> bool:
         return await self._backend.is_vlm()
+
+    async def _run_vision_judge(self, current_png: bytes, iteration: int) -> None:
+        """Ask a vision model whether this iter made visible progress
+        toward the goal, and queue the verdict for the next user turn.
+
+        Local-first by design: this runs OUT-OF-BAND from the building
+        backend. The user's local model keeps writing code (as today);
+        only the visual judgment uses the local MLX-VLM resolved at
+        session start. If no local VLM is discoverable, we skip rather
+        than silently calling a cloud model (user rule: never silent
+        cloud calls). If the judge is unreachable or returns nothing,
+        we log a single trace event and continue — never block the run.
+        """
+        try:
+            from vision_judge import is_enabled, judge_visual_progress
+        except Exception:
+            return
+        if not is_enabled():
+            return
+        if not self._goal:
+            return
+        # Resolve a local VLM once per session. We never auto-use a
+        # cloud model here — the chat.py /check command remains the
+        # explicit user-triggered path for that.
+        if self._local_vlm_path is None:
+            try:
+                from backend import discover_local_vlm
+                resolved = discover_local_vlm()
+            except Exception:
+                resolved = None
+            # Sentinel "" = scanned, nothing found. Stops us rescanning.
+            self._local_vlm_path = resolved or ""
+            if resolved:
+                self._trace({"kind": "vision_judge_local_vlm", "path": resolved})
+        if not self._local_vlm_path:
+            return
+        prev_png = self._prev_judge_png
+        verdict = await judge_visual_progress(
+            goal=self._goal,
+            current_png=current_png,
+            previous_png=prev_png,
+            model=self._local_vlm_path,
+        )
+        # Rotate for next iter's comparison even when the judge skipped,
+        # so a transient API failure doesn't permanently break "compare
+        # against prior" once it recovers.
+        self._prev_judge_png = current_png
+        if verdict is None:
+            self._trace({
+                "kind": "vision_judge_skipped",
+                "iteration": iteration,
+                "reason": "no verdict (disabled, no key, or call failed)",
+            })
+            return
+        delta = self._last_screenshot_delta
+        self._trace({
+            "kind": "vision_judge",
+            "iteration": iteration,
+            "progress": verdict.progress,
+            "note": verdict.note,
+            "model": verdict.model,
+            "screenshot_delta": delta,
+        })
+        # Stash the last verdict so it survives compaction and can be
+        # surfaced in the state-anchor summary (item 8). The text
+        # marker is light enough to embed in the anchor string without
+        # needing a multi-modal message shape.
+        self._last_vision_verdict_iter = iteration
+        self._last_vision_verdict_progress = verdict.progress
+        self._last_vision_verdict_note = (verdict.note or "").strip()
+        # Surface the verdict to the user — short and unambiguous.
+        prog_label = (
+            "progress" if verdict.progress is True
+            else ("no progress" if verdict.progress is False else "unclear")
+        )
+        self._record(AgentEvent(
+            "info",
+            f"[magenta]vision judge[/magenta] (iter {iteration}): "
+            f"{prog_label} — {verdict.note or '(no note)'}"
+        ))
+        # Queue the "what's still missing" line for the next user turn
+        # so the building model gets concrete visual feedback. Only when
+        # it's actionable (non-empty, and not "nothing obvious").
+        note = (verdict.note or "").strip()
+        if note and note.lower().strip(".") != "nothing obvious":
+            prefix = (
+                "VISUAL JUDGE (looked at the screenshot of your last "
+                "iteration): "
+            )
+            # Visible-regression escalation: a "no progress" verdict
+            # combined with a substantial pixel-delta against the prior
+            # frame means this iter visibly CHANGED the canvas without
+            # making it better. That's the regression signature the
+            # screenshot-diff detector is for. Flag it explicitly so
+            # the next iter's fix prompt is tuned for rollback rather
+            # than further forward edits.
+            regression = (
+                verdict.progress is False
+                and delta is not None
+                and delta > 0.15
+            )
+            if regression:
+                prefix += (
+                    "REGRESSION SUSPECTED — this iter visibly changed "
+                    f"the canvas (pixel delta {delta:.2f}) but the "
+                    "result is NOT closer to the goal. Consider "
+                    "rolling back the last patch and trying a smaller "
+                    "change. "
+                )
+            elif verdict.progress is False:
+                prefix += "this iteration did NOT visibly move toward the goal. "
+            elif verdict.progress is True:
+                prefix += "this iteration made progress, but "
+            else:
+                prefix += "(progress unclear). "
+            self._pending_coaching.append(
+                prefix + "Still visibly missing/wrong: " + note +
+                " — address this on the next iter."
+            )
 
     async def _stream(
         self, on_token, *,
@@ -2518,6 +2791,7 @@ class GameAgent:
         self._last_stream_looped = bool(result.looped)
         self._last_stream_stalled = bool(result.stalled)
         self._last_stream_deliberated = bool(result.deliberated)
+        self._last_stream_crashed = bool(result.crashed)
         self._trace({
             "kind": "stream_done",
             "tokens": result.tokens,
@@ -2595,23 +2869,42 @@ class GameAgent:
                 "same cap and produce another wasted iter."
             )
         if result.crashed:
-            # mlx_lm.server's generate thread died mid-flight (Metal
-            # wired-memory limit, OOM, segfault). HTTP layer is still
-            # answering /v1/models, but the loaded model can't generate
-            # anything. Surface the specific recovery hint instead of
-            # the generic stall message — saves the user from digging
-            # through mlx_lm.server's stderr in another terminal.
+            # The backend's generation raised mid-stream. The MLX
+            # backend now formats the actual exception at the catch
+            # site and surfaces it via `result.error_message`, and
+            # also drops the loaded model + clears Metal cache so
+            # the next stream re-enters the load path on a clean GPU.
+            # So: print the REAL exception (no more hardcoded "Metal
+            # OOM" guess) and one short recovery hint.
+            err = (result.error_message or "").strip() or "(no exception text captured)"
+            backend_name = (
+                getattr(self._backend, "info", None)
+                and self._backend.info.name
+            ) or "unknown"
+            if backend_name == "mlx":
+                hint = (
+                    "GPU state has been reset — the next turn will reload the "
+                    "model on a clean Metal context. If it keeps crashing on "
+                    "the same prompt: lower [b]MLX_MAX_TOKENS[/b], drop "
+                    "[b]MLX_PREFILL_STEP_SIZE[/b] to 512, or raise "
+                    "[b]iogpu.wired_limit_mb[/b] (Metal memory cap)."
+                )
+            else:
+                hint = (
+                    "Retry the turn. If it persists, check the backend's logs "
+                    "and rate limits."
+                )
             self._record(AgentEvent(
                 "error",
-                "[red]mlx_lm.server crashed mid-generation[/red] — almost "
-                "always Metal wired-memory exhaustion. Recover with:\n"
-                "  1. [b]pkill -f mlx_lm.server[/b]\n"
-                "  2. [b]sudo sysctl iogpu.wired_limit_mb=$N[/b] "
-                "(see README §MLX memory limit on Apple Silicon)\n"
-                "  3. relaunch [b]mlx_lm.server[/b] and try again",
+                f"[red]backend crashed mid-generation[/red] after "
+                f"{result.tokens} tok / {result.duration_s:.0f}s.\n"
+                f"  cause: {err}\n"
+                f"  {hint}",
                 {
                     "tokens_at_crash": result.tokens,
                     "duration_s": round(result.duration_s, 2),
+                    "error_message": err,
+                    "backend": backend_name,
                 },
             ))
         if result.looped:
@@ -4949,13 +5242,29 @@ class GameAgent:
                     looped_or_stalled = (
                         self._last_stream_looped or self._last_stream_stalled
                     )
-                    invoke_doctor = (
-                        self._format_stuck_streak == 2
-                        or (
-                            self._format_stuck_streak == 1
-                            and looped_or_stalled
+                    # A crash returns partial text with stalled=True, but
+                    # format-doctor (re-stream from same context) is the
+                    # wrong response: the underlying worker died, not the
+                    # output shape. DK trace 2026-05-15: doctor burned ~5
+                    # min re-streaming 34 KB after a crash and also truncated.
+                    # Skip doctor entirely when the prior stream crashed —
+                    # the GPU state was reset by `_drop_after_crash`, so
+                    # the next iter starts fresh.
+                    if self._last_stream_crashed:
+                        self._trace({
+                            "kind": "format_doctor_skipped_on_crash",
+                            "iteration": iteration,
+                            "rejection_kind": format_rejection.kind,
+                        })
+                        invoke_doctor = False
+                    else:
+                        invoke_doctor = (
+                            self._format_stuck_streak == 2
+                            or (
+                                self._format_stuck_streak == 1
+                                and looped_or_stalled
+                            )
                         )
-                    )
                     if invoke_doctor:
                         if looped_or_stalled and self._format_stuck_streak == 1:
                             self._trace({
@@ -5293,15 +5602,52 @@ class GameAgent:
                 ))
 
             # Queue screenshot bytes for VLM attachment on next turn.
+            # ALSO captured unconditionally (independent of `_is_vlm`) so
+            # the vision-progress judge can compare current vs. previous
+            # even when the building model is text-only.
+            after_bytes: bytes | None = None
             if shot_path is not None and report.get("screenshot"):
+                try:
+                    after_bytes = Path(report["screenshot"]).read_bytes()
+                except Exception:
+                    after_bytes = None
                 if self._is_vlm is not False:
-                    try:
-                        after_bytes = Path(report["screenshot"]).read_bytes()
-                        self._next_image_bytes = after_bytes
-                        self._last_screenshot_after = after_bytes
-                    except Exception:
-                        self._next_image_bytes = None
-                        self._last_screenshot_after = None
+                    self._next_image_bytes = after_bytes
+                    self._last_screenshot_after = after_bytes
+                elif after_bytes is None:
+                    self._next_image_bytes = None
+                    self._last_screenshot_after = None
+
+            # Compute the screenshot delta BEFORE the vision judge runs
+            # — the judge rotates `_prev_judge_png` to the current frame
+            # at the end of its call, so we need to read against the
+            # prior frame here. Delta is mean per-pixel RGB diff in
+            # [0, 1]; >0.15 means a substantial visual change. The
+            # judge uses this to detect visible regressions (high delta
+            # paired with "no progress" verdict).
+            if after_bytes is not None:
+                try:
+                    from tools import screenshot_delta as _sshot_delta
+                    self._last_screenshot_delta = _sshot_delta(
+                        self._prev_judge_png, after_bytes,
+                    )
+                except Exception:
+                    self._last_screenshot_delta = None
+            # Visual-progress judge: auto-runs when a local MLX-VLM is
+            # discoverable on disk (honors the "never silent cloud calls"
+            # rule — `_run_vision_judge` skips cleanly when no local VLM
+            # is found, and does NOT fall back to Anthropic). The user
+            # can still invoke a cloud judge explicitly via `/check with
+            # <model>` in chat.py. Disable entirely with VISION_JUDGE=0.
+            if after_bytes is not None:
+                try:
+                    await self._run_vision_judge(after_bytes, iteration)
+                except Exception as exc:
+                    self._trace({
+                        "kind": "vision_judge_error",
+                        "iteration": iteration,
+                        "error": str(exc),
+                    })
             if self._use_double_screenshot and report.get("screenshot_before"):
                 try:
                     self._last_screenshot_before = Path(
@@ -6075,6 +6421,43 @@ class GameAgent:
             )
 
         report_text = format_report_for_model(report)
+
+        # SCOPED-CHANGE override: when the user explicitly locked the
+        # turn ("no code changes", "only X"), the failing-probes report
+        # must NOT be framed as "fix these failures" — the user told
+        # the model to ignore them this turn. Without this gate, the
+        # full report text travels downstream as "fix these" context
+        # and competes with the SCOPED-CHANGE directive that says
+        # "ignore them". DK trace 2026-05-15 iter 3 is the case study:
+        # 4 KB of failing-probe text drowned out the user's scope-lock
+        # and the model "fixed" 5 things instead of the 1 thing asked.
+        #
+        # We still record that issues existed (1 short line of
+        # context) so the model knows the session isn't shippable yet —
+        # just not actively pushed to fix them this turn.
+        if self._scoped_change_active and not report["ok"]:
+            n_errs = len(report.get("errors") or [])
+            n_warn = len(report.get("soft_warnings") or [])
+            probes = report.get("probes") or []
+            n_probe_fail = sum(1 for p in probes if not p.get("ok"))
+            report_text = (
+                "NOTE: previous iter had "
+                f"{n_errs} error(s), {n_warn} soft warning(s), and "
+                f"{n_probe_fail} failing probe(s). The user has scoped "
+                "THIS turn to ONLY the change in the USER FEEDBACK and "
+                "SCOPED-CHANGE blocks above — do NOT address the "
+                "previous iter's failures this turn. They will come "
+                "back into scope on a later turn once the user has "
+                "verified the scoped change landed."
+            )
+            self._trace({
+                "kind": "scoped_change_report_suppressed",
+                "n_errors": n_errs,
+                "n_soft_warnings": n_warn,
+                "n_probes_failed": n_probe_fail,
+            })
+            # Consume the flag — only applies to THIS fix-prompt build.
+            self._scoped_change_active = False
 
         if report["ok"]:
             return self._p.post_clean_instruction(report_text)

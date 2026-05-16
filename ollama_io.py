@@ -378,14 +378,19 @@ class StreamResult:
     # streaming chunks). Often differs from chunk count — kept distinct so
     # the chunk count stays meaningful for stall diagnostics.
     completion_tokens: int | None = None
-    # True when we detected a server-side crash mid-generation: the
-    # mlx_lm.server scenario where prompt-eval finished (we got a
-    # `Prompt processing progress: N/N` keepalive) but the generate
-    # thread died before any content tokens came back. Distinct from
-    # `stalled` so the agent can surface a specific recovery message
-    # (raise iogpu.wired_limit_mb, restart server) instead of a
-    # generic timeout.
+    # True when the backend raised an exception mid-generation
+    # (in-process MLX worker, cloud API error, etc.). Distinct from
+    # `stalled` so the agent can surface a specific recovery path.
+    # Pair with `error_message` for the actual cause — without it the
+    # agent has to guess (and the guess used to be wrong; see
+    # 2026-05-15 DK trace where a hardcoded "mlx_lm.server crashed"
+    # message survived the move to in-process MLX).
     crashed: bool = False
+    # Real exception text from the backend when `crashed=True`.
+    # Captured via `traceback.format_exception_only(type(e), e)` so it
+    # works for BaseException subclasses (MemoryError, KeyboardInterrupt,
+    # Metal RuntimeError, ...). None on a clean finish.
+    error_message: str | None = None
     # A2: model produced `deliberation_threshold` chars of pure reasoning
     # with no output tag (no <plan>, <patch>, <html_file>, ```html, etc).
     # Folded into `stalled` for backward compatibility; standalone field

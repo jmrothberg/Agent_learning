@@ -32,6 +32,45 @@ _MAX_MSG_LEN = 240      # truncate each line to this many chars
 _MAX_BODY_TEXT = 200    # tiny snippet of body text
 
 
+def screenshot_delta(prev_png: bytes | None, curr_png: bytes | None) -> float | None:
+    """Mean per-pixel RGB delta between two PNGs, normalized to [0, 1].
+
+    Returns None when either input is missing or PIL is unavailable.
+    Used by the loop's visual-regression detector: a high delta paired
+    with a "no progress" verdict from the vision judge implies the
+    iter visibly changed the canvas without making it better — i.e.,
+    a regression. The threshold lives in the caller.
+
+    Implementation note: both screenshots are resized to a small fixed
+    resolution before differencing so the comparison is fast and
+    independent of the original game's canvas size. We use 128×128
+    because that's enough to capture overall composition while keeping
+    the diff under 1 ms on the harness machine.
+    """
+    if not prev_png or not curr_png:
+        return None
+    try:
+        from io import BytesIO
+
+        from PIL import Image
+    except Exception:
+        return None
+    try:
+        a = Image.open(BytesIO(prev_png)).convert("RGB").resize((128, 128))
+        b = Image.open(BytesIO(curr_png)).convert("RGB").resize((128, 128))
+    except Exception:
+        return None
+    pa = a.tobytes()
+    pb = b.tobytes()
+    if len(pa) != len(pb) or not pa:
+        return None
+    total = 0
+    for x, y in zip(pa, pb):
+        d = x - y
+        total += d if d >= 0 else -d
+    return total / (len(pa) * 255.0)
+
+
 # Stop-Losing-To-OneShot todo #2 — criteria coverage helper.
 # Stop-words drop generic prose ("the player should be able to move")
 # and keep meaningful tokens ("rotate", "thrust", "shoot"). Genre-free:
@@ -207,6 +246,57 @@ EventTarget.prototype.addEventListener = function(type, ...rest) {
     } catch (e) { /* ignore - some targets are exotic */ }
     return _origAdd.call(this, type, ...rest);
 };
+
+// Audio-events shim — records every Audio playback start so probes can
+// assert "an SFX fired in response to <event>". We wrap both the plain
+// HTMLAudioElement.play() path AND the WebAudio source.start() path
+// because games use either. The record shape is intentionally flat
+// — {t: epoch-ms, src: source identifier} — so probes can filter with
+// trivial JS without parsing nested events.
+window.__audioEvents = [];
+const _origAudioPlay = HTMLAudioElement && HTMLAudioElement.prototype && HTMLAudioElement.prototype.play;
+if (_origAudioPlay) {
+    HTMLAudioElement.prototype.play = function(...rest) {
+        try {
+            window.__audioEvents.push({
+                t: Date.now(),
+                src: (this && this.src) ? this.src : "<inline>",
+                kind: "html_audio",
+            });
+        } catch (e) { /* ignore */ }
+        return _origAudioPlay.apply(this, rest);
+    };
+}
+if (typeof AudioBufferSourceNode !== "undefined" && AudioBufferSourceNode.prototype) {
+    const _origStart = AudioBufferSourceNode.prototype.start;
+    if (_origStart) {
+        AudioBufferSourceNode.prototype.start = function(...rest) {
+            try {
+                window.__audioEvents.push({
+                    t: Date.now(),
+                    src: "<webaudio_buffer>",
+                    kind: "webaudio",
+                });
+            } catch (e) { /* ignore */ }
+            return _origStart.apply(this, rest);
+        };
+    }
+}
+if (typeof OscillatorNode !== "undefined" && OscillatorNode.prototype) {
+    const _origOscStart = OscillatorNode.prototype.start;
+    if (_origOscStart) {
+        OscillatorNode.prototype.start = function(...rest) {
+            try {
+                window.__audioEvents.push({
+                    t: Date.now(),
+                    src: "<oscillator>",
+                    kind: "oscillator",
+                });
+            } catch (e) { /* ignore */ }
+            return _origOscStart.apply(this, rest);
+        };
+    }
+}
 """
 
 # Downsampled canvas hash. We sample a 32x32 grid spread across the canvas
@@ -430,6 +520,13 @@ _AUDIOCTX_RECEIVERS = {"audioctx", "audiocontext", "actx", "audctx"}
 # distinct from its 2D rendering context).
 _CANVAS_ELT_RECEIVERS = {"cvs", "canvas", "canvasel", "canvaselt"}
 
+# Receivers we treat as HTMLAudioElement (`new Audio(...)` instances).
+# Distinct from AudioContext above. Common variable names for sound-
+# effect handles in browser games. We're conservative: bare `audio` is
+# overloaded with AudioContext patterns in some codebases, so we skip
+# it for AudioContext and treat it as HTMLAudioElement only.
+_AUDIO_ELT_RECEIVERS = {"audio", "snd", "sfx", "sound", "clip", "track"}
+
 # Real CanvasRenderingContext2D methods (subset useful for games).
 # Source: MDN. Hallucinations the model often emits (drawCircle,
 # fillCircle, drawLine, line, point) are NOT in this set, so flagged.
@@ -488,6 +585,18 @@ _CANVAS_ELT_METHODS = frozenset({
     "animate", "scrollintoview",
 })
 
+# Real HTMLAudioElement / HTMLMediaElement methods (subset useful for
+# games). Hallucinations the model often emits — `playWithFade`,
+# `start3d`, `loopOnce` — are NOT here, so flagged.
+_AUDIO_ELT_METHODS = frozenset({
+    "play", "pause", "load", "canplaytype", "fastseek",
+    "addtexttrack", "captureStream".lower(), "capturestream",
+    # Inherited Element methods used in audio-handling patterns.
+    "addeventlistener", "removeeventlistener", "dispatchevent",
+    "cloneNode".lower(), "clonenode",
+    "setattribute", "getattribute", "remove",
+})
+
 # Map of (lowered receiver name) -> (allowlist set, friendly label).
 _RECEIVER_TYPES: dict[str, tuple[frozenset[str], str]] = {}
 for r in _CANVAS2D_RECEIVERS:
@@ -496,6 +605,8 @@ for r in _AUDIOCTX_RECEIVERS:
     _RECEIVER_TYPES[r] = (_AUDIOCTX_METHODS, "AudioContext")
 for r in _CANVAS_ELT_RECEIVERS:
     _RECEIVER_TYPES[r] = (_CANVAS_ELT_METHODS, "HTMLCanvasElement")
+for r in _AUDIO_ELT_RECEIVERS:
+    _RECEIVER_TYPES[r] = (_AUDIO_ELT_METHODS, "HTMLAudioElement")
 
 # Match `<word>.<word>(` in JS source. The receiver word must be on the
 # left of the dot, the method on the right, with a `(` immediately after
@@ -879,12 +990,97 @@ def run_micro_probes(
             warnings.extend(path_warnings)
             stats["missing_asset_paths"] = len(path_warnings)
 
+        # Inverse check: assets generated on disk but NEVER referenced
+        # in the HTML. Common silent failure — model declared 12 sprites
+        # in <assets>, generated them all, then forgot to wire them in.
+        # Probes pass, visual judge sees a blank canvas, iter "succeeds".
+        # Soft warnings only; the model decides whether to wire or drop.
+        unused_warnings = _check_unused_assets(html, out_path)
+        if unused_warnings:
+            warnings.extend(unused_warnings)
+            stats["unused_assets"] = len(unused_warnings)
+
     return {
         "ok": not errors,
         "errors": errors,
         "warnings": warnings,
         "stats": stats,
     }
+
+
+def _check_unused_assets(
+    html: str, out_path: "Path | None"
+) -> list[str]:
+    """Find generated assets (PNG/OGG) on disk under the session dir
+    that are NOT referenced by the HTML. Returns warning strings.
+
+    Why this matters: a session can pay 30s+ to generate a dozen sprites
+    and a half-dozen sound clips, then ship an HTML file that never
+    references any of them. The visible game looks empty/silent; the
+    harness probes still pass on the structural side. This check makes
+    the omission explicit so the next iter's fix prompt is specific
+    instead of "the game looks blank, fix it".
+    """
+    if out_path is None:
+        return []
+    try:
+        from pathlib import Path
+        out = Path(out_path)
+        base = out.parent
+        if not base.is_dir():
+            return []
+    except Exception:
+        return []
+    # Only flag files under the session's generated dirs — we ignore
+    # arbitrary art the user dropped into the workspace.
+    sprite_dirs: list[Path] = []
+    sound_dirs: list[Path] = []
+    try:
+        for child in base.iterdir():
+            if not child.is_dir():
+                continue
+            n = child.name.lower()
+            if n.endswith("_assets"):
+                sprite_dirs.append(child)
+            elif n.endswith("_sounds"):
+                sound_dirs.append(child)
+    except OSError:
+        return []
+    if not sprite_dirs and not sound_dirs:
+        return []
+    html_text = html or ""
+    out_warnings: list[str] = []
+    for kind, dirs in (("sprite", sprite_dirs), ("sound", sound_dirs)):
+        for d in dirs:
+            try:
+                files = sorted(d.iterdir())
+            except OSError:
+                continue
+            for f in files:
+                if not f.is_file():
+                    continue
+                # Cheap presence test: either the basename or the full
+                # relative path appears verbatim in the HTML. Avoids
+                # false positives from arbitrary path-mangling.
+                name = f.name
+                if name in html_text:
+                    continue
+                try:
+                    rel = f.relative_to(base).as_posix()
+                except Exception:
+                    rel = name
+                if rel in html_text:
+                    continue
+                out_warnings.append(
+                    f"{kind} {name!r} was generated to {rel!r} but is "
+                    "NEVER referenced in the HTML. Either wire it in "
+                    "(use the GENERATED ASSETS path verbatim) or drop "
+                    "it from the next <assets>/<sounds> request to "
+                    "save generation time."
+                )
+                if len(out_warnings) >= 8:
+                    return out_warnings
+    return out_warnings
 
 
 def format_micro_probes_for_model(report: dict[str, Any]) -> str:
