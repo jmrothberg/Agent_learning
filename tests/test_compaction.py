@@ -128,10 +128,14 @@ def test_prune_messages_default_elision_path(tmp_path):
     n_before = len(a._messages)
     a._prune_messages()
     assert len(a._messages) == n_before  # elision keeps shape
-    # Older turns no longer carry the inline HTML.
+    # Older ASSISTANT turns no longer carry inline HTML; user turns are
+    # preserved verbatim so instruction examples are not mutated.
     older = a._messages[1:1 + (n_before - 1 - _PRUNE_KEEP_RECENT_TURNS)]
     for m in older:
-        assert "[omitted:" in m["content"]
+        if m["role"] == "assistant":
+            assert "[omitted:" in m["content"]
+        else:
+            assert "[omitted:" not in m["content"]
     # Most-recent K turns untouched.
     recent = a._messages[-_PRUNE_KEEP_RECENT_TURNS:]
     for m in recent:
@@ -180,6 +184,43 @@ def test_structured_summary_critical_context_always_present(tmp_path):
     s = a._build_structured_summary()
     assert "source of truth" in s
     assert "patch against" in s.lower()
+
+
+def test_prune_preserves_user_instruction_examples(tmp_path):
+    """Compaction must not rewrite user-format examples containing tiny
+    <html_file> snippets.
+    """
+    a = _make_agent(tmp_path)
+    small_example = "<html_file>...</html_file>"
+    big_html = "<html_file>" + ("A" * 5000) + "</html_file>"
+    a._messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": f"format example: {small_example}"},
+        {"role": "assistant", "content": f"model html {big_html}"},
+        {"role": "user", "content": "u2"},
+        {"role": "assistant", "content": "a2"},
+        {"role": "user", "content": "u3"},
+        {"role": "assistant", "content": "a3"},
+    ]
+    a._prune_messages()
+    assert "format example: <html_file>...</html_file>" in a._messages[1]["content"]
+
+
+def test_prune_keeps_small_assistant_html_snippets(tmp_path):
+    """Tiny assistant snippets are examples, not payload blobs — don't elide."""
+    a = _make_agent(tmp_path)
+    small_html = "<html_file><!doctype html><html></html></html_file>"
+    a._messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "assistant", "content": f"example: {small_html}"},
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "u2"},
+        {"role": "assistant", "content": "a2"},
+        {"role": "user", "content": "u3"},
+    ]
+    a._prune_messages()
+    assert "[omitted:" not in a._messages[1]["content"]
 
 
 # ---------------------------------------------------------------------------

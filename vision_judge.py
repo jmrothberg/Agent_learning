@@ -13,11 +13,10 @@ closer to the user's goal, and what's still visibly missing?". The
 answer is fed into the next iteration's prompt so the code-writing
 model knows what to fix — without the user having to play through.
 
-Local-first policy: if the active building backend is itself a VLM
-(rare for local — most coding models are text-only), use it. Otherwise
-fall back to Anthropic Claude (cheap, fast, vision-capable). Skip
-silently if neither is available — the run still works, just without
-this signal.
+Local-first policy: the automatic in-loop judge uses a discoverable
+local MLX VLM path only. It does NOT silently fall back to cloud. Cloud
+review is explicit via `chat.py` `/check with <model>` and runs only
+when the user asks for it.
 
 Disable entirely with env VISION_JUDGE=0.
 """

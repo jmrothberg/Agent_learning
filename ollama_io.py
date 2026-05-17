@@ -93,22 +93,40 @@ _BLOCK_MAX_REPEATS = 3        # 3 identical blocks within one response → loop
 _ADJACENT_SPAM_REPEATS = 4    # 4 identical consecutive normalized lines
 
 
-# Strip trailing digits / underscored numeric suffixes / whitespace from a
-# line so near-duplicates collapse to a single bucket. Examples:
+# Strip numeric SUFFIXES on identifiers so near-duplicate template spam
+# collapses (asset_1, asset_2, ...), without erasing standalone numeric
+# literals that are normal in real game code (coordinates, dimensions).
+# Examples:
 #   `{"name":"minimap_compiler179","prompt":"…"},`     →
 #   `{"name":"minimap_compiler","prompt":"…"},`
-#   `      'p_47',`                                    →  `'p',`
-#   `<patch>id="enemy42">`                             →  `<patch>id="enemy">`
-# We only collapse digit runs; alphabetic content stays exact so legitimate
-# lines like `const score = 0;` and `const lives = 0;` are still distinct.
+#   `const id_47 = "x";`                               →  `const id_ = "x";`
+# but:
+#   `{ x1: 0, x2: 800 }` keeps `0` and `800` intact.
 import re as _re
-_DIGIT_RUN_RE = _re.compile(r"\d+")
+_IDENT_SUFFIX_DIGITS_RE = _re.compile(r"(?<=[A-Za-z_])\d+\b")
+_DIM_TOKEN_RE = _re.compile(r"\b\d+x\d+\b", _re.IGNORECASE)
+_HAS_SIGNAL_RE = _re.compile(r"[A-Za-z_]")
 
 
 def _normalize_line_for_repeat(s: str) -> str:
     """Bucket near-duplicate lines so a model spamming numbered variants
     of the same template (asset_1, asset_2, …) collapses to one entry."""
-    return _DIGIT_RUN_RE.sub("", s).strip()
+    out = _DIM_TOKEN_RE.sub("x", s)
+    out = _IDENT_SUFFIX_DIGITS_RE.sub("", out)
+    return out.strip()
+
+
+def _is_repeat_signal_line(s: str) -> bool:
+    """True for lines that carry semantic signal.
+
+    Repetition guards should ignore punctuation-only structural closers
+    (`});`, `}`, `],`) because those frequently appear in bursts in
+    healthy JS output and were causing false loop aborts on one-shot
+    long HTML generations.
+    """
+    if not s:
+        return False
+    return bool(_HAS_SIGNAL_RE.search(s))
 
 
 class RepetitionDetector:
@@ -180,12 +198,12 @@ class RepetitionDetector:
             s = ln.strip()
             if not s:
                 continue
-            if len(s) <= _REPEAT_LINE_MAX_LEN:
+            if _is_repeat_signal_line(s) and len(s) <= _REPEAT_LINE_MAX_LEN:
                 self._recent_lines.append(s)
                 if len(self._recent_lines) > _REPEAT_WINDOW_LINES:
                     self._recent_lines.pop(0)
             norm = _normalize_line_for_repeat(s)
-            if norm:
+            if norm and _is_repeat_signal_line(norm):
                 self._recent_lines_norm.append(norm)
                 if len(self._recent_lines_norm) > _REPEAT_WINDOW_LINES:
                     self._recent_lines_norm.pop(0)

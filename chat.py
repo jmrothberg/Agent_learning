@@ -856,6 +856,21 @@ class CodingBoxApp(App):
         # large when running a frontier-tier model. We do NOT inspect
         # the model name — the user rotates local LLMs constantly.
         self._model_class: str | None = None
+        # Run-profile contract shown in status/mode bar. "custom" means
+        # ad-hoc command composition (/wait + /backend + /check manually).
+        self._run_profile: str = "custom"
+        # Optional reviewer model used by the local_plus_review profile.
+        # Explicitly user-configured via /mode local_plus_review with <model>.
+        self._profile_review_model: str | None = None
+        # When true, local_plus_review in AUTO mode can run `/check --apply`
+        # automatically after failed tests. OFF by default to avoid surprise
+        # paid API calls.
+        self._profile_review_auto_apply: bool = False
+        # Guard against overlapping auto-review workers.
+        self._auto_review_running: bool = False
+        # Optional expanded per-iter diagnostics line. OFF by default so
+        # normal runs stay concise; toggle via /iter-detail on|off.
+        self._iter_decision_verbose: bool = False
 
     # ----------------------------- layout ---------------------------------
 
@@ -1237,7 +1252,26 @@ class CodingBoxApp(App):
             vlm_hint = "  [dim]\\[text-only][/dim]"
         else:
             vlm_hint = ""  # unprobed — stay silent
-        return f"[bold]Mode:[/bold] {mode_badge}{vlm_hint}\n"
+        profile = self._format_run_profile()
+        review_hint = ""
+        if self._run_profile == "local_plus_review" and self._profile_review_model:
+            apply_hint = "auto-apply" if self._profile_review_auto_apply else "manual-apply"
+            review_hint = (
+                "  "
+                f"[dim]review: {_esc(self._profile_review_model)} "
+                f"({apply_hint})[/dim]"
+            )
+        return f"[bold]Mode:[/bold] {mode_badge}{vlm_hint}\n[bold]Profile:[/bold] {profile}{review_hint}\n"
+
+    def _format_run_profile(self) -> str:
+        """Human-readable label for the active run profile."""
+        labels = {
+            "custom": "custom",
+            "local_manual": "local_manual",
+            "local_auto": "local_auto",
+            "local_plus_review": "local_plus_review",
+        }
+        return labels.get(self._run_profile, self._run_profile)
 
     def _render_iteration_block(self) -> str:
         """Phase / iteration / streak / probes / ctx / model / goal / queued."""
@@ -1269,6 +1303,13 @@ class CodingBoxApp(App):
             out += f"[b]Backend:[/b] {self._session_backend_info.name.upper()}\n"
         if self._session_model:
             out += f"[b]Model:[/b] {self._session_model}\n"
+        out += f"[b]Run profile:[/b] {self._format_run_profile()}\n"
+        if self._run_profile == "local_plus_review" and self._profile_review_model:
+            apply_hint = "auto-apply in AUTO mode" if self._profile_review_auto_apply else "manual apply"
+            out += (
+                f"[b]Review hook:[/b] {_esc(self._profile_review_model)} "
+                f"[dim]({apply_hint})[/dim]\n"
+            )
         # Surface the staged-for-next-/new pair when it differs from the
         # running session. /load and /backend only stage — the current
         # session keeps its model — but the status panel used to be
@@ -1346,6 +1387,9 @@ class CodingBoxApp(App):
             prefix_badges.append("[black on yellow] WAIT MODE [/]")
         else:
             prefix_badges.append("[black on green] AUTO [/]")
+        if self._run_profile != "custom":
+            profile_badge = self._format_run_profile().replace("_", " ").upper()
+            prefix_badges.append(f"[black on blue] {profile_badge} [/]")
         if getattr(self, "_selection_mode_on", False):
             prefix_badges.append("[black on cyan] SELECT [/]")
         badge_prefix = " ".join(prefix_badges) + (" " if prefix_badges else "")
@@ -1777,6 +1821,10 @@ class CodingBoxApp(App):
                 self._cmd_status()
             elif cmd == "wait":
                 self._cmd_toggle_wait(arg)
+            elif cmd in ("iter-detail", "iterdetail"):
+                self._cmd_iter_detail(arg)
+            elif cmd == "mode":
+                self._cmd_set_mode(arg)
             elif cmd in ("playbook", "memory"):
                 self._cmd_toggle_playbook(arg)
             elif cmd == "audit":
@@ -1862,13 +1910,16 @@ class CodingBoxApp(App):
             "  [b]/clear[/b]                   clear the agent log pane (does not affect staged state)",
             "  [b]/status[/b]                  print model, phase, iteration, paths, what's staged",
             "  [b]/wait[/b] [on|off]            toggle step-mode: pause after each iter; Enter or feedback to continue",
+            "  [b]/iter-detail[/b] [on|off]     optional extra blocker details after each iter decision (default off)",
+            "  [b]/mode[/b] [local_manual|local_auto|local_plus_review with <model> [--auto-apply]|custom]",
+            "                                  set run contract; local_plus_review can auto-run /check in AUTO mode",
             "  [b]/playbook[/b] [on|off]        toggle playbook bullet injection (alias /memory) - A/B vs one-shot when iters feel worse than no agent",
             "  [b]/audit[/b]                     print per-bullet earnings (fires, pass-rate, avg-iter) from trace history",
-            "  [b]/check[/b] [with <model>]    look at the latest screenshot with a vision model · YOU pick when",
+            "  [b]/check[/b] [with <model>] [--apply]  visual review of latest screenshot · YOU pick when",
             "                                  [dim]bare /check uses your active session model if it's a VLM (no API cost)[/dim]",
             "                                  [dim]cloud: /check with claude   /check with gpt-5   (needs API key for that vendor)[/dim]",
             "                                  [dim]local: /check with qwen3.6   (substring-match against your MLX VLMs)[/dim]",
-            "                                  [dim]model says 'progress: yes/no/unclear' + what's still visibly wrong; not auto-injected[/dim]",
+            "                                  [dim]add --apply to queue the verdict into the next coding turn[/dim]",
             "  [b]/ref <path>[/b]              attach a reference image (PNG/JPEG/WebP) to the NEXT user turn",
             "                                  [dim]VLM-only — say 'make the game look like this' on the next line[/dim]",
             "                                  [dim]drag a file from Finder into the terminal to fill in the path[/dim]",
@@ -2211,6 +2262,9 @@ class CodingBoxApp(App):
                 )
                 return
             self._next_backend = "openai"
+            self._run_profile = "custom"
+            self._profile_review_model = None
+            self._profile_review_auto_apply = False
             self._log_info(
                 "backend → [b]openai[/b] (sticky) — "
                 "[yellow]cloud calls cost real money[/yellow]"
@@ -2225,6 +2279,9 @@ class CodingBoxApp(App):
                 )
                 return
             self._next_backend = "anthropic"
+            self._run_profile = "custom"
+            self._profile_review_model = None
+            self._profile_review_auto_apply = False
             self._log_info(
                 "backend → [b]anthropic[/b] (sticky) — "
                 "[yellow]cloud calls cost real money[/yellow]"
@@ -2577,7 +2634,7 @@ class CodingBoxApp(App):
         self._log_info(msg)
 
     async def _cmd_check(self, arg: str) -> None:
-        """/check [with <model>] — explicit, on-demand visual progress check.
+        """/check [with <model>] [--apply] — explicit visual progress check.
 
         Looks at the most recent screenshot of your game with a vision
         model and answers two things: did the last iteration make
@@ -2587,10 +2644,10 @@ class CodingBoxApp(App):
         what you asked for).
 
         EXPLICIT BY DESIGN. Calls a paid API exactly when you type the
-        command — never automatic, never on every iter. The verdict is
-        printed for you to read; not auto-injected into the next turn.
-        Copy/paste it yourself if you want the building model to act
-        on it.
+        command — never automatic unless you explicitly opt into the
+        local_plus_review profile with auto-apply. Default behavior is
+        still print-only. Pass --apply to queue the verdict into the
+        next coding turn as coaching.
 
         Vendor routing (any vision-capable model works):
           - `claude` / `sonnet` / `opus` / `haiku` / `claude-*` →
@@ -2605,6 +2662,19 @@ class CodingBoxApp(App):
         #   (no arg)          → use active session model if VLM
         #   "with <model>"    → explicit selection
         #   "<model>"         → tolerated shorthand, same as "with ..."
+        # Optional flag:
+        #   --apply           → queue reviewer verdict into agent coaching
+        apply_verdict = False
+        stripped_full = (arg or "").strip()
+        if stripped_full:
+            tokens = stripped_full.split()
+            kept: list[str] = []
+            for tok in tokens:
+                if tok == "--apply":
+                    apply_verdict = True
+                else:
+                    kept.append(tok)
+            arg = " ".join(kept).strip()
         agent = getattr(self, "agent", None)
         if not arg:
             # No arg: prefer the active session model when it's a VLM.
@@ -2613,7 +2683,7 @@ class CodingBoxApp(App):
                 model = getattr(agent, "model", None) or ""
                 if not model:
                     self._log_info(
-                        "usage: /check [with <model>]   (no active model)"
+                        "usage: /check [with <model>] [--apply]   (no active model)"
                     )
                     return
                 self._log_info(
@@ -2621,7 +2691,7 @@ class CodingBoxApp(App):
                     f"VLM: [b]{_esc(model)}[/b]"
                 )
             else:
-                self._log_info("usage: /check with <model>")
+                self._log_info("usage: /check with <model> [--apply]")
                 self._log_info(
                     "  cloud:  /check with claude   /check with gpt-5"
                 )
@@ -2741,11 +2811,32 @@ class CodingBoxApp(App):
         self._log_info(
             f"[magenta]/check[/magenta] calling [b]{_esc(model)}[/b] (one API call)…"
         )
+        await self._run_visual_check(
+            model=model,
+            goal=goal,
+            png=png,
+            agent=agent,
+            apply_verdict=apply_verdict,
+            source="slash_check",
+        )
+
+    async def _run_visual_check(
+        self,
+        *,
+        model: str,
+        goal: str,
+        png: bytes,
+        agent: GameAgent,
+        apply_verdict: bool,
+        source: str,
+    ) -> bool:
+        """Run one visual check and optionally queue coaching."""
         try:
-            from vision_judge import judge_visual_progress
+            from vision_judge import judge_visual_progress, _cloud_vendor
         except Exception as e:
             self._log_error(f"/check: vision_judge unavailable — {e}")
-            return
+            return False
+        vendor = _cloud_vendor(model)
         verdict = await judge_visual_progress(
             goal=goal,
             current_png=png,
@@ -2754,22 +2845,61 @@ class CodingBoxApp(App):
         )
         if verdict is None:
             self._log_error(
-                "/check: model returned nothing (API down, timeout, or "
-                "rejected). No state was changed."
+                "/check: model returned nothing (API down, timeout, or rejected). "
+                "No state was changed."
             )
-            return
+            return False
         if verdict.progress is True:
             prog = "[green]progress[/green]"
+            progress_label = "yes"
         elif verdict.progress is False:
             prog = "[red]no progress[/red]"
+            progress_label = "no"
         else:
             prog = "[yellow]unclear[/yellow]"
+            progress_label = "unclear"
         self._log(f"[magenta]{_esc(model)}:[/magenta] {prog}")
-        self._log(f"  missing: {_esc(verdict.note) if verdict.note else '(no note)'}")
-        self._log_info(
-            "(verdict NOT auto-injected — type what you want into the "
-            "next message yourself if you want the model to act on it)"
-        )
+        note = (verdict.note or "").strip()
+        self._log(f"  missing: {_esc(note) if note else '(no note)'}")
+        applied = False
+        if apply_verdict:
+            coach = (
+                f"EXTERNAL VISUAL REVIEW ({model}): progress={progress_label}. "
+                f"Most important visible gap: {note or 'unspecified by reviewer'}. "
+                "Address this in the next iteration before shipping."
+            )
+            pending = getattr(agent, "_pending_coaching", None)
+            if isinstance(pending, list):
+                pending.append(coach)
+                applied = True
+            else:
+                agent.add_user_feedback(coach)
+                applied = True
+            self._log_info(
+                "[green]review verdict queued[/green] for the next coding turn "
+                "(via agent coaching)"
+            )
+        else:
+            self._log_info(
+                "(verdict NOT auto-injected — pass [b]--apply[/b] to queue it for the next turn)"
+            )
+        # Trace the explicit reviewer action so tune/forensics can measure
+        # cloud/local review impact on iteration outcomes.
+        trace_fn = getattr(agent, "_trace", None)
+        if callable(trace_fn):
+            try:
+                trace_fn({
+                    "kind": "manual_visual_check",
+                    "source": source,
+                    "model": model,
+                    "vendor": vendor or "local",
+                    "applied": applied,
+                    "progress": verdict.progress,
+                    "note": note,
+                })
+            except Exception:
+                pass
+        return True
 
     def _cmd_set_model_class(self, arg: str) -> None:
         """/model-class auto|small|mid|large — override the system-prompt
@@ -2850,6 +2980,9 @@ class CodingBoxApp(App):
         self._max_iters = 6
         self._restart_n = 2
         self._model_class = None
+        self._run_profile = "custom"
+        self._profile_review_model = None
+        self._profile_review_auto_apply = False
         bits: list[str] = []
         if had_seed is not None:
             bits.append(f"seed={had_seed}")
@@ -2890,6 +3023,10 @@ class CodingBoxApp(App):
             f"  restart-N:         {self._restart_n if self._restart_n > 1 else '1 (off)'}",
             f"  model-class:       {self._model_class or 'auto (= small, lean ~5KB schema)'}",
             f"  step-mode (/wait): {step_label}",
+            f"  iter detail:       {self._iter_decision_verbose}",
+            f"  run profile:       {self._format_run_profile()}",
+            f"  review hook:       {self._profile_review_model or '—'}",
+            f"  review auto-apply: {self._profile_review_auto_apply}",
             f"  staged seed:       {_esc(str(self._next_seed) if self._next_seed else '—')}",
             f"  session done:      {self._session_done}",
             f"  game file:         {self._out_path or '—'}",
@@ -2897,6 +3034,121 @@ class CodingBoxApp(App):
         ]
         for line in lines:
             self._log(line)
+
+    def _cmd_iter_detail(self, arg: str) -> None:
+        """/iter-detail [on|off] — toggle optional expanded iter blocker info."""
+        a = (arg or "").strip().lower()
+        if not a:
+            self._iter_decision_verbose = not self._iter_decision_verbose
+        elif a in {"on", "true", "1"}:
+            self._iter_decision_verbose = True
+        elif a in {"off", "false", "0"}:
+            self._iter_decision_verbose = False
+        else:
+            self._log_info("usage: /iter-detail [on|off]")
+            return
+        state = "ON" if self._iter_decision_verbose else "off"
+        self._log_info(f"iter decision detail → [b]{state}[/b]")
+        self._update_status()
+
+    def _cmd_set_mode(self, arg: str) -> None:
+        """/mode — apply a run profile.
+
+        Profiles:
+          - local_manual: local-first + wait mode ON
+          - local_auto: local-first + wait mode OFF
+          - local_plus_review with <model> [--auto-apply]:
+                local-first + wait mode OFF + reviewer hook model
+                (auto-apply only runs when NOT in wait mode)
+          - custom: clear profile and keep manual command control
+        """
+        raw = (arg or "").strip()
+        if not raw:
+            self._log_info(
+                "usage: /mode <local_manual|local_auto|local_plus_review with <model> [--auto-apply]|custom>"
+            )
+            self._log_info(
+                f"current profile: [b]{self._format_run_profile()}[/b] · "
+                f"review model: [b]{_esc(self._profile_review_model or '—')}[/b] · "
+                f"auto-apply: [b]{self._profile_review_auto_apply}[/b]"
+            )
+            return
+        parts = raw.split()
+        profile = parts[0].lower()
+        rest = parts[1:]
+        if profile == "custom":
+            self._run_profile = "custom"
+            self._profile_review_model = None
+            self._profile_review_auto_apply = False
+            self._log_info("run profile → [b]custom[/b] (manual /wait, /backend, /check workflow)")
+            self._update_status()
+            self._update_mode_bar()
+            return
+        if profile not in {"local_manual", "local_auto", "local_plus_review"}:
+            self._log_error(
+                "unknown /mode profile. Use local_manual, local_auto, local_plus_review, or custom."
+            )
+            return
+
+        # Local-first contract: clear staged cloud backend so next /new
+        # resolves through the local auto policy.
+        if self._next_backend in {"openai", "anthropic"}:
+            self._next_backend = None
+            self._next_model = None
+            self._log_info(
+                "[yellow]cleared staged cloud backend/model[/yellow] to honor local-first mode"
+            )
+
+        if profile == "local_plus_review":
+            auto_apply = False
+            cleaned: list[str] = []
+            for tok in rest:
+                if tok == "--auto-apply":
+                    auto_apply = True
+                else:
+                    cleaned.append(tok)
+            if cleaned and cleaned[0].lower() == "with":
+                cleaned = cleaned[1:]
+            review_model = " ".join(cleaned).strip()
+            if not review_model:
+                self._log_error(
+                    "/mode local_plus_review needs a model. Example: "
+                    "/mode local_plus_review with gpt-5 --auto-apply"
+                )
+                return
+            self._profile_review_model = review_model
+            self._profile_review_auto_apply = auto_apply
+        else:
+            self._profile_review_model = None
+            self._profile_review_auto_apply = False
+
+        self._run_profile = profile
+        if self.agent is not None:
+            if profile == "local_manual":
+                self.agent.set_step_mode(True)
+            else:
+                self.agent.set_step_mode(False)
+        mode_bits = [f"profile → [b]{profile}[/b]"]
+        if profile == "local_plus_review":
+            mode_bits.append(f"review model: [b]{_esc(self._profile_review_model or '')}[/b]")
+            mode_bits.append(
+                "auto-apply ON (AUTO mode only)" if self._profile_review_auto_apply
+                else "auto-apply OFF (manual apply)"
+            )
+            try:
+                from vision_judge import _cloud_vendor
+                vendor = _cloud_vendor(self._profile_review_model or "")
+            except Exception:
+                vendor = ""
+            if vendor:
+                mode_bits.append("[yellow]explicit cloud review can incur cost[/yellow]")
+        elif profile == "local_manual":
+            mode_bits.append("wait mode ON")
+        elif profile == "local_auto":
+            mode_bits.append("wait mode OFF")
+        self._log_info(" · ".join(mode_bits))
+        self._update_status()
+        self._update_mode_bar()
 
     def _cmd_toggle_wait(self, arg: str) -> None:
         """/wait — toggle step-mode (pause after each iter and wait for
@@ -2917,6 +3169,12 @@ class CodingBoxApp(App):
             new_state = False
         else:
             new_state = not getattr(self.agent, "_step_mode", False)
+        if self._run_profile == "local_manual" and not new_state:
+            self._run_profile = "custom"
+            self._log_info("[dim]run profile moved to custom (manual /wait override)[/dim]")
+        elif self._run_profile == "local_auto" and new_state:
+            self._run_profile = "custom"
+            self._log_info("[dim]run profile moved to custom (manual /wait override)[/dim]")
         self.agent.set_step_mode(new_state)
         if new_state:
             self._log_info(
@@ -3163,6 +3421,11 @@ class CodingBoxApp(App):
             # when bullets actually retrieved.
             playbook_writeback=True,
         )
+        # Apply run-profile step policy on session start.
+        if self._run_profile == "local_manual":
+            self.agent.set_step_mode(True)
+        elif self._run_profile in {"local_auto", "local_plus_review"}:
+            self.agent.set_step_mode(False)
         self.agent.set_token_callback(self._emit_token)
 
         # Persist the resolved-timeouts info to the session trace now
@@ -3355,6 +3618,106 @@ class CodingBoxApp(App):
                 "for a fresh session, [b]/help[/b] for all commands."
             )
 
+    def _classify_test_blocker(self, report: dict) -> tuple[str, str]:
+        """Return (category, short detail) for the top failing signal."""
+        if report.get("ok"):
+            return ("clean", "all checks passed")
+        probes = report.get("probes") or []
+        if isinstance(probes, list):
+            failed = [p for p in probes if isinstance(p, dict) and not p.get("ok")]
+            if failed:
+                name = str(failed[0].get("name") or "probe")
+                return ("probe", name[:60])
+        errors = [str(e) for e in (report.get("errors") or []) if e]
+        joined = " | ".join(errors).lower()
+        if "page failed to load" in joined:
+            return ("browser", errors[0][:80] if errors else "page failed to load")
+        asset_tokens = (
+            "err_file_not_found", "failed to load resource", "404",
+            "no such file", "could not decode", "decode()",
+        )
+        if any(tok in joined for tok in asset_tokens):
+            return ("assets", errors[0][:80] if errors else "asset load failure")
+        if errors:
+            return ("runtime", errors[0][:80])
+        warns = [str(s) for s in (report.get("soft_warnings") or []) if s]
+        if warns:
+            return ("runtime", warns[0][:80])
+        return ("format", "non-actionable output shape")
+
+    async def _run_profile_review_hook(self, model: str) -> None:
+        """Auto-run /check for local_plus_review when AUTO mode is active."""
+        try:
+            agent = self.agent
+            if agent is None:
+                return
+            try:
+                from vision_judge import _cloud_vendor
+                vendor = _cloud_vendor(model)
+            except Exception:
+                vendor = ""
+            if vendor == "anthropic" and not os.environ.get("ANTHROPIC_API_KEY"):
+                self._log_info(
+                    "[magenta]review hook[/magenta] skipped — ANTHROPIC_API_KEY not set"
+                )
+                return
+            if vendor == "openai" and not os.environ.get("OPENAI_API_KEY"):
+                self._log_info(
+                    "[magenta]review hook[/magenta] skipped — OPENAI_API_KEY not set"
+                )
+                return
+            goal = getattr(agent, "_goal", None)
+            png = (
+                getattr(agent, "_last_screenshot_after", None)
+                or getattr(agent, "_prev_judge_png", None)
+            )
+            if not goal or not png:
+                return
+            self._log_info(
+                f"[magenta]review hook[/magenta] running /check with "
+                f"[b]{_esc(model)}[/b] --apply"
+            )
+            await self._run_visual_check(
+                model=model,
+                goal=goal,
+                png=png,
+                agent=agent,
+                apply_verdict=True,
+                source="profile_hook_auto",
+            )
+        finally:
+            self._auto_review_running = False
+
+    def _maybe_trigger_profile_review(self, report: dict, blocker_category: str) -> None:
+        """Schedule or suggest reviewer checks for local_plus_review."""
+        if self._run_profile != "local_plus_review":
+            return
+        if report.get("ok"):
+            return
+        model = (self._profile_review_model or "").strip()
+        if not model:
+            return
+        step_on = bool(getattr(self.agent, "_step_mode", False))
+        base_cmd = f"/check with {model}"
+        if self._profile_review_auto_apply:
+            base_cmd += " --apply"
+        if step_on:
+            self._log_info(
+                f"[magenta]review hook[/magenta] ({blocker_category}) ready: "
+                f"run [b]{_esc(base_cmd)}[/b] before continuing"
+            )
+            return
+        if self._profile_review_auto_apply:
+            if self._auto_review_running:
+                return
+            self._auto_review_running = True
+            self.run_worker(self._run_profile_review_hook(model), exclusive=False)
+            return
+        self._log_info(
+            f"[magenta]review hook[/magenta] ({blocker_category}) suggestion: "
+            f"[b]{_esc(base_cmd)}[/b]"
+        )
+
     def _handle_event(self, ev: AgentEvent) -> None:
         """Pattern-match on event kind and update the UI."""
         # Always flush any half-streamed line before logging a new event header.
@@ -3400,10 +3763,40 @@ class CodingBoxApp(App):
             # {name, expr, ok, err, ...} dicts (see tools.py). Counting at
             # consume-time keeps the UI insulated from payload-shape drift.
             probes = ev.data.get("probes") or []
+            probe_text = "—"
             if isinstance(probes, list) and probes:
                 passed = sum(1 for p in probes if isinstance(p, dict) and p.get("ok"))
                 self._probes_passed = passed
                 self._probes_total = len(probes)
+                probe_text = f"{passed}/{len(probes)}"
+            blocker_category, blocker_detail = self._classify_test_blocker(ev.data or {})
+            decision = "pass" if ok else "blocked"
+            self._log(
+                "[dim]iter decision:[/dim] "
+                f"{decision} · probes {probe_text} · blocker {blocker_category}"
+                + (f" ({_esc(blocker_detail)})" if blocker_detail else "")
+            )
+            if self._iter_decision_verbose and not ok:
+                page_err = (ev.data.get("page_errors") or [])
+                console_err = (ev.data.get("console_errors") or [])
+                soft = (ev.data.get("soft_warnings") or [])
+                probe_fail = [
+                    str(p.get("name") or "probe")
+                    for p in probes
+                    if isinstance(p, dict) and not p.get("ok")
+                ]
+                detail_bits: list[str] = []
+                if probe_fail:
+                    detail_bits.append("probe_fails=" + ",".join(probe_fail[:3]))
+                if page_err:
+                    detail_bits.append("page_error=" + str(page_err[0])[:80])
+                if console_err:
+                    detail_bits.append("console_error=" + str(console_err[0])[:80])
+                if soft:
+                    detail_bits.append("soft=" + str(soft[0])[:80])
+                if detail_bits:
+                    self._log("[dim]iter detail:[/dim] " + _esc(" | ".join(detail_bits)))
+            self._maybe_trigger_profile_review(ev.data or {}, blocker_category)
             # Also drop the full report into the right-hand status panel.
             self._update_status(extra=f"[b]Last test:[/b]\n{text_safe}")
 

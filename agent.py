@@ -521,6 +521,24 @@ _SKELETON_MAX_BYTES = 4_000        # body cap; 374-byte DK trace fits easily
 _SKELETON_MIN_BODY_BYTES = 800     # post-comment-strip JS volume below this is suspicious
 
 
+def _looks_like_placeholder_html_payload(html: str) -> bool:
+    """True when extracted `<html_file>` body is a tiny placeholder.
+
+    Guards against format-doctor fallback outputs like `...` being treated as
+    a valid full rewrite, which then writes a 3-byte baseline and burns the
+    next iterations on recovery.
+    """
+    if not html:
+        return True
+    body = html.strip()
+    if body in {"...", "…"}:
+        return True
+    has_html_marker = ("<html" in body.lower()) or ("<!doctype" in body.lower())
+    if not has_html_marker and len(body) < 256:
+        return True
+    return False
+
+
 def _detect_block_bloat(text: str) -> str | None:
     """Scan `text` for repeated N-line blocks. None if clean."""
     lines = [ln for ln in text.splitlines() if ln.strip()]
@@ -556,6 +574,11 @@ _PRUNE_KEEP_RECENT_TURNS = 4
 # run rarely triggers it (planning + first build + ~5 fix turns ≈ 12 msgs)
 # but a long extension session does.
 _STRUCTURED_PRUNE_THRESHOLD = 14
+
+# Only elide genuinely large inline HTML blobs during message compaction.
+# Small examples (e.g. `<html_file>...</html_file>` in instructions) must
+# remain verbatim or we mutate the semantics of prior user guidance.
+_SUMMARIZE_MIN_HTML_BYTES = 1024
 
 
 # Centipede trace 20260512_180020: user typed
@@ -1631,13 +1654,23 @@ class GameAgent:
             {"role": "system", "content": sys_prompt},
             {"role": "user", "content": user_msg},
         ]
+        # Keep doctor bounded so a malformed reply can't trap the session in
+        # a long opaque recovery sub-step while user feedback queues up.
+        doctor_stall_seconds = min(self.stall_seconds, 120.0)
+        doctor_overall_seconds = min(self.overall_seconds, 240.0)
+        self._trace({
+            "kind": "format_doctor_start",
+            "stall_seconds": doctor_stall_seconds,
+            "overall_seconds": doctor_overall_seconds,
+            "rejection_kind": rejection.kind,
+        })
         try:
             result = await self._backend.stream_chat(
                 messages,
                 on_token=None,
                 options={"temperature": 0.1, "num_ctx": self.num_ctx},
-                stall_seconds=self.stall_seconds,
-                overall_seconds=self.overall_seconds,
+                stall_seconds=doctor_stall_seconds,
+                overall_seconds=doctor_overall_seconds,
                 max_retries=0,
                 cancel_event=self._ensure_stop_event(),
             )
@@ -1649,6 +1682,10 @@ class GameAgent:
             "kind": "format_doctor_stream_done",
             "len": len(text),
             "preview": text[:300],
+            "stalled": bool(getattr(result, "stalled", False)),
+            "looped": bool(getattr(result, "looped", False)),
+            "deliberated": bool(getattr(result, "deliberated", False)),
+            "crashed": bool(getattr(result, "crashed", False)),
         })
         return text or None
 
@@ -2112,10 +2149,14 @@ class GameAgent:
         """Replace embedded HTML blobs with size markers — keep tags + notes."""
         def html_repl(m):
             n = len(m.group(1))
+            if n < _SUMMARIZE_MIN_HTML_BYTES:
+                return m.group(0)
             return f"<html_file>[omitted: {n} bytes of HTML; see snapshot]</html_file>"
 
         def fence_repl(m):
             n = len(m.group(1))
+            if n < _SUMMARIZE_MIN_HTML_BYTES:
+                return m.group(0)
             return f"```html\n[omitted: {n} bytes of HTML; see snapshot]\n```"
 
         c = self._SUMMARIZE_HTML_RE.sub(html_repl, c)
@@ -2341,6 +2382,11 @@ class GameAgent:
         cutoff = n - _PRUNE_KEEP_RECENT_TURNS
         for i in range(1, cutoff):
             msg = self._messages[i]
+            # Do NOT rewrite user/system turns here. Mutating prior user
+            # instructions (especially format examples) creates false context
+            # and can derail one-shot generations.
+            if msg.get("role") != "assistant":
+                continue
             c = msg.get("content", "") or ""
             new_c = self._summarize_content(c)
             if new_c != c:
@@ -3076,11 +3122,17 @@ class GameAgent:
             # Visible to the user via the agent log so they understand why
             # the stream cut off mid-output. Trim trailing whitespace from
             # the partial text so downstream regexes see a clean tail.
+            loop_kind = getattr(result, "loop_kind", None) or "unknown"
+            loop_line = (getattr(result, "loop_line", None) or "").strip()
+            extra = f" reason={loop_kind}"
+            if loop_line:
+                preview = loop_line[:80] + ("..." if len(loop_line) > 80 else "")
+                extra += f" sample='{preview}'"
             self._record(AgentEvent(
                 "info",
                 f"[yellow]repetition loop detected[/yellow] — model was emitting "
                 f"the same 1-2 short lines on repeat after {result.tokens} tokens "
-                f"({result.duration_s:.0f}s). Aborted stream and kept partial output."
+                f"({result.duration_s:.0f}s). Aborted stream and kept partial output.{extra}"
             ))
         if result.deliberated:
             # A2: smaller LLMs sometimes ramble pre-tag for thousands of
@@ -3253,6 +3305,11 @@ class GameAgent:
 
         html = self._extract_html(reply)
         if html is not None:
+            if _looks_like_placeholder_html_payload(html):
+                return None, (
+                    "<html_file> rejected: extracted body is a tiny placeholder "
+                    "(e.g. `...`) rather than a real HTML document."
+                )
             # Stop-Losing-To-OneShot: ban full <html_file> rewrites once
             # a baseline exists. The DOOM trace burned 5 consecutive iters
             # on truncated rewrites. Force the model into <patch> mode.
@@ -5607,9 +5664,17 @@ class GameAgent:
                                 "stalled": self._last_stream_stalled,
                                 "iteration": iteration,
                             })
-                        doctor_reply = await self._run_format_doctor(
-                            reply, format_rejection,
-                        )
+                        yield self._record(AgentEvent(
+                            "activity",
+                            "format_doctor",
+                            {"label": "format-doctor recovery"},
+                        ))
+                        try:
+                            doctor_reply = await self._run_format_doctor(
+                                reply, format_rejection,
+                            )
+                        finally:
+                            yield self._record(AgentEvent("activity", "idle"))
                         if doctor_reply:
                             d_html, _d_msg = await self._materialize(
                                 doctor_reply, dry_run=True,
