@@ -1145,6 +1145,9 @@ class GameAgent:
         # arm for the rest of the run.
         self._auto_step_armed: bool = False
         self._step_auto_disabled: bool = False
+        # Master switch for auto-arming step mode on first failed iter.
+        # Drivers can disable this for uninterrupted AUTO sessions.
+        self._auto_step_on_failure: bool = True
         # Released by signal_step_continue() to unblock a step-mode wait
         # without adding any user feedback. add_user_feedback also
         # unblocks (via has_pending_user_input becoming True).
@@ -1951,6 +1954,14 @@ class GameAgent:
         No-op when no wait is active."""
         self._step_continue = True
         self._trace({"kind": "step_continue_signal"})
+
+    def set_auto_step_on_failure(self, on: bool) -> None:
+        """Enable/disable auto step-mode arming on first failed iter."""
+        self._auto_step_on_failure = bool(on)
+        self._trace({
+            "kind": "auto_step_on_failure_set",
+            "on": self._auto_step_on_failure,
+        })
 
     # -- asset-reference alignment scan ----------------------------------
     #
@@ -6240,6 +6251,8 @@ class GameAgent:
             # provide. Self-arms exactly once per session; user can
             # /wait off to opt out for the rest of the run.
             if (
+                self._auto_step_on_failure
+                and
                 not self._auto_step_armed
                 and not report.get("ok", False)
                 and not self._step_mode

@@ -95,7 +95,7 @@ consume the stream; they do not contain agent logic of their own.
    one-sentence "what's still missing" note that flows into the next
    user turn as coaching. A high pixel-delta paired with `PROGRESS:
    no` escalates to REGRESSION SUSPECTED. Never silently falls back to
-  a cloud model — the user's `/check with <model>` slash command is
+  a cloud model — the user's `/check <N|model>` slash command is
   the explicit path for cloud-backed judging (Anthropic or OpenAI).
 
 **No new asset generators are introduced.** Z-Image-Turbo for sprites
@@ -388,7 +388,7 @@ MLX-VLM model (any path whose name classifies as `vlm` —
 the HF cache. Disable explicitly with `VISION_JUDGE=0`.
 
 **Never silently calls a cloud model.** Cloud paths (Anthropic/OpenAI)
-are reachable only via explicit user actions (e.g. `/check with ...` or
+are reachable only via explicit user actions (e.g. `/check ...` or
 staging a cloud backend). The agent loop never auto-falls back to cloud.
 
 The last verdict (iter + progress + note) survives the state-anchor
@@ -549,7 +549,7 @@ is data the agent will see, not just developer notes.
 |---|---|
 | `/help`, `/h`, `/?` | Show command list. |
 | `/list`, `/models` | Inventory of MLX + Ollama models, with `[VLM]` / `[text]` labels. |
-| `/model <name>`, `/load <name>` | Switch the chat model. |
+| `/model <N\|name>`, `/load <N\|name>` | Switch the chat model. |
 | `/backend <auto\|ollama\|mlx\|openai\|anthropic>` | Switch the backend (cloud choices are explicit and billable). |
 | `/unload` | Free the loaded MLX model from VRAM. |
 | `/new` | Start a new session in the same workspace. |
@@ -562,7 +562,7 @@ is data the agent will see, not just developer notes.
 | `/seed <text>` | Inject a one-shot system seed at the next user turn. |
 | `/reset` | Reset agent state to a fresh session. |
 | `/status` | Print iter count, ok status, model, backend, VLM. |
-| `/wait <on\|off>` | Toggle "wait" / step-mode — pause after each iter. On first failed iter, step-mode can auto-arm once unless you disable it with `/wait off`. |
+| `/wait <on\|off>` | Toggle step-mode — when on, pause after each iter; when off, iterate continuously. |
 | `/iter-detail <on\|off>` | Toggle optional expanded blocker detail after the compact iter decision line (default off). |
 | `/mode <local_manual\|local_auto\|local_plus_review with <model> [--auto-apply]\|custom>` | Apply a run contract: manual checkpoints, autonomous loop, or autonomous loop with an explicit reviewer hook. |
 | `/playbook`, `/memory` | Print the matched playbook bullets. |
@@ -570,7 +570,7 @@ is data the agent will see, not just developer notes.
 | `/restarts` | Show backend restart history. |
 | `/model-class <small\|mid\|large>` | Override the prompt trim path. |
 | `/launch` | Manually launch Chromium against the current best file. |
-| `/check [with <model>] [--apply]` | Run visual review on the latest screenshot. No `with` uses the active VLM session model. `with claude-…` routes Anthropic, `with gpt-…` routes OpenAI, and other names resolve local MLX VLMs. `--apply` injects verdict coaching into the next coding turn. |
+| `/check [<N\|model>]` | Run visual review on the latest screenshot. `N` selects by `/list` number. Bare `/check` uses the active VLM session model. `claude-…` routes Anthropic, `gpt-…` routes OpenAI, and other names resolve local MLX VLMs. In wait mode ON, suggestion is prefilled in input for edit/Enter; in wait mode OFF, coaching auto-queues to the next coding turn. |
 
 ### CLI flags (`coder.py`)
 
@@ -633,9 +633,9 @@ Use this matrix when validating `chat.py` loop/control changes:
 | Asteroids regression guard | `/new asteroids` on local backend | Ship direction uses `vx = cos(angle) * speed`; asteroids stay irregular polygons. |
 | Wait-mode manual control | `/mode local_manual` then run a game | Agent pauses after each iter (`await_user`), accepts user feedback before continuing. |
 | Autonomous loop control | `/mode local_auto` then run a game | Agent iterates continuously without step pauses unless user explicitly enables wait mode. |
-| Explicit external review (manual) | `/mode local_plus_review with <model>` and keep wait on | Reviewer guidance is suggested; `/check --apply` queues coaching when user chooses. |
+| Explicit external review (manual) | `/mode local_plus_review with <model>` and keep wait on | Reviewer guidance can be run via `/check <N\|model>`; suggestion is prefilled for edit/Enter. |
 | Explicit external review (auto loop) | `/mode local_plus_review with <model> --auto-apply` with wait off | Failed iters can auto-run explicit reviewer hook and inject coaching for next turn. |
-| No silent cloud guarantee | Local-only run (`/mode local_auto` or `/mode local_manual`) | No cloud calls unless user explicitly picks cloud backend or `/check with ...`. |
+| No silent cloud guarantee | Local-only run (`/mode local_auto` or `/mode local_manual`) | No cloud calls unless user explicitly picks cloud backend or `/check ...`. |
 | Early-cutoff regression guard | Rich-media first-build run on local model | Do not reintroduce aggressive early aborts that cut normal long `<html_file>` emission mid-stream; changes to loop/deliberation/timeout guards must be trace-backed. |
 
 ---
@@ -921,7 +921,7 @@ Python packages (in `requirements.txt` and `requirements-diffuser.txt`):
 - **ollama** — async client.
 - **mlx-lm** + optional **mlx-vlm** — Apple GPU inference.
 - **anthropic** / **openai** — optional cloud backends, only used when
-  explicitly selected (`/backend anthropic|openai` or `/check with ...`).
+  explicitly selected (`/backend anthropic|openai` or `/check ...`).
 - **torch + diffusers + transformers + accelerate** — asset and audio
   pipelines.
 - **PIL** — sprite postprocessing.

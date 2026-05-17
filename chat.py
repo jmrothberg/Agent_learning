@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -203,19 +204,20 @@ class MultilinePasteInput(Input):
             self.screen_x = screen_x
             self.screen_y = screen_y
 
+    def paste_flattened_text(self, text: str) -> bool:
+        """Insert pasted text using the same newline->space policy as _on_paste."""
+        flat = " ".join((text or "").split())
+        if not flat:
+            return False
+        selection = self.selection
+        if selection.is_empty:
+            self.insert_text_at_cursor(flat)
+        else:
+            self.replace(flat, *selection)
+        return True
+
     def _on_paste(self, event: events.Paste) -> None:  # type: ignore[override]
-        text = event.text or ""
-        # Collapse all runs of whitespace (including newlines and tabs)
-        # to a single space. Strip leading/trailing whitespace so a
-        # paste that starts with a blank line doesn't drop a leading
-        # space into the field at the cursor.
-        flat = " ".join(text.split())
-        if flat:
-            selection = self.selection
-            if selection.is_empty:
-                self.insert_text_at_cursor(flat)
-            else:
-                self.replace(flat, *selection)
+        self.paste_flattened_text(event.text or "")
         # prevent_default() is REQUIRED, not just event.stop().
         # Textual's MessagePump dispatches _on_paste to every class in
         # the MRO (textual/message_pump.py:_get_dispatch_methods walks
@@ -860,6 +862,9 @@ class CodingBoxApp(App):
         # again to resume normal TUI mouse handling. Without this, the
         # left log pane is unselectable while the agent is running.
         Binding("ctrl+s", "toggle_selection_mode", "Select text"),
+        # Route keyboard paste through the same OS-aware path as the
+        # input context menu, so external clipboard content works.
+        Binding("ctrl+v", "paste_input", "Paste into input", show=False),
     ]
 
     def __init__(self) -> None:
@@ -884,6 +889,9 @@ class CodingBoxApp(App):
         # Plain lines mirrored from the log pane for right-click copy.
         self._log_mirror_lines: list[str] = []
         self._status_plain: str = ""
+        # Optional manual status body (e.g. /help). When set, it is shown
+        # in the status panel until the next user input.
+        self._status_manual_body: str | None = None
         self._context_menu: ContextMenuOverlay | None = None
         self._context_menu_origin: str = ""
         # Per-session paths assigned in _start_session. None until then.
@@ -978,8 +986,8 @@ class CodingBoxApp(App):
         # Optional reviewer model used by the local_plus_review profile.
         # Explicitly user-configured via /mode local_plus_review with <model>.
         self._profile_review_model: str | None = None
-        # When true, local_plus_review in AUTO mode can run `/check --apply`
-        # automatically after failed tests. OFF by default to avoid surprise
+        # When true, local_plus_review in AUTO mode can run `/check <model>`
+        # and auto-queue its guidance after failed tests. OFF by default to avoid surprise
         # paid API calls.
         self._profile_review_auto_apply: bool = False
         # Guard against overlapping auto-review workers.
@@ -1068,7 +1076,7 @@ class CodingBoxApp(App):
         self._log_info(
             "[dim]Right-click the input for Cut/Copy/Paste; right-click the log "
             "or status panel to copy text or enable drag-select (same as "
-            "Ctrl+S). Input also supports Ctrl+X/C/V.[/dim]"
+            "Ctrl+S). Paste in input: Ctrl+V (or terminal Edit→Paste / Cmd+V on macOS).[/dim]"
         )
         # Short prompt-engineering tips for medium-skilled local models
         # (qwen3.6:27b/35b). Long-form guidance lives in the README;
@@ -1212,6 +1220,14 @@ class CodingBoxApp(App):
              stored block instead of wiping it. New test replaces it;
              session reset clears it.
         """
+        if self._status_manual_body is not None:
+            body = self._status_manual_body
+            if extra is not None:
+                self._last_test_block = extra
+            self._status_plain = self._MARKUP_RE.sub("", body)
+            self.query_one("#status-body", Static).update(body)
+            self._update_mode_bar()
+            return
         if extra is not None:
             self._last_test_block = extra
         body = self._render_activity_line()
@@ -1760,6 +1776,18 @@ class CodingBoxApp(App):
         self._log(f"[dim]  tail -f {jsonl}[/dim]")
         self._log("[dim]Press Ctrl+S to enable mouse selection in this pane.[/dim]")
 
+    def action_paste_input(self) -> None:
+        """Ctrl+V - paste into the bottom input using OS/local clipboard fallback."""
+        try:
+            inp = self.query_one("#user-input", MultilinePasteInput)
+        except Exception:
+            return
+        if self._paste_into_input(inp):
+            return
+        self._log_info(
+            "[dim]Paste unavailable — clipboard appears empty or inaccessible.[/dim]"
+        )
+
     def _append_log_mirror_line(self, plain: str) -> None:
         """Keep a bounded plain-text mirror for context-menu copy."""
         self._log_mirror_lines.append(plain)
@@ -1787,6 +1815,44 @@ class CodingBoxApp(App):
             except Exception:
                 pass
         return "\n".join(self._log_mirror_lines[-n:])
+
+    def _read_system_clipboard_text(self) -> str | None:
+        """Best-effort read of OS clipboard text (outside Textual's local mirror)."""
+        commands: list[list[str]]
+        if sys.platform == "darwin":
+            commands = [["pbpaste"]]
+        else:
+            commands = [
+                ["wl-paste", "--no-newline"],
+                ["xclip", "-selection", "clipboard", "-o"],
+                ["xsel", "--clipboard", "--output"],
+            ]
+        for cmd in commands:
+            if shutil.which(cmd[0]) is None:
+                continue
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=1.5,
+                    check=False,
+                )
+            except Exception:
+                continue
+            if proc.returncode == 0:
+                return proc.stdout or ""
+        return None
+
+    def _paste_into_input(self, inp: MultilinePasteInput) -> bool:
+        """Paste into input, preferring OS clipboard then Textual local clipboard."""
+        system_text = self._read_system_clipboard_text()
+        if system_text is not None and inp.paste_flattened_text(system_text):
+            return True
+        local_text = self.clipboard or ""
+        if local_text and inp.paste_flattened_text(local_text):
+            return True
+        return False
 
     def _input_context_menu_items(
         self, inp: MultilinePasteInput,
@@ -1866,7 +1932,8 @@ class CodingBoxApp(App):
                 elif action_id == "copy":
                     inp.action_copy()
                 elif action_id == "paste":
-                    inp.action_paste()
+                    if not self._paste_into_input(inp):
+                        raise SkipAction()
                 elif action_id == "select_all":
                     inp.action_select_all()
                 else:
@@ -2049,6 +2116,11 @@ class CodingBoxApp(App):
         """
         text = (message.value or "").strip()
         message.input.value = ""
+        # Clear manual /help status content on the next non-help input.
+        if self._status_manual_body is not None:
+            lower = text.lower()
+            if lower not in {"/help", "/h", "/?"}:
+                self._status_manual_body = None
 
         # Step-mode (Stop-Losing-To-OneShot todo #1): when the agent has
         # paused between iters, empty Enter means "continue" and any
@@ -2210,6 +2282,7 @@ class CodingBoxApp(App):
             "  [b]ship as-is, stop[/b]              type [b]done[/b] / [b]looks good[/b] / [b]ship[/b] (or Ctrl+D)",
             "  [b]brand-new unrelated game[/b]      [b]/new <goal>[/b]",
             "  [b]start from an existing .html[/b]  [b]/seed <path>[/b]  then  [b]/new <goal>[/b]",
+            "  [b]paste in input[/b]                [b]Ctrl+V[/b] or terminal Edit→Paste ([b]Cmd+V[/b] on macOS)",
             "",
             "[bold cyan]── redraw ONE asset (no code change) ──[/bold cyan]",
             "  [dim]Use the asset name + a media verb + a code-lock phrase.[/dim]",
@@ -2270,13 +2343,13 @@ class CodingBoxApp(App):
             "  [b]/iter-detail[/b] [on|off]     optional extra blocker details after each iter decision (default off)",
             "  [b]/mode[/b] [local_manual|local_auto|local_plus_review with <model> [--auto-apply]|custom]",
             "                                  set run contract; local_plus_review can auto-run /check in AUTO mode",
+            "                                  [dim]IMPORTANT: reviewer auto-apply runs only when WAIT mode is OFF (/wait off)[/dim]",
             "  [b]/playbook[/b] [on|off]        toggle playbook bullet injection (alias /memory) - A/B vs one-shot when iters feel worse than no agent",
             "  [b]/audit[/b]                     print per-bullet earnings (fires, pass-rate, avg-iter) from trace history",
-            "  [b]/check[/b] [with <model>] [--apply]  visual review of latest screenshot · YOU pick when",
+            "  [b]/check[/b] [<N|model>]       visual review + guidance using model #N from /list or a model name",
             "                                  [dim]bare /check uses your active session model if it's a VLM (no API cost)[/dim]",
-            "                                  [dim]cloud: /check with claude   /check with gpt-5   (needs API key for that vendor)[/dim]",
-            "                                  [dim]local: /check with qwen3.6   (substring-match against your MLX VLMs)[/dim]",
-            "                                  [dim]add --apply to queue the verdict into the next coding turn[/dim]",
+            "                                  [dim]WAIT ON: loads suggested feedback into input for edit/Enter[/dim]",
+            "                                  [dim]WAIT OFF: auto-queues guidance into the next coding turn[/dim]",
             "  [b]/ref <path>[/b]              attach a reference image (PNG/JPEG/WebP) to the NEXT user turn",
             "                                  [dim]works before /new too — it stages for the first turn[/dim]",
             "                                  [dim]VLM-only — say 'make the game look like this' on the next line[/dim]",
@@ -2294,6 +2367,10 @@ class CodingBoxApp(App):
         ]
         for line in lines:
             self._log(line)
+        # Mirror /help in the right status panel so command guidance is
+        # visible there immediately.
+        self._status_manual_body = "\n".join(lines)
+        self._update_status()
 
     def _refresh_listing(self) -> list[tuple[str, str]]:
         """Build a unified (backend, model) list across both daemons.
@@ -2998,7 +3075,7 @@ class CodingBoxApp(App):
         self._log_info(msg)
 
     async def _cmd_check(self, arg: str) -> None:
-        """/check [with <model>] [--apply] — explicit visual progress check.
+        """/check [<N|model>] — visual check + guidance injection.
 
         Looks at the most recent screenshot of your game with a vision
         model and answers two things: did the last iteration make
@@ -3007,11 +3084,15 @@ class CodingBoxApp(App):
         (probes only check structure, not whether the game LOOKS like
         what you asked for).
 
-        EXPLICIT BY DESIGN. Calls a paid API exactly when you type the
-        command — never automatic unless you explicitly opt into the
-        local_plus_review profile with auto-apply. Default behavior is
-        still print-only. Pass --apply to queue the verdict into the
-        next coding turn as coaching.
+        Calls a reviewer model exactly when you type the command. This
+        does NOT change the coding model; it only produces guidance.
+
+        Simpler default behavior:
+          - wait OFF: verdict is auto-queued into the next coding turn.
+          - wait ON: suggested feedback is inserted into the input box
+            so you can edit it or press Enter as-is.
+
+        Back-compat: `--apply` still forces direct queueing.
 
         Vendor routing (any vision-capable model works):
           - `claude` / `sonnet` / `opus` / `haiku` / `claude-*` →
@@ -3019,26 +3100,27 @@ class CodingBoxApp(App):
           - `gpt` / `gpt-5` / `gpt-4o` / `o3` / `o4-mini` →
             OpenAI (needs OPENAI_API_KEY)
           - anything else → resolved against your local MLX VLMs
-        With no `with <model>` argument, uses the active session model
-        IF it's a VLM (so a local-VLM session can just type `/check`).
+        With no argument, uses the active session model IF it's a VLM.
         """
-        # Parse the argument. Three shapes:
-        #   (no arg)          → use active session model if VLM
-        #   "with <model>"    → explicit selection
-        #   "<model>"         → tolerated shorthand, same as "with ..."
-        # Optional flag:
-        #   --apply           → queue reviewer verdict into agent coaching
-        apply_verdict = False
+        # Parse argument forms:
+        #   (no arg)       -> active VLM session model
+        #   "<N>"          -> /list row number (e.g. /check 17)
+        #   "with <model>" -> tolerated legacy form
+        #   "<model>"      -> explicit model string
+        # Optional flag (back-compat):
+        #   --apply        -> force queueing even when wait is ON
+        apply_requested = False
         stripped_full = (arg or "").strip()
         if stripped_full:
             tokens = stripped_full.split()
             kept: list[str] = []
             for tok in tokens:
                 if tok == "--apply":
-                    apply_verdict = True
+                    apply_requested = True
                 else:
                     kept.append(tok)
             arg = " ".join(kept).strip()
+        selected_backend: str | None = None
         agent = getattr(self, "agent", None)
         if not arg:
             # No arg: prefer the active session model when it's a VLM.
@@ -3047,7 +3129,7 @@ class CodingBoxApp(App):
                 model = getattr(agent, "model", None) or ""
                 if not model:
                     self._log_info(
-                        "usage: /check [with <model>] [--apply]   (no active model)"
+                        "usage: /check [<N|model>]   (no active model)"
                     )
                     return
                 self._log_info(
@@ -3055,16 +3137,12 @@ class CodingBoxApp(App):
                     f"VLM: [b]{_esc(model)}[/b]"
                 )
             else:
-                self._log_info("usage: /check with <model> [--apply]")
+                self._log_info("usage: /check <N|model>")
                 self._log_info(
-                    "  cloud:  /check with claude   /check with gpt-5"
+                    "  by number: /check 17   (uses model #17 from /list)"
                 )
                 self._log_info(
-                    "  local:  /check with <name-substring-of-an-MLX-VLM>"
-                )
-                self._log_info(
-                    "  bare:   /check   (uses your active session model "
-                    "when it's a VLM)"
+                    "  by name: /check claude   /check gpt-5   /check <mlx-vlm-substring>"
                 )
                 return
         else:
@@ -3074,6 +3152,24 @@ class CodingBoxApp(App):
                 model = stripped[5:].strip()
             else:
                 model = stripped
+            # Numeric shorthand: resolve via /list snapshot.
+            if model.isdigit():
+                model_num = model
+                selected_backend, resolved = self._resolve_listing_arg(model)
+                if resolved is None:
+                    return
+                model = resolved
+                if selected_backend == "ollama":
+                    self._log_error(
+                        "/check by number only supports vision-capable reviewer "
+                        "entries (MLX/OpenAI/Claude). The selected /list row is "
+                        "an Ollama entry."
+                    )
+                    return
+                self._log_info(
+                    f"[magenta]/check[/magenta] model #{_esc(model_num)} → "
+                    f"[b]{_esc(model)}[/b]"
+                )
         aliases = {
             "claude": "claude-sonnet-4-6",
             "sonnet": "claude-sonnet-4-6",
@@ -3099,9 +3195,9 @@ class CodingBoxApp(App):
                 self._log_error(
                     "/check: ANTHROPIC_API_KEY not set. Add it to .env "
                     "or your shell env, OR use a local VLM "
-                    "([b]/check with <name>[/b] — run /list and look "
+                    "([b]/check <name-or-number>[/b] — run /list and look "
                     "for [magenta]\\[VLM][/magenta]), OR use OpenAI "
-                    "([b]/check with gpt-5[/b]) if OPENAI_API_KEY is set."
+                    "([b]/check gpt-5[/b]) if OPENAI_API_KEY is set."
                 )
                 return
         elif vendor == "openai":
@@ -3109,9 +3205,9 @@ class CodingBoxApp(App):
                 self._log_error(
                     "/check: OPENAI_API_KEY not set. Add it to .env "
                     "or your shell env, OR use a local VLM "
-                    "([b]/check with <name>[/b] — run /list and look "
+                    "([b]/check <name-or-number>[/b] — run /list and look "
                     "for [magenta]\\[VLM][/magenta]), OR use Anthropic "
-                    "([b]/check with claude[/b]) if ANTHROPIC_API_KEY "
+                    "([b]/check claude[/b]) if ANTHROPIC_API_KEY "
                     "is set."
                 )
                 return
@@ -3140,8 +3236,8 @@ class CodingBoxApp(App):
                         "vendor (claude / gpt / o*) or any local MLX "
                         "VLM. Run /list to see local VLMs (look for "
                         "[magenta]\\[VLM][/magenta]). Cloud examples: "
-                        "[b]/check with claude[/b]  or  "
-                        "[b]/check with gpt-5[/b]."
+                        "[b]/check claude[/b]  or  "
+                        "[b]/check gpt-5[/b]."
                     )
                     return
                 self._log_info(
@@ -3149,6 +3245,12 @@ class CodingBoxApp(App):
                     f"[b]{_esc(resolved)}[/b]"
                 )
                 model = resolved  # vision_judge picks the path back up
+        if backend_mod.classify_model_modality(model) != "vlm":
+            self._log_error(
+                f"/check: {_esc(model)!r} is not a vision model. Pick a "
+                "[magenta]\\[VLM][/magenta] entry from /list."
+            )
+            return
         agent = getattr(self, "agent", None)
         if agent is None:
             self._log_error(
@@ -3172,6 +3274,9 @@ class CodingBoxApp(App):
                 "/check: no active goal. Start a session with /new <goal>."
             )
             return
+        step_on = bool(getattr(agent, "_step_mode", False))
+        apply_verdict = apply_requested or (not step_on)
+        offer_input_suggestion = (not apply_requested) and step_on
         self._log_info(
             f"[magenta]/check[/magenta] calling [b]{_esc(model)}[/b] (one API call)…"
         )
@@ -3181,6 +3286,7 @@ class CodingBoxApp(App):
             png=png,
             agent=agent,
             apply_verdict=apply_verdict,
+            offer_input_suggestion=offer_input_suggestion,
             source="slash_check",
         )
 
@@ -3192,6 +3298,7 @@ class CodingBoxApp(App):
         png: bytes,
         agent: GameAgent,
         apply_verdict: bool,
+        offer_input_suggestion: bool = False,
         source: str,
     ) -> bool:
         """Run one visual check and optionally queue coaching."""
@@ -3225,13 +3332,13 @@ class CodingBoxApp(App):
         self._log(f"[magenta]{_esc(model)}:[/magenta] {prog}")
         note = (verdict.note or "").strip()
         self._log(f"  missing: {_esc(note) if note else '(no note)'}")
+        coach = (
+            f"EXTERNAL VISUAL REVIEW ({model}): progress={progress_label}. "
+            f"Most important visible gap: {note or 'unspecified by reviewer'}. "
+            "Address this in the next iteration before shipping."
+        )
         applied = False
         if apply_verdict:
-            coach = (
-                f"EXTERNAL VISUAL REVIEW ({model}): progress={progress_label}. "
-                f"Most important visible gap: {note or 'unspecified by reviewer'}. "
-                "Address this in the next iteration before shipping."
-            )
             pending = getattr(agent, "_pending_coaching", None)
             if isinstance(pending, list):
                 pending.append(coach)
@@ -3243,9 +3350,25 @@ class CodingBoxApp(App):
                 "[green]review verdict queued[/green] for the next coding turn "
                 "(via agent coaching)"
             )
+        elif offer_input_suggestion:
+            try:
+                inp = self.query_one("#user-input", Input)
+                inp.value = coach
+                inp.placeholder = "review suggestion loaded · edit it or press Enter to submit"
+                inp.focus()
+                self._awaiting_kind = "feedback"
+                self._log_info(
+                    "[green]review suggestion loaded into input[/green] — "
+                    "edit it, or press Enter to send as-is."
+                )
+            except Exception:
+                self._log_info(
+                    "[yellow]review suggestion ready[/yellow] but input focus "
+                    "failed; copy from log and send manually."
+                )
         else:
             self._log_info(
-                "(verdict NOT auto-injected — pass [b]--apply[/b] to queue it for the next turn)"
+                "(verdict shown only; no injection requested)"
             )
         # Trace the explicit reviewer action so tune/forensics can measure
         # cloud/local review impact on iteration outcomes.
@@ -3496,8 +3619,12 @@ class CodingBoxApp(App):
         if self.agent is not None:
             if profile == "local_manual":
                 self.agent.set_step_mode(True)
+                self.agent.set_auto_step_on_failure(True)
             else:
                 self.agent.set_step_mode(False)
+                # Keep AUTO profiles uninterrupted: no surprise
+                # auto-pause when an iteration fails.
+                self.agent.set_auto_step_on_failure(False)
         mode_bits = [f"profile → [b]{profile}[/b]"]
         if profile == "local_plus_review":
             mode_bits.append(f"review model: [b]{_esc(self._profile_review_model or '')}[/b]")
@@ -3546,6 +3673,9 @@ class CodingBoxApp(App):
             self._run_profile = "custom"
             self._log_info("[dim]run profile moved to custom (manual /wait override)[/dim]")
         self.agent.set_step_mode(new_state)
+        # Mirror explicit /wait intent for auto-step behavior: when the
+        # user turns wait OFF, don't auto-re-enable pauses later.
+        self.agent.set_auto_step_on_failure(new_state)
         if new_state:
             self._log_info(
                 "[yellow]step-mode ON[/yellow] — agent will pause after each "
@@ -3794,8 +3924,12 @@ class CodingBoxApp(App):
         # Apply run-profile step policy on session start.
         if self._run_profile == "local_manual":
             self.agent.set_step_mode(True)
-        elif self._run_profile in {"local_auto", "local_plus_review"}:
+            self.agent.set_auto_step_on_failure(True)
+        else:
             self.agent.set_step_mode(False)
+            # Default for non-manual flows: keep running without forced
+            # checkpoints; user can always /wait on when desired.
+            self.agent.set_auto_step_on_failure(False)
         self.agent.set_token_callback(self._emit_token)
         # Pre-session /ref staging: if the user attached an image before
         # starting, feed it into the very first user turn of this run.
@@ -4056,8 +4190,8 @@ class CodingBoxApp(App):
             if not goal or not png:
                 return
             self._log_info(
-                f"[magenta]review hook[/magenta] running /check with "
-                f"[b]{_esc(model)}[/b] --apply"
+                f"[magenta]review hook[/magenta] running /check "
+                f"[b]{_esc(model)}[/b] (auto-queue)"
             )
             await self._run_visual_check(
                 model=model,
@@ -4080,9 +4214,7 @@ class CodingBoxApp(App):
         if not model:
             return
         step_on = bool(getattr(self.agent, "_step_mode", False))
-        base_cmd = f"/check with {model}"
-        if self._profile_review_auto_apply:
-            base_cmd += " --apply"
+        base_cmd = f"/check {model}"
         if step_on:
             self._log_info(
                 f"[magenta]review hook[/magenta] ({blocker_category}) ready: "
