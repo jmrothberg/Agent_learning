@@ -69,8 +69,8 @@ def test_no_abort_when_tag_opens_before_threshold():
     d = DeliberationDetector(threshold_chars=6000, think_threshold_chars=12000)
     # Push 1000 chars of rambling.
     d.feed("a" * 1000)
-    # Tag opens — detector latches.
-    d.feed("here is the code: <html_file>")
+    # Tag opens at line-start — detector latches.
+    d.feed("\n<html_file>")
     # Now push another 7000 chars; should NOT abort (latched).
     aborted = False
     for _ in range(70):
@@ -78,6 +78,21 @@ def test_no_abort_when_tag_opens_before_threshold():
             aborted = True
             break
     assert aborted is False
+
+
+def test_inline_tag_literal_in_prose_does_not_latch():
+    """Inline prose mentions like `emit <html_file>` must not latch.
+
+    Regression for the DOOM trace (2026-05-17) where the model repeated
+    planning prose containing `<html_file>` literals; old detector treated
+    those as real output starts and never aborted deliberation.
+    """
+    d = DeliberationDetector(threshold_chars=80, think_threshold_chars=120)
+    assert d.feed("I need to emit the `<html_file>` tag soon. ") is False
+    assert d._seen_tag is False
+    # Keep rambling past the outside-think threshold -> abort.
+    assert d.feed("x" * 80) is True
+    assert d.stall_reason == "deliberation_loop"
 
 
 def test_inside_think_higher_budget():

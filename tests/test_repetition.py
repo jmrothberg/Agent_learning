@@ -345,10 +345,11 @@ def test_deliberation_detector_catches_tag_split_across_pieces():
     happen to land a boundary mid-tag would trip the guard.
     """
     d = ollama_io.DeliberationDetector(threshold_chars=10000)
-    # Pump 270 chars of prose so the buffer is sticky, then half-tag.
+    # Pump 270 chars of prose so the buffer is sticky, then split a
+    # line-start tag across pieces.
     for ch in "preamble " * 30:
         d.feed(ch)
-    assert d.feed("<html_") is False
+    assert d.feed("\n<html_") is False
     assert d.feed("file>") is False
     # 'seen_tag' should now be latched True.
     for _ in range(10000):
@@ -413,7 +414,7 @@ def test_deliberation_outside_think_latches_normally():
     # 500 chars of preamble (well under 6000) then a real <html_file>.
     for _ in range(50):
         d.feed("preamble preamble preamble ")
-    assert d.feed("<html_file>") is False
+    assert d.feed("\n<html_file>") is False
     assert d._seen_tag is True
 
 

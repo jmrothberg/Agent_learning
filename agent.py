@@ -1367,6 +1367,18 @@ class GameAgent:
         self._session_looping: set[str] = set()
         self.restart_n: int = max(1, int(restart_n))
         self.restart_score_threshold: float = float(restart_score_threshold)
+        # restart-N attempt index (0-based). Attempt 0 keeps the default
+        # decode profile; later attempts apply a diversified profile so a
+        # restart doesn't replay the same generation trajectory.
+        self._restart_attempt_idx: int = 0
+        self._restart_seed_base: int = (
+            (int.from_bytes(os.urandom(4), "big") & 0x7FFFFFFF) or 1
+        )
+        self._restart_attempt_seed: int | None = None
+        # First-build rescue flag. If iter 1 emits prose without code,
+        # force the next first-build turn to start from an <html_file>
+        # prefill stub to break the loop.
+        self._force_first_build_prefill: bool = False
 
     # Read-through to the resolved backend's model id. Existing call sites
     # (trace metadata, conversation dump, memory.record_outcome, ...) used
@@ -1601,6 +1613,15 @@ class GameAgent:
                     "No markdown fences."
                 )
             return "\n\n".join(parts), False
+        if not has_existing_file:
+            fallback = (
+                "FIRST BUILD REQUIRED — your previous reply had no usable "
+                "<html_file>/<patch>. Re-emit this turn as CODE ONLY.\n"
+                "Start your reply immediately with `<html_file>` as the first "
+                "non-whitespace token (no preamble, no reasoning prose), then "
+                "emit the complete HTML document and close with `</html_file>`."
+            )
+            return fallback, False
         fallback = (
             "I could not find a <patch> or <html_file> block "
             "in your reply. If this is the first build, send "
@@ -2986,6 +3007,7 @@ class GameAgent:
         self, on_token, *,
         override_temp: float | None = None,
         prefill: str = "",
+        prefill_force: bool = False,
     ) -> str:
         """Stream once, with watchdog. Recovers from stalls by raising/logging.
 
@@ -3050,14 +3072,28 @@ class GameAgent:
         # trailing assistant message; Ollama's chat API treats it as a
         # partial completion to extend.
         prefill_used = False
-        if self._use_prefill and prefill:
+        prefill_enabled = bool(prefill) and (self._use_prefill or prefill_force)
+        if prefill_enabled:
             self._messages.append({"role": "assistant", "content": prefill})
             prefill_used = True
-            self._trace({"kind": "prefill", "len": len(prefill)})
+            self._trace({
+                "kind": "prefill",
+                "len": len(prefill),
+                "forced": bool(prefill_force and not self._use_prefill),
+            })
 
         temp = override_temp if override_temp is not None else (
             0.25 if self._fix_mode else 0.7
         )
+        if override_temp is None and self._restart_attempt_idx > 0:
+            bias = self._restart_temperature_bias(self._restart_attempt_idx)
+            temp = max(0.05, min(1.2, temp + bias))
+            self._trace({
+                "kind": "restart_temp_bias_applied",
+                "attempt_idx": self._restart_attempt_idx,
+                "bias": bias,
+                "result_temp": temp,
+            })
         self._trace({"kind": "stream_start", "temperature": temp, "fix_mode": self._fix_mode})
 
         # Heartbeat wrapper around the caller's on_token. Every
@@ -3141,10 +3177,13 @@ class GameAgent:
             })
 
         try:
+            opts: dict[str, Any] = {"temperature": temp, "num_ctx": self.num_ctx}
+            if self._restart_attempt_seed is not None:
+                opts["seed"] = int(self._restart_attempt_seed)
             result = await self._backend.stream_chat(
                 self._messages,
                 on_token=_heartbeat_on_token,
-                options={"temperature": temp, "num_ctx": self.num_ctx},
+                options=opts,
                 stall_seconds=self.stall_seconds,
                 overall_seconds=effective_overall_seconds,
                 max_retries=1,
@@ -5462,14 +5501,21 @@ class GameAgent:
                     # is forced. First-build (iter 1, fix_mode False) doesn't
                     # use diagnose, so prefill is empty there.
                     reply_prefill = ""
+                    prefill_force = False
                     if self._use_prefill and self._fix_mode:
                         reply_prefill = "<diagnose>\n"
+                    elif (not self._current_file) and self._force_first_build_prefill:
+                        # First-build rescue after a no-code turn.
+                        reply_prefill = "<html_file>\n<!DOCTYPE html>\n"
+                        prefill_force = True
                     yield self._record(AgentEvent(
                         "activity", "streaming",
                         {"label": f"streaming iter {iteration} reply"},
                     ))
                     reply = await self._stream(
-                        self._token_cb_wrapper, prefill=reply_prefill,
+                        self._token_cb_wrapper,
+                        prefill=reply_prefill,
+                        prefill_force=prefill_force,
                     )
                     yield self._record(AgentEvent("activity", "idle"))
             except Exception as e:
@@ -5931,6 +5977,9 @@ class GameAgent:
                                 )
                                 self._format_stuck_streak = 0
             if new_html is None:
+                if not self._current_file:
+                    # Keep first-build rescue armed until code lands.
+                    self._force_first_build_prefill = True
                 trunc = self._truncation_diagnosis(reply)
                 if trunc:
                     yield self._record(AgentEvent("error", f"TRUNCATED REPLY — {trunc}"))
@@ -6036,6 +6085,7 @@ class GameAgent:
             # clear the format-stuck streak: a successful parse means
             # whatever shape the model picked just worked, regardless
             # of what came before.
+            self._force_first_build_prefill = False
             self._consecutive_plan_only = 0
             self._format_stuck_streak = 0
             self._last_materialized_iter = iteration
@@ -6904,6 +6954,8 @@ class GameAgent:
         fresh sessions.
         """
         if continuation or self.restart_n <= 1:
+            self._restart_attempt_idx = 0
+            self._restart_attempt_seed = None
             async for ev in self.run(goal, continuation=continuation):
                 yield ev
             return
@@ -6920,6 +6972,22 @@ class GameAgent:
                 "kind": "restart_attempt_start",
                 "attempt_idx": k,
                 "restart_n": self.restart_n,
+            })
+            self._restart_attempt_idx = k
+            if k > 0:
+                self._restart_attempt_seed = (
+                    (self._restart_seed_base + (k * 7919)) & 0x7FFFFFFF
+                ) or (k + 1)
+                self._force_first_build_prefill = True
+            else:
+                self._restart_attempt_seed = None
+                self._force_first_build_prefill = False
+            self._trace({
+                "kind": "restart_attempt_profile",
+                "attempt_idx": k,
+                "seed": self._restart_attempt_seed,
+                "temp_bias": self._restart_temperature_bias(k),
+                "force_first_build_prefill": self._force_first_build_prefill,
             })
             async for ev in self.run(goal):
                 yield ev
@@ -7028,6 +7096,9 @@ class GameAgent:
         self._last_screenshot_before = None
         self._last_screenshot_after = None
         self._active_bullet_ids = []
+        self._restart_attempt_idx = 0
+        self._restart_attempt_seed = None
+        self._force_first_build_prefill = False
 
     def _score_attempt(self) -> float:
         """Score the just-finished attempt. Reuses tools.score_test_report
@@ -7036,6 +7107,14 @@ class GameAgent:
         if self._previous_report_ok is True:
             return 100.0
         return score_test_report(self._previous_report or {})
+
+    @staticmethod
+    def _restart_temperature_bias(attempt_idx: int) -> float:
+        """Small deterministic temp offsets for restart attempts."""
+        if attempt_idx <= 0:
+            return 0.0
+        pattern = (-0.20, +0.10, -0.30, +0.20)
+        return pattern[(attempt_idx - 1) % len(pattern)]
 
     # -- helpers ----------------------------------------------------------
 

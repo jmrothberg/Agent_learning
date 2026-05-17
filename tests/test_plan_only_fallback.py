@@ -111,3 +111,27 @@ def test_not_plan_only_returns_generic_reminder():
     assert "loop detected" not in low
     assert "build phase" not in low
     assert reset is False
+
+
+def test_not_plan_only_no_baseline_uses_first_build_lock():
+    """No baseline + no code tags should get a strict first-build lock.
+
+    Regression for DOOM trace 20260517_155638 where prose mentions of
+    `<html_file>` kept repeating without any real tagged output.
+    """
+    text, reset = _fallback(plan_only=False, has_existing_file=False, streak=0)
+    low = text.lower()
+    assert "first build required" in low
+    assert "code only" in low
+    assert "first non-whitespace token" in low
+    assert "<html_file>" in text
+    assert reset is False
+
+
+def test_restart_temperature_bias_pattern_is_stable():
+    """Restart attempts should diversify decode paths deterministically."""
+    assert GameAgent._restart_temperature_bias(0) == 0.0
+    assert GameAgent._restart_temperature_bias(1) == -0.20
+    assert GameAgent._restart_temperature_bias(2) == 0.10
+    assert GameAgent._restart_temperature_bias(3) == -0.30
+    assert GameAgent._restart_temperature_bias(4) == 0.20

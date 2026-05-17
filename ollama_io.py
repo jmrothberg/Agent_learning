@@ -312,9 +312,15 @@ class RepetitionDetector:
 # fail to materialize regardless of whether the detector latches).
 # ` ```html ` fences are kept because they're how the model legitimately
 # delivers code in seed-build paths and rarely appear in reasoning prose.
+# Match only at line starts (allowing leading whitespace). Inline mentions
+# like "I need to emit `<html_file>`" are prose, not a real output start,
+# and must NOT latch the detector.
 _TAG_OPENER_RE = _re.compile(
+    r"(?:^|\n)\s*(?:"
     r"<(?:plan|patch|html_file|diagnose|notes|criteria|probes|assets|sounds|"
-    r"done|confirm_done|lookup_bullet)\b|```(?:html|js)?\b",
+    r"done|confirm_done|lookup_bullet)\b"
+    r"|```(?:html|js)?\b"
+    r")",
     _re.IGNORECASE,
 )
 
