@@ -129,6 +129,38 @@ def _is_repeat_signal_line(s: str) -> bool:
     return bool(_HAS_SIGNAL_RE.search(s))
 
 
+def _in_unclosed_html_file_block(text: str) -> bool:
+    """True when streamed text has opened `<html_file>` but not closed it.
+
+    Used by the one-shot inline-data grace path: long first-build HTML
+    streams can legitimately include large repeated-looking tables/lists
+    before finally closing `</html_file>`. We grant one continuation before
+    aborting so normal long emissions are less likely to be cut mid-output.
+    """
+    if not text:
+        return False
+    lower = text.lower()
+    last_open = lower.rfind("<html_file>")
+    if last_open < 0:
+        return False
+    last_close = lower.rfind("</html_file>")
+    return last_close < last_open
+
+
+def _should_grace_inline_data_bloat(
+    *,
+    stall_reason: str | None,
+    assembled_text: str,
+    grace_already_used: bool,
+) -> bool:
+    """One-shot grace gate for `inline_data_bloat` repetition aborts."""
+    return (
+        not grace_already_used
+        and stall_reason == "inline_data_bloat"
+        and _in_unclosed_html_file_block(assembled_text)
+    )
+
+
 class RepetitionDetector:
     """Streaming repetition detector shared by both backends.
 
@@ -319,22 +351,14 @@ class DeliberationDetector:
 
     def __init__(
         self,
-        # Item 2, trace build-a-donkey-kong-clone-in-o_20260514_214747:
-        # tightened from 6000 → 4000 chars (outside <think>) and
-        # 15000 → 8000 chars (inside <think>). The DK trace's iter 1
-        # and iter 3 both spent 1000+ lines of <think> reasoning
-        # before emitting code — the old 15K think-threshold caught
-        # them but only after ~200 lines of pure deliberation. With
-        # 8K, abort fires at ~100 lines, saving 5-10 minutes of
-        # wall-clock time per stuck iter. False-positive risk on
-        # legitimately complex problems is low because the
-        # _TAG_OPENER_RE matches the moment ANY output tag begins
-        # (including ```html or ```js fences in seed builds), so
-        # any model that's actually about to emit code latches
-        # before the threshold trips.
-        threshold_chars: int = 4000,
+        # Raised modestly after donkey-kong 20260516_170758 where
+        # the 4000/8000 setting cut off valid long-form transitions
+        # into code too early on qwen3.6 local runs. Keep the guard,
+        # but give one-shot-capable models more room before we call
+        # it deliberation-only.
+        threshold_chars: int = 6000,
         *,
-        think_threshold_chars: int = 8000,
+        think_threshold_chars: int = 12000,
     ) -> None:
         import os as _os
         # `_buf` holds a trailing slice for tag-opener regex matching
@@ -467,6 +491,12 @@ class StreamResult:
     # was stuck on instead of just "your reply was aborted." None when
     # the detector didn't capture one (older code paths).
     loop_line: str | None = None
+    # One-shot safety valve: True when we observed an inline-data-bloat
+    # repetition signal while a `<html_file>` was still open, granted one
+    # continuation, and resumed streaming.
+    loop_grace_used: bool = False
+    # Textual reason for the grace event (currently one value).
+    loop_grace_reason: str | None = None
 
 
 async def stream_chat(
@@ -506,6 +536,8 @@ async def stream_chat(
     # only reasoning paragraphs with no output tag for too long.
     delib = DeliberationDetector()
     deliberated = False
+    loop_grace_used = False
+    loop_grace_reason: str | None = None
 
     # ollama.AsyncClient.chat returns an async iterator of dicts. We pull
     # .__aiter__() so we can wrap each .__anext__() in asyncio.wait_for.
@@ -557,6 +589,17 @@ async def stream_chat(
 
             # ---- repetition detector --------------------------------
             if repeat.feed(piece):
+                if _should_grace_inline_data_bloat(
+                    stall_reason=repeat.stall_reason,
+                    assembled_text="".join(parts),
+                    grace_already_used=loop_grace_used,
+                ):
+                    loop_grace_used = True
+                    loop_grace_reason = "inline_data_bloat_unclosed_html_file"
+                    # Reset the detector so we only abort if the same
+                    # loop shape appears again after this grace.
+                    repeat = RepetitionDetector()
+                    continue
                 looped = True
                 stall_at = n_tokens
                 break
@@ -592,6 +635,8 @@ async def stream_chat(
         completion_tokens=completion_tokens,
         loop_kind=repeat.stall_reason if looped else None,
         loop_line=repeat.loop_line if looped else None,
+        loop_grace_used=loop_grace_used,
+        loop_grace_reason=loop_grace_reason,
     )
 
 

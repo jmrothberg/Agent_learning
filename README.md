@@ -636,6 +636,7 @@ Use this matrix when validating `chat.py` loop/control changes:
 | Explicit external review (manual) | `/mode local_plus_review with <model>` and keep wait on | Reviewer guidance is suggested; `/check --apply` queues coaching when user chooses. |
 | Explicit external review (auto loop) | `/mode local_plus_review with <model> --auto-apply` with wait off | Failed iters can auto-run explicit reviewer hook and inject coaching for next turn. |
 | No silent cloud guarantee | Local-only run (`/mode local_auto` or `/mode local_manual`) | No cloud calls unless user explicitly picks cloud backend or `/check with ...`. |
+| Early-cutoff regression guard | Rich-media first-build run on local model | Do not reintroduce aggressive early aborts that cut normal long `<html_file>` emission mid-stream; changes to loop/deliberation/timeout guards must be trace-backed. |
 
 ---
 
@@ -663,6 +664,10 @@ These have evidence behind them and should not be broken silently.
 7. **Never silently call a cloud model.** Cloud / paid API calls must
    be EXPLICIT (slash command, flag). Never default-on, never auto-
    fallback. The user owns the wallet.
+8. **Do not re-tighten early-termination guards blindly.** Any change to
+   repetition / deliberation / timeout abort logic must cite concrete
+   trace evidence and include regression validation that long first-build
+   `<html_file>` turns are not cut off mid-stream.
 
 ---
 

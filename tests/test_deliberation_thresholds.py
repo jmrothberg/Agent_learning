@@ -7,7 +7,7 @@ without ever committing). The previous defaults (6000 outside-think
 / 15000 inside-think chars) caught them but only after ~200 lines —
 several minutes of wall-clock per stuck iter.
 
-We tightened to 4000 / 8000. These tests pin the new defaults AND
+Defaults are now 6000 / 12000. These tests pin the new defaults AND
 the relationship `think_threshold >= threshold` (the inside-think
 budget must be at least as large as the outside-think budget; the
 detector internally clamps the inside threshold to max(threshold,
@@ -24,14 +24,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from ollama_io import DeliberationDetector  # noqa: E402
 
 
-def test_default_thresholds_pinned_at_4000_and_8000():
-    """The default thresholds — tightened from 6000/15000 to 4000/8000
-    in response to trace 20260514_214747. If you genuinely need to
-    raise them, update this test AND document the rationale in the
-    `DeliberationDetector.__init__` docstring."""
+def test_default_thresholds_pinned_at_6000_and_12000():
+    """The default thresholds — raised from 4000/8000 to 6000/12000
+    after donkey-kong 20260516_170758 showed premature cutoffs on valid
+    long transitions to code. If you change them, update this test and
+    document the rationale in `DeliberationDetector.__init__`."""
     d = DeliberationDetector()
-    assert d._threshold == 4000
-    assert d._think_threshold == 8000
+    assert d._threshold == 6000
+    assert d._think_threshold == 12000
 
 
 def test_inside_think_threshold_at_least_outside():
@@ -46,16 +46,16 @@ def test_abort_after_threshold_chars_no_tag():
     """Outside <think>, ~`threshold_chars` of pre-tag rambling triggers
     abort. Feed 3999 chars (just under) — no abort. Then one more
     piece pushing over — abort fires."""
-    d = DeliberationDetector(threshold_chars=4000, think_threshold_chars=8000)
-    # 3999 chars of rambling, no tag opener.
-    chunk = "a" * 100  # 40 pieces × 100 = 4000, just over
+    d = DeliberationDetector(threshold_chars=6000, think_threshold_chars=12000)
+    # 5900 chars of rambling, no tag opener.
+    chunk = "a" * 100
     aborted = False
-    for _ in range(39):
+    for _ in range(59):
         if d.feed(chunk):
             aborted = True
             break
     assert aborted is False
-    # One more 100-char piece pushes us over 4000. Should abort.
+    # One more 100-char piece pushes us over 6000. Should abort.
     if d.feed(chunk):
         aborted = True
     assert aborted is True
@@ -66,14 +66,14 @@ def test_no_abort_when_tag_opens_before_threshold():
     """If the stream produces a known output-tag opener (e.g.
     `<patch>`, `<html_file>`, `<plan>`, …) BEFORE the threshold, the
     detector latches on it and stops counting."""
-    d = DeliberationDetector(threshold_chars=4000, think_threshold_chars=8000)
+    d = DeliberationDetector(threshold_chars=6000, think_threshold_chars=12000)
     # Push 1000 chars of rambling.
     d.feed("a" * 1000)
     # Tag opens — detector latches.
     d.feed("here is the code: <html_file>")
-    # Now push another 5000 chars; should NOT abort (latched).
+    # Now push another 7000 chars; should NOT abort (latched).
     aborted = False
-    for _ in range(50):
+    for _ in range(70):
         if d.feed("a" * 100):
             aborted = True
             break
@@ -81,10 +81,10 @@ def test_no_abort_when_tag_opens_before_threshold():
 
 
 def test_inside_think_higher_budget():
-    """Inside `<think>...</think>` the budget is higher (8000 vs 4000).
-    Feed 4500 chars of `<think>` body — must NOT abort under the new
-    8000-char inside-think threshold."""
-    d = DeliberationDetector(threshold_chars=4000, think_threshold_chars=8000)
+    """Inside `<think>...</think>` the budget is higher (12000 vs 6000).
+    Feed ~4700 chars of `<think>` body — must NOT abort under the new
+    12000-char inside-think threshold."""
+    d = DeliberationDetector(threshold_chars=6000, think_threshold_chars=12000)
     # Enter <think>
     d.feed("<think>\n")
     aborted = False

@@ -917,24 +917,11 @@ window — either expose them (e.g. `window.state = state`) or use DOM /
 canvas-pixel checks instead. Aim for 3 to 5 probes that together check
 the criteria above. Keep each expr short.
 
-PROBE ROBUSTNESS — make probes test STRUCTURE, not specific
-positions or rendered details that change frame-to-frame:
-  - GOOD: `typeof window.state.x === 'number'` (the ball has a
-    coordinate)
-  - BAD:  testing a single pixel at canvas center for red — a moving
-    object isn't at center most frames; test fails the moment the
-    game animates correctly.
-  - GOOD: `document.getElementById('score').textContent.length > 0`
-    (the score is rendered)
-  - BAD:  requiring a function with an exact name like
-    `window.state.reset` — your own code may use `restart` or
-    `resetGame`; you'll fail your own probe.
-Test that the THING EXISTS and has the right SHAPE, not that the
-runtime is in a specific instantaneous state.
+PROBE ROBUSTNESS — test structure and behavior over time, not one
+frame-specific pixel or exact helper names.
 
 EXPECTED — emit an <assets> block whenever the game has visual entities
-the player will see (sprites, characters, projectiles, terrain). Most
-canvas games qualify: shooters, platformers, RPGs, racers, adventures.
+the player will see (sprites, characters, projectiles, terrain).
 
 <assets>
 [
@@ -943,19 +930,15 @@ canvas games qualify: shooters, platformers, RPGs, racers, adventures.
 ]
 </assets>
 
-The harness runs a local Z-Image-Turbo diffuser and saves PNGs next to
-your HTML file. Their paths come back in the first-build prompt; load
-each via `new Image()` + `await img.decode()`.
+The harness saves generated PNGs next to your HTML file. Paths return in
+the first-build prompt; load with `new Image()` + `await img.decode()`.
 
-SKIP <assets> ONLY for pure-DOM apps where text + emojis suffice (todo
-lists, calculators, tic-tac-toe, color pickers). If the canvas has any
-rendered entity with visual character, EMIT <assets> — do NOT decide
-pre-emptively that procedural ctx.fillRect drawing is "good enough".
+SKIP <assets> ONLY for pure-DOM apps. If canvas entities have visual
+character, EMIT <assets> (do not silently downgrade to bare rectangles).
 
 EXPECTED ALSO — emit a <sounds> block whenever the game has audible
 events the player will hear (firing, hits, pickups, explosions, jumps)
-or could benefit from a looping background track. Most arcade /
-shooter / platformer games qualify.
+or when a looping background track improves the game feel.
 
 <sounds>
 [
@@ -965,14 +948,11 @@ shooter / platformer games qualify.
 ]
 </sounds>
 
-The harness runs Stable Audio Open locally and saves OGGs next to your
-HTML file. Their paths come back in the first-build prompt with a
-loader pattern; use `new Audio(path)` and play on the relevant events.
-Browsers require a user gesture before audio plays — the loader pattern
-already handles that (first keydown / pointerdown unlocks audio).
+The harness saves generated OGGs next to your HTML file. Paths return in
+the first-build prompt; load with `new Audio(path)` and play on events.
 
-SKIP <sounds> for pure-DOM apps where audio adds nothing (calculators,
-color pickers). Otherwise, prefer EMITTING — silent games feel cheap.
+SKIP <sounds> only for pure-DOM apps where audio adds nothing.
+Otherwise, emit sounds by default.
 
 No <html_file> yet. No prose outside tags.
 """
@@ -1087,21 +1067,14 @@ def first_build_instruction(
     if playbook_block:
         pb = (
             f"{playbook_block}\n\n"
-            "CRITICAL: review the playbook entries above BEFORE writing "
-            "code. They are accumulated lessons from past runs. If any "
-            "applies to this goal, apply it on the first try — do not "
-            "wait for the test to fail.\n\n"
+            "Apply relevant playbook entries on the first attempt.\n\n"
         )
     return (
         "Plan accepted. Now write the FIRST version of the game.\n\n"
         f"{pb}"
         f"{seed_framing}\n\n"
-        "For DOM-driven goals where a canvas would be silly (todo list, "
-        "tic-tac-toe, calculator, drawing app) you MAY remove the canvas "
-        "and RAF loop and use HTML elements instead. In that case keep "
-        "the HUD and modal structure; bind onclick handlers; and update "
-        "DOM text directly on input. Either path is fine — pick "
-        "whichever fits the goal.\n\n"
+        "Do NOT write planning prose this turn. Start with <html_file> as "
+        "the first non-whitespace output.\n\n"
         "Output the COMPLETE file in <html_file>...</html_file> tags. "
         "ULTRA IMPORTANT: emit the COMPLETE file, no elisions, no "
         "'rest of code unchanged' placeholders. Then add a <notes> tag "

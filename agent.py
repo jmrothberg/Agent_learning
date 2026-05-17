@@ -1375,6 +1375,27 @@ class GameAgent:
         return self._backend.info.model
 
     @staticmethod
+    def _should_skip_format_doctor(
+        *,
+        last_stream_looped: bool,
+        last_stream_loop_kind: str | None,
+        rejection_kind: str,
+    ) -> bool:
+        """Skip doctor when a known high-cost/non-recovering pattern hits.
+
+        Donkey-kong traces showed this sequence repeatedly:
+          inline_data_bloat loop abort -> unclosed_html_file rejection.
+        Re-streaming the same huge partial reply through format-doctor
+        usually burns minutes and still truncates. Let the next iter use
+        direct recovery coaching instead.
+        """
+        return (
+            last_stream_looped
+            and last_stream_loop_kind == "inline_data_bloat"
+            and rejection_kind == "unclosed_html_file"
+        )
+
+    @staticmethod
     def _no_usable_code_fallback(
         *,
         plan_only: bool,
@@ -2965,13 +2986,27 @@ class GameAgent:
                 "total": total,
             })
 
+        # Rich first-build turns (no baseline file yet) can be long on
+        # local models; give them a larger overall wall-clock cap while
+        # keeping normal patch turns at the configured default.
+        effective_overall_seconds = self.overall_seconds
+        if self._current_file is None:
+            effective_overall_seconds = max(self.overall_seconds, 2400.0)
+        if effective_overall_seconds != self.overall_seconds:
+            self._trace({
+                "kind": "stream_timeout_override",
+                "base_overall_seconds": self.overall_seconds,
+                "effective_overall_seconds": effective_overall_seconds,
+                "reason": "no_baseline_file",
+            })
+
         try:
             result = await self._backend.stream_chat(
                 self._messages,
                 on_token=_heartbeat_on_token,
                 options={"temperature": temp, "num_ctx": self.num_ctx},
                 stall_seconds=self.stall_seconds,
-                overall_seconds=self.overall_seconds,
+                overall_seconds=effective_overall_seconds,
                 max_retries=1,
                 on_stall=lambda r, attempt: self._trace({
                     "kind": "stream_stalled",
@@ -3020,6 +3055,13 @@ class GameAgent:
             "completion_tokens": result.completion_tokens,
             "max_tokens_hit": result.max_tokens_hit,
         })
+        if bool(getattr(result, "loop_grace_used", False)):
+            self._trace({
+                "kind": "loop_grace_used",
+                "reason": getattr(result, "loop_grace_reason", None),
+                "tokens": result.tokens,
+                "len": len(result.text),
+            })
         # Output-cap detection.
         #
         # Two paths, preferring the explicit signal when available:
@@ -5646,6 +5688,18 @@ class GameAgent:
                             "kind": "format_doctor_skipped_on_crash",
                             "iteration": iteration,
                             "rejection_kind": format_rejection.kind,
+                        })
+                        invoke_doctor = False
+                    elif GameAgent._should_skip_format_doctor(
+                        last_stream_looped=self._last_stream_looped,
+                        last_stream_loop_kind=self._last_stream_loop_kind,
+                        rejection_kind=format_rejection.kind,
+                    ):
+                        self._trace({
+                            "kind": "format_doctor_skipped_inline_data_bloat",
+                            "iteration": iteration,
+                            "rejection_kind": format_rejection.kind,
+                            "loop_kind": self._last_stream_loop_kind,
                         })
                         invoke_doctor = False
                     else:

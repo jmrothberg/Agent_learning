@@ -52,6 +52,7 @@ from ollama_io import (
     DeliberationDetector,
     RepetitionDetector,
     StreamResult,
+    _should_grace_inline_data_bloat,
     stream_chat_with_retry,
 )
 
@@ -690,6 +691,8 @@ class MLXBackend(Backend):
         # A2: shared deliberation detector for unique-text reasoning loops.
         delib = DeliberationDetector()
         deliberated = False
+        loop_grace_used = False
+        loop_grace_reason: str | None = None
 
         # Route decision: VLM models (Qwen3.6-27B, LLaVA, MiniCPM-V,
         # etc.) go through `mlx_vlm` so the agent can pass screenshot
@@ -1062,6 +1065,17 @@ class MLXBackend(Backend):
                 if on_token is not None:
                     _safe_call(on_token, piece)
                 if repeat.feed(piece):
+                    if _should_grace_inline_data_bloat(
+                        stall_reason=repeat.stall_reason,
+                        assembled_text="".join(parts),
+                        grace_already_used=loop_grace_used,
+                    ):
+                        loop_grace_used = True
+                        loop_grace_reason = "inline_data_bloat_unclosed_html_file"
+                        # One-shot grace only; if repetition returns after
+                        # reset, we abort as usual.
+                        repeat = RepetitionDetector()
+                        continue
                     looped = True
                     stall_at = n_tokens
                     worker_cancel.set()
@@ -1090,6 +1104,8 @@ class MLXBackend(Backend):
             crashed=False,
             loop_kind=repeat.stall_reason if looped else None,
             loop_line=repeat.loop_line if looped else None,
+            loop_grace_used=loop_grace_used,
+            loop_grace_reason=loop_grace_reason,
         )
 
     async def is_vlm(self) -> bool:

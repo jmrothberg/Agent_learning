@@ -112,6 +112,26 @@ def test_unclosed_html_without_prior_loop_uses_generic_path():
     assert "token-repetition loop" not in text.lower()
 
 
+def test_skip_format_doctor_for_inline_data_bloat_unclosed_html():
+    """Known expensive/noisy pattern should skip doctor and use direct
+    recovery coaching on the next iter."""
+    assert GameAgent._should_skip_format_doctor(
+        last_stream_looped=True,
+        last_stream_loop_kind="inline_data_bloat",
+        rejection_kind="unclosed_html_file",
+    ) is True
+    assert GameAgent._should_skip_format_doctor(
+        last_stream_looped=True,
+        last_stream_loop_kind="adjacent_line_spam",
+        rejection_kind="unclosed_html_file",
+    ) is False
+    assert GameAgent._should_skip_format_doctor(
+        last_stream_looped=False,
+        last_stream_loop_kind="inline_data_bloat",
+        rejection_kind="unclosed_html_file",
+    ) is False
+
+
 # ---------------------------------------------------------------------------
 # B2 — probes-only reply coaching
 # ---------------------------------------------------------------------------

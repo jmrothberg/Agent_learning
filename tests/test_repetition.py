@@ -78,6 +78,31 @@ def test_normalize_handles_blank_and_whitespace():
     )
 
 
+def test_unclosed_html_file_block_detection():
+    body = "<html_file>\n<html><body><script>const x = 1;\n"
+    assert ollama_io._in_unclosed_html_file_block(body) is True
+    assert ollama_io._in_unclosed_html_file_block(body + "</script></body></html></html_file>") is False
+
+
+def test_inline_data_bloat_grace_gate():
+    partial = "<html_file>\n<html><body>...\n"
+    assert ollama_io._should_grace_inline_data_bloat(
+        stall_reason="inline_data_bloat",
+        assembled_text=partial,
+        grace_already_used=False,
+    ) is True
+    assert ollama_io._should_grace_inline_data_bloat(
+        stall_reason="inline_data_bloat",
+        assembled_text=partial,
+        grace_already_used=True,
+    ) is False
+    assert ollama_io._should_grace_inline_data_bloat(
+        stall_reason="adjacent_line_spam",
+        assembled_text=partial,
+        grace_already_used=False,
+    ) is False
+
+
 # ---------------------------------------------------------------------------
 # RepetitionDetector — the shared class used by BOTH backends. These tests
 # pin its behavior directly so we don't rely on the Ollama or MLX wrappers

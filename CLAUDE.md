@@ -165,6 +165,7 @@ These bind decisions across sessions:
 - **Visible Chromium, not headless.** The TUI default is `headless=False` so the user can watch the game. CLI keeps `--headless` for unattended runs.
 - **Asteroids is the canonical regression check.** Ship-direction (`vx = cos(angle)*speed`) and round-asteroid (must be irregular polygons, not perfect circles) are the failure pair to verify after any change to retrieval / prompts / patches.
 - **Iterate autonomously.** Drive build/test/improve loops yourself; tune battery is the alignment check; research-grounded techniques only.
+- **Do not reintroduce aggressive early cutoffs.** Changes to repetition / deliberation / timeout guards must be trace-backed and must preserve long first-build `<html_file>` completion (no premature guard aborts as the default behavior).
 
 ---
 
@@ -173,4 +174,5 @@ These bind decisions across sessions:
 - Don't add features without first checking `tools.py` reports `ok=True` honestly. The harness signal must be right before adding more agent-loop machinery — see commit `044edf4` and `games/traces/using-great-graphics-that-you_…` for what happens when it isn't.
 - Don't bypass `<patch>` once `best.html` exists. Full `<html_file>` rewrites on a working game are a regression-amplification risk.
 - Don't expand the system prompt with always-on rules that only matter sometimes. Use the per-format `FormatSpec.guidelines` (deduped) or a goal-keyword detector (`_detect_*_intent`) to make the rule conditional.
+- Don't tighten repetition/deliberation/timeout abort thresholds without concrete trace evidence and a regression run proving rich first-build streams are not cut mid-output.
 - Don't commit generated artifacts. `.gitignore` already excludes `games/<*>.html`, `games/snapshots/`, `games/traces/`, `games/_asset_cache/`, `games/*_assets/`, `games/_smoke/`, `games/memory/`. Use `scripts/clean_artifacts.sh` to wipe them.
