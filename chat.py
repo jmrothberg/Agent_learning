@@ -93,12 +93,88 @@ from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.actions import SkipAction
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import Footer, Header, Input, RichLog, Static
+from textual.message import Message
+from textual.widget import Widget
+from textual.widgets import Footer, Header, Input, OptionList, RichLog, Static
+from textual.widgets._option_list import Option
 
 import backend as backend_mod
 from agent import AgentEvent, GameAgent
 from tools import LiveBrowser
+
+# xterm SGR uses 2 for right press; some stacks report 3.
+_RIGHT_CLICK_BUTTONS = frozenset({2, 3})
+_CONTEXT_LOG_TAIL_LINES = 200
+
+
+class ContextMenuOverlay(Vertical):
+    """Small floating menu (Cut/Copy/Paste or log/status copy actions)."""
+
+    DEFAULT_CSS = """
+    ContextMenuOverlay {
+        layer: overlay;
+        width: 36;
+        height: auto;
+        background: $surface;
+        border: round $primary;
+        padding: 0;
+    }
+    ContextMenuOverlay OptionList {
+        width: 36;
+        height: auto;
+        max-height: 14;
+        border: none;
+        padding: 0 1;
+    }
+    """
+
+    class Closed(Message):
+        """Posted when the user picks an item or presses Escape."""
+
+        def __init__(self, action_id: str | None) -> None:
+            super().__init__()
+            self.action_id = action_id
+
+    def __init__(
+        self,
+        menu_items: list[tuple[str, str, bool]],
+        *,
+        screen_x: int,
+        screen_y: int,
+    ) -> None:
+        """menu_items: (label, action_id, disabled)."""
+        super().__init__(id="context-menu-overlay")
+        self._menu_items = menu_items
+        self._screen_x = screen_x
+        self._screen_y = screen_y
+
+    def compose(self) -> ComposeResult:
+        options = [
+            Option(label, id=action_id, disabled=disabled)
+            for label, action_id, disabled in self._menu_items
+        ]
+        yield OptionList(*options, id="context-menu-list", compact=True)
+
+    def on_mount(self) -> None:
+        self.styles.offset = (self._screen_x, self._screen_y)
+        try:
+            self.query_one(OptionList).focus()
+        except Exception:
+            self.focus()
+
+    def on_option_list_option_selected(
+        self, event: OptionList.OptionSelected,
+    ) -> None:
+        action_id = event.option_id or ""
+        self.post_message(self.Closed(action_id))
+        event.stop()
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "escape":
+            self.post_message(self.Closed(None))
+            event.stop()
 
 
 class MultilinePasteInput(Input):
@@ -118,6 +194,14 @@ class MultilinePasteInput(Input):
     multi-line semantics, swap Input for TextArea instead (different
     submit ergonomics — Ctrl+Enter to submit, Enter inserts newline).
     """
+
+    class RightClickRequest(Message):
+        """Request the app to open the input context menu."""
+
+        def __init__(self, *, screen_x: int, screen_y: int) -> None:
+            super().__init__()
+            self.screen_x = screen_x
+            self.screen_y = screen_y
 
     def _on_paste(self, event: events.Paste) -> None:  # type: ignore[override]
         text = event.text or ""
@@ -144,6 +228,28 @@ class MultilinePasteInput(Input):
         # doesn't stop the MRO walk on the same widget.
         event.prevent_default()
         event.stop()
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        """Forward input right-clicks even if Input consumes mouse down."""
+        if event.button not in _RIGHT_CLICK_BUTTONS:
+            return
+        sx = getattr(event, "screen_x", event.x)
+        sy = getattr(event, "screen_y", event.y)
+        self.post_message(self.RightClickRequest(
+            screen_x=int(sx),
+            screen_y=int(sy),
+        ))
+        event.stop()
+
+
+def _widget_has_id(widget: Widget | None, widget_id: str) -> bool:
+    """True if `widget` is or is inside a node with the given id."""
+    node: Widget | None = widget
+    while node is not None:
+        if getattr(node, "id", None) == widget_id:
+            return True
+        node = node.parent  # type: ignore[assignment]
+    return False
 
 
 # Parent directory for all generated artifacts. Each session writes a unique
@@ -775,6 +881,11 @@ class CodingBoxApp(App):
         # "not yet open" - _log() handles that gracefully.
         self._log_file_handle = None
         self._log_file_path: Path | None = None
+        # Plain lines mirrored from the log pane for right-click copy.
+        self._log_mirror_lines: list[str] = []
+        self._status_plain: str = ""
+        self._context_menu: ContextMenuOverlay | None = None
+        self._context_menu_origin: str = ""
         # Per-session paths assigned in _start_session. None until then.
         self._out_path: Path | None = None
         self._best_path: Path | None = None
@@ -844,6 +955,11 @@ class CodingBoxApp(App):
         # /seed stages an existing HTML file as the baseline for the next
         # /new session. Cleared once consumed.
         self._next_seed: Path | None = None
+        # /ref can be staged before a session exists. On session start we
+        # hand these bytes to GameAgent._next_image_bytes so the FIRST user
+        # turn (planning/build) gets the reference image.
+        self._staged_ref_image_bytes: bytes | None = None
+        self._staged_ref_image_name: str | None = None
         # Stop-Losing-To-OneShot Track A — restart-N. The threshold gate
         # makes 2 essentially free for simple games (they pass iter 1
         # with score > 60 and never trigger a restart) while giving hard
@@ -941,20 +1057,18 @@ class CodingBoxApp(App):
             )
         self._log_info("Type your game idea in the input box below and press Enter.")
         self._log_info(
-            "[dim]Keys: Ctrl+D ship · Ctrl+L log paths · Ctrl+S select-text · "
-            "Ctrl+Q quit · if the shell stops echoing after exit, run `reset`.[/dim]"
+            "[dim]Keys: Ctrl+D ship · Ctrl+L show log file paths · Ctrl+S select "
+            "in log · Ctrl+Q quit · if the shell stops echoing after exit, run "
+            "`reset`.[/dim]"
         )
         self._log_info(
             "[dim]Slash commands available — type [b]/help[/b] for the full list "
             "(/list, /model, /new, /open, /clear, /iters, /status, /ship, /quit).[/dim]"
         )
         self._log_info(
-            "[dim]Cut/paste: press [b]Ctrl+S[/b] to enable selection mode, then "
-            "click-drag to select (Ctrl+Shift+C to copy). Or hold [b]Shift[/b] "
-            "(or [b]Option[/b] on iTerm2) while dragging — the modifier bypasses "
-            "Textual's mouse capture without toggling. Or [b]tail -f[/b] the "
-            ".jsonl trace from another terminal (path via Ctrl+L) for live "
-            "progress including [b]stream_heartbeat[/b] events every 30 s.[/dim]"
+            "[dim]Right-click the input for Cut/Copy/Paste; right-click the log "
+            "or status panel to copy text or enable drag-select (same as "
+            "Ctrl+S). Input also supports Ctrl+X/C/V.[/dim]"
         )
         # Short prompt-engineering tips for medium-skilled local models
         # (qwen3.6:27b/35b). Long-form guidance lives in the README;
@@ -1012,10 +1126,12 @@ class CodingBoxApp(App):
         instead — Rich would otherwise eat those brackets as fake markup tags.
         """
         self.query_one("#log-pane", RichLog).write(text)
+        plain = self._MARKUP_RE.sub("", text).rstrip()
+        if plain:
+            self._append_log_mirror_line(plain)
         if self._log_file_handle is not None:
             try:
-                plain = self._MARKUP_RE.sub("", text)
-                self._log_file_handle.write(plain.rstrip() + "\n")
+                self._log_file_handle.write(plain + "\n")
                 self._log_file_handle.flush()  # so `tail -f` sees it live
             except Exception:
                 # Mirror must never crash the TUI.
@@ -1030,9 +1146,12 @@ class CodingBoxApp(App):
         pane. Wrapping in `Text` bypasses Rich's parser entirely.
         """
         self.query_one("#log-pane", RichLog).write(Text(text))
+        line = text.rstrip("\n")
+        if line:
+            self._append_log_mirror_line(line)
         if self._log_file_handle is not None:
             try:
-                self._log_file_handle.write(text.rstrip("\n") + "\n")
+                self._log_file_handle.write(line + "\n")
                 self._log_file_handle.flush()
             except Exception:
                 pass
@@ -1104,6 +1223,7 @@ class CodingBoxApp(App):
         body += self._render_files_block()
         if self._last_test_block:
             body += "\n" + self._last_test_block
+        self._status_plain = self._MARKUP_RE.sub("", body)
         self.query_one("#status-body", Static).update(body)
         # Mode bar gets a free refresh on every status tick. It's a
         # single-line Static update — cheap.
@@ -1329,6 +1449,26 @@ class CodingBoxApp(App):
                 f"[b]Staged for /new:[/b] [yellow]{label_b}[/yellow] · "
                 f"{_esc(label_m)}\n"
             )
+        if self._next_seed is not None:
+            out += f"[b]Staged seed:[/b] [dim]{_esc(str(self._next_seed))}[/dim]\n"
+        # /ref visibility in the status panel:
+        #   - staged before /new (no active agent yet)
+        #   - queued for the next user turn on an active session
+        if self._staged_ref_image_name:
+            out += (
+                f"[b]Ref image:[/b] [yellow]{_esc(self._staged_ref_image_name)}[/yellow] "
+                "[dim](staged for first turn of next session)[/dim]\n"
+            )
+        elif (
+            self.agent is not None
+            and bool(getattr(self.agent, "_next_image_bytes", None))
+        ):
+            model_is_vlm = getattr(self.agent, "_is_vlm", None)
+            if model_is_vlm is False:
+                hint = " [yellow](queued, but active model is text-only)[/yellow]"
+            else:
+                hint = " [dim](queued for next user turn)[/dim]"
+            out += f"[b]Ref image:[/b] [green]queued[/green]{hint}\n"
         # Context window row: hide entirely when neither max nor a
         # running agent is available (avoids a sad-looking "0 / 0" on
         # backends that don't expose context_length).
@@ -1620,6 +1760,222 @@ class CodingBoxApp(App):
         self._log(f"[dim]  tail -f {jsonl}[/dim]")
         self._log("[dim]Press Ctrl+S to enable mouse selection in this pane.[/dim]")
 
+    def _append_log_mirror_line(self, plain: str) -> None:
+        """Keep a bounded plain-text mirror for context-menu copy."""
+        self._log_mirror_lines.append(plain)
+        if len(self._log_mirror_lines) > 5000:
+            self._log_mirror_lines = self._log_mirror_lines[-3000:]
+
+    def _log_text_for_copy(self, *, tail: int | None) -> str:
+        """Plain log text — prefer on-disk mirror, else in-memory lines."""
+        if tail is None:
+            if self._log_file_path is not None and self._log_file_path.exists():
+                try:
+                    return self._log_file_path.read_text(
+                        encoding="utf-8", errors="replace",
+                    )
+                except Exception:
+                    pass
+            return "\n".join(self._log_mirror_lines)
+        n = max(1, tail)
+        if self._log_file_path is not None and self._log_file_path.exists():
+            try:
+                lines = self._log_file_path.read_text(
+                    encoding="utf-8", errors="replace",
+                ).splitlines()
+                return "\n".join(lines[-n:])
+            except Exception:
+                pass
+        return "\n".join(self._log_mirror_lines[-n:])
+
+    def _input_context_menu_items(
+        self, inp: MultilinePasteInput,
+    ) -> list[tuple[str, str, bool]]:
+        has_sel = not inp.selection.is_empty
+        return [
+            ("Cut", "cut", not has_sel),
+            ("Copy", "copy", not has_sel),
+            # Keep paste enabled even when Textual's clipboard mirror is
+            # empty; the terminal/system clipboard can still have content.
+            ("Paste", "paste", False),
+            ("Select all", "select_all", False),
+        ]
+
+    def _log_context_menu_items(self) -> list[tuple[str, str, bool]]:
+        has_log = bool(self._log_mirror_lines) or (
+            self._log_file_path is not None and self._log_file_path.exists()
+        )
+        return [
+            (
+                f"Copy last {_CONTEXT_LOG_TAIL_LINES} lines",
+                "copy_log_tail",
+                not has_log,
+            ),
+            ("Copy full log", "copy_log_all", not has_log),
+            ("Enable selection mode (drag to copy)", "selection_mode", False),
+        ]
+
+    def _status_context_menu_items(self) -> list[tuple[str, str, bool]]:
+        has_body = bool((self._status_plain or "").strip())
+        return [
+            ("Copy status panel", "copy_status", not has_body),
+            ("Enable selection mode (drag to copy)", "selection_mode", False),
+        ]
+
+    async def _dismiss_context_menu(self) -> None:
+        menu = self._context_menu
+        self._context_menu = None
+        self._context_menu_origin = ""
+        if menu is not None:
+            try:
+                await menu.remove()
+            except Exception:
+                pass
+
+    async def _show_context_menu(
+        self,
+        *,
+        screen_x: int,
+        screen_y: int,
+        items: list[tuple[str, str, bool]],
+        origin: str,
+    ) -> None:
+        await self._dismiss_context_menu()
+        sw = max(1, self.size.width)
+        sh = max(1, self.size.height)
+        # Keep the whole popup on screen; opening near the bottom used to
+        # place the menu off-screen so it couldn't be navigated.
+        menu_w = 36
+        menu_h = min(14, max(1, len(items))) + 2
+        x = max(0, min(screen_x, max(0, sw - menu_w)))
+        y = max(0, min(screen_y, max(0, sh - menu_h)))
+        menu = ContextMenuOverlay(items, screen_x=x, screen_y=y)
+        self._context_menu = menu
+        self._context_menu_origin = origin
+        await self.screen.mount(menu)
+
+    async def _run_context_menu_action(self, action_id: str | None) -> None:
+        if not action_id:
+            return
+        origin = self._context_menu_origin
+        try:
+            if origin == "input":
+                inp = self.query_one("#user-input", MultilinePasteInput)
+                if action_id == "cut":
+                    inp.action_cut()
+                elif action_id == "copy":
+                    inp.action_copy()
+                elif action_id == "paste":
+                    inp.action_paste()
+                elif action_id == "select_all":
+                    inp.action_select_all()
+                else:
+                    return
+                self._log_info("[dim]Clipboard action applied to input.[/dim]")
+            elif origin == "log":
+                if action_id == "copy_log_tail":
+                    text = self._log_text_for_copy(
+                        tail=_CONTEXT_LOG_TAIL_LINES,
+                    )
+                    if text.strip():
+                        self.copy_to_clipboard(text)
+                        self._log_info(
+                            f"[dim]Copied last {_CONTEXT_LOG_TAIL_LINES} "
+                            "log lines to clipboard.[/dim]"
+                        )
+                elif action_id == "copy_log_all":
+                    text = self._log_text_for_copy(tail=None)
+                    if text.strip():
+                        self.copy_to_clipboard(text)
+                        self._log_info("[dim]Copied full log to clipboard.[/dim]")
+                elif action_id == "selection_mode":
+                    if not getattr(self, "_selection_mode_on", False):
+                        await self.action_toggle_selection_mode()
+                    else:
+                        self._log_info("[dim]Selection mode is already on.[/dim]")
+                else:
+                    return
+            elif origin == "status":
+                if action_id == "copy_status":
+                    text = (self._status_plain or "").strip()
+                    if text:
+                        self.copy_to_clipboard(text)
+                        self._log_info(
+                            "[dim]Copied status panel to clipboard.[/dim]"
+                        )
+                elif action_id == "selection_mode":
+                    if not getattr(self, "_selection_mode_on", False):
+                        await self.action_toggle_selection_mode()
+                    else:
+                        self._log_info("[dim]Selection mode is already on.[/dim]")
+                else:
+                    return
+        except SkipAction:
+            self._log_info("[dim]That action is not available right now.[/dim]")
+        except Exception as e:
+            self._log_info(f"[dim]Clipboard action failed: {e!r}[/dim]")
+
+    async def on_context_menu_overlay_closed(
+        self, message: ContextMenuOverlay.Closed,
+    ) -> None:
+        origin = self._context_menu_origin
+        action_id = message.action_id
+        await self._dismiss_context_menu()
+        self._context_menu_origin = origin
+        await self._run_context_menu_action(action_id)
+
+    async def on_multiline_paste_input_right_click_request(
+        self, message: MultilinePasteInput.RightClickRequest,
+    ) -> None:
+        """Open input menu for right-clicks consumed by Input internals."""
+        inp = self.query_one("#user-input", MultilinePasteInput)
+        await self._show_context_menu(
+            screen_x=message.screen_x,
+            screen_y=message.screen_y,
+            items=self._input_context_menu_items(inp),
+            origin="input",
+        )
+
+    async def on_mouse_down(self, event: events.MouseDown) -> None:
+        """Right-click context menus on input, log, and status panes."""
+        target = event.widget
+        if _widget_has_id(target, "context-menu-overlay"):
+            return
+        menu = self._context_menu
+        if menu is not None:
+            await self._dismiss_context_menu()
+        if event.button not in _RIGHT_CLICK_BUTTONS:
+            return
+        event.stop()
+        sx = getattr(event, "screen_x", None)
+        sy = getattr(event, "screen_y", None)
+        if sx is None or sy is None:
+            sx, sy = event.x, event.y
+        if _widget_has_id(target, "user-input"):
+            inp = self.query_one("#user-input", MultilinePasteInput)
+            await self._show_context_menu(
+                screen_x=int(sx),
+                screen_y=int(sy),
+                items=self._input_context_menu_items(inp),
+                origin="input",
+            )
+        elif _widget_has_id(target, "log-pane"):
+            await self._show_context_menu(
+                screen_x=int(sx),
+                screen_y=int(sy),
+                items=self._log_context_menu_items(),
+                origin="log",
+            )
+        elif _widget_has_id(target, "status-pane") or _widget_has_id(
+            target, "status-body",
+        ) or _widget_has_id(target, "status-scroll"):
+            await self._show_context_menu(
+                screen_x=int(sx),
+                screen_y=int(sy),
+                items=self._status_context_menu_items(),
+                origin="status",
+            )
+
     async def action_toggle_selection_mode(self) -> None:
         """Ctrl+S - toggle Textual's mouse tracking so the terminal can
         handle drag-select. Useful for copying log content while the
@@ -1811,6 +2167,7 @@ class CodingBoxApp(App):
                 self._cmd_open()
             elif cmd == "clear":
                 self.query_one("#log-pane", RichLog).clear()
+                self._log_mirror_lines = []
             elif cmd == "iters":
                 self._cmd_set_iters(arg)
             elif cmd == "seed":
@@ -1921,6 +2278,7 @@ class CodingBoxApp(App):
             "                                  [dim]local: /check with qwen3.6   (substring-match against your MLX VLMs)[/dim]",
             "                                  [dim]add --apply to queue the verdict into the next coding turn[/dim]",
             "  [b]/ref <path>[/b]              attach a reference image (PNG/JPEG/WebP) to the NEXT user turn",
+            "                                  [dim]works before /new too — it stages for the first turn[/dim]",
             "                                  [dim]VLM-only — say 'make the game look like this' on the next line[/dim]",
             "                                  [dim]drag a file from Finder into the terminal to fill in the path[/dim]",
             "  [b]/quit[/b]                    quit (= Ctrl+Q)",
@@ -2502,9 +2860,6 @@ class CodingBoxApp(App):
           - The image clears after one use (single-shot). Re-run /ref
             for each turn that needs a reference.
         """
-        if self.agent is None:
-            self._log_error("/ref needs an active agent — start a session first with /new <goal>")
-            return
         path_str = (arg or "").strip().strip('"\'')
         if not path_str:
             self._log_info(
@@ -2546,22 +2901,31 @@ class CodingBoxApp(App):
                 "(cap is 4 MB). Resize to ~1024px max and retry."
             )
             return
-        # Attach. The agent's _stream path handles the rest.
-        self.agent._next_image_bytes = data
-        # Surface a hint if the active model is text-only — the bytes
-        # will be silently dropped otherwise.
-        is_vlm = bool(getattr(self.agent, "_is_vlm", False))
-        vlm_hint = (
-            "" if is_vlm
-            else " [yellow](active model is text-only — image will be dropped; "
-                 "/load a VLM first)[/yellow]"
-        )
         kind = (
             "PNG" if is_png else ("JPEG" if is_jpeg else "WebP")
         )
+        # Active session -> attach directly to the next user turn.
+        if self.agent is not None:
+            self.agent._next_image_bytes = data
+            # Surface a hint if the active model is text-only — the bytes
+            # will be ignored in that case.
+            is_vlm = bool(getattr(self.agent, "_is_vlm", False))
+            vlm_hint = (
+                "" if is_vlm
+                else " [yellow](active model is text-only — image may be ignored; "
+                     "/load a VLM first)[/yellow]"
+            )
+            self._log_info(
+                f"/ref: attached {path.name} ({kind}, {len(data) // 1024} KB) "
+                f"to the next user turn.{vlm_hint}"
+            )
+            return
+        # No active agent yet -> stage for the first turn of the next session.
+        self._staged_ref_image_bytes = data
+        self._staged_ref_image_name = path.name
         self._log_info(
-            f"/ref: attached {path.name} ({kind}, {len(data) // 1024} KB) "
-            f"to the next user turn.{vlm_hint}"
+            f"/ref: staged {path.name} ({kind}, {len(data) // 1024} KB) for "
+            "the first turn of the next session. Start with /new <goal> (or type a goal)."
         )
 
     def _cmd_set_iters(self, arg: str) -> None:
@@ -2974,9 +3338,12 @@ class CodingBoxApp(App):
         had_iters = self._max_iters
         had_restarts = self._restart_n
         had_class = self._model_class
+        had_ref = self._staged_ref_image_name
         self._next_seed = None
         self._next_model = None
         self._next_backend = None
+        self._staged_ref_image_bytes = None
+        self._staged_ref_image_name = None
         self._max_iters = 6
         self._restart_n = 2
         self._model_class = None
@@ -2996,6 +3363,8 @@ class CodingBoxApp(App):
             bits.append(f"restarts={had_restarts}→2")
         if had_class:
             bits.append(f"model-class={had_class}→auto")
+        if had_ref:
+            bits.append(f"ref={had_ref}→cleared")
         if not bits:
             self._log_info("nothing to reset (no staged seed/model, iters at default)")
             return
@@ -3028,6 +3397,7 @@ class CodingBoxApp(App):
             f"  review hook:       {self._profile_review_model or '—'}",
             f"  review auto-apply: {self._profile_review_auto_apply}",
             f"  staged seed:       {_esc(str(self._next_seed) if self._next_seed else '—')}",
+            f"  staged /ref image: {_esc(self._staged_ref_image_name or '—')}",
             f"  session done:      {self._session_done}",
             f"  game file:         {self._out_path or '—'}",
             f"  log file:          {self._log_file_path or '—'}",
@@ -3427,6 +3797,16 @@ class CodingBoxApp(App):
         elif self._run_profile in {"local_auto", "local_plus_review"}:
             self.agent.set_step_mode(False)
         self.agent.set_token_callback(self._emit_token)
+        # Pre-session /ref staging: if the user attached an image before
+        # starting, feed it into the very first user turn of this run.
+        if self._staged_ref_image_bytes is not None:
+            self.agent._next_image_bytes = self._staged_ref_image_bytes
+            staged_name = self._staged_ref_image_name or "reference image"
+            self._log_info(
+                f"/ref: using staged {staged_name} on the first model turn."
+            )
+            self._staged_ref_image_bytes = None
+            self._staged_ref_image_name = None
 
         # Persist the resolved-timeouts info to the session trace now
         # that the agent (and its _trace sink) exist. Lets future
@@ -3559,6 +3939,8 @@ class CodingBoxApp(App):
             except Exception:
                 pass
         self.query_one("#log-pane", RichLog).clear()
+        self._log_mirror_lines = []
+        self._status_plain = ""
         self._goal = goal
         self._iteration_label = "—"
         self._awaiting_kind = "feedback"

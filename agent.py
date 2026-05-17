@@ -1408,6 +1408,7 @@ class GameAgent:
         prior_stream_looped: bool = False,
         prior_loop_kind: str | None = None,
         prior_loop_line: str | None = None,
+        is_local_backend: bool = False,
     ) -> tuple[str, bool]:
         """Pick the fallback message + decide whether to reset the
         plan-only streak counter.
@@ -1539,24 +1540,40 @@ class GameAgent:
                 line_clue = (
                     f" The repeated content was: `{clue}`."
                 )
-            fallback = (
-                f"Your previous reply hit a token-repetition loop and the "
-                f"stream was aborted, so {kind_label} block has no closing "
-                f"tag. The loop shape was: {loop_shape}.{line_clue}\n\n"
-                "DO NOT re-emit the same draft — the section that was "
-                "looping is the root cause; restarting will hit the same "
-                "wall. Instead, choose ONE:\n"
-                "  - emit a `<question>` describing what you were trying "
-                "to compute when the loop started (preferred when you're "
-                "unsure how to proceed without the dead branch), OR\n"
-                "  - emit a smaller `<html_file>...</html_file>` that "
-                "OMITS the branch that was looping. If it was a "
-                "fall-through state-reset block where every flag was "
-                "already cleared upstream, delete the block entirely — "
-                "don't pad with redundant `flag = false; flag = false;` "
-                "statements (those are a known token-loop trigger).\n\n"
-                "Whichever you choose, keep this turn SHORT."
-            )
+            if is_local_backend:
+                fallback = (
+                    f"Your previous reply hit a token-repetition loop and the "
+                    f"stream was aborted, so {kind_label} block has no closing "
+                    f"tag. The loop shape was: {loop_shape}.{line_clue}\n\n"
+                    "DO NOT ask the user a question this turn. Recover "
+                    "autonomously by emitting a smaller complete "
+                    "<html_file>...</html_file> that OMITS the branch that "
+                    "was looping. If it was a fall-through state-reset block "
+                    "where every flag was already cleared upstream, delete the "
+                    "block entirely — don't pad with redundant "
+                    "`flag = false; flag = false;` statements (known loop "
+                    "trigger on local models).\n\n"
+                    "Keep this turn short and code-only."
+                )
+            else:
+                fallback = (
+                    f"Your previous reply hit a token-repetition loop and the "
+                    f"stream was aborted, so {kind_label} block has no closing "
+                    f"tag. The loop shape was: {loop_shape}.{line_clue}\n\n"
+                    "DO NOT re-emit the same draft — the section that was "
+                    "looping is the root cause; restarting will hit the same "
+                    "wall. Instead, choose ONE:\n"
+                    "  - emit a `<question>` describing what you were trying "
+                    "to compute when the loop started (preferred when you're "
+                    "unsure how to proceed without the dead branch), OR\n"
+                    "  - emit a smaller `<html_file>...</html_file>` that "
+                    "OMITS the branch that was looping. If it was a "
+                    "fall-through state-reset block where every flag was "
+                    "already cleared upstream, delete the block entirely — "
+                    "don't pad with redundant `flag = false; flag = false;` "
+                    "statements (those are a known token-loop trigger).\n\n"
+                    "Whichever you choose, keep this turn SHORT."
+                )
             return fallback, False
         # Structured-rejection path: model emitted something tag-shaped
         # but malformed. Surface the specific reason BEFORE the generic
@@ -1972,6 +1989,25 @@ class GameAgent:
     _ASSET_LIST_NAME_RE = __import__("re").compile(
         r"""['"]([A-Za-z_][A-Za-z0-9_]*)['"]"""
     )
+    # Sound alignment scan mirrors the asset scan above so missing OGG
+    # references are surfaced before Chromium wastes an iteration on 404s.
+    _SOUND_SUBSCRIPT_RE = __import__("re").compile(
+        r"""SOUNDS\s*\[\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]\s*\]"""
+    )
+    _SOUND_DOT_RE = __import__("re").compile(
+        r"""\bSOUNDS\.([A-Za-z_][A-Za-z0-9_]*)\b"""
+    )
+    _SOUND_PATH_RE = __import__("re").compile(
+        r"""['"][^'"\s]*_sounds/([A-Za-z_][A-Za-z0-9_]*)\.(?:ogg|mp3|wav|m4a)['"]""",
+        __import__("re").IGNORECASE,
+    )
+    _SOUND_LIST_RE = __import__("re").compile(
+        r"""\b(?:soundNames|soundList|sfxNames|audioNames)\s*=\s*\[([^\]]+)\]""",
+        __import__("re").IGNORECASE,
+    )
+    _SOUND_LIST_NAME_RE = __import__("re").compile(
+        r"""['"]([A-Za-z_][A-Za-z0-9_]*)['"]"""
+    )
 
     @classmethod
     def _scan_html_for_asset_refs(cls, html: str) -> set[str]:
@@ -2033,6 +2069,99 @@ class GameAgent:
             "hide the load failure, they don't fix it."
         )
         return missing
+
+    @classmethod
+    def _scan_html_for_sound_refs(cls, html: str) -> set[str]:
+        """Return the set of sound *names* the HTML references."""
+        refs: set[str] = set()
+        for m in cls._SOUND_SUBSCRIPT_RE.finditer(html):
+            refs.add(m.group(1))
+        for m in cls._SOUND_DOT_RE.finditer(html):
+            refs.add(m.group(1))
+        for m in cls._SOUND_PATH_RE.finditer(html):
+            refs.add(m.group(1))
+        for m in cls._SOUND_LIST_RE.finditer(html):
+            for nm in cls._SOUND_LIST_NAME_RE.finditer(m.group(1)):
+                refs.add(nm.group(1))
+        return refs
+
+    def _check_sound_alignment(self, html: str) -> set[str]:
+        """Compare HTML sound references against generated files."""
+        refs = self._scan_html_for_sound_refs(html)
+        if not refs:
+            return set()
+        available = set(self._session_sounds.keys())
+        missing = refs - available
+        if not missing:
+            return set()
+        self._trace({
+            "kind": "sound_alignment_gap",
+            "referenced": sorted(refs),
+            "available": sorted(available),
+            "missing": sorted(missing),
+        })
+        miss_list = ", ".join(sorted(missing))
+        avail_list = ", ".join(sorted(available)) or "(none)"
+        self._pending_coaching.append(
+            "Sound references don't match the files on disk. Your code "
+            f"references these sound names that were never generated: {miss_list}. "
+            f"Available sounds: {avail_list}. The browser is returning "
+            "net::ERR_FILE_NOT_FOUND for missing OGGs, not an Audio.play() "
+            "bug. To fix the root cause, EITHER (a) emit a `<sounds>...</sounds>` "
+            "block in this turn requesting the missing names — the harness "
+            "will regenerate them mid-session and your code will work as "
+            "written — OR (b) edit the code to only reference sounds that "
+            "exist. Do NOT add more try/catch around play(); that hides the "
+            "load failure, it doesn't fix it."
+        )
+        return missing
+
+    def _is_local_backend(self) -> bool:
+        """True for local backends (MLX/Ollama)."""
+        return self._backend.info.name in {"mlx", "ollama"}
+
+    def _local_first_build_nudge(self) -> str:
+        """Small local-only nudge to reduce long repetitive first builds."""
+        if not self._is_local_backend():
+            return ""
+        n_assets = len(self._session_assets)
+        n_sounds = len(self._session_sounds)
+        if n_assets < 10 and n_sounds < 6:
+            return ""
+        return (
+            "LOCAL MODEL SAFETY NUDGE: Keep first-build code compact to avoid "
+            "token loops. Use short name arrays + loops for media loaders; do "
+            "NOT hand-enumerate long repeated `[name, path]` blocks. Use ONLY "
+            "sound/sprite names present in the GENERATED ASSETS/SOUNDS blocks "
+            "above."
+        )
+
+    def _local_should_fallback_skeleton(self, skel: SkeletonHit) -> tuple[bool, str]:
+        """Guard local backends from mismatched won-skeleton media naming."""
+        if not self._is_local_backend():
+            return (False, "")
+        if skel.source_goal is None:
+            return (False, "")
+        refs_assets = self._scan_html_for_asset_refs(skel.html)
+        refs_sounds = self._scan_html_for_sound_refs(skel.html)
+        refs = refs_assets | refs_sounds
+        if not refs:
+            return (False, "")
+        available = set(self._session_assets.keys()) | set(self._session_sounds.keys())
+        if not available:
+            return (False, "")
+        overlap = refs & available
+        ratio = len(overlap) / max(1, len(refs))
+        if ratio >= 0.25 or len(overlap) >= 2:
+            return (False, "")
+        return (
+            True,
+            (
+                "low media-name overlap on local backend "
+                f"(skeleton refs={len(refs)}, overlap={len(overlap)}, "
+                f"ratio={ratio:.2f})"
+            ),
+        )
 
     def set_token_callback(self, cb) -> None:
         self._token_cb = cb
@@ -5020,6 +5149,9 @@ class GameAgent:
                 prelude = "\n\n".join(b for b in (asset_block, sound_block) if b)
                 if prelude:
                     build_msg = prelude + "\n\n" + build_msg
+                local_nudge = self._local_first_build_nudge()
+                if local_nudge:
+                    build_msg = local_nudge + "\n\n" + build_msg
                 probe_nudge = self._probe_quality_nudge()
                 if probe_nudge:
                     build_msg = probe_nudge + "\n\n" + build_msg
@@ -5051,6 +5183,26 @@ class GameAgent:
                     )
                 else:
                     skel = self._memory.retrieve_skeleton(goal)
+                should_fallback, fallback_reason = (
+                    self._local_should_fallback_skeleton(skel)
+                )
+                if should_fallback:
+                    skel = SkeletonHit(
+                        name=DEFAULT_SKELETON_NAME,
+                        html=DEFAULT_SKELETON,
+                        score=0.0,
+                        source_goal=None,
+                    )
+                    yield self._record(AgentEvent(
+                        "memory",
+                        "local skeleton guard: fallback to default scaffold "
+                        f"({fallback_reason})",
+                        {
+                            "fallback_reason": fallback_reason,
+                            "skeleton": skel.name,
+                            "backend": self._backend.info.name,
+                        },
+                    ))
                 memory_msg = (
                     f"using skeleton: {skel.name}"
                     + (f" (sim={skel.score:.2f}, src goal: {skel.source_goal!r})"
@@ -5178,6 +5330,9 @@ class GameAgent:
                 prelude = "\n\n".join(b for b in (asset_block, sound_block) if b)
                 if prelude:
                     build_msg = prelude + "\n\n" + build_msg
+                local_nudge = self._local_first_build_nudge()
+                if local_nudge:
+                    build_msg = local_nudge + "\n\n" + build_msg
                 probe_nudge = self._probe_quality_nudge()
                 if probe_nudge:
                     build_msg = probe_nudge + "\n\n" + build_msg
@@ -5852,6 +6007,9 @@ class GameAgent:
                             prior_stream_looped=self._last_stream_looped,
                             prior_loop_kind=self._last_stream_loop_kind,
                             prior_loop_line=self._last_stream_loop_line,
+                            is_local_backend=(
+                                self._backend.info.name in {"mlx", "ollama"}
+                            ),
                         )
                     )
                     if reset_streak:
@@ -5950,6 +6108,11 @@ class GameAgent:
             # referencing names that don't exist.
             try:
                 self._check_asset_alignment(new_html)
+            except Exception:
+                # Never let the scan crash the loop.
+                pass
+            try:
+                self._check_sound_alignment(new_html)
             except Exception:
                 # Never let the scan crash the loop.
                 pass
