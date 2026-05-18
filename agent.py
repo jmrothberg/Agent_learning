@@ -65,7 +65,7 @@ from sounds import (
     render_sound_paths_block,
     try_load_audio_generator,
 )
-from backend import Backend, BackendInfo, make_backend
+from backend import Backend, BackendInfo, detect_backend, make_backend
 from memory import (
     CANVAS_SKELETON_V2,
     CANVAS_SKELETON_V2_NAME,
@@ -706,6 +706,28 @@ def _feedback_locks_code(text: str) -> bool:
     return any(p.search(text) for p in _CODE_LOCK_PATTERNS)
 
 
+_STRICT_SCOPE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"\bonly\b.*\b(?:change|fix|edit|touch|update|do)\b",
+        re.I,
+    ),
+    re.compile(
+        r"\b(?:don['’]?t|do\s+not)\s+change\s+anything\s+else\b",
+        re.I,
+    ),
+    re.compile(r"\bnothing\s+else\b", re.I),
+)
+
+
+def _feedback_is_strict_scope(text: str) -> bool:
+    """True when feedback explicitly narrows the turn to one scoped change."""
+    if not text:
+        return False
+    if _feedback_locks_code(text):
+        return True
+    return any(p.search(text) for p in _STRICT_SCOPE_PATTERNS)
+
+
 # Behavior verbs — gameplay actions a player or game object performs.
 # Used to detect "user is reporting a behavior bug" patterns like
 # "mario doesn't climb" / "barrels don't roll" / "nothing happens when
@@ -1079,6 +1101,10 @@ class GameAgent:
         self.seed_file: Path | None = Path(seed_file) if seed_file else None
         self._messages: list[dict] = []
         self._pending_feedback: list[str] = []
+        # Most recent feedback batch consumed by _flush_user_injections.
+        # Used to restore feedback if a stream fails before any assistant
+        # reply lands (extension fallback / backend failure path).
+        self._last_drained_feedback: list[str] = []
         # Set by `_flush_user_injections` when the user locks the turn
         # ("no code changes", "only X"). The fix-mode prompt reads this
         # and suppresses the failing-test "fix these" framing so the
@@ -1379,6 +1405,10 @@ class GameAgent:
         # force the next first-build turn to start from an <html_file>
         # prefill stub to break the loop.
         self._force_first_build_prefill: bool = False
+        # One-shot "same-iteration" retry budget for first-build no-code
+        # failures. We grant one bonus iter so format-only recovery does
+        # not consume the user's regular iteration budget.
+        self._first_build_retry_bonus_used: bool = False
 
     # Read-through to the resolved backend's model id. Existing call sites
     # (trace metadata, conversation dump, memory.record_outcome, ...) used
@@ -1520,6 +1550,23 @@ class GameAgent:
                 "they live in session state."
             )
             return fallback, False
+        # Repetition-loop recovery path (plan item: loop-recovery-minpatch).
+        # After a loop abort on an existing baseline, force a tiny patch-only
+        # turn so we recover deterministically instead of re-streaming another
+        # large draft.
+        if prior_stream_looped and has_existing_file:
+            fallback = (
+                "REPETITION-LOOP RECOVERY: your previous stream was aborted "
+                "after repeating tokens. Recover with ONE minimal "
+                "<patch>...</patch> only.\n"
+                "Rules for this turn:\n"
+                "  - Start immediately with <patch> as the first non-whitespace text.\n"
+                "  - No long reasoning, no re-deriving prior context, no <html_file>.\n"
+                "  - Change only the smallest failing region.\n"
+                "If you are uncertain, patch one symbol/path and let the next "
+                "test report guide the next step."
+            )
+            return fallback, False
         # Repetition-loop + unclosed <html_file>: the most common
         # sequence is "model entered a token loop inside a code block, the
         # RepetitionDetector aborted the stream mid-emit, and the parser
@@ -1615,8 +1662,9 @@ class GameAgent:
             return "\n\n".join(parts), False
         if not has_existing_file:
             fallback = (
-                "FIRST BUILD REQUIRED — your previous reply had no usable "
-                "<html_file>/<patch>. Re-emit this turn as CODE ONLY.\n"
+                "FIRST BUILD REQUIRED — FORMAT-ONLY RECOVERY: your previous "
+                "reply had no usable <html_file>/<patch>. Re-emit this turn "
+                "as CODE ONLY.\n"
                 "Start your reply immediately with `<html_file>` as the first "
                 "non-whitespace token (no preamble, no reasoning prose), then "
                 "emit the complete HTML document and close with `</html_file>`."
@@ -2590,6 +2638,7 @@ class GameAgent:
 
     def _flush_user_injections(self, base_message: str) -> str:
         parts: list[str] = []
+        self._last_drained_feedback = []
         # Snapshot the queue BEFORE consuming so we can push a visible
         # "✓ APPLIED to this turn" confirmation into the agent log via
         # the TUI's token callback. Without this, only the right-hand
@@ -2612,7 +2661,22 @@ class GameAgent:
             self._trace({"kind": "answer_injected", "text": ans})
             self._pending_answer = None
         if self._pending_feedback:
-            joined = "\n- ".join(self._pending_feedback)
+            feedback_items = list(self._pending_feedback)
+            strict_idxs = [
+                i for (i, fb) in enumerate(feedback_items)
+                if _feedback_is_strict_scope(fb)
+            ]
+            strict_scope_dropped = 0
+            if strict_idxs:
+                # Latest strict scope wins. Earlier queued asks are
+                # intentionally suppressed for this turn so local models
+                # don't try to satisfy contradictory objectives.
+                keep_i = strict_idxs[-1]
+                selected_feedback = [feedback_items[keep_i]]
+                strict_scope_dropped = len(feedback_items) - 1
+            else:
+                selected_feedback = feedback_items
+            joined = "\n- ".join(selected_feedback)
             parts.append(
                 "================ USER FEEDBACK (HIGHEST PRIORITY) ================\n"
                 "The user just typed this while watching your game. It OVERRIDES\n"
@@ -2620,8 +2684,21 @@ class GameAgent:
                 f"\n- {joined}\n"
                 "=================================================================="
             )
-            for fb in self._pending_feedback:
+            for fb in selected_feedback:
                 self._trace({"kind": "feedback_injected", "text": fb})
+            if strict_scope_dropped:
+                parts.append(
+                    "================ FEEDBACK SCOPE ARBITRATION ================\n"
+                    "A strict scope lock was present in the latest feedback.\n"
+                    "For THIS turn, treat ONLY that latest scoped request as\n"
+                    "in-scope. Ignore earlier queued requests.\n"
+                    "============================================================"
+                )
+                self._trace({
+                    "kind": "feedback_scope_arbitration",
+                    "kept_latest_scoped": selected_feedback[0][:200],
+                    "dropped_count": strict_scope_dropped,
+                })
 
             # Detect intent BEFORE clearing the queue so we can shape the
             # follow-up directives. Centipede trace 20260512_180020 is
@@ -2642,6 +2719,7 @@ class GameAgent:
                 joined, sound_names,
             )
             behavior_bug = _feedback_is_behavior_bug(joined)
+            self._last_drained_feedback = list(selected_feedback)
 
             self._pending_feedback.clear()
 
@@ -2833,14 +2911,31 @@ class GameAgent:
         # repeat-error nudges). Rendered as a single high-priority block
         # so the model sees them before the base instruction.
         if self._pending_coaching:
-            joined = "\n- ".join(self._pending_coaching)
-            parts.append(
-                "================ AGENT COACHING ================\n"
-                f"- {joined}\n"
-                "================================================"
+            prev = self._previous_report or {}
+            probes = prev.get("probes") or []
+            full_probe_pass = bool(probes) and all(bool(p.get("ok")) for p in probes)
+            clean_report = (
+                self._previous_report_ok is True
+                and full_probe_pass
+                and not (prev.get("errors") or [])
+                and not (prev.get("soft_warnings") or [])
+                and not (prev.get("page_errors") or [])
+                and not (prev.get("console_errors") or [])
             )
-            for c in self._pending_coaching:
-                self._trace({"kind": "coaching_injected", "text": c})
+            if clean_report:
+                self._trace({
+                    "kind": "coaching_suppressed_clean_pass",
+                    "count": len(self._pending_coaching),
+                })
+            else:
+                joined = "\n- ".join(self._pending_coaching)
+                parts.append(
+                    "================ AGENT COACHING ================\n"
+                    f"- {joined}\n"
+                    "================================================"
+                )
+                for c in self._pending_coaching:
+                    self._trace({"kind": "coaching_injected", "text": c})
             self._pending_coaching.clear()
         if base_message:
             parts.append(base_message)
@@ -3977,6 +4072,127 @@ class GameAgent:
         return False
 
     @staticmethod
+    def _signature_focus_identifiers(sig: str) -> list[str]:
+        """Extract dotted identifier paths from a failure signature."""
+        if not sig:
+            return []
+        out: list[str] = []
+        seen: set[str] = set()
+        for tok in re.findall(
+            r"[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*){1,4}",
+            sig,
+        ):
+            if tok in seen:
+                continue
+            seen.add(tok)
+            out.append(tok)
+            if len(out) >= 8:
+                break
+        return out
+
+    @staticmethod
+    def _identifier_occurrence_slice(
+        html: str,
+        identifiers: list[str] | tuple[str, ...],
+        *,
+        radius: int = 1,
+        max_chars: int = 2400,
+    ) -> str:
+        """Return a compact line-window block containing all identifier hits."""
+        if not html or not identifiers:
+            return ""
+        lines = html.splitlines()
+        chosen: set[int] = set()
+        idents = [i for i in identifiers if i]
+        for i, ln in enumerate(lines):
+            if any(tok in ln for tok in idents):
+                lo = max(0, i - radius)
+                hi = min(len(lines), i + radius + 1)
+                for j in range(lo, hi):
+                    chosen.add(j)
+        if not chosen:
+            return ""
+        ordered = sorted(chosen)
+        out_lines: list[str] = []
+        used = 0
+        for j in ordered:
+            row = f"{j + 1:5d}: {lines[j]}"
+            row_len = len(row) + 1
+            if used + row_len > max_chars:
+                break
+            out_lines.append(row)
+            used += row_len
+        return "\n".join(out_lines)
+
+    def _partial_patch_recovery_block(
+        self,
+        partial_failed: list[tuple[int, object, str]],
+    ) -> str:
+        """Prompt addendum for partial patch application retries."""
+        if not partial_failed or not self._current_file:
+            return ""
+        from patches import find_anchor  # local import to avoid module cycle
+
+        lines = [
+            "PATCH-APPLY RECOVERY (previous reply partially applied):",
+            "Send ONE consolidated <patch> that fixes the unresolved region.",
+            "Do NOT scatter multiple overlapping patches for this retry.",
+        ]
+        for (i, p, reason) in partial_failed[:3]:
+            lines.append(f"- unresolved patch #{i + 1}: {reason}")
+            search = (getattr(p, "search", "") or "").strip()
+            if search:
+                preview = search.splitlines()[0][:180]
+                lines.append(f"  failed SEARCH head: {preview!r}")
+                anchor = find_anchor(self._current_file, search)
+                if anchor:
+                    lines.append("  nearest current-file anchor:")
+                    lines.extend(f"    {ln}" for ln in anchor.splitlines()[:8])
+        if len(partial_failed) > 3:
+            lines.append(f"- (+{len(partial_failed) - 3} more unresolved patches)")
+        return "\n".join(lines)
+
+    def _repeat_error_fastpath_block(self, report: dict) -> str:
+        """Force a narrow one-patch retry after repeated same-signature failures."""
+        if self._repeat_sig_streak < 2 or not self._current_file:
+            return ""
+        sig = self._last_mistake_sig or signature_for_report(report) or ""
+        hint = _subsystem_hint(sig)
+        identifiers: list[str] = []
+        if hint:
+            identifiers.extend(list(hint["identifiers"]))
+        identifiers.extend(self._signature_focus_identifiers(sig))
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for tok in identifiers:
+            if tok in seen:
+                continue
+            seen.add(tok)
+            deduped.append(tok)
+            if len(deduped) >= 12:
+                break
+        occurrence_block = self._identifier_occurrence_slice(
+            self._current_file,
+            deduped,
+        )
+        lines = [
+            "REPEATED-ERROR FAST PATH:",
+            f"The same failure signature has repeated for {self._repeat_sig_streak} consecutive iterations.",
+            "THIS TURN: emit exactly ONE minimal <patch> targeting the failing symbol/path.",
+            "Do NOT refactor, rename unrelated code, or emit a full <html_file>.",
+        ]
+        if hint:
+            lines.append(f"Target subsystem: {hint['name']} ({hint['fix_phrase']}).")
+        if deduped:
+            lines.append("Implicated identifiers: " + ", ".join(f"`{x}`" for x in deduped[:8]))
+        if occurrence_block:
+            lines.append("All matching identifier occurrences in CURRENT FILE:")
+            lines.append("```text")
+            lines.append(occurrence_block)
+            lines.append("```")
+        return "\n".join(lines)
+
+    @staticmethod
     def _extract_notes(reply: str) -> str | None:
         reply = _strip_thinking(reply)
         m = _NOTES_RE.search(reply)
@@ -4389,6 +4605,76 @@ class GameAgent:
             "stall_seconds": seconds,
             "message_preview": err_text[:400],
         }
+
+    async def _try_extension_backend_fallback(
+        self,
+        *,
+        stall: dict | None,
+        iteration: int,
+    ) -> tuple[bool, str]:
+        """Try one local fallback (MLX -> Ollama) for extension turns."""
+        info = getattr(self._backend, "info", None)
+        backend_name = getattr(info, "name", None)
+        if backend_name != "mlx":
+            return False, "fallback skipped: current backend is not MLX"
+        if not stall or stall.get("kind") != "no_tokens_stall":
+            return False, "fallback skipped: stall shape is not no-token"
+
+        candidate = None
+        errs: list[str] = []
+        for prefer in ("auto", "ollama"):
+            try:
+                resolved = detect_backend(prefer=prefer)
+            except Exception as e:
+                errs.append(f"{prefer}: {e}")
+                continue
+            if resolved.name == "ollama":
+                candidate = resolved
+                break
+            errs.append(
+                f"{prefer}: resolved {resolved.name}:{resolved.model} (not ollama)"
+            )
+        if candidate is None:
+            reason = " | ".join(errs) if errs else "no ollama backend available"
+            self._trace({
+                "kind": "extension_backend_fallback_unavailable",
+                "iteration": iteration,
+                "reason": reason[:500],
+            })
+            return False, (
+                "Extension fallback unavailable: no local Ollama backend could "
+                f"be resolved ({reason[:220]})."
+            )
+
+        old = self._backend
+        old_name = f"{old.info.name}:{old.info.model}"
+        try:
+            new_backend = make_backend(candidate)
+        except Exception as e:
+            self._trace({
+                "kind": "extension_backend_fallback_failed",
+                "iteration": iteration,
+                "reason": f"make_backend failed: {e}",
+            })
+            return False, (
+                "Extension fallback failed while initializing Ollama backend: "
+                f"{e}"
+            )
+        try:
+            await old.close()
+        except Exception:
+            pass
+        self._backend = new_backend
+        self._trace({
+            "kind": "extension_backend_fallback_switched",
+            "iteration": iteration,
+            "from": old_name,
+            "to": f"{candidate.name}:{candidate.model}",
+        })
+        return True, (
+            f"Extension fallback: switched backend from {old_name} to "
+            f"{candidate.name}:{candidate.model} for this turn."
+        )
 
     async def _maybe_generate_assets_and_sounds(
         self, reply: str, *, trigger: str,
@@ -5414,6 +5700,15 @@ class GameAgent:
             # Reset per-iter flags so the media-only-bonus check sees
             # only THIS iter's regen state.
             self._media_regenerated_this_iter = False
+            # Decay stale diagnose context after clean passes so extension
+            # prompts don't keep carrying an obsolete root-cause string.
+            if self._consecutive_clean_iters >= 1 and self._last_diagnose:
+                self._trace({
+                    "kind": "last_diagnose_decayed",
+                    "reason": "clean_streak",
+                    "clean_iters": self._consecutive_clean_iters,
+                })
+                self._last_diagnose = None
             # User hard-stop: Ctrl-D in the TUI sets _user_force_done. Honor
             # it at the top of every iteration so the agent never starts a
             # new stream after the user asked to stop, even when probes
@@ -5473,66 +5768,95 @@ class GameAgent:
             # AND only when we have N>1. The first build is always single
             # because there's no test signal yet to score against.
             use_bon = self._fix_mode and self.best_of_n > 1
-            try:
-                if use_bon:
-                    yield self._record(AgentEvent(
-                        "best_of_n",
-                        f"sampling {self.best_of_n} candidates",
-                        {"n": self.best_of_n},
-                    ))
-                    winner, all_cands = await self._generate_and_score_candidates(self.best_of_n)
-                    # Replay the winner visually for the user — feel as if
-                    # the model just wrote it now, even though it generated
-                    # silently.
-                    for piece in self._chunk_for_display(winner.text):
-                        self._token_cb_wrapper(piece)
-                    reply = winner.text
-                    yield self._record(AgentEvent(
-                        "best_of_n",
-                        f"picked candidate score={winner.score:+.2f} from {len(all_cands)}",
-                        {
-                            "winner_score": winner.score,
-                            "all_scores": [c.score for c in all_cands],
-                            "winner_extra": winner.extra,
-                        },
-                    ))
-                else:
-                    # Prefill diagnose tag on fix turns so format compliance
-                    # is forced. First-build (iter 1, fix_mode False) doesn't
-                    # use diagnose, so prefill is empty there.
-                    reply_prefill = ""
-                    prefill_force = False
-                    if self._use_prefill and self._fix_mode:
-                        reply_prefill = "<diagnose>\n"
-                    elif (not self._current_file) and self._force_first_build_prefill:
-                        # First-build rescue after a no-code turn.
-                        reply_prefill = "<html_file>\n<!DOCTYPE html>\n"
-                        prefill_force = True
-                    yield self._record(AgentEvent(
-                        "activity", "streaming",
-                        {"label": f"streaming iter {iteration} reply"},
-                    ))
-                    reply = await self._stream(
-                        self._token_cb_wrapper,
-                        prefill=reply_prefill,
-                        prefill_force=prefill_force,
-                    )
+            fallback_attempted = False
+            while True:
+                try:
+                    if use_bon:
+                        yield self._record(AgentEvent(
+                            "best_of_n",
+                            f"sampling {self.best_of_n} candidates",
+                            {"n": self.best_of_n},
+                        ))
+                        winner, all_cands = await self._generate_and_score_candidates(self.best_of_n)
+                        # Replay the winner visually for the user — feel as if
+                        # the model just wrote it now, even though it generated
+                        # silently.
+                        for piece in self._chunk_for_display(winner.text):
+                            self._token_cb_wrapper(piece)
+                        reply = winner.text
+                        yield self._record(AgentEvent(
+                            "best_of_n",
+                            f"picked candidate score={winner.score:+.2f} from {len(all_cands)}",
+                            {
+                                "winner_score": winner.score,
+                                "all_scores": [c.score for c in all_cands],
+                                "winner_extra": winner.extra,
+                            },
+                        ))
+                    else:
+                        # Prefill diagnose tag on fix turns so format compliance
+                        # is forced. First-build (iter 1, fix_mode False) doesn't
+                        # use diagnose, so prefill is empty there.
+                        reply_prefill = ""
+                        prefill_force = False
+                        if self._use_prefill and self._fix_mode:
+                            reply_prefill = "<diagnose>\n"
+                        elif (not self._current_file) and self._force_first_build_prefill:
+                            # First-build rescue after a no-code turn.
+                            reply_prefill = "<html_file>\n<!DOCTYPE html>\n"
+                            prefill_force = True
+                        yield self._record(AgentEvent(
+                            "activity", "streaming",
+                            {"label": f"streaming iter {iteration} reply"},
+                        ))
+                        reply = await self._stream(
+                            self._token_cb_wrapper,
+                            prefill=reply_prefill,
+                            prefill_force=prefill_force,
+                        )
+                        yield self._record(AgentEvent("activity", "idle"))
+                    break
+                except Exception as e:
                     yield self._record(AgentEvent("activity", "idle"))
-            except Exception as e:
-                yield self._record(AgentEvent("activity", "idle"))
-                err_msg = (
-                    f"{self._backend.info.name.upper()} call failed: {e}"
-                )
-                yield self._record(AgentEvent("error", err_msg))
-                stall = self._classify_stall(str(e))
-                if stall:
-                    yield self._record(AgentEvent(
-                        "mlx_stall", err_msg,
-                        {**stall, "phase": "iterate", "iteration": iteration},
-                    ))
-                return
+                    err_msg = (
+                        f"{self._backend.info.name.upper()} call failed: {e}"
+                    )
+                    yield self._record(AgentEvent("error", err_msg))
+                    stall = self._classify_stall(str(e))
+                    if stall:
+                        yield self._record(AgentEvent(
+                            "mlx_stall", err_msg,
+                            {**stall, "phase": "iterate", "iteration": iteration},
+                        ))
+                    if (
+                        continuation
+                        and not fallback_attempted
+                    ):
+                        fallback_attempted = True
+                        switched, note = await self._try_extension_backend_fallback(
+                            stall=stall,
+                            iteration=iteration,
+                        )
+                        if switched:
+                            yield self._record(AgentEvent("info", note))
+                            continue
+                        if note:
+                            yield self._record(AgentEvent("info", note))
+                    if continuation and self._last_drained_feedback:
+                        # Stream failed before we got any assistant reply; put
+                        # the just-consumed feedback back in queue so extension
+                        # requests are not silently dropped.
+                        self._pending_feedback = (
+                            self._last_drained_feedback + self._pending_feedback
+                        )
+                        self._trace({
+                            "kind": "feedback_requeued_after_stream_failure",
+                            "count": len(self._last_drained_feedback),
+                        })
+                    return
 
             self._messages.append({"role": "assistant", "content": reply})
+            self._last_drained_feedback = []
             self._extract_and_queue_lookups(reply)
             self._capture_todos(reply)
             self._dump_conversation()
@@ -5985,6 +6309,25 @@ class GameAgent:
                     yield self._record(AgentEvent("error", f"TRUNCATED REPLY — {trunc}"))
                 else:
                     yield self._record(AgentEvent("info", f"no usable code: {materialize_msg}"))
+                # First-build format-only recovery: grant one bonus iter so
+                # the retry does not consume the normal iteration budget.
+                if (
+                    not self._current_file
+                    and not self._first_build_retry_bonus_used
+                    and self._iter_budget_bonus < revert_bonus_cap
+                ):
+                    self._first_build_retry_bonus_used = True
+                    self._iter_budget_bonus += 1
+                    self._trace({
+                        "kind": "first_build_format_retry_bonus",
+                        "iteration": iteration,
+                        "bonus_total": self._iter_budget_bonus,
+                    })
+                    yield self._record(AgentEvent(
+                        "info",
+                        "[dim]first-build format recovery: granting +1 bonus "
+                        "iter so this retry keeps the same effective build slot.[/dim]",
+                    ))
                 # Bonus iter for media-only emission. When the model
                 # emitted <assets>/<sounds> (regen succeeded) but no
                 # code, the harness picked up real work even though
@@ -6284,6 +6627,22 @@ class GameAgent:
                 continue
 
             yield self._record(AgentEvent("activity", "idle"))
+            if partial_failed:
+                # Partial patch-apply means intended fixes are not fully
+                # landed, even if probes happen to pass. Force one focused
+                # recovery turn so unresolved SEARCH targets are addressed.
+                sw = list(report.get("soft_warnings") or [])
+                sw.append(
+                    f"partial patch apply: {len(partial_failed)} patch block(s) "
+                    "did not apply; fix not complete."
+                )
+                report["soft_warnings"] = sw
+                report["ok"] = False
+                self._trace({
+                    "kind": "partial_patch_forced_retry",
+                    "failed_count": len(partial_failed),
+                    "iteration": iteration,
+                })
             report_text = format_report_for_model(report)
             self._last_report_summary = report_text
             self._last_test_report = report
@@ -7070,6 +7429,7 @@ class GameAgent:
         backend, memory, playbook, generated assets/sounds cache).
         """
         self._messages = []
+        self._last_drained_feedback = []
         self._previous_report_ok = None
         self._previous_report = None
         self._iter_budget_bonus = 0
@@ -7099,6 +7459,7 @@ class GameAgent:
         self._restart_attempt_idx = 0
         self._restart_attempt_seed = None
         self._force_first_build_prefill = False
+        self._first_build_retry_bonus_used = False
 
     def _score_attempt(self) -> float:
         """Score the just-finished attempt. Reuses tools.score_test_report
@@ -7295,12 +7656,11 @@ class GameAgent:
         fix = self._p.fix_instruction(
             report_text, self._current_file, hints, **fix_kwargs,
         )
+        repeat_fastpath = self._repeat_error_fastpath_block(report)
+        if repeat_fastpath:
+            fix += "\n\n" + repeat_fastpath
         if partial_failed:
-            fix += (
-                "\n\nNOTE: some of your previous patches did not apply. "
-                "When fixing this turn, also re-send corrected versions of:\n"
-                + "\n".join(f"  - {reason}" for (_i, _p, reason) in partial_failed)
-            )
+            fix += "\n\n" + self._partial_patch_recovery_block(partial_failed)
         # Probe-sanity findings: surface tautological-probe or
         # unassigned-property warnings so the model can fix the probes
         # alongside the code. Without this the model often "fixes" the

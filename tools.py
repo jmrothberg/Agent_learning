@@ -1104,6 +1104,7 @@ def _check_unused_assets(
         from pathlib import Path
         out = Path(out_path)
         base = out.parent
+        session_prefix = (out.stem or "").lower()
         if not base.is_dir():
             return []
     except Exception:
@@ -1117,9 +1118,17 @@ def _check_unused_assets(
             if not child.is_dir():
                 continue
             n = child.name.lower()
-            if n.endswith("_assets"):
+            if (
+                session_prefix
+                and n.startswith(session_prefix + "_")
+                and n.endswith("_assets")
+            ):
                 sprite_dirs.append(child)
-            elif n.endswith("_sounds"):
+            elif (
+                session_prefix
+                and n.startswith(session_prefix + "_")
+                and n.endswith("_sounds")
+            ):
                 sound_dirs.append(child)
     except OSError:
         return []

@@ -4446,6 +4446,9 @@ class CodingBoxApp(App):
             self._streak_clean = int((ev.data or {}).get("consecutive_clean_iters", 0))
             self._streak_stuck = int((ev.data or {}).get("stuck_streak", 0))
             self._streak_min = int((ev.data or {}).get("min_to_ship", 2))
+            if self._streak_clean >= 1 and self._last_diagnose:
+                # Clear stale diagnose text once clean iterations are flowing.
+                self._last_diagnose = None
             self._update_status()
 
     def _format_sounds_summary(self, data: dict) -> str:
