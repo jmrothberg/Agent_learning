@@ -389,6 +389,8 @@ HARD_RULES: list[str] = [
     "Vanilla JS by default. CDN <script src=\"...\"> tags are allowed for "
     "Phaser, three.js, kontra.js etc. when warranted. NO bundlers, NO "
     "node_modules.",
+    "For three.js/WebGL, output must run in normal browser file:// "
+    "(no harness-only security flags).",
     "Drive animation with requestAnimationFrame (RAF), never setInterval.",
     "Keyboard input: e.code values ('ArrowUp', 'KeyW', 'Space'), NOT "
     "e.key (layout-dependent), NOT e.keyCode (deprecated). Listen on "
@@ -825,11 +827,12 @@ def plan_instruction(*, reference_block: str = "", goal: str = "") -> str:
             "  <script src=\"https://cdn.jsdelivr.net/npm/three@0.160/build/three.min.js\"></script>\n"
             "  <script src=\"https://cdnjs.cloudflare.com/ajax/libs/babylonjs/6.32.0/babylon.min.js\"></script>\n"
             "\n"
-            "Pair three.js with <assets>: load the generated PNGs as "
-            "`THREE.TextureLoader().load(path)` and apply them to "
-            "PlaneGeometry walls, SpriteMaterial billboards (for enemies/"
-            "weapons), or BoxGeometry tiles. That's how you ship real "
-            "Doom-shaped output instead of a 12 KB raycaster sketch.\n"
+            "Pair three.js with <assets> using file://-safe texture wiring. "
+            "Do NOT rely on disabled web-security flags. If local PNG texture "
+            "loading fails in a normal browser file:// session, switch to a "
+            "file://-safe path (for example inline/data-URL textures) and keep "
+            "the same art direction. That's how you ship real Doom-shaped "
+            "output instead of a 12 KB raycaster sketch.\n"
             "\n"
             "ONLY hand-roll a raycaster if the goal explicitly says "
             "\"raycaster from scratch\" or \"no libraries\". Otherwise "

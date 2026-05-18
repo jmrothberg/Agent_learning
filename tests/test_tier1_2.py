@@ -293,6 +293,52 @@ def test_24_taint_downgrade_logic_in_source():
     assert "tainted" in src
 
 
+def test_24_strict_runtime_marker_detects_threejs_candidate():
+    assert tools._is_threejs_candidate_html(
+        "<script src='https://cdn.jsdelivr.net/npm/three@0.160/build/three.min.js'></script>"
+    )
+    assert not tools._is_threejs_candidate_html("<canvas id='c'></canvas>")
+
+
+def test_24_strict_failure_classifier_cors():
+    kind, summary, hint = tools._classify_strict_file_failure(
+        page_errors=["UNCAUGHT: SecurityError: blocked by CORS policy"],
+        console_errors=[],
+        canvas_info={"raf_ran": True},
+    )
+    assert kind == "cors_blocked"
+    assert "SecurityError" in summary or "security" in summary.lower()
+    assert "file://-safe" in hint
+
+
+def test_24_format_renders_strict_runtime_summary():
+    r = _stub_report()
+    r["strict_file_runtime"] = {
+        "checked": True,
+        "status": "fail",
+        "failure_type": "cors_blocked",
+        "summary": "SecurityError: blocked by CORS policy",
+        "hints": ["Use file://-safe texture loading."],
+    }
+    text = tools.format_report_for_model(r)
+    assert "Strict file:// runtime: FAIL [cors_blocked]" in text
+    assert "Strict fix hint" in text
+
+
+def test_24_strict_runtime_check_infra_error_is_nonfatal(monkeypatch):
+    class _BrokenPlaywright:
+        def __enter__(self):
+            raise RuntimeError("playwright unavailable")
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(tools, "sync_playwright", lambda: _BrokenPlaywright())
+    out = tools._run_strict_file_runtime_check(Path("/tmp/nope.html"))
+    assert out["status"] == "infra_error"
+    assert out["failure_type"] == "infra_error"
+
+
 # ---------------------------------------------------------------------------
 # A1 — crash-site source slice (tools.extract_crash_source_slices)
 # ---------------------------------------------------------------------------

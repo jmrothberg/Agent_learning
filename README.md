@@ -338,6 +338,13 @@ default):
 - Launches with `--allow-file-access-from-files` +
   `--disable-web-security` so `drawImage(<file:// PNG>)` doesn't taint
   the canvas.
+- For likely three.js/WebGL pages, runs a short second strict check in
+  stock `file://` Chromium **without** those relaxed flags; strict
+  failures are classified into concise repair buckets
+  (`cors_blocked`, `script_load_failed`, `asset_path_missing`,
+  `render_loop_missing`) and block `ok=True`. If the strict checker
+  itself fails (harness infra issue), it downgrades to a warning and
+  does not block shipping.
 - Captures `console.error` and `pageerror`, capped at 12 lines × 240
   chars to keep small models from drowning in logs.
 - Canvas state (size, RAF fired, blank detection sampling 32×32

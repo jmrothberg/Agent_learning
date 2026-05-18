@@ -222,6 +222,143 @@ def _truncate(s: str, n: int) -> str:
     return s[:n] + f"...[+{len(s) - n} chars]"
 
 
+_THREE_RUNTIME_MARKERS = (
+    "three.min.js",
+    "three.js",
+    "three@",
+    "new three.",
+    "three.webglrenderer",
+)
+
+
+def _is_threejs_candidate_html(html_text: str) -> bool:
+    """Cheap gate: strict outside-agent check only for likely three.js pages."""
+    if not html_text:
+        return False
+    low = html_text.lower()
+    return any(mark in low for mark in _THREE_RUNTIME_MARKERS)
+
+
+def _classify_strict_file_failure(
+    page_errors: list[str],
+    console_errors: list[str],
+    canvas_info: dict[str, Any] | None,
+) -> tuple[str, str, str]:
+    """Map strict-file failures to one concise class + one concise fix hint."""
+    merged = [*(page_errors or []), *(console_errors or [])]
+    low = "\n".join(merged).lower()
+    first = (merged[0] if merged else "").strip()
+    if any(tok in low for tok in ("securityerror", "cross-origin", "blocked by cors", "cors")):
+        return (
+            "cors_blocked",
+            first or "Security/CORS restriction triggered in stock file:// runtime.",
+            "Use file://-safe texture loading (for example inline/data URL textures), not harness-only security flags.",
+        )
+    if any(tok in low for tok in ("err_file_not_found", "failed to load resource", "not allowed to load local resource", "404")):
+        return (
+            "asset_path_missing",
+            first or "One or more local asset paths failed in stock file:// runtime.",
+            "Fix relative asset paths and ensure each referenced local file exists next to the HTML.",
+        )
+    if any(tok in low for tok in ("failed to load module script", "cannot use import statement outside a module", "three is not defined")):
+        return (
+            "script_load_failed",
+            first or "Core script/module failed in stock file:// runtime.",
+            "Use a script-loading path that works in normal browser file:// mode.",
+        )
+    if page_errors:
+        return (
+            "render_loop_missing",
+            first or "Uncaught runtime error prevents stable render loop in stock file:// runtime.",
+            "Fix the first uncaught exception; render/update loop must run cleanly before tuning visuals.",
+        )
+    if canvas_info and canvas_info.get("raf_ran") is False:
+        return (
+            "render_loop_missing",
+            "requestAnimationFrame never fired in stock file:// runtime.",
+            "Start RAF after scene setup and avoid early returns that block the loop.",
+        )
+    return "", "", ""
+
+
+def _run_strict_file_runtime_check(path: Path, run_seconds: float = 1.2) -> dict[str, Any]:
+    """Second-pass outside-agent check: stock Chromium file:// with no relaxed flags."""
+    page_errors: list[str] = []
+    console_errors: list[str] = []
+    canvas_info: dict[str, Any] | None = None
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True, args=[])
+            context = browser.new_context(viewport={"width": 800, "height": 600})
+            try:
+                context.add_init_script(_INSTRUMENTATION_JS)
+                page = context.new_page()
+
+                def on_console(msg):
+                    if msg.type == "error":
+                        console_errors.append(_truncate(msg.text, _MAX_MSG_LEN))
+
+                def on_pageerror(exc):
+                    page_errors.append(_truncate(f"UNCAUGHT: {exc}", _MAX_MSG_LEN))
+
+                page.on("console", on_console)
+                page.on("pageerror", on_pageerror)
+                try:
+                    page.goto(f"file://{path}", wait_until="load", timeout=8_000)
+                except Exception as e:
+                    return {
+                        "checked": True,
+                        "status": "fail",
+                        "failure_type": "script_load_failed",
+                        "summary": _truncate(str(e), _MAX_MSG_LEN),
+                        "hints": [
+                            "Ensure scripts/assets load under normal file:// browser settings (no special flags).",
+                        ],
+                    }
+                time.sleep(max(0.8, min(run_seconds, 1.8)))
+                try:
+                    canvas_info = page.evaluate(_CANVAS_PROBE_JS)
+                except Exception:
+                    canvas_info = None
+            finally:
+                try:
+                    context.close()
+                except Exception:
+                    pass
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+    except Exception as e:
+        # Circuit breaker: harness infra issues should not block shipping.
+        return {
+            "checked": True,
+            "status": "infra_error",
+            "failure_type": "infra_error",
+            "summary": _truncate(str(e), _MAX_MSG_LEN),
+            "hints": [],
+        }
+
+    failure_type, summary, hint = _classify_strict_file_failure(
+        page_errors, console_errors, canvas_info
+    )
+    if failure_type:
+        return {
+            "checked": True,
+            "status": "fail",
+            "failure_type": failure_type,
+            "summary": _truncate(summary, _MAX_MSG_LEN),
+            "hints": [hint][:1],
+        }
+    return {
+        "checked": True,
+        "status": "pass",
+        "failure_type": "",
+        "summary": "Runs in stock file:// Chromium without harness-only flags.",
+        "hints": [],
+    }
+
+
 # JS injected via add_init_script BEFORE any of the page's own scripts run.
 # Hooks requestAnimationFrame (so we know if the loop fires) and wraps
 # addEventListener (so we can count input handlers). Shared by both
@@ -1513,6 +1650,22 @@ def format_report_for_model(report: dict[str, Any]) -> str:
     lines.append(f"Body text length: {report['body_chars']} chars")
     if report["body_sample"]:
         lines.append(f"Body sample: {report['body_sample']!r}")
+    strict = report.get("strict_file_runtime") or {}
+    if strict.get("checked"):
+        status = strict.get("status")
+        if status == "pass":
+            lines.append("Strict file:// runtime: pass")
+        elif status == "fail":
+            lines.append(
+                "Strict file:// runtime: FAIL "
+                f"[{strict.get('failure_type') or 'unknown'}] — "
+                f"{strict.get('summary') or 'failed'}"
+            )
+            hints = strict.get("hints") or []
+            if hints:
+                lines.append(f"Strict fix hint: {hints[0]}")
+        elif status == "infra_error":
+            lines.append("Strict file:// runtime: unavailable (harness issue)")
     if report["errors"]:
         # 2.4: split rendering when the harness exposed kinds. Page
         # errors (uncaught exceptions) are usually game bugs the model
@@ -2099,6 +2252,36 @@ class LiveBrowser:
                 for p in probe_results
                 if not p.get("ok") and p.get("err")
             ]
+        # Outside-agent strict compatibility gate for likely three.js pages:
+        # run a short second pass under stock file:// Chromium (no relaxed
+        # security flags). Keep diagnostics compact so local small models can
+        # fix in one iteration.
+        strict_runtime: dict[str, Any] = {"checked": False}
+        try:
+            html_text = path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            html_text = ""
+        if _is_threejs_candidate_html(html_text):
+            strict_runtime = _run_strict_file_runtime_check(
+                path, run_seconds=min(1.4, max(0.9, self._run_seconds / 2.0))
+            )
+            status = strict_runtime.get("status")
+            if status == "fail":
+                failure_type = strict_runtime.get("failure_type") or "unknown"
+                summary = strict_runtime.get("summary") or "outside-agent strict file:// check failed"
+                report["soft_warnings"].append(
+                    f"STRICT FILE RUNTIME FAILED [{failure_type}]: {summary}"
+                )
+                hints = strict_runtime.get("hints") or []
+                if hints:
+                    report["soft_warnings"].append(f"STRICT FIX HINT: {hints[0]}")
+            elif status == "infra_error":
+                # Circuit breaker: strict-check infra problems are non-blocking.
+                summary = strict_runtime.get("summary") or "unknown harness issue"
+                report["warnings"].append(
+                    f"Strict outside-agent check unavailable: {summary}"
+                )
+        report["strict_file_runtime"] = strict_runtime
         # ok must reflect the fresh soft_warnings count after we appended.
         report["ok"] = len(report["errors"]) == 0 and len(report["soft_warnings"]) == 0
         return report

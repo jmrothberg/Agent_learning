@@ -207,6 +207,7 @@ def test_b1_3d_nudge_appears_in_plan_instruction():
     out = prompts_v1.plan_instruction(goal="first person shooter with monsters")
     assert "3D INTENT DETECTED" in out
     assert "three.js" in out
+    assert "file://" in out
 
 
 def test_b1_no_3d_nudge_for_2d_goal():
@@ -220,6 +221,12 @@ def test_b1_both_nudges_can_fire_together():
     out = prompts_v1.plan_instruction(goal="first person shooter with sprite art")
     assert "ART INTENT DETECTED" in out
     assert "3D INTENT DETECTED" in out
+
+
+def test_b1_hard_rules_require_threejs_file_runtime():
+    joined = "\n".join(prompts_v1.HARD_RULES)
+    assert "three.js/WebGL" in joined
+    assert "file://" in joined
 
 
 # ---------------------------------------------------------------------------
