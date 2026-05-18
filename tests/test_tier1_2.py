@@ -339,6 +339,17 @@ def test_24_strict_runtime_check_infra_error_is_nonfatal(monkeypatch):
     assert out["failure_type"] == "infra_error"
 
 
+def test_24_format_renders_scoped_check_summary():
+    r = _stub_report()
+    r["scoped_check"] = {
+        "required": True,
+        "keywords": ["cpu", "facing"],
+        "pass": False,
+    }
+    text = tools.format_report_for_model(r)
+    assert "Scoped check: FAIL (cpu, facing)" in text
+
+
 # ---------------------------------------------------------------------------
 # A1 — crash-site source slice (tools.extract_crash_source_slices)
 # ---------------------------------------------------------------------------

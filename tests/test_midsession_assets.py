@@ -161,3 +161,129 @@ def test_midsession_overwrite_same_name(tmp_path: Path) -> None:
     # cache may still reference it) but the session pointer moves.
     assert a._session_assets["alien"] != old_path
     assert Path(a._session_assets["alien"]).exists()
+
+
+def test_midsession_same_name_skips_loader_block(tmp_path: Path) -> None:
+    """MK trace 20260517_220025 fix: when an asset is regenerated with
+    a name already referenced by the on-disk HTML, the heavy
+    `ASSETS_LOADER` block must NOT be injected — the regenerated PNG
+    has already replaced the file, and the existing drawImage() call
+    picks it up. Emit a compact MEDIA REGEN COMPLETE confirmation
+    instead so the model doesn't think it needs to add a loader."""
+    a = _make_agent(tmp_path)
+    a._asset_generator = _StubImageGenerator()
+    # Simulate the current on-disk HTML referencing `player_kick` via
+    # the canonical ASSETS map pattern.
+    a._current_file = (
+        "<html><body><canvas></canvas><script>"
+        "const ASSETS = {};"
+        "ASSETS.player_kick = new Image();"
+        "ASSETS['player_kick'].src = './g_assets/player_kick.png';"
+        "</script></body></html>"
+    )
+    old = tmp_path / "old_player_kick.png"
+    old.write_bytes(b"old bytes")
+    a._session_assets = {"player_kick": old}
+
+    reply = (
+        "<assets>[{\"name\": \"player_kick\", \"prompt\": \"mirrored kick\"}]"
+        "</assets>"
+    )
+    asyncio.run(_drain(a._maybe_generate_assets_and_sounds(
+        reply, trigger="mid_session",
+    )))
+
+    assert a._pending_feedback, "expected a queued feedback line"
+    fb = a._pending_feedback[0]
+    # Compact confirmation — name appears, but NOT the heavy loader.
+    assert "MEDIA REGEN COMPLETE" in fb
+    assert "player_kick" in fb
+    assert "changed" in fb
+    assert "ASSETS_LOADER" not in fb
+    assert "ULTRA IMPORTANT" not in fb
+    assert "async function loadAssets" not in fb
+
+
+def test_midsession_same_name_trace_records_old_new_hash(tmp_path: Path) -> None:
+    a = _make_agent(tmp_path)
+    a._asset_generator = _StubImageGenerator()
+    a._current_file = (
+        "<html><body><script>"
+        "const ASSETS = {}; ASSETS.player_kick = new Image();"
+        "</script></body></html>"
+    )
+    old = tmp_path / "old_player_kick.png"
+    old.write_bytes(b"old bytes")
+    a._session_assets = {"player_kick": old}
+    traces: list[dict] = []
+    a._trace = lambda obj: traces.append(obj)
+
+    reply = (
+        "<assets>[{\"name\": \"player_kick\", \"prompt\": \"mirrored kick\"}]"
+        "</assets>"
+    )
+    asyncio.run(_drain(a._maybe_generate_assets_and_sounds(
+        reply, trigger="mid_session",
+    )))
+
+    event = next(
+        t for t in traces
+        if t.get("kind") == "midsession_asset_injection_queued"
+    )
+    rep = event["asset_replacements"]["player_kick"]
+    assert rep["old_hash"] is not None
+    assert rep["new_hash"] is not None
+    assert rep["old_hash"] != rep["new_hash"]
+    assert rep["changed"] is True
+
+
+def test_midsession_new_name_still_emits_loader_block(tmp_path: Path) -> None:
+    """Negative control: a brand-new asset name (not in HTML) must
+    still get the full loader block so the model knows to wire it in."""
+    a = _make_agent(tmp_path)
+    a._asset_generator = _StubImageGenerator()
+    # Current HTML has no asset references at all.
+    a._current_file = "<html><body><canvas></canvas></body></html>"
+
+    reply = (
+        "<assets>[{\"name\": \"explosion\", \"prompt\": \"orange burst\"}]"
+        "</assets>"
+    )
+    asyncio.run(_drain(a._maybe_generate_assets_and_sounds(
+        reply, trigger="mid_session",
+    )))
+
+    assert a._pending_feedback, "expected a queued feedback line"
+    fb = a._pending_feedback[0]
+    # New name → full loader block injected.
+    assert "Mid-session asset/sound additions" in fb
+    assert "explosion" in fb
+
+
+def test_scoped_media_lock_drops_new_asset_names(tmp_path: Path) -> None:
+    a = _make_agent(tmp_path)
+    a._asset_generator = _StubImageGenerator()
+    existing = tmp_path / "player.png"
+    existing.write_bytes(b"")
+    a._session_assets = {"player": existing}
+    a._scoped_constraints = {
+        "mode": "media_only",
+        "media_name_lock": True,
+        "allowed_asset_names": ["player"],
+        "allowed_sound_names": [],
+    }
+    reply = (
+        "<assets>["
+        "{\"name\": \"player\", \"prompt\": \"updated player\"},"
+        "{\"name\": \"enemy_new\", \"prompt\": \"new enemy\"}"
+        "]</assets>"
+    )
+    asyncio.run(_drain(a._maybe_generate_assets_and_sounds(
+        reply, trigger="mid_session",
+    )))
+
+    assert "enemy_new" not in a._session_assets
+    assert any(
+        "SCOPED MEDIA NAME LOCK" in fb and "player" in fb
+        for fb in a._pending_feedback
+    )

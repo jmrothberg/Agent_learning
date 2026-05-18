@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from agent import GameAgent  # noqa: E402
 from backend import _read_mlx_context_length  # noqa: E402
+from chat import CodingBoxApp  # noqa: E402
 
 
 def _agent(tmp_path: Path) -> GameAgent:
@@ -64,6 +65,11 @@ def test_estimate_ctx_fill_skips_non_string_content(tmp_path: Path) -> None:
     ]
     # Only the two string contents count: 5 + 5 = 10
     assert a._estimate_ctx_fill() == 10
+
+
+def test_tui_defaults_to_wait_mode_profile() -> None:
+    app = CodingBoxApp()
+    assert app._run_profile == "local_manual"
 
 
 # ---------------------------------------------------------------------------

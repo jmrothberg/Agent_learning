@@ -255,6 +255,15 @@ def test_seeded_session_writes_into_original_folder(tmp_path: Path) -> None:
     (existing_dir / "player.png").write_bytes(b"\x89PNG seed")
 
     a = _make_agent(tmp_path, out_name=f"{seed_basename}.html")
+    # _make_agent creates the out_path and overwrites it with a tiny HTML
+    # placeholder, so restore the seed content before scanning it.
+    seed.write_text(
+        "<html><script>"
+        "const ASSETS={}; ASSETS.p2_hit = new Image();"
+        "ASSETS['p2_hit'].src='./fight_20260101_assets/p2_hit.png';"
+        "</script></html>",
+        encoding="utf-8",
+    )
     a._asset_generator = _StubImageGenerator()
     a._session_assets["player"] = (existing_dir / "player.png").resolve()
 
@@ -277,6 +286,40 @@ def test_seeded_session_writes_into_original_folder(tmp_path: Path) -> None:
     assert siblings.count(f"{seed_basename}_assets") == 1
     # The seed's original asset is intact (merge, not overwrite).
     assert "player" in a._session_assets
+
+
+def test_seed_media_contract_lists_unused_existing_assets(tmp_path: Path) -> None:
+    seed_basename = "fight_20260101"
+    seed = tmp_path / f"{seed_basename}.html"
+    seed.write_text(
+        "<html><script>"
+        "const ASSETS={}; ASSETS.p2_hit = new Image();"
+        "ASSETS['p2_hit'].src='./fight_20260101_assets/p2_hit.png';"
+        "</script></html>",
+        encoding="utf-8",
+    )
+    a = _make_agent(tmp_path, out_name=f"{seed_basename}.html")
+    seed.write_text(
+        "<html><script>"
+        "const ASSETS={}; ASSETS.p2_hit = new Image();"
+        "ASSETS['p2_hit'].src='./fight_20260101_assets/p2_hit.png';"
+        "</script></html>",
+        encoding="utf-8",
+    )
+    a._session_assets = {
+        "p2_hit": tmp_path / "p2_hit.png",
+        "p2_idle_1": tmp_path / "p2_idle_1.png",
+        "p2_idle_2": tmp_path / "p2_idle_2.png",
+    }
+    block = a._render_seed_media_contract(seed.read_text())
+
+    assert "SEED MEDIA CONTRACT" in block
+    assert "Available assets:" in block
+    assert "Referenced assets in HTML: p2_hit" in block
+    assert "Existing assets not currently referenced/loaded:" in block
+    assert "p2_idle_1" in block
+    assert "p2_idle_2" in block
+    assert "use existing" in block.lower()
 
 
 def test_fresh_session_creates_basename_folder(tmp_path: Path) -> None:

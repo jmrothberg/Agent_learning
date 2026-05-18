@@ -17,9 +17,15 @@ These tests pin the routing fix so the failure doesn't recur:
 
 from __future__ import annotations
 
+from pathlib import Path
+from unittest.mock import MagicMock
+
 from agent import (
+    GameAgent,
     _feedback_is_art_change,
     _feedback_is_behavior_bug,
+    _feedback_is_orientation_change,
+    _feedback_mentions_scoped_behavior_change,
     _feedback_is_sound_change,
     _feedback_locks_code,
 )
@@ -227,3 +233,440 @@ def test_redo_the_run_frames_is_art_change() -> None:
     """'frames' covers user phrasing like 'redo the run frames'."""
     text = "redo the run frames, they don't look like walking"
     assert _feedback_is_art_change(text, DK_ASSETS) is True
+
+
+def _make_agent(tmp_path: Path) -> GameAgent:
+    out = tmp_path / "g.html"
+    out.write_text("<html></html>")
+    return GameAgent(
+        model="stub",
+        out_path=out,
+        browser=MagicMock(),
+        max_iters=2,
+        memory_root=str(tmp_path / "memory"),
+    )
+
+
+def test_scoped_lock_suppresses_unrelated_coaching(tmp_path: Path) -> None:
+    a = _make_agent(tmp_path)
+    a._session_assets = {"tail": tmp_path / "tail.png"}
+    a._pending_coaching.append("unrelated coaching should be hidden")
+    a._pending_feedback.append("only change the tail sprite, no code changes")
+    rendered = a._flush_user_injections(base_message="<base>")
+
+    assert "SCOPED-CHANGE DIRECTIVE" in rendered
+    assert "AGENT COACHING" not in rendered
+    assert a._pending_coaching == []
+
+
+def test_scoped_validator_rejects_format_preamble(tmp_path: Path) -> None:
+    a = _make_agent(tmp_path)
+    a._session_assets = {"player": tmp_path / "player.png"}
+    a._pending_feedback.append("only make the player faster, no code changes")
+    a._flush_user_injections(base_message="<base>")
+
+    violation = a._scoped_reply_violation(
+        "I will patch now\n<patch>\n<<<<<<< SEARCH\nA\n=======\nB\n>>>>>>> REPLACE\n</patch>"
+    )
+    assert violation is not None
+    assert "SCOPED FORMAT" in violation
+
+
+def test_scoped_validator_rejects_full_rewrite_and_multi_patch(tmp_path: Path) -> None:
+    a = _make_agent(tmp_path)
+    a._session_assets = {"player": tmp_path / "player.png"}
+    a._pending_feedback.append("only tweak jump speed, no code changes")
+    a._flush_user_injections(base_message="<base>")
+
+    html_violation = a._scoped_reply_violation(
+        "<html_file><!doctype html><html><body></body></html></html_file>"
+    )
+    assert html_violation is not None
+    assert "full <html_file>" in html_violation
+
+    multi_patch_violation = a._scoped_reply_violation(
+        "<patch>\n<<<<<<< SEARCH\nA\n=======\nB\n>>>>>>> REPLACE\n</patch>\n"
+        "<patch>\n<<<<<<< SEARCH\nC\n=======\nD\n>>>>>>> REPLACE\n</patch>"
+    )
+    assert multi_patch_violation is not None
+    assert "exactly one <patch>" in multi_patch_violation
+
+
+def test_behavior_scoped_turn_requires_probe_signal(tmp_path: Path) -> None:
+    a = _make_agent(tmp_path)
+    a._session_assets = {"fighter_kick": tmp_path / "fighter_kick.png"}
+    feedback = "only turn the kick around to face cpu, no code changes elsewhere"
+    assert _feedback_mentions_scoped_behavior_change(feedback)
+    a._pending_feedback.append(feedback)
+    a._flush_user_injections(base_message="<base>")
+
+    no_probe = a._scoped_reply_violation(
+        "<patch>\n<<<<<<< SEARCH\nA\n=======\nB\n>>>>>>> REPLACE\n</patch>"
+    )
+    assert no_probe is not None
+    assert "SCOPED CHECK" in no_probe
+
+    with_probe = (
+        "<patch>\n<<<<<<< SEARCH\nA\n=======\nB\n>>>>>>> REPLACE\n</patch>\n"
+        "<probes>[{\"name\":\"cpu_facing_fix\",\"expr\":\"window.state.cpuFacing==='left'\"}]</probes>"
+    )
+    assert a._scoped_reply_violation(with_probe) is None
+
+
+def test_apply_scoped_check_marks_report_fail_when_probe_not_passing(
+    tmp_path: Path,
+) -> None:
+    a = _make_agent(tmp_path)
+    a._pending_scoped_check_keywords = ["cpu"]
+    report = {
+        "ok": True,
+        "soft_warnings": [],
+        "probes": [
+            {"name": "cpu_behavior", "expr": "window.state.cpuAction !== 'jump'", "ok": False, "err": "falsy"}
+        ],
+    }
+    a._apply_scoped_check_to_report(report)
+    assert report["scoped_check"]["required"] is True
+    assert report["scoped_check"]["pass"] is False
+    assert report["ok"] is False
+    assert any("SCOPED CHECK FAILED" in w for w in report["soft_warnings"])
+
+
+# ----------------------------------------------------------------------
+# Tier 1.1: sound classifier must NOT fire on graphics-only feedback
+# that happens to mention combat action words (MK trace
+# 20260517_220025).
+# ----------------------------------------------------------------------
+
+
+MK_SOUNDS = [
+    "block", "fatality", "fireball_hit", "fireball_launch",
+    "kick", "music", "punch",
+]
+
+
+def test_mk_invert_player_kick_is_not_sound_change() -> None:
+    """First MK feedback: pure graphics question, no audio vocabulary.
+    Must NOT classify as sound_change even though "kick" is a sound
+    name."""
+    text = "is there a way to INVERT the asset we use for the player kick?"
+    assert _feedback_is_sound_change(text, MK_SOUNDS) is False
+
+
+def test_mk_facing_wrong_way_is_not_sound_change() -> None:
+    """Second MK feedback: orientation request. Mentions "kicks",
+    "punching", "jump" — all ambiguous action words — but no audio
+    vocabulary. Must NOT classify as sound_change."""
+    text = (
+        "the player is facing the wrong way when it kicks, make a new "
+        "asset facing the other way. the cpu is facing the wrong way "
+        "idle, kicking and punching, JUMP is correct facing. this "
+        "should be an easy NEW ASSET"
+    )
+    assert _feedback_is_sound_change(text, MK_SOUNDS) is False
+
+
+def test_explicit_music_feedback_is_sound_change() -> None:
+    """Positive case: explicit audio vocabulary routes to sound_change."""
+    text = "the music is too loud, replace it with something quieter"
+    assert _feedback_is_sound_change(text, MK_SOUNDS) is True
+
+
+def test_explicit_sound_for_kick_is_sound_change() -> None:
+    """User says they want a new sound for the kick → audio context
+    + ambiguous-name match → True."""
+    text = "make a new sound effect for the kick"
+    assert _feedback_is_sound_change(text, MK_SOUNDS) is True
+
+
+# ----------------------------------------------------------------------
+# Tier 1.3: orientation-change classifier (genre-free).
+# ----------------------------------------------------------------------
+
+
+def test_orientation_invert_fires() -> None:
+    assert _feedback_is_orientation_change(
+        "invert the player_kick sprite please"
+    ) is True
+
+
+def test_orientation_mirror_fires() -> None:
+    assert _feedback_is_orientation_change(
+        "mirror the cpu punch horizontally"
+    ) is True
+
+
+def test_orientation_flip_fires() -> None:
+    assert _feedback_is_orientation_change(
+        "flip the cpu_warrior so it faces the player"
+    ) is True
+
+
+def test_orientation_wrong_way_fires() -> None:
+    assert _feedback_is_orientation_change(
+        "the player kick is facing the wrong way"
+    ) is True
+
+
+def test_orientation_regen_blocker_suppresses() -> None:
+    """User explicitly asks for new art → not an orientation request."""
+    assert _feedback_is_orientation_change(
+        "make a new asset for cpu_warrior facing the other way"
+    ) is False
+    assert _feedback_is_orientation_change(
+        "regenerate the player kick so it mirrors correctly"
+    ) is False
+    assert _feedback_is_orientation_change(
+        "redraw the punch sprite, the current one is bad"
+    ) is False
+
+
+def test_orientation_empty_is_false() -> None:
+    assert _feedback_is_orientation_change("") is False
+    assert _feedback_is_orientation_change(None) is False  # type: ignore[arg-type]
+
+
+def test_orientation_invert_routes_to_mirror_not_media_change(tmp_path: Path) -> None:
+    """MK trace 20260517_220025 turn-4 feedback. The standalone
+    classifier says orientation_change=True; the agent routing must
+    suppress MEDIA-CHANGE and inject ORIENTATION-CHANGE instead so
+    the model emits a canvas mirror patch, not <assets> regen."""
+    a = _make_agent(tmp_path)
+    a._session_assets = {"player_kick": tmp_path / "player_kick.png"}
+    a._session_sounds = {"kick": tmp_path / "kick.ogg"}
+    a._pending_feedback.append(
+        "is there a way to INVERT the asset we use for the player kick?"
+    )
+    rendered = a._flush_user_injections(base_message="<base>")
+
+    # MEDIA-CHANGE must NOT fire — orientation request, not regen.
+    assert "MEDIA-CHANGE DIRECTIVE" not in rendered
+    # ORIENTATION-CHANGE DIRECTIVE must fire with the canvas recipe.
+    assert "ORIENTATION-CHANGE DIRECTIVE" in rendered
+    assert "ctx.scale(-1, 1)" in rendered
+    # Contract flag set.
+    assert a._last_turn_contract["orientation_change"] is True
+
+
+def test_orientation_new_asset_still_routes_to_media_change(tmp_path: Path) -> None:
+    """MK trace 20260517_220025 turn-5 feedback explicitly says
+    'make a new asset' which is a regen request, not a mirror. The
+    orientation classifier must NOT fire here and MEDIA-CHANGE must
+    proceed normally."""
+    a = _make_agent(tmp_path)
+    a._session_assets = {"player_kick": tmp_path / "player_kick.png"}
+    a._session_sounds = {"kick": tmp_path / "kick.ogg"}
+    a._pending_feedback.append(
+        "the player is facing the wrong way when it kicks, make a new "
+        "asset facing the other way"
+    )
+    rendered = a._flush_user_injections(base_message="<base>")
+    # ORIENTATION suppressor must NOT trigger.
+    assert "ORIENTATION-CHANGE DIRECTIVE" not in rendered
+    assert a._last_turn_contract["orientation_change"] is False
+
+
+# ----------------------------------------------------------------------
+# Tier 2.1: scoped constraints applied from the initial goal text
+# (MK trace 20260517_220025: goal had 'make NO other changes' but the
+# first build user message was assembled without scope arbitration).
+# ----------------------------------------------------------------------
+
+
+def test_initial_goal_scope_lock_applied(tmp_path: Path) -> None:
+    """A strict-scope initial goal must configure scoped constraints
+    AND inject the SCOPE LOCK notice into the build_msg before it's
+    flushed."""
+    a = _make_agent(tmp_path)
+    a._session_assets = {"cpu_punch": tmp_path / "cpu_punch.png"}
+    goal = "ROTATING just the CPU punch horizontally make NO other changes."
+    augmented = a._apply_initial_goal_scoping(goal, "<base>")
+    assert "INITIAL-GOAL SCOPE LOCK" in augmented
+    assert a._scoped_constraints is not None
+    assert a._scoped_constraints.get("mode") in ("single_patch", "media_only")
+
+
+def test_unscoped_initial_goal_passes_through(tmp_path: Path) -> None:
+    """A plain goal must not configure scoped constraints or augment
+    the build_msg — most sessions remain unscoped."""
+    a = _make_agent(tmp_path)
+    goal = "build me a simple snake game with wraparound"
+    augmented = a._apply_initial_goal_scoping(goal, "<base>")
+    assert augmented == "<base>"
+    assert a._scoped_constraints is None
+
+
+# ----------------------------------------------------------------------
+# Tier 2.3: bounded asset-only turn prompt for media_only scope.
+# ----------------------------------------------------------------------
+
+
+def test_media_only_turn_appends_bounded_output_spec(tmp_path: Path) -> None:
+    """When the user locks the turn to asset regen, the bounded
+    output spec must appear at the end of the user message so the
+    model sees a hard 'one <assets> block, stop' instruction."""
+    a = _make_agent(tmp_path)
+    a._session_assets = {
+        "player_kick": tmp_path / "player_kick.png",
+        "cpu_punch": tmp_path / "cpu_punch.png",
+    }
+    a._pending_feedback.append(
+        "redraw the player_kick sprite, only the asset, no code changes"
+    )
+    rendered = a._flush_user_injections(base_message="<base>")
+    assert "BOUNDED OUTPUT — MEDIA ONLY" in rendered
+    assert "player_kick" in rendered
+    assert "</assets> and STOP" in rendered
+    assert a._scoped_constraints["mode"] == "media_only"
+
+
+def test_single_patch_turn_does_not_append_bounded_asset_block(tmp_path: Path) -> None:
+    """A single_patch scoped turn (behavior tweak, not asset regen)
+    must NOT inject the BOUNDED OUTPUT block — that's only for
+    media_only mode."""
+    a = _make_agent(tmp_path)
+    a._session_assets = {"player_kick": tmp_path / "player_kick.png"}
+    a._pending_feedback.append(
+        "only turn the kick around to face cpu, no code changes elsewhere"
+    )
+    rendered = a._flush_user_injections(base_message="<base>")
+    assert a._scoped_constraints["mode"] == "single_patch"
+    assert "BOUNDED OUTPUT — MEDIA ONLY" not in rendered
+
+
+# ----------------------------------------------------------------------
+# Tier 1.2: turn_contract bookkeeping inside _flush_user_injections.
+# ----------------------------------------------------------------------
+
+
+def test_turn_contract_records_flags_on_feedback_turn(tmp_path: Path) -> None:
+    """After draining feedback, the agent records the classifier flags
+    on `_last_turn_contract` so `_stream` can emit one `turn_contract`
+    row per stream."""
+    a = _make_agent(tmp_path)
+    a._session_assets = {"player_kick": tmp_path / "player_kick.png"}
+    a._pending_feedback.append("only mirror the player_kick, no code changes")
+    a._flush_user_injections(base_message="<base>")
+    c = a._last_turn_contract
+    assert c is not None
+    assert c["had_feedback"] is True
+    assert c["locks_code"] is True
+    assert c["orientation_change"] is True
+
+
+def test_turn_contract_resets_on_empty_feedback_turn(tmp_path: Path) -> None:
+    """A turn with no queued feedback must record had_feedback=False so
+    stale flags from a prior turn don't leak into this turn's contract."""
+    a = _make_agent(tmp_path)
+    a._session_assets = {"player_kick": tmp_path / "player_kick.png"}
+    # First turn: feedback present, contract reflects it.
+    a._pending_feedback.append("only mirror the player_kick, no code changes")
+    a._flush_user_injections(base_message="<base>")
+    assert a._last_turn_contract["had_feedback"] is True
+    # Second turn: no feedback queued, contract resets.
+    a._flush_user_injections(base_message="<base>")
+    assert a._last_turn_contract["had_feedback"] is False
+    assert a._last_turn_contract["locks_code"] is False
+    assert a._last_turn_contract["orientation_change"] is False
+
+
+def test_derive_allowed_forbidden_tags_first_build(tmp_path: Path) -> None:
+    """First build (no snapshot yet, no scoped lock) expects <html_file>."""
+    a = _make_agent(tmp_path)
+    a._snapshot_n = 0
+    a._scoped_constraints = None
+    a._allow_one_rewrite = False
+    allowed, forbidden = a._derive_allowed_forbidden_tags()
+    assert "<html_file>" in allowed
+    assert forbidden == []
+
+
+def test_derive_allowed_forbidden_tags_mid_session_no_rewrite(tmp_path: Path) -> None:
+    """Mid-session without rewrite exemption: patches only."""
+    a = _make_agent(tmp_path)
+    a._snapshot_n = 2
+    a._scoped_constraints = None
+    a._allow_one_rewrite = False
+    allowed, forbidden = a._derive_allowed_forbidden_tags()
+    assert allowed == ["<patch>"]
+    assert "<html_file>" in forbidden
+
+
+def test_derive_allowed_forbidden_tags_media_only(tmp_path: Path) -> None:
+    """media_only scoped mode forbids <patch> and <html_file>."""
+    a = _make_agent(tmp_path)
+    a._snapshot_n = 2
+    a._scoped_constraints = {"mode": "media_only"}
+    allowed, forbidden = a._derive_allowed_forbidden_tags()
+    assert "<assets>" in allowed
+    assert "<patch>" in forbidden
+    assert "<html_file>" in forbidden
+
+
+def test_derive_allowed_forbidden_tags_single_patch(tmp_path: Path) -> None:
+    """single_patch scoped mode allows <patch> only, forbids <html_file>."""
+    a = _make_agent(tmp_path)
+    a._snapshot_n = 2
+    a._scoped_constraints = {"mode": "single_patch"}
+    allowed, forbidden = a._derive_allowed_forbidden_tags()
+    assert allowed == ["<patch>"]
+    assert "<html_file>" in forbidden
+
+
+def test_estimate_prompt_section_chars_keys(tmp_path: Path) -> None:
+    """The helper returns at minimum system and history_total keys; if
+    the most recent user message contains known markers, each marker
+    becomes a `section_*` key with a positive char count."""
+    a = _make_agent(tmp_path)
+    a._messages = [
+        {"role": "system", "content": "SYS"},
+        {
+            "role": "user",
+            "content": (
+                "================ USER FEEDBACK (HIGHEST PRIORITY) ================\n"
+                "do the thing\n"
+                "================ SCOPED-CHANGE DIRECTIVE ================\n"
+                "narrow it\n"
+            ),
+        },
+    ]
+    s = a._estimate_prompt_section_chars()
+    assert s["system"] == 3
+    assert s["history_total"] >= 3
+    assert s.get("section_user_feedback", 0) > 0
+    assert s.get("section_scoped_change", 0) > 0
+
+
+def test_post_clean_feedback_contract_compacts_clean_report(tmp_path: Path) -> None:
+    a = _make_agent(tmp_path)
+    a._previous_report_ok = True
+    a._previous_report = {
+        "ok": True,
+        "errors": [],
+        "soft_warnings": [],
+        "page_errors": [],
+        "console_errors": [],
+        "probes": [
+            {"name": "canvas", "ok": True},
+            {"name": "input", "ok": True},
+        ],
+    }
+    a._pending_feedback.append("each player is missing the hit image")
+    rendered = a._flush_user_injections(
+        "OK: True\nNo errors. The game works. STRONGLY prefer ending with <done/>.\n"
+        "Acceptance probes: lots of noisy details"
+    )
+    assert "POST-CLEAN FEEDBACK CONTRACT" in rendered
+    assert "PREVIOUS BUILD WAS CLEAN: 2/2 probes passed" in rendered
+    assert "Acceptance probes: lots of noisy details" not in rendered
+
+
+def test_media_directive_allows_missing_sprite_plus_loader_patch(tmp_path: Path) -> None:
+    a = _make_agent(tmp_path)
+    a._session_assets = {"p1_idle": tmp_path / "p1_idle.png"}
+    a._pending_feedback.append("missing image when hit, add the hit animation")
+    rendered = a._flush_user_injections(base_message="<base>")
+    assert "MEDIA-CHANGE DIRECTIVE" in rendered
+    assert "animation/image is MISSING" in rendered
+    assert "ONE small" in rendered
+    assert "asset loader/list" in rendered

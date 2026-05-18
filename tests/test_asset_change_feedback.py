@@ -23,6 +23,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from agent import (  # noqa: E402
     GameAgent,
     _feedback_is_art_change,
+    _feedback_requests_existing_media,
+    _feedback_mentions_scoped_behavior_change,
     _feedback_is_sound_change,
     _feedback_locks_code,
 )
@@ -101,6 +103,18 @@ def test_art_change_matches_noun_plus_verb() -> None:
     assert _feedback_is_art_change("change the sprite", [])
     assert _feedback_is_art_change("redraw the art", [])
     assert _feedback_is_art_change("update the graphics", [])
+
+
+def test_existing_media_request_suppresses_regen_intent() -> None:
+    assert _feedback_requests_existing_media(
+        "some animations are missing, dont redo them, use them, the original ones"
+    )
+    assert _feedback_requests_existing_media(
+        "use existing p2_idle frames, do not regenerate"
+    )
+    assert not _feedback_requests_existing_media(
+        "redraw the p2 block animation with new art"
+    )
 
 
 def test_art_change_negative_cases() -> None:
@@ -227,3 +241,57 @@ def test_flush_no_directive_when_no_assets_in_session(
     # (We don't assert _allow_one_rewrite here; code_locked still
     # suppresses it, and that's the desired behavior.)
     assert a._allow_one_rewrite is False
+
+
+def test_flush_persists_scoped_constraints_for_media_only_turn(
+    tmp_path: Path,
+) -> None:
+    a = _make_agent(tmp_path)
+    a._session_assets = {"tail": tmp_path / "tail.png"}
+    a._pending_feedback.append("redraw only the tail sprite, no code changes")
+    a._flush_user_injections(base_message="<base>")
+
+    assert a._scoped_constraints is not None
+    assert a._scoped_constraints["mode"] == "media_only"
+    assert a._scoped_constraints["media_name_lock"] is True
+    assert a._scoped_constraints["allowed_asset_names"] == ["tail"]
+
+
+def test_flush_routes_behavior_worded_animation_feedback_to_patch_mode(
+    tmp_path: Path,
+) -> None:
+    a = _make_agent(tmp_path)
+    a._session_assets = {"player_kick": tmp_path / "player_kick.png"}
+    text = (
+        "only change the animation so the kick turns around to face the CPU, "
+        "no code changes elsewhere"
+    )
+    assert _feedback_mentions_scoped_behavior_change(text) is True
+    a._pending_feedback.append(text)
+    a._flush_user_injections(base_message="<base>")
+
+    assert a._scoped_constraints is not None
+    assert a._scoped_constraints["mode"] == "single_patch"
+    assert a._scoped_constraints["max_patch_count"] == 1
+    assert a._scoped_constraints["require_scope_probe"] is True
+
+
+def test_flush_sets_preserve_baseline_guard_on_clean_scoped_tweak(
+    tmp_path: Path,
+) -> None:
+    a = _make_agent(tmp_path)
+    a._session_assets = {"player": tmp_path / "player.png"}
+    a._previous_report_ok = True
+    a._previous_report = {
+        "errors": [],
+        "soft_warnings": [],
+        "page_errors": [],
+        "console_errors": [],
+        "probes": [{"ok": True}],
+    }
+    a._pending_feedback.append("only make movement faster; no other changes")
+    a._flush_user_injections(base_message="<base>")
+
+    assert a._scoped_constraints is not None
+    assert a._scoped_constraints["mode"] == "single_patch"
+    assert a._scoped_constraints["preserve_baseline"] is True

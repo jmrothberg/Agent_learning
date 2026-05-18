@@ -32,6 +32,81 @@ _MAX_MSG_LEN = 240      # truncate each line to this many chars
 _MAX_BODY_TEXT = 200    # tiny snippet of body text
 
 
+_PROBE_EVAL_ERROR_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("syntax_error", re.compile(r"\bSyntaxError\b|missing \) after argument list", re.I)),
+    ("reference_error", re.compile(r"\bReferenceError\b", re.I)),
+    ("type_error", re.compile(r"\bTypeError\b", re.I)),
+)
+
+
+def _classify_probe_eval_error(err: str) -> str | None:
+    """Return a compact class when a probe failed before yielding a value.
+
+    These are harness/probe-expression failures, not game-state falsy
+    results. Keeping the classifier small prevents ordinary failed game
+    assertions from being softened.
+    """
+    if not err:
+        return None
+    for label, pat in _PROBE_EVAL_ERROR_PATTERNS:
+        if pat.search(err):
+            return label
+    return None
+
+
+_ARROW_IIFE_RE = re.compile(
+    r"^\(\s*(?:async\s*)?\(?[^=(){};]*\)?\s*=>.*\)\s*$",
+    re.DOTALL,
+)
+_FUNCTION_IIFE_RE = re.compile(
+    r"^\(\s*(?:async\s+)?function\b.*\)\s*$",
+    re.DOTALL,
+)
+
+
+def _normalize_probe_expr(expr: str) -> str:
+    """Normalize model-authored probe expressions before Boolean wrapping.
+
+    Strong models sometimes emit a bare IIFE expression with a trailing
+    semicolon, e.g. `(()=>{ ... });`. Wrapping that directly as
+    `Boolean(EXPR)` creates `Boolean((()=>{...});)` and throws a
+    SyntaxError. Strip one trailing semicolon and invoke bare function
+    expressions so the probe evaluates to the promised result.
+    """
+    out = str(expr or "true").strip()
+    if out.endswith(";"):
+        out = out[:-1].rstrip()
+    # Already-invoked IIFEs end with `)()` or `)(...)`; leave them alone.
+    already_invoked = bool(re.search(r"\)\s*\([^)]*\)\s*$", out))
+    if not already_invoked and (
+        _ARROW_IIFE_RE.match(out) or _FUNCTION_IIFE_RE.match(out)
+    ):
+        out += "()"
+    return out or "true"
+
+
+def _format_probe_failure_warning(p: dict[str, Any]) -> str:
+    """Human/model-facing warning for one failed probe."""
+    name = p.get("name", "probe")
+    expr = (p.get("expr") or "")[:80]
+    err = p.get("err") or "evaluated falsy"
+    if p.get("kind") == "eval_error":
+        error_class = p.get("error_class") or "eval_error"
+        return (
+            f"PROBE BROKEN [{name}]: `{expr}` — {err}. "
+            f"The probe expression itself errored at eval time "
+            f"({error_class}). This is the probe, not the game. "
+            "Re-emit a corrected <probes>...</probes> block alongside "
+            "your next code change; new probes are adopted when they "
+            "accompany code."
+        )
+    return (
+        f"PROBE FAILED [{name}]: `{expr}` — {err}. "
+        "Your Phase A acceptance criterion is unmet; fix the "
+        "game so it evaluates truthy."
+    )
+
+
 def screenshot_delta(prev_png: bytes | None, curr_png: bytes | None) -> float | None:
     """Mean per-pixel RGB delta between two PNGs, normalized to [0, 1].
 
@@ -1666,6 +1741,19 @@ def format_report_for_model(report: dict[str, Any]) -> str:
                 lines.append(f"Strict fix hint: {hints[0]}")
         elif status == "infra_error":
             lines.append("Strict file:// runtime: unavailable (harness issue)")
+    scoped = report.get("scoped_check") or {}
+    if scoped.get("required"):
+        keys = ", ".join(scoped.get("keywords") or [])
+        if scoped.get("pass"):
+            lines.append(
+                "Scoped check: PASS"
+                + (f" ({keys})" if keys else "")
+            )
+        else:
+            lines.append(
+                "Scoped check: FAIL"
+                + (f" ({keys})" if keys else "")
+            )
     if report["errors"]:
         # 2.4: split rendering when the harness exposed kinds. Page
         # errors (uncaught exceptions) are usually game bugs the model
@@ -1929,7 +2017,7 @@ class LiveBrowser:
             for p in probes:
                 pname = str(p.get("name") or "probe")[:60]
                 pexpr = str(p.get("expr") or "true")[:600]
-                ok, err = await self._run_probe(pexpr)
+                ok, err, err_kind = await self._run_probe(pexpr)
                 # 1.2: tainted-canvas / cross-origin / SecurityError on
                 # getImageData are HARNESS-side limitations, not game
                 # bugs — the actual canvas might be perfectly rendered.
@@ -1944,12 +2032,17 @@ class LiveBrowser:
                 entry: dict[str, Any] = {
                     "name": pname, "expr": pexpr[:200], "ok": ok, "err": err,
                 }
+                if err_kind:
+                    entry["kind"] = "eval_error"
+                    entry["error_class"] = err_kind
                 if taint_signal and not ok:
                     entry["ok"] = True
                     entry["downgraded"] = (
                         "harness-side CORS/taint (probe relies on "
                         "getImageData/toDataURL) — treating as pass"
                     )
+                    entry.pop("kind", None)
+                    entry.pop("error_class", None)
                 probe_results.append(entry)
 
         title = (await self._page.title()) or ""
@@ -2015,6 +2108,16 @@ class LiveBrowser:
             f"{p.get('name','?')}: {p.get('err','')[:160]}"
             for p in probe_results
             if not p.get("ok") and p.get("err")
+        ]
+        report["probe_eval_errors"] = [
+            {
+                "name": p.get("name", "probe"),
+                "expr_preview": (p.get("expr") or "")[:120],
+                "error_class": p.get("error_class") or "eval_error",
+                "err": (p.get("err") or "")[:200],
+            }
+            for p in probe_results
+            if not p.get("ok") and p.get("kind") == "eval_error"
         ]
         # A1: precompute source slices once so format_report_for_model
         # doesn't re-read the file on every render. file_filter biases the
@@ -2199,12 +2302,7 @@ class LiveBrowser:
                 continue
             name = p.get("name", "probe")
             expr = (p.get("expr") or "")[:80]
-            err = p.get("err") or "evaluated falsy"
-            report["soft_warnings"].append(
-                f"PROBE FAILED [{name}]: `{expr}` — {err}. "
-                "Your Phase A acceptance criterion is unmet; fix the "
-                "game so it evaluates truthy."
-            )
+            report["soft_warnings"].append(_format_probe_failure_warning(p))
         # Stop-Losing-To-OneShot todo #2 — criteria/probe coverage gate.
         # The model authors its own <probes>; mid-tier models often write
         # existence-only probes (`!!player`) that pass even when the
@@ -2252,6 +2350,16 @@ class LiveBrowser:
                 for p in probe_results
                 if not p.get("ok") and p.get("err")
             ]
+            report["probe_eval_errors"] = [
+                {
+                    "name": p.get("name", "probe"),
+                    "expr_preview": (p.get("expr") or "")[:120],
+                    "error_class": p.get("error_class") or "eval_error",
+                    "err": (p.get("err") or "")[:200],
+                }
+                for p in probe_results
+                if not p.get("ok") and p.get("kind") == "eval_error"
+            ]
         # Outside-agent strict compatibility gate for likely three.js pages:
         # run a short second pass under stock file:// Chromium (no relaxed
         # security flags). Keep diagnostics compact so local small models can
@@ -2293,11 +2401,12 @@ class LiveBrowser:
         except Exception:
             return None
 
-    async def _run_probe(self, expr: str) -> tuple[bool, str]:
+    async def _run_probe(self, expr: str) -> tuple[bool, str, str | None]:
         """Run one model-proposed probe expression in the page; return
-        (ok, err). Wraps in (() => Boolean(EXPR))() so the model can write
-        either a boolean expression or a IIFE.
+        (ok, err, err_kind). Wraps in (() => Boolean(EXPR))() so the model
+        can write either a boolean expression or an IIFE.
         """
+        expr = _normalize_probe_expr(expr)
         wrapped = (
             "(() => { try { return Boolean(" + expr + "); } "
             "catch (e) { return { __probe_err: String(e && e.message || e) }; } })()"
@@ -2305,10 +2414,12 @@ class LiveBrowser:
         try:
             res = await self._page.evaluate(wrapped)
             if isinstance(res, dict) and res.get("__probe_err"):
-                return False, str(res["__probe_err"])[:200]
-            return bool(res), ""
+                err = str(res["__probe_err"])[:200]
+                return False, err, _classify_probe_eval_error(err)
+            return bool(res), "", None
         except Exception as e:
-            return False, str(e)[:200]
+            err = str(e)[:200]
+            return False, err, _classify_probe_eval_error(err)
 
     async def _input_smoke_test(self) -> dict[str, Any]:
         """Hold each test key for a few frames; report whether the canvas changed.

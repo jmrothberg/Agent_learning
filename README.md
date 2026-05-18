@@ -252,6 +252,24 @@ a token callback, and consume the event stream. The TUI adds a
 mid-stream user feedback queue drained at every user-turn boundary by
 `_flush_user_injections`.
 
+**Scoped-turn hard enforcement (small-local-LLM guardrails).** When
+feedback explicitly locks scope ("only X", "no code changes"), the
+agent now persists a deterministic one-turn contract and rejects
+non-compliant replies before materialization:
+
+- **`single_patch` mode** (default for behavior/size tweaks): one small
+  `<patch>` only; no `<html_file>` rewrite; max 1 patch block.
+- **`media_only` mode** (style-only redraw wording): `<assets>`/`<sounds>`
+  only, with existing session names only (new keys are dropped with a
+  concise correction line).
+- **Format-only gate:** scoped replies must start with the required tag
+  (no prose preamble, no `<think>` leakage).
+- **Scoped verification hook:** behavior-scoped turns require one compact
+  probe signal tied to the requested behavior; missing/failing scoped
+  checks are surfaced as a test issue and block `ok=True`.
+- **Coaching suppression:** while strict scoped lock is active, unrelated
+  agent coaching is withheld so the model sees one objective.
+
 **Done detection.** `<done/>` requires
 `self._consecutive_clean_iters >= self._min_clean_streak_to_ship`
 (default 2) AND the latest report's `ok=True`. Any failure resets the
@@ -569,7 +587,7 @@ is data the agent will see, not just developer notes.
 | `/seed <text>` | Inject a one-shot system seed at the next user turn. |
 | `/reset` | Reset agent state to a fresh session. |
 | `/status` | Print iter count, ok status, model, backend, VLM. |
-| `/wait <on\|off>` | Toggle step-mode — when on, pause after each iter; when off, iterate continuously. |
+| `/wait <on\|off>` | Toggle step-mode — default ON in the TUI; when on, pause after each iter; when off, iterate continuously. |
 | `/iter-detail <on\|off>` | Toggle optional expanded blocker detail after the compact iter decision line (default off). |
 | `/mode <local_manual\|local_auto\|local_plus_review with <model> [--auto-apply]\|custom>` | Apply a run contract: manual checkpoints, autonomous loop, or autonomous loop with an explicit reviewer hook. |
 | `/playbook`, `/memory` | Print the matched playbook bullets. |
@@ -638,8 +656,8 @@ Use this matrix when validating `chat.py` loop/control changes:
 | Scenario | Setup | Expected result |
 |---|---|---|
 | Asteroids regression guard | `/new asteroids` on local backend | Ship direction uses `vx = cos(angle) * speed`; asteroids stay irregular polygons. |
-| Wait-mode manual control | `/mode local_manual` then run a game | Agent pauses after each iter (`await_user`), accepts user feedback before continuing. |
-| Autonomous loop control | `/mode local_auto` then run a game | Agent iterates continuously without step pauses unless user explicitly enables wait mode. |
+| Wait-mode manual control | Default TUI mode, or `/mode local_manual` | Agent pauses after each iter (`await_user`), accepts user feedback before continuing. |
+| Autonomous loop control | `/mode local_auto` or `/wait off` | Agent iterates continuously without step pauses unless user explicitly enables wait mode. |
 | Explicit external review (manual) | `/mode local_plus_review with <model>` and keep wait on | Reviewer guidance can be run via `/check <N\|model>`; suggestion is prefilled for edit/Enter. |
 | Explicit external review (auto loop) | `/mode local_plus_review with <model> --auto-apply` with wait off | Failed iters can auto-run explicit reviewer hook and inject coaching for next turn. |
 | No silent cloud guarantee | Local-only run (`/mode local_auto` or `/mode local_manual`) | No cloud calls unless user explicitly picks cloud backend or `/check ...`. |
@@ -891,6 +909,85 @@ the words.
 
 ---
 
+## Improving the Agent From a Trace
+
+When a session goes wrong, the artifacts under `games/traces/` are
+the single source of truth. Use this checklist instead of guessing.
+
+**Order of inspection.**
+
+1. `games/traces/<session>.log` — human-readable timeline. Read this
+   first to identify which iteration broke and what the user said.
+2. `games/traces/<session>.jsonl` — structured events, one JSON per
+   line. Grep for `kind` values listed in the glossary below to see
+   the agent's routing decisions.
+3. `games/traces/<session>.conversation.md` — the exact prompts and
+   replies the model saw. Look here when you suspect prompt bloat or
+   conflicting directives.
+4. `games/snapshots/<session>/iter_<N>.png` — visual regression
+   evidence. Compare consecutive screenshots when the test report
+   says probes pass but the user disagrees.
+
+Seeded runs reuse the canonical game HTML/assets basename, but trace
+artifacts are per-run. A seeded game like `games/foo.html` writes
+fresh artifacts such as `foo__run_<timestamp>.jsonl`, `.log`,
+`.conversation.md`, and `snapshots/foo__run_<timestamp>/`. This keeps
+the live game/assets stable while preventing different goals from
+mixing in the same trace/log/conversation files.
+
+**Diagnostic order.**
+
+1. Identify the user's actual intent in plain English.
+2. Find the `feedback_injected` event for that turn and the
+   `turn_contract` row immediately after.
+3. Compare expected tags vs `allowed_tags`/`forbidden_tags`. If the
+   contract is wrong, the failure is in the classifier or routing,
+   not the model.
+4. Check whether the harness probes test real behavior or just a
+   flag (look for `probe_lint` events flagging `probe_bait_flag`).
+5. Check the screenshot delta and `vision_judge` events for visual
+   evidence (vs probe-pass).
+6. Prefer routing / prompt / probe fixes before loop or timeout
+   changes.
+7. Never fix runaway streams by adding aggressive cutoffs unless
+   trace-backed and regression-tested. Prefer pre-stream containment
+   (bounded prompts, narrower contracts) over stream guards.
+
+### Trace event glossary
+
+The `.jsonl` file mixes high-level events (`event`) with structured
+agent decisions. Use these `kind` values as entry points:
+
+| `kind` | When it fires | What it tells you |
+|---|---|---|
+| `session_start` | Start of every run | Includes `session_id` (game basename), `artifact_id` (per-run trace id), goal, model, trace path, conversation path |
+| `feedback_queued` / `feedback_injected` | User typed feedback | Exact text the next user turn will carry |
+| `turn_contract` | Once per stream, just before model call | Routing contract for this turn: allowed/forbidden tags, scoped_mode, classifier flags, prompt section sizes |
+| `media_change_directive_injected` | MEDIA-CHANGE block added to prompt | Routed feedback to asset/sound regen |
+| `media_change_directive_suppressed` | MEDIA-CHANGE skipped | Reason is in `reason` field: `behavior_bug`, `behavior_scope_on_strict_turn`, `orientation_change`, or `use_existing_media` |
+| `orientation_change_directive_injected` | ORIENTATION-CHANGE block added | Routed feedback to canvas mirror patch |
+| `scoped_constraints_set` | `_configure_scoped_constraints` ran | `mode` is `single_patch` or `media_only` |
+| `scoped_change_directive_injected` | SCOPED-CHANGE block added | User locked the turn |
+| `bounded_asset_only_injected` | BOUNDED OUTPUT block appended | Final hard cap for media_only turns |
+| `initial_goal_scoping_applied` | First build had scope-lock language | Scope applied from goal, not feedback |
+| `rewrite_exemption_armed` / `rewrite_exemption_suppressed` | `<html_file>` rewrite license toggled | `_allow_one_rewrite` is on or off |
+| `assets_generated` / `midsession_asset_injection_queued` | Z-Image-Turbo regen finished | `already_in_html_assets` vs `new_assets` shows whether a loader block was injected; same-name replacements include old/new hashes and `changed` |
+| `probe_lint` / `probe_lint_postbuild` | Probes flagged as broken | Includes `probe_bait_flag` for boolean-flag bait probes |
+| `probe_eval_error` | A probe expression errors before yielding true/false | The probe is broken, not necessarily the game |
+| `probe_quarantined` | Same probe has repeated eval-time errors | Probe removed from future runs until model re-emits a corrected probe |
+| `post_clean_feedback_contract` | User gives feedback after a clean build | Full clean report is compacted; model is told to keep the clean build as baseline and make only the requested change |
+| `stream_start` / `stream_done` / `stream_heartbeat` | Token streaming events | Repeated `tail` across heartbeats indicates a degenerate loop; do NOT cut it off by default — read `_flush_user_injections` to find what gave the model contradictory instructions |
+| `no_usable_code` | Reply had no `<patch>` / `<html_file>` | `media_only=true` means asset regen with no code edit |
+| `vision_judge` | VLM verdict on this iter's screenshot | `progress` is yes/no/unclear |
+| `format_rejection` | Reply didn't parse as expected tags | Usually means stream stalled mid-tag |
+| `status_snapshot` | TUI status panel snapshot | Persists right-hand panel state to JSONL |
+
+When you see the same failure shape twice, write a regression test
+in `tests/` and add a one-line bullet to `playbook.jsonl` via
+`learner.py reflect`.
+
+---
+
 ## Troubleshooting
 
 - **`Playwright Chromium missing`**: run `env -u PLAYWRIGHT_BROWSERS_PATH
@@ -917,6 +1014,18 @@ the words.
 - **`Game looks great, probes still fail`**: the vision judge note is
   the human signal; the failing probe name is the machine signal.
   Reconcile them in chat.
+- **`Seeded game ignores existing sprites/sounds`**: seeded prompts
+  include a `SEED MEDIA CONTRACT` listing available media, currently
+  referenced media, and media that exists on disk but is not loaded.
+  If the user says "use existing", "don't redo", or "use the original
+  ones", MEDIA-CHANGE is suppressed and the model should patch loader
+  or draw mapping instead of regenerating assets.
+- **`Regenerated asset still looks unchanged`**: same-name media regen
+  records old/new file hashes in `midsession_asset_injection_queued`.
+  If `changed=false`, the generator returned identical bytes or failed
+  to replace the file; if `changed=true` but the screenshot is unchanged,
+  inspect draw-state mapping or browser caching rather than blindly
+  regenerating again.
 
 ---
 

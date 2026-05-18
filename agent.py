@@ -657,7 +657,7 @@ _CODE_LOCK_PATTERNS: tuple[re.Pattern[str], ...] = (
 _MEDIA_VERBS: tuple[str, ...] = (
     "change", "swap", "replace", "redraw", "regenerate", "remake",
     "redo", "redesign", "update", "make", "render", "rerender",
-    "rerecord", "rebuild",
+    "rerecord", "rebuild", "add", "missing",
     # Added 2026-05-15: user said "fix the images" / "fix the
     # animations" and got a CODE rewrite instead of sprite regen.
     # "fix" alone is too generic to route on, but the gate also
@@ -691,6 +691,30 @@ _SOUND_NOUNS: tuple[str, ...] = (
     "sound", "sounds", "audio", "sfx", "music", "song",
     "beep", "chime", "sample", "clip", "track", "ogg", "tune",
     "soundtrack",
+)
+
+# Scoped-behavior terms: if these appear in a strict scoped feedback turn,
+# route to a ONE-PATCH behavior fix path (not media-only regen). Added for
+# Mortal Kombat trace where "turn around / facing / CPU behavior" got
+# misrouted into art regeneration.
+_SCOPED_BEHAVIOR_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bturn(?:\s*-\s*|\s+)around\b", re.I),
+    re.compile(r"\bfac(?:e|es|ing)\b", re.I),
+    re.compile(r"\bcpu\b", re.I),
+    re.compile(r"\bai\b", re.I),
+    re.compile(r"\bbehavior\b", re.I),
+    re.compile(r"\baction(?:s)?\b", re.I),
+    re.compile(r"\b(?:kick|kicks|kicking)\b", re.I),
+    re.compile(r"\b(?:punch|punches|punching)\b", re.I),
+    re.compile(r"\b(?:attack|attacks|attacking)\b", re.I),
+    re.compile(r"\banimation\s+for\b", re.I),
+)
+_SCOPED_SIZE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"\b\d+(?:\.\d+)?\s*(?:x|times?)\s*(?:larger|smaller|bigger)\b", re.I,
+    ),
+    re.compile(r"\b(?:larger|smaller|bigger)\b", re.I),
+    re.compile(r"\b(?:scale|size)\b", re.I),
 )
 
 
@@ -832,6 +856,31 @@ def _name_in_text(text_lower: str, names: list[str]) -> bool:
     return False
 
 
+def _matched_names_in_text(text_lower: str, names: list[str]) -> set[str]:
+    """Return canonical known names found in feedback text."""
+    canon_text = re.sub(r"[\s\-]+", "_", text_lower)
+    matched: set[str] = set()
+    for name in names:
+        n = (name or "").strip().lower()
+        if not n:
+            continue
+        canon_name = re.sub(r"[\s\-]+", "_", n)
+        if canon_name and canon_name in canon_text:
+            matched.add(canon_name)
+    return matched
+
+
+def _has_audio_context(text_lower: str) -> bool:
+    """True when feedback language is explicitly about audio."""
+    if any(re.search(rf"\b{re.escape(n)}\b", text_lower) for n in _SOUND_NOUNS):
+        return True
+    audio_words = (
+        "volume", "louder", "quieter", "quiet", "loud", "mute",
+        "unmute", "pitch", "echo", "bass", "treble",
+    )
+    return any(re.search(rf"\b{re.escape(w)}\b", text_lower) for w in audio_words)
+
+
 def _feedback_is_art_change(text: str, asset_names: list[str]) -> bool:
     """User feedback is asking to change visual art.
 
@@ -852,10 +901,39 @@ def _feedback_is_art_change(text: str, asset_names: list[str]) -> bool:
 
 
 def _feedback_is_sound_change(text: str, sound_names: list[str]) -> bool:
-    """Same shape as `_feedback_is_art_change`, for `<sounds>`."""
+    """Classifier heuristic for `<sounds>` regen feedback.
+
+    Action words that double as combat-game sound names ("kick",
+    "punch", "block", "hit", "jump", "attack", "fireball",
+    "fatality") are AMBIGUOUS — they appear in graphics-only feedback
+    too ("the CPU kick is facing the wrong way", MK trace
+    20260517_220025). When ONLY those names matched, require explicit
+    audio vocabulary (a `_SOUND_NOUN` or volume/pitch word) before
+    routing to sound regen. False positives steer the model toward
+    `<sounds>` regeneration on a graphics turn, polluting the prompt
+    and (in the trace) burning iters; false negatives keep the turn
+    on its current path which is the safer outcome.
+    """
     lo = text.lower()
-    if _name_in_text(lo, sound_names):
-        return True
+    matched = _matched_names_in_text(lo, sound_names)
+    if matched:
+        ambiguous = {
+            "kick", "punch", "block", "hit", "jump", "attack",
+            "fireball", "fatality",
+        }
+        unambiguous_match = any(name not in ambiguous for name in matched)
+        if unambiguous_match:
+            return True
+        if _has_audio_context(lo):
+            return True
+        # All matched names are ambiguous AND no audio context — do
+        # NOT fall through to the noun+verb gate, which has False
+        # negatives we already accept. Returning False here pins the
+        # behavior observed by the MK regression tests.
+        return False
+    # No sound-name match at all → require BOTH a sound noun and a
+    # media verb. This catches generic "redo the music" / "redesign
+    # the soundtrack" without an existing-name match.
     has_noun = any(
         re.search(rf"\b{re.escape(n)}\b", lo) for n in _SOUND_NOUNS
     )
@@ -863,6 +941,109 @@ def _feedback_is_sound_change(text: str, sound_names: list[str]) -> bool:
         re.search(rf"\b{re.escape(v)}\b", lo) for v in _MEDIA_VERBS
     )
     return has_noun and has_verb
+
+
+_EXISTING_MEDIA_ONLY_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bdon['’]?t\s+(?:redo|redraw|regenerate|remake)\b", re.I),
+    re.compile(r"\bdo\s+not\s+(?:redo|redraw|regenerate|remake)\b", re.I),
+    re.compile(r"\buse\s+(?:the\s+)?(?:existing|original|old|current)\b", re.I),
+    re.compile(r"\balready\s+exists?\b", re.I),
+    re.compile(r"\buse\s+them\b", re.I),
+)
+
+
+def _feedback_requests_existing_media(text: str) -> bool:
+    """User wants existing media wired/used, not regenerated."""
+    if not text:
+        return False
+    return any(p.search(text) for p in _EXISTING_MEDIA_ONLY_PATTERNS)
+
+
+def _feedback_requests_size_change(text: str) -> bool:
+    if not text:
+        return False
+    return any(p.search(text) for p in _SCOPED_SIZE_PATTERNS)
+
+
+# Orientation-change vocabulary: "invert / mirror / flip / face the
+# other way / facing wrong / horizontally". Genre-free: describes a
+# rendering modality (mirror a sprite) not subject matter. A false
+# positive routes the turn to a one-patch canvas-flip recipe instead
+# of asset regeneration, so the gate also REQUIRES the absence of
+# explicit style-change verbs ("redraw", "redesign", "new art") and
+# does not fire when the user explicitly says "new asset" / "make a
+# new" — those are regen requests, not mirror requests.
+_ORIENTATION_VERB_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\binvert(?:ed|ing)?\b", re.I),
+    re.compile(r"\bmirror(?:ed|ing)?\b", re.I),
+    re.compile(r"\bflip(?:ped|ping)?\b", re.I),
+    re.compile(r"\b(?:facing|faces|face)\s+(?:the\s+)?(?:wrong|other|opposite|right|left)\b", re.I),
+    re.compile(r"\bwrong\s+(?:way|direction)\b", re.I),
+    re.compile(r"\bhorizontal(?:ly)?\b", re.I),
+    re.compile(r"\brotat(?:e|ed|ing|ion)\s+(?:just|only|the)\b", re.I),
+)
+_ORIENTATION_REGEN_BLOCKERS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bnew\s+asset\b", re.I),
+    re.compile(r"\bmake\s+(?:a\s+)?new\b", re.I),
+    re.compile(r"\bregenerat(?:e|ed|ing)\b", re.I),
+    re.compile(r"\bredraw\b", re.I),
+    re.compile(r"\bredesign\b", re.I),
+    re.compile(r"\bdifferent\s+style\b", re.I),
+)
+
+
+def _feedback_is_orientation_change(text: str) -> bool:
+    """Classifier heuristic: user wants a sprite mirrored/flipped on
+    the canvas (one small <patch>), not regenerated. False positives
+    push a code patch path when the user actually wanted regen, so
+    blockers like "new asset" / "redraw" suppress the route.
+
+    Genre-free: vocabulary describes rendering modality, not subject
+    matter. Returns True only when an orientation verb fires AND no
+    explicit regen blocker fires.
+    """
+    if not text:
+        return False
+    if any(p.search(text) for p in _ORIENTATION_REGEN_BLOCKERS):
+        return False
+    return any(p.search(text) for p in _ORIENTATION_VERB_PATTERNS)
+
+
+def _feedback_mentions_scoped_behavior_change(text: str) -> bool:
+    if not text:
+        return False
+    if _feedback_is_behavior_bug(text):
+        return True
+    return any(p.search(text) for p in _SCOPED_BEHAVIOR_PATTERNS)
+
+
+def _scoped_probe_keywords(text: str, limit: int = 3) -> list[str]:
+    """Pick a tiny deterministic keyword set for scoped-check probes.
+
+    Keep this intentionally short for local-model correction prompts.
+    """
+    if not text:
+        return []
+    lo = text.lower()
+    ordered = (
+        "turn around",
+        "facing",
+        "cpu",
+        "ai",
+        "behavior",
+        "action",
+        "kick",
+        "punch",
+        "jump",
+        "attack",
+    )
+    out: list[str] = []
+    for key in ordered:
+        if key in lo:
+            out.append(key)
+        if len(out) >= limit:
+            break
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1112,6 +1293,29 @@ class GameAgent:
         # "fix these test failures" in the same prompt (DK trace
         # 2026-05-15). Self-clears after each fix-prompt build.
         self._scoped_change_active: bool = False
+        # Per-turn scoped routing metadata persisted when feedback is drained.
+        # Applies deterministic guards before materialization:
+        #   - route mode: "single_patch" | "media_only"
+        #   - max patch blocks
+        #   - existing-name lock for media-only turns
+        #   - optional scoped-check probe requirement (behavior asks)
+        self._scoped_constraints: dict[str, Any] | None = None
+        # Routing decisions saved by _flush_user_injections so _stream
+        # can emit a single turn_contract trace event with allowed/
+        # forbidden tags and classifier flags. None until first turn.
+        self._last_turn_contract: dict[str, Any] | None = None
+        # One-turn scoped-check keywords carried into the next test report.
+        # When non-empty, we require at least one matching probe pass.
+        self._pending_scoped_check_keywords: list[str] = []
+        # Probe eval-error recovery: distinguish broken probes from
+        # game-false probes, quarantine repeated eval-error probes, and
+        # avoid re-feeding the same harness-side SyntaxError forever.
+        self._probe_eval_error_streak: dict[str, int] = {}
+        self._probe_eval_error_shape_streak: dict[str, int] = {}
+        self._probe_names_ever_passed: set[str] = set()
+        self._pending_probe_quarantine_notices: list[str] = []
+        # Last few raw feedback strings for repeated-request detection.
+        self._recent_feedback_texts: list[str] = []
         self._pending_answer: str | None = None
         # A2: short coaching strings queued when the deliberation detector
         # aborts the last stream or another agent-side guard wants the
@@ -1179,19 +1383,27 @@ class GameAgent:
         # unblocks (via has_pending_user_input becoming True).
         self._step_continue: bool = False
 
-        # All per-session artifact paths share the out_path stem so a session
-        # named e.g. "asteroids_20260503_175727.html" produces matching
-        # asteroids_20260503_175727.{jsonl,log,best.html,conversation.md} and
-        # snapshots/asteroids_20260503_175727/. The driver (chat.py / coder.py)
-        # is responsible for making the stem unique + meaningful — usually
-        # "<goal-slug>_<timestamp>".
+        # Game/session basename comes from out_path and may intentionally be
+        # reused for seed/continuation workflows so the live HTML, best.html,
+        # assets, and sounds keep the same canonical names.
+        #
+        # Trace artifacts must NOT reuse that bare basename: a later seeded
+        # run against the same game can have a different user goal. Mixing a
+        # new .log/.conversation.md with an old appended .jsonl makes traces
+        # untrustworthy. Give every GameAgent construction its own artifact id
+        # while keeping `_session_id` stable for game assets.
         basename = self.out_path.stem or datetime.now().strftime("%Y%m%d_%H%M%S")
         self._session_id = basename
+        self._artifact_id = (
+            f"{basename}__run_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+        )
         out_dir = self.out_path.parent
-        self.trace_path: Path = out_dir / "traces" / f"{basename}.jsonl"
-        self.snapshots_dir: Path = out_dir / "snapshots" / basename
+        self.trace_path: Path = out_dir / "traces" / f"{self._artifact_id}.jsonl"
+        self.snapshots_dir: Path = out_dir / "snapshots" / self._artifact_id
         self.best_path: Path = out_dir / f"{basename}.best.html"
-        self.conversation_path: Path = out_dir / "traces" / f"{basename}.conversation.md"
+        self.conversation_path: Path = (
+            out_dir / "traces" / f"{self._artifact_id}.conversation.md"
+        )
         self._previous_report_ok: bool | None = None
         # Stop-Losing-To-OneShot todo #3 — track the full previous report
         # so the <done/> gate can ask richer questions than just "ok?".
@@ -2150,6 +2362,63 @@ class GameAgent:
         )
         return missing
 
+    def _render_seed_media_contract(
+        self,
+        html: str,
+        *,
+        asset_names: list[str] | None = None,
+        sound_names: list[str] | None = None,
+    ) -> str:
+        """Compact contract for seed runs: existing media are first-class.
+
+        Seeded edits should wire or reuse media already on disk before asking
+        for new generations. The contract lists referenced vs available names
+        and highlights available-but-unused names that often solve "missing
+        animation" requests by adding loader entries, not regenerating art.
+        """
+        assets = sorted(asset_names if asset_names is not None else self._session_assets.keys())
+        sounds = sorted(sound_names if sound_names is not None else self._session_sounds.keys())
+        refs_a = sorted(self._scan_html_for_asset_refs(html or ""))
+        refs_s = sorted(self._scan_html_for_sound_refs(html or ""))
+        unused_a = sorted(set(assets) - set(refs_a))
+        unused_s = sorted(set(sounds) - set(refs_s))
+
+        def _fmt(names: list[str], cap: int = 28) -> str:
+            if not names:
+                return "(none)"
+            shown = names[:cap]
+            more = f" (+{len(names) - cap} more)" if len(names) > cap else ""
+            return ", ".join(shown) + more
+
+        lines = [
+            "================ SEED MEDIA CONTRACT ================",
+            "This is an EXISTING seeded game. Treat assets/sounds already",
+            "on disk as the current game's media API. Use/wire existing",
+            "names before asking for new art or sound.",
+            "",
+            f"Available assets: {_fmt(assets)}",
+            f"Referenced assets in HTML: {_fmt(refs_a)}",
+            f"Existing assets not currently referenced/loaded: {_fmt(unused_a)}",
+        ]
+        if sounds:
+            lines.extend([
+                "",
+                f"Available sounds: {_fmt(sounds)}",
+                f"Referenced sounds in HTML: {_fmt(refs_s)}",
+                f"Existing sounds not currently referenced/loaded: {_fmt(unused_s)}",
+            ])
+        lines.extend([
+            "",
+            "Rules for seed edits:",
+            "  - If the user says missing / use existing / don't redo, patch",
+            "    loader or draw mapping to use existing names.",
+            "  - Emit <assets>/<sounds> only when the user explicitly asks",
+            "    for new art/sound or no existing name can satisfy the request.",
+            "  - Do not design a new game; adapt this seed.",
+            "=====================================================",
+        ])
+        return "\n".join(lines)
+
     @classmethod
     def _scan_html_for_sound_refs(cls, html: str) -> set[str]:
         """Return the set of sound *names* the HTML references."""
@@ -2261,6 +2530,147 @@ class GameAgent:
                 total += len(content)
         return total
 
+    # Markers used by `_estimate_prompt_section_chars` to attribute
+    # the most recent user message to known sections. Position of the
+    # first occurrence is used as the section start; the section ends
+    # at the next marker (or end-of-string).
+    _PROMPT_SECTION_MARKERS: tuple[tuple[str, str], ...] = (
+        ("user_answer", "================ USER ANSWER (HIGHEST PRIORITY)"),
+        ("user_feedback", "================ USER FEEDBACK (HIGHEST PRIORITY)"),
+        ("scope_arbitration", "================ FEEDBACK SCOPE ARBITRATION"),
+        ("media_directive", "================ MEDIA-CHANGE DIRECTIVE"),
+        ("scoped_change", "================ SCOPED-CHANGE DIRECTIVE"),
+        ("agent_coaching", "================ AGENT COACHING"),
+        ("generated_assets", "================ GENERATED ASSETS"),
+        ("generated_sounds", "================ GENERATED SOUNDS"),
+        ("state_anchor", "# Session state anchor"),
+        ("current_file", "CURRENT FILE ON DISK"),
+        ("seed_file", "EXISTING FILE:"),
+    )
+
+    def _estimate_prompt_section_chars(self) -> dict:
+        """Approximate char counts per section in the most recent user
+        message, plus totals for system prompt and message history.
+        Read by the `turn_contract` trace event. Best-effort: silently
+        returns minimal data if the message list is empty.
+        """
+        out: dict[str, int] = {}
+        # System prompt size (first message, role=system).
+        if self._messages and self._messages[0].get("role") == "system":
+            sys_content = self._messages[0].get("content") or ""
+            out["system"] = len(sys_content) if isinstance(sys_content, str) else 0
+        else:
+            out["system"] = 0
+        # Total message-history chars (matches _estimate_ctx_fill).
+        out["history_total"] = self._estimate_ctx_fill()
+        # Most-recent user message section breakdown.
+        last_user_content = ""
+        for msg in reversed(self._messages):
+            if msg.get("role") == "user":
+                content = msg.get("content")
+                if isinstance(content, str):
+                    last_user_content = content
+                break
+        if not last_user_content:
+            return out
+        out["last_user_chars"] = len(last_user_content)
+        # Find every marker's first-occurrence offset; sort by offset
+        # and slice between consecutive markers. Sections that don't
+        # appear in this message are omitted (cheap, no noise).
+        hits: list[tuple[int, str]] = []
+        for label, marker in self._PROMPT_SECTION_MARKERS:
+            idx = last_user_content.find(marker)
+            if idx >= 0:
+                hits.append((idx, label))
+        hits.sort()
+        for i, (start, label) in enumerate(hits):
+            end = hits[i + 1][0] if i + 1 < len(hits) else len(last_user_content)
+            out[f"section_{label}"] = end - start
+        return out
+
+    def _apply_initial_goal_scoping(self, goal: str, build_msg: str) -> str:
+        """Apply scoped constraints + SCOPED-CHANGE directive when the
+        initial goal carries strict-scope language ("no other changes",
+        "just X", "only Y"). Returns the (possibly augmented)
+        build_msg. MK trace 20260517_220025 motivation: goal said
+        "ROTATING just the CPU punch horizontally make NO other
+        changes" but scoping only kicked in for mid-session feedback,
+        not the very first build turn.
+        """
+        if not goal:
+            return build_msg
+        if not (_feedback_is_strict_scope(goal) or _feedback_locks_code(goal)):
+            return build_msg
+        locks_code = _feedback_locks_code(goal)
+        asset_names = list(self._session_assets.keys()) if self._session_assets else []
+        sound_names = list(self._session_sounds.keys()) if self._session_sounds else []
+        art_change = bool(asset_names) and _feedback_is_art_change(goal, asset_names)
+        sound_change = bool(sound_names) and _feedback_is_sound_change(goal, sound_names)
+        self._configure_scoped_constraints(
+            joined_feedback=goal,
+            locks_code=locks_code,
+            art_change=art_change,
+            sound_change=sound_change,
+        )
+        self._trace({
+            "kind": "initial_goal_scoping_applied",
+            "locks_code": locks_code,
+            "art_change": art_change,
+            "sound_change": sound_change,
+            "scoped_mode": (self._scoped_constraints or {}).get("mode"),
+        })
+        # Prepend a compact SCOPED-CHANGE notice so the model sees the
+        # narrowed contract right at iter 1. Full SCOPED-CHANGE block
+        # also fires automatically on any subsequent feedback turn.
+        scoped_mode = (self._scoped_constraints or {}).get("mode") or "single_patch"
+        mode_label = (
+            "MEDIA-ONLY (existing names only)"
+            if scoped_mode == "media_only"
+            else "ONE-SMALL-PATCH (no rewrite, max one patch block)"
+        )
+        scoped_notice = (
+            "================ INITIAL-GOAL SCOPE LOCK ================\n"
+            "Your goal above carries strict-scope language. Treat this\n"
+            "entire session as scoped:\n"
+            f"  - Turn mode: {mode_label}\n"
+            "  - Address ONLY what the goal explicitly names.\n"
+            "  - Do NOT touch unrelated functions, variables, or files.\n"
+            "  - Do NOT refactor or 'improve' anything not asked for.\n"
+            "==========================================================="
+        )
+        return f"{scoped_notice}\n\n{build_msg}"
+
+    def _derive_allowed_forbidden_tags(self) -> tuple[list[str], list[str]]:
+        """Compute the turn's allowed/forbidden output tags from the
+        current scoped/rewrite state. Used by the `turn_contract`
+        trace event for visibility; does NOT enforce — enforcement
+        lives in `_scoped_reply_violation` and downstream materializer.
+        """
+        scoped = self._scoped_constraints or {}
+        mode = scoped.get("mode")
+        if mode == "media_only":
+            return (
+                ["<assets>", "<sounds>"],
+                ["<patch>", "<html_file>"],
+            )
+        if mode == "single_patch":
+            return (
+                ["<patch>"],
+                ["<html_file>"],
+            )
+        # No scoped lock: default workflow rules.
+        if self._snapshot_n == 0:
+            # First build: complete file expected.
+            return (["<html_file>"], [])
+        # Mid-session: patches preferred; rewrite only when armed.
+        allowed = ["<patch>"]
+        forbidden: list[str] = []
+        if self._allow_one_rewrite:
+            allowed.append("<html_file>")
+        else:
+            forbidden.append("<html_file>")
+        return (allowed, forbidden)
+
     def trace_status(self, snapshot: dict) -> None:
         """Persist a TUI status-panel snapshot to the trace .jsonl.
 
@@ -2343,12 +2753,35 @@ class GameAgent:
             pass
         return ""
 
+    @staticmethod
+    def _file_hash16(path: Path | str | None) -> str | None:
+        """Return a short sha256 for a media file, or None if unreadable."""
+        if not path:
+            return None
+        try:
+            import hashlib
+
+            p = Path(path)
+            if not p.exists() or not p.is_file():
+                return None
+            h = hashlib.sha256()
+            with p.open("rb") as f:
+                for chunk in iter(lambda: f.read(1024 * 128), b""):
+                    h.update(chunk)
+            return h.hexdigest()[:16]
+        except Exception:
+            return None
+
     def _dump_conversation(self) -> None:
         try:
             self.conversation_path.parent.mkdir(parents=True, exist_ok=True)
             lines: list[str] = [
                 f"# Conversation dump — {self.model}",
                 f"_session: {self._session_id}_  ",
+                f"_artifact: {self._artifact_id}_  ",
+                f"_goal: {self._goal or '(not set)'}_  ",
+                f"_trace: {self.trace_path}_  ",
+                f"_game: {self.out_path}_  ",
                 f"_iteration count: {self._snapshot_n}_  ",
                 f"_messages: {len(self._messages)}_",
                 "",
@@ -2624,6 +3057,349 @@ class GameAgent:
 
     # -- user-injection plumbing -------------------------------------------
 
+    def _clear_scoped_constraints(self) -> None:
+        self._scoped_constraints = None
+        self._pending_scoped_check_keywords = []
+
+    def _previous_iter_clean_for_scope_guard(self) -> bool:
+        prev = self._previous_report or {}
+        probes = prev.get("probes") or []
+        probes_all_pass = bool(probes) and all(bool(p.get("ok")) for p in probes)
+        return (
+            self._previous_report_ok is True
+            and probes_all_pass
+            and not (prev.get("errors") or [])
+            and not (prev.get("soft_warnings") or [])
+            and not (prev.get("page_errors") or [])
+            and not (prev.get("console_errors") or [])
+        )
+
+    def _configure_scoped_constraints(
+        self,
+        *,
+        joined_feedback: str,
+        locks_code: bool,
+        art_change: bool,
+        sound_change: bool,
+    ) -> None:
+        """Persist deterministic scoped routing for the next model reply."""
+        if not locks_code:
+            self._clear_scoped_constraints()
+            return
+        behavior_scope = _feedback_mentions_scoped_behavior_change(joined_feedback)
+        size_scope = _feedback_requests_size_change(joined_feedback)
+        # Preserve working baselines on strict scoped tweaks: default to one
+        # small patch unless this is an explicit style-only media request.
+        media_only = bool(art_change or sound_change) and not behavior_scope and not size_scope
+        mode = "media_only" if media_only else "single_patch"
+        probe_keywords = (
+            _scoped_probe_keywords(joined_feedback)
+            if mode == "single_patch" and behavior_scope
+            else []
+        )
+        self._scoped_constraints = {
+            "mode": mode,
+            "max_patch_count": 1,
+            "allowed_asset_names": sorted(self._session_assets.keys()),
+            "allowed_sound_names": sorted(self._session_sounds.keys()),
+            "media_name_lock": mode == "media_only",
+            "require_scope_probe": bool(probe_keywords),
+            "probe_keywords": probe_keywords,
+            "preserve_baseline": self._previous_iter_clean_for_scope_guard(),
+            "feedback_preview": joined_feedback[:220],
+        }
+        self._pending_scoped_check_keywords = list(probe_keywords)
+        self._trace({
+            "kind": "scoped_constraints_set",
+            "mode": mode,
+            "max_patch_count": 1,
+            "require_scope_probe": bool(probe_keywords),
+            "probe_keywords": probe_keywords,
+            "media_name_lock": mode == "media_only",
+            "preserve_baseline": self._scoped_constraints["preserve_baseline"],
+        })
+
+    def _scoped_reply_violation(self, reply: str) -> str | None:
+        """Return a compact deterministic violation message, else None."""
+        cfg = self._scoped_constraints
+        if not cfg:
+            return None
+        stripped = (reply or "").lstrip()
+        if not stripped:
+            return "SCOPED FORMAT: empty reply; emit required tag only."
+        if stripped.lower().startswith("<think"):
+            return "SCOPED FORMAT: do not emit <think>; start with required tag."
+        if not stripped.startswith("<"):
+            return "SCOPED FORMAT: no prose preamble; start with required tag."
+        low = stripped.lower()
+        has_assets = bool(_ASSETS_OPEN_RE.search(low))
+        has_sounds = bool(_SOUNDS_OPEN_RE.search(low))
+        patches = extract_patches(reply)
+        patch_count = len(patches)
+        has_html = self._extract_html(reply) is not None
+        mode = str(cfg.get("mode") or "single_patch")
+        if mode == "media_only":
+            if has_html or patch_count > 0:
+                return "SCOPED MEDIA: emit <assets>/<sounds> only; no <patch>/<html_file>."
+            if not (has_assets or has_sounds):
+                return "SCOPED MEDIA: emit <assets> or <sounds> with existing names."
+            return None
+        if has_html:
+            return "SCOPED PATCH: full <html_file> rewrite blocked; send one <patch>."
+        if patch_count == 0:
+            return "SCOPED PATCH: send exactly one <patch>."
+        max_patch = int(cfg.get("max_patch_count") or 1)
+        if patch_count > max_patch:
+            return f"SCOPED PATCH: send exactly one <patch> (got {patch_count})."
+        if bool(cfg.get("require_scope_probe")):
+            probes = self._extract_probes(reply)
+            if not probes:
+                return "SCOPED CHECK: include one compact <probes> check for requested behavior."
+            keys = [str(k).lower() for k in (cfg.get("probe_keywords") or []) if k]
+            if keys:
+                probe_text = " ".join(
+                    f"{p.get('name','')} {p.get('expr','')}".lower()
+                    for p in probes
+                )
+                if not any(k in probe_text for k in keys):
+                    want = ", ".join(keys[:3])
+                    return (
+                        "SCOPED CHECK: probe must mention requested behavior "
+                        f"(e.g. {want})."
+                    )
+        return None
+
+    def _scoped_retry_instruction(self, violation: str) -> str:
+        cfg = self._scoped_constraints or {}
+        mode = cfg.get("mode") or "single_patch"
+        if mode == "media_only":
+            allowed_assets = ", ".join(cfg.get("allowed_asset_names") or []) or "(none)"
+            allowed_sounds = ", ".join(cfg.get("allowed_sound_names") or []) or "(none)"
+            return (
+                f"{violation}\n"
+                "Retry now with only <assets>/<sounds> using existing names.\n"
+                f"Allowed asset names: {allowed_assets}. Allowed sound names: {allowed_sounds}."
+            )
+        probe_line = ""
+        if cfg.get("require_scope_probe"):
+            probe_line = " Include one compact <probes> entry verifying the requested behavior."
+        return (
+            f"{violation}\n"
+            "Retry now with exactly one small <patch>; change only the scoped request."
+            f"{probe_line}"
+        )
+
+    def _apply_scoped_check_to_report(self, report: dict[str, Any]) -> None:
+        keys = [k for k in self._pending_scoped_check_keywords if k]
+        if not keys:
+            return
+        probes = report.get("probes") or []
+        matched = [
+            p for p in probes
+            if any(
+                key in (
+                    f"{str(p.get('name') or '').lower()} "
+                    f"{str(p.get('expr') or '').lower()}"
+                )
+                for key in keys
+            )
+        ]
+        passed = any(bool(p.get("ok")) for p in matched)
+        report["scoped_check"] = {
+            "required": True,
+            "keywords": keys[:3],
+            "matched": len(matched),
+            "pass": passed,
+        }
+        if not passed:
+            sw = list(report.get("soft_warnings") or [])
+            sw.append(
+                "SCOPED CHECK FAILED: requested behavior change was not "
+                "verified by a passing scoped probe."
+            )
+            report["soft_warnings"] = sw
+            report["ok"] = False
+
+    @staticmethod
+    def _probe_shape_key(p: dict[str, Any]) -> str:
+        name = str(p.get("name") or "probe").strip().lower()
+        expr = str(p.get("expr") or "").strip().lower()
+        err_class = str(p.get("error_class") or "eval_error").strip().lower()
+        return f"{name}:{err_class}:{expr[:80]}"
+
+    @staticmethod
+    def _refresh_probe_error_fields(report: dict[str, Any]) -> None:
+        probes = list(report.get("probes") or [])
+        report["probe_errors"] = [
+            f"{p.get('name','?')}: {p.get('err','')[:160]}"
+            for p in probes
+            if not p.get("ok") and p.get("err")
+        ]
+        report["probe_eval_errors"] = [
+            {
+                "name": p.get("name", "probe"),
+                "expr_preview": (p.get("expr") or "")[:120],
+                "error_class": p.get("error_class") or "eval_error",
+                "err": (p.get("err") or "")[:200],
+            }
+            for p in probes
+            if not p.get("ok") and p.get("kind") == "eval_error"
+        ]
+
+    @staticmethod
+    def _remove_probe_warnings(report: dict[str, Any], names: set[str]) -> None:
+        if not names:
+            return
+        kept: list[str] = []
+        for w in list(report.get("soft_warnings") or []):
+            drop = False
+            for name in names:
+                if (
+                    f"PROBE FAILED [{name}]" in w
+                    or f"PROBE BROKEN [{name}]" in w
+                ):
+                    drop = True
+                    break
+            if not drop:
+                kept.append(w)
+        report["soft_warnings"] = kept
+
+    def _handle_probe_eval_errors(self, report: dict[str, Any], iteration: int) -> None:
+        """Trace, soften, and quarantine probes that fail at eval time.
+
+        Falsy probes are still game failures. Eval-error probes are broken
+        probe expressions; after two consecutive eval errors for the same
+        name, drop the probe from future iterations so it stops drowning the
+        model in stale harness errors.
+        """
+        probes = list(report.get("probes") or [])
+        if not probes:
+            return
+
+        failing = [p for p in probes if not p.get("ok")]
+        eval_failing = [
+            p for p in failing
+            if p.get("kind") == "eval_error"
+        ]
+
+        for p in probes:
+            name = str(p.get("name") or "probe")
+            if p.get("ok"):
+                self._probe_names_ever_passed.add(name)
+                self._probe_eval_error_streak[name] = 0
+                self._probe_eval_error_shape_streak[self._probe_shape_key(p)] = 0
+                continue
+            if p.get("kind") == "eval_error":
+                shape = self._probe_shape_key(p)
+                self._probe_eval_error_streak[name] = (
+                    self._probe_eval_error_streak.get(name, 0) + 1
+                )
+                self._probe_eval_error_shape_streak[shape] = (
+                    self._probe_eval_error_shape_streak.get(shape, 0) + 1
+                )
+                self._trace({
+                    "kind": "probe_eval_error",
+                    "iteration": iteration,
+                    "name": name,
+                    "expr_preview": (p.get("expr") or "")[:120],
+                    "error_class": p.get("error_class") or "eval_error",
+                    "streak": self._probe_eval_error_streak[name],
+                    "shape_streak": self._probe_eval_error_shape_streak[shape],
+                })
+            else:
+                # A real falsy result breaks the eval-error streak.
+                self._probe_eval_error_streak[name] = 0
+
+        quarantine_names = {
+            str(p.get("name") or "probe")
+            for p in eval_failing
+            if self._probe_eval_error_streak.get(str(p.get("name") or "probe"), 0) >= 2
+        }
+        if quarantine_names:
+            for p in eval_failing:
+                name = str(p.get("name") or "probe")
+                if name not in quarantine_names:
+                    continue
+                self._trace({
+                    "kind": "probe_quarantined",
+                    "iteration": iteration,
+                    "name": name,
+                    "expr_preview": (p.get("expr") or "")[:120],
+                    "eval_error_class": p.get("error_class") or "eval_error",
+                    "streak": self._probe_eval_error_streak.get(name, 0),
+                })
+                notice = (
+                    f"PROBE {name} QUARANTINED: had eval errors twice; "
+                    "re-emit <probes>...</probes> to replace, or leave it "
+                    "dropped if it was not testing real behavior."
+                )
+                if notice not in self._pending_probe_quarantine_notices:
+                    self._pending_probe_quarantine_notices.append(notice)
+
+            self._probes = [
+                p for p in self._probes
+                if str(p.get("name") or "probe") not in quarantine_names
+            ]
+            report["probes"] = [
+                p for p in probes
+                if str(p.get("name") or "probe") not in quarantine_names
+            ]
+            self._remove_probe_warnings(report, quarantine_names)
+            warnings = list(report.get("warnings") or [])
+            warnings.append(
+                "Probe quarantine: dropped "
+                f"{len(quarantine_names)} probe(s) after repeated eval-time "
+                "errors; re-emit <probes> to replace if needed."
+            )
+            report["warnings"] = warnings
+            self._refresh_probe_error_fields(report)
+
+        # C1: before a probe is quarantined, avoid blocking on eval-error-only
+        # probes when the rest of the harness says the game is healthy.
+        remaining = list(report.get("probes") or [])
+        remaining_failing = [p for p in remaining if not p.get("ok")]
+        if remaining_failing and all(
+            p.get("kind") == "eval_error" for p in remaining_failing
+        ):
+            input_test = report.get("input_test") or {}
+            canvas = report.get("canvas") or {}
+            healthy_page = not (report.get("page_errors") or report.get("console_errors"))
+            healthy_harness = (
+                input_test.get("ran") is True
+                and input_test.get("any_change") is True
+                and canvas.get("blank") is False
+                and healthy_page
+            )
+            proven_probe_bug = all(
+                (
+                    str(p.get("name") or "probe") in self._probe_names_ever_passed
+                    or self._probe_eval_error_shape_streak.get(self._probe_shape_key(p), 0) >= 2
+                )
+                for p in remaining_failing
+            )
+            if healthy_harness and proven_probe_bug:
+                softened = {str(p.get("name") or "probe") for p in remaining_failing}
+                for p in remaining_failing:
+                    p["ok"] = True
+                    p["downgraded"] = (
+                        "probe eval error softened: input/canvas/page checks "
+                        "were healthy and this probe shape repeatedly failed "
+                        "before evaluating"
+                    )
+                self._remove_probe_warnings(report, softened)
+                warnings = list(report.get("warnings") or [])
+                warnings.append(
+                    "Probe eval errors softened: all remaining probe failures "
+                    "were eval-time errors while input/canvas/page checks were healthy."
+                )
+                report["warnings"] = warnings
+                self._refresh_probe_error_fields(report)
+
+        report["ok"] = (
+            len(report.get("errors") or []) == 0
+            and len(report.get("soft_warnings") or []) == 0
+        )
+
     def _consumed_feedback_summary(self) -> str | None:
         bits: list[str] = []
         if self._pending_answer is not None:
@@ -2636,9 +3412,109 @@ class GameAgent:
             return None
         return "→ applying your input to next turn: " + "; ".join(bits)
 
+    @staticmethod
+    def _feedback_shingles(text: str, n: int = 4) -> set[tuple[str, ...]]:
+        words = re.findall(r"[a-z0-9]+", (text or "").lower())
+        if len(words) < n:
+            return {tuple(words)} if words else set()
+        return {tuple(words[i:i + n]) for i in range(0, len(words) - n + 1)}
+
+    @staticmethod
+    def _feedback_keywords(text: str) -> set[str]:
+        stop = {
+            "the", "a", "an", "to", "and", "or", "but", "it", "is", "are",
+            "be", "of", "for", "with", "when", "still", "need", "needs",
+            "make", "also", "not", "just", "this", "that", "their",
+        }
+        return {
+            w for w in re.findall(r"[a-z0-9]+", (text or "").lower())
+            if len(w) > 2 and w not in stop
+        }
+
+    def _detect_repeated_feedback(self, text: str) -> dict | None:
+        """Return overlap metadata when latest feedback repeats a recent ask."""
+        cur = self._feedback_shingles(text)
+        cur_kw = self._feedback_keywords(text)
+        if not cur:
+            return None
+        best: tuple[float, int, set[str]] | None = None
+        for idx, prev in enumerate(self._recent_feedback_texts[-2:]):
+            prev_set = self._feedback_shingles(prev)
+            if not prev_set:
+                continue
+            union = cur | prev_set
+            shingle_overlap = len(cur & prev_set) / max(1, len(union))
+            prev_kw = self._feedback_keywords(prev)
+            kw_union = cur_kw | prev_kw
+            kw_overlap = len(cur_kw & prev_kw) / max(1, len(kw_union))
+            overlap = max(shingle_overlap, kw_overlap)
+            shared = {" ".join(s) for s in (cur & prev_set)}
+            shared.update(cur_kw & prev_kw)
+            if best is None or overlap > best[0]:
+                # idx here is relative to the final two entries.
+                best = (overlap, len(self._recent_feedback_texts[-2:]) - idx, shared)
+        if not best or best[0] < 0.5:
+            return None
+        shared_words: list[str] = []
+        for term in sorted(best[2])[:5]:
+            if term:
+                shared_words.append(term)
+        return {
+            "overlap": round(best[0], 3),
+            "overlap_with_recent_turns_ago": best[1],
+            "shared_terms": shared_words,
+        }
+
+    @staticmethod
+    def _is_post_clean_instruction(base_message: str) -> bool:
+        """True when `base_message` is the clean-report post-clean prompt.
+
+        Fresh user feedback after a clean pass should not drag a full test
+        report and stale "prefer <done/>" text into the next model turn.
+        The local MK trace showed this confusing small models after the
+        user asked for one narrow missing-animation fix.
+        """
+        if not base_message:
+            return False
+        return (
+            "No errors. The game works. STRONGLY prefer ending with <done/>"
+            in base_message
+        )
+
+    def _compact_post_clean_context(self) -> str:
+        prev = self._previous_report or {}
+        probes = prev.get("probes") or []
+        passed = sum(1 for p in probes if p.get("ok"))
+        total = len(probes)
+        return (
+            "PREVIOUS BUILD WAS CLEAN: "
+            f"{passed}/{total} probes passed, no page errors, no console errors. "
+            "Treat that version as the baseline."
+        )
+
     def _flush_user_injections(self, base_message: str) -> str:
+        """Main router: drain queued user input, inject directives, and
+        record the routing decisions consumed by `_stream` to emit one
+        `turn_contract` trace row per stream. False positives in the
+        classifier helpers (`_feedback_is_art_change`,
+        `_feedback_is_sound_change`, `_feedback_is_orientation_change`)
+        flip allowed/forbidden output tags and are expensive — keep
+        them genre-free and prefer false negatives over false positives.
+        """
         parts: list[str] = []
         self._last_drained_feedback = []
+        # Reset routing record so a turn without feedback shows up as
+        # "no feedback" rather than inheriting the previous turn's flags.
+        # Fields are filled in below as decisions are made.
+        self._last_turn_contract = {
+            "had_feedback": False,
+            "locks_code": False,
+            "art_change": False,
+            "sound_change": False,
+            "behavior_scope": False,
+            "behavior_bug": False,
+            "orientation_change": False,
+        }
         # Snapshot the queue BEFORE consuming so we can push a visible
         # "✓ APPLIED to this turn" confirmation into the agent log via
         # the TUI's token callback. Without this, only the right-hand
@@ -2677,11 +3553,39 @@ class GameAgent:
             else:
                 selected_feedback = feedback_items
             joined = "\n- ".join(selected_feedback)
+            repeated = self._detect_repeated_feedback(joined)
+            repeat_prefix = ""
+            if repeated:
+                repeat_prefix = (
+                    "[USER HAS RAISED THIS BEFORE — review screenshots "
+                    "and prior fix]\n"
+                )
+                self._trace({
+                    "kind": "repeated_user_request",
+                    **repeated,
+                    "text_preview": joined[:240],
+                })
+            post_clean_feedback = self._is_post_clean_instruction(base_message)
+            if post_clean_feedback:
+                parts.append(
+                    "================ POST-CLEAN FEEDBACK CONTRACT ================\n"
+                    f"{self._compact_post_clean_context()}\n"
+                    "The user is asking for a follow-up on a working game.\n"
+                    "Make ONLY the requested change. Do not refactor,\n"
+                    "rewrite, rebalance, or address stale coaching unless\n"
+                    "the user explicitly asks for that broader work.\n"
+                    "=============================================================="
+                )
+                self._trace({
+                    "kind": "post_clean_feedback_contract",
+                    "feedback_preview": joined[:240],
+                })
+
             parts.append(
                 "================ USER FEEDBACK (HIGHEST PRIORITY) ================\n"
                 "The user just typed this while watching your game. It OVERRIDES\n"
                 "any plan or default behavior. Address it explicitly in this turn:\n"
-                f"\n- {joined}\n"
+                f"\n{repeat_prefix}- {joined}\n"
                 "=================================================================="
             )
             for fb in selected_feedback:
@@ -2718,8 +3622,41 @@ class GameAgent:
             sound_change = bool(sound_names) and _feedback_is_sound_change(
                 joined, sound_names,
             )
+            existing_media_request = _feedback_requests_existing_media(joined)
+            if existing_media_request and (art_change or sound_change):
+                self._trace({
+                    "kind": "media_change_directive_suppressed",
+                    "reason": "use_existing_media",
+                    "art_change": art_change,
+                    "sound_change": sound_change,
+                })
+                art_change = False
+                sound_change = False
             behavior_bug = _feedback_is_behavior_bug(joined)
+            behavior_scope = _feedback_mentions_scoped_behavior_change(joined)
+            orientation_change = _feedback_is_orientation_change(joined)
+            # Record routing flags so `_stream` can emit the
+            # `turn_contract` trace event. Mode + tag derivation happens
+            # after `_configure_scoped_constraints` runs below.
+            self._last_turn_contract.update({
+                "had_feedback": True,
+                "locks_code": locks_code,
+                "art_change": art_change,
+                "sound_change": sound_change,
+                "behavior_scope": behavior_scope,
+                "behavior_bug": behavior_bug,
+                "orientation_change": orientation_change,
+                "existing_media_request": existing_media_request,
+            })
+            self._configure_scoped_constraints(
+                joined_feedback=joined,
+                locks_code=locks_code,
+                art_change=art_change,
+                sound_change=sound_change,
+            )
             self._last_drained_feedback = list(selected_feedback)
+            self._recent_feedback_texts.extend(selected_feedback)
+            self._recent_feedback_texts = self._recent_feedback_texts[-3:]
 
             self._pending_feedback.clear()
 
@@ -2732,10 +3669,31 @@ class GameAgent:
             # asset-name match in `_feedback_is_art_change` is a
             # weak signal that needs an explicit suppressor when the
             # feedback contains behavior-bug language.
-            if behavior_bug and (art_change or sound_change):
+            if (behavior_bug or (locks_code and behavior_scope)) and (art_change or sound_change):
                 self._trace({
                     "kind": "media_change_directive_suppressed",
-                    "reason": "behavior_bug",
+                    "reason": (
+                        "behavior_scope_on_strict_turn"
+                        if locks_code and behavior_scope
+                        else "behavior_bug"
+                    ),
+                    "art_change": art_change,
+                    "sound_change": sound_change,
+                })
+
+            # ORIENTATION-CHANGE suppression — MK trace
+            # 20260517_220025: user asked "is there a way to INVERT
+            # the asset we use for the player kick?" which mentions an
+            # existing asset name, so `art_change` fires; the standard
+            # MEDIA-CHANGE directive then tells the model to regen the
+            # sprite, which is the wrong fix (a one-line ctx.scale(-1,1)
+            # canvas mirror was the right one). When orientation
+            # vocabulary is present AND no regen blocker, route to the
+            # one-patch canvas mirror path instead.
+            if orientation_change and (art_change or sound_change):
+                self._trace({
+                    "kind": "media_change_directive_suppressed",
+                    "reason": "orientation_change",
                     "art_change": art_change,
                     "sound_change": sound_change,
                 })
@@ -2754,6 +3712,8 @@ class GameAgent:
                 (asset_names or sound_names)
                 and (art_change or sound_change)
                 and not behavior_bug
+                and not (locks_code and behavior_scope)
+                and not orientation_change
             ):
                 lines: list[str] = [
                     "================ MEDIA-CHANGE DIRECTIVE ================",
@@ -2772,6 +3732,12 @@ class GameAgent:
                         "  <assets>[{\"name\":\"<existing_name>\","
                         "\"prompt\":\"<new visual prompt>\"}]</assets>",
                         f"  Existing asset names: {asset_list}",
+                        "",
+                        "If the user says an animation/image is MISSING",
+                        "and no existing name matches that state, you may",
+                        "emit a NEW same-pattern sprite name plus ONE small",
+                        "<patch> that only adds the name to the existing",
+                        "asset loader/list. Do not rewrite gameplay code.",
                     ])
                 if sound_names:
                     sound_list = ", ".join(sorted(sound_names))
@@ -2798,8 +3764,50 @@ class GameAgent:
                     "locks_code": locks_code,
                     "art_change": art_change,
                     "sound_change": sound_change,
+                    "behavior_scope": behavior_scope,
                     "asset_count": len(asset_names),
                     "sound_count": len(sound_names),
+                })
+
+            # ORIENTATION-CHANGE DIRECTIVE — when the user wants a
+            # sprite mirrored on the canvas (not regenerated) emit a
+            # short canvas-mirror recipe so the model emits ONE small
+            # <patch> wrapping the existing draw call rather than
+            # reaching for <assets>. Genre-free, code-only.
+            if orientation_change:
+                orient_lines = [
+                    "================ ORIENTATION-CHANGE DIRECTIVE ================",
+                    "The user wants a SPRITE MIRRORED/FLIPPED on the canvas,",
+                    "not regenerated. Emit ONE small <patch> that wraps the",
+                    "existing drawImage() call for the named sprite with a",
+                    "ctx.save() / ctx.scale(-1, 1) / ctx.restore() block.",
+                    "Do NOT emit <assets> — the existing PNG is fine and",
+                    "another generation will not change its facing direction",
+                    "in a reliable way.",
+                    "",
+                    "Canonical recipe (adapt names to this file's helper):",
+                    "  if (currentSpriteName === '<name>') {",
+                    "    ctx.save();",
+                    "    ctx.translate(x + w, 0);",
+                    "    ctx.scale(-1, 1);",
+                    "    ctx.drawImage(sprite, 0, y, w, h);",
+                    "    ctx.restore();",
+                    "  } else {",
+                    "    ctx.drawImage(sprite, x, y, w, h);",
+                    "  }",
+                    "",
+                    "If a facing-aware branch already exists in the helper,",
+                    "KEEP it for all sprites and ADD a separate sprite-name",
+                    "guard with an EXTRA scale(-1,1). Never replace the",
+                    "existing facing branch with an `else if`.",
+                    "===============================================================",
+                ]
+                parts.append("\n".join(orient_lines))
+                self._trace({
+                    "kind": "orientation_change_directive_injected",
+                    "art_change": art_change,
+                    "sound_change": sound_change,
+                    "locks_code": locks_code,
                 })
 
             # SCOPED-CHANGE DIRECTIVE — fires whenever the user locked
@@ -2860,16 +3868,74 @@ class GameAgent:
                     "    achieves the intent and nothing else.",
                     "=========================================================",
                 ]
+                if self._scoped_constraints is not None:
+                    scoped_mode = self._scoped_constraints.get("mode")
+                    if scoped_mode == "media_only":
+                        scoped_lines.insert(
+                            3,
+                            "Turn mode: MEDIA-ONLY (existing names only).",
+                        )
+                    else:
+                        scoped_lines.insert(
+                            3,
+                            "Turn mode: ONE-SMALL-PATCH (no rewrite, max one patch block).",
+                        )
                 parts.append("\n".join(scoped_lines))
                 self._trace({
                     "kind": "scoped_change_directive_injected",
                     "art_change": art_change,
                     "sound_change": sound_change,
+                    "mode": (
+                        (self._scoped_constraints or {}).get("mode")
+                        or "single_patch"
+                    ),
                 })
                 # Flag consumed by the fix-mode prompt builder to drop
                 # the "fix these failing probes" framing for this turn.
                 # Cleared after one fix-mode build cycle (caller resets).
                 self._scoped_change_active = True
+
+            # BOUNDED-ASSET-ONLY TURN — when scoped_mode is media_only,
+            # append a hard, narrow output spec at the end of the user
+            # message. MK trace 20260517_220025: the model streamed an
+            # asset prompt fragment in a loop for 30 minutes because
+            # the user message had multiple competing instructions
+            # (USER FEEDBACK + MEDIA-CHANGE + SCOPED-CHANGE) and no
+            # explicit "stop after one block" constraint. Adding the
+            # cap LAST so it's the most recent instruction the model
+            # sees before generating.
+            scoped_mode_now = (self._scoped_constraints or {}).get("mode")
+            if scoped_mode_now == "media_only":
+                allowed_assets = sorted(asset_names)
+                bounded_lines = [
+                    "================ BOUNDED OUTPUT — MEDIA ONLY ================",
+                    "Emit exactly ONE <assets> JSON array. No other tags.",
+                    "  - Use ONLY these existing names (regen replaces the",
+                    "    file on disk; the existing drawImage call picks",
+                    "    up the new pixels automatically):",
+                ]
+                if allowed_assets:
+                    bounded_lines.append(
+                        "    " + ", ".join(allowed_assets)
+                    )
+                else:
+                    bounded_lines.append(
+                        "    (no existing asset names — abort and ask "
+                        "the user instead)"
+                    )
+                bounded_lines.extend([
+                    "  - Each prompt: ONE short sentence, ≤ 200 chars.",
+                    "  - Close the block with </assets> and STOP. Do NOT",
+                    "    repeat or restate the JSON, do NOT add prose,",
+                    "    do NOT emit <patch>, <html_file>, <plan>,",
+                    "    <criteria>, <probes>, or <notes>.",
+                    "=============================================================",
+                ])
+                parts.append("\n".join(bounded_lines))
+                self._trace({
+                    "kind": "bounded_asset_only_injected",
+                    "asset_count": len(allowed_assets),
+                })
 
             # Rewrite-exemption gating — unchanged from before, just
             # moved below SCOPED-CHANGE so the order in the prompt is:
@@ -2907,38 +3973,73 @@ class GameAgent:
             for block in self._pending_bullet_lookups:
                 parts.append(block)
             self._pending_bullet_lookups.clear()
+
+        # Probe quarantine notices are not normal "coaching"; they explain
+        # that the agent dropped a broken model-authored probe after repeated
+        # eval-time errors. Always surface once so the next model turn knows
+        # it may re-emit <probes> if the dropped assertion mattered.
+        if self._pending_probe_quarantine_notices:
+            joined = "\n- ".join(self._pending_probe_quarantine_notices)
+            parts.append(
+                "================ PROBE QUARANTINE NOTICE ================\n"
+                f"- {joined}\n"
+                "========================================================="
+            )
+            for c in self._pending_probe_quarantine_notices:
+                self._trace({"kind": "probe_quarantine_notice_injected", "text": c})
+            self._pending_probe_quarantine_notices.clear()
+
         # A2/A5: agent-queued coaching lines (deliberation guard recovery,
         # repeat-error nudges). Rendered as a single high-priority block
         # so the model sees them before the base instruction.
         if self._pending_coaching:
-            prev = self._previous_report or {}
-            probes = prev.get("probes") or []
-            full_probe_pass = bool(probes) and all(bool(p.get("ok")) for p in probes)
-            clean_report = (
-                self._previous_report_ok is True
-                and full_probe_pass
-                and not (prev.get("errors") or [])
-                and not (prev.get("soft_warnings") or [])
-                and not (prev.get("page_errors") or [])
-                and not (prev.get("console_errors") or [])
-            )
-            if clean_report:
+            scoped_lock_active = bool(self._scoped_constraints is not None)
+            if scoped_lock_active:
                 self._trace({
-                    "kind": "coaching_suppressed_clean_pass",
+                    "kind": "coaching_suppressed_scoped_lock",
                     "count": len(self._pending_coaching),
                 })
+                self._pending_coaching.clear()
             else:
-                joined = "\n- ".join(self._pending_coaching)
-                parts.append(
-                    "================ AGENT COACHING ================\n"
-                    f"- {joined}\n"
-                    "================================================"
+                prev = self._previous_report or {}
+                probes = prev.get("probes") or []
+                full_probe_pass = bool(probes) and all(bool(p.get("ok")) for p in probes)
+                clean_report = (
+                    self._previous_report_ok is True
+                    and full_probe_pass
+                    and not (prev.get("errors") or [])
+                    and not (prev.get("soft_warnings") or [])
+                    and not (prev.get("page_errors") or [])
+                    and not (prev.get("console_errors") or [])
                 )
-                for c in self._pending_coaching:
-                    self._trace({"kind": "coaching_injected", "text": c})
-            self._pending_coaching.clear()
+                if clean_report:
+                    self._trace({
+                        "kind": "coaching_suppressed_clean_pass",
+                        "count": len(self._pending_coaching),
+                    })
+                else:
+                    joined = "\n- ".join(self._pending_coaching)
+                    parts.append(
+                        "================ AGENT COACHING ================\n"
+                        f"- {joined}\n"
+                        "================================================"
+                    )
+                    for c in self._pending_coaching:
+                        self._trace({"kind": "coaching_injected", "text": c})
+                self._pending_coaching.clear()
         if base_message:
-            parts.append(base_message)
+            if (
+                self._last_turn_contract
+                and self._last_turn_contract.get("had_feedback")
+                and self._is_post_clean_instruction(base_message)
+            ):
+                # Replace the large clean report with one compact line; the
+                # POST-CLEAN FEEDBACK CONTRACT above carries the important
+                # baseline signal without drowning the user's fresh request.
+                parts.append(self._compact_post_clean_context())
+                self._trace({"kind": "post_clean_report_compacted"})
+            else:
+                parts.append(base_message)
 
         # Push a confirmation line into the TUI agent log via the token
         # callback. Plain text only — the TUI renders streamed tokens
@@ -3189,6 +4290,31 @@ class GameAgent:
                 "bias": bias,
                 "result_temp": temp,
             })
+        # One row per stream summarizing the turn's routing contract.
+        # Read by future debugging tools / the offline learner; does
+        # not affect runtime behavior. Best-effort: any KeyError /
+        # type error is swallowed by the outer _trace try/except.
+        try:
+            contract = dict(self._last_turn_contract or {})
+            scoped_mode = (self._scoped_constraints or {}).get("mode") or "none"
+            contract.update({
+                "kind": "turn_contract",
+                "fix_mode": self._fix_mode,
+                "continuation": bool(getattr(self, "_continuation", False)),
+                "scoped_mode": scoped_mode,
+                "rewrite_allowed": bool(self._allow_one_rewrite),
+                "scoped_change_active": bool(self._scoped_change_active),
+                "force_question": self._force_question_subsystem is not None,
+                "snapshot_n": self._snapshot_n,
+                "prompt_sections": self._estimate_prompt_section_chars(),
+                "temperature": temp,
+            })
+            allowed, forbidden = self._derive_allowed_forbidden_tags()
+            contract["allowed_tags"] = allowed
+            contract["forbidden_tags"] = forbidden
+            self._trace(contract)
+        except Exception:
+            pass
         self._trace({"kind": "stream_start", "temperature": temp, "fix_mode": self._fix_mode})
 
         # Heartbeat wrapper around the caller's on_token. Every
@@ -3525,6 +4651,10 @@ class GameAgent:
         # the winning one is replayed visually after we pick it.
         async def scorer(text: str) -> tuple[float, dict]:
             extra: dict = {"kind": "candidate", "text_len": len(text)}
+            scoped_violation = self._scoped_reply_violation(text)
+            if scoped_violation:
+                extra["scoped_violation"] = scoped_violation
+                return -20.0, extra
             html, applied_msg = await self._materialize(text, dry_run=True)
             extra["materialized"] = bool(html)
             extra["materialize_msg"] = applied_msg
@@ -4076,12 +5206,21 @@ class GameAgent:
         """Extract dotted identifier paths from a failure signature."""
         if not sig:
             return []
+        browser_noise = {
+            "Page.evaluate",
+            "UtilityScript.evaluate",
+            "UtilityScript.anonymous",
+            "Page.ev",
+        }
+        browser_prefixes = ("UtilityScript.", "Page.")
         out: list[str] = []
         seen: set[str] = set()
         for tok in re.findall(
             r"[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*){1,4}",
             sig,
         ):
+            if tok in browser_noise or tok.startswith(browser_prefixes):
+                continue
             if tok in seen:
                 continue
             seen.add(tok)
@@ -4383,6 +5522,93 @@ class GameAgent:
         re.IGNORECASE | re.DOTALL,
     )
 
+    # MK trace 20260517_220025 fix. Iter 2 probe:
+    #   (()=>{try{const s=window.state; if(!s)return false;
+    #          return s.cpuPunchFlipped===true;}catch(e){return false;}})()
+    # was bait — the SAME iter's patch added `cpuPunchFlipped: true`
+    # to state.reset(), so the probe trivially passed without
+    # verifying the actual draw transform. Detect this shape so the
+    # next user-turn fix prompt surfaces the bait. The probe-side
+    # pattern matches any `<ident>.<prop> === true|false` shape (the
+    # probe in the MK trace used `s.X` where `s` was a local alias
+    # for `window.state`). False-positive risk is bounded by the
+    # second-pass check that `<prop>` was also assigned to a literal
+    # boolean by the same iter's patch.
+    _PROBE_BAIT_PROP_RE = re.compile(
+        r"\b\w+\.(\w+)\s*===\s*(?:true|false)\b",
+        re.IGNORECASE,
+    )
+    # Inline constant assignment matchers — both object-literal
+    # (`cpuPunchFlipped: true`) and statement (`state.X = true`,
+    # `window.X = true`) forms. Conservative on purpose: we only
+    # match LITERAL true/false to flag the exact bait shape.
+    _PROBE_BAIT_OBJLIT_RE = re.compile(
+        r"\b(\w+)\s*:\s*(?:true|false)\b",
+        re.IGNORECASE,
+    )
+    _PROBE_BAIT_ASSIGN_RE = re.compile(
+        r"(?:state|window|self|globalThis)\.(\w+)\s*=\s*(?:true|false)\b",
+        re.IGNORECASE,
+    )
+
+    @staticmethod
+    def _probes_baited_by_patches(
+        probes: list[dict], applied_replaces: list[str],
+    ) -> list[dict]:
+        """Detect probes whose only assertion is `state.X === true|false`
+        when the SAME iter's applied patch also writes that exact flag
+        as a literal constant. Returns the same `{name, kind, message}`
+        shape as `_lint_probes`. MK trace 20260517_220025 iter 2 is
+        the case study: a probe checked `state.cpuPunchFlipped===true`
+        while the patch added `cpuPunchFlipped: true` to reset() — the
+        probe passed without actually testing the rendered flip.
+
+        Conservative: requires LITERAL true/false on both sides, and
+        only flags when the same property name appears in BOTH the
+        probe expr and a REPLACE constant assignment. False positives
+        would noisily lint legitimate flag checks; false negatives
+        keep the existing behavior.
+        """
+        if not probes or not applied_replaces:
+            return []
+        # Build the set of property names assigned to a literal
+        # boolean by the applied patches.
+        assigned_to_bool: set[str] = set()
+        for replace_text in applied_replaces:
+            if not isinstance(replace_text, str) or not replace_text:
+                continue
+            for m in GameAgent._PROBE_BAIT_OBJLIT_RE.finditer(replace_text):
+                assigned_to_bool.add(m.group(1))
+            for m in GameAgent._PROBE_BAIT_ASSIGN_RE.finditer(replace_text):
+                assigned_to_bool.add(m.group(1))
+        if not assigned_to_bool:
+            return []
+        findings: list[dict] = []
+        for p in probes:
+            name = str(p.get("name", "?"))
+            expr = str(p.get("expr", ""))
+            if not expr:
+                continue
+            for m in GameAgent._PROBE_BAIT_PROP_RE.finditer(expr):
+                prop = m.group(1)
+                if prop in assigned_to_bool:
+                    findings.append({
+                        "name": name,
+                        "kind": "probe_bait_flag",
+                        "message": (
+                            f"probe `{name}` checks "
+                            f"`{prop} === true|false` but the same "
+                            f"iter's patch sets `{prop}` to a literal "
+                            f"boolean — the probe passes without "
+                            f"verifying the actual behavior. Replace "
+                            f"the flag check with a draw-path / DOM / "
+                            f"canvas-state assertion that fails when "
+                            f"the visual change is missing."
+                        ),
+                    })
+                    break
+        return findings
+
     @staticmethod
     def _lint_probes(probes: list[dict]) -> list[dict]:
         """Return a list of `{name, kind, message}` lint findings for
@@ -4501,9 +5727,10 @@ class GameAgent:
                         f"probe `{name}` reads {sample} but the game "
                         f"code never assigns those properties — the "
                         f"probe will trivially fail (or short-circuit "
-                        f"return) regardless of game behavior. Either "
-                        f"fix the probe to read a real game-state "
-                        f"property, or add the assignment to the game."
+                        f"return) regardless of game behavior. Prefer "
+                        f"fixing the probe to read real runtime state; "
+                        f"do not add a constant pass-flag assignment "
+                        f"unless it is genuinely updated by gameplay."
                     ),
                 })
         return findings
@@ -4676,6 +5903,30 @@ class GameAgent:
             f"{candidate.name}:{candidate.model} for this turn."
         )
 
+    @staticmethod
+    def _filter_media_specs_to_allowed(
+        specs: list[dict[str, Any]],
+        allowed_names: set[str],
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        if not specs:
+            return specs, []
+        if not allowed_names:
+            dropped = [
+                str(spec.get("name") or "").strip()
+                for spec in specs
+                if str(spec.get("name") or "").strip()
+            ]
+            return [], dropped
+        kept: list[dict[str, Any]] = []
+        dropped: list[str] = []
+        for spec in specs:
+            name = str(spec.get("name") or "").strip()
+            if name in allowed_names:
+                kept.append(spec)
+            elif name:
+                dropped.append(name)
+        return kept, dropped
+
     async def _maybe_generate_assets_and_sounds(
         self, reply: str, *, trigger: str,
     ) -> AsyncIterator[AgentEvent]:
@@ -4705,6 +5956,41 @@ class GameAgent:
         """
         asset_specs, dropped_asset_names = parse_assets_block_with_meta(reply)
         sound_specs = parse_sounds_block(reply)
+        # Strict scoped-media lock: when the user said "regenerate only the
+        # existing media", reject additive names early (before generation).
+        scoped = self._scoped_constraints or {}
+        if (
+            trigger == "mid_session"
+            and scoped.get("mode") == "media_only"
+            and scoped.get("media_name_lock")
+        ):
+            allowed_assets = set(scoped.get("allowed_asset_names") or [])
+            allowed_sounds = set(scoped.get("allowed_sound_names") or [])
+            asset_specs, dropped_new_assets = self._filter_media_specs_to_allowed(
+                asset_specs, allowed_assets,
+            )
+            sound_specs, dropped_new_sounds = self._filter_media_specs_to_allowed(
+                sound_specs, allowed_sounds,
+            )
+            if dropped_new_assets or dropped_new_sounds:
+                allowed_asset_line = ", ".join(sorted(allowed_assets)) or "(none)"
+                allowed_sound_line = ", ".join(sorted(allowed_sounds)) or "(none)"
+                dropped_line = ", ".join(dropped_new_assets + dropped_new_sounds)
+                self._trace({
+                    "kind": "scoped_media_new_names_rejected",
+                    "dropped": sorted(dropped_new_assets + dropped_new_sounds),
+                    "allowed_assets": sorted(allowed_assets),
+                    "allowed_sounds": sorted(allowed_sounds),
+                })
+                self._pending_feedback.append(
+                    "SCOPED MEDIA NAME LOCK: new names were ignored "
+                    f"[{dropped_line}]. Use existing names only. Assets: "
+                    f"{allowed_asset_line}. Sounds: {allowed_sound_line}."
+                )
+                yield self._record(AgentEvent(
+                    "info",
+                    "scoped media lock: dropped new names; only existing keys are allowed this turn.",
+                ))
         if not asset_specs and not sound_specs:
             return
 
@@ -4749,6 +6035,17 @@ class GameAgent:
         new_asset_paths: dict[str, Path] = {}
         new_sound_paths: dict[str, Path] = {}
         new_looping: set[str] = set()
+        pre_asset_hashes: dict[str, str | None] = {}
+        pre_sound_hashes: dict[str, str | None] = {}
+        if trigger == "mid_session":
+            for spec in asset_specs:
+                nm = str(spec.get("name", "")).strip()
+                if nm and nm in self._session_assets:
+                    pre_asset_hashes[nm] = self._file_hash16(self._session_assets.get(nm))
+            for spec in sound_specs:
+                nm = str(spec.get("name", "")).strip()
+                if nm and nm in self._session_sounds:
+                    pre_sound_hashes[nm] = self._file_hash16(self._session_sounds.get(nm))
 
         if asset_specs:
             yield self._record(AgentEvent(
@@ -5021,29 +6318,137 @@ class GameAgent:
             # follow-up "no usable code" outcome doesn't get charged
             # against max_iters. See _media_regenerated_this_iter init.
             self._media_regenerated_this_iter = True
-            blocks: list[str] = []
-            if new_asset_paths:
-                blocks.append(render_asset_paths_block(
-                    new_asset_paths, self.out_path,
-                ))
-            if new_sound_paths:
-                blocks.append(render_sound_paths_block(
-                    new_sound_paths, self.out_path,
-                    looping_names=new_looping,
-                ))
-            blocks = [b for b in blocks if b]
-            if blocks:
-                msg = (
-                    "Mid-session asset/sound additions — load these in "
-                    "your next patch and use them where appropriate. "
-                    "The files exist on disk now:\n\n"
-                    + "\n\n".join(blocks)
+            # MK trace 20260517_220025 fix: when an existing asset is
+            # regenerated with the SAME name, the file on disk has
+            # already been replaced — the existing drawImage(ASSETS.X)
+            # call picks up the new pixels automatically. Injecting the
+            # heavy ASSETS_LOADER block in that case told the model "add
+            # a new loader entry", which on a small model led to a 30-
+            # minute repeating asset-prompt stream. Split into:
+            #   - already_in_html: regen confirmation only
+            #   - new_to_html: full loader block
+            html_for_refs = self._current_file or ""
+            html_asset_refs = self._scan_html_for_asset_refs(html_for_refs)
+            html_sound_refs = self._scan_html_for_sound_refs(html_for_refs)
+            already_assets = {
+                n: p for n, p in new_asset_paths.items()
+                if n in html_asset_refs
+            }
+            new_assets = {
+                n: p for n, p in new_asset_paths.items()
+                if n not in html_asset_refs
+            }
+            already_sounds = {
+                n: p for n, p in new_sound_paths.items()
+                if n in html_sound_refs
+            }
+            new_sounds = {
+                n: p for n, p in new_sound_paths.items()
+                if n not in html_sound_refs
+            }
+            asset_replacements = {
+                n: {
+                    "old_hash": pre_asset_hashes.get(n),
+                    "new_hash": self._file_hash16(p),
+                    "changed": (
+                        pre_asset_hashes.get(n) is not None
+                        and self._file_hash16(p) is not None
+                        and pre_asset_hashes.get(n) != self._file_hash16(p)
+                    ),
+                }
+                for n, p in already_assets.items()
+            }
+            sound_replacements = {
+                n: {
+                    "old_hash": pre_sound_hashes.get(n),
+                    "new_hash": self._file_hash16(p),
+                    "changed": (
+                        pre_sound_hashes.get(n) is not None
+                        and self._file_hash16(p) is not None
+                        and pre_sound_hashes.get(n) != self._file_hash16(p)
+                    ),
+                }
+                for n, p in already_sounds.items()
+            }
+
+            msg_parts: list[str] = []
+            if already_assets or already_sounds:
+                # Compact confirmation; no loader pattern, no procedural-
+                # vs-sprite warnings, no orientation reminder. The
+                # existing draw / Audio() call already references these
+                # names by path, so the regen is transparent.
+                lines = [
+                    "================ MEDIA REGEN COMPLETE ================",
+                    "These names already exist in your HTML. The files on",
+                    "disk have been REPLACED with newly generated content.",
+                    "No JS patch is required — the existing drawImage() /",
+                    "new Audio() calls will pick up the new pixels / audio",
+                    "automatically on the next Chromium load.",
+                ]
+                if already_assets:
+                    lines.append("")
+                    lines.append("Regenerated sprites:")
+                    for n in sorted(already_assets):
+                        rep = asset_replacements.get(n) or {}
+                        status = (
+                            "changed"
+                            if rep.get("changed") is True
+                            else "unchanged/unknown"
+                        )
+                        lines.append(f"  - {n} ({status})")
+                if already_sounds:
+                    lines.append("")
+                    lines.append("Regenerated sounds:")
+                    for n in sorted(already_sounds):
+                        rep = sound_replacements.get(n) or {}
+                        status = (
+                            "changed"
+                            if rep.get("changed") is True
+                            else "unchanged/unknown"
+                        )
+                        lines.append(f"  - {n} ({status})")
+                lines.append(
+                    "======================================================"
                 )
-                self._pending_feedback.append(msg)
+                msg_parts.append("\n".join(lines))
+
+            if new_assets or new_sounds:
+                # New names → emit the full loader block so the model
+                # knows how to wire them in via a <patch>.
+                blocks: list[str] = []
+                if new_assets:
+                    blocks.append(render_asset_paths_block(
+                        new_assets, self.out_path,
+                    ))
+                if new_sounds:
+                    new_looping_subset = {
+                        n for n in new_looping if n in new_sounds
+                    }
+                    blocks.append(render_sound_paths_block(
+                        new_sounds, self.out_path,
+                        looping_names=new_looping_subset,
+                    ))
+                blocks = [b for b in blocks if b]
+                if blocks:
+                    msg_parts.append(
+                        "Mid-session asset/sound additions — load these in "
+                        "your next patch and use them where appropriate. "
+                        "The files exist on disk now:\n\n"
+                        + "\n\n".join(blocks)
+                    )
+
+            if msg_parts:
+                self._pending_feedback.append("\n\n".join(msg_parts))
                 self._trace({
                     "kind": "midsession_asset_injection_queued",
                     "asset_names": list(new_asset_paths.keys()),
                     "sound_names": list(new_sound_paths.keys()),
+                    "already_in_html_assets": sorted(already_assets.keys()),
+                    "already_in_html_sounds": sorted(already_sounds.keys()),
+                    "new_assets": sorted(new_assets.keys()),
+                    "new_sounds": sorted(new_sounds.keys()),
+                    "asset_replacements": asset_replacements,
+                    "sound_replacements": sound_replacements,
                 })
 
     # -- main loop ----------------------------------------------------------
@@ -5074,6 +6479,9 @@ class GameAgent:
         """
         if not continuation:
             self._goal = goal
+        # Persist for `turn_contract` trace event; reset per call so a
+        # fresh session after an extension does not inherit True.
+        self._continuation = bool(continuation)
         self.out_path.parent.mkdir(parents=True, exist_ok=True)
 
         if continuation:
@@ -5220,10 +6628,13 @@ class GameAgent:
 
             self._trace({
                 "kind": "session_start",
+                "session_id": self._session_id,
+                "artifact_id": self._artifact_id,
                 "model": self.model,
                 "goal": goal,
                 "out_path": str(self.out_path),
                 "trace_path": str(self.trace_path),
+                "conversation_path": str(self.conversation_path),
                 "snapshots_dir": str(self.snapshots_dir),
                 "best_path": str(self.best_path),
                 "max_iters": self.max_iters,
@@ -5482,7 +6893,14 @@ class GameAgent:
                     self._session_sounds, self.out_path,
                     looping_names=self._session_looping,
                 )
-                prelude = "\n\n".join(b for b in (asset_block, sound_block) if b)
+                seed_media_contract = self._render_seed_media_contract(
+                    seed_html,
+                    asset_names=list(self._session_assets.keys()),
+                    sound_names=list(self._session_sounds.keys()),
+                )
+                prelude = "\n\n".join(
+                    b for b in (seed_media_contract, asset_block, sound_block) if b
+                )
                 if prelude:
                     build_msg = prelude + "\n\n" + build_msg
                 local_nudge = self._local_first_build_nudge()
@@ -5491,6 +6909,9 @@ class GameAgent:
                 probe_nudge = self._probe_quality_nudge()
                 if probe_nudge:
                     build_msg = probe_nudge + "\n\n" + build_msg
+                # MK trace 20260517_220025: apply scope lock from the
+                # initial goal so iter 1 of a seed edit doesn't sprawl.
+                build_msg = self._apply_initial_goal_scoping(goal, build_msg)
                 self._messages.append({
                     "role": "user",
                     "content": self._flush_user_injections(build_msg),
@@ -5672,6 +7093,9 @@ class GameAgent:
                 probe_nudge = self._probe_quality_nudge()
                 if probe_nudge:
                     build_msg = probe_nudge + "\n\n" + build_msg
+                # Mirror the seed-file branch: apply scope lock from
+                # the initial goal so iter 1 of a strict goal honors it.
+                build_msg = self._apply_initial_goal_scoping(goal, build_msg)
                 self._messages.append({
                     "role": "user",
                     "content": self._flush_user_injections(build_msg),
@@ -5846,6 +7270,7 @@ class GameAgent:
                         # Stream failed before we got any assistant reply; put
                         # the just-consumed feedback back in queue so extension
                         # requests are not silently dropped.
+                        self._clear_scoped_constraints()
                         self._pending_feedback = (
                             self._last_drained_feedback + self._pending_feedback
                         )
@@ -5866,6 +7291,24 @@ class GameAgent:
                 "len": len(reply),
                 "preview": reply[:600],
             })
+            violation = self._scoped_reply_violation(reply)
+            if violation:
+                self._trace({
+                    "kind": "scoped_reply_rejected",
+                    "iteration": iteration,
+                    "violation": violation,
+                })
+                yield self._record(AgentEvent(
+                    "info",
+                    f"scoped guard: {violation}",
+                ))
+                self._messages.append({
+                    "role": "user",
+                    "content": self._flush_user_injections(
+                        self._scoped_retry_instruction(violation)
+                    ),
+                })
+                continue
 
             # ---- mid-session asset / sound generation ------------------
             # If the model emitted a fresh <assets> or <sounds> block in
@@ -5919,35 +7362,69 @@ class GameAgent:
                 bool(self._planning_coverage_gaps)
                 or prev_probe_failures > 0
                 or seed_iter1
+                or bool((self._scoped_constraints or {}).get("require_scope_probe"))
             )
             if (
                 allow_probe_reparse
                 and "<probes>" in reply_low
                 and has_code
             ):
+                scoped_probe_required = bool(
+                    (self._scoped_constraints or {}).get("require_scope_probe")
+                )
                 new_probes = self._extract_probes(reply)
-                if new_probes and len(new_probes) >= len(self._probes):
+                merged_scoped = False
+                adopted_probes = list(new_probes)
+                if (
+                    scoped_probe_required
+                    and new_probes
+                    and len(new_probes) < len(self._probes)
+                ):
+                    # Scoped-check turns may re-emit a tiny probe set.
+                    # Merge new probes into the current list instead of
+                    # dropping them on the floor due to the length guard.
+                    merged_scoped = True
+                    seen = {
+                        (
+                            str(p.get("name") or "").strip().lower(),
+                            str(p.get("expr") or "").strip().lower(),
+                        )
+                        for p in self._probes
+                    }
+                    adopted_probes = list(self._probes)
+                    for p in new_probes:
+                        sig = (
+                            str(p.get("name") or "").strip().lower(),
+                            str(p.get("expr") or "").strip().lower(),
+                        )
+                        if sig in seen:
+                            continue
+                        seen.add(sig)
+                        adopted_probes.append(p)
+                if adopted_probes and len(adopted_probes) >= len(self._probes):
                     from tools import _criteria_coverage_gaps as _gaps_fn
-                    new_gaps = _gaps_fn(self._criteria or "", new_probes)
+                    new_gaps = _gaps_fn(self._criteria or "", adopted_probes)
                     self._trace({
                         "kind": "probes_reparsed",
                         "iteration": iteration,
                         "old_count": len(self._probes),
-                        "new_count": len(new_probes),
+                        "new_count": len(adopted_probes),
+                        "scoped_merged": merged_scoped,
                         "remaining_gaps": new_gaps[:6],
                         "trigger": (
                             "coverage_gap" if self._planning_coverage_gaps
                             else "prev_probe_failures" if prev_probe_failures > 0
-                            else "seed_iter1"
+                            else "seed_iter1" if seed_iter1
+                            else "scoped_probe"
                         ),
                     })
                     yield self._record(AgentEvent(
                         "info",
                         f"probes re-emitted ({len(self._probes)} → "
-                        f"{len(new_probes)}); remaining coverage gaps: "
+                        f"{len(adopted_probes)}); remaining coverage gaps: "
                         f"{len(new_gaps)}",
                     ))
-                    self._probes = new_probes
+                    self._probes = adopted_probes
                     self._planning_coverage_gaps = new_gaps[:6]
 
             # ---- diagnose extraction (logged + memory-keyed) -----------
@@ -6300,6 +7777,20 @@ class GameAgent:
                                     await self._materialize(reply)
                                 )
                                 self._format_stuck_streak = 0
+            if (
+                new_html is None
+                and self._media_regenerated_this_iter
+                and self._current_file
+                and (self._scoped_constraints or {}).get("mode") == "media_only"
+            ):
+                # Scoped media-only turns can be valid with no code edit:
+                # regenerated files are picked up by existing loaders.
+                new_html = self._current_file
+                materialize_msg = "scoped media-only regeneration (no code patch)"
+                self._trace({
+                    "kind": "scoped_media_only_turn_accepted",
+                    "iteration": iteration,
+                })
             if new_html is None:
                 if not self._current_file:
                     # Keep first-build rescue armed until code lands.
@@ -6428,6 +7919,14 @@ class GameAgent:
             # clear the format-stuck streak: a successful parse means
             # whatever shape the model picked just worked, regardless
             # of what came before.
+            if self._scoped_constraints is not None:
+                scoped_check_keys = list(self._pending_scoped_check_keywords)
+                self._trace({
+                    "kind": "scoped_constraints_cleared_after_materialize",
+                    "iteration": iteration,
+                })
+                self._clear_scoped_constraints()
+                self._pending_scoped_check_keywords = scoped_check_keys
             self._force_first_build_prefill = False
             self._consecutive_plan_only = 0
             self._format_stuck_streak = 0
@@ -6451,18 +7950,34 @@ class GameAgent:
                 unassigned = GameAgent._probes_referencing_unassigned_props(
                     self._probes, new_html,
                 )
-                if unassigned:
+                # Probe-sanity lint pass 3 (MK 20260517_220025 fix):
+                # detect bait probes where the SAME iter's patch added
+                # a literal flag the probe just reads back. The patch
+                # REPLACE texts are the only evidence; pull them from
+                # the applied patches.
+                applied_replaces = [
+                    getattr(p, "replace", "") or ""
+                    for p in (patches_in_reply or [])
+                ]
+                baited = GameAgent._probes_baited_by_patches(
+                    self._probes, applied_replaces,
+                )
+                if unassigned or baited:
                     # Combine with the tautological findings from Phase A;
                     # both flow to the model the same way.
                     self._probe_lint_findings = (
-                        [f for f in self._probe_lint_findings
-                         if f.get("kind") != "unassigned_property_read"]
+                        [
+                            f for f in self._probe_lint_findings
+                            if f.get("kind")
+                            not in ("unassigned_property_read", "probe_bait_flag")
+                        ]
                         + unassigned
+                        + baited
                     )
                     self._trace({
                         "kind": "probe_lint_postbuild",
                         "iteration": iteration,
-                        "findings": unassigned,
+                        "findings": (unassigned + baited),
                     })
 
             # Save + per-iter snapshot
@@ -6643,6 +8158,8 @@ class GameAgent:
                     "failed_count": len(partial_failed),
                     "iteration": iteration,
                 })
+            self._handle_probe_eval_errors(report, iteration)
+            self._apply_scoped_check_to_report(report)
             report_text = format_report_for_model(report)
             self._last_report_summary = report_text
             self._last_test_report = report
@@ -6979,6 +8496,7 @@ class GameAgent:
                 })
                 self._previous_report_ok = report["ok"]
                 self._previous_report = report  # todo #3 — full report
+                self._pending_scoped_check_keywords = []
                 self._fix_mode = False
                 continue
 
@@ -7126,6 +8644,7 @@ class GameAgent:
             })
             self._previous_report_ok = report["ok"]
             self._previous_report = report  # todo #3 — full report
+            self._pending_scoped_check_keywords = []
 
         # ---- iteration cap reached ------------------------------------
         if self.has_pending_user_input():
@@ -7154,23 +8673,36 @@ class GameAgent:
                     "iteration": self.max_iters + 1,
                     "len": len(reply),
                 })
-                # Mid-session asset/sound re-parse also applies on the
-                # bonus turn — the user's feedback that triggered this
-                # turn often says "add sprites" and the model's reply
-                # may include a fresh <assets> block.
-                async for ev in self._maybe_generate_assets_and_sounds(
-                    reply, trigger="mid_session",
-                ):
-                    yield ev
-                new_html, materialize_msg = await self._materialize(reply)
-                if new_html is not None:
-                    self.out_path.write_text(new_html, encoding="utf-8")
-                    self._current_file = new_html
-                    self._save_snapshot(new_html)
+                violation = self._scoped_reply_violation(reply)
+                if violation:
                     yield self._record(AgentEvent(
-                        "code", str(self.out_path),
-                        {"size": len(new_html), "materialize": materialize_msg},
+                        "info",
+                        f"scoped guard (bonus turn): {violation}",
                     ))
+                    self._messages.append({
+                        "role": "user",
+                        "content": self._flush_user_injections(
+                            self._scoped_retry_instruction(violation)
+                        ),
+                    })
+                else:
+                    # Mid-session asset/sound re-parse also applies on the
+                    # bonus turn — the user's feedback that triggered this
+                    # turn often says "add sprites" and the model's reply
+                    # may include a fresh <assets> block.
+                    async for ev in self._maybe_generate_assets_and_sounds(
+                        reply, trigger="mid_session",
+                    ):
+                        yield ev
+                    new_html, materialize_msg = await self._materialize(reply)
+                    if new_html is not None:
+                        self.out_path.write_text(new_html, encoding="utf-8")
+                        self._current_file = new_html
+                        self._save_snapshot(new_html)
+                        yield self._record(AgentEvent(
+                            "code", str(self.out_path),
+                            {"size": len(new_html), "materialize": materialize_msg},
+                        ))
             except Exception as e:
                 yield self._record(AgentEvent("activity", "idle"))
                 yield self._record(AgentEvent("error", f"Final feedback turn failed: {e}"))
@@ -7449,6 +8981,13 @@ class GameAgent:
         self._repeat_sig_streak = 0
         self._force_question_subsystem = None
         self._allow_one_rewrite = False
+        self._scoped_constraints = None
+        self._pending_scoped_check_keywords = []
+        self._probe_eval_error_streak = {}
+        self._probe_eval_error_shape_streak = {}
+        self._probe_names_ever_passed = set()
+        self._pending_probe_quarantine_notices = []
+        self._recent_feedback_texts = []
         self._user_force_done = False
         if self._stop_event is not None:
             self._stop_event.clear()
@@ -7672,6 +9211,17 @@ class GameAgent:
                 "\nRe-emit `<probes>[...]</probes>` alongside your patch "
                 "this turn, rewriting the flagged probes so they actually "
                 "test the behavior they claim to test."
+            )
+        eval_error_count = sum(
+            1 for p in (report.get("probes") or [])
+            if p.get("kind") == "eval_error" and not p.get("ok")
+        )
+        if eval_error_count:
+            fix += (
+                "\n\nPROBES NEED REPAIR: "
+                f"{eval_error_count} probe(s) errored at eval time last iter. "
+                "You may emit `<probes>[...]</probes>` alongside your patch "
+                "this turn to replace them; the harness will adopt the new set."
             )
         if self._is_vlm and self._next_image_bytes:
             fix += "\n\n" + self._p.VLM_REVIEW_NOTE

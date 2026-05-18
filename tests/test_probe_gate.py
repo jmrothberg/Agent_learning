@@ -14,6 +14,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import prompts_v1  # noqa: E402
 from agent import GameAgent  # noqa: E402
+from tools import (  # noqa: E402
+    _classify_probe_eval_error,
+    _format_probe_failure_warning,
+    _normalize_probe_expr,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -53,14 +58,7 @@ def _apply_probe_gate(report: dict) -> None:
     for p in (report.get("probes") or []):
         if p.get("ok"):
             continue
-        name = p.get("name", "probe")
-        expr = (p.get("expr") or "")[:80]
-        err = p.get("err") or "evaluated falsy"
-        report["soft_warnings"].append(
-            f"PROBE FAILED [{name}]: `{expr}` — {err}. "
-            "Your Phase A acceptance criterion is unmet; fix the "
-            "game so it evaluates truthy."
-        )
+        report["soft_warnings"].append(_format_probe_failure_warning(p))
     report["ok"] = (
         len(report["errors"]) == 0 and len(report["soft_warnings"]) == 0
     )
@@ -113,6 +111,43 @@ def test_a1_failed_probe_with_runtime_error_surfaces_message():
     found = [w for w in r["soft_warnings"] if "broken" in w]
     assert found
     assert "TypeError" in found[0]
+
+
+def test_probe_eval_error_message_blames_probe_not_game():
+    r = _stub_report()
+    r["probes"] = [
+        {
+            "name": "move_right",
+            "expr": "(()=>{const x0=state.player.x;return new Promise(r=>r(true));});",
+            "ok": False,
+            "err": "Page.evaluate: SyntaxError: missing ) after argument list",
+            "kind": "eval_error",
+            "error_class": "syntax_error",
+        },
+    ]
+    _apply_probe_gate(r)
+    assert r["ok"] is False
+    warning = r["soft_warnings"][0]
+    assert "PROBE BROKEN [move_right]" in warning
+    assert "This is the probe, not the game" in warning
+    assert "fix the game so it evaluates truthy" not in warning
+
+
+def test_probe_expr_normalization_strips_semicolon_and_invokes_arrow_iife():
+    expr = "(()=>{ return Promise.resolve(true); });"
+    assert _normalize_probe_expr(expr).endswith("()")
+    assert not _normalize_probe_expr(expr).endswith(";")
+
+
+def test_probe_expr_normalization_leaves_invoked_iife_alone():
+    expr = "(()=>true)()"
+    assert _normalize_probe_expr(expr) == expr
+
+
+def test_probe_eval_error_classifier():
+    assert _classify_probe_eval_error("SyntaxError: missing ) after argument list") == "syntax_error"
+    assert _classify_probe_eval_error("ReferenceError: state is not defined") == "reference_error"
+    assert _classify_probe_eval_error("evaluated falsy") is None
 
 
 # ---------------------------------------------------------------------------

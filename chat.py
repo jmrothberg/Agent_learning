@@ -963,6 +963,10 @@ class CodingBoxApp(App):
         # /seed stages an existing HTML file as the baseline for the next
         # /new session. Cleared once consumed.
         self._next_seed: Path | None = None
+        # Seed file latched into the CURRENT session at /new time. This is
+        # separate from _next_seed so status can still show "seed in use"
+        # even if the staged seed gets changed/cleared mid-session.
+        self._session_seed: Path | None = None
         # /ref can be staged before a session exists. On session start we
         # hand these bytes to GameAgent._next_image_bytes so the FIRST user
         # turn (planning/build) gets the reference image.
@@ -980,9 +984,11 @@ class CodingBoxApp(App):
         # large when running a frontier-tier model. We do NOT inspect
         # the model name — the user rotates local LLMs constantly.
         self._model_class: str | None = None
-        # Run-profile contract shown in status/mode bar. "custom" means
-        # ad-hoc command composition (/wait + /backend + /check manually).
-        self._run_profile: str = "custom"
+        # Run-profile contract shown in status/mode bar. Default to
+        # local_manual so new sessions start in wait mode: the user can
+        # inspect each iter before the next model call. Override with
+        # `/mode local_auto` or `/wait off` for unattended runs.
+        self._run_profile: str = "local_manual"
         # Optional reviewer model used by the local_plus_review profile.
         # Explicitly user-configured via /mode local_plus_review with <model>.
         self._profile_review_model: str | None = None
@@ -1465,6 +1471,8 @@ class CodingBoxApp(App):
                 f"[b]Staged for /new:[/b] [yellow]{label_b}[/yellow] · "
                 f"{_esc(label_m)}\n"
             )
+        if self._session_seed is not None:
+            out += f"[b]Seed in use:[/b] [green]{_esc(str(self._session_seed))}[/green]\n"
         if self._next_seed is not None:
             out += f"[b]Staged seed:[/b] [dim]{_esc(str(self._next_seed))}[/dim]\n"
         # /ref visibility in the status panel:
@@ -3519,6 +3527,7 @@ class CodingBoxApp(App):
             f"  run profile:       {self._format_run_profile()}",
             f"  review hook:       {self._profile_review_model or '—'}",
             f"  review auto-apply: {self._profile_review_auto_apply}",
+            f"  seed in use:       {_esc(str(self._session_seed) if self._session_seed else '—')}",
             f"  staged seed:       {_esc(str(self._next_seed) if self._next_seed else '—')}",
             f"  staged /ref image: {_esc(self._staged_ref_image_name or '—')}",
             f"  session done:      {self._session_done}",
@@ -3766,6 +3775,9 @@ class CodingBoxApp(App):
         """Boot the LiveBrowser + GameAgent and start consuming events."""
         self._phase_label = "starting browser"
         self._session_done = False
+        self._session_seed = (
+            Path(self._next_seed).resolve() if self._next_seed is not None else None
+        )
         self._update_status()
 
         if self.browser is None:
@@ -3971,7 +3983,10 @@ class CodingBoxApp(App):
         except Exception:
             self._ctx_max = None
 
-        self._open_log_mirror(basename)
+        # Use the agent-owned artifact stem, not the reusable game basename.
+        # Seeded runs intentionally reuse games/<basename>.html and assets,
+        # but logs/conversations/traces must be per-run to avoid mixed goals.
+        self._open_log_mirror(self.agent.trace_path.stem)
 
         # Spawn the agent loop as a background task so the TUI stays responsive.
         self.run_worker(self._consume_events(goal, continuation=False), exclusive=True)
