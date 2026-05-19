@@ -32,6 +32,25 @@ _MAX_MSG_LEN = 240      # truncate each line to this many chars
 _MAX_BODY_TEXT = 200    # tiny snippet of body text
 
 
+def _input_evidence_is_plausible(path: str) -> bool:
+    """Return True when a state delta is likely caused by held input.
+
+    Keep this structural, not genre-specific. Per-entity array-member
+    deltas (`objects.3.x`, `things.0.age`) are often autonomous motion
+    or animation noise, so they are weak proof that a key worked. Direct
+    object fields (`player.x`, `camera.zoom`, `cursor.angle`) and array
+    length changes (`shots.length`) remain useful input evidence.
+    """
+    parts = [p for p in str(path or "").split(".") if p]
+    if not parts:
+        return False
+    if parts[-1] == "length":
+        return True
+    if any(p.isdigit() for p in parts[:-1]):
+        return False
+    return True
+
+
 _PROBE_EVAL_ERROR_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("syntax_error", re.compile(r"\bSyntaxError\b|missing \) after argument list", re.I)),
     ("reference_error", re.compile(r"\bReferenceError\b", re.I)),
@@ -2587,7 +2606,10 @@ class LiveBrowser:
             input_only_leaves: set[str] = set()
             if has_gamestate:
                 held_changes = _gs_changed_leaves(before_gs, after_gs)
-                input_only_leaves = held_changes - ambient_gs_changes
+                input_only_leaves = {
+                    leaf for leaf in (held_changes - ambient_gs_changes)
+                    if _input_evidence_is_plausible(leaf)
+                }
             # (2) canvas-hash fallback: only credit when ambient was
             # stable (so the held-window change was input-induced).
             canvas_input_changed = (

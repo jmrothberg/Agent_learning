@@ -177,3 +177,56 @@ def test_function_cap_raised_to_five(tmp_path):
     n_kept = slice_text.count("--- function `")
     assert n_kept <= 5, f"function cap should be ≤ 5, got {n_kept}"
     assert n_kept >= 3, f"expected at least 3 high-scoring functions, got {n_kept}"
+
+
+def test_state_assignment_context_includes_reset_writes(tmp_path):
+    """When selected logic reads a state field, include reset/init writes.
+
+    Space-invaders_20260519_125234 failed because the slice showed alien
+    march logic reading `state.alienStepInterval`, but omitted reset()
+    resetting that same field back to 1.0.
+    """
+    html = """<!DOCTYPE html><html><body><script>
+const state = {
+  alienStepInterval: 0.25,
+  alienStepTimer: 0,
+  score: 0
+};
+
+function update(dt) {
+  // Alien march must reverse at the edge.
+  state.alienStepTimer += dt;
+  const interval = state.alienStepInterval;
+  if (state.alienStepTimer >= interval) {
+    state.alienStepTimer = 0;
+  }
+}
+
+function reset() {
+  state.score = 0;
+  state.alienStepInterval = 1.0;
+  state.alienStepTimer = 0;
+}
+
+function draw() {
+  return state.score;
+}
+</script></body></html>""" + ("// padding to push past _FULL_FILE_INJECT_LIMIT. " * 260)
+    a = _agent(tmp_path)
+    report = {
+        "errors": [],
+        "console_errors": [],
+        "page_errors": [],
+        "soft_warnings": ["aliens did not march and reverse at the edge"],
+        "probes": [],
+    }
+    slice_text = a._focused_slice(
+        html,
+        report,
+        "Edge: aliens march left-to-right, reverse direction, and drop at edge.",
+    )
+    assert slice_text is not None
+    assert "function update" in slice_text
+    assert "related state assignments" in slice_text
+    assert "function reset" in slice_text
+    assert "state.alienStepInterval = 1.0;" in slice_text

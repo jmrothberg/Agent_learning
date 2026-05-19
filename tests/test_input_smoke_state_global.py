@@ -78,6 +78,22 @@ def test_format_report_uses_summary():
     assert 'it.get("summary")' in fmt_src or "it.get('summary')" in fmt_src
 
 
+def test_input_evidence_rejects_per_entity_animation_noise():
+    """Per-entity array deltas are weak proof of direct key response.
+
+    A held key should not get credit merely because an autonomous object
+    or visual effect changed while the key was down.
+    """
+    assert tools._input_evidence_is_plausible("objects.3.x") is False
+    assert tools._input_evidence_is_plausible("effects.0.age") is False
+
+
+def test_input_evidence_accepts_direct_state_and_collection_length():
+    assert tools._input_evidence_is_plausible("player.x") is True
+    assert tools._input_evidence_is_plausible("camera.zoom") is True
+    assert tools._input_evidence_is_plausible("things.length") is True
+
+
 def test_prompt_and_smoke_test_agree_on_window_state():
     """End-to-end sanity: the prompt teaches `window.state` and the
     smoke test now samples `window.state`. If either side drifts, the

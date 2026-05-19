@@ -37,6 +37,7 @@ does.
 - [Architecture — the parts that span multiple files](#architecture--the-parts-that-span-multiple-files)
   - [The agent loop](#the-agent-loop-async-and-event-driven)
   - [Patch engine](#patch-engine)
+  - [Prompt-side noise suppression and truth-source rules](#prompt-side-noise-suppression-and-truth-source-rules)
   - [Memory and playbook](#memory-and-playbook-compounds-across-sessions)
   - [Verification harness](#verification-harness-multi-layered)
   - [Visual-progress judge (local VLM)](#visual-progress-judge-local-vlm)
@@ -295,6 +296,67 @@ patches apply in **reverse source-order** so earlier offsets stay valid.
 `repair_reply` strips BOM, CRLF, and internal ```html fences before
 parsing. The error messages are prescriptive: the model is told which
 patch number caused the problem and what to change to fix it.
+
+### Prompt-side noise suppression and truth-source rules
+
+Three small, evidence-backed rules in [`agent.py`](agent.py) that
+keep the model's working set focused on **what changed and what
+needs to change** instead of stale narration. All three are
+domain-neutral.
+
+**Post-clean truth-source inject** (`_build_fix_prompt` post-clean
+branch). When the previous iter was clean AND the user has queued
+feedback (or a pending answer), append a `CURRENT FILE ON DISK`
+block to the post_clean instruction. Same shape that
+`continuation_instruction` and `fix_instruction` already use.
+Capped at 60 KB so pathological files don't blow context.
+
+Why this matters for local 27B-class models: without a truth source,
+post-clean follow-up patches get written against memory and SEARCH
+fails to anchor. Trace `fighing-game_20260519_153115` iter 4 wrote
+`<<<<<<< SEARCH` for an imagined `drawFighter`; 1/2 patches applied;
+the iter failed. The model literally said in conversation.md *"I need
+to check the actual current file ... I will assume the draw logic
+already handles flipping"* — i.e. patching from an assumption.
+Trace event: `post_clean_truth_source_injected`.
+
+**Persistent warning dedup** (`_advance_warning_persistence`,
+`_compact_warnings_for_prompt`, `_format_report_for_model`). Each
+non-empty string in `report["warnings"]` counts as +1 per consecutive
+iter; absent strings reset to 0. On the third consecutive appearance
+of an unchanged string, the prompt-side rendering replaces it with
+`persistent warning [seen N× in a row]: <80-char preview>…`. The
+full warning text stays in `report` (and therefore in the trace
+JSONL) for postmortem; only the model-facing rendering is compacted.
+Persistence resets on every restart attempt.
+
+Why this matters: trace `fighing-game_20260519_153115` carried eight
+unused-asset warning lines (~1.6 KB) verbatim every iter for four
+iters while the model stopped reacting. Carrying that text into the
+working set after it has clearly been seen wastes context. Dedup is
+keyed by exact-string equality (SHA-256 hash of the warning string),
+not by content — domain-neutral by construction. Threshold lives at
+`GameAgent._WARNING_COMPACT_THRESHOLD = 3`.
+
+**Vision-note relevance gate** (`_clean_actionable_vision_note`).
+Beyond the existing structural filters (rejects unmatched
+parens/brackets, leading "Image 1" / "Wait," / "Let me ", trailing
+preposition), drop notes that contain no token from a small generic
+actionable set: negation (`no`, `none`, `missing`, `lacks`, …),
+direct-change verbs (`add`, `fix`, `make`, `replace`, `remove`,
+`improve`, …), modals (`needs`, `should`, `must`), and
+comparatives-implying-change (`too`, `over`, `under`). The list lives
+at `GameAgent._VISION_NOTE_ACTIONABLE_TOKENS`.
+
+Why this matters: trace `fighing-game_20260519_153115` injected
+`"Controls are listed at the bottom"` (iter 3) and `"Both images
+show very low-resolution, pixel-art style"` (iter 4) as coaching.
+Pure screenshot narration with zero actionable signal — paid context
+tokens with negative information value. The same trace's iter-1
+useful note `"look very basic ... There are no complex super…"`
+passes the gate via `no`, so genuine missing-thing observations
+still flow through. Suppressed notes still trace as
+`vision_judge_coaching_suppressed` with `reason: non_actionable_fragment`.
 
 ### Memory and playbook (compounds across sessions)
 
@@ -588,6 +650,7 @@ is data the agent will see, not just developer notes.
 | `/reset` | Reset agent state to a fresh session. |
 | `/status` | Print iter count, ok status, model, backend, VLM. |
 | `/wait <on\|off>` | Toggle step-mode — default ON in the TUI; when on, pause after each iter; when off, iterate continuously. |
+| `/wiki <on\|off>` | Toggle Wikipedia research lookup before planning (default OFF). When on, prepends a `<reference>` block to Phase A so the model's plan is grounded in real game mechanics for named titles (Asteroids, Pac-Man, Mr. Do!, etc.). Per-call cost ~5-10s and only a single lookup runs per session. Empirical hit rate on named arcade games is good when the goal cleanly names the title. |
 | `/iter-detail <on\|off>` | Toggle optional expanded blocker detail after the compact iter decision line (default off). |
 | `/mode <local_manual\|local_auto\|local_plus_review with <model> [--auto-apply]\|custom>` | Apply a run contract: manual checkpoints, autonomous loop, or autonomous loop with an explicit reviewer hook. |
 | `/playbook`, `/memory` | Print the matched playbook bullets. |
@@ -986,6 +1049,8 @@ agent decisions. Use these `kind` values as entry points:
 | `probe_eval_error` | A probe expression errors before yielding true/false | The probe is broken, not necessarily the game |
 | `probe_quarantined` | Same probe has repeated eval-time errors | Probe removed from future runs until model re-emits a corrected probe |
 | `post_clean_feedback_contract` | User gives feedback after a clean build | Full clean report is compacted; model is told to keep the clean build as baseline and make only the requested change |
+| `post_clean_truth_source_injected` | Post-clean iter with queued feedback inlined the file on disk | Truth-source inject so the next `<patch>`'s SEARCH anchors against disk text, not against memory. Skipped when the file is over the inject cap (default 60 KB). |
+| `vision_judge_coaching_suppressed` | Local-VLM note dropped before injection | `reason: non_actionable_fragment` covers both the structural filter (parens, leading "Image 1", trailing preposition) and the actionable-token relevance gate (no negation / change verb / modal / comparative). Full raw note is in the same event for postmortem |
 | `stream_start` / `stream_done` / `stream_heartbeat` | Token streaming events | Changing tails mean active generation. Never add a wall-clock cutoff for active streams; only no-activity stall, repetition, deliberation, max-token cap, hard crash, or user cancel should stop them. Repeated identical tails indicate a degenerate loop; read `_flush_user_injections` to find what gave the model contradictory instructions |
 | `no_usable_code` | Reply had no `<patch>` / `<html_file>` | `media_only=true` means asset regen with no code edit |
 | `vision_judge` | VLM verdict on this iter's screenshot | `progress` is yes/no/unclear |
