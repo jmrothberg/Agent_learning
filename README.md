@@ -661,7 +661,7 @@ Use this matrix when validating `chat.py` loop/control changes:
 | Explicit external review (manual) | `/mode local_plus_review with <model>` and keep wait on | Reviewer guidance can be run via `/check <N\|model>`; suggestion is prefilled for edit/Enter. |
 | Explicit external review (auto loop) | `/mode local_plus_review with <model> --auto-apply` with wait off | Failed iters can auto-run explicit reviewer hook and inject coaching for next turn. |
 | No silent cloud guarantee | Local-only run (`/mode local_auto` or `/mode local_manual`) | No cloud calls unless user explicitly picks cloud backend or `/check ...`. |
-| Early-cutoff regression guard | Rich-media first-build run on local model | Do not reintroduce aggressive early aborts that cut normal long `<html_file>` emission mid-stream; changes to loop/deliberation/timeout guards must be trace-backed. |
+| Active-stream cutoff regression guard | Rich-media first-build run on local MLX/Ollama model | If tokens or backend progress are still arriving, the model is working. Never stop it with an absolute wall-clock cutoff; only no-activity stalls, repetition loops, deliberation loops, backend max-token caps, hard crashes, or explicit user cancel may stop generation. |
 
 ---
 
@@ -689,10 +689,16 @@ These have evidence behind them and should not be broken silently.
 7. **Never silently call a cloud model.** Cloud / paid API calls must
    be EXPLICIT (slash command, flag). Never default-on, never auto-
    fallback. The user owns the wallet.
-8. **Do not re-tighten early-termination guards blindly.** Any change to
-   repetition / deliberation / timeout abort logic must cite concrete
-   trace evidence and include regression validation that long first-build
-   `<html_file>` turns are not cut off mid-stream.
+8. **Never cut off an active local-model stream for wall-clock time.**
+   MLX/Ollama context windows can be huge and rich first-build
+   `<html_file>` emissions can be slow. If tokens or backend progress
+   are still arriving, generation is working and must be allowed to
+   finish. Safe stop reasons are: no-activity stall, repetition loop,
+   deliberation/no-output loop, backend max-token cap, hard backend
+   crash, or explicit user cancel. Any change to repetition /
+   deliberation / timeout abort logic must cite concrete trace evidence
+   and include regression validation that active first-build streams are
+   not cut off mid-emission.
 
 ---
 
@@ -949,8 +955,12 @@ mixing in the same trace/log/conversation files.
    evidence (vs probe-pass).
 6. Prefer routing / prompt / probe fixes before loop or timeout
    changes.
-7. Never fix runaway streams by adding aggressive cutoffs unless
-   trace-backed and regression-tested. Prefer pre-stream containment
+7. Never fix runaway streams by adding an absolute wall-clock cutoff to
+   active generation. If `stream_heartbeat` tails keep changing, or MLX
+   prompt/token progress is still arriving, the model is working. Let it
+   finish unless a real guard fires: no-activity stall, repetition loop,
+   deliberation/no-output loop, backend max-token cap, hard backend
+   crash, or explicit user cancel. Prefer pre-stream containment
    (bounded prompts, narrower contracts) over stream guards.
 
 ### Trace event glossary
@@ -976,7 +986,7 @@ agent decisions. Use these `kind` values as entry points:
 | `probe_eval_error` | A probe expression errors before yielding true/false | The probe is broken, not necessarily the game |
 | `probe_quarantined` | Same probe has repeated eval-time errors | Probe removed from future runs until model re-emits a corrected probe |
 | `post_clean_feedback_contract` | User gives feedback after a clean build | Full clean report is compacted; model is told to keep the clean build as baseline and make only the requested change |
-| `stream_start` / `stream_done` / `stream_heartbeat` | Token streaming events | Repeated `tail` across heartbeats indicates a degenerate loop; do NOT cut it off by default — read `_flush_user_injections` to find what gave the model contradictory instructions |
+| `stream_start` / `stream_done` / `stream_heartbeat` | Token streaming events | Changing tails mean active generation. Never add a wall-clock cutoff for active streams; only no-activity stall, repetition, deliberation, max-token cap, hard crash, or user cancel should stop them. Repeated identical tails indicate a degenerate loop; read `_flush_user_injections` to find what gave the model contradictory instructions |
 | `no_usable_code` | Reply had no `<patch>` / `<html_file>` | `media_only=true` means asset regen with no code edit |
 | `vision_judge` | VLM verdict on this iter's screenshot | `progress` is yes/no/unclear |
 | `format_rejection` | Reply didn't parse as expected tags | Usually means stream stalled mid-tag |

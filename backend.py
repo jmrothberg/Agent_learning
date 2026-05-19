@@ -1016,12 +1016,6 @@ class MLXBackend(Backend):
                         break
                     continue
 
-                if time.monotonic() - started > overall_seconds:
-                    stalled = True
-                    stall_at = n_tokens
-                    worker_cancel.set()
-                    break
-
                 kind, payload, pt, ct = item
                 if kind == "error":
                     worker_cancel.set()

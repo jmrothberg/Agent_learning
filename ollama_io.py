@@ -9,8 +9,8 @@ num_ctx), the agent freezes forever. There is no exception, no log, no exit.
 What this module gives us:
 
   * `stream_chat()` — same shape as the old call, but every awaited chunk has
-    a per-chunk inactivity timeout AND an overall deadline. A stall raises
-    `StreamStalled` so the caller can recover or abort cleanly.
+    a per-chunk inactivity timeout. Slow-but-active streams are allowed to
+    finish; repetition and deliberation detectors handle runaway output.
 
   * `stream_chat_collect()` — convenience wrapper that returns the full text
     plus token rate, used when we don't care about per-token streaming
@@ -518,8 +518,11 @@ async def stream_chat(
     """Stream a chat completion with a stall watchdog.
 
     `stall_seconds` is the per-chunk inactivity budget — if no token arrives
-    for that long we stop waiting. `overall_seconds` is the absolute ceiling
-    (a long but slow stream is still a problem if it never ends).
+    for that long we stop waiting. `overall_seconds` is accepted for caller
+    compatibility and telemetry, but it is NOT an active-stream cutoff: a
+    model that keeps producing tokens is working and must be allowed to close
+    its `<html_file>`. Runaway output is bounded by repetition/deliberation
+    detectors and backend max-token settings, not by wall-clock time.
 
     On a clean finish we return the full text and stalled=False. On stall we
     return what we collected so far AND set stalled=True so the caller can
@@ -560,12 +563,6 @@ async def stream_chat(
             except StopAsyncIteration:
                 break
             except asyncio.TimeoutError:
-                stalled = True
-                stall_at = n_tokens
-                break
-
-            # Overall deadline check (cheap; keeps stuck-at-trickle bounded).
-            if time.monotonic() - started > overall_seconds:
                 stalled = True
                 stall_at = n_tokens
                 break
