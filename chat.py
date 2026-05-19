@@ -1370,7 +1370,7 @@ class CodingBoxApp(App):
         positive). Lets the user know at a glance whether the model can
         consume screenshots for visual debugging or is text-only.
         """
-        step_on = bool(getattr(self.agent, "_step_mode", False))
+        step_on = self._effective_step_mode()
         if step_on:
             mode_badge = (
                 "[black on yellow] WAIT [/]  "
@@ -1414,6 +1414,12 @@ class CodingBoxApp(App):
             "local_plus_review": "local_plus_review",
         }
         return labels.get(self._run_profile, self._run_profile)
+
+    def _effective_step_mode(self) -> bool:
+        """UI truth for WAIT mode before and after a GameAgent exists."""
+        if self.agent is not None:
+            return bool(getattr(self.agent, "_step_mode", False))
+        return self._run_profile == "local_manual"
 
     def _render_iteration_block(self) -> str:
         """Phase / iteration / streak / probes / ctx / model / goal / queued."""
@@ -1546,7 +1552,7 @@ class CodingBoxApp(App):
         # inferring from absence-of-badge. Yellow = WAIT (pause per
         # iter); green-dim = AUTO (continuous).
         prefix_badges: list[str] = []
-        step_on = bool(getattr(self.agent, "_step_mode", False))
+        step_on = self._effective_step_mode()
         if step_on:
             prefix_badges.append("[black on yellow] WAIT MODE [/]")
         else:
@@ -2857,6 +2863,9 @@ class CodingBoxApp(App):
             self._session_backend = new_backend
             self._session_backend_info = new_info
             self._session_model = chosen_name
+            self.agent.set_step_mode(True)
+            self.agent.set_auto_step_on_failure(True)
+            self._run_profile = "local_manual"
             self.title = (
                 f"JMR's Coding Box — {new_info.name.upper()} · {chosen_name}"
             )
@@ -2867,19 +2876,20 @@ class CodingBoxApp(App):
                     f"[green]switched current session to[/green] "
                     f"[b]{backend_label}[/b] · [b]{_esc(chosen_name)}[/b] "
                     f"[dim](mid-stream — current iter finishes on the OLD "
-                    f"model; next iter uses the new one)[/dim]"
+                    f"model; next iter uses the new one; WAIT mode ON)[/dim]"
                 )
             else:
                 self._log_info(
                     f"[green]switched current session to[/green] "
                     f"[b]{backend_label}[/b] · [b]{_esc(chosen_name)}[/b] "
-                    f"[dim](next iter uses it)[/dim]"
+                    f"[dim](next iter uses it; WAIT mode ON)[/dim]"
                 )
             self._update_status()
             return
+        self._run_profile = "local_manual"
         self._log_info(
             f"staged [b]{backend_label}[/b] · [b]{_esc(chosen_name)}[/b] "
-            "for next /new session [dim](no active session to hot-swap)[/dim]"
+            "for next /new session [dim](WAIT mode ON; no active session to hot-swap)[/dim]"
         )
 
         # MLX-specific: warn if the staged model differs from the
@@ -2901,6 +2911,8 @@ class CodingBoxApp(App):
                     f"preload immediately, run [b]/unload mlx[/b] then "
                     f"trigger a generation."
                 )
+        self._update_status()
+        self._update_mode_bar()
 
     async def _cmd_new(self, arg: str) -> None:
         if not arg:
@@ -3507,9 +3519,7 @@ class CodingBoxApp(App):
     def _cmd_status(self) -> None:
         # Step-mode shows up here so users can confirm whether the
         # agent will pause between iters or run continuously.
-        step_label = "—"
-        if self.agent is not None:
-            step_label = "ON" if getattr(self.agent, "_step_mode", False) else "off"
+        step_label = "ON" if self._effective_step_mode() else "off"
         lines = [
             "[bold cyan]── status ──[/bold cyan]",
             f"  backend (active):  {_esc(self._session_backend_info.name if self._session_backend_info else '—')}",

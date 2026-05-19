@@ -3401,6 +3401,11 @@ class GameAgent:
         )
 
     def _consumed_feedback_summary(self) -> str | None:
+        if self._should_defer_feedback_for_blocker():
+            return (
+                "→ queued your input, but deferring it until the current "
+                "test blocker is fixed."
+            )
         bits: list[str] = []
         if self._pending_answer is not None:
             ans = self._pending_answer
@@ -3411,6 +3416,35 @@ class GameAgent:
         if not bits:
             return None
         return "→ applying your input to next turn: " + "; ".join(bits)
+
+    _BLOCKER_OVERRIDE_RE = re.compile(
+        r"\b("
+        r"ignore\s+(?:the\s+)?(?:test|tests|harness|failure|blocker|error)|"
+        r"override\s+(?:the\s+)?(?:test|tests|harness|failure|blocker|error)|"
+        r"abandon\s+(?:the\s+)?(?:test|tests|harness|failure|blocker|error)|"
+        r"skip\s+(?:the\s+)?(?:test|tests|harness|failure|blocker|error)|"
+        r"ship\s+(?:it\s+)?(?:as[- ]is|anyway)|"
+        r"ship\s+the\s+partial|"
+        r"accept\s+(?:the\s+)?(?:known\s+)?failure"
+        r")\b",
+        re.I,
+    )
+
+    def _has_active_blocker(self) -> bool:
+        """True when the previous tested build failed and the next turn is a fix."""
+        return bool(self._fix_mode and self._previous_report_ok is False)
+
+    def _should_defer_feedback_for_blocker(self) -> bool:
+        """Keep fresh feedback from distracting a failing repair turn.
+
+        The queue is left intact so the exact feedback is applied after a clean
+        report. Only explicit "ignore/ship anyway" style overrides are allowed
+        through while a blocker is active.
+        """
+        if not (self._pending_feedback and self._has_active_blocker()):
+            return False
+        joined = "\n".join(self._pending_feedback)
+        return self._BLOCKER_OVERRIDE_RE.search(joined) is None
 
     @staticmethod
     def _feedback_shingles(text: str, n: int = 4) -> set[tuple[str, ...]]:
@@ -3514,6 +3548,7 @@ class GameAgent:
             "behavior_scope": False,
             "behavior_bug": False,
             "orientation_change": False,
+            "blocker_feedback_deferred": False,
         }
         # Snapshot the queue BEFORE consuming so we can push a visible
         # "✓ APPLIED to this turn" confirmation into the agent log via
@@ -3524,8 +3559,10 @@ class GameAgent:
         consumed_items: list[str] = []
         if self._pending_answer is not None:
             consumed_items.append(f"answer: {self._pending_answer[:120]}")
-        for fb in self._pending_feedback:
-            consumed_items.append(f"feedback: {fb[:120]}")
+        defer_feedback_for_blocker = self._should_defer_feedback_for_blocker()
+        if not defer_feedback_for_blocker:
+            for fb in self._pending_feedback:
+                consumed_items.append(f"feedback: {fb[:120]}")
 
         if self._pending_answer is not None:
             ans = self._pending_answer
@@ -3536,7 +3573,26 @@ class GameAgent:
             )
             self._trace({"kind": "answer_injected", "text": ans})
             self._pending_answer = None
-        if self._pending_feedback:
+        if defer_feedback_for_blocker:
+            feedback_items = list(self._pending_feedback)
+            preview = "\n- ".join(fb[:240] for fb in feedback_items)
+            parts.append(
+                "================ BLOCKER-FIRST FEEDBACK DEFERRAL ================\n"
+                "The previous browser/micro-probe report is still failing, so\n"
+                "fresh user feedback is queued for after the blocker is clean.\n"
+                "THIS turn must fix the failing test report below first.\n"
+                f"\nDeferred feedback:\n- {preview}\n"
+                "================================================================="
+            )
+            self._last_turn_contract["blocker_feedback_deferred"] = True
+            self._trace({
+                "kind": "feedback_deferred_blocker",
+                "count": len(feedback_items),
+                "previous_report_ok": self._previous_report_ok,
+                "fix_mode": self._fix_mode,
+                "preview": "\n- ".join(feedback_items)[:400],
+            })
+        elif self._pending_feedback:
             feedback_items = list(self._pending_feedback)
             strict_idxs = [
                 i for (i, fb) in enumerate(feedback_items)
@@ -9196,8 +9252,6 @@ class GameAgent:
             report_text, self._current_file, hints, **fix_kwargs,
         )
         repeat_fastpath = self._repeat_error_fastpath_block(report)
-        if repeat_fastpath:
-            fix += "\n\n" + repeat_fastpath
         if partial_failed:
             fix += "\n\n" + self._partial_patch_recovery_block(partial_failed)
         # Probe-sanity findings: surface tautological-probe or
@@ -9225,6 +9279,8 @@ class GameAgent:
             )
         if self._is_vlm and self._next_image_bytes:
             fix += "\n\n" + self._p.VLM_REVIEW_NOTE
+        if repeat_fastpath:
+            fix += "\n\n" + repeat_fastpath
 
         format_anchor = (
             "REPLY FORMAT FOR THIS TURN — emit these tags IN THIS ORDER:\n"
