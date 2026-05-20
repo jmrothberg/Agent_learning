@@ -231,6 +231,10 @@ class MultilinePasteInput(Input):
         event.prevent_default()
         event.stop()
 
+    def action_paste(self) -> None:
+        """Paste from the OS/app clipboard, flattening any newlines to spaces."""
+        self.paste_flattened_text(self.app.clipboard)
+
     def on_mouse_down(self, event: events.MouseDown) -> None:
         """Forward input right-clicks even if Input consumes mouse down."""
         if event.button not in _RIGHT_CLICK_BUTTONS:
@@ -613,6 +617,29 @@ def _running_models_via_cli() -> tuple[list[str], str | None]:
 # blacklisted without touching the rest of the resolver.
 _KNOWN_BROKEN_TAGS: set[str] = set()
 
+# Ollama load failures (bad GGUF blob, corrupt manifest). Used to auto-skip
+# tags in resolve_chat_model and to surface /model escape hints in the TUI.
+_OLLAMA_LOAD_FAIL_MARKERS: tuple[str, ...] = (
+    "unable to load model",
+    "status code: 500",
+    "status code: 502",
+)
+
+
+def _is_ollama_load_failure(err_text: str) -> bool:
+    low = (err_text or "").lower()
+    return any(m in low for m in _OLLAMA_LOAD_FAIL_MARKERS)
+
+
+def mark_broken_ollama_tag(tag: str, *, reason: str = "") -> None:
+    """Session-scoped blacklist: skip on auto-detect; still forceable via /model."""
+    name = (tag or "").strip()
+    if not name:
+        return
+    if name in _KNOWN_BROKEN_TAGS:
+        return
+    _KNOWN_BROKEN_TAGS.add(name)
+
 # Tags that are clearly NOT chat models — diffusers (Z-Image-Turbo,
 # Stable Diffusion), embedding models, etc. Excluded from auto-pick in
 # both /api/ps and /api/tags paths because Ollama lists them alongside
@@ -691,7 +718,11 @@ def resolve_chat_model(fallback: str) -> tuple[str, str]:
         # `x/z-image-turbo:latest` tag, that tag becomes the most-recently-
         # used entry in /api/ps; without this filter the next /new session
         # would try to chat with it and Ollama returns 400.
-        chat_running = [m for m in running if _is_chat_capable_tag(m["name"])]
+        chat_running = [
+            m for m in running
+            if _is_chat_capable_tag(m["name"])
+            and m["name"] not in _KNOWN_BROKEN_TAGS
+        ]
         if chat_running:
             chosen = chat_running[0]["name"]
             names = [m["name"] for m in chat_running]
@@ -948,6 +979,13 @@ class CodingBoxApp(App):
         # None / "auto" = probe both daemons and pick whichever has a
         # model loaded (MLX wins ties). "ollama" / "mlx" = force.
         self._next_backend: str | None = None
+        # Secondary and tertiary model slots with configurable roles
+        self._next_model2: str | None = None
+        self._next_backend2: str | None = None
+        self._next_role2: str | None = None
+        self._next_model3: str | None = None
+        self._next_backend3: str | None = None
+        self._next_role3: str | None = None
         # Snapshot of the last /list output: list of (backend_name, model_id)
         # pairs in display order, so /load N or /model N can pick by number
         # across BOTH backends. Empty until the user runs /list once; the
@@ -957,6 +995,14 @@ class CodingBoxApp(App):
         # Constructed in _start_session.
         self._session_backend = None
         self._session_backend_info: backend_mod.BackendInfo | None = None
+        self._session_backend2 = None
+        self._session_backend_info2: backend_mod.BackendInfo | None = None
+        self._session_model2: str | None = None
+        self._session_role2: str | None = None
+        self._session_backend3 = None
+        self._session_backend_info3: backend_mod.BackendInfo | None = None
+        self._session_model3: str | None = None
+        self._session_role3: str | None = None
         # /iters lets the user change the max-iters cap before starting a
         # session or extending. Default matches GameAgent's default.
         self._max_iters: int = 6
@@ -1020,7 +1066,9 @@ class CodingBoxApp(App):
                         yield Static("", id="status-body")
         # Input row docked to the bottom. We start it empty with a goal prompt.
         yield MultilinePasteInput(
-            placeholder="What game do you want to build?", id="user-input"
+            placeholder="What game do you want to build?",
+            id="user-input",
+            select_on_focus=False,
         )
         # Single-row mode indicator just above the Footer. Tells the
         # user at a glance whether the agent is RUNNING or WAITING for
@@ -1349,13 +1397,26 @@ class CodingBoxApp(App):
                 f"{self._stream_tokens:,} tok, {tok_per_s:.1f} tok/s, "
                 f"last {since_last:.1f}s ago {tag}\n"
             )
+        ret = ""
         if self._activity_label:
             age = now - self._activity_started_at if self._activity_started_at else 0.0
-            return (
+            ret = (
                 f"[bold yellow]Activity:[/bold yellow] {self._activity_label} "
                 f"[dim]({age:.0f}s)[/dim]\n"
             )
-        return "[bold yellow]Activity:[/bold yellow] [dim]idle[/dim]\n"
+        else:
+            ret = "[bold yellow]Activity:[/bold yellow] [dim]idle[/dim]\n"
+
+        if self.agent is not None:
+            model2_act = getattr(self.agent, "_model2_activity", None) or "idle"
+            model3_act = getattr(self.agent, "_model3_activity", None) or "idle"
+            if self._session_backend2:
+                role = self._session_role2 or "critic"
+                ret += f"[bold green]Card 2 (Model 2 - {role}):[/bold green] [dim]{model2_act}[/dim]\n"
+            if self._session_backend3:
+                role = self._session_role3 or "architect"
+                ret += f"[bold magenta]Card 3 (Model 3 - {role}):[/bold magenta] [dim]{model3_act}[/dim]\n"
+        return ret
 
     def _render_mode_row(self) -> str:
         """Render the colored Mode row in the right-hand status panel.
@@ -1456,6 +1517,14 @@ class CodingBoxApp(App):
             out += f"[b]Backend:[/b] {self._session_backend_info.name.upper()}\n"
         if self._session_model:
             out += f"[b]Model:[/b] {self._session_model}\n"
+        if self._session_backend_info2 is not None:
+            out += f"[b]Model 2 Backend:[/b] {self._session_backend_info2.name.upper()} [dim]({self._session_role2})[/dim]\n"
+        if self._session_model2:
+            out += f"[b]Model 2:[/b] {self._session_model2}\n"
+        if self._session_backend_info3 is not None:
+            out += f"[b]Model 3 Backend:[/b] {self._session_backend_info3.name.upper()} [dim]({self._session_role3})[/dim]\n"
+        if self._session_model3:
+            out += f"[b]Model 3:[/b] {self._session_model3}\n"
         out += f"[b]Run profile:[/b] {self._format_run_profile()}\n"
         if self._run_profile == "local_plus_review" and self._profile_review_model:
             apply_hint = "auto-apply in AUTO mode" if self._profile_review_auto_apply else "manual apply"
@@ -1481,6 +1550,42 @@ class CodingBoxApp(App):
             out += (
                 f"[b]Staged for /new:[/b] [yellow]{label_b}[/yellow] · "
                 f"{_esc(label_m)}\n"
+            )
+
+        # Stage model2
+        cur_backend2 = (
+            self._session_backend_info2.name if self._session_backend_info2 else None
+        )
+        staged_backend2 = self._next_backend2
+        staged_model2 = self._next_model2
+        differs_b2 = staged_backend2 is not None and staged_backend2 != cur_backend2
+        differs_m2 = staged_model2 is not None and staged_model2 != self._session_model2
+        if differs_b2 or differs_m2:
+            label_b2 = (staged_backend2 or cur_backend2 or "auto").upper()
+            label_m2 = staged_model2 or self._session_model2 or "—"
+            role2 = self._next_role2 or self._session_role2 or ""
+            role_part = f" [dim]({role2})[/dim]" if role2 else ""
+            out += (
+                f"[b]Staged Model 2:[/b] [yellow]{label_b2}[/yellow] · "
+                f"{_esc(label_m2)}{role_part}\n"
+            )
+
+        # Stage model3
+        cur_backend3 = (
+            self._session_backend_info3.name if self._session_backend_info3 else None
+        )
+        staged_backend3 = self._next_backend3
+        staged_model3 = self._next_model3
+        differs_b3 = staged_backend3 is not None and staged_backend3 != cur_backend3
+        differs_m3 = staged_model3 is not None and staged_model3 != self._session_model3
+        if differs_b3 or differs_m3:
+            label_b3 = (staged_backend3 or cur_backend3 or "auto").upper()
+            label_m3 = staged_model3 or self._session_model3 or "—"
+            role3 = self._next_role3 or self._session_role3 or ""
+            role_part = f" [dim]({role3})[/dim]" if role3 else ""
+            out += (
+                f"[b]Staged Model 3:[/b] [yellow]{label_b3}[/yellow] · "
+                f"{_esc(label_m3)}{role_part}\n"
             )
         if self._session_seed is not None:
             out += f"[b]Seed in use:[/b] [green]{_esc(str(self._session_seed))}[/green]\n"
@@ -1837,6 +1942,59 @@ class CodingBoxApp(App):
                 pass
         return "\n".join(self._log_mirror_lines[-n:])
 
+    def _write_system_clipboard_text(self, text: str) -> bool:
+        """Best-effort write to OS clipboard text (outside Textual's local mirror)
+
+        using system tools like pbcopy on macOS and wl-copy/xclip/xsel on Linux.
+        """
+        if not text:
+            return False
+        commands: list[list[str]]
+        if sys.platform == "darwin":
+            commands = [["pbcopy"], ["/usr/bin/pbcopy"]]
+        else:
+            commands = [
+                ["wl-copy"],
+                ["xclip", "-selection", "clipboard"],
+                ["xsel", "--clipboard", "--input"],
+            ]
+        for cmd in commands:
+            if shutil.which(cmd[0]) is None:
+                continue
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    input=text,
+                    capture_output=True,
+                    text=True,
+                    timeout=1.5,
+                    check=False,
+                )
+                if proc.returncode == 0:
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def copy_to_clipboard(self, text: str) -> None:
+        """Override Textual's copy_to_clipboard to also write to the system OS clipboard.
+
+        This ensures both TUI actions (Cut, Copy, copying logs/status) and standard
+        keyboard triggers like Ctrl+C work correctly on macOS and Linux.
+        """
+        # Update Textual's local clipboard state and output OSC 52
+        super().copy_to_clipboard(text)
+        # Attempt system clipboard write
+        self._write_system_clipboard_text(text)
+
+    @property
+    def clipboard(self) -> str:
+        """Get the clipboard value, prioritizing the OS clipboard, then Textual's local fallback."""
+        sys_text = self._read_system_clipboard_text()
+        if sys_text is not None:
+            return sys_text
+        return getattr(self, "_clipboard", "")
+
     def _read_system_clipboard_text(self) -> str | None:
         """Best-effort read of OS clipboard text (outside Textual's local mirror)."""
         commands: list[list[str]]
@@ -1866,14 +2024,8 @@ class CodingBoxApp(App):
         return None
 
     def _paste_into_input(self, inp: MultilinePasteInput) -> bool:
-        """Paste into input, preferring OS clipboard then Textual local clipboard."""
-        system_text = self._read_system_clipboard_text()
-        if system_text is not None and inp.paste_flattened_text(system_text):
-            return True
-        local_text = self.clipboard or ""
-        if local_text and inp.paste_flattened_text(local_text):
-            return True
-        return False
+        """Paste into input using the app's OS/local clipboard."""
+        return inp.paste_flattened_text(self.clipboard)
 
     def _input_context_menu_items(
         self, inp: MultilinePasteInput,
@@ -1948,6 +2100,8 @@ class CodingBoxApp(App):
         try:
             if origin == "input":
                 inp = self.query_one("#user-input", MultilinePasteInput)
+                # Focus the input back so cursor state is active and visible
+                inp.focus()
                 if action_id == "cut":
                     inp.action_cut()
                 elif action_id == "copy":
@@ -2244,6 +2398,12 @@ class CodingBoxApp(App):
                 self._cmd_list_models()
             elif cmd in ("model", "load"):
                 self._cmd_set_model(arg)
+            elif cmd == "model2":
+                self._cmd_set_model2(arg)
+            elif cmd == "model3":
+                self._cmd_set_model3(arg)
+            elif cmd == "retry":
+                await self._cmd_retry(arg)
             elif cmd == "backend":
                 self._cmd_set_backend(arg)
             elif cmd == "unload":
@@ -2353,6 +2513,9 @@ class CodingBoxApp(App):
             "  [b]/help[/b]                    show this help (also /h, /?)",
             "  [b]/list[/b]                    unified Ollama + MLX list with numbers (also /models)",
             "  [b]/load <N|name>[/b]           pick model #N from /list (any backend) · STICKY across /new (also /model)",
+            "  [b]/model2 <N|name> [--role critic|architect][/b]  configure and stage secondary model 2",
+            "  [b]/model3 <N|name> [--role critic|architect][/b]  configure and stage tertiary model 3",
+            "  [b]/retry[/b]                   re-run after a bad model (keeps game file + trace; uses /model pick first)",
             "  [b]/launch <N|name|path>[/b]   stage an MLX model for next /new (loads in-process on first request)",
             "  [b]/backend <auto|ollama|mlx|openai|anthropic>[/b]  stage default backend when no specific model is staged",
             "                                  [dim]cloud backends require OPENAI_API_KEY / ANTHROPIC_API_KEY in shell env[/dim]",
@@ -2456,75 +2619,85 @@ class CodingBoxApp(App):
             "[magenta]VLM[/magenta] = can read screenshots (vision-language) · "
             "[dim]text[/dim] = text-only[/dim]"
         )
-        # Track which model the next /new will resolve to so it gets the
-        # ← staged marker even when the user hasn't typed /load yet.
-        staged_backend = self._next_backend or "ollama"
+        # Track active/staged model configurations across all slots
+        staged_backend_1 = self._next_backend or "ollama"
+        staged_backend_2 = self._next_backend2 or "ollama"
+        staged_backend_3 = self._next_backend3 or "ollama"
+        
         for i, (b, name) in enumerate(listing, 1):
             if b == "ollama":
                 tag = "O"
                 loaded = "*" if name in ollama_loaded else " "
-                is_active = (
-                    self._session_backend_info is not None
-                    and self._session_backend_info.name == "ollama"
-                    and name == self._session_model
-                )
-                is_staged = name == self._next_model and staged_backend == "ollama"
             elif b == "mlx":
                 tag = "M"
                 loaded = "*" if name == mlx_active else " "
-                is_active = (
-                    self._session_backend_info is not None
-                    and self._session_backend_info.name == "mlx"
-                    and name == self._session_model
-                )
-                is_staged = name == self._next_model and staged_backend == "mlx"
             elif b == "openai":
-                tag = "X"  # openX-AI — X stands out vs O (Ollama)
-                # Cloud backends have no notion of "loaded in VRAM"; the
-                # asterisk slot stays blank.
+                tag = "X"
                 loaded = " "
-                is_active = (
-                    self._session_backend_info is not None
-                    and self._session_backend_info.name == "openai"
-                    and name == self._session_model
-                )
-                is_staged = name == self._next_model and staged_backend == "openai"
             else:  # anthropic
-                tag = "C"  # Claude
+                tag = "C"
                 loaded = " "
-                is_active = (
-                    self._session_backend_info is not None
-                    and self._session_backend_info.name == "anthropic"
-                    and name == self._session_model
-                )
-                is_staged = name == self._next_model and staged_backend == "anthropic"
-            mark_active = "  [yellow]← active[/yellow]" if is_active else ""
-            mark_staged = "  [magenta]← staged[/magenta]" if is_staged else ""
+
+            is_active_1 = (
+                self._session_backend_info is not None
+                and self._session_backend_info.name == b
+                and name == self._session_model
+            )
+            is_active_2 = (
+                self._session_backend_info2 is not None
+                and self._session_backend_info2.name == b
+                and name == self._session_model2
+            )
+            is_active_3 = (
+                self._session_backend_info3 is not None
+                and self._session_backend_info3.name == b
+                and name == self._session_model3
+            )
+
+            is_staged_1 = name == self._next_model and staged_backend_1 == b
+            is_staged_2 = name == self._next_model2 and staged_backend_2 == b
+            is_staged_3 = name == self._next_model3 and staged_backend_3 == b
+
+            active_roles = []
+            if is_active_1:
+                active_roles.append("coder")
+            if is_active_2:
+                active_roles.append(f"model2: {self._session_role2 or 'critic'}")
+            if is_active_3:
+                active_roles.append(f"model3: {self._session_role3 or 'architect'}")
+
+            staged_roles = []
+            if is_staged_1:
+                staged_roles.append("coder")
+            if is_staged_2:
+                staged_roles.append(f"model2: {self._next_role2 or 'critic'}")
+            if is_staged_3:
+                staged_roles.append(f"model3: {self._next_role3 or 'architect'}")
+
+            mark_active = ""
+            if active_roles:
+                roles_str = ", ".join(active_roles)
+                mark_active = f"  [yellow]← active ({roles_str})[/yellow]"
+
+            mark_staged = ""
+            if staged_roles:
+                roles_str = ", ".join(staged_roles)
+                mark_staged = f"  [magenta]← staged ({roles_str})[/magenta]"
+
             # Show MLX entries by short basename when they're disk paths
-            # (avoids screen-eating absolute paths for the common case).
-            # The full path is still what /load N picks for launching.
             if b == "mlx" and "/" in name:
                 display = Path(name).name
                 hint = f"  [dim]({Path(name).parent})[/dim]"
             else:
                 display = name
                 hint = ""
-            # Item 4: VLM/text modality badge. Computed name-based via
-            # backend.classify_model_modality — VLM models can read
-            # screenshots (the agent's _detect_vlm runtime probe + the
-            # /vlm critique path). For text-only models the badge is
-            # a dim "[text]"; for VLMs a colored "[VLM]" so the user
-            # spots them at a glance. Cloud backends (openai, anthropic)
-            # match the table for current GPT-4o / Claude families.
-            #
-            # NOTE: name-based classifier may miss novel VLM families.
-            # The runtime probe in GameAgent is the authoritative
-            # source — this badge is a hint for the model-picker UI.
+
             modality = backend_mod.classify_model_modality(name)
             if modality == "vlm":
                 badge = " [magenta]\\[VLM][/magenta]"
             else:
                 badge = " [dim]\\[text][/dim]"
+
             self._log(
                 f"  [{i:>2}] [b]{tag}[/b] {loaded} {_esc(display)}"
                 f"{badge}{mark_active}{mark_staged}{hint}"
@@ -2565,6 +2738,26 @@ class CodingBoxApp(App):
                 tag = "[green]✓[/green]" if ok else "[red]✗[/red]"
                 self._log_info(f"  {tag} {_esc(name)} — {_esc(msg)}")
             self._log_info("[dim](MLX untouched — /unload mlx for that.)[/dim]")
+            return
+
+        if norm_lc == "model2":
+            if (
+                self._session_backend_info2 is None
+                or self._session_backend_info2.name != "ollama"
+            ):
+                self._log_info("no active Ollama model2 to unload.")
+                return
+            self._unload_ollama_named(self._session_backend_info2.model)
+            return
+
+        if norm_lc == "model3":
+            if (
+                self._session_backend_info3 is None
+                or self._session_backend_info3.name != "ollama"
+            ):
+                self._log_info("no active Ollama model3 to unload.")
+                return
+            self._unload_ollama_named(self._session_backend_info3.model)
             return
 
         # Default (no arg): unload the active session's Ollama model.
@@ -2650,6 +2843,18 @@ class CodingBoxApp(App):
         ok, msg = backend_mod.unload_ollama_model(name)
         tag = "[green]✓[/green]" if ok else "[red]✗[/red]"
         self._log_info(f"{tag} {_esc(name)} — {_esc(msg)}")
+        if ok and (
+            self._session_model == name
+            or (
+                self._session_backend_info is not None
+                and self._session_backend_info.model == name
+            )
+        ):
+            self._log_info(
+                "[dim]Session is still bound to that tag in VRAM terms — "
+                "use [b]/model <N>[/b] to point the agent at a working model "
+                "(your game file and trace are kept).[/dim]"
+            )
 
     def _print_mlx_kill_hint(self) -> None:
         """/unload mlx — MLX now runs in-process. Drop the cached model
@@ -2760,103 +2965,42 @@ class CodingBoxApp(App):
             "auto, ollama, mlx, openai, anthropic"
         )
 
-    def _cmd_set_model(self, arg: str) -> None:
-        """/model <N|name> — pick by global number from /list, or by substring.
+    def _ollama_escape_hint(self) -> str:
+        """One-line hint after a load failure or /unload — how to switch model."""
+        return (
+            "[yellow]Escape:[/yellow] [b]/list[/b] then [b]/model <N>[/b] "
+            "(works even after the session ends — keeps your game file). "
+            "Then type feedback to continue, or [b]/retry[/b] to re-run planning."
+        )
 
-        N is the unified-list index across both Ollama and MLX (the
-        number printed in /list). Substring matches against any
-        installed Ollama tag or downloaded MLX id; ambiguous matches
-        require disambiguation. Bare /model clears the staged model.
-        """
-        if not arg:
-            if self._next_model is None:
-                self._log_info(
-                    "no staged model (usage: /model <number-from-/list-or-name>)"
-                )
-            else:
-                self._log_info(f"cleared staged model (was: {self._next_model})")
-                self._next_model = None
-                # Don't clear _next_backend — user may still want to force a
-                # specific daemon for the next /new.
-            return
-
-        # Refresh the unified listing if /list hasn't been run yet.
-        if not self._last_listing:
-            self._refresh_listing()
-        listing = self._last_listing
-        if not listing:
-            self._log_error(
-                "no LLM backend reachable — start ollama, or set MLX_MODEL / drop a model under ~/MLX_Models"
-            )
-            return
-
-        chosen_backend: str | None = None
-        chosen_name: str | None = None
-
-        # 1) Numeric → unified-list index.
-        if arg.isdigit():
-            idx = int(arg) - 1
-            if 0 <= idx < len(listing):
-                chosen_backend, chosen_name = listing[idx]
-            else:
-                self._log_error(
-                    f"out of range: /list has {len(listing)} entries (1-{len(listing)})"
-                )
-                return
-
-        # 2) Exact full-string match (e.g. user pasted a tag).
-        if chosen_name is None:
-            for b, name in listing:
-                if arg == name:
-                    chosen_backend, chosen_name = b, name
+    def _apply_model_to_active_session_slot(
+        self, chosen_backend: str, chosen_name: str, slot: int, role: str | None, *, source: str,
+    ) -> bool:
+        """Point the live agent's slots at a new backend. Returns False on init error."""
+        # Check if the requested model name & backend match what is already loaded in any other slot,
+        # and reuse the Backend and BackendInfo instances directly. This avoids double-allocations,
+        # redundant in-VRAM loading, and cold-start pauses on Apple Silicon or local Ollama.
+        reused_backend = None
+        reused_info = None
+        # Use getattr with a default of None in case attributes are not yet initialized (e.g. mock objects or partial setups)
+        slots_to_check = [
+            ("_session_backend_info", "_session_backend"),
+            ("_session_backend_info2", "_session_backend2"),
+            ("_session_backend_info3", "_session_backend3")
+        ]
+        for info_attr, inst_attr in slots_to_check:
+            b_info = getattr(self, info_attr, None)
+            b_inst = getattr(self, inst_attr, None)
+            if b_info is not None and b_inst is not None:
+                if b_info.name == chosen_backend and b_info.model == chosen_name:
+                    reused_backend = b_inst
+                    reused_info = b_info
                     break
 
-        # 3) Case-insensitive substring match. Ambiguity is an error so we
-        #    don't silently pick the wrong model.
-        if chosen_name is None:
-            needle = arg.lower()
-            matches = [(b, n) for b, n in listing if needle in n.lower()]
-            if len(matches) == 1:
-                chosen_backend, chosen_name = matches[0]
-            elif len(matches) > 1:
-                names = [f"{b.upper()}:{n}" for b, n in matches]
-                self._log_error(f"ambiguous {arg!r} — matches: {names}")
-                return
-
-        if chosen_name is None or chosen_backend is None:
-            self._log_error(f"no match for {arg!r} — try /list")
-            return
-
-        # Stage backend + model together. _start_session honors this pair
-        # over plain detect_backend so the user's pick wins even when both
-        # daemons are running.
-        self._next_backend = chosen_backend
-        self._next_model = chosen_name
-        backend_label = chosen_backend.upper()
-        # Hot-swap: when an active session exists, ALWAYS apply the
-        # swap to that session (not just to the next /new). The user
-        # typed /model — they mean now, not "next time you start over".
-        #
-        # Safe even mid-stream: the running stream_chat call has the
-        # old backend bound on its async stack and finishes on the old
-        # model; only the NEXT call reads `self._backend` and picks up
-        # the new one. So at worst, the current iter finishes on the
-        # old model and iter N+1 onward uses the new one — never a
-        # half-and-half mid-stream switch.
-        #
-        # Before 2026-05-15 we gated this on `_awaiting_kind == "step"`
-        # (i.e. only swap when the user was paused in /wait mode).
-        # That confused users who typed /model mid-session and got a
-        # silent "staged for next /new" instead of an actual switch.
-        # The Space Invaders trace from that day was the smoking gun:
-        # the local model was failing, user typed /model 12 to swap to
-        # Qwen3.6-27B; the agent staged instead of swapping; the
-        # failing model kept failing for two more iters.
-        can_hotswap = (
-            self.agent is not None
-            and not self._session_done
-        )
-        if can_hotswap:
+        if reused_backend is not None and reused_info is not None:
+            new_backend = reused_backend
+            new_info = reused_info
+        else:
             try:
                 if chosen_backend == "mlx":
                     endpoint = backend_mod.mlx_endpoint_url()
@@ -2868,52 +3012,257 @@ class CodingBoxApp(App):
                     endpoint = backend_mod.ollama_endpoint_url()
                 new_info = backend_mod.BackendInfo(
                     name=chosen_backend, model=chosen_name,
-                    source=f"/load hot-swap during /wait pause",
+                    source=source,
                     endpoint=endpoint,
                 )
                 new_backend = backend_mod.make_backend(new_info)
             except Exception as e:
-                self._log_error(f"hot-swap failed: {e}")
-                return
-            # Replace the running agent's backend. The agent reads
-            # self._backend.info.name lazily inside stream/best_of_n, so
-            # the next call will use the new one.
+                self._log_error(f"model swap failed: {e}")
+                return False
+
+        if slot == 1:
+            return self._apply_model_to_active_session(chosen_backend, chosen_name, source=source)
+        elif slot == 2:
+            if self.agent is not None:
+                self.agent._backend2 = new_backend
+                self.agent._model2_role = role
+            self._session_backend2 = new_backend
+            self._session_backend_info2 = new_info
+            self._session_model2 = chosen_name
+            self._session_role2 = role
+        elif slot == 3:
+            if self.agent is not None:
+                self.agent._backend3 = new_backend
+                self.agent._model3_role = role
+            self._session_backend3 = new_backend
+            self._session_backend_info3 = new_info
+            self._session_model3 = chosen_name
+            self._session_role3 = role
+
+        return True
+
+    def _apply_model_to_active_session(
+        self, chosen_backend: str, chosen_name: str, *, source: str,
+    ) -> bool:
+        """Point the live agent at a new backend. Returns False on init error."""
+        try:
+            if chosen_backend == "mlx":
+                endpoint = backend_mod.mlx_endpoint_url()
+            elif chosen_backend == "openai":
+                endpoint = backend_mod.openai_endpoint_url()
+            elif chosen_backend == "anthropic":
+                endpoint = backend_mod.anthropic_endpoint_url()
+            else:
+                endpoint = backend_mod.ollama_endpoint_url()
+            new_info = backend_mod.BackendInfo(
+                name=chosen_backend, model=chosen_name,
+                source=source,
+                endpoint=endpoint,
+            )
+            new_backend = backend_mod.make_backend(new_info)
+        except Exception as e:
+            self._log_error(f"model swap failed: {e}")
+            return False
+        if self.agent is not None:
             self.agent._backend = new_backend
-            self._session_backend = new_backend
-            self._session_backend_info = new_info
-            self._session_model = chosen_name
-            self.agent.set_step_mode(True)
-            self.agent.set_auto_step_on_failure(True)
-            self._run_profile = "local_manual"
+        self._session_backend = new_backend
+        self._session_backend_info = new_info
+        self._session_model = chosen_name
+        if getattr(self, "_id", None) is not None:
             self.title = (
                 f"JMR's Coding Box — {new_info.name.upper()} · {chosen_name}"
             )
-            if self._is_streaming:
-                # Mid-stream swap: in-flight call finishes on the old
-                # model, next call uses the new one. Tell the user.
+        return True
+
+    def _parse_model_and_role(self, arg: str) -> tuple[str, str | None]:
+        role = None
+        # Support `--role critic` or `-r critic` etc. (case-insensitive)
+        match = re.search(r"\s+--(?:role|r)\s+(\w+)", arg, re.IGNORECASE)
+        if match:
+            role = match.group(1).lower()
+            arg = arg[:match.start()].strip()
+        else:
+            match_short = re.search(r"\s+-r\s+(\w+)", arg, re.IGNORECASE)
+            if match_short:
+                role = match_short.group(1).lower()
+                arg = arg[:match_short.start()].strip()
+        return arg, role
+
+    def _cmd_set_model(self, arg: str) -> None:
+        """/model <N|name> — pick by global number from /list, or by substring.
+
+        N is the unified-list index across both Ollama and MLX (the
+        number printed in /list). Substring matches against any
+        installed Ollama tag or downloaded MLX id; ambiguous matches
+        require disambiguation. Bare /model clears the staged model.
+        """
+        self._cmd_set_model_slot(arg, 1)
+
+    def _cmd_set_model2(self, arg: str) -> None:
+        """/model2 <N|name> [--role critic|architect] — pick and configure role for Model 2."""
+        self._cmd_set_model_slot(arg, 2)
+
+    def _cmd_set_model3(self, arg: str) -> None:
+        """/model3 <N|name> [--role critic|architect] — pick and configure role for Model 3."""
+        self._cmd_set_model_slot(arg, 3)
+
+    def _cmd_set_model_slot(self, arg: str, slot: int) -> None:
+        slot_str = "" if slot == 1 else str(slot)
+        next_model_attr = f"_next_model{slot_str}"
+        next_backend_attr = f"_next_backend{slot_str}"
+        next_role_attr = f"_next_role{slot_str}"
+
+        if not arg:
+            current_val = getattr(self, next_model_attr)
+            if current_val is None:
                 self._log_info(
-                    f"[green]switched current session to[/green] "
-                    f"[b]{backend_label}[/b] · [b]{_esc(chosen_name)}[/b] "
-                    f"[dim](mid-stream — current iter finishes on the OLD "
-                    f"model; next iter uses the new one; WAIT mode ON)[/dim]"
+                    f"no staged model{slot_str} (usage: /model{slot_str} <number-from-/list-or-name> [--role critic|architect])"
+                )
+            else:
+                self._log_info(f"cleared staged model{slot_str} (was: {current_val})")
+                setattr(self, next_model_attr, None)
+                setattr(self, next_backend_attr, None)
+                setattr(self, next_role_attr, None)
+            self._update_status()
+            return
+
+        arg, role = self._parse_model_and_role(arg)
+
+        # Smart inheritance of model and backend from Model 1 if arg is empty but role is specified!
+        if not arg and role is not None and slot > 1:
+            chosen_name = self._next_model or self._session_model
+            chosen_backend = self._next_backend or (self._session_backend_info.name if self._session_backend_info else None)
+            if not chosen_name:
+                self._log_error("cannot stage role without a primary model. Please stage/load Model 1 first.")
+                return
+        else:
+            # Refresh the unified listing if /list hasn't been run yet.
+            if not self._last_listing:
+                self._refresh_listing()
+            listing = self._last_listing
+            if not listing:
+                self._log_error(
+                    "no LLM backend reachable — start ollama, or set MLX_MODEL / drop a model under ~/MLX_Models"
+                )
+                return
+
+            chosen_backend = None
+            chosen_name = None
+
+            # 1) Numeric → unified-list index.
+            if arg.isdigit():
+                idx = int(arg) - 1
+                if 0 <= idx < len(listing):
+                    chosen_backend, chosen_name = listing[idx]
+                else:
+                    self._log_error(
+                        f"out of range: /list has {len(listing)} entries (1-{len(listing)})"
+                    )
+                    return
+
+            # 2) Exact full-string match (e.g. user pasted a tag).
+            if chosen_name is None:
+                for b, name in listing:
+                    if arg == name:
+                        chosen_backend, chosen_name = b, name
+                        break
+
+            # 3) Case-insensitive substring match. Ambiguity is an error so we
+            #    don't silently pick the wrong model.
+            if chosen_name is None:
+                needle = arg.lower()
+                matches = [(b, n) for b, n in listing if needle in n.lower()]
+                if len(matches) == 1:
+                    chosen_backend, chosen_name = matches[0]
+                elif len(matches) > 1:
+                    names = [f"{b.upper()}:{n}" for b, n in matches]
+                    self._log_error(f"ambiguous {arg!r} — matches: {names}")
+                    return
+
+            if chosen_name is None or chosen_backend is None:
+                self._log_error(f"no match for {arg!r} — try /list")
+                return
+
+        # Smart role default if not explicitly specified
+        if slot > 1 and role is None:
+            modality = backend_mod.classify_model_modality(chosen_name)
+            base_default = "critic" if modality == "vlm" else "architect"
+            if slot == 3:
+                model2_role = self._next_role2 or self._session_role2
+                if model2_role == "critic":
+                    role = "architect"
+                elif model2_role == "architect":
+                    role = "critic" if modality == "vlm" else "architect"
+                else:
+                    role = base_default
+            elif slot == 2:
+                model3_role = self._next_role3 or self._session_role3
+                if model3_role == "critic":
+                    role = "architect"
+                elif model3_role == "architect":
+                    role = "critic" if modality == "vlm" else "architect"
+                else:
+                    role = base_default
+            else:
+                role = base_default
+
+        if role is not None and role not in ("critic", "architect"):
+            self._log_error(f"invalid role {role!r} — must be 'critic' or 'architect'")
+            return
+
+        setattr(self, next_backend_attr, chosen_backend)
+        setattr(self, next_model_attr, chosen_name)
+        setattr(self, next_role_attr, role)
+
+        backend_label = chosen_backend.upper()
+        role_suffix = f" [--role {role}]" if role else ""
+
+        if self.agent is not None:
+            if not self._apply_model_to_active_session_slot(
+                chosen_backend, chosen_name, slot, role=role, source=f"/model{slot_str} hot-swap",
+            ):
+                return
+            self.agent.set_step_mode(True)
+            self.agent.set_auto_step_on_failure(True)
+            self._run_profile = "local_manual"
+            if self._is_streaming:
+                self._log_info(
+                    f"[green]switched session model{slot_str} to[/green] "
+                    f"[b]{backend_label}[/b] · [b]{_esc(chosen_name)}[/b]{role_suffix} "
+                    f"[dim](in-flight call finishes on the OLD model; "
+                    f"next LLM call uses the new one; WAIT mode ON)[/dim]"
+                )
+            elif self._session_done:
+                has_file = (
+                    self._out_path is not None
+                    and self._out_path.exists()
+                    and self._out_path.stat().st_size > 200
+                )
+                cont = (
+                    "Type feedback to continue this game (file + trace kept)."
+                    if has_file
+                    else f"Run [b]/retry[/b] to re-run planning with this model{slot_str}."
+                )
+                self._log_info(
+                    f"[green]switched session model{slot_str} to[/green] "
+                    f"[b]{backend_label}[/b] · [b]{_esc(chosen_name)}[/b]{role_suffix} "
+                    f"[dim](session ended — {cont})[/dim]"
                 )
             else:
                 self._log_info(
-                    f"[green]switched current session to[/green] "
-                    f"[b]{backend_label}[/b] · [b]{_esc(chosen_name)}[/b] "
+                    f"[green]switched session model{slot_str} to[/green] "
+                    f"[b]{backend_label}[/b] · [b]{_esc(chosen_name)}[/b]{role_suffix} "
                     f"[dim](next iter uses it; WAIT mode ON)[/dim]"
                 )
             self._update_status()
             return
+
         self._run_profile = "local_manual"
         self._log_info(
-            f"staged [b]{backend_label}[/b] · [b]{_esc(chosen_name)}[/b] "
-            "for next /new session [dim](WAIT mode ON; no active session to hot-swap)[/dim]"
+            f"staged model{slot_str} [b]{backend_label}[/b] · [b]{_esc(chosen_name)}[/b]{role_suffix} "
+            "for next /new session [dim](WAIT mode ON; no agent yet)[/dim]"
         )
 
-        # MLX-specific: warn if the staged model differs from the
-        # currently in-VRAM model. The in-process loader will swap on
-        # first request (~30-60s pause); the user should know.
         if chosen_backend == "mlx":
             mlx_active = backend_mod.MLXBackend._loaded_path
             if mlx_active is None:
@@ -2932,6 +3281,48 @@ class CodingBoxApp(App):
                 )
         self._update_status()
         self._update_mode_bar()
+
+    async def _cmd_retry(self, arg: str) -> None:
+        """/retry — re-run after swapping off a bad model without /new.
+
+        Keeps out_path, trace, snapshots, and (when present) the HTML on
+        disk. Uses continuation when a working file exists; otherwise
+        re-runs planning with the stored goal.
+        """
+        if self.agent is None:
+            self._log_error("no agent — type a goal to start first")
+            return
+        if not self._session_done:
+            self._log_error(
+                "session still running — wait for it to finish, or "
+                "[b]/model <N>[/b] mid-run to swap for the next LLM call"
+            )
+            return
+        has_file = (
+            self._out_path is not None
+            and self._out_path.exists()
+            and self._out_path.stat().st_size > 200
+        )
+        if has_file:
+            feedback = (arg or "Continue from the current game file.").strip()
+            await self._extend_session(feedback)
+            return
+        goal = (arg or self._goal or "").strip()
+        if not goal:
+            self._log_info(
+                "usage: /retry [goal] — no stored goal; pass the game description"
+            )
+            return
+        self._goal = goal
+        self._session_done = False
+        self._phase_label = "retry"
+        self.sub_title = "agent is working (retry)"
+        self._log_info(
+            f"[yellow]retrying[/yellow] planning + build with "
+            f"[b]{_esc(self._session_model or '?')}[/b] "
+            f"[dim](trace + paths unchanged)[/dim]"
+        )
+        self.run_worker(self._consume_events(goal, continuation=False), exclusive=True)
 
     async def _cmd_new(self, arg: str) -> None:
         if not arg:
@@ -3541,32 +3932,43 @@ class CodingBoxApp(App):
         step_label = "ON" if self._effective_step_mode() else "off"
         lines = [
             "[bold cyan]── status ──[/bold cyan]",
-            f"  backend (active):  {_esc(self._session_backend_info.name if self._session_backend_info else '—')}",
-            f"  backend (next /new): {_esc(self._next_backend or '(auto)')}",
-            f"  model (active):    {_esc(self._session_model or '—')}",
-            f"  model (next /new): {_esc(self._next_model or '(auto-detect)')}",
-            f"  goal:              {_esc(self._goal or '—')}",
-            f"  phase:             {_esc(self._phase_label)}",
-            f"  iteration:         {_esc(self._iteration_label)}",
-            f"  max iters:         {self._max_iters}",
-            f"  restart-N:         {self._restart_n if self._restart_n > 1 else '1 (off)'}",
-            f"  model-class:       {self._model_class or 'auto (= small, lean ~5KB schema)'}",
-            f"  step-mode (/wait): {step_label}",
-            f"  prefill:           {'ON' if self._use_prefill else 'off'}",
-            f"  architect-split:   {'ON' if self._use_architect_split else 'off'}",
-            f"  double-screenshot: {'ON' if self._use_double_screenshot else 'off'}",
-            f"  vlm-critique:      {'ON' if self._use_vlm_critique else 'off'}",
-            f"  iter detail:       {self._iter_decision_verbose}",
-            f"  run profile:       {self._format_run_profile()}",
-            f"  review hook:       {self._profile_review_model or '—'}",
-            f"  review auto-apply: {self._profile_review_auto_apply}",
-            f"  seed in use:       {_esc(str(self._session_seed) if self._session_seed else '—')}",
-            f"  staged seed:       {_esc(str(self._next_seed) if self._next_seed else '—')}",
-            f"  staged /ref image: {_esc(self._staged_ref_image_name or '—')}",
-            f"  session done:      {self._session_done}",
-            f"  game file:         {self._out_path or '—'}",
-            f"  log file:          {self._log_file_path or '—'}",
+            f"  backend (active):     {_esc(self._session_backend_info.name if self._session_backend_info else '—')}",
+            f"  backend (next /new):  {_esc(self._next_backend or '(auto)')}",
+            f"  model (active):       {_esc(self._session_model or '—')}",
+            f"  model (next /new):    {_esc(self._next_model or '(auto-detect)')}",
         ]
+        
+        if self._session_backend_info2 or self._next_model2:
+            lines.append(f"  model2 (active):      {_esc(self._session_model2 or '—')} [dim]({self._session_role2 or 'critic'})[/dim]")
+            lines.append(f"  model2 (next /new):   {_esc(self._next_model2 or '—')} [dim]({self._next_role2 or 'critic'})[/dim]")
+            
+        if self._session_backend_info3 or self._next_model3:
+            lines.append(f"  model3 (active):      {_esc(self._session_model3 or '—')} [dim]({self._session_role3 or 'architect'})[/dim]")
+            lines.append(f"  model3 (next /new):   {_esc(self._next_model3 or '—')} [dim]({self._next_role3 or 'architect'})[/dim]")
+
+        lines.extend([
+            f"  goal:                 {_esc(self._goal or '—')}",
+            f"  phase:                {_esc(self._phase_label)}",
+            f"  iteration:            {_esc(self._iteration_label)}",
+            f"  max iters:            {self._max_iters}",
+            f"  restart-N:            {self._restart_n if self._restart_n > 1 else '1 (off)'}",
+            f"  model-class:          {self._model_class or 'auto (= small, lean ~5KB schema)'}",
+            f"  step-mode (/wait):    {step_label}",
+            f"  prefill:              {'ON' if self._use_prefill else 'off'}",
+            f"  architect-split:      {'ON' if self._use_architect_split else 'off'}",
+            f"  double-screenshot:    {'ON' if self._use_double_screenshot else 'off'}",
+            f"  vlm-critique:         {'ON' if self._use_vlm_critique else 'off'}",
+            f"  iter detail:          {self._iter_decision_verbose}",
+            f"  run profile:          {self._format_run_profile()}",
+            f"  review hook:          {self._profile_review_model or '—'}",
+            f"  review auto-apply:    {self._profile_review_auto_apply}",
+            f"  seed in use:          {_esc(str(self._session_seed) if self._session_seed else '—')}",
+            f"  staged seed:          {_esc(str(self._next_seed) if self._next_seed else '—')}",
+            f"  staged /ref image:    {_esc(self._staged_ref_image_name or '—')}",
+            f"  session done:         {self._session_done}",
+            f"  game file:            {self._out_path or '—'}",
+            f"  log file:             {self._log_file_path or '—'}",
+        ])
         for line in lines:
             self._log(line)
 
@@ -3936,11 +4338,87 @@ class CodingBoxApp(App):
         self._session_backend_info = info
         model_name = info.model
         self._session_model = model_name
+
+        # Resolve staged model2 and model3
+        self._session_backend2 = None
+        self._session_backend_info2 = None
+        self._session_model2 = None
+        self._session_role2 = self._next_role2
+        if self._next_backend2 and self._next_model2:
+            if self._next_backend2 == info.name and self._next_model2 == info.model:
+                self._session_backend2 = self._session_backend
+                self._session_backend_info2 = info
+                self._session_model2 = info.model
+            else:
+                if self._next_backend2 == "mlx":
+                    endpoint = backend_mod.mlx_endpoint_url()
+                elif self._next_backend2 == "openai":
+                    endpoint = backend_mod.openai_endpoint_url()
+                elif self._next_backend2 == "anthropic":
+                    endpoint = backend_mod.anthropic_endpoint_url()
+                else:
+                    endpoint = backend_mod.ollama_endpoint_url()
+                info2 = backend_mod.BackendInfo(
+                    name=self._next_backend2, model=self._next_model2,
+                    source=f"/model2 staged: {self._next_backend2} (sticky)",
+                    endpoint=endpoint,
+                )
+                try:
+                    self._session_backend2 = backend_mod.make_backend(info2)
+                    self._session_backend_info2 = info2
+                    self._session_model2 = info2.model
+                except Exception as e:
+                    self._log_error(f"could not initialize backend2: {e}")
+
+        self._session_backend3 = None
+        self._session_backend_info3 = None
+        self._session_model3 = None
+        self._session_role3 = self._next_role3
+        if self._next_backend3 and self._next_model3:
+            if self._next_backend3 == info.name and self._next_model3 == info.model:
+                self._session_backend3 = self._session_backend
+                self._session_backend_info3 = info
+                self._session_model3 = info.model
+            elif self._session_backend_info2 and self._next_backend3 == self._session_backend_info2.name and self._next_model3 == self._session_backend_info2.model:
+                self._session_backend3 = self._session_backend2
+                self._session_backend_info3 = self._session_backend_info2
+                self._session_model3 = self._session_backend_info2.model
+            else:
+                if self._next_backend3 == "mlx":
+                    endpoint = backend_mod.mlx_endpoint_url()
+                elif self._next_backend3 == "openai":
+                    endpoint = backend_mod.openai_endpoint_url()
+                elif self._next_backend3 == "anthropic":
+                    endpoint = backend_mod.anthropic_endpoint_url()
+                else:
+                    endpoint = backend_mod.ollama_endpoint_url()
+                info3 = backend_mod.BackendInfo(
+                    name=self._next_backend3, model=self._next_model3,
+                    source=f"/model3 staged: {self._next_backend3} (sticky)",
+                    endpoint=endpoint,
+                )
+                try:
+                    self._session_backend3 = backend_mod.make_backend(info3)
+                    self._session_backend_info3 = info3
+                    self._session_model3 = info3.model
+                except Exception as e:
+                    self._log_error(f"could not initialize backend3: {e}")
+
         self.title = f"JMR's Coding Box — {info.name.upper()} · {model_name}"
         self._log_info(
             f"Using [b]{info.name.upper()}[/b] · [b]{_esc(model_name)}[/b] "
             f"[dim]({_esc(info.source)})[/dim]"
         )
+        if self._session_backend2:
+            self._log_info(
+                f"Using Model 2 [b]{self._session_backend_info2.name.upper()}[/b] · [b]{_esc(self._session_model2)}[/b] "
+                f"as [cyan]{self._session_role2}[/cyan]"
+            )
+        if self._session_backend3:
+            self._log_info(
+                f"Using Model 3 [b]{self._session_backend_info3.name.upper()}[/b] · [b]{_esc(self._session_model3)}[/b] "
+                f"as [cyan]{self._session_role3}[/cyan]"
+            )
         self._update_status()
 
         # Use the staged seed file (if any). Staging is STICKY — every /new
@@ -4031,6 +4509,10 @@ class CodingBoxApp(App):
             use_vlm_critique=self._use_vlm_critique,
             use_double_screenshot=self._use_double_screenshot,
             use_architect_split=self._use_architect_split,
+            backend2=self._session_backend2,
+            model2_role=self._session_role2,
+            backend3=self._session_backend3,
+            model3_role=self._session_role3,
         )
         # Apply run-profile step policy on session start.
         if self._run_profile == "local_manual":
@@ -4450,6 +4932,11 @@ class CodingBoxApp(App):
 
         elif ev.kind == "error":
             self._log_error(text_safe)
+            if _is_ollama_load_failure(ev.text or ""):
+                bad = self._session_model
+                if bad:
+                    mark_broken_ollama_tag(bad, reason=ev.text or "")
+                self._log_info(self._ollama_escape_hint())
 
         elif ev.kind == "info":
             self._log_info(text_safe)

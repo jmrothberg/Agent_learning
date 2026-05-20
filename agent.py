@@ -1255,6 +1255,10 @@ class GameAgent:
         # behavior so callers that don't opt in are unchanged).
         restart_n: int = 1,
         restart_score_threshold: float = 60.0,
+        backend2: Backend | None = None,
+        model2_role: str | None = None,
+        backend3: Backend | None = None,
+        model3_role: str | None = None,
     ):
         # Backend resolution. Legacy callers pass `model="..."` without
         # `backend=` (notably the unit-test fixtures that never stream);
@@ -1272,6 +1276,12 @@ class GameAgent:
                 endpoint=os.environ.get("OLLAMA_HOST") or "http://127.0.0.1:11434",
             ))
         self._backend: Backend = backend
+        self._backend2: Backend | None = backend2
+        self._model2_role: str | None = model2_role
+        self._backend3: Backend | None = backend3
+        self._model3_role: str | None = model3_role
+        self._model2_activity: str = "idle"
+        self._model3_activity: str = "idle"
         self.out_path = Path(out_path)
         self.browser = browser
         self.max_iters = max_iters
@@ -1632,6 +1642,34 @@ class GameAgent:
     @property
     def model(self) -> str:
         return self._backend.info.model
+
+    def get_backend(self, role: str) -> Backend:
+        """Dynamic hierarchical routing for multi-GPU configurations."""
+        if role == "coder":
+            return self._backend  # Always Model 1
+            
+        elif role == "architect":
+            # Check if Model 2 or Model 3 is explicitly configured as architect
+            if getattr(self, "_model2_role", None) == "architect" and getattr(self, "_backend2", None) is not None:
+                return self._backend2
+            if getattr(self, "_model3_role", None) == "architect" and getattr(self, "_backend3", None) is not None:
+                return self._backend3
+            return self._backend  # Fallback to Model 1
+            
+        elif role == "critic":
+            # Check if Model 3 or Model 2 is explicitly configured as visual critic
+            if getattr(self, "_model3_role", None) == "critic" and getattr(self, "_backend3", None) is not None:
+                return self._backend3
+            if getattr(self, "_model2_role", None) == "critic" and getattr(self, "_backend2", None) is not None:
+                return self._backend2
+            return None  # Fallback to standard non-visual automated testing
+
+    def _set_role_activity(self, role: str, activity: str) -> None:
+        """Set TUI status panel text for Model 2 and Model 3 dynamically."""
+        if getattr(self, "_model2_role", None) == role:
+            self._model2_activity = activity
+        if getattr(self, "_model3_role", None) == role:
+            self._model3_activity = activity
 
     @staticmethod
     def _should_skip_format_doctor(
@@ -2732,6 +2770,13 @@ class GameAgent:
     def _trace(self, obj: dict) -> None:
         try:
             self.trace_path.parent.mkdir(parents=True, exist_ok=True)
+            # Add dynamic multi-agent telemetry role & name metadata
+            if "model_role" not in obj and "model_name" not in obj:
+                role = getattr(self, "_last_stream_role", "coder")
+                backend = self.get_backend(role)
+                if backend:
+                    obj["model_role"] = role
+                    obj["model_name"] = backend.info.model
             payload = {"ts": datetime.utcnow().isoformat() + "Z", **obj}
             with self.trace_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
@@ -2811,7 +2856,18 @@ class GameAgent:
             for i, msg in enumerate(self._messages):
                 role = msg.get("role", "?")
                 content = msg.get("content", "") or ""
-                lines.append(f"## [{i:02d}] {role}")
+                model_role = msg.get("model_role")
+                model_name = msg.get("model_name")
+                
+                role_label = f"{role.upper()}"
+                if role == "assistant":
+                    m_role = model_role or "coder"
+                    m_name = model_name or self.model
+                    role_label += f" — Role: {m_role} ({m_name})"
+                elif role == "system" and model_role:
+                    role_label += f" — Role: {model_role}"
+                    
+                lines.append(f"## [{i:02d}] {role_label}")
                 lines.append("")
                 lines.append("```")
                 lines.append(content)
@@ -4139,8 +4195,63 @@ class GameAgent:
 
     # -- streaming ----------------------------------------------------------
 
-    async def _detect_vlm(self) -> bool:
-        return await self._backend.is_vlm()
+    async def _detect_vlm(self, role: str = "coder") -> bool:
+        backend = self.get_backend(role)
+        if not backend:
+            return False
+        if not hasattr(self, "_vlm_cache"):
+            self._vlm_cache = {}
+        if backend in self._vlm_cache:
+            return self._vlm_cache[backend]
+        val = await backend.is_vlm()
+        self._vlm_cache[backend] = val
+        if val:
+            self._trace({"kind": "vlm_detected", "model": backend.info.model, "role": role})
+        return val
+
+    async def run_visual_critic(self, current_png: bytes) -> str | None:
+        """Run the configured out-of-band Visual Critic model on current_png."""
+        backend = self.get_backend("critic")
+        if backend is None:
+            return None
+            
+        self._set_role_activity("critic", "Auditing screenshot...")
+        try:
+            # We construct a highly structured prompt for Model 2/3 (Visual Critic)
+            prompt = (
+                "You are an expert out-of-band Visual PlayTester and Critic for a game development sandbox. "
+                "You are looking at a screenshot of the latest generated HTML5 canvas game.\n\n"
+                f"GOAL FROM THE USER: {self._goal}\n\n"
+                "Review the attached screenshot carefully for visual, positioning, or rendering bugs. Examples:\n"
+                "  - Are projectiles spawning in the wrong direction?\n"
+                "  - Are character sprites misaligned or offset?\n"
+                "  - Are HUD elements overlapping or clipped?\n"
+                "  - Is the canvas completely blank or frozen?\n\n"
+                "If everything looks correct, write 'Visual Critic: OK'.\n"
+                "If you spot a clear rendering defect or bug, write a 2-sentence visual critique. "
+                "Keep it objective, name the specific visual evidence (e.g., 'character facing right but attack rendering to the left'), "
+                "and state what likely needs adjusting. Do NOT output code or patches."
+            )
+            messages = [
+                {"role": "user", "content": prompt, "images": [current_png]}
+            ]
+            self._trace({"kind": "visual_critic_start", "model": backend.info.model})
+            result = await backend.stream_chat(
+                messages,
+                on_token=lambda _t: None,
+                options={"temperature": 0.2, "num_ctx": 4096},
+                stall_seconds=120.0,
+                overall_seconds=300.0,
+                max_retries=1,
+            )
+            critique = (result.text or "").strip()
+            self._trace({"kind": "visual_critic_end", "critique": critique})
+            return critique
+        except Exception as e:
+            self._trace({"kind": "visual_critic_failed", "error": str(e)})
+            return None
+        finally:
+            self._set_role_activity("critic", "idle")
 
     async def _run_vision_judge(self, current_png: bytes, iteration: int) -> None:
         """Ask a vision model whether this iter made visible progress
@@ -4284,6 +4395,7 @@ class GameAgent:
         override_temp: float | None = None,
         prefill: str = "",
         prefill_force: bool = False,
+        role: str = "coder",
     ) -> str:
         """Stream once, with watchdog. Recovers from stalls by raising/logging.
 
@@ -4295,13 +4407,14 @@ class GameAgent:
         Ollama continues from there. The prefill is prepended to the
         returned text so downstream parsers see the full output.
         """
-        if self._is_vlm is None:
-            self._is_vlm = await self._detect_vlm()
-            if self._is_vlm:
-                self._trace({"kind": "vlm_detected", "model": self.model})
+        # Determine the target backend and its VLM capability dynamically
+        active_backend = self.get_backend(role)
+        is_vlm_active = await self._detect_vlm(role)
+
+        self._set_role_activity(role, f"Streaming {role} reply...")
 
         if (
-            self._is_vlm
+            is_vlm_active
             and self._messages
             and self._messages[-1].get("role") == "user"
         ):
@@ -4481,7 +4594,7 @@ class GameAgent:
             opts: dict[str, Any] = {"temperature": temp, "num_ctx": self.num_ctx}
             if self._restart_attempt_seed is not None:
                 opts["seed"] = int(self._restart_attempt_seed)
-            result = await self._backend.stream_chat(
+            result = await active_backend.stream_chat(
                 self._messages,
                 on_token=_heartbeat_on_token,
                 options=opts,
@@ -6747,7 +6860,7 @@ class GameAgent:
             yield self._record(AgentEvent("phase", "planning"))
             yield self._record(AgentEvent("activity", "streaming", {"label": "planning reply"}))
             try:
-                plan_reply = await self._stream(self._token_cb_wrapper)
+                plan_reply = await self._stream(self._token_cb_wrapper, role="architect")
             except Exception as e:
                 yield self._record(AgentEvent("activity", "idle"))
                 err_msg = (
@@ -6763,7 +6876,12 @@ class GameAgent:
                     ))
                 return
             yield self._record(AgentEvent("activity", "idle"))
-            self._messages.append({"role": "assistant", "content": plan_reply})
+            self._messages.append({
+                "role": "assistant",
+                "content": plan_reply,
+                "model_role": "architect",
+                "model_name": self.get_backend("architect").info.model
+            })
             self._extract_and_queue_lookups(plan_reply)
             self._capture_todos(plan_reply)
             self._dump_conversation()
@@ -6876,7 +6994,7 @@ class GameAgent:
                     {"label": "streaming plan after question"},
                 ))
                 try:
-                    plan_reply = await self._stream(self._token_cb_wrapper)
+                    plan_reply = await self._stream(self._token_cb_wrapper, role="architect")
                 except Exception as e:
                     yield self._record(AgentEvent("activity", "idle"))
                     err_msg = (
@@ -6891,7 +7009,12 @@ class GameAgent:
                         ))
                     return
                 yield self._record(AgentEvent("activity", "idle"))
-                self._messages.append({"role": "assistant", "content": plan_reply})
+                self._messages.append({
+                    "role": "assistant",
+                    "content": plan_reply,
+                    "model_role": "architect",
+                    "model_name": self.get_backend("architect").info.model
+                })
                 self._extract_and_queue_lookups(plan_reply)
                 self._capture_todos(plan_reply)
                 self._dump_conversation()
@@ -7103,7 +7226,7 @@ class GameAgent:
                         {"label": "streaming architect note"},
                     ))
                     try:
-                        arch_reply = await self._stream(self._token_cb_wrapper)
+                        arch_reply = await self._stream(self._token_cb_wrapper, role="architect")
                     except Exception as e:
                         yield self._record(AgentEvent("activity", "idle"))
                         yield self._record(AgentEvent(
@@ -7115,7 +7238,12 @@ class GameAgent:
                             self._messages.pop()
                     else:
                         yield self._record(AgentEvent("activity", "idle"))
-                        self._messages.append({"role": "assistant", "content": arch_reply})
+                        self._messages.append({
+                            "role": "assistant",
+                            "content": arch_reply,
+                            "model_role": "architect",
+                            "model_name": self.get_backend("architect").info.model
+                        })
                         m = re.search(r"<architect>\s*(.*?)\s*</architect>",
                                       arch_reply, re.DOTALL | re.IGNORECASE)
                         if m:
@@ -8093,6 +8221,7 @@ class GameAgent:
                 "materialize": materialize_msg,
                 "patches_applied": len(patches_in_reply) - len(partial_failed),
                 "patches_failed": len(partial_failed),
+                "diagnose": self._last_diagnose,
             })
             yield self._record(AgentEvent(
                 "code",
@@ -8335,14 +8464,35 @@ class GameAgent:
             # can still invoke a cloud judge explicitly via `/check with
             # <model>` in chat.py. Disable entirely with VISION_JUDGE=0.
             if after_bytes is not None:
-                try:
-                    await self._run_vision_judge(after_bytes, iteration)
-                except Exception as exc:
-                    self._trace({
-                        "kind": "vision_judge_error",
-                        "iteration": iteration,
-                        "error": str(exc),
-                    })
+                critic_backend = self.get_backend("critic")
+                if critic_backend is not None:
+                    try:
+                        critique = await self.run_visual_critic(after_bytes)
+                        if critique:
+                            cleaned = critique.strip()
+                            if cleaned and "ok" not in cleaned.lower()[:30]:
+                                prefix = "VISUAL CRITIC (looked at the screenshot of your last iteration): "
+                                self._pending_coaching.append(prefix + cleaned)
+                                # Also log a visible event so the TUI logs show it!
+                                yield self._record(AgentEvent(
+                                    "info",
+                                    f"[magenta]visual critic[/magenta] (iter {iteration}): {cleaned}"
+                                ))
+                    except Exception as exc:
+                        self._trace({
+                            "kind": "visual_critic_error",
+                            "iteration": iteration,
+                            "error": str(exc),
+                        })
+                else:
+                    try:
+                        await self._run_vision_judge(after_bytes, iteration)
+                    except Exception as exc:
+                        self._trace({
+                            "kind": "vision_judge_error",
+                            "iteration": iteration,
+                            "error": str(exc),
+                        })
             if self._use_double_screenshot and report.get("screenshot_before"):
                 try:
                     before_path = str(report["screenshot_before"])
@@ -8405,6 +8555,13 @@ class GameAgent:
                                 "a previously-covered criterion is no longer covered"
                             )
                         problems_str = "; ".join(problems)
+                        self._trace({
+                            "kind": "auto_revert",
+                            "iteration": iteration,
+                            "problems": problems,
+                            "bonus_used": self._iter_budget_bonus,
+                            "bonus_cap": revert_bonus_cap,
+                        })
                         yield self._record(AgentEvent(
                             "info",
                             f"REGRESSION on iter {iteration}: {problems_str} — "
@@ -8850,10 +9007,13 @@ class GameAgent:
                 {"label": "streaming exit-decision turn"},
             ))
             try:
-                exit_reply = await self._stream(self._token_cb_wrapper)
+                exit_reply = await self._stream(self._token_cb_wrapper, role="architect")
                 yield self._record(AgentEvent("activity", "idle"))
                 self._messages.append({
-                    "role": "assistant", "content": exit_reply,
+                    "role": "assistant",
+                    "content": exit_reply,
+                    "model_role": "architect",
+                    "model_name": self.get_backend("architect").info.model
                 })
                 self._dump_conversation()
                 self._trace({

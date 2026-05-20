@@ -106,6 +106,18 @@ CANVAS_CARDS_SKELETON_SIDECAR = '{"goal": "cards drag and drop mouse touch board
 
 CANVAS_PHYSICS_SKELETON_NAME = "canvas_physics_basic.html"
 CANVAS_PHYSICS_SKELETON_SIDECAR = '{"goal": "physics puzzle bubble shooter angry birds projectile trajectory launch gravity reflection collision stick"}'
+
+CANVAS_VOXEL_MINECRAFT_SKELETON_NAME = "canvas_voxel_minecraft_basic.html"
+CANVAS_VOXEL_MINECRAFT_SKELETON_SIDECAR = '{"goal": "voxel 3D grid minecraft cube block chunk terrain procedurally mouse look pointer lock build break Three.js"}'
+
+CANVAS_AR_FLICK_SKELETON_NAME = "canvas_ar_flick_basic.html"
+CANVAS_AR_FLICK_SKELETON_SIDECAR = '{"goal": "flick mobile pointer swipe curveball projectile spin gravity throw capture target poke pokeman go ar camera"}'
+
+CANVAS_LIT_DUNGEON_SKELETON_NAME = "canvas_lit_dungeon_basic.html"
+CANVAS_LIT_DUNGEON_SIDECAR = '{"goal": "lighting light composite dynamic dungeon visual shadow darkness gradient vision crawler top down"}'
+
+CANVAS_VFX_PARTICLES_SKELETON_NAME = "canvas_vfx_particles_basic.html"
+CANVAS_VFX_PARTICLES_SIDECAR = '{"goal": "vfx visual effects particles shake screenshake pooling explosion magic juicy float feedback damage impact text"}'
 DEFAULT_SKELETON = """<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1335,13 +1347,556 @@ CANVAS_PHYSICS_SKELETON = """<!DOCTYPE html>
 """
 
 
+CANVAS_VOXEL_MINECRAFT_SKELETON = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Voxel Minecraft basic</title>
+<style>
+  :root { color-scheme: dark; }
+  html,body { margin:0; height:100%; background:#101118; font-family:sans-serif; overflow:hidden; }
+  #wrap { position:fixed; inset:0; }
+  #hud { position:fixed; top:12px; left:12px; background:rgba(0,0,0,0.6); padding:8px 12px; border-radius:8px; pointer-events:none; }
+  #help { position:fixed; bottom:12px; left:50%; transform:translateX(-50%); background:rgba(0,0,0,0.6); padding:8px 12px; border-radius:8px; pointer-events:none; text-align:center; font-size:14px; }
+  #crosshair { position:fixed; top:50%; left:50%; width:10px; height:10px; transform:translate(-50%,-50%); pointer-events:none; }
+  #crosshair::before, #crosshair::after { content:''; position:absolute; background:#fff; }
+  #crosshair::before { top:4px; left:0; width:10px; height:2px; }
+  #crosshair::after { top:0; left:4px; width:2px; height:10px; }
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+<div id="wrap"></div>
+<div id="hud">Blocks Broken: <span id="score">0</span></div>
+<div id="help">Click to lock mouse. WASD to move, Space to Jump.<br>Left-Click to break, Right-Click to place.</div>
+<div id="crosshair"></div>
+<script>
+(() => {
+  "use strict";
+  let scene, camera, renderer, score = 0;
+  const blocks = new Map();
+  const keys = { KeyW:0, KeyS:0, KeyA:0, KeyD:0, Space:0 };
+  let py = 1, vy = 0, isGrounded = true;
+  const moveSpeed = 6, gravity = 20, jumpForce = 8;
+  const cameraRotation = { x: 0, y: 0 };
+  
+  // Pointer lock setup
+  const wrap = document.getElementById("wrap");
+  wrap.addEventListener("click", () => wrap.requestPointerLock());
+  document.addEventListener("mousemove", e => {
+    if (document.pointerLockElement !== wrap) return;
+    cameraRotation.y -= e.movementX * 0.002;
+    cameraRotation.x -= e.movementY * 0.002;
+    cameraRotation.x = Math.max(-Math.PI/2 + 0.05, Math.min(Math.PI/2 - 0.05, cameraRotation.x));
+  });
+
+  addEventListener("keydown", e => { if (e.code in keys) keys[e.code] = 1; });
+  addEventListener("keyup", e => { if (e.code in keys) keys[e.code] = 0; });
+
+  function init() {
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x80a0e0);
+    scene.fog = new THREE.FogExp2(0x80a0e0, 0.03);
+
+    camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    wrap.appendChild(renderer.domElement);
+
+    const ambientLight = new THREE.AmbientLight(0xcccccc); scene.add(ambientLight);
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.5); dirLight.position.set(10, 20, 10); scene.add(dirLight);
+
+    // Procedural voxel texture
+    const cvs = document.createElement("canvas"); cvs.width = 16; cvs.height = 16;
+    const ctx = cvs.getContext("2d");
+    ctx.fillStyle = "#557a2b"; ctx.fillRect(0,0,16,16);
+    ctx.fillStyle = "#8d5e3a"; ctx.fillRect(0,4,16,12);
+    const tex = new THREE.CanvasTexture(cvs); tex.magFilter = THREE.NearestFilter; tex.minFilter = THREE.NearestFilter;
+    const geo = new THREE.BoxGeometry(1, 1, 1);
+    const mat = new THREE.MeshLambertMaterial({ map: tex });
+
+    // Seed terrain
+    for (let x = -10; x <= 10; x++) {
+      for (let z = -10; z <= 10; z++) {
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.position.set(x, 0, z); scene.add(mesh);
+        blocks.set(`${x},0,${z}`, mesh);
+      }
+    }
+
+    camera.position.set(0, py + 1.6, 5);
+    
+    // Build/break logic
+    const raycaster = new THREE.Raycaster();
+    const mouseCenter = new THREE.Vector2(0, 0);
+
+    wrap.addEventListener("pointerdown", e => {
+      if (document.pointerLockElement !== wrap) return;
+      raycaster.setFromCamera(mouseCenter, camera);
+      const intersects = raycaster.intersectObjects(Array.from(blocks.values()));
+      if (intersects.length > 0 && intersects[0].distance < 6) {
+        const hit = intersects[0];
+        if (e.button === 0) { // Break
+          scene.remove(hit.object);
+          for (let [k, v] of blocks.entries()) { if (v === hit.object) { blocks.delete(k); break; } }
+          score++; document.getElementById("score").textContent = score;
+        } else if (e.button === 2) { // Place
+          const p = hit.point.clone().add(hit.face.normal.clone().multiplyScalar(0.5));
+          const bx = Math.round(p.x), by = Math.round(p.y), bz = Math.round(p.z);
+          const key = `${bx},${by},${bz}`;
+          if (!blocks.has(key)) {
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.position.set(bx, by, bz); scene.add(mesh);
+            blocks.set(key, mesh);
+          }
+        }
+      }
+    });
+
+    addEventListener("resize", () => {
+      camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000); last = now;
+    
+    // Physics / Controls
+    camera.rotation.set(cameraRotation.x, cameraRotation.y, 0, 'YXZ');
+    
+    const moveVector = new THREE.Vector3();
+    if (keys.KeyW) moveVector.z -= 1; if (keys.KeyS) moveVector.z += 1;
+    if (keys.KeyA) moveVector.x -= 1; if (keys.KeyD) moveVector.x += 1;
+    moveVector.normalize().multiplyScalar(moveSpeed * dt).applyQuaternion(camera.quaternion);
+    moveVector.y = 0;
+    
+    camera.position.add(moveVector);
+
+    // Gravity & Jump
+    vy -= gravity * dt;
+    camera.position.y += vy * dt;
+    const floorY = 0 + 1.6;
+    if (camera.position.y <= floorY) { camera.position.y = floorY; vy = 0; isGrounded = true; }
+    if (keys.Space && isGrounded) { vy = jumpForce; isGrounded = false; }
+
+    renderer.render(scene, camera);
+    requestAnimationFrame(frame);
+  }
+
+  init();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body></html>
+"""
+
+
+CANVAS_AR_FLICK_SKELETON = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AR Capture basic</title>
+<style>
+  :root { color-scheme: dark; }
+  html,body { margin:0; height:100%; background:#101118; font-family:sans-serif; overflow:hidden; }
+  #wrap { position:fixed; inset:0; display:grid; place-items:center; }
+  canvas { background:#141622; touch-action:none; max-width:100vw; max-height:100vh; }
+  #hud { position:fixed; top:12px; left:12px; background:rgba(0,0,0,0.6); padding:8px 12px; border-radius:8px; pointer-events:none; }
+  #help { position:fixed; bottom:12px; left:50%; transform:translateX(-50%); background:rgba(0,0,0,0.6); padding:8px 12px; border-radius:8px; pointer-events:none; font-size:12px; text-align:center; }
+  #camView { position:fixed; inset:0; object-fit:cover; z-index:-1; display:none; }
+</style></head>
+<body>
+<video id="camView" autoplay playsinline></video>
+<div id="wrap"><canvas id="c" width="400" height="600"></canvas></div>
+<div id="hud">Caught: <span id="score">0</span></div>
+<div id="help">Swipe up rapidly to throw the ball at the target! Add horizontal curve for bonus.</div>
+<script>
+(() => {
+  "use strict";
+  const cvs = document.getElementById("c");
+  const ctx = cvs.getContext("2d");
+  const scoreEl = document.getElementById("score");
+  const cam = document.getElementById("camView");
+  
+  let score = 0;
+  
+  // Try AR Camera
+  navigator.mediaDevices?.getUserMedia({ video: { facingMode: "environment" } })
+    .then(s => { cam.srcObject = s; cam.style.display = "block"; })
+    .catch(() => {});
+
+  const monster = { x: 200, y: 200, r: 35, baseR: 35, t: 0 };
+  const ball = { x: 200, y: 520, z: 0, vx: 0, vy: 0, vz: 0, r: 20, active: false, drag: false, prev: [] };
+  const target = { pulse: 0, size: 40 };
+
+  cvs.addEventListener("pointerdown", e => {
+    const r = cvs.getBoundingClientRect();
+    const mx = e.clientX - r.left, my = e.clientY - r.top;
+    if (Math.hypot(mx - ball.x, my - ball.y) < 40 && !ball.active) {
+      ball.drag = true; ball.prev = [{ x: mx, y: my, t: performance.now() }];
+    }
+  });
+
+  cvs.addEventListener("pointermove", e => {
+    const r = cvs.getBoundingClientRect();
+    const mx = e.clientX - r.left, my = e.clientY - r.top;
+    if (ball.drag) {
+      ball.x = mx; ball.y = my;
+      ball.prev.push({ x: mx, y: my, t: performance.now() });
+      if (ball.prev.length > 5) ball.prev.shift();
+    }
+  });
+
+  cvs.addEventListener("pointerup", e => {
+    if (ball.drag) {
+      ball.drag = false;
+      if (ball.prev.length >= 2) {
+        const p1 = ball.prev[0], p2 = ball.prev[ball.prev.length - 1];
+        const dt = (p2.t - p1.t) / 1000;
+        if (dt > 0.05) {
+          ball.vx = (p2.x - p1.x) / dt;
+          ball.vy = (p2.y - p1.y) / dt;
+          ball.vz = -Math.abs(ball.vy) * 1.5; // Simulate forward depth
+          if (ball.vy < -200) { ball.active = true; }
+        }
+      }
+      if (!ball.active) { ball.x = 200; ball.y = 520; }
+    }
+  });
+
+  function drawBackground() {
+    if (cam.style.display !== "block") {
+      const grad = ctx.createLinearGradient(0,0,0,600);
+      grad.addColorStop(0, "#2c3e50"); grad.addColorStop(1, "#1e272c");
+      ctx.fillStyle = grad; ctx.fillRect(0,0,400,600);
+
+      // Draw landscape hills
+      ctx.fillStyle = "#27ae60";
+      ctx.beginPath(); ctx.ellipse(200, 480, 300, 150, 0, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = "#2ecc71";
+      ctx.beginPath(); ctx.ellipse(100, 500, 250, 120, 0, 0, Math.PI*2); ctx.fill();
+    } else {
+      ctx.clearRect(0,0,400,600);
+    }
+  }
+
+  function update(dt) {
+    monster.t += dt;
+    monster.y = 200 + Math.sin(monster.t * 2) * 40;
+    monster.r = monster.baseR + Math.sin(monster.t * 4) * 2;
+
+    target.pulse = (target.pulse + dt) % 1.5;
+    target.size = 50 * (1 - (target.pulse / 1.5));
+
+    if (ball.active) {
+      ball.vz += 800 * dt; // Gravity
+      ball.x += ball.vx * dt;
+      ball.y += ball.vy * dt + ball.vz * 0.05 * dt;
+      ball.r = Math.max(8, 20 * (1 - (Math.abs(ball.vz) / 3000)));
+
+      if (ball.y < -100 || ball.y > 650 || ball.x < -100 || ball.x > 500) {
+        ball.active = false; ball.x = 200; ball.y = 520; ball.vz = 0;
+      }
+
+      if (ball.y <= monster.y + 10 && ball.y >= monster.y - 10) {
+        if (Math.hypot(ball.x - monster.x, ball.y - monster.y) < monster.r + 5) {
+          score++; scoreEl.textContent = score;
+          ball.active = false; ball.x = 200; ball.y = 520; ball.vz = 0;
+        }
+      }
+    }
+  }
+
+  function draw() {
+    drawBackground();
+
+    ctx.fillStyle = "#e74c3c";
+    ctx.beginPath(); ctx.arc(monster.x, monster.y, monster.r, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = "#fff";
+    ctx.beginPath(); ctx.arc(monster.x - 10, monster.y - 5, 8, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(monster.x + 10, monster.y - 5, 8, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = "#000";
+    ctx.beginPath(); ctx.arc(monster.x - 10, monster.y - 5, 3, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(monster.x + 10, monster.y - 5, 3, 0, Math.PI*2); ctx.fill();
+
+    ctx.strokeStyle = "#2ecc71"; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(monster.x, monster.y, target.size, 0, Math.PI*2); ctx.stroke();
+
+    ctx.save();
+    ctx.translate(ball.x, ball.y);
+    ctx.shadowColor = "rgba(0,0,0,0.5)"; ctx.shadowBlur = 8;
+    ctx.fillStyle = "#f1c40f";
+    ctx.beginPath(); ctx.arc(0, 0, ball.r, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = "#ffffff";
+    ctx.beginPath(); ctx.arc(-ball.r/4, -ball.r/4, ball.r/4, 0, Math.PI*2); ctx.fill();
+    ctx.restore();
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000); last = now;
+    update(dt); draw();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body></html>
+"""
+
+
+CANVAS_LIT_DUNGEON_SKELETON = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lit Dungeon basic</title>
+<style>
+  :root { color-scheme: dark; }
+  html,body { margin:0; height:100%; background:#050508; font-family:sans-serif; overflow:hidden; }
+  #wrap { position:fixed; inset:0; display:grid; place-items:center; }
+  canvas { background:#08080c; border-radius:12px; max-width:96vw; max-height:90vh; touch-action:none; }
+</style></head>
+<body>
+<div id="wrap"><canvas id="c" width="800" height="600"></canvas></div>
+<script>
+(() => {
+  "use strict";
+  const cvs = document.getElementById("c");
+  const ctx = cvs.getContext("2d");
+  
+  const lightCvs = document.createElement("canvas");
+  const lightCtx = lightCvs.getContext("2d");
+  lightCvs.width = 800; lightCvs.height = 600;
+
+  const player = { x: 400, y: 300, speed: 200, r: 15, lightRadius: 180 };
+  const keys = { KeyW: 0, KeyS: 0, KeyA: 0, KeyD: 0 };
+  const torches = [
+    { x: 200, y: 150, r: 80, pulse: 0 },
+    { x: 600, y: 150, r: 80, pulse: 0.5 },
+    { x: 400, y: 450, r: 100, pulse: 0.2 }
+  ];
+
+  addEventListener("keydown", e => { if (e.code in keys) keys[e.code] = 1; });
+  addEventListener("keyup", e => { if (e.code in keys) keys[e.code] = 0; });
+
+  function update(dt) {
+    let dx = 0, dy = 0;
+    if (keys.KeyW) dy -= 1; if (keys.KeyS) dy += 1;
+    if (keys.KeyA) dx -= 1; if (keys.KeyD) dx += 1;
+    if (dx !== 0 && dy !== 0) { dx *= 0.707; dy *= 0.707; }
+    player.x = Math.max(20, Math.min(780, player.x + dx * player.speed * dt));
+    player.y = Math.max(20, Math.min(580, player.y + dy * player.speed * dt));
+
+    torches.forEach(t => {
+      t.pulse = (t.pulse + dt) % (Math.PI * 2);
+    });
+  }
+
+  function draw() {
+    ctx.clearRect(0,0,800,600);
+    
+    ctx.fillStyle = "#1e1f29";
+    for(let y=0; y<600; y+=40) {
+      for(let x=0; x<800; x+=40) {
+        ctx.fillRect(x+1, y+1, 38, 38);
+      }
+    }
+
+    torches.forEach(t => {
+      ctx.fillStyle = "#d35400";
+      ctx.fillRect(t.x-4, t.y-4, 8, 16);
+      ctx.fillStyle = "#f1c40f";
+      ctx.beginPath(); ctx.arc(t.x, t.y-6, 6 + Math.sin(t.pulse*6)*2, 0, Math.PI*2); ctx.fill();
+    });
+
+    ctx.fillStyle = "#3498db";
+    ctx.beginPath(); ctx.arc(player.x, player.y, player.r, 0, Math.PI*2); ctx.fill();
+
+    lightCtx.fillStyle = "#0c0d12";
+    lightCtx.fillRect(0,0,800,600);
+    lightCtx.globalCompositeOperation = "screen";
+
+    const playerGrad = lightCtx.createRadialGradient(player.x, player.y, 0, player.x, player.y, player.lightRadius);
+    playerGrad.addColorStop(0, "rgba(255,255,255,1.0)");
+    playerGrad.addColorStop(0.5, "rgba(255,255,255,0.4)");
+    playerGrad.addColorStop(1, "rgba(255,255,255,0.0)");
+    lightCtx.fillStyle = playerGrad;
+    lightCtx.beginPath(); lightCtx.arc(player.x, player.y, player.lightRadius, 0, Math.PI*2); lightCtx.fill();
+
+    torches.forEach(t => {
+      const tr = t.r + Math.sin(t.pulse*8)*5;
+      const torchGrad = lightCtx.createRadialGradient(t.x, t.y-6, 0, t.x, t.y-6, tr);
+      torchGrad.addColorStop(0, "rgba(230,126,34,1.0)");
+      torchGrad.addColorStop(0.4, "rgba(230,126,34,0.5)");
+      torchGrad.addColorStop(1, "rgba(230,126,34,0.0)");
+      lightCtx.fillStyle = torchGrad;
+      lightCtx.beginPath(); lightCtx.arc(t.x, t.y-6, tr, 0, Math.PI*2); lightCtx.fill();
+    });
+
+    lightCtx.globalCompositeOperation = "source-over";
+
+    ctx.globalCompositeOperation = "multiply";
+    ctx.drawImage(lightCvs, 0, 0);
+    ctx.globalCompositeOperation = "source-over";
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000); last = now;
+    update(dt); draw();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body></html>
+"""
+
+
+CANVAS_VFX_PARTICLES_SKELETON = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>VFX Particles sandbox</title>
+<style>
+  :root { color-scheme: dark; }
+  html,body { margin:0; height:100%; background:#0a0b10; font-family:sans-serif; overflow:hidden; }
+  #wrap { position:fixed; inset:0; display:grid; place-items:center; }
+  canvas { background:#0e1017; border-radius:12px; max-width:96vw; max-height:90vh; touch-action:none; }
+</style></head>
+<body>
+<div id="wrap"><canvas id="c" width="800" height="600"></canvas></div>
+<script>
+(() => {
+  "use strict";
+  const cvs = document.getElementById("c");
+  const ctx = cvs.getContext("2d");
+
+  const player = { x: 400, y: 300, r: 15 };
+  const numbers = [];
+  const particlePool = [];
+  
+  for(let i=0; i<150; i++) {
+    particlePool.push({ x:0, y:0, vx:0, vy:0, color:"#fff", size:1, life:0, maxLife:0, active:false });
+  }
+
+  let shake = { x: 0, y: 0, amt: 0 };
+
+  cvs.addEventListener("pointerdown", e => {
+    const r = cvs.getBoundingClientRect();
+    const mx = e.clientX - r.left, my = e.clientY - r.top;
+    triggerExplosion(mx, my);
+    triggerScreenShake(12);
+    triggerDamageNumber(mx, my - 20, Math.floor(Math.random() * 50) + 10);
+  });
+
+  function spawnParticle(x, y, color, size) {
+    const p = particlePool.find(item => !item.active);
+    if (!p) return;
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 50 + Math.random() * 150;
+    p.x = x; p.y = y;
+    p.vx = Math.cos(angle) * speed; p.vy = Math.sin(angle) * speed;
+    p.color = color; p.size = size;
+    p.life = p.maxLife = 0.4 + Math.random() * 0.4;
+    p.active = true;
+  }
+
+  function triggerExplosion(x, y) {
+    const colors = ["#ff5722", "#ffc107", "#ffeb3b", "#e91e63"];
+    for(let i=0; i<30; i++) {
+      spawnParticle(x, y, colors[Math.floor(Math.random() * colors.length)], 2 + Math.random() * 4);
+    }
+  }
+
+  function triggerScreenShake(power) {
+    shake.amt = power;
+  }
+
+  function triggerDamageNumber(x, y, num) {
+    numbers.push({ x, y, val: num, life: 1.0, vy: -50 });
+  }
+
+  function update(dt) {
+    if (shake.amt > 0.1) {
+      shake.x = (Math.random() - 0.5) * shake.amt;
+      shake.y = (Math.random() - 0.5) * shake.amt;
+      shake.amt *= Math.exp(-6 * dt);
+    } else {
+      shake.x = 0; shake.y = 0; shake.amt = 0;
+    }
+
+    particlePool.forEach(p => {
+      if (!p.active) return;
+      p.life -= dt;
+      if (p.life <= 0) { p.active = false; return; }
+      p.x += p.vx * dt; p.y += p.vy * dt;
+    });
+
+    for(let i = numbers.length - 1; i >= 0; i--) {
+      const n = numbers[i];
+      n.life -= dt;
+      if (n.life <= 0) { numbers.splice(i, 1); continue; }
+      n.y += n.vy * dt;
+    }
+  }
+
+  function draw() {
+    ctx.save();
+    ctx.translate(shake.x, shake.y);
+    ctx.clearRect(0,0,800,600);
+
+    ctx.strokeStyle = "#1a1e2a"; ctx.lineWidth = 1;
+    for(let x=0; x<800; x+=50) {
+      ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,600); ctx.stroke();
+    }
+    for(let y=0; y<600; y+=50) {
+      ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(800,y); ctx.stroke();
+    }
+
+    ctx.save();
+    ctx.globalCompositeOperation = "screen";
+    particlePool.forEach(p => {
+      if (!p.active) return;
+      ctx.globalAlpha = p.life / p.maxLife;
+      ctx.fillStyle = p.color;
+      ctx.fillRect(p.x - p.size/2, p.y - p.size/2, p.size, p.size);
+    });
+    ctx.restore();
+
+    ctx.fillStyle = "#a855f7";
+    ctx.beginPath(); ctx.arc(player.x, player.y, player.r, 0, Math.PI*2); ctx.fill();
+
+    ctx.textAlign = "center"; ctx.font = "bold 20px system-ui";
+    numbers.forEach(n => {
+      ctx.fillStyle = `rgba(239, 68, 68, ${n.life})`;
+      ctx.fillText(n.val, n.x, n.y);
+    });
+
+    ctx.restore();
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000); last = now;
+    update(dt); draw();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body></html>
+"""
+
+
 # Tokens we strip when computing similarity. Mostly stop-words plus generic
 # game-domain words that don't help discriminate (e.g. "game" matches every
 # past entry and so adds no signal).
 _STOPWORDS: set[str] = {
     "a", "an", "and", "the", "of", "for", "in", "on", "with", "to", "by",
     "is", "it", "or", "as", "at", "be", "this", "that",
-    "game", "make", "build", "create", "simple", "small",
+    "game", "make", "build", "create", "simple", "small", "making",
+    "canvas", "html", "css", "javascript", "js", "app", "application",
+    "using", "use", "uses", "play", "player", "screen", "implementation",
+    "implement", "code", "file", "single",
 }
 
 _TOKEN_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9]*")
@@ -1421,6 +1976,10 @@ class GameMemory:
                 (CANVAS_RPG_SKELETON_NAME, CANVAS_RPG_SKELETON, CANVAS_RPG_SKELETON_SIDECAR),
                 (CANVAS_CARDS_SKELETON_NAME, CANVAS_CARDS_SKELETON, CANVAS_CARDS_SKELETON_SIDECAR),
                 (CANVAS_PHYSICS_SKELETON_NAME, CANVAS_PHYSICS_SKELETON, CANVAS_PHYSICS_SKELETON_SIDECAR),
+                (CANVAS_VOXEL_MINECRAFT_SKELETON_NAME, CANVAS_VOXEL_MINECRAFT_SKELETON, CANVAS_VOXEL_MINECRAFT_SKELETON_SIDECAR),
+                (CANVAS_AR_FLICK_SKELETON_NAME, CANVAS_AR_FLICK_SKELETON, CANVAS_AR_FLICK_SKELETON_SIDECAR),
+                (CANVAS_LIT_DUNGEON_SKELETON_NAME, CANVAS_LIT_DUNGEON_SKELETON, CANVAS_LIT_DUNGEON_SIDECAR),
+                (CANVAS_VFX_PARTICLES_SKELETON_NAME, CANVAS_VFX_PARTICLES_SKELETON, CANVAS_VFX_PARTICLES_SIDECAR),
             ]
 
             for name, html, sidecar in templates:
