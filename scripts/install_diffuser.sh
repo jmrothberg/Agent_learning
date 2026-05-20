@@ -8,8 +8,9 @@
 # `./scripts/setup.sh` calls this once; you can also run this script alone
 # after creating `.venv`.
 #
-# Model weights are NOT downloaded here — they populate ~/.cache/huggingface/hub/
-# on first <assets>/<sounds> or scripts/_smoke_*.py (login rarely needed; README if 403).
+# Model weights: run `./scripts/setup.sh` — prompts for Z-Image-Turbo path
+# (Enter = use local copy or download ~32 GB). Writes DIFFUSION_MODELS_DIR
+# to .env. Stable Audio still downloads on first <sounds> unless cached.
 
 set -euo pipefail
 
@@ -48,6 +49,17 @@ PY=".venv/bin/python"
 # ---------------------------------------------------------------------------
 
 OS="$(uname -s)"
+
+# Auto-pick PyTorch wheel CUDA tag from the installed NVIDIA driver unless
+# TORCH_CUDA is already set. Nightly cu130 needs a CUDA 13.x driver; driver
+# 12.x (e.g. 570 + CUDA 12.8) needs stable cu126 wheels.
+if [ -z "${TORCH_CUDA:-}" ] && [ "$OS" = "Linux" ] && command -v nvidia-smi >/dev/null 2>&1; then
+  _cuda_drv_major="$(nvidia-smi 2>/dev/null | sed -n 's/.*CUDA Version: \([0-9]*\)\.[0-9]*/\1/p' | head -1)"
+  case "${_cuda_drv_major:-}" in
+    12) TORCH_CUDA=126 ;;
+    13) TORCH_CUDA=130 ;;
+  esac
+fi
 TORCH_CUDA="${TORCH_CUDA:-130}"
 
 case "$OS" in
@@ -58,8 +70,13 @@ case "$OS" in
     ;;
   Linux)
     PLATFORM_LABEL="Linux + NVIDIA (CUDA $TORCH_CUDA)"
-    TORCH_INDEX_FLAGS="--pre --index-url https://download.pytorch.org/whl/nightly/cu${TORCH_CUDA}"
-    DEVICE_NOTE="If your GPU needs a different CUDA version, re-run with TORCH_CUDA=121 (or 124, etc)."
+    if [ "$TORCH_CUDA" = "130" ]; then
+      TORCH_INDEX_FLAGS="--pre --index-url https://download.pytorch.org/whl/nightly/cu${TORCH_CUDA}"
+    else
+      # Stable wheels for cu126/cu124/cu121 — matches CUDA 12.x drivers.
+      TORCH_INDEX_FLAGS="--index-url https://download.pytorch.org/whl/cu${TORCH_CUDA}"
+    fi
+    DEVICE_NOTE="If your GPU needs a different CUDA version, re-run with TORCH_CUDA=121 (or 124, 126, etc)."
     ;;
   *)
     PLATFORM_LABEL="$OS (no GPU support)"
@@ -74,7 +91,7 @@ echo
 
 echo "[1/4] Installing torch + torchvision + torchaudio …"
 # shellcheck disable=SC2086
-$PIP install $TORCH_INDEX_FLAGS torch torchvision torchaudio
+$PIP install --force-reinstall $TORCH_INDEX_FLAGS torch torchvision torchaudio
 
 echo
 echo "[2/4] Installing diffusers from git HEAD (needed for ZImagePipeline + Stable Audio) …"

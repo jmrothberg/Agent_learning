@@ -11,6 +11,7 @@
 #                                        #   interpreter shim is now stale)
 #   ./scripts/setup.sh --skip-playwright # skip `playwright install chromium`
 #   ./scripts/setup.sh --skip-tests      # skip the pytest verification step
+#   ./scripts/setup.sh --non-interactive # no prompts; auto-detect weights only
 #   ./scripts/setup.sh --no-mlx-tools    # Apple Silicon: skip mlx-lm pip install
 #   ./scripts/setup.sh -h | --help
 #
@@ -25,8 +26,10 @@
 #      cache goes to ~/Library/Caches/ms-playwright (Mac) or ~/.cache/ms-playwright.
 #   6. GPU stack — `./scripts/install_diffuser.sh` installs torch + diffusers git +
 #      transformers AND layers `requirements-diffuser.txt` (soundfile, torchsde)
-#      in one script — Z-Image sprites + Stable Audio pip deps together.
-#      Omit with `--no-gpu`.
+#      in one script — Z-Image sprites + Stable Audio Open pip deps together.
+#      Omit with `--no-gpu`. Then prompts for Z-Image-Turbo weights (or downloads
+#      from HuggingFace when you press Enter with no local copy) and writes
+#      DIFFUSION_MODELS_DIR into `.env` for chat.py / coder.py.
 #   7. Run the pytest suite end-to-end as a sanity check (~190 tests, < 20 s).
 #   8. Print MLX / Ollama next-steps + HF download recovery (only if 403/401).
 #
@@ -48,9 +51,10 @@ SKIP_PLAYWRIGHT=0
 SKIP_TESTS=0
 RECREATE_VENV=0
 MLX_TOOLS_SKIP=0
+NONINTERACTIVE=0
 
 usage() {
-    sed -n '2,16p' "$0"
+    sed -n '2,17p' "$0"
     exit "${1:-0}"
 }
 
@@ -62,10 +66,16 @@ for arg in "$@"; do
         --skip-tests)         SKIP_TESTS=1 ;;
         --recreate-venv)      RECREATE_VENV=1 ;;
         --no-mlx-tools)       MLX_TOOLS_SKIP=1 ;;
+        --non-interactive)    NONINTERACTIVE=1 ;;
         -h|--help)            usage 0 ;;
         *)                    echo "unknown flag: $arg" >&2; usage 1 ;;
     esac
 done
+
+# Pipelines / CI have no TTY — skip weight prompts unless forced interactive.
+if [ ! -t 0 ]; then
+    NONINTERACTIVE=1
+fi
 
 # --- helpers ---------------------------------------------------------------
 
@@ -86,6 +96,167 @@ warn() {
 die() {
     printf '\n\033[1;31mERROR:\033[0m %s\n' "$1" >&2
     exit 1
+}
+
+# Return 0 when the venv's Playwright Chromium binary is on disk.
+# IDE sandboxes sometimes set PLAYWRIGHT_BROWSERS_PATH to a temp dir, so
+# callers must `env -u PLAYWRIGHT_BROWSERS_PATH` when invoking this.
+playwright_chromium_ready() {
+    env -u PLAYWRIGHT_BROWSERS_PATH "$VENV_PY" - <<'PY' >/dev/null 2>&1
+import os, sys
+from playwright.sync_api import sync_playwright
+with sync_playwright() as p:
+    exe = p.chromium.executable_path
+    if not os.path.isfile(exe):
+        sys.exit(1)
+PY
+}
+
+# Upsert one KEY=VALUE line in repo-root .env (gitignored; chat.py loads it).
+write_env_var() {
+    local key="$1"
+    local val="$2"
+    "$VENV_PY" - "$key" "$val" "$ROOT/.env" <<'PY'
+import sys
+from pathlib import Path
+key, val, path = sys.argv[1], sys.argv[2], Path(sys.argv[3])
+lines = path.read_text().splitlines() if path.exists() else []
+out = [ln for ln in lines if not ln.startswith(key + "=")]
+out.append(f"{key}={val}")
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text("\n".join(out) + "\n")
+PY
+}
+
+# Print candidate DIFFUSION_MODELS_DIR roots that already contain Z-Image-Turbo.
+find_zimage_roots() {
+    local bases=()
+    if [ "$PLATFORM" = "linux" ] && [ -d "/data/Diffusion_Models" ]; then
+        bases+=("/data/Diffusion_Models")
+    fi
+    if [ "$PLATFORM" = "macos" ]; then
+        bases+=(
+            "$HOME/Diffusion_Models"
+            "$HOME/.Diffusion_Models"
+            "$HOME/Models_Diffusers"
+            "$HOME/.Models_Diffusers"
+        )
+    else
+        bases+=(
+            "$HOME/.Models_Diffusers"
+            "$HOME/Models_Diffusers"
+            "$HOME/.Diffusion_Models"
+            "$HOME/Diffusion_Models"
+        )
+    fi
+    local base
+    for base in "${bases[@]}"; do
+        if [ -f "$base/Z-Image-Turbo/model_index.json" ]; then
+            printf '%s\n' "$base"
+        fi
+    done
+}
+
+# Resolve a user-entered path to the parent dir for DIFFUSION_MODELS_DIR.
+# Accepts either .../Z-Image-Turbo or its parent (.../Diffusion_Models).
+resolve_diffusion_models_dir() {
+    local raw="${1:-}"
+    raw="${raw/#\~/$HOME}"
+    raw="${raw%/}"
+    if [ -z "$raw" ]; then
+        return 1
+    fi
+    if [ -f "$raw/model_index.json" ]; then
+        dirname "$raw"
+        return 0
+    fi
+    if [ -f "$raw/Z-Image-Turbo/model_index.json" ]; then
+        printf '%s\n' "$raw"
+        return 0
+    fi
+    return 1
+}
+
+download_zimage_turbo() {
+    local parent="$1"
+    mkdir -p "$parent"
+    warn "Downloading Z-Image-Turbo from HuggingFace (~32 GB one-time) …"
+    DIFFUSION_DOWNLOAD_ROOT="$parent" "$VENV_PY" - <<'PY'
+from huggingface_hub import snapshot_download
+import os
+root = os.path.expanduser(os.environ["DIFFUSION_DOWNLOAD_ROOT"])
+path = snapshot_download(
+    "Tongyi-MAI/Z-Image-Turbo",
+    local_dir=os.path.join(root, "Z-Image-Turbo"),
+)
+print(path)
+PY
+}
+
+configure_diffusion_weights() {
+    if [ "$WITH_GPU" != "on" ]; then
+        return 0
+    fi
+
+    local detected_root=""
+    detected_root="$(find_zimage_roots | head -1 || true)"
+
+    # Respect an existing .env unless we are interactive and user picks anew.
+    if [ -f "$ROOT/.env" ] && grep -q '^DIFFUSION_MODELS_DIR=' "$ROOT/.env" 2>/dev/null; then
+        local existing
+        existing="$(grep '^DIFFUSION_MODELS_DIR=' "$ROOT/.env" | tail -1 | cut -d= -f2-)"
+        if [ -n "$existing" ] && [ -f "${existing/#\~/$HOME}/Z-Image-Turbo/model_index.json" ]; then
+            ok "DIFFUSION_MODELS_DIR already in .env → ${existing}"
+            return 0
+        fi
+    fi
+
+    if [ "$NONINTERACTIVE" -eq 1 ]; then
+        if [ -n "$detected_root" ]; then
+            write_env_var "DIFFUSION_MODELS_DIR" "$detected_root"
+            ok "DIFFUSION_MODELS_DIR=$detected_root (auto-detected → .env)"
+        else
+            warn "no local Z-Image-Turbo found (re-run interactively to download)"
+        fi
+        return 0
+    fi
+
+    printf '\n'
+    echo "   Z-Image-Turbo sprite weights"
+    echo "   Stable Audio Open uses the same root (or HuggingFace on first <sounds>)."
+    if [ -n "$detected_root" ]; then
+        echo "   Local copy found: $detected_root/Z-Image-Turbo"
+        printf '   Path to Z-Image-Turbo directory [Enter = use local copy]: '
+    else
+        echo "   No local copy found on this machine."
+        printf '   Path to Z-Image-Turbo directory [Enter = download from HuggingFace]: '
+    fi
+    local zpath=""
+    read -r zpath || zpath=""
+    zpath="${zpath/#\~/$HOME}"
+
+    local models_dir=""
+    if [ -z "$zpath" ]; then
+        if [ -n "$detected_root" ]; then
+            models_dir="$detected_root"
+        else
+            local dl_root="$HOME/Models_Diffusers"
+            if [ "$PLATFORM" = "macos" ]; then
+                dl_root="$HOME/Diffusion_Models"
+            fi
+            download_zimage_turbo "$dl_root"
+            models_dir="$dl_root"
+        fi
+    else
+        if ! models_dir="$(resolve_diffusion_models_dir "$zpath")"; then
+            warn "not a Z-Image-Turbo tree (need model_index.json) — skipping .env"
+            warn "chat.py will download from HuggingFace on first <assets> instead."
+            return 0
+        fi
+    fi
+
+    write_env_var "DIFFUSION_MODELS_DIR" "$models_dir"
+    ok "DIFFUSION_MODELS_DIR=$models_dir → .env (chat.py will use local weights)"
 }
 
 # --- platform detect -------------------------------------------------------
@@ -212,9 +383,20 @@ if [ $SKIP_PLAYWRIGHT -eq 1 ]; then
     warn "skipped (--skip-playwright). Run when ready: env -u PLAYWRIGHT_BROWSERS_PATH $VENV_PY -m playwright install chromium"
 else
     # IDE sandboxes sometimes set PLAYWRIGHT_BROWSERS_PATH to a temp dir;
-    # unset so browsers land in the normal OS cache (~/Library/Caches/… on Mac).
-    env -u PLAYWRIGHT_BROWSERS_PATH "$VENV_PY" -m playwright install chromium
+    # unset so browsers land in the normal OS cache (~/.cache/ms-playwright).
+    if playwright_chromium_ready; then
+        ok "Chromium already cached"
+    else
+        warn "Chromium missing — downloading (first run or after playwright upgrade) …"
+        env -u PLAYWRIGHT_BROWSERS_PATH "$VENV_PY" -m playwright install chromium
+    fi
+    if ! playwright_chromium_ready; then
+        die "Chromium install failed. Re-run: env -u PLAYWRIGHT_BROWSERS_PATH $VENV_PY -m playwright install chromium"
+    fi
     ok "Chromium ready"
+    if [ "$PLATFORM" = "linux" ]; then
+        warn "If launch fails with missing .so libs: sudo env -u PLAYWRIGHT_BROWSERS_PATH $VENV_PY -m playwright install-deps chromium"
+    fi
 fi
 
 # --- 6. optional GPU stack -------------------------------------------------
@@ -224,10 +406,24 @@ step "6/8" "GPU stack — torch + diffusers + sprites + audio (skip with --no-gp
 if [ "$WITH_GPU" = "off" ]; then
     warn "skipped (--no-gpu). No Z-Image / Stable Audio — sprite + sound generation unavailable."
 else
+    # Match PyTorch wheel CUDA tag to the installed NVIDIA driver unless the
+    # caller already set TORCH_CUDA. Nightly cu130 needs CUDA 13.x driver;
+    # driver 12.x (e.g. 570 + CUDA 12.8) needs stable cu126 wheels.
+    if [ -z "${TORCH_CUDA:-}" ] && [ "$PLATFORM" = "linux" ] && command -v nvidia-smi >/dev/null 2>&1; then
+        _cuda_drv_major="$(nvidia-smi 2>/dev/null | sed -n 's/.*CUDA Version: \([0-9]*\)\.[0-9]*/\1/p' | head -1)"
+        case "${_cuda_drv_major:-}" in
+            12) export TORCH_CUDA=126 ;;
+            13) export TORCH_CUDA=130 ;;
+        esac
+        if [ -n "${TORCH_CUDA:-}" ]; then
+            ok "auto TORCH_CUDA=${TORCH_CUDA} from nvidia-smi (override: TORCH_CUDA=124 ./scripts/setup.sh)"
+        fi
+    fi
     # One script: torch + diffusers + transformers + requirements-diffuser.txt
     # (soundfile, torchsde) — sprites AND Stable Audio Open deps together.
     bash ./scripts/install_diffuser.sh
     ok "GPU stack installed (sprites + sound pip deps)"
+    configure_diffusion_weights
 fi
 
 # --- 7. tests --------------------------------------------------------------
@@ -273,12 +469,14 @@ EOF
 
 if [ "$WITH_GPU" = "on" ]; then
     cat <<'EOF'
-   GENERATED ASSETS — Z-Image-Turbo (~5 GB into ~/.cache/huggingface/hub/ typically):
-     Usually no login prompt on first <assets> or smoke run.
+   SPRITE WEIGHTS — Z-Image-Turbo:
+     setup.sh writes DIFFUSION_MODELS_DIR to .env when a local tree exists
+     (Linux: /data/Diffusion_Models, Mac: ~/Diffusion_Models, etc.).
+     Re-run ./scripts/setup.sh interactively to pick a path or download (~32 GB).
        .venv/bin/python scripts/_smoke_doom.py
 
    GENERATED SOUNDS — Stable Audio Open 1.0 (~9 GB cache typical):
-     Same pattern — downloads on first <sounds> or smoke; often no password asked.
+     Downloads on first <sounds> or smoke unless cached under DIFFUSION_MODELS_DIR.
        .venv/bin/python scripts/_smoke_audio.py
      Only if download fails with 403/401:
        • https://huggingface.co/stabilityai/stable-audio-open-1.0 — agree if prompted
