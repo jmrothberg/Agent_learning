@@ -619,7 +619,7 @@ CANVAS_GRID_SKELETON = """<!DOCTYPE html>
 """
 
 
-# Platformer climbing and gravity jumping mechanics.
+# Platformer climbing and gravity jumping mechanics. Includes input buffering.
 CANVAS_PLATFORMER_SKELETON = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <title>Platformer Game</title>
@@ -631,17 +631,38 @@ CANVAS_PLATFORMER_SKELETON = """<!DOCTYPE html>
 </style></head>
 <body>
 <div id="wrap"><canvas id="c" width="800" height="600"></canvas></div>
-<div id="hud">Score: <span id="score">0</span></div>
+<div id="hud">Score: <span id="score">0</span> &nbsp; Health: <span id="health">100</span></div>
 <script>
 (() => {
   const cvs = document.getElementById("c");
   const ctx = cvs.getContext("2d");
-  const p = { x: 100, y: 400, vx: 0, vy: 0, w: 20, h: 32, climbing: false, grounded: false };
+  const p = { x: 100, y: 400, vx: 0, vy: 0, w: 20, h: 32, climbing: false, grounded: false, health: 100, visibleHealth: 100 };
   const gravity = 800, speed = 200, jumpForce = -350;
   const keys = {};
 
-  addEventListener("keydown", e => { keys[e.code] = true; });
+  // Simple input buffer
+  const inputBuffer = [];
+  const BUFFER_WINDOW = 0.2; // 200ms
+
+  addEventListener("keydown", e => {
+    keys[e.code] = true;
+    inputBuffer.push({ code: e.code, t: performance.now() / 1000 });
+  });
   addEventListener("keyup", e => { keys[e.code] = false; });
+
+  function checkBuffer(code) {
+    const now = performance.now() / 1000;
+    // Clean old
+    while (inputBuffer.length > 0 && now - inputBuffer[0].t > BUFFER_WINDOW) {
+      inputBuffer.shift();
+    }
+    const idx = inputBuffer.findIndex(item => item.code === code);
+    if (idx >= 0) {
+      inputBuffer.splice(idx, 1); // consume
+      return true;
+    }
+    return false;
+  }
 
   function update(dt) {
     p.vx = 0;
@@ -654,22 +675,41 @@ CANVAS_PLATFORMER_SKELETON = """<!DOCTYPE html>
       if (keys.ArrowDown || keys.KeyS) p.vy = speed / 2;
     } else {
       p.vy += gravity * dt;
-      if ((keys.ArrowUp || keys.KeyW) && p.grounded) { p.vy = jumpForce; p.grounded = false; }
+      
+      // Buffer check for jump
+      const wantsJump = keys.ArrowUp || keys.KeyW || checkBuffer("Space");
+      if (wantsJump && p.grounded) {
+        p.vy = jumpForce;
+        p.grounded = false;
+      }
     }
 
     p.x += p.vx * dt;
     p.y += p.vy * dt;
     if (p.y > 450) { p.y = 450; p.vy = 0; p.grounded = true; }
+
+    // Smooth HUD health bar transition (LERP)
+    p.visibleHealth += (p.health - p.visibleHealth) * 0.1;
   }
 
   function draw() {
     ctx.clearRect(0,0,800,600);
     ctx.fillStyle = "#00ff88";
     ctx.fillRect(p.x, p.y, p.w, p.h);
+
+    // Draw HUD Health Bar smoothly
+    ctx.fillStyle = "#300";
+    ctx.fillRect(100, 20, 200, 16);
+    ctx.fillStyle = "#ff3333";
+    ctx.fillRect(100, 20, (p.visibleHealth / 100) * 200, 16);
+    ctx.strokeStyle = "#fff";
+    ctx.strokeRect(100, 20, 200, 16);
   }
 
-  function frame() {
-    update(0.016); draw();
+  function frame(now) {
+    const dt = 0.016;
+    update(dt); draw();
+    document.getElementById("health").textContent = Math.round(p.health);
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
@@ -826,7 +866,7 @@ CANVAS_MODE7_SKELETON = """<!DOCTYPE html>
 """
 
 
-# Top-down dungeon crawler with wall-sliding diagonal velocity response.
+# Top-down dungeon crawler with wall-sliding diagonal velocity response, pathfinding and FSM.
 CANVAS_CRAWLER_SKELETON = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <title>Dungeon Crawler</title>
@@ -844,30 +884,143 @@ CANVAS_CRAWLER_SKELETON = """<!DOCTYPE html>
   const p = { x: 400, y: 300, vx: 0, vy: 0, r: 16 };
   const keys = {};
 
+  // Procedural maze grid (1 = wall, 0 = path)
+  const COLS = 25, ROWS = 19;
+  const grid = Array(ROWS).fill(null).map(() => Array(COLS).fill(1));
+  for (let r = 1; r < ROWS - 1; r++) {
+    for (let c = 1; c < COLS - 1; c++) {
+      if (Math.random() > 0.28 || r % 2 === 1 && c % 2 === 1) {
+        grid[r][c] = 0; // path
+      }
+    }
+  }
+
+  // BFS Pathfinding toward player grid position
+  function findPathBFS(startX, startY, targetX, targetY) {
+    const queue = [[[startX, startY]]];
+    const visited = new Set([`${startX},${startY}`]);
+
+    while (queue.length > 0) {
+      const path = queue.shift();
+      const [cx, cy] = path[path.length - 1];
+
+      if (cx === targetX && cy === targetY) {
+        return path[1] || path[0]; // Next step
+      }
+
+      const neighbors = [
+        [cx, cy - 1], [cx, cy + 1], [cx - 1, cy], [cx + 1, cy]
+      ];
+
+      for (const [nx, ny] of neighbors) {
+        if (nx >= 0 && nx < COLS && ny >= 0 && ny < ROWS && grid[ny][nx] === 0) {
+          const key = `${nx},${ny}`;
+          if (!visited.has(key)) {
+            visited.add(key);
+            queue.push([...path, [nx, ny]]);
+          }
+        }
+      }
+    }
+    return [startX, startY]; // stay
+  }
+
+  // Enemy FSM State representation
+  const enemy = {
+    x: 100, y: 100, r: 12, speed: 80,
+    state: "patrol", // "patrol", "alert", "chase"
+    targetNode: { x: 100, y: 100 },
+    timer: 0
+  };
+
   addEventListener("keydown", e => { keys[e.code] = true; });
   addEventListener("keyup", e => { keys[e.code] = false; });
 
+  function checkCollision(x, y, r) {
+    const gridX = Math.floor(x / 32);
+    const gridY = Math.floor(y / 32);
+    if (gridX < 0 || gridX >= COLS || gridY < 0 || gridY >= ROWS) return true;
+    return grid[gridY][gridX] === 1;
+  }
+
   function update(dt) {
     const speed = 180;
-    p.vx = 0; p.vy = 0;
-    if (keys.ArrowLeft || keys.KeyA) p.vx = -speed;
-    if (keys.ArrowRight || keys.KeyD) p.vx = speed;
-    if (keys.ArrowUp || keys.KeyW) p.vy = -speed;
-    if (keys.ArrowDown || keys.KeyS) p.vy = speed;
+    
+    // 1. Decomposed Wall-Sliding movement
+    let targetX = p.x;
+    let targetY = p.y;
+    
+    if (keys.ArrowLeft || keys.KeyA) targetX -= speed * dt;
+    if (keys.ArrowRight || keys.KeyD) targetX += speed * dt;
+    if (!checkCollision(targetX, p.y, p.r)) {
+      p.x = targetX;
+    }
+    
+    if (keys.ArrowUp || keys.KeyW) targetY -= speed * dt;
+    if (keys.ArrowDown || keys.KeyS) targetY += speed * dt;
+    if (!checkCollision(p.x, targetY, p.r)) {
+      p.y = targetY;
+    }
 
-    p.x += p.vx * dt;
-    if (p.x < p.r) p.x = p.r;
-    if (p.x > 800 - p.r) p.x = 800 - p.r;
-
-    p.y += p.vy * dt;
-    if (p.y < p.r) p.y = p.r;
-    if (p.y > 600 - p.r) p.y = 600 - p.r;
+    // 2. Enemy AI State Loop & BFS pathfinding
+    const pGridX = Math.floor(p.x / 32);
+    const pGridY = Math.floor(p.y / 32);
+    const eGridX = Math.floor(enemy.x / 32);
+    const eGridY = Math.floor(enemy.y / 32);
+    
+    const distToPlayer = Math.hypot(p.x - enemy.x, p.y - enemy.y);
+    
+    if (enemy.state === "patrol") {
+      if (distToPlayer < 180) {
+        enemy.state = "chase";
+      } else {
+        // Simple random node walk
+        enemy.timer -= dt;
+        if (enemy.timer <= 0) {
+          enemy.timer = 2 + Math.random() * 2;
+          enemy.targetNode = {
+            x: (1 + Math.floor(Math.random() * (COLS - 2))) * 32 + 16,
+            y: (1 + Math.floor(Math.random() * (ROWS - 2))) * 32 + 16
+          };
+        }
+        const ang = Math.atan2(enemy.targetNode.y - enemy.y, enemy.targetNode.x - enemy.x);
+        enemy.x += Math.cos(ang) * (enemy.speed * 0.6) * dt;
+        enemy.y += Math.sin(ang) * (enemy.speed * 0.6) * dt;
+      }
+    } else if (enemy.state === "chase") {
+      if (distToPlayer > 300) {
+        enemy.state = "patrol";
+      } else {
+        const nextStep = findPathBFS(eGridX, eGridY, pGridX, pGridY);
+        const targetX = nextStep[0] * 32 + 16;
+        const targetY = nextStep[1] * 32 + 16;
+        const ang = Math.atan2(targetY - enemy.y, targetX - enemy.x);
+        enemy.x += Math.cos(ang) * enemy.speed * dt;
+        enemy.y += Math.sin(ang) * enemy.speed * dt;
+      }
+    }
   }
 
   function draw() {
     ctx.clearRect(0,0,800,600);
+    
+    // Draw grid map
+    ctx.fillStyle = "#2a1e12";
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        if (grid[r][c] === 1) {
+          ctx.fillRect(c * 32, r * 32, 32, 32);
+        }
+      }
+    }
+
+    // Player
     ctx.fillStyle = "#bf935a";
     ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI*2); ctx.fill();
+
+    // Enemy
+    ctx.fillStyle = enemy.state === "chase" ? "#ff3333" : "#ff9933";
+    ctx.beginPath(); ctx.arc(enemy.x, enemy.y, enemy.r, 0, Math.PI*2); ctx.fill();
   }
 
   function frame() {
@@ -2112,6 +2265,78 @@ SEED_BULLETS: list[Bullet] = [
             "Draw forecasted points on canvas as a guide line."
         ),
         tags=["physics", "trajectory", "bounce", "vector", "reflection", "gravity", "launch", "shooter"],
+    ),
+    Bullet(
+        id="pathfinding-bfs-grid",
+        content=(
+            "To implement simple grid pathfinding for enemy chasers (e.g. Pac-Man ghosts, Gauntlet ghosts) avoiding walls: "
+            "Use Breadth-First Search (BFS) to find the shortest path in a 2D tile map. "
+            "Algorithm: Let queue = [[start]]; let visited = set(start). While queue is not empty, pop first path. "
+            "Get last cell in path. If it equals target, return first step of path. "
+            "Otherwise, for each neighboring cell (up, down, left, right), if inside map, not a wall, and not visited: "
+            "visited.add(neighbor) and push path + [neighbor] to queue. Falls back to straight-line direction vector when target is unreached."
+        ),
+        tags=["pathfinding", "bfs", "ghosts", "enemy-ai", "maze", "chase", "grid", "map", "path"],
+    ),
+    Bullet(
+        id="enemy-fsm-states",
+        content=(
+            "To manage complex enemy behaviors in arcade games: Implement a Finite State Machine (FSM) "
+            "with states: 'patrol' (walk between spawn nodes), 'alert' (stop and look around when player is near), "
+            "'chase' (pathfind towards player coordinates), and 'attack' (trigger attack-frames and pause movement). "
+            "Transition triggers: distance to player < alertRadius transitions to 'alert', distance < chaseRadius transitions "
+            "to 'chase', and distance < attackRadius transitions to 'attack'. Use cooldown-ticks or timers to enforce state durations."
+        ),
+        tags=["fsm", "state-machine", "enemy-ai", "combat", "states", "behavior", "ai", "arcade"],
+    ),
+    Bullet(
+        id="pseudo3d-curved-road",
+        content=(
+            "To project an Out Run/retro style curved 3D road onto a 2D canvas: "
+            "Use a scanline camera projection. For each screen line y below horizon (e.g., from top to bottom): "
+            "Calculate normalized depth: z = fov / (y - horizon). Compute horizontal road center shift: "
+            "roadX = baseCenterX + curveAccumulator * (z * z) + Math.sin(z * frequency) * amplitude. "
+            "Project road width: screenW = baseRoadWidth / z. Draw road segment from `roadX - screenW` to "
+            "`roadX + screenW`. Scale obstacles and cars proportionally: scale = spriteSize / z, and draw "
+            "with x offset centered relative to roadX."
+        ),
+        tags=["pseudo-3d", "pseudo3d", "road", "racer", "scanline", "curve", "projection", "outrun", "pole-position"],
+    ),
+    Bullet(
+        id="animation-frame-timing",
+        content=(
+            "To manage smooth sprite animations (running, swinging, hitting) with variable frame rates: "
+            "Track animation state holding: animTimer, currentFrameIndex, and activeSpriteSheet. "
+            "On update, increment: `animTimer += dt`. If `animTimer >= 1 / fps`: reset timer `animTimer -= 1 / fps` "
+            "and advance frame `currentFrameIndex = (currentFrameIndex + 1) % totalFrames`. "
+            "When rendering, draw image using clipping coordinates: `ctx.drawImage(sheet, currentFrameIndex * frameW, 0, "
+            "frameW, frameH, x, y, w, h)`. This keeps visual cycles consistent and speed-independent."
+        ),
+        tags=["animation", "sprite-sheet", "sprites", "frame-rate", "clipping", "timing", "frames", "loop"],
+    ),
+    Bullet(
+        id="input-buffering-queue",
+        content=(
+            "To implement responsive input buffering for fighting or action games (e.g. Street Fighter, platformers): "
+            "Create a buffer queue array to store recent inputs with timestamps: `inputBuffer.push({ key, t: now })`. "
+            "On update, filter out old actions: `inputBuffer = inputBuffer.filter(item => now - item.t < bufferWindowSeconds)` "
+            "(window is typically 0.15 to 0.25 seconds). When a player exits recovery states, hitstun, or lands "
+            "on the ground: check if any valid command key (e.g., 'jump' or 'attack') exists in the active buffer. "
+            "If found, consume it immediately: execute action and clear buffer."
+        ),
+        tags=["input", "buffer", "buffering", "queue", "responsive", "fighting", "action", "combos"],
+    ),
+    Bullet(
+        id="resource-meters-hud",
+        content=(
+            "To render smooth, glowing, or animated health and ammo meters on canvas: "
+            "Draw a background bar: `ctx.fillStyle = '#300'; ctx.fillRect(x, y, maxW, h);`. "
+            "Linearly interpolate visible value to actual value for a smooth animated fill effect: "
+            "`visibleVal += (actualVal - visibleVal) * 0.1` (or `dt * speed`). "
+            "Draw filled bar: `ctx.fillStyle = '#f33'; ctx.fillRect(x, y, (visibleVal / maxVal) * maxW, h);`. "
+            "Add a glossy stroke outline and thin vertical interval lines to make it look clean and highly readable."
+        ),
+        tags=["hud", "health", "ammo", "meter", "ui", "lerp", "canvas-draw", "glossy"],
     ),
 ]
 
