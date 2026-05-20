@@ -63,7 +63,7 @@ from ollama_io import (
 _NON_CHAT_TAG_FRAGMENTS: tuple[str, ...] = (
     "z-image", "stable-diffusion", "sdxl", "flux",
     "embed", "embedding", "minilm", "bge-", "rerank",
-    "whisper", "tts-",
+    "whisper", "tts-", "voxcpm", "speech-", "voice-",
 )
 
 
