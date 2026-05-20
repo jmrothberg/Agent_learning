@@ -77,6 +77,8 @@ DEFAULT_SKELETON_NAME = "canvas_basic.html"
 # token bleed.
 _SKELETON_MIN_SIM = 0.3
 CANVAS_SKELETON_V2_NAME = "canvas_basic_v2.html"
+CANVAS_3D_SKELETON_NAME = "canvas_3d_basic.html"
+CANVAS_3D_SKELETON_SIDECAR = '{"goal": "3D space vector WebGL three.js coordinate projection game first person perspective"}'
 DEFAULT_SKELETON = """<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -408,6 +410,135 @@ CANVAS_SKELETON_V2 = """<!DOCTYPE html>
 """
 
 
+# 3D/WebGL three.js template. Serves as a robust, generic seed when you build 3D
+# games (first person, space shooters, 3D arenas).
+CANVAS_3D_SKELETON = """<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>3D Game</title>
+<style>
+  :root { color-scheme: dark; }
+  html,body { margin:0; height:100%; background:#0b1020; color:#e7ecff;
+    font:16px/1.4 system-ui,sans-serif; overflow:hidden; }
+  #wrap { position:fixed; inset:0; display:grid; place-items:center; }
+  canvas { display:block; max-width:100vw; max-height:100vh; touch-action:none; }
+  #hud { position:fixed; top:12px; left:12px; background:#0008; padding:8px 12px;
+    border-radius:8px; pointer-events:none; }
+  #help { position:fixed; bottom:12px; left:12px; opacity:.75; font-size:13px; }
+  #modal { position:fixed; inset:0; display:none; place-items:center;
+    background:#000a; backdrop-filter:blur(4px); z-index:100; }
+  #modal .card { background:#1a2348; padding:24px 28px; border-radius:14px;
+    text-align:center; box-shadow:0 20px 60px #000a; }
+  button { background:#3b62ff; color:#fff; border:0; padding:10px 18px;
+    border-radius:8px; font-size:15px; cursor:pointer; }
+  button:hover { filter:brightness(1.1); }
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+<div id="wrap"><canvas id="c"></canvas></div>
+<div id="hud">Score: <span id="score">0</span></div>
+<div id="help">WASD/Arrows to move, Space to act, Mouse to look</div>
+<div id="modal"><div class="card">
+  <h2 id="endTitle">Game Over</h2>
+  <p id="endMsg">Final score: <span id="endScore">0</span></p>
+  <button id="restart">Play again</button>
+</div></div>
+<script>
+(() => {
+  "use strict";
+  const cvs = document.getElementById("c");
+  const scoreEl = document.getElementById("score");
+  const modal = document.getElementById("modal");
+  const endScoreEl = document.getElementById("endScore");
+
+  // Create Scene, Camera, Renderer
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0b1020);
+  scene.fog = new THREE.FogExp2(0x0b1020, 0.015);
+
+  const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+  const renderer = new THREE.WebGLRenderer({ canvas: cvs, antialias: true });
+  renderer.shadowMap.enabled = true;
+
+  function fit() {
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+    renderer.setSize(w, h);
+  }
+  fit(); window.addEventListener("resize", fit);
+
+  // Add simple lighting
+  const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+  scene.add(ambientLight);
+  const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+  dirLight.position.set(20, 40, 20);
+  dirLight.castShadow = true;
+  scene.add(dirLight);
+
+  // Inputs
+  const keys = Object.create(null);
+  const KEYMAP = { ArrowUp:"up", ArrowDown:"down", ArrowLeft:"left", ArrowRight:"right",
+    KeyW:"up", KeyS:"down", KeyA:"left", KeyD:"right", Space:"act" };
+  addEventListener("keydown", e => {
+    const k = KEYMAP[e.code]; if (!k) return;
+    keys[k] = true;
+    if (["up","down","left","right","act"].includes(k)) e.preventDefault();
+  }, { passive:false });
+  addEventListener("keyup", e => { const k = KEYMAP[e.code]; if (k) keys[k] = false; });
+
+  const state = { score:0, over:false };
+  function reset() {
+    state.score = 0; state.over = false;
+    modal.style.display = "none";
+    camera.position.set(0, 5, 15);
+    camera.lookAt(0, 0, 0);
+  }
+  document.getElementById("restart").onclick = reset;
+  reset();
+
+  function update(dt) {
+    if (state.over) return;
+    const speed = 10;
+    if (keys.left)  camera.position.x -= speed*dt;
+    if (keys.right) camera.position.x += speed*dt;
+    if (keys.up)    camera.position.z -= speed*dt;
+    if (keys.down)  camera.position.z += speed*dt;
+  }
+
+  function draw() {
+    renderer.render(scene, camera);
+  }
+
+  function gameOver() {
+    state.over = true;
+    endScoreEl.textContent = state.score;
+    modal.style.display = "grid";
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    try {
+      update(dt);
+      draw();
+      scoreEl.textContent = state.score;
+    } catch (err) {
+      console.error("game crashed:", err);
+      gameOver();
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body></html>
+"""
+
+
 # Tokens we strip when computing similarity. Mostly stop-words plus generic
 # game-domain words that don't help discriminate (e.g. "game" matches every
 # past entry and so adds no signal).
@@ -473,7 +604,7 @@ class GameMemory:
     # --- bootstrap ---------------------------------------------------------
 
     def ensure(self) -> None:
-        """Create directory layout and seed the default skeleton if missing.
+        """Create directory layout and seed default skeletons if missing.
 
         Cheap to call repeatedly; agent constructor calls it once.
         """
@@ -483,6 +614,15 @@ class GameMemory:
             default = self.skeletons_dir / DEFAULT_SKELETON_NAME
             if not default.exists():
                 default.write_text(DEFAULT_SKELETON, encoding="utf-8")
+
+            # Seed default 3D / Three.js skeleton and sidecar if missing.
+            default_3d = self.skeletons_dir / CANVAS_3D_SKELETON_NAME
+            if not default_3d.exists():
+                default_3d.write_text(CANVAS_3D_SKELETON, encoding="utf-8")
+
+            sidecar_3d = self.skeletons_dir / "canvas_3d_basic.json"
+            if not sidecar_3d.exists():
+                sidecar_3d.write_text(CANVAS_3D_SKELETON_SIDECAR, encoding="utf-8")
         except Exception:
             # If memory is broken (read-only fs etc) the agent should still
             # run — retrieval just returns empty results.
