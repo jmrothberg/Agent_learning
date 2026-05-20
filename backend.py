@@ -118,6 +118,7 @@ _VLM_NAME_SUBSTRINGS: tuple[str, ...] = (
     # (without ".6") was NOT unified — keep that prefix OUT of this
     # list so plain Qwen3-30B etc. stay labeled text-only.
     "qwen3.6-27b", "qwen3.6-7b", "qwen3.6-72b", "qwen3.6-235b",
+    "qwen3.6:27b", "qwen3.6:7b", "qwen3.6:72b", "qwen3.6:235b",
     # LLaVA family
     "llava", "bakllava",
     # DeepSeek vision
