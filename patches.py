@@ -340,6 +340,10 @@ def repair_reply(reply: str) -> str:
         backticks corrupts the patch parser the same way assets/sounds
         were corrupted in
         games/traces/game-of-space-invaders-with-gr_20260511_093225).
+      * Loose spacing inside SEARCH/REPLACE/DIVIDER markers (normalized to
+        single space / standard format).
+      * Consecutive duplicate `=======` divider lines (collapsed to one).
+      * Unclosed <patch> blocks ending with REPLACE marker (closes them).
 
     We do NOT touch the body of <patch> blocks here; per-patch repairs
     (fence stripping) happen after extraction so we don't accidentally
@@ -354,6 +358,55 @@ def repair_reply(reply: str) -> str:
     if idx >= 0:
         reply = reply[idx + len("</think>"):]
     reply = _strip_outer_fences_around_tags(reply)
+
+    # 1. Normalize spaces inside SEARCH / REPLACE / DIVIDER markers
+    reply = re.sub(r"^[ \t]*<{7,}[ \t]*SEARCH[ \t]*$", "<<<<<<< SEARCH", reply, flags=re.MULTILINE | re.IGNORECASE)
+    reply = re.sub(r"^[ \t]*={7,}[ \t]*$", "=======", reply, flags=re.MULTILINE)
+    reply = re.sub(r"^[ \t]*>{7,}[ \t]*REPLACE[ \t]*$", ">>>>>>> REPLACE", reply, flags=re.MULTILINE | re.IGNORECASE)
+
+    # 2. Collapse consecutive duplicate/empty ======= divider lines
+    # This matches multiple ======= lines separated only by whitespace or newlines.
+    reply = re.sub(r"\n=======(?:\s*=======)+", "\n=======", reply)
+
+    # 3. Auto-close <patch> blocks that end with the REPLACE marker but are missing </patch>
+    # We do this by finding '<patch>' (case-insensitive) where there's no matching '</patch>' ahead
+    # before another '<patch>', and we see '>>>>>>> REPLACE'.
+    # A simple but extremely robust line-by-line or block-based correction:
+    lines = reply.splitlines()
+    open_patch_idx = -1
+    has_replace = False
+    has_close = False
+    
+    for i, line in enumerate(lines):
+        line_stripped = line.strip().lower()
+        if "<patch>" in line_stripped:
+            open_patch_idx = i
+            has_replace = False
+            has_close = False
+        elif ">>>>>>> replace" in line_stripped:
+            has_replace = True
+        elif "</patch>" in line_stripped:
+            has_close = True
+            open_patch_idx = -1
+        
+        # If we reach another <patch> or the end of the file, and we have an open patch
+        # with a REPLACE marker but no </patch> closer, let's fix it.
+        is_last_line = (i == len(lines) - 1)
+        next_is_patch = (not is_last_line and "<patch>" in lines[i+1].strip().lower())
+        
+        if open_patch_idx != -1 and has_replace and not has_close and (is_last_line or next_is_patch):
+            # Insert </patch> right after the REPLACE marker line
+            # Let's locate the replace line index starting backwards from i
+            for j in range(i, open_patch_idx, -1):
+                if ">>>>>>> replace" in lines[j].strip().lower():
+                    lines.insert(j + 1, "</patch>")
+                    break
+            # Reset trackers
+            open_patch_idx = -1
+            has_replace = False
+            has_close = False
+            
+    reply = "\n".join(lines)
     return reply
 
 
