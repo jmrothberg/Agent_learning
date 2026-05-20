@@ -17,7 +17,8 @@ env/
 games/*.html
 games/snapshots/
 games/traces/
-games/memory/
+games/memory/*
+!games/memory/playbook.jsonl
 games/test_*.html
 games/tune/
 # Asset-pipeline artifacts (PNGs are 50-200KB each; cache grows over time)

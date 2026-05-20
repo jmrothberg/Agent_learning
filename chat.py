@@ -1001,6 +1001,11 @@ class CodingBoxApp(App):
         # Optional expanded per-iter diagnostics line. OFF by default so
         # normal runs stay concise; toggle via /iter-detail on|off.
         self._iter_decision_verbose: bool = False
+        # Advanced agent behavior bundles (toggled dynamically via slash commands)
+        self._use_prefill: bool = True
+        self._use_vlm_critique: bool = False
+        self._use_double_screenshot: bool = False
+        self._use_architect_split: bool = False
 
     # ----------------------------- layout ---------------------------------
 
@@ -2282,6 +2287,14 @@ class CodingBoxApp(App):
                 await self._cmd_check(arg)
             elif cmd == "ref":
                 self._cmd_attach_ref_image(arg)
+            elif cmd == "prefill":
+                self._cmd_toggle_prefill(arg)
+            elif cmd in ("architect", "arch"):
+                self._cmd_toggle_architect(arg)
+            elif cmd in ("double-screenshot", "doublescreenshot", "ds"):
+                self._cmd_toggle_double_screenshot(arg)
+            elif cmd in ("vlm-critique", "vlmcritique", "vc"):
+                self._cmd_toggle_vlm_critique(arg)
             else:
                 self._log_info(f"unknown command /{cmd} — type /help")
         except Exception as e:
@@ -2359,6 +2372,10 @@ class CodingBoxApp(App):
             "                                  set run contract; local_plus_review can auto-run /check in AUTO mode",
             "                                  [dim]IMPORTANT: reviewer auto-apply runs only when WAIT mode is OFF (/wait off)[/dim]",
             "  [b]/playbook[/b] [on|off]        toggle playbook bullet injection (alias /memory) - A/B vs one-shot when iters feel worse than no agent",
+            "  [b]/prefill[/b] [on|off]         toggle forcing assistant prefill tags (default ON; forces XML syntax compliance)",
+            "  [b]/architect[/b] [on|off]       toggle architect/editor split on complex first-builds (Aider's 2-call pattern; default off)",
+            "  [b]/double-screenshot[/b] [on|off] toggle capturing startup + after-input screenshots (default off; helps debugging movement)",
+            "  [b]/vlm-critique[/b] [on|off]    toggle attaching screenshot to Phase C self-critique turns (default off; VLM-only)",
             "  [b]/audit[/b]                     print per-bullet earnings (fires, pass-rate, avg-iter) from trace history",
             "  [b]/check[/b] [<N|model>]       visual review + guidance using model #N from /list or a model name",
             "                                  [dim]bare /check uses your active session model if it's a VLM (no API cost)[/dim]",
@@ -3533,6 +3550,10 @@ class CodingBoxApp(App):
             f"  restart-N:         {self._restart_n if self._restart_n > 1 else '1 (off)'}",
             f"  model-class:       {self._model_class or 'auto (= small, lean ~5KB schema)'}",
             f"  step-mode (/wait): {step_label}",
+            f"  prefill:           {'ON' if self._use_prefill else 'off'}",
+            f"  architect-split:   {'ON' if self._use_architect_split else 'off'}",
+            f"  double-screenshot: {'ON' if self._use_double_screenshot else 'off'}",
+            f"  vlm-critique:      {'ON' if self._use_vlm_critique else 'off'}",
             f"  iter detail:       {self._iter_decision_verbose}",
             f"  run profile:       {self._format_run_profile()}",
             f"  review hook:       {self._profile_review_model or '—'}",
@@ -3779,6 +3800,70 @@ class CodingBoxApp(App):
             )
         self._update_status()
 
+    def _cmd_toggle_prefill(self, arg: str) -> None:
+        """/prefill [on|off] — toggle assistant prefill force (<plan> / <diagnose> tags)."""
+        arg_lc = arg.strip().lower()
+        if arg_lc in ("on", "true", "1", "enable"):
+            new_state = True
+        elif arg_lc in ("off", "false", "0", "disable"):
+            new_state = False
+        else:
+            new_state = not self._use_prefill
+        self._use_prefill = new_state
+        if self.agent is not None:
+            self.agent._use_prefill = new_state
+        status = "[green]ON[/green]" if new_state else "[yellow]OFF[/yellow]"
+        self._log_info(f"assistant prefill set to {status}")
+        self._update_status()
+
+    def _cmd_toggle_architect(self, arg: str) -> None:
+        """/architect [on|off] — toggle architect/editor split (Aider's 2-call pattern)."""
+        arg_lc = arg.strip().lower()
+        if arg_lc in ("on", "true", "1", "enable"):
+            new_state = True
+        elif arg_lc in ("off", "false", "0", "disable"):
+            new_state = False
+        else:
+            new_state = not self._use_architect_split
+        self._use_architect_split = new_state
+        if self.agent is not None:
+            self.agent._use_architect_split = new_state
+        status = "[green]ON[/green]" if new_state else "[yellow]OFF[/yellow]"
+        self._log_info(f"architect split set to {status} (doubles plan-turn time)")
+        self._update_status()
+
+    def _cmd_toggle_double_screenshot(self, arg: str) -> None:
+        """/double-screenshot [on|off] — toggle dual-screenshot capturing (startup and after input)."""
+        arg_lc = arg.strip().lower()
+        if arg_lc in ("on", "true", "1", "enable"):
+            new_state = True
+        elif arg_lc in ("off", "false", "0", "disable"):
+            new_state = False
+        else:
+            new_state = not self._use_double_screenshot
+        self._use_double_screenshot = new_state
+        if self.agent is not None:
+            self.agent._use_double_screenshot = new_state
+        status = "[green]ON[/green]" if new_state else "[yellow]OFF[/yellow]"
+        self._log_info(f"double screenshot capturing set to {status}")
+        self._update_status()
+
+    def _cmd_toggle_vlm_critique(self, arg: str) -> None:
+        """/vlm-critique [on|off] — toggle attaching screenshot to Phase C self-critique turns."""
+        arg_lc = arg.strip().lower()
+        if arg_lc in ("on", "true", "1", "enable"):
+            new_state = True
+        elif arg_lc in ("off", "false", "0", "disable"):
+            new_state = False
+        else:
+            new_state = not self._use_vlm_critique
+        self._use_vlm_critique = new_state
+        if self.agent is not None:
+            self.agent._use_vlm_critique = new_state
+        status = "[green]ON[/green]" if new_state else "[yellow]OFF[/yellow]"
+        self._log_info(f"VLM critique screenshot attachment set to {status}")
+        self._update_status()
+
     # ----------------------------- session --------------------------------
 
     async def _start_session(self, goal: str) -> None:
@@ -3931,17 +4016,19 @@ class CodingBoxApp(App):
             model_class=self._model_class or "auto",
             restart_n=self._restart_n,
             restart_score_threshold=self._restart_threshold,
-            # Playbook injection OFF by default — across 6 ON/OFF
-            # bench pairs on a 27B local model, OFF beat ON 5/6.
-            # The "kitchen sink" effect (8 bullets of advice at plan
-            # stage) hurt more than it helped. Users can /playbook on
-            # to enable; status panel shows the current state.
-            playbook_top_k=0,
+            # Playbook injection is now ON by default, because we regulated
+            # retrieval sizes for mid/small models to avoid attention pollution
+            # and filled it with elite classic-game math & physics bullets.
+            playbook_top_k=6,
             # Writeback still on so that when the user enables the
             # playbook (/playbook on), session outcomes update the
             # counters. Safe even when top_k=0 — writeback only fires
             # when bullets actually retrieved.
             playbook_writeback=True,
+            use_prefill=self._use_prefill,
+            use_vlm_critique=self._use_vlm_critique,
+            use_double_screenshot=self._use_double_screenshot,
+            use_architect_split=self._use_architect_split,
         )
         # Apply run-profile step policy on session start.
         if self._run_profile == "local_manual":

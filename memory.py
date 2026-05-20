@@ -1104,6 +1104,60 @@ SEED_BULLETS: list[Bullet] = [
             "thinktag-thrash",
         ],
     ),
+    Bullet(
+        id="projection-3d-wireframe",
+        content=(
+            "To render 3D wireframe perspective projection (e.g. Battlezone-style vector "
+            "graphics) on a 2D canvas without heavy external libraries: "
+            "(1) Translate/rotate coordinates relative to player position (px, pz) and player "
+            "angle (theta): const dx = x - px, dz = z - pz; const rx = dx * Math.cos(-theta) - "
+            "dz * Math.sin(-theta); const rz = dx * Math.sin(-theta) + dz * Math.cos(-theta). "
+            "(2) Perspective Projection: Projected screen coordinates are: if (rz <= 0.1) return; "
+            "const screenX = centerX + (rx / rz) * fov; const screenY = centerY - (y / rz) * fov "
+            "(y-axis inverted on canvas). (3) Rendering: Sort objects by depth (painter's algorithm) "
+            "from farthest to closest (descending rz) so overlapping elements render correctly; connect "
+            "projected points with ctx.beginPath(), ctx.moveTo(x1, y1), ctx.lineTo(x2, y2), ctx.stroke()."
+        ),
+        tags=["3d", "projection", "wireframe", "battlezone", "perspective", "vector", "camera", "rotation"],
+    ),
+    Bullet(
+        id="platformer-ladders-and-one-way",
+        content=(
+            "For platformers with climbing (e.g. Donkey Kong) and one-way platforms: "
+            "(1) Ladders: Allow climbing only when entity's center is closely aligned horizontally "
+            "with the ladder's x position. Set gravity to zero and allow vertical velocity while "
+            "climbing. (2) One-way platforms: Allow entities to jump up through platforms by checking "
+            "collisions ONLY when velocity vy is positive (falling) AND the entity's feet (bottom) "
+            "are above the platform's top edge before the step. Check: if (vy > 0 && feet <= platformTop "
+            "&& feet + vy >= platformTop) { land_on_platform }."
+        ),
+        tags=["ladder", "climbing", "one-way", "platformer", "gravity", "jump", "donkey-kong"],
+    ),
+    Bullet(
+        id="fighting-states-and-hitboxes",
+        content=(
+            "For fighting/action games (e.g. Street Fighter): (1) State Machine: "
+            "Separate characters into strict states: idle, walking, jumping, crouching, "
+            "attack-startup, attack-active, attack-recovery, hitstun, knockback. Block input "
+            "during attacks, hitstun, and knockback. (2) Combat Collision: Do NOT check plain player "
+            "bounding-box overlaps for attacks. Instead, define 'hurtboxes' (body regions that can "
+            "be hit) and 'hitboxes' (attack regions, e.g. fist/foot). Check overlap of attacker's "
+            "active hitbox with defender's hurtbox ONLY during 'attack-active' animation frames."
+        ),
+        tags=["fighting", "state-machine", "hitbox", "hurtbox", "combat", "collision", "melee", "street-fighter"],
+    ),
+    Bullet(
+        id="isometric-grid-math",
+        content=(
+            "To project a 3D grid onto an isometric screen coordinate system (e.g. Q-bert style): "
+            "For a grid coordinate (row, col, height): screenX = centerX + (col - row) * (tileWidth / 2); "
+            "screenY = centerY + (col + row) * (tileHeight / 2) - height * heightScale. "
+            "To sort rendering order to prevent overlaps (painter's algorithm), draw entities "
+            "by sorting from lowest (row + col) to highest. For isometric jumping, animate "
+            "entity's height with a parabolic curve: height = jumpApex * (4 * t * (1 - t)) where t goes 0..1."
+        ),
+        tags=["isometric", "grid", "q-bert", "math", "projection", "render-order", "isometric-jump"],
+    ),
 ]
 
 

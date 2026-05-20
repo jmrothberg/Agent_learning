@@ -2012,18 +2012,30 @@ class GameAgent:
         return text or None
 
     @classmethod
-    def _classify_model(cls, model: str) -> str:
+    def _classify_model(cls, model: str | None) -> str:
         """Default model class.
 
-        We deliberately do NOT inspect the model name. The user runs a
-        rotating set of mid-size local LLMs (~27B-class) — qwen3.6, the
-        next qwen, whatever ships next quarter — and a model-name table
-        would go stale every release. The class is "small" by default:
-        the lean ~5 KB system prompt + drop of the <assets>/<sounds>/
-        <lookup_bullet> pipelines, biased for one-shot strength on simple
-        games. Pass `model_class="large"` explicitly when running a
-        frontier-tier model that can absorb the full schema.
+        We dynamically classify the model based on substring matching of its
+        name, falling back to 'small' for smaller models or unknown systems.
         """
+        if not model:
+            return "small"
+        m = str(model).lower()
+        # Large/frontier models
+        large_keywords = [
+            "70b", "72b", "100b", "110b", "120b", "132b", "141b", "236b", "314b", "405b",
+            "gpt-4", "gpt-4o", "o1-", "o3-", "claude-3", "claude-3.5", "claude-4",
+            "opus", "sonnet"
+        ]
+        if any(kw in m for kw in large_keywords):
+            return "large"
+        # Mid-tier capable models (14B-35B class + notable architectures)
+        mid_keywords = [
+            "14b", "16b", "20b", "22b", "27b", "32b", "33b", "34b", "35b", "moe",
+            "qwen3.6", "qwen", "deepseek", "gemini", "gemma"
+        ]
+        if any(kw in m for kw in mid_keywords):
+            return "mid"
         return "small"
 
     @staticmethod
@@ -2082,6 +2094,8 @@ class GameAgent:
         try:
             if stage == "plan":
                 k = self._playbook_top_k + self._PLAN_STAGE_TOP_K_BONUS
+                if self._model_class in ("mid", "small"):
+                    k = 2
                 budget = self._PLAN_STAGE_CHAR_BUDGET
                 # Stop-Losing-To-OneShot todo #6 — mid-tier models lose
                 # focus when the playbook bloats the planning context;
@@ -2095,11 +2109,15 @@ class GameAgent:
                 # ID-only index. Model emits <lookup_bullet> if it wants
                 # the body of any indexed entry. Pi-mono "skills" pattern.
                 render_mode = "hybrid"
+                full_top_n_val = 1 if self._model_class in ("mid", "small") else 3
             else:
                 k = min(self._playbook_top_k, self._CODE_STAGE_TOP_K)
+                if self._model_class in ("mid", "small"):
+                    k = 1
                 budget = self._CODE_STAGE_CHAR_BUDGET
                 # Code stage already narrowly retrieves; full bodies on all.
                 render_mode = "full"
+                full_top_n_val = 3
             hits = self._playbook.retrieve(
                 goal, code=code, k=k, stage=stage,
             )
@@ -2116,7 +2134,7 @@ class GameAgent:
                 })
                 self._active_bullet_ids = list(ids)
             return render_playbook_block(
-                hits, char_budget=budget, mode=render_mode,
+                hits, char_budget=budget, mode=render_mode, full_top_n=full_top_n_val,
             )
         except Exception:
             return ""

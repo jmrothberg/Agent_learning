@@ -799,15 +799,29 @@ class MLXBackend(Backend):
                 # Build prompt via chat template. Falls back to a naive
                 # role/content concat if the tokenizer lacks the template
                 # (rare with modern Instruct models).
+                # Support assistant prefill: if the last message is an assistant message,
+                # we run the chat template on the preceding messages with add_generation_prompt=True,
+                # and then manually append the assistant message content to the prompt.
+                has_prefill = (len(cleaned_messages) > 0 and cleaned_messages[-1].get("role") == "assistant")
+                if has_prefill:
+                    history = cleaned_messages[:-1]
+                    prefill_content = cleaned_messages[-1].get("content", "")
+                else:
+                    history = cleaned_messages
+                    prefill_content = ""
+
                 try:
                     prompt = tokenizer.apply_chat_template(
-                        cleaned_messages, tokenize=False, add_generation_prompt=True
+                        history, tokenize=False, add_generation_prompt=True
                     )
                 except Exception:
                     prompt = "\n\n".join(
                         f"{m.get('role', 'user')}: {m.get('content', '')}"
-                        for m in cleaned_messages
+                        for m in history
                     ) + "\n\nassistant:"
+
+                if has_prefill:
+                    prompt += prefill_content
 
                 from mlx_lm.sample_utils import make_sampler  # type: ignore
                 sampler = make_sampler(
@@ -871,17 +885,29 @@ class MLXBackend(Backend):
                 from mlx_vlm.prompt_utils import (  # type: ignore
                     apply_chat_template as _vlm_template,
                 )
+                # Support assistant prefill in VLM template
+                has_prefill = (len(cleaned_messages) > 0 and cleaned_messages[-1].get("role") == "assistant")
+                if has_prefill:
+                    history = cleaned_messages[:-1]
+                    prefill_content = cleaned_messages[-1].get("content", "")
+                else:
+                    history = cleaned_messages
+                    prefill_content = ""
+
                 try:
                     prompt = _vlm_template(
-                        processor, config, cleaned_messages,
+                        processor, config, history,
                         num_images=len(image_paths),
                     )
                 except Exception:
                     # Same naive fallback as text-only.
                     prompt = "\n\n".join(
                         f"{m.get('role', 'user')}: {m.get('content', '')}"
-                        for m in cleaned_messages
+                        for m in history
                     ) + "\n\nassistant:"
+
+                if has_prefill:
+                    prompt += prefill_content
 
                 from mlx_vlm import stream_generate as _vlm_stream  # type: ignore
                 # mlx_vlm.stream_generate doesn't take a `sampler` like

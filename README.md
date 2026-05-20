@@ -591,6 +591,10 @@ is data the agent will see, not just developer notes.
 | `/iter-detail <on\|off>` | Toggle optional expanded blocker detail after the compact iter decision line (default off). |
 | `/mode <local_manual\|local_auto\|local_plus_review with <model> [--auto-apply]\|custom>` | Apply a run contract: manual checkpoints, autonomous loop, or autonomous loop with an explicit reviewer hook. |
 | `/playbook`, `/memory` | Print the matched playbook bullets. |
+| `/prefill <on\|off>` | Toggle forcing assistant prefill tags (`<plan>`, `<diagnose>`) to prevent preamble talk and lock XML formatting (default ON). |
+| `/architect <on\|off>` | Toggle architect/editor split (Aider's 2-call pattern) on complex first-builds to split planning from coding (default off). |
+| `/double-screenshot <on\|off>` | Toggle capturing dual screenshots (startup and post-input) to help the model see movement/animation (default off). |
+| `/vlm-critique <on\|off>` | Toggle VLM screenshot attachment during Phase C successful critique turns for layout and UI polishing (default off). |
 | `/audit` | Detailed view of last iter's micro-probes + report. |
 | `/restarts` | Show backend restart history. |
 | `/model-class <small\|mid\|large>` | Override the prompt trim path. |
