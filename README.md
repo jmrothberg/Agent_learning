@@ -300,17 +300,22 @@ patch number caused the problem and what to change to fix it.
 
 [`memory.py`](memory.py):
 
-- **`GameMemory`** — skeleton retrieval (bundled `canvas_basic.html`
-  default + auto-promoted `won_<session_id>.html` from past wins) and
-  mistake retrieval keyed by error signature.
+- **`GameMemory`** — skeleton retrieval and mistake retrieval.
+  - **Premium Default Skeletons (Autobootstrapped on boot)**: The system provides 11 generic, high-fidelity scaffolds in `games/memory/skeletons/` designed to give local models a perfect first-build template:
+    - `canvas_basic.html`: Clean 2D canvas with DPR scaling, frame loops, and window keyboard handlers.
+    - `canvas_basic_v2.html`:Denser, bug-hardened scaffold pre-empting blur-clearing, focus-loss, and cleanup.
+    - `canvas_3d_basic.html`: Full 3D perspective setup utilizing CDN Three.js, lights, camera, and aspect-ratio fits.
+    - `canvas_grid_basic.html`: Continuous tile-aligned corridor movement and corner snapping (e.g., Pac-Man, Sokoban).
+    - `canvas_platformer_basic.html`: Gravity jumps, vertical ladder alignments, climbing, and platform landings (e.g., Donkey Kong).
+    - `canvas_scrolling_basic.html`: Cam viewport horizontal scrolling and parallax backgrounds (e.g., Defender).
+    - `canvas_mode7_basic.html`: Scanline perspective projection texture mapping for rotatable tracks (e.g., Mario Kart).
+    - `canvas_crawler_basic.html`: Top-down dungeon rooms, spawner pools, wall-sliding, and multi-player bounding clamps (e.g., Gauntlet).
+    - `canvas_mobile_basic.html`: Pointer Events touch joystick, tap-buttons, and mobile aspect letterboxing (e.g., iOS Safari).
+    - `canvas_rpg_basic.html`: Grid-locked discrete stepping and lerp walking animations (e.g., Pokemon).
+    - `canvas_cards_basic.html`: Mouse/touch drag-and-drop hit testing and grid snapping (e.g., Solitaire, Chess).
+    - `canvas_physics_basic.html`: Gravity projectile trajectories, launch slingshots, and elastic boundary collisions.
 - **`Playbook`** — JSONL of bullets with `helpful` / `harmful`
-  counters. Retrieval is weighted Jaccard × quality multiplier
-  `1 + 0.10·tanh(score/5)`. `stage="plan"` returns broader top-K
-  including net-harmful entries (exposure to history); `stage="code"`
-  drops bullets with score ≤ -2 (only validated patterns at coding
-  time). On-demand expansion via `<lookup_bullet>id</lookup_bullet>` —
-  the model fetches a body lazily; `agent._extract_and_queue_lookups`
-  drains lookups into the next user turn (5/turn cap).
+  counters. Features elite math and physics rules for retro classics (Mode 7 scanning, wall-sliding, segmented follow, angle biasing, mobile joysticks, aspect ratio letterboxing) alongside the standard set. Retrieval is weighted Jaccard × quality multiplier `1 + 0.10·tanh(score/5)`. `stage="plan"` returns broader top-K; `stage="code"` drops bullets with score ≤ -2. On-demand expansion via `<lookup_bullet>id</lookup_bullet>`.
 - **Dedup + budget capping**: `dedup_hits` (5-gram Jaccard ≥ 0.85) +
   `cap_hits_by_budget` run inside `render_playbook_block` by default.
 - **Won-skeleton promotion**: after `<confirm_done/>`, the agent
