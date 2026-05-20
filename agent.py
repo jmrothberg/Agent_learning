@@ -1282,6 +1282,7 @@ class GameAgent:
         self.seed_file: Path | None = Path(seed_file) if seed_file else None
         self._messages: list[dict] = []
         self._pending_feedback: list[str] = []
+        self._feedback_deferred_last_turn: bool = False
         # Most recent feedback batch consumed by _flush_user_injections.
         # Used to restore feedback if a stream fails before any assistant
         # reply lands (extension fallback / backend failure path).
@@ -2194,10 +2195,12 @@ class GameAgent:
         text = text.strip()
         if text:
             self._pending_feedback.append(text)
+            self._feedback_deferred_last_turn = False
             self._trace({"kind": "feedback_queued", "text": text})
 
     def add_user_answer(self, text: str) -> None:
         self._pending_answer = text.strip()
+        self._feedback_deferred_last_turn = False
         self._trace({"kind": "answer_queued", "text": self._pending_answer})
 
     def has_pending_user_input(self) -> bool:
@@ -3582,6 +3585,7 @@ class GameAgent:
             for fb in self._pending_feedback:
                 consumed_items.append(f"feedback: {fb[:120]}")
 
+        self._feedback_deferred_last_turn = False
         if self._pending_answer is not None:
             ans = self._pending_answer
             parts.append(
@@ -3592,6 +3596,7 @@ class GameAgent:
             self._trace({"kind": "answer_injected", "text": ans})
             self._pending_answer = None
         if defer_feedback_for_blocker:
+            self._feedback_deferred_last_turn = True
             feedback_items = list(self._pending_feedback)
             preview = "\n- ".join(fb[:240] for fb in feedback_items)
             parts.append(
@@ -7240,9 +7245,18 @@ class GameAgent:
                     "Enter to continue, or type feedback",
                     {"just_finished_iter": iteration - 1},
                 ))
-                while not self._step_continue and not self.has_pending_user_input():
+                # Only bypass the pause if we have pending input AND that input was NOT deferred.
+                # If it was deferred, we must still pause so the user can see if the blocker was fixed.
+                def should_wait():
+                    if self._step_continue:
+                        return False
+                    if self.has_pending_user_input() and not self._feedback_deferred_last_turn:
+                        return False
+                    return True
+
+                while should_wait():
                     await asyncio.sleep(0.1)
-                if self.has_pending_user_input():
+                if self.has_pending_user_input() and not self._feedback_deferred_last_turn:
                     if self._messages and self._messages[-1].get("role") == "user":
                         base = self._messages.pop()["content"]
                         self._messages.append({
