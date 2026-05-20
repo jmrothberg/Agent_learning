@@ -79,6 +79,33 @@ _SKELETON_MIN_SIM = 0.3
 CANVAS_SKELETON_V2_NAME = "canvas_basic_v2.html"
 CANVAS_3D_SKELETON_NAME = "canvas_3d_basic.html"
 CANVAS_3D_SKELETON_SIDECAR = '{"goal": "3D space vector WebGL three.js coordinate projection game first person perspective"}'
+
+CANVAS_GRID_SKELETON_NAME = "canvas_grid_basic.html"
+CANVAS_GRID_SKELETON_SIDECAR = '{"goal": "grid continuous tile corridor snap slide sokoban pacman maze"}'
+
+CANVAS_PLATFORMER_SKELETON_NAME = "canvas_platformer_basic.html"
+CANVAS_PLATFORMER_SKELETON_SIDECAR = '{"goal": "platformer gravity jump climbing ladders oneway donkey kong lode runner"}'
+
+CANVAS_SCROLLING_SKELETON_NAME = "canvas_scrolling_basic.html"
+CANVAS_SCROLLING_SKELETON_SIDECAR = '{"goal": "scrolling camera viewport parallax offsets scroll horizontal defender scramble side scroller shooter"}'
+
+CANVAS_MODE7_SKELETON_NAME = "canvas_mode7_basic.html"
+CANVAS_MODE7_SKELETON_SIDECAR = '{"goal": "mode7 mode 7 perspective ground texture projection 3D rotating kart retro racer fzero f-zero"}'
+
+CANVAS_CRAWLER_SKELETON_NAME = "canvas_crawler_basic.html"
+CANVAS_CRAWLER_SKELETON_SIDECAR = '{"goal": "crawler dungeon procedural hack and slash gauntlet multi player wall slide screen clamp boundaries split"}'
+
+CANVAS_MOBILE_SKELETON_NAME = "canvas_mobile_basic.html"
+CANVAS_MOBILE_SKELETON_SIDECAR = '{"goal": "mobile touch tablet phone ipad iphone virtual joystick d-pad responsive letterbox pointer events"}'
+
+CANVAS_RPG_SKELETON_NAME = "canvas_rpg_basic.html"
+CANVAS_RPG_SKELETON_SIDECAR = '{"goal": "rpg grid tile-based discrete step movement pokemon adventure explorer"}'
+
+CANVAS_CARDS_SKELETON_NAME = "canvas_cards_basic.html"
+CANVAS_CARDS_SKELETON_SIDECAR = '{"goal": "cards drag and drop mouse touch board game chess checker solitaire puzzle match snap grid stacking"}'
+
+CANVAS_PHYSICS_SKELETON_NAME = "canvas_physics_basic.html"
+CANVAS_PHYSICS_SKELETON_SIDECAR = '{"goal": "physics puzzle bubble shooter angry birds projectile trajectory launch gravity reflection collision stick"}'
 DEFAULT_SKELETON = """<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -539,6 +566,622 @@ CANVAS_3D_SKELETON = """<!DOCTYPE html>
 """
 
 
+# Corridor movement and corner snapping (Pac-man, Sokoban).
+CANVAS_GRID_SKELETON = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Grid Game</title>
+<style>
+  html,body { margin:0; background:#0b1020; color:#fff; overflow:hidden; }
+  #wrap { position:fixed; inset:0; display:grid; place-items:center; }
+  canvas { background:#10162e; border-radius:8px; max-width:96vw; max-height:90vh; }
+  #hud { position:fixed; top:12px; left:12px; background:#0008; padding:8px 12px; border-radius:8px; }
+</style></head>
+<body>
+<div id="wrap"><canvas id="c" width="640" height="480"></canvas></div>
+<div id="hud">Score: <span id="score">0</span></div>
+<script>
+(() => {
+  const cvs = document.getElementById("c");
+  const ctx = cvs.getContext("2d");
+  const TILE_SIZE = 32;
+  const state = { player: { x: 32, y: 32, vx: 0, vy: 0 }, score: 0 };
+  const keys = {};
+
+  addEventListener("keydown", e => { keys[e.code] = true; });
+  addEventListener("keyup", e => { keys[e.code] = false; });
+
+  function update(dt) {
+    const p = state.player;
+    const speed = 120;
+    if (keys.ArrowLeft || keys.KeyA) { p.vx = -speed; p.vy = 0; }
+    else if (keys.ArrowRight || keys.KeyD) { p.vx = speed; p.vy = 0; }
+    else if (keys.ArrowUp || keys.KeyW) { p.vy = -speed; p.vx = 0; }
+    else if (keys.ArrowDown || keys.KeyS) { p.vy = speed; p.vx = 0; }
+
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+  }
+
+  function draw() {
+    ctx.clearRect(0,0,640,480);
+    ctx.fillStyle = "#4a6cff";
+    ctx.fillRect(state.player.x, state.player.y, TILE_SIZE, TILE_SIZE);
+  }
+
+  function frame() {
+    update(0.016); draw();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body></html>
+"""
+
+
+# Platformer climbing and gravity jumping mechanics.
+CANVAS_PLATFORMER_SKELETON = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Platformer Game</title>
+<style>
+  html,body { margin:0; background:#0b1020; color:#fff; overflow:hidden; }
+  #wrap { position:fixed; inset:0; display:grid; place-items:center; }
+  canvas { background:#10162e; border-radius:8px; }
+  #hud { position:fixed; top:12px; left:12px; background:#0008; padding:8px 12px; border-radius:8px; }
+</style></head>
+<body>
+<div id="wrap"><canvas id="c" width="800" height="600"></canvas></div>
+<div id="hud">Score: <span id="score">0</span></div>
+<script>
+(() => {
+  const cvs = document.getElementById("c");
+  const ctx = cvs.getContext("2d");
+  const p = { x: 100, y: 400, vx: 0, vy: 0, w: 20, h: 32, climbing: false, grounded: false };
+  const gravity = 800, speed = 200, jumpForce = -350;
+  const keys = {};
+
+  addEventListener("keydown", e => { keys[e.code] = true; });
+  addEventListener("keyup", e => { keys[e.code] = false; });
+
+  function update(dt) {
+    p.vx = 0;
+    if (keys.ArrowLeft || keys.KeyA) p.vx = -speed;
+    if (keys.ArrowRight || keys.KeyD) p.vx = speed;
+
+    if (p.climbing) {
+      p.vy = 0;
+      if (keys.ArrowUp || keys.KeyW) p.vy = -speed / 2;
+      if (keys.ArrowDown || keys.KeyS) p.vy = speed / 2;
+    } else {
+      p.vy += gravity * dt;
+      if ((keys.ArrowUp || keys.KeyW) && p.grounded) { p.vy = jumpForce; p.grounded = false; }
+    }
+
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    if (p.y > 450) { p.y = 450; p.vy = 0; p.grounded = true; }
+  }
+
+  function draw() {
+    ctx.clearRect(0,0,800,600);
+    ctx.fillStyle = "#00ff88";
+    ctx.fillRect(p.x, p.y, p.w, p.h);
+  }
+
+  function frame() {
+    update(0.016); draw();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body></html>
+"""
+
+
+# Camera viewport horizontal scroll and multi-layer parallax backdrop.
+CANVAS_SCROLLING_SKELETON = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Scrolling Game</title>
+<style>
+  html,body { margin:0; background:#010206; color:#fff; overflow:hidden; }
+  #wrap { position:fixed; inset:0; display:grid; place-items:center; }
+  canvas { background:#040613; }
+</style></head>
+<body>
+<div id="wrap"><canvas id="c" width="800" height="400"></canvas></div>
+<script>
+(() => {
+  const cvs = document.getElementById("c");
+  const ctx = cvs.getContext("2d");
+  const cam = { x: 0, y: 0 };
+  const p = { x: 100, y: 200, w: 24, h: 24 };
+  const keys = {};
+
+  addEventListener("keydown", e => { keys[e.code] = true; });
+  addEventListener("keyup", e => { keys[e.code] = false; });
+
+  function update(dt) {
+    const speed = 250;
+    if (keys.ArrowLeft || keys.KeyA) p.x -= speed * dt;
+    if (keys.ArrowRight || keys.KeyD) p.x += speed * dt;
+    if (keys.ArrowUp || keys.KeyW) p.y -= speed * dt;
+    if (keys.ArrowDown || keys.KeyS) p.y += speed * dt;
+
+    cam.x += (p.x - cam.x - 400) * 0.1;
+  }
+
+  function draw() {
+    ctx.clearRect(0,0,800,400);
+    ctx.save();
+    ctx.translate(-cam.x, -cam.y);
+    
+    ctx.fillStyle = "rgba(255,255,255,0.2)";
+    for (let i = 0; i < 20; i++) {
+      let sx = (i * 120 - cam.x * 0.3) % 1200;
+      ctx.fillRect(sx, 50 + (i % 3) * 40, 2, 2);
+    }
+
+    ctx.fillStyle = "#ff4a8b";
+    ctx.fillRect(p.x, p.y, p.w, p.h);
+    ctx.restore();
+  }
+
+  function frame() {
+    update(0.016); draw();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body></html>
+"""
+
+
+# Mode 7 texture coordinate perspective ground projection mapping.
+CANVAS_MODE7_SKELETON = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Mode 7 Racer</title>
+<style>
+  html,body { margin:0; background:#000; overflow:hidden; }
+  #wrap { position:fixed; inset:0; display:grid; place-items:center; }
+  canvas { background:#111; }
+</style></head>
+<body>
+<div id="wrap"><canvas id="c" width="320" height="240"></canvas></div>
+<script>
+(() => {
+  const cvs = document.getElementById("c");
+  const ctx = cvs.getContext("2d");
+  const p = { x: 50, y: 50, angle: 0, speed: 0 };
+  const keys = {};
+
+  addEventListener("keydown", e => { keys[e.code] = true; });
+  addEventListener("keyup", e => { keys[e.code] = false; });
+
+  const texSize = 64;
+  const tex = ctx.createImageData(texSize, texSize);
+  for (let y = 0; y < texSize; y++) {
+    for (let x = 0; x < texSize; x++) {
+      const isAlt = ((x >> 3) + (y >> 3)) % 2 === 0;
+      const idx = (y * texSize + x) * 4;
+      tex.data[idx] = isAlt ? 40 : 100;
+      tex.data[idx+1] = isAlt ? 140 : 40;
+      tex.data[idx+2] = isAlt ? 40 : 20;
+      tex.data[idx+3] = 255;
+    }
+  }
+
+  function update(dt) {
+    if (keys.ArrowUp || keys.KeyW) p.speed = 40;
+    else if (keys.ArrowDown || keys.KeyS) p.speed = -20;
+    else p.speed *= 0.95;
+
+    if (keys.ArrowLeft || keys.KeyA) p.angle -= 2.5 * dt;
+    if (keys.ArrowRight || keys.KeyD) p.angle += 2.5 * dt;
+
+    p.x += Math.cos(p.angle) * p.speed * dt;
+    p.y += Math.sin(p.angle) * p.speed * dt;
+  }
+
+  function draw() {
+    ctx.clearRect(0,0,320,240);
+    ctx.fillStyle = "#87ceeb"; ctx.fillRect(0, 0, 320, 100);
+    
+    const screenData = ctx.getImageData(0, 100, 320, 140);
+    const horizon = 0, fov = 120;
+    for (let screenY = 0; screenY < 140; screenY++) {
+      const distance = fov / (screenY + 1);
+      const scaleX = distance / fov;
+      const stepX = Math.sin(p.angle) * scaleX;
+      const stepY = -Math.cos(p.angle) * scaleX;
+      let worldX = p.x + Math.cos(p.angle) * distance - 160 * stepX;
+      let worldY = p.y + Math.sin(p.angle) * distance - 160 * stepY;
+
+      for (let screenX = 0; screenX < 320; screenX++) {
+        const tx = Math.floor(worldX) & (texSize - 1);
+        const ty = Math.floor(worldY) & (texSize - 1);
+        const texIdx = (ty * texSize + tx) * 4;
+        const screenIdx = (screenY * 320 + screenX) * 4;
+
+        screenData.data[screenIdx] = tex.data[texIdx];
+        screenData.data[screenIdx+1] = tex.data[texIdx+1];
+        screenData.data[screenIdx+2] = tex.data[texIdx+2];
+        screenData.data[screenIdx+3] = 255;
+
+        worldX += stepX; worldY += stepY;
+      }
+    }
+    ctx.putImageData(screenData, 0, 100);
+  }
+
+  function frame() {
+    update(0.016); draw();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body></html>
+"""
+
+
+# Top-down dungeon crawler with wall-sliding diagonal velocity response.
+CANVAS_CRAWLER_SKELETON = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Dungeon Crawler</title>
+<style>
+  html,body { margin:0; background:#0a0705; color:#fff; overflow:hidden; }
+  #wrap { position:fixed; inset:0; display:grid; place-items:center; }
+  canvas { background:#15100e; border: 2px solid #5a3c28; }
+</style></head>
+<body>
+<div id="wrap"><canvas id="c" width="800" height="600"></canvas></div>
+<script>
+(() => {
+  const cvs = document.getElementById("c");
+  const ctx = cvs.getContext("2d");
+  const p = { x: 400, y: 300, vx: 0, vy: 0, r: 16 };
+  const keys = {};
+
+  addEventListener("keydown", e => { keys[e.code] = true; });
+  addEventListener("keyup", e => { keys[e.code] = false; });
+
+  function update(dt) {
+    const speed = 180;
+    p.vx = 0; p.vy = 0;
+    if (keys.ArrowLeft || keys.KeyA) p.vx = -speed;
+    if (keys.ArrowRight || keys.KeyD) p.vx = speed;
+    if (keys.ArrowUp || keys.KeyW) p.vy = -speed;
+    if (keys.ArrowDown || keys.KeyS) p.vy = speed;
+
+    p.x += p.vx * dt;
+    if (p.x < p.r) p.x = p.r;
+    if (p.x > 800 - p.r) p.x = 800 - p.r;
+
+    p.y += p.vy * dt;
+    if (p.y < p.r) p.y = p.r;
+    if (p.y > 600 - p.r) p.y = 600 - p.r;
+  }
+
+  function draw() {
+    ctx.clearRect(0,0,800,600);
+    ctx.fillStyle = "#bf935a";
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI*2); ctx.fill();
+  }
+
+  function frame() {
+    update(0.016); draw();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body></html>
+"""
+
+
+# Responsive mobile/iPad letterbox scaling with on-screen virtual controls.
+CANVAS_MOBILE_SKELETON = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>Mobile Joystick Game</title>
+<style>
+  html,body { margin:0; height:100%; background:#0b1020; color:#fff; overflow:hidden; touch-action:none; }
+  #wrap { position:fixed; inset:0; display:grid; place-items:center; }
+  canvas { background:#10162e; max-width:100%; max-height:100%; touch-action:none; }
+</style></head>
+<body>
+<div id="wrap"><canvas id="c" width="800" height="600"></canvas></div>
+<script>
+(() => {
+  const cvs = document.getElementById("c");
+  const ctx = cvs.getContext("2d");
+  const p = { x: 400, y: 300, vx: 0, vy: 0, r: 16 };
+  const joystick = { active: false, startX: 0, startY: 0, curX: 0, curY: 0, maxDist: 60 };
+
+  function fit() {
+    const dpr = Math.min(window.devicePixelRatio||1, 2);
+    cvs.width = 800*dpr; cvs.height = 600*dpr;
+    cvs.style.width = "100%"; cvs.style.height = "100%";
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+  }
+  fit(); window.addEventListener("resize", fit);
+
+  addEventListener("pointerdown", e => {
+    if (e.clientX < window.innerWidth / 2) {
+      joystick.active = true;
+      joystick.startX = e.clientX; joystick.startY = e.clientY;
+      joystick.curX = e.clientX; joystick.curY = e.clientY;
+    }
+  });
+
+  addEventListener("pointermove", e => {
+    if (joystick.active) {
+      joystick.curX = e.clientX; joystick.curY = e.clientY;
+      const dx = joystick.curX - joystick.startX;
+      const dy = joystick.curY - joystick.startY;
+      const dist = Math.hypot(dx, dy);
+      const angle = Math.atan2(dy, dx);
+      const finalDist = Math.min(dist, joystick.maxDist);
+      p.vx = Math.cos(angle) * (finalDist / joystick.maxDist) * 200;
+      p.vy = Math.sin(angle) * (finalDist / joystick.maxDist) * 200;
+    }
+  });
+
+  addEventListener("pointerup", e => {
+    joystick.active = false; p.vx = 0; p.vy = 0;
+  });
+
+  function update(dt) {
+    p.x += p.vx * dt; p.y += p.vy * dt;
+    p.x = Math.max(p.r, Math.min(800 - p.r, p.x));
+    p.y = Math.max(p.r, Math.min(600 - p.r, p.y));
+  }
+
+  function draw() {
+    ctx.clearRect(0,0,800,600);
+    ctx.fillStyle = "#ff5555";
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI*2); ctx.fill();
+
+    if (joystick.active) {
+      const localX = 100, localY = 500;
+      ctx.fillStyle = "rgba(255,255,255,0.1)";
+      ctx.beginPath(); ctx.arc(localX, localY, joystick.maxDist, 0, Math.PI*2); ctx.fill();
+      const dx = joystick.curX - joystick.startX;
+      const dy = joystick.curY - joystick.startY;
+      const d = Math.hypot(dx, dy);
+      const a = Math.atan2(dy, dx);
+      const fd = Math.min(d, joystick.maxDist);
+      ctx.fillStyle = "rgba(255,255,255,0.4)";
+      ctx.beginPath(); ctx.arc(localX + Math.cos(a)*fd, localY + Math.sin(a)*fd, 20, 0, Math.PI*2); ctx.fill();
+    }
+  }
+
+  function frame() {
+    update(0.016); draw();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body></html>
+"""
+
+
+# Pokemon-style continuous-lerp tile-discrete steps (Pokemon/RPG style explorers).
+CANVAS_RPG_SKELETON = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Tile RPG</title>
+<style>
+  html,body { margin:0; background:#000; overflow:hidden; }
+  #wrap { position:fixed; inset:0; display:grid; place-items:center; }
+  canvas { background:#1e2f15; }
+</style></head>
+<body>
+<div id="wrap"><canvas id="c" width="480" height="480"></canvas></div>
+<script>
+(() => {
+  const cvs = document.getElementById("c");
+  const ctx = cvs.getContext("2d");
+  const TILE_SIZE = 32;
+  const p = { gridX: 7, gridY: 7, animX: 7, animY: 7, moving: false, t: 0 };
+  const keys = {};
+
+  addEventListener("keydown", e => { keys[e.code] = true; });
+  addEventListener("keyup", e => { keys[e.code] = false; });
+
+  function update(dt) {
+    if (p.moving) {
+      p.t += dt * 6;
+      if (p.t >= 1) {
+        p.animX = p.gridX; p.animY = p.gridY;
+        p.moving = false; p.t = 0;
+      } else {
+        p.animX = p.animX + (p.gridX - p.animX) * p.t;
+        p.animY = p.animY + (p.gridY - p.animY) * p.t;
+      }
+    } else {
+      let dx = 0, dy = 0;
+      if (keys.ArrowLeft || keys.KeyA) dx = -1;
+      else if (keys.ArrowRight || keys.KeyD) dx = 1;
+      else if (keys.ArrowUp || keys.KeyW) dy = -1;
+      else if (keys.ArrowDown || keys.KeyS) dy = 1;
+
+      if (dx !== 0 || dy !== 0) {
+        p.gridX += dx; p.gridY += dy;
+        p.moving = true; p.t = 0;
+      }
+    }
+  }
+
+  function draw() {
+    ctx.clearRect(0,0,480,480);
+    ctx.fillStyle = "#ffd84a";
+    ctx.fillRect(p.animX * TILE_SIZE, p.animY * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+  }
+
+  function frame() {
+    update(0.016); draw();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body></html>
+"""
+
+
+# Card/Board drag-and-drop coordinate overlaps and target card snaps.
+CANVAS_CARDS_SKELETON = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Card Snapper</title>
+<style>
+  html,body { margin:0; background:#072517; overflow:hidden; }
+  #wrap { position:fixed; inset:0; display:grid; place-items:center; }
+  canvas { background:#0a3a25; border-radius:8px; }
+</style></head>
+<body>
+<div id="wrap"><canvas id="c" width="800" height="600"></canvas></div>
+<script>
+(() => {
+  const cvs = document.getElementById("c");
+  const ctx = cvs.getContext("2d");
+  const cards = [{ id: 1, x: 100, y: 100, w: 80, h: 120, targetX: 100, targetY: 100, dragging: false }];
+  const slots = [{ x: 400, y: 300, w: 90, h: 130 }];
+  let activeCard = null, dragOffset = { x: 0, y: 0 };
+
+  cvs.addEventListener("pointerdown", e => {
+    const rect = cvs.getBoundingClientRect();
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    for (const c of cards) {
+      if (mx > c.x && mx < c.x+c.w && my > c.y && my < c.y+c.h) {
+        activeCard = c; c.dragging = true;
+        dragOffset.x = mx - c.x; dragOffset.y = my - c.y;
+        break;
+      }
+    }
+  });
+
+  addEventListener("pointermove", e => {
+    if (activeCard) {
+      const rect = cvs.getBoundingClientRect();
+      const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+      activeCard.x = mx - dragOffset.x; activeCard.y = my - dragOffset.y;
+    }
+  });
+
+  addEventListener("pointerup", e => {
+    if (activeCard) {
+      activeCard.dragging = false;
+      for (const s of slots) {
+        const dx = (activeCard.x + activeCard.w/2) - (s.x + s.w/2);
+        const dy = (activeCard.y + activeCard.h/2) - (s.y + s.h/2);
+        if (Math.hypot(dx, dy) < 80) {
+          activeCard.targetX = s.x + 5; activeCard.targetY = s.y + 5;
+          break;
+        }
+      }
+      activeCard = null;
+    }
+  });
+
+  function update(dt) {
+    for (const c of cards) {
+      if (!c.dragging) {
+        c.x += (c.targetX - c.x) * 0.2;
+        c.y += (c.targetY - c.y) * 0.2;
+      }
+    }
+  }
+
+  function draw() {
+    ctx.clearRect(0,0,800,600);
+    ctx.strokeStyle = "rgba(255,255,255,0.2)"; ctx.lineWidth = 2;
+    for (const s of slots) ctx.strokeRect(s.x, s.y, s.w, s.h);
+    ctx.fillStyle = "#ffffff";
+    for (const c of cards) ctx.fillRect(c.x, c.y, c.w, c.h);
+  }
+
+  function frame() {
+    update(0.016); draw();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body></html>
+"""
+
+
+# Physics launch with gravity trajectories and elastic boundary wall bounces.
+CANVAS_PHYSICS_SKELETON = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Physics Launch</title>
+<style>
+  html,body { margin:0; background:#0c0d14; overflow:hidden; }
+  #wrap { position:fixed; inset:0; display:grid; place-items:center; }
+  canvas { background:#141622; }
+</style></head>
+<body>
+<div id="wrap"><canvas id="c" width="800" height="600"></canvas></div>
+<script>
+(() => {
+  const cvs = document.getElementById("c");
+  const ctx = cvs.getContext("2d");
+  const b = { x: 100, y: 450, vx: 0, vy: 0, r: 12, launched: false };
+  const gravity = 400;
+  let dragStart = null, mouse = { x: 0, y: 0 };
+
+  cvs.addEventListener("pointerdown", e => {
+    const rect = cvs.getBoundingClientRect();
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    if (Math.hypot(mx - b.x, my - b.y) < 30) { dragStart = { x: b.x, y: b.y }; }
+  });
+
+  addEventListener("pointermove", e => {
+    const rect = cvs.getBoundingClientRect();
+    mouse.x = e.clientX - rect.left; mouse.y = e.clientY - rect.top;
+  });
+
+  addEventListener("pointerup", e => {
+    if (dragStart) {
+      const dx = dragStart.x - mouse.x, dy = dragStart.y - mouse.y;
+      b.vx = dx * 4; b.vy = dy * 4;
+      b.launched = true; dragStart = null;
+    }
+  });
+
+  function update(dt) {
+    if (b.launched) {
+      b.vy += gravity * dt;
+      b.x += b.vx * dt; b.y += b.vy * dt;
+      if (b.x < b.r || b.x > 800 - b.r) { b.vx = -b.vx * 0.8; b.x = b.x < b.r ? b.r : 800 - b.r; }
+      if (b.y > 600 - b.r) { b.vy = -b.vy * 0.6; b.y = 600 - b.r; }
+    }
+  }
+
+  function draw() {
+    ctx.clearRect(0,0,800,600);
+    if (dragStart) {
+      ctx.strokeStyle = "rgba(255,255,255,0.4)"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(dragStart.x, dragStart.y); ctx.lineTo(mouse.x, mouse.y); ctx.stroke();
+    }
+    ctx.fillStyle = "#ffd54f";
+    ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, Math.PI*2); ctx.fill();
+  }
+
+  function frame() {
+    update(0.016); draw();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body></html>
+"""
+
+
 # Tokens we strip when computing similarity. Mostly stop-words plus generic
 # game-domain words that don't help discriminate (e.g. "game" matches every
 # past entry and so adds no signal).
@@ -611,18 +1254,30 @@ class GameMemory:
         try:
             self.skeletons_dir.mkdir(parents=True, exist_ok=True)
             self.goals_dir.mkdir(parents=True, exist_ok=True)
-            default = self.skeletons_dir / DEFAULT_SKELETON_NAME
-            if not default.exists():
-                default.write_text(DEFAULT_SKELETON, encoding="utf-8")
 
-            # Seed default 3D / Three.js skeleton and sidecar if missing.
-            default_3d = self.skeletons_dir / CANVAS_3D_SKELETON_NAME
-            if not default_3d.exists():
-                default_3d.write_text(CANVAS_3D_SKELETON, encoding="utf-8")
+            # List of all default templates to bootstrap
+            templates = [
+                (DEFAULT_SKELETON_NAME, DEFAULT_SKELETON, None),
+                (CANVAS_3D_SKELETON_NAME, CANVAS_3D_SKELETON, CANVAS_3D_SKELETON_SIDECAR),
+                (CANVAS_GRID_SKELETON_NAME, CANVAS_GRID_SKELETON, CANVAS_GRID_SKELETON_SIDECAR),
+                (CANVAS_PLATFORMER_SKELETON_NAME, CANVAS_PLATFORMER_SKELETON, CANVAS_PLATFORMER_SKELETON_SIDECAR),
+                (CANVAS_SCROLLING_SKELETON_NAME, CANVAS_SCROLLING_SKELETON, CANVAS_SCROLLING_SKELETON_SIDECAR),
+                (CANVAS_MODE7_SKELETON_NAME, CANVAS_MODE7_SKELETON, CANVAS_MODE7_SKELETON_SIDECAR),
+                (CANVAS_CRAWLER_SKELETON_NAME, CANVAS_CRAWLER_SKELETON, CANVAS_CRAWLER_SKELETON_SIDECAR),
+                (CANVAS_MOBILE_SKELETON_NAME, CANVAS_MOBILE_SKELETON, CANVAS_MOBILE_SKELETON_SIDECAR),
+                (CANVAS_RPG_SKELETON_NAME, CANVAS_RPG_SKELETON, CANVAS_RPG_SKELETON_SIDECAR),
+                (CANVAS_CARDS_SKELETON_NAME, CANVAS_CARDS_SKELETON, CANVAS_CARDS_SKELETON_SIDECAR),
+                (CANVAS_PHYSICS_SKELETON_NAME, CANVAS_PHYSICS_SKELETON, CANVAS_PHYSICS_SKELETON_SIDECAR),
+            ]
 
-            sidecar_3d = self.skeletons_dir / "canvas_3d_basic.json"
-            if not sidecar_3d.exists():
-                sidecar_3d.write_text(CANVAS_3D_SKELETON_SIDECAR, encoding="utf-8")
+            for name, html, sidecar in templates:
+                html_file = self.skeletons_dir / name
+                if not html_file.exists():
+                    html_file.write_text(html, encoding="utf-8")
+                if sidecar is not None:
+                    sidecar_file = html_file.with_suffix(".json")
+                    if not sidecar_file.exists():
+                        sidecar_file.write_text(sidecar, encoding="utf-8")
         except Exception:
             # If memory is broken (read-only fs etc) the agent should still
             # run — retrieval just returns empty results.
@@ -1297,6 +1952,166 @@ SEED_BULLETS: list[Bullet] = [
             "entity's height with a parabolic curve: height = jumpApex * (4 * t * (1 - t)) where t goes 0..1."
         ),
         tags=["isometric", "grid", "q-bert", "math", "projection", "render-order", "isometric-jump"],
+    ),
+    Bullet(
+        id="corner-sliding-alignment",
+        content=(
+            "To implement smooth tile-based corner sliding (e.g. Pac-Man) in continuous movement: "
+            "Allow the player to buffer turns before aligning perfectly with a tile axis. If key is pressed, "
+            "check if coordinate orthogonal to movement is close to a tile boundary (e.g., within a snap tolerance of "
+            "8px). If close, snap coordinate directly to tile center (p.y = Math.floor(p.y/TILE)*TILE) and change "
+            "velocity. This prevents players from sticking to walls when turning corridors."
+        ),
+        tags=["grid", "movement", "corner", "snap", "alignment", "corridor", "pacman", "pac-man"],
+    ),
+    Bullet(
+        id="grid-wave-movement",
+        content=(
+            "For Space Invaders alien wave formations: Store coordinates in a grid matrix or array. "
+            "Move all aliens horizontally together. Keep track of left-most and right-most active bounds. "
+            "When either bound touches screen margins, reverse horizontal direction for all aliens and "
+            "increment their y position downward by one step. To keep tension, increase movement update "
+            "speed proportionally as the number of remaining aliens decreases (e.g., delay = baseDelay * (activeCount / total))."
+        ),
+        tags=["wave", "grid", "formation", "movement", "space-invaders", "aliens", "shooter"],
+    ),
+    Bullet(
+        id="segmented-entity-follow",
+        content=(
+            "To make segment links cleanly follow a leader (e.g. Centipede): Store a history array of the leader's "
+            "coordinates (e.g., up to 200 points). Each follower segment is assigned a specific history index offset "
+            "(e.g., segment i reads index i * segmentSpacing from history). On update, push leader's latest coordinate "
+            "to the front of the history array and trim the tail. This prevents segments from overlapping or separating during turns."
+        ),
+        tags=["follow", "segmented", "centipede", "tail", "history", "movement", "snake"],
+    ),
+    Bullet(
+        id="ball-paddle-angle-bias",
+        content=(
+            "To prevent endless horizontal/vertical bouncing in Breakout: Modify ball bounce angle based on "
+            "where it strikes the paddle. Calculate offset = (ball.x - paddle.x) / paddle.width (valued -0.5 to +0.5). "
+            "Determine bounce direction angle: angle = (offset * maxBiasAngle) - Math.PI/2. Set new ball velocities: "
+            "vx = Math.cos(angle) * speed; vy = Math.sin(angle) * speed (making vy negative/up). This rewards precision hits."
+        ),
+        tags=["breakout", "bounce", "paddle", "physics", "angle", "ball", "collision", "arkanoid"],
+    ),
+    Bullet(
+        id="parallax-coordinate-camera",
+        content=(
+            "For side-scrolling worlds (e.g. Defender): Create a camera object holding a single horizontal "
+            "offset: camera.x = player.x - centerX. When rendering, wrap context drawings inside ctx.save() / "
+            "ctx.translate(-camera.x, -camera.y). Render background details with an offset multiplier (e.g., "
+            "star.x - camera.x * 0.3) to achieve parallax depth. Automatically clear/recycle bullets and "
+            "enemies once they move beyond the viewport boundaries (e.g., x < camera.x - 100)."
+        ),
+        tags=["scrolling", "camera", "parallax", "viewport", "defender", "wrap", "sidescroller"],
+    ),
+    Bullet(
+        id="mode7-ground-projection",
+        content=(
+            "To render a SNES-style Mode 7 3D ground projection in 2D canvas (e.g. Mario Kart): "
+            "For each screen scanline y below horizon, calculate physical distance: distance = fov / (y + 1). "
+            "Compute texture scale factor: scaleX = distance / fov. For rotation angle theta, steps are: "
+            "stepX = Math.sin(theta) * scaleX, stepY = -Math.cos(theta) * scaleX. Sample pixels along scanline using: "
+            "worldX = player.x + Math.cos(theta)*distance + (screenX - centerX)*stepX, and matching worldY. Read "
+            "color from track texture, clamp coordinate bounds, and write into ctx.getImageData screen buffer."
+        ),
+        tags=["mode7", "mode-7", "projection", "perspective", "racer", "3d", "retro", "mario-kart"],
+    ),
+    Bullet(
+        id="tetris-matrix-rotation",
+        content=(
+            "To rotate 2D piece matrices in Tetris: Transpose and reverse the grid array: "
+            "rotated = matrix[0].map((_, i) => matrix.map(row => row[i]).reverse()). "
+            "To prevent clipping walls on rotation, implement a 'wall-kick' guard: "
+            "If the rotated shape collides with side boundaries or locked cells, try shifting "
+            "its position left or right by 1 or 2 cells. If all shifts still collide, revert rotation. "
+            "When rows are cleared, slice them out and unshift empty rows of width W to the top of the board."
+        ),
+        tags=["matrix", "rotation", "tetris", "blocks", "grid", "wall-kick", "row-clear"],
+    ),
+    Bullet(
+        id="crawler-wall-sliding",
+        content=(
+            "To prevent players from sticking to walls during diagonal movement (e.g. Gauntlet): "
+            "Decompose player movement into separate horizontal and vertical steps. "
+            "Step 1: Apply x movement `p.x += p.vx * dt`, and check collisions. If overlapping a wall boundary, "
+            "snap x position back and zero out `vx`. Step 2: Apply y movement `p.y += p.vy * dt`, and check "
+            "collisions. If overlapping, snap y back. This allows the player to slide smoothly along walls."
+        ),
+        tags=["crawler", "collision", "slide", "wall-sliding", "diagonal", "gauntlet", "movement"],
+    ),
+    Bullet(
+        id="shared-camera-bounds",
+        content=(
+            "For shared shared-screen multiplayer viewports (e.g. Gauntlet): "
+            "Calculate camera center as the average coordinates of all active players: "
+            "centerX = sum(players.x) / count. Clamp camera coordinate boundaries to global "
+            "level bounds. Clamping players: Prevent players from leaving screen edges by checking "
+            "their distance to the clamped camera bounds. If a player coordinates `p.x` leaves "
+            "`centerX - halfScreenWidth`, clamp their coordinates to the screen margin."
+        ),
+        tags=["multiplayer", "camera", "shared-screen", "clamp", "viewport", "gauntlet", "bounds"],
+    ),
+    Bullet(
+        id="mobile-joystick-theta",
+        content=(
+            "To calculate player velocity from virtual joystick touches: "
+            "On pointermove, compute offsets: dx = touchX - joystickStartX, dy = touchY - joystickStartY. "
+            "Find absolute distance and angle: dist = Math.hypot(dx, dy), theta = Math.atan2(dy, dx). "
+            "If distance exceeds max joystick radius, clamp touch visual coordinates to `maxRadius`. "
+            "Calculate player velocities: vx = Math.cos(theta) * speed * Math.min(1, dist/maxRadius), "
+            "and matching vy. This ensures responsive and precise multi-directional mobile steering."
+        ),
+        tags=["mobile", "touch", "joystick", "theta", "angle", "velocity", "trig", "controls"],
+    ),
+    Bullet(
+        id="mobile-letterbox-scaling",
+        content=(
+            "To letterbox a standard canvas for mobile viewports (e.g. iPad/iPhone): "
+            "On resize, fetch window aspect ratio and scale canvas container styles. "
+            "Check: scale = Math.min(window.innerWidth / baseW, window.innerHeight / baseH). "
+            "Set canvas styled width/height: cvs.style.width = (baseW * scale) + 'px'; "
+            "cvs.style.height = (baseH * scale) + 'px'. Center canvas container with flexbox "
+            "or fixed absolute positioning. This prevents screen distortion on rotated devices."
+        ),
+        tags=["mobile", "scaling", "responsive", "letterbox", "aspect-ratio", "resize", "ios"],
+    ),
+    Bullet(
+        id="drag-and-drop-snapping",
+        content=(
+            "For card/board drag-and-drop mechanics (e.g. Solitaire): "
+            "On pointerdown, test bounding box of all items from top-drawn to bottom. "
+            "On match, record active item and calculate dragging offset relative to cursor: "
+            "offsetX = mouseX - item.x. On pointermove, set `item.x = mouseX - offsetX`. "
+            "On pointerup, check overlaps with valid slots using circle-distance or AABB. "
+            "If overlapping, snap item coordinate directly to target coordinates, else lerp back to original slot."
+        ),
+        tags=["drag-and-drop", "mouse", "touch", "snap", "board", "puzzle", "cards", "solitaire"],
+    ),
+    Bullet(
+        id="discrete-tile-stepping",
+        content=(
+            "To implement discrete grid step movement (e.g. Pokemon/Ultima): "
+            "Do NOT move player sprites continuously on arrow holds. Store separate coordinates: "
+            "gridX/gridY (logical grid) and animX/animY (visual coordinates). When a direction key is pressed "
+            "and player is idle: set target cells, block input, and flag player as moving. "
+            "Increment animation offset: t += dt * speed; visually interpolate: animX = animX + (gridX - animX) * t. "
+            "When t >= 1, snap visual coordinates to grid, unblock input, and reset t = 0."
+        ),
+        tags=["grid", "rpg", "discrete", "tile", "step", "interpolation", "lerp", "movement"],
+    ),
+    Bullet(
+        id="gravity-trajectory-bounce",
+        content=(
+            "To bounce projectile circles off wall boundaries (e.g. Bubble Shooter): "
+            "Upon edge collision check, mirror the horizontal velocity: vx = -vx. "
+            "To reflect projectile circles off line segments: find normal vector of segment. "
+            "Velocity reflection formula: R = V - 2 * (V . N) * N. For gravity path forecasting: "
+            "Plot trajectory coordinates inside a simple loop: nextX = x + vx * t; nextY = y + vy * t + 0.5 * gravity * t*t. "
+            "Draw forecasted points on canvas as a guide line."
+        ),
+        tags=["physics", "trajectory", "bounce", "vector", "reflection", "gravity", "launch", "shooter"],
     ),
 ]
 

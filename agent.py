@@ -1449,6 +1449,7 @@ class GameAgent:
         # the writeback feedback loop to credit/blame them after the next
         # test result.
         self._active_bullet_ids: list[str] = []
+        self._active_skeleton: str | None = None
         self._skeleton_mode = skeleton_mode
         self._prompt_version = prompt_version
         self._p = self._load_prompt_module(prompt_version)
@@ -6949,6 +6950,7 @@ class GameAgent:
                         "seed_assets": {n: str(p) for n, p in seed_assets.items()},
                         "seed_sounds": {n: str(p) for n, p in seed_sounds.items()},
                     }))
+                self._active_skeleton = f"seed: {self.seed_file.name}"
                 yield self._record(AgentEvent("memory", (
                     f"using user-provided seed file: {self.seed_file} "
                     f"({len(seed_html)} bytes) — memory skeleton skipped"
@@ -7039,6 +7041,7 @@ class GameAgent:
                             "backend": self._backend.info.name,
                         },
                     ))
+                self._active_skeleton = skel.name
                 memory_msg = (
                     f"using skeleton: {skel.name}"
                     + (f" (sim={skel.score:.2f}, src goal: {skel.source_goal!r})"

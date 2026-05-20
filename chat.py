@@ -1511,6 +1511,8 @@ class CodingBoxApp(App):
         if ctx_row:
             out += ctx_row
         out += f"[b]Goal:[/b] {self._goal or '—'}\n"
+        if self.agent is not None and getattr(self.agent, "_active_skeleton", None) is not None:
+            out += f"[b]Skeleton:[/b] [cyan]{_esc(self.agent._active_skeleton)}[/cyan]\n"
         if self._last_diagnose:
             out += f"[b]Last fix:[/b] [dim]{_esc(self._last_diagnose)}[/dim]\n"
         if self.agent is not None:
