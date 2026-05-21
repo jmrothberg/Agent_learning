@@ -735,12 +735,54 @@ Disable auto-unload with `AGENT_NO_AUTO_OLLAMA_GPU_FIX=1`. On **small
 GPUs** (two ~8–16 GB cards), split may stay — the panel says that is
 expected. If split persists, the yellow tip suggests `/unload all`.
 
+**3-model run — one Ollama daemon per GPU (automatic on 4×48 GB Linux/NVIDIA).**
+When `/model`, `/model2`, and `/model3` are all Ollama slots, `chat.py`
+auto-pins them on this workstation shape:
+
+- exactly four visible NVIDIA GPUs
+- each GPU is 48 GB-class
+- Linux with `nvidia-smi`
+- not macOS / MLX
+- no manual `OLLAMA_HOST2` / `OLLAMA_HOST3` already set
+
+The TUI starts missing same-user daemons as:
+
+```text
+11434 → GPU 1
+11435 → GPU 2
+11436 → GPU 3
+```
+
+GPU 0 is left for the TUI / diffusers path. `CODING_BOX_NUM_CTX` stays at
+the full default (262144) unless you explicitly override it. If an old
+same-user single daemon on 11434 has a split model loaded, the TUI unloads
+that model before restarting the daemon pinned to GPU 1. It does not use
+sudo, does not edit systemd, and does not touch daemons owned by another
+user; those become `single daemon fallback` in the status panel.
+
+Manual override still works: set `OLLAMA_HOST2` / `OLLAMA_HOST3` yourself
+and the TUI will respect them without rewriting placement.
+
+The status panel maps each slot by endpoint, not just by model tag: the
+same model on `11434` / `11435` / `11436` should show GPU 1 / GPU 2 / GPU 3,
+with `pinned, not loaded` until that slot handles its first request. If a
+large Q8 model plus full 262K context cannot allocate on one 48 GB card, the
+Ollama call retries once without the `num_gpu=999` offload hint while keeping
+the same `num_ctx`. For three simultaneous Q8-class slots, a practical large
+context override is:
+
+```bash
+CODING_BOX_NUM_CTX=100000 .venv/bin/python chat.py
+```
+
 **Useful env vars (GPU / backends)**
 
 | Variable | Effect |
 |---|---|
 | `LLM_BACKEND` | `auto`, `ollama`, or `mlx` (default: MLX on macOS, else `auto`) |
 | `OLLAMA_MODEL` / `CHAT_OLLAMA_MODEL` | Force the Ollama tag for chat |
+| `OLLAMA_HOST` / `OLLAMA_HOST2` / `OLLAMA_HOST3` | Ollama HTTP base per slot (coder / model2 / model3) |
+| `AGENT_NO_AUTO_OLLAMA_PIN=1` | Disable automatic 4-GPU per-slot Ollama daemon startup |
 | `AGENT_NO_AUTO_OLLAMA_GPU_FIX=1` | Do not auto-unload split Ollama VRAM on `/new` |
 | `CODING_BOX_NUM_CTX` | Ollama context window (default 262144) |
 | `DIFFUSION_MODELS_DIR` | Override root for Z-Image / SD-Turbo weights |

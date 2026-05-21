@@ -1014,6 +1014,7 @@ class CodingBoxApp(App):
         self._session_backend_info3: backend_mod.BackendInfo | None = None
         self._session_model3: str | None = None
         self._session_role3: str | None = None
+        self._ollama_placement_status: str = ""
         # /iters lets the user change the max-iters cap before starting a
         # session or extending. Default matches GameAgent's default.
         self._max_iters: int = 6
@@ -1607,6 +1608,21 @@ class CodingBoxApp(App):
             return bool(getattr(self.agent, "_step_mode", False))
         return self._run_profile == "local_manual"
 
+    def _wants_three_ollama_slots(self) -> bool:
+        """True when the staged session needs coder + two Ollama sidecars."""
+        primary_backend = (self._next_backend or "auto").lower()
+        if primary_backend in ("mlx", "openai", "anthropic", "claude"):
+            return False
+        for backend_name, model_name in (
+            (self._next_backend2, self._next_model2),
+            (self._next_backend3, self._next_model3),
+        ):
+            if not model_name:
+                return False
+            if (backend_name or "ollama").lower() != "ollama":
+                return False
+        return True
+
     def _render_iteration_block(self) -> str:
         """Phase / iteration / streak / probes / ctx / model / goal / queued."""
         out = (
@@ -1646,6 +1662,8 @@ class CodingBoxApp(App):
         if self._session_model3:
             out += f"[b]Model 3:[/b] {self._session_model3}\n"
         out += f"[b]Run profile:[/b] {self._format_run_profile()}\n"
+        if self._ollama_placement_status:
+            out += f"[b]Ollama placement:[/b] {_esc(self._ollama_placement_status)}\n"
         if self._run_profile == "local_plus_review" and self._profile_review_model:
             apply_hint = "auto-apply in AUTO mode" if self._profile_review_auto_apply else "manual apply"
             out += (
@@ -1915,13 +1933,21 @@ class CodingBoxApp(App):
                     ))
             return out
 
-        def _ollama_ps_entry(tag: str | None) -> dict | None:
+        def _ollama_ps_entry(
+            tag: str | None,
+            endpoint: str | None = None,
+        ) -> dict | None:
             if not tag:
                 return None
             want = tag.strip()
+            ep = (endpoint or "").strip().rstrip("/")
             for m in ollama_ps:
-                if (m.get("name") or "").strip() == want:
-                    return m
+                if (m.get("name") or "").strip() != want:
+                    continue
+                row_ep = (m.get("endpoint") or "").strip().rstrip("/")
+                if ep and row_ep and row_ep != ep:
+                    continue
+                return m
             return None
 
         def _slot_gpu_line(
@@ -1931,12 +1957,28 @@ class CodingBoxApp(App):
             if bi is None and not model:
                 return "not loaded"
             if bi and bi.name == "ollama":
-                entry = _ollama_ps_entry(model)
+                endpoint_gpu = gs.ollama_endpoint_gpu_index(bi.endpoint or "")
+                entry = _ollama_ps_entry(
+                    model,
+                    bi.endpoint if bi else None,
+                )
                 vram_gib = entry.get("vram_gib") if entry else None
+                vram_bytes = entry.get("size_vram_bytes") if entry else None
                 if entry is None:
+                    if endpoint_gpu is not None:
+                        placed = gs.format_model_gpu_placement([endpoint_gpu], snap)
+                        return f"{placed} [dim](pinned, not loaded)[/dim]"
                     return gs.format_model_gpu_placement([], snap, not_loaded=True)
+                slot_gpus = (
+                    [endpoint_gpu] if endpoint_gpu is not None
+                    else gs.gpu_indices_for_ollama_loaded_model(
+                        snap,
+                        vram_bytes=vram_bytes,
+                        vram_gib=vram_gib,
+                    )
+                )
                 return gs.format_model_gpu_placement(
-                    ollama_gpus, snap, vram_gib=vram_gib,
+                    slot_gpus, snap, vram_gib=vram_gib,
                 )
             if bi and bi.name == "mlx":
                 gpus = gs.pids_on_gpus(snap, pid=my_pid) or gs.large_python_gpu_indices(
@@ -1962,11 +2004,14 @@ class CodingBoxApp(App):
             return (
                 bi.name == b1.name
                 and (model or "").strip() == (m1 or "").strip()
+                and (
+                    bi.name != "ollama"
+                    or (bi.endpoint or "").rstrip("/") == (b1.endpoint or "").rstrip("/")
+                )
             )
 
         slots = _collect_slots()
         ollama_ps = gs.ollama_loaded_models()
-        ollama_gpus = gs.infer_ollama_gpu_indices(snap)
 
         if slots:
             rows.append("  [b]LLM[/b]")
@@ -3257,9 +3302,19 @@ class CodingBoxApp(App):
         self, chosen_backend: str, chosen_name: str, slot: int, role: str | None, *, source: str,
     ) -> bool:
         """Point the live agent's slots at a new backend. Returns False on init error."""
+        if chosen_backend == "mlx":
+            desired_endpoint = backend_mod.mlx_endpoint_url()
+        elif chosen_backend == "openai":
+            desired_endpoint = backend_mod.openai_endpoint_url()
+        elif chosen_backend == "anthropic":
+            desired_endpoint = backend_mod.anthropic_endpoint_url()
+        else:
+            desired_endpoint = backend_mod.ollama_endpoint_url(slot)
+
         # Check if the requested model name & backend match what is already loaded in any other slot,
         # and reuse the Backend and BackendInfo instances directly. This avoids double-allocations,
-        # redundant in-VRAM loading, and cold-start pauses on Apple Silicon or local Ollama.
+        # redundant in-VRAM loading, and cold-start pauses on Apple Silicon. For Ollama,
+        # the endpoint must also match so auto-pinned slots do not collapse to one daemon.
         reused_backend = None
         reused_info = None
         # Use getattr with a default of None in case attributes are not yet initialized (e.g. mock objects or partial setups)
@@ -3272,7 +3327,15 @@ class CodingBoxApp(App):
             b_info = getattr(self, info_attr, None)
             b_inst = getattr(self, inst_attr, None)
             if b_info is not None and b_inst is not None:
-                if b_info.name == chosen_backend and b_info.model == chosen_name:
+                same_endpoint = (
+                    chosen_backend != "ollama"
+                    or (b_info.endpoint or "").rstrip("/") == desired_endpoint.rstrip("/")
+                )
+                if (
+                    b_info.name == chosen_backend
+                    and b_info.model == chosen_name
+                    and same_endpoint
+                ):
                     reused_backend = b_inst
                     reused_info = b_info
                     break
@@ -3282,18 +3345,10 @@ class CodingBoxApp(App):
             new_info = reused_info
         else:
             try:
-                if chosen_backend == "mlx":
-                    endpoint = backend_mod.mlx_endpoint_url()
-                elif chosen_backend == "openai":
-                    endpoint = backend_mod.openai_endpoint_url()
-                elif chosen_backend == "anthropic":
-                    endpoint = backend_mod.anthropic_endpoint_url()
-                else:
-                    endpoint = backend_mod.ollama_endpoint_url()
                 new_info = backend_mod.BackendInfo(
                     name=chosen_backend, model=chosen_name,
                     source=source,
-                    endpoint=endpoint,
+                    endpoint=desired_endpoint,
                 )
                 new_backend = backend_mod.make_backend(new_info)
             except Exception as e:
@@ -3333,7 +3388,7 @@ class CodingBoxApp(App):
             elif chosen_backend == "anthropic":
                 endpoint = backend_mod.anthropic_endpoint_url()
             else:
-                endpoint = backend_mod.ollama_endpoint_url()
+                endpoint = backend_mod.ollama_endpoint_url(1)
             new_info = backend_mod.BackendInfo(
                 name=chosen_backend, model=chosen_name,
                 source=source,
@@ -4589,6 +4644,26 @@ class CodingBoxApp(App):
         self._session_seed = (
             Path(self._next_seed).resolve() if self._next_seed is not None else None
         )
+        try:
+            placement = backend_mod.ensure_ollama_slot_daemons_for_chat(
+                enabled=self._wants_three_ollama_slots(),
+                prefer=self._next_backend,
+            )
+            if placement.mode == "auto-pinned":
+                self._ollama_placement_status = (
+                    "auto-pinned · 11434→GPU1 · 11435→GPU2 · 11436→GPU3"
+                )
+                self._log_info(f"[dim]Ollama placement: {_esc(self._ollama_placement_status)}[/dim]")
+            elif placement.mode == "manual":
+                self._ollama_placement_status = "manual HOST2/HOST3"
+            elif placement.mode == "fallback" and self._wants_three_ollama_slots():
+                self._ollama_placement_status = f"single daemon fallback · {placement.message}"
+                self._log_info(f"[yellow]Ollama placement:[/yellow] {_esc(self._ollama_placement_status)}")
+            elif self._wants_three_ollama_slots():
+                self._ollama_placement_status = f"single daemon fallback · {placement.message}"
+        except Exception as e:
+            self._ollama_placement_status = f"single daemon fallback · autopin error: {e}"
+            self._log_info(f"[yellow]Ollama placement:[/yellow] {_esc(self._ollama_placement_status)}")
         self._update_status()
 
         if self.browser is None:
@@ -4622,7 +4697,7 @@ class CodingBoxApp(App):
             elif self._next_backend == "anthropic":
                 endpoint = backend_mod.anthropic_endpoint_url()
             else:
-                endpoint = backend_mod.ollama_endpoint_url()
+                endpoint = backend_mod.ollama_endpoint_url(1)
             info = backend_mod.BackendInfo(
                 name=self._next_backend, model=self._next_model,
                 source=f"/load staged: {self._next_backend} (sticky)",
@@ -4632,7 +4707,7 @@ class CodingBoxApp(App):
             info = backend_mod.BackendInfo(
                 name="ollama", model=self._next_model,
                 source="/model staged (sticky)",
-                endpoint=backend_mod.ollama_endpoint_url(),
+                endpoint=backend_mod.ollama_endpoint_url(1),
             )
         else:
             try:
@@ -4657,7 +4732,20 @@ class CodingBoxApp(App):
         self._session_model2 = None
         self._session_role2 = self._next_role2
         if self._next_backend2 and self._next_model2:
-            if self._next_backend2 == info.name and self._next_model2 == info.model:
+            endpoint2 = (
+                backend_mod.ollama_endpoint_url(2)
+                if self._next_backend2 == "ollama"
+                else None
+            )
+            can_reuse_slot2 = (
+                self._next_backend2 == info.name
+                and self._next_model2 == info.model
+                and (
+                    self._next_backend2 != "ollama"
+                    or (endpoint2 or "").rstrip("/") == (info.endpoint or "").rstrip("/")
+                )
+            )
+            if can_reuse_slot2:
                 self._session_backend2 = self._session_backend
                 self._session_backend_info2 = info
                 self._session_model2 = info.model
@@ -4669,7 +4757,7 @@ class CodingBoxApp(App):
                 elif self._next_backend2 == "anthropic":
                     endpoint = backend_mod.anthropic_endpoint_url()
                 else:
-                    endpoint = backend_mod.ollama_endpoint_url()
+                    endpoint = backend_mod.ollama_endpoint_url(2)
                 info2 = backend_mod.BackendInfo(
                     name=self._next_backend2, model=self._next_model2,
                     source=f"/model2 staged: {self._next_backend2} (sticky)",
@@ -4687,11 +4775,35 @@ class CodingBoxApp(App):
         self._session_model3 = None
         self._session_role3 = self._next_role3
         if self._next_backend3 and self._next_model3:
-            if self._next_backend3 == info.name and self._next_model3 == info.model:
+            endpoint3 = (
+                backend_mod.ollama_endpoint_url(3)
+                if self._next_backend3 == "ollama"
+                else None
+            )
+            can_reuse_primary_for_slot3 = (
+                self._next_backend3 == info.name
+                and self._next_model3 == info.model
+                and (
+                    self._next_backend3 != "ollama"
+                    or (endpoint3 or "").rstrip("/") == (info.endpoint or "").rstrip("/")
+                )
+            )
+            can_reuse_slot2_for_slot3 = (
+                self._session_backend_info2
+                and self._next_backend3 == self._session_backend_info2.name
+                and self._next_model3 == self._session_backend_info2.model
+                and (
+                    self._next_backend3 != "ollama"
+                    or (endpoint3 or "").rstrip("/") == (
+                        self._session_backend_info2.endpoint or ""
+                    ).rstrip("/")
+                )
+            )
+            if can_reuse_primary_for_slot3:
                 self._session_backend3 = self._session_backend
                 self._session_backend_info3 = info
                 self._session_model3 = info.model
-            elif self._session_backend_info2 and self._next_backend3 == self._session_backend_info2.name and self._next_model3 == self._session_backend_info2.model:
+            elif can_reuse_slot2_for_slot3:
                 self._session_backend3 = self._session_backend2
                 self._session_backend_info3 = self._session_backend_info2
                 self._session_model3 = self._session_backend_info2.model
@@ -4703,7 +4815,7 @@ class CodingBoxApp(App):
                 elif self._next_backend3 == "anthropic":
                     endpoint = backend_mod.anthropic_endpoint_url()
                 else:
-                    endpoint = backend_mod.ollama_endpoint_url()
+                    endpoint = backend_mod.ollama_endpoint_url(3)
                 info3 = backend_mod.BackendInfo(
                     name=self._next_backend3, model=self._next_model3,
                     source=f"/model3 staged: {self._next_backend3} (sticky)",
@@ -4732,8 +4844,24 @@ class CodingBoxApp(App):
                 f"as [cyan]{self._session_role3}[/cyan]"
             )
 
+        for bi in (
+            self._session_backend_info,
+            self._session_backend_info2,
+            self._session_backend_info3,
+        ):
+            if (
+                bi is not None
+                and bi.name == "ollama"
+                and not bi.context_length
+            ):
+                cl = backend_mod.ollama_context_length(bi.endpoint, bi.model)
+                if cl:
+                    bi.context_length = cl
+
         # Large workstation: auto-unload tensor-split Ollama VRAM on /new so
         # the user does not need manual /unload or Ollama service env edits.
+        # Probe each distinct Ollama endpoint (3-slot runs use HOST/HOST2/HOST3).
+        seen_endpoints: set[str] = set()
         for bi in (
             self._session_backend_info,
             self._session_backend_info2,
@@ -4741,15 +4869,16 @@ class CodingBoxApp(App):
         ):
             if bi is None or bi.name != "ollama":
                 continue
+            ep = (bi.endpoint or "").rstrip("/")
+            if not ep or ep in seen_endpoints:
+                continue
+            seen_endpoints.add(ep)
             try:
-                fixed, fix_msg = backend_mod.auto_fix_ollama_tensor_split(
-                    bi.endpoint,
-                )
+                fixed, fix_msg = backend_mod.auto_fix_ollama_tensor_split(ep)
                 if fixed and fix_msg:
                     self._log_info(f"[dim]{_esc(fix_msg)}[/dim]")
-                break
             except Exception:
-                break
+                pass
 
         self._update_status()
 
@@ -4825,6 +4954,12 @@ class CodingBoxApp(App):
             # <probes>, stuck-loop ladder. Real sessions need this on
             # so the offline learner has rich traces to reflect over.
             prompt_version="v1",
+            # Pass the resolved chat model name so GameAgent._classify_model
+            # can map it to "small"/"mid"/"large". Without this, model=None
+            # falls through to "small" and silently strips <assets>/<sounds>/
+            # <todos>/<lookup_bullet> from the system prompt for every local
+            # 14B-35B coder, hiding the diffuser pipeline from the model.
+            model=self._session_model,
             model_class=self._model_class or "auto",
             restart_n=self._restart_n,
             restart_score_threshold=self._restart_threshold,
@@ -4893,6 +5028,8 @@ class CodingBoxApp(App):
             backend = getattr(self.agent, "_backend", None)
             info = getattr(backend, "info", None) if backend else None
             self._ctx_max = getattr(info, "context_length", None) if info else None
+            if self._ctx_max is None and self.agent is not None:
+                self._ctx_max = int(getattr(self.agent, "num_ctx", 0) or 0) or None
         except Exception:
             self._ctx_max = None
 

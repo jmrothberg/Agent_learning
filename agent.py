@@ -601,10 +601,16 @@ _CODE_LOCK_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bno\s+code\s+(?:change|edit|modification)s?\b", re.I),
     # "no other code", "no other asset or code"
     re.compile(r"\bno\s+other\s+\w+(?:\s+or\s+code)?\b.*\bcode\b", re.I),
-    # "don't change/touch/modify the code", "do not change code"
+    # "don't change/touch/modify the code", "do not change code",
+    # AND "do not change the <noun> code" (e.g. "the game code", "the
+    # player code", "the AI code", "the physics code"). Allowing up to
+    # two intervening words covers natural-English phrasings like
+    # "do not change the chess game code" without firing on neutral
+    # text — _feedback_is_strict_scope still requires the explicit
+    # forbid-verb so loosening the noun slot can't false-positive.
     re.compile(
         r"\b(?:don['’]?t|do\s+not)\s+(?:change|touch|modify|edit)"
-        r"\s+(?:the\s+|any\s+)?code\b",
+        r"\s+(?:the\s+|any\s+)?(?:\w+\s+){0,2}code\b",
         re.I,
     ),
     # "without changing/touching/modifying the code"
@@ -3786,12 +3792,15 @@ class GameAgent:
                 if self._session_sounds else []
             )
             locks_code = _feedback_locks_code(joined)
-            art_change = bool(asset_names) and _feedback_is_art_change(
-                joined, asset_names,
-            )
-            sound_change = bool(sound_names) and _feedback_is_sound_change(
-                joined, sound_names,
-            )
+            # Drop the bool(asset_names) / bool(sound_names) short-circuits
+            # so first-time art/audio requests can route to the MEDIA-CHANGE
+            # directive ladder. The classifiers themselves require an art
+            # noun + media verb (and audio noun + media verb), so neutral
+            # feedback like "fix the bug" still won't fire here. The
+            # directive renderer below already branches on whether asset/
+            # sound names exist when picking which recipe to emit.
+            art_change = _feedback_is_art_change(joined, asset_names)
+            sound_change = _feedback_is_sound_change(joined, sound_names)
             existing_media_request = _feedback_requests_existing_media(joined)
             if existing_media_request and (art_change or sound_change):
                 self._trace({
@@ -3878,56 +3887,130 @@ class GameAgent:
             # drawImage size patch — same regenerated PNGs at the same
             # canvas size achieve nothing visible). The new SCOPED-CHANGE
             # block below handles the code-lock case directly.
+            #
+            # Two branches:
+            #   - has_existing_media: regen using the existing name(s).
+            #   - else: emit a fresh <assets>/<sounds> block (NEW ART) +
+            #     ONE small <patch> wiring the loader. The 2026-05-21
+            #     chess trace is the motivating case — first-time art
+            #     request after a working game shipped, no sprites yet,
+            #     model defaulted to inline SVG instead of the diffuser.
+            has_existing_media = bool(asset_names or sound_names)
             if (
-                (asset_names or sound_names)
-                and (art_change or sound_change)
+                (art_change or sound_change)
                 and not behavior_bug
                 and not (locks_code and behavior_scope)
                 and not orientation_change
             ):
-                lines: list[str] = [
-                    "================ MEDIA-CHANGE DIRECTIVE ================",
-                    "The feedback above is about ART/SOUND, not code. The",
-                    "harness can regenerate any sprite or sound in place:",
-                    "emit a fresh block with the EXISTING name and a new",
-                    "prompt — no JS edit needed. The existing drawSprite()",
-                    "/ new Audio() call already in the file automatically",
-                    "picks up the regenerated file.",
-                ]
-                if asset_names:
-                    asset_list = ", ".join(sorted(asset_names))
+                if has_existing_media:
+                    lines: list[str] = [
+                        "================ MEDIA-CHANGE DIRECTIVE ================",
+                        "The feedback above is about ART/SOUND, not code. The",
+                        "harness can regenerate any sprite or sound in place:",
+                        "emit a fresh block with the EXISTING name and a new",
+                        "prompt — no JS edit needed. The existing drawSprite()",
+                        "/ new Audio() call already in the file automatically",
+                        "picks up the regenerated file.",
+                    ]
+                    if asset_names:
+                        asset_list = ", ".join(sorted(asset_names))
+                        lines.extend([
+                            "",
+                            "Sprites — use <assets> to re-render:",
+                            "  <assets>[{\"name\":\"<existing_name>\","
+                            "\"prompt\":\"<new visual prompt>\"}]</assets>",
+                            f"  Existing asset names: {asset_list}",
+                            "",
+                            "If the user says an animation/image is MISSING",
+                            "and no existing name matches that state, you may",
+                            "emit a NEW same-pattern sprite name plus ONE small",
+                            "<patch> that only adds the name to the existing",
+                            "asset loader/list. Do not rewrite gameplay code.",
+                        ])
+                    if sound_names:
+                        sound_list = ", ".join(sorted(sound_names))
+                        lines.extend([
+                            "",
+                            "Sounds — use <sounds> to re-render:",
+                            "  <sounds>[{\"name\":\"<existing_name>\","
+                            "\"prompt\":\"<new audio prompt>\","
+                            "\"duration\":1.0}]</sounds>",
+                            f"  Existing sound names: {sound_list}",
+                        ])
                     lines.extend([
                         "",
-                        "Sprites — use <assets> to re-render:",
-                        "  <assets>[{\"name\":\"<existing_name>\","
-                        "\"prompt\":\"<new visual prompt>\"}]</assets>",
-                        f"  Existing asset names: {asset_list}",
-                        "",
-                        "If the user says an animation/image is MISSING",
-                        "and no existing name matches that state, you may",
-                        "emit a NEW same-pattern sprite name plus ONE small",
-                        "<patch> that only adds the name to the existing",
-                        "asset loader/list. Do not rewrite gameplay code.",
+                        "Do NOT swap an existing drawSprite(name,…) or",
+                        "new Audio(path) call for inline procedural code here —",
+                        "that loses the media path and regresses. If the user",
+                        "truly asked for code changes too, address those with a",
+                        "small <patch>.",
+                        "========================================================",
                     ])
-                if sound_names:
-                    sound_list = ", ".join(sorted(sound_names))
+                else:
+                    # NEW MEDIA branch — session has no generated assets/
+                    # sounds yet. Tell the model to emit a fresh <assets>
+                    # / <sounds> block + ONE small <patch> that loads
+                    # them. Without this branch, the directive ladder
+                    # was suppressed entirely and the model fell back to
+                    # inline SVG / ctx.fillRect / AudioContext beeps.
+                    lines = [
+                        "================ MEDIA-CHANGE DIRECTIVE (NEW MEDIA) ================",
+                        "The feedback above is asking for generated MEDIA, but",
+                        "this session has no sprites/sounds yet. The harness",
+                        "runs Z-Image-Turbo (sprites) and Stable-Audio-Open",
+                        "(sounds) locally — emit the right block this turn",
+                        "and the PNG/OGG paths arrive in the next user turn.",
+                    ]
+                    if art_change:
+                        lines.extend([
+                            "",
+                            "Sprites — emit fresh names:",
+                            "  <assets>[",
+                            "    {\"name\":\"<short_id>\",",
+                            "     \"prompt\":\"<one short visual sentence,"
+                            " transparent bg>\"},",
+                            "    ...one entry per visual entity the player"
+                            " sees...",
+                            "  ]</assets>",
+                            "",
+                            "Then ONE small <patch> that:",
+                            "  1. Adds `const ASSETS = { name: new Image(),"
+                            " ... }` and `await Promise.all(Object.values("
+                            "ASSETS).map(i => i.decode()))` before the loop"
+                            " starts.",
+                            "  2. Replaces the procedural drawing site with"
+                            " `ctx.drawImage(ASSETS.<name>, x, y, w, h)`.",
+                            "Do NOT draw the entities with inline SVG, ctx",
+                            "primitives, Unicode glyphs, or emoji — the user",
+                            "explicitly asked for generated art and that's",
+                            "exactly the failure mode this directive prevents.",
+                        ])
+                    if sound_change:
+                        lines.extend([
+                            "",
+                            "Sounds — emit fresh names:",
+                            "  <sounds>[",
+                            "    {\"name\":\"<short_id>\",",
+                            "     \"prompt\":\"<one short audio sentence>\",",
+                            "     \"duration\":<0.3-1.5>},",
+                            "    ...one entry per discrete audible event...",
+                            "  ]</sounds>",
+                            "",
+                            "Then ONE small <patch> that does",
+                            "`new Audio('./<dir>/<name>.ogg').play()` on the",
+                            "matching event. Do NOT synthesize beeps with",
+                            "AudioContext oscillators — the user asked for",
+                            "real sound.",
+                        ])
                     lines.extend([
                         "",
-                        "Sounds — use <sounds> to re-render:",
-                        "  <sounds>[{\"name\":\"<existing_name>\","
-                        "\"prompt\":\"<new audio prompt>\","
-                        "\"duration\":1.0}]</sounds>",
-                        f"  Existing sound names: {sound_list}",
+                        "Path conventions (the harness sets these for you):",
+                        "  - Sprites land in `./<session>_assets/<name>.png`.",
+                        "  - Sounds land in `./<session>_sounds/<name>.ogg`.",
+                        "Reference the names you emit; the next user turn",
+                        "will surface the exact relative paths.",
+                        "===================================================================",
                     ])
-                lines.extend([
-                    "",
-                    "Do NOT swap an existing drawSprite(name,…) or",
-                    "new Audio(path) call for inline procedural code here —",
-                    "that loses the media path and regresses. If the user",
-                    "truly asked for code changes too, address those with a",
-                    "small <patch>.",
-                    "========================================================",
-                ])
                 parts.append("\n".join(lines))
                 self._trace({
                     "kind": "media_change_directive_injected",
@@ -3937,6 +4020,9 @@ class GameAgent:
                     "behavior_scope": behavior_scope,
                     "asset_count": len(asset_names),
                     "sound_count": len(sound_names),
+                    # Tag the branch so offline analysis can tell first-
+                    # time art requests from regen requests at a glance.
+                    "branch": "existing" if has_existing_media else "new",
                 })
 
             # ORIENTATION-CHANGE DIRECTIVE — when the user wants a

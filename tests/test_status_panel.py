@@ -16,6 +16,8 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from agent import GameAgent  # noqa: E402
@@ -23,6 +25,12 @@ import backend as backend_mod  # noqa: E402
 from backend import _read_mlx_context_length  # noqa: E402
 from chat import CodingBoxApp  # noqa: E402
 import gpu_status  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def clear_ollama_slot_env(monkeypatch):
+    for key in ("OLLAMA_HOST2", "OLLAMA_HOST3"):
+        monkeypatch.delenv(key, raising=False)
 
 
 def _agent(tmp_path: Path) -> GameAgent:
@@ -310,6 +318,30 @@ def test_ollama_split_tip_short() -> None:
     assert "pid" not in tip.lower()
 
 
+def test_ollama_split_tip_suppressed_for_multi_daemon(monkeypatch) -> None:
+    snap = gpu_status.GpuSnapshot(
+        processes=[
+            gpu_status.GpuProcess(1, 7, "ollama", 28000),
+            gpu_status.GpuProcess(3, 7, "ollama", 27000),
+        ],
+    )
+    monkeypatch.setenv("OLLAMA_HOST2", "http://127.0.0.1:11435")
+    assert gpu_status.ollama_split_tip_short(snap) is None
+
+
+def test_gpu_indices_for_ollama_loaded_model_single_card() -> None:
+    snap = gpu_status.GpuSnapshot(
+        processes=[
+            gpu_status.GpuProcess(2, 10, "ollama", 28000),
+            gpu_status.GpuProcess(1, 11, "ollama", 4000),
+        ],
+    )
+    vram_bytes = 28 * 1024 * 1024 * 1024
+    assert gpu_status.gpu_indices_for_ollama_loaded_model(
+        snap, vram_bytes=vram_bytes,
+    ) == [2]
+
+
 def test_auto_fix_ollama_tensor_split_unloads(monkeypatch) -> None:
     snap = gpu_status.GpuSnapshot(
         gpus=[
@@ -383,6 +415,68 @@ def test_render_gpu_block_three_model_rows(monkeypatch) -> None:
     assert "Z-Image-Turbo" in block
     assert "not loaded" in block
     assert "still split" in block or "/unload" in block
+
+
+def test_render_gpu_block_separate_ollama_endpoints(monkeypatch) -> None:
+    app = CodingBoxApp()
+    tag = "qwen3.6:27b-q8_0"
+    bi1 = backend_mod.BackendInfo(
+        name="ollama", model=tag, source="test",
+        endpoint="http://127.0.0.1:11434",
+    )
+    bi2 = backend_mod.BackendInfo(
+        name="ollama", model=tag, source="test",
+        endpoint="http://127.0.0.1:11435",
+    )
+    bi3 = backend_mod.BackendInfo(
+        name="ollama", model=tag, source="test",
+        endpoint="http://127.0.0.1:11436",
+    )
+    agent = MagicMock()
+    agent.model = tag
+    agent._backend = MagicMock(info=bi1)
+    agent._backend2 = MagicMock(info=bi2)
+    agent._backend3 = MagicMock(info=bi3)
+    agent._model2_role = "critic"
+    agent._model3_role = "architect"
+    agent._asset_generator = None
+    agent._sound_generator = None
+    app.agent = agent
+    app._session_model2 = tag
+    app._session_model3 = tag
+
+    snap = gpu_status.GpuSnapshot(
+        gpus=[
+            gpu_status.GpuInfo(1, "B", memory_used_mib=44000, memory_total_mib=49140),
+            gpu_status.GpuInfo(2, "C", memory_used_mib=33000, memory_total_mib=49140),
+            gpu_status.GpuInfo(3, "D", memory_used_mib=430, memory_total_mib=49140),
+        ],
+    )
+    monkeypatch.setattr(gpu_status, "snapshot_gpus", lambda **_: snap)
+    monkeypatch.setattr(
+        gpu_status,
+        "ollama_endpoint_gpu_index",
+        lambda endpoint: {
+            "http://127.0.0.1:11434": 1,
+            "http://127.0.0.1:11435": 2,
+            "http://127.0.0.1:11436": 3,
+        }.get(endpoint),
+    )
+    monkeypatch.setattr(
+        gpu_status,
+        "ollama_loaded_models",
+        lambda: [
+            {"name": tag, "endpoint": "http://127.0.0.1:11434", "vram_gib": 41.8},
+            {"name": tag, "endpoint": "http://127.0.0.1:11435", "vram_gib": 32.8},
+        ],
+    )
+
+    block = app._render_gpu_placement_block()
+    assert "Model 1 (coder)" in block and "GPU 1" in block
+    assert "Model 2 (critic)" in block and "GPU 2" in block
+    assert "Model 3 (architect)" in block and "GPU 3" in block
+    assert "pinned, not loaded" in block
+    assert "same VRAM" not in block
 
 
 def test_diffuser_kind_labels() -> None:

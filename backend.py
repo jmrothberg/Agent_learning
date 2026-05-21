@@ -35,6 +35,8 @@ import asyncio
 import json
 import os
 import re
+import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -191,6 +193,15 @@ class BackendInfo:
     source: str               # human-readable provenance ("loaded in ollama (/api/ps): 'qwen3.6:27b'")
     endpoint: str             # base URL — "http://127.0.0.1:11434" or "http://127.0.0.1:8080"
     context_length: int | None = None
+
+
+@dataclass
+class OllamaAutopinResult:
+    """Outcome of best-effort per-GPU Ollama daemon setup for the TUI."""
+
+    mode: Literal["off", "manual", "auto-pinned", "fallback"]
+    message: str = ""
+    endpoints: dict[int, str] | None = None
 
 
 # Cloud-backend defaults. The curated single-model-each shape keeps /list
@@ -1649,13 +1660,317 @@ def list_anthropic_inventory() -> tuple[list[str], str | None]:
 # -----------------------------------------------------------------------------
 
 
+def _normalize_ollama_host(raw: str, *, default_port: int = 11434) -> str:
+    s = (raw or "").strip().rstrip("/")
+    if not s:
+        return f"http://127.0.0.1:{default_port}"
+    if not s.startswith("http"):
+        s = "http://" + s
+    return s
+
+
 def _ollama_endpoint() -> str:
-    raw = (os.environ.get("OLLAMA_HOST") or "").strip().rstrip("/")
-    if not raw:
-        return "http://127.0.0.1:11434"
-    if not raw.startswith("http"):
-        raw = "http://" + raw
-    return raw
+    return _normalize_ollama_host(os.environ.get("OLLAMA_HOST") or "")
+
+
+def _ollama_endpoint_for_slot(slot: int) -> str:
+    """HTTP base for Ollama slot 1/2/3 (3-model runs on separate daemons).
+
+    Slot 1: ``OLLAMA_HOST`` (default ``http://127.0.0.1:11434``).
+    Slot 2: ``OLLAMA_HOST2``, else slot 1.
+    Slot 3: ``OLLAMA_HOST3``, else slot 1.
+    """
+    if slot <= 1:
+        return _ollama_endpoint()
+    key = "OLLAMA_HOST2" if slot == 2 else "OLLAMA_HOST3"
+    raw = (os.environ.get(key) or "").strip()
+    if raw:
+        return _normalize_ollama_host(raw)
+    return _ollama_endpoint()
+
+
+def _env_truthy(name: str) -> bool:
+    return (os.environ.get(name) or "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _manual_ollama_slot_hosts_set() -> bool:
+    return bool(
+        (os.environ.get("OLLAMA_HOST2") or "").strip()
+        or (os.environ.get("OLLAMA_HOST3") or "").strip()
+    )
+
+
+def _ollama_cli_candidates() -> list[str]:
+    """Resolve `ollama`; Cursor-launched Python often has a thin PATH."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for c in (
+        shutil.which("ollama"),
+        "/usr/local/bin/ollama",
+        "/usr/bin/ollama",
+        "/snap/bin/ollama",
+        os.path.expanduser("~/.local/bin/ollama"),
+    ):
+        if not c or c in seen:
+            continue
+        seen.add(c)
+        if os.path.isfile(c) and os.access(c, os.X_OK):
+            out.append(c)
+    return out
+
+
+def _resolve_ollama_models_dir() -> str:
+    """Choose the model store for auto-started slot daemons."""
+    raw = (os.environ.get("OLLAMA_MODELS") or "").strip()
+    candidates = [raw] if raw else []
+    candidates.extend([
+        "/usr/share/ollama/.ollama/models",
+        os.path.expanduser("~/.ollama/models"),
+    ])
+    for path in candidates:
+        if not path:
+            continue
+        manifests = os.path.join(path, "manifests")
+        if os.path.isdir(manifests):
+            return path
+    return raw or os.path.expanduser("~/.ollama/models")
+
+
+def _is_four_gpu_linux_nvidia_workstation() -> tuple[bool, str]:
+    """Strict autopin gate: Linux + exactly 4 large NVIDIA GPUs."""
+    if sys.platform == "darwin":
+        return False, "macOS/MLX host"
+    if not sys.platform.startswith("linux"):
+        return False, f"non-Linux platform {sys.platform!r}"
+    try:
+        import gpu_status as gs
+    except Exception:
+        return False, "gpu_status unavailable"
+    snap = gs.snapshot_gpus(force=True)
+    if snap is None or not snap.gpus:
+        return False, "nvidia-smi unavailable"
+    gpus = sorted(snap.gpus, key=lambda g: g.index)
+    if len(gpus) != 4:
+        return False, f"{len(gpus)} visible GPUs"
+    if not all("nvidia" in (g.name or "").lower() for g in gpus):
+        return False, "non-NVIDIA or mixed GPU inventory"
+    if not all((g.memory_total_mib or 0) >= 40000 for g in gpus):
+        return False, "not all GPUs are 48 GB-class"
+    if [g.index for g in gpus] != [0, 1, 2, 3]:
+        return False, f"unexpected GPU indices {[g.index for g in gpus]}"
+    return True, "4x NVIDIA 48 GB-class workstation"
+
+
+def _port_owner_pid(port: int) -> int | None:
+    """PID listening on TCP port, if `ss` can see it."""
+    try:
+        r = subprocess.run(
+            ["ss", "-tlnp"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    if r.returncode != 0:
+        return None
+    marker = f":{port}"
+    for line in (r.stdout or "").splitlines():
+        if marker not in line:
+            continue
+        m = re.search(r"pid=(\d+)", line)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def _proc_cmdline(pid: int) -> str:
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            data = f.read()
+    except OSError:
+        return ""
+    return data.replace(b"\0", b" ").decode(errors="replace").strip()
+
+
+def _proc_environ(pid: int) -> dict[str, str]:
+    try:
+        with open(f"/proc/{pid}/environ", "rb") as f:
+            raw = f.read()
+    except OSError:
+        return {}
+    out: dict[str, str] = {}
+    for item in raw.split(b"\0"):
+        if not item or b"=" not in item:
+            continue
+        k, v = item.split(b"=", 1)
+        out[k.decode(errors="replace")] = v.decode(errors="replace")
+    return out
+
+
+def _pid_is_same_user(pid: int) -> bool:
+    try:
+        return os.stat(f"/proc/{pid}").st_uid == os.getuid()
+    except OSError:
+        return False
+
+
+def _pid_is_ollama_serve(pid: int) -> bool:
+    cmd = _proc_cmdline(pid).lower()
+    return "ollama" in cmd and "serve" in cmd
+
+
+def _endpoint_ready(base: str) -> bool:
+    return isinstance(_http_get_json(base.rstrip("/") + "/api/tags", timeout=1.5), dict)
+
+
+def _wait_endpoint_ready(base: str, *, timeout_s: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if _endpoint_ready(base):
+            return True
+        time.sleep(0.25)
+    return _endpoint_ready(base)
+
+
+def _terminate_same_user_ollama_serve(pid: int, *, port: int) -> tuple[bool, str]:
+    if not _pid_is_same_user(pid) or not _pid_is_ollama_serve(pid):
+        return False, (
+            f"port {port} is owned by pid {pid}, not a same-user ollama serve; "
+            "left untouched"
+        )
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError as e:
+        return False, f"could not stop ollama serve pid {pid}: {e!r}"
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if _port_owner_pid(port) != pid:
+            return True, f"stopped stale ollama serve pid {pid} on {port}"
+        time.sleep(0.2)
+    return False, f"ollama serve pid {pid} on {port} did not stop"
+
+
+def _slot_daemon_matches(pid: int, *, gpu: int, models_dir: str) -> bool:
+    env = _proc_environ(pid)
+    visible = (env.get("CUDA_VISIBLE_DEVICES") or "").strip()
+    store = (env.get("OLLAMA_MODELS") or "").strip()
+    return visible == str(gpu) and (not store or os.path.abspath(store) == os.path.abspath(models_dir))
+
+
+def _start_ollama_slot_daemon(
+    *,
+    exe: str,
+    port: int,
+    gpu: int,
+    models_dir: str,
+) -> tuple[bool, str]:
+    env = os.environ.copy()
+    env["CUDA_VISIBLE_DEVICES"] = str(gpu)
+    env["OLLAMA_HOST"] = f"127.0.0.1:{port}"
+    env["OLLAMA_MODELS"] = models_dir
+    env["OLLAMA_SCHED_SPREAD"] = "2"
+    try:
+        subprocess.Popen(
+            [exe, "serve"],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as e:
+        return False, f"failed to start ollama on {port}/GPU{gpu}: {e!r}"
+    base = f"http://127.0.0.1:{port}"
+    if not _wait_endpoint_ready(base):
+        return False, f"ollama on {port}/GPU{gpu} did not become reachable"
+    return True, f"started ollama {port} on GPU{gpu}"
+
+
+def _slot_endpoint_env(slot: int, port: int) -> tuple[str, str]:
+    key = "OLLAMA_HOST" if slot == 1 else f"OLLAMA_HOST{slot}"
+    return key, f"http://127.0.0.1:{port}"
+
+
+def ensure_ollama_slot_daemons_for_chat(
+    *,
+    enabled: bool,
+    prefer: str | None = None,
+) -> OllamaAutopinResult:
+    """Auto-start one Ollama daemon per LLM slot on the 4-GPU Linux box.
+
+    This is intentionally a no-op everywhere except the strict workstation
+    shape. It never uses sudo/systemd and never changes context size.
+    """
+    if not enabled:
+        return OllamaAutopinResult("off", "not a 3-slot Ollama run")
+    if _env_truthy("AGENT_NO_AUTO_OLLAMA_PIN"):
+        return OllamaAutopinResult("off", "AGENT_NO_AUTO_OLLAMA_PIN=1")
+    if _manual_ollama_slot_hosts_set():
+        return OllamaAutopinResult("manual", "manual OLLAMA_HOST2/HOST3 in use")
+
+    pref = (prefer or os.environ.get("LLM_BACKEND") or "").strip().lower()
+    if pref in ("mlx", "openai", "oai", "anthropic", "claude"):
+        return OllamaAutopinResult("off", f"backend {pref!r} is not Ollama")
+    if pref in ("", "auto"):
+        try:
+            if _try_mlx() is not None:
+                return OllamaAutopinResult("off", "auto backend selected MLX")
+        except Exception:
+            pass
+
+    ok, reason = _is_four_gpu_linux_nvidia_workstation()
+    if not ok:
+        return OllamaAutopinResult("off", reason)
+
+    exe_candidates = _ollama_cli_candidates()
+    if not exe_candidates:
+        return OllamaAutopinResult("fallback", "no ollama executable found")
+    exe = exe_candidates[0]
+    models_dir = _resolve_ollama_models_dir()
+    slots = ((1, 11434, 1), (2, 11435, 2), (3, 11436, 3))
+    messages: list[str] = []
+
+    for slot, port, gpu in slots:
+        base = f"http://127.0.0.1:{port}"
+        owner = _port_owner_pid(port)
+        if owner is not None:
+            if _slot_daemon_matches(owner, gpu=gpu, models_dir=models_dir) and _endpoint_ready(base):
+                messages.append(f"{port}->GPU{gpu} already pinned")
+            else:
+                loaded = _ollama_running_models(base)
+                if loaded:
+                    unload_all_ollama_models(base)
+                stopped, msg = _terminate_same_user_ollama_serve(owner, port=port)
+                messages.append(msg)
+                if not stopped:
+                    return OllamaAutopinResult("fallback", "; ".join(messages))
+                started, msg = _start_ollama_slot_daemon(
+                    exe=exe, port=port, gpu=gpu, models_dir=models_dir,
+                )
+                messages.append(msg)
+                if not started:
+                    return OllamaAutopinResult("fallback", "; ".join(messages))
+        else:
+            started, msg = _start_ollama_slot_daemon(
+                exe=exe, port=port, gpu=gpu, models_dir=models_dir,
+            )
+            messages.append(msg)
+            if not started:
+                return OllamaAutopinResult("fallback", "; ".join(messages))
+
+        key, value = _slot_endpoint_env(slot, port)
+        os.environ[key] = value
+
+    endpoints = {slot: value for slot, port, _ in slots for _, value in [_slot_endpoint_env(slot, port)]}
+    return OllamaAutopinResult(
+        "auto-pinned",
+        " · ".join(messages),
+        endpoints=endpoints,
+    )
 
 
 def _ollama_endpoints() -> list[str]:
@@ -2198,6 +2513,11 @@ def mlx_endpoint_url() -> str:
     return _mlx_endpoint()
 
 
-def ollama_endpoint_url() -> str:
-    """Public alias for the resolved Ollama endpoint URL."""
-    return _ollama_endpoint()
+def ollama_endpoint_url(slot: int = 1) -> str:
+    """Public alias for the resolved Ollama endpoint URL (per model slot)."""
+    return _ollama_endpoint_for_slot(slot)
+
+
+def ollama_context_length(endpoint: str, model: str) -> int | None:
+    """Native context length from ``/api/show``; None if unreachable."""
+    return _ollama_show_context_length(endpoint, model)

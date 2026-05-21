@@ -664,15 +664,40 @@ async def stream_chat_with_retry(
     """
     last: StreamResult | None = None
     for attempt in range(max_retries + 1):
-        result = await stream_chat(
-            client,
-            model,
-            messages,
-            on_token,
-            options=options,
-            stall_seconds=stall_seconds,
-            overall_seconds=overall_seconds,
-        )
+        try:
+            result = await stream_chat(
+                client,
+                model,
+                messages,
+                on_token,
+                options=options,
+                stall_seconds=stall_seconds,
+                overall_seconds=overall_seconds,
+            )
+        except ollama.ResponseError as e:
+            msg = str(e).lower()
+            opts = dict(options or {})
+            # On single-GPU-pinned Ollama daemons, `num_gpu=999` can force an
+            # impossible all-GPU memory layout for Q8 + 262K ctx. Keep num_ctx
+            # intact, drop only the offload hint, and let Ollama choose layout.
+            if (
+                "memory layout cannot be allocated" in msg
+                and "num_gpu" in msg
+                and "num_gpu" in opts
+            ):
+                retry_opts = dict(opts)
+                retry_opts.pop("num_gpu", None)
+                result = await stream_chat(
+                    client,
+                    model,
+                    messages,
+                    on_token,
+                    options=retry_opts,
+                    stall_seconds=stall_seconds,
+                    overall_seconds=overall_seconds,
+                )
+            else:
+                raise
         last = result
         if not result.stalled:
             return result

@@ -201,18 +201,27 @@ ASSETS_FORMAT = FormatSpec(
         "Optional `size` is a string (\"64x64\", \"128x96\") or an int "
         "(square). Default 128 px square. Keep sprites small — 32–128 px "
         "is typical; over-large sprites blur when drawn small.",
-        "ANIMATION FRAMES: when you need a coherent sprite sequence "
-        "(walk cycle, attack windup, flap, idle bob), declare frame 1 "
-        "normally, then add `\"from_image\": \"<name-of-frame-1>\"` and "
-        "`\"strength\": 0.35-0.55` on subsequent frames. The harness "
-        "runs SD-Turbo img2img with the previous frame as the init "
-        "image, so frame 2 inherits frame 1's silhouette + palette and "
-        "only the pose changes. Without `from_image` each frame is an "
-        "independent txt2img and the result looks like two different "
-        "characters. Example: "
-        "{\"name\":\"alien_walk1\", \"prompt\":\"8-bit alien, legs together\"}, "
-        "{\"name\":\"alien_walk2\", \"prompt\":\"8-bit alien, legs apart\", "
-        "\"from_image\":\"alien_walk1\", \"strength\":0.45}.",
+        "ANIMATION FRAMES & ROSTER LIMITS: When you need coherent "
+        "animation sequences (walk cycles, idle bobs, attacks, shatters, "
+        "impact effects), declare frame 1 normally, then add "
+        "`\"from_image\": \"<name-of-frame-1>\"` and `\"strength\": 0.35-0.55` "
+        "on subsequent frames to run local SD-Turbo img2img. This chains "
+        "frames so they preserve the silhouette + palette, whereas "
+        "independent txt2img rolls look like different characters. "
+        "Examples: "
+        "{\"name\":\"hero_idle\", \"prompt\":\"8-bit hero holding sword\"}, "
+        "{\"name\":\"hero_walk1\", \"prompt\":\"8-bit hero walking, legs together\", \"from_image\":\"hero_idle\", \"strength\":0.40}, "
+        "{\"name\":\"hero_walk2\", \"prompt\":\"8-bit hero walking, legs apart\", \"from_image\":\"hero_walk1\", \"strength\":0.45}. "
+        "ROSTER PLANNING & TURNS: The local generator is capped at 24 assets per "
+        "turn to prevent runaway loops. If your full planned roster (e.g. idle states, "
+        "movement animations, and impact VFX for many pieces/characters) exceeds "
+        "this limit, do NOT compromise on variety or shrink the visual scope. Instead, "
+        "split generation across turns: prioritize base idles and core icons "
+        "on the first build turn, then emit subsequent mid-session <assets> blocks "
+        "on later turns for specialized walk/attack/VFX frames. Write your JS loading "
+        "code in a structured, extensible way (e.g., loading lists/arrays of sprites) "
+        "and handle missing or generating frames gracefully with fallback drawing so "
+        "each turn remains playable and testable while the diffuser catches up.",
         "SKIP <assets> ONLY for pure-DOM apps where text + emojis are "
         "enough — todo lists, calculators, tic-tac-toe, color pickers. "
         "If the canvas has any rendered entity with visual character, "
@@ -1228,6 +1237,23 @@ def continuation_instruction(current_file: str) -> str:
         "character-for-character. Reply with one or more <patch> "
         "blocks that address the feedback. Use a full <html_file> "
         "only if patches truly cannot express the change.\n\n"
+        # Surface the diffuser path on every post-ship turn. Without
+        # this reminder the model defaults to a code-only mental model
+        # and substitutes inline SVG / ctx primitives / AudioContext
+        # beeps for what should be generated media (chess trace 2026-
+        # 05-21 is the motivating case — model drew SVG instead of
+        # asking the diffuser for sprites). Genre-free; works for any
+        # goal, any subject matter.
+        "If the feedback asks for ART / sprites / new visual entities "
+        "(any genre, any subject), emit a fresh <assets> block in "
+        "this turn — the harness runs Z-Image-Turbo and writes PNGs "
+        "next to the HTML — plus ONE small <patch> that loads and "
+        "draws them with `new Image()` + `ctx.drawImage`. Same shape "
+        "for AUDIO: emit a <sounds> block + a small <patch> that "
+        "plays `new Audio(path)` on the matching event. Do NOT "
+        "substitute inline SVG, Unicode glyphs, ctx.fillRect, or "
+        "synthesized AudioContext beeps for generated media when "
+        "the user explicitly asked for art or sound.\n\n"
         f"{file_block}"
     )
 

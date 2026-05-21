@@ -329,6 +329,8 @@ def ollama_chat_load_options(snapshot: GpuSnapshot | None = None) -> dict[str, A
 
 def ollama_split_tip_short(snapshot: GpuSnapshot | None) -> str | None:
     """One-line split hint for the panel (no pid jargon)."""
+    if ollama_multi_daemon_setup():
+        return None
     indices = ollama_tensor_split_gpu_indices(snapshot)
     if not indices:
         return None
@@ -380,61 +382,212 @@ def format_four_gpu_summary(snapshot: GpuSnapshot | None) -> str:
     return " · ".join(parts)
 
 
-def _ollama_api_bases() -> list[str]:
+def _normalize_ollama_base(raw: str) -> str:
+    s = raw.strip().rstrip("/")
+    if not s.startswith("http"):
+        s = "http://" + s
+    return s
+
+
+def _normalize_hostport(raw: str) -> str:
+    s = (raw or "").strip().rstrip("/")
+    if s.startswith("http://"):
+        s = s[len("http://"):]
+    elif s.startswith("https://"):
+        s = s[len("https://"):]
+    if s.startswith("localhost:"):
+        s = "127.0.0.1:" + s.split(":", 1)[1]
+    return s
+
+
+def _proc_environ(pid: int) -> dict[str, str]:
+    try:
+        with open(f"/proc/{pid}/environ", "rb") as f:
+            raw = f.read()
+    except OSError:
+        return {}
+    out: dict[str, str] = {}
+    for item in raw.split(b"\0"):
+        if not item or b"=" not in item:
+            continue
+        k, v = item.split(b"=", 1)
+        out[k.decode(errors="replace")] = v.decode(errors="replace")
+    return out
+
+
+def _proc_cmdline(pid: int) -> str:
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            data = f.read()
+    except OSError:
+        return ""
+    return data.replace(b"\0", b" ").decode(errors="replace").strip()
+
+
+def ollama_endpoint_gpu_index(endpoint: str) -> int | None:
+    """Physical GPU pinned to an `ollama serve` endpoint via CUDA_VISIBLE_DEVICES."""
+    want = _normalize_hostport(endpoint or "")
+    if not want:
+        return None
+    try:
+        r = subprocess.run(
+            ["pgrep", "-f", "ollama serve"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    if r.returncode != 0:
+        return None
+    for raw_pid in (r.stdout or "").split():
+        try:
+            pid = int(raw_pid)
+        except ValueError:
+            continue
+        if "ollama" not in _proc_cmdline(pid).lower():
+            continue
+        env = _proc_environ(pid)
+        host = _normalize_hostport(env.get("OLLAMA_HOST") or "")
+        if host != want:
+            continue
+        visible = (env.get("CUDA_VISIBLE_DEVICES") or "").strip()
+        # Auto-pinned daemons use one visible physical GPU. If someone
+        # configured a list, this endpoint is not a single-GPU pin.
+        if "," in visible or not visible:
+            return None
+        try:
+            return int(visible)
+        except ValueError:
+            return None
+    return None
+
+
+def ollama_all_api_bases() -> list[str]:
+    """All Ollama HTTP bases: OLLAMA_HOST (+ HOST2/HOST3) and loopback fallbacks."""
     out: list[str] = []
     seen: set[str] = set()
-    for raw in (
-        os.environ.get("OLLAMA_HOST") or "",
-        "127.0.0.1:11434",
-        "localhost:11434",
-    ):
-        s = raw.strip().rstrip("/")
-        if not s:
+    for key in ("OLLAMA_HOST", "OLLAMA_HOST2", "OLLAMA_HOST3"):
+        raw = (os.environ.get(key) or "").strip()
+        if not raw and key == "OLLAMA_HOST":
+            raw = "127.0.0.1:11434"
+        if not raw:
             continue
-        if not s.startswith("http"):
-            s = "http://" + s
+        s = _normalize_ollama_base(raw)
+        if s not in seen:
+            seen.add(s)
+            out.append(s)
+    for fallback in ("127.0.0.1:11434", "localhost:11434"):
+        s = _normalize_ollama_base(fallback)
         if s not in seen:
             seen.add(s)
             out.append(s)
     return out or ["http://127.0.0.1:11434"]
 
 
+def _ollama_api_bases() -> list[str]:
+    """Primary + loopback probes (backward-compatible alias)."""
+    return ollama_all_api_bases()
+
+
+def ollama_multi_daemon_setup() -> bool:
+    """True when model2/model3 use separate Ollama ports (intentional multi-GPU)."""
+    return bool(
+        (os.environ.get("OLLAMA_HOST2") or "").strip()
+        or (os.environ.get("OLLAMA_HOST3") or "").strip()
+    )
+
+
+def ollama_ps_at_endpoint(base: str) -> list[dict[str, Any]]:
+    """Loaded models on one Ollama daemon (/api/ps)."""
+    endpoint = _normalize_ollama_base(base)
+    try:
+        req = urllib.request.Request(endpoint.rstrip("/") + "/api/ps", method="GET")
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode())
+    except (
+        urllib.error.URLError,
+        TimeoutError,
+        json.JSONDecodeError,
+        OSError,
+        ValueError,
+    ):
+        return []
+    if not isinstance(data, dict):
+        return []
+    out: list[dict[str, Any]] = []
+    for m in data.get("models") or []:
+        if not isinstance(m, dict):
+            continue
+        name = (m.get("name") or m.get("model") or "").strip()
+        if not name:
+            continue
+        size = int(m.get("size") or 0)
+        vram = int(m.get("size_vram") or 0)
+        out.append({
+            "name": name,
+            "endpoint": endpoint,
+            "size_bytes": size,
+            "size_vram_bytes": vram,
+            "vram_gib": round(vram / (1024 ** 3), 1) if vram else None,
+        })
+    return out
+
+
+def gpu_indices_for_ollama_loaded_model(
+    snapshot: GpuSnapshot | None,
+    *,
+    vram_bytes: int | None = None,
+    vram_gib: float | None = None,
+) -> list[int]:
+    """Best GPU index for one loaded Ollama model (single card, not global split)."""
+    if snapshot is None:
+        return []
+    target_mib = 0
+    if vram_bytes and vram_bytes > 0:
+        target_mib = int(vram_bytes / (1024 * 1024))
+    elif vram_gib and vram_gib > 0:
+        target_mib = int(vram_gib * 1024)
+    by_pid: dict[int, dict[int, int]] = {}
+    for p in snapshot.processes:
+        if "ollama" not in p.process_name.lower():
+            continue
+        mem = p.memory_mib or 0
+        if mem < _LLM_OLLAMA_SLICE_MIB:
+            continue
+        by_pid.setdefault(p.pid, {})
+        by_pid[p.pid][p.gpu_index] = by_pid[p.pid].get(p.gpu_index, 0) + mem
+    if not by_pid:
+        return []
+    best_gpu: int | None = None
+    best_score = -1.0
+    for per_gpu in by_pid.values():
+        total = sum(per_gpu.values())
+        primary = max(per_gpu, key=lambda g: per_gpu[g])
+        if target_mib > 0:
+            # Match this model's /api/ps VRAM to the runner PID footprint.
+            score = 1.0 / (1.0 + abs(total - target_mib))
+        else:
+            score = float(total)
+        if score > best_score:
+            best_score = score
+            best_gpu = primary
+    return [best_gpu] if best_gpu is not None else []
+
+
 def ollama_loaded_models() -> list[dict[str, Any]]:
-    """Models currently resident in Ollama (/api/ps), best-effort."""
-    for base in _ollama_api_bases():
-        try:
-            req = urllib.request.Request(
-                base.rstrip("/") + "/api/ps", method="GET",
-            )
-            with urllib.request.urlopen(req, timeout=3) as resp:
-                data = json.loads(resp.read().decode())
-        except (
-            urllib.error.URLError,
-            TimeoutError,
-            json.JSONDecodeError,
-            OSError,
-            ValueError,
-        ):
-            continue
-        if not isinstance(data, dict):
-            continue
-        out: list[dict[str, Any]] = []
-        for m in data.get("models") or []:
-            if not isinstance(m, dict):
+    """Models currently resident in Ollama (/api/ps), merged across all daemons."""
+    merged: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for base in ollama_all_api_bases():
+        for row in ollama_ps_at_endpoint(base):
+            key = (row["endpoint"], row["name"])
+            if key in seen:
                 continue
-            name = (m.get("name") or m.get("model") or "").strip()
-            if not name:
-                continue
-            size = int(m.get("size") or 0)
-            vram = int(m.get("size_vram") or 0)
-            out.append({
-                "name": name,
-                "size_bytes": size,
-                "size_vram_bytes": vram,
-                "vram_gib": round(vram / (1024 ** 3), 1) if vram else None,
-            })
-        return out
-    return []
+            seen.add(key)
+            merged.append(row)
+    return merged
 
 
 def infer_ollama_gpu_indices(
