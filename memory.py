@@ -77,11 +77,22 @@ DEFAULT_SKELETON_NAME = "canvas_basic.html"
 # token bleed.
 _SKELETON_MIN_SIM = 0.3
 CANVAS_SKELETON_V2_NAME = "canvas_basic_v2.html"
+# v2 sidecar: deliberately generic tokens so it wins as the FALLBACK when no
+# modality skeleton matches, NOT so it competes with modality scaffolds. 4/4
+# May 20-21 traces (chess, pac, doom, FPS) fell through to the bare v1 default
+# at score 0.0 — v2 pre-empts the focus-blur / dt-cap / restart-cleanup /
+# DPR / lazy-audio / HUD pointer-events failures those sessions repeatedly hit.
+CANVAS_BASIC_V2_SIDECAR = '{"goal": "canvas 2d generic action arcade default fallback"}'
 CANVAS_3D_SKELETON_NAME = "canvas_3d_basic.html"
 CANVAS_3D_SKELETON_SIDECAR = '{"goal": "3D space vector WebGL three.js coordinate projection game first person perspective"}'
 
 CANVAS_GRID_SKELETON_NAME = "canvas_grid_basic.html"
-CANVAS_GRID_SKELETON_SIDECAR = '{"goal": "grid continuous tile corridor snap slide sokoban pacman maze"}'
+# Grid sidecar — pac/man/ghost/ghosts added 2026-05-21 after May 20-21
+# pac-man trace fell through to canvas_basic.html at score 0.0 because the
+# goal "pac man with ghosts" tokenized to ["pac","man","ghosts"], none of
+# which matched the existing single-token "pacman". Splitting both spellings
+# in the sidecar covers either user phrasing without committing to a genre.
+CANVAS_GRID_SKELETON_SIDECAR = '{"goal": "grid continuous tile corridor snap slide sokoban pacman pac man ghost ghosts maze"}'
 
 CANVAS_PLATFORMER_SKELETON_NAME = "canvas_platformer_basic.html"
 CANVAS_PLATFORMER_SKELETON_SIDECAR = '{"goal": "platformer gravity jump climbing ladders oneway donkey kong lode runner"}'
@@ -118,6 +129,20 @@ CANVAS_LIT_DUNGEON_SIDECAR = '{"goal": "lighting light composite dynamic dungeon
 
 CANVAS_VFX_PARTICLES_SKELETON_NAME = "canvas_vfx_particles_basic.html"
 CANVAS_VFX_PARTICLES_SIDECAR = '{"goal": "vfx visual effects particles shake screenshake pooling explosion magic juicy float feedback damage impact text"}'
+
+# Turn-based board scaffold: click-to-select / click-to-move on a grid with
+# alternating players. Added 2026-05-21 after chess-trace evidence — bare
+# canvas_basic.html was being used for chess/checkers/go and the model burned
+# iters re-discovering board indexing + click handling. Genre-free sidecar
+# tokens (turn-based / board / select / move + a few canonical examples).
+CANVAS_BOARD_TURN_SKELETON_NAME = "canvas_board_turn_basic.html"
+CANVAS_BOARD_TURN_SKELETON_SIDECAR = '{"goal": "turn based board click cell select move alternate player hotseat chess checkers go reversi tic tac toe othello"}'
+
+# DOM-only scaffold for UI-style apps where canvas is overkill: calculator,
+# tic-tac-toe, todo lists, simple word games. The existing ui-driven-no-canvas
+# playbook bullet pointed in this direction but provided no starter shape.
+CANVAS_DOM_SKELETON_NAME = "canvas_dom_basic.html"
+CANVAS_DOM_SKELETON_SIDECAR = '{"goal": "dom html buttons table calculator todo word puzzle text form input click no canvas tic tac toe simple"}'
 DEFAULT_SKELETON = """<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1887,6 +1912,297 @@ CANVAS_VFX_PARTICLES_SKELETON = """<!DOCTYPE html>
 """
 
 
+# Turn-based board scaffold. Added 2026-05-21 to stop chess/checkers/go goals
+# falling through to canvas_basic.html. Provides: 8x8 grid, currentPlayer,
+# selected cell, click-to-select / click-to-move state machine, HUD showing
+# whose turn it is, and a stub legalMoves(from) the model REPLACES with real
+# rules. Window.gameState exposed so probes can see it (addresses the
+# recurring window.state-undefined failure across May 20-21 traces).
+CANVAS_BOARD_TURN_SKELETON = """<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Board Game</title>
+<style>
+  html,body { margin:0; height:100%; background:#1a1a2e; color:#e7ecff;
+    font:16px/1.4 system-ui,sans-serif; overflow:hidden; user-select:none; }
+  #wrap { position:fixed; inset:0; display:grid; place-items:center; gap:12px;
+    grid-template-rows:auto auto auto; }
+  canvas { background:#2a2a3e; border-radius:8px; touch-action:none;
+    box-shadow:0 10px 40px #0008; image-rendering:pixelated; }
+  #hud { font-size:18px; opacity:.9; pointer-events:none; }
+  #ctrls { display:flex; gap:8px; }
+  button { background:#3b62ff; color:#fff; border:0; padding:8px 14px;
+    border-radius:6px; font-size:14px; cursor:pointer; }
+  button:hover { filter:brightness(1.1); }
+</style></head>
+<body>
+<div id="wrap">
+  <div id="hud">Turn: <span id="turn">White</span> &nbsp; <span id="msg"></span></div>
+  <canvas id="c" width="480" height="480"></canvas>
+  <div id="ctrls"><button id="restart">Restart</button></div>
+</div>
+<script>
+(() => {
+  "use strict";
+  const cvs = document.getElementById("c");
+  const ctx = cvs.getContext("2d");
+  const turnEl = document.getElementById("turn");
+  const msgEl  = document.getElementById("msg");
+  const SIZE = 8, TILE = 60;
+
+  // ---- State (exposed on window so probes can read it) ------------------
+  const state = {
+    board: [],            // board[r][c] = null | { kind, owner: 'W'|'B' }
+    currentPlayer: "W",   // 'W' or 'B'
+    selected: null,       // { r, c } or null
+    legalTargets: [],     // [{r,c}, ...] for the selected piece
+    over: false,
+    winner: null,
+  };
+  window.gameState = state;
+  window.game = { reset, currentPlayer: () => state.currentPlayer };
+
+  // ---- Init / reset -----------------------------------------------------
+  function reset() {
+    state.board = Array.from({ length: SIZE }, () => Array(SIZE).fill(null));
+    // Demo placement: model REPLACES this with real piece setup.
+    state.board[0][0] = { kind: "piece", owner: "B" };
+    state.board[7][7] = { kind: "piece", owner: "W" };
+    state.currentPlayer = "W";
+    state.selected = null;
+    state.legalTargets = [];
+    state.over = false;
+    state.winner = null;
+    msgEl.textContent = "";
+    turnEl.textContent = state.currentPlayer === "W" ? "White" : "Black";
+    draw();
+  }
+  document.getElementById("restart").addEventListener("click", reset);
+
+  // ---- Rules stub (model REPLACES with real logic) ----------------------
+  function legalMoves(from) {
+    // Demo: any empty cell is "legal". Real games override this entirely.
+    const out = [];
+    for (let r = 0; r < SIZE; r++) for (let c = 0; c < SIZE; c++) {
+      if (!state.board[r][c]) out.push({ r, c });
+    }
+    return out;
+  }
+
+  function applyMove(from, to) {
+    state.board[to.r][to.c] = state.board[from.r][from.c];
+    state.board[from.r][from.c] = null;
+    state.currentPlayer = state.currentPlayer === "W" ? "B" : "W";
+    turnEl.textContent = state.currentPlayer === "W" ? "White" : "Black";
+  }
+
+  // ---- Pointer -> cell --------------------------------------------------
+  function cellFromPointer(e) {
+    const rect = cvs.getBoundingClientRect();
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    const c = Math.floor(mx / TILE), r = Math.floor(my / TILE);
+    if (r < 0 || r >= SIZE || c < 0 || c >= SIZE) return null;
+    return { r, c };
+  }
+
+  cvs.addEventListener("pointerdown", e => {
+    if (state.over) return;
+    const cell = cellFromPointer(e);
+    if (!cell) return;
+
+    if (state.selected) {
+      const ok = state.legalTargets.some(t => t.r === cell.r && t.c === cell.c);
+      if (ok) {
+        applyMove(state.selected, cell);
+        state.selected = null;
+        state.legalTargets = [];
+      } else {
+        // Clicking own piece reselects; otherwise deselect.
+        const p = state.board[cell.r][cell.c];
+        if (p && p.owner === state.currentPlayer) {
+          state.selected = cell;
+          state.legalTargets = legalMoves(cell);
+        } else {
+          state.selected = null;
+          state.legalTargets = [];
+        }
+      }
+    } else {
+      const p = state.board[cell.r][cell.c];
+      if (p && p.owner === state.currentPlayer) {
+        state.selected = cell;
+        state.legalTargets = legalMoves(cell);
+      }
+    }
+    draw();
+  });
+
+  // ---- Draw -------------------------------------------------------------
+  function draw() {
+    try {
+      for (let r = 0; r < SIZE; r++) for (let c = 0; c < SIZE; c++) {
+        ctx.fillStyle = ((r + c) % 2 === 0) ? "#e6d3a8" : "#7a5a3a";
+        ctx.fillRect(c * TILE, r * TILE, TILE, TILE);
+      }
+      if (state.selected) {
+        ctx.strokeStyle = "#ffd84a"; ctx.lineWidth = 3;
+        ctx.strokeRect(state.selected.c * TILE + 2, state.selected.r * TILE + 2,
+                       TILE - 4, TILE - 4);
+      }
+      for (const t of state.legalTargets) {
+        ctx.fillStyle = "rgba(80,200,120,0.45)";
+        ctx.beginPath();
+        ctx.arc(t.c * TILE + TILE / 2, t.r * TILE + TILE / 2, TILE * 0.18, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      for (let r = 0; r < SIZE; r++) for (let c = 0; c < SIZE; c++) {
+        const p = state.board[r][c];
+        if (!p) continue;
+        ctx.fillStyle = p.owner === "W" ? "#fafafa" : "#1a1a1a";
+        ctx.beginPath();
+        ctx.arc(c * TILE + TILE / 2, r * TILE + TILE / 2, TILE * 0.35, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = "#444"; ctx.lineWidth = 2; ctx.stroke();
+      }
+    } catch (err) { console.error("draw failed:", err); }
+  }
+
+  reset();
+})();
+</script>
+</body></html>
+"""
+
+
+# DOM-only scaffold. For UI-style apps where canvas would be over-engineering:
+# tic-tac-toe, calculators, todo lists, word games. Uses <table> with
+# data-r/data-c attributes + event delegation. Window.gameState exposed for
+# probes. Added 2026-05-21 to complement the ui-driven-no-canvas playbook
+# bullet which had no scaffold backing it.
+CANVAS_DOM_SKELETON = """<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DOM App</title>
+<style>
+  html,body { margin:0; min-height:100%; background:#1a1a2e; color:#e7ecff;
+    font:16px/1.4 system-ui,sans-serif; }
+  #app { max-width:520px; margin:32px auto; padding:24px;
+    background:#2a2a3e; border-radius:12px; box-shadow:0 10px 40px #0008; }
+  h1 { margin:0 0 16px; font-size:22px; }
+  #hud { display:flex; justify-content:space-between; margin-bottom:12px;
+    font-size:16px; opacity:.9; }
+  table { border-collapse:collapse; margin:8px auto; }
+  td button { width:64px; height:64px; font-size:28px; cursor:pointer;
+    background:#1a1a2e; color:#e7ecff; border:2px solid #3b62ff;
+    border-radius:8px; user-select:none; }
+  td button:hover:not(:disabled) { filter:brightness(1.2); }
+  td button:disabled { opacity:.7; cursor:default; }
+  #ctrls { display:flex; gap:8px; justify-content:center; margin-top:12px; }
+  button.action { background:#3b62ff; color:#fff; border:0; padding:8px 14px;
+    border-radius:6px; font-size:14px; cursor:pointer; }
+</style></head>
+<body>
+<div id="app">
+  <h1>App</h1>
+  <div id="hud"><span id="turn">Turn: X</span><span id="msg"></span></div>
+  <table id="board"></table>
+  <div id="ctrls"><button class="action" id="restart">Restart</button></div>
+</div>
+<script>
+(() => {
+  "use strict";
+  const SIZE = 3;
+  const boardEl = document.getElementById("board");
+  const turnEl  = document.getElementById("turn");
+  const msgEl   = document.getElementById("msg");
+
+  // ---- State (exposed on window so probes can read it) ------------------
+  const state = {
+    cells: [],           // flat length SIZE*SIZE; "" | "X" | "O"
+    currentPlayer: "X",  // "X" or "O"
+    over: false,
+    winner: null,
+    score: 0,            // common probe target
+  };
+  window.gameState = state;
+  window.game = { reset, currentPlayer: () => state.currentPlayer };
+
+  function buildBoard() {
+    boardEl.innerHTML = "";
+    for (let r = 0; r < SIZE; r++) {
+      const tr = document.createElement("tr");
+      for (let c = 0; c < SIZE; c++) {
+        const td = document.createElement("td");
+        const b = document.createElement("button");
+        b.dataset.r = String(r); b.dataset.c = String(c);
+        td.appendChild(b); tr.appendChild(td);
+      }
+      boardEl.appendChild(tr);
+    }
+  }
+
+  function reset() {
+    state.cells = Array(SIZE * SIZE).fill("");
+    state.currentPlayer = "X";
+    state.over = false;
+    state.winner = null;
+    state.score = 0;
+    msgEl.textContent = "";
+    turnEl.textContent = "Turn: " + state.currentPlayer;
+    render();
+  }
+  document.getElementById("restart").addEventListener("click", reset);
+
+  // Event delegation on the table — one listener for the whole board.
+  boardEl.addEventListener("click", e => {
+    const btn = e.target.closest("button");
+    if (!btn || state.over) return;
+    const r = +btn.dataset.r, c = +btn.dataset.c;
+    const idx = r * SIZE + c;
+    if (state.cells[idx]) return;
+    state.cells[idx] = state.currentPlayer;
+    state.score += 1;
+    if (checkWin(state.currentPlayer)) {
+      state.over = true; state.winner = state.currentPlayer;
+      msgEl.textContent = state.currentPlayer + " wins!";
+    } else if (state.cells.every(x => x)) {
+      state.over = true;
+      msgEl.textContent = "Draw";
+    } else {
+      state.currentPlayer = state.currentPlayer === "X" ? "O" : "X";
+      turnEl.textContent = "Turn: " + state.currentPlayer;
+    }
+    render();
+  });
+
+  function checkWin(p) {
+    const lines = [
+      [0,1,2],[3,4,5],[6,7,8],          // rows
+      [0,3,6],[1,4,7],[2,5,8],          // cols
+      [0,4,8],[2,4,6],                  // diagonals
+    ];
+    return lines.some(L => L.every(i => state.cells[i] === p));
+  }
+
+  function render() {
+    try {
+      const btns = boardEl.querySelectorAll("button");
+      btns.forEach(b => {
+        const idx = (+b.dataset.r) * SIZE + (+b.dataset.c);
+        b.textContent = state.cells[idx];
+        b.disabled = !!state.cells[idx] || state.over;
+      });
+    } catch (err) { console.error("render failed:", err); }
+  }
+
+  buildBoard();
+  reset();
+})();
+</script>
+</body></html>
+"""
+
+
 # Tokens we strip when computing similarity. Mostly stop-words plus generic
 # game-domain words that don't help discriminate (e.g. "game" matches every
 # past entry and so adds no signal).
@@ -1904,6 +2220,135 @@ _TOKEN_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9]*")
 
 def _tokenize(s: str) -> list[str]:
     return [t.lower() for t in _TOKEN_RE.findall(s) if t.lower() not in _STOPWORDS]
+
+
+# Modality keyword sets — genre-free per the project rule. Pure rendering /
+# UI shape (turn-based-board, DOM-only, 3D), NOT subject matter (chess,
+# tic-tac-toe, doom). Canonical game names appear only as token hooks the
+# user is likely to type, not as game-specific scaffolds. Added 2026-05-21
+# after May 20-21 trace evidence: chess / pac / doom / FPS all fell through
+# to canvas_basic.html at score 0.0 because Jaccard on short goals (1-2
+# non-stopword tokens) cannot clear _SKELETON_MIN_SIM = 0.3.
+_BOARD_KEYWORDS: frozenset[str] = frozenset({
+    "board", "chess", "checkers", "checker", "go", "reversi", "othello",
+    "hotseat", "turn-based", "turnbased",
+    "tic", "tac", "toe", "tic-tac-toe", "tictactoe",
+    "two-player", "twoplayer", "hot-seat",
+})
+
+_DOM_KEYWORDS: frozenset[str] = frozenset({
+    "calculator", "todo", "form", "word", "puzzle",
+    "tic-tac-toe", "tictactoe", "button", "buttons", "table", "input",
+    "spreadsheet", "checklist",
+})
+
+# Hint: if the goal explicitly asks for canvas/animation, DOM scaffold is
+# the wrong fit even if it has DOM-keyword overlap. Used as a NEGATIVE
+# filter inside _detect_dom_intent.
+_CANVAS_HINT_KEYWORDS: frozenset[str] = frozenset({
+    "canvas", "animation", "animated", "sprite", "sprites", "render",
+    "rendered", "draw", "particle", "particles", "physics", "shader",
+    "webgl",
+})
+
+# 3D rendering modality. Mirrors prompts_v1._3D_KEYWORDS to avoid a new
+# cross-module import — keep in sync if either side changes.
+_3D_MODALITY_KEYWORDS: frozenset[str] = frozenset({
+    "3d", "three", "threejs",
+    "first-person", "firstperson", "fps",
+    "raycaster", "raycasting", "raycast",
+    "voxel", "voxels",
+    "wolfenstein", "doom", "doom-like", "doomlike",
+    "minecraft", "minecraft-like", "minecraftlike",
+    "perspective",
+})
+
+# When ≥ this many modality tokens hit, the modality skeleton wins.
+# Threshold of 2 balances "needs more than coincidence" against the trace
+# evidence that chess/doom/FPS goals have only 1-2 modality tokens at most.
+_MODALITY_MIN_HITS = 2
+
+# Lone-hook tokens that are SO specific they justify a modality match on
+# their own (1 hit is enough). Keeps "chess" / "doom" / "tic-tac-toe" from
+# needing a second keyword to find their scaffold.
+_BOARD_STRONG_HOOKS: frozenset[str] = frozenset({
+    "chess", "checkers", "reversi", "othello", "tictactoe", "tic-tac-toe",
+})
+_DOM_STRONG_HOOKS: frozenset[str] = frozenset({
+    "calculator", "todo", "tictactoe", "tic-tac-toe",
+})
+_3D_STRONG_HOOKS: frozenset[str] = frozenset({
+    "doom", "wolfenstein", "minecraft", "raycaster", "raycasting",
+    "first-person", "firstperson", "voxel",
+})
+
+
+def _modality_tokens(goal: str) -> list[str]:
+    """Lowercased word tokens including digits + hyphenated forms.
+
+    Different from `_tokenize`: keeps digits (so "3d" survives) and does
+    not strip stopwords (modality words are rarely stopwords; the safety
+    net just adds noise here). Also emits two- and three-word joined
+    forms ("first person" -> "firstperson", "tic-tac-toe" stays as-is).
+    """
+    if not goal:
+        return []
+    s = goal.lower()
+    raw = [w for w in re.findall(r"[a-z0-9-]+", s)]
+    if not raw:
+        return raw
+    out: list[str] = list(raw)
+    for i in range(len(raw) - 1):
+        joined = raw[i] + raw[i + 1]
+        out.append(joined)
+        out.append(raw[i] + "-" + raw[i + 1])
+    for i in range(len(raw) - 2):
+        out.append(raw[i] + raw[i + 1] + raw[i + 2])
+        out.append(raw[i] + "-" + raw[i + 1] + "-" + raw[i + 2])
+    return out
+
+
+def _detect_board_intent(goal: str) -> list[str]:
+    """Return list of board-modality keywords found in `goal`. Empty means
+    the board scaffold is NOT a match. Genre-free per project rule —
+    these are UI-shape words (board, turn-based) + canonical token hooks
+    a user is likely to type.
+    """
+    toks = _modality_tokens(goal)
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in toks:
+        if t in _BOARD_KEYWORDS and t not in seen:
+            seen.add(t); out.append(t)
+    return out
+
+
+def _detect_dom_intent(goal: str) -> list[str]:
+    """Return DOM-modality keywords. Empty if the goal mentions canvas /
+    animation / sprites (those override toward a canvas scaffold even if
+    DOM keywords also appear).
+    """
+    toks = _modality_tokens(goal)
+    if any(t in _CANVAS_HINT_KEYWORDS for t in toks):
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in toks:
+        if t in _DOM_KEYWORDS and t not in seen:
+            seen.add(t); out.append(t)
+    return out
+
+
+def _detect_3d_intent(goal: str) -> list[str]:
+    """Return 3D-modality keywords. Mirrors the prompts_v1 detector but
+    kept local so memory.py doesn't import the prompt module."""
+    toks = _modality_tokens(goal)
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in toks:
+        if t in _3D_MODALITY_KEYWORDS and t not in seen:
+            seen.add(t); out.append(t)
+    return out
 
 
 def _score_similarity(a_tokens: list[str], b_tokens: list[str]) -> float:
@@ -1947,10 +2392,30 @@ class GameMemory:
     """
 
     def __init__(self, root: str | Path = "memory"):
-        self.root = Path(root)
-        self.skeletons_dir = self.root / "skeletons"
-        self.goals_dir = self.root / "goals"
-        self.mistakes_path = self.root / "mistakes.jsonl"
+        self._input_root = Path(root)
+        
+        # Detect standard run vs custom test run
+        if self._input_root.name == "memory" and self._input_root.parent == Path("."):
+            self.base_root = self._input_root
+            self.live_root = Path("games/game-memory")
+            self.short_term_root = Path("games")
+        else:
+            self.base_root = self._input_root
+            self.live_root = self._input_root
+            self.short_term_root = self._input_root
+
+        # Keep root pointing to live_root for all legacy/writing lookups
+        self.root = self.live_root
+
+        self.base_skeletons_dir = self.base_root / "skeletons"
+        self.live_skeletons_dir = self.live_root / "skeletons"
+        self.goals_dir = self.short_term_root / "goals"
+        self.base_mistakes_path = self.base_root / "mistakes.jsonl"
+        self.live_mistakes_path = self.live_root / "mistakes.jsonl"
+
+        # Compatibility properties for legacy accesses
+        self.skeletons_dir = self.live_skeletons_dir
+        self.mistakes_path = self.live_mistakes_path
 
     # --- bootstrap ---------------------------------------------------------
 
@@ -1960,12 +2425,16 @@ class GameMemory:
         Cheap to call repeatedly; agent constructor calls it once.
         """
         try:
-            self.skeletons_dir.mkdir(parents=True, exist_ok=True)
+            self.base_skeletons_dir.mkdir(parents=True, exist_ok=True)
+            self.live_skeletons_dir.mkdir(parents=True, exist_ok=True)
             self.goals_dir.mkdir(parents=True, exist_ok=True)
 
-            # List of all default templates to bootstrap
+            # List of all default templates to bootstrap.
+            # v2 + board + dom added 2026-05-21 — see plan
+            # memory_completeness_review for evidence.
             templates = [
                 (DEFAULT_SKELETON_NAME, DEFAULT_SKELETON, None),
+                (CANVAS_SKELETON_V2_NAME, CANVAS_SKELETON_V2, CANVAS_BASIC_V2_SIDECAR),
                 (CANVAS_3D_SKELETON_NAME, CANVAS_3D_SKELETON, CANVAS_3D_SKELETON_SIDECAR),
                 (CANVAS_GRID_SKELETON_NAME, CANVAS_GRID_SKELETON, CANVAS_GRID_SKELETON_SIDECAR),
                 (CANVAS_PLATFORMER_SKELETON_NAME, CANVAS_PLATFORMER_SKELETON, CANVAS_PLATFORMER_SKELETON_SIDECAR),
@@ -1980,10 +2449,12 @@ class GameMemory:
                 (CANVAS_AR_FLICK_SKELETON_NAME, CANVAS_AR_FLICK_SKELETON, CANVAS_AR_FLICK_SKELETON_SIDECAR),
                 (CANVAS_LIT_DUNGEON_SKELETON_NAME, CANVAS_LIT_DUNGEON_SKELETON, CANVAS_LIT_DUNGEON_SIDECAR),
                 (CANVAS_VFX_PARTICLES_SKELETON_NAME, CANVAS_VFX_PARTICLES_SKELETON, CANVAS_VFX_PARTICLES_SIDECAR),
+                (CANVAS_BOARD_TURN_SKELETON_NAME, CANVAS_BOARD_TURN_SKELETON, CANVAS_BOARD_TURN_SKELETON_SIDECAR),
+                (CANVAS_DOM_SKELETON_NAME, CANVAS_DOM_SKELETON, CANVAS_DOM_SKELETON_SIDECAR),
             ]
 
             for name, html, sidecar in templates:
-                html_file = self.skeletons_dir / name
+                html_file = self.base_skeletons_dir / name
                 if not html_file.exists():
                     html_file.write_text(html, encoding="utf-8")
                 if sidecar is not None:
@@ -2000,15 +2471,48 @@ class GameMemory:
     def retrieve_skeleton(self, goal: str) -> SkeletonHit:
         """Pick the best skeleton for a new goal.
 
-        Strategy: among all skeletons (default + past winning games), pick
-        the one whose tagged source goal has the highest token-Jaccard with
-        the current goal. Falls back to the bundled default with score 0.0.
+        Strategy:
+        1. MODALITY DETECTOR (added 2026-05-21) — pure keyword match on
+           board/DOM/3D intent. Short goals like "chess game" or "doom"
+           tokenize to 1-2 non-stopword tokens; weighted Jaccard cannot
+           clear the 0.30 threshold for them. 4/4 May 20-21 traces
+           (chess, pac, doom, FPS) hit this failure mode. Strong-hook
+           lookup (single decisive token like "chess" / "doom" / "tictactoe")
+           catches the 1-keyword case; otherwise ≥ _MODALITY_MIN_HITS
+           wins. Genre-free per project rule (UI shape, not subject).
+        2. JACCARD over all skeletons + past wins (existing behavior).
+        3. FALLBACK is now canvas_basic_v2 (was canvas_basic). v2 pre-
+           empts focus-blur / dt-cap / restart-cleanup / DPR-resize /
+           lazy-audio / HUD pointer-events failures that the medium 27B
+           model keeps reinventing wrong. v1 stays reachable via
+           skeleton_mode="default" for tune A/B baselines.
         """
         self.ensure()
         goal_toks = _tokenize(goal)
 
+        # ---- 1. Modality detector (before Jaccard) -----------------------
+        modality_pick = self._modality_skeleton(goal)
+        if modality_pick is not None:
+            return modality_pick
+
         best: SkeletonHit | None = None
-        for path in sorted(self.skeletons_dir.glob("*.html")):
+        paths: dict[str, Path] = {}
+        # Base skeletons
+        if self.base_skeletons_dir.exists():
+            for p in self.base_skeletons_dir.glob("*.html"):
+                paths[p.name] = p
+        # Live skeletons (override base)
+        if self.live_skeletons_dir.exists():
+            for p in self.live_skeletons_dir.glob("*.html"):
+                paths[p.name] = p
+
+        for name, path in sorted(paths.items()):
+            # v1 (canvas_basic.html) is bootstrapped to disk only so
+            # skeleton_mode="default" tune baseline has a file to read.
+            # It is NOT a retrieval candidate — v2 is the new fallback.
+            # (Locked 2026-05-21 — see retrieve_skeleton docstring.)
+            if name == DEFAULT_SKELETON_NAME:
+                continue
             try:
                 html = path.read_text(encoding="utf-8")
             except Exception:
@@ -2025,6 +2529,13 @@ class GameMemory:
 
             if source_goal:
                 score = _score_similarity(goal_toks, _tokenize(source_goal))
+                # A 0.0 sidecar match means NO token overlap whatsoever — not
+                # a real candidate. Skip so we don't accidentally win ties
+                # against the v2 fallback by being alphabetically first.
+                # (Caught 2026-05-21 when "asteroids" picked canvas_3d_basic
+                # at 0.0 because 3d was first in sorted order.)
+                if score <= 0.0:
+                    continue
             elif path.name == DEFAULT_SKELETON_NAME:
                 # Default is a no-op match — only picked if nothing else hits.
                 score = 0.0
@@ -2045,31 +2556,90 @@ class GameMemory:
             # bad scaffold on a mismatched goal). If the winner is a
             # past-win match below the threshold, fall back to the
             # bundled empty template — the model builds fresh instead
-            # of fighting wrong structure. Manually-added skeletons
-            # (score=0.05, no sidecar) also fall through; the default
-            # itself (score=0.0, name match) is exempt so it can still
-            # win when it IS the best.
+            # of fighting wrong structure. BUNDLED skeletons (canvas_*)
+            # with curated sidecars are EXEMPT from the threshold —
+            # their sidecar tokens are deliberately picked, so even a
+            # 0.15 weighted-Jaccard hit (pac-man against the grid sidecar
+            # = 3 of 13 tokens) should win over the bare default. Past-
+            # win files start with "won_" so the prefix-check distinguishes
+            # them deterministically. Added 2026-05-21 after pac-man trace
+            # showed Jaccard at 0.23 (< 0.30) discarding the correct grid
+            # scaffold pick.
+            is_past_win = best.name.startswith("won_")
             below_threshold = (
-                best.source_goal is not None
+                is_past_win
+                and best.source_goal is not None
                 and best.score < _SKELETON_MIN_SIM
             )
             if below_threshold:
-                default_path = self.skeletons_dir / DEFAULT_SKELETON_NAME
+                # v2 fallback (was DEFAULT_SKELETON_NAME). Locked 2026-05-21
+                # — 4/4 newest traces hit this branch and v1's bare scaffold
+                # forced the model to re-invent boilerplate. v1 still wins
+                # for skeleton_mode="default" (tune baseline).
+                fallback_path = self.live_skeletons_dir / CANVAS_SKELETON_V2_NAME
+                if not fallback_path.exists():
+                    fallback_path = self.base_skeletons_dir / CANVAS_SKELETON_V2_NAME
                 try:
-                    default_html = default_path.read_text(encoding="utf-8")
+                    fallback_html = fallback_path.read_text(encoding="utf-8")
                 except Exception:
-                    default_html = DEFAULT_SKELETON
+                    fallback_html = CANVAS_SKELETON_V2
                 return SkeletonHit(
-                    name=DEFAULT_SKELETON_NAME,
-                    html=default_html,
+                    name=CANVAS_SKELETON_V2_NAME,
+                    html=fallback_html,
                     score=0.0,
                     source_goal=None,
                 )
             return best
-        # Fully empty memory dir — return DEFAULT_SKELETON in-memory.
+        # Fully empty memory dir — return v2 in-memory (was DEFAULT_SKELETON).
         return SkeletonHit(
-            name=DEFAULT_SKELETON_NAME, html=DEFAULT_SKELETON, score=0.0,
+            name=CANVAS_SKELETON_V2_NAME, html=CANVAS_SKELETON_V2, score=0.0,
             source_goal=None,
+        )
+
+    def _modality_skeleton(self, goal: str) -> SkeletonHit | None:
+        """Return a SkeletonHit if the goal cleanly matches a modality
+        (board / DOM / 3D), else None. Single STRONG-HOOK token (e.g.
+        "chess", "doom", "tictactoe") wins on its own; otherwise we need
+        ≥ _MODALITY_MIN_HITS keyword matches to commit. See class docstring
+        on retrieve_skeleton for the trace evidence motivating this.
+        """
+        # 3D is checked first because some 3D goals also mention "board"
+        # ("3D chess") but should pick the 3D scaffold, not the board one.
+        threed_hits = _detect_3d_intent(goal)
+        if any(h in _3D_STRONG_HOOKS for h in threed_hits) or len(threed_hits) >= _MODALITY_MIN_HITS:
+            return self._load_modality(CANVAS_3D_SKELETON_NAME, CANVAS_3D_SKELETON,
+                                       source_goal_tokens=threed_hits)
+
+        board_hits = _detect_board_intent(goal)
+        if any(h in _BOARD_STRONG_HOOKS for h in board_hits) or len(board_hits) >= _MODALITY_MIN_HITS:
+            return self._load_modality(CANVAS_BOARD_TURN_SKELETON_NAME, CANVAS_BOARD_TURN_SKELETON,
+                                       source_goal_tokens=board_hits)
+
+        dom_hits = _detect_dom_intent(goal)
+        if any(h in _DOM_STRONG_HOOKS for h in dom_hits) or len(dom_hits) >= _MODALITY_MIN_HITS:
+            return self._load_modality(CANVAS_DOM_SKELETON_NAME, CANVAS_DOM_SKELETON,
+                                       source_goal_tokens=dom_hits)
+
+        return None
+
+    def _load_modality(self, name: str, fallback_html: str,
+                       *, source_goal_tokens: list[str]) -> SkeletonHit:
+        """Helper for `_modality_skeleton`: load the on-disk template (so
+        the agent sees the exact bytes the user can edit), falling back to
+        the bundled constant if disk read fails.
+        """
+        path = self.live_skeletons_dir / name
+        if not path.exists():
+            path = self.base_skeletons_dir / name
+        try:
+            html = path.read_text(encoding="utf-8")
+        except Exception:
+            html = fallback_html
+        # Score signals "modality match"; > _SKELETON_MIN_SIM so callers
+        # downstream don't think it's a low-confidence pick.
+        return SkeletonHit(
+            name=name, html=html, score=1.0,
+            source_goal=" ".join(source_goal_tokens) if source_goal_tokens else None,
         )
 
     # --- mistake retrieval -------------------------------------------------
@@ -2080,34 +2650,39 @@ class GameMemory:
         Used by the diagnose prompt to give the model "you've seen this
         before, here's what worked" hints. Empty list if no memory yet.
         """
-        if not self.mistakes_path.exists():
-            return []
         sig_toks = _tokenize(error_signature)
         if not sig_toks:
             return []
 
         hits: list[MistakeHit] = []
-        try:
-            with self.mistakes_path.open("r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        rec = json.loads(line)
-                    except Exception:
-                        continue
-                    sig = rec.get("error_signature", "")
-                    fix = rec.get("fix_summary", "")
-                    if not sig or not fix:
-                        continue
-                    s = _score_similarity(sig_toks, _tokenize(sig))
-                    if s > 0.15:  # threshold to avoid noise
-                        hits.append(MistakeHit(
-                            error_signature=sig, fix_summary=fix, score=s,
-                        ))
-        except Exception:
-            return []
+
+        def load_from_file(path: Path):
+            if not path.exists():
+                return
+            try:
+                with path.open("r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            rec = json.loads(line)
+                        except Exception:
+                            continue
+                        sig = rec.get("error_signature", "")
+                        fix = rec.get("fix_summary", "")
+                        if not sig or not fix:
+                            continue
+                        s = _score_similarity(sig_toks, _tokenize(sig))
+                        if s > 0.15:  # threshold to avoid noise
+                            hits.append(MistakeHit(
+                                error_signature=sig, fix_summary=fix, score=s,
+                            ))
+            except Exception:
+                pass
+
+        load_from_file(self.base_mistakes_path)
+        load_from_file(self.live_mistakes_path)
 
         hits.sort(key=lambda h: h.score, reverse=True)
         return hits[:k]
@@ -2122,7 +2697,7 @@ class GameMemory:
             return
         self.ensure()
         try:
-            with self.mistakes_path.open("a", encoding="utf-8") as f:
+            with self.live_mistakes_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps({
                     "ts": datetime.utcnow().isoformat() + "Z",
                     "error_signature": error_signature[:500],
@@ -2174,7 +2749,7 @@ class GameMemory:
                 # retrieval can match on it. Name uses session_id to avoid
                 # collisions; goals_dir keeps the human-readable copy too.
                 skel_name = f"won_{session_id}.html"
-                skel_path = self.skeletons_dir / skel_name
+                skel_path = self.live_skeletons_dir / skel_name
                 try:
                     shutil.copy2(best_html_path, skel_path)
                     skel_path.with_suffix(".json").write_text(
@@ -2592,18 +3167,14 @@ SEED_BULLETS: list[Bullet] = [
     Bullet(
         id="place-entities-at-runtime",
         content=(
-            "When a level uses a tile grid (maze, dungeon, room), PLACE "
-            "spawn/exit/enemies/pickups at runtime by SCANNING empty cells "
-            "in code — do not hand-verify coordinates in your reply. "
-            "Snippet: function pickEmpty(map){ while(true){ const "
-            "x=1+Math.floor(Math.random()*(W-2)), "
+            "For tile-grid levels, PLACE spawn/exit/enemies/pickups by "
+            "SCANNING empty cells in code — never hand-verify coordinates "
+            "in your reply. Snippet: function pickEmpty(map){ while(true){"
+            " const x=1+Math.floor(Math.random()*(W-2)), "
             "y=1+Math.floor(Math.random()*(H-2)); if(map[y][x]===0) "
-            "return {x:x+0.5,y:y+0.5}; } }. The trap: enumerating "
-            "'(3.5, 9.5): row 9 col 3 = 1 (wall!)' in the reply or in "
-            "<think> burns thousands of tokens on validation the runtime "
-            "would do in microseconds, and often never reaches the "
-            "<html_file> tag at all. If the maze is fixed, also write "
-            "spawn/exit lookups as scans, not as literal coordinates."
+            "return {x:x+0.5,y:y+0.5}; } }. Enumerating 'row 9 col 3 = "
+            "wall!' in <think> burns thousands of tokens and often never "
+            "reaches <html_file>."
         ),
         tags=[
             "maze", "grid", "spawn", "placement", "level", "entity",
@@ -2614,16 +3185,14 @@ SEED_BULLETS: list[Bullet] = [
     Bullet(
         id="projection-3d-wireframe",
         content=(
-            "To render 3D wireframe perspective projection (e.g. Battlezone-style vector "
-            "graphics) on a 2D canvas without heavy external libraries: "
-            "(1) Translate/rotate coordinates relative to player position (px, pz) and player "
-            "angle (theta): const dx = x - px, dz = z - pz; const rx = dx * Math.cos(-theta) - "
-            "dz * Math.sin(-theta); const rz = dx * Math.sin(-theta) + dz * Math.cos(-theta). "
-            "(2) Perspective Projection: Projected screen coordinates are: if (rz <= 0.1) return; "
-            "const screenX = centerX + (rx / rz) * fov; const screenY = centerY - (y / rz) * fov "
-            "(y-axis inverted on canvas). (3) Rendering: Sort objects by depth (painter's algorithm) "
-            "from farthest to closest (descending rz) so overlapping elements render correctly; connect "
-            "projected points with ctx.beginPath(), ctx.moveTo(x1, y1), ctx.lineTo(x2, y2), ctx.stroke()."
+            "3D wireframe perspective on 2D canvas (Battlezone-style): "
+            "(1) Rotate to camera space: dx=x-px, dz=z-pz; rx=dx*cos(-θ)-"
+            "dz*sin(-θ); rz=dx*sin(-θ)+dz*cos(-θ). "
+            "(2) Project: if(rz<=0.1) return; screenX=cx+(rx/rz)*fov; "
+            "screenY=cy-(y/rz)*fov. "
+            "(3) Sort objects by descending rz (painter's algorithm) so "
+            "closer geometry draws on top; connect with beginPath/moveTo/"
+            "lineTo/stroke."
         ),
         tags=["3d", "projection", "wireframe", "battlezone", "perspective", "vector", "camera", "rotation"],
     ),
@@ -2721,12 +3290,13 @@ SEED_BULLETS: list[Bullet] = [
     Bullet(
         id="mode7-ground-projection",
         content=(
-            "To render a SNES-style Mode 7 3D ground projection in 2D canvas (e.g. Mario Kart): "
-            "For each screen scanline y below horizon, calculate physical distance: distance = fov / (y + 1). "
-            "Compute texture scale factor: scaleX = distance / fov. For rotation angle theta, steps are: "
-            "stepX = Math.sin(theta) * scaleX, stepY = -Math.cos(theta) * scaleX. Sample pixels along scanline using: "
-            "worldX = player.x + Math.cos(theta)*distance + (screenX - centerX)*stepX, and matching worldY. Read "
-            "color from track texture, clamp coordinate bounds, and write into ctx.getImageData screen buffer."
+            "SNES Mode 7 ground projection on 2D canvas (Mario Kart style): "
+            "for each scanline y below horizon, distance = fov / (y + 1); "
+            "scaleX = distance / fov; stepX = sin(θ)*scaleX, stepY = "
+            "-cos(θ)*scaleX. Per pixel along the line: worldX = player.x "
+            "+ cos(θ)*distance + (screenX - cx)*stepX (and matching "
+            "worldY). Sample track texture, clamp bounds, write to "
+            "getImageData buffer."
         ),
         tags=["mode7", "mode-7", "projection", "perspective", "racer", "3d", "retro", "mario-kart"],
     ),
@@ -2897,6 +3467,80 @@ SEED_BULLETS: list[Bullet] = [
         ),
         tags=["hud", "health", "ammo", "meter", "ui", "lerp", "canvas-draw", "glossy"],
     ),
+    # ---- Added 2026-05-21 from May 20-21 trace evidence ------------------
+    # Highest-frequency probe failure across pac/dk/sf/doom/FPS traces was
+    # missing window.gameState / window.game.reset. Promotes the recurring
+    # diagnose hint into a proactive rule.
+    Bullet(
+        id="expose-state-on-window",
+        content=(
+            "Acceptance probes look up state via window.gameState, "
+            "window.state, or window.game.reset() — un-exposed state fails "
+            "probes even when the game works. Always end init with: "
+            "window.gameState = state; window.game = { reset: () => "
+            "resetGame() }. Score, player position, currentPlayer, and any "
+            "reset entry point must be reachable from a probe in ≤3 lines."
+        ),
+        tags=["state", "window", "probe", "gameState", "exposure", "reset",
+              "testing", "acceptance"],
+    ),
+    # Promoted from learned -> seed 2026-05-21 (helpful=1 in live).
+    # Documents the 3s probe warmup window so the model designs init
+    # accordingly instead of paying it in lost iters.
+    Bullet(
+        id="probe-warmup-state-exposure",
+        content=(
+            "Automated acceptance probes typically evaluate window.gameState "
+            "after a ~3-second warmup. Expose the state object synchronously "
+            "before any async asset loading or initialization callbacks. "
+            "Remove or minimize startup delays (ready timers, intro screens, "
+            "loading gates) so gameplay begins immediately and probes can "
+            "verify score increases or entity positions within the evaluation "
+            "window."
+        ),
+        tags=["probe", "testing", "warmup", "state", "async", "ready-timer"],
+    ),
+    # Turn-based board mechanics. Genre-free (no chess/checkers rules) —
+    # just the select-then-move state machine that all of them share.
+    Bullet(
+        id="turn-based-select-move",
+        content=(
+            "Turn-based board UIs use a two-click commit: state.selected = "
+            "null at start; clicking your own piece sets selected and "
+            "computes legalMoves(); clicking a legal target calls "
+            "applyMove() then state.currentPlayer = (currentPlayer === 'W' "
+            "? 'B' : 'W'). Block input during animations or AI thinking. "
+            "Highlight the selected cell + legal targets so the user knows "
+            "what's clickable."
+        ),
+        tags=["turn-based", "board", "select", "move", "alternate", "hotseat",
+              "click", "two-click", "chess", "checkers"],
+    ),
+    Bullet(
+        id="board-grid-indexing",
+        content=(
+            "Store a 2D board as board[r][c] with r=row=y-index, c=col=x-"
+            "index — NEVER mix (x,y) and (r,c) in the same function. "
+            "Render with: for(let r=0;r<SIZE;r++) for(let c=0;c<SIZE;c++) "
+            "{ const piece = board[r][c]; drawAt(c*TILE, r*TILE, piece); }. "
+            "Always (row, col) order in code; (col*TILE, row*TILE) only at "
+            "the draw boundary."
+        ),
+        tags=["board", "grid", "row", "col", "index", "tile", "indexing"],
+    ),
+    Bullet(
+        id="click-cell-from-pointer",
+        content=(
+            "Pointer -> board cell: const rect = cvs.getBoundingClientRect(); "
+            "const mx = e.clientX - rect.left, my = e.clientY - rect.top; "
+            "const c = Math.floor(mx / TILE), r = Math.floor(my / TILE); if "
+            "(r < 0 || r >= SIZE || c < 0 || c >= SIZE) return; — rejects "
+            "clicks outside the board. Use pointerdown (unified mouse + "
+            "touch + pen) and call e.preventDefault() if the page scrolls."
+        ),
+        tags=["pointer", "click", "cell", "board", "getBoundingClientRect",
+              "tile", "input"],
+    ),
 ]
 
 
@@ -2908,37 +3552,59 @@ class Playbook:
     and (optionally) the in-progress code.
     """
 
-    def __init__(self, root: str | Path = "memory"):
-        self.root = Path(root)
-        self.path = self.root / PLAYBOOK_FILENAME
+    def __init__(self, base_root: str | Path = "memory", live_root: str | Path | None = None, root: str | Path | None = None):
+        if root is not None:
+            self.base_root = Path(root)
+        else:
+            self.base_root = Path(base_root)
+        
+        if live_root is None:
+            if self.base_root.name == "memory" and self.base_root.parent == Path("."):
+                self.live_root = Path("games/game-memory")
+            else:
+                self.live_root = self.base_root
+        else:
+            self.live_root = Path(live_root)
+
+        self.base_path = self.base_root / PLAYBOOK_FILENAME
+        self.live_path = self.live_root / PLAYBOOK_FILENAME
+        
+        # Compatibility properties for legacy calls
+        self.path = self.live_path
+        self.root = self.live_root
 
     # --- bootstrap ---------------------------------------------------------
 
     def ensure(self) -> None:
         try:
-            self.root.mkdir(parents=True, exist_ok=True)
-            if not self.path.exists():
-                self._save_all(SEED_BULLETS)
+            self.base_root.mkdir(parents=True, exist_ok=True)
+            self.live_root.mkdir(parents=True, exist_ok=True)
+            if not self.base_path.exists():
+                self._save_all_to_path(SEED_BULLETS, self.base_path)
         except Exception:
             pass
 
-    def _save_all(self, bullets: list[Bullet]) -> None:
+    def _save_all_to_path(self, bullets: list[Bullet], path: Path) -> None:
         try:
-            tmp = self.path.with_suffix(".jsonl.tmp")
+            tmp = path.with_suffix(".jsonl.tmp")
             with tmp.open("w", encoding="utf-8") as f:
                 for b in bullets:
                     if not b.created_at:
                         b.created_at = datetime.utcnow().isoformat() + "Z"
                     f.write(b.to_jsonl() + "\n")
-            tmp.replace(self.path)
+            tmp.replace(path)
         except Exception:
             pass
 
-    def load_all(self) -> list[Bullet]:
-        self.ensure()
+    def _save_all(self, bullets: list[Bullet]) -> None:
+        self._save_all_to_path(bullets, self.path)
+
+    def _load_from_path(self, path: Path) -> list[Bullet]:
+        if not path.exists():
+            return []
         out: list[Bullet] = []
         try:
-            with self.path.open("r", encoding="utf-8") as f:
+            with path.open("r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
@@ -2960,6 +3626,33 @@ class Playbook:
             return []
         return out
 
+    def load_all(self) -> list[Bullet]:
+        self.ensure()
+        
+        # Load base bullets
+        base_bullets = self._load_from_path(self.base_path)
+        
+        # Load live bullets
+        live_bullets = self._load_from_path(self.live_path)
+        
+        # Merge them by ID (live overrides base)
+        merged: dict[str, Bullet] = {b.id: b for b in base_bullets}
+        for b in live_bullets:
+            merged[b.id] = b
+            
+        # Preserve original base/seed bullet ordering, followed by any new live bullets
+        ordered_merged: list[Bullet] = []
+        seen = set()
+        for b in base_bullets:
+            ordered_merged.append(merged[b.id])
+            seen.add(b.id)
+        for b in live_bullets:
+            if b.id not in seen:
+                ordered_merged.append(b)
+                seen.add(b.id)
+                
+        return ordered_merged
+
     # --- retrieval ---------------------------------------------------------
 
     def retrieve(
@@ -2969,6 +3662,7 @@ class Playbook:
         code: str = "",
         k: int = 8,
         stage: str = "code",
+        modality_tokens: list[str] | None = None,
     ) -> list[BulletHit]:
         """Return up to k bullets most relevant to goal (+ optional code).
 
@@ -2993,6 +3687,15 @@ class Playbook:
             ≤ -2, since at code-time we want only validated patterns. This
             mirrors OpenCoder's two-stage SFT (broad first, narrow second).
 
+        `modality_tokens` (optional, added 2026-05-21): caller-supplied
+        keyword list from the modality detector (e.g. ["grid","tile","maze",
+        "pacman"] for a pac-man goal). Appended to the query so bullets
+        tagged with those modality words retrieve above the 0.05 Jaccard
+        noise floor. Evidence: May 21 FPS trace retrieved `tetris-matrix-
+        rotation` for a Doom goal because its single token-overlap was
+        enough to top the noise; pac-man trace got `corner-sliding` at
+        0.05 instead of the much higher score it deserves.
+
         Caller is responsible for any further dedup / budget capping
         (see `dedup_hits` and `cap_hits_by_budget`).
         """
@@ -3000,7 +3703,13 @@ class Playbook:
         if not bullets:
             return []
 
-        query_toks = _tokenize(goal) + _tokenize(code)
+        # Modality tokens go through the same stopword stripper as the
+        # goal so "3d" / "tic-tac-toe" tokenize consistently.
+        mod_toks: list[str] = []
+        if modality_tokens:
+            mod_toks = _tokenize(" ".join(modality_tokens))
+
+        query_toks = _tokenize(goal) + _tokenize(code) + mod_toks
         if not query_toks:
             ordered = sorted(bullets, key=lambda b: (-b.score(), b.id))
             return [BulletHit(b, 0.0) for b in ordered[:k]]

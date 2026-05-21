@@ -49,9 +49,9 @@ count_lines() {
 n_html=$(find games -maxdepth 1 -name "*.html" -type f 2>/dev/null | wc -l)
 n_traces=$(find games/traces -maxdepth 1 -type f 2>/dev/null | wc -l)
 n_snapshots=$(find games/snapshots -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l)
-n_won=$(find memory/skeletons -maxdepth 1 -name "won_*" 2>/dev/null | wc -l)
-n_goals=$(find memory/goals -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l)
-n_mistakes=$(count_lines memory/mistakes.jsonl)
+n_won=$(find games/game-memory/skeletons -maxdepth 1 -name "won_*" 2>/dev/null | wc -l)
+n_goals=$(find games/goals -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l)
+n_mistakes=$(count_lines games/game-memory/mistakes.jsonl)
 n_tune_runs=$(find games/tune -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l)
 
 echo "About to delete:"
@@ -114,15 +114,15 @@ fi
 
 # Skeletons: drop only won_* (KEEP canvas_basic.html and any other
 # hand-placed file).
-rm -f memory/skeletons/won_*
+rm -f games/game-memory/skeletons/won_*
 
 # Goals: drop every per-session subdir.
-if [ -d memory/goals ]; then
-    find memory/goals -maxdepth 1 -mindepth 1 -type d -exec rm -rf {} +
+if [ -d games/goals ]; then
+    find games/goals -maxdepth 1 -mindepth 1 -type d -exec rm -rf {} +
 fi
 
 # Mistakes: drop the file entirely (recreated on next session).
-rm -f memory/mistakes.jsonl
+rm -f games/game-memory/mistakes.jsonl
 
 # Tune-battery runs: drop subdirs, keep battery.jsonl test definitions.
 if [ -d games/tune ]; then

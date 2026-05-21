@@ -48,6 +48,8 @@ does.
   - [Compaction](#compaction-two-tier-state-anchor)
   - [Project-config injection](#project-config-injection)
 - [TUI and CLI reference](#tui-and-cli-reference)
+  - [Model topologies](#model-topologies-1-2-and-3-model-runs)
+  - [Status panel & GPU map](#status-panel-right-column)
 - [Tuning rig and playbook commands](#tuning-rig-and-playbook-commands)
 - [Standing rules and design constraints](#standing-rules-and-design-constraints)
 - [Major future improvements](#major-future-improvements)
@@ -65,7 +67,8 @@ entirely on a local machine. Three drivers ship in the repo:
 
 - `chat.py` — Textual TUI with a visible Chromium beside the terminal.
   Default. Mid-stream user feedback queue, slash commands, asset
-  picker, screenshot review, model swap, playbook viewer.
+  picker, screenshot review, model swap, playbook viewer, live status
+  panel (GPU map, per-role activity).
 - `coder.py` — Headless CLI for unattended runs. Same agent, same
   loop, no UI.
 - `tune.py` — A/B battery rig. Runs the agent against a curated set
@@ -298,12 +301,19 @@ patch number caused the problem and what to change to fix it.
 
 ### Memory and playbook (compounds across sessions)
 
-[`memory.py`](memory.py):
+[`memory.py`](memory.py) uses **three tiers** (run `./scripts/migrate_memory.sh`
+once if you still have an old single `memory/` tree):
+
+| Path | Role |
+|---|---|
+| `memory/` | **Pristine reference** — bundled skeletons, seed playbook bullets, asset library index |
+| `games/game-memory/` | **Live learned** — `playbook.jsonl`, `won_*` skeletons, `mistakes.jsonl` (agent reads/writes here) |
+| `games/goals/` | **Short-term** — per-session `goal.txt`, `best.html`, `outcome.json` |
 
 - **`GameMemory`** — skeleton retrieval and mistake retrieval.
-  - **Premium Default Skeletons (Autobootstrapped on boot)**: The system provides 11 generic, high-fidelity scaffolds in `memory/skeletons/` designed to give local models a perfect first-build template:
-    - `canvas_basic.html`: Clean 2D canvas with DPR scaling, frame loops, and window keyboard handlers.
-    - `canvas_basic_v2.html`:Denser, bug-hardened scaffold pre-empting blur-clearing, focus-loss, and cleanup.
+  - **Premium Default Skeletons (Autobootstrapped on boot)**: The system provides 17 generic, high-fidelity scaffolds in `memory/skeletons/` designed to give local models a perfect first-build template:
+    - `canvas_basic.html`: Clean 2D canvas with DPR scaling, frame loops, and window keyboard handlers. Kept for `skeleton_mode="default"` tune baselines; **no longer the retrieval fallback** (2026-05-21).
+    - `canvas_basic_v2.html`: **New fallback (2026-05-21)** — denser bug-hardened scaffold pre-empting focus-blur, dt-cap, restart-cleanup, DPR-resize, lazy-audio, and HUD pointer-events failures. Used when no modality or sidecar scaffold matches.
     - `canvas_3d_basic.html`: Full 3D perspective setup utilizing CDN Three.js, lights, camera, and aspect-ratio fits.
     - `canvas_grid_basic.html`: Continuous tile-aligned corridor movement and corner snapping (e.g., Pac-Man, Sokoban).
     - `canvas_platformer_basic.html`: Gravity jumps, vertical ladder alignments, climbing, and platform landings (e.g., Donkey Kong).
@@ -312,14 +322,23 @@ patch number caused the problem and what to change to fix it.
     - `canvas_crawler_basic.html`: Top-down dungeon rooms, spawner pools, wall-sliding, and multi-player bounding clamps (e.g., Gauntlet).
     - `canvas_mobile_basic.html`: Pointer Events touch joystick, tap-buttons, and mobile aspect letterboxing (e.g., iOS Safari).
     - `canvas_rpg_basic.html`: Grid-locked discrete stepping and lerp walking animations (e.g., Pokemon).
-    - `canvas_cards_basic.html`: Mouse/touch drag-and-drop hit testing and grid snapping (e.g., Solitaire, Chess).
+    - `canvas_cards_basic.html`: Mouse/touch drag-and-drop hit testing and grid snapping (e.g., Solitaire).
     - `canvas_physics_basic.html`: Gravity projectile trajectories, launch slingshots, and elastic boundary collisions.
+    - `canvas_voxel_minecraft_basic.html`: Voxel/cube terrain, pointer-lock + WASD, build/break interaction.
+    - `canvas_ar_flick_basic.html`: Pointer flick/swipe gestures with spin and gravity (e.g., Pokémon-Go-style throws).
+    - `canvas_lit_dungeon_basic.html`: Composite-mode dynamic lighting + shadow gradients for top-down dungeons.
+    - `canvas_vfx_particles_basic.html`: Pooled particle effects + screen shake + damage numbers.
+    - `canvas_board_turn_basic.html`: **New (2026-05-21)** — 8×8 grid with click-to-select / click-to-move state machine, alternating `currentPlayer`, exposed `window.gameState` (e.g., Chess, Checkers, Go, Reversi).
+    - `canvas_dom_basic.html`: **New (2026-05-21)** — DOM-only `<table>` + event delegation for UI-style apps (e.g., Tic-Tac-Toe, Calculator, Todo).
+  - **Modality detector (added 2026-05-21)**: short goals like "chess" or "doom" tokenize to 1-2 non-stopword tokens — too sparse for Jaccard to clear the 0.30 sidecar threshold. `retrieve_skeleton()` now runs `_detect_board_intent` / `_detect_dom_intent` / `_detect_3d_intent` FIRST; a single strong-hook token (e.g. `chess`, `doom`, `tictactoe`, `calculator`) or ≥2 modality keywords commits the matching scaffold without going through Jaccard.
 - **`Playbook`** — JSONL of bullets with `helpful` / `harmful`
-  counters. Features elite math and physics rules for retro classics (Mode 7 scanning, wall-sliding, segmented follow, angle biasing, mobile joysticks, aspect ratio letterboxing) alongside the standard set. Retrieval is weighted Jaccard × quality multiplier `1 + 0.10·tanh(score/5)`. `stage="plan"` returns broader top-K; `stage="code"` drops bullets with score ≤ -2. On-demand expansion via `<lookup_bullet>id</lookup_bullet>`.
+  counters. Features elite math and physics rules for retro classics (Mode 7 scanning, wall-sliding, segmented follow, angle biasing, mobile joysticks, aspect ratio letterboxing) alongside the standard set, plus 2026-05-21 additions for turn-based board mechanics (`turn-based-select-move`, `board-grid-indexing`, `click-cell-from-pointer`) and the `expose-state-on-window` rule promoted from learned. Retrieval is weighted Jaccard × quality multiplier `1 + 0.10·tanh(score/5)`. `stage="plan"` returns broader top-K; `stage="code"` drops bullets with score ≤ -2. On-demand expansion via `<lookup_bullet>id</lookup_bullet>`.
+- **Modality token expansion (added 2026-05-21)**: when retrieving for a goal that hits a modality detector, the matched keywords are appended to the query. Pac-man's `corner-sliding-alignment` jumps from 0.026 → 0.076 (~3×); doom's `tetris-matrix-rotation` retrieval noise disappears. Backwards-compatible: pass `modality_tokens=[]` or omit to get default behavior.
 - **Dedup + budget capping**: `dedup_hits` (5-gram Jaccard ≥ 0.85) +
   `cap_hits_by_budget` run inside `render_playbook_block` by default.
+- **Mistake memory (`games/game-memory/mistakes.jsonl`)**: seeded 2026-05-21 with 8 trace-derived signatures (window-state exposure, pointer-lock target, missing HUD elements, restart probe, partial-patch apply, duplicate top-level declarations). The diagnose prompt retrieves matching signatures so the model gets "you've seen this before — here's what worked" hints instead of re-diagnosing from scratch.
 - **Won-skeleton promotion**: after `<confirm_done/>`, the agent
-  copies the working HTML to `memory/skeletons/won_<session>.html`
+  copies the working HTML to `games/game-memory/skeletons/won_<session>.html`
   and indexes it so future sessions with similar goals can use it as
   the starting scaffold.
 
@@ -580,8 +599,10 @@ is data the agent will see, not just developer notes.
 | `/help`, `/h`, `/?` | Show command list. |
 | `/list`, `/models` | Inventory of MLX + Ollama models, with `[VLM]` / `[text]` labels. |
 | `/model <N\|name>`, `/load <N\|name>` | Switch the chat model. |
+| `/model2 <N\|name> [--role critic\|architect]` | Stage or hot-swap secondary model 2. Defaults to `critic` for VLMs and `architect` for text models unless role balancing chooses otherwise. |
+| `/model3 <N\|name> [--role critic\|architect]` | Stage or hot-swap tertiary model 3. Used to split architect and critic roles in 3-model runs. |
 | `/backend <auto\|ollama\|mlx\|openai\|anthropic>` | Switch the backend (cloud choices are explicit and billable). |
-| `/unload` | Free the loaded MLX model from VRAM. |
+| `/unload` | Free VRAM: bare `/unload` evicts the active Ollama tag; `/unload all` every loaded Ollama model; `/unload mlx` drops the in-process MLX weights. |
 | `/new` | Start a new session in the same workspace. |
 | `/ship` | Force `<confirm_done/>` on the next critique turn. |
 | `/quit` | Exit. |
@@ -605,6 +626,124 @@ is data the agent will see, not just developer notes.
 | `/model-class <small\|mid\|large>` | Override the prompt trim path. |
 | `/launch` | Manually launch Chromium against the current best file. |
 | `/check [<N\|model>]` | Run visual review on the latest screenshot. `N` selects by `/list` number. Bare `/check` uses the active VLM session model. `claude-…` routes Anthropic, `gpt-…` routes OpenAI, and other names resolve local MLX VLMs. In wait mode ON, suggestion is prefilled in input for edit/Enter; in wait mode OFF, coaching auto-queues to the next coding turn. |
+
+### Model topologies (1, 2, and 3 model runs)
+
+The TUI always has one **coder** model: `/model` or `/load` selects the
+model that writes `<plan>`, `<html_file>`, `<patch>`, and normal fix
+turns. Optional `/model2` and `/model3` sidecars do not replace the
+coder; they take narrow roles so the main loop can keep one source of
+truth for edits.
+
+**1-model run.** Use only `/model`. The same model plans, codes, reads
+browser reports, and decides whether to patch or ship. The deterministic
+harness still runs every iter: micro-probes, Chromium load, input smoke
+test, screenshots, canvas freeze checks, and model-authored probes.
+If a local VLM is discoverable, the built-in vision judge can add visual
+coaching; otherwise visual checks stay programmatic unless you run
+`/check` explicitly.
+
+**2-model run.** Use `/model` for the coder and `/model2 ... --role
+critic` or `/model2 ... --role architect` for one sidecar:
+
+- `--role critic` is best for a VLM. After each browser test it reviews
+  the latest screenshot, and when before/after screenshots are available
+  it compares them for visible movement, frozen screens, misalignment,
+  clipped HUD, or other rendering bugs. Critic output becomes coaching
+  for the next coder turn.
+- `--role architect` is best for a strong text model. When architect
+  split is enabled (`/architect on`), complex first builds get a short
+  design pass before the coder writes HTML. The architect role is also
+  used for the final exit-decision turn when available.
+
+**Auto-staff (added 2026-05-21).** Setting `/model2 N --role critic` (or
+`--role architect`) automatically enables the matching feature
+(`vlm-critique` or `architect-split`) in one step — no separate toggle
+needed. The same hook fires when a local VLM is loaded on **any** slot,
+so single-model users with a VLM coder get the visual critic loop
+without typing `/vlm-critique on`. The status panel marks auto-flipped
+features with `[auto]`. Override anytime with `/vlm-critique off` or
+`/architect off` — the explicit toggle wins and persists.
+
+If you omit `--role`, VLMs default toward `critic` and text models
+default toward `architect`.
+
+**3-model run.** Use `/model` for the coder, then assign one sidecar as
+architect and one as critic:
+
+```text
+/model 1
+/model2 2 --role architect
+/model3 3 --role critic
+```
+
+This gives the cleanest split: model 1 edits code, the architect handles
+planning/exit decisions, and the critic reviews screenshots. If both
+sidecars are assigned the same role, routing is deterministic but less
+useful: architect prefers model 2, critic prefers model 3.
+
+**Wait on vs. wait off.** Sidecar roles run after the verifier either
+way. With `/wait on` (the TUI default), the agent pauses between iters
+so you can inspect Chromium and add feedback before the next model turn.
+With `/wait off`, the loop continues automatically; critic, vision, and
+programmatic warnings are queued as coaching for the next coder turn.
+Cloud models are never called silently: use an explicit cloud backend or
+explicit `/check <cloud-model>` if you want one involved.
+
+**Status panel (right column).** Refreshes about once per second while a
+session runs.
+
+- **Activity (role)** — Who is working *right now*: `Activity (coder)`,
+  `Activity (architect)`, or `Activity (critic)`. Shows the same live
+  detail as before: waiting for first token, prompt-eval progress (MLX),
+  tok/s, STALLED. When the architect or critic is streaming, that role
+  owns the top Activity line; Model 2 / Model 3 lines below still show
+  their slot with the same stats.
+- **Model 2 / Model 3** — Sidecar roles (not “Card 2/3”): model tag,
+  backend, and GPU placement. `idle`, `streaming …`, `failed`, or
+  `crashed` when something goes wrong (no more stuck “streaming architect”
+  with no warning).
+- **GPU map → LLM** — One row per configured slot:
+  - `Model 1 (coder) · <tag> · OLLAMA · GPU …`
+  - `Model 2 (critic) · …` / `Model 3 (architect) · …`
+  - Same tag on all three → **same GPU** on each row; Models 2–3 add
+    `same VRAM` (one physical Ollama load, three logical roles).
+  - `not loaded` before the first request to that tag.
+- **GPU map → Diffusers** — Three lines, always shown:
+  - `Z-Image-Turbo`, `SD-Turbo img2img`, `Stable-Audio`: `loaded · GPU N`
+    only after this session constructs the pipeline (first `<assets>` /
+    sound generation). **`not loaded` does not mean GPU 0 is empty** —
+    `nvidia-smi` may still show ~20 GB on `python` for the chat process
+    (browser, torch, or stale VRAM). When that happens, a dim
+    `chat process · GPU 0 ~20 GB` note explains it.
+  - Footer: `VRAM · 0:20/48 · 1:27/48 · …` for all cards.
+
+**Reading `nvidia-smi` alongside the panel**
+
+| What you see | Meaning |
+|---|---|
+| `ollama` on GPU 1+3, ~53 GB total | Your LLM (often one 27B copy, tensor-split) |
+| `python` ~20 GB on GPU 0 | Usually **this TUI process**, not Ollama — not the same as “Z-Image loaded” in the panel until sprites run |
+| Diffusers `not loaded` + GPU 0 busy | Normal for a text-only goal (chess, etc.) until the plan triggers asset generation |
+
+**Multi-GPU workstation (automatic, no manual Ollama config).** On `/new`,
+if Ollama is already **tensor-split** across two cards and the box has
+48 GB-class GPUs, the agent **auto-unloads** those models (same mechanism
+as `/unload`) so the next LLM request can reload cleanly. Diffusers pick
+a **quiet** GPU (skip cards with large `ollama` / `python` compute).
+Disable auto-unload with `AGENT_NO_AUTO_OLLAMA_GPU_FIX=1`. On **small
+GPUs** (two ~8–16 GB cards), split may stay — the panel says that is
+expected. If split persists, the yellow tip suggests `/unload all`.
+
+**Useful env vars (GPU / backends)**
+
+| Variable | Effect |
+|---|---|
+| `LLM_BACKEND` | `auto`, `ollama`, or `mlx` (default: MLX on macOS, else `auto`) |
+| `OLLAMA_MODEL` / `CHAT_OLLAMA_MODEL` | Force the Ollama tag for chat |
+| `AGENT_NO_AUTO_OLLAMA_GPU_FIX=1` | Do not auto-unload split Ollama VRAM on `/new` |
+| `CODING_BOX_NUM_CTX` | Ollama context window (default 262144) |
+| `DIFFUSION_MODELS_DIR` | Override root for Z-Image / SD-Turbo weights |
 
 ### CLI flags (`coder.py`)
 
@@ -664,6 +803,9 @@ Use this matrix when validating `chat.py` loop/control changes:
 
 | Scenario | Setup | Expected result |
 |---|---|---|
+| 1-model run | `/model <N>` only | Coder handles planning, edits, and exit decisions; harness and programmatic checks still verify every iter. |
+| 2-model run | `/model <N>` plus `/model2 <N> --role critic` or `--role architect` | Coder remains the only editor; one sidecar contributes screenshot critique or architect planning/exit decisions. |
+| 3-model run | `/model <N>`, `/model2 <N> --role architect`, `/model3 <N> --role critic` | Coder edits, architect plans/handles exit decisions, critic reviews screenshots and queues coaching. |
 | Asteroids regression guard | `/new asteroids` on local backend | Ship direction uses `vx = cos(angle) * speed`; asteroids stay irregular polygons. |
 | Wait-mode manual control | Default TUI mode, or `/mode local_manual` | Agent pauses after each iter (`await_user`), accepts user feedback before continuing. |
 | Autonomous loop control | `/mode local_auto` or `/wait off` | Agent iterates continuously without step pauses unless user explicitly enables wait mode. |
@@ -768,31 +910,22 @@ available.
 other even with no token overlap. Playbook retrieval gets less brittle
 to paraphrase. Asset library scales to 10–100k entries.
 
-### 4. Multi-agent critic ensemble
+### 4. Make critic findings harder to ignore
 
-**Problem.** A single coding model is both the implementer and (via
-self-critique) the reviewer. Local 27–35B models are weaker at
-honest self-assessment than at code generation — they shadow-pass
-their own bugs.
+**Problem.** Sidecar critics and the local vision judge can now feed
+coaching into the next coder turn, but most findings are still advisory.
+A game can pass structural probes while the visual reviewer spots a
+real playability problem, such as a player that appears stuck.
 
-**Change.** Ship three lightweight sidecar critics that run after
-each iter:
+**Change.** Promote only high-confidence, generic critic findings into
+harder gates: static before/after screenshots, missing player
+locomotion after input simulation, blank or clipped canvas, and clear
+asset/sound mismatches. Keep subjective art taste as coaching so weak
+critics cannot block a working game.
 
-- **Art critic** (VLM): "does the rendered sprite match the prompt?
-  is it readable at this draw scale? is alpha working?"
-- **Sound critic** (text + audio-event timeline): "do the audio
-  events fire on the moments that matter — collision, scoring, death?
-  is anything looping that should be one-shot?"
-- **Gameplay critic** (text + report + screenshot): "given the
-  acceptance criteria, what one thing is most missing?"
-
-Each emits a one-sentence verdict that joins the next user turn as
-coaching. Cheap to run because each critic gets a tight, scoped
-prompt (~1 KB context).
-
-**Why this matters more for small models.** Specialized critics each
-get the full attention budget on their narrow domain; a single
-generalist self-critique splits attention across all three.
+**Effect.** One-, two-, and three-model runs all get stricter where the
+evidence is objective, without turning the critic into an unreliable
+second coder.
 
 ### 5. Best-of-N at the iter level, not the session level
 
@@ -809,20 +942,20 @@ needed).
 form "this works fine and I have no reason to change it but it
 doesn't look great."
 
-### 6. Two-model split: planner vs. coder
+### 6. Per-phase model policy
 
-**Problem.** Local 27–35B models good at structured Phase A planning
-are often *not* the same ones good at high-quality Phase B patches,
-and vice versa.
+**Problem.** The TUI already supports coder, architect, and critic
+roles, but selection is still mostly manual. Some goals benefit from a
+stronger architect, while others need the fastest patch model or the
+best VLM critic.
 
-**Change.** Optionally bind two different MLX models — a planning
-model for Phase A and a coding model for Phase B/C — with weights
-both in VRAM (small enough Macs only) or hot-swapped (larger Macs).
-The agent already abstracts the backend; the change is per-phase
-backend selection.
+**Change.** Add a lightweight policy layer that can recommend a role
+assignment from local model inventory, VRAM budget, and goal modality.
+The policy should only suggest local models unless the user explicitly
+selects a cloud backend.
 
-**Effect.** Each phase gets the model that's best at it. The cost is
-VRAM (or load latency on swap).
+**Effect.** Users keep the current 1/2/3-model controls, but common
+setups become one command instead of manual role assignment.
 
 ### 7. Game-feel benchmarks
 
@@ -1039,6 +1172,15 @@ in `tests/` and add a one-line bullet to `playbook.jsonl` via
   If the user says "use existing", "don't redo", or "use the original
   ones", MEDIA-CHANGE is suppressed and the model should patch loader
   or draw mapping instead of regenerating assets.
+- **`GPU map says Diffusers not loaded but nvidia-smi shows 20 GB python
+  on GPU 0`**: the panel tracks **in-session** pipeline objects, not every
+  byte in VRAM. GPU 0 is usually the **chat.py** process until Z-Image
+  loads after the first sprite batch; restart the TUI if that VRAM is
+  stale from a crashed run. Ollama VRAM is separate (often GPU 1+3).
+- **`Status stuck on streaming architect`**: restart the TUI to pick up
+  current code; sidecar activity should reset to `idle`, `failed`, or
+  `crashed`. Check the log for `architect call failed` or
+  `backend crashed mid-generation`.
 - **`Regenerated asset still looks unchanged`**: same-name media regen
   records old/new file hashes in `midsession_asset_injection_queued`.
   If `changed=false`, the generator returned identical bytes or failed

@@ -19,8 +19,10 @@ from unittest.mock import MagicMock
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from agent import GameAgent  # noqa: E402
+import backend as backend_mod  # noqa: E402
 from backend import _read_mlx_context_length  # noqa: E402
 from chat import CodingBoxApp  # noqa: E402
+import gpu_status  # noqa: E402
 
 
 def _agent(tmp_path: Path) -> GameAgent:
@@ -70,6 +72,39 @@ def test_estimate_ctx_fill_skips_non_string_content(tmp_path: Path) -> None:
 def test_tui_defaults_to_wait_mode_profile() -> None:
     app = CodingBoxApp()
     assert app._run_profile == "local_manual"
+
+
+def test_chat_process_gpu_vram() -> None:
+    snap = gpu_status.GpuSnapshot(
+        processes=[gpu_status.GpuProcess(0, 42, "python", 20416)],
+    )
+    assert gpu_status.chat_process_gpu_vram(snap, 42) == [(0, 20416)]
+    assert gpu_status.chat_process_gpu_vram(snap, 99) == []
+
+
+def test_activity_header_includes_role() -> None:
+    app = CodingBoxApp()
+    app._model3_is_streaming = True
+    app._session_role3 = "architect"
+    app._activity_label = "architect note"
+    app._activity_role = "architect"
+    app._model3_stream_started_at = 1000.0
+    import time
+    app._model3_stream_started_at = time.monotonic() - 5.0
+    line = app._render_activity_line()
+    assert "Activity (architect):" in line
+    assert "Activity (coder):" not in line
+
+
+def test_role_slot_for_stream_maps_sidecars() -> None:
+    app = CodingBoxApp()
+    app._session_backend2 = object()
+    app._session_backend3 = object()
+    app._session_role2 = "critic"
+    app._session_role3 = "architect"
+    assert app._role_slot_for_stream("coder") is None
+    assert app._role_slot_for_stream("critic") == 2
+    assert app._role_slot_for_stream("architect") == 3
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +158,243 @@ def test_read_mlx_context_length_malformed_config(tmp_path: Path) -> None:
     (tmp_path / "m").mkdir()
     (tmp_path / "m" / "config.json").write_text("not json", encoding="utf-8")
     assert _read_mlx_context_length(str(tmp_path / "m")) is None
+
+
+def test_cuda_device_label_visible_devices() -> None:
+    import os
+    old = os.environ.get("CUDA_VISIBLE_DEVICES")
+    try:
+        os.environ["CUDA_VISIBLE_DEVICES"] = "2,3"
+        assert gpu_status.cuda_device_label("cuda", 0) == "GPU 2 (cuda:0)"
+        assert gpu_status.cuda_device_label("cuda", 1) == "GPU 3 (cuda:1)"
+    finally:
+        if old is None:
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        else:
+            os.environ["CUDA_VISIBLE_DEVICES"] = old
+
+
+def test_cuda_device_label_plain_cuda() -> None:
+    import os
+    old = os.environ.get("CUDA_VISIBLE_DEVICES")
+    try:
+        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        assert gpu_status.cuda_device_label("cuda", 1) == "GPU 1"
+    finally:
+        if old is not None:
+            os.environ["CUDA_VISIBLE_DEVICES"] = old
+
+
+def test_pick_least_loaded_cuda_index() -> None:
+    snap = gpu_status.GpuSnapshot(
+        gpus=[
+            gpu_status.GpuInfo(0, "A", memory_used_mib=40000, memory_total_mib=49140),
+            gpu_status.GpuInfo(1, "B", memory_used_mib=28000, memory_total_mib=49140),
+            gpu_status.GpuInfo(2, "C", memory_used_mib=2000, memory_total_mib=49140),
+            gpu_status.GpuInfo(3, "D", memory_used_mib=27000, memory_total_mib=49140),
+        ],
+    )
+    assert gpu_status.pick_least_loaded_cuda_index(snap) == 2
+
+
+def test_pick_least_loaded_skips_llm_gpus() -> None:
+    snap = gpu_status.GpuSnapshot(
+        gpus=[
+            gpu_status.GpuInfo(0, "A", memory_used_mib=40000, memory_total_mib=49140),
+            gpu_status.GpuInfo(1, "B", memory_used_mib=28000, memory_total_mib=49140),
+            gpu_status.GpuInfo(2, "C", memory_used_mib=2000, memory_total_mib=49140),
+            gpu_status.GpuInfo(3, "D", memory_used_mib=27000, memory_total_mib=49140),
+        ],
+        processes=[
+            gpu_status.GpuProcess(0, 99, "ollama", 28000),
+            gpu_status.GpuProcess(1, 99, "ollama", 27000),
+        ],
+    )
+    assert gpu_status.pick_least_loaded_cuda_index(snap) == 2
+
+
+def test_format_gpu_indices_label_never_bare_question() -> None:
+    assert "GPU ?" not in gpu_status.format_gpu_indices_label([], None, pending=True)
+    assert "GPU ?" not in gpu_status.format_gpu_indices_label([], None, vram_gib=20.5)
+    snap = gpu_status.GpuSnapshot(
+        gpus=[gpu_status.GpuInfo(1, "B", memory_used_mib=1000, memory_total_mib=49140)],
+    )
+    label = gpu_status.format_gpu_indices_label([1], snap)
+    assert label.startswith("GPU 1")
+    assert "GPU ?" not in label
+
+
+def test_infer_ollama_gpu_indices_from_processes() -> None:
+    snap = gpu_status.GpuSnapshot(
+        gpus=[gpu_status.GpuInfo(1, "B", memory_used_mib=28000, memory_total_mib=49140)],
+        processes=[gpu_status.GpuProcess(1, 42, "/usr/bin/ollama", 28000)],
+    )
+    assert gpu_status.infer_ollama_gpu_indices(snap) == [1]
+
+
+def test_ollama_tensor_split_warning() -> None:
+    snap = gpu_status.GpuSnapshot(
+        gpus=[],
+        processes=[
+            gpu_status.GpuProcess(1, 7, "ollama", 28000),
+            gpu_status.GpuProcess(3, 7, "ollama", 27000),
+        ],
+    )
+    warn = gpu_status.ollama_tensor_split_warning(snap)
+    assert warn is not None
+    assert "GPU 1" in warn and "3" in warn
+
+
+def test_format_four_gpu_summary() -> None:
+    snap = gpu_status.GpuSnapshot(
+        gpus=[
+            gpu_status.GpuInfo(0, "A", memory_used_mib=20480, memory_total_mib=49140),
+            gpu_status.GpuInfo(1, "B", memory_used_mib=0, memory_total_mib=49140),
+        ],
+    )
+    s = gpu_status.format_four_gpu_summary(snap)
+    assert "0 [" in s and "1 [" in s
+
+
+def test_format_model_gpu_placement_multi_gpu() -> None:
+    snap = gpu_status.GpuSnapshot(
+        gpus=[
+            gpu_status.GpuInfo(1, "B", memory_used_mib=28000, memory_total_mib=49140),
+            gpu_status.GpuInfo(3, "D", memory_used_mib=27000, memory_total_mib=49140),
+        ],
+    )
+    line = gpu_status.format_model_gpu_placement([1, 3], snap, vram_gib=53.1)
+    assert line == "GPU 1 + 3 (~53.1 GB)"
+    assert "GPU ?" not in line
+
+
+def test_prefer_single_gpu_workstation() -> None:
+    big = gpu_status.GpuSnapshot(
+        gpus=[gpu_status.GpuInfo(0, "A", memory_total_mib=49140)],
+    )
+    assert gpu_status.prefer_single_gpu_workstation(big) is True
+    small = gpu_status.GpuSnapshot(
+        gpus=[
+            gpu_status.GpuInfo(0, "A", memory_total_mib=8192),
+            gpu_status.GpuInfo(1, "B", memory_total_mib=8192),
+        ],
+    )
+    assert gpu_status.prefer_single_gpu_workstation(small) is False
+
+
+def test_ollama_chat_load_options_big_box() -> None:
+    snap = gpu_status.GpuSnapshot(
+        gpus=[gpu_status.GpuInfo(0, "A", memory_total_mib=49140)],
+    )
+    assert gpu_status.ollama_chat_load_options(snap) == {"num_gpu": 999}
+    small = gpu_status.GpuSnapshot(
+        gpus=[gpu_status.GpuInfo(0, "A", memory_total_mib=8192)],
+    )
+    assert gpu_status.ollama_chat_load_options(small) == {}
+
+
+def test_ollama_split_tip_short() -> None:
+    snap = gpu_status.GpuSnapshot(
+        gpus=[
+            gpu_status.GpuInfo(0, "A", memory_total_mib=49140),
+            gpu_status.GpuInfo(1, "B", memory_total_mib=49140),
+        ],
+        processes=[
+            gpu_status.GpuProcess(1, 7, "ollama", 28000),
+            gpu_status.GpuProcess(3, 7, "ollama", 27000),
+        ],
+    )
+    tip = gpu_status.ollama_split_tip_short(snap)
+    assert tip is not None
+    assert "/unload" in tip
+    assert "pid" not in tip.lower()
+
+
+def test_auto_fix_ollama_tensor_split_unloads(monkeypatch) -> None:
+    snap = gpu_status.GpuSnapshot(
+        gpus=[
+            gpu_status.GpuInfo(1, "B", memory_total_mib=49140),
+            gpu_status.GpuInfo(3, "D", memory_total_mib=49140),
+        ],
+        processes=[
+            gpu_status.GpuProcess(1, 7, "ollama", 28000),
+            gpu_status.GpuProcess(3, 7, "ollama", 27000),
+        ],
+    )
+    monkeypatch.setattr(gpu_status, "snapshot_gpus", lambda **_: snap)
+    monkeypatch.setattr(
+        backend_mod,
+        "unload_all_ollama_models",
+        lambda endpoint=None: [("qwen3.6:27b-q8_0", True, "ok")],
+    )
+    ok, msg = backend_mod.auto_fix_ollama_tensor_split()
+    assert ok is True
+    assert "released split" in msg
+
+
+def test_render_gpu_block_three_model_rows(monkeypatch) -> None:
+    app = CodingBoxApp()
+    tag = "qwen3.6:27b-q8_0"
+    bi = backend_mod.BackendInfo(
+        name="ollama",
+        model=tag,
+        source="test",
+        endpoint="http://127.0.0.1:11434",
+    )
+    agent = MagicMock()
+    agent.model = tag
+    agent._backend = MagicMock(info=bi)
+    agent._backend2 = MagicMock(info=bi)
+    agent._backend3 = MagicMock(info=bi)
+    agent._model2_role = "architect"
+    agent._model3_role = "critic"
+    agent._asset_generator = None
+    agent._sound_generator = None
+    app.agent = agent
+    app._session_model2 = tag
+    app._session_model3 = tag
+
+    snap = gpu_status.GpuSnapshot(
+        gpus=[
+            gpu_status.GpuInfo(1, "B", memory_used_mib=28000, memory_total_mib=49140),
+            gpu_status.GpuInfo(3, "D", memory_used_mib=27000, memory_total_mib=49140),
+        ],
+        processes=[
+            gpu_status.GpuProcess(1, 7, "ollama", 28000),
+            gpu_status.GpuProcess(3, 7, "ollama", 27000),
+        ],
+    )
+
+    monkeypatch.setattr(gpu_status, "snapshot_gpus", lambda **_: snap)
+    monkeypatch.setattr(
+        gpu_status, "ollama_loaded_models",
+        lambda: [{"name": tag, "vram_gib": 53.1}],
+    )
+
+    block = app._render_gpu_placement_block()
+    assert "GPU ?" not in block
+    assert "Ollama VRAM" not in block
+    assert "shared load" not in block
+    assert "Model 1" in block and "Model 2" in block and "Model 3" in block
+    assert tag in block
+    assert "same VRAM" in block
+    assert "LLM" in block
+    assert "Diffusers" in block
+    assert "Z-Image-Turbo" in block
+    assert "not loaded" in block
+    assert "still split" in block or "/unload" in block
+
+
+def test_diffuser_kind_labels() -> None:
+    class ZImageTurboGenerator:
+        pass
+    class Img2ImgGenerator:
+        pass
+    class StableAudioGenerator:
+        pass
+    assert gpu_status.diffuser_kind(ZImageTurboGenerator()) == "Z-Image-Turbo"
+    assert gpu_status.diffuser_kind(Img2ImgGenerator()) == "SD-Turbo img2img"
+    assert gpu_status.diffuser_kind(StableAudioGenerator()) == "Stable-Audio"
 
 
 def test_read_mlx_context_length_ignores_non_positive(tmp_path: Path) -> None:

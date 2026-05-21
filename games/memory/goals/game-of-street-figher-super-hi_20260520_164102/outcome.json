@@ -1,9 +1,0 @@
-{
-  "session_id": "game-of-street-figher-super-hi_20260520_164102",
-  "goal": "game of street-figher, super high resultion graphics, well annimated graphics, street figher always punching, kicking, shooting fireballs FACING the opponent. all moves ducking blocking jumping well animanted, all hits by fist, foot, or fireball specifically annimated, gorgous detailed arena to fight in, as close as possible to the original street figher game in terms of graphics, movess and animation",
-  "model": "qwen3.6:27b-q8_0",
-  "iterations": 13,
-  "ok": true,
-  "last_report_summary": "OK: True\nTitle: 'Street Fighter'\nCanvas: 800x600, RAF ran: True, blank: False\nInput listeners: total=19 (doc=0, win=18, body=0, other=1)\nInput test: PASS \u2014 ArrowUp\u2192[_inputUp, p1.grounded, p1.vx, p1.vy, p1.x]; ArrowDown\u2192[_inputDown, p1.vx, p1.vy, p1.x, p1.y]; ArrowLeft\u2192[_inputLeft, p1.facing, p1.grounded, p1.lastAttackTime, p1.stateTimer]; ArrowRight\u2192[_inputRight, fireballs.0.dmg, fireballs.0.h, fireballs.0.owner.animFrame, fireballs.0.owner.blocking]\nFrozen canvas: no (pixels changed during run)\nBody text length: 92 chars\nBody sample: 'ROUND 1 \\xa0 95\\n\u2190\u2192 Move | \u2191 Jump | \u2193 Duck | F Punch | G Kick | H Fireball | B Block | R Restart'\nWarnings:\n  - Canvas2D: Multiple readback operations using getImageData are faster with the willReadFrequently attribute set to true. See: https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently\nAcceptance probes: 7/7 pass\n  ok  canvas_present: !!document.querySelector('canvas')\n  ok  health_bars_visible: window.state && state.",
-  "ts": "2026-05-21T01:18:35.742146Z"
-}

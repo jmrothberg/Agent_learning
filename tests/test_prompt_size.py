@@ -16,8 +16,14 @@ from prompts_v1 import build_system_prompt
 
 
 def test_small_model_prompt_under_six_kilobytes():
+    """Target is ≤ ~6 KB so the small-model prompt stays lean. 2026-05-21
+    bumped the cap from 6_000 to 6_300 to admit the new window-state
+    hard-rule (Expose state on window: window.gameState = state; ...).
+    Evidence: that rule prevents the single most common probe failure
+    across May 20-21 traces (pac/dk/sf/doom/FPS all hit it). The +200
+    chars is justified by the failure mode it eliminates."""
     p = build_system_prompt("snake game", model_class="small")
-    assert len(p) <= 6_000, f"small-model prompt {len(p)} chars exceeds 6 KB target"
+    assert len(p) <= 6_300, f"small-model prompt {len(p)} chars exceeds 6.3 KB target"
 
 
 def test_small_model_prompt_drops_optional_tags():

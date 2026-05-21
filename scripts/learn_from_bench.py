@@ -195,7 +195,7 @@ def main() -> int:
         print("[no deltas] all pairs were within the noise band")
     if args.apply and (helpful or harmful):
         import memory
-        pb = memory.Playbook(str(REPO / "games" / "memory"))
+        pb = memory.Playbook(str(REPO / "games" / "game-memory"))
         # Aggregate to single update calls for atomicity.
         for bid, n in helpful.items():
             pb.update_counters([bid], helpful_delta=n)

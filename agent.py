@@ -1282,6 +1282,9 @@ class GameAgent:
         self._model3_role: str | None = model3_role
         self._model2_activity: str = "idle"
         self._model3_activity: str = "idle"
+        # Role passed to the in-flight _stream() call — chat.py routes
+        # token counters to Model 2/3 lines when this is critic/architect.
+        self._last_stream_role: str = "coder"
         self.out_path = Path(out_path)
         self.browser = browser
         self.max_iters = max_iters
@@ -1518,8 +1521,15 @@ class GameAgent:
         self._last_test_report: dict | None = None
         self._use_prefill = bool(use_prefill)
         self._use_vlm_critique = bool(use_vlm_critique)
+        # Auto-staff flag (2026-05-21): True when _use_vlm_critique was
+        # flipped by the auto-enable hook in _detect_vlm rather than by an
+        # explicit /vlm-critique on. Surfaced in the TUI status panel so
+        # users see "[auto]" and know they can override.
+        self._vlm_critique_auto: bool = False
         self._use_double_screenshot = bool(use_double_screenshot)
         self._use_architect_split = bool(use_architect_split)
+        # Auto-staff flag for architect split (same shape as above).
+        self._architect_split_auto: bool = False
         # todo #6 — resolve "auto" via simple substring-match. Adding a
         # name to _MID_MODEL_TAGS is a one-line opt-in for new families.
         self._model_class: str = (
@@ -2158,8 +2168,27 @@ class GameAgent:
                 # Code stage already narrowly retrieves; full bodies on all.
                 render_mode = "full"
                 full_top_n_val = 3
+            # Modality-token expansion (added 2026-05-21): when the goal
+            # mentions a known modality (board/DOM/3D/etc), append those
+            # keywords to the playbook query so the modality-tagged
+            # bullets retrieve above the 0.05 Jaccard noise floor. The
+            # detectors are the same ones the skeleton retrieval uses;
+            # importing here keeps the helper public-API stable.
+            mod_toks: list[str] = []
+            try:
+                from memory import (
+                    _detect_board_intent, _detect_dom_intent, _detect_3d_intent,
+                )
+                mod_toks = (
+                    _detect_3d_intent(goal)
+                    + _detect_board_intent(goal)
+                    + _detect_dom_intent(goal)
+                )
+            except Exception:
+                mod_toks = []
             hits = self._playbook.retrieve(
                 goal, code=code, k=k, stage=stage,
+                modality_tokens=mod_toks,
             )
             if hits:
                 ids = [h.bullet.id for h in hits]
@@ -3717,11 +3746,16 @@ class GameAgent:
                     "feedback_preview": joined[:240],
                 })
 
+            # [USER NOTE] markers added 2026-05-21: explicit labels survive
+            # the structured-prune compaction step. Without them, late-
+            # session prompts lose user voice — the compactor summarizes
+            # the banner away. The marker is also a literal token the
+            # model can search-and-attend to.
             parts.append(
                 "================ USER FEEDBACK (HIGHEST PRIORITY) ================\n"
                 "The user just typed this while watching your game. It OVERRIDES\n"
                 "any plan or default behavior. Address it explicitly in this turn:\n"
-                f"\n{repeat_prefix}- {joined}\n"
+                f"\n[USER NOTE]\n{repeat_prefix}- {joined}\n[/USER NOTE]\n"
                 "=================================================================="
             )
             for fb in selected_feedback:
@@ -4148,19 +4182,53 @@ class GameAgent:
                     and not (prev.get("page_errors") or [])
                     and not (prev.get("console_errors") or [])
                 )
+                coaching_to_inject = self._pending_coaching
                 if clean_report:
+                    # Visual/static/player-motion warnings are generated
+                    # specifically because the normal report looked clean.
+                    # Preserve those so "passes but not playable" issues
+                    # still reach the next coder turn.
+                    must_keep_keywords = (
+                        "VISUAL CRITIC",
+                        "VISUAL JUDGE",
+                        "REGRESSION SUSPECTED",
+                        "STATIC SCREEN",
+                        "STATE LOCOMOTION",
+                        "Asset references",
+                        "Sound references",
+                    )
+                    coaching_to_inject = [
+                        c for c in self._pending_coaching
+                        if any(kw in c for kw in must_keep_keywords)
+                    ]
+                    suppressed = [
+                        c for c in self._pending_coaching
+                        if c not in coaching_to_inject
+                    ]
                     self._trace({
                         "kind": "coaching_suppressed_clean_pass",
-                        "count": len(self._pending_coaching),
+                        "count": len(suppressed),
+                        "preserved_count": len(coaching_to_inject),
                     })
-                else:
-                    joined = "\n- ".join(self._pending_coaching)
+                if coaching_to_inject:
+                    joined = "\n- ".join(coaching_to_inject)
+                    # [CRITIC] marker (added 2026-05-21): mirrors the
+                    # [USER NOTE] pattern so critic findings get the same
+                    # compaction-survival treatment as user feedback.
+                    # Distinct label so the model can tell which voice is
+                    # speaking (user override > critic suggestion).
+                    has_critic = any(
+                        "VISUAL CRITIC" in c or "VISUAL JUDGE" in c
+                        for c in coaching_to_inject
+                    )
+                    label_open = "[CRITIC]\n" if has_critic else ""
+                    label_close = "\n[/CRITIC]" if has_critic else ""
                     parts.append(
                         "================ AGENT COACHING ================\n"
-                        f"- {joined}\n"
+                        f"{label_open}- {joined}{label_close}\n"
                         "================================================"
                     )
-                    for c in self._pending_coaching:
+                    for c in coaching_to_inject:
                         self._trace({"kind": "coaching_injected", "text": c})
                 self._pending_coaching.clear()
         if base_message:
@@ -4207,9 +4275,29 @@ class GameAgent:
         self._vlm_cache[backend] = val
         if val:
             self._trace({"kind": "vlm_detected", "model": backend.info.model, "role": role})
+            # Auto-staff (added 2026-05-21): if a local VLM is on ANY
+            # slot (coder/critic/architect) and vlm-critique is still off,
+            # enable it. Single-model users with a VLM coder were getting
+            # nothing from the proven-useful visual critic loop because
+            # /vlm-critique stayed off by default. User can still override
+            # with /vlm-critique off, and the explicit toggle path remains
+            # the source of truth.
+            if not self._use_vlm_critique:
+                self._use_vlm_critique = True
+                self._vlm_critique_auto = True
+                self._trace({
+                    "kind": "auto_enabled",
+                    "feature": "vlm_critique",
+                    "reason": f"local VLM detected on role={role}",
+                    "model": backend.info.model,
+                })
         return val
 
-    async def run_visual_critic(self, current_png: bytes) -> str | None:
+    async def run_visual_critic(
+        self,
+        current_png: bytes,
+        before_png: bytes | None = None,
+    ) -> str | None:
         """Run the configured out-of-band Visual Critic model on current_png."""
         backend = self.get_backend("critic")
         if backend is None:
@@ -4218,24 +4306,56 @@ class GameAgent:
         self._set_role_activity("critic", "Auditing screenshot...")
         try:
             # We construct a highly structured prompt for Model 2/3 (Visual Critic)
-            prompt = (
-                "You are an expert out-of-band Visual PlayTester and Critic for a game development sandbox. "
-                "You are looking at a screenshot of the latest generated HTML5 canvas game.\n\n"
-                f"GOAL FROM THE USER: {self._goal}\n\n"
-                "Review the attached screenshot carefully for visual, positioning, or rendering bugs. Examples:\n"
-                "  - Are projectiles spawning in the wrong direction?\n"
-                "  - Are character sprites misaligned or offset?\n"
-                "  - Are HUD elements overlapping or clipped?\n"
-                "  - Is the canvas completely blank or frozen?\n\n"
-                "If everything looks correct, write 'Visual Critic: OK'.\n"
-                "If you spot a clear rendering defect or bug, write a 2-sentence visual critique. "
-                "Keep it objective, name the specific visual evidence (e.g., 'character facing right but attack rendering to the left'), "
-                "and state what likely needs adjusting. Do NOT output code or patches."
-            )
+            if before_png is not None:
+                prompt = (
+                    "You are an expert out-of-band Visual PlayTester and Critic "
+                    "for a game development sandbox.\n"
+                    "You are looking at TWO screenshots of the latest generated "
+                    "HTML5 canvas game:\n"
+                    "1. Image 1 is taken before simulated inputs/playtesting.\n"
+                    "2. Image 2 is taken after simulated inputs/playtesting.\n\n"
+                    f"GOAL FROM THE USER: {self._goal}\n\n"
+                    "Compare the two screenshots carefully for:\n"
+                    "  - Lack of player locomotion or unresponsiveness: if the "
+                    "goal implies a controllable player and simulated inputs "
+                    "should move it, does the player appear stuck in the same "
+                    "place across both images?\n"
+                    "  - Visual, positioning, or rendering bugs: wrong facing "
+                    "direction, misaligned sprites, overlapping/clipped HUD, "
+                    "blank canvas, or visibly frozen gameplay.\n\n"
+                    "If everything looks correct and responsive, write "
+                    "'Visual Critic: OK'.\n"
+                    "If you spot a clear rendering defect, lack of movement, "
+                    "frozen state, or control bug, write a 2-sentence visual "
+                    "critique. Keep it objective, name the specific visual "
+                    "evidence, and state what likely needs adjusting. Do NOT "
+                    "output code or patches."
+                )
+                images = [before_png, current_png]
+            else:
+                prompt = (
+                    "You are an expert out-of-band Visual PlayTester and Critic for a game development sandbox. "
+                    "You are looking at a screenshot of the latest generated HTML5 canvas game.\n\n"
+                    f"GOAL FROM THE USER: {self._goal}\n\n"
+                    "Review the attached screenshot carefully for visual, positioning, or rendering bugs. Examples:\n"
+                    "  - Are projectiles spawning in the wrong direction?\n"
+                    "  - Are character sprites misaligned or offset?\n"
+                    "  - Are HUD elements overlapping or clipped?\n"
+                    "  - Is the canvas completely blank or frozen?\n\n"
+                    "If everything looks correct, write 'Visual Critic: OK'.\n"
+                    "If you spot a clear rendering defect or bug, write a 2-sentence visual critique. "
+                    "Keep it objective, name the specific visual evidence (e.g., 'character facing right but attack rendering to the left'), "
+                    "and state what likely needs adjusting. Do NOT output code or patches."
+                )
+                images = [current_png]
             messages = [
-                {"role": "user", "content": prompt, "images": [current_png]}
+                {"role": "user", "content": prompt, "images": images}
             ]
-            self._trace({"kind": "visual_critic_start", "model": backend.info.model})
+            self._trace({
+                "kind": "visual_critic_start",
+                "model": backend.info.model,
+                "image_count": len(images),
+            })
             result = await backend.stream_chat(
                 messages,
                 on_token=lambda _t: None,
@@ -4409,9 +4529,12 @@ class GameAgent:
         """
         # Determine the target backend and its VLM capability dynamically
         active_backend = self.get_backend(role)
+        if active_backend is None:
+            raise RuntimeError(f"no backend configured for role={role!r}")
         is_vlm_active = await self._detect_vlm(role)
 
-        self._set_role_activity(role, f"Streaming {role} reply...")
+        self._last_stream_role = role
+        self._set_role_activity(role, f"streaming {role}…")
 
         if (
             is_vlm_active
@@ -4590,10 +4713,17 @@ class GameAgent:
                 "reason": "no_baseline_file",
             })
 
+        result = None
         try:
             opts: dict[str, Any] = {"temperature": temp, "num_ctx": self.num_ctx}
             if self._restart_attempt_seed is not None:
                 opts["seed"] = int(self._restart_attempt_seed)
+            if getattr(active_backend, "info", None) and active_backend.info.name == "ollama":
+                try:
+                    import gpu_status as _gs
+                    opts.update(_gs.ollama_chat_load_options())
+                except Exception:
+                    pass
             result = await active_backend.stream_chat(
                 self._messages,
                 on_token=_heartbeat_on_token,
@@ -4610,12 +4740,20 @@ class GameAgent:
                 on_progress=_on_progress,
                 cancel_event=self._ensure_stop_event(),
             )
+        except Exception as exc:
+            self._set_role_activity(role, f"failed ({type(exc).__name__})")
+            raise
         finally:
             # Always remove our prefill scaffolding before returning so
             # the message history we save & feed to subsequent turns
             # contains a single coherent assistant message.
             if prefill_used and self._messages and self._messages[-1].get("role") == "assistant":
                 self._messages.pop()
+            if result is not None:
+                if getattr(result, "crashed", False):
+                    self._set_role_activity(role, "crashed")
+                else:
+                    self._set_role_activity(role, "idle")
 
         # Stash the streaming-abort signals so callers (the format-
         # rejection branch in run()) can consult them without
@@ -6858,7 +6996,10 @@ class GameAgent:
 
             # ---- PHASE A: planning ------------------------------------------
             yield self._record(AgentEvent("phase", "planning"))
-            yield self._record(AgentEvent("activity", "streaming", {"label": "planning reply"}))
+            yield self._record(AgentEvent(
+                "activity", "streaming",
+                {"label": "planning reply", "role": "architect"},
+            ))
             try:
                 plan_reply = await self._stream(self._token_cb_wrapper, role="architect")
             except Exception as e:
@@ -6991,7 +7132,7 @@ class GameAgent:
                 })
                 yield self._record(AgentEvent(
                     "activity", "streaming",
-                    {"label": "streaming plan after question"},
+                    {"label": "streaming plan after question", "role": "architect"},
                 ))
                 try:
                     plan_reply = await self._stream(self._token_cb_wrapper, role="architect")
@@ -7223,11 +7364,12 @@ class GameAgent:
                     })
                     yield self._record(AgentEvent(
                         "activity", "streaming",
-                        {"label": "streaming architect note"},
+                        {"label": "architect note", "role": "architect"},
                     ))
                     try:
                         arch_reply = await self._stream(self._token_cb_wrapper, role="architect")
                     except Exception as e:
+                        self._set_role_activity("architect", "idle")
                         yield self._record(AgentEvent("activity", "idle"))
                         yield self._record(AgentEvent(
                             "info", f"architect call failed, continuing single-shot: {e}",
@@ -7450,7 +7592,7 @@ class GameAgent:
                             prefill_force = True
                         yield self._record(AgentEvent(
                             "activity", "streaming",
-                            {"label": f"streaming iter {iteration} reply"},
+                            {"label": f"iter {iteration} reply", "role": "coder"},
                         ))
                         reply = await self._stream(
                             self._token_cb_wrapper,
@@ -8442,6 +8584,15 @@ class GameAgent:
                     self._last_screenshot_after = None
                     self._last_screenshot_after_path = None
 
+            before_bytes: bytes | None = None
+            before_path: str | None = None
+            if shot_path is not None and report.get("screenshot_before"):
+                before_path = str(report["screenshot_before"])
+                try:
+                    before_bytes = Path(before_path).read_bytes()
+                except Exception:
+                    before_bytes = None
+
             # Compute the screenshot delta BEFORE the vision judge runs
             # — the judge rotates `_prev_judge_png` to the current frame
             # at the end of its call, so we need to read against the
@@ -8457,6 +8608,92 @@ class GameAgent:
                     )
                 except Exception:
                     self._last_screenshot_delta = None
+            if before_bytes is not None and after_bytes is not None:
+                try:
+                    from tools import screenshot_delta as _sshot_delta
+                    input_playtest_delta = _sshot_delta(before_bytes, after_bytes)
+                except Exception:
+                    input_playtest_delta = None
+                if (
+                    input_playtest_delta is not None
+                    and input_playtest_delta < 0.005
+                ):
+                    self._pending_coaching.append(
+                        "STATIC SCREEN WARNING: The screen was completely "
+                        "static before and after input simulation "
+                        f"(pixel delta {input_playtest_delta:.4f}). This "
+                        "usually means controls are unwired, state is not "
+                        "updating, or the RAF loop is drawing the same frame."
+                    )
+                    self._trace({
+                        "kind": "static_screen_warning",
+                        "iteration": iteration,
+                        "input_playtest_delta": input_playtest_delta,
+                    })
+                    yield self._record(AgentEvent(
+                        "info",
+                        f"[yellow]warning[/yellow] (iter {iteration}): "
+                        "static screen detected after simulated input "
+                        f"(delta {input_playtest_delta:.4f})"
+                    ))
+
+            input_test = report.get("input_test") or {}
+            if isinstance(input_test, dict) and input_test.get("ran"):
+                evidence = input_test.get("responsive_evidence") or {}
+                if isinstance(evidence, dict) and evidence:
+                    movement_fields: list[str] = []
+                    input_buffer_fields: list[str] = []
+                    other_fields: list[str] = []
+                    movement_exact = {"x", "y", "px", "py", "col", "row"}
+                    movement_names = ("pos", "position", "coord")
+                    input_exact = {"dir", "nextdir", "keys", "pressed", "input"}
+                    input_names = ("lastfire", "lastinput", "key", "press")
+                    for changed_fields in evidence.values():
+                        if not isinstance(changed_fields, list):
+                            continue
+                        for field in changed_fields:
+                            field_text = str(field)
+                            field_low = field_text.lower()
+                            leaf = field_low.rsplit(".", 1)[-1]
+                            if (
+                                leaf in movement_exact
+                                or any(name in leaf for name in movement_names)
+                            ):
+                                movement_fields.append(field_text)
+                            if (
+                                leaf in input_exact
+                                or any(name in leaf for name in input_names)
+                            ):
+                                input_buffer_fields.append(field_text)
+                            elif not (
+                                leaf in movement_exact
+                                or any(name in leaf for name in movement_names)
+                            ):
+                                other_fields.append(field_text)
+                    if (
+                        input_buffer_fields
+                        and not movement_fields
+                        and not other_fields
+                    ):
+                        self._pending_coaching.append(
+                            "STATE LOCOMOTION WARNING: Input simulation changed "
+                            "input-buffer/state fields but did NOT change any "
+                            "player coordinate fields (x, y, px, py, row/col, "
+                            "position). This suggests the controllable player "
+                            "is trapped or movement logic is not wired through, "
+                            "for example by a grid-alignment snap or collision "
+                            "check that cancels movement every frame."
+                        )
+                        self._trace({
+                            "kind": "state_locomotion_warning",
+                            "iteration": iteration,
+                            "input_buffer_fields": input_buffer_fields[:8],
+                        })
+                        yield self._record(AgentEvent(
+                            "info",
+                            f"[yellow]warning[/yellow] (iter {iteration}): "
+                            "input changed buffers but no player coordinates"
+                        ))
             # Visual-progress judge: auto-runs when a local MLX-VLM is
             # discoverable on disk (honors the "never silent cloud calls"
             # rule — `_run_vision_judge` skips cleanly when no local VLM
@@ -8467,7 +8704,10 @@ class GameAgent:
                 critic_backend = self.get_backend("critic")
                 if critic_backend is not None:
                     try:
-                        critique = await self.run_visual_critic(after_bytes)
+                        critique = await self.run_visual_critic(
+                            after_bytes,
+                            before_bytes,
+                        )
                         if critique:
                             cleaned = critique.strip()
                             if cleaned and "ok" not in cleaned.lower()[:30]:
@@ -8493,10 +8733,13 @@ class GameAgent:
                             "iteration": iteration,
                             "error": str(exc),
                         })
-            if self._use_double_screenshot and report.get("screenshot_before"):
+            if (
+                self._use_double_screenshot
+                and before_path is not None
+                and before_bytes is not None
+            ):
                 try:
-                    before_path = str(report["screenshot_before"])
-                    self._last_screenshot_before = Path(before_path).read_bytes()
+                    self._last_screenshot_before = before_bytes
                     self._last_screenshot_before_path = before_path
                 except Exception:
                     self._last_screenshot_before = None
@@ -8908,7 +9151,7 @@ class GameAgent:
             })
             yield self._record(AgentEvent(
                 "activity", "streaming",
-                {"label": "streaming bonus turn (cap reached)"},
+                {"label": "bonus turn (cap reached)", "role": "coder"},
             ))
             try:
                 reply = await self._stream(self._token_cb_wrapper)
@@ -9004,7 +9247,7 @@ class GameAgent:
             self._trace({"kind": "exit_decision_turn_prompted"})
             yield self._record(AgentEvent(
                 "activity", "streaming",
-                {"label": "streaming exit-decision turn"},
+                {"label": "exit decision", "role": "architect"},
             ))
             try:
                 exit_reply = await self._stream(self._token_cb_wrapper, role="architect")

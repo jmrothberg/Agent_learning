@@ -33,12 +33,13 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-MEM = REPO_ROOT / "memory"
+LIVE_MEM = REPO_ROOT / "games" / "game-memory"
+SHORT_TERM = REPO_ROOT / "games"
 
 
 def list_state() -> int:
-    skel_dir = MEM / "skeletons"
-    goals_dir = MEM / "goals"
+    skel_dir = LIVE_MEM / "skeletons"
+    goals_dir = SHORT_TERM / "goals"
     print("won_* skeletons:")
     for p in sorted(skel_dir.glob("won_*.json")) if skel_dir.exists() else []:
         try:
@@ -57,8 +58,8 @@ def list_state() -> int:
 
 
 def forget(session_id: str, *, dry_run: bool) -> int:
-    skel_dir = MEM / "skeletons"
-    goals_dir = MEM / "goals"
+    skel_dir = LIVE_MEM / "skeletons"
+    goals_dir = SHORT_TERM / "goals"
     targets: list[Path] = []
     for ext in (".html", ".json"):
         f = skel_dir / f"won_{session_id}{ext}"
@@ -87,7 +88,7 @@ def forget(session_id: str, *, dry_run: bool) -> int:
     # Best-effort: prune mistakes.jsonl entries with a matching session
     # field. Most entries don't carry one (the writer only adds it for
     # newer traces), so this rewrite is small and safe.
-    mistakes = MEM / "mistakes.jsonl"
+    mistakes = LIVE_MEM / "mistakes.jsonl"
     if mistakes.exists():
         kept: list[str] = []
         dropped = 0

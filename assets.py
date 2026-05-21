@@ -392,6 +392,8 @@ class ZImageTurboGenerator:
         self._pipeline: Any = None  # lazy-init in .generate()
         # Resolved at first .generate() call; "cuda", "mps", or None.
         self._device: str | None = None
+        # Physical/logical CUDA index after .to("cuda"); status panel only.
+        self._cuda_device_index: int | None = None
         # Last error captured from _lazy_init or generate. Surfaced via
         # last_stats[i]["error"] so the caller can show the user the
         # actual exception (instead of a canned "OOM / NSFW / etc"
@@ -433,6 +435,14 @@ class ZImageTurboGenerator:
         if torch.cuda.is_available():
             device = "cuda"
             dtype = torch.bfloat16   # Blackwell-class GPU sweet spot
+            try:
+                import gpu_status as _gs
+                snap = _gs.snapshot_gpus()
+                pick = _gs.pick_least_loaded_cuda_index(snap)
+                if pick is not None:
+                    _gs.activate_cuda_device(pick)
+            except Exception:
+                pass
         elif (
             hasattr(torch.backends, "mps")
             and torch.backends.mps.is_available()
@@ -458,6 +468,10 @@ class ZImageTurboGenerator:
             )
             self._pipeline.to(device)
             self._device = device
+            self._cuda_device_index = (
+                int(torch.cuda.current_device())
+                if device == "cuda" else None
+            )
             return True
         except Exception as e:
             import traceback as _tb
@@ -468,6 +482,7 @@ class ZImageTurboGenerator:
             )
             self._pipeline = None
             self._device = None
+            self._cuda_device_index = None
             return False
 
     def generate(self, prompt: str) -> str | None:
@@ -575,6 +590,7 @@ class Img2ImgGenerator:
         self.model_path = model_path or _resolve_sd_turbo_path()
         self._pipeline: Any = None
         self._device: str | None = None
+        self._cuda_device_index: int | None = None
         self._last_error: str | None = None
 
     def cleanup(self) -> None:
@@ -605,6 +621,14 @@ class Img2ImgGenerator:
         if torch.cuda.is_available():
             device = "cuda"
             dtype = torch.float16
+            try:
+                import gpu_status as _gs
+                snap = _gs.snapshot_gpus()
+                pick = _gs.pick_least_loaded_cuda_index(snap)
+                if pick is not None:
+                    _gs.activate_cuda_device(pick)
+            except Exception:
+                pass
         elif (
             hasattr(torch.backends, "mps")
             and torch.backends.mps.is_available()
@@ -636,6 +660,10 @@ class Img2ImgGenerator:
             if sc is not None:
                 self._pipeline.safety_checker = None
             self._device = device
+            self._cuda_device_index = (
+                int(torch.cuda.current_device())
+                if device == "cuda" else None
+            )
             return True
         except Exception as e:
             import traceback as _tb
@@ -646,6 +674,7 @@ class Img2ImgGenerator:
             )
             self._pipeline = None
             self._device = None
+            self._cuda_device_index = None
             return False
 
     def generate(
@@ -990,6 +1019,7 @@ def generate_assets(
             out[name] = target_path.resolve()
             stat["cache_hit"] = True
             stat["gen_seconds"] = round(time.time() - t0, 3)
+            _attach_diffuser_stat(stat, image_generator)
             asset_stats.append(stat)
             continue
         # Cross-session library lookup — only for root assets (img2img
@@ -1016,6 +1046,7 @@ def generate_assets(
                     stat["library_score"] = round(hit.score, 3)
                     stat["library_source_prompt"] = hit.entry.prompt[:80]
                     stat["gen_seconds"] = round(time.time() - t0, 3)
+                    _attach_diffuser_stat(stat, image_generator)
                     asset_stats.append(stat)
                     continue
                 except Exception:
@@ -1054,6 +1085,12 @@ def generate_assets(
                 "generator's _last_error attribute)"
             )
             stat["gen_seconds"] = round(time.time() - t0, 3)
+            _attach_diffuser_stat(
+                stat,
+                img2img_generator
+                if from_image and not stat.get("fallback_to_txt2img")
+                else image_generator,
+            )
             asset_stats.append(stat)
             continue
         try:
@@ -1099,6 +1136,12 @@ def generate_assets(
             stat["error"] = f"{type(e).__name__}: {str(e)[:120]}"
         finally:
             stat["gen_seconds"] = round(time.time() - t0, 3)
+            _attach_diffuser_stat(
+                stat,
+                img2img_generator
+                if from_image and not stat.get("fallback_to_txt2img")
+                else image_generator,
+            )
             asset_stats.append(stat)
     # Stash stats on the generator so the caller can read them out.
     try:
@@ -1106,6 +1149,22 @@ def generate_assets(
     except Exception:
         pass
     return out
+
+
+def _attach_diffuser_stat(stat: dict[str, Any], gen: Any | None) -> None:
+    """Status-panel fields: which diffuser ran and on which GPU."""
+    if gen is None:
+        return
+    try:
+        import gpu_status as _gs
+    except Exception:
+        return
+    stat["diffuser"] = _gs.diffuser_kind(gen)
+    stat["gpu"] = (
+        _gs.diffuser_placement(gen)
+        if getattr(gen, "_pipeline", None) is not None
+        else "not loaded"
+    )
 
 
 def _safe_generate(gen: Any, prompt: str) -> str | None:

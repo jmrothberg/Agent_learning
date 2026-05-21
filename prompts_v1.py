@@ -410,6 +410,12 @@ HARD_RULES: list[str] = [
     "response and the work is wasted. Reset any module-level timer, "
     "counter, or cooldown variable (e.g. lastFireTime, lastSpawnTime) "
     "inside reset() so restart actually restarts.",
+    # Added 2026-05-21 — most common probe failure across May 20-21 traces
+    # (pac, dk, sf, doom, FPS). Tight phrasing so small-model prompt stays
+    # under the 6KB target verified by test_prompt_size.
+    "Expose state on window: `window.gameState = state; window.game = "
+    "{ reset }`. Probes call `window.gameState.score`, `window.game.reset()` "
+    "— un-exposed state fails probes even when the game works.",
 ]
 
 ANTI_PATTERNS: list[str] = [

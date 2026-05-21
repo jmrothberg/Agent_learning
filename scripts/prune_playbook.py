@@ -133,7 +133,7 @@ def decide(
 def apply(decisions: list[Decision]) -> None:
     """Mutate playbook.jsonl: remove pruned, bump harmful counters."""
     import memory
-    pb = memory.Playbook(str(REPO / "games" / "memory"))
+    pb = memory.Playbook(str(REPO / "games" / "game-memory"))
     bullets = pb.load_all()
     prune_ids = {d.bid for d in decisions if d.action == "prune"}
     harmful_ids = [d.bid for d in decisions if d.action == "harmful"]

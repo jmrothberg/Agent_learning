@@ -1964,6 +1964,41 @@ def unload_ollama_model(name: str, endpoint: str | None = None) -> tuple[bool, s
     return True, f"unloaded {name!r}"
 
 
+def auto_fix_ollama_tensor_split(endpoint: str | None = None) -> tuple[bool, str]:
+    """On large-GPU workstations, drop tensor-split Ollama VRAM before a session.
+
+    Uses existing ``/unload`` machinery (``keep_alive=0``). No manual
+    ``OLLAMA_SCHED_SPREAD`` or systemd edits required. Skipped on small-GPU
+    topologies where split may be intentional. Disable with
+    ``AGENT_NO_AUTO_OLLAMA_GPU_FIX=1``.
+    """
+    if os.environ.get("AGENT_NO_AUTO_OLLAMA_GPU_FIX", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    ):
+        return False, ""
+    try:
+        import gpu_status as gs
+    except Exception:
+        return False, ""
+    snap = gs.snapshot_gpus(force=True)
+    if not gs.ollama_is_tensor_split(snap):
+        return False, ""
+    if not gs.prefer_single_gpu_workstation(snap):
+        return False, ""
+    results = unload_all_ollama_models(endpoint)
+    if not results:
+        return False, ""
+    names = [n for n, ok, _ in results if ok]
+    if not names:
+        err = results[0][2] if results else "unload failed"
+        return False, err
+    gs.snapshot_gpus(force=True)
+    return True, (
+        "released split Ollama VRAM — next LLM request reloads "
+        f"({', '.join(names)})"
+    )
+
+
 def unload_all_ollama_models(endpoint: str | None = None) -> list[tuple[str, bool, str]]:
     """Walk /api/ps and unload every loaded model. Returns per-model results."""
     base = endpoint or _ollama_endpoint()
