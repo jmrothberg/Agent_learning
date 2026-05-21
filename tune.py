@@ -385,7 +385,7 @@ async def cmd_run(args) -> int:
         # Seed the playbook from the current shared file if one exists,
         # so we test against the agent's accumulated rules even though
         # skeletons are isolated.
-        shared_playbook = REPO_ROOT / "games" / "memory" / "playbook.jsonl"
+        shared_playbook = REPO_ROOT / "games" / "game-memory" / "playbook.jsonl"
         if shared_playbook.exists():
             try:
                 (Path(memory_root) / "playbook.jsonl").write_text(
@@ -508,7 +508,7 @@ async def _auto_learn(run_dir: Path, results, args, memory_root) -> None:
     import backend as backend_mod
 
     pb_root = (
-        Path(REPO_ROOT) / "games" / "memory"
+        Path(REPO_ROOT) / "games" / "game-memory"
         if args.learn_shared else Path(memory_root)
     )
     playbook = Playbook(root=pb_root)
@@ -626,7 +626,7 @@ def cmd_analyze(args) -> int:
 
     pb_root = Path(args.playbook_root) if args.playbook_root else (run_dir / "_memory")
     if not (pb_root / "playbook.jsonl").exists():
-        pb_root = Path(REPO_ROOT) / "games" / "memory"
+        pb_root = Path(REPO_ROOT) / "games" / "game-memory"
     playbook = Playbook(root=pb_root)
     bullets = playbook.load_all()
 
@@ -777,7 +777,7 @@ async def cmd_validate_bullet(args) -> int:
 
     pb_root = (
         Path(args.playbook_root) if args.playbook_root
-        else (Path(__file__).resolve().parent / "games" / "memory")
+        else (Path(__file__).resolve().parent / "games" / "game-memory")
     )
     pb = Playbook(root=pb_root)
     pb.ensure()
@@ -997,7 +997,7 @@ def main() -> int:
                          "--learn-shared is also set)")
     pr.add_argument("--learn-shared", action="store_true",
                     help="with --auto-learn, write playbook updates back "
-                         "to the shared games/memory/playbook.jsonl "
+                         "to the shared memory/playbook.jsonl "
                          "instead of the per-run isolated copy")
     pr.add_argument("--reflector-model", default=None,
                     help="model for the offline reflector (default: same "
@@ -1025,7 +1025,7 @@ def main() -> int:
     pan.add_argument("run_id")
     pan.add_argument("--playbook-root", default=None,
                      help="playbook dir (default: run's isolated _memory, "
-                          "fallback to project games/memory)")
+                          "fallback to project memory)")
 
     pv = sub.add_parser(
         "validate-bullet",
@@ -1044,7 +1044,7 @@ def main() -> int:
     pv.add_argument("--max-iters", type=int, default=None)
     pv.add_argument("--best-of-n", type=int, default=None)
     pv.add_argument("--playbook-root", default=None,
-                    help="playbook dir (default: project games/memory)")
+                    help="playbook dir (default: project memory)")
 
     args = p.parse_args()
 

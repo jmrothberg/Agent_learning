@@ -1193,7 +1193,7 @@ class GameAgent:
         # generation including pathological MoE prefills + multi-KB
         # html_file rewrites. Runaway generation is still bounded.
         overall_seconds: float = 1800.0,
-        memory_root: str | Path = "games/memory",
+        memory_root: str | Path = "memory",
         # Optional path to an existing HTML file to start from. When set,
         # the agent skips memory-skeleton retrieval and uses this file as
         # the baseline; the model is asked to ADAPT it (via patches) to
@@ -1256,6 +1256,10 @@ class GameAgent:
         # behavior so callers that don't opt in are unchanged).
         restart_n: int = 1,
         restart_score_threshold: float = 60.0,
+        backend2: Backend | None = None,
+        model2_role: str | None = None,
+        backend3: Backend | None = None,
+        model3_role: str | None = None,
     ):
         # Backend resolution. Legacy callers pass `model="..."` without
         # `backend=` (notably the unit-test fixtures that never stream);
@@ -1273,6 +1277,15 @@ class GameAgent:
                 endpoint=os.environ.get("OLLAMA_HOST") or "http://127.0.0.1:11434",
             ))
         self._backend: Backend = backend
+        self._backend2: Backend | None = backend2
+        self._model2_role: str | None = model2_role
+        self._backend3: Backend | None = backend3
+        self._model3_role: str | None = model3_role
+        self._model2_activity: str = "idle"
+        self._model3_activity: str = "idle"
+        # Role passed to the in-flight _stream() call — chat.py routes
+        # token counters to Model 2/3 lines when this is critic/architect.
+        self._last_stream_role: str = "coder"
         self.out_path = Path(out_path)
         self.browser = browser
         self.max_iters = max_iters
@@ -1283,6 +1296,7 @@ class GameAgent:
         self.seed_file: Path | None = Path(seed_file) if seed_file else None
         self._messages: list[dict] = []
         self._pending_feedback: list[str] = []
+        self._feedback_deferred_last_turn: bool = False
         # Most recent feedback batch consumed by _flush_user_injections.
         # Used to restore feedback if a stream fails before any assistant
         # reply lands (extension fallback / backend failure path).
@@ -1454,6 +1468,7 @@ class GameAgent:
         # the writeback feedback loop to credit/blame them after the next
         # test result.
         self._active_bullet_ids: list[str] = []
+        self._active_skeleton: str | None = None
         self._skeleton_mode = skeleton_mode
         self._prompt_version = prompt_version
         self._p = self._load_prompt_module(prompt_version)
@@ -1526,8 +1541,15 @@ class GameAgent:
         self._warning_persistence: dict[str, int] = {}
         self._use_prefill = bool(use_prefill)
         self._use_vlm_critique = bool(use_vlm_critique)
+        # Auto-staff flag (2026-05-21): True when _use_vlm_critique was
+        # flipped by the auto-enable hook in _detect_vlm rather than by an
+        # explicit /vlm-critique on. Surfaced in the TUI status panel so
+        # users see "[auto]" and know they can override.
+        self._vlm_critique_auto: bool = False
         self._use_double_screenshot = bool(use_double_screenshot)
         self._use_architect_split = bool(use_architect_split)
+        # Auto-staff flag for architect split (same shape as above).
+        self._architect_split_auto: bool = False
         # todo #6 — resolve "auto" via simple substring-match. Adding a
         # name to _MID_MODEL_TAGS is a one-line opt-in for new families.
         self._model_class: str = (
@@ -1654,6 +1676,34 @@ class GameAgent:
     @property
     def model(self) -> str:
         return self._backend.info.model
+
+    def get_backend(self, role: str) -> Backend:
+        """Dynamic hierarchical routing for multi-GPU configurations."""
+        if role == "coder":
+            return self._backend  # Always Model 1
+            
+        elif role == "architect":
+            # Check if Model 2 or Model 3 is explicitly configured as architect
+            if getattr(self, "_model2_role", None) == "architect" and getattr(self, "_backend2", None) is not None:
+                return self._backend2
+            if getattr(self, "_model3_role", None) == "architect" and getattr(self, "_backend3", None) is not None:
+                return self._backend3
+            return self._backend  # Fallback to Model 1
+            
+        elif role == "critic":
+            # Check if Model 3 or Model 2 is explicitly configured as visual critic
+            if getattr(self, "_model3_role", None) == "critic" and getattr(self, "_backend3", None) is not None:
+                return self._backend3
+            if getattr(self, "_model2_role", None) == "critic" and getattr(self, "_backend2", None) is not None:
+                return self._backend2
+            return None  # Fallback to standard non-visual automated testing
+
+    def _set_role_activity(self, role: str, activity: str) -> None:
+        """Set TUI status panel text for Model 2 and Model 3 dynamically."""
+        if getattr(self, "_model2_role", None) == role:
+            self._model2_activity = activity
+        if getattr(self, "_model3_role", None) == role:
+            self._model3_activity = activity
 
     @staticmethod
     def _should_skip_format_doctor(
@@ -2036,18 +2086,30 @@ class GameAgent:
         return text or None
 
     @classmethod
-    def _classify_model(cls, model: str) -> str:
+    def _classify_model(cls, model: str | None) -> str:
         """Default model class.
 
-        We deliberately do NOT inspect the model name. The user runs a
-        rotating set of mid-size local LLMs (~27B-class) — qwen3.6, the
-        next qwen, whatever ships next quarter — and a model-name table
-        would go stale every release. The class is "small" by default:
-        the lean ~5 KB system prompt + drop of the <assets>/<sounds>/
-        <lookup_bullet> pipelines, biased for one-shot strength on simple
-        games. Pass `model_class="large"` explicitly when running a
-        frontier-tier model that can absorb the full schema.
+        We dynamically classify the model based on substring matching of its
+        name, falling back to 'small' for smaller models or unknown systems.
         """
+        if not model:
+            return "small"
+        m = str(model).lower()
+        # Large/frontier models
+        large_keywords = [
+            "70b", "72b", "100b", "110b", "120b", "132b", "141b", "236b", "314b", "405b",
+            "gpt-4", "gpt-4o", "o1-", "o3-", "claude-3", "claude-3.5", "claude-4",
+            "opus", "sonnet"
+        ]
+        if any(kw in m for kw in large_keywords):
+            return "large"
+        # Mid-tier capable models (14B-35B class + notable architectures)
+        mid_keywords = [
+            "14b", "16b", "20b", "22b", "27b", "32b", "33b", "34b", "35b", "moe",
+            "qwen3.6", "qwen", "deepseek", "gemini", "gemma"
+        ]
+        if any(kw in m for kw in mid_keywords):
+            return "mid"
         return "small"
 
     @staticmethod
@@ -2106,6 +2168,8 @@ class GameAgent:
         try:
             if stage == "plan":
                 k = self._playbook_top_k + self._PLAN_STAGE_TOP_K_BONUS
+                if self._model_class in ("mid", "small"):
+                    k = 2
                 budget = self._PLAN_STAGE_CHAR_BUDGET
                 # Stop-Losing-To-OneShot todo #6 — mid-tier models lose
                 # focus when the playbook bloats the planning context;
@@ -2119,13 +2183,36 @@ class GameAgent:
                 # ID-only index. Model emits <lookup_bullet> if it wants
                 # the body of any indexed entry. Pi-mono "skills" pattern.
                 render_mode = "hybrid"
+                full_top_n_val = 1 if self._model_class in ("mid", "small") else 3
             else:
                 k = min(self._playbook_top_k, self._CODE_STAGE_TOP_K)
+                if self._model_class in ("mid", "small"):
+                    k = 1
                 budget = self._CODE_STAGE_CHAR_BUDGET
                 # Code stage already narrowly retrieves; full bodies on all.
                 render_mode = "full"
+                full_top_n_val = 3
+            # Modality-token expansion (added 2026-05-21): when the goal
+            # mentions a known modality (board/DOM/3D/etc), append those
+            # keywords to the playbook query so the modality-tagged
+            # bullets retrieve above the 0.05 Jaccard noise floor. The
+            # detectors are the same ones the skeleton retrieval uses;
+            # importing here keeps the helper public-API stable.
+            mod_toks: list[str] = []
+            try:
+                from memory import (
+                    _detect_board_intent, _detect_dom_intent, _detect_3d_intent,
+                )
+                mod_toks = (
+                    _detect_3d_intent(goal)
+                    + _detect_board_intent(goal)
+                    + _detect_dom_intent(goal)
+                )
+            except Exception:
+                mod_toks = []
             hits = self._playbook.retrieve(
                 goal, code=code, k=k, stage=stage,
+                modality_tokens=mod_toks,
             )
             if hits:
                 ids = [h.bullet.id for h in hits]
@@ -2140,7 +2227,7 @@ class GameAgent:
                 })
                 self._active_bullet_ids = list(ids)
             return render_playbook_block(
-                hits, char_budget=budget, mode=render_mode,
+                hits, char_budget=budget, mode=render_mode, full_top_n=full_top_n_val,
             )
         except Exception:
             return ""
@@ -2200,10 +2287,12 @@ class GameAgent:
         text = text.strip()
         if text:
             self._pending_feedback.append(text)
+            self._feedback_deferred_last_turn = False
             self._trace({"kind": "feedback_queued", "text": text})
 
     def add_user_answer(self, text: str) -> None:
         self._pending_answer = text.strip()
+        self._feedback_deferred_last_turn = False
         self._trace({"kind": "answer_queued", "text": self._pending_answer})
 
     def has_pending_user_input(self) -> bool:
@@ -2747,6 +2836,13 @@ class GameAgent:
     def _trace(self, obj: dict) -> None:
         try:
             self.trace_path.parent.mkdir(parents=True, exist_ok=True)
+            # Add dynamic multi-agent telemetry role & name metadata
+            if "model_role" not in obj and "model_name" not in obj:
+                role = getattr(self, "_last_stream_role", "coder")
+                backend = self.get_backend(role)
+                if backend:
+                    obj["model_role"] = role
+                    obj["model_name"] = backend.info.model
             payload = {"ts": datetime.utcnow().isoformat() + "Z", **obj}
             with self.trace_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
@@ -2826,7 +2922,18 @@ class GameAgent:
             for i, msg in enumerate(self._messages):
                 role = msg.get("role", "?")
                 content = msg.get("content", "") or ""
-                lines.append(f"## [{i:02d}] {role}")
+                model_role = msg.get("model_role")
+                model_name = msg.get("model_name")
+                
+                role_label = f"{role.upper()}"
+                if role == "assistant":
+                    m_role = model_role or "coder"
+                    m_name = model_name or self.model
+                    role_label += f" — Role: {m_role} ({m_name})"
+                elif role == "system" and model_role:
+                    role_label += f" — Role: {model_role}"
+                    
+                lines.append(f"## [{i:02d}] {role_label}")
                 lines.append("")
                 lines.append("```")
                 lines.append(content)
@@ -3601,6 +3708,7 @@ class GameAgent:
             for fb in self._pending_feedback:
                 consumed_items.append(f"feedback: {fb[:120]}")
 
+        self._feedback_deferred_last_turn = False
         if self._pending_answer is not None:
             ans = self._pending_answer
             parts.append(
@@ -3611,6 +3719,7 @@ class GameAgent:
             self._trace({"kind": "answer_injected", "text": ans})
             self._pending_answer = None
         if defer_feedback_for_blocker:
+            self._feedback_deferred_last_turn = True
             feedback_items = list(self._pending_feedback)
             preview = "\n- ".join(fb[:240] for fb in feedback_items)
             parts.append(
@@ -3674,11 +3783,16 @@ class GameAgent:
                     "feedback_preview": joined[:240],
                 })
 
+            # [USER NOTE] markers added 2026-05-21: explicit labels survive
+            # the structured-prune compaction step. Without them, late-
+            # session prompts lose user voice — the compactor summarizes
+            # the banner away. The marker is also a literal token the
+            # model can search-and-attend to.
             parts.append(
                 "================ USER FEEDBACK (HIGHEST PRIORITY) ================\n"
                 "The user just typed this while watching your game. It OVERRIDES\n"
                 "any plan or default behavior. Address it explicitly in this turn:\n"
-                f"\n{repeat_prefix}- {joined}\n"
+                f"\n[USER NOTE]\n{repeat_prefix}- {joined}\n[/USER NOTE]\n"
                 "=================================================================="
             )
             for fb in selected_feedback:
@@ -4105,19 +4219,53 @@ class GameAgent:
                     and not (prev.get("page_errors") or [])
                     and not (prev.get("console_errors") or [])
                 )
+                coaching_to_inject = self._pending_coaching
                 if clean_report:
+                    # Visual/static/player-motion warnings are generated
+                    # specifically because the normal report looked clean.
+                    # Preserve those so "passes but not playable" issues
+                    # still reach the next coder turn.
+                    must_keep_keywords = (
+                        "VISUAL CRITIC",
+                        "VISUAL JUDGE",
+                        "REGRESSION SUSPECTED",
+                        "STATIC SCREEN",
+                        "STATE LOCOMOTION",
+                        "Asset references",
+                        "Sound references",
+                    )
+                    coaching_to_inject = [
+                        c for c in self._pending_coaching
+                        if any(kw in c for kw in must_keep_keywords)
+                    ]
+                    suppressed = [
+                        c for c in self._pending_coaching
+                        if c not in coaching_to_inject
+                    ]
                     self._trace({
                         "kind": "coaching_suppressed_clean_pass",
-                        "count": len(self._pending_coaching),
+                        "count": len(suppressed),
+                        "preserved_count": len(coaching_to_inject),
                     })
-                else:
-                    joined = "\n- ".join(self._pending_coaching)
+                if coaching_to_inject:
+                    joined = "\n- ".join(coaching_to_inject)
+                    # [CRITIC] marker (added 2026-05-21): mirrors the
+                    # [USER NOTE] pattern so critic findings get the same
+                    # compaction-survival treatment as user feedback.
+                    # Distinct label so the model can tell which voice is
+                    # speaking (user override > critic suggestion).
+                    has_critic = any(
+                        "VISUAL CRITIC" in c or "VISUAL JUDGE" in c
+                        for c in coaching_to_inject
+                    )
+                    label_open = "[CRITIC]\n" if has_critic else ""
+                    label_close = "\n[/CRITIC]" if has_critic else ""
                     parts.append(
                         "================ AGENT COACHING ================\n"
-                        f"- {joined}\n"
+                        f"{label_open}- {joined}{label_close}\n"
                         "================================================"
                     )
-                    for c in self._pending_coaching:
+                    for c in coaching_to_inject:
                         self._trace({"kind": "coaching_injected", "text": c})
                 self._pending_coaching.clear()
         if base_message:
@@ -4152,8 +4300,115 @@ class GameAgent:
 
     # -- streaming ----------------------------------------------------------
 
-    async def _detect_vlm(self) -> bool:
-        return await self._backend.is_vlm()
+    async def _detect_vlm(self, role: str = "coder") -> bool:
+        backend = self.get_backend(role)
+        if not backend:
+            return False
+        if not hasattr(self, "_vlm_cache"):
+            self._vlm_cache = {}
+        if backend in self._vlm_cache:
+            return self._vlm_cache[backend]
+        val = await backend.is_vlm()
+        self._vlm_cache[backend] = val
+        if val:
+            self._trace({"kind": "vlm_detected", "model": backend.info.model, "role": role})
+            # Auto-staff (added 2026-05-21): if a local VLM is on ANY
+            # slot (coder/critic/architect) and vlm-critique is still off,
+            # enable it. Single-model users with a VLM coder were getting
+            # nothing from the proven-useful visual critic loop because
+            # /vlm-critique stayed off by default. User can still override
+            # with /vlm-critique off, and the explicit toggle path remains
+            # the source of truth.
+            if not self._use_vlm_critique:
+                self._use_vlm_critique = True
+                self._vlm_critique_auto = True
+                self._trace({
+                    "kind": "auto_enabled",
+                    "feature": "vlm_critique",
+                    "reason": f"local VLM detected on role={role}",
+                    "model": backend.info.model,
+                })
+        return val
+
+    async def run_visual_critic(
+        self,
+        current_png: bytes,
+        before_png: bytes | None = None,
+    ) -> str | None:
+        """Run the configured out-of-band Visual Critic model on current_png."""
+        backend = self.get_backend("critic")
+        if backend is None:
+            return None
+            
+        self._set_role_activity("critic", "Auditing screenshot...")
+        try:
+            # We construct a highly structured prompt for Model 2/3 (Visual Critic)
+            if before_png is not None:
+                prompt = (
+                    "You are an expert out-of-band Visual PlayTester and Critic "
+                    "for a game development sandbox.\n"
+                    "You are looking at TWO screenshots of the latest generated "
+                    "HTML5 canvas game:\n"
+                    "1. Image 1 is taken before simulated inputs/playtesting.\n"
+                    "2. Image 2 is taken after simulated inputs/playtesting.\n\n"
+                    f"GOAL FROM THE USER: {self._goal}\n\n"
+                    "Compare the two screenshots carefully for:\n"
+                    "  - Lack of player locomotion or unresponsiveness: if the "
+                    "goal implies a controllable player and simulated inputs "
+                    "should move it, does the player appear stuck in the same "
+                    "place across both images?\n"
+                    "  - Visual, positioning, or rendering bugs: wrong facing "
+                    "direction, misaligned sprites, overlapping/clipped HUD, "
+                    "blank canvas, or visibly frozen gameplay.\n\n"
+                    "If everything looks correct and responsive, write "
+                    "'Visual Critic: OK'.\n"
+                    "If you spot a clear rendering defect, lack of movement, "
+                    "frozen state, or control bug, write a 2-sentence visual "
+                    "critique. Keep it objective, name the specific visual "
+                    "evidence, and state what likely needs adjusting. Do NOT "
+                    "output code or patches."
+                )
+                images = [before_png, current_png]
+            else:
+                prompt = (
+                    "You are an expert out-of-band Visual PlayTester and Critic for a game development sandbox. "
+                    "You are looking at a screenshot of the latest generated HTML5 canvas game.\n\n"
+                    f"GOAL FROM THE USER: {self._goal}\n\n"
+                    "Review the attached screenshot carefully for visual, positioning, or rendering bugs. Examples:\n"
+                    "  - Are projectiles spawning in the wrong direction?\n"
+                    "  - Are character sprites misaligned or offset?\n"
+                    "  - Are HUD elements overlapping or clipped?\n"
+                    "  - Is the canvas completely blank or frozen?\n\n"
+                    "If everything looks correct, write 'Visual Critic: OK'.\n"
+                    "If you spot a clear rendering defect or bug, write a 2-sentence visual critique. "
+                    "Keep it objective, name the specific visual evidence (e.g., 'character facing right but attack rendering to the left'), "
+                    "and state what likely needs adjusting. Do NOT output code or patches."
+                )
+                images = [current_png]
+            messages = [
+                {"role": "user", "content": prompt, "images": images}
+            ]
+            self._trace({
+                "kind": "visual_critic_start",
+                "model": backend.info.model,
+                "image_count": len(images),
+            })
+            result = await backend.stream_chat(
+                messages,
+                on_token=lambda _t: None,
+                options={"temperature": 0.2, "num_ctx": 4096},
+                stall_seconds=120.0,
+                overall_seconds=300.0,
+                max_retries=1,
+            )
+            critique = (result.text or "").strip()
+            self._trace({"kind": "visual_critic_end", "critique": critique})
+            return critique
+        except Exception as e:
+            self._trace({"kind": "visual_critic_failed", "error": str(e)})
+            return None
+        finally:
+            self._set_role_activity("critic", "idle")
 
     async def _run_vision_judge(self, current_png: bytes, iteration: int) -> None:
         """Ask a vision model whether this iter made visible progress
@@ -4305,6 +4560,7 @@ class GameAgent:
         override_temp: float | None = None,
         prefill: str = "",
         prefill_force: bool = False,
+        role: str = "coder",
     ) -> str:
         """Stream once, with watchdog. Recovers from stalls by raising/logging.
 
@@ -4316,13 +4572,17 @@ class GameAgent:
         Ollama continues from there. The prefill is prepended to the
         returned text so downstream parsers see the full output.
         """
-        if self._is_vlm is None:
-            self._is_vlm = await self._detect_vlm()
-            if self._is_vlm:
-                self._trace({"kind": "vlm_detected", "model": self.model})
+        # Determine the target backend and its VLM capability dynamically
+        active_backend = self.get_backend(role)
+        if active_backend is None:
+            raise RuntimeError(f"no backend configured for role={role!r}")
+        is_vlm_active = await self._detect_vlm(role)
+
+        self._last_stream_role = role
+        self._set_role_activity(role, f"streaming {role}…")
 
         if (
-            self._is_vlm
+            is_vlm_active
             and self._messages
             and self._messages[-1].get("role") == "user"
         ):
@@ -4498,11 +4758,18 @@ class GameAgent:
                 "reason": "no_baseline_file",
             })
 
+        result = None
         try:
             opts: dict[str, Any] = {"temperature": temp, "num_ctx": self.num_ctx}
             if self._restart_attempt_seed is not None:
                 opts["seed"] = int(self._restart_attempt_seed)
-            result = await self._backend.stream_chat(
+            if getattr(active_backend, "info", None) and active_backend.info.name == "ollama":
+                try:
+                    import gpu_status as _gs
+                    opts.update(_gs.ollama_chat_load_options())
+                except Exception:
+                    pass
+            result = await active_backend.stream_chat(
                 self._messages,
                 on_token=_heartbeat_on_token,
                 options=opts,
@@ -4518,12 +4785,20 @@ class GameAgent:
                 on_progress=_on_progress,
                 cancel_event=self._ensure_stop_event(),
             )
+        except Exception as exc:
+            self._set_role_activity(role, f"failed ({type(exc).__name__})")
+            raise
         finally:
             # Always remove our prefill scaffolding before returning so
             # the message history we save & feed to subsequent turns
             # contains a single coherent assistant message.
             if prefill_used and self._messages and self._messages[-1].get("role") == "assistant":
                 self._messages.pop()
+            if result is not None:
+                if getattr(result, "crashed", False):
+                    self._set_role_activity(role, "crashed")
+                else:
+                    self._set_role_activity(role, "idle")
 
         # Stash the streaming-abort signals so callers (the format-
         # rejection branch in run()) can consult them without
@@ -7029,9 +7304,12 @@ class GameAgent:
 
             # ---- PHASE A: planning ------------------------------------------
             yield self._record(AgentEvent("phase", "planning"))
-            yield self._record(AgentEvent("activity", "streaming", {"label": "planning reply"}))
+            yield self._record(AgentEvent(
+                "activity", "streaming",
+                {"label": "planning reply", "role": "architect"},
+            ))
             try:
-                plan_reply = await self._stream(self._token_cb_wrapper)
+                plan_reply = await self._stream(self._token_cb_wrapper, role="architect")
             except Exception as e:
                 yield self._record(AgentEvent("activity", "idle"))
                 err_msg = (
@@ -7047,7 +7325,12 @@ class GameAgent:
                     ))
                 return
             yield self._record(AgentEvent("activity", "idle"))
-            self._messages.append({"role": "assistant", "content": plan_reply})
+            self._messages.append({
+                "role": "assistant",
+                "content": plan_reply,
+                "model_role": "architect",
+                "model_name": self.get_backend("architect").info.model
+            })
             self._extract_and_queue_lookups(plan_reply)
             self._capture_todos(plan_reply)
             self._dump_conversation()
@@ -7157,10 +7440,10 @@ class GameAgent:
                 })
                 yield self._record(AgentEvent(
                     "activity", "streaming",
-                    {"label": "streaming plan after question"},
+                    {"label": "streaming plan after question", "role": "architect"},
                 ))
                 try:
-                    plan_reply = await self._stream(self._token_cb_wrapper)
+                    plan_reply = await self._stream(self._token_cb_wrapper, role="architect")
                 except Exception as e:
                     yield self._record(AgentEvent("activity", "idle"))
                     err_msg = (
@@ -7175,7 +7458,12 @@ class GameAgent:
                         ))
                     return
                 yield self._record(AgentEvent("activity", "idle"))
-                self._messages.append({"role": "assistant", "content": plan_reply})
+                self._messages.append({
+                    "role": "assistant",
+                    "content": plan_reply,
+                    "model_role": "architect",
+                    "model_name": self.get_backend("architect").info.model
+                })
                 self._extract_and_queue_lookups(plan_reply)
                 self._capture_todos(plan_reply)
                 self._dump_conversation()
@@ -7234,6 +7522,7 @@ class GameAgent:
                         "seed_assets": {n: str(p) for n, p in seed_assets.items()},
                         "seed_sounds": {n: str(p) for n, p in seed_sounds.items()},
                     }))
+                self._active_skeleton = f"seed: {self.seed_file.name}"
                 yield self._record(AgentEvent("memory", (
                     f"using user-provided seed file: {self.seed_file} "
                     f"({len(seed_html)} bytes) — memory skeleton skipped"
@@ -7324,6 +7613,7 @@ class GameAgent:
                             "backend": self._backend.info.name,
                         },
                     ))
+                self._active_skeleton = skel.name
                 memory_msg = (
                     f"using skeleton: {skel.name}"
                     + (f" (sim={skel.score:.2f}, src goal: {skel.source_goal!r})"
@@ -7382,11 +7672,12 @@ class GameAgent:
                     })
                     yield self._record(AgentEvent(
                         "activity", "streaming",
-                        {"label": "streaming architect note"},
+                        {"label": "architect note", "role": "architect"},
                     ))
                     try:
-                        arch_reply = await self._stream(self._token_cb_wrapper)
+                        arch_reply = await self._stream(self._token_cb_wrapper, role="architect")
                     except Exception as e:
+                        self._set_role_activity("architect", "idle")
                         yield self._record(AgentEvent("activity", "idle"))
                         yield self._record(AgentEvent(
                             "info", f"architect call failed, continuing single-shot: {e}",
@@ -7397,7 +7688,12 @@ class GameAgent:
                             self._messages.pop()
                     else:
                         yield self._record(AgentEvent("activity", "idle"))
-                        self._messages.append({"role": "assistant", "content": arch_reply})
+                        self._messages.append({
+                            "role": "assistant",
+                            "content": arch_reply,
+                            "model_role": "architect",
+                            "model_name": self.get_backend("architect").info.model
+                        })
                         m = re.search(r"<architect>\s*(.*?)\s*</architect>",
                                       arch_reply, re.DOTALL | re.IGNORECASE)
                         if m:
@@ -7530,9 +7826,18 @@ class GameAgent:
                     "Enter to continue, or type feedback",
                     {"just_finished_iter": iteration - 1},
                 ))
-                while not self._step_continue and not self.has_pending_user_input():
+                # Only bypass the pause if we have pending input AND that input was NOT deferred.
+                # If it was deferred, we must still pause so the user can see if the blocker was fixed.
+                def should_wait():
+                    if self._step_continue:
+                        return False
+                    if self.has_pending_user_input() and not self._feedback_deferred_last_turn:
+                        return False
+                    return True
+
+                while should_wait():
                     await asyncio.sleep(0.1)
-                if self.has_pending_user_input():
+                if self.has_pending_user_input() and not self._feedback_deferred_last_turn:
                     if self._messages and self._messages[-1].get("role") == "user":
                         base = self._messages.pop()["content"]
                         self._messages.append({
@@ -7595,7 +7900,7 @@ class GameAgent:
                             prefill_force = True
                         yield self._record(AgentEvent(
                             "activity", "streaming",
-                            {"label": f"streaming iter {iteration} reply"},
+                            {"label": f"iter {iteration} reply", "role": "coder"},
                         ))
                         reply = await self._stream(
                             self._token_cb_wrapper,
@@ -8482,6 +8787,7 @@ class GameAgent:
                 "materialize": materialize_msg,
                 "patches_applied": len(patches_in_reply) - len(partial_failed),
                 "patches_failed": len(partial_failed),
+                "diagnose": self._last_diagnose,
             })
             yield self._record(AgentEvent(
                 "code",
@@ -8720,6 +9026,15 @@ class GameAgent:
                     self._last_screenshot_after = None
                     self._last_screenshot_after_path = None
 
+            before_bytes: bytes | None = None
+            before_path: str | None = None
+            if shot_path is not None and report.get("screenshot_before"):
+                before_path = str(report["screenshot_before"])
+                try:
+                    before_bytes = Path(before_path).read_bytes()
+                except Exception:
+                    before_bytes = None
+
             # Compute the screenshot delta BEFORE the vision judge runs
             # — the judge rotates `_prev_judge_png` to the current frame
             # at the end of its call, so we need to read against the
@@ -8735,6 +9050,92 @@ class GameAgent:
                     )
                 except Exception:
                     self._last_screenshot_delta = None
+            if before_bytes is not None and after_bytes is not None:
+                try:
+                    from tools import screenshot_delta as _sshot_delta
+                    input_playtest_delta = _sshot_delta(before_bytes, after_bytes)
+                except Exception:
+                    input_playtest_delta = None
+                if (
+                    input_playtest_delta is not None
+                    and input_playtest_delta < 0.005
+                ):
+                    self._pending_coaching.append(
+                        "STATIC SCREEN WARNING: The screen was completely "
+                        "static before and after input simulation "
+                        f"(pixel delta {input_playtest_delta:.4f}). This "
+                        "usually means controls are unwired, state is not "
+                        "updating, or the RAF loop is drawing the same frame."
+                    )
+                    self._trace({
+                        "kind": "static_screen_warning",
+                        "iteration": iteration,
+                        "input_playtest_delta": input_playtest_delta,
+                    })
+                    yield self._record(AgentEvent(
+                        "info",
+                        f"[yellow]warning[/yellow] (iter {iteration}): "
+                        "static screen detected after simulated input "
+                        f"(delta {input_playtest_delta:.4f})"
+                    ))
+
+            input_test = report.get("input_test") or {}
+            if isinstance(input_test, dict) and input_test.get("ran"):
+                evidence = input_test.get("responsive_evidence") or {}
+                if isinstance(evidence, dict) and evidence:
+                    movement_fields: list[str] = []
+                    input_buffer_fields: list[str] = []
+                    other_fields: list[str] = []
+                    movement_exact = {"x", "y", "px", "py", "col", "row"}
+                    movement_names = ("pos", "position", "coord")
+                    input_exact = {"dir", "nextdir", "keys", "pressed", "input"}
+                    input_names = ("lastfire", "lastinput", "key", "press")
+                    for changed_fields in evidence.values():
+                        if not isinstance(changed_fields, list):
+                            continue
+                        for field in changed_fields:
+                            field_text = str(field)
+                            field_low = field_text.lower()
+                            leaf = field_low.rsplit(".", 1)[-1]
+                            if (
+                                leaf in movement_exact
+                                or any(name in leaf for name in movement_names)
+                            ):
+                                movement_fields.append(field_text)
+                            if (
+                                leaf in input_exact
+                                or any(name in leaf for name in input_names)
+                            ):
+                                input_buffer_fields.append(field_text)
+                            elif not (
+                                leaf in movement_exact
+                                or any(name in leaf for name in movement_names)
+                            ):
+                                other_fields.append(field_text)
+                    if (
+                        input_buffer_fields
+                        and not movement_fields
+                        and not other_fields
+                    ):
+                        self._pending_coaching.append(
+                            "STATE LOCOMOTION WARNING: Input simulation changed "
+                            "input-buffer/state fields but did NOT change any "
+                            "player coordinate fields (x, y, px, py, row/col, "
+                            "position). This suggests the controllable player "
+                            "is trapped or movement logic is not wired through, "
+                            "for example by a grid-alignment snap or collision "
+                            "check that cancels movement every frame."
+                        )
+                        self._trace({
+                            "kind": "state_locomotion_warning",
+                            "iteration": iteration,
+                            "input_buffer_fields": input_buffer_fields[:8],
+                        })
+                        yield self._record(AgentEvent(
+                            "info",
+                            f"[yellow]warning[/yellow] (iter {iteration}): "
+                            "input changed buffers but no player coordinates"
+                        ))
             # Visual-progress judge: auto-runs when a local MLX-VLM is
             # discoverable on disk (honors the "never silent cloud calls"
             # rule — `_run_vision_judge` skips cleanly when no local VLM
@@ -8742,18 +9143,45 @@ class GameAgent:
             # can still invoke a cloud judge explicitly via `/check with
             # <model>` in chat.py. Disable entirely with VISION_JUDGE=0.
             if after_bytes is not None:
+                critic_backend = self.get_backend("critic")
+                if critic_backend is not None:
+                    try:
+                        critique = await self.run_visual_critic(
+                            after_bytes,
+                            before_bytes,
+                        )
+                        if critique:
+                            cleaned = critique.strip()
+                            if cleaned and "ok" not in cleaned.lower()[:30]:
+                                prefix = "VISUAL CRITIC (looked at the screenshot of your last iteration): "
+                                self._pending_coaching.append(prefix + cleaned)
+                                # Also log a visible event so the TUI logs show it!
+                                yield self._record(AgentEvent(
+                                    "info",
+                                    f"[magenta]visual critic[/magenta] (iter {iteration}): {cleaned}"
+                                ))
+                    except Exception as exc:
+                        self._trace({
+                            "kind": "visual_critic_error",
+                            "iteration": iteration,
+                            "error": str(exc),
+                        })
+                else:
+                    try:
+                        await self._run_vision_judge(after_bytes, iteration)
+                    except Exception as exc:
+                        self._trace({
+                            "kind": "vision_judge_error",
+                            "iteration": iteration,
+                            "error": str(exc),
+                        })
+            if (
+                self._use_double_screenshot
+                and before_path is not None
+                and before_bytes is not None
+            ):
                 try:
-                    await self._run_vision_judge(after_bytes, iteration)
-                except Exception as exc:
-                    self._trace({
-                        "kind": "vision_judge_error",
-                        "iteration": iteration,
-                        "error": str(exc),
-                    })
-            if self._use_double_screenshot and report.get("screenshot_before"):
-                try:
-                    before_path = str(report["screenshot_before"])
-                    self._last_screenshot_before = Path(before_path).read_bytes()
+                    self._last_screenshot_before = before_bytes
                     self._last_screenshot_before_path = before_path
                 except Exception:
                     self._last_screenshot_before = None
@@ -8812,6 +9240,13 @@ class GameAgent:
                                 "a previously-covered criterion is no longer covered"
                             )
                         problems_str = "; ".join(problems)
+                        self._trace({
+                            "kind": "auto_revert",
+                            "iteration": iteration,
+                            "problems": problems,
+                            "bonus_used": self._iter_budget_bonus,
+                            "bonus_cap": revert_bonus_cap,
+                        })
                         yield self._record(AgentEvent(
                             "info",
                             f"REGRESSION on iter {iteration}: {problems_str} — "
@@ -9158,7 +9593,7 @@ class GameAgent:
             })
             yield self._record(AgentEvent(
                 "activity", "streaming",
-                {"label": "streaming bonus turn (cap reached)"},
+                {"label": "bonus turn (cap reached)", "role": "coder"},
             ))
             try:
                 reply = await self._stream(self._token_cb_wrapper)
@@ -9254,13 +9689,16 @@ class GameAgent:
             self._trace({"kind": "exit_decision_turn_prompted"})
             yield self._record(AgentEvent(
                 "activity", "streaming",
-                {"label": "streaming exit-decision turn"},
+                {"label": "exit decision", "role": "architect"},
             ))
             try:
-                exit_reply = await self._stream(self._token_cb_wrapper)
+                exit_reply = await self._stream(self._token_cb_wrapper, role="architect")
                 yield self._record(AgentEvent("activity", "idle"))
                 self._messages.append({
-                    "role": "assistant", "content": exit_reply,
+                    "role": "assistant",
+                    "content": exit_reply,
+                    "model_role": "architect",
+                    "model_name": self.get_backend("architect").info.model
                 })
                 self._dump_conversation()
                 self._trace({

@@ -1975,8 +1975,23 @@ class LiveBrowser:
         """
         import asyncio
 
-        if self._page is None:
-            raise RuntimeError("LiveBrowser.start() must be awaited before load_and_test()")
+        # Auto-reopen logic: if the user (or the system) closed the browser window unexpectedly,
+        # or if _page has become closed/unusable, we proactively reconstruct and reopen it.
+        browser_is_closed = True
+        try:
+            if self._page is not None and self._browser is not None and self._browser.is_connected():
+                # Test the connection to ensure the page is active and connected
+                await self._page.evaluate("1")
+                browser_is_closed = False
+        except Exception:
+            browser_is_closed = True
+
+        if browser_is_closed:
+            try:
+                await self.close()
+            except Exception:
+                pass
+            await self.start()
 
         # Reset per-test buffers. The handlers stay attached.
         self._errors.clear()
@@ -1989,6 +2004,27 @@ class LiveBrowser:
         file_url = f"file://{path}"
         try:
             await self._page.goto(file_url, wait_until="load", timeout=10_000)
+            
+            # --- Dynamic Splash-Clicker Start Screen Bypass ---
+            # Automatically detect and click common "Start", "Play", "Enter", "Begin" overlay buttons,
+            # or click the canvas/body so interactive and loop elements start running before we test.
+            try:
+                # Common elements representing start/play overlays or canvas buttons
+                selectors = [
+                    "button", "#startBtn", "#start", "#playBtn", "#play", 
+                    ".start", ".play", "#restartBtn", "#restart", "canvas", "body"
+                ]
+                for sel in selectors:
+                    el = await self._page.query_selector(sel)
+                    if el and await el.is_visible() and await el.is_enabled():
+                        text = (await el.inner_text() or "").lower()
+                        # Match standard terms (like "start", "play", "enter", "begin", "hell")
+                        if any(w in text for w in ("start", "play", "enter", "begin", "hell", "click", "tap")):
+                            await el.click()
+                            await asyncio.sleep(0.5) # Allow 500ms for assets/scene setup
+                            break
+            except Exception:
+                pass
         except Exception as e:
             return _build_report(
                 [f"PAGE FAILED TO LOAD: {e}"], [], [], "", None,

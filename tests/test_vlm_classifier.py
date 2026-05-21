@@ -30,7 +30,7 @@ def test_qwen_vl_variants():
     """Qwen family — VL and Omni multimodal variants."""
     for name in (
         "qwen-vl-7b", "qwen2-vl-7b", "qwen2.5-vl-7b", "qwen3-vl-32b",
-        "qwen3.6-vl-27b", "qwen-omni-7b", "qwen2.5-omni-7b",
+        "qwen3.6-vl-27b", "qwen-omni-7b", "qwen2.5-omni-7b", "qwen3.6:27b",
     ):
         assert classify_model_modality(name) == "vlm", name
 
@@ -107,7 +107,7 @@ def test_openai_vision_models():
 
 def test_qwen_non_vl_is_text():
     """Plain Qwen / Qwen-Coder without -vl- in the name = text-only."""
-    for name in ("qwen3.6:27b", "qwen2.5-coder-32b", "qwen2.5:7b",
+    for name in ("qwen2.5-coder-32b", "qwen2.5:7b",
                  "qwen3.6-35b"):
         assert classify_model_modality(name) == "text", name
 

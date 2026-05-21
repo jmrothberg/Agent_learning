@@ -63,7 +63,7 @@ from ollama_io import (
 _NON_CHAT_TAG_FRAGMENTS: tuple[str, ...] = (
     "z-image", "stable-diffusion", "sdxl", "flux",
     "embed", "embedding", "minilm", "bge-", "rerank",
-    "whisper", "tts-",
+    "whisper", "tts-", "voxcpm", "speech-", "voice-",
 )
 
 
@@ -118,6 +118,7 @@ _VLM_NAME_SUBSTRINGS: tuple[str, ...] = (
     # (without ".6") was NOT unified — keep that prefix OUT of this
     # list so plain Qwen3-30B etc. stay labeled text-only.
     "qwen3.6-27b", "qwen3.6-7b", "qwen3.6-72b", "qwen3.6-235b",
+    "qwen3.6:27b", "qwen3.6:7b", "qwen3.6:72b", "qwen3.6:235b",
     # LLaVA family
     "llava", "bakllava",
     # DeepSeek vision
@@ -799,15 +800,29 @@ class MLXBackend(Backend):
                 # Build prompt via chat template. Falls back to a naive
                 # role/content concat if the tokenizer lacks the template
                 # (rare with modern Instruct models).
+                # Support assistant prefill: if the last message is an assistant message,
+                # we run the chat template on the preceding messages with add_generation_prompt=True,
+                # and then manually append the assistant message content to the prompt.
+                has_prefill = (len(cleaned_messages) > 0 and cleaned_messages[-1].get("role") == "assistant")
+                if has_prefill:
+                    history = cleaned_messages[:-1]
+                    prefill_content = cleaned_messages[-1].get("content", "")
+                else:
+                    history = cleaned_messages
+                    prefill_content = ""
+
                 try:
                     prompt = tokenizer.apply_chat_template(
-                        cleaned_messages, tokenize=False, add_generation_prompt=True
+                        history, tokenize=False, add_generation_prompt=True
                     )
                 except Exception:
                     prompt = "\n\n".join(
                         f"{m.get('role', 'user')}: {m.get('content', '')}"
-                        for m in cleaned_messages
+                        for m in history
                     ) + "\n\nassistant:"
+
+                if has_prefill:
+                    prompt += prefill_content
 
                 from mlx_lm.sample_utils import make_sampler  # type: ignore
                 sampler = make_sampler(
@@ -871,17 +886,29 @@ class MLXBackend(Backend):
                 from mlx_vlm.prompt_utils import (  # type: ignore
                     apply_chat_template as _vlm_template,
                 )
+                # Support assistant prefill in VLM template
+                has_prefill = (len(cleaned_messages) > 0 and cleaned_messages[-1].get("role") == "assistant")
+                if has_prefill:
+                    history = cleaned_messages[:-1]
+                    prefill_content = cleaned_messages[-1].get("content", "")
+                else:
+                    history = cleaned_messages
+                    prefill_content = ""
+
                 try:
                     prompt = _vlm_template(
-                        processor, config, cleaned_messages,
+                        processor, config, history,
                         num_images=len(image_paths),
                     )
                 except Exception:
                     # Same naive fallback as text-only.
                     prompt = "\n\n".join(
                         f"{m.get('role', 'user')}: {m.get('content', '')}"
-                        for m in cleaned_messages
+                        for m in history
                     ) + "\n\nassistant:"
+
+                if has_prefill:
+                    prompt += prefill_content
 
                 from mlx_vlm import stream_generate as _vlm_stream  # type: ignore
                 # mlx_vlm.stream_generate doesn't take a `sampler` like
@@ -1935,6 +1962,41 @@ def unload_ollama_model(name: str, endpoint: str | None = None) -> tuple[bool, s
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         return False, f"{e!r}"
     return True, f"unloaded {name!r}"
+
+
+def auto_fix_ollama_tensor_split(endpoint: str | None = None) -> tuple[bool, str]:
+    """On large-GPU workstations, drop tensor-split Ollama VRAM before a session.
+
+    Uses existing ``/unload`` machinery (``keep_alive=0``). No manual
+    ``OLLAMA_SCHED_SPREAD`` or systemd edits required. Skipped on small-GPU
+    topologies where split may be intentional. Disable with
+    ``AGENT_NO_AUTO_OLLAMA_GPU_FIX=1``.
+    """
+    if os.environ.get("AGENT_NO_AUTO_OLLAMA_GPU_FIX", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    ):
+        return False, ""
+    try:
+        import gpu_status as gs
+    except Exception:
+        return False, ""
+    snap = gs.snapshot_gpus(force=True)
+    if not gs.ollama_is_tensor_split(snap):
+        return False, ""
+    if not gs.prefer_single_gpu_workstation(snap):
+        return False, ""
+    results = unload_all_ollama_models(endpoint)
+    if not results:
+        return False, ""
+    names = [n for n, ok, _ in results if ok]
+    if not names:
+        err = results[0][2] if results else "unload failed"
+        return False, err
+    gs.snapshot_gpus(force=True)
+    return True, (
+        "released split Ollama VRAM — next LLM request reloads "
+        f"({', '.join(names)})"
+    )
 
 
 def unload_all_ollama_models(endpoint: str | None = None) -> list[tuple[str, bool, str]]:

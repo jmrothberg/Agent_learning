@@ -1,0 +1,12 @@
+# TEXT-ONLY Unsloth Q8_0 (no mmproj, no image input — not a VLM).
+# Re-import: ollama create qwen3.6-27b-unsloth-q8 -f scripts/ollama_models/qwen3.6-27b-unsloth-q8.Modelfile
+FROM /usr/share/ollama/.ollama/models/blobs/sha256-f93f517f38e696d35a1a7df2c0e3155a64f4c4dcd662107a146ae263f7fb14ce
+TEMPLATE {{ .Prompt }}
+RENDERER qwen3.5
+PARSER qwen3.5
+PARAMETER presence_penalty 1.5
+PARAMETER repeat_penalty 1
+PARAMETER temperature 0.7
+PARAMETER top_k 20
+PARAMETER top_p 0.8
+PARAMETER min_p 0

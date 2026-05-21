@@ -1,0 +1,16 @@
+# DEPRECATED filename (was misleading: not a working VLM).
+# Use scripts/ollama_models/qwen3.6-27b-unsloth-q8-with-mmproj.Modelfile instead.
+# Text + mmproj experiment — does not load on Ollama 0.24 today. For text-only use
+# qwen3.6-27b-unsloth-q8.Modelfile. For image input use official qwen3.6:27b.
+# Dual-FROM per https://github.com/ollama/ollama/issues/9780
+FROM /usr/share/ollama/.ollama/models/blobs/sha256-f93f517f38e696d35a1a7df2c0e3155a64f4c4dcd662107a146ae263f7fb14ce
+FROM /usr/share/ollama/.ollama/models/blobs/sha256-eacf610d1ee4bd5ed0197a0777dd8f4fceb8eefa27009067c7d496cb68fbde45
+TEMPLATE {{ .Prompt }}
+RENDERER qwen3.5
+PARSER qwen3.5
+PARAMETER presence_penalty 1.5
+PARAMETER repeat_penalty 1
+PARAMETER temperature 0.7
+PARAMETER top_k 20
+PARAMETER top_p 0.8
+PARAMETER min_p 0

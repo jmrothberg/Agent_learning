@@ -426,3 +426,63 @@ def test_end_to_end_overlap_error_surfaces():
     assert result.applied == 0
     assert len(result.failed) == 2
     assert result.text == src
+
+
+def test_repair_reply_duplicate_dividers():
+    """Consecutive or duplicate ======= dividers are collapsed."""
+    reply = (
+        "<patch>\n"
+        "<<<<<<< SEARCH\n"
+        "old code\n"
+        "=======\n"
+        "=======\n"
+        "new code\n"
+        ">>>>>>> REPLACE\n"
+        "</patch>"
+    )
+    repaired = repair_reply(reply)
+    # Count how many divider lines are left
+    assert repaired.count("=======") == 1
+    
+    # Extract should now succeed perfectly
+    parsed = extract_patches(reply)
+    assert len(parsed) == 1
+    assert parsed[0].search.strip() == "old code"
+    assert parsed[0].replace.strip() == "new code"
+
+
+def test_repair_reply_unclosed_patch():
+    """An unclosed <patch> ending with a REPLACE marker is auto-closed."""
+    reply = (
+        "<patch>\n"
+        "<<<<<<< SEARCH\n"
+        "old code\n"
+        "=======\n"
+        "new code\n"
+        ">>>>>>> REPLACE"
+    )
+    repaired = repair_reply(reply)
+    assert "</patch>" in repaired
+    
+    parsed = extract_patches(reply)
+    assert len(parsed) == 1
+    assert parsed[0].search.strip() == "old code"
+    assert parsed[0].replace.strip() == "new code"
+
+
+def test_repair_reply_marker_spaces():
+    """Spaces around SEARCH/REPLACE/DIVIDER markers are normalized."""
+    reply = (
+        "<patch>\n"
+        "  <<<<<<<      SEARCH  \n"
+        "old code\n"
+        "   =======   \n"
+        "new code\n"
+        "   >>>>>>>   REPLACE  \n"
+        "</patch>"
+    )
+    parsed = extract_patches(reply)
+    assert len(parsed) == 1
+    assert parsed[0].search.strip() == "old code"
+    assert parsed[0].replace.strip() == "new code"
+

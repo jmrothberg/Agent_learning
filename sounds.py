@@ -101,6 +101,10 @@ def _default_model_search_dirs() -> list[str]:
         home_bases = [dot_dm, diffusion_models, dot_md, models_diffusers]
     else:
         home_bases = [dot_md, models_diffusers, dot_dm, diffusion_models]
+        # Linux workstation: weights live on /data, not under ~/.
+        # Only prepended on Linux — macOS search order stays unchanged.
+        if _os.path.isdir("/data/Diffusion_Models"):
+            home_bases = ["/data/Diffusion_Models"] + home_bases
     return home_bases + [
         "/home/jonathan/Models_Diffusers",
         "./models_diffusers",

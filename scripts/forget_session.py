@@ -6,9 +6,9 @@ swapped — its `won_*.html` would otherwise get retrieved as the
 starting skeleton next time someone asked for Missile Command).
 
 What gets deleted:
-  - games/memory/skeletons/won_<session_id>.{html,json}
-  - games/memory/goals/<session_id>/  (the win-record dir)
-  - games/memory/mistakes.jsonl entries whose 'session' field matches
+  - memory/skeletons/won_<session_id>.{html,json}
+  - memory/goals/<session_id>/  (the win-record dir)
+  - memory/mistakes.jsonl entries whose 'session' field matches
     (only some entries carry one; we keep the rest)
 
 What is NOT touched:
@@ -33,12 +33,13 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-MEM = REPO_ROOT / "games" / "memory"
+LIVE_MEM = REPO_ROOT / "games" / "game-memory"
+SHORT_TERM = REPO_ROOT / "games"
 
 
 def list_state() -> int:
-    skel_dir = MEM / "skeletons"
-    goals_dir = MEM / "goals"
+    skel_dir = LIVE_MEM / "skeletons"
+    goals_dir = SHORT_TERM / "goals"
     print("won_* skeletons:")
     for p in sorted(skel_dir.glob("won_*.json")) if skel_dir.exists() else []:
         try:
@@ -57,8 +58,8 @@ def list_state() -> int:
 
 
 def forget(session_id: str, *, dry_run: bool) -> int:
-    skel_dir = MEM / "skeletons"
-    goals_dir = MEM / "goals"
+    skel_dir = LIVE_MEM / "skeletons"
+    goals_dir = SHORT_TERM / "goals"
     targets: list[Path] = []
     for ext in (".html", ".json"):
         f = skel_dir / f"won_{session_id}{ext}"
@@ -87,7 +88,7 @@ def forget(session_id: str, *, dry_run: bool) -> int:
     # Best-effort: prune mistakes.jsonl entries with a matching session
     # field. Most entries don't carry one (the writer only adds it for
     # newer traces), so this rewrite is small and safe.
-    mistakes = MEM / "mistakes.jsonl"
+    mistakes = LIVE_MEM / "mistakes.jsonl"
     if mistakes.exists():
         kept: list[str] = []
         dropped = 0

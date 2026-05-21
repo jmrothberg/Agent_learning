@@ -13,7 +13,7 @@ match — same scoring shape as `memory.Playbook.retrieve`. A hit lets
 `generate_assets` skip the GPU call entirely and copy the library
 file into the session dir instead.
 
-Storage layout under `games/memory/`:
+Storage layout under `memory/`:
 
     asset_library/
         sprites/<id>.png
@@ -78,7 +78,7 @@ def _jaccard(a: list[str], b: list[str]) -> float:
 
 def default_library_root() -> Path:
     """Project-relative default. Sits beside other memory artifacts."""
-    return Path(__file__).resolve().parent / "games" / "memory"
+    return Path(__file__).resolve().parent / "memory"
 
 
 @dataclass

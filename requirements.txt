@@ -17,8 +17,12 @@
 #   requirements-mlx.txt      — mlx_lm.server on Apple Silicon (optional elsewhere)
 #   requirements-diffuser.txt — sprites + Stable Audio (after install_diffuser.sh)
 #
-# OUTSIDE PIP:
-#   • Ollama app + at least one pulled model  OR  mlx_lm.server (see requirements-mlx.txt)
+# OUTSIDE PIP (handled by ./scripts/setup.sh):
+#   • Playwright Chromium — env -u PLAYWRIGHT_BROWSERS_PATH … install chromium
+#   • torch + diffusers git + requirements-diffuser.txt — install_diffuser.sh
+#   • Z-Image-Turbo weights — interactive path prompt; Enter downloads if missing
+#     (writes DIFFUSION_MODELS_DIR into .env for chat.py / coder.py)
+#   • Ollama app + at least one pulled model  OR  mlx_lm.server (requirements-mlx.txt)
 #   • Display for chat.py visible Chromium (use coder.py --headless if none)
 
 ollama>=0.3.0

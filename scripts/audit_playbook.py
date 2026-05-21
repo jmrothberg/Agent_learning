@@ -163,7 +163,7 @@ def audit(traces_dir: Path) -> tuple[list[BulletStats], list[SessionSummary]]:
     # Also list every bullet in the playbook, including never-retrieved.
     try:
         import memory
-        pb = memory.Playbook(str(REPO / "games" / "memory"))
+        pb = memory.Playbook(str(REPO / "games" / "game-memory"))
         for b in pb.load_all():
             if b.id not in stats:
                 stats[b.id] = BulletStats(bid=b.id)

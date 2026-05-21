@@ -15,8 +15,9 @@
 #   .venv/bin/pip install -r requirements-diffuser.txt
 #
 # After install, the FIRST <assets> request in a session will:
-#   1. Re-use Z-Image-Turbo weights at ~/Models_Diffusers/Z-Image-
-#      Turbo/ if present, else download (~5GB) from HuggingFace into
+#   1. Re-use Z-Image-Turbo weights under DIFFUSION_MODELS_DIR (setup.sh /
+#      .env), or auto-discovered paths (Linux: /data/Diffusion_Models, Mac:
+#      ~/Diffusion_Models, etc.), else download (~32 GB) from HuggingFace into
 #      ~/.cache/huggingface/hub/.
 #   2. Load the pipeline into GPU VRAM (~30-60s the first time).
 #   3. Generate each requested sprite at 768x768 (~2-4s per image).
