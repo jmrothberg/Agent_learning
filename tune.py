@@ -997,7 +997,7 @@ def main() -> int:
                          "--learn-shared is also set)")
     pr.add_argument("--learn-shared", action="store_true",
                     help="with --auto-learn, write playbook updates back "
-                         "to the shared games/memory/playbook.jsonl "
+                         "to the shared memory/playbook.jsonl "
                          "instead of the per-run isolated copy")
     pr.add_argument("--reflector-model", default=None,
                     help="model for the offline reflector (default: same "
@@ -1025,7 +1025,7 @@ def main() -> int:
     pan.add_argument("run_id")
     pan.add_argument("--playbook-root", default=None,
                      help="playbook dir (default: run's isolated _memory, "
-                          "fallback to project games/memory)")
+                          "fallback to project memory)")
 
     pv = sub.add_parser(
         "validate-bullet",
@@ -1044,7 +1044,7 @@ def main() -> int:
     pv.add_argument("--max-iters", type=int, default=None)
     pv.add_argument("--best-of-n", type=int, default=None)
     pv.add_argument("--playbook-root", default=None,
-                    help="playbook dir (default: project games/memory)")
+                    help="playbook dir (default: project memory)")
 
     args = p.parse_args()
 

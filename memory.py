@@ -1,6 +1,6 @@
 """Persistent cross-session memory for the coding agent.
 
-Layout under games/memory/:
+Layout under memory/:
 
     skeletons/                 hand-curated and accumulated skeletons
         canvas_basic.html      the default RAF + DPR + input loop
@@ -1942,11 +1942,11 @@ class MistakeHit:
 class GameMemory:
     """Filesystem-backed memory for the agent.
 
-    All paths are computed from `root` (default games/memory/). The directory
+    All paths are computed from `root` (default memory/). The directory
     is created lazily on first write so a fresh checkout works without setup.
     """
 
-    def __init__(self, root: str | Path = "games/memory"):
+    def __init__(self, root: str | Path = "memory"):
         self.root = Path(root)
         self.skeletons_dir = self.root / "skeletons"
         self.goals_dir = self.root / "goals"
@@ -2908,7 +2908,7 @@ class Playbook:
     and (optionally) the in-progress code.
     """
 
-    def __init__(self, root: str | Path = "games/memory"):
+    def __init__(self, root: str | Path = "memory"):
         self.root = Path(root)
         self.path = self.root / PLAYBOOK_FILENAME
 

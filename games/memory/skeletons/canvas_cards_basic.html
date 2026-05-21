@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Card Snapper</title>
+<style>
+  html,body { margin:0; background:#072517; overflow:hidden; }
+  #wrap { position:fixed; inset:0; display:grid; place-items:center; }
+  canvas { background:#0a3a25; border-radius:8px; }
+</style></head>
+<body>
+<div id="wrap"><canvas id="c" width="800" height="600"></canvas></div>
+<script>
+(() => {
+  const cvs = document.getElementById("c");
+  const ctx = cvs.getContext("2d");
+  const cards = [{ id: 1, x: 100, y: 100, w: 80, h: 120, targetX: 100, targetY: 100, dragging: false }];
+  const slots = [{ x: 400, y: 300, w: 90, h: 130 }];
+  let activeCard = null, dragOffset = { x: 0, y: 0 };
+
+  cvs.addEventListener("pointerdown", e => {
+    const rect = cvs.getBoundingClientRect();
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    for (const c of cards) {
+      if (mx > c.x && mx < c.x+c.w && my > c.y && my < c.y+c.h) {
+        activeCard = c; c.dragging = true;
+        dragOffset.x = mx - c.x; dragOffset.y = my - c.y;
+        break;
+      }
+    }
+  });
+
+  addEventListener("pointermove", e => {
+    if (activeCard) {
+      const rect = cvs.getBoundingClientRect();
+      const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+      activeCard.x = mx - dragOffset.x; activeCard.y = my - dragOffset.y;
+    }
+  });
+
+  addEventListener("pointerup", e => {
+    if (activeCard) {
+      activeCard.dragging = false;
+      for (const s of slots) {
+        const dx = (activeCard.x + activeCard.w/2) - (s.x + s.w/2);
+        const dy = (activeCard.y + activeCard.h/2) - (s.y + s.h/2);
+        if (Math.hypot(dx, dy) < 80) {
+          activeCard.targetX = s.x + 5; activeCard.targetY = s.y + 5;
+          break;
+        }
+      }
+      activeCard = null;
+    }
+  });
+
+  function update(dt) {
+    for (const c of cards) {
+      if (!c.dragging) {
+        c.x += (c.targetX - c.x) * 0.2;
+        c.y += (c.targetY - c.y) * 0.2;
+      }
+    }
+  }
+
+  function draw() {
+    ctx.clearRect(0,0,800,600);
+    ctx.strokeStyle = "rgba(255,255,255,0.2)"; ctx.lineWidth = 2;
+    for (const s of slots) ctx.strokeRect(s.x, s.y, s.w, s.h);
+    ctx.fillStyle = "#ffffff";
+    for (const c of cards) ctx.fillRect(c.x, c.y, c.w, c.h);
+  }
+
+  function frame() {
+    update(0.016); draw();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body></html>

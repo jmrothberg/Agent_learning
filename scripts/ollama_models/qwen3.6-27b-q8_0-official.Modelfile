@@ -1,0 +1,12 @@
+# Official Ollama qwen3.6:27b-q8_0 (fused vision-capable GGUF — accepts images when pull is complete).
+# Match qwen3.6:27b template/params. Not the same as text-only Unsloth import.
+FROM /usr/share/ollama/.ollama/models/blobs/sha256-4ea6c77b17e88551dad9c9e6528ecf73500ad2490b612ba9cf364e398f11a16c
+TEMPLATE {{ .Prompt }}
+RENDERER qwen3.5
+PARSER qwen3.5
+PARAMETER presence_penalty 1.5
+PARAMETER repeat_penalty 1
+PARAMETER temperature 1
+PARAMETER top_k 20
+PARAMETER top_p 0.95
+PARAMETER min_p 0

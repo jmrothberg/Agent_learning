@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Grid Game</title>
+<style>
+  html,body { margin:0; background:#0b1020; color:#fff; overflow:hidden; }
+  #wrap { position:fixed; inset:0; display:grid; place-items:center; }
+  canvas { background:#10162e; border-radius:8px; max-width:96vw; max-height:90vh; }
+  #hud { position:fixed; top:12px; left:12px; background:#0008; padding:8px 12px; border-radius:8px; }
+</style></head>
+<body>
+<div id="wrap"><canvas id="c" width="640" height="480"></canvas></div>
+<div id="hud">Score: <span id="score">0</span></div>
+<script>
+(() => {
+  const cvs = document.getElementById("c");
+  const ctx = cvs.getContext("2d");
+  const TILE_SIZE = 32;
+  const state = { player: { x: 32, y: 32, vx: 0, vy: 0 }, score: 0 };
+  const keys = {};
+
+  addEventListener("keydown", e => { keys[e.code] = true; });
+  addEventListener("keyup", e => { keys[e.code] = false; });
+
+  function update(dt) {
+    const p = state.player;
+    const speed = 120;
+    if (keys.ArrowLeft || keys.KeyA) { p.vx = -speed; p.vy = 0; }
+    else if (keys.ArrowRight || keys.KeyD) { p.vx = speed; p.vy = 0; }
+    else if (keys.ArrowUp || keys.KeyW) { p.vy = -speed; p.vx = 0; }
+    else if (keys.ArrowDown || keys.KeyS) { p.vy = speed; p.vx = 0; }
+
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+  }
+
+  function draw() {
+    ctx.clearRect(0,0,640,480);
+    ctx.fillStyle = "#4a6cff";
+    ctx.fillRect(state.player.x, state.player.y, TILE_SIZE, TILE_SIZE);
+  }
+
+  function frame() {
+    update(0.016); draw();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body></html>

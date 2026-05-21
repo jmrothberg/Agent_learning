@@ -11,7 +11,7 @@ bullet, decides one of three actions:
            the existing quality multiplier ranks it lower at retrieval.
   PRUNE   — fires often with terrible earnings, OR has zero fires after
            --min-sessions sessions in playbook.jsonl. The bullet is
-           removed from games/memory/playbook.jsonl. (Seed list in
+           removed from memory/playbook.jsonl. (Seed list in
            memory.py is left alone; a future `git pull` rehydrates.)
 
 The script REFUSES to prune if --min-sessions hasn't been hit, so a

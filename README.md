@@ -20,7 +20,7 @@ sprites (txt2img, 768×768 native, downscaled and chroma-keyed to RGBA)
 and **Stable Audio Open** for sounds (OGG, 0.2–12 s), with optional
 **SD-Turbo img2img** for animation frame chains via the `from_image`
 field. None of those touch the network at runtime once weights are
-cached. A cross-session **asset library** under `games/memory/` lets
+cached. A cross-session **asset library** under `memory/` lets
 admitted assets compound across sessions exactly the way the playbook
 does.
 
@@ -301,7 +301,7 @@ patch number caused the problem and what to change to fix it.
 [`memory.py`](memory.py):
 
 - **`GameMemory`** — skeleton retrieval and mistake retrieval.
-  - **Premium Default Skeletons (Autobootstrapped on boot)**: The system provides 11 generic, high-fidelity scaffolds in `games/memory/skeletons/` designed to give local models a perfect first-build template:
+  - **Premium Default Skeletons (Autobootstrapped on boot)**: The system provides 11 generic, high-fidelity scaffolds in `memory/skeletons/` designed to give local models a perfect first-build template:
     - `canvas_basic.html`: Clean 2D canvas with DPR scaling, frame loops, and window keyboard handlers.
     - `canvas_basic_v2.html`:Denser, bug-hardened scaffold pre-empting blur-clearing, focus-loss, and cleanup.
     - `canvas_3d_basic.html`: Full 3D perspective setup utilizing CDN Three.js, lights, camera, and aspect-ratio fits.
@@ -319,7 +319,7 @@ patch number caused the problem and what to change to fix it.
 - **Dedup + budget capping**: `dedup_hits` (5-gram Jaccard ≥ 0.85) +
   `cap_hits_by_budget` run inside `render_playbook_block` by default.
 - **Won-skeleton promotion**: after `<confirm_done/>`, the agent
-  copies the working HTML to `games/memory/skeletons/won_<session>.html`
+  copies the working HTML to `memory/skeletons/won_<session>.html`
   and indexes it so future sessions with similar goals can use it as
   the starting scaffold.
 
@@ -483,10 +483,10 @@ per-project `_asset_cache/`. It indexes admitted assets by tokenized
 prompt and metadata, and serves them on semantically-similar prompts
 in future sessions.
 
-- **Index**: `games/memory/asset_index.jsonl` — one JSON line per
+- **Index**: `memory/asset_index.jsonl` — one JSON line per
   entry. Schema: `id, modality, prompt, tokens, size_or_duration,
   sha, path, helpful, harmful, last_used, created_at`.
-- **Storage**: `games/memory/asset_library/sprites/<id>.png` and
+- **Storage**: `memory/asset_library/sprites/<id>.png` and
   `…/sounds/<id>.ogg`.
 - **Retrieval**: Jaccard token match against the prompt, scoped to
   exact size for sprites (10% tolerance for sound duration), minimum

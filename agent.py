@@ -1192,7 +1192,7 @@ class GameAgent:
         # generation including pathological MoE prefills + multi-KB
         # html_file rewrites. Runaway generation is still bounded.
         overall_seconds: float = 1800.0,
-        memory_root: str | Path = "games/memory",
+        memory_root: str | Path = "memory",
         # Optional path to an existing HTML file to start from. When set,
         # the agent skips memory-skeleton retrieval and uses this file as
         # the baseline; the model is asked to ADAPT it (via patches) to

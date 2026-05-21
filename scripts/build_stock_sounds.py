@@ -9,7 +9,7 @@ result: first-iter games are silent.
 
 This script runs once at setup time. It synthesizes a small bank of
 universal SFX (jump, pickup, hit, win, lose, click, laser, explosion)
-into `games/memory/asset_library/sounds/` and indexes them so any
+into `memory/asset_library/sounds/` and indexes them so any
 future session can hit them via the cross-session asset library. The
 prompt-side guideline (prompts_v1.py's <sounds> FormatSpec) tells the
 model these names exist; the asset library serves them for free.

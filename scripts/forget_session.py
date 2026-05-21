@@ -6,9 +6,9 @@ swapped — its `won_*.html` would otherwise get retrieved as the
 starting skeleton next time someone asked for Missile Command).
 
 What gets deleted:
-  - games/memory/skeletons/won_<session_id>.{html,json}
-  - games/memory/goals/<session_id>/  (the win-record dir)
-  - games/memory/mistakes.jsonl entries whose 'session' field matches
+  - memory/skeletons/won_<session_id>.{html,json}
+  - memory/goals/<session_id>/  (the win-record dir)
+  - memory/mistakes.jsonl entries whose 'session' field matches
     (only some entries carry one; we keep the rest)
 
 What is NOT touched:
@@ -33,7 +33,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-MEM = REPO_ROOT / "games" / "memory"
+MEM = REPO_ROOT / "memory"
 
 
 def list_state() -> int:

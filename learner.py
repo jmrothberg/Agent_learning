@@ -13,9 +13,8 @@ Subcommands:
     learner apply <paths...>       # reflect + curate (writes playbook.jsonl)
 
 Notes:
-  - The Reflector defaults to qwen3.6:35b (better reasoning for offline
-    one-shot tasks) but the coder model is fine too — the prompt is
-    structured to work on either.
+  - The Reflector dynamically falls back to the currently loaded model
+    (via detect_backend()) when no explicit --model is provided.
   - Deltas are applied deterministically: ADD a new bullet if id is
     novel; UPDATE counters on existing bullets; never rewrite content of
     seed bullets without explicit `--allow-overwrite-seed`.
@@ -46,9 +45,11 @@ from memory import Bullet, Playbook
 
 
 REPO_ROOT = Path(__file__).resolve().parent
-DEFAULT_PLAYBOOK_ROOT = REPO_ROOT / "games" / "memory"
+DEFAULT_PLAYBOOK_ROOT = REPO_ROOT / "memory"
 DEFAULT_TRACES_DIR = REPO_ROOT / "games" / "traces"
-DEFAULT_REFLECTOR_MODEL = "qwen3.6:35b"
+# Surgical change: Set default reflector model to None so it dynamically
+# falls back to the currently loaded model via detect_backend().
+DEFAULT_REFLECTOR_MODEL = None
 
 
 # ---------------------------------------------------------------------------
@@ -707,7 +708,9 @@ async def _run_reflect_apply(args, *, apply: bool) -> int:
     if args.successes_only:
         sessions = [s for s in sessions if s.final_ok]
 
-    print(f"reflecting over {len(sessions)} session(s) using {args.model} ...")
+    # Surgical change: Print the exact resolved model inside the print statement
+    model_disp = args.model if args.model else "dynamic default"
+    print(f"reflecting over {len(sessions)} session(s) using {model_disp} ...")
     pb_root = Path(args.playbook_root or DEFAULT_PLAYBOOK_ROOT)
     playbook = Playbook(root=pb_root)
     playbook.ensure()
@@ -789,7 +792,7 @@ def main() -> int:
     pr.add_argument("paths", nargs="*",
                     help=f"trace files or dirs (default {DEFAULT_TRACES_DIR})")
     pr.add_argument("--model", default=DEFAULT_REFLECTOR_MODEL,
-                    help=f"Reflector model (default {DEFAULT_REFLECTOR_MODEL})")
+                    help="Reflector model (default: currently loaded/detected model)")
     pr.add_argument("--tests", default=None,
                     help="comma-separated substrings to filter session ids/goals")
     pr.add_argument("--failures-only", action="store_true",
