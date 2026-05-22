@@ -597,12 +597,12 @@ is data the agent will see, not just developer notes.
 | Command | What it does |
 |---|---|
 | `/help`, `/h`, `/?` | Show command list. |
-| `/list`, `/models` | Inventory of MLX + Ollama models, with `[VLM]` / `[text]` labels. |
+| `/list`, `/models` | Inventory of MLX + Ollama models, with `[VLM]` / `[text]` labels. `*` = loaded in Ollama VRAM on any slot (11434–11436); `← active` = bound to this session (coder/model2/model3), not VRAM. |
 | `/model <N\|name>`, `/load <N\|name>` | Switch the chat model. |
 | `/model2 <N\|name> [--role critic\|architect]` | Stage or hot-swap secondary model 2. Defaults to `critic` for VLMs and `architect` for text models unless role balancing chooses otherwise. |
 | `/model3 <N\|name> [--role critic\|architect]` | Stage or hot-swap tertiary model 3. Used to split architect and critic roles in 3-model runs. |
 | `/backend <auto\|ollama\|mlx\|openai\|anthropic>` | Switch the backend (cloud choices are explicit and billable). |
-| `/unload` | Free VRAM: bare `/unload` evicts the active Ollama tag; `/unload all` every loaded Ollama model; `/unload mlx` drops the in-process MLX weights. |
+| `/unload` | Free VRAM: bare `/unload` evicts the active session tag; `/unload all` walks **every** Ollama slot (11434–11436) plus diffusers preload, not only `OLLAMA_HOST`; `/unload mlx` drops in-process MLX. |
 | `/new` | Start a new session in the same workspace. |
 | `/ship` | Force `<confirm_done/>` on the next critique turn. |
 | `/quit` | Exit. |
@@ -693,16 +693,15 @@ explicit `/check <cloud-model>` if you want one involved.
 **Status panel (right column).** Refreshes about once per second while a
 session runs.
 
-- **Activity (role)** — Who is working *right now*: `Activity (coder)`,
-  `Activity (architect)`, or `Activity (critic)`. Shows the same live
-  detail as before: waiting for first token, prompt-eval progress (MLX),
-  tok/s, STALLED. When the architect or critic is streaming, that role
-  owns the top Activity line; Model 2 / Model 3 lines below still show
-  their slot with the same stats.
-- **Model 2 / Model 3** — Sidecar roles (not “Card 2/3”): model tag,
-  backend, and GPU placement. `idle`, `streaming …`, `failed`, or
-  `crashed` when something goes wrong (no more stuck “streaming architect”
-  with no warning).
+- **Activity (coder / critic / architect)** — One line per role when
+  configured: always shown with the same live detail (waiting for first
+  token, prompt-eval progress on MLX, tok/s, STALLED). Coder uses the
+  main model; sidecars use Model 2 / Model 3 when staged. Idle roles stay
+  visible as `idle` so you can see all three slots at once in a 3-model
+  run.
+- **Model 2 / Model 3** — Sidecar model tag, backend, and GPU placement.
+  `idle`, `streaming …`, `failed`, or `crashed` when something goes wrong.
+  Footer may add `busy now: GPU N (role)` when multiple cards are active.
 - **GPU map → LLM** — One row per configured slot:
   - `Model 1 (coder) · <tag> · OLLAMA · GPU …`
   - `Model 2 (critic) · …` / `Model 3 (architect) · …`
@@ -711,8 +710,9 @@ session runs.
   - `not loaded` before the first request to that tag.
 - **GPU map → Diffusers** — Three lines, always shown:
   - `Z-Image-Turbo`, `SD-Turbo img2img`, `Stable-Audio`: `loaded · GPU N`
-    only after this session constructs the pipeline (first `<assets>` /
-    sound generation). **`not loaded` does not mean GPU 0 is empty** —
+    (index shown for all three, including Stable-Audio) only after this
+    session constructs the pipeline (first `<assets>` / sound generation).
+    **`not loaded` does not mean GPU 0 is empty** —
     `nvidia-smi` may still show ~20 GB on `python` for the chat process
     (browser, torch, or stale VRAM). When that happens, a dim
     `chat process · GPU 0 ~20 GB` note explains it.
@@ -722,7 +722,8 @@ session runs.
 
 | What you see | Meaning |
 |---|---|
-| `ollama` on GPU 1+3, ~53 GB total | Your LLM (often one 27B copy, tensor-split) |
+| `ollama` on GPU 1–3, ~22–35 GB each | Normal 3-model pin: one daemon per slot (11434–11436) |
+| `ollama` on GPU 1+3, ~53 GB total | Tensor-split single daemon — run `/unload all` then `/new` to re-pin |
 | `python` ~20 GB on GPU 0 | Usually **this TUI process**, not Ollama — not the same as “Z-Image loaded” in the panel until sprites run |
 | Diffusers `not loaded` + GPU 0 busy | Normal for a text-only goal (chess, etc.) until the plan triggers asset generation |
 

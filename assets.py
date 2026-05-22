@@ -794,6 +794,37 @@ def _construct_generator() -> Any:
         return None
 
 
+def release_preloaded_diffusers() -> list[str]:
+    """Release module-level diffuser pipelines and free CUDA cache.
+
+    Called from chat ``/unload all`` so sprite/img2img VRAM is dropped
+    alongside Ollama models. Returns human labels for what was cleared.
+    """
+    global _PRELOADED, _PRELOADED_IMG2IMG
+    freed: list[str] = []
+    for label, attr in (
+        ("Z-Image-Turbo", "_PRELOADED"),
+        ("SD-Turbo img2img", "_PRELOADED_IMG2IMG"),
+    ):
+        gen = globals().get(attr)
+        if gen is None:
+            continue
+        try:
+            if hasattr(gen, "cleanup"):
+                gen.cleanup()
+        except Exception:
+            pass
+        globals()[attr] = None
+        freed.append(label)
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+    return freed
+
+
 def try_load_image_generator(
     model_id: str = "Z-Image-Turbo",  # kept for API stability; unused
     diffuser_dir: str | None = None,  # kept for API stability; unused

@@ -726,4 +726,11 @@ def diffuser_placement(generator: Any) -> str:
     """Device label for a loaded diffuser instance."""
     device = getattr(generator, "_device", None)
     idx = getattr(generator, "_cuda_device_index", None)
+    if device == "cuda" and idx is None:
+        try:
+            import torch
+            if torch.cuda.is_available():
+                idx = int(torch.cuda.current_device())
+        except Exception:
+            pass
     return cuda_device_label(device, idx)

@@ -2262,28 +2262,42 @@ def _try_mlx() -> BackendInfo | None:
 def unload_ollama_model(name: str, endpoint: str | None = None) -> tuple[bool, str]:
     """Tell Ollama to evict `name` from VRAM by POSTing keep_alive=0.
 
-    Returns (ok, message). Uses /api/generate with prompt="" — Ollama
-    treats keep_alive=0 as "drop this model now". The model stays
-    installed on disk; only the VRAM allocation is released.
-
-    Why /api/generate and not /api/chat: /api/chat ignores keep_alive
-    when the model isn't already loaded for chat. /api/generate is the
-    documented unload path.
+    Tries /api/chat (empty messages) then /api/generate — the agent loads
+    models via chat, and either endpoint accepts keep_alive=0 to drop VRAM.
     """
     base = (endpoint or _ollama_endpoint()).rstrip("/")
-    url = base + "/api/generate"
-    payload = json.dumps({"model": name, "prompt": "", "keep_alive": 0}).encode()
-    req = urllib.request.Request(
-        url, data=payload, method="POST",
-        headers={"Content-Type": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            resp.read()
-    except urllib.error.HTTPError as e:
-        return False, f"HTTP {e.code}: {e.reason}"
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
-        return False, f"{e!r}"
+    attempts = [
+        (
+            base + "/api/chat",
+            {"model": name, "messages": [], "keep_alive": 0},
+        ),
+        (
+            base + "/api/generate",
+            {"model": name, "prompt": "", "keep_alive": 0},
+        ),
+    ]
+    last_err = ""
+    for url, body in attempts:
+        data = _http_post_json(url, body, timeout=30.0)
+        if data is None:
+            last_err = f"no response from {url}"
+            continue
+        if data.get("done_reason") == "unload" or data.get("done") is True:
+            return True, f"unloaded {name!r}"
+    if last_err:
+        return False, last_err
+    # Active chat sessions use keep_alive=-1 and can reload immediately.
+    time.sleep(0.4)
+    still = [
+        m for m in _ollama_running_models(base)
+        if name in (m.get("name") or "")
+    ]
+    if still:
+        return (
+            False,
+            f"still loaded at {base.rsplit(':', 1)[-1]} after unload "
+            "(stop the running game session, or another client is holding the model)",
+        )
     return True, f"unloaded {name!r}"
 
 
@@ -2322,14 +2336,55 @@ def auto_fix_ollama_tensor_split(endpoint: str | None = None) -> tuple[bool, str
     )
 
 
-def unload_all_ollama_models(endpoint: str | None = None) -> list[tuple[str, bool, str]]:
-    """Walk /api/ps and unload every loaded model. Returns per-model results."""
-    base = endpoint or _ollama_endpoint()
+# Standard multi-GPU slot ports (mirrors ensure_ollama_slot_daemons_for_chat).
+_OLLAMA_SLOT_PORTS = (11434, 11435, 11436)
+
+
+def ollama_unload_probe_bases() -> list[str]:
+    """All Ollama HTTP bases to probe for /unload all (deduped by port)."""
+    try:
+        import gpu_status as gs
+        bases = list(gs.ollama_all_api_bases())
+    except Exception:
+        bases = [_ollama_endpoint()]
+    by_port: dict[int, str] = {}
+    for raw in bases:
+        m = re.search(r":(\d+)$", raw.rstrip("/"))
+        if not m:
+            continue
+        port = int(m.group(1))
+        by_port.setdefault(port, f"http://127.0.0.1:{port}")
+    for port in _OLLAMA_SLOT_PORTS:
+        base = f"http://127.0.0.1:{port}"
+        if port not in by_port and _endpoint_ready(base):
+            by_port[port] = base
+    return [by_port[p] for p in sorted(by_port)]
+
+
+def _unload_all_at_endpoint(base: str) -> list[tuple[str, bool, str]]:
     loaded = _ollama_running_models(base)
     return [
         (m["name"], *unload_ollama_model(m["name"], endpoint=base))
         for m in loaded
     ]
+
+
+def unload_all_ollama_models(endpoint: str | None = None) -> list[tuple[str, bool, str]]:
+    """Walk /api/ps and unload every loaded model.
+
+    When ``endpoint`` is None, every reachable Ollama daemon is probed
+    (slot 1–3 on the 4-GPU box, not only ``OLLAMA_HOST``). Messages
+    include the endpoint so multi-daemon runs are easy to audit.
+    """
+    if endpoint is not None:
+        return _unload_all_at_endpoint(endpoint.rstrip("/"))
+
+    results: list[tuple[str, bool, str]] = []
+    for base in ollama_unload_probe_bases():
+        for name, ok, msg in _unload_all_at_endpoint(base):
+            port = base.rsplit(":", 1)[-1]
+            results.append((name, ok, f"{msg} ({port})"))
+    return results
 
 
 def mlx_server_pids() -> list[int]:
@@ -2347,18 +2402,18 @@ def list_ollama_inventory() -> tuple[list[str], set[str]]:
 
     Filters non-chat tags (z-image, embedders, ...) so the numbered list
     only includes models that can actually answer /load N. The "loaded"
-    set is returned unfiltered so a currently-running diffuser is still
-    visible in status surfaces.
+    set merges /api/ps across every probed Ollama slot (11434–11436), not
+    only OLLAMA_HOST — so ``*`` in /list matches what /unload all touches.
     """
     installed: list[str] = []
     loaded: set[str] = set()
-    for base in _ollama_endpoints():
+    bases = ollama_unload_probe_bases()
+    for base in bases:
         if not installed:
             installed = _ollama_installed_models(base)
-        if not loaded:
-            loaded = {m["name"] for m in _ollama_running_models(base)}
-        if installed and loaded:
-            break
+        for m in _ollama_running_models(base):
+            if m.get("name"):
+                loaded.add(m["name"])
     return [n for n in installed if _is_chat_capable_tag(n)], loaded
 
 

@@ -141,3 +141,53 @@ def test_autopin_unloads_split_before_same_user_restart(monkeypatch) -> None:
     result = backend.ensure_ollama_slot_daemons_for_chat(enabled=True, prefer="ollama")
     assert result.mode == "auto-pinned"
     assert unloaded == ["http://127.0.0.1:11434"]
+
+
+def test_list_ollama_inventory_merges_all_slots(monkeypatch) -> None:
+    def fake_running(base: str) -> list[dict]:
+        if base.endswith(":11435"):
+            return [{"name": "qwen3.6:27b"}]
+        return []
+
+    monkeypatch.setattr(
+        backend,
+        "ollama_unload_probe_bases",
+        lambda: ["http://127.0.0.1:11434", "http://127.0.0.1:11435"],
+    )
+    monkeypatch.setattr(backend, "_ollama_installed_models", lambda _b: ["qwen3.6:27b"])
+    monkeypatch.setattr(backend, "_ollama_running_models", fake_running)
+    _installed, loaded = backend.list_ollama_inventory()
+    assert "qwen3.6:27b" in loaded
+
+
+def test_unload_all_probes_three_slot_ports(monkeypatch) -> None:
+    """/unload all must hit 11434/11435/11436, not only OLLAMA_HOST."""
+    calls: list[str] = []
+
+    def fake_ready(base: str) -> bool:
+        return base.endswith((":11434", ":11435", ":11436"))
+
+    def fake_running(base: str) -> list[dict]:
+        if base.endswith(":11435"):
+            return [{"name": "qwen3.6:27b"}]
+        return []
+
+    def fake_unload(name: str, endpoint: str | None = None) -> tuple[bool, str]:
+        calls.append(endpoint or "")
+        return True, "ok"
+
+    monkeypatch.setattr(backend, "_endpoint_ready", fake_ready)
+    monkeypatch.setattr(backend, "_ollama_running_models", fake_running)
+    monkeypatch.setattr(backend, "unload_ollama_model", fake_unload)
+    monkeypatch.setattr(
+        backend,
+        "ollama_unload_probe_bases",
+        lambda: [
+            "http://127.0.0.1:11434",
+            "http://127.0.0.1:11435",
+            "http://127.0.0.1:11436",
+        ],
+    )
+    results = backend.unload_all_ollama_models()
+    assert len(results) == 1
+    assert "http://127.0.0.1:11435" in calls

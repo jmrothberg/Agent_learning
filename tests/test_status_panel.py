@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -92,16 +93,19 @@ def test_chat_process_gpu_vram() -> None:
 
 def test_activity_header_includes_role() -> None:
     app = CodingBoxApp()
+    app._session_backend3 = object()
     app._model3_is_streaming = True
+    app._model3_stream_tokens = 50
     app._session_role3 = "architect"
+    app._session_model3 = "qwen3.6:27b"
     app._activity_label = "architect note"
     app._activity_role = "architect"
-    app._model3_stream_started_at = 1000.0
-    import time
     app._model3_stream_started_at = time.monotonic() - 5.0
+    app._model3_last_token_at = time.monotonic() - 1.0
     line = app._render_activity_line()
     assert "Activity (architect):" in line
-    assert "Activity (coder):" not in line
+    assert "50 tok" in line
+    assert "Activity (coder):" in line
 
 
 def test_role_slot_for_stream_maps_sidecars() -> None:
@@ -477,6 +481,51 @@ def test_render_gpu_block_separate_ollama_endpoints(monkeypatch) -> None:
     assert "Model 3 (architect)" in block and "GPU 3" in block
     assert "pinned, not loaded" in block
     assert "same VRAM" not in block
+
+
+def test_render_activity_lines_all_roles() -> None:
+    app = CodingBoxApp()
+    app.agent = MagicMock()
+    app.agent.model = "qwen3.6:27b"
+    app.agent._backend2 = MagicMock()
+    app.agent._backend3 = MagicMock()
+    app.agent._model2_activity = "proposing playtest"
+    app.agent._model3_activity = "idle"
+    app._session_model2 = "qwen3.6:27b"
+    app._session_model3 = "qwen3.6:27b"
+    app._session_role2 = "critic"
+    app._session_role3 = "architect"
+    app._is_streaming = True
+    app._stream_tokens = 120
+    app._stream_started_at = 1000.0
+    app._last_token_at = 1005.0
+    app._activity_label = "iter 2 reply"
+    app._activity_role = "coder"
+    app._model2_is_streaming = True
+    app._model2_stream_tokens = 40
+    app._model2_stream_started_at = 1001.0
+    app._model2_last_token_at = 1004.0
+    monkeypatch_now = 1010.0
+    orig = time.monotonic
+    try:
+        time.monotonic = lambda: monkeypatch_now
+        block = app._render_activity_line()
+    finally:
+        time.monotonic = orig
+    assert "Activity (coder)" in block
+    assert "Activity (critic)" in block
+    assert "Activity (architect)" in block
+    assert "120 tok" in block
+    assert "40 tok" in block
+    assert "tok/s" in block
+
+
+def test_diffuser_placement_stable_audio_gpu_index() -> None:
+    class StableAudioGenerator:
+        _device = "cuda"
+        _cuda_device_index = 2
+
+    assert "GPU 2" in gpu_status.diffuser_placement(StableAudioGenerator())
 
 
 def test_diffuser_kind_labels() -> None:

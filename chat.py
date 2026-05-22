@@ -1367,6 +1367,10 @@ class CodingBoxApp(App):
                 agent.trace_status({
                     "activity": self._activity_label or "idle",
                     "is_streaming": bool(self._is_streaming),
+                    "model2_streaming": bool(self._model2_is_streaming),
+                    "model3_streaming": bool(self._model3_is_streaming),
+                    "model2_tokens": self._model2_stream_tokens,
+                    "model3_tokens": self._model3_stream_tokens,
                     "phase": self._phase_label,
                     "iteration": self._iteration_label,
                     "streak_clean": int(self._streak_clean or 0),
@@ -1432,89 +1436,61 @@ class CodingBoxApp(App):
             f"last {since_last:.1f}s ago {tag}"
         )
 
-    def _render_model_slot_activity(
+    def _slot_stream_state(
         self,
-        slot: int,
-        role: str,
-        *,
-        color: str,
-    ) -> str:
-        """One status line for Model 2 or Model 3 with live stream stats."""
-        tag = getattr(self.agent, f"_model{slot}_activity", None) or "idle"
-        label = tag if tag != "idle" else role
-        if slot == 2 and self._model2_is_streaming:
-            body = self._format_stream_activity_detail(
-                label=label,
-                tokens=self._model2_stream_tokens,
-                stream_started_at=self._model2_stream_started_at,
-                last_token_at=self._model2_last_token_at,
-                is_streaming=True,
-            )
-        elif slot == 3 and self._model3_is_streaming:
-            body = self._format_stream_activity_detail(
-                label=label,
-                tokens=self._model3_stream_tokens,
-                stream_started_at=self._model3_stream_started_at,
-                last_token_at=self._model3_last_token_at,
-                is_streaming=True,
-            )
-        elif tag in ("crashed",) or tag.startswith("failed"):
-            body = f"[red]{_esc(tag)}[/red]"
-        else:
-            body = f"[dim]{_esc(tag)}[/dim]"
-        model_tag = ""
-        if slot == 2 and self._session_model2:
-            model_tag = f" · {_esc(self._session_model2)}"
-        elif slot == 3 and self._session_model3:
-            model_tag = f" · {_esc(self._session_model3)}"
-        return (
-            f"[bold {color}]Model {slot} ({role})[/bold {color}]{model_tag}: {body}\n"
-        )
-
-    def _primary_activity_stream(self) -> tuple[str, str, int, float, float, bool]:
-        """Role, label, tokens, started_at, last_token_at, is_streaming for top line."""
-        role = self._activity_role or "coder"
-        label = self._activity_label or "idle"
-        if self._model3_is_streaming:
-            role = self._session_role3 or "architect"
-            tag = (
-                getattr(self.agent, "_model3_activity", None) if self.agent else None
-            ) or label
+        slot: int | None,
+    ) -> tuple[bool, int, float, float, str]:
+        """(is_streaming, tokens, started_at, last_token_at, idle_label) per slot."""
+        if slot == 2:
             return (
-                role, tag,
-                self._model3_stream_tokens,
-                self._model3_stream_started_at,
-                self._model3_last_token_at,
-                True,
-            )
-        if self._model2_is_streaming:
-            role = self._session_role2 or "critic"
-            tag = (
-                getattr(self.agent, "_model2_activity", None) if self.agent else None
-            ) or label
-            return (
-                role, tag,
+                self._model2_is_streaming,
                 self._model2_stream_tokens,
                 self._model2_stream_started_at,
                 self._model2_last_token_at,
-                True,
+                (
+                    getattr(self.agent, "_model2_activity", None)
+                    if self.agent else None
+                ) or "idle",
             )
-        if self._is_streaming:
+        if slot == 3:
             return (
-                "coder", label,
-                self._stream_tokens,
-                self._stream_started_at,
-                self._last_token_at,
-                True,
+                self._model3_is_streaming,
+                self._model3_stream_tokens,
+                self._model3_stream_started_at,
+                self._model3_last_token_at,
+                (
+                    getattr(self.agent, "_model3_activity", None)
+                    if self.agent else None
+                ) or "idle",
             )
-        return (role, label, 0, 0.0, 0.0, False)
+        return (
+            self._is_streaming,
+            self._stream_tokens,
+            self._stream_started_at,
+            self._last_token_at,
+            self._activity_label or "idle",
+        )
 
-    def _render_activity_line(self) -> str:
-        """Top line: the heartbeat. Always shows which role (coder/critic/architect)."""
-        now = time.monotonic()
-        role, label, tokens, started, last_tok, streaming = self._primary_activity_stream()
+    def _render_role_activity_line(
+        self,
+        role: str,
+        *,
+        slot: int | None = None,
+        color: str = "cyan",
+        model_name: str | None = None,
+    ) -> str:
+        """One Activity row per role — same tok/tok/s display as the coder line."""
+        streaming, tokens, started, last_tok, idle_tag = self._slot_stream_state(slot)
         hdr = self._activity_header(role)
         if streaming:
+            if slot is None:
+                label = self._activity_label or f"streaming {role}"
+            elif (self._activity_role or "") == role:
+                label = self._activity_label or idle_tag
+            else:
+                label = idle_tag if idle_tag not in ("idle", role) else f"streaming {role}"
+            if label in ("idle", role):
+                label = f"streaming {role}"
             body = self._format_stream_activity_detail(
                 label=label,
                 tokens=tokens,
@@ -1522,22 +1498,52 @@ class CodingBoxApp(App):
                 last_token_at=last_tok,
                 is_streaming=True,
             )
-            return f"{hdr} {body}\n"
-        if self._activity_label and self._activity_label != "idle":
-            age = now - self._activity_started_at if self._activity_started_at else 0.0
-            return f"{hdr} {_esc(self._activity_label)} [dim]({age:.0f}s)[/dim]\n"
-        ret = f"{hdr} [dim]idle[/dim]\n"
+        elif idle_tag and idle_tag != "idle":
+            age = (
+                time.monotonic() - self._activity_started_at
+                if self._activity_started_at and slot is None
+                else 0.0
+            )
+            if idle_tag in ("crashed",) or str(idle_tag).startswith("failed"):
+                body = f"[red]{_esc(idle_tag)}[/red]"
+            else:
+                suffix = f" [dim]({age:.0f}s)[/dim]" if age > 0 else ""
+                body = f"{_esc(idle_tag)}{suffix}"
+        else:
+            body = "[dim]idle[/dim]"
+        model_tag = f" · {_esc(model_name)}" if model_name else ""
+        return f"{hdr}{model_tag} {body}\n"
 
+    def _render_activity_line(self) -> str:
+        """Per-role activity rows: coder + model2 + model3 when configured."""
+        lines: list[str] = []
+        coder_model = None
         if self.agent is not None:
-            if self._session_backend2:
-                ret += self._render_model_slot_activity(
-                    2, self._session_role2 or "critic", color="green",
-                )
-            if self._session_backend3:
-                ret += self._render_model_slot_activity(
-                    3, self._session_role3 or "architect", color="magenta",
-                )
-        return ret
+            coder_model = getattr(self.agent, "model", None)
+        elif self._session_model:
+            coder_model = self._session_model
+        lines.append(self._render_role_activity_line(
+            "coder", slot=None, color="cyan", model_name=coder_model,
+        ))
+        if self._session_backend2 or (
+            self.agent is not None and getattr(self.agent, "_backend2", None)
+        ):
+            lines.append(self._render_role_activity_line(
+                self._session_role2 or "critic",
+                slot=2,
+                color="green",
+                model_name=self._session_model2,
+            ))
+        if self._session_backend3 or (
+            self.agent is not None and getattr(self.agent, "_backend3", None)
+        ):
+            lines.append(self._render_role_activity_line(
+                self._session_role3 or "architect",
+                slot=3,
+                color="magenta",
+                model_name=self._session_model3,
+            ))
+        return "".join(lines)
 
     def _render_mode_row(self) -> str:
         """Render the colored Mode row in the right-hand status panel.
@@ -1840,7 +1846,11 @@ class CodingBoxApp(App):
             body = "[dim]idle — type a new goal or /help[/dim]"
         elif self._session_done:
             body = "[dim]session ended — type feedback to extend, or /new[/dim]"
-        elif self._is_streaming:
+        elif (
+            self._is_streaming
+            or self._model2_is_streaming
+            or self._model3_is_streaming
+        ):
             body = "[bold green]RUNNING:[/bold green] streaming — feedback queues for next turn"
         else:
             body = "[bold green]RUNNING:[/bold green] feedback queues for next turn"
@@ -2010,6 +2020,15 @@ class CodingBoxApp(App):
                 )
             )
 
+        def _slot_is_streaming(slot_i: int) -> bool:
+            if slot_i == 1:
+                return self._is_streaming
+            if slot_i == 2:
+                return self._model2_is_streaming
+            if slot_i == 3:
+                return self._model3_is_streaming
+            return False
+
         slots = _collect_slots()
         ollama_ps = gs.ollama_loaded_models()
 
@@ -2017,6 +2036,7 @@ class CodingBoxApp(App):
             rows.append("  [b]LLM[/b]")
             m1_model, _, m1_bi = slots[0]
             m1_gpu = _slot_gpu_line(m1_model, m1_bi)
+            live_gpus: list[str] = []
             for slot_i, (model, role, bi) in enumerate(slots, start=1):
                 if bi is None and not model:
                     continue
@@ -2026,9 +2046,21 @@ class CodingBoxApp(App):
                 suffix = ""
                 if _same_physical_as_slot1(slot_i, model, bi, m1_model, m1_bi):
                     suffix = " · [dim]same VRAM[/dim]"
+                live = ""
+                if _slot_is_streaming(slot_i):
+                    live = " · [green]live[/green]"
+                    m = re.search(r"GPU\s*(\d+)", gpu_line)
+                    if m:
+                        live_gpus.append(f"GPU {m.group(1)} ({role or '?'})")
+                    elif "not loaded" not in gpu_line.lower():
+                        live_gpus.append(role or f"slot{slot_i}")
                 rows.append(
                     f"  Model {slot_i}{role_s} · {_esc(model or '—')} · {bname} · "
-                    f"{gpu_line}{suffix}"
+                    f"{gpu_line}{suffix}{live}"
+                )
+            if live_gpus:
+                rows.append(
+                    "  [green]busy now:[/green] " + ", ".join(live_gpus)
                 )
             split_tip = gs.ollama_split_tip_short(snap)
             if split_tip:
@@ -2939,7 +2971,7 @@ class CodingBoxApp(App):
         self._log("[bold cyan]── available models ──[/bold cyan]")
         self._log(
             "[dim]  [O]llama / [M]LX / open[X]AI / [C]laude  ·  "
-            "* = loaded right now  ·  ← active = this session  ·  "
+            "* = loaded in Ollama VRAM now  ·  ← active = bound to this session  ·  "
             "← staged = next /new  ·  "
             "[magenta]VLM[/magenta] = can read screenshots (vision-language) · "
             "[dim]text[/dim] = text-only[/dim]"
@@ -3055,14 +3087,30 @@ class CodingBoxApp(App):
             return
 
         if norm_lc == "all":
+            bases = backend_mod.ollama_unload_probe_bases()
+            ports = ", ".join(b.rsplit(":", 1)[-1] for b in bases)
             results = backend_mod.unload_all_ollama_models()
             if not results:
-                self._log_info("[dim]no Ollama models currently loaded[/dim]")
-                return
-            for name, ok, msg in results:
-                tag = "[green]✓[/green]" if ok else "[red]✗[/red]"
-                self._log_info(f"  {tag} {_esc(name)} — {_esc(msg)}")
+                self._log_info(
+                    f"[dim]probed Ollama on port(s) {ports}; "
+                    "no model was resident in VRAM (/api/ps empty on each).[/dim]"
+                )
+            else:
+                for name, ok, msg in results:
+                    tag = "[green]✓[/green]" if ok else "[red]✗[/red]"
+                    self._log_info(f"  {tag} {_esc(name)} — {_esc(msg)}")
+            freed_diff = self._unload_diffusers_vram()
+            if freed_diff:
+                self._log_info(
+                    f"[green]✓[/green] released diffuser VRAM: {_esc(', '.join(freed_diff))}"
+                )
             self._log_info("[dim](MLX untouched — /unload mlx for that.)[/dim]")
+            self._log_info(
+                "[dim]← active in /list = this session's model picks (coder/model2/model3); "
+                "that does not change after unload. Use * to see VRAM residency; "
+                "run /list again.[/dim]"
+            )
+            self._log_post_unload_vram_hint()
             return
 
         if norm_lc == "model2":
@@ -3179,6 +3227,65 @@ class CodingBoxApp(App):
                 "[dim]Session is still bound to that tag in VRAM terms — "
                 "use [b]/model <N>[/b] to point the agent at a working model "
                 "(your game file and trace are kept).[/dim]"
+            )
+
+    def _unload_diffusers_vram(self) -> list[str]:
+        """Drop in-process Z-Image / img2img pipelines (chat preload + agent)."""
+        freed: list[str] = []
+        try:
+            from assets import release_preloaded_diffusers
+            freed.extend(release_preloaded_diffusers())
+        except Exception:
+            pass
+        agent = self.agent
+        if agent is not None:
+            gen = getattr(agent, "_asset_generator", None)
+            if gen is not None and hasattr(gen, "cleanup"):
+                try:
+                    gen.cleanup()
+                    if "Z-Image-Turbo (session)" not in freed:
+                        freed.append("Z-Image-Turbo (session)")
+                except Exception:
+                    pass
+        return freed
+
+    def _log_post_unload_vram_hint(self) -> None:
+        """After /unload all, show remaining GPU use so 'still full' is actionable."""
+        try:
+            import gpu_status as gs
+            snap = gs.snapshot_gpus(force=True)
+        except Exception:
+            return
+        if snap is None:
+            return
+        footer = gs.format_vram_footer(snap)
+        if footer:
+            self._log_info(f"[dim]GPU VRAM now: {footer}[/dim]")
+        split = gs.ollama_tensor_split_gpu_indices(snap)
+        if split and not gs.ollama_multi_daemon_setup():
+            self._log_info(
+                f"[yellow]Ollama still split across GPU "
+                f"{'+'.join(str(i) for i in split)} — "
+                "try again or stop stray `ollama serve` processes.[/yellow]"
+            )
+        elif gs.ollama_multi_daemon_setup():
+            loaded = gs.ollama_loaded_models()
+            if loaded:
+                rows = ", ".join(
+                    f"{m['name']}@{m['endpoint'].rsplit(':', 1)[-1]}"
+                    for m in loaded[:4]
+                )
+                self._log_info(
+                    f"[yellow]Still loaded in Ollama: {rows} — "
+                    "re-run /unload all[/yellow]"
+                )
+        # chat.py / diffusers often hold a separate Python allocation (not /api/ps).
+        py_vram = gs.chat_process_gpu_vram(snap, os.getpid(), min_mib=4000)
+        if py_vram:
+            gpus = "+".join(str(g) for g, _ in py_vram)
+            self._log_info(
+                f"[dim]This chat process still uses GPU {gpus} "
+                f"(diffusers/MLX) — /unload mlx or quit chat to drop that.[/dim]"
             )
 
     def _print_mlx_kill_hint(self) -> None:
@@ -5456,17 +5563,32 @@ class CodingBoxApp(App):
             label = data.get("label", "")
             stream_role = data.get("role", "coder")
             now = time.monotonic()
+            slot = self._role_slot_for_stream(stream_role)
+
+            def _any_slot_streaming() -> bool:
+                return (
+                    self._is_streaming
+                    or self._model2_is_streaming
+                    or self._model3_is_streaming
+                )
+
             if state == "idle":
-                self._activity_label = ""
-                self._activity_role = "coder"
-                self._activity_started_at = 0.0
-                self._is_streaming = False
-                self._model2_is_streaming = False
-                self._model3_is_streaming = False
-                self._model2_stream_tokens = 0
-                self._model3_stream_tokens = 0
+                if "role" not in data:
+                    # Legacy bare idle — end every slot's stream display.
+                    self._is_streaming = False
+                    self._model2_is_streaming = False
+                    self._model3_is_streaming = False
+                elif slot == 2:
+                    self._model2_is_streaming = False
+                elif slot == 3:
+                    self._model3_is_streaming = False
+                else:
+                    self._is_streaming = False
+                if not _any_slot_streaming():
+                    self._activity_label = ""
+                    self._activity_role = "coder"
+                    self._activity_started_at = 0.0
             else:
-                slot = self._role_slot_for_stream(stream_role)
                 display = label or state.replace("_", " ")
                 self._activity_role = stream_role
                 self._activity_label = display
@@ -5477,20 +5599,20 @@ class CodingBoxApp(App):
                         self._model2_stream_tokens = 0
                         self._model2_stream_started_at = now
                         self._model2_last_token_at = 0.0
-                        self._is_streaming = False
                     elif slot == 3:
                         self._model3_is_streaming = True
                         self._model3_stream_tokens = 0
                         self._model3_stream_started_at = now
                         self._model3_last_token_at = 0.0
-                        self._is_streaming = False
                     else:
                         self._is_streaming = True
                         self._stream_tokens = 0
                         self._stream_started_at = now
                         self._last_token_at = 0.0
-                        self._model2_is_streaming = False
-                        self._model3_is_streaming = False
+                elif slot == 2:
+                    self._model2_is_streaming = False
+                elif slot == 3:
+                    self._model3_is_streaming = False
                 else:
                     self._is_streaming = False
             self._update_status()

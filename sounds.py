@@ -312,6 +312,8 @@ class StableAudioGenerator:
         self.model_path = model_path or _resolve_stable_audio_path()
         self._pipeline: Any = None
         self._device: str | None = None
+        # Physical CUDA index after .to("cuda"); status panel (gpu_status).
+        self._cuda_device_index: int | None = None
         self._sample_rate: int = 44100   # set after pipeline load
         self._last_error: str | None = None
 
@@ -395,6 +397,14 @@ class StableAudioGenerator:
         if torch.cuda.is_available():
             device = "cuda"
             dtype = torch.float16
+            try:
+                import gpu_status as _gs
+                snap = _gs.snapshot_gpus()
+                pick = _gs.pick_least_loaded_cuda_index(snap)
+                if pick is not None:
+                    _gs.activate_cuda_device(pick)
+            except Exception:
+                pass
         elif (
             hasattr(torch.backends, "mps")
             and torch.backends.mps.is_available()
@@ -442,6 +452,10 @@ class StableAudioGenerator:
                 pass
             self._pipeline.to(device)
             self._device = device
+            self._cuda_device_index = (
+                int(torch.cuda.current_device())
+                if device == "cuda" else None
+            )
             # Pipeline exposes the model's native sample rate via its
             # vae. Cache it so generate() can hand it to soundfile.
             try:
@@ -460,6 +474,7 @@ class StableAudioGenerator:
             )
             self._pipeline = None
             self._device = None
+            self._cuda_device_index = None
             return False
 
     def generate(self, prompt: str, duration_s: float = 1.0) -> str | None:

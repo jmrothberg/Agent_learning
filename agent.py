@@ -2903,6 +2903,17 @@ class GameAgent:
             except Exception:
                 pass
 
+    def _role_token_cb(self, role: str):
+        """Token callback that tags stream pieces for the TUI status panel."""
+        def _cb(piece: str) -> None:
+            self._last_stream_role = role
+            self._token_cb_wrapper(piece)
+        return _cb
+
+    @staticmethod
+    def _activity_idle_event(role: str = "coder") -> AgentEvent:
+        return AgentEvent("activity", "idle", {"role": role})
+
     # -- trace / snapshot helpers ------------------------------------------
 
     def _trace(self, obj: dict) -> None:
@@ -4545,9 +4556,16 @@ class GameAgent:
                 "model": backend.info.model,
                 "image_count": len(images),
             })
+            critic_role = getattr(self, "_model3_role", None)
+            if critic_role != "critic":
+                critic_role = getattr(self, "_model2_role", None) or "critic"
+            on_tok = (
+                self._role_token_cb(critic_role)
+                if self._token_cb is not None else None
+            )
             result = await backend.stream_chat(
                 messages,
-                on_token=lambda _t: None,
+                on_token=on_tok,
                 options={"temperature": 0.2, "num_ctx": 4096},
                 keep_alive=self._keep_alive_for_backend(backend),
                 stall_seconds=120.0,
@@ -4563,8 +4581,11 @@ class GameAgent:
         finally:
             self._set_role_activity("critic", "idle")
 
-    async def _run_opening_book_sidecars(self, report: dict, iteration: int) -> None:
-        """Let warm side models propose live recipes; store only after browser evidence."""
+    async def _run_opening_book_sidecars(self, report: dict, iteration: int):
+        """Let warm side models propose live recipes; store only after browser evidence.
+
+        Yields activity events so the TUI can show per-role tok/s while sidecars run.
+        """
         if not report.get("ok"):
             return
         sidecars: list[tuple[str, str, str]] = []
@@ -4580,6 +4601,11 @@ class GameAgent:
             if backend is None:
                 continue
             self._set_role_activity(role, f"proposing {kind}")
+            yield self._record(AgentEvent(
+                "activity",
+                "streaming",
+                {"label": f"proposing {kind}", "role": role},
+            ))
             prompt = (
                 "You are proposing one compact reusable opening-book memory "
                 "item for a single-file HTML game agent. Only propose a "
@@ -4592,9 +4618,13 @@ class GameAgent:
                 f"{format_report_for_model(report)[:1600]}\n"
             )
             try:
+                on_tok = (
+                    self._role_token_cb(role)
+                    if self._token_cb is not None else None
+                )
                 result = await backend.stream_chat(
                     [{"role": "user", "content": prompt}],
-                    on_token=lambda _t: None,
+                    on_token=on_tok,
                     options={"temperature": 0.2, "num_ctx": 4096},
                     keep_alive=self._keep_alive_for_backend(backend),
                     stall_seconds=120.0,
@@ -4639,6 +4669,7 @@ class GameAgent:
                 })
             finally:
                 self._set_role_activity(role, "idle")
+                yield self._record(self._activity_idle_event(role))
 
     async def _run_vision_judge(self, current_png: bytes, iteration: int) -> None:
         """Ask a vision model whether this iter made visible progress
@@ -9003,10 +9034,23 @@ class GameAgent:
                 critic_backend = self.get_backend("critic")
                 if critic_backend is not None:
                     try:
+                        critic_bk = self.get_backend("critic")
+                        if critic_bk is getattr(self, "_backend3", None):
+                            vc_role = getattr(self, "_model3_role", None) or "critic"
+                        elif critic_bk is getattr(self, "_backend2", None):
+                            vc_role = getattr(self, "_model2_role", None) or "critic"
+                        else:
+                            vc_role = "critic"
+                        yield self._record(AgentEvent(
+                            "activity",
+                            "streaming",
+                            {"label": "visual critic", "role": vc_role},
+                        ))
                         critique = await self.run_visual_critic(
                             after_bytes,
                             before_bytes,
                         )
+                        yield self._record(self._activity_idle_event(vc_role))
                         if critique:
                             cleaned = critique.strip()
                             if cleaned and "ok" not in cleaned.lower()[:30]:
@@ -9033,7 +9077,8 @@ class GameAgent:
                             "error": str(exc),
                         })
             try:
-                await self._run_opening_book_sidecars(report, iteration)
+                async for _ob_ev in self._run_opening_book_sidecars(report, iteration):
+                    yield _ob_ev
             except Exception as exc:
                 self._trace({
                     "kind": "opening_book_sidecars_failed",
