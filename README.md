@@ -301,8 +301,8 @@ patch number caused the problem and what to change to fix it.
 
 ### Memory and playbook (compounds across sessions)
 
-[`memory.py`](memory.py) uses **three tiers** (run `./scripts/migrate_memory.sh`
-once if you still have an old single `memory/` tree):
+[`memory.py`](memory.py) uses **three tiers** (`Playbook.ensure()` /
+`GameMemory.ensure()` create missing dirs and seed the playbook on first run):
 
 | Path | Role |
 |---|---|
