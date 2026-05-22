@@ -102,7 +102,15 @@ from textual.widgets import Footer, Header, Input, OptionList, RichLog, Static
 from textual.widgets._option_list import Option
 
 import backend as backend_mod
-from agent import AgentEvent, GameAgent
+from agent import (
+    AgentEvent,
+    DEFAULT_NUM_CTX,
+    MAX_NUM_CTX,
+    MIN_NUM_CTX,
+    GameAgent,
+    default_num_ctx,
+    parse_num_ctx_arg,
+)
 from tools import LiveBrowser
 
 # xterm SGR uses 2 for right press; some stacks report 3.
@@ -883,7 +891,15 @@ class CodingBoxApp(App):
     # can skip full driver teardown, leaving the tty with echo disabled. Use
     # ctrl+q instead (common TUI convention).
     BINDINGS = [
-        Binding("ctrl+d", "ship_it", "Ship game / done"),
+        # priority=True is REQUIRED — Textual's Input widget has its own
+        # `Binding('delete,ctrl+d', 'delete_right')` that captures Ctrl+D
+        # whenever focus is on the input box (which is ~all of the time
+        # in a chat-style TUI). Without `priority=True`, Ctrl+D silently
+        # deletes a character from the input instead of shipping the
+        # build. User-visible symptom before this fix: "Ctrl+D never
+        # works." Ctrl+Q escapes the same way (Input has no Ctrl+Q
+        # binding) so we keep that one normal.
+        Binding("ctrl+d", "ship_it", "Ship game / done", priority=True),
         Binding("ctrl+q", "quit_app", "Quit"),
         # Ctrl+L: re-print where the FULL log files live. Useful when you
         # want to `cat` them from another terminal to share with an LLM.
@@ -1018,6 +1034,8 @@ class CodingBoxApp(App):
         # /iters lets the user change the max-iters cap before starting a
         # session or extending. Default matches GameAgent's default.
         self._max_iters: int = 6
+        # /ctx sets Ollama num_ctx (KV reservation). Sticky across /new.
+        self._num_ctx: int = default_num_ctx()
         # /seed stages an existing HTML file as the baseline for the next
         # /new session. Cleared once consumed.
         self._next_seed: Path | None = None
@@ -1324,7 +1342,13 @@ class CodingBoxApp(App):
              session reset clears it.
         """
         if self._status_manual_body is not None:
-            body = self._status_manual_body
+            # Always prepend live activity + mode so the user can still
+            # see what the agent is doing while /help is on screen. The
+            # pre-fix behavior replaced the entire panel with help text
+            # — a session in flight became invisible and the user
+            # couldn't tell whether to wait, ship, or quit.
+            live_prefix = self._render_activity_line() + self._render_mode_row()
+            body = live_prefix + "\n" + self._status_manual_body
             if extra is not None:
                 self._last_test_block = extra
             self._status_plain = self._MARKUP_RE.sub("", body)
@@ -2759,6 +2783,8 @@ class CodingBoxApp(App):
                 self._cmd_set_model2(arg)
             elif cmd == "model3":
                 self._cmd_set_model3(arg)
+            elif cmd in ("modelall", "loadall"):
+                self._cmd_set_model_all(arg)
             elif cmd == "retry":
                 await self._cmd_retry(arg)
             elif cmd == "backend":
@@ -2780,6 +2806,8 @@ class CodingBoxApp(App):
                 self._log_mirror_lines = []
             elif cmd == "iters":
                 self._cmd_set_iters(arg)
+            elif cmd == "ctx":
+                self._cmd_set_ctx(arg)
             elif cmd == "seed":
                 self._cmd_set_seed(arg)
             elif cmd == "reset":
@@ -2872,6 +2900,8 @@ class CodingBoxApp(App):
             "  [b]/load <N|name>[/b]           pick model #N from /list (any backend) · STICKY across /new (also /model)",
             "  [b]/model2 <N|name> [--role critic|architect][/b]  configure and stage secondary model 2",
             "  [b]/model3 <N|name> [--role critic|architect][/b]  configure and stage tertiary model 3",
+            "  [b]/modelall <N|name>[/b]      stage the SAME model on all 3 slots (coder + critic + architect) · alias /loadall",
+            "                                  [dim]4-GPU workstation: 11434→GPU1, 11435→GPU2, 11436→GPU3 — one command for all three[/dim]",
             "  [b]/retry[/b]                   re-run after a bad model (keeps game file + trace; uses /model pick first)",
             "  [b]/launch <N|name|path>[/b]   stage an MLX model for next /new (loads in-process on first request)",
             "  [b]/backend <auto|ollama|mlx|openai|anthropic>[/b]  stage default backend when no specific model is staged",
@@ -2879,6 +2909,9 @@ class CodingBoxApp(App):
             "  [b]/unload [N|name|all|mlx][/b]  free VRAM · #N from /list · bare = active session · all = every Ollama · mlx = drop the in-process MLX model",
             "  [b]/seed <path>[/b]             stage a baseline .html (STICKY across /new) · /seed alone clears",
             "  [b]/iters <N>[/b]               set max iterations (sticky)",
+            "  [b]/ctx [N|100k|131k|262k|full][/b]  Ollama context window (sticky · default 100k · /ctx alone shows current)",
+            "                                  [dim]raises KV VRAM; Ollama reloads on next request — preload with[/dim]",
+            "                                  [dim]`ollama run --ctx-size N <model>` to avoid a stall[/dim]",
             "  [b]/restarts <N>[/b]            independent full restarts when iter-1 score < 60 (sticky · default 2 · 1=off)",
             "  [b]/model-class <auto|small|mid|large>[/b]  override prompt-size trim (sticky · default 'small' = lean ~5KB)",
             "  [b]/reset[/b]                   wipe ALL staged state (seed + model + iters → defaults)",
@@ -3548,6 +3581,51 @@ class CodingBoxApp(App):
         """/model3 <N|name> [--role critic|architect] — pick and configure role for Model 3."""
         self._cmd_set_model_slot(arg, 3)
 
+    def _cmd_set_model_all(self, arg: str) -> None:
+        """/modelall <N|name> — stage the SAME model into slots 1, 2, and 3.
+
+        Convenience for the multi-slot Ollama topology (auto-pin on the
+        4×48 GB workstation: 11434→GPU1, 11435→GPU2, 11436→GPU3). Useful
+        when you want three identical model instances ready for:
+          - parallel best-of-N candidate sampling
+          - non-blocking critic on the architect's idle slot
+          - any future fan-out work that benefits from identical capacity
+            across all three GPUs
+
+        Roles default to coder / critic / architect on slots 1 / 2 / 3
+        via the same smart-default logic /model2 and /model3 use; pass
+        per-slot `/model2` or `/model3 --role X` afterward to override.
+        Bare /modelall clears all three staged slots.
+        """
+        if not arg.strip():
+            # Clear all three slots — matches the bare /model behavior.
+            for slot in (1, 2, 3):
+                slot_str = "" if slot == 1 else str(slot)
+                next_model_attr = f"_next_model{slot_str}"
+                next_backend_attr = f"_next_backend{slot_str}"
+                next_role_attr = f"_next_role{slot_str}"
+                setattr(self, next_model_attr, None)
+                setattr(self, next_backend_attr, None)
+                setattr(self, next_role_attr, None)
+            self._log_info(
+                "cleared staged model on all 3 slots "
+                "(usage: /modelall <number-from-/list-or-name>)"
+            )
+            self._update_status()
+            return
+        # Stage slot 1 first (no role flag — coder is the default).
+        self._cmd_set_model_slot(arg, 1)
+        # Slots 2 and 3 get explicit critic/architect roles so the
+        # auto-staff side-effects (vlm-critique on, architect-split on)
+        # fire deterministically regardless of how the smart-default
+        # logic would have picked them.
+        self._cmd_set_model_slot(f"{arg} --role critic", 2)
+        self._cmd_set_model_slot(f"{arg} --role architect", 3)
+        self._log_info(
+            "[green]/modelall[/green] — same model staged on all 3 slots "
+            "(slot 1: coder · slot 2: critic · slot 3: architect)"
+        )
+
     def _cmd_set_model_slot(self, arg: str, slot: int) -> None:
         slot_str = "" if slot == 1 else str(slot)
         next_model_attr = f"_next_model{slot_str}"
@@ -3910,6 +3988,52 @@ class CodingBoxApp(App):
         self._log_info(
             f"max iterations set to [b]{self._max_iters}[/b] for next session/extension"
         )
+
+    def _cmd_set_ctx(self, arg: str) -> None:
+        """/ctx [N|100k|131k|262k|full] — Ollama num_ctx (KV reservation)."""
+        if not arg:
+            self._log_info(
+                f"Ollama context: [b]{self._num_ctx:,}[/b] tokens "
+                f"(default {DEFAULT_NUM_CTX:,}). "
+                "usage: /ctx <N|100k|131k|262k|full|native>"
+            )
+            if self.agent is not None:
+                self._log_info(
+                    f"[dim]active session agent.num_ctx={self.agent.num_ctx:,}[/dim]"
+                )
+            return
+        try:
+            new_ctx = parse_num_ctx_arg(arg)
+        except ValueError as e:
+            self._log_error(str(e))
+            self._log_info(
+                "usage: /ctx <N|100k|131k|262k|full>  "
+                f"(range {MIN_NUM_CTX:,}–{MAX_NUM_CTX:,})"
+            )
+            return
+        old = self._num_ctx
+        self._num_ctx = new_ctx
+        self._ctx_max = new_ctx
+        if self.agent is not None:
+            self.agent.num_ctx = new_ctx
+        self._log_info(
+            f"Ollama context set to [b]{new_ctx:,}[/b] "
+            f"(was {old:,}) for next turns"
+        )
+        if (
+            self._session_backend_info is not None
+            and self._session_backend_info.name == "ollama"
+        ):
+            self._log_info(
+                "[dim]Ollama will reload the model on the next request when "
+                "num_ctx changes. Preload to avoid a stall: "
+                f"`ollama run --ctx-size {new_ctx} "
+                f"{self._session_model or '<model>'}`[/dim]"
+            )
+        elif self.agent is not None:
+            self._log_info(
+                "[dim]num_ctx applies to Ollama backends; MLX ignores it.[/dim]"
+            )
 
     def _cmd_set_restarts(self, arg: str) -> None:
         """/restarts N — when iter 1 of a session ends below the score
@@ -4356,6 +4480,7 @@ class CodingBoxApp(App):
         had_model = self._next_model
         had_backend = self._next_backend
         had_iters = self._max_iters
+        had_ctx = self._num_ctx
         had_restarts = self._restart_n
         had_class = self._model_class
         had_ref = self._staged_ref_image_name
@@ -4365,6 +4490,8 @@ class CodingBoxApp(App):
         self._staged_ref_image_bytes = None
         self._staged_ref_image_name = None
         self._max_iters = 6
+        self._num_ctx = default_num_ctx()
+        self._ctx_max = self._num_ctx
         self._restart_n = 2
         self._model_class = None
         self._run_profile = "custom"
@@ -4379,6 +4506,8 @@ class CodingBoxApp(App):
             bits.append(f"backend={had_backend}")
         if had_iters != 6:
             bits.append(f"iters={had_iters}→6")
+        if had_ctx != default_num_ctx():
+            bits.append(f"ctx={had_ctx}→{self._num_ctx}")
         if had_restarts != 2:
             bits.append(f"restarts={had_restarts}→2")
         if had_class:
@@ -4418,6 +4547,7 @@ class CodingBoxApp(App):
             f"  phase:                {_esc(self._phase_label)}",
             f"  iteration:            {_esc(self._iteration_label)}",
             f"  max iters:            {self._max_iters}",
+            f"  Ollama ctx (next):    {self._num_ctx:,}",
             f"  restart-N:            {self._restart_n if self._restart_n > 1 else '1 (off)'}",
             f"  model-class:          {self._model_class or 'auto (= small, lean ~5KB schema)'}",
             f"  step-mode (/wait):    {step_label}",
@@ -5057,6 +5187,7 @@ class CodingBoxApp(App):
             seed_file=seed,
             stall_seconds=stall_s,
             overall_seconds=overall_s,
+            num_ctx=self._num_ctx,
             # v1 prompt: includes <playbook> retrieval, <criteria>,
             # <probes>, stuck-loop ladder. Real sessions need this on
             # so the offline learner has rich traces to reflect over.
@@ -5212,8 +5343,9 @@ class CodingBoxApp(App):
             combined = f"{self._goal} — {feedback}" if self._goal else feedback
             await self._new_session(combined)
             return
-        # Apply any /iters change before extending.
+        # Apply any /iters or /ctx change before extending.
         self.agent.max_iters = self._max_iters
+        self.agent.num_ctx = self._num_ctx
         self._session_done = False
         self._phase_label = "extending"
         self.sub_title = "agent is working (extension)"

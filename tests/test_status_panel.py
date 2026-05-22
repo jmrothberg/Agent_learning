@@ -259,6 +259,22 @@ def test_pick_diffuser_reuse_cuda_index() -> None:
     assert gpu_status.pick_diffuser_cuda_index(snap, reuse_cuda_index=0) == 0
 
 
+def test_pick_diffuser_reuses_gpu0_even_when_zimage_makes_it_look_llm() -> None:
+    # Regression: Z-Image-Turbo loaded on GPU 0 (~20 GB python) flags the
+    # card as "LLM-heavy" to the generic detector. Stable-Audio must still
+    # colocate on GPU 0, not flee to a coder/critic/architect slot.
+    snap = _four_gpu_workstation_snap(
+        used=(20500, 39000, 22500, 43000),
+        processes=[
+            gpu_status.GpuProcess(0, 3221355, ".venv/bin/python", 20526),
+            gpu_status.GpuProcess(1, 3606725, "/usr/bin/ollama", 39558),
+            gpu_status.GpuProcess(2, 1835108, "/usr/local/bin/ollama", 22500),
+            gpu_status.GpuProcess(3, 3518139, "/usr/local/bin/ollama", 43836),
+        ],
+    )
+    assert gpu_status.pick_diffuser_cuda_index(snap, reuse_cuda_index=0) == 0
+
+
 def test_format_gpu_indices_label_never_bare_question() -> None:
     assert "GPU ?" not in gpu_status.format_gpu_indices_label([], None, pending=True)
     assert "GPU ?" not in gpu_status.format_gpu_indices_label([], None, vram_gib=20.5)

@@ -704,9 +704,15 @@ def pick_diffuser_cuda_index(
     if snap is None or not snap.gpus:
         return None
     llm_gpus = set(gpu_indices_with_llm_vram(snap))
+    on_workstation = _is_four_gpu_linux_nvidia_workstation(snap)
 
     def _ok(index: int) -> bool:
-        if index in llm_gpus:
+        # On the 4×48 GB workstation GPU 0 is the diffuser slot by
+        # construction — once Z-Image-Turbo loads, our own Python process
+        # makes the card look "LLM-heavy" to the generic detector. Skip
+        # the veto for index 0 there so Stable-Audio colocates with
+        # Z-Image instead of stealing GPU 1 from the coder slot.
+        if index in llm_gpus and not (on_workstation and index == 0):
             return False
         free = _gpu_free_mib(snap, index)
         return free is not None and free >= _MIN_DIFFUSER_FREE_MIB
@@ -714,10 +720,10 @@ def pick_diffuser_cuda_index(
     if reuse_cuda_index is not None and _ok(reuse_cuda_index):
         return reuse_cuda_index
 
-    if _is_four_gpu_linux_nvidia_workstation(snap) and _ok(0):
+    if on_workstation and _ok(0):
         return 0
 
-    reserved = set(_OLLAMA_SLOT_GPUS) if _is_four_gpu_linux_nvidia_workstation(snap) else set()
+    reserved = set(_OLLAMA_SLOT_GPUS) if on_workstation else set()
 
     def _best(candidates: list[GpuInfo]) -> int | None:
         best_idx: int | None = None

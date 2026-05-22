@@ -234,7 +234,16 @@ spec lists). The user-turn prompt is built by
 `prompts_v1.plan_instruction(goal=...)` which detects art and 3D
 modality keywords and escalates `<assets>` / three.js usage from
 "expected" to "required this turn" when matched. Modality keywords are
-intentionally genre-free.
+intentionally genre-free. Goals with explicit **multi-frame / animation
+roster** language (`prompts_v1._detect_multi_frame_intent`) get a
+planning nudge to emit `from_image` variant chains (not idle-only
+sprites) and a raised per-turn asset cap (up to 36 entries) so large
+rosters are not silently truncated at the default 24-asset limit.
+
+**Cross-slot KV warm (multi-model Ollama).** When the coder slot sits
+idle during architect planning or asset/sound generation, the agent can
+call `Backend.warm_prefix()` on the coder's backend so its first build
+turn reuses prefix-matched KV instead of paying full prefill again.
 
 **Phase B — build/iterate (up to `max_iters`).** Each iter: stream the
 model's reply → materialize via `<patch>` (preferred) or `<html_file>`
@@ -598,9 +607,11 @@ is data the agent will see, not just developer notes.
 |---|---|
 | `/help`, `/h`, `/?` | Show command list. |
 | `/list`, `/models` | Inventory of MLX + Ollama models, with `[VLM]` / `[text]` labels. `*` = loaded in Ollama VRAM on any slot (11434–11436); `← active` = bound to this session (coder/model2/model3), not VRAM. |
-| `/model <N\|name>`, `/load <N\|name>` | Switch the chat model. |
+| `/model <N\|name>`, `/load <N\|name>` | Stage the coder model (sticky across `/new`). |
+| `/modelall <N\|name>`, `/loadall` | Stage the **same** model on all three Ollama slots (coder + critic + architect). Bare `/modelall` clears all three. |
 | `/model2 <N\|name> [--role critic\|architect]` | Stage or hot-swap secondary model 2. Defaults to `critic` for VLMs and `architect` for text models unless role balancing chooses otherwise. |
 | `/model3 <N\|name> [--role critic\|architect]` | Stage or hot-swap tertiary model 3. Used to split architect and critic roles in 3-model runs. |
+| `/launch <N\|name\|path>` | Stage an MLX model for the next `/new` (in-process load on first request). |
 | `/backend <auto\|ollama\|mlx\|openai\|anthropic>` | Switch the backend (cloud choices are explicit and billable). |
 | `/unload` | Free VRAM: bare `/unload` evicts the active session tag; `/unload all` walks **every** Ollama slot (11434–11436) plus diffusers preload, not only `OLLAMA_HOST`; `/unload mlx` drops in-process MLX. |
 | `/new` | Start a new session in the same workspace. |
@@ -609,22 +620,23 @@ is data the agent will see, not just developer notes.
 | `/open` | Reveal the current HTML in the file browser. |
 | `/log`, `/paths`, `/files` | Print log + artifact paths. |
 | `/clear` | Clear the chat scrollback (does not reset the session). |
-| `/iters <n>` | Change the iter budget mid-session. |
-| `/seed <text>` | Inject a one-shot system seed at the next user turn. |
-| `/reset` | Reset agent state to a fresh session. |
-| `/status` | Print iter count, ok status, model, backend, VLM. |
+| `/iters <n>` | Change the iter budget (sticky for next `/new` and extensions). |
+| `/ctx [N\|100k\|131k\|262k\|full]` | Ollama `num_ctx` / KV reservation (default **100k**; sticky). Bare `/ctx` shows current. Ollama reloads on change — preload with `ollama run --ctx-size N <model>`. |
+| `/seed <path>` | Stage a baseline `.html` for the next `/new` (sticky). Bare `/seed` clears. |
+| `/reset` | Wipe staged state (seed, models, iters, ctx → defaults). Does not stop a running session. |
+| `/status` | Print model, phase, iteration, staged picks, ctx, paths. |
+| `/retry` | Re-run after a bad model (keeps game file + trace; uses staged `/model` first). |
 | `/wait <on\|off>` | Toggle step-mode — default ON in the TUI; when on, pause after each iter; when off, iterate continuously. |
 | `/iter-detail <on\|off>` | Toggle optional expanded blocker detail after the compact iter decision line (default off). |
 | `/mode <local_manual\|local_auto\|local_plus_review with <model> [--auto-apply]\|custom>` | Apply a run contract: manual checkpoints, autonomous loop, or autonomous loop with an explicit reviewer hook. |
-| `/playbook`, `/memory` | Print the matched playbook bullets. |
+| `/playbook`, `/memory` | Toggle playbook bullet injection (`on` / `off`; default on in production TUI). |
 | `/prefill <on\|off>` | Toggle forcing assistant prefill tags (`<plan>`, `<diagnose>`) to prevent preamble talk and lock XML formatting (default ON). |
 | `/architect <on\|off>` | Toggle architect/editor split (Aider's 2-call pattern) on complex first-builds to split planning from coding (default off). |
 | `/double-screenshot <on\|off>` | Toggle capturing dual screenshots (startup and post-input) to help the model see movement/animation (default off). |
 | `/vlm-critique <on\|off>` | Toggle VLM screenshot attachment during Phase C successful critique turns for layout and UI polishing (default off). |
-| `/audit` | Detailed view of last iter's micro-probes + report. |
-| `/restarts` | Show backend restart history. |
-| `/model-class <small\|mid\|large>` | Override the prompt trim path. |
-| `/launch` | Manually launch Chromium against the current best file. |
+| `/audit` | Per-bullet playbook earnings from trace history (fires, pass-rate, avg-iter). |
+| `/restarts <N>` | Independent full restarts when iter-1 score is below 60 (sticky; default 2; `1` = off). |
+| `/model-class <auto\|small\|mid\|large>` | Override system-prompt trim (sticky; default `auto` → lean ~5 KB schema). |
 | `/check [<N\|model>]` | Run visual review on the latest screenshot. `N` selects by `/list` number. Bare `/check` uses the active VLM session model. `claude-…` routes Anthropic, `gpt-…` routes OpenAI, and other names resolve local MLX VLMs. In wait mode ON, suggestion is prefilled in input for edit/Enter; in wait mode OFF, coaching auto-queues to the next coding turn. |
 
 ### Model topologies (1, 2, and 3 model runs)
@@ -758,8 +770,8 @@ The TUI starts missing same-user daemons as:
 GPU 0 is left for the TUI / diffusers path. Z-Image-Turbo and Stable-Audio
 load on **GPU 0** on this box (not “whichever card has the most free
 VRAM” — that used to pick empty GPU 1 and collide with the coder).
-Override with `DIFFUSER_CUDA_DEVICE=N`. `CODING_BOX_NUM_CTX` stays at
-the full default (262144) unless you explicitly override it. If an old
+Override with `DIFFUSER_CUDA_DEVICE=N`. `CODING_BOX_NUM_CTX` defaults to
+**100000** (or **`/ctx`** in the TUI — e.g. `/ctx 262k` for long extensions). If an old
 same-user single daemon on 11434 has a split model loaded, the TUI unloads
 that model before restarting the daemon pinned to GPU 1. It does not use
 sudo, does not edit systemd, and does not touch daemons owned by another
@@ -770,14 +782,15 @@ and the TUI will respect them without rewriting placement.
 
 The status panel maps each slot by endpoint, not just by model tag: the
 same model on `11434` / `11435` / `11436` should show GPU 1 / GPU 2 / GPU 3,
-with `pinned, not loaded` until that slot handles its first request. If a
-large Q8 model plus full 262K context cannot allocate on one 48 GB card, the
-Ollama call retries once without the `num_gpu=999` offload hint while keeping
-the same `num_ctx`. For three simultaneous Q8-class slots, a practical large
-context override is:
+with `pinned, not loaded` until that slot handles its first request. Default
+Ollama context is **100k** (`/ctx` or `CODING_BOX_NUM_CTX`) to keep KV VRAM
+reasonable on 48 GB cards. If allocation still fails, the Ollama call retries
+once without the `num_gpu=999` offload hint while keeping the same `num_ctx`.
+For long extension chats on one slot, raise context explicitly:
 
 ```bash
-CODING_BOX_NUM_CTX=100000 .venv/bin/python chat.py
+# TUI: /ctx 262k   — or before launch:
+CODING_BOX_NUM_CTX=262144 .venv/bin/python chat.py
 ```
 
 **Useful env vars (GPU / backends)**
@@ -790,7 +803,7 @@ CODING_BOX_NUM_CTX=100000 .venv/bin/python chat.py
 | `OLLAMA_KEEP_ALIVE` | Ollama model residency between turns; default `-1` keeps the model loaded to prevent idle eviction during feedback pauses |
 | `AGENT_NO_AUTO_OLLAMA_PIN=1` | Disable automatic 4-GPU per-slot Ollama daemon startup |
 | `AGENT_NO_AUTO_OLLAMA_GPU_FIX=1` | Do not auto-unload split Ollama VRAM on `/new` |
-| `CODING_BOX_NUM_CTX` | Ollama context window (default 262144) |
+| `CODING_BOX_NUM_CTX` | Ollama context window (default 100000; `/ctx` in TUI) |
 | `DIFFUSION_MODELS_DIR` | Override root for Z-Image / SD-Turbo weights |
 | `DIFFUSER_CUDA_DEVICE` | Force diffusers (Z-Image, Stable-Audio) onto a specific CUDA index; default on 4×48 GB Linux is GPU 0 |
 
@@ -808,6 +821,7 @@ CODING_BOX_NUM_CTX=100000 .venv/bin/python chat.py
   [--no-skeleton]            # ignore skeleton library
   [--no-assets]              # skip Z-Image-Turbo
   [--no-sounds]              # skip Stable Audio
+  [--num-ctx N]              # Ollama context (default 100000; env CODING_BOX_NUM_CTX)
 ```
 
 `tune.py` flags include `--prompt-version`, `--best-of-n`,
@@ -865,6 +879,7 @@ Use this matrix when validating `chat.py` loop/control changes:
 | 1-model run | `/model <N>` only | Coder handles planning, edits, and exit decisions; harness and programmatic checks still verify every iter. |
 | 2-model run | `/model <N>` plus `/model2 <N> --role critic` or `--role architect` | Coder remains the only editor; one sidecar contributes screenshot critique or architect planning/exit decisions. |
 | 3-model run | `/model <N>`, `/model2 <N> --role architect`, `/model3 <N> --role critic` | Coder edits, architect plans/handles exit decisions, critic reviews screenshots and queues coaching. |
+| 3-slot same model | `/modelall <N>` on 4×48 GB autopin box | Same tag on 11434/11435/11436 (GPU 1/2/3); roles coder / critic / architect; enables parallel best-of-N and non-blocking sidecars. |
 | Asteroids regression guard | `/new asteroids` on local backend | Ship direction uses `vx = cos(angle) * speed`; asteroids stay irregular polygons. |
 | Wait-mode manual control | Default TUI mode, or `/mode local_manual` | Agent pauses after each iter (`await_user`), accepts user feedback before continuing. |
 | Autonomous loop control | `/mode local_auto` or `/wait off` | Agent iterates continuously without step pauses unless user explicitly enables wait mode. |
@@ -1207,8 +1222,9 @@ in `tests/` and add a one-line bullet to `playbook.jsonl` via
   quant. `MLX_PREFILL_STEP_SIZE=512` if you OOM mid-generation.
   DeepSeek-V4 Flash specifically requires 512 (auto-detected via path
   substring).
-- **`Ollama context too small`**: `ollama run --ctx-size 262144 <model>`
-  before launching. The agent's default is 256K.
+- **`Ollama context too small`**: raise with `/ctx 262k` or
+  `CODING_BOX_NUM_CTX=262144`, and preload with `ollama run --ctx-size N <model>`
+  before launching. Default is 100K.
 - **`Vision judge never fires`**: check `VISION_JUDGE=0` isn't set;
   verify `backend.discover_local_vlm()` returns a path (run
   `.venv/bin/python -c "from backend import discover_local_vlm;

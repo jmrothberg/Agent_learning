@@ -2,7 +2,7 @@
 
 Usage:
     python coder.py "Make a Snake game with a wraparound board and a score counter"
-    python coder.py "snake" --max-iters 4 --best-of-n 1 --headless
+    python coder.py "snake" --max-iters 4 --best-of-n 3 --headless
 
 Optional flags:
     --backend BACKEND   Pick LLM daemon: mlx (default on macOS) | auto |
@@ -14,8 +14,8 @@ Optional flags:
                         '/Users/jonathanrothberg_1/MLX_Models/Qwen3.6-27B-mxfp8'.)
     --max-iters N       Cap iterations (default 6)
     --out PATH          Where to save the final game (default games/game.html)
-    --best-of-n N       Sample N candidates per fix turn (default 2)
-    --num-ctx N         Ollama context window (default 262144; env CODING_BOX_NUM_CTX)
+    --best-of-n N       Sample N candidates per fix turn (default 3)
+    --num-ctx N         Ollama context window (default 100000; env CODING_BOX_NUM_CTX)
     --stall-seconds N   Per-stream no-activity watchdog (default 300; fail-open floor)
     --headless          Run Chromium headless (no visible window). Use this
                         for unattended runs and CI; the TUI uses visible.
@@ -52,7 +52,7 @@ except ImportError:
         )
 
 import backend as backend_mod
-from agent import AgentEvent, GameAgent
+from agent import AgentEvent, GameAgent, default_num_ctx
 from tools import LiveBrowser
 
 # Sentinel: --out was not supplied → derive a unique meaningful name from
@@ -318,19 +318,19 @@ def main() -> int:
         action="store_false",
         help="Freeze playbook scores (for A/B baseline comparisons).",
     )
-    p.add_argument("--best-of-n", type=int, default=1,
-                   help="Sample N candidates per fix, sequentially with early exit. "
-                        "Default 1 (off). Set 2-3 to retry harder when local model is weak.")
-    p.add_argument("--num-ctx", type=int,
-                   default=int(os.environ.get("CODING_BOX_NUM_CTX", "262144")),
-                   help="Ollama context window. Default 262144 (matches the "
-                        "native context of current Qwen3.6 / DeepSeek V4 / "
-                        "GLM 5.1 / MiniMax M2). Override with --num-ctx or "
-                        "CODING_BOX_NUM_CTX env var (lower it if you're "
-                        "OOMing — KV-cache scales linearly with ctx). "
-                        "Changing between calls forces an Ollama model reload "
-                        "— preload your model at this ctx size first with "
-                        "`ollama run --ctx-size 262144 <model>`.")
+    p.add_argument("--best-of-n", type=int, default=3,
+                   help="Sample N candidates per fix, sequentially with early exit "
+                        "(score=100 ships immediately). Default 3 — the 2026-05-22 "
+                        "chess trace had `best_of_n=1` and burned 1356s on three "
+                        "scrapped iters; flipping to 3 amortises the local model's "
+                        "first-try variance. Set 1 to disable; set 2 to halve cost.")
+    p.add_argument("--num-ctx", type=int, default=None,
+                   help="Ollama context window. Default 100000 (or "
+                        "CODING_BOX_NUM_CTX env: supports 100k, 262k, full). "
+                        "KV-cache scales linearly with ctx — raise to 262144 "
+                        "only for long extension chats. Changing forces an "
+                        "Ollama reload; preload with "
+                        "`ollama run --ctx-size N <model>`.")
     p.add_argument("--stall-seconds", type=float, default=600.0,
                    help="Per-stream no-activity stall budget (default 600s = "
                         "10 min). Activity-aware: prefill progress chunks and "
@@ -396,6 +396,8 @@ def main() -> int:
             print(f"--seed path is not a file: {seed_path}", file=sys.stderr)
             return 2
 
+    resolved_ctx = args.num_ctx if args.num_ctx is not None else default_num_ctx()
+
     return asyncio.run(_run(
         goal=args.goal,
         backend_pref=args.backend,
@@ -403,7 +405,7 @@ def main() -> int:
         max_iters=args.max_iters,
         out_path=_resolve_out_path(args.out, args.goal),
         best_of_n=args.best_of_n,
-        num_ctx=args.num_ctx,
+        num_ctx=resolved_ctx,
         stall_seconds=args.stall_seconds,
         headless=args.headless,
         open_when_done=args.open,

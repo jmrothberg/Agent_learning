@@ -201,7 +201,7 @@ def _try_repair_truncated_json_list(text: str) -> list[Any]:
         return []
 
 
-def parse_assets_block(reply: str) -> list[dict]:
+def parse_assets_block(reply: str, *, max_assets: int | None = None) -> list[dict]:
     """Extract the JSON list inside <assets>...</assets>.
 
     Tolerant of fenced ```json wrappers (some models love adding them)
@@ -219,14 +219,20 @@ def parse_assets_block(reply: str) -> list[dict]:
     Use `parse_assets_block_with_meta` if you also need the names of
     entries dropped due to the per-turn cap — the agent uses that to
     coach the model on the overflow instead of silently swallowing it.
+
+    Phase 0.10 — `max_assets` defaults to `_MAX_ASSETS_PER_TURN` (24)
+    but can be raised per-session when the user's goal explicitly asks
+    for multi-frame rosters (see `prompts_v1._detect_multi_frame_intent`).
     """
-    specs, _dropped = parse_assets_block_with_meta(reply)
+    specs, _dropped = parse_assets_block_with_meta(reply, max_assets=max_assets)
     return specs
 
 
-def parse_assets_block_with_meta(reply: str) -> tuple[list[dict], list[str]]:
+def parse_assets_block_with_meta(
+    reply: str, *, max_assets: int | None = None,
+) -> tuple[list[dict], list[str]]:
     """Same as `parse_assets_block` but also returns the names of any
-    asset specs that were parsed-but-dropped due to `_MAX_ASSETS_PER_TURN`.
+    asset specs that were parsed-but-dropped due to the per-turn cap.
 
     Why a separate API: the agent needs to tell the model (and the user)
     when a plan asked for more assets than we'll generate, so the model
@@ -235,7 +241,15 @@ def parse_assets_block_with_meta(reply: str) -> tuple[list[dict], list[str]]:
     14 of its requested sprites would exist; only 8 did; the rest 404'd
     in the browser and triggered a 3-iter debugging cascade (4 DK
     traces with this exact pattern).
+
+    Phase 0.10 — `max_assets` is the effective cap for this call. When
+    None (default), falls back to module-level `_MAX_ASSETS_PER_TURN`.
+    The agent passes a raised cap when the goal contains explicit
+    multi-frame language (`prompts_v1._detect_multi_frame_intent`); the
+    raise lets a user-requested 12 entities × 3 frames = 36 roster
+    land in one turn instead of getting silently truncated to 24.
     """
+    effective_cap = _MAX_ASSETS_PER_TURN if max_assets is None else max(1, int(max_assets))
     if not reply:
         return [], []
     body = _extract_assets_body(reply)
@@ -293,7 +307,7 @@ def parse_assets_block_with_meta(reply: str) -> tuple[list[dict], list[str]]:
             except (TypeError, ValueError):
                 strength = 0.45
             spec["strength"] = max(0.05, min(1.0, strength))
-        if len(out) >= _MAX_ASSETS_PER_TURN:
+        if len(out) >= effective_cap:
             dropped.append(name)
             continue
         out.append(spec)

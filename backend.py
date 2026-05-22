@@ -327,6 +327,75 @@ class Backend(ABC):
         cands.sort(key=lambda c: (c.score, -c.duration_s), reverse=True)
         return cands[0], cands
 
+    async def warm_prefix(
+        self,
+        messages: list[dict],
+        *,
+        options: dict[str, Any] | None = None,
+        keep_alive: float | str | None = None,
+        timeout_s: float = 120.0,
+    ) -> dict[str, Any]:
+        """Pre-fill this backend's KV cache for `messages` without
+        producing meaningful output.
+
+        Used to hide cross-slot prompt-reprefill cost: when role A
+        streams on slot A and then control hands off to role B on slot
+        B, slot B has never seen this conversation and pays the full
+        prefill on its first request. The 2026-05-22 chess trace had
+        slot 1 (coder) idle for 58 s during architect + asset/sound gen,
+        then iter 1 spent its own prefill time on tokens slot 3
+        (architect) had already processed. Firing this method during
+        that idle window means slot 1's KV is hot before iter 1's
+        stream starts.
+
+        Default implementation: stream_chat with 1-token cap, output
+        discarded. Ollama caches the prompt KV across requests by
+        prefix-match; a subsequent stream_chat with the SAME messages
+        reuses the cached KV. Subclasses can override for backends that
+        expose a cheaper prompt-only path.
+
+        Returns a dict with `ok`, `elapsed_s`, optional `tokens`,
+        `error`. Never raises — the caller treats warm as advisory.
+        """
+        import time as _time
+        opts = dict(options or {})
+        # Two common knobs; backends pick whichever they honor.
+        opts.setdefault("num_predict", 1)
+        opts.setdefault("max_tokens", 1)
+        opts.setdefault("temperature", 0.0)
+        started_at = _time.monotonic()
+        try:
+            result = await asyncio.wait_for(
+                self.stream_chat(
+                    messages,
+                    on_token=None,
+                    options=opts,
+                    keep_alive=keep_alive,
+                    stall_seconds=timeout_s,
+                    overall_seconds=timeout_s,
+                    max_retries=0,
+                ),
+                timeout=timeout_s,
+            )
+            return {
+                "ok": True,
+                "elapsed_s": round(_time.monotonic() - started_at, 2),
+                "tokens": getattr(result, "tokens", None),
+                "stalled": getattr(result, "stalled", False),
+            }
+        except asyncio.TimeoutError:
+            return {
+                "ok": False,
+                "elapsed_s": round(_time.monotonic() - started_at, 2),
+                "error": "timeout",
+            }
+        except Exception as e:
+            return {
+                "ok": False,
+                "elapsed_s": round(_time.monotonic() - started_at, 2),
+                "error": str(e)[:200],
+            }
+
     async def close(self) -> None:
         """Best-effort cleanup of any underlying connection pools."""
         return None
@@ -1288,16 +1357,21 @@ class OpenAIBackend(Backend):
                 try:
                     await _run(params)
                 except Exception as e2:
+                    err_payload = f"{type(e2).__name__}: {e2}"
                     print(
-                        f"openai stream_chat error: "
-                        f"{type(e2).__name__}: {e2}",
+                        f"openai stream_chat error: {err_payload}",
                         file=sys.stderr,
                     )
+                    # Phase 5a: real crash, not a stall. Lets the agent
+                    # route to fallback / retry rather than synthesizing
+                    # a misleading "stalled at <stall_seconds>s" message.
                     return StreamResult(
                         text="".join(parts),
                         tokens=tokens,
                         duration_s=time.monotonic() - t0,
-                        stalled=True,
+                        stalled=False,
+                        crashed=True,
+                        error_message=err_payload,
                         prompt_tokens=prompt_tokens,
                         completion_tokens=completion_tokens,
                     )
@@ -1308,16 +1382,20 @@ class OpenAIBackend(Backend):
             # here. Surface the real exception class + message to
             # stderr so callers can diagnose without enabling debug
             # logging — 429 insufficient_quota is a billing fix, 401
-            # is a key fix, and a generic "stalled" hides both.
+            # is a key fix.
+            err_payload = f"{type(e).__name__}: {e}"
             print(
-                f"openai stream_chat error: {type(e).__name__}: {e}",
+                f"openai stream_chat error: {err_payload}",
                 file=sys.stderr,
             )
+            # Phase 5a: real crash, not a stall (see Anthropic note).
             return StreamResult(
                 text="".join(parts),
                 tokens=tokens,
                 duration_s=time.monotonic() - t0,
-                stalled=True,
+                stalled=False,
+                crashed=True,
+                error_message=err_payload,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
             )
@@ -1477,31 +1555,39 @@ class AnthropicBackend(Backend):
                     tokens = 0
                     await _run_anthropic(kwargs)
                 except Exception as e2:
+                    err_payload = f"{type(e2).__name__}: {e2}"
                     print(
-                        f"anthropic stream_chat error: "
-                        f"{type(e2).__name__}: {e2}",
+                        f"anthropic stream_chat error: {err_payload}",
                         file=sys.stderr,
                     )
                     return StreamResult(
                         text="".join(parts),
                         tokens=tokens,
                         duration_s=time.monotonic() - t0,
-                        stalled=True,
+                        stalled=False,
+                        crashed=True,
+                        error_message=err_payload,
                         prompt_tokens=prompt_tokens,
                         completion_tokens=completion_tokens,
                     )
             else:
-                # Mirror OpenAIBackend: surface the real exception class +
-                # message so 429 / 401 / overload diagnoses bubble up.
+                # Phase 5a: mark this as a real CRASH, not a stall, so
+                # the agent can route to the fallback / retry path.
+                # Trace 2 (chess 20260522_104235) had Anthropic raise in
+                # 0.48s and the agent reported "stalling at 600s" because
+                # this branch returned `stalled=True` with no error_message.
+                err_payload = f"{type(e).__name__}: {e}"
                 print(
-                    f"anthropic stream_chat error: {type(e).__name__}: {e}",
+                    f"anthropic stream_chat error: {err_payload}",
                     file=sys.stderr,
                 )
                 return StreamResult(
                     text="".join(parts),
                     tokens=tokens,
                     duration_s=time.monotonic() - t0,
-                    stalled=True,
+                    stalled=False,
+                    crashed=True,
+                    error_message=err_payload,
                     prompt_tokens=prompt_tokens,
                     completion_tokens=completion_tokens,
                 )
