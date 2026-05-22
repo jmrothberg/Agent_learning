@@ -69,6 +69,10 @@ python tune.py run --full --prompt-version v1 --auto-learn
 python tune.py diff baseline_v0 v1_run            # per-test pass/fail deltas
 python tune.py why <run_id> <test_name>           # postmortem
 
+# System tests (visible browser; smoke fast, pacman slow — prompts unless --yes)
+python system_tests.py run --suite smoke --three-model
+python system_tests.py run --suite pacman --yes   # skip slow-run confirmation
+
 # Offline learner (Reflector + Curator over traces)
 python learner.py walk                            # one-line summary per past session
 python learner.py reflect games/traces/           # propose deltas (no writes)
@@ -84,6 +88,7 @@ python learner.py apply games/traces/             # propose AND write to playboo
 - `LLM_BACKEND` — unset defaults to **`mlx` on macOS** (Apple GPU), else **`auto`**. Values: `auto` | `ollama` | `mlx`. `auto` probes both; if a local MLX model is discoverable AND Ollama also has a model loaded, MLX wins. Set `LLM_BACKEND=auto` on a Mac to allow Ollama-only fallback again.
 - `OLLAMA_MODEL` / `CHAT_OLLAMA_MODEL` — explicit Ollama model override (else: detected from `/api/ps`, then first installed)
 - `OLLAMA_HOST` — non-default Ollama daemon address
+- `OLLAMA_KEEP_ALIVE` — Ollama model residency between chat turns. Default `-1` keeps the model loaded for the chat process lifetime to prevent 5-minute idle evictions during user-feedback pauses; set e.g. `10m` on tight-VRAM hosts.
 - `MLX_MODEL` — explicit MLX model path or HF id. Loaded in-process via `mlx_lm.load`. If unset, the backend scans `~/MLX_Models/` / `MLX_MODELS_DIR` / HF cache and picks a single discoverable chat model (multi-match → first, with a "set MLX_MODEL to override" hint in `info.source`).
 - `MLX_MODELS_DIR` — `:`-separated list of additional dirs to scan for downloaded MLX models. Defaults: `~/MLX_Models`, `~/Models_MLX`, `~/.cache/huggingface/hub`, `/opt/mlx_models`.
 - `MLX_PREFILL_STEP_SIZE` — chunk size for prompt eval. Per-model defaults applied automatically: **512** if the model path contains `flash` (DeepSeek-V4 Flash crashes mid-generation at >512 — observed 2026-05-15 DK trace), else **1024**. Env override always wins. Raise to `2048` on small models if you want a few % more throughput.

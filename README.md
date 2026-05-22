@@ -782,6 +782,7 @@ CODING_BOX_NUM_CTX=100000 .venv/bin/python chat.py
 | `LLM_BACKEND` | `auto`, `ollama`, or `mlx` (default: MLX on macOS, else `auto`) |
 | `OLLAMA_MODEL` / `CHAT_OLLAMA_MODEL` | Force the Ollama tag for chat |
 | `OLLAMA_HOST` / `OLLAMA_HOST2` / `OLLAMA_HOST3` | Ollama HTTP base per slot (coder / model2 / model3) |
+| `OLLAMA_KEEP_ALIVE` | Ollama model residency between turns; default `-1` keeps the model loaded to prevent idle eviction during feedback pauses |
 | `AGENT_NO_AUTO_OLLAMA_PIN=1` | Disable automatic 4-GPU per-slot Ollama daemon startup |
 | `AGENT_NO_AUTO_OLLAMA_GPU_FIX=1` | Do not auto-unload split Ollama VRAM on `/new` |
 | `CODING_BOX_NUM_CTX` | Ollama context window (default 262144) |
@@ -817,6 +818,16 @@ python tune.py run                                  # quick: max_iters=2, best_o
 python tune.py run --full --prompt-version v1 --auto-learn
 python tune.py diff baseline_v0 v1_run              # per-test pass/fail deltas
 python tune.py why <run_id> <test_name>             # postmortem one test
+
+# Visible system tests (multi-GPU plumbing + optional slow Pac-Man benchmark).
+# Smoke suite (~5–10 min): plumbing + “player does not move” regressions.
+python system_tests.py run --suite smoke --three-model --model qwen3.6:27b
+# Pac-Man is slow (~15–30 min) — runner asks “Run now? [y/N]” unless you pass --yes.
+python system_tests.py run --suite pacman --max-iters 3 --three-model
+python system_tests.py run --suite full --three-model   # smoke first, then prompts for pacman-hard
+python system_tests.py run --suite pacman --yes         # skip confirmation (CI / unattended)
+python system_tests.py show run_20260521_120000         # SYSTEM_SUMMARY.md
+python system_tests.py list
 
 # Offline learner — Reflector + Curator over traces.
 python learner.py walk                              # one-line summary per past session

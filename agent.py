@@ -72,9 +72,15 @@ from memory import (
     DEFAULT_SKELETON,
     DEFAULT_SKELETON_NAME,
     GameMemory,
+    OpeningBookHit,
+    OpeningBookItem,
     Playbook,
+    PLAYTESTS_FILENAME,
+    ASSET_AUDITS_FILENAME,
+    ANIMATION_AUDITS_FILENAME,
     SkeletonHit,
     lookup_bullet,
+    render_opening_book_block,
     render_playbook_block,
     signature_for_report,
 )
@@ -1147,6 +1153,33 @@ class AgentEvent:
     data: dict = field(default_factory=dict)
 
 
+def _parse_ollama_keep_alive_env() -> float | str:
+    """Ollama chat keep_alive override.
+
+    Default -1 keeps local models resident between feedback turns. Reject 0
+    because it immediately evicts after every call and recreates the stall.
+    """
+    raw = (os.environ.get("OLLAMA_KEEP_ALIVE") or "").strip()
+    if not raw:
+        return -1
+    low = raw.lower()
+    if re.fullmatch(r"0+(?:\.0+)?(?:ms|s|m|h)?", low):
+        raise ValueError(
+            "OLLAMA_KEEP_ALIVE=0 would unload the model after every call; "
+            "use -1, 10m, 1h, or unset it for the default -1."
+        )
+    try:
+        numeric = float(raw)
+    except ValueError:
+        return raw
+    if numeric == 0:
+        raise ValueError(
+            "OLLAMA_KEEP_ALIVE=0 would unload the model after every call; "
+            "use -1, 10m, 1h, or unset it for the default -1."
+        )
+    return int(numeric) if numeric.is_integer() else numeric
+
+
 class GameAgent:
     """Drives the planning/coding/critique loop. One instance per session."""
 
@@ -1298,6 +1331,7 @@ class GameAgent:
         self.num_ctx = num_ctx
         self.stall_seconds = stall_seconds
         self.overall_seconds = overall_seconds
+        self._ollama_keep_alive: float | str = _parse_ollama_keep_alive_env()
         self.seed_file: Path | None = Path(seed_file) if seed_file else None
         self._messages: list[dict] = []
         self._pending_feedback: list[str] = []
@@ -1468,6 +1502,7 @@ class GameAgent:
         # the writeback feedback loop to credit/blame them after the next
         # test result.
         self._active_bullet_ids: list[str] = []
+        self._active_opening_book_recipes: list[dict] = []
         self._active_skeleton: str | None = None
         self._skeleton_mode = skeleton_mode
         self._prompt_version = prompt_version
@@ -1679,6 +1714,11 @@ class GameAgent:
             if getattr(self, "_model2_role", None) == "critic" and getattr(self, "_backend2", None) is not None:
                 return self._backend2
             return None  # Fallback to standard non-visual automated testing
+
+    def _keep_alive_for_backend(self, backend: Backend | None) -> float | str | None:
+        if backend is not None and getattr(backend, "info", None) and backend.info.name == "ollama":
+            return self._ollama_keep_alive
+        return None
 
     def _set_role_activity(self, role: str, activity: str) -> None:
         """Set TUI status panel text for Model 2 and Model 3 dynamically."""
@@ -2047,6 +2087,7 @@ class GameAgent:
                 messages,
                 on_token=None,
                 options={"temperature": 0.1, "num_ctx": self.num_ctx},
+                keep_alive=self._keep_alive_for_backend(self._backend),
                 stall_seconds=doctor_stall_seconds,
                 overall_seconds=doctor_overall_seconds,
                 max_retries=0,
@@ -2213,6 +2254,68 @@ class GameAgent:
             )
         except Exception:
             return ""
+
+    def _retrieve_opening_book_block(
+        self,
+        goal: str,
+        *,
+        stage: str = "plan",
+    ) -> tuple[str, list[dict]]:
+        """Retrieve compact root/live opening-book recipes with hard caps."""
+        try:
+            mod_toks: list[str] = []
+            try:
+                from memory import (
+                    _detect_3d_intent, _detect_board_intent, _detect_dom_intent,
+                )
+                mod_toks = (
+                    _detect_3d_intent(goal)
+                    + _detect_board_intent(goal)
+                    + _detect_dom_intent(goal)
+                )
+            except Exception:
+                mod_toks = []
+            outline = self._memory.retrieve_implementation_outline(goal, mod_toks)
+            playtests = self._memory.retrieve_playtests(
+                goal, mod_toks, k=3 if stage == "plan" else 1,
+            )
+            asset_audits = self._memory.retrieve_asset_audits(
+                goal, mod_toks, k=2 if stage == "plan" else 1,
+            )
+            animation_audits = self._memory.retrieve_animation_audits(
+                goal, mod_toks, k=2 if stage == "plan" else 1,
+            )
+            block = render_opening_book_block(
+                outline, playtests, asset_audits, animation_audits,
+                char_budget=2600 if stage == "plan" else 1400,
+            )
+
+            def _row(kind: str, hit: OpeningBookHit) -> dict:
+                return {
+                    "kind": kind,
+                    "id": hit.item.id,
+                    "tier": hit.item.source_tier,
+                    "score": round(hit.score, 4),
+                    "recipe": hit.item.recipe,
+                }
+
+            hits: list[dict] = []
+            if outline:
+                hits.append(_row("outline", outline))
+            hits.extend(_row("playtest", h) for h in playtests)
+            hits.extend(_row("asset_audit", h) for h in asset_audits)
+            hits.extend(_row("animation_audit", h) for h in animation_audits)
+            if hits:
+                self._trace({
+                    "kind": "opening_book_retrieved",
+                    "stage": stage,
+                    "hits": hits,
+                    "modality_tokens": mod_toks,
+                })
+            return block, hits
+        except Exception as e:
+            self._trace({"kind": "opening_book_error", "stage": stage, "err": str(e)})
+            return "", []
 
     def _extract_and_queue_lookups(self, reply: str) -> None:
         """Find <lookup_bullet>id</lookup_bullet> tags in an assistant reply,
@@ -4446,6 +4549,7 @@ class GameAgent:
                 messages,
                 on_token=lambda _t: None,
                 options={"temperature": 0.2, "num_ctx": 4096},
+                keep_alive=self._keep_alive_for_backend(backend),
                 stall_seconds=120.0,
                 overall_seconds=300.0,
                 max_retries=1,
@@ -4458,6 +4562,83 @@ class GameAgent:
             return None
         finally:
             self._set_role_activity("critic", "idle")
+
+    async def _run_opening_book_sidecars(self, report: dict, iteration: int) -> None:
+        """Let warm side models propose live recipes; store only after browser evidence."""
+        if not report.get("ok"):
+            return
+        sidecars: list[tuple[str, str, str]] = []
+        if self.get_backend("architect") is not self._backend:
+            sidecars.append(("architect", PLAYTESTS_FILENAME, "playtest"))
+        if self.get_backend("critic") is not None:
+            sidecars.append(("critic", ASSET_AUDITS_FILENAME, "asset_audit"))
+            sidecars.append(("critic", ANIMATION_AUDITS_FILENAME, "animation_audit"))
+        if not sidecars:
+            return
+        for role, filename, kind in sidecars:
+            backend = self.get_backend(role)
+            if backend is None:
+                continue
+            self._set_role_activity(role, f"proposing {kind}")
+            prompt = (
+                "You are proposing one compact reusable opening-book memory "
+                "item for a single-file HTML game agent. Only propose a "
+                "generic, transferable, executable or audit-style recipe. "
+                "Do not mention this specific session name. Output STRICT JSON "
+                "ONLY with keys: id, content, tags, recipe.\n\n"
+                f"GOAL: {self._goal}\n"
+                f"ITERATION: {iteration}\n"
+                "BROWSER REPORT SUMMARY:\n"
+                f"{format_report_for_model(report)[:1600]}\n"
+            )
+            try:
+                result = await backend.stream_chat(
+                    [{"role": "user", "content": prompt}],
+                    on_token=lambda _t: None,
+                    options={"temperature": 0.2, "num_ctx": 4096},
+                    keep_alive=self._keep_alive_for_backend(backend),
+                    stall_seconds=120.0,
+                    overall_seconds=300.0,
+                    max_retries=0,
+                )
+                text = (result.text or "").strip()
+                m = re.search(r"\{.*\}", text, re.DOTALL)
+                if not m:
+                    continue
+                rec = json.loads(m.group(0))
+                item = OpeningBookItem(
+                    id=str(rec.get("id") or "").strip()[:80],
+                    kind=kind,
+                    content=str(rec.get("content") or "").strip()[:800],
+                    tags=[str(t).strip() for t in (rec.get("tags") or [])[:8] if str(t).strip()],
+                    source_tier="live",
+                    verified=True,
+                    helpful=0,
+                    harmful=0,
+                    recipe=dict(rec.get("recipe") or {}),
+                    trace_ids=[self._session_id],
+                    pass_count=1,
+                    false_positive_count=0,
+                    last_verified_at=datetime.utcnow().isoformat() + "Z",
+                )
+                if item.id and item.content:
+                    ok = self._memory.append_live_opening_book_item(filename, item)
+                    self._trace({
+                        "kind": "opening_book_sidecar_proposal",
+                        "role": role,
+                        "filename": filename,
+                        "id": item.id,
+                        "stored": ok,
+                    })
+            except Exception as e:
+                self._trace({
+                    "kind": "opening_book_sidecar_error",
+                    "role": role,
+                    "kind_name": kind,
+                    "err": str(e)[:200],
+                })
+            finally:
+                self._set_role_activity(role, "idle")
 
     async def _run_vision_judge(self, current_png: bytes, iteration: int) -> None:
         """Ask a vision model whether this iter made visible progress
@@ -4714,10 +4895,16 @@ class GameAgent:
             allowed, forbidden = self._derive_allowed_forbidden_tags()
             contract["allowed_tags"] = allowed
             contract["forbidden_tags"] = forbidden
+            contract["keep_alive"] = self._keep_alive_for_backend(active_backend)
             self._trace(contract)
         except Exception:
             pass
-        self._trace({"kind": "stream_start", "temperature": temp, "fix_mode": self._fix_mode})
+        self._trace({
+            "kind": "stream_start",
+            "temperature": temp,
+            "fix_mode": self._fix_mode,
+            "keep_alive": self._keep_alive_for_backend(active_backend),
+        })
 
         # Heartbeat wrapper around the caller's on_token. Every
         # _STREAM_HEARTBEAT_SECONDS of wall clock, we trace a
@@ -4814,6 +5001,7 @@ class GameAgent:
                 self._messages,
                 on_token=_heartbeat_on_token,
                 options=opts,
+                keep_alive=self._keep_alive_for_backend(active_backend),
                 stall_seconds=self.stall_seconds,
                 overall_seconds=effective_overall_seconds,
                 max_retries=1,
@@ -5084,6 +5272,7 @@ class GameAgent:
                 report = await self.browser.load_and_test(
                     tmp_path, screenshot_path=None,
                     probes=self._probes or None,
+                    opening_book_recipes=getattr(self, "_active_opening_book_recipes", []),
                     # todo #2: pass criteria so the harness can flag
                     # coverage gaps even on best-of-N candidate scoring.
                     criteria=self._criteria or None,
@@ -5101,6 +5290,7 @@ class GameAgent:
             self._messages,
             n=n,
             options={"num_ctx": self.num_ctx},
+            keep_alive=self._keep_alive_for_backend(self._backend),
             stall_seconds=self.stall_seconds,
             overall_seconds=self.overall_seconds,
             scorer=scorer,
@@ -7313,10 +7503,21 @@ class GameAgent:
                 pb_block = self._retrieve_playbook_block(
                     goal, code=seed_html, stage="plan",
                 )
+                opening_block, opening_hits = self._retrieve_opening_book_block(
+                    goal, stage="plan",
+                )
+                self._active_opening_book_recipes = opening_hits
                 pb_kwargs = {"playbook_block": pb_block} if pb_block else {}
                 build_msg = self._p.seed_build_instruction(
                     seed_html, str(self.seed_file), **pb_kwargs,
                 )
+                if opening_block:
+                    build_msg = (
+                        f"{opening_block}\n\n"
+                        "Use the opening-book recipes above as verified "
+                        "implementation and test guidance.\n\n"
+                        + build_msg
+                    )
                 asset_block = render_asset_paths_block(
                     self._session_assets, self.out_path,
                 )
@@ -7415,6 +7616,10 @@ class GameAgent:
                 pb_block = self._retrieve_playbook_block(
                     goal, stage="plan",
                 )
+                opening_block, opening_hits = self._retrieve_opening_book_block(
+                    goal, stage="plan",
+                )
+                self._active_opening_book_recipes = opening_hits
                 pb_kwargs = {"playbook_block": pb_block} if pb_block else {}
 
                 # Optional architect step — produce an English design
@@ -7508,6 +7713,13 @@ class GameAgent:
                     current_sound_dir=cur_sound_dir,
                     **pb_kwargs,
                 )
+                if opening_block:
+                    build_msg = (
+                        f"{opening_block}\n\n"
+                        "Use the opening-book recipes above as verified "
+                        "implementation and test guidance.\n\n"
+                        + build_msg
+                    )
                 if architect_note:
                     build_msg = (
                         "ARCHITECT NOTE (your own plan from the previous turn — "
@@ -8572,6 +8784,7 @@ class GameAgent:
                     self.out_path, screenshot_path=shot_path,
                     screenshot_before_path=shot_before_path,
                     probes=self._probes or None,
+                    opening_book_recipes=getattr(self, "_active_opening_book_recipes", []),
                     # todo #2: pass criteria so the harness can flag
                     # coverage gaps as a soft_warning (forces the model
                     # to add probes that actually test what it promised).
@@ -8819,6 +9032,14 @@ class GameAgent:
                             "iteration": iteration,
                             "error": str(exc),
                         })
+            try:
+                await self._run_opening_book_sidecars(report, iteration)
+            except Exception as exc:
+                self._trace({
+                    "kind": "opening_book_sidecars_failed",
+                    "iteration": iteration,
+                    "error": str(exc),
+                })
             if (
                 self._use_double_screenshot
                 and before_path is not None
@@ -9575,6 +9796,7 @@ class GameAgent:
         self._last_screenshot_before = None
         self._last_screenshot_after = None
         self._active_bullet_ids = []
+        self._active_opening_book_recipes = []
         self._restart_attempt_idx = 0
         self._restart_attempt_seed = None
         self._force_first_build_prefill = False
@@ -9743,6 +9965,10 @@ class GameAgent:
         pb_block = self._retrieve_playbook_block(
             self._goal, code=self._current_file, stage="code",
         )
+        opening_block, opening_hits = self._retrieve_opening_book_block(
+            self._goal, stage="code",
+        )
+        self._active_opening_book_recipes = opening_hits
         fix_kwargs: dict = {}
         if pb_block:
             fix_kwargs["playbook_block"] = pb_block
@@ -9775,6 +10001,13 @@ class GameAgent:
         fix = self._p.fix_instruction(
             report_text, self._current_file, hints, **fix_kwargs,
         )
+        if opening_block:
+            fix = (
+                f"{opening_block}\n\n"
+                "Use only opening-book recipes that directly match this failure; "
+                "do not add unrelated scope.\n\n"
+                + fix
+            )
         repeat_fastpath = self._repeat_error_fastpath_block(report)
         if partial_failed:
             fix += "\n\n" + self._partial_patch_recovery_block(partial_failed)
@@ -9876,6 +10109,7 @@ class GameAgent:
                 screenshot_path=None,
                 screenshot_before_path=None,
                 probes=self._probes or None,
+                opening_book_recipes=getattr(self, "_active_opening_book_recipes", []),
                 criteria=self._criteria or None,
             )
         except Exception as e:

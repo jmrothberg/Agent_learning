@@ -1806,6 +1806,14 @@ def format_report_for_model(report: dict[str, Any]) -> str:
             tag = "ok " if p.get("ok") else "FAIL"
             err = f"  ({p['err']})" if p.get("err") else ""
             lines.append(f"  {tag} {p.get('name','probe')}: {p.get('expr','')[:80]}{err}")
+    if report.get("opening_book_checks"):
+        checks = report["opening_book_checks"]
+        n_pass = sum(1 for c in checks if c.get("ok"))
+        lines.append(f"Opening-book checks: {n_pass}/{len(checks)} pass")
+        for c in checks[:6]:
+            tag = "ok " if c.get("ok") else "FAIL"
+            err = f"  ({c.get('err','')})" if c.get("err") else ""
+            lines.append(f"  {tag} {c.get('id','recipe')}: {c.get('type','')}{err}")
     if report["logs"] and not report["errors"]:
         # Only show logs when there are no errors - otherwise the model focuses
         # on the wrong thing.
@@ -1939,6 +1947,7 @@ class LiveBrowser:
         screenshot_path: str | Path | None = None,
         *,
         probes: list[dict] | None = None,
+        opening_book_recipes: list[dict] | None = None,
         screenshot_before_path: str | Path | None = None,
         criteria: str | None = None,
     ) -> dict[str, Any]:
@@ -2138,6 +2147,16 @@ class LiveBrowser:
         # is the union — kept for backward compat with downstream code.
         report["console_errors"] = list(self._console_errors)
         report["page_errors"] = list(self._page_errors)
+        report["opening_book_checks"] = await self._run_opening_book_recipes(
+            path, opening_book_recipes or [], input_test=input_test,
+            canvas_info=canvas_info, frozen=frozen,
+        )
+        for chk in report["opening_book_checks"]:
+            if chk.get("ok") is False and chk.get("hard"):
+                report["soft_warnings"].append(
+                    f"OPENING BOOK CHECK FAILED [{chk.get('id','recipe')}]: "
+                    f"{chk.get('err','')[:180]}"
+                )
         # Probe errors are derived from probe_results (entries with
         # ok=False AND non-empty err).
         report["probe_errors"] = [
@@ -2436,6 +2455,80 @@ class LiveBrowser:
             return await self._page.evaluate(js)
         except Exception:
             return None
+
+    async def _run_opening_book_recipes(
+        self,
+        path: Path,
+        recipes: list[dict],
+        *,
+        input_test: dict[str, Any],
+        canvas_info: dict[str, Any] | None,
+        frozen: bool | None,
+    ) -> list[dict[str, Any]]:
+        """Execute compact verified-memory recipes against the loaded page.
+
+        Recipes are intentionally conservative: they either reuse existing
+        harness evidence or inspect source for generated-asset wiring.
+        """
+        out: list[dict[str, Any]] = []
+        if not recipes:
+            return out
+        try:
+            html_text = Path(path).read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            html_text = ""
+        for rec in recipes[:8]:
+            rid = str(rec.get("id") or rec.get("kind") or "recipe")[:80]
+            kind = str(rec.get("kind") or "")
+            recipe = rec.get("recipe") if isinstance(rec.get("recipe"), dict) else {}
+            rtype = str(recipe.get("type") or "")
+            check = {"id": rid, "kind": kind, "type": rtype, "ok": True, "hard": False}
+            if rtype == "input_delta":
+                ok = bool(input_test.get("ran") and input_test.get("any_change") is True)
+                check.update({
+                    "ok": ok,
+                    "hard": True,
+                    "err": "" if ok else "expected input to cause state or canvas delta",
+                })
+            elif rtype == "asset_usage":
+                has_assets = "_assets/" in html_text or "ASSET_LIST" in html_text or "const ASSETS" in html_text
+                uses_draw = "drawImage" in html_text
+                ok = (not has_assets) or uses_draw
+                check.update({
+                    "ok": ok,
+                    "hard": has_assets,
+                    "err": "" if ok else "generated assets present but no drawImage usage found",
+                })
+            elif rtype == "asset_stats":
+                has_assets = "_assets/" in html_text or "ASSET_LIST" in html_text or "const ASSETS" in html_text
+                ok = (not has_assets) or ("new Image" in html_text and "decode" in html_text)
+                check.update({
+                    "ok": ok,
+                    "hard": has_assets,
+                    "err": "" if ok else "asset loader does not clearly decode generated images",
+                })
+            elif rtype in {"before_mid_after", "event_window"}:
+                animated_or_input = (
+                    (frozen is False)
+                    or bool(input_test.get("ran") and input_test.get("any_change") is True)
+                    or "requestAnimationFrame" in html_text
+                )
+                check.update({
+                    "ok": bool(animated_or_input),
+                    "hard": False,
+                    "err": "" if animated_or_input else "no visible animation evidence",
+                })
+            elif rtype == "restart_reset":
+                has_reset = any(s in html_text for s in ("resetGame", "function reset", ".reset(", "restart"))
+                check.update({
+                    "ok": bool(has_reset),
+                    "hard": False,
+                    "err": "" if has_reset else "no obvious restart/reset hook found",
+                })
+            else:
+                check.update({"ok": True, "skipped": True, "err": "unsupported recipe type"})
+            out.append(check)
+        return out
 
     async def _run_probe(self, expr: str) -> tuple[bool, str, str | None]:
         """Run one model-proposed probe expression in the page; return

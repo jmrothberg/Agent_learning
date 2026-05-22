@@ -21,6 +21,7 @@ memory/*
 !memory/playbook.jsonl
 games/test_*.html
 games/tune/
+games/system-tests/run_*/
 # Asset-pipeline artifacts (PNGs are 50-200KB each; cache grows over time)
 games/_asset_cache/
 games/_smoke/

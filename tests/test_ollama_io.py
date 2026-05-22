@@ -29,9 +29,11 @@ class _FakeStream:
 class _FakeClient:
     def __init__(self):
         self.options_seen: list[dict] = []
+        self.keep_alive_seen: list[float | str | None] = []
 
-    async def chat(self, *, model, messages, stream, options):
+    async def chat(self, *, model, messages, stream, options, keep_alive=None):
         self.options_seen.append(dict(options or {}))
+        self.keep_alive_seen.append(keep_alive)
         if len(self.options_seen) == 1:
             raise ollama.ResponseError(
                 "memory layout cannot be allocated with num_gpu = 999",
@@ -51,6 +53,7 @@ def test_stream_retry_drops_num_gpu_but_keeps_num_ctx() -> None:
             "qwen3.6:27b-q8_0",
             [{"role": "user", "content": "hi"}],
             options={"num_ctx": 262144, "num_gpu": 999, "temperature": 0.1},
+            keep_alive=-1,
             max_retries=0,
         )
     )
@@ -60,3 +63,4 @@ def test_stream_retry_drops_num_gpu_but_keeps_num_ctx() -> None:
         {"num_ctx": 262144, "num_gpu": 999, "temperature": 0.1},
         {"num_ctx": 262144, "temperature": 0.1},
     ]
+    assert client.keep_alive_seen == [-1, -1]

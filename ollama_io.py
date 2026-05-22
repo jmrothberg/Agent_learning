@@ -512,6 +512,7 @@ async def stream_chat(
     on_token: Callable[[str], None] | None = None,
     *,
     options: dict[str, Any] | None = None,
+    keep_alive: float | str | None = None,
     stall_seconds: float = 600.0,
     overall_seconds: float = 1800.0,
 ) -> StreamResult:
@@ -551,7 +552,11 @@ async def stream_chat(
     # ollama.AsyncClient.chat returns an async iterator of dicts. We pull
     # .__aiter__() so we can wrap each .__anext__() in asyncio.wait_for.
     stream = await client.chat(
-        model=model, messages=messages, stream=True, options=options
+        model=model,
+        messages=messages,
+        stream=True,
+        options=options,
+        keep_alive=keep_alive,
     )
     ait = stream.__aiter__()
 
@@ -650,6 +655,7 @@ async def stream_chat_with_retry(
     on_token: Callable[[str], None] | None = None,
     *,
     options: dict[str, Any] | None = None,
+    keep_alive: float | str | None = None,
     stall_seconds: float = 600.0,
     overall_seconds: float = 1800.0,
     max_retries: int = 1,
@@ -671,6 +677,7 @@ async def stream_chat_with_retry(
                 messages,
                 on_token,
                 options=options,
+                keep_alive=keep_alive,
                 stall_seconds=stall_seconds,
                 overall_seconds=overall_seconds,
             )
@@ -693,6 +700,7 @@ async def stream_chat_with_retry(
                     messages,
                     on_token,
                     options=retry_opts,
+                    keep_alive=keep_alive,
                     stall_seconds=stall_seconds,
                     overall_seconds=overall_seconds,
                 )
@@ -737,6 +745,7 @@ async def best_of_n(
     n: int = 3,
     temperatures: Iterable[float] | None = None,
     options: dict[str, Any] | None = None,
+    keep_alive: float | str | None = None,
     stall_seconds: float = 600.0,
     overall_seconds: float = 1800.0,
     scorer: Callable[[str], Awaitable[tuple[float, dict]]],
@@ -778,6 +787,7 @@ async def best_of_n(
             messages,
             on_token=None,
             options=opts,
+            keep_alive=keep_alive,
             stall_seconds=stall_seconds,
             overall_seconds=overall_seconds,
         )
