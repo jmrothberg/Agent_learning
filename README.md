@@ -731,7 +731,8 @@ session runs.
 if Ollama is already **tensor-split** across two cards and the box has
 48 GB-class GPUs, the agent **auto-unloads** those models (same mechanism
 as `/unload`) so the next LLM request can reload cleanly. Diffusers pick
-a **quiet** GPU (skip cards with large `ollama` / `python` compute).
+GPU **0** on the 4×48 GB workstation (skip Ollama slots 1–3 and cards
+with large `ollama` / `python` compute).
 Disable auto-unload with `AGENT_NO_AUTO_OLLAMA_GPU_FIX=1`. On **small
 GPUs** (two ~8–16 GB cards), split may stay — the panel says that is
 expected. If split persists, the yellow tip suggests `/unload all`.
@@ -754,7 +755,10 @@ The TUI starts missing same-user daemons as:
 11436 → GPU 3
 ```
 
-GPU 0 is left for the TUI / diffusers path. `CODING_BOX_NUM_CTX` stays at
+GPU 0 is left for the TUI / diffusers path. Z-Image-Turbo and Stable-Audio
+load on **GPU 0** on this box (not “whichever card has the most free
+VRAM” — that used to pick empty GPU 1 and collide with the coder).
+Override with `DIFFUSER_CUDA_DEVICE=N`. `CODING_BOX_NUM_CTX` stays at
 the full default (262144) unless you explicitly override it. If an old
 same-user single daemon on 11434 has a split model loaded, the TUI unloads
 that model before restarting the daemon pinned to GPU 1. It does not use
@@ -788,6 +792,7 @@ CODING_BOX_NUM_CTX=100000 .venv/bin/python chat.py
 | `AGENT_NO_AUTO_OLLAMA_GPU_FIX=1` | Do not auto-unload split Ollama VRAM on `/new` |
 | `CODING_BOX_NUM_CTX` | Ollama context window (default 262144) |
 | `DIFFUSION_MODELS_DIR` | Override root for Z-Image / SD-Turbo weights |
+| `DIFFUSER_CUDA_DEVICE` | Force diffusers (Z-Image, Stable-Audio) onto a specific CUDA index; default on 4×48 GB Linux is GPU 0 |
 
 ### CLI flags (`coder.py`)
 

@@ -225,6 +225,40 @@ def test_pick_least_loaded_skips_llm_gpus() -> None:
     assert gpu_status.pick_least_loaded_cuda_index(snap) == 2
 
 
+def _four_gpu_workstation_snap(
+    *,
+    used: tuple[int, int, int, int] = (1000, 2000, 2000, 43000),
+    processes: list | None = None,
+) -> gpu_status.GpuSnapshot:
+    name = "NVIDIA RTX 6000 Ada Generation"
+    return gpu_status.GpuSnapshot(
+        gpus=[
+            gpu_status.GpuInfo(i, name, memory_used_mib=used[i], memory_total_mib=49140)
+            for i in range(4)
+        ],
+        processes=processes or [],
+    )
+
+
+def test_pick_diffuser_prefers_gpu0_on_workstation() -> None:
+    """Empty GPU 1 must not steal diffusers from reserved GPU 0."""
+    snap = _four_gpu_workstation_snap(used=(1000, 500, 2000, 43000))
+    assert gpu_status.pick_diffuser_cuda_index(snap) == 0
+
+
+def test_pick_diffuser_skips_ollama_slot_gpus() -> None:
+    snap = _four_gpu_workstation_snap(
+        used=(1000, 20000, 10000, 43000),
+        processes=[gpu_status.GpuProcess(3, 9, "ollama", 43000)],
+    )
+    assert gpu_status.pick_diffuser_cuda_index(snap) == 0
+
+
+def test_pick_diffuser_reuse_cuda_index() -> None:
+    snap = _four_gpu_workstation_snap()
+    assert gpu_status.pick_diffuser_cuda_index(snap, reuse_cuda_index=0) == 0
+
+
 def test_format_gpu_indices_label_never_bare_question() -> None:
     assert "GPU ?" not in gpu_status.format_gpu_indices_label([], None, pending=True)
     assert "GPU ?" not in gpu_status.format_gpu_indices_label([], None, vram_gib=20.5)

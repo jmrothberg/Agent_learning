@@ -438,7 +438,7 @@ class ZImageTurboGenerator:
             try:
                 import gpu_status as _gs
                 snap = _gs.snapshot_gpus()
-                pick = _gs.pick_least_loaded_cuda_index(snap)
+                pick = _gs.pick_diffuser_cuda_index(snap)
                 if pick is not None:
                     _gs.activate_cuda_device(pick)
             except Exception:
@@ -624,7 +624,7 @@ class Img2ImgGenerator:
             try:
                 import gpu_status as _gs
                 snap = _gs.snapshot_gpus()
-                pick = _gs.pick_least_loaded_cuda_index(snap)
+                pick = _gs.pick_diffuser_cuda_index(snap)
                 if pick is not None:
                     _gs.activate_cuda_device(pick)
             except Exception:
@@ -749,6 +749,15 @@ class Img2ImgGenerator:
 # / safetensors / transformers do it during from_pretrained); doing
 # it before Playwright opens its pipes is the entire fix.
 _PRELOADED: Any = None
+
+
+def diffuser_cuda_reuse_index() -> int | None:
+    """Physical CUDA index of a loaded image pipeline (for co-locating audio)."""
+    gen = _PRELOADED
+    if gen is None:
+        return None
+    idx = getattr(gen, "_cuda_device_index", None)
+    return int(idx) if idx is not None else None
 
 
 def preload() -> Any:

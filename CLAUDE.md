@@ -97,6 +97,7 @@ python learner.py apply games/traces/             # propose AND write to playboo
 - `MLX_MAX_TOKENS` — MLX output cap (default **131072**). Sized as a runaway-generation guard, not a working limit — measured peak across observed sessions is ~5.7K completion tokens, so 131K gives ~23× headroom. Raise it (e.g. 262144) only if a future model genuinely needs more output per turn.
 - `ANTHROPIC_MAX_TOKENS` — Anthropic output cap (default 32768, the safe ceiling across Sonnet 4.6 / Opus 4.7). Override only if you hit per-model API limits.
 - `DIFFUSION_MODELS_DIR` — root override for weights search (sprites + sounds layout); hidden **`~/.Diffusion_Models`** / **`~/.Models_Diffusers`** are tried before visible `~/…` siblings; HuggingFace cache fallback if absent.
+- `DIFFUSER_CUDA_DEVICE` — force Z-Image / Stable-Audio onto a specific CUDA index; on the auto-pinned 4×48 GB Linux box the default is **GPU 0** so Ollama slots 1–3 stay dedicated to coder/critic/architect.
 - `TORCH_CUDA` — CUDA version for `install_diffuser.sh` (`130` default, `121`/`124` for older GPUs)
 
 ---

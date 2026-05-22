@@ -400,7 +400,15 @@ class StableAudioGenerator:
             try:
                 import gpu_status as _gs
                 snap = _gs.snapshot_gpus()
-                pick = _gs.pick_least_loaded_cuda_index(snap)
+                reuse = None
+                try:
+                    import assets as _assets
+                    reuse = _assets.diffuser_cuda_reuse_index()
+                except Exception:
+                    pass
+                pick = _gs.pick_diffuser_cuda_index(
+                    snap, reuse_cuda_index=reuse,
+                )
                 if pick is not None:
                     _gs.activate_cuda_device(pick)
             except Exception:

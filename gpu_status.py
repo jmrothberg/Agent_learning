@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -651,11 +652,99 @@ def large_python_gpu_indices(
     })
 
 
+def _gpu_free_mib(snap: GpuSnapshot, index: int) -> int | None:
+    for g in snap.gpus:
+        if g.index != index:
+            continue
+        if g.memory_total_mib is None or g.memory_used_mib is None:
+            return None
+        return g.memory_total_mib - g.memory_used_mib
+    return None
+
+
+def _is_four_gpu_linux_nvidia_workstation(snap: GpuSnapshot | None) -> bool:
+    """True on the auto-pinned 4×48 GB Linux box (diffusers → GPU 0)."""
+    if not sys.platform.startswith("linux"):
+        return False
+    if snap is None or not snap.gpus:
+        return False
+    gpus = sorted(snap.gpus, key=lambda g: g.index)
+    if len(gpus) != 4:
+        return False
+    if not all("nvidia" in (g.name or "").lower() for g in gpus):
+        return False
+    if not all((g.memory_total_mib or 0) >= 40000 for g in gpus):
+        return False
+    return [g.index for g in gpus] == [0, 1, 2, 3]
+
+
+# Z-Image-Turbo needs ~14 GB VRAM; leave headroom for Stable-Audio on GPU 0.
+_MIN_DIFFUSER_FREE_MIB = 12000
+# Ollama slot daemons pin LLMs to these physical GPUs (see backend autopin).
+_OLLAMA_SLOT_GPUS = (1, 2, 3)
+
+
+def pick_diffuser_cuda_index(
+    snapshot: GpuSnapshot | None = None,
+    *,
+    reuse_cuda_index: int | None = None,
+) -> int | None:
+    """Pick a CUDA device for Z-Image / Stable-Audio.
+
+    On the 4×48 GB workstation, **prefer GPU 0** so GPUs 1–3 stay for the
+    three Ollama slots. ``DIFFUSER_CUDA_DEVICE=N`` overrides. When
+    ``reuse_cuda_index`` is set (e.g. image pipeline already on GPU 0),
+    reuse that card if it still has room.
+    """
+    raw = (os.environ.get("DIFFUSER_CUDA_DEVICE") or "").strip()
+    if raw.isdigit():
+        return int(raw)
+
+    snap = snapshot if snapshot is not None else snapshot_gpus()
+    if snap is None or not snap.gpus:
+        return None
+    llm_gpus = set(gpu_indices_with_llm_vram(snap))
+
+    def _ok(index: int) -> bool:
+        if index in llm_gpus:
+            return False
+        free = _gpu_free_mib(snap, index)
+        return free is not None and free >= _MIN_DIFFUSER_FREE_MIB
+
+    if reuse_cuda_index is not None and _ok(reuse_cuda_index):
+        return reuse_cuda_index
+
+    if _is_four_gpu_linux_nvidia_workstation(snap) and _ok(0):
+        return 0
+
+    reserved = set(_OLLAMA_SLOT_GPUS) if _is_four_gpu_linux_nvidia_workstation(snap) else set()
+
+    def _best(candidates: list[GpuInfo]) -> int | None:
+        best_idx: int | None = None
+        best_free = -1
+        for g in candidates:
+            if g.index in llm_gpus or g.index in reserved:
+                continue
+            free = _gpu_free_mib(snap, g.index)
+            if free is None or free < _MIN_DIFFUSER_FREE_MIB:
+                continue
+            if free > best_free:
+                best_free = free
+                best_idx = g.index
+        return best_idx
+
+    non_llm = [g for g in snap.gpus if g.index not in llm_gpus]
+    pick = _best(non_llm)
+    if pick is not None:
+        return pick
+    return pick_least_loaded_cuda_index(snap)
+
+
 def pick_least_loaded_cuda_index(snapshot: GpuSnapshot | None = None) -> int | None:
     """Pick the quietest GPU for diffusers, avoiding LLM-heavy cards first.
 
-    Phase B: skip GPUs that already hold ≥8 GB ``ollama``/``python`` compute.
-    Falls back to the global least-loaded card if every GPU looks busy.
+    Prefer :func:`pick_diffuser_cuda_index` for pipeline loads; this remains
+    the global fallback when no card meets the diffuser free-VRAM floor.
     """
     snap = snapshot if snapshot is not None else snapshot_gpus()
     if snap is None or not snap.gpus:
