@@ -4081,10 +4081,13 @@ class Playbook:
 
         self.base_path = self.base_root / PLAYBOOK_FILENAME
         self.live_path = self.live_root / PLAYBOOK_FILENAME
-        
+
+        # Learner / curator / writeback persist to the root playbook (tracked in
+        # git). games/game-memory/playbook.jsonl is optional local overlay on read
+        # only — not committed.
+        self.path = self.base_path
         # Compatibility properties for legacy calls
-        self.path = self.live_path
-        self.root = self.live_root
+        self.root = self.base_root
 
     # --- bootstrap ---------------------------------------------------------
 

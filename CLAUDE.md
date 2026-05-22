@@ -182,4 +182,4 @@ These bind decisions across sessions:
 - Don't bypass `<patch>` once `best.html` exists. Full `<html_file>` rewrites on a working game are a regression-amplification risk.
 - Don't expand the system prompt with always-on rules that only matter sometimes. Use the per-format `FormatSpec.guidelines` (deduped) or a goal-keyword detector (`_detect_*_intent`) to make the rule conditional.
 - Don't tighten repetition/deliberation/timeout abort thresholds without concrete trace evidence and a regression run proving rich first-build streams are not cut mid-output.
-- Don't commit generated artifacts. `.gitignore` already excludes `games/<*>.html`, `games/snapshots/`, `games/traces/`, `games/_asset_cache/`, `games/*_assets/`, `games/_smoke/`, `memory/`. Use `scripts/clean_artifacts.sh` to wipe them.
+- Don't commit generated artifacts. `.gitignore` excludes `games/<*>.html`, `games/snapshots/`, `games/traces/`, `games/_asset_cache/`, `games/*_assets/`, `games/_smoke/`, `games/game-memory/`, and other `memory/*` except **`memory/playbook.jsonl`** (learner-maintained; do not hand-edit). Use `scripts/clean_artifacts.sh` to wipe stale session artifacts.

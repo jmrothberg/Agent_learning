@@ -306,8 +306,8 @@ once if you still have an old single `memory/` tree):
 
 | Path | Role |
 |---|---|
-| `memory/` | **Pristine reference** — bundled skeletons, seed playbook bullets, asset library index |
-| `games/game-memory/` | **Live learned** — `playbook.jsonl`, `won_*` skeletons, `mistakes.jsonl` (agent reads/writes here) |
+| `memory/` | **Tracked reference** — `playbook.jsonl` (seed + learner/curator merges; commit to git), bundled skeletons, asset library index |
+| `games/game-memory/` | **Local learned** (gitignored) — optional live playbook overlay, `won_*` skeletons, `mistakes.jsonl` |
 | `games/goals/` | **Short-term** — per-session `goal.txt`, `best.html`, `outcome.json` |
 
 - **`GameMemory`** — skeleton retrieval and mistake retrieval.
@@ -344,7 +344,7 @@ once if you still have an old single `memory/` tree):
 
 [`learner.py`](learner.py) is the offline pipeline that reads
 completed traces and runs a Reflector (proposes bullet deltas) +
-Curator (deterministic merge into `playbook.jsonl`, increments
+Curator (deterministic merge into `memory/playbook.jsonl`, increments
 helpful/harmful counters, prunes dead bullets). It runs on demand or
 attached to a `tune.py run --auto-learn`.
 

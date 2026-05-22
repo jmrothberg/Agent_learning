@@ -829,7 +829,7 @@ def _write_manifest(
 
 def _seed_memory(memory_root: Path) -> None:
     memory_root.mkdir(parents=True, exist_ok=True)
-    shared_playbook = REPO_ROOT / "games" / "game-memory" / "playbook.jsonl"
+    shared_playbook = REPO_ROOT / "memory" / "playbook.jsonl"
     if shared_playbook.exists():
         dest = memory_root / "playbook.jsonl"
         if not dest.exists():

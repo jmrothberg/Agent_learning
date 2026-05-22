@@ -29,6 +29,9 @@ games/*_assets/
 # Sound-pipeline artifacts (OGGs are 5-50KB each; cache grows over time)
 games/_sound_cache/
 games/*_sounds/
+# Per-machine learned memory (won skeletons, live playbook overlay, mistakes).
+# Canonical playbook for git is memory/playbook.jsonl only.
+games/game-memory/
 
 # Editor / OS noise
 .vscode/
