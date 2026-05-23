@@ -509,6 +509,55 @@ if (typeof OscillatorNode !== "undefined" && OscillatorNode.prototype) {
         };
     }
 }
+// drawImage shim — records every CanvasRenderingContext2D.drawImage call
+// so the harness can detect "asset loaded into an Image but never drawn".
+// The 2026-05-23 chess trace had the model populate `ASSETS[name] = new
+// Image(); img.src = ...; await img.decode()` AND then draw chess pieces
+// procedurally via ctx.fillText() Unicode glyphs — the existing
+// sprite-alpha-and-distinctness check tests loader existence, not actual
+// drawImage usage, so it passed. Recording one event per call (with a
+// best-effort source identifier) lets the harness diff loaded names
+// against drawn names without re-parsing the file. Mirrors the
+// __audioEvents shape: {t, src, kind} so probes can filter cheaply.
+window.__drawImageEvents = [];
+if (typeof CanvasRenderingContext2D !== "undefined"
+    && CanvasRenderingContext2D.prototype) {
+    const _origDrawImage = CanvasRenderingContext2D.prototype.drawImage;
+    if (_origDrawImage) {
+        CanvasRenderingContext2D.prototype.drawImage = function(image, ...rest) {
+            try {
+                // Best-effort source identifier — full URL preferred,
+                // currentSrc as fallback for HTMLImageElement, "<canvas>"
+                // or "<bitmap>" for non-image draw sources.
+                let src = "<unknown>";
+                if (image) {
+                    if (typeof image.src === "string" && image.src) {
+                        src = image.src;
+                    } else if (typeof image.currentSrc === "string" && image.currentSrc) {
+                        src = image.currentSrc;
+                    } else if (image instanceof HTMLCanvasElement) {
+                        src = "<canvas>";
+                    } else if (typeof ImageBitmap !== "undefined" && image instanceof ImageBitmap) {
+                        src = "<bitmap>";
+                    } else if (typeof image.tagName === "string") {
+                        src = "<" + image.tagName.toLowerCase() + ">";
+                    }
+                }
+                // Cap the buffer so a long-running game with many sprite
+                // calls per frame doesn't grow window.__drawImageEvents
+                // unboundedly. The harness only needs to know WHICH
+                // sources have been seen, not the count per source.
+                if (window.__drawImageEvents.length < 4000) {
+                    window.__drawImageEvents.push({
+                        t: Date.now(),
+                        src: src,
+                    });
+                }
+            } catch (e) { /* ignore - keep draw call intact */ }
+            return _origDrawImage.call(this, image, ...rest);
+        };
+    }
+}
 """
 
 # Downsampled canvas hash. We sample a 32x32 grid spread across the canvas
@@ -2239,6 +2288,21 @@ class LiveBrowser:
         report["frozen_canvas"] = frozen
         report["input_test"] = input_test
         report["probes"] = probe_results
+        # Phase fix #4 (2026-05-23 traces) — a frozen canvas was being
+        # set on the report but never feeding into the ok decision, so
+        # iters could ship with `ok=True, frozen_canvas=True`. The
+        # 2026-05-22 Pac-Man trace iter 7 is the case study. Soft
+        # warnings already flip ok to False; this is a one-line wire-up.
+        # Model-agnostic — applies to anything that renders to canvas.
+        if frozen is True:
+            report["soft_warnings"].append(
+                "FROZEN-CANVAS: 32×32 canvas hash unchanged between "
+                "t=0.5s and t=1.0s while RAF was firing. The render "
+                "loop is alive but drawing the same frame — likely a "
+                "stuck game-state, a draw() function that early-returns "
+                "before the entity layer, or all entity update timers "
+                "stopped advancing."
+            )
         # 2.4: split error sources so the model + trace can tell apart
         # "console.error('...')" (game-logged, often informational) from
         # "UNCAUGHT TypeError" (real crash). Existing report["errors"]
@@ -2288,6 +2352,85 @@ class LiveBrowser:
                     "in state but not drawn — check the draw() / render "
                     "function references this entity, and that any "
                     "sprite/image is decoded before drawImage is called."
+                )
+        # Drawn-asset detector — read the drawImage shim's event buffer
+        # and diff against the session's known asset filenames. Catches
+        # "model loaded the PNG into ASSETS[name] but never called
+        # drawImage on it" — the failure shape from the 2026-05-23 chess
+        # trace where the model wrote `await img.decode()` then drew
+        # chess pieces with ctx.fillText Unicode glyphs.
+        try:
+            draw_events = await self._safe_eval(
+                "window.__drawImageEvents || []"
+            )
+        except Exception:
+            draw_events = None
+        if isinstance(draw_events, list):
+            drawn_sources = []
+            for ev in draw_events:
+                if isinstance(ev, dict):
+                    s = ev.get("src") or ""
+                    if isinstance(s, str):
+                        drawn_sources.append(s)
+            drawn_blob = "\n".join(drawn_sources).lower()
+            # Find every PNG path the HTML references (already on disk,
+            # already in the resolved-asset-paths report field if the
+            # caller set it). We derive the candidate name list from
+            # the HTML file's relative-path mentions to stay agent-
+            # independent — the harness doesn't need to know which
+            # session_dir produced the assets.
+            try:
+                html_text = Path(path).read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                html_text = ""
+            import re as _re
+            asset_path_re = _re.compile(
+                r"['\"]\./([A-Za-z0-9_\-]+_assets/[A-Za-z0-9_\-]+\.png)['\"]"
+            )
+            referenced_assets: dict[str, str] = {}
+            for m in asset_path_re.finditer(html_text):
+                rel_path = m.group(1)
+                stem = rel_path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+                referenced_assets[stem] = rel_path
+            undrawn: list[str] = []
+            for stem, rel_path in referenced_assets.items():
+                # Drawn-sources match if the path's filename appears in
+                # the recorded src URL (drawImage sees a file:// URL).
+                fname = rel_path.rsplit("/", 1)[-1].lower()
+                if fname not in drawn_blob:
+                    undrawn.append(stem)
+            report["drawn_asset_check"] = {
+                "loaded_referenced_count": len(referenced_assets),
+                "drawn_event_count": len(drawn_sources),
+                "undrawn": undrawn,
+            }
+            # Only flag when SOME assets exist AND a significant fraction
+            # are unused. Genuine all-undrawn (because the page just
+            # loaded and no frames rendered) shouldn't false-alarm — we
+            # already gate via RAF-fired/non-blank canvas; if those held
+            # and we still have undrawn assets, the gap is real.
+            if (
+                referenced_assets
+                and undrawn
+                and len(undrawn) >= max(1, len(referenced_assets) // 3)
+                and canvas_info
+                and canvas_info.get("raf_ran")
+                and canvas_info.get("blank") is False
+            ):
+                preview = ", ".join(undrawn[:8])
+                if len(undrawn) > 8:
+                    preview += f", … (+{len(undrawn) - 8} more)"
+                report["soft_warnings"].append(
+                    f"ASSETS_LOADED_BUT_UNDRAWN [{preview}]: "
+                    f"{len(undrawn)}/{len(referenced_assets)} asset PNG(s) "
+                    "are referenced by the HTML's asset loader but no "
+                    "ctx.drawImage call was recorded with their URL "
+                    "during this run. The model likely added "
+                    "`new Image() + img.decode()` (so the loader-presence "
+                    "check passes) but is still drawing entities "
+                    "procedurally via ctx.fillText / ctx.fillRect / "
+                    "Unicode glyphs. Replace those drawing sites with "
+                    "ctx.drawImage(ASSETS.<name>, x, y, w, h)."
                 )
         # Probe errors are derived from probe_results (entries with
         # ok=False AND non-empty err).

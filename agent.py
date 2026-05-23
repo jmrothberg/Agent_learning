@@ -2693,6 +2693,35 @@ class GameAgent:
             self._pending_feedback.append(text)
             self._feedback_deferred_last_turn = False
             self._trace({"kind": "feedback_queued", "text": text})
+            # Fix #2 (2026-05-22 Pac-Man trace) — refresh the autonomous
+            # playtest budget when the user types fresh feedback. The
+            # 12-iter Pac-Man session exhausted the 3-cycle cap by iter
+            # 6-7 and then ran 5 more iters with no autonomous oversight
+            # even after the user typed two new bug reports. New
+            # feedback is a strong "verify again" signal — refresh the
+            # cycle counter by one and clear the no-findings streak.
+            # Model-agnostic; works regardless of session length.
+            try:
+                prior_cycle = getattr(self, "_autonomous_playtest_cycle", 0)
+                prior_streak = getattr(self, "_autonomous_no_findings_streak", 0)
+                refreshed = False
+                if prior_cycle > 0:
+                    self._autonomous_playtest_cycle = max(0, prior_cycle - 1)
+                    refreshed = True
+                if prior_streak > 0:
+                    self._autonomous_no_findings_streak = 0
+                    refreshed = True
+                if refreshed:
+                    self._trace({
+                        "kind": "autonomous_budget_refreshed_on_feedback",
+                        "prior_cycle": prior_cycle,
+                        "new_cycle": getattr(self, "_autonomous_playtest_cycle", 0),
+                        "prior_no_findings_streak": prior_streak,
+                    })
+            except Exception:
+                # Field may not exist on every agent path (early-init,
+                # tests). Refresh is advisory; never block feedback.
+                pass
 
     def add_user_answer(self, text: str) -> None:
         self._pending_answer = text.strip()
@@ -3871,16 +3900,41 @@ class GameAgent:
                 # A real falsy result breaks the eval-error streak.
                 self._probe_eval_error_streak[name] = 0
 
-        quarantine_names = {
-            str(p.get("name") or "probe")
-            for p in eval_failing
-            if self._probe_eval_error_streak.get(str(p.get("name") or "probe"), 0) >= 2
-        }
+        # Two-strike rule for general eval errors, ONE-STRIKE for
+        # SyntaxError. Syntax errors mean the probe expression itself
+        # is malformed JavaScript — re-evaluating it next iter cannot
+        # produce a different result; the only way it would "pass" is
+        # if the model re-emits a corrected probe. Holding the broken
+        # probe in the active set for a second iter just lets the
+        # syntax error mask other harness signals (the 2026-05-23
+        # chess trace's iter 2/3 chased a `new Promise(r=>{...})`
+        # parser error for two iters while the actual
+        # ASSETS_LOADED_BUT_UNDRAWN problem was hidden behind it).
+        # Model-agnostic: any model that emits unparseable JS triggers
+        # the fast-path; legitimate runtime-eval errors still get the
+        # tolerant 2-strike treatment.
+        def _is_syntax_error(p: dict) -> bool:
+            err_class = (p.get("error_class") or "").lower()
+            err_text = (p.get("err") or "").lower()
+            return (
+                "syntaxerror" in err_class
+                or "syntaxerror" in err_text
+                or "unexpected token" in err_text
+                or "unexpected identifier" in err_text
+                or "unterminated" in err_text
+            )
+        quarantine_names: set[str] = set()
+        for p in eval_failing:
+            name = str(p.get("name") or "probe")
+            streak = self._probe_eval_error_streak.get(name, 0)
+            if streak >= 2 or _is_syntax_error(p):
+                quarantine_names.add(name)
         if quarantine_names:
             for p in eval_failing:
                 name = str(p.get("name") or "probe")
                 if name not in quarantine_names:
                     continue
+                is_syntax = _is_syntax_error(p)
                 self._trace({
                     "kind": "probe_quarantined",
                     "iteration": iteration,
@@ -3888,12 +3942,23 @@ class GameAgent:
                     "expr_preview": (p.get("expr") or "")[:120],
                     "eval_error_class": p.get("error_class") or "eval_error",
                     "streak": self._probe_eval_error_streak.get(name, 0),
+                    "fast_path": "syntax_error" if is_syntax else None,
                 })
-                notice = (
-                    f"PROBE {name} QUARANTINED: had eval errors twice; "
-                    "re-emit <probes>...</probes> to replace, or leave it "
-                    "dropped if it was not testing real behavior."
-                )
+                if is_syntax:
+                    notice = (
+                        f"PROBE {name} QUARANTINED IMMEDIATELY: the "
+                        "expression is unparseable JavaScript (syntax "
+                        "error). Re-emit <probes>...</probes> with a "
+                        "corrected expression — re-running malformed "
+                        "JS cannot produce a different result and "
+                        "would mask other harness signals."
+                    )
+                else:
+                    notice = (
+                        f"PROBE {name} QUARANTINED: had eval errors twice; "
+                        "re-emit <probes>...</probes> to replace, or leave it "
+                        "dropped if it was not testing real behavior."
+                    )
                 if notice not in self._pending_probe_quarantine_notices:
                     self._pending_probe_quarantine_notices.append(notice)
 
@@ -5361,18 +5426,49 @@ class GameAgent:
     # concurrent runs just queue at the daemon — no benefit, so we
     # fall back to the existing blocking await.
 
+    @staticmethod
+    def _endpoint_supports_concurrency(endpoint: str) -> bool:
+        """Fix #5 — does this endpoint accept concurrent requests in
+        parallel, or do they queue at a single local daemon?
+
+        Heuristic: **loopback URLs serialize** (a single Ollama daemon
+        on 127.0.0.1:11434 handles one stream at a time). **Non-loopback
+        HTTP(S) endpoints are assumed to support concurrency** — cloud
+        provider APIs (Anthropic, OpenAI, future providers) accept many
+        concurrent requests per account, and self-hosted multi-worker
+        inference servers on a LAN typically do too.
+
+        Detection is by ENDPOINT SHAPE, not provider name. Adding a
+        new provider in the future works automatically; no string-match
+        on `"anthropic"` or `"openai"` anywhere.
+        """
+        if not endpoint:
+            return False
+        ep = endpoint.lower()
+        # Loopback patterns — single-daemon, serialize.
+        loopback_markers = ("127.", "localhost", "[::1]", "0.0.0.0")
+        return not any(m in ep for m in loopback_markers)
+
     def _critic_runs_on_independent_slot(self, critic_backend) -> bool:
         """True when the critic backend is a different slot than the
-        coder, AND not the same Ollama daemon endpoint."""
+        coder, AND either points at a different endpoint OR shares a
+        concurrent-capable endpoint (cloud / LAN inference server).
+
+        The 2026-05-23 SOTA chess trace showed all three roles pointing
+        at the same Anthropic endpoint; the pre-fix-#5 check then forced
+        sequential best-of-N because endpoints matched. For cloud APIs,
+        concurrent requests against the same account run in parallel
+        just fine — fall-through to sequential there is over-conservative.
+        """
         if critic_backend is None or critic_backend is self._backend:
             return False
-        # Defensive: even if the backend objects differ, they could
-        # point at the same Ollama HTTP endpoint (rare edge case).
         try:
             ce = getattr(getattr(critic_backend, "info", None), "endpoint", "")
             be = getattr(getattr(self._backend, "info", None), "endpoint", "")
             if ce and be and ce == be:
-                return False
+                # Same endpoint — concurrent only if the endpoint shape
+                # supports it (cloud / LAN multi-worker).
+                return self._endpoint_supports_concurrency(ce)
         except Exception:
             pass
         return True
@@ -5672,6 +5768,32 @@ class GameAgent:
             f"({len(behavior_recipes)} recipes available)[/dim]",
         ))
 
+        # Fix #3 — diagnostic probes evaluated only when a recipe's
+        # applies_when gate fails. Each entry is a small structural
+        # check the gate is likely testing for; the boolean map gets
+        # stashed on the skip event so future trace mining can see
+        # which specific condition was false (no state global, no
+        # canvas, no exposed player.x/.y, etc.) without re-running
+        # the session. Genre-free, applies to any HTML game shape.
+        _GATE_DIAGNOSTICS_JS = (
+            "(()=>{const out={};"
+            "out.has_state=!!window.state;"
+            "out.has_gameState=!!window.gameState;"
+            "const s=window.state||window.gameState||null;"
+            "out.has_state_or_gameState=!!s;"
+            "out.has_canvas=!!document.querySelector('canvas');"
+            "out.canvas_has_dims=(()=>{const c=document.querySelector('canvas');"
+            "return !!c&&c.width>0&&c.height>0;})();"
+            "out.has_player_xy=!!(s&&(typeof s.player?.x==='number'&&typeof s.player?.y==='number'));"
+            "out.has_player_facing=!!(s&&(typeof s.player?.facing==='number'||"
+            "typeof s.player?.angle==='number'||typeof s.player?.heading==='number'||"
+            "typeof s.player?.rot==='number'||typeof s.player?.rotation==='number'));"
+            "out.top_level_xy_count=(()=>{if(!s||typeof s!=='object')return 0;let n=0;"
+            "for(const k in s){try{const v=s[k];if(v&&typeof v==='object'&&"
+            "typeof v.x==='number'&&typeof v.y==='number')n++}catch(e){}};return n;})();"
+            "return out;})()"
+        )
+
         findings: list[dict] = []
         for rec in behavior_recipes:
             r = rec.recipe
@@ -5681,10 +5803,17 @@ class GameAgent:
             except Exception:
                 applies = False
             if not applies:
+                # Run the diagnostic probes so the trace shows WHICH
+                # condition was missing on this game's state shape.
+                try:
+                    diag = await self.browser._safe_eval(_GATE_DIAGNOSTICS_JS)
+                except Exception as e:
+                    diag = {"diag_error": str(e)[:120]}
                 self._trace({
                     "kind": "autonomous_recipe_skipped",
                     "recipe_id": getattr(rec, "id", ""),
                     "reason": "applicability_gate_falsy",
+                    "diagnostics": diag if isinstance(diag, dict) else {},
                 })
                 continue
             timeline = await self.browser.record_playtest(
@@ -6247,6 +6376,52 @@ class GameAgent:
             "completion_tokens": result.completion_tokens,
             "max_tokens_hit": result.max_tokens_hit,
         })
+        # Short-stream warning — symmetric to runaway_stream_warning.
+        # Counterpart to the 2026-05-23 SOTA chess trace where a coder
+        # role emitted 8 tokens in 1.74s and the agent accepted it as
+        # a clean reply. Local 27B models also produce abnormally short
+        # replies (cold KV cache, prompt formatting confusion, refusal
+        # patterns). Model-agnostic: signal is the token count + role
+        # combination, no model name involved.
+        try:
+            ctokens = (
+                result.completion_tokens
+                if result.completion_tokens is not None
+                else result.tokens
+            )
+        except Exception:
+            ctokens = result.tokens
+        _SHORT_STREAM_FLOOR = 50
+        _is_done_reply = (
+            "<confirm_done/>" in result.text
+            or "<done/>" in result.text
+            or result.text.strip() == ""
+        )
+        if (
+            role in ("coder", "architect")
+            and not result.stalled
+            and not result.looped
+            and not result.crashed
+            and not _is_done_reply
+            and ctokens is not None
+            and ctokens < _SHORT_STREAM_FLOOR
+        ):
+            self._trace({
+                "kind": "short_stream_warning",
+                "role": role,
+                "completion_tokens": ctokens,
+                "duration_s": round(result.duration_s, 2),
+                "len": len(result.text),
+                "tail": (result.text or "")[-160:],
+                "hint": (
+                    f"stream emitted <{_SHORT_STREAM_FLOOR} completion "
+                    "tokens with no stall/loop/crash flag and no <done/> "
+                    "marker. Likely a degenerate reply — context "
+                    "confusion, format refusal, or the model declared "
+                    "completion implicitly. Worth a coaching nudge or "
+                    "Ctrl+D if this repeats."
+                ),
+            })
         if bool(getattr(result, "loop_grace_used", False)):
             self._trace({
                 "kind": "loop_grace_used",
@@ -6477,8 +6652,16 @@ class GameAgent:
                 ep = getattr(getattr(bk, "info", None), "endpoint", "") or ""
             except Exception:
                 ep = ""
-            if ep and ep in seen_endpoints:
-                # Same daemon as another slot — would just queue.
+            if (
+                ep
+                and ep in seen_endpoints
+                and not self._endpoint_supports_concurrency(ep)
+            ):
+                # Same loopback daemon as another slot — would just
+                # queue. Fix #5: for non-loopback endpoints (cloud
+                # APIs, LAN inference servers) concurrent requests
+                # run in parallel and we DO want both slots in the
+                # fan-out set.
                 continue
             if critic_busy_backend is not None and bk is critic_busy_backend:
                 continue
