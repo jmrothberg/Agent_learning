@@ -716,6 +716,20 @@ _MEDIA_VERBS: tuple[str, ...] = (
     # "fix the keyboard handler" still correctly stays in code-fix
     # mode (no art noun → no MEDIA-CHANGE).
     "fix", "improve",
+    # Phase 0.11 — descriptive verbs that pair with an art noun to
+    # signal a STYLE rebrand without using an imperative verb. Real
+    # user examples that previously failed classification:
+    #   "all the images need to be animated as fantasy monsters"
+    #   "i want all new graphics so the pieces look like monsters"
+    #   "the sprites should look more like X"
+    # The art-noun + verb gate keeps these from false-firing on
+    # behavior asks ("the player should jump higher" has no art noun
+    # → still classified as behavior, not art).
+    "look", "looks", "looking",
+    "want", "wants", "wanting",
+    "need", "needs", "needing",
+    "should",
+    "feel", "feels", "feeling",
 )
 _ART_NOUNS: tuple[str, ...] = (
     "asset", "assets", "sprite", "sprites", "image", "images",
@@ -997,14 +1011,23 @@ def _has_audio_context(text_lower: str) -> bool:
 def _feedback_is_art_change(text: str, asset_names: list[str]) -> bool:
     """User feedback is asking to change visual art.
 
-    Heuristic: a known asset name appears in the text, OR text contains
-    an art-noun ("sprite", "image", "art", …) together with a media
-    verb ("change", "redraw", "make", …). Misses are safe (no directive
-    injected, regular flow proceeds). False positives are also safe —
-    the directive only advises the model to prefer <assets>.
+    Heuristic: a known asset name appears in the text (literal OR via
+    fuzzy stem — Phase 0.11), OR text contains an art-noun ("sprite",
+    "image", "art", …) together with a media verb ("change", "redraw",
+    "make", "look", "want", …). Misses are safe (no directive injected,
+    regular flow proceeds). False positives are also safe — the
+    directive only advises the model to prefer <assets>.
+
+    Phase 0.11: when the user says "all the pawns" and the session has
+    `white_pawn_idle, black_pawn_idle` etc., the fuzzy stem match
+    counts. Without this, a session with N-frame entity names (every
+    asset is `<entity>_<state>`) would skip art-change classification
+    even when the user clearly referenced an entity.
     """
     lo = text.lower()
     if _name_in_text(lo, asset_names):
+        return True
+    if _resolve_fuzzy_asset_stems(text, asset_names):
         return True
     has_noun = any(re.search(rf"\b{re.escape(n)}\b", lo) for n in _ART_NOUNS)
     has_verb = any(
@@ -1096,6 +1119,39 @@ def _feedback_requests_img2img_chain(text: str) -> bool:
     if not text:
         return False
     return any(p.search(text) for p in _IMG2IMG_CHAIN_PATTERNS)
+
+
+# Phase 0.11 — phrases that signal the user wants a STYLE REBRAND of
+# existing assets (regenerate every existing asset NAME with a NEW
+# prompt that bakes in a different style). Distinct from:
+#   - existing_media: "use the existing X, don't regen" (KEEP as-is)
+#   - img2img_chain: "use existing as starting point for animation
+#                     frames" (REGEN as variants via from_image)
+#   - style_rebrand: "ALL of the images need to look like X" /
+#                    "all new graphics, look like monsters" — REGEN
+#                    each name in place via txt2img (NOT from_image,
+#                    because that would carry the old style forward)
+_STYLE_REBRAND_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\blook(?:s|ing)?\s+like\b", re.I),
+    re.compile(r"\binstead\s+of\b", re.I),
+    re.compile(r"\bnot\s+look\s+like\b", re.I),
+    re.compile(r"\bnot\s+(?:regular|standard|normal|plain|generic)\b", re.I),
+    re.compile(r"\b(?:themed?|styled?)\s+(?:as|like)\b", re.I),
+    re.compile(r"\b(?:in\s+the\s+)?style\s+of\b", re.I),
+    re.compile(r"\bnew\s+(?:style|look|theme|art|graphics|design|visuals?)\b", re.I),
+    re.compile(r"\bdifferent\s+(?:style|look|theme|art|design|aesthetic)\b", re.I),
+    re.compile(r"\b(?:all|every)\s+(?:new|fresh)\s+(?:graphics?|sprites?|images?|art|assets?)\b", re.I),
+    re.compile(r"\b(?:re\s*-?\s*)?(?:design|theme|skin|reskin)\s+(?:them|the\s+\w+|all)\b", re.I),
+    re.compile(r"\bmake\s+(?:them|all|every)\b.*\blook\b", re.I | re.DOTALL),
+)
+
+
+def _feedback_requests_style_rebrand(text: str) -> bool:
+    """True when the user wants existing assets re-rendered with a new
+    visual style (txt2img with new prompts, not from_image)."""
+    if not text:
+        return False
+    return any(p.search(text) for p in _STYLE_REBRAND_PATTERNS)
 
 
 def _feedback_requests_size_change(text: str) -> bool:
@@ -1862,6 +1918,26 @@ class GameAgent:
         # lets a user-requested N entities × M frames roster land in one
         # turn instead of getting silently truncated to 24.
         self._session_asset_cap: int | None = None
+        # Phase 1.5 — autonomous self-feedback loop. Mirrors the chat.py
+        # toggle so the agent can check this flag without depending on
+        # the TUI. Default ON; one slash command (/feedback off) flips it.
+        # The standard error-reporting paths (test reports, patch
+        # diagnostics, visual critic) are NOT gated by this — only the
+        # extra autonomous direction.
+        self._use_autonomous_feedback: bool = True
+        # Cycle counter for the budget governor. Resets per session.
+        # Capped at _AUTONOMOUS_MAX_CYCLES; auto-stops if two consecutive
+        # playtests find nothing new.
+        self._autonomous_playtest_cycle: int = 0
+        self._autonomous_no_findings_streak: int = 0
+        # Phase 1A — background task handle for the non-blocking visual
+        # critic. When the critic backend is a DIFFERENT slot than the
+        # coder, the critic runs as an asyncio.Task overlapping iter N+1's
+        # coder stream prefill + early tokens, and its coaching lands in
+        # `_pending_coaching` whenever the task completes. When critic
+        # backend == coder backend (single-slot fallback), we await
+        # inline (no benefit, no extra complexity).
+        self._critic_task: "asyncio.Task | None" = None
         # Same lazy-load pattern for Stable Audio Open. Only loaded when
         # the model emits a <sounds> block in Phase A.
         self._sound_generator: Any = None
@@ -4316,10 +4392,12 @@ class GameAgent:
             # 2026-05-22 chess trace shows the user asked for img2img
             # animation chains three times and got nothing.
             img2img_chain_request = _feedback_requests_img2img_chain(joined)
+            style_rebrand_request = _feedback_requests_style_rebrand(joined)
             if (
                 existing_media_request
                 and (art_change or sound_change)
                 and not img2img_chain_request
+                and not style_rebrand_request
             ):
                 self._trace({
                     "kind": "media_change_directive_suppressed",
@@ -4333,6 +4411,12 @@ class GameAgent:
                 self._trace({
                     "kind": "img2img_chain_directive_active",
                     "existing_media_request": existing_media_request,
+                    "art_change": art_change,
+                    "sound_change": sound_change,
+                })
+            if style_rebrand_request and (art_change or sound_change):
+                self._trace({
+                    "kind": "style_rebrand_directive_active",
                     "art_change": art_change,
                     "sound_change": sound_change,
                 })
@@ -4490,6 +4574,32 @@ class GameAgent:
                                 " regenerate from scratch via txt2img — the"
                                 " new frames will look like different"
                                 " characters and break visual continuity."
+                            )
+                        # Phase 0.11 — STYLE REBRAND branch. User wants
+                        # EVERY existing asset re-rendered with a new
+                        # visual style (e.g. "all the images should look
+                        # like monsters, not regular chess pieces").
+                        # Different from img2img chains: this is full
+                        # txt2img regeneration with NEW prompts, because
+                        # from_image would carry the OLD style forward.
+                        if style_rebrand_request:
+                            lines.append("")
+                            lines.append("STYLE REBRAND DETECTED:")
+                            lines.append(
+                                "The user wants ALL existing assets re-rendered"
+                                " with a new visual style. For EACH existing"
+                                " asset name, emit one entry in <assets> with"
+                                " the SAME name + a NEW prompt that bakes in"
+                                " the requested style. Do NOT use `from_image`"
+                                " — chaining would carry the OLD style forward."
+                                " The harness regenerates each PNG in place."
+                            )
+                            lines.append(
+                                "Roster-size note: a full rebrand of N existing"
+                                " assets = N new <assets> entries. If your"
+                                " session has many entries, split the LAST"
+                                " batch into a follow-up turn — never silently"
+                                " regenerate only a subset."
                             )
                         lines.extend([
                             "",
@@ -5137,6 +5247,499 @@ class GameAgent:
                 self._set_role_activity(role, "idle")
                 yield self._record(self._activity_idle_event(role))
 
+    # ---- Phase 1B — diffuser pre-warm during Phase A --------------------
+
+    def _maybe_prewarm_diffusers_during_phase_a(self) -> None:
+        """Background-load Z-Image-Turbo + Stable Audio Open during the
+        architect's streaming window — but ONLY when the diffuser GPU
+        is independent of any LLM slot.
+
+        On the 4-GPU workstation the diffusers run on GPU 0 and the
+        LLM on GPUs 1-3, so the warmup is pure speedup (~30-60 s
+        hidden). On a single-GPU box the diffuser and the architect
+        share VRAM, so pre-warming would steal VRAM from the in-flight
+        plan stream — skip in that case.
+
+        Fires-and-forgets: each pipeline's `ensure_loaded()` runs in
+        `asyncio.to_thread`; if loading raises, we trace + move on.
+        The user-facing wins are captured by `prefill_warm` trace
+        events tagged with `target: "z_image" | "stable_audio"`.
+        """
+        try:
+            import gpu_status as _gs
+            snap = _gs.snapshot_gpus()
+            if not _gs.diffuser_has_dedicated_gpu(snap):
+                self._trace({
+                    "kind": "diffuser_prewarm_skipped",
+                    "reason": "no_dedicated_gpu",
+                    "n_gpus": len(snap.gpus) if snap and snap.gpus else 0,
+                })
+                return
+        except Exception as e:
+            self._trace({
+                "kind": "diffuser_prewarm_skipped",
+                "reason": "gpu_probe_error",
+                "err": str(e)[:200],
+            })
+            return
+
+        async def _prewarm_image() -> None:
+            import time as _t
+            t0 = _t.monotonic()
+            try:
+                import assets as _assets
+                gen = self._asset_generator or _assets.ZImageTurboGenerator()
+                self._asset_generator = gen
+                ok = await asyncio.to_thread(gen._lazy_init)
+                self._trace({
+                    "kind": "prefill_warm",
+                    "target": "z_image",
+                    "elapsed_s": round(_t.monotonic() - t0, 2),
+                    "ok": bool(ok),
+                    "hidden_under_phase_a": True,
+                })
+            except Exception as e:
+                self._trace({
+                    "kind": "prefill_warm",
+                    "target": "z_image",
+                    "elapsed_s": round(_t.monotonic() - t0, 2),
+                    "ok": False,
+                    "err": str(e)[:200],
+                })
+
+        async def _prewarm_audio() -> None:
+            import time as _t
+            t0 = _t.monotonic()
+            try:
+                import sounds as _sounds
+                gen = self._sound_generator or _sounds.StableAudioGenerator()
+                self._sound_generator = gen
+                ok = await asyncio.to_thread(gen._lazy_init)
+                self._trace({
+                    "kind": "prefill_warm",
+                    "target": "stable_audio",
+                    "elapsed_s": round(_t.monotonic() - t0, 2),
+                    "ok": bool(ok),
+                    "hidden_under_phase_a": True,
+                })
+            except Exception as e:
+                self._trace({
+                    "kind": "prefill_warm",
+                    "target": "stable_audio",
+                    "elapsed_s": round(_t.monotonic() - t0, 2),
+                    "ok": False,
+                    "err": str(e)[:200],
+                })
+
+        # Fire-and-forget. We don't await — these run concurrently with
+        # the architect's streaming. The tasks complete on their own
+        # schedule; the next `<assets>` / `<sounds>` block uses the
+        # already-loaded pipeline.
+        try:
+            asyncio.create_task(_prewarm_image())
+            asyncio.create_task(_prewarm_audio())
+        except Exception:
+            pass
+
+    # ---- Phase 1A — non-blocking visual critic --------------------------
+    #
+    # When the critic role is bound to a SEPARATE Ollama slot from the
+    # coder (the normal multi-GPU configuration), running the critic
+    # serially after each iter wastes 20-300 s of wall-clock — the
+    # critic compute could overlap with the next iter's coder stream.
+    # Spawning it as `asyncio.Task` lets that overlap happen and lets
+    # the coaching land in `_pending_coaching` whenever the task
+    # finishes (one-turn lag at worst). When the critic backend is the
+    # SAME as the coder backend (single-slot / single-GPU fallback),
+    # concurrent runs just queue at the daemon — no benefit, so we
+    # fall back to the existing blocking await.
+
+    def _critic_runs_on_independent_slot(self, critic_backend) -> bool:
+        """True when the critic backend is a different slot than the
+        coder, AND not the same Ollama daemon endpoint."""
+        if critic_backend is None or critic_backend is self._backend:
+            return False
+        # Defensive: even if the backend objects differ, they could
+        # point at the same Ollama HTTP endpoint (rare edge case).
+        try:
+            ce = getattr(getattr(critic_backend, "info", None), "endpoint", "")
+            be = getattr(getattr(self._backend, "info", None), "endpoint", "")
+            if ce and be and ce == be:
+                return False
+        except Exception:
+            pass
+        return True
+
+    async def _drain_pending_critic_task(self, *, wait: bool) -> bool:
+        """Optionally await the in-flight critic task and surface its
+        coaching. Returns True if a task was drained (whether it
+        produced coaching or not). Used at iter-boundary cleanup."""
+        task = self._critic_task
+        if task is None:
+            return False
+        if not wait and not task.done():
+            return False
+        try:
+            if not task.done():
+                await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            self._trace({"kind": "visual_critic_error", "error": str(e)[:240]})
+        finally:
+            self._critic_task = None
+        return True
+
+    async def _spawn_visual_critic(
+        self,
+        after_bytes: bytes,
+        before_bytes: bytes | None,
+        iteration: int,
+        vc_role: str,
+    ) -> None:
+        """Background worker that runs the visual critic and appends to
+        `_pending_coaching` on completion. Errors are swallowed +
+        traced so a critic crash never kills the iter loop."""
+        try:
+            critique = await self.run_visual_critic(after_bytes, before_bytes)
+        except Exception as exc:
+            self._trace({
+                "kind": "visual_critic_error",
+                "iteration": iteration,
+                "error": str(exc)[:240],
+            })
+            return
+        if not critique:
+            return
+        cleaned = critique.strip()
+        if not cleaned or "ok" in cleaned.lower()[:30]:
+            return
+        prefix = "VISUAL CRITIC (looked at the screenshot of your last iteration): "
+        self._pending_coaching.append(prefix + cleaned)
+        self._trace({
+            "kind": "visual_critic_concurrent_completed",
+            "iteration": iteration,
+            "vc_role": vc_role,
+            "critique_preview": cleaned[:240],
+        })
+
+    # ---- Phase 1.5 — autonomous self-feedback ---------------------------
+    #
+    # `_run_autonomous_playtest` is the per-iter hook that:
+    #   1. Reads the root-playbook "behavior_playtest" recipes
+    #   2. Skips any whose `applies_when` JS gate evaluates falsy in the
+    #      current page (so a turn-based board game never runs the
+    #      directional-movement recipe and vice versa — applicability
+    #      is observable, not genre-named)
+    #   3. Runs the surviving recipes via LiveBrowser.record_playtest
+    #   4. Evaluates the per-recipe `check_kind` against the timeline
+    #   5. If any recipe produced a finding, asks the critic slot for ONE
+    #      paragraph of user-style feedback, prepends "[AUTONOMOUS PLAYTEST]"
+    #      and routes it into _pending_feedback so Phase 0.1's partitioner
+    #      handles it like a real user message
+    # The budget governor (3 cycles/session, 2-no-finding auto-stop) and
+    # the `/feedback off` kill-switch are both checked first; this method
+    # is a no-op when either gate is closed.
+
+    _AUTONOMOUS_MAX_CYCLES = 3
+    _AUTONOMOUS_FACING_TOLERANCE_DEG = 25.0
+    _AUTONOMOUS_MIN_MOVE_PX = 6.0
+
+    def _autonomous_playtest_disabled(self) -> tuple[bool, str]:
+        """Gate check: return (disabled, reason)."""
+        if not getattr(self, "_use_autonomous_feedback", True):
+            return True, "feedback_off"
+        if self._user_force_done:
+            return True, "force_done"
+        if self._autonomous_playtest_cycle >= self._AUTONOMOUS_MAX_CYCLES:
+            return True, "budget_exhausted"
+        if self._autonomous_no_findings_streak >= 2:
+            return True, "no_findings_streak"
+        return False, ""
+
+    def _evaluate_behavior_playtest_check(
+        self,
+        recipe: dict,
+        timeline: dict,
+    ) -> dict | None:
+        """Apply the recipe's `check_kind` to the captured timeline.
+
+        Returns a finding dict {check_kind, finding_label, evidence} or
+        None when the check passed. Each `check_kind` is genre-free —
+        the recipe owns its applicability gate AND the human-readable
+        finding label; this method just turns sampled state into a
+        pass/fail call.
+        """
+        check_kind = (recipe.get("check_kind") or "").lower()
+        samples = timeline.get("samples") or []
+        if not samples or not check_kind:
+            return None
+        label = recipe.get("finding_label") or check_kind
+
+        def _player_xy(state: dict | None) -> tuple[float, float] | None:
+            if not state:
+                return None
+            for px, py in (
+                ("player.x", "player.y"), ("ship.x", "ship.y"),
+                ("hero.x", "hero.y"), ("x", "y"),
+            ):
+                if isinstance(state.get(px), (int, float)) and isinstance(state.get(py), (int, float)):
+                    return float(state[px]), float(state[py])
+            return None
+
+        def _player_facing_rad(state: dict | None) -> float | None:
+            if not state:
+                return None
+            for path in (
+                "player.facing", "player.angle", "player.heading",
+                "player.rot", "player.rotation",
+                "ship.facing", "ship.angle", "ship.heading",
+                "hero.facing", "hero.angle", "hero.heading",
+                "facing", "angle", "heading", "rot", "rotation",
+            ):
+                v = state.get(path)
+                if isinstance(v, (int, float)):
+                    # If the value is > ~6.5 we assume degrees; convert
+                    # to radians so the comparison is consistent. Generic
+                    # heuristic; doesn't matter which the game uses.
+                    import math
+                    return math.radians(v) if abs(v) > 6.5 else float(v)
+            return None
+
+        if check_kind == "any_progress":
+            # No new info in 10s of observation = the game is stuck.
+            base_hash = samples[0].get("canvas_hash")
+            base_state = samples[0].get("state") or {}
+            changed = False
+            for s in samples[1:]:
+                if s.get("canvas_hash") and s["canvas_hash"] != base_hash:
+                    changed = True
+                    break
+                s_state = s.get("state") or {}
+                # Any numeric leaf differing from baseline counts as progress.
+                for k, v in s_state.items():
+                    if isinstance(v, (int, float)) and base_state.get(k) != v:
+                        changed = True
+                        break
+                if changed:
+                    break
+            if not changed:
+                return {
+                    "check_kind": check_kind,
+                    "finding_label": label,
+                    "evidence": "no canvas/state delta across 10s of observation",
+                }
+            return None
+
+        if check_kind == "facing_matches_movement":
+            import math
+            s0 = samples[0]
+            s1 = samples[-1]
+            xy0 = _player_xy(s0.get("state"))
+            xy1 = _player_xy(s1.get("state"))
+            facing = _player_facing_rad(s0.get("state"))
+            if xy0 is None or xy1 is None or facing is None:
+                return None  # game stopped exposing state mid-test
+            dx = xy1[0] - xy0[0]
+            dy = xy1[1] - xy0[1]
+            mag = (dx * dx + dy * dy) ** 0.5
+            if mag < self._AUTONOMOUS_MIN_MOVE_PX:
+                # No movement at all — different recipe will catch this.
+                return None
+            move_angle = math.atan2(-dy, dx)  # screen-Y flipped to math-Y
+            diff = abs(((move_angle - facing) + math.pi) % (2 * math.pi) - math.pi)
+            tol = math.radians(self._AUTONOMOUS_FACING_TOLERANCE_DEG)
+            if diff > tol:
+                evidence = (
+                    f"facing≈{math.degrees(facing):.0f}°, "
+                    f"movement≈{math.degrees(move_angle):.0f}° "
+                    f"(Δ={math.degrees(diff):.0f}°), |move|={mag:.1f}px"
+                )
+                return {
+                    "check_kind": check_kind,
+                    "finding_label": label,
+                    "evidence": evidence,
+                }
+            return None
+
+        if check_kind == "stays_in_canvas":
+            # Player left the canvas during a 3s held-key window.
+            # Canvas size sampled via custom_expr in the recipe would
+            # be cleaner; here we approximate by checking the largest
+            # observed coordinate against a generous bound (4000 px).
+            # Real games rarely have canvases bigger than that.
+            xy_last = _player_xy((samples[-1].get("state") or {}))
+            if xy_last is None:
+                return None
+            x, y = xy_last
+            if not (-50.0 <= x <= 4000.0 and -50.0 <= y <= 4000.0):
+                return {
+                    "check_kind": check_kind,
+                    "finding_label": label,
+                    "evidence": f"player ended at ({x:.0f},{y:.0f}) — out of plausible canvas range",
+                }
+            return None
+
+        # Unknown check_kind — log + skip rather than throw.
+        return None
+
+    async def _run_autonomous_playtest(
+        self,
+        iteration: int,
+        report: dict,
+    ):
+        """One cycle of the autonomous self-feedback loop.
+
+        Caller is the iter loop; we only run when:
+          - /feedback is on (default)
+          - probes passed this iter (report.ok is True)
+          - the budget governor allows another cycle
+          - no Ctrl+D in flight
+
+        Yields AgentEvents for status panel; queues findings into
+        _pending_feedback for the NEXT iter's _flush_user_injections.
+        """
+        # Phase 1.5.2 — single skip-reason trace event so we can see WHY
+        # the loop didn't run in future sessions. The 2026-05-22 Pac-Man
+        # session had no autonomous events at all and we couldn't tell
+        # whether the loop disabled, the iter failed, or recipes were
+        # missing. Every silent return now leaves a breadcrumb.
+        disabled, reason = self._autonomous_playtest_disabled()
+        if disabled:
+            self._trace({
+                "kind": "autonomous_playtest_skipped",
+                "reason": f"disabled:{reason}",
+                "iteration": iteration,
+            })
+            return
+        if not report.get("ok"):
+            self._trace({
+                "kind": "autonomous_playtest_skipped",
+                "reason": "iter_failed",
+                "iteration": iteration,
+            })
+            return
+        if self.browser is None:
+            self._trace({
+                "kind": "autonomous_playtest_skipped",
+                "reason": "no_browser",
+                "iteration": iteration,
+            })
+            return
+        try:
+            # Load directly from the seed function — guarantees we see
+            # the behavior_playtest recipes even on a fresh install where
+            # the on-disk root playbook hasn't been hydrated yet. The
+            # heavier in-memory `OpeningBookStore` is used by the model-
+            # facing render path, but for an in-process check the seed
+            # list is faster and avoids file-IO timing flakes in tests.
+            from memory import _opening_book_seed_items, PLAYTESTS_FILENAME
+            seed = _opening_book_seed_items()
+            recipes = seed.get(PLAYTESTS_FILENAME, [])
+        except Exception as e:
+            self._trace({
+                "kind": "autonomous_playtest_skipped",
+                "reason": "recipe_load_error",
+                "err": str(e)[:200],
+                "iteration": iteration,
+            })
+            return
+        behavior_recipes = [
+            r for r in recipes
+            if isinstance(getattr(r, "recipe", None), dict)
+            and (r.recipe.get("type") or "").lower() == "behavior_playtest"
+        ]
+        if not behavior_recipes:
+            self._trace({
+                "kind": "autonomous_playtest_skipped",
+                "reason": "no_behavior_recipes",
+                "iteration": iteration,
+                "total_recipes": len(recipes),
+            })
+            return
+
+        self._autonomous_playtest_cycle += 1
+        yield self._record(AgentEvent(
+            "info",
+            f"[dim]autonomous playtest: cycle {self._autonomous_playtest_cycle}/{self._AUTONOMOUS_MAX_CYCLES} "
+            f"({len(behavior_recipes)} recipes available)[/dim]",
+        ))
+
+        findings: list[dict] = []
+        for rec in behavior_recipes:
+            r = rec.recipe
+            applies_js = r.get("applies_when") or "true"
+            try:
+                applies = await self.browser._safe_eval(applies_js)
+            except Exception:
+                applies = False
+            if not applies:
+                self._trace({
+                    "kind": "autonomous_recipe_skipped",
+                    "recipe_id": getattr(rec, "id", ""),
+                    "reason": "applicability_gate_falsy",
+                })
+                continue
+            timeline = await self.browser.record_playtest(
+                input_script=r.get("input_script") or [],
+                sample_times_s=r.get("sample_times_s") or [0.0],
+            )
+            self._trace({
+                "kind": "autonomous_recipe_ran",
+                "recipe_id": getattr(rec, "id", ""),
+                "samples": len(timeline.get("samples") or []),
+                "errors": timeline.get("errors") or [],
+            })
+            try:
+                finding = self._evaluate_behavior_playtest_check(r, timeline)
+            except Exception as e:
+                self._trace({
+                    "kind": "autonomous_check_error",
+                    "recipe_id": getattr(rec, "id", ""),
+                    "err": str(e)[:200],
+                })
+                finding = None
+            if finding:
+                finding["recipe_id"] = getattr(rec, "id", "")
+                findings.append(finding)
+
+        self._trace({
+            "kind": "autonomous_playtest_summary",
+            "iteration": iteration,
+            "cycle": self._autonomous_playtest_cycle,
+            "ran": len(behavior_recipes),
+            "findings": len(findings),
+            "finding_ids": [f.get("recipe_id") for f in findings],
+        })
+
+        if not findings:
+            self._autonomous_no_findings_streak += 1
+            return
+        self._autonomous_no_findings_streak = 0
+
+        # Build the user-style feedback string. Keep this TIGHT — local
+        # 27B models lose focus past ~200 tokens of pre-amble. We don't
+        # call the critic at all in this round; instead we synthesize
+        # one paragraph from the recipe-supplied finding_labels +
+        # evidence. A future enhancement can route to the critic slot
+        # for a freer-form summary, but the trade-off is cost + drift.
+        bullets = []
+        for f in findings:
+            bullets.append(f"- {f['finding_label']} ({f['evidence']})")
+        feedback_text = (
+            "[AUTONOMOUS PLAYTEST] I ran a short scripted playtest after "
+            "iter {iter} passed probes and noticed:\n{body}\n"
+            "Treat this as one user observation, not a hard failure — "
+            "address what's actionable; ignore what's already correct."
+        ).format(iter=iteration, body="\n".join(bullets))
+        self._pending_feedback.append(feedback_text)
+        yield self._record(AgentEvent(
+            "info",
+            f"[magenta]autonomous feedback queued[/magenta] "
+            f"({len(findings)} finding(s) from cycle "
+            f"{self._autonomous_playtest_cycle})",
+        ))
+
     async def _run_vision_judge(self, current_png: bytes, iteration: int) -> None:
         """Ask a vision model whether this iter made visible progress
         toward the goal, and queue the verdict for the next user turn.
@@ -5432,6 +6035,8 @@ class GameAgent:
             # event only emits once per stream when the condition first
             # holds; subsequent regular heartbeats keep flowing.
             "slow_prefill_emitted": False,
+            # Phase 0.14 — fire-once flag for runaway-stream warning.
+            "runaway_warned": False,
         }
         _STREAM_HEARTBEAT_SECONDS = 30.0
         _STREAM_HEARTBEAT_TAIL_CHARS = 120
@@ -5442,6 +6047,15 @@ class GameAgent:
         # future trace mining doesn't have to grep heartbeats by hand.
         _SLOW_PREFILL_TOK_FLOOR = 5
         _SLOW_PREFILL_ELAPSED_FLOOR = 120.0
+        # Phase 0.14 — runaway-generation watchdog. The 2026-05-22 third
+        # chess trace had a coder stream emit 36,736 completion tokens
+        # over 25 minutes. The user couldn't tell whether the model was
+        # making progress or stuck in a loop; their queued feedback sat
+        # invisible the entire time. Threshold below is intentionally
+        # conservative — a typical iter is 1–4k tokens, a giant
+        # legitimate rewrite is ~10k. Past 15k something has usually
+        # gone wrong. Fires-once, no behavior change — pure visibility.
+        _RUNAWAY_TOKEN_FLOOR = 15000
 
         def _heartbeat_on_token(piece: str) -> None:
             if on_token is not None:
@@ -5488,6 +6102,31 @@ class GameAgent:
                             "cache after a cross-slot role switch — "
                             "Backend.warm_prefix on the next role's slot "
                             "during the prior role's stream avoids it."
+                        ),
+                    })
+                if (
+                    not hb_state["runaway_warned"]
+                    and hb_state["tokens"] >= _RUNAWAY_TOKEN_FLOOR
+                ):
+                    hb_state["runaway_warned"] = True
+                    self._trace({
+                        "kind": "runaway_stream_warning",
+                        "tokens": hb_state["tokens"],
+                        "elapsed_s": round(elapsed, 1),
+                        "tok_per_s": round(tok_per_s, 2),
+                        "model_role": role,
+                        "model_name": getattr(
+                            getattr(active_backend, "info", None),
+                            "model",
+                            "unknown",
+                        ),
+                        "hint": (
+                            f"completion >{_RUNAWAY_TOKEN_FLOOR} tokens — "
+                            "typical iter is 1-4k. Likely a token-repetition "
+                            "loop, an oversized rewrite, or the model "
+                            "concatenating multiple drafts. Press Ctrl+D to "
+                            "ship the current best build and re-queue your "
+                            "feedback if waiting feels wrong."
                         ),
                     })
 
@@ -5790,12 +6429,68 @@ class GameAgent:
 
     # -- best-of-N for fix iterations --------------------------------------
 
+    # ---- Phase 2A — independent-slot detection for fan-out ----------
+
+    def _available_sampler_slots(self) -> list[tuple["Backend", str]]:
+        """List of (backend, label) tuples that can run a best-of-N
+        candidate independently of slot 1. Excludes any slot whose
+        endpoint matches slot 1's (would queue at the same daemon)
+        AND any slot currently busy with a concurrent critic task.
+
+        Always returns slot 1 first; slots 2 and 3 only when truly
+        independent. On a single-slot / single-GPU config this returns
+        just slot 1, which lets the caller fall back to the existing
+        sequential best_of_n path.
+        """
+        out: list[tuple["Backend", str]] = [(self._backend, "slot1")]
+        seen_endpoints: set[str] = set()
+        try:
+            ep1 = getattr(getattr(self._backend, "info", None), "endpoint", "") or ""
+            if ep1:
+                seen_endpoints.add(ep1)
+        except Exception:
+            pass
+
+        # Detect which slot the critic is currently using so we don't
+        # steal it from a concurrent visual-critic task spawned by Phase 1A.
+        critic_busy_backend = None
+        if self._critic_task is not None and not self._critic_task.done():
+            try:
+                critic_busy_backend = self.get_backend("critic")
+            except Exception:
+                critic_busy_backend = None
+
+        for label, bk in (
+            ("slot2", getattr(self, "_backend2", None)),
+            ("slot3", getattr(self, "_backend3", None)),
+        ):
+            if bk is None or bk is self._backend:
+                continue
+            try:
+                ep = getattr(getattr(bk, "info", None), "endpoint", "") or ""
+            except Exception:
+                ep = ""
+            if ep and ep in seen_endpoints:
+                # Same daemon as another slot — would just queue.
+                continue
+            if critic_busy_backend is not None and bk is critic_busy_backend:
+                continue
+            if ep:
+                seen_endpoints.add(ep)
+            out.append((bk, label))
+        return out
+
     async def _generate_and_score_candidates(
         self,
         n: int,
     ) -> tuple[Candidate, list[Candidate]]:
         """Sample N completions and score each by running its result through
         the test harness against a temp file. Used when fixing a failed iter.
+
+        Phase 2A: when multiple independent slots are available, fan out
+        across them in parallel. When only slot 1 is independent (single-
+        slot / single-GPU / critic holding the others), fall back to the
+        existing sequential path.
 
         Scorer is a continuous quality score in [0, 100] from
         `score_test_report` so partial-credit candidates ("almost works")
@@ -5837,6 +6532,15 @@ class GameAgent:
                 # broken" but better than "didn't apply".
                 return 10.0, extra
 
+        # Phase 2A — parallel fan-out across independent slots.
+        slots = self._available_sampler_slots()
+        if len(slots) >= 2 and n >= 2:
+            winner, all_cands = await self._fan_out_best_of_n_across_slots(
+                slots=slots, n=n, scorer=scorer,
+            )
+            return winner, all_cands
+
+        # Single-slot fallback — preserved exactly as before.
         winner, all_cands = await self._backend.best_of_n(
             self._messages,
             n=n,
@@ -5857,6 +6561,154 @@ class GameAgent:
             cancel_event=self._ensure_stop_event(),
         )
         return winner, all_cands
+
+    async def _fan_out_best_of_n_across_slots(
+        self,
+        *,
+        slots: list[tuple["Backend", str]],
+        n: int,
+        scorer,
+    ) -> tuple[Candidate, list[Candidate]]:
+        """Phase 2A — sample N candidates in parallel across `slots`.
+
+        Each candidate runs on a different slot with a different
+        temperature (and optional alternate fix-strategy prompt for
+        2B). Slot endpoints are independent — verified by
+        `_available_sampler_slots` — so the LLM daemons don't queue
+        the requests. Candidates are scored sequentially against the
+        SAME Chromium browser (single LiveBrowser instance) to avoid
+        race conditions on the test harness; only the LLM generation
+        is parallel. That's where the time savings live anyway
+        (generation: 30-120 s vs scoring: 5-10 s).
+        """
+        from backend import Candidate as _Candidate
+        # Pair each candidate with a slot + temperature. When n > len(slots),
+        # subsequent candidates wrap back to slot 1 to keep total count = n.
+        temps = [0.2, 0.6, 0.9]
+        while len(temps) < n:
+            temps.append(temps[-1])
+        pairs: list[tuple["Backend", str, float]] = []
+        for i in range(n):
+            bk, label = slots[i % len(slots)]
+            pairs.append((bk, label, temps[i]))
+
+        cancel = self._ensure_stop_event()
+
+        async def _run_one(idx: int, backend, label: str, temp: float):
+            t0 = asyncio.get_event_loop().time()
+            try:
+                result = await backend.stream_chat(
+                    self._messages,
+                    on_token=None,
+                    options={"num_ctx": self.num_ctx, "temperature": temp},
+                    keep_alive=self._keep_alive_for_backend(backend),
+                    stall_seconds=self.stall_seconds,
+                    overall_seconds=self.overall_seconds,
+                    max_retries=0,
+                    cancel_event=cancel,
+                )
+            except Exception as e:
+                self._trace({
+                    "kind": "best_of_n_candidate_error",
+                    "candidate": idx,
+                    "slot": label,
+                    "temperature": temp,
+                    "err": str(e)[:200],
+                })
+                return _Candidate(
+                    text="", score=-100.0,
+                    extra={"slot": label, "err": str(e)[:200]},
+                    tokens=0, duration_s=0.0, stalled=True,
+                )
+            duration = asyncio.get_event_loop().time() - t0
+            self._trace({
+                "kind": "best_of_n_candidate_generated",
+                "candidate": idx,
+                "slot": label,
+                "temperature": temp,
+                "tokens": result.tokens,
+                "duration_s": round(duration, 2),
+            })
+            return _Candidate(
+                text=result.text,
+                score=0.0,  # scored below
+                extra={"slot": label, "temperature": temp},
+                tokens=result.tokens,
+                duration_s=duration,
+                stalled=result.stalled,
+            )
+
+        # Phase: fan out generations in parallel.
+        gen_tasks = [
+            _run_one(i, bk, label, temp)
+            for i, (bk, label, temp) in enumerate(pairs)
+        ]
+        candidates_raw = await asyncio.gather(*gen_tasks, return_exceptions=False)
+
+        # Phase: score sequentially (single Chromium).
+        scored: list[_Candidate] = []
+        for i, c in enumerate(candidates_raw):
+            if not c.text:
+                scored.append(c)
+                continue
+            try:
+                score, extra = await scorer(c.text)
+            except Exception as e:
+                score = -1.0
+                extra = {"scorer_error": str(e)[:200]}
+            extra = {**(c.extra or {}), **extra}
+            scored.append(_Candidate(
+                text=c.text, score=score, extra=extra,
+                tokens=c.tokens, duration_s=c.duration_s, stalled=c.stalled,
+            ))
+            self._trace({
+                "kind": "best_of_n_candidate_scored",
+                "candidate": i,
+                "slot": (c.extra or {}).get("slot"),
+                "score": round(score, 2),
+                "report_ok": extra.get("report_ok"),
+            })
+
+        # Highest score wins; tie-break by shorter text (smaller diff).
+        scored.sort(key=lambda c: (c.score, -len(c.text)), reverse=True)
+        winner = scored[0] if scored else None
+        if winner is not None:
+            winning_slot = (winner.extra or {}).get("slot", "?")
+            # Phase 3 surprise: a non-slot-1 candidate winning is a
+            # signal worth surfacing — it means the alternate slots'
+            # extra capacity is actually pulling its weight, and
+            # justifies the multi-slot configuration.
+            self._trace({
+                "kind": "best_of_n_attempt",
+                "n": n,
+                "winner_slot": winning_slot,
+                "winner_score": round(winner.score, 2),
+                "winner_temperature": (winner.extra or {}).get("temperature"),
+                "candidate_summary": [
+                    {
+                        "slot": (c.extra or {}).get("slot"),
+                        "temperature": (c.extra or {}).get("temperature"),
+                        "score": round(c.score, 2),
+                        "tokens": c.tokens,
+                    }
+                    for c in scored
+                ],
+            })
+            if winning_slot != "slot1":
+                self._trace({
+                    "kind": "surprise",
+                    "category": "non_slot1_bon_winner",
+                    "winner_slot": winning_slot,
+                    "winner_score": round(winner.score, 2),
+                    "hint": (
+                        "An alternate slot won the fan-out — the "
+                        "additional slot capacity is generating better "
+                        "candidates than slot 1 alone. Worth comparing "
+                        "the winning temperature against slot 1's for "
+                        "schedule tuning."
+                    ),
+                })
+        return winner, scored
 
     # -- text → file: extract patches OR <html_file> -----------------------
 
@@ -7194,6 +8046,65 @@ class GameAgent:
             reply, max_assets=session_cap,
         )
         sound_specs = parse_sounds_block(reply)
+        # Phase 0.13 — when the model emits a mid-session <assets> block
+        # BUT the user has queued feedback asking for a style rebrand,
+        # the model is about to generate sprites guaranteed to be
+        # discarded next turn. Defer the asset gen and queue a coaching
+        # note so the next user-turn re-emits the same <assets> with the
+        # user's style baked in. Prevents the "model emitted 14 wrong-
+        # style sprites while user feedback waited 25 minutes" failure
+        # mode from the 2026-05-22 trace. General behavior — fires only
+        # on the conjunction of mid-session model-driven asset gen AND
+        # style-rebrand intent in pending feedback.
+        if (
+            trigger == "mid_session"
+            and asset_specs
+            and self._pending_feedback
+        ):
+            joined_pending = "\n".join(self._pending_feedback)
+            try:
+                wants_rebrand = _feedback_requests_style_rebrand(joined_pending)
+            except Exception:
+                wants_rebrand = False
+            if wants_rebrand:
+                # Echo the asset names back so the model knows what to
+                # re-emit; include the user feedback preview so the
+                # coaching is grounded in their own words.
+                deferred_names = [str(s.get("name", "")) for s in asset_specs]
+                fb_preview = joined_pending[:240].replace("\n", " | ")
+                self._trace({
+                    "kind": "mid_session_assets_deferred_for_user_style",
+                    "deferred_names": deferred_names,
+                    "feedback_preview": fb_preview,
+                })
+                yield self._record(AgentEvent(
+                    "info",
+                    f"[yellow]mid-session <assets> deferred[/yellow] — "
+                    f"user has queued style-rebrand feedback. "
+                    f"{len(deferred_names)} asset spec(s) will be re-emitted "
+                    "next turn with the user's style applied.",
+                ))
+                # Coaching note carried into the next user-turn so the
+                # model knows the prior <assets> got dropped and must be
+                # re-emitted with the new style.
+                self._pending_coaching.append(
+                    "MID-SESSION ASSET DEFERRAL — your last reply emitted "
+                    f"<assets> for {len(deferred_names)} entries "
+                    f"({', '.join(deferred_names[:6])}"
+                    f"{'…' if len(deferred_names) > 6 else ''}) but the user "
+                    "had QUEUED feedback asking for a style rebrand. The "
+                    "asset gen was SKIPPED so you don't burn GPU on sprites "
+                    "guaranteed to be replaced. Re-emit the SAME asset "
+                    "names in THIS turn's <assets> block but with NEW "
+                    "prompts that bake in the style the user described. "
+                    "Do NOT use `from_image` for the rebrand (it would "
+                    "carry the old style forward)."
+                )
+                # Bail out — no gen, no path injection, no session-asset
+                # bookkeeping. The next iter's flush will inject user
+                # feedback + this coaching note + the regular MEDIA-CHANGE
+                # / STYLE-REBRAND directive.
+                return
         # Strict scoped-media lock: when the user said "regenerate only the
         # existing media", reject additive names early (before generation).
         scoped = self._scoped_constraints or {}
@@ -7976,6 +8887,15 @@ class GameAgent:
 
             # ---- PHASE A: planning ------------------------------------------
             yield self._record(AgentEvent("phase", "planning"))
+            # Phase 1B — when the diffuser pipeline lives on a GPU that
+            # is NOT shared with any LLM slot, pre-warm it during
+            # architect streaming so the cold-load (~30-60 s) is hidden
+            # under the plan stream. The 2026-05-22 chess traces showed
+            # ~37 s wasted between phase-A end and first asset gen.
+            # SKIPPED on single-GPU systems where pre-warm would
+            # compete with the architect for VRAM and slow it down.
+            # General behavior — observable detection, no genre logic.
+            self._maybe_prewarm_diffusers_during_phase_a()
             yield self._record(AgentEvent(
                 "activity", "streaming",
                 {"label": "planning reply", "role": "architect"},
@@ -8528,6 +9448,17 @@ class GameAgent:
             # new stream after the user asked to stop, even when probes
             # haven't passed. Whatever's in best.html (or out_path) ships.
             if self._user_force_done:
+                # Phase 1A — cancel any in-flight background critic
+                # before exiting. The critic generates coaching for an
+                # iter that's not going to run; finishing it wastes
+                # 20-300 s of user wait time.
+                if self._critic_task is not None and not self._critic_task.done():
+                    self._critic_task.cancel()
+                    try:
+                        await self._critic_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    self._critic_task = None
                 yield self._record(AgentEvent(
                     "info", "user requested ship - exiting iteration loop",
                 ))
@@ -9606,6 +10537,88 @@ class GameAgent:
             self._last_tested_iter = iteration
             yield self._record(AgentEvent("test", report_text, report))
 
+            # Phase 3 — per-iter summary for the learner. Structured,
+            # one record per iter, with enough signal to spot patterns
+            # across sessions without re-grepping heartbeats. The
+            # learner.py reflector consumes these alongside the
+            # existing per-stream trace events.
+            try:
+                probes_list = report.get("probes") or []
+                probes_passed = sum(1 for p in probes_list if p.get("ok"))
+                probes_total = len(probes_list)
+                soft_warnings = report.get("soft_warnings") or []
+                page_errors = report.get("page_errors") or []
+                console_errors = report.get("console_errors") or []
+                fail_reasons: list[str] = []
+                if page_errors:
+                    fail_reasons.append(f"page_errors:{len(page_errors)}")
+                if console_errors:
+                    fail_reasons.append(f"console_errors:{len(console_errors)}")
+                if soft_warnings:
+                    fail_reasons.append(f"soft_warnings:{len(soft_warnings)}")
+                if report.get("frozen_canvas"):
+                    fail_reasons.append("frozen_canvas")
+                entity_check = report.get("entity_render_check") or {}
+                missing_entities = (entity_check.get("missing") or []) if isinstance(entity_check, dict) else []
+                summary_payload = {
+                    "kind": "iter_summary",
+                    "iteration": iteration,
+                    "ok": bool(report.get("ok")),
+                    "probes_passed": probes_passed,
+                    "probes_total": probes_total,
+                    "soft_warnings_count": len(soft_warnings),
+                    "page_errors_count": len(page_errors),
+                    "console_errors_count": len(console_errors),
+                    "frozen_canvas": bool(report.get("frozen_canvas")),
+                    "entity_missing_count": len(missing_entities),
+                    "fail_reason": ",".join(fail_reasons) or "ok",
+                }
+                self._trace(summary_payload)
+                # Phase 3 surprise rules — fire on signals worth a
+                # learner pass. Surprise events are a separate kind
+                # so the reflector can prioritise them.
+                if missing_entities and report.get("ok"):
+                    # Probes passed but entity-render check found gaps.
+                    # This is the Pac-Man-without-Pac-Man shape.
+                    self._trace({
+                        "kind": "surprise",
+                        "category": "state_vs_render_gap",
+                        "iteration": iteration,
+                        "missing_entities": [
+                            m.get("name") for m in missing_entities
+                            if isinstance(m, dict)
+                        ],
+                        "hint": (
+                            "Probes passed but the entity-render check "
+                            "flagged entities that exist in state but "
+                            "aren't drawn on the canvas. Strong signal "
+                            "to add a dynamic probe that samples canvas "
+                            "pixels at the player position."
+                        ),
+                    })
+                if not report.get("ok") and self._previous_report_ok is True:
+                    # Last iter was clean; this one regressed.
+                    self._trace({
+                        "kind": "surprise",
+                        "category": "regression_after_clean_iter",
+                        "iteration": iteration,
+                        "fail_reason": summary_payload["fail_reason"],
+                        "hint": (
+                            "Iter N-1 passed all probes; iter N "
+                            "regressed. The fix-mode prompt should "
+                            "favour reverting recent edits, not "
+                            "elaborating on them. Common cause: model "
+                            "rewrote working code while trying to add "
+                            "a feature."
+                        ),
+                    })
+            except Exception as e:
+                self._trace({
+                    "kind": "iter_summary_error",
+                    "iteration": iteration,
+                    "err": str(e)[:200],
+                })
+
             # Auto-arm step-mode on the FIRST failing iter. Rationale
             # (donkey-kong trace 20260513_122154): iter 2 burned 7 min
             # writing a 22 KB file that loaded with ERR_FILE_NOT_FOUND
@@ -9799,40 +10812,78 @@ class GameAgent:
                     })
                     critic_backend = None
                 if critic_backend is not None:
-                    try:
-                        critic_bk = self.get_backend("critic")
-                        if critic_bk is getattr(self, "_backend3", None):
-                            vc_role = getattr(self, "_model3_role", None) or "critic"
-                        elif critic_bk is getattr(self, "_backend2", None):
-                            vc_role = getattr(self, "_model2_role", None) or "critic"
-                        else:
-                            vc_role = "critic"
+                    critic_bk = self.get_backend("critic")
+                    if critic_bk is getattr(self, "_backend3", None):
+                        vc_role = getattr(self, "_model3_role", None) or "critic"
+                    elif critic_bk is getattr(self, "_backend2", None):
+                        vc_role = getattr(self, "_model2_role", None) or "critic"
+                    else:
+                        vc_role = "critic"
+                    # Phase 1A — when the critic is on a separate slot
+                    # from the coder, spawn it as a background task so its
+                    # compute overlaps with iter N+1's coder stream. The
+                    # coaching lands in `_pending_coaching` whenever the
+                    # task completes (one-turn lag at worst) and is
+                    # drained at the next user-turn boundary. On
+                    # single-slot configs (critic backend == coder
+                    # backend) we await inline — concurrent runs would
+                    # just queue at the daemon, no benefit.
+                    if self._critic_runs_on_independent_slot(critic_backend):
+                        # If a previous critic task is still in flight,
+                        # let it finish first (or drain non-blocking).
+                        # We don't pile up tasks — one critic at a time.
+                        await self._drain_pending_critic_task(wait=False)
                         yield self._record(AgentEvent(
-                            "activity",
-                            "streaming",
-                            {"label": "visual critic", "role": vc_role},
+                            "info",
+                            f"[dim]visual critic spawned on slot ({vc_role}) — "
+                            f"runs in parallel with iter {iteration + 1}[/dim]",
                         ))
-                        critique = await self.run_visual_critic(
-                            after_bytes,
-                            before_bytes,
-                        )
-                        yield self._record(self._activity_idle_event(vc_role))
-                        if critique:
-                            cleaned = critique.strip()
-                            if cleaned and "ok" not in cleaned.lower()[:30]:
-                                prefix = "VISUAL CRITIC (looked at the screenshot of your last iteration): "
-                                self._pending_coaching.append(prefix + cleaned)
-                                # Also log a visible event so the TUI logs show it!
-                                yield self._record(AgentEvent(
-                                    "info",
-                                    f"[magenta]visual critic[/magenta] (iter {iteration}): {cleaned}"
-                                ))
-                    except Exception as exc:
                         self._trace({
-                            "kind": "visual_critic_error",
+                            "kind": "visual_critic_spawned_concurrent",
                             "iteration": iteration,
-                            "error": str(exc),
+                            "vc_role": vc_role,
                         })
+                        try:
+                            self._critic_task = asyncio.create_task(
+                                self._spawn_visual_critic(
+                                    after_bytes, before_bytes, iteration, vc_role,
+                                )
+                            )
+                        except Exception as exc:
+                            self._trace({
+                                "kind": "visual_critic_spawn_error",
+                                "iteration": iteration,
+                                "error": str(exc)[:240],
+                            })
+                    else:
+                        # Blocking inline path — preserved for single-slot
+                        # / single-GPU configurations.
+                        try:
+                            yield self._record(AgentEvent(
+                                "activity",
+                                "streaming",
+                                {"label": "visual critic", "role": vc_role},
+                            ))
+                            critique = await self.run_visual_critic(
+                                after_bytes,
+                                before_bytes,
+                            )
+                            yield self._record(self._activity_idle_event(vc_role))
+                            if critique:
+                                cleaned = critique.strip()
+                                if cleaned and "ok" not in cleaned.lower()[:30]:
+                                    prefix = "VISUAL CRITIC (looked at the screenshot of your last iteration): "
+                                    self._pending_coaching.append(prefix + cleaned)
+                                    yield self._record(AgentEvent(
+                                        "info",
+                                        f"[magenta]visual critic[/magenta] (iter {iteration}): {cleaned}"
+                                    ))
+                        except Exception as exc:
+                            self._trace({
+                                "kind": "visual_critic_error",
+                                "iteration": iteration,
+                                "error": str(exc),
+                            })
                 else:
                     try:
                         await self._run_vision_judge(after_bytes, iteration)
@@ -9850,6 +10901,20 @@ class GameAgent:
                     "kind": "opening_book_sidecars_failed",
                     "iteration": iteration,
                     "error": str(exc),
+                })
+            # Phase 1.5 — autonomous self-feedback. Only fires on clean
+            # iters (probes_ok) and respects the /feedback toggle + the
+            # budget governor + the Ctrl+D fast-path. Findings flow into
+            # _pending_feedback so Phase 0.1's partitioner handles them
+            # like real user feedback.
+            try:
+                async for _af_ev in self._run_autonomous_playtest(iteration, report):
+                    yield _af_ev
+            except Exception as exc:
+                self._trace({
+                    "kind": "autonomous_playtest_error",
+                    "iteration": iteration,
+                    "error": str(exc)[:240],
                 })
             if (
                 self._use_double_screenshot

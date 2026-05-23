@@ -2556,6 +2556,130 @@ def _opening_book_seed_items() -> dict[str, list[OpeningBookItem]]:
                     "expect": "state_returns_initial",
                 },
             ),
+            # Phase 1.5 — autonomous-mode recipes. Driven by the agent's
+            # _run_autonomous_playtest hook, NOT the standard harness
+            # check pass. Each recipe carries a `type: "behavior_playtest"`
+            # marker so the existing opening-book pipeline ignores it
+            # (it only handles the legacy `input_delta` / `state_delta`
+            # / `restart_reset` types). Every recipe is GENRE-FREE —
+            # applicability gates filter on observable structure (state
+            # exposure, canvas presence) and never on subject matter.
+            PlaytestRecipe(
+                id="entity-progress-over-time",
+                kind="playtest",
+                content=(
+                    "For any game with self-driven motion (animations, AI, "
+                    "projectiles, timers), with no user input, the game "
+                    "state or canvas pixels should advance over a 10-second "
+                    "observation window. If nothing changes the game is "
+                    "stuck and the user can't tell because the page didn't "
+                    "crash. Catches the 'agent shipped a frozen game' bug."
+                ),
+                tags=["progress", "motion", "stuck", "frozen", "ai", "timer"],
+                verified=True,
+                helpful=1,
+                pass_count=1,
+                recipe={
+                    "type": "behavior_playtest",
+                    "applies_when": (
+                        "(()=>{const c=document.querySelector('canvas');"
+                        "return !!c && c.width>0 && c.height>0;})()"
+                    ),
+                    "input_script": [{"type": "wait", "ms": 10000}],
+                    "sample_times_s": [0.0, 2.0, 5.0, 9.5],
+                    "check_kind": "any_progress",
+                    "finding_label": (
+                        "After 10 seconds with no user input, neither the "
+                        "canvas pixels nor any exposed game-state field "
+                        "changed. The game appears frozen — likely no RAF "
+                        "loop, no AI tick, or a stuck game-state."
+                    ),
+                },
+            ),
+            PlaytestRecipe(
+                id="input-axis-matches-facing",
+                kind="playtest",
+                content=(
+                    "For controllable games that expose a player position "
+                    "AND a facing/angle, holding the 'forward' control "
+                    "should produce a position delta whose angle matches "
+                    "the rendered facing (±15°). Catches the bug where "
+                    "the forward key is mapped to a world axis instead of "
+                    "the facing-vector projection (cos/sin of facing)."
+                ),
+                tags=["controls", "facing", "direction", "movement", "forward"],
+                verified=True,
+                helpful=1,
+                pass_count=1,
+                recipe={
+                    "type": "behavior_playtest",
+                    "applies_when": (
+                        "(()=>{const s=window.state||window.gameState;"
+                        "if(!s)return false;"
+                        "const p=s.player||s.ship||s.hero||s;"
+                        "const hasPos=typeof p.x==='number'&&typeof p.y==='number';"
+                        "const hasFace=typeof p.facing==='number'||"
+                        "typeof p.angle==='number'||typeof p.heading==='number'||"
+                        "typeof p.rot==='number'||typeof p.rotation==='number';"
+                        "return hasPos&&hasFace;})()"
+                    ),
+                    "input_script": [
+                        {"type": "wait", "ms": 200},
+                        {"type": "keydown", "key": "ArrowUp", "duration_ms": 1000},
+                    ],
+                    "sample_times_s": [0.05, 1.30],
+                    "check_kind": "facing_matches_movement",
+                    "finding_label": (
+                        "Held the forward control for 1 s. The position "
+                        "moved, but in a direction that doesn't match the "
+                        "facing/angle exposed on the player. The forward "
+                        "control is likely mapped to a fixed world axis "
+                        "(world-X or world-Y) instead of cos/sin of the "
+                        "player's facing. Project velocity through the "
+                        "facing in the movement update."
+                    ),
+                },
+            ),
+            PlaytestRecipe(
+                id="held-key-stays-in-bounds",
+                kind="playtest",
+                content=(
+                    "For controllable games that expose a player position "
+                    "and a canvas, holding any directional control for "
+                    "3 seconds should NOT carry the player outside the "
+                    "canvas viewport. Out-of-bounds means the boundary or "
+                    "wall logic is missing — the entity flies off-map. "
+                    "Generic version of the 'ghosts walk through walls' "
+                    "shape."
+                ),
+                tags=["bounds", "wall", "collision", "boundary", "off-screen"],
+                verified=True,
+                helpful=1,
+                pass_count=1,
+                recipe={
+                    "type": "behavior_playtest",
+                    "applies_when": (
+                        "(()=>{const c=document.querySelector('canvas');"
+                        "if(!c||!c.width||!c.height)return false;"
+                        "const s=window.state||window.gameState;if(!s)return false;"
+                        "const p=s.player||s.ship||s.hero||s;"
+                        "return typeof p.x==='number'&&typeof p.y==='number';})()"
+                    ),
+                    "input_script": [
+                        {"type": "wait", "ms": 200},
+                        {"type": "keydown", "key": "ArrowRight", "duration_ms": 3000},
+                    ],
+                    "sample_times_s": [0.05, 3.20],
+                    "check_kind": "stays_in_canvas",
+                    "finding_label": (
+                        "Held ArrowRight for 3 s. The player position "
+                        "left the canvas bounds entirely. Either there's "
+                        "no boundary / wall logic in the movement update, "
+                        "or the entity clamp is missing. Add a clamp or "
+                        "wall-collision test in the update step."
+                    ),
+                },
+            ),
         ],
         ASSET_AUDITS_FILENAME: [
             AssetAuditRecipe(

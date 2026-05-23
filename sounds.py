@@ -686,6 +686,12 @@ def generate_sounds(
             stat["cache_hit"] = True
             stat["gen_seconds"] = round(time.time() - t0, 3)
             sound_stats.append(stat)
+            # Phase 1C — live publish so the TUI can show
+            # "Sounds: 2/5 · 1.8s avg" while gen is running.
+            try:
+                audio_generator.last_stats = list(sound_stats)  # type: ignore[attr-defined]
+            except Exception:
+                pass
             continue
         # Cross-session library lookup before paying the GPU.
         if library is not None:
@@ -720,6 +726,12 @@ def generate_sounds(
             )
             stat["gen_seconds"] = round(time.time() - t0, 3)
             sound_stats.append(stat)
+            # Phase 1C — live publish so the TUI can show
+            # "Sounds: 2/5 · 1.8s avg" while gen is running.
+            try:
+                audio_generator.last_stats = list(sound_stats)  # type: ignore[attr-defined]
+            except Exception:
+                pass
             continue
         try:
             # Move temp OGG into cache, then link/copy into session dir.
@@ -744,6 +756,11 @@ def generate_sounds(
         finally:
             stat["gen_seconds"] = round(time.time() - t0, 3)
             sound_stats.append(stat)
+            # Phase 1C — same live-publish for the success path.
+            try:
+                audio_generator.last_stats = list(sound_stats)  # type: ignore[attr-defined]
+            except Exception:
+                pass
             # Best-effort cleanup of the temp file the pipeline wrote.
             try:
                 _os.unlink(gen_path)

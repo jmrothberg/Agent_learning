@@ -499,6 +499,79 @@ class ZImageTurboGenerator:
             self._cuda_device_index = None
             return False
 
+    def generate_batch(self, prompts: list[str]) -> list[str | None]:
+        """Phase 2C — batched txt2img. Same pipeline, one forward pass
+        for N prompts. Returns one path per prompt (None on failure).
+
+        Falls back to per-prompt `generate()` calls on any exception
+        — preserves the existing behavior on hardware that can't fit
+        the batch in VRAM, on diffusers API drift, or on pipelines
+        that don't accept a list prompt argument.
+
+        Caller decides batch size. Stable for batches of 2-4 on a
+        48 GB card with Z-Image-Turbo (~14 GB resident, ~3 GB per
+        batched forward). Larger batches risk OOM; the caller should
+        chunk.
+
+        Wire-in status (2026-05-22): this method is **available** for
+        callers but `generate_assets` is NOT yet refactored to use it
+        — that refactor touches the per-spec cache/chroma-key/library
+        code path with several side effects per asset, and the win
+        (~10s on a 12-asset batch) doesn't justify destabilising the
+        existing per-call flow until we have live coverage. Use this
+        method directly from new code paths; the existing
+        generate_assets continues to call .generate() per spec.
+        """
+        self._last_error = None
+        if not prompts:
+            return []
+        if len(prompts) == 1:
+            return [self.generate(prompts[0])]
+        if not self._lazy_init():
+            return [None] * len(prompts)
+        try:
+            import tempfile
+            import torch
+            gen = torch.Generator(self._device or "cpu").manual_seed(42)
+            result = self._pipeline(
+                prompt=list(prompts),
+                height=768,
+                width=768,
+                num_inference_steps=9,
+                guidance_scale=0.0,
+                generator=gen,
+            )
+            images = getattr(result, "images", None)
+            if not images or len(images) != len(prompts):
+                self._last_error = (
+                    f"batched pipeline returned {len(images) if images else 0} "
+                    f"images for {len(prompts)} prompts — falling back to "
+                    "per-prompt generation."
+                )
+                # Fall back per-prompt so the user still gets all
+                # requested PNGs even if batching is wonky on this
+                # pipeline version.
+                return [self.generate(p) for p in prompts]
+            out: list[str | None] = []
+            for image in images:
+                try:
+                    f = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+                    f.close()
+                    image.save(f.name, format="PNG")
+                    out.append(f.name)
+                except Exception as e:
+                    self._last_error = f"save failed: {type(e).__name__}: {e!s}"
+                    out.append(None)
+            return out
+        except Exception as e:
+            import traceback as _tb
+            self._last_error = (
+                f"batched gen failed, falling back to per-prompt: "
+                f"{type(e).__name__}: {e!s} | "
+                f"trace: {_tb.format_exc().splitlines()[-3:]}"
+            )
+            return [self.generate(p) for p in prompts]
+
     def generate(self, prompt: str) -> str | None:
         """Run inference and save a 768×768 PNG to a temp file. Returns
         the absolute path, or None on failure (caller skips that asset).
@@ -1075,6 +1148,15 @@ def generate_assets(
             stat["gen_seconds"] = round(time.time() - t0, 3)
             _attach_diffuser_stat(stat, image_generator)
             asset_stats.append(stat)
+            # Phase 1C — make progress visible LIVE by publishing
+            # the partial stats list after each asset, so the TUI
+            # poller can render "Sprites: 4/12 · 2.9s avg" while gen
+            # is still running. Caller polls `image_generator.last_stats`
+            # at the existing 1 Hz status tick.
+            try:
+                image_generator.last_stats = list(asset_stats)  # type: ignore[attr-defined]
+            except Exception:
+                pass
             continue
         # Cross-session library lookup — only for root assets (img2img
         # children depend on session-local parents). Returns the path
@@ -1146,6 +1228,15 @@ def generate_assets(
                 else image_generator,
             )
             asset_stats.append(stat)
+            # Phase 1C — make progress visible LIVE by publishing
+            # the partial stats list after each asset, so the TUI
+            # poller can render "Sprites: 4/12 · 2.9s avg" while gen
+            # is still running. Caller polls `image_generator.last_stats`
+            # at the existing 1 Hz status tick.
+            try:
+                image_generator.last_stats = list(asset_stats)  # type: ignore[attr-defined]
+            except Exception:
+                pass
             continue
         try:
             from PIL import Image
@@ -1197,6 +1288,11 @@ def generate_assets(
                 else image_generator,
             )
             asset_stats.append(stat)
+            # Phase 1C — same live-publish for the success branch.
+            try:
+                image_generator.last_stats = list(asset_stats)  # type: ignore[attr-defined]
+            except Exception:
+                pass
     # Stash stats on the generator so the caller can read them out.
     try:
         image_generator.last_stats = asset_stats  # type: ignore[attr-defined]

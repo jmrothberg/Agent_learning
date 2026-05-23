@@ -575,6 +575,104 @@ _CANVAS_HASH_JS = """
 # sample would all hit the uniform background and miss the centered
 # content. With 1024 samples, even small centered text / a single
 # rendered sprite produces colors.size >= 2 → not blank.
+# Phase 1.5.1 — detect "state has the entity but canvas doesn't render
+# it". General, no genre logic: scans top-level fields on window.state
+# / window.gameState for objects with numeric .x/.y; tries both raw-
+# pixel and inferred-tile coordinate interpretations; samples a 16×16
+# patch around each candidate position; flags entities where >80% of
+# the patch pixels are background-colored (low alpha OR close to the
+# top-left corner color). Catches the failure shape from the 2026-05-22
+# Pac-Man trace where pacman_exists passed on state but no Pac-Man
+# was drawn. Returns None when nothing to check, else
+# {checked: N, missing: [{name, x, y, bg_fraction, position_kind}]}.
+_ENTITY_RENDERED_JS = """
+(() => {
+  const s = window.state || window.gameState;
+  if (!s || typeof s !== 'object') return null;
+  const c = document.querySelector('canvas');
+  if (!c || !c.width || !c.height) return null;
+  let ctx;
+  try {
+    ctx = c.getContext('2d', {willReadFrequently: true});
+  } catch (e) { return null; }
+  if (!ctx) return null;
+  let bg;
+  try {
+    bg = ctx.getImageData(0, 0, 4, 4).data;
+  } catch (e) { return null; }
+  const bgR = bg[0], bgG = bg[1], bgB = bg[2];
+
+  // Find candidate entities: top-level state fields whose value is an
+  // object with numeric .x AND .y. Skip the state object itself.
+  const candidates = [];
+  for (const k in s) {
+    if (k.startsWith('_')) continue;
+    let v;
+    try { v = s[k]; } catch (e) { continue; }
+    if (v && typeof v === 'object' && !Array.isArray(v)
+        && typeof v.x === 'number' && typeof v.y === 'number'
+        && isFinite(v.x) && isFinite(v.y)) {
+      candidates.push({name: k, x: v.x, y: v.y});
+    }
+  }
+  if (candidates.length === 0) return null;
+
+  // Tile-size inference: many grid games store coords in tile units
+  // (e.g. entity.x = 14 = column 14). We don't know the grid count
+  // generically, so we try a few common arcade widths and pick the
+  // interpretation with the lowest background fraction for each entity.
+  const tileCandidates = [28, 32, 20, 16, 8];
+
+  const missing = [];
+  for (const ent of candidates) {
+    const positions = [{kind: 'pixel', px: ent.x, py: ent.y}];
+    for (const n of tileCandidates) {
+      const t = c.width / n;
+      positions.push({
+        kind: `tile${n}`,
+        px: ent.x * t + t / 2,
+        py: ent.y * t + t / 2,
+      });
+    }
+    let bestPos = null, bestBgFrac = 1.0;
+    for (const p of positions) {
+      if (p.px < 4 || p.px > c.width - 4
+          || p.py < 4 || p.py > c.height - 4) continue;
+      let patch;
+      try {
+        patch = ctx.getImageData(
+          Math.max(0, Math.round(p.px) - 8),
+          Math.max(0, Math.round(p.py) - 8),
+          16, 16
+        ).data;
+      } catch (e) { continue; }
+      let bgCount = 0, total = 0;
+      for (let i = 0; i < patch.length; i += 4) {
+        total++;
+        const r = patch[i], g = patch[i+1], b = patch[i+2], a = patch[i+3];
+        const delta = Math.abs(r - bgR) + Math.abs(g - bgG) + Math.abs(b - bgB);
+        if (a < 32 || delta < 30) bgCount++;
+      }
+      const bgFrac = total > 0 ? bgCount / total : 1.0;
+      if (bestPos === null || bgFrac < bestBgFrac) {
+        bestPos = p;
+        bestBgFrac = bgFrac;
+      }
+    }
+    if (bestPos !== null && bestBgFrac > 0.80) {
+      missing.push({
+        name: ent.name,
+        x: ent.x, y: ent.y,
+        bg_fraction: Math.round(bestBgFrac * 100) / 100,
+        position_kind: bestPos.kind,
+      });
+    }
+  }
+  return {checked: candidates.length, missing: missing};
+})();
+"""
+
+
 _CANVAS_PROBE_JS = """
 () => {
     const c = document.querySelector('canvas');
@@ -2157,6 +2255,40 @@ class LiveBrowser:
                     f"OPENING BOOK CHECK FAILED [{chk.get('id','recipe')}]: "
                     f"{chk.get('err','')[:180]}"
                 )
+        # Phase 1.5.1 — state-has-entity-but-canvas-doesn't-render-it.
+        # Detects the failure shape from the 2026-05-22 Pac-Man trace:
+        # gameState.pacman.x exists, the probe `gameState.pacman.x !==
+        # undefined` passes, the canvas is NOT blank (maze + ghosts +
+        # dots render), but the Pac-Man itself is invisible because the
+        # draw() function never references the sprite.
+        # General: works on any game whose state exposes a top-level
+        # field with numeric .x/.y. Tries both raw-pixel and inferred-
+        # tile-coordinate interpretations. Soft warning so the model
+        # sees it in the report and the harness ok flag flips.
+        try:
+            entity_render_result = await self._safe_eval(_ENTITY_RENDERED_JS)
+        except Exception:
+            entity_render_result = None
+        if isinstance(entity_render_result, dict):
+            missing = entity_render_result.get("missing") or []
+            report["entity_render_check"] = entity_render_result
+            for m in missing:
+                if not isinstance(m, dict):
+                    continue
+                name = m.get("name", "?")
+                bg_frac = m.get("bg_fraction", 0)
+                pk = m.get("position_kind", "?")
+                ex = m.get("x", 0)
+                ey = m.get("y", 0)
+                report["soft_warnings"].append(
+                    f"ENTITY-NOT-RENDERED [{name}]: gameState.{name} is "
+                    f"at ({ex},{ey}) but the canvas at that position is "
+                    f"{int(bg_frac * 100)}% background "
+                    f"(position interpreted as {pk}). The entity is "
+                    "in state but not drawn — check the draw() / render "
+                    "function references this entity, and that any "
+                    "sprite/image is decoded before drawImage is called."
+                )
         # Probe errors are derived from probe_results (entries with
         # ok=False AND non-empty err).
         report["probe_errors"] = [
@@ -2455,6 +2587,177 @@ class LiveBrowser:
             return await self._page.evaluate(js)
         except Exception:
             return None
+
+    # ---- Phase 1.5 — multi-window playtest capture --------------------
+    #
+    # Generalises _input_smoke_test into a scripted timeline: drive
+    # synthetic input across multiple time windows and sample
+    # screenshots + game state at requested times. Used by the
+    # autonomous self-feedback loop to detect bugs a single-frame
+    # critic cannot — entity-stuck, input-axis-mismatch, out-of-bounds.
+    #
+    # Genre-free by design: no recipe-specific code lives here. Recipes
+    # in the root playbook supply their own `input_script` (list of
+    # action dicts) and `sample_times_s` (when to capture state); this
+    # method just executes them and returns the timeline.
+
+    async def record_playtest(
+        self,
+        input_script: list[dict],
+        sample_times_s: list[float],
+        *,
+        capture_screenshots: bool = False,
+        state_expr: str | None = None,
+    ) -> dict[str, Any]:
+        """Drive a scripted input timeline and sample state at intervals.
+
+        `input_script` items support:
+          {"type": "wait", "ms": 1000}
+          {"type": "keydown", "key": "ArrowUp", "duration_ms": 1000}
+            — fires keydown, sleeps duration_ms, fires keyup.
+          {"type": "press", "key": "Space"}
+            — single press event (~50 ms hold internally).
+          {"type": "click", "x": 100, "y": 100}
+            — mouse click at canvas-relative coords (clamped to viewport).
+
+        `sample_times_s` lists offsets from the start of the script at
+        which to capture state. Each sample carries:
+          {
+            "t_s": float,         # actual elapsed time
+            "canvas_hash": str?,  # 32x32 downsample hash, None on failure
+            "state": dict?,       # window.state / window.gameState
+                                  #   flattened to {dotted: number}
+            "screenshot_b64": str?,  # only when capture_screenshots=True
+            "custom": Any?,       # `state_expr` evaluated against page
+          }
+
+        Returns: {"ok": bool, "samples": [...], "errors": [...],
+                  "input_script_replay": <echoed for the trace>}.
+
+        Never raises — caller treats the timeline as advisory and
+        gracefully skips findings on incomplete captures.
+        """
+        import asyncio
+        import base64
+        import time as _t
+        result: dict[str, Any] = {
+            "ok": False,
+            "samples": [],
+            "errors": [],
+            "input_script_replay": list(input_script or []),
+        }
+        if self._page is None:
+            result["errors"].append("no page open")
+            return result
+        if not sample_times_s:
+            result["errors"].append("no sample_times_s requested")
+            return result
+
+        try:
+            await self._page.bring_to_front()
+            await self._page.evaluate("if (document.body) document.body.focus();")
+        except Exception:
+            pass
+
+        # Snapshot helper. State expression mirrors _input_smoke_test's
+        # numeric-leaf flatten; we keep it inline here so the recipe
+        # contract doesn't depend on private helpers.
+        _STATE_JS = (
+            "(()=>{const s=window.state||window.gameState||null;"
+            "if(!s||typeof s!=='object')return null;"
+            "const out={};const stack=[['',s,0]];const MAXD=4;const MAXN=80;"
+            "while(stack.length){const[pref,obj,depth]=stack.pop();"
+            "if(depth>MAXD)continue;let n=0;"
+            "for(const k in obj){if(n++>MAXN)break;let v;try{v=obj[k]}catch(e){continue}"
+            "if(typeof v==='number'&&Number.isFinite(v))out[pref?pref+'.'+k:k]=v;"
+            "else if(typeof v==='boolean')out[pref?pref+'.'+k:k]=v?1:0;"
+            "else if(v&&typeof v==='object'&&!Array.isArray(v))stack.push([pref?pref+'.'+k:k,v,depth+1]);}}"
+            "return out;})()"
+        )
+        _CANVAS_HASH_LITERAL = (
+            "(()=>{const c=document.querySelector('canvas');if(!c||!c.width||!c.height)return null;"
+            "try{const tmp=document.createElement('canvas');tmp.width=32;tmp.height=32;"
+            "const tctx=tmp.getContext('2d',{willReadFrequently:true});"
+            "tctx.drawImage(c,0,0,32,32);"
+            "const d=tctx.getImageData(0,0,32,32).data;let h=0;"
+            "for(let i=0;i<d.length;i+=4){h=((h*131)+(d[i]<<16)+(d[i+1]<<8)+d[i+2])>>>0;}"
+            "return h.toString(16);}catch(e){return null}})()"
+        )
+
+        async def _sample(at_t: float) -> dict[str, Any]:
+            entry: dict[str, Any] = {"t_s": round(at_t, 3)}
+            try:
+                entry["canvas_hash"] = await self._safe_eval(_CANVAS_HASH_LITERAL)
+            except Exception as e:
+                entry["canvas_hash"] = None
+                entry["errors"] = [f"hash:{e}"]
+            try:
+                entry["state"] = await self._safe_eval(_STATE_JS)
+            except Exception as e:
+                entry["state"] = None
+                entry.setdefault("errors", []).append(f"state:{e}")
+            if state_expr:
+                try:
+                    entry["custom"] = await self._safe_eval(state_expr)
+                except Exception as e:
+                    entry["custom"] = None
+                    entry.setdefault("errors", []).append(f"custom:{e}")
+            if capture_screenshots:
+                try:
+                    raw = await self._page.screenshot(full_page=False)
+                    entry["screenshot_b64"] = base64.b64encode(raw).decode("ascii")
+                except Exception as e:
+                    entry["screenshot_b64"] = None
+                    entry.setdefault("errors", []).append(f"shot:{e}")
+            return entry
+
+        # Run the input script and sampler concurrently. We schedule each
+        # sample as a sleep + capture task so input + sampling run on the
+        # same event loop without stepping on each other.
+        started_at = _t.monotonic()
+
+        async def _run_script() -> None:
+            for action in input_script or []:
+                kind = (action.get("type") or "").lower()
+                try:
+                    if kind == "wait":
+                        await asyncio.sleep((action.get("ms") or 0) / 1000.0)
+                    elif kind == "keydown":
+                        key = action.get("key") or "ArrowRight"
+                        dur = (action.get("duration_ms") or 1000) / 1000.0
+                        await self._page.keyboard.down(key)
+                        try:
+                            await asyncio.sleep(dur)
+                        finally:
+                            await self._page.keyboard.up(key)
+                    elif kind == "press":
+                        key = action.get("key") or "Space"
+                        await self._page.keyboard.press(key, delay=50)
+                    elif kind == "click":
+                        x = int(action.get("x") or 0)
+                        y = int(action.get("y") or 0)
+                        await self._page.mouse.click(x, y)
+                except Exception as e:
+                    result["errors"].append(f"action {kind}:{e}")
+
+        async def _run_samples() -> None:
+            for t in sample_times_s:
+                target = float(t)
+                # Sleep until at least `target` seconds after start.
+                while True:
+                    elapsed = _t.monotonic() - started_at
+                    if elapsed >= target:
+                        break
+                    await asyncio.sleep(max(0.01, target - elapsed))
+                entry = await _sample(_t.monotonic() - started_at)
+                result["samples"].append(entry)
+
+        try:
+            await asyncio.gather(_run_script(), _run_samples())
+            result["ok"] = True
+        except Exception as e:
+            result["errors"].append(f"gather:{e}")
+        return result
 
     async def _run_opening_book_recipes(
         self,

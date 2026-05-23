@@ -307,6 +307,35 @@ ULTRA IMPORTANT rules:
     variables, conventions, with code-snippet phrasing where helpful.
   - If nothing learnable came out of this session, return empty arrays.
 
+Trace event kinds you may encounter (Phase 0–3 instrumentation):
+  - `iter_summary`         per-iter probe / soft-warning / error counts +
+                            a `fail_reason` string. Walk these to find
+                            the first iter that regressed.
+  - `surprise`             pre-flagged class of failure (category field):
+                            `state_vs_render_gap` (entity in state, not
+                            drawn), `regression_after_clean_iter`,
+                            `non_slot1_bon_winner` (alternate slot won
+                            the fan-out). When present, weight these
+                            observations higher than the regular
+                            per-stream events.
+  - `best_of_n_attempt`    per-candidate score + slot + temperature.
+                            Look for candidates that scored highest
+                            despite low temperature, or vice versa.
+  - `patch_outcome`        per-block applied / ambiguous / no_match
+                            with a nearest-anchor preview when no_match.
+  - `slow_prefill`         tokens<5 after 120s — cross-slot KV cache
+                            stall. The hint string explains how
+                            Backend.warm_prefix avoids it.
+  - `mid_session_assets_deferred_for_user_style` user wanted a rebrand;
+                            agent skipped GPU work to save it for the
+                            next turn.
+  - `autonomous_playtest_skipped` reason field tells you why the
+                            multi-screenshot playtest didn't run.
+  - `multi_frame_intent_detected`, `media_only_parallel_inject`,
+    `prefill_warm`, `runaway_stream_warning` — additional Phase 0–1
+                            visibility events the reflector can ignore
+                            unless they cluster with a failure.
+
 Output STRICT JSON ONLY. No prose outside the JSON. Schema:
 
 {

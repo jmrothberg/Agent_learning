@@ -964,6 +964,12 @@ class CodingBoxApp(App):
         self._model3_last_token_at: float = 0.0
         self._model3_is_streaming: bool = False
         self._assets_summary: str = ""        # sticky summary of last batch
+        # Phase 1C — in-flight totals so the status panel can render
+        # live "Sprites: 4/12 · 2.9s avg · ~24s ETA" rows. Set when
+        # the agent emits `activity:generating_assets`, cleared when
+        # the `assets` completion event fires.
+        self._assets_in_flight_total: int = 0
+        self._sounds_in_flight_total: int = 0
         # Sticky sounds summary — same pattern as assets. Populated from
         # the `sounds` event payload; cleared on session reset. Looping
         # entries surface a `(loop)` suffix in the rendered list.
@@ -1080,6 +1086,15 @@ class CodingBoxApp(App):
         # Advanced agent behavior bundles (toggled dynamically via slash commands)
         self._use_prefill: bool = True
         self._use_vlm_critique: bool = False
+        # Phase 1.5 — autonomous self-feedback loop. After each clean
+        # iter, runs a short scripted playtest, captures multi-window
+        # screenshots, evaluates genre-free behavior recipes, and queues
+        # user-style feedback into _pending_feedback. Default ON; one
+        # slash command (/feedback off) disables if it ever causes
+        # regressions. Existing test reports + visual critic + patch
+        # diagnostics are NOT gated by this — only the extra autonomous
+        # direction is.
+        self._use_autonomous_feedback: bool = True
         # Auto-staff flags (2026-05-21): True when the matching feature
         # was flipped by auto-enable (sidecar role or local-VLM detect)
         # rather than by an explicit toggle. Surfaced in the status panel
@@ -1567,6 +1582,31 @@ class CodingBoxApp(App):
                 color="magenta",
                 model_name=self._session_model3,
             ))
+        # Phase 0.12 — queued-feedback banner right under the activity
+        # rows so users can see "my feedback IS pending" during a long
+        # stream. The 2026-05-22 trace had 25 minutes of silent waiting
+        # while a stream finished and the queued feedback was invisible
+        # at the top of the panel — the existing `Queued (N):` section
+        # only appears further down. This banner is high-visibility
+        # (bold yellow) and shows when ANY input is queued for the next
+        # user-turn boundary.
+        if self.agent is not None:
+            pending_count = len(getattr(self.agent, "_pending_feedback", []) or [])
+            pending_ans = getattr(self.agent, "_pending_answer", None)
+            if pending_ans or pending_count:
+                bits: list[str] = []
+                if pending_ans:
+                    bits.append("1 answer")
+                if pending_count:
+                    bits.append(
+                        f"{pending_count} feedback item{'s' if pending_count != 1 else ''}"
+                    )
+                summary = " + ".join(bits)
+                lines.append(
+                    f"[bold yellow]⚠ Queued for next user-turn:[/bold yellow] "
+                    f"{summary} [dim](inject at iter boundary — current stream "
+                    f"finishes first)[/dim]\n"
+                )
         return "".join(lines)
 
     def _render_mode_row(self) -> str:
@@ -2132,17 +2172,97 @@ class CodingBoxApp(App):
 
     def _render_assets_block(self) -> str:
         """Sticky multi-line summary of the most recent asset batch.
-        Empty when no assets have been generated this session."""
+
+        Phase 1C — when a gen is IN-FLIGHT (the `last_stats` count on
+        the generator is rising but no `assets_generated` event has
+        fired yet), render a live progress row instead of the sticky
+        summary so the user sees the rate + ETA in real time.
+        Empty when no assets have been generated this session.
+        """
+        live = self._format_assets_live_progress()
+        if live:
+            return f"\n{live}\n"
         if not self._assets_summary:
             return ""
         return f"\n{self._assets_summary}\n"
 
     def _render_sounds_block(self) -> str:
         """Sticky compact summary of the most recent sound batch.
-        Empty when no sounds have been generated this session."""
+
+        Phase 1C — same live-progress treatment as the assets block.
+        Empty when no sounds have been generated this session.
+        """
+        live = self._format_sounds_live_progress()
+        if live:
+            return f"\n{live}\n"
         if not self._sounds_summary:
             return ""
         return f"\n{self._sounds_summary}\n"
+
+    def _format_assets_live_progress(self) -> str:
+        """Phase 1C — render `Sprites: 4/12 · 2.9s avg · 0.34/s · ~24s ETA`
+        when an assets gen is mid-flight. Detection: the generator has
+        `last_stats` but the in-flight `_assets_in_flight_total` is set
+        and > len(last_stats). Returns "" when no gen is in flight."""
+        agent = getattr(self, "agent", None)
+        if agent is None:
+            return ""
+        total = getattr(self, "_assets_in_flight_total", 0) or 0
+        if total <= 0:
+            return ""
+        gen = getattr(agent, "_asset_generator", None)
+        stats = list(getattr(gen, "last_stats", None) or []) if gen else []
+        produced = len(stats)
+        if produced >= total:
+            # Done — let the sticky summary take over on next tick.
+            return ""
+        avg_s = 0.0
+        if stats:
+            secs = [
+                s.get("gen_seconds", 0.0)
+                for s in stats
+                if isinstance(s.get("gen_seconds"), (int, float))
+            ]
+            if secs:
+                avg_s = sum(secs) / len(secs)
+        rate = (1.0 / avg_s) if avg_s > 0.0 else 0.0
+        remaining = max(0, total - produced)
+        eta_s = remaining * avg_s if avg_s > 0.0 else 0.0
+        return (
+            f"[b]Sprites:[/b] {produced}/{total} "
+            f"[dim]· {avg_s:.1f}s avg · {rate:.2f}/s · "
+            f"~{eta_s:.0f}s ETA[/dim]"
+        )
+
+    def _format_sounds_live_progress(self) -> str:
+        agent = getattr(self, "agent", None)
+        if agent is None:
+            return ""
+        total = getattr(self, "_sounds_in_flight_total", 0) or 0
+        if total <= 0:
+            return ""
+        gen = getattr(agent, "_sound_generator", None)
+        stats = list(getattr(gen, "last_stats", None) or []) if gen else []
+        produced = len(stats)
+        if produced >= total:
+            return ""
+        avg_s = 0.0
+        if stats:
+            secs = [
+                s.get("gen_seconds", 0.0)
+                for s in stats
+                if isinstance(s.get("gen_seconds"), (int, float))
+            ]
+            if secs:
+                avg_s = sum(secs) / len(secs)
+        rate = (1.0 / avg_s) if avg_s > 0.0 else 0.0
+        remaining = max(0, total - produced)
+        eta_s = remaining * avg_s if avg_s > 0.0 else 0.0
+        return (
+            f"[b]Sounds:[/b] {produced}/{total} "
+            f"[dim]· {avg_s:.1f}s avg · {rate:.2f}/s · "
+            f"~{eta_s:.0f}s ETA[/dim]"
+        )
 
     def _render_playbook_block(self) -> str:
         """Show which playbook bullets are currently injected in prompts,
@@ -2842,6 +2962,8 @@ class CodingBoxApp(App):
                 self._cmd_toggle_double_screenshot(arg)
             elif cmd in ("vlm-critique", "vlmcritique", "vc"):
                 self._cmd_toggle_vlm_critique(arg)
+            elif cmd == "feedback":
+                self._cmd_toggle_autonomous_feedback(arg)
             else:
                 self._log_info(f"unknown command /{cmd} — type /help")
         except Exception as e:
@@ -2931,6 +3053,8 @@ class CodingBoxApp(App):
             "  [b]/architect[/b] [on|off]       toggle architect/editor split on complex first-builds (Aider's 2-call pattern; default off)",
             "  [b]/double-screenshot[/b] [on|off] toggle capturing startup + after-input screenshots (default off; helps debugging movement)",
             "  [b]/vlm-critique[/b] [on|off]    toggle attaching screenshot to Phase C self-critique turns (default off; VLM-only)",
+            "  [b]/feedback[/b] [on|off]        toggle autonomous self-feedback loop (default ON · multi-screenshot playtest + genre-free behavior recipes)",
+            "                                  [dim]only the extra direction is gated; test reports, patch diagnostics, and the critic still run when off[/dim]",
             "  [b]/audit[/b]                     print per-bullet earnings (fires, pass-rate, avg-iter) from trace history",
             "  [b]/check[/b] [<N|model>]       visual review + guidance using model #N from /list or a model name",
             "                                  [dim]bare /check uses your active session model if it's a VLM (no API cost)[/dim]",
@@ -4555,6 +4679,7 @@ class CodingBoxApp(App):
             f"  architect-split:      {'ON' if self._use_architect_split else 'off'}{' [auto]' if self._architect_split_auto and self._use_architect_split else ''}",
             f"  double-screenshot:    {'ON' if self._use_double_screenshot else 'off'}",
             f"  vlm-critique:         {'ON' if self._use_vlm_critique else 'off'}{' [auto]' if self._vlm_critique_auto and self._use_vlm_critique else ''}",
+            f"  autonomous /feedback: {'ON' if self._use_autonomous_feedback else 'OFF'}  [dim](multi-shot playtest + recipe checks; /feedback off to disable)[/dim]",
             f"  iter detail:          {self._iter_decision_verbose}",
             f"  run profile:          {self._format_run_profile()}",
             f"  review hook:          {self._profile_review_model or '—'}",
@@ -4850,6 +4975,48 @@ class CodingBoxApp(App):
             self.agent._use_double_screenshot = new_state
         status = "[green]ON[/green]" if new_state else "[yellow]OFF[/yellow]"
         self._log_info(f"double screenshot capturing set to {status}")
+        self._update_status()
+
+    def _cmd_toggle_autonomous_feedback(self, arg: str) -> None:
+        """/feedback [on|off] — toggle the autonomous self-feedback loop.
+
+        When ON (default): after each clean iter, the agent runs a short
+        scripted playtest (multi-window screenshot capture + genre-free
+        behavior recipes from the root playbook), and if something looks
+        wrong it generates one paragraph of user-style feedback and
+        queues it into the same input pipeline real user feedback uses.
+
+        When OFF: existing test reports, patch diagnostics, and the
+        visual critic continue running unchanged. Only the extra
+        autonomous direction is suppressed.
+
+        Sticky across /new. Safe to toggle mid-session.
+        """
+        arg_lc = arg.strip().lower()
+        if arg_lc in ("on", "true", "1", "enable"):
+            new_state = True
+        elif arg_lc in ("off", "false", "0", "disable"):
+            new_state = False
+        elif arg_lc == "":
+            # Show current state instead of flipping when called bare —
+            # autonomous mode has bigger consequences than a vlm-critique
+            # toggle, so we don't silently flip on bare invocation.
+            cur = "[green]ON[/green]" if self._use_autonomous_feedback else "[yellow]OFF[/yellow]"
+            self._log_info(
+                f"autonomous self-feedback is {cur} "
+                "(usage: /feedback on  ·  /feedback off)"
+            )
+            return
+        else:
+            new_state = not self._use_autonomous_feedback
+        self._use_autonomous_feedback = new_state
+        if self.agent is not None:
+            self.agent._use_autonomous_feedback = new_state
+        status = "[green]ON[/green]" if new_state else "[yellow]OFF[/yellow]"
+        self._log_info(
+            f"autonomous self-feedback set to {status} "
+            "(standard error reporting unaffected)"
+        )
         self._update_status()
 
     def _cmd_toggle_vlm_critique(self, arg: str) -> None:
@@ -5219,6 +5386,12 @@ class CodingBoxApp(App):
             backend3=self._session_backend3,
             model3_role=self._session_role3,
         )
+        # Phase 1.5 — autonomous-feedback flag is set on the agent
+        # AFTER construction so we don't have to thread it through
+        # GameAgent.__init__'s long kwargs list (every existing test
+        # that constructs GameAgent would otherwise need updating).
+        # Default on the agent is True; the App's runtime toggle wins.
+        self.agent._use_autonomous_feedback = self._use_autonomous_feedback
         # Apply run-profile step policy on session start.
         if self._run_profile == "local_manual":
             self.agent.set_step_mode(True)
@@ -5725,6 +5898,18 @@ class CodingBoxApp(App):
                 self._activity_role = stream_role
                 self._activity_label = display
                 self._activity_started_at = now
+                # Phase 1C — record in-flight totals so the live
+                # progress row in the status panel can show "Sprites:
+                # N/total · X.Ys avg · ~Y ETA". The agent emits the
+                # `requested` count alongside the activity event.
+                if state == "generating_assets":
+                    req = data.get("requested", 0)
+                    if isinstance(req, int) and req > 0:
+                        self._assets_in_flight_total = req
+                elif state == "generating_sounds":
+                    req = data.get("requested", 0)
+                    if isinstance(req, int) and req > 0:
+                        self._sounds_in_flight_total = req
                 if state == "streaming":
                     if slot == 2:
                         self._model2_is_streaming = True
@@ -5751,6 +5936,9 @@ class CodingBoxApp(App):
 
         elif ev.kind == "assets":
             self._assets_summary = self._format_assets_summary(ev.data or {})
+            # Phase 1C — completion clears the in-flight total so the
+            # live progress row stops rendering on the next tick.
+            self._assets_in_flight_total = 0
             session_dir = (ev.data or {}).get("session_dir")
             if session_dir:
                 try:
@@ -5770,6 +5958,8 @@ class CodingBoxApp(App):
             # names are what you reference in feedback ("make shoot less
             # harsh"); per-sound timing stays in .log / .jsonl.
             self._sounds_summary = self._format_sounds_summary(ev.data or {})
+            # Phase 1C — same clear pattern for sounds.
+            self._sounds_in_flight_total = 0
             session_dir = (ev.data or {}).get("session_dir")
             if session_dir:
                 try:

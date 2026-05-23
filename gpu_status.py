@@ -678,6 +678,38 @@ def _is_four_gpu_linux_nvidia_workstation(snap: GpuSnapshot | None) -> bool:
     return [g.index for g in gpus] == [0, 1, 2, 3]
 
 
+def diffuser_has_dedicated_gpu(snap: GpuSnapshot | None = None) -> bool:
+    """True when the diffuser pipeline runs on a GPU that is NOT shared
+    with any Ollama LLM slot.
+
+    Phase 1B uses this to decide whether to pre-warm diffusers during
+    Phase A architect streaming. On a dedicated-GPU setup the pre-warm
+    is pure speedup (~30-60 s hidden). On a single-GPU setup it would
+    compete with the LLM for VRAM and slow the architect down, so
+    pre-warm must be skipped.
+
+    Detection is observable, not genre-named:
+      - the 4×48 GB workstation has GPU 0 for diffusers, GPUs 1-3 for
+        Ollama (returns True)
+      - a 2-GPU box where one card hosts the LLM and one hosts the
+        diffuser also returns True (provided their indices don't
+        overlap)
+      - a 1-GPU laptop forced to share returns False
+    Conservative: returns False on snapshot failure.
+    """
+    if snap is None:
+        snap = snapshot_gpus()
+    if snap is None or not snap.gpus:
+        return False
+    if len(snap.gpus) <= 1:
+        return False
+    diffuser_idx = pick_diffuser_cuda_index(snap)
+    if diffuser_idx is None:
+        return False
+    llm_indices = set(gpu_indices_with_llm_vram(snap))
+    return diffuser_idx not in llm_indices
+
+
 # Z-Image-Turbo needs ~14 GB VRAM; leave headroom for Stable-Audio on GPU 0.
 _MIN_DIFFUSER_FREE_MIB = 12000
 # Ollama slot daemons pin LLMs to these physical GPUs (see backend autopin).
