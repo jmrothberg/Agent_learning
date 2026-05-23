@@ -387,10 +387,14 @@ from `memory/playtests.jsonl` (recipes with JS `applies_when` gates —
 frozen canvas, facing vs movement, held-key bounds, etc.).
 `LiveBrowser.record_playtest()` drives a timeline and samples state at
 multiple timestamps. Failures produce one paragraph tagged
-`[AUTONOMOUS PLAYTEST]` and enter the same feedback queue as typed input.
-Budget: **3 cycles** per session max; stops after **2** consecutive
-cycles with no findings. Harness failures, patch diagnostics, and the
-visual critic are **unchanged** when autonomous mode is off.
+`[AUTONOMOUS PLAYTEST]` and enter the same feedback queue as typed input
+(unless you **ship with Ctrl+D** first — see above). Budget: **3 cycles**
+per session max; stops after **2** consecutive cycles with no findings.
+Harness failures, patch diagnostics, and the visual critic are
+**unchanged** when autonomous mode is off. The always-on **state-vs-render
+gap** check (below) can also emit `surprise` events with category
+`state_vs_render_gap` when probes pass but an entity with `x`/`y` in
+`window.state` is not visibly drawn.
 
 ### Patch engine
 
@@ -475,7 +479,10 @@ attached to a `tune.py run --auto-learn`.
   HTMLAudioElement** — added so `audio.startWithFadeIn()` and similar
   invented audio APIs fail static, not in Chromium).
 - Repetition-collapse loops (`_ACTUAL_ACTUAL_ACTUAL_…` family, line
-  repeats, suffix loops in large bodies).
+  repeats, suffix loops in large bodies). Mid-stream watchdog (Ollama/MLX)
+  also catches **semicolon-chained** one-line template loops and
+  **mid-identifier** counter runs (`p.onGirder0`, `p.onGirder1`, …) that
+  never produce newlines.
 - Elision sentinels (`// ... rest unchanged`, etc.) — fails the iter
   before shipping a half-implemented file.
 - **Asset path existence**: relative `./*.png` / `./*.ogg` paths in
@@ -755,8 +762,8 @@ is data the agent will see, not just developer notes.
 | `/mode <local_manual\|local_auto\|local_plus_review with <model> [--auto-apply]\|custom>` | Apply a run contract: manual checkpoints, autonomous loop, or autonomous loop with an explicit reviewer hook. |
 | `/playbook`, `/memory` | Toggle playbook bullet injection (`on` / `off`; default on in production TUI). |
 | `/prefill <on\|off>` | Toggle forcing assistant prefill tags (`<plan>`, `<diagnose>`) to prevent preamble talk and lock XML formatting (default ON). |
-| `/architect <on\|off>` | Toggle architect/editor split (Aider's 2-call pattern) on complex first-builds to split planning from coding (default off). This is the Phase B *split*; for the slot-role tag use `/model2 ... --role architect`. |
-| `/allroles` | No-arg bare toggle. Bundles `/architect on` + `/vlm-critique on` so a single loaded LLM covers **coder + critic + architect** with no `/model2` / `/model3` staging or extra GPUs. If a critic- or architect-tagged slot 2/3 is staged, the router still prefers it — `/allroles` only flips the role-using features on. `/reset` clears the bundle. |
+| `/architect <on\|off>` | Toggle architect/editor split (Aider's 2-call pattern) on complex first-builds — planning pass before the coder writes HTML (default off). Distinct from `/model2 … --role architect`, which assigns a **sidecar slot**. |
+| `/allroles` [on\|off] | Toggle **architect-split + vlm-critique** together for **one** loaded LLM (no `/model2` / `/model3`, no extra GPUs). Bare `/allroles` flips on/off. Staged critic/architect slots still win when present. `/reset` clears the bundle. |
 | `/double-screenshot <on\|off>` | Toggle capturing dual screenshots (startup and post-input) to help the model see movement/animation (default off). |
 | `/vlm-critique <on\|off>` | Toggle VLM screenshot attachment during Phase C successful critique turns for layout and UI polishing (default off). Needs a VLM as the loaded model; uses slot 1 when no critic slot is staged. |
 | `/feedback [on\|off]` | Toggle autonomous playtest loop (default **on**). Bare `/feedback` prints state without flipping. When on: after clean iters, genre-free behavior recipes may queue `[AUTONOMOUS PLAYTEST]` coaching. Test reports and the critic still run when off. |
@@ -779,7 +786,9 @@ harness still runs every iter: micro-probes, Chromium load, input smoke
 test, screenshots, canvas freeze checks, and model-authored probes.
 If a local VLM is discoverable, the built-in vision judge can add visual
 coaching; otherwise visual checks stay programmatic unless you run
-`/check` explicitly.
+`/check` explicitly. **`/allroles`** is the shortcut when you want that
+one model to also run architect-split and VLM critique without staging
+slot 2/3 (requires a VLM-capable model for critique screenshots).
 
 **2-model run.** Use `/model` for the coder and `/model2 ... --role
 critic` or `/model2 ... --role architect` for one sidecar:
@@ -1018,6 +1027,9 @@ Use this matrix when validating `chat.py` loop/control changes:
 | Active-stream cutoff regression guard | Rich-media first-build run on local MLX/Ollama model | If tokens or backend progress are still arriving, the model is working. Never stop it with an absolute wall-clock cutoff; only no-activity stalls, repetition loops, deliberation loops, backend max-token caps, hard crashes, or explicit user cancel may stop generation. |
 | Style rebrand feedback | Mid-session: "all new graphics … look like X" with existing `_assets` | `style_rebrand_directive_active` in trace; mid-session `<assets>` may defer as `mid_session_assets_deferred_for_user_style` until coaching applies. |
 | Autonomous playtest | Default TUI; `/feedback on` after clean iter on canvas game | `[AUTONOMOUS PLAYTEST]` may appear in `feedback_queued` when a `behavior_playtest` recipe fails; `/feedback off` suppresses only this path. |
+| Single-LLM all roles | `/model <VLM>` then `/allroles on` | Architect-split + vlm-critique on slot 1; no second GPU. Critic routing uses the loaded model when no `/model2` critic is staged. |
+| Ship while streaming | Ctrl+D or `done` during a long stream | Queued feedback (including autonomous findings) is **dropped** at ship; second Ctrl+D within 2s force-quits the TUI. |
+| MLX stall | `LLM_BACKEND=mlx`, stall mid-stream | No silent fallback to Ollama — MLX-specific recovery hint only; use `/backend ollama` explicitly if you want to switch. |
 
 ---
 
@@ -1408,6 +1420,14 @@ in `tests/` and add a one-line bullet to `playbook.jsonl` via
 - **`Stream ran 15k+ tokens with no end`**: look for `runaway_stream_warning`
   in the log; consider Ctrl+D and a smaller change (`<patch>`) on the next
   turn — the agent does not hard-abort active streams for token count alone.
+- **`Shipped but my queued feedback never applied`**: by design after
+  Ctrl+D / `done` / `/ship` — ship wins over the queue. Re-type the feedback
+  and extend, or ship only after the stream ends.
+- **`MLX stalled then Ollama errors appeared`**: MLX no longer auto-falls back
+  to Ollama; follow the MLX hint or switch backends explicitly.
+- **`Probes pass but nothing visible on canvas`**: check for
+  `ENTITY-NOT-RENDERED` / `surprise` `state_vs_render_gap` — state exists but
+  draw() never references the sprite.
 - **`GPU map says Diffusers not loaded but nvidia-smi shows 20 GB python
   on GPU 0`**: the panel tracks **in-session** pipeline objects, not every
   byte in VRAM. GPU 0 is usually the **chat.py** process until Z-Image
