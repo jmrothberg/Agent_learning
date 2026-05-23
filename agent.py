@@ -783,7 +783,6 @@ _SCOPED_SIZE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\b(?:scale|size)\b", re.I),
 )
 
-
 def _feedback_locks_code(text: str) -> bool:
     """User explicitly forbade code changes for this turn.
 
@@ -2524,8 +2523,7 @@ class GameAgent:
         Empty string when nothing matches OR when the active prompt module
         has set PLAYBOOK_DISABLED = True (gives a v0-prompt the option to
         opt out wholesale). Logs retrieved bullet IDs + stage to the trace
-        so the offline learner can later credit/blame each bullet for the
-        eventual outcome.
+        for postmortem inspection of which bullets fired.
         """
         if self._playbook_top_k <= 0:
             return ""
@@ -3744,6 +3742,10 @@ class GameAgent:
             "probe_keywords": probe_keywords,
             "media_name_lock": mode == "media_only",
             "preserve_baseline": self._scoped_constraints["preserve_baseline"],
+            "art_change": bool(art_change),
+            "sound_change": bool(sound_change),
+            "behavior_scope": behavior_scope,
+            "size_scope": size_scope,
         })
 
     def _scoped_reply_violation(self, reply: str) -> str | None:
@@ -3765,19 +3767,47 @@ class GameAgent:
         patch_count = len(patches)
         has_html = self._extract_html(reply) is not None
         mode = str(cfg.get("mode") or "single_patch")
-        if mode == "media_only":
-            if has_html or patch_count > 0:
-                return "SCOPED MEDIA: emit <assets>/<sounds> only; no <patch>/<html_file>."
-            if not (has_assets or has_sounds):
-                return "SCOPED MEDIA: emit <assets> or <sounds> with existing names."
-            return None
+        # Be permissive about which tag the model chose. The classifier
+        # that picked `media_only` vs `single_patch` reads the user's
+        # English feedback through a regex pattern — it's necessarily
+        # incomplete (natural language is unbounded). When the model
+        # picked a different tag than we expected, it usually has a
+        # reason: e.g., DOOM trace 20260523_171650 iter 4 — user wrote
+        # "do not change any graphics... just shift the pistol 15 px
+        # right" which scored as art_change → media_only, but the model
+        # correctly chose a CSS <patch>. Rejecting that patch with
+        # "SCOPED MEDIA: emit <assets>/<sounds> only" sent the model
+        # into a doom loop where it regenerated the gun asset with a
+        # wrong prompt. Auto-revert is the safety net for genuinely bad
+        # patches; the scope gate's only remaining job is to block full
+        # <html_file> rewrites on small-scope feedback (a single patch
+        # is hard to misjudge in a way auto-revert can't catch).
         if has_html:
-            return "SCOPED PATCH: full <html_file> rewrite blocked; send one <patch>."
-        if patch_count == 0:
-            return "SCOPED PATCH: send exactly one <patch>."
+            return "SCOPED: full <html_file> rewrite blocked; send one <patch>."
+        if not (patch_count or has_assets or has_sounds):
+            return "SCOPED: emit one <patch>, or <assets>/<sounds> with existing names."
         max_patch = int(cfg.get("max_patch_count") or 1)
         if patch_count > max_patch:
-            return f"SCOPED PATCH: send exactly one <patch> (got {patch_count})."
+            # Wording matches the historical "SCOPED PATCH: send exactly
+            # one <patch>" message so existing tests keep working.
+            return f"SCOPED: send exactly one <patch> (got {patch_count})."
+        # Soft trace when the model's tag choice diverges from the
+        # classifier's expectation. Useful for postmortem to spot
+        # patterns without us having to enumerate them in regex.
+        if mode == "media_only" and patch_count > 0 and not (has_assets or has_sounds):
+            self._trace({
+                "kind": "scoped_classifier_overruled_by_model",
+                "expected_mode": mode,
+                "model_emitted": "patch_only",
+                "feedback_preview": str(cfg.get("feedback_preview") or "")[:200],
+            })
+        elif mode == "single_patch" and (has_assets or has_sounds) and patch_count == 0:
+            self._trace({
+                "kind": "scoped_classifier_overruled_by_model",
+                "expected_mode": mode,
+                "model_emitted": "media_only",
+                "feedback_preview": str(cfg.get("feedback_preview") or "")[:200],
+            })
         if bool(cfg.get("require_scope_probe")):
             probes = self._extract_probes(reply)
             if not probes:
@@ -3798,21 +3828,14 @@ class GameAgent:
 
     def _scoped_retry_instruction(self, violation: str) -> str:
         cfg = self._scoped_constraints or {}
-        mode = cfg.get("mode") or "single_patch"
-        if mode == "media_only":
-            allowed_assets = ", ".join(cfg.get("allowed_asset_names") or []) or "(none)"
-            allowed_sounds = ", ".join(cfg.get("allowed_sound_names") or []) or "(none)"
-            return (
-                f"{violation}\n"
-                "Retry now with only <assets>/<sounds> using existing names.\n"
-                f"Allowed asset names: {allowed_assets}. Allowed sound names: {allowed_sounds}."
-            )
         probe_line = ""
         if cfg.get("require_scope_probe"):
             probe_line = " Include one compact <probes> entry verifying the requested behavior."
         return (
             f"{violation}\n"
-            "Retry now with exactly one small <patch>; change only the scoped request."
+            "Retry: emit either one small <patch> (preserve the working "
+            "baseline — change only the scoped request) OR an <assets>/"
+            "<sounds> block re-using EXISTING names."
             f"{probe_line}"
         )
 
@@ -4331,6 +4354,7 @@ class GameAgent:
             consumed_items.append(f"feedback: {fb[:120]}")
 
         self._feedback_deferred_last_turn = False
+        answer_was_consumed = False
         if self._pending_answer is not None:
             ans = self._pending_answer
             parts.append(
@@ -4340,6 +4364,7 @@ class GameAgent:
             )
             self._trace({"kind": "answer_injected", "text": ans})
             self._pending_answer = None
+            answer_was_consumed = True
         if defer_block_active:
             self._feedback_deferred_last_turn = True
             feedback_items = list(code_to_defer)
@@ -5107,12 +5132,14 @@ class GameAgent:
                     for c in coaching_to_inject:
                         self._trace({"kind": "coaching_injected", "text": c})
                 self._pending_coaching.clear()
+        post_clean_with_feedback = bool(
+            base_message
+            and self._last_turn_contract
+            and self._last_turn_contract.get("had_feedback")
+            and self._is_post_clean_instruction(base_message)
+        )
         if base_message:
-            if (
-                self._last_turn_contract
-                and self._last_turn_contract.get("had_feedback")
-                and self._is_post_clean_instruction(base_message)
-            ):
+            if post_clean_with_feedback:
                 # Replace the large clean report with one compact line; the
                 # POST-CLEAN FEEDBACK CONTRACT above carries the important
                 # baseline signal without drowning the user's fresh request.
@@ -5120,6 +5147,35 @@ class GameAgent:
                 self._trace({"kind": "post_clean_report_compacted"})
             else:
                 parts.append(base_message)
+
+        # Inline CURRENT FILE ON DISK on post-clean feedback turns and
+        # whenever an answer is being injected. Without this, the model
+        # is asked to patch concrete code ("remove the circles", "shift
+        # the muzzle flash up") with no file in context — after compaction
+        # the original <html_file> is gone from history, and post-clean
+        # / answer turns don't otherwise carry it (unlike fix_instruction).
+        # The DOOM trace 20260523_152317 has the model literally saying
+        # "I genuinely do not have the file contents in my context this
+        # turn" and giving up. Mirrors the file block from
+        # continuation_instruction.
+        if (post_clean_with_feedback or answer_was_consumed) and self._current_file:
+            parts.append(
+                "CURRENT FILE ON DISK (this is the SOURCE OF TRUTH — patch "
+                "against THIS exact text, character-for-character; earlier "
+                "turns' code may be stale or absent from this prompt):\n"
+                "```html\n"
+                f"{self._current_file}\n"
+                "```"
+            )
+            self._trace({
+                "kind": "current_file_inlined",
+                "reason": (
+                    "post_clean_with_feedback"
+                    if post_clean_with_feedback
+                    else "answer_consumed"
+                ),
+                "bytes": len(self._current_file),
+            })
 
         # Push a confirmation line into the TUI agent log via the token
         # callback. Plain text only — the TUI renders streamed tokens
@@ -5154,9 +5210,18 @@ class GameAgent:
         if not hasattr(self, "_vlm_cache"):
             self._vlm_cache = {}
         if backend in self._vlm_cache:
-            return self._vlm_cache[backend]
+            val = self._vlm_cache[backend]
+            if role == "coder":
+                self._is_vlm = val
+            return val
         val = await backend.is_vlm()
         self._vlm_cache[backend] = val
+        # `self._is_vlm` is read by /ref (chat.py) and the fix-prompt
+        # VLM_REVIEW_NOTE gate (agent.py:12195). Without this assignment
+        # `_is_vlm` stays None for the session and /ref always warns
+        # "active model is text-only" even on Claude Opus / VLM locals.
+        if role == "coder":
+            self._is_vlm = val
         if val:
             self._trace({"kind": "vlm_detected", "model": backend.info.model, "role": role})
             # Auto-staff (added 2026-05-21): if a local VLM is on ANY
@@ -6155,8 +6220,8 @@ class GameAgent:
                 "result_temp": temp,
             })
         # One row per stream summarizing the turn's routing contract.
-        # Read by future debugging tools / the offline learner; does
-        # not affect runtime behavior. Best-effort: any KeyError /
+        # Read by future debugging tools; does not affect runtime
+        # behavior. Best-effort: any KeyError /
         # type error is swallowed by the outer _trace try/except.
         try:
             contract = dict(self._last_turn_contract or {})
@@ -6224,7 +6289,7 @@ class GameAgent:
         # Phase 0.7 — cold KV-cache stalls (cross-slot role switches with
         # no warm_prefix) produce minutes of near-zero token output. The
         # 2026-05-22 chess trace had iter 2 emit 1 token in 740s before
-        # ramping. Threshold below auto-flags this for the learner so
+        # ramping. Threshold below auto-flags this in the trace so
         # future trace mining doesn't have to grep heartbeats by hand.
         _SLOW_PREFILL_TOK_FLOOR = 5
         _SLOW_PREFILL_ELAPSED_FLOOR = 120.0
@@ -6968,12 +7033,12 @@ class GameAgent:
                 # No baseline yet — we shouldn't be using patches. Reject.
                 return None, "patch reply but no baseline file yet"
             res = apply_patches(base, patches)
-            # Phase 0.5 — structured per-block outcome trace for the
-            # learner. The patch_retry_instruction prompt already shows
-            # the model nearest-anchor diagnostics; this records the
-            # same info in JSONL so cross-session pattern mining (e.g.
-            # "the same SEARCH for `let kbCursor` failed in 3 sessions
-            # — the model has a persistent blind spot here") works.
+            # Phase 0.5 — structured per-block outcome trace. The
+            # patch_retry_instruction prompt already shows the model
+            # nearest-anchor diagnostics; this records the same info
+            # in JSONL so cross-session pattern mining (e.g. "the same
+            # SEARCH for `let kbCursor` failed in 3 sessions — the
+            # model has a persistent blind spot here") works.
             if not dry_run:
                 try:
                     from patches import find_anchor as _find_anchor
@@ -10341,8 +10406,8 @@ class GameAgent:
                 # Shotgun-shape detector: flag when the model emitted a
                 # ranked-hypothesis list. We don't reject the turn (the
                 # patch may still be good); we just trace the violation
-                # so the offline learner can credit/blame this pattern,
-                # and surface an info event so the user sees it too.
+                # so postmortem can credit/blame this pattern, and
+                # surface an info event so the user sees it too.
                 if self._diagnose_is_shotgun(diag):
                     self._trace({
                         "kind": "diagnose_shotgun",
@@ -11184,11 +11249,9 @@ class GameAgent:
             self._last_tested_iter = iteration
             yield self._record(AgentEvent("test", report_text, report))
 
-            # Phase 3 — per-iter summary for the learner. Structured,
+            # Phase 3 — per-iter summary in the trace. Structured,
             # one record per iter, with enough signal to spot patterns
-            # across sessions without re-grepping heartbeats. The
-            # learner.py reflector consumes these alongside the
-            # existing per-stream trace events.
+            # across sessions without re-grepping heartbeats.
             try:
                 probes_list = report.get("probes") or []
                 probes_passed = sum(1 for p in probes_list if p.get("ok"))
@@ -11221,9 +11284,9 @@ class GameAgent:
                     "fail_reason": ",".join(fail_reasons) or "ok",
                 }
                 self._trace(summary_payload)
-                # Phase 3 surprise rules — fire on signals worth a
-                # learner pass. Surprise events are a separate kind
-                # so the reflector can prioritise them.
+                # Phase 3 surprise rules — fire on signals worth
+                # postmortem attention. Surprise events are a separate
+                # kind so they're easy to grep out of the trace.
                 if missing_entities and report.get("ok"):
                     # Probes passed but entity-render check found gaps.
                     # This is the Pac-Man-without-Pac-Man shape.
@@ -12787,35 +12850,6 @@ class GameAgent:
             })
         except Exception as e:
             self._trace({"kind": "outcome_record_failed", "err": str(e)})
-        # Close the playbook learning loop. Traces sit in trace_path.parent;
-        # learner.py reads them and merges deltas into playbook.jsonl so
-        # retrieval actually compounds across sessions. Default-on; opt
-        # out via LEARNER_AUTO_APPLY=0 (e.g. tune.py runs that don't want
-        # to mutate the shared playbook).
-        if os.environ.get("LEARNER_AUTO_APPLY", "1").lower() not in ("0", "false", "no"):
-            self._auto_apply_learner()
-
-    def _auto_apply_learner(self) -> None:
-        try:
-            import subprocess
-            import sys
-            traces_dir = self.trace_path.parent
-            learner_script = Path(__file__).parent / "learner.py"
-            if not learner_script.exists():
-                return
-            proc = subprocess.run(
-                [sys.executable, str(learner_script), "apply", str(traces_dir),
-                 "--tests", self._session_id],
-                capture_output=True, text=True, timeout=300, check=False,
-            )
-            self._trace({
-                "kind": "learner_auto_apply",
-                "rc": proc.returncode,
-                "stdout_tail": (proc.stdout or "")[-400:],
-                "stderr_tail": (proc.stderr or "")[-200:],
-            })
-        except Exception as e:
-            self._trace({"kind": "learner_auto_apply_failed", "err": str(e)})
 
     @staticmethod
     def _chunk_for_display(text: str, chunk: int = 120) -> list[str]:

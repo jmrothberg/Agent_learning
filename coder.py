@@ -53,6 +53,7 @@ except ImportError:
 
 import backend as backend_mod
 from agent import AgentEvent, GameAgent, default_num_ctx
+from overlay_identity import PRODUCT_NAME
 from tools import LiveBrowser
 
 # Sentinel: --out was not supplied → derive a unique meaningful name from
@@ -184,8 +185,6 @@ async def _run(
         stall_seconds=stall_seconds,
         seed_file=seed_file,
         # Default to v1 prompt: <playbook> + <criteria> + <probes>.
-        # Real sessions feed the offline learner; v1 produces the
-        # rich traces it needs.
         prompt_version="v1",
         # todo #6 — mid-tier prompt trim. "auto" infers from model
         # tag; pass --model-class mid|large to override.
@@ -211,7 +210,7 @@ async def _run(
         agent.set_step_mode(True)
 
     print(
-        f"== Coding Box CLI · {info.name.upper()}={info.model} "
+        f"== {PRODUCT_NAME} CLI · {info.name.upper()}={info.model} "
         f"[{info.source}] · headless={headless} · "
         f"best-of-N={best_of_n} · step={step}"
     )

@@ -1,4 +1,12 @@
-# Coding Box — Local HTML Game Agent
+# Coding Box Overlay — Local HTML Game Agent (harness fork)
+
+> **This repo is not `Agent_learning` on GitHub.** It is the **overlay /
+> harness** line (feedback routing, playtests, multi-slot fan-out, TUI
+> polish). Push here: **`jmrothberg/Agent_learning_overlay`** so you do not
+> overwrite the upstream program at `jmrothberg/Agent_learning`.
+> Clone: `git clone https://github.com/jmrothberg/Agent_learning_overlay.git`
+> Remote setup: `git remote set-url origin https://github.com/jmrothberg/Agent_learning_overlay.git`
+> and optionally `git remote add upstream https://github.com/jmrothberg/Agent_learning.git`
 
 A specialist agent that drives a **small local LLM** (Ollama or MLX
 in-process) to write, test, and iteratively fix **single-file HTML5
@@ -24,7 +32,8 @@ cached. A cross-session **asset library** under `memory/` lets
 admitted assets compound across sessions exactly the way the playbook
 does.
 
-**Remote:** https://github.com/jmrothberg/Agent_learning
+**Remote (this fork):** https://github.com/jmrothberg/Agent_learning_overlay  
+**Upstream program (do not push overlay work here):** https://github.com/jmrothberg/Agent_learning
 
 ---
 
@@ -64,7 +73,7 @@ does.
 
 The product is a coding agent narrowly specialized for **playable
 single-file HTML5 games with visual and audible feedback**, that runs
-entirely on a local machine. Three drivers ship in the repo:
+entirely on a local machine. Two drivers ship in the repo:
 
 - `chat.py` — Textual TUI with a visible Chromium beside the terminal.
   Default. Mid-stream user feedback queue, slash commands, asset
@@ -72,9 +81,6 @@ entirely on a local machine. Three drivers ship in the repo:
   panel (GPU map, per-role activity).
 - `coder.py` — Headless CLI for unattended runs. Same agent, same
   loop, no UI.
-- `tune.py` — A/B battery rig. Runs the agent against a curated set
-  of goals under different prompt versions / feature flags, compares
-  pass/fail deltas per goal, postmortems failing tests.
 
 The core loop is event-driven and yields a stream of `AgentEvent`
 objects (`info`, `tokens`, `iter_test`, `done`, …). The drivers
@@ -252,7 +258,7 @@ emits `<confirm_done/>` (ship) or one more `<patch>` (one last fix).
 On VLM-capable backends the latest screenshot is attached and the
 critique prompt names the visual things to look for.
 
-Drivers (`chat.py`, `coder.py`, `tune.py`) construct `GameAgent`, wire
+Drivers (`chat.py`, `coder.py`) construct `GameAgent`, wire
 a token callback, and consume the event stream. The TUI adds a
 mid-stream user feedback queue drained at every user-turn boundary by
 `_flush_user_injections`.
@@ -328,7 +334,7 @@ feedback repeats that intent.
 `coder.py --best-of-n`; set `1` to disable). Each candidate is scored;
 the first that passes can ship the iter early. Every applied patch block
 emits a structured **`patch_outcome`** trace row (per-block ok/error,
-match tier) so postmortems and the learner can see which SEARCH/REPLACE
+match tier) so postmortems can see which SEARCH/REPLACE
 shapes fail repeatedly.
 
 **Multi-slot fan-out (Ollama 2- or 3-model topology).** When the agent
@@ -345,7 +351,7 @@ difference, just no parallel speedup. Per-candidate trace events
 (`best_of_n_candidate_generated`, `best_of_n_candidate_scored`,
 `best_of_n_attempt`) carry slot id, temperature, score, and rejection
 reason. When a non-slot-1 candidate wins, a `surprise` event with
-`category: "non_slot1_bon_winner"` fires so the learner can flag it.
+`category: "non_slot1_bon_winner"` fires.
 
 **Cross-slot prompt cache (Ollama multi-model).** When the coder slot is
 idle during architect planning or asset/sound generation, the agent may
@@ -491,7 +497,7 @@ still flow through. Suppressed notes still trace as
 
 - **`GameMemory`** — skeleton retrieval and mistake retrieval.
   - **Premium Default Skeletons (Autobootstrapped on boot)**: The system provides 17 generic, high-fidelity scaffolds in `memory/skeletons/` designed to give local models a perfect first-build template:
-    - `canvas_basic.html`: Clean 2D canvas with DPR scaling, frame loops, and window keyboard handlers. Kept for `skeleton_mode="default"` tune baselines; **no longer the retrieval fallback** (2026-05-21).
+    - `canvas_basic.html`: Clean 2D canvas with DPR scaling, frame loops, and window keyboard handlers. Kept for `skeleton_mode="default"` baseline; **no longer the retrieval fallback** (2026-05-21).
     - `canvas_basic_v2.html`: **New fallback (2026-05-21)** — denser bug-hardened scaffold pre-empting focus-blur, dt-cap, restart-cleanup, DPR-resize, lazy-audio, and HUD pointer-events failures. Used when no modality or sidecar scaffold matches.
     - `canvas_3d_basic.html`: Full 3D perspective setup utilizing CDN Three.js, lights, camera, and aspect-ratio fits.
     - `canvas_grid_basic.html`: Continuous tile-aligned corridor movement and corner snapping (e.g., Pac-Man, Sokoban).
@@ -521,11 +527,8 @@ still flow through. Suppressed notes still trace as
   and indexes it so future sessions with similar goals can use it as
   the starting scaffold.
 
-[`learner.py`](learner.py) is the offline pipeline that reads
-completed traces and runs a Reflector (proposes bullet deltas) +
-Curator (deterministic merge into `memory/playbook.jsonl`, increments
-helpful/harmful counters, prunes dead bullets). It runs on demand or
-attached to a `tune.py run --auto-learn`.
+`memory/playbook.jsonl` is hand-curated. Add or revise bullets
+manually; `memory.Playbook` rereads the file at session start.
 
 ### Verification harness (multi-layered)
 
@@ -1025,21 +1028,11 @@ CODING_BOX_NUM_CTX=262144 .venv/bin/python chat.py
   [--num-ctx N]              # Ollama context (default 100000; env CODING_BOX_NUM_CTX)
 ```
 
-`tune.py` flags include `--prompt-version`, `--best-of-n`,
-`--max-iters`, `--feature-flags prefill,vlm_critique,…`, `--learn`,
-`--auto-learn`, `--learn-shared`.
-
 ---
 
-## Tuning rig and playbook commands
+## System tests and memory hygiene
 
 ```bash
-# A/B between prompt versions and feature flags.
-python tune.py run                                  # quick: max_iters=2, best_of_n=1
-python tune.py run --full --prompt-version v1 --auto-learn
-python tune.py diff baseline_v0 v1_run              # per-test pass/fail deltas
-python tune.py why <run_id> <test_name>             # postmortem one test
-
 # Visible system tests (multi-GPU plumbing + optional slow Pac-Man benchmark).
 # Smoke suite (~5–10 min): plumbing + “player does not move” regressions.
 python system_tests.py run --suite smoke --three-model --model qwen3.6:27b
@@ -1050,20 +1043,10 @@ python system_tests.py run --suite pacman --yes         # skip confirmation (CI 
 python system_tests.py show run_20260521_120000         # SYSTEM_SUMMARY.md
 python system_tests.py list
 
-# Offline learner — Reflector + Curator over traces.
-python learner.py walk                              # one-line summary per past session
-python learner.py reflect games/traces/             # propose deltas (no writes)
-python learner.py apply games/traces/               # propose AND write to playbook.jsonl
-
 # Memory hygiene.
 .venv/bin/python scripts/forget_session.py --list
 .venv/bin/python scripts/forget_session.py <session_id>
 ./scripts/clean_artifacts.sh --yes                  # bulk wipe stale per-session artifacts
-
-# Playbook ops.
-.venv/bin/python scripts/audit_playbook.py
-.venv/bin/python scripts/prune_playbook.py --negative-only
-.venv/bin/python scripts/bench_playbook_ab.py
 ```
 
 The canonical regression check is **asteroids**: `vx = cos(angle) *
@@ -1116,7 +1099,6 @@ These have evidence behind them and should not be broken silently.
 5. **Asteroids is the canonical regression check.** Ship direction +
    irregular-polygon asteroids must still pass after any change.
 6. **Iterate autonomously.** Drive build/test/improve loops yourself.
-   The tune battery is the alignment check.
 7. **Never silently call a cloud model.** Cloud / paid API calls must
    be EXPLICIT (slash command, flag). Never default-on, never auto-
    fallback. The user owns the wallet.
@@ -1156,23 +1138,6 @@ if no local VLM is discoverable.
 way to make "looks like the user asked for" a hard precondition rather
 than a hint. The infrastructure is already in place; the change is a
 single guard in `agent.py`'s done-detection block.
-
-### 2. Reward-shaping the playbook from vision verdicts
-
-**Problem.** The playbook's helpful/harmful counters increment on
-session outcome (won = +1 to active bullets, regressed = -1). The
-vision judge produces a per-iter signal that today only flows into
-coaching.
-
-**Change.** Reflector reads `vision_judge.{iteration, progress, note}`
-records alongside test outcomes. When `PROGRESS: yes` follows a
-patch derived from a specific bullet, that bullet gets a smaller
-helpful increment (e.g. +0.3). When `PROGRESS: no` with high
-screenshot-delta follows a bullet's pattern, that bullet gets a
-proportional harmful increment. Compound the signal across sessions.
-
-**Effect.** The playbook starts to learn what makes games *look*
-better, not just what makes probes pass.
 
 ### 3. Semantic-embedding retrieval (replace Jaccard)
 
@@ -1287,22 +1252,6 @@ prepends that to the prompt and regenerates *once* (capped).
 **Effect.** First-iter sprites improve materially without growing the
 model context.
 
-### 10. Self-play curriculum
-
-**Problem.** The tune battery is hand-curated and small (~12 goals).
-Generalization to long-tail goals comes from the user, not from
-training.
-
-**Change.** Periodically, the agent generates its own goal ("simple
-puzzle game where two colors must combine to create a third"), runs a
-full session against it, evaluates with the vision judge + probes,
-and feeds the trace to the learner. Treat goal generation as a
-diversity exercise — sample from modality keywords plus a small
-plot-noun bank, not a genre list (rule 2 stays).
-
-**Effect.** The playbook compounds even when the user isn't actively
-building.
-
 ### 11. Local LoRA adapter from session traces
 
 **Problem.** The playbook compounds *retrieval-time* knowledge, not
@@ -1398,7 +1347,7 @@ agent decisions. Use these `kind` values as entry points:
 | `feedback_deferral_escalated` | Same ask deferred twice before | Third turn forces the request through with escalation text |
 | `media_only_parallel_inject` | Art/sound feedback during blocker | Media peeled off the queue; runs on diffuser GPU this turn |
 | `turn_contract` | Once per stream, just before model call | Routing contract for this turn: allowed/forbidden tags, scoped_mode, classifier flags, prompt section sizes |
-| `patch_outcome` | After patch apply | Per-block success/failure and matcher tier for learner/postmortem |
+| `patch_outcome` | After patch apply | Per-block success/failure and matcher tier for postmortem |
 | `slow_prefill` | Prefill with no tokens yet | One-shot “still working” signal during long MLX/Ollama prefill |
 | `media_change_directive_injected` | MEDIA-CHANGE block added to prompt | Routed feedback to asset/sound regen |
 | `media_change_directive_suppressed` | MEDIA-CHANGE skipped | Reason is in `reason` field: `behavior_bug`, `behavior_scope_on_strict_turn`, `orientation_change`, `use_existing_media`, or `style_rebrand` (rebrand uses its own directive, not generic MEDIA-CHANGE) |
@@ -1432,8 +1381,8 @@ agent decisions. Use these `kind` values as entry points:
 | `status_snapshot` | TUI status panel snapshot | Persists right-hand panel state to JSONL |
 
 When you see the same failure shape twice, write a regression test
-in `tests/` and add a one-line bullet to `playbook.jsonl` via
-`learner.py reflect`.
+in `tests/` and add a one-line bullet to `memory/playbook.jsonl` by
+hand.
 
 ---
 
@@ -1536,9 +1485,6 @@ External weights (auto-downloaded to system caches on first use):
   MiniMax-M2 are all known-working).
 - Optional: an MLX-VLM (qwen2.5-vl, llava, etc.) for the local visual
   judge.
-
-`tune.py` and `learner.py` have no extra dependencies beyond the
-agent.
 
 ---
 

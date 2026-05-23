@@ -83,7 +83,7 @@ def test_fix2_fresh_feedback_refreshes_exhausted_budget():
     assert a._autonomous_playtest_cycle == 2
     # Streak reset so the no-findings auto-stop doesn't gate.
     assert a._autonomous_no_findings_streak == 0
-    # Refresh event surfaced for the learner.
+    # Refresh event surfaced in the trace.
     refreshes = [t for t in a._trace_events if t.get("kind") == "autonomous_budget_refreshed_on_feedback"]
     assert len(refreshes) == 1
     assert refreshes[0]["prior_cycle"] == 3

@@ -102,6 +102,7 @@ from textual.widgets import Footer, Header, Input, OptionList, RichLog, Static
 from textual.widgets._option_list import Option
 
 import backend as backend_mod
+from overlay_identity import PRODUCT_NAME
 from agent import (
     AgentEvent,
     DEFAULT_NUM_CTX,
@@ -1140,7 +1141,7 @@ class CodingBoxApp(App):
             yield Footer()
 
     async def on_mount(self) -> None:
-        self.title = "JMR's Coding Box"
+        self.title = PRODUCT_NAME
         self.sub_title = "type your game idea below, then Enter"
         self._update_status()
         # Periodic refresh so the activity line ages naturally — tok/s,
@@ -1565,8 +1566,18 @@ class CodingBoxApp(App):
             coder_model = getattr(self.agent, "model", None)
         elif self._session_model:
             coder_model = self._session_model
+        # In /allroles mode (or any time no dedicated slot 2/3 is staged
+        # for the active role), architect / critic streams are multiplexed
+        # onto the coder backend. Swap the slot-1 header to show the
+        # currently-active role so the user can SEE the architect drive
+        # Phase A planning and the critic fire after a clean iter — the
+        # row used to be hardcoded "coder" and made those roles invisible.
+        slot1_role = "coder"
+        active = self._activity_role or "coder"
+        if active != "coder" and self._role_slot_for_stream(active) is None:
+            slot1_role = active
         lines.append(self._render_role_activity_line(
-            "coder", slot=None, color="cyan", model_name=coder_model,
+            slot1_role, slot=None, color="cyan", model_name=coder_model,
         ))
         if self._session_backend2 or (
             self.agent is not None and getattr(self.agent, "_backend2", None)
@@ -1664,7 +1675,51 @@ class CodingBoxApp(App):
                 f"[dim]review: {_esc(self._profile_review_model)} "
                 f"({apply_hint})[/dim]"
             )
-        return f"[bold]Mode:[/bold] {mode_badge}{vlm_hint}\n[bold]Profile:[/bold] {profile}{review_hint}\n"
+        # /allroles indicator — when architect-split AND vlm-critique are
+        # both enabled (the /allroles bundle), tell the user the multiplex
+        # is wired so they know the architect + critic ARE running, even
+        # though everything routes through the coder backend. Prefer the
+        # live agent's feature flags when a session is running; fall back
+        # to the chat-level toggle otherwise.
+        if self.agent is not None:
+            arch_on = bool(getattr(self.agent, "_use_architect_split", False))
+            crit_on = bool(getattr(self.agent, "_use_vlm_critique", False))
+        else:
+            arch_on = self._use_architect_split
+            crit_on = self._use_vlm_critique
+        roles_line = ""
+        slot2_active = bool(self._session_backend2)
+        slot3_active = bool(self._session_backend3)
+        if arch_on and crit_on:
+            if slot2_active or slot3_active:
+                roles_line = (
+                    "\n[bold]Roles:[/bold] "
+                    "[green]/allroles ON[/green] "
+                    "[dim]— architect + critic enabled (using staged slot 2/3 where assigned, "
+                    "else multiplexed onto the coder backend)[/dim]"
+                )
+            else:
+                roles_line = (
+                    "\n[bold]Roles:[/bold] "
+                    "[green]/allroles ON[/green] "
+                    "[dim]— coder + architect + critic all on the one loaded LLM "
+                    "(slot-1 Activity header reflects which role is streaming)[/dim]"
+                )
+        elif arch_on:
+            roles_line = (
+                "\n[bold]Roles:[/bold] [green]architect-split ON[/green] "
+                "[dim]— architect drives planning (critic off)[/dim]"
+            )
+        elif crit_on:
+            roles_line = (
+                "\n[bold]Roles:[/bold] [green]vlm-critique ON[/green] "
+                "[dim]— critic reviews each clean iter (architect-split off)[/dim]"
+            )
+        return (
+            f"[bold]Mode:[/bold] {mode_badge}{vlm_hint}\n"
+            f"[bold]Profile:[/bold] {profile}{review_hint}"
+            f"{roles_line}\n"
+        )
 
     def _format_run_profile(self) -> str:
         """Human-readable label for the active run profile."""
@@ -3684,7 +3739,7 @@ class CodingBoxApp(App):
         self._session_model = chosen_name
         if getattr(self, "_id", None) is not None:
             self.title = (
-                f"JMR's Coding Box — {new_info.name.upper()} · {chosen_name}"
+                f"{PRODUCT_NAME} — {new_info.name.upper()} · {chosen_name}"
             )
         return True
 
@@ -5337,7 +5392,7 @@ class CodingBoxApp(App):
                 except Exception as e:
                     self._log_error(f"could not initialize backend3: {e}")
 
-        self.title = f"JMR's Coding Box — {info.name.upper()} · {model_name}"
+        self.title = f"{PRODUCT_NAME} — {info.name.upper()} · {model_name}"
         self._log_info(
             f"Using [b]{info.name.upper()}[/b] · [b]{_esc(model_name)}[/b] "
             f"[dim]({_esc(info.source)})[/dim]"
@@ -5472,8 +5527,7 @@ class CodingBoxApp(App):
             overall_seconds=overall_s,
             num_ctx=self._num_ctx,
             # v1 prompt: includes <playbook> retrieval, <criteria>,
-            # <probes>, stuck-loop ladder. Real sessions need this on
-            # so the offline learner has rich traces to reflect over.
+            # <probes>, stuck-loop ladder.
             prompt_version="v1",
             # Pass the resolved chat model name so GameAgent._classify_model
             # can map it to "small"/"mid"/"large". Without this, model=None

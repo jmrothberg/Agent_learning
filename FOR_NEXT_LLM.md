@@ -1,6 +1,7 @@
-# FOR_NEXT_LLM.md — Working on This Codebase as a Coding Agent
+# FOR_NEXT_LLM.md — Coding Box Overlay (harness fork)
 
-You are the next LLM picking up this project. The codebase drives a **medium-size local LLM** (qwen3.6:27b/35b, DeepSeek-V4, GLM-5.1, MiniMax-M2) to write single-file HTML5 games with a real Chromium browser as the verifier. The whole thing runs on the user's machine; the agent itself (the loop, prompts, harness, learner) is what we keep improving.
+You are the next LLM picking up this project. GitHub remote for overlay work:
+`jmrothberg/Agent_learning_overlay` — not `Agent_learning`. The codebase drives a **medium-size local LLM** (qwen3.6:27b/35b, DeepSeek-V4, GLM-5.1, MiniMax-M2) to write single-file HTML5 games with a real Chromium browser as the verifier. The whole thing runs on the user's machine; the agent itself (the loop, prompts, harness) is what we keep improving.
 
 This document is the **brief** for that work. Read it before you propose changes.
 
@@ -21,7 +22,7 @@ This document is the **brief** for that work. Read it before you propose changes
 ## What this agent looks like end-to-end
 
 ```
-chat.py / coder.py / tune.py   ← drivers (TUI, CLI, A/B rig)
+chat.py / coder.py             ← drivers (TUI, CLI)
         ↓
 GameAgent.run(goal)            ← agent.py — async event-stream loop
         ↓
@@ -55,10 +56,9 @@ GameAgent.run(goal)            ← agent.py — async event-stream loop
                                  counter updates
 ```
 
-Three drivers:
+Two drivers:
 - **`chat.py`** — Textual TUI (default; visible Chromium beside the terminal). Mid-stream feedback queue, slash commands, live throughput rates.
 - **`coder.py`** — headless CLI for unattended runs. Same agent.
-- **`tune.py`** — A/B battery comparing prompt versions / feature flags across many goals. The alignment check.
 
 ---
 
@@ -89,7 +89,7 @@ Read the `MEMORY.md` index before touching code. Each rule was learned the hard 
 
 2. **Listening fixes.** Anything that prevents the agent from swallowing what the user typed. Every iter the user can intervene is an iter that can recover. Phase 0.1 / 0.2 / 0.11 / 0.12 / 0.13 are all in this bucket.
 
-3. **Generalizable playbook bullets.** The Reflector / Curator in `learner.py` turns *trace patterns* into bullets that get retrieved on future goals. A bullet that says "for any canvas game, expose `window.state.player.x` so the input smoke test detects movement" pays you back forever. A bullet that says "in chess games…" doesn't.
+3. **Generalizable playbook bullets.** Hand-curated entries in `memory/playbook.jsonl` that get retrieved on future goals. A bullet that says "for any canvas game, expose `window.state.player.x` so the input smoke test detects movement" pays you back forever. A bullet that says "in chess games…" doesn't.
 
 4. **Visibility.** Status panel rows, structured trace events with reasons, surprise categories. The agent gets better when *you can see why a session went sideways without re-running it*.
 
@@ -166,7 +166,7 @@ Frontier models tolerate verbose, multi-objective prompts. Qwen3.6:27b does not.
 
 5. **Cross-session embeddings retrieval for the playbook.** Currently Jaccard-weighted. Vector retrieval (sentence-transformers, fully local) would catch semantic matches Jaccard misses. The bullet schema is stable; this is a swap inside `memory.Playbook.retrieve`.
 
-6. **Compaction reads its own structured trace.** `_build_structured_summary` is deterministic. A learner pass could spot patterns in compacted state across sessions ("agent always compresses asset paths and then re-emits them — surface them in the anchor by default").
+6. **Compaction reads its own structured trace.** `_build_structured_summary` is deterministic. Patterns in compacted state across sessions ("agent always compresses asset paths and then re-emits them — surface them in the anchor by default") could feed back into the anchor schema.
 
 ---
 

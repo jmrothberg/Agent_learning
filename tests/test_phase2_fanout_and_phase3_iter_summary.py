@@ -255,19 +255,3 @@ def test_phase_3_surprise_rules_in_source():
     assert '"category": "state_vs_render_gap"' in src
     assert '"category": "regression_after_clean_iter"' in src
     assert '"category": "non_slot1_bon_winner"' in src
-
-
-def test_learner_reflector_prompt_documents_new_kinds():
-    """The reflector must know what the new trace kinds mean, or its
-    JSON output will treat them as noise."""
-    import inspect
-    import learner as learner_module
-    src = inspect.getsource(learner_module)
-    for kind in (
-        "iter_summary", "surprise", "best_of_n_attempt",
-        "patch_outcome", "slow_prefill",
-        "autonomous_playtest_skipped",
-    ):
-        assert kind in src, (
-            f"REFLECTOR_SYSTEM must document trace kind {kind!r}"
-        )

@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+**Repo identity:** This checkout is **Coding Box Overlay** (`Agent_learning_overlay` on GitHub). Do not treat pushes as updates to `jmrothberg/Agent_learning` unless the user explicitly retargets `origin`.
+
 ---
 
 ## What this project is
@@ -11,7 +13,7 @@ A coding agent that drives a **local Ollama model** (qwen3.6:27b/35b is the work
 - `chat.py` — Textual TUI (default entry point; visible Chromium beside the terminal)
 - `coder.py` — headless CLI driver for unattended runs / scripting
 - A self-contained Z-Image-Turbo sprite-generation pipeline (no server, in-process)
-- A persistent cross-session **playbook** of HTML/JS rules of thumb that compounds via an offline learner
+- A persistent cross-session **playbook** of HTML/JS rules of thumb (`memory/playbook.jsonl`, hand-curated seed bullets retrieved at runtime by `memory.py`)
 
 The README has a deep walkthrough; this file is the operational summary.
 
@@ -63,20 +65,9 @@ MLX_MODEL=/Users/jonathanrothberg/MLX_Models/Qwen3.6-27B-mxfp8 .venv/bin/python 
 .venv/bin/python -m pytest tests/test_patches.py -v        # one file
 .venv/bin/python -m pytest tests/test_patches.py::test_apply_smart_quote_match -v   # one test
 
-# Tune battery (compare prompt/playbook changes A/B)
-python tune.py run                                # quick: max_iters=2, best_of_n=1
-python tune.py run --full --prompt-version v1 --auto-learn
-python tune.py diff baseline_v0 v1_run            # per-test pass/fail deltas
-python tune.py why <run_id> <test_name>           # postmortem
-
 # System tests (visible browser; smoke fast, pacman slow — prompts unless --yes)
 python system_tests.py run --suite smoke --three-model
 python system_tests.py run --suite pacman --yes   # skip slow-run confirmation
-
-# Offline learner (Reflector + Curator over traces)
-python learner.py walk                            # one-line summary per past session
-python learner.py reflect games/traces/           # propose deltas (no writes)
-python learner.py apply games/traces/             # propose AND write to playbook.jsonl
 
 # Memory hygiene
 .venv/bin/python scripts/forget_session.py --list
@@ -132,8 +123,7 @@ Drivers (`chat.py`, `coder.py`) construct `GameAgent`, wire a token callback, an
 - `Playbook` — JSONL of bullets with `helpful` / `harmful` counters. Retrieval is weighted Jaccard × quality multiplier `1 + 0.10·tanh(score/5)`. `stage="plan"` returns broader top-K including net-harmful entries; `stage="code"` drops bullets with score ≤ -2.
 - `render_playbook_block(hits, mode="hybrid", char_budget=...)` — pi-mono "skills" pattern: top-3 with full bodies + remaining as ID-only index entries. Model emits `<lookup_bullet>id</lookup_bullet>` to fetch a body on demand; `agent._extract_and_queue_lookups` drains lookups into the next user turn (capped at 5/turn).
 - `dedup_hits` (5-gram Jaccard ≥ 0.85) + `cap_hits_by_budget` run inside `render_playbook_block` by default.
-
-`learner.py` reads completed traces and proposes bullet deltas (Reflector) which the Curator merges deterministically into `playbook.jsonl`.
+- `memory/playbook.jsonl` is hand-curated; bullets are added/edited by you, not by an offline learner pass.
 
 ### Asset generation (Z-Image-Turbo, in-process)
 
@@ -171,7 +161,7 @@ These bind decisions across sessions:
 - **All code self-contained in Agent_learning.** No sys.path-injecting sibling repos (pre-existing `Colossal_Cave/diffusion_manager.py` was vendored into `assets.py` for this reason). External *data* at standard system paths (Ollama models, diffusion weights) is fine.
 - **Visible Chromium, not headless.** The TUI default is `headless=False` so the user can watch the game. CLI keeps `--headless` for unattended runs.
 - **Asteroids is the canonical regression check.** Ship-direction (`vx = cos(angle)*speed`) and round-asteroid (must be irregular polygons, not perfect circles) are the failure pair to verify after any change to retrieval / prompts / patches.
-- **Iterate autonomously.** Drive build/test/improve loops yourself; tune battery is the alignment check; research-grounded techniques only.
+- **Iterate autonomously.** Drive build/test/improve loops yourself; research-grounded techniques only.
 - **Do not reintroduce aggressive early cutoffs.** Changes to repetition / deliberation / timeout guards must be trace-backed and must preserve long first-build `<html_file>` completion (no premature guard aborts as the default behavior).
 
 ---
@@ -182,4 +172,4 @@ These bind decisions across sessions:
 - Don't bypass `<patch>` once `best.html` exists. Full `<html_file>` rewrites on a working game are a regression-amplification risk.
 - Don't expand the system prompt with always-on rules that only matter sometimes. Use the per-format `FormatSpec.guidelines` (deduped) or a goal-keyword detector (`_detect_*_intent`) to make the rule conditional.
 - Don't tighten repetition/deliberation/timeout abort thresholds without concrete trace evidence and a regression run proving rich first-build streams are not cut mid-output.
-- Don't commit generated artifacts. `.gitignore` excludes `games/<*>.html`, `games/snapshots/`, `games/traces/`, `games/_asset_cache/`, `games/*_assets/`, `games/_smoke/`, `games/game-memory/`, and other `memory/*` except **`memory/playbook.jsonl`** (learner-maintained; do not hand-edit). Use `scripts/clean_artifacts.sh` to wipe stale session artifacts.
+- Don't commit generated artifacts. `.gitignore` excludes `games/<*>.html`, `games/snapshots/`, `games/traces/`, `games/_asset_cache/`, `games/*_assets/`, `games/_smoke/`, `games/game-memory/`, and other `memory/*` except **`memory/playbook.jsonl`** (hand-curated). Use `scripts/clean_artifacts.sh` to wipe stale session artifacts.

@@ -2102,8 +2102,26 @@ class LiveBrowser:
         else:
             self._logs.append(text)
 
+    # Errors that fire only because the headless/auto-input harness can't
+    # provide a real user gesture. They aren't real bugs — pointer-lock
+    # works fine for a human player — so routing them through page_errors
+    # poisons the regression detector (agent.py auto-revert), throwing
+    # away good patches on FPS-style games every other iter. Downgrade
+    # to soft warnings: the model still sees them and can decide whether
+    # to defensive-wrap, but the harness doesn't count them as a
+    # regression. DOOM trace 20260523_152317 is the motivating case
+    # (iters 5/7/11 all reverted on this).
+    _HARNESS_ENV_ERROR_PATTERNS: tuple[str, ...] = (
+        "not valid for pointer lock",
+        "pointer lock", # generic catch for "Document is not focused" variants
+    )
+
     def _on_pageerror(self, exc) -> None:
         text = _truncate(f"UNCAUGHT: {exc}", _MAX_MSG_LEN)
+        low = text.lower()
+        if any(p in low for p in self._HARNESS_ENV_ERROR_PATTERNS):
+            self._warnings.append(text + "  [harness-env, not counted as regression]")
+            return
         self._page_errors.append(text)
         self._errors.append(text)
 

@@ -30,7 +30,12 @@ from agent import GameAgent
 from tools import LiveBrowser
 
 import backend as backend_mod
-from tune import _timeouts_for_model
+
+
+def _timeouts_for_model(model: str) -> tuple[float, float, int]:
+    from chat import resolve_session_timeouts
+    stall_s, overall_s = resolve_session_timeouts(model)
+    return stall_s, overall_s, 8192
 
 
 REPO_ROOT = Path(__file__).resolve().parent
