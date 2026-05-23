@@ -1994,6 +1994,12 @@ class GameAgent:
                 return self._backend3
             if getattr(self, "_model2_role", None) == "critic" and getattr(self, "_backend2", None) is not None:
                 return self._backend2
+            # Single-LLM "all roles" path: when the user opted into VLM critique
+            # but no dedicated critic slot exists, run the critic on slot 1.
+            # Gated on the toggle so the default-off path keeps returning None
+            # (which lets _run_vision_judge take over when a local VLM is on disk).
+            if getattr(self, "_use_vlm_critique", False):
+                return self._backend
             return None  # Fallback to standard non-visual automated testing
 
     def _keep_alive_for_backend(self, backend: Backend | None) -> float | str | None:
@@ -5167,7 +5173,8 @@ class GameAgent:
         sidecars: list[tuple[str, str, str]] = []
         if self.get_backend("architect") is not self._backend:
             sidecars.append(("architect", PLAYTESTS_FILENAME, "playtest"))
-        if self.get_backend("critic") is not None:
+        critic_bk = self.get_backend("critic")
+        if critic_bk is not None and critic_bk is not self._backend:
             sidecars.append(("critic", ASSET_AUDITS_FILENAME, "asset_audit"))
             sidecars.append(("critic", ANIMATION_AUDITS_FILENAME, "animation_audit"))
         if not sidecars:
@@ -7917,13 +7924,28 @@ class GameAgent:
         stall: dict | None,
         iteration: int,
     ) -> tuple[bool, str]:
-        """Try one local fallback (MLX or Anthropic -> Ollama) on extension stalls."""
+        """Try one local fallback (Anthropic -> Ollama) on extension stalls.
+
+        MLX is intentionally NOT included: a user who picked MLX wants the
+        local model, and silently switching to Ollama on a transient Metal
+        / Ctrl+D stall produces a confusing cross-backend error cascade
+        (DK trace 20260523_081532 — MLX stall at 0.0s after Ctrl+D fell
+        through to Ollama gemma4:e4b which the user had never asked for).
+        MLX failures now surface with the MLX-specific recovery hint and
+        stop there; the cloud→local safety net for Anthropic remains.
+        """
         info = getattr(self._backend, "info", None)
         backend_name = getattr(info, "name", None)
-        if backend_name not in ("mlx", "anthropic"):
+        if backend_name == "mlx":
+            return False, (
+                "MLX stall — staying on MLX (no silent fallback to Ollama). "
+                "Use the MLX recovery hint above, or switch backends explicitly "
+                "with /backend ollama + /load <N>."
+            )
+        if backend_name not in ("anthropic",):
             return False, (
                 f"fallback skipped: current backend is {backend_name} "
-                "(only mlx and anthropic fall back to local Ollama)"
+                "(only anthropic falls back to local Ollama)"
             )
         if not stall or stall.get("kind") != "no_tokens_stall":
             return False, "fallback skipped: stall shape is not no-token"
@@ -11096,21 +11118,22 @@ class GameAgent:
                     self._last_diagnose = None
 
             # ---- USER force-done shortcut ------------------------------
+            # Ctrl+D wins unconditionally: ship the current passing build.
+            # Earlier behavior tried to apply autonomous/typed feedback that
+            # had landed concurrently with the ship request, which (a)
+            # contradicted the user's explicit intent and (b) re-entered the
+            # iter loop while _stop_event was still set from request_done(),
+            # causing the next stream to bail at 0.0s with no tokens.
             if self._user_force_done and report["ok"]:
-                if self.has_pending_user_input():
+                dropped = len(self._pending_feedback) + (1 if self._pending_answer else 0)
+                if dropped:
+                    self._pending_feedback.clear()
+                    self._pending_answer = None
                     yield self._record(AgentEvent(
                         "info",
-                        "Ship requested but new user feedback arrived - applying it before shipping.",
+                        f"[dim]shipping per Ctrl+D — dropping {dropped} queued "
+                        f"feedback item(s) (re-send after ship if still wanted)[/dim]",
                     ))
-                    self._user_force_done = False
-                    self._messages.append({
-                        "role": "user",
-                        "content": self._flush_user_injections(
-                            "The user wanted to ship but then sent the feedback above. "
-                            "Address that feedback. Send a <patch>."
-                        ),
-                    })
-                    continue
                 yield self._record(AgentEvent("done", "User confirmed - shipping current build."))
                 self._record_session_outcome(ok=True)
                 return

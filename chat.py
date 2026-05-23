@@ -1103,6 +1103,10 @@ class CodingBoxApp(App):
         self._use_double_screenshot: bool = False
         self._use_architect_split: bool = False
         self._architect_split_auto: bool = False
+        # Bundle toggle: /allroles flips architect-split + vlm-critique together
+        # so a single loaded LLM covers coder + critic + architect roles
+        # without needing /model2 / /model3 staging or extra GPUs.
+        self._all_roles_enabled: bool = False
 
     # ----------------------------- layout ---------------------------------
 
@@ -2962,6 +2966,8 @@ class CodingBoxApp(App):
                 self._cmd_toggle_double_screenshot(arg)
             elif cmd in ("vlm-critique", "vlmcritique", "vc"):
                 self._cmd_toggle_vlm_critique(arg)
+            elif cmd in ("allroles", "all-roles"):
+                self._cmd_toggle_allroles(arg)
             elif cmd == "feedback":
                 self._cmd_toggle_autonomous_feedback(arg)
             else:
@@ -2976,6 +2982,7 @@ class CodingBoxApp(App):
             "  [b]small change to what shipped[/b]  just type it — no slash needed",
             "                                  e.g. [italic]ship is too slow, double the thrust[/italic]",
             "  [b]ship as-is, stop[/b]              type [b]done[/b] / [b]looks good[/b] / [b]ship[/b] (or Ctrl+D)",
+            "                                  [dim]Ctrl+D wins: any queued feedback (incl. autonomous playtest) is dropped — re-send after ship if still wanted[/dim]",
             "  [b]brand-new unrelated game[/b]      [b]/new <goal>[/b]",
             "  [b]start from an existing .html[/b]  [b]/seed <path>[/b]  then  [b]/new <goal>[/b]",
             "  [b]paste in input[/b]                [b]Ctrl+V[/b] or terminal Edit→Paste ([b]Cmd+V[/b] on macOS)",
@@ -3026,6 +3033,7 @@ class CodingBoxApp(App):
             "                                  [dim]4-GPU workstation: 11434→GPU1, 11435→GPU2, 11436→GPU3 — one command for all three[/dim]",
             "  [b]/retry[/b]                   re-run after a bad model (keeps game file + trace; uses /model pick first)",
             "  [b]/launch <N|name|path>[/b]   stage an MLX model for next /new (loads in-process on first request)",
+            "                                  [dim]MLX stalls no longer auto-fall-back to Ollama — surface the MLX hint and stop (use /backend ollama + /load <N> to switch deliberately)[/dim]",
             "  [b]/backend <auto|ollama|mlx|openai|anthropic>[/b]  stage default backend when no specific model is staged",
             "                                  [dim]cloud backends require OPENAI_API_KEY / ANTHROPIC_API_KEY in shell env[/dim]",
             "  [b]/unload [N|name|all|mlx][/b]  free VRAM · #N from /list · bare = active session · all = every Ollama · mlx = drop the in-process MLX model",
@@ -3051,8 +3059,12 @@ class CodingBoxApp(App):
             "  [b]/playbook[/b] [on|off]        toggle playbook bullet injection (alias /memory) - A/B vs one-shot when iters feel worse than no agent",
             "  [b]/prefill[/b] [on|off]         toggle forcing assistant prefill tags (default ON; forces XML syntax compliance)",
             "  [b]/architect[/b] [on|off]       toggle architect/editor split on complex first-builds (Aider's 2-call pattern; default off)",
+            "                                  [dim]this is the Phase B split — for the slot tag use [b]/model2 ... --role architect[/b][/dim]",
+            "  [b]/allroles[/b]                 turn on all roles (critic + architect) using your one loaded LLM — no extra GPUs, no args",
+            "                                  [dim]bundles /architect on + /vlm-critique on; safe with /modelall (staged slots still win)[/dim]",
             "  [b]/double-screenshot[/b] [on|off] toggle capturing startup + after-input screenshots (default off; helps debugging movement)",
-            "  [b]/vlm-critique[/b] [on|off]    toggle attaching screenshot to Phase C self-critique turns (default off; VLM-only)",
+            "  [b]/vlm-critique[/b] [on|off]    toggle attaching screenshot to Phase C self-critique turns (default off)",
+            "                                  [dim]needs a VLM as the loaded model; uses slot 1 when no critic slot is staged[/dim]",
             "  [b]/feedback[/b] [on|off]        toggle autonomous self-feedback loop (default ON · multi-screenshot playtest + genre-free behavior recipes)",
             "                                  [dim]only the extra direction is gated; test reports, patch diagnostics, and the critic still run when off[/dim]",
             "  [b]/audit[/b]                     print per-bullet earnings (fires, pass-rate, avg-iter) from trace history",
@@ -4608,6 +4620,7 @@ class CodingBoxApp(App):
         had_restarts = self._restart_n
         had_class = self._model_class
         had_ref = self._staged_ref_image_name
+        had_allroles = self._all_roles_enabled
         self._next_seed = None
         self._next_model = None
         self._next_backend = None
@@ -4621,6 +4634,17 @@ class CodingBoxApp(App):
         self._run_profile = "custom"
         self._profile_review_model = None
         self._profile_review_auto_apply = False
+        if had_allroles:
+            self._all_roles_enabled = False
+            self._use_architect_split = False
+            self._use_vlm_critique = False
+            self._architect_split_auto = False
+            self._vlm_critique_auto = False
+            if self.agent is not None:
+                self.agent._use_architect_split = False
+                self.agent._use_vlm_critique = False
+                self.agent._architect_split_auto = False
+                self.agent._vlm_critique_auto = False
         bits: list[str] = []
         if had_seed is not None:
             bits.append(f"seed={had_seed}")
@@ -4638,6 +4662,8 @@ class CodingBoxApp(App):
             bits.append(f"model-class={had_class}→auto")
         if had_ref:
             bits.append(f"ref={had_ref}→cleared")
+        if had_allroles:
+            bits.append("allroles=on→off")
         if not bits:
             self._log_info("nothing to reset (no staged seed/model, iters at default)")
             return
@@ -4679,6 +4705,7 @@ class CodingBoxApp(App):
             f"  architect-split:      {'ON' if self._use_architect_split else 'off'}{' [auto]' if self._architect_split_auto and self._use_architect_split else ''}",
             f"  double-screenshot:    {'ON' if self._use_double_screenshot else 'off'}",
             f"  vlm-critique:         {'ON' if self._use_vlm_critique else 'off'}{' [auto]' if self._vlm_critique_auto and self._use_vlm_critique else ''}",
+            f"  /allroles bundle:     {'ON' if self._all_roles_enabled else 'off'}",
             f"  autonomous /feedback: {'ON' if self._use_autonomous_feedback else 'OFF'}  [dim](multi-shot playtest + recipe checks; /feedback off to disable)[/dim]",
             f"  iter detail:          {self._iter_decision_verbose}",
             f"  run profile:          {self._format_run_profile()}",
@@ -5037,6 +5064,43 @@ class CodingBoxApp(App):
             self.agent._vlm_critique_auto = False
         status = "[green]ON[/green]" if new_state else "[yellow]OFF[/yellow]"
         self._log_info(f"VLM critique screenshot attachment set to {status}")
+        self._update_status()
+
+    def _cmd_toggle_allroles(self, arg: str) -> None:
+        """/allroles — toggle ON/OFF: run coder + critic + architect on the single loaded LLM.
+
+        Bundles architect-split and vlm-critique so one bare command covers
+        every role without /model2 / /model3 staging or a second GPU. If a
+        critic- or architect-tagged slot 2/3 IS staged, the router still
+        prefers it — this toggle just turns the role-using features on.
+        """
+        arg_lc = arg.strip().lower()
+        if arg_lc in ("on", "true", "1", "enable"):
+            new_state = True
+        elif arg_lc in ("off", "false", "0", "disable"):
+            new_state = False
+        else:
+            new_state = not self._all_roles_enabled
+        self._all_roles_enabled = new_state
+        self._use_architect_split = new_state
+        self._use_vlm_critique = new_state
+        # Explicit user toggle — clear auto-staff flags so the state sticks.
+        self._architect_split_auto = False
+        self._vlm_critique_auto = False
+        if self.agent is not None:
+            self.agent._use_architect_split = new_state
+            self.agent._use_vlm_critique = new_state
+            self.agent._architect_split_auto = False
+            self.agent._vlm_critique_auto = False
+        if new_state:
+            self._log_info(
+                "[green]/allroles ON[/green] — coder + critic + architect "
+                "all running on the loaded LLM (architect-split + vlm-critique on)"
+            )
+        else:
+            self._log_info(
+                "[yellow]/allroles OFF[/yellow] — architect-split and vlm-critique disabled"
+            )
         self._update_status()
 
     # ----------------------------- session --------------------------------

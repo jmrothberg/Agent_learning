@@ -362,6 +362,25 @@ token count alone. While a stream is running, the status panel shows a
 is waiting for the next user-turn boundary (input always drains after
 the current stream finishes).
 
+**Ctrl+D wins unconditionally.** A ship request (first Ctrl+D, the `/ship`
+command, or typing `done` / `looks good`) ends the session at the next
+iter boundary on the current passing build. Any feedback that landed in
+the queue between the ship request and the boundary — including
+`[AUTONOMOUS PLAYTEST]` findings — is **dropped** with a one-line notice
+so you can re-send if you actually wanted it applied. Earlier behavior
+auto-applied queued feedback before shipping; that contradicted the
+explicit ship intent and (because `_stop_event` was still set from the
+ship request) caused the next stream to bail at 0.0s with no tokens
+(DK trace 20260523_081532). Second Ctrl+D within 2s force-quits the TUI.
+
+**No silent backend fallback from MLX.** MLX stalls now surface with the
+MLX-specific recovery hint (lower `MLX_MAX_TOKENS`, raise
+`iogpu.wired_limit_mb`, restart the chat process) and stop there. The
+former MLX→Ollama auto-fallback produced confusing cross-backend error
+cascades (an MLX user gets bombed with Ollama 500s they never asked for).
+The cloud→local safety net for **Anthropic** is unchanged: a transient
+Anthropic stall still tries a local Ollama once before giving up.
+
 **Autonomous playtests (default ON, `/feedback off` to disable).** After
 each **clean** iter, the agent may run scripted **behavior playtests**
 from `memory/playtests.jsonl` (recipes with JS `applies_when` gates —
@@ -736,9 +755,10 @@ is data the agent will see, not just developer notes.
 | `/mode <local_manual\|local_auto\|local_plus_review with <model> [--auto-apply]\|custom>` | Apply a run contract: manual checkpoints, autonomous loop, or autonomous loop with an explicit reviewer hook. |
 | `/playbook`, `/memory` | Toggle playbook bullet injection (`on` / `off`; default on in production TUI). |
 | `/prefill <on\|off>` | Toggle forcing assistant prefill tags (`<plan>`, `<diagnose>`) to prevent preamble talk and lock XML formatting (default ON). |
-| `/architect <on\|off>` | Toggle architect/editor split (Aider's 2-call pattern) on complex first-builds to split planning from coding (default off). |
+| `/architect <on\|off>` | Toggle architect/editor split (Aider's 2-call pattern) on complex first-builds to split planning from coding (default off). This is the Phase B *split*; for the slot-role tag use `/model2 ... --role architect`. |
+| `/allroles` | No-arg bare toggle. Bundles `/architect on` + `/vlm-critique on` so a single loaded LLM covers **coder + critic + architect** with no `/model2` / `/model3` staging or extra GPUs. If a critic- or architect-tagged slot 2/3 is staged, the router still prefers it — `/allroles` only flips the role-using features on. `/reset` clears the bundle. |
 | `/double-screenshot <on\|off>` | Toggle capturing dual screenshots (startup and post-input) to help the model see movement/animation (default off). |
-| `/vlm-critique <on\|off>` | Toggle VLM screenshot attachment during Phase C successful critique turns for layout and UI polishing (default off). |
+| `/vlm-critique <on\|off>` | Toggle VLM screenshot attachment during Phase C successful critique turns for layout and UI polishing (default off). Needs a VLM as the loaded model; uses slot 1 when no critic slot is staged. |
 | `/feedback [on\|off]` | Toggle autonomous playtest loop (default **on**). Bare `/feedback` prints state without flipping. When on: after clean iters, genre-free behavior recipes may queue `[AUTONOMOUS PLAYTEST]` coaching. Test reports and the critic still run when off. |
 | `/audit` | Per-bullet playbook earnings from trace history (fires, pass-rate, avg-iter). |
 | `/restarts <N>` | Independent full restarts when iter-1 score is below 60 (sticky; default 2; `1` = off). |

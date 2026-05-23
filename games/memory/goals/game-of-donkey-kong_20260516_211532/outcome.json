@@ -1,0 +1,9 @@
+{
+  "session_id": "game-of-donkey-kong_20260516_211532",
+  "goal": "game of donkey-kong",
+  "model": "claude-opus-4-7",
+  "iterations": 5,
+  "ok": true,
+  "last_report_summary": "OK: True\nTitle: 'Donkey Kong'\nCanvas: 600x700, RAF ran: True, blank: False\nInput listeners: total=5 (doc=0, win=5, body=0, other=0)\nInput test: PASS \u2014 ArrowLeft\u2192[player.facing, player.vx, player.x]; ArrowRight\u2192[barrelInterval, barrels.1.falling, barrels.1.pending, barrels.1.platIdx, barrels.1.r]; Space\u2192[barrels.1.pending, barrels.1.rollAngle, barrels.1.x, kongThrow, player.jumping]; KeyW\u2192[barrels.1.rollAngle, barrels.1.x, kongThrow, player.vy, player.y]\nFrozen canvas: no (pixels changed during run)\nBody text length: 90 chars\nBody sample: 'SCORE 0000 | LIVES \u2665\u2665\u2665 | L1\\n\u2190 \u2192 move \u00b7 \u2191 \u2193 climb ladder \u00b7 SPACE jump \u00b7 R restart \u00b7 P pause'\nWarnings:\n  - Canvas2D: Multiple readback operations using getImageData are faster with the willReadFrequently attribute set to true. See: https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently\nAcceptance probes: 7/7 pass\n  ok  canvas_present: !!document.querySelector('canvas')\n  ok  non_blank: (()=>{const c=document.querySelect",
+  "ts": "2026-05-17T02:55:44.648025Z"
+}

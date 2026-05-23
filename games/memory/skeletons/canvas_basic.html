@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Game</title>
+<style>
+  :root { color-scheme: dark; }
+  html,body { margin:0; height:100%; background:#0b1020; color:#e7ecff;
+    font:16px/1.4 system-ui,sans-serif; overflow:hidden; }
+  #wrap { position:fixed; inset:0; display:grid; place-items:center; }
+  canvas { background:#10162e; border-radius:12px; box-shadow:0 10px 40px #0008;
+    max-width:96vw; max-height:90vh; touch-action:none; }
+  #hud { position:fixed; top:12px; left:12px; background:#0008; padding:8px 12px;
+    border-radius:8px; pointer-events:none; }
+  #help { position:fixed; bottom:12px; left:12px; opacity:.75; font-size:13px; }
+  #modal { position:fixed; inset:0; display:none; place-items:center;
+    background:#000a; backdrop-filter:blur(4px); }
+  #modal .card { background:#1a2348; padding:24px 28px; border-radius:14px;
+    text-align:center; box-shadow:0 20px 60px #000a; }
+  button { background:#3b62ff; color:#fff; border:0; padding:10px 18px;
+    border-radius:8px; font-size:15px; cursor:pointer; }
+  button:hover { filter:brightness(1.1); }
+</style></head>
+<body>
+<div id="wrap"><canvas id="c" width="800" height="600"></canvas></div>
+<div id="hud">Score: <span id="score">0</span></div>
+<div id="help">Arrows/WASD to move, Space to act, P to pause</div>
+<div id="modal"><div class="card">
+  <h2 id="endTitle">Game Over</h2>
+  <p id="endMsg">Final score: <span id="endScore">0</span></p>
+  <button id="restart">Play again</button>
+</div></div>
+<script>
+(() => {
+  "use strict";
+  const cvs = document.getElementById("c");
+  const ctx = cvs.getContext("2d");
+  const scoreEl = document.getElementById("score");
+  const modal = document.getElementById("modal");
+  const endScoreEl = document.getElementById("endScore");
+  function fit() {
+    const dpr = Math.min(window.devicePixelRatio||1, 2);
+    const w = 800, h = 600;
+    cvs.width = w*dpr; cvs.height = h*dpr;
+    cvs.style.width = w+"px"; cvs.style.height = h+"px";
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+  }
+  fit(); addEventListener("resize", fit);
+
+  const keys = Object.create(null), pressed = Object.create(null);
+  const KEYMAP = { ArrowUp:"up", ArrowDown:"down", ArrowLeft:"left", ArrowRight:"right",
+    KeyW:"up", KeyS:"down", KeyA:"left", KeyD:"right", Space:"act", KeyP:"pause" };
+  addEventListener("keydown", e => {
+    const k = KEYMAP[e.code]; if (!k) return;
+    if (!keys[k]) pressed[k] = true;
+    keys[k] = true;
+    if (["up","down","left","right","act"].includes(k)) e.preventDefault();
+  }, { passive:false });
+  addEventListener("keyup", e => { const k = KEYMAP[e.code]; if (k) keys[k] = false; });
+  cvs.addEventListener("pointerdown", e => { pressed.act = true; });
+
+  const state = { score:0, paused:false, over:false, t:0, x:400, y:300 };
+  function reset() {
+    state.score = 0; state.paused = false; state.over = false; state.t = 0;
+    state.x = 400; state.y = 300;
+    modal.style.display = "none";
+  }
+  document.getElementById("restart").onclick = reset;
+
+  function update(dt) {
+    if (state.over || state.paused) return;
+    state.t += dt;
+    const speed = 220;
+    if (keys.left)  state.x -= speed*dt;
+    if (keys.right) state.x += speed*dt;
+    if (keys.up)    state.y -= speed*dt;
+    if (keys.down)  state.y += speed*dt;
+    state.x = Math.max(20, Math.min(780, state.x));
+    state.y = Math.max(20, Math.min(580, state.y));
+    if (pressed.act)   state.score += 1;
+    if (pressed.pause) state.paused = !state.paused;
+  }
+  function draw() {
+    ctx.clearRect(0,0,800,600);
+    ctx.fillStyle = "#7ab6ff";
+    ctx.beginPath(); ctx.arc(state.x, state.y, 18, 0, Math.PI*2); ctx.fill();
+    if (state.paused) {
+      ctx.fillStyle = "#fff"; ctx.font = "32px system-ui";
+      ctx.textAlign = "center"; ctx.fillText("PAUSED", 400, 300);
+    }
+  }
+  function gameOver() {
+    state.over = true;
+    endScoreEl.textContent = state.score;
+    modal.style.display = "grid";
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    try {
+      update(dt);
+      draw();
+      scoreEl.textContent = state.score;
+    } catch (err) {
+      console.error("game crashed:", err);
+      gameOver();
+    }
+    for (const k in pressed) pressed[k] = false;
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body></html>

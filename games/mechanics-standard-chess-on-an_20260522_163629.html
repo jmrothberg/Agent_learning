@@ -282,6 +282,8 @@ class Chess{
 }
 
 // === AI ===
+const AI_SEARCH_DEPTH=4;
+
 function evaluate(ch){
   let score=0;
   for(let i=0;i<64;i++){
@@ -328,7 +330,7 @@ function findBestMove(ch){
   let best=null,bestVal=-Infinity;
   for(const m of moves){
     const info=ch._makeMove(m);
-    const val=-negamax(ch,2,-Infinity,Infinity);
+    const val=-negamax(ch,AI_SEARCH_DEPTH,-Infinity,Infinity);
     ch._unmakeMove(info);
     if(val>bestVal){bestVal=val;best=m;}
   }
