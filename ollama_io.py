@@ -79,8 +79,15 @@ _REPEAT_LINE_MAX_LEN = 80   # short-line detector only watches lines ≤ 80 char
 # count appearances. See games/traces (DOOM/FPS sessions) and the live
 # maze/broken-pipe failure observed 2026-05-10.
 _BLOCK_WINDOW_LINES = 8       # 8 consecutive lines form one "block hash"
-_BLOCK_MIN_BYTES = 200        # skip trivially short blocks (e.g. whitespace)
+_BLOCK_MIN_BYTES = 100        # skip trivially short blocks (e.g. whitespace)
 _BLOCK_MAX_REPEATS = 3        # 3 identical blocks within one response → loop
+# Lowered from 200 → 100 once `;` joined `\n` as a statement boundary:
+# semicolon-split lines are roughly half the length of newline-split
+# lines, so an 8-line repeating cycle that's pathological now joins to
+# ~150 bytes instead of ~300. 100 still excludes pure-whitespace blocks
+# (8 lines × 12 char floor) while letting template-rotation loops with
+# multiple distinct RHS values (e.g. const X=440; const Y=48; const
+# Y=140;) be caught by block-level repetition.
 
 # Window 4 (ADJACENT spam): catches the dead-state-reset block failure
 # observed in donkey-kong-game-matching-orig_20260516_142445 iter 1,
@@ -93,19 +100,41 @@ _BLOCK_MAX_REPEATS = 3        # 3 identical blocks within one response → loop
 _ADJACENT_SPAM_REPEATS = 4    # 4 identical consecutive normalized lines
 
 
-# Strip numeric SUFFIXES on identifiers so near-duplicate template spam
-# collapses (asset_1, asset_2, ...), without erasing standalone numeric
-# literals that are normal in real game code (coordinates, dimensions).
+# Strip numeric runs INSIDE identifiers (suffix OR mid-identifier) so
+# near-duplicate template spam collapses regardless of where the counter
+# sits, without erasing standalone numeric literals that are normal in
+# real game code (coordinates, dimensions).
 # Examples:
 #   `{"name":"minimap_compiler179","prompt":"…"},`     →
 #   `{"name":"minimap_compiler","prompt":"…"},`
 #   `const id_47 = "x";`                               →  `const id_ = "x";`
+#   `const LADDER784_Y2 = 140;`                        →  `const LADDER_Y = 140;`
 # but:
-#   `{ x1: 0, x2: 800 }` keeps `0` and `800` intact.
+#   `{ x1: 0, x2: 800 }` keeps `0` and `800` intact (lookbehind only
+#   fires when the digit run follows a letter/underscore, not whitespace
+#   or punctuation).
+#
+# The original `\b` anchor at the tail required the digit run to END at
+# a word boundary, which `_` (a word char) breaks — so `LADDER784_Y2`
+# kept `784` because `4` is followed by `_`. The current pattern omits
+# the trailing anchor so mid-identifier digit runs are also stripped,
+# letting the donkey-kong-style `const LADDERnnn_Yn=v;…` loops collapse
+# to one template.
 import re as _re
-_IDENT_SUFFIX_DIGITS_RE = _re.compile(r"(?<=[A-Za-z_])\d+\b")
+_IDENT_SUFFIX_DIGITS_RE = _re.compile(r"(?<=[A-Za-z_])\d+")
 _DIM_TOKEN_RE = _re.compile(r"\b\d+x\d+\b", _re.IGNORECASE)
 _HAS_SIGNAL_RE = _re.compile(r"[A-Za-z_]")
+# Logical-unit boundaries inside the streaming line buffer. Newlines are
+# the obvious separator, but a model that fires off a long
+# `const A1=…;const A2=…;…` chain on ONE line never produces \n, so the
+# detector previously never flushed and missed the loop entirely. `;`
+# is the canonical statement terminator in every C-family language the
+# coder emits (JS, CSS-in-JS, JSON-with-comments), so treating it as a
+# co-equal boundary makes single-line statement spam visible to the
+# repetition windows without changing behavior for healthy code (where
+# `;`-chained statements differ from each other after normalization and
+# stay below `_REPEAT_MAX_UNIQUE`).
+_STATEMENT_BOUNDARY_RE = _re.compile(r"[\n;]")
 
 
 def _normalize_line_for_repeat(s: str) -> str:
@@ -223,9 +252,9 @@ class RepetitionDetector:
         — i.e., the model is looping and the caller should abort.
         """
         self._line_buf += piece
-        if "\n" not in self._line_buf:
+        if "\n" not in self._line_buf and ";" not in self._line_buf:
             return False
-        *complete, self._line_buf = self._line_buf.split("\n")
+        *complete, self._line_buf = _STATEMENT_BOUNDARY_RE.split(self._line_buf)
         for ln in complete:
             s = ln.strip()
             if not s:
@@ -255,7 +284,15 @@ class RepetitionDetector:
             # single block. If we see the same block hash >
             # _BLOCK_MAX_REPEATS times in one response, the model is
             # duplicating a structured literal (maze/tilemap/const-table).
-            self._all_lines.append(s)
+            # Hash NORMALIZED lines (digit-stripped templates) rather
+            # than raw text, so a rotating cycle of K>2 unique templates
+            # (which Window 2's ≤2-unique threshold misses) is still
+            # caught when the same K-cycle of templates repeats across
+            # the rolling window — see donkey-kong 20260523_091509 where
+            # `_X=440;_Y1=48;_Y2=140;` rotated for 2588 tokens without
+            # tripping any line-unique check because the rotation has 3
+            # distinct templates.
+            self._all_lines.append(norm if norm else s)
             if len(self._all_lines) >= _BLOCK_WINDOW_LINES:
                 tail = self._all_lines[-_BLOCK_WINDOW_LINES:]
                 joined = "\n".join(tail)

@@ -179,7 +179,9 @@ def test_repdetector_adjacent_line_spam_triggers():
     assert fired_at is not None
     assert fired_at <= 4, f"adjacency should fire by line 4, got line {fired_at}"
     assert det.stall_reason == "adjacent_line_spam"
-    assert det.loop_line == "p.onGirder = false;"
+    # Trailing `;` is now a statement delimiter (see
+    # `_STATEMENT_BOUNDARY_RE`), so it's stripped from the captured line.
+    assert det.loop_line == "p.onGirder = false"
 
 
 # ---------------------------------------------------------------------------

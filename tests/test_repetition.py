@@ -179,6 +179,70 @@ def test_detector_does_not_false_positive_on_real_code():
         assert not d.feed(s), f"false positive on real code at: {s!r}"
 
 
+def test_normalize_collapses_mid_identifier_digit_runs():
+    """The donkey-kong 20260523_091509 trace: model emitted
+
+        const LADDER783_X=440;const LADDER784_Y1=48;const LADDER784_Y2=140;…
+
+    for 55 minutes / 2588 tokens before being cut off externally. The
+    original normalizer used `\\d+\\b` which required the digit run to
+    end at a word boundary, and `_` is a word char, so `LADDER784_Y2`
+    kept `784` and the templates never collapsed to one bucket. The
+    current pattern drops the boundary anchor so mid-identifier counters
+    are stripped too."""
+    a = ollama_io._normalize_line_for_repeat("const LADDER783_X=440")
+    b = ollama_io._normalize_line_for_repeat("const LADDER784_Y1=48")
+    c = ollama_io._normalize_line_for_repeat("const LADDER999_Y2=140")
+    # Counter portions collapse; assignment values (preceded by `=`,
+    # not a letter/underscore) stay intact and disambiguate when they
+    # legitimately differ.
+    assert "783" not in a and "784" not in b and "999" not in c
+    # Right-hand-side numeric literals must survive — these are real
+    # values, not counters, and erasing them would conflate distinct
+    # statements.
+    assert "440" in a and "48" in b and "140" in c
+
+
+def test_detector_catches_semicolon_chained_template_loop_with_no_newlines():
+    """Reproduces the donkey-kong 20260523_091509 stream shape exactly:
+    one long line, semicolon-terminated statements, embedded counters,
+    no `\\n` anywhere. Before the fix the detector's line buffer never
+    flushed (it only split on `\\n`) so all four windows stayed empty
+    and the model burned ~55 min at 0.8 tok/s.
+
+    Streamed as one piece (no newline) — the detector must still see
+    the per-statement boundaries via `;` and fire."""
+    d = ollama_io.RepetitionDetector()
+    chain = "".join(
+        f"const LADDER{i}_X=440;const LADDER{i}_Y1=48;const LADDER{i}_Y2=140;"
+        for i in range(1, 30)
+    )
+    fired = d.feed(chain)
+    assert fired, "semicolon-chained template loop must fire even with no \\n"
+
+
+def test_detector_does_not_false_positive_on_semicolon_chained_distinct_statements():
+    """Real coder output often packs multiple distinct statements onto
+    one line:
+
+        const W=480,H=640;const canvas=document.getElementById('c');
+        const ctx=canvas.getContext('2d');ctx.scale(DPR,DPR);
+
+    The `;`-aware split must NOT trip on this. Each statement is
+    structurally unique after normalization."""
+    d = ollama_io.RepetitionDetector()
+    line = (
+        "const W=480,H=640;const canvas=document.getElementById('c');"
+        "const ctx=canvas.getContext('2d');ctx.scale(DPR,DPR);"
+        "canvas.width=W*DPR;canvas.height=H*DPR;"
+        "canvas.style.width=W+'px';canvas.style.height=H+'px';"
+    )
+    # Feed the line several times in a row to be safe — these distinct
+    # statements should never collapse to ≤2 unique templates.
+    for _ in range(3):
+        assert not d.feed(line), "false positive on healthy single-line code"
+
+
 def test_detector_state_is_per_instance():
     """Constructing a new detector resets state — so a wedged previous
     stream can't poison the next one."""
