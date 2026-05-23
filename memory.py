@@ -3438,7 +3438,7 @@ def _strip_volatile(s: str) -> str:
 # looking guidance the agent uses while planning and building.
 #
 # Inspired by ACE (arXiv 2510.04618): bullets carry helpful/harmful counters
-# so the offline learner can prune rules that fire on failed runs and reward
+# so you can manually prune rules that fire on failed runs and reward
 # rules that fire on passing ones, without context-collapsing rewrites.
 # ===========================================================================
 
@@ -3452,7 +3452,7 @@ class Bullet:
 
     `tags` are short strings used both for retrieval (match against goal +
     code) and for organization. `helpful`/`harmful` are running counters
-    updated by the offline learner.
+    you can hand-update when a bullet proves itself or misfires.
     """
 
     id: str
@@ -4392,7 +4392,7 @@ class Playbook:
         hits.sort(key=lambda h: h.score, reverse=True)
         return hits[:k]
 
-    # --- delta ops (used by offline learner) -------------------------------
+    # --- delta ops (hand-edit helpers) -------------------------------------
 
     def add(self, bullet: Bullet) -> None:
         all_b = self.load_all()

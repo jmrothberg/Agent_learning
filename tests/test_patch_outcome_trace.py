@@ -1,10 +1,10 @@
 """Phase 0.5 — structured patch_outcome trace events.
 
 When `apply_patches` runs (via `_materialize`), the agent emits a
-`patch_outcome` JSONL record so the learner can reason about recurring
+`patch_outcome` JSONL record so postmortems can reason about recurring
 patch failure patterns across sessions. The 2026-05-22 chess trace had
 patch failures that silently produced broken outputs — without structured
-per-block detail in the trace, the learner can't see WHICH searches keep
+per-block detail in the trace, postmortems can't see WHICH searches keep
 failing.
 """
 

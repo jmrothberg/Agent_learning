@@ -232,7 +232,7 @@ def test_exit_prompt_offers_both_done_and_question_options():
 
 def test_exit_decision_trace_kinds_named_in_source():
     """Pin the trace event kinds so they're stable across edits —
-    useful for tune.py and downstream observability."""
+    useful for downstream observability."""
     agent_py = (
         Path(__file__).parent.parent / "agent.py"
     ).read_text(encoding="utf-8")

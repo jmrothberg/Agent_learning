@@ -35,8 +35,6 @@ Almost every recent change is a **detection** or **recovery** improvement, not a
 | Unclosed-html-after-loop coaching ([agent.py](agent.py)) | Tells the model *what* line was looping when its `<html_file>` got aborted | Prevent the loop in the first place |
 | Probes-only reply coaching ([agent.py](agent.py)) | Names the failure shape ("you re-emitted probes, no code") | Make the model emit code on its own |
 | Probe-sanity lint ([agent.py](agent.py)) | Flags `b.x0` (never assigned) or `return true` (after discarded work) | Make the model write better probes |
-| Reflector trace-shape detectors ([learner.py](learner.py)) | Auto-proposes playbook bullets from failure-shape traces — compounds **across sessions** | Help the model in *this* session |
-| `tune.py validate-bullet` | A/B-tests whether one bullet improves pass rate before it gets full retrieval weight | Add new gameplay capabilities |
 
 **Read that table again.** If you ran the agent 30 times and saw little quality lift, that is consistent with these changes working as designed: faster aborts, clearer coaching, slightly better playbook bullets the *next* session. None of these changes add an inch of headroom to "this model can build a playable Donkey Kong in 6 iters." That headroom comes from elsewhere (see "where the actual quality lift lives" below).
 
@@ -65,14 +63,6 @@ Each item names the file and the failure trace that motivated it. The inline com
 - **[agent.py:5790-5810](agent.py:5790)** — post-materialize wiring: `_probes_referencing_unassigned_props` runs on `new_html`, merges findings (replacing prior post-build entries, preserving the parse-time tautology entries).
 - **[agent.py:7036-7048](agent.py:7036)** — `fix_instruction` consumer: any findings on `self._probe_lint_findings` get appended to the diagnose-then-fix prompt with a directive to re-emit `<probes>` alongside the patch.
 
-### Learning loop (Layer C — every trace teaches the playbook, deterministically)
-
-- **[learner.py:501-628](learner.py:501)** — `detect_failure_shapes(trace_path)` walks raw trace rows and emits new_bullet proposals for two shapes:
-  - `no-dead-state-reset-fallthrough` — fires on `stream_done.looped=True` + `loop_kind in {adjacent_line_spam, short_line_loop}` + `loop_line` matching `_FLAG_ASSIGN_RE` (`x = false;` etc.). Legacy-trace fallback: `looped=True` (no metadata) followed by a `format_rejection.rejection_kind=unclosed_html_file` event.
-  - `no-concatenated-drafts` — fires on any `event:test` carrying a console error matching `Identifier 'X' has already been declared`.
-- **[learner.py:644-670](learner.py:644)** — `_run_reflect_apply` runs `detect_failure_shapes` on every session and merges its proposals into the LLM Reflector's `new_bullets`. The Curator's existing dedup (by `id`) handles re-runs idempotently.
-- **[tune.py:753-882](tune.py:753)** — `validate-bullet --id <id>` subcommand. Snapshots a bullet's counters, runs the battery twice (treatment vs. control with `harmful=999`), prints the pass-rate delta and a HELPS/NEUTRAL/HARMS verdict. Restores counters on exit, even on crash.
-
 ### User-facing additions
 
 - **[chat.py](chat.py) `/ref <path>`** — attach a reference image (PNG/JPEG/WebP) to the next user turn. Use case: "make the game look like this." Magic-byte validated, 4 MB cap, VLM-only. The agent's existing `_next_image_bytes` plumbing handles the rest. See "VLM image-paste — what's possible" below for limits.
@@ -80,7 +70,6 @@ Each item names the file and the failure trace that motivated it. The inline com
 
 ### Tests
 
-- **[tests/test_donkey_kong_harness_fixes.py](tests/test_donkey_kong_harness_fixes.py)** — 14 tests covering A1, B1, B2, B3, C1. Each test names the trace iter it codifies.
 - **[tests/test_microprobes.py](tests/test_microprobes.py)** — 4 new cases: dotted-elision (2), duplicate-decl positive + negative.
 - **[tests/test_bloat_detectors.py](tests/test_bloat_detectors.py)** — added `test_repdetector_adjacent_line_spam_triggers`, updated the existing tests to use varied inputs so they still exercise their intended window (the adjacency check is strictly tighter than the prior windows, so test inputs needed to alternate to distinguish them).
 - **[tests/test_check_routing.py](tests/test_check_routing.py)** — 7 tests covering `_cloud_vendor` (Anthropic / OpenAI / local), case-insensitivity, drift-guard between `_cloud_vendor` and `_looks_like_local_mlx`, and import-level surface for `_openai_judge`.
@@ -96,7 +85,6 @@ Total tests: 642 (was 617 before this work). Full suite still runs in ~2 s.
 - **Aborting bad streams fast.** Once the model enters a token-repetition loop, every additional token is wasted compute. The detectors keep getting tighter (Window 4 abort at 4 lines now, was ≥ 12).
 - **Naming the failure shape.** When something breaks, the coaching now quotes the actual broken thing back to the model (the duplicated identifier, the looped line, the unassigned property), rather than a generic "your reply was malformed."
 - **Catching cheap structural mistakes pre-Chromium.** Elision sentinels, duplicate `const`, brace imbalance, API-allowlist hallucinations — all fire before paying the 3-second browser load and tell the model exactly which name was wrong.
-- **Compounding learning across sessions.** The playbook gets a new bullet for each new failure shape (`no-concatenated-drafts`, `no-dead-state-reset-fallthrough`), proposed deterministically without an LLM call.
 - **Not silently calling the cloud.** The cloud-VLM path is `/check with <model>` only — the agent loop never auto-upgrades.
 
 ### What this harness is NOT good at (and where future quality lift actually lives)
@@ -106,16 +94,15 @@ These are the things that bound how good first-iter HTML can be on a fixed local
 1. **The base model's HTML/JS prior.** A 27B / 35B local model has a ceiling on how well it can hold a 16 KB-game architecture in one shot. No amount of coaching makes a 27B model write a flawless side-scroller.
 2. **The playbook's coverage.** A bullet only helps if it retrieves on the goal's keywords. Today's retrieval is token-Jaccard; "explosion sprite" and "boom particle effect" don't hit each other. See README "Major future improvements" #3 (semantic embedding retrieval) — that's a real quality unlock.
 3. **The vision judge doesn't gate `<done/>`.** A game can pass all probes with a blank canvas and ship. See README "Major future improvements" #1 — single-line guard in `agent.py`'s done-detection block, highest-leverage change still on the list.
-4. **No reward-shaping from VLM verdicts.** The playbook's `helpful` / `harmful` counters only update on session outcome (won/regressed). Vision-judge `PROGRESS: yes/no` per iter is currently coaching-only. Wiring it into Reflector scoring would make the playbook learn what makes games *look* better. See README #2.
-5. **A single model is both implementer and reviewer.** Self-critique by a small model is weak. Specialized sidecar critics (art / sound / gameplay) each on a tight scoped prompt would catch more. See README #4.
+4. **A single model is both implementer and reviewer.** Self-critique by a small model is weak. Specialized sidecar critics (art / sound / gameplay) each on a tight scoped prompt would catch more. See README #4.
 
-**If you ran the agent 30 times and saw flat results, the bottleneck is one of items 1–5, not "we need another detector."**
+**If you ran the agent 30 times and saw flat results, the bottleneck is one of items 1–4, not "we need another detector."**
 
 ### Honest diagnostic recipe — "why is this session not improving?"
 
 Run these in order. The first non-empty answer is the bottleneck.
 
-1. **`python learner.py walk` over `games/traces/` for the recent N sessions.** Are the FAIL signatures the same every time, or different? If the same: the playbook is missing a bullet for that shape (run `python learner.py reflect games/traces/...jsonl` and check what the shape-detectors propose; pair with `tune.py validate-bullet`). If different: the bottleneck is base-model quality, not detection.
+1. **Scan FAIL signatures across the recent N sessions in `games/traces/`.** Are the FAIL signatures the same every time, or different? If the same: the playbook is missing a bullet for that shape — hand-add one to `memory/playbook.jsonl`. If different: the bottleneck is base-model quality, not detection.
 2. **`grep "stream_done.*looped.*true" games/traces/*.jsonl | wc -l`** — how often does the repetition detector fire? If > 1 in 4 iters, the prompt or seed code is provoking loops (see "Don't inline large literals" in the system prompt's hard-rules; the seeded-generator escape hatch may need wider mention).
 3. **`grep "duplicate top-level declaration" games/traces/*.jsonl | wc -l`** — concatenated-drafts rate. If non-zero, the model is splitting reasoning across `<html_file>` boundaries. The new micro-probe catches it but does not prevent it; consider tightening the `<html_file>` instruction prefix in `prompts_v1.py`.
 4. **`grep "probe lint" games/traces/*.jsonl | wc -l`** — bad-probe rate. If chronic, the probe-quality nudge isn't being respected; consider moving `_lint_probes` findings BEFORE the iter-1 user message rather than at the diagnose-then-fix turn.
@@ -153,20 +140,16 @@ The reference image only attaches once. Re-run `/ref` for each turn that needs i
 
 ---
 
-## How to add a new shape detector (the path the Reflector takes today)
+## How to add a new playbook bullet
 
-If a new failure shape emerges, the lowest-friction add is in `learner.detect_failure_shapes`:
+If a new failure shape emerges, hand-add a bullet to `memory/playbook.jsonl`:
 
-1. Read 1-3 raw `.jsonl` traces that exhibit the shape. Identify a deterministic signature in the trace rows (a `kind=stream_done` flag combination, a `console_errors` regex, an `iter_test` field, etc.).
-2. Add a detector block inside the `for r in rows:` loop in [learner.py](learner.py). Emit a `new_bullet` dict matching the schema:
+1. Read 1-3 raw `.jsonl` traces that exhibit the shape. Identify the failing pattern.
+2. Append a JSON line with the bullet schema:
    ```python
-   {"id": "kebab-case-id", "tags": [...], "content": "..."}
+   {"id": "kebab-case-id", "content": "...", "tags": [...], "helpful": 0, "harmful": 0, "source": "seed", "created_at": "..."}
    ```
-3. Add a test in [tests/test_donkey_kong_harness_fixes.py](tests/test_donkey_kong_harness_fixes.py) (or a new test file). Use the `_write_trace` helper there.
-4. Run `python learner.py reflect <trace-path>` and confirm the bullet proposes.
-5. Run `python tune.py validate-bullet --id <id>` once you've actually applied it; that's the gate before letting it influence retrieval at `stage="code"`.
-
-The point of going through `detect_failure_shapes` rather than hand-editing `playbook.jsonl`: every future trace exhibiting the same shape compounds the helpful counter automatically. Hand-edits don't get the counter increment.
+3. Verify retrieval picks it up on a goal that should match — `memory.Playbook` reads the file at session start, so just run a fresh session.
 
 ---
 
@@ -189,11 +172,8 @@ These are from the user's standing memory:
 - [backend.py](backend.py) — MLX path's `StreamResult` construction
 - [tools.py](tools.py) — `run_micro_probes` (elision, duplicate-decl, API allowlist, asset paths)
 - [agent.py](agent.py) — `_no_usable_code_fallback`, `_lint_probes`, `_probes_referencing_unassigned_props`, format-rejection handling, `_last_stream_loop_*` state, post-materialize lint pass, `fix_instruction` consumer
-- [learner.py](learner.py) — `detect_failure_shapes`, `_run_reflect_apply` integration
-- [tune.py](tune.py) — `cmd_validate_bullet`
 - [chat.py](chat.py) — `_cmd_attach_ref_image` (`/ref`), `_cmd_check` (multi-vendor `/check`)
 - [vision_judge.py](vision_judge.py) — `_cloud_vendor`, `_openai_judge` (new), `_anthropic_judge`, `_resolve_local_mlx_vlm`
-- [tests/test_donkey_kong_harness_fixes.py](tests/test_donkey_kong_harness_fixes.py)
 - [tests/test_microprobes.py](tests/test_microprobes.py) — new dotted-elision + duplicate-decl tests
 - [tests/test_bloat_detectors.py](tests/test_bloat_detectors.py) — Window-4 adjacency test + adjusted Windows-1/2 fixtures
 - [tests/test_check_routing.py](tests/test_check_routing.py) — vendor routing for `/check`

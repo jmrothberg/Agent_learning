@@ -1470,30 +1470,6 @@ PATCH_REMINDER = (
 )
 
 
-def diagnose_instruction(report_text: str, mistakes_hints: str = "") -> str:
-    """Standalone diagnose turn — kept for compatibility with v0; v1 uses
-    the combined diagnose+fix flow in `fix_instruction` instead.
-    """
-    hints = ""
-    if mistakes_hints:
-        hints = (
-            "\n\nFROM YOUR PAST RUNS (you have seen mistakes like this "
-            "before):\n"
-            f"{mistakes_hints}\n"
-        )
-    return (
-        "BEFORE you write any code, diagnose. The test reported:\n\n"
-        f"{report_text}\n"
-        f"{hints}\n"
-        "Reply with ONLY this tag (no patches, no html, no plan):\n\n"
-        "<diagnose>\n"
-        "Root cause in ≤2 sentences. Be concrete: name the function, "
-        "the variable, or the missing wiring. If multiple things are "
-        "wrong, list the ONE that explains the most failures.\n"
-        "</diagnose>\n"
-    )
-
-
 def continuation_instruction(current_file: str) -> str:
     """User-feedback turn after `<done/>` (or restart of a previously
     finished session).

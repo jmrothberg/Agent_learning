@@ -1,9 +1,0 @@
-{
-  "session_id": "game-of-donkey-kong-with-all-p_20260516_080613",
-  "goal": "game of donkey-kong with all players animated",
-  "model": "/Users/jonathanrothberg_1/MLX_Models/Qwen3.6-27B-mxfp8",
-  "iterations": 6,
-  "ok": false,
-  "last_report_summary": "OK: False\nTitle: 'Donkey Kong'\nCanvas: 800x600, RAF ran: True, blank: False\nInput listeners: total=4 (doc=0, win=3, body=0, other=1)\nInput test: FAIL \u2014 pressed ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space', 'KeyW', 'KeyA', 'KeyS', 'KeyD'] and canvas pixels never changed.\nFrozen canvas: no (pixels changed during run)\nBody text length: 74 chars\nBody sample: 'Score: 0\\nLives: 3\\n\u2190 \u2192 move | \u2191 \u2193 climb ladder | Space jump | Enter restart'\nISSUES (must fix):\n  - HEURISTIC: pressed ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Space, KeyW, KeyA, KeyS, KeyD - 4 key listener(s) registered on window AND the RAF loop is rendering, but pressing keys did not produce any visible pixel change. The wiring exists but the data flow between your keydown handler and your draw() is broken. CHECK: (1) your keydown handler writes to the SAME `keys` object that updatePlayer/draw() reads from (closure-scope mismatch is the #1 cause on small models); (2) you use `e.code` (not `e.key`) so layout-depend",
-  "ts": "2026-05-16T14:32:00.336909Z"
-}
