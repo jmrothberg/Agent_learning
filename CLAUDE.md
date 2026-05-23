@@ -69,6 +69,10 @@ python tune.py run --full --prompt-version v1 --auto-learn
 python tune.py diff baseline_v0 v1_run            # per-test pass/fail deltas
 python tune.py why <run_id> <test_name>           # postmortem
 
+# System tests (visible browser; smoke fast, pacman slow — prompts unless --yes)
+python system_tests.py run --suite smoke --three-model
+python system_tests.py run --suite pacman --yes   # skip slow-run confirmation
+
 # Offline learner (Reflector + Curator over traces)
 python learner.py walk                            # one-line summary per past session
 python learner.py reflect games/traces/           # propose deltas (no writes)
@@ -84,14 +88,16 @@ python learner.py apply games/traces/             # propose AND write to playboo
 - `LLM_BACKEND` — unset defaults to **`mlx` on macOS** (Apple GPU), else **`auto`**. Values: `auto` | `ollama` | `mlx`. `auto` probes both; if a local MLX model is discoverable AND Ollama also has a model loaded, MLX wins. Set `LLM_BACKEND=auto` on a Mac to allow Ollama-only fallback again.
 - `OLLAMA_MODEL` / `CHAT_OLLAMA_MODEL` — explicit Ollama model override (else: detected from `/api/ps`, then first installed)
 - `OLLAMA_HOST` — non-default Ollama daemon address
+- `OLLAMA_KEEP_ALIVE` — Ollama model residency between chat turns. Default `-1` keeps the model loaded for the chat process lifetime to prevent 5-minute idle evictions during user-feedback pauses; set e.g. `10m` on tight-VRAM hosts.
 - `MLX_MODEL` — explicit MLX model path or HF id. Loaded in-process via `mlx_lm.load`. If unset, the backend scans `~/MLX_Models/` / `MLX_MODELS_DIR` / HF cache and picks a single discoverable chat model (multi-match → first, with a "set MLX_MODEL to override" hint in `info.source`).
 - `MLX_MODELS_DIR` — `:`-separated list of additional dirs to scan for downloaded MLX models. Defaults: `~/MLX_Models`, `~/Models_MLX`, `~/.cache/huggingface/hub`, `/opt/mlx_models`.
 - `MLX_PREFILL_STEP_SIZE` — chunk size for prompt eval. Per-model defaults applied automatically: **512** if the model path contains `flash` (DeepSeek-V4 Flash crashes mid-generation at >512 — observed 2026-05-15 DK trace), else **1024**. Env override always wins. Raise to `2048` on small models if you want a few % more throughput.
-- `CODING_BOX_NUM_CTX` — Ollama context window (default **262144**, matching the native context of current local coding models — Qwen3.6, DeepSeek V4, GLM 5.1, MiniMax M2). Lower it if you OOM on tight-VRAM hardware (KV-cache scales linearly with ctx). Preload your Ollama model at this size with `ollama run --ctx-size 262144 <model>` to avoid a reload on first request.
+- `CODING_BOX_NUM_CTX` — Ollama context window (default **100000** — enough for typical 6-iter game sessions; KV-cache scales linearly with ctx). In the TUI use **`/ctx`** to raise (e.g. `262k`, `full`) for long extension chats. Preload at the chosen size with `ollama run --ctx-size N <model>` to avoid a reload on first request.
 - `AGENT_NO_AUTO_OLLAMA_GPU_FIX` — set to `1` to disable automatic unload of tensor-split Ollama VRAM on `/new` (default: auto-fix on 48 GB-class GPUs).
 - `MLX_MAX_TOKENS` — MLX output cap (default **131072**). Sized as a runaway-generation guard, not a working limit — measured peak across observed sessions is ~5.7K completion tokens, so 131K gives ~23× headroom. Raise it (e.g. 262144) only if a future model genuinely needs more output per turn.
 - `ANTHROPIC_MAX_TOKENS` — Anthropic output cap (default 32768, the safe ceiling across Sonnet 4.6 / Opus 4.7). Override only if you hit per-model API limits.
 - `DIFFUSION_MODELS_DIR` — root override for weights search (sprites + sounds layout); hidden **`~/.Diffusion_Models`** / **`~/.Models_Diffusers`** are tried before visible `~/…` siblings; HuggingFace cache fallback if absent.
+- `DIFFUSER_CUDA_DEVICE` — force Z-Image / Stable-Audio onto a specific CUDA index; on the auto-pinned 4×48 GB Linux box the default is **GPU 0** so Ollama slots 1–3 stay dedicated to coder/critic/architect.
 - `TORCH_CUDA` — CUDA version for `install_diffuser.sh` (`130` default, `121`/`124` for older GPUs)
 
 ---
@@ -176,4 +182,4 @@ These bind decisions across sessions:
 - Don't bypass `<patch>` once `best.html` exists. Full `<html_file>` rewrites on a working game are a regression-amplification risk.
 - Don't expand the system prompt with always-on rules that only matter sometimes. Use the per-format `FormatSpec.guidelines` (deduped) or a goal-keyword detector (`_detect_*_intent`) to make the rule conditional.
 - Don't tighten repetition/deliberation/timeout abort thresholds without concrete trace evidence and a regression run proving rich first-build streams are not cut mid-output.
-- Don't commit generated artifacts. `.gitignore` already excludes `games/<*>.html`, `games/snapshots/`, `games/traces/`, `games/_asset_cache/`, `games/*_assets/`, `games/_smoke/`, `memory/`. Use `scripts/clean_artifacts.sh` to wipe them.
+- Don't commit generated artifacts. `.gitignore` excludes `games/<*>.html`, `games/snapshots/`, `games/traces/`, `games/_asset_cache/`, `games/*_assets/`, `games/_smoke/`, `games/game-memory/`, and other `memory/*` except **`memory/playbook.jsonl`** (learner-maintained; do not hand-edit). Use `scripts/clean_artifacts.sh` to wipe stale session artifacts.

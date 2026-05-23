@@ -35,6 +35,8 @@ import asyncio
 import json
 import os
 import re
+import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -193,6 +195,15 @@ class BackendInfo:
     context_length: int | None = None
 
 
+@dataclass
+class OllamaAutopinResult:
+    """Outcome of best-effort per-GPU Ollama daemon setup for the TUI."""
+
+    mode: Literal["off", "manual", "auto-pinned", "fallback"]
+    message: str = ""
+    endpoints: dict[int, str] | None = None
+
+
 # Cloud-backend defaults. The curated single-model-each shape keeps /list
 # tight; edit these constants (or add more entries to the inventory lists
 # below) to expose more variants. API keys are read from env at request
@@ -216,6 +227,7 @@ class Backend(ABC):
         *,
         on_token: Callable[[str], None] | None = None,
         options: dict[str, Any] | None = None,
+        keep_alive: float | str | None = None,
         stall_seconds: float = 600.0,
         overall_seconds: float = 1800.0,
         max_retries: int = 1,
@@ -250,6 +262,7 @@ class Backend(ABC):
         n: int = 3,
         temperatures: Iterable[float] | None = None,
         options: dict[str, Any] | None = None,
+        keep_alive: float | str | None = None,
         stall_seconds: float = 600.0,
         overall_seconds: float = 1800.0,
         scorer: Callable[[str], Awaitable[tuple[float, dict]]],
@@ -284,6 +297,7 @@ class Backend(ABC):
                 messages,
                 on_token=None,
                 options=opts,
+                keep_alive=keep_alive,
                 stall_seconds=stall_seconds,
                 overall_seconds=overall_seconds,
                 max_retries=0,
@@ -312,6 +326,75 @@ class Backend(ABC):
                 break
         cands.sort(key=lambda c: (c.score, -c.duration_s), reverse=True)
         return cands[0], cands
+
+    async def warm_prefix(
+        self,
+        messages: list[dict],
+        *,
+        options: dict[str, Any] | None = None,
+        keep_alive: float | str | None = None,
+        timeout_s: float = 120.0,
+    ) -> dict[str, Any]:
+        """Pre-fill this backend's KV cache for `messages` without
+        producing meaningful output.
+
+        Used to hide cross-slot prompt-reprefill cost: when role A
+        streams on slot A and then control hands off to role B on slot
+        B, slot B has never seen this conversation and pays the full
+        prefill on its first request. The 2026-05-22 chess trace had
+        slot 1 (coder) idle for 58 s during architect + asset/sound gen,
+        then iter 1 spent its own prefill time on tokens slot 3
+        (architect) had already processed. Firing this method during
+        that idle window means slot 1's KV is hot before iter 1's
+        stream starts.
+
+        Default implementation: stream_chat with 1-token cap, output
+        discarded. Ollama caches the prompt KV across requests by
+        prefix-match; a subsequent stream_chat with the SAME messages
+        reuses the cached KV. Subclasses can override for backends that
+        expose a cheaper prompt-only path.
+
+        Returns a dict with `ok`, `elapsed_s`, optional `tokens`,
+        `error`. Never raises — the caller treats warm as advisory.
+        """
+        import time as _time
+        opts = dict(options or {})
+        # Two common knobs; backends pick whichever they honor.
+        opts.setdefault("num_predict", 1)
+        opts.setdefault("max_tokens", 1)
+        opts.setdefault("temperature", 0.0)
+        started_at = _time.monotonic()
+        try:
+            result = await asyncio.wait_for(
+                self.stream_chat(
+                    messages,
+                    on_token=None,
+                    options=opts,
+                    keep_alive=keep_alive,
+                    stall_seconds=timeout_s,
+                    overall_seconds=timeout_s,
+                    max_retries=0,
+                ),
+                timeout=timeout_s,
+            )
+            return {
+                "ok": True,
+                "elapsed_s": round(_time.monotonic() - started_at, 2),
+                "tokens": getattr(result, "tokens", None),
+                "stalled": getattr(result, "stalled", False),
+            }
+        except asyncio.TimeoutError:
+            return {
+                "ok": False,
+                "elapsed_s": round(_time.monotonic() - started_at, 2),
+                "error": "timeout",
+            }
+        except Exception as e:
+            return {
+                "ok": False,
+                "elapsed_s": round(_time.monotonic() - started_at, 2),
+                "error": str(e)[:200],
+            }
 
     async def close(self) -> None:
         """Best-effort cleanup of any underlying connection pools."""
@@ -342,6 +425,7 @@ class OllamaBackend(Backend):
         *,
         on_token: Callable[[str], None] | None = None,
         options: dict[str, Any] | None = None,
+        keep_alive: float | str | None = None,
         stall_seconds: float = 600.0,
         overall_seconds: float = 1800.0,
         max_retries: int = 1,
@@ -360,6 +444,7 @@ class OllamaBackend(Backend):
             messages,
             on_token=on_token,
             options=options,
+            keep_alive=keep_alive,
             stall_seconds=stall_seconds,
             overall_seconds=overall_seconds,
             max_retries=max_retries,
@@ -604,6 +689,7 @@ class MLXBackend(Backend):
         *,
         on_token: Callable[[str], None] | None = None,
         options: dict[str, Any] | None = None,
+        keep_alive: float | str | None = None,
         stall_seconds: float = 600.0,
         overall_seconds: float = 1800.0,
         max_retries: int = 1,
@@ -1192,6 +1278,7 @@ class OpenAIBackend(Backend):
         *,
         on_token: Callable[[str], None] | None = None,
         options: dict[str, Any] | None = None,
+        keep_alive: float | str | None = None,
         stall_seconds: float = 600.0,
         overall_seconds: float = 1800.0,
         max_retries: int = 1,
@@ -1270,16 +1357,21 @@ class OpenAIBackend(Backend):
                 try:
                     await _run(params)
                 except Exception as e2:
+                    err_payload = f"{type(e2).__name__}: {e2}"
                     print(
-                        f"openai stream_chat error: "
-                        f"{type(e2).__name__}: {e2}",
+                        f"openai stream_chat error: {err_payload}",
                         file=sys.stderr,
                     )
+                    # Phase 5a: real crash, not a stall. Lets the agent
+                    # route to fallback / retry rather than synthesizing
+                    # a misleading "stalled at <stall_seconds>s" message.
                     return StreamResult(
                         text="".join(parts),
                         tokens=tokens,
                         duration_s=time.monotonic() - t0,
-                        stalled=True,
+                        stalled=False,
+                        crashed=True,
+                        error_message=err_payload,
                         prompt_tokens=prompt_tokens,
                         completion_tokens=completion_tokens,
                     )
@@ -1290,16 +1382,20 @@ class OpenAIBackend(Backend):
             # here. Surface the real exception class + message to
             # stderr so callers can diagnose without enabling debug
             # logging — 429 insufficient_quota is a billing fix, 401
-            # is a key fix, and a generic "stalled" hides both.
+            # is a key fix.
+            err_payload = f"{type(e).__name__}: {e}"
             print(
-                f"openai stream_chat error: {type(e).__name__}: {e}",
+                f"openai stream_chat error: {err_payload}",
                 file=sys.stderr,
             )
+            # Phase 5a: real crash, not a stall (see Anthropic note).
             return StreamResult(
                 text="".join(parts),
                 tokens=tokens,
                 duration_s=time.monotonic() - t0,
-                stalled=True,
+                stalled=False,
+                crashed=True,
+                error_message=err_payload,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
             )
@@ -1351,6 +1447,7 @@ class AnthropicBackend(Backend):
         *,
         on_token: Callable[[str], None] | None = None,
         options: dict[str, Any] | None = None,
+        keep_alive: float | str | None = None,
         stall_seconds: float = 600.0,
         overall_seconds: float = 1800.0,
         max_retries: int = 1,
@@ -1458,31 +1555,39 @@ class AnthropicBackend(Backend):
                     tokens = 0
                     await _run_anthropic(kwargs)
                 except Exception as e2:
+                    err_payload = f"{type(e2).__name__}: {e2}"
                     print(
-                        f"anthropic stream_chat error: "
-                        f"{type(e2).__name__}: {e2}",
+                        f"anthropic stream_chat error: {err_payload}",
                         file=sys.stderr,
                     )
                     return StreamResult(
                         text="".join(parts),
                         tokens=tokens,
                         duration_s=time.monotonic() - t0,
-                        stalled=True,
+                        stalled=False,
+                        crashed=True,
+                        error_message=err_payload,
                         prompt_tokens=prompt_tokens,
                         completion_tokens=completion_tokens,
                     )
             else:
-                # Mirror OpenAIBackend: surface the real exception class +
-                # message so 429 / 401 / overload diagnoses bubble up.
+                # Phase 5a: mark this as a real CRASH, not a stall, so
+                # the agent can route to the fallback / retry path.
+                # Trace 2 (chess 20260522_104235) had Anthropic raise in
+                # 0.48s and the agent reported "stalling at 600s" because
+                # this branch returned `stalled=True` with no error_message.
+                err_payload = f"{type(e).__name__}: {e}"
                 print(
-                    f"anthropic stream_chat error: {type(e).__name__}: {e}",
+                    f"anthropic stream_chat error: {err_payload}",
                     file=sys.stderr,
                 )
                 return StreamResult(
                     text="".join(parts),
                     tokens=tokens,
                     duration_s=time.monotonic() - t0,
-                    stalled=True,
+                    stalled=False,
+                    crashed=True,
+                    error_message=err_payload,
                     prompt_tokens=prompt_tokens,
                     completion_tokens=completion_tokens,
                 )
@@ -1649,13 +1754,317 @@ def list_anthropic_inventory() -> tuple[list[str], str | None]:
 # -----------------------------------------------------------------------------
 
 
+def _normalize_ollama_host(raw: str, *, default_port: int = 11434) -> str:
+    s = (raw or "").strip().rstrip("/")
+    if not s:
+        return f"http://127.0.0.1:{default_port}"
+    if not s.startswith("http"):
+        s = "http://" + s
+    return s
+
+
 def _ollama_endpoint() -> str:
-    raw = (os.environ.get("OLLAMA_HOST") or "").strip().rstrip("/")
-    if not raw:
-        return "http://127.0.0.1:11434"
-    if not raw.startswith("http"):
-        raw = "http://" + raw
-    return raw
+    return _normalize_ollama_host(os.environ.get("OLLAMA_HOST") or "")
+
+
+def _ollama_endpoint_for_slot(slot: int) -> str:
+    """HTTP base for Ollama slot 1/2/3 (3-model runs on separate daemons).
+
+    Slot 1: ``OLLAMA_HOST`` (default ``http://127.0.0.1:11434``).
+    Slot 2: ``OLLAMA_HOST2``, else slot 1.
+    Slot 3: ``OLLAMA_HOST3``, else slot 1.
+    """
+    if slot <= 1:
+        return _ollama_endpoint()
+    key = "OLLAMA_HOST2" if slot == 2 else "OLLAMA_HOST3"
+    raw = (os.environ.get(key) or "").strip()
+    if raw:
+        return _normalize_ollama_host(raw)
+    return _ollama_endpoint()
+
+
+def _env_truthy(name: str) -> bool:
+    return (os.environ.get(name) or "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _manual_ollama_slot_hosts_set() -> bool:
+    return bool(
+        (os.environ.get("OLLAMA_HOST2") or "").strip()
+        or (os.environ.get("OLLAMA_HOST3") or "").strip()
+    )
+
+
+def _ollama_cli_candidates() -> list[str]:
+    """Resolve `ollama`; Cursor-launched Python often has a thin PATH."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for c in (
+        shutil.which("ollama"),
+        "/usr/local/bin/ollama",
+        "/usr/bin/ollama",
+        "/snap/bin/ollama",
+        os.path.expanduser("~/.local/bin/ollama"),
+    ):
+        if not c or c in seen:
+            continue
+        seen.add(c)
+        if os.path.isfile(c) and os.access(c, os.X_OK):
+            out.append(c)
+    return out
+
+
+def _resolve_ollama_models_dir() -> str:
+    """Choose the model store for auto-started slot daemons."""
+    raw = (os.environ.get("OLLAMA_MODELS") or "").strip()
+    candidates = [raw] if raw else []
+    candidates.extend([
+        "/usr/share/ollama/.ollama/models",
+        os.path.expanduser("~/.ollama/models"),
+    ])
+    for path in candidates:
+        if not path:
+            continue
+        manifests = os.path.join(path, "manifests")
+        if os.path.isdir(manifests):
+            return path
+    return raw or os.path.expanduser("~/.ollama/models")
+
+
+def _is_four_gpu_linux_nvidia_workstation() -> tuple[bool, str]:
+    """Strict autopin gate: Linux + exactly 4 large NVIDIA GPUs."""
+    if sys.platform == "darwin":
+        return False, "macOS/MLX host"
+    if not sys.platform.startswith("linux"):
+        return False, f"non-Linux platform {sys.platform!r}"
+    try:
+        import gpu_status as gs
+    except Exception:
+        return False, "gpu_status unavailable"
+    snap = gs.snapshot_gpus(force=True)
+    if snap is None or not snap.gpus:
+        return False, "nvidia-smi unavailable"
+    gpus = sorted(snap.gpus, key=lambda g: g.index)
+    if len(gpus) != 4:
+        return False, f"{len(gpus)} visible GPUs"
+    if not all("nvidia" in (g.name or "").lower() for g in gpus):
+        return False, "non-NVIDIA or mixed GPU inventory"
+    if not all((g.memory_total_mib or 0) >= 40000 for g in gpus):
+        return False, "not all GPUs are 48 GB-class"
+    if [g.index for g in gpus] != [0, 1, 2, 3]:
+        return False, f"unexpected GPU indices {[g.index for g in gpus]}"
+    return True, "4x NVIDIA 48 GB-class workstation"
+
+
+def _port_owner_pid(port: int) -> int | None:
+    """PID listening on TCP port, if `ss` can see it."""
+    try:
+        r = subprocess.run(
+            ["ss", "-tlnp"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    if r.returncode != 0:
+        return None
+    marker = f":{port}"
+    for line in (r.stdout or "").splitlines():
+        if marker not in line:
+            continue
+        m = re.search(r"pid=(\d+)", line)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def _proc_cmdline(pid: int) -> str:
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            data = f.read()
+    except OSError:
+        return ""
+    return data.replace(b"\0", b" ").decode(errors="replace").strip()
+
+
+def _proc_environ(pid: int) -> dict[str, str]:
+    try:
+        with open(f"/proc/{pid}/environ", "rb") as f:
+            raw = f.read()
+    except OSError:
+        return {}
+    out: dict[str, str] = {}
+    for item in raw.split(b"\0"):
+        if not item or b"=" not in item:
+            continue
+        k, v = item.split(b"=", 1)
+        out[k.decode(errors="replace")] = v.decode(errors="replace")
+    return out
+
+
+def _pid_is_same_user(pid: int) -> bool:
+    try:
+        return os.stat(f"/proc/{pid}").st_uid == os.getuid()
+    except OSError:
+        return False
+
+
+def _pid_is_ollama_serve(pid: int) -> bool:
+    cmd = _proc_cmdline(pid).lower()
+    return "ollama" in cmd and "serve" in cmd
+
+
+def _endpoint_ready(base: str) -> bool:
+    return isinstance(_http_get_json(base.rstrip("/") + "/api/tags", timeout=1.5), dict)
+
+
+def _wait_endpoint_ready(base: str, *, timeout_s: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if _endpoint_ready(base):
+            return True
+        time.sleep(0.25)
+    return _endpoint_ready(base)
+
+
+def _terminate_same_user_ollama_serve(pid: int, *, port: int) -> tuple[bool, str]:
+    if not _pid_is_same_user(pid) or not _pid_is_ollama_serve(pid):
+        return False, (
+            f"port {port} is owned by pid {pid}, not a same-user ollama serve; "
+            "left untouched"
+        )
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError as e:
+        return False, f"could not stop ollama serve pid {pid}: {e!r}"
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if _port_owner_pid(port) != pid:
+            return True, f"stopped stale ollama serve pid {pid} on {port}"
+        time.sleep(0.2)
+    return False, f"ollama serve pid {pid} on {port} did not stop"
+
+
+def _slot_daemon_matches(pid: int, *, gpu: int, models_dir: str) -> bool:
+    env = _proc_environ(pid)
+    visible = (env.get("CUDA_VISIBLE_DEVICES") or "").strip()
+    store = (env.get("OLLAMA_MODELS") or "").strip()
+    return visible == str(gpu) and (not store or os.path.abspath(store) == os.path.abspath(models_dir))
+
+
+def _start_ollama_slot_daemon(
+    *,
+    exe: str,
+    port: int,
+    gpu: int,
+    models_dir: str,
+) -> tuple[bool, str]:
+    env = os.environ.copy()
+    env["CUDA_VISIBLE_DEVICES"] = str(gpu)
+    env["OLLAMA_HOST"] = f"127.0.0.1:{port}"
+    env["OLLAMA_MODELS"] = models_dir
+    env["OLLAMA_SCHED_SPREAD"] = "2"
+    try:
+        subprocess.Popen(
+            [exe, "serve"],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as e:
+        return False, f"failed to start ollama on {port}/GPU{gpu}: {e!r}"
+    base = f"http://127.0.0.1:{port}"
+    if not _wait_endpoint_ready(base):
+        return False, f"ollama on {port}/GPU{gpu} did not become reachable"
+    return True, f"started ollama {port} on GPU{gpu}"
+
+
+def _slot_endpoint_env(slot: int, port: int) -> tuple[str, str]:
+    key = "OLLAMA_HOST" if slot == 1 else f"OLLAMA_HOST{slot}"
+    return key, f"http://127.0.0.1:{port}"
+
+
+def ensure_ollama_slot_daemons_for_chat(
+    *,
+    enabled: bool,
+    prefer: str | None = None,
+) -> OllamaAutopinResult:
+    """Auto-start one Ollama daemon per LLM slot on the 4-GPU Linux box.
+
+    This is intentionally a no-op everywhere except the strict workstation
+    shape. It never uses sudo/systemd and never changes context size.
+    """
+    if not enabled:
+        return OllamaAutopinResult("off", "not a 3-slot Ollama run")
+    if _env_truthy("AGENT_NO_AUTO_OLLAMA_PIN"):
+        return OllamaAutopinResult("off", "AGENT_NO_AUTO_OLLAMA_PIN=1")
+    if _manual_ollama_slot_hosts_set():
+        return OllamaAutopinResult("manual", "manual OLLAMA_HOST2/HOST3 in use")
+
+    pref = (prefer or os.environ.get("LLM_BACKEND") or "").strip().lower()
+    if pref in ("mlx", "openai", "oai", "anthropic", "claude"):
+        return OllamaAutopinResult("off", f"backend {pref!r} is not Ollama")
+    if pref in ("", "auto"):
+        try:
+            if _try_mlx() is not None:
+                return OllamaAutopinResult("off", "auto backend selected MLX")
+        except Exception:
+            pass
+
+    ok, reason = _is_four_gpu_linux_nvidia_workstation()
+    if not ok:
+        return OllamaAutopinResult("off", reason)
+
+    exe_candidates = _ollama_cli_candidates()
+    if not exe_candidates:
+        return OllamaAutopinResult("fallback", "no ollama executable found")
+    exe = exe_candidates[0]
+    models_dir = _resolve_ollama_models_dir()
+    slots = ((1, 11434, 1), (2, 11435, 2), (3, 11436, 3))
+    messages: list[str] = []
+
+    for slot, port, gpu in slots:
+        base = f"http://127.0.0.1:{port}"
+        owner = _port_owner_pid(port)
+        if owner is not None:
+            if _slot_daemon_matches(owner, gpu=gpu, models_dir=models_dir) and _endpoint_ready(base):
+                messages.append(f"{port}->GPU{gpu} already pinned")
+            else:
+                loaded = _ollama_running_models(base)
+                if loaded:
+                    unload_all_ollama_models(base)
+                stopped, msg = _terminate_same_user_ollama_serve(owner, port=port)
+                messages.append(msg)
+                if not stopped:
+                    return OllamaAutopinResult("fallback", "; ".join(messages))
+                started, msg = _start_ollama_slot_daemon(
+                    exe=exe, port=port, gpu=gpu, models_dir=models_dir,
+                )
+                messages.append(msg)
+                if not started:
+                    return OllamaAutopinResult("fallback", "; ".join(messages))
+        else:
+            started, msg = _start_ollama_slot_daemon(
+                exe=exe, port=port, gpu=gpu, models_dir=models_dir,
+            )
+            messages.append(msg)
+            if not started:
+                return OllamaAutopinResult("fallback", "; ".join(messages))
+
+        key, value = _slot_endpoint_env(slot, port)
+        os.environ[key] = value
+
+    endpoints = {slot: value for slot, port, _ in slots for _, value in [_slot_endpoint_env(slot, port)]}
+    return OllamaAutopinResult(
+        "auto-pinned",
+        " · ".join(messages),
+        endpoints=endpoints,
+    )
 
 
 def _ollama_endpoints() -> list[str]:
@@ -1939,28 +2348,42 @@ def _try_mlx() -> BackendInfo | None:
 def unload_ollama_model(name: str, endpoint: str | None = None) -> tuple[bool, str]:
     """Tell Ollama to evict `name` from VRAM by POSTing keep_alive=0.
 
-    Returns (ok, message). Uses /api/generate with prompt="" — Ollama
-    treats keep_alive=0 as "drop this model now". The model stays
-    installed on disk; only the VRAM allocation is released.
-
-    Why /api/generate and not /api/chat: /api/chat ignores keep_alive
-    when the model isn't already loaded for chat. /api/generate is the
-    documented unload path.
+    Tries /api/chat (empty messages) then /api/generate — the agent loads
+    models via chat, and either endpoint accepts keep_alive=0 to drop VRAM.
     """
     base = (endpoint or _ollama_endpoint()).rstrip("/")
-    url = base + "/api/generate"
-    payload = json.dumps({"model": name, "prompt": "", "keep_alive": 0}).encode()
-    req = urllib.request.Request(
-        url, data=payload, method="POST",
-        headers={"Content-Type": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            resp.read()
-    except urllib.error.HTTPError as e:
-        return False, f"HTTP {e.code}: {e.reason}"
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
-        return False, f"{e!r}"
+    attempts = [
+        (
+            base + "/api/chat",
+            {"model": name, "messages": [], "keep_alive": 0},
+        ),
+        (
+            base + "/api/generate",
+            {"model": name, "prompt": "", "keep_alive": 0},
+        ),
+    ]
+    last_err = ""
+    for url, body in attempts:
+        data = _http_post_json(url, body, timeout=30.0)
+        if data is None:
+            last_err = f"no response from {url}"
+            continue
+        if data.get("done_reason") == "unload" or data.get("done") is True:
+            return True, f"unloaded {name!r}"
+    if last_err:
+        return False, last_err
+    # Active chat sessions use keep_alive=-1 and can reload immediately.
+    time.sleep(0.4)
+    still = [
+        m for m in _ollama_running_models(base)
+        if name in (m.get("name") or "")
+    ]
+    if still:
+        return (
+            False,
+            f"still loaded at {base.rsplit(':', 1)[-1]} after unload "
+            "(stop the running game session, or another client is holding the model)",
+        )
     return True, f"unloaded {name!r}"
 
 
@@ -1999,14 +2422,55 @@ def auto_fix_ollama_tensor_split(endpoint: str | None = None) -> tuple[bool, str
     )
 
 
-def unload_all_ollama_models(endpoint: str | None = None) -> list[tuple[str, bool, str]]:
-    """Walk /api/ps and unload every loaded model. Returns per-model results."""
-    base = endpoint or _ollama_endpoint()
+# Standard multi-GPU slot ports (mirrors ensure_ollama_slot_daemons_for_chat).
+_OLLAMA_SLOT_PORTS = (11434, 11435, 11436)
+
+
+def ollama_unload_probe_bases() -> list[str]:
+    """All Ollama HTTP bases to probe for /unload all (deduped by port)."""
+    try:
+        import gpu_status as gs
+        bases = list(gs.ollama_all_api_bases())
+    except Exception:
+        bases = [_ollama_endpoint()]
+    by_port: dict[int, str] = {}
+    for raw in bases:
+        m = re.search(r":(\d+)$", raw.rstrip("/"))
+        if not m:
+            continue
+        port = int(m.group(1))
+        by_port.setdefault(port, f"http://127.0.0.1:{port}")
+    for port in _OLLAMA_SLOT_PORTS:
+        base = f"http://127.0.0.1:{port}"
+        if port not in by_port and _endpoint_ready(base):
+            by_port[port] = base
+    return [by_port[p] for p in sorted(by_port)]
+
+
+def _unload_all_at_endpoint(base: str) -> list[tuple[str, bool, str]]:
     loaded = _ollama_running_models(base)
     return [
         (m["name"], *unload_ollama_model(m["name"], endpoint=base))
         for m in loaded
     ]
+
+
+def unload_all_ollama_models(endpoint: str | None = None) -> list[tuple[str, bool, str]]:
+    """Walk /api/ps and unload every loaded model.
+
+    When ``endpoint`` is None, every reachable Ollama daemon is probed
+    (slot 1–3 on the 4-GPU box, not only ``OLLAMA_HOST``). Messages
+    include the endpoint so multi-daemon runs are easy to audit.
+    """
+    if endpoint is not None:
+        return _unload_all_at_endpoint(endpoint.rstrip("/"))
+
+    results: list[tuple[str, bool, str]] = []
+    for base in ollama_unload_probe_bases():
+        for name, ok, msg in _unload_all_at_endpoint(base):
+            port = base.rsplit(":", 1)[-1]
+            results.append((name, ok, f"{msg} ({port})"))
+    return results
 
 
 def mlx_server_pids() -> list[int]:
@@ -2024,18 +2488,18 @@ def list_ollama_inventory() -> tuple[list[str], set[str]]:
 
     Filters non-chat tags (z-image, embedders, ...) so the numbered list
     only includes models that can actually answer /load N. The "loaded"
-    set is returned unfiltered so a currently-running diffuser is still
-    visible in status surfaces.
+    set merges /api/ps across every probed Ollama slot (11434–11436), not
+    only OLLAMA_HOST — so ``*`` in /list matches what /unload all touches.
     """
     installed: list[str] = []
     loaded: set[str] = set()
-    for base in _ollama_endpoints():
+    bases = ollama_unload_probe_bases()
+    for base in bases:
         if not installed:
             installed = _ollama_installed_models(base)
-        if not loaded:
-            loaded = {m["name"] for m in _ollama_running_models(base)}
-        if installed and loaded:
-            break
+        for m in _ollama_running_models(base):
+            if m.get("name"):
+                loaded.add(m["name"])
     return [n for n in installed if _is_chat_capable_tag(n)], loaded
 
 
@@ -2198,6 +2662,11 @@ def mlx_endpoint_url() -> str:
     return _mlx_endpoint()
 
 
-def ollama_endpoint_url() -> str:
-    """Public alias for the resolved Ollama endpoint URL."""
-    return _ollama_endpoint()
+def ollama_endpoint_url(slot: int = 1) -> str:
+    """Public alias for the resolved Ollama endpoint URL (per model slot)."""
+    return _ollama_endpoint_for_slot(slot)
+
+
+def ollama_context_length(endpoint: str, model: str) -> int | None:
+    """Native context length from ``/api/show``; None if unreachable."""
+    return _ollama_show_context_length(endpoint, model)

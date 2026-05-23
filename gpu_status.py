@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -329,6 +330,8 @@ def ollama_chat_load_options(snapshot: GpuSnapshot | None = None) -> dict[str, A
 
 def ollama_split_tip_short(snapshot: GpuSnapshot | None) -> str | None:
     """One-line split hint for the panel (no pid jargon)."""
+    if ollama_multi_daemon_setup():
+        return None
     indices = ollama_tensor_split_gpu_indices(snapshot)
     if not indices:
         return None
@@ -380,61 +383,212 @@ def format_four_gpu_summary(snapshot: GpuSnapshot | None) -> str:
     return " · ".join(parts)
 
 
-def _ollama_api_bases() -> list[str]:
+def _normalize_ollama_base(raw: str) -> str:
+    s = raw.strip().rstrip("/")
+    if not s.startswith("http"):
+        s = "http://" + s
+    return s
+
+
+def _normalize_hostport(raw: str) -> str:
+    s = (raw or "").strip().rstrip("/")
+    if s.startswith("http://"):
+        s = s[len("http://"):]
+    elif s.startswith("https://"):
+        s = s[len("https://"):]
+    if s.startswith("localhost:"):
+        s = "127.0.0.1:" + s.split(":", 1)[1]
+    return s
+
+
+def _proc_environ(pid: int) -> dict[str, str]:
+    try:
+        with open(f"/proc/{pid}/environ", "rb") as f:
+            raw = f.read()
+    except OSError:
+        return {}
+    out: dict[str, str] = {}
+    for item in raw.split(b"\0"):
+        if not item or b"=" not in item:
+            continue
+        k, v = item.split(b"=", 1)
+        out[k.decode(errors="replace")] = v.decode(errors="replace")
+    return out
+
+
+def _proc_cmdline(pid: int) -> str:
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            data = f.read()
+    except OSError:
+        return ""
+    return data.replace(b"\0", b" ").decode(errors="replace").strip()
+
+
+def ollama_endpoint_gpu_index(endpoint: str) -> int | None:
+    """Physical GPU pinned to an `ollama serve` endpoint via CUDA_VISIBLE_DEVICES."""
+    want = _normalize_hostport(endpoint or "")
+    if not want:
+        return None
+    try:
+        r = subprocess.run(
+            ["pgrep", "-f", "ollama serve"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    if r.returncode != 0:
+        return None
+    for raw_pid in (r.stdout or "").split():
+        try:
+            pid = int(raw_pid)
+        except ValueError:
+            continue
+        if "ollama" not in _proc_cmdline(pid).lower():
+            continue
+        env = _proc_environ(pid)
+        host = _normalize_hostport(env.get("OLLAMA_HOST") or "")
+        if host != want:
+            continue
+        visible = (env.get("CUDA_VISIBLE_DEVICES") or "").strip()
+        # Auto-pinned daemons use one visible physical GPU. If someone
+        # configured a list, this endpoint is not a single-GPU pin.
+        if "," in visible or not visible:
+            return None
+        try:
+            return int(visible)
+        except ValueError:
+            return None
+    return None
+
+
+def ollama_all_api_bases() -> list[str]:
+    """All Ollama HTTP bases: OLLAMA_HOST (+ HOST2/HOST3) and loopback fallbacks."""
     out: list[str] = []
     seen: set[str] = set()
-    for raw in (
-        os.environ.get("OLLAMA_HOST") or "",
-        "127.0.0.1:11434",
-        "localhost:11434",
-    ):
-        s = raw.strip().rstrip("/")
-        if not s:
+    for key in ("OLLAMA_HOST", "OLLAMA_HOST2", "OLLAMA_HOST3"):
+        raw = (os.environ.get(key) or "").strip()
+        if not raw and key == "OLLAMA_HOST":
+            raw = "127.0.0.1:11434"
+        if not raw:
             continue
-        if not s.startswith("http"):
-            s = "http://" + s
+        s = _normalize_ollama_base(raw)
+        if s not in seen:
+            seen.add(s)
+            out.append(s)
+    for fallback in ("127.0.0.1:11434", "localhost:11434"):
+        s = _normalize_ollama_base(fallback)
         if s not in seen:
             seen.add(s)
             out.append(s)
     return out or ["http://127.0.0.1:11434"]
 
 
+def _ollama_api_bases() -> list[str]:
+    """Primary + loopback probes (backward-compatible alias)."""
+    return ollama_all_api_bases()
+
+
+def ollama_multi_daemon_setup() -> bool:
+    """True when model2/model3 use separate Ollama ports (intentional multi-GPU)."""
+    return bool(
+        (os.environ.get("OLLAMA_HOST2") or "").strip()
+        or (os.environ.get("OLLAMA_HOST3") or "").strip()
+    )
+
+
+def ollama_ps_at_endpoint(base: str) -> list[dict[str, Any]]:
+    """Loaded models on one Ollama daemon (/api/ps)."""
+    endpoint = _normalize_ollama_base(base)
+    try:
+        req = urllib.request.Request(endpoint.rstrip("/") + "/api/ps", method="GET")
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode())
+    except (
+        urllib.error.URLError,
+        TimeoutError,
+        json.JSONDecodeError,
+        OSError,
+        ValueError,
+    ):
+        return []
+    if not isinstance(data, dict):
+        return []
+    out: list[dict[str, Any]] = []
+    for m in data.get("models") or []:
+        if not isinstance(m, dict):
+            continue
+        name = (m.get("name") or m.get("model") or "").strip()
+        if not name:
+            continue
+        size = int(m.get("size") or 0)
+        vram = int(m.get("size_vram") or 0)
+        out.append({
+            "name": name,
+            "endpoint": endpoint,
+            "size_bytes": size,
+            "size_vram_bytes": vram,
+            "vram_gib": round(vram / (1024 ** 3), 1) if vram else None,
+        })
+    return out
+
+
+def gpu_indices_for_ollama_loaded_model(
+    snapshot: GpuSnapshot | None,
+    *,
+    vram_bytes: int | None = None,
+    vram_gib: float | None = None,
+) -> list[int]:
+    """Best GPU index for one loaded Ollama model (single card, not global split)."""
+    if snapshot is None:
+        return []
+    target_mib = 0
+    if vram_bytes and vram_bytes > 0:
+        target_mib = int(vram_bytes / (1024 * 1024))
+    elif vram_gib and vram_gib > 0:
+        target_mib = int(vram_gib * 1024)
+    by_pid: dict[int, dict[int, int]] = {}
+    for p in snapshot.processes:
+        if "ollama" not in p.process_name.lower():
+            continue
+        mem = p.memory_mib or 0
+        if mem < _LLM_OLLAMA_SLICE_MIB:
+            continue
+        by_pid.setdefault(p.pid, {})
+        by_pid[p.pid][p.gpu_index] = by_pid[p.pid].get(p.gpu_index, 0) + mem
+    if not by_pid:
+        return []
+    best_gpu: int | None = None
+    best_score = -1.0
+    for per_gpu in by_pid.values():
+        total = sum(per_gpu.values())
+        primary = max(per_gpu, key=lambda g: per_gpu[g])
+        if target_mib > 0:
+            # Match this model's /api/ps VRAM to the runner PID footprint.
+            score = 1.0 / (1.0 + abs(total - target_mib))
+        else:
+            score = float(total)
+        if score > best_score:
+            best_score = score
+            best_gpu = primary
+    return [best_gpu] if best_gpu is not None else []
+
+
 def ollama_loaded_models() -> list[dict[str, Any]]:
-    """Models currently resident in Ollama (/api/ps), best-effort."""
-    for base in _ollama_api_bases():
-        try:
-            req = urllib.request.Request(
-                base.rstrip("/") + "/api/ps", method="GET",
-            )
-            with urllib.request.urlopen(req, timeout=3) as resp:
-                data = json.loads(resp.read().decode())
-        except (
-            urllib.error.URLError,
-            TimeoutError,
-            json.JSONDecodeError,
-            OSError,
-            ValueError,
-        ):
-            continue
-        if not isinstance(data, dict):
-            continue
-        out: list[dict[str, Any]] = []
-        for m in data.get("models") or []:
-            if not isinstance(m, dict):
+    """Models currently resident in Ollama (/api/ps), merged across all daemons."""
+    merged: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for base in ollama_all_api_bases():
+        for row in ollama_ps_at_endpoint(base):
+            key = (row["endpoint"], row["name"])
+            if key in seen:
                 continue
-            name = (m.get("name") or m.get("model") or "").strip()
-            if not name:
-                continue
-            size = int(m.get("size") or 0)
-            vram = int(m.get("size_vram") or 0)
-            out.append({
-                "name": name,
-                "size_bytes": size,
-                "size_vram_bytes": vram,
-                "vram_gib": round(vram / (1024 ** 3), 1) if vram else None,
-            })
-        return out
-    return []
+            seen.add(key)
+            merged.append(row)
+    return merged
 
 
 def infer_ollama_gpu_indices(
@@ -498,11 +652,137 @@ def large_python_gpu_indices(
     })
 
 
+def _gpu_free_mib(snap: GpuSnapshot, index: int) -> int | None:
+    for g in snap.gpus:
+        if g.index != index:
+            continue
+        if g.memory_total_mib is None or g.memory_used_mib is None:
+            return None
+        return g.memory_total_mib - g.memory_used_mib
+    return None
+
+
+def _is_four_gpu_linux_nvidia_workstation(snap: GpuSnapshot | None) -> bool:
+    """True on the auto-pinned 4×48 GB Linux box (diffusers → GPU 0)."""
+    if not sys.platform.startswith("linux"):
+        return False
+    if snap is None or not snap.gpus:
+        return False
+    gpus = sorted(snap.gpus, key=lambda g: g.index)
+    if len(gpus) != 4:
+        return False
+    if not all("nvidia" in (g.name or "").lower() for g in gpus):
+        return False
+    if not all((g.memory_total_mib or 0) >= 40000 for g in gpus):
+        return False
+    return [g.index for g in gpus] == [0, 1, 2, 3]
+
+
+def diffuser_has_dedicated_gpu(snap: GpuSnapshot | None = None) -> bool:
+    """True when the diffuser pipeline runs on a GPU that is NOT shared
+    with any Ollama LLM slot.
+
+    Phase 1B uses this to decide whether to pre-warm diffusers during
+    Phase A architect streaming. On a dedicated-GPU setup the pre-warm
+    is pure speedup (~30-60 s hidden). On a single-GPU setup it would
+    compete with the LLM for VRAM and slow the architect down, so
+    pre-warm must be skipped.
+
+    Detection is observable, not genre-named:
+      - the 4×48 GB workstation has GPU 0 for diffusers, GPUs 1-3 for
+        Ollama (returns True)
+      - a 2-GPU box where one card hosts the LLM and one hosts the
+        diffuser also returns True (provided their indices don't
+        overlap)
+      - a 1-GPU laptop forced to share returns False
+    Conservative: returns False on snapshot failure.
+    """
+    if snap is None:
+        snap = snapshot_gpus()
+    if snap is None or not snap.gpus:
+        return False
+    if len(snap.gpus) <= 1:
+        return False
+    diffuser_idx = pick_diffuser_cuda_index(snap)
+    if diffuser_idx is None:
+        return False
+    llm_indices = set(gpu_indices_with_llm_vram(snap))
+    return diffuser_idx not in llm_indices
+
+
+# Z-Image-Turbo needs ~14 GB VRAM; leave headroom for Stable-Audio on GPU 0.
+_MIN_DIFFUSER_FREE_MIB = 12000
+# Ollama slot daemons pin LLMs to these physical GPUs (see backend autopin).
+_OLLAMA_SLOT_GPUS = (1, 2, 3)
+
+
+def pick_diffuser_cuda_index(
+    snapshot: GpuSnapshot | None = None,
+    *,
+    reuse_cuda_index: int | None = None,
+) -> int | None:
+    """Pick a CUDA device for Z-Image / Stable-Audio.
+
+    On the 4×48 GB workstation, **prefer GPU 0** so GPUs 1–3 stay for the
+    three Ollama slots. ``DIFFUSER_CUDA_DEVICE=N`` overrides. When
+    ``reuse_cuda_index`` is set (e.g. image pipeline already on GPU 0),
+    reuse that card if it still has room.
+    """
+    raw = (os.environ.get("DIFFUSER_CUDA_DEVICE") or "").strip()
+    if raw.isdigit():
+        return int(raw)
+
+    snap = snapshot if snapshot is not None else snapshot_gpus()
+    if snap is None or not snap.gpus:
+        return None
+    llm_gpus = set(gpu_indices_with_llm_vram(snap))
+    on_workstation = _is_four_gpu_linux_nvidia_workstation(snap)
+
+    def _ok(index: int) -> bool:
+        # On the 4×48 GB workstation GPU 0 is the diffuser slot by
+        # construction — once Z-Image-Turbo loads, our own Python process
+        # makes the card look "LLM-heavy" to the generic detector. Skip
+        # the veto for index 0 there so Stable-Audio colocates with
+        # Z-Image instead of stealing GPU 1 from the coder slot.
+        if index in llm_gpus and not (on_workstation and index == 0):
+            return False
+        free = _gpu_free_mib(snap, index)
+        return free is not None and free >= _MIN_DIFFUSER_FREE_MIB
+
+    if reuse_cuda_index is not None and _ok(reuse_cuda_index):
+        return reuse_cuda_index
+
+    if on_workstation and _ok(0):
+        return 0
+
+    reserved = set(_OLLAMA_SLOT_GPUS) if on_workstation else set()
+
+    def _best(candidates: list[GpuInfo]) -> int | None:
+        best_idx: int | None = None
+        best_free = -1
+        for g in candidates:
+            if g.index in llm_gpus or g.index in reserved:
+                continue
+            free = _gpu_free_mib(snap, g.index)
+            if free is None or free < _MIN_DIFFUSER_FREE_MIB:
+                continue
+            if free > best_free:
+                best_free = free
+                best_idx = g.index
+        return best_idx
+
+    non_llm = [g for g in snap.gpus if g.index not in llm_gpus]
+    pick = _best(non_llm)
+    if pick is not None:
+        return pick
+    return pick_least_loaded_cuda_index(snap)
+
+
 def pick_least_loaded_cuda_index(snapshot: GpuSnapshot | None = None) -> int | None:
     """Pick the quietest GPU for diffusers, avoiding LLM-heavy cards first.
 
-    Phase B: skip GPUs that already hold ≥8 GB ``ollama``/``python`` compute.
-    Falls back to the global least-loaded card if every GPU looks busy.
+    Prefer :func:`pick_diffuser_cuda_index` for pipeline loads; this remains
+    the global fallback when no card meets the diffuser free-VRAM floor.
     """
     snap = snapshot if snapshot is not None else snapshot_gpus()
     if snap is None or not snap.gpus:
@@ -573,4 +853,11 @@ def diffuser_placement(generator: Any) -> str:
     """Device label for a loaded diffuser instance."""
     device = getattr(generator, "_device", None)
     idx = getattr(generator, "_cuda_device_index", None)
+    if device == "cuda" and idx is None:
+        try:
+            import torch
+            if torch.cuda.is_available():
+                idx = int(torch.cuda.current_device())
+        except Exception:
+            pass
     return cuda_device_label(device, idx)

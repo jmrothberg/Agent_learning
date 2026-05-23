@@ -8,6 +8,7 @@ relevant probes so the test runs offline and deterministically.
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 from unittest.mock import patch  # noqa: F401 - retained for downstream test additions
@@ -17,6 +18,36 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import backend  # noqa: E402
+
+
+def test_ollama_backend_forwards_keep_alive(monkeypatch):
+    seen: dict = {}
+
+    async def fake_stream_chat_with_retry(client, model, messages, **kwargs):
+        seen.update(kwargs)
+        return backend.StreamResult(
+            text="ok", tokens=1, duration_s=0.01, stalled=False
+        )
+
+    monkeypatch.setattr(
+        backend, "stream_chat_with_retry", fake_stream_chat_with_retry
+    )
+    be = backend.OllamaBackend(backend.BackendInfo(
+        name="ollama",
+        model="qwen3.6:27b-q8_0",
+        source="test",
+        endpoint="http://127.0.0.1:11434",
+    ))
+
+    result = asyncio.run(be.stream_chat(
+        [{"role": "user", "content": "hi"}],
+        options={"temperature": 0.1},
+        keep_alive=-1,
+    ))
+
+    assert result.text == "ok"
+    assert seen["keep_alive"] == -1
+    assert seen["options"] == {"temperature": 0.1}
 
 
 # ---------------------------------------------------------------------------

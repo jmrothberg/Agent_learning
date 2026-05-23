@@ -44,7 +44,11 @@ def test_adjacency_fires_with_loop_line_captured():
             break
     assert fired
     assert det.stall_reason == "adjacent_line_spam"
-    assert det.loop_line == "p.onGirder = false;"
+    # `;` is a statement boundary alongside `\n` (see `_STATEMENT_BOUNDARY_RE`),
+    # so the trailing `;` is stripped as a delimiter rather than retained as
+    # part of the loop_line. Semantically the recovery coach still names the
+    # right statement.
+    assert det.loop_line == "p.onGirder = false"
 
 
 def test_adjacency_distinct_lines_do_not_fire():

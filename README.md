@@ -235,7 +235,8 @@ spec lists). The user-turn prompt is built by
 `prompts_v1.plan_instruction(goal=...)` which detects art and 3D
 modality keywords and escalates `<assets>` / three.js usage from
 "expected" to "required this turn" when matched. Modality keywords are
-intentionally genre-free.
+intentionally genre-free (see **Feedback routing…** below for multi-frame
+rosters, asset-cap raises, and cross-slot KV warm).
 
 **Phase B — build/iterate (up to `max_iters`).** Each iter: stream the
 model's reply → materialize via `<patch>` (preferred) or `<html_file>`
@@ -279,6 +280,122 @@ non-compliant replies before materialization:
 (default 2) AND the latest report's `ok=True`. Any failure resets the
 counter to 0. The iter budget can grant one bonus iter on auto-revert
 to avoid punishing rollback work.
+
+**Feedback routing, fix strategy, and loop telemetry.** The items below
+are what the harness does between your typed messages and the next model
+call — no separate modes to configure unless noted.
+
+**When the last iter failed (blocker-first).** If micro-probes or
+Chromium still report `ok=False`, code-touching feedback is normally
+**deferred** so the model fixes the failing test first. Before that
+decision runs, the queue is **partitioned**:
+
+- **Media-only asks** (regen sprites/sounds, animation frames via
+  `from_image`) are peeled off and processed **this turn** on the
+  diffuser path (GPU 0) — they do not wait behind a canvas draw warning
+  on the coder GPU.
+- **Code-touching asks** stay deferred until the blocker is clean.
+
+If the same code ask was deferred **twice** already, **escalation**
+forces it through on the third turn: the test report still appears, but
+the model is told the user has repeated the request and must honor it.
+**Natural-language overrides** also bypass deferral — e.g. "the game
+works great", "don't change the game", "ship anyway", "ignore the test"
+— without hiding the harness failure from the prompt.
+
+**Mid-session feedback classifiers (genre-free).** On every injected
+user message, heuristics decide whether to add MEDIA-CHANGE (regen
+`<assets>` / `<sounds>`), keep existing media, request **img2img chains**
+(`from_image` off a prior frame), or a **style rebrand** (regenerate
+every existing asset **name** with new txt2img prompts — **not**
+`from_image`, which would keep the old look). Art-change detection
+includes descriptive verbs (`want`, `need`, `look like`, …) and **fuzzy
+entity stems** (`"all the pawns"` → `white_pawn_idle`, …). Mid-session
+feedback that clearly requests a rebrand can **raise the asset cap** the
+same way the initial goal can. If a rebrand is queued and the model still
+emits mid-session `<assets>`, generation is **skipped** and the model is
+coached to apply the rebrand directive first — avoids GPU time on sprites
+that will be thrown away.
+
+**Multi-frame goals.** Planning detects explicit walk-cycle / animation-
+roster language and nudges the model to emit `from_image` variant chains
+(not idle-only sprites). The per-turn asset cap rises (up to **36**
+entries vs the default **24**) at session start and when mid-session
+feedback repeats that intent.
+
+**Fix turns: best-of-N and patch traces.** Failed iters sample up to
+**three** patch candidates by default (`best_of_n=3` in `GameAgent` and
+`coder.py --best-of-n`; set `1` to disable). Each candidate is scored;
+the first that passes can ship the iter early. Every applied patch block
+emits a structured **`patch_outcome`** trace row (per-block ok/error,
+match tier) so postmortems and the learner can see which SEARCH/REPLACE
+shapes fail repeatedly.
+
+**Multi-slot fan-out (Ollama 2- or 3-model topology).** When the agent
+detects multiple **independent** Ollama daemons (different backend
+objects + different endpoint URLs + critic slot not in flight), the
+best-of-N candidates are dispatched **in parallel** across slots
+(`_available_sampler_slots` selects them; `_fan_out_best_of_n_across_slots`
+runs `asyncio.gather` over the streams). Each candidate uses a distinct
+temperature (0.2 / 0.6 / 0.9). Generations run concurrently, scoring is
+sequential against the single Chromium so the harness never races
+itself. On single-slot / single-GPU configurations the path falls back
+to the existing sequential `Backend.best_of_n` — no behavioral
+difference, just no parallel speedup. Per-candidate trace events
+(`best_of_n_candidate_generated`, `best_of_n_candidate_scored`,
+`best_of_n_attempt`) carry slot id, temperature, score, and rejection
+reason. When a non-slot-1 candidate wins, a `surprise` event with
+`category: "non_slot1_bon_winner"` fires so the learner can flag it.
+
+**Cross-slot prompt cache (Ollama multi-model).** When the coder slot is
+idle during architect planning or asset/sound generation, the agent may
+call **`Backend.warm_prefix()`** on the coder backend so the first build
+stream reuses prefix-matched KV instead of paying full prefill again
+(same messages → Ollama cache hit on the next request).
+
+**Streaming and queue visibility.** Long MLX/Ollama **prefill with no
+tokens yet** emits a one-shot **`slow_prefill`** trace + TUI note (work
+is not stalled — prefill is in progress). Completions above **~15k
+tokens** without a closing tag emit **`runaway_stream_warning`** so you
+can Ctrl+D; the harness does **not** hard-abort an active stream for
+token count alone. While a stream is running, the status panel shows a
+**Queued for next user-turn** banner whenever feedback or a plan answer
+is waiting for the next user-turn boundary (input always drains after
+the current stream finishes).
+
+**Ctrl+D wins unconditionally.** A ship request (first Ctrl+D, the `/ship`
+command, or typing `done` / `looks good`) ends the session at the next
+iter boundary on the current passing build. Any feedback that landed in
+the queue between the ship request and the boundary — including
+`[AUTONOMOUS PLAYTEST]` findings — is **dropped** with a one-line notice
+so you can re-send if you actually wanted it applied. Earlier behavior
+auto-applied queued feedback before shipping; that contradicted the
+explicit ship intent and (because `_stop_event` was still set from the
+ship request) caused the next stream to bail at 0.0s with no tokens
+(DK trace 20260523_081532). Second Ctrl+D within 2s force-quits the TUI.
+
+**No silent backend fallback from MLX.** MLX stalls now surface with the
+MLX-specific recovery hint (lower `MLX_MAX_TOKENS`, raise
+`iogpu.wired_limit_mb`, restart the chat process) and stop there. The
+former MLX→Ollama auto-fallback produced confusing cross-backend error
+cascades (an MLX user gets bombed with Ollama 500s they never asked for).
+The cloud→local safety net for **Anthropic** is unchanged: a transient
+Anthropic stall still tries a local Ollama once before giving up.
+
+**Autonomous playtests (default ON, `/feedback off` to disable).** After
+each **clean** iter, the agent may run scripted **behavior playtests**
+from `memory/playtests.jsonl` (recipes with JS `applies_when` gates —
+frozen canvas, facing vs movement, held-key bounds, etc.).
+`LiveBrowser.record_playtest()` drives a timeline and samples state at
+multiple timestamps. Failures produce one paragraph tagged
+`[AUTONOMOUS PLAYTEST]` and enter the same feedback queue as typed input
+(unless you **ship with Ctrl+D** first — see above). Budget: **3 cycles**
+per session max; stops after **2** consecutive cycles with no findings.
+Harness failures, patch diagnostics, and the visual critic are
+**unchanged** when autonomous mode is off. The always-on **state-vs-render
+gap** check (below) can also emit `surprise` events with category
+`state_vs_render_gap` when probes pass but an entity with `x`/`y` in
+`window.state` is not visibly drawn.
 
 ### Patch engine
 
@@ -363,13 +480,13 @@ still flow through. Suppressed notes still trace as
 
 ### Memory and playbook (compounds across sessions)
 
-[`memory.py`](memory.py) uses **three tiers** (run `./scripts/migrate_memory.sh`
-once if you still have an old single `memory/` tree):
+[`memory.py`](memory.py) uses **three tiers** (`Playbook.ensure()` /
+`GameMemory.ensure()` create missing dirs and seed the playbook on first run):
 
 | Path | Role |
 |---|---|
-| `memory/` | **Pristine reference** — bundled skeletons, seed playbook bullets, asset library index |
-| `games/game-memory/` | **Live learned** — `playbook.jsonl`, `won_*` skeletons, `mistakes.jsonl` (agent reads/writes here) |
+| `memory/` | **Tracked reference** — `playbook.jsonl`, `playtests.jsonl` (behavior playtest recipes for `/feedback`), bundled skeletons, asset library index |
+| `games/game-memory/` | **Local learned** (gitignored) — optional live playbook overlay, `won_*` skeletons, `mistakes.jsonl` |
 | `games/goals/` | **Short-term** — per-session `goal.txt`, `best.html`, `outcome.json` |
 
 - **`GameMemory`** — skeleton retrieval and mistake retrieval.
@@ -406,7 +523,7 @@ once if you still have an old single `memory/` tree):
 
 [`learner.py`](learner.py) is the offline pipeline that reads
 completed traces and runs a Reflector (proposes bullet deltas) +
-Curator (deterministic merge into `playbook.jsonl`, increments
+Curator (deterministic merge into `memory/playbook.jsonl`, increments
 helpful/harmful counters, prunes dead bullets). It runs on demand or
 attached to a `tune.py run --auto-learn`.
 
@@ -424,7 +541,10 @@ attached to a `tune.py run --auto-learn`.
   HTMLAudioElement** — added so `audio.startWithFadeIn()` and similar
   invented audio APIs fail static, not in Chromium).
 - Repetition-collapse loops (`_ACTUAL_ACTUAL_ACTUAL_…` family, line
-  repeats, suffix loops in large bodies).
+  repeats, suffix loops in large bodies). Mid-stream watchdog (Ollama/MLX)
+  also catches **semicolon-chained** one-line template loops and
+  **mid-identifier** counter runs (`p.onGirder0`, `p.onGirder1`, …) that
+  never produce newlines.
 - Elision sentinels (`// ... rest unchanged`, etc.) — fails the iter
   before shipping a half-implemented file.
 - **Asset path existence**: relative `./*.png` / `./*.ogg` paths in
@@ -468,6 +588,26 @@ default):
   assert against this to gate that sounds actually FIRE (not just
   load).
 - Screenshot captured every iter; saved alongside the trace.
+- **State-vs-render gap check** (`_ENTITY_RENDERED_JS`, always-on): for
+  every top-level field on `window.state` / `window.gameState` that has
+  numeric `.x` and `.y`, samples a 16×16 patch around the screen
+  position (trying both raw-pixel and inferred-tile coordinate
+  interpretations: 28/32/20/16/8-cell grids). If >80% of patch pixels
+  are background-colored (low alpha OR within RGB tolerance of the
+  top-left corner), appends a `ENTITY-NOT-RENDERED [name]` soft warning
+  to the report. Catches the "Pac-Man without a Pac-Man" failure class
+  — probes that test state existence can pass while the draw() function
+  never references the sprite. Genre-free: candidates are found by
+  *shape* (object with numeric x/y), not by name. The check flips
+  `report["ok"]` to False so the model gets a fix turn with the
+  warning visible.
+
+**Multi-window playtest capture** (`LiveBrowser.record_playtest`): executes
+a recipe's `input_script` and samples state (and optional screenshots) at
+`sample_times_s` offsets. Used by the autonomous `/feedback` loop and by
+`behavior_playtest` entries in `memory/playtests.jsonl` (e.g. frozen-game
+progress check, forward-key vs facing-vector alignment, held-key canvas
+bounds). Recipes are filtered in-page via `applies_when` — no genre names.
 
 Probes gate `ok=True`. A failed probe or `soft_warning` flips
 `report["ok"] = False`. `<done/>` requires the consecutive-clean-iters
@@ -659,35 +799,40 @@ is data the agent will see, not just developer notes.
 | Command | What it does |
 |---|---|
 | `/help`, `/h`, `/?` | Show command list. |
-| `/list`, `/models` | Inventory of MLX + Ollama models, with `[VLM]` / `[text]` labels. |
-| `/model <N\|name>`, `/load <N\|name>` | Switch the chat model. |
+| `/list`, `/models` | Inventory of MLX + Ollama models, with `[VLM]` / `[text]` labels. `*` = loaded in Ollama VRAM on any slot (11434–11436); `← active` = bound to this session (coder/model2/model3), not VRAM. |
+| `/model <N\|name>`, `/load <N\|name>` | Stage the coder model (sticky across `/new`). |
+| `/modelall <N\|name>`, `/loadall` | Stage the **same** model on all three Ollama slots (coder + critic + architect). Bare `/modelall` clears all three. |
 | `/model2 <N\|name> [--role critic\|architect]` | Stage or hot-swap secondary model 2. Defaults to `critic` for VLMs and `architect` for text models unless role balancing chooses otherwise. |
 | `/model3 <N\|name> [--role critic\|architect]` | Stage or hot-swap tertiary model 3. Used to split architect and critic roles in 3-model runs. |
+| `/launch <N\|name\|path>` | Stage an MLX model for the next `/new` (in-process load on first request). |
 | `/backend <auto\|ollama\|mlx\|openai\|anthropic>` | Switch the backend (cloud choices are explicit and billable). |
-| `/unload` | Free VRAM: bare `/unload` evicts the active Ollama tag; `/unload all` every loaded Ollama model; `/unload mlx` drops the in-process MLX weights. |
+| `/unload` | Free VRAM: bare `/unload` evicts the active session tag; `/unload all` walks **every** Ollama slot (11434–11436) plus diffusers preload, not only `OLLAMA_HOST`; `/unload mlx` drops in-process MLX. |
 | `/new` | Start a new session in the same workspace. |
 | `/ship` | Force `<confirm_done/>` on the next critique turn. |
 | `/quit` | Exit. |
 | `/open` | Reveal the current HTML in the file browser. |
 | `/log`, `/paths`, `/files` | Print log + artifact paths. |
 | `/clear` | Clear the chat scrollback (does not reset the session). |
-| `/iters <n>` | Change the iter budget mid-session. |
-| `/seed <text>` | Inject a one-shot system seed at the next user turn. |
-| `/reset` | Reset agent state to a fresh session. |
-| `/status` | Print iter count, ok status, model, backend, VLM. |
+| `/iters <n>` | Change the iter budget (sticky for next `/new` and extensions). |
+| `/ctx [N\|100k\|131k\|262k\|full]` | Ollama `num_ctx` / KV reservation (default **100k**; sticky). Bare `/ctx` shows current. Ollama reloads on change — preload with `ollama run --ctx-size N <model>`. |
+| `/seed <path>` | Stage a baseline `.html` for the next `/new` (sticky). Bare `/seed` clears. Snapshots under `games/snapshots/<basename>/` resolve to the canonical `games/<basename>.html` so traces/assets keep one stem. |
+| `/reset` | Wipe staged state (seed, models, iters, ctx → defaults). Does not stop a running session. |
+| `/status` | Print model, phase, iteration, staged picks, ctx, paths. |
+| `/retry` | Re-run after a bad model (keeps game file + trace; uses staged `/model` first). |
 | `/wait <on\|off>` | Toggle step-mode — default ON in the TUI; when on, pause after each iter; when off, iterate continuously. |
 | `/wiki <on\|off>` | Toggle Wikipedia research lookup before planning (default OFF). When on, prepends a `<reference>` block to Phase A so the model's plan is grounded in real game mechanics for named titles (Asteroids, Pac-Man, Mr. Do!, etc.). Per-call cost ~5-10s and only a single lookup runs per session. Empirical hit rate on named arcade games is good when the goal cleanly names the title. |
 | `/iter-detail <on\|off>` | Toggle optional expanded blocker detail after the compact iter decision line (default off). |
 | `/mode <local_manual\|local_auto\|local_plus_review with <model> [--auto-apply]\|custom>` | Apply a run contract: manual checkpoints, autonomous loop, or autonomous loop with an explicit reviewer hook. |
-| `/playbook`, `/memory` | Print the matched playbook bullets. |
+| `/playbook`, `/memory` | Toggle playbook bullet injection (`on` / `off`; default on in production TUI). |
 | `/prefill <on\|off>` | Toggle forcing assistant prefill tags (`<plan>`, `<diagnose>`) to prevent preamble talk and lock XML formatting (default ON). |
-| `/architect <on\|off>` | Toggle architect/editor split (Aider's 2-call pattern) on complex first-builds to split planning from coding (default off). |
+| `/architect <on\|off>` | Toggle architect/editor split (Aider's 2-call pattern) on complex first-builds — planning pass before the coder writes HTML (default off). Distinct from `/model2 … --role architect`, which assigns a **sidecar slot**. |
+| `/allroles` [on\|off] | Toggle **architect-split + vlm-critique** together for **one** loaded LLM (no `/model2` / `/model3`, no extra GPUs). Bare `/allroles` flips on/off. Staged critic/architect slots still win when present. `/reset` clears the bundle. |
 | `/double-screenshot <on\|off>` | Toggle capturing dual screenshots (startup and post-input) to help the model see movement/animation (default off). |
-| `/vlm-critique <on\|off>` | Toggle VLM screenshot attachment during Phase C successful critique turns for layout and UI polishing (default off). |
-| `/audit` | Detailed view of last iter's micro-probes + report. |
-| `/restarts` | Show backend restart history. |
-| `/model-class <small\|mid\|large>` | Override the prompt trim path. |
-| `/launch` | Manually launch Chromium against the current best file. |
+| `/vlm-critique <on\|off>` | Toggle VLM screenshot attachment during Phase C successful critique turns for layout and UI polishing (default off). Needs a VLM as the loaded model; uses slot 1 when no critic slot is staged. |
+| `/feedback [on\|off]` | Toggle autonomous playtest loop (default **on**). Bare `/feedback` prints state without flipping. When on: after clean iters, genre-free behavior recipes may queue `[AUTONOMOUS PLAYTEST]` coaching. Test reports and the critic still run when off. |
+| `/audit` | Per-bullet playbook earnings from trace history (fires, pass-rate, avg-iter). |
+| `/restarts <N>` | Independent full restarts when iter-1 score is below 60 (sticky; default 2; `1` = off). |
+| `/model-class <auto\|small\|mid\|large>` | Override system-prompt trim (sticky; default `auto` → lean ~5 KB schema). |
 | `/check [<N\|model>]` | Run visual review on the latest screenshot. `N` selects by `/list` number. Bare `/check` uses the active VLM session model. `claude-…` routes Anthropic, `gpt-…` routes OpenAI, and other names resolve local MLX VLMs. In wait mode ON, suggestion is prefilled in input for edit/Enter; in wait mode OFF, coaching auto-queues to the next coding turn. |
 
 ### Model topologies (1, 2, and 3 model runs)
@@ -704,7 +849,9 @@ harness still runs every iter: micro-probes, Chromium load, input smoke
 test, screenshots, canvas freeze checks, and model-authored probes.
 If a local VLM is discoverable, the built-in vision judge can add visual
 coaching; otherwise visual checks stay programmatic unless you run
-`/check` explicitly.
+`/check` explicitly. **`/allroles`** is the shortcut when you want that
+one model to also run architect-split and VLM critique without staging
+slot 2/3 (requires a VLM-capable model for critique screenshots).
 
 **2-model run.** Use `/model` for the coder and `/model2 ... --role
 critic` or `/model2 ... --role architect` for one sidecar:
@@ -756,16 +903,18 @@ explicit `/check <cloud-model>` if you want one involved.
 **Status panel (right column).** Refreshes about once per second while a
 session runs.
 
-- **Activity (role)** — Who is working *right now*: `Activity (coder)`,
-  `Activity (architect)`, or `Activity (critic)`. Shows the same live
-  detail as before: waiting for first token, prompt-eval progress (MLX),
-  tok/s, STALLED. When the architect or critic is streaming, that role
-  owns the top Activity line; Model 2 / Model 3 lines below still show
-  their slot with the same stats.
-- **Model 2 / Model 3** — Sidecar roles (not “Card 2/3”): model tag,
-  backend, and GPU placement. `idle`, `streaming …`, `failed`, or
-  `crashed` when something goes wrong (no more stuck “streaming architect”
-  with no warning).
+- **Activity (coder / critic / architect)** — One line per role when
+  configured: always shown with the same live detail (waiting for first
+  token, prompt-eval progress on MLX, tok/s, STALLED). Coder uses the
+  main model; sidecars use Model 2 / Model 3 when staged. Idle roles stay
+  visible as `idle` so you can see all three slots at once in a 3-model
+  run.
+- **Model 2 / Model 3** — Sidecar model tag, backend, and GPU placement.
+  `idle`, `streaming …`, `failed`, or `crashed` when something goes wrong.
+  Footer may add `busy now: GPU N (role)` when multiple cards are active.
+- **Queued for next user-turn** — Bold yellow banner when feedback or a
+  plan answer is queued but the current stream has not finished yet
+  (high-visibility; complements the lower `Queued (N):` summary).
 - **GPU map → LLM** — One row per configured slot:
   - `Model 1 (coder) · <tag> · OLLAMA · GPU …`
   - `Model 2 (critic) · …` / `Model 3 (architect) · …`
@@ -774,8 +923,9 @@ session runs.
   - `not loaded` before the first request to that tag.
 - **GPU map → Diffusers** — Three lines, always shown:
   - `Z-Image-Turbo`, `SD-Turbo img2img`, `Stable-Audio`: `loaded · GPU N`
-    only after this session constructs the pipeline (first `<assets>` /
-    sound generation). **`not loaded` does not mean GPU 0 is empty** —
+    (index shown for all three, including Stable-Audio) only after this
+    session constructs the pipeline (first `<assets>` / sound generation).
+    **`not loaded` does not mean GPU 0 is empty** —
     `nvidia-smi` may still show ~20 GB on `python` for the chat process
     (browser, torch, or stale VRAM). When that happens, a dim
     `chat process · GPU 0 ~20 GB` note explains it.
@@ -785,7 +935,8 @@ session runs.
 
 | What you see | Meaning |
 |---|---|
-| `ollama` on GPU 1+3, ~53 GB total | Your LLM (often one 27B copy, tensor-split) |
+| `ollama` on GPU 1–3, ~22–35 GB each | Normal 3-model pin: one daemon per slot (11434–11436) |
+| `ollama` on GPU 1+3, ~53 GB total | Tensor-split single daemon — run `/unload all` then `/new` to re-pin |
 | `python` ~20 GB on GPU 0 | Usually **this TUI process**, not Ollama — not the same as “Z-Image loaded” in the panel until sprites run |
 | Diffusers `not loaded` + GPU 0 busy | Normal for a text-only goal (chess, etc.) until the plan triggers asset generation |
 
@@ -793,10 +944,55 @@ session runs.
 if Ollama is already **tensor-split** across two cards and the box has
 48 GB-class GPUs, the agent **auto-unloads** those models (same mechanism
 as `/unload`) so the next LLM request can reload cleanly. Diffusers pick
-a **quiet** GPU (skip cards with large `ollama` / `python` compute).
+GPU **0** on the 4×48 GB workstation (skip Ollama slots 1–3 and cards
+with large `ollama` / `python` compute).
 Disable auto-unload with `AGENT_NO_AUTO_OLLAMA_GPU_FIX=1`. On **small
 GPUs** (two ~8–16 GB cards), split may stay — the panel says that is
 expected. If split persists, the yellow tip suggests `/unload all`.
+
+**3-model run — one Ollama daemon per GPU (automatic on 4×48 GB Linux/NVIDIA).**
+When `/model`, `/model2`, and `/model3` are all Ollama slots, `chat.py`
+auto-pins them on this workstation shape:
+
+- exactly four visible NVIDIA GPUs
+- each GPU is 48 GB-class
+- Linux with `nvidia-smi`
+- not macOS / MLX
+- no manual `OLLAMA_HOST2` / `OLLAMA_HOST3` already set
+
+The TUI starts missing same-user daemons as:
+
+```text
+11434 → GPU 1
+11435 → GPU 2
+11436 → GPU 3
+```
+
+GPU 0 is left for the TUI / diffusers path. Z-Image-Turbo and Stable-Audio
+load on **GPU 0** on this box (not “whichever card has the most free
+VRAM” — that used to pick empty GPU 1 and collide with the coder).
+Override with `DIFFUSER_CUDA_DEVICE=N`. `CODING_BOX_NUM_CTX` defaults to
+**100000** (or **`/ctx`** in the TUI — e.g. `/ctx 262k` for long extensions). If an old
+same-user single daemon on 11434 has a split model loaded, the TUI unloads
+that model before restarting the daemon pinned to GPU 1. It does not use
+sudo, does not edit systemd, and does not touch daemons owned by another
+user; those become `single daemon fallback` in the status panel.
+
+Manual override still works: set `OLLAMA_HOST2` / `OLLAMA_HOST3` yourself
+and the TUI will respect them without rewriting placement.
+
+The status panel maps each slot by endpoint, not just by model tag: the
+same model on `11434` / `11435` / `11436` should show GPU 1 / GPU 2 / GPU 3,
+with `pinned, not loaded` until that slot handles its first request. Default
+Ollama context is **100k** (`/ctx` or `CODING_BOX_NUM_CTX`) to keep KV VRAM
+reasonable on 48 GB cards. If allocation still fails, the Ollama call retries
+once without the `num_gpu=999` offload hint while keeping the same `num_ctx`.
+For long extension chats on one slot, raise context explicitly:
+
+```bash
+# TUI: /ctx 262k   — or before launch:
+CODING_BOX_NUM_CTX=262144 .venv/bin/python chat.py
+```
 
 **Useful env vars (GPU / backends)**
 
@@ -804,16 +1000,20 @@ expected. If split persists, the yellow tip suggests `/unload all`.
 |---|---|
 | `LLM_BACKEND` | `auto`, `ollama`, or `mlx` (default: MLX on macOS, else `auto`) |
 | `OLLAMA_MODEL` / `CHAT_OLLAMA_MODEL` | Force the Ollama tag for chat |
+| `OLLAMA_HOST` / `OLLAMA_HOST2` / `OLLAMA_HOST3` | Ollama HTTP base per slot (coder / model2 / model3) |
+| `OLLAMA_KEEP_ALIVE` | Ollama model residency between turns; default `-1` keeps the model loaded to prevent idle eviction during feedback pauses |
+| `AGENT_NO_AUTO_OLLAMA_PIN=1` | Disable automatic 4-GPU per-slot Ollama daemon startup |
 | `AGENT_NO_AUTO_OLLAMA_GPU_FIX=1` | Do not auto-unload split Ollama VRAM on `/new` |
-| `CODING_BOX_NUM_CTX` | Ollama context window (default 262144) |
+| `CODING_BOX_NUM_CTX` | Ollama context window (default 100000; `/ctx` in TUI) |
 | `DIFFUSION_MODELS_DIR` | Override root for Z-Image / SD-Turbo weights |
+| `DIFFUSER_CUDA_DEVICE` | Force diffusers (Z-Image, Stable-Audio) onto a specific CUDA index; default on 4×48 GB Linux is GPU 0 |
 
 ### CLI flags (`coder.py`)
 
 ```bash
 .venv/bin/python coder.py "<goal>" \
   [--max-iters N]            # iter budget (default 6)
-  [--best-of-n N]            # best-of-N sampling per turn (default 1)
+  [--best-of-n N]            # best-of-N patch candidates per failed iter (default 3; 1=off)
   [--headless]               # no visible Chromium
   [--backend auto|ollama|mlx]
   [--model <name>]
@@ -822,6 +1022,7 @@ expected. If split persists, the yellow tip suggests `/unload all`.
   [--no-skeleton]            # ignore skeleton library
   [--no-assets]              # skip Z-Image-Turbo
   [--no-sounds]              # skip Stable Audio
+  [--num-ctx N]              # Ollama context (default 100000; env CODING_BOX_NUM_CTX)
 ```
 
 `tune.py` flags include `--prompt-version`, `--best-of-n`,
@@ -838,6 +1039,16 @@ python tune.py run                                  # quick: max_iters=2, best_o
 python tune.py run --full --prompt-version v1 --auto-learn
 python tune.py diff baseline_v0 v1_run              # per-test pass/fail deltas
 python tune.py why <run_id> <test_name>             # postmortem one test
+
+# Visible system tests (multi-GPU plumbing + optional slow Pac-Man benchmark).
+# Smoke suite (~5–10 min): plumbing + “player does not move” regressions.
+python system_tests.py run --suite smoke --three-model --model qwen3.6:27b
+# Pac-Man is slow (~15–30 min) — runner asks “Run now? [y/N]” unless you pass --yes.
+python system_tests.py run --suite pacman --max-iters 3 --three-model
+python system_tests.py run --suite full --three-model   # smoke first, then prompts for pacman-hard
+python system_tests.py run --suite pacman --yes         # skip confirmation (CI / unattended)
+python system_tests.py show run_20260521_120000         # SYSTEM_SUMMARY.md
+python system_tests.py list
 
 # Offline learner — Reflector + Curator over traces.
 python learner.py walk                              # one-line summary per past session
@@ -869,6 +1080,7 @@ Use this matrix when validating `chat.py` loop/control changes:
 | 1-model run | `/model <N>` only | Coder handles planning, edits, and exit decisions; harness and programmatic checks still verify every iter. |
 | 2-model run | `/model <N>` plus `/model2 <N> --role critic` or `--role architect` | Coder remains the only editor; one sidecar contributes screenshot critique or architect planning/exit decisions. |
 | 3-model run | `/model <N>`, `/model2 <N> --role architect`, `/model3 <N> --role critic` | Coder edits, architect plans/handles exit decisions, critic reviews screenshots and queues coaching. |
+| 3-slot same model | `/modelall <N>` on 4×48 GB autopin box | Same tag on 11434/11435/11436 (GPU 1/2/3); roles coder / critic / architect; enables parallel best-of-N and non-blocking sidecars. |
 | Asteroids regression guard | `/new asteroids` on local backend | Ship direction uses `vx = cos(angle) * speed`; asteroids stay irregular polygons. |
 | Wait-mode manual control | Default TUI mode, or `/mode local_manual` | Agent pauses after each iter (`await_user`), accepts user feedback before continuing. |
 | Autonomous loop control | `/mode local_auto` or `/wait off` | Agent iterates continuously without step pauses unless user explicitly enables wait mode. |
@@ -876,6 +1088,11 @@ Use this matrix when validating `chat.py` loop/control changes:
 | Explicit external review (auto loop) | `/mode local_plus_review with <model> --auto-apply` with wait off | Failed iters can auto-run explicit reviewer hook and inject coaching for next turn. |
 | No silent cloud guarantee | Local-only run (`/mode local_auto` or `/mode local_manual`) | No cloud calls unless user explicitly picks cloud backend or `/check ...`. |
 | Active-stream cutoff regression guard | Rich-media first-build run on local MLX/Ollama model | If tokens or backend progress are still arriving, the model is working. Never stop it with an absolute wall-clock cutoff; only no-activity stalls, repetition loops, deliberation loops, backend max-token caps, hard crashes, or explicit user cancel may stop generation. |
+| Style rebrand feedback | Mid-session: "all new graphics … look like X" with existing `_assets` | `style_rebrand_directive_active` in trace; mid-session `<assets>` may defer as `mid_session_assets_deferred_for_user_style` until coaching applies. |
+| Autonomous playtest | Default TUI; `/feedback on` after clean iter on canvas game | `[AUTONOMOUS PLAYTEST]` may appear in `feedback_queued` when a `behavior_playtest` recipe fails; `/feedback off` suppresses only this path. |
+| Single-LLM all roles | `/model <VLM>` then `/allroles on` | Architect-split + vlm-critique on slot 1; no second GPU. Critic routing uses the loaded model when no `/model2` critic is staged. |
+| Ship while streaming | Ctrl+D or `done` during a long stream | Queued feedback (including autonomous findings) is **dropped** at ship; second Ctrl+D within 2s force-quits the TUI. |
+| MLX stall | `LLM_BACKEND=mlx`, stall mid-stream | No silent fallback to Ollama — MLX-specific recovery hint only; use `/backend ollama` explicitly if you want to switch. |
 
 ---
 
@@ -1177,9 +1394,24 @@ agent decisions. Use these `kind` values as entry points:
 |---|---|---|
 | `session_start` | Start of every run | Includes `session_id` (game basename), `artifact_id` (per-run trace id), goal, model, trace path, conversation path |
 | `feedback_queued` / `feedback_injected` | User typed feedback | Exact text the next user turn will carry |
+| `feedback_deferred_blocker` | Code feedback held while tests fail | Preview of deferred items; media-only may still run in parallel |
+| `feedback_deferral_escalated` | Same ask deferred twice before | Third turn forces the request through with escalation text |
+| `media_only_parallel_inject` | Art/sound feedback during blocker | Media peeled off the queue; runs on diffuser GPU this turn |
 | `turn_contract` | Once per stream, just before model call | Routing contract for this turn: allowed/forbidden tags, scoped_mode, classifier flags, prompt section sizes |
+| `patch_outcome` | After patch apply | Per-block success/failure and matcher tier for learner/postmortem |
+| `slow_prefill` | Prefill with no tokens yet | One-shot “still working” signal during long MLX/Ollama prefill |
 | `media_change_directive_injected` | MEDIA-CHANGE block added to prompt | Routed feedback to asset/sound regen |
-| `media_change_directive_suppressed` | MEDIA-CHANGE skipped | Reason is in `reason` field: `behavior_bug`, `behavior_scope_on_strict_turn`, `orientation_change`, or `use_existing_media` |
+| `media_change_directive_suppressed` | MEDIA-CHANGE skipped | Reason is in `reason` field: `behavior_bug`, `behavior_scope_on_strict_turn`, `orientation_change`, `use_existing_media`, or `style_rebrand` (rebrand uses its own directive, not generic MEDIA-CHANGE) |
+| `multi_frame_intent_detected` | Goal or feedback asks for animation rosters | Asset cap may be raised; plan nudge favors `from_image` chains |
+| `style_rebrand_directive_active` | STYLE REBRAND block added | User asked to re-render all existing asset names with a new visual style (txt2img, not `from_image`) |
+| `mid_session_assets_deferred_for_user_style` | Mid-session `<assets>` skipped | User queued a style rebrand; model tried to generate more sprites first — deferred to avoid wasted VRAM/time |
+| `runaway_stream_warning` | Stream past ~15k completion tokens | TUI/log warning so you can Ctrl+D or wait; not an automatic abort |
+| `autonomous_playtest_*` | After a clean iter (when `/feedback` on) | Recipe run, finding, or budget stop — see trace `detail` / `finding` fields |
+| `autonomous_playtest_skipped` | Autonomous loop early-exited | `reason` field: `disabled:feedback_off / disabled:force_done / disabled:budget_exhausted / disabled:no_findings_streak / iter_failed / no_browser / no_behavior_recipes / recipe_load_error` |
+| `iter_summary` | End of every iter | Structured summary: probes_passed/total, soft_warnings_count, page/console_errors, frozen_canvas, entity_missing_count, fail_reason |
+| `surprise` | Auto-flagged across all phases | `category` field tags the class: `state_vs_render_gap` (probes pass but entity not drawn), `regression_after_clean_iter`, `non_slot1_bon_winner` |
+| `best_of_n_attempt` | Fan-out best-of-N picked a winner | candidate_summary lists per-slot scores + temperatures; surfaces which slot won |
+| `best_of_n_candidate_generated` / `_scored` | Per-candidate event during fan-out | slot, temperature, tokens, duration_s, eventual score |
 | `orientation_change_directive_injected` | ORIENTATION-CHANGE block added | Routed feedback to canvas mirror patch |
 | `scoped_constraints_set` | `_configure_scoped_constraints` ran | `mode` is `single_patch` or `media_only` |
 | `scoped_change_directive_injected` | SCOPED-CHANGE block added | User locked the turn |
@@ -1213,8 +1445,9 @@ in `tests/` and add a one-line bullet to `playbook.jsonl` via
   quant. `MLX_PREFILL_STEP_SIZE=512` if you OOM mid-generation.
   DeepSeek-V4 Flash specifically requires 512 (auto-detected via path
   substring).
-- **`Ollama context too small`**: `ollama run --ctx-size 262144 <model>`
-  before launching. The agent's default is 256K.
+- **`Ollama context too small`**: raise with `/ctx 262k` or
+  `CODING_BOX_NUM_CTX=262144`, and preload with `ollama run --ctx-size N <model>`
+  before launching. Default is 100K.
 - **`Vision judge never fires`**: check `VISION_JUDGE=0` isn't set;
   verify `backend.discover_local_vlm()` returns a path (run
   `.venv/bin/python -c "from backend import discover_local_vlm;
@@ -1237,6 +1470,29 @@ in `tests/` and add a one-line bullet to `playbook.jsonl` via
   If the user says "use existing", "don't redo", or "use the original
   ones", MEDIA-CHANGE is suppressed and the model should patch loader
   or draw mapping instead of regenerating assets.
+- **`User wants new art style but model keeps redrawing wrong sprites`**:
+  use phrasing like "all new graphics", "look like monsters", "not regular
+  chess pieces" — the agent classifies **style rebrand** and injects a
+  directive to regen each existing asset name with a new prompt (no
+  `from_image`). If you queued that feedback during a long stream, wait
+  for the iter boundary; mid-session `<assets>` may be deferred until
+  the rebrand coaching lands.
+- **`Feedback typed during a long stream seems ignored`**: check the
+  status panel **Queued for next user-turn** banner — input injects at
+  the next user-turn boundary after the current stream finishes.
+- **`Autonomous coaching feels noisy`**: `/feedback off` disables only
+  the extra playtest loop; harness failures and `/check` still apply.
+- **`Stream ran 15k+ tokens with no end`**: look for `runaway_stream_warning`
+  in the log; consider Ctrl+D and a smaller change (`<patch>`) on the next
+  turn — the agent does not hard-abort active streams for token count alone.
+- **`Shipped but my queued feedback never applied`**: by design after
+  Ctrl+D / `done` / `/ship` — ship wins over the queue. Re-type the feedback
+  and extend, or ship only after the stream ends.
+- **`MLX stalled then Ollama errors appeared`**: MLX no longer auto-falls back
+  to Ollama; follow the MLX hint or switch backends explicitly.
+- **`Probes pass but nothing visible on canvas`**: check for
+  `ENTITY-NOT-RENDERED` / `surprise` `state_vs_render_gap` — state exists but
+  draw() never references the sprite.
 - **`GPU map says Diffusers not loaded but nvidia-smi shows 20 GB python
   on GPU 0`**: the panel tracks **in-session** pipeline objects, not every
   byte in VRAM. GPU 0 is usually the **chat.py** process until Z-Image

@@ -385,7 +385,7 @@ async def cmd_run(args) -> int:
         # Seed the playbook from the current shared file if one exists,
         # so we test against the agent's accumulated rules even though
         # skeletons are isolated.
-        shared_playbook = REPO_ROOT / "games" / "game-memory" / "playbook.jsonl"
+        shared_playbook = REPO_ROOT / "memory" / "playbook.jsonl"
         if shared_playbook.exists():
             try:
                 (Path(memory_root) / "playbook.jsonl").write_text(

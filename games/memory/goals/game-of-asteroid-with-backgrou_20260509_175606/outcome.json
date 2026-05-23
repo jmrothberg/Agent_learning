@@ -1,0 +1,9 @@
+{
+  "session_id": "game-of-asteroid-with-backgrou_20260509_175606",
+  "goal": "game of asteroid with background art and sound",
+  "model": "/Users/jonathanrothberg_1/MLX_Models/Qwen3.6-27B-mxfp8",
+  "iterations": 6,
+  "ok": false,
+  "last_report_summary": "OK: False\nTitle: 'Asteroids'\nCanvas: 800x600, RAF ran: True, blank: False\nInput listeners: total=9 (doc=2, win=4, body=2, other=1)\nInput test: FAIL \u2014 pressed ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space', 'KeyW', 'KeyA', 'KeyS', 'KeyD'] and canvas pixels never changed.\nFrozen canvas: no (pixels changed during run)\nBody text length: 79 chars\nBody sample: 'Score: 0\\n\u2190 \u2192 rotate \u00b7 \u2191 thrust \u00b7 \u2193 brake \u00b7 Space fire \u00b7 P pause \u00b7 Enter restart'\nCONSOLE ERRORS:\n  - Failed to load resource: net::ERR_FILE_NOT_FOUND\nISSUES (must fix):\n  - PROBE COVERAGE GAP: the following <criteria> lines have no <probes> entry whose name/expr mentions them \u2014 your test list may be passing without actually testing what was promised. Add or revise probes to cover each:\n  - Edge:   When an asteroid is shot, it splits into 2 smaller asteroids (or disappears if already small); screen edges wrap for ship, bullets, \nWarnings:\n  - Note: keyboard test produced no canvas change, but the page has clickable elemen",
+  "ts": "2026-05-09T23:31:51.758348Z"
+}

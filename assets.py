@@ -201,7 +201,7 @@ def _try_repair_truncated_json_list(text: str) -> list[Any]:
         return []
 
 
-def parse_assets_block(reply: str) -> list[dict]:
+def parse_assets_block(reply: str, *, max_assets: int | None = None) -> list[dict]:
     """Extract the JSON list inside <assets>...</assets>.
 
     Tolerant of fenced ```json wrappers (some models love adding them)
@@ -219,14 +219,20 @@ def parse_assets_block(reply: str) -> list[dict]:
     Use `parse_assets_block_with_meta` if you also need the names of
     entries dropped due to the per-turn cap — the agent uses that to
     coach the model on the overflow instead of silently swallowing it.
+
+    Phase 0.10 — `max_assets` defaults to `_MAX_ASSETS_PER_TURN` (24)
+    but can be raised per-session when the user's goal explicitly asks
+    for multi-frame rosters (see `prompts_v1._detect_multi_frame_intent`).
     """
-    specs, _dropped = parse_assets_block_with_meta(reply)
+    specs, _dropped = parse_assets_block_with_meta(reply, max_assets=max_assets)
     return specs
 
 
-def parse_assets_block_with_meta(reply: str) -> tuple[list[dict], list[str]]:
+def parse_assets_block_with_meta(
+    reply: str, *, max_assets: int | None = None,
+) -> tuple[list[dict], list[str]]:
     """Same as `parse_assets_block` but also returns the names of any
-    asset specs that were parsed-but-dropped due to `_MAX_ASSETS_PER_TURN`.
+    asset specs that were parsed-but-dropped due to the per-turn cap.
 
     Why a separate API: the agent needs to tell the model (and the user)
     when a plan asked for more assets than we'll generate, so the model
@@ -235,7 +241,15 @@ def parse_assets_block_with_meta(reply: str) -> tuple[list[dict], list[str]]:
     14 of its requested sprites would exist; only 8 did; the rest 404'd
     in the browser and triggered a 3-iter debugging cascade (4 DK
     traces with this exact pattern).
+
+    Phase 0.10 — `max_assets` is the effective cap for this call. When
+    None (default), falls back to module-level `_MAX_ASSETS_PER_TURN`.
+    The agent passes a raised cap when the goal contains explicit
+    multi-frame language (`prompts_v1._detect_multi_frame_intent`); the
+    raise lets a user-requested 12 entities × 3 frames = 36 roster
+    land in one turn instead of getting silently truncated to 24.
     """
+    effective_cap = _MAX_ASSETS_PER_TURN if max_assets is None else max(1, int(max_assets))
     if not reply:
         return [], []
     body = _extract_assets_body(reply)
@@ -293,7 +307,7 @@ def parse_assets_block_with_meta(reply: str) -> tuple[list[dict], list[str]]:
             except (TypeError, ValueError):
                 strength = 0.45
             spec["strength"] = max(0.05, min(1.0, strength))
-        if len(out) >= _MAX_ASSETS_PER_TURN:
+        if len(out) >= effective_cap:
             dropped.append(name)
             continue
         out.append(spec)
@@ -438,7 +452,7 @@ class ZImageTurboGenerator:
             try:
                 import gpu_status as _gs
                 snap = _gs.snapshot_gpus()
-                pick = _gs.pick_least_loaded_cuda_index(snap)
+                pick = _gs.pick_diffuser_cuda_index(snap)
                 if pick is not None:
                     _gs.activate_cuda_device(pick)
             except Exception:
@@ -484,6 +498,79 @@ class ZImageTurboGenerator:
             self._device = None
             self._cuda_device_index = None
             return False
+
+    def generate_batch(self, prompts: list[str]) -> list[str | None]:
+        """Phase 2C — batched txt2img. Same pipeline, one forward pass
+        for N prompts. Returns one path per prompt (None on failure).
+
+        Falls back to per-prompt `generate()` calls on any exception
+        — preserves the existing behavior on hardware that can't fit
+        the batch in VRAM, on diffusers API drift, or on pipelines
+        that don't accept a list prompt argument.
+
+        Caller decides batch size. Stable for batches of 2-4 on a
+        48 GB card with Z-Image-Turbo (~14 GB resident, ~3 GB per
+        batched forward). Larger batches risk OOM; the caller should
+        chunk.
+
+        Wire-in status (2026-05-22): this method is **available** for
+        callers but `generate_assets` is NOT yet refactored to use it
+        — that refactor touches the per-spec cache/chroma-key/library
+        code path with several side effects per asset, and the win
+        (~10s on a 12-asset batch) doesn't justify destabilising the
+        existing per-call flow until we have live coverage. Use this
+        method directly from new code paths; the existing
+        generate_assets continues to call .generate() per spec.
+        """
+        self._last_error = None
+        if not prompts:
+            return []
+        if len(prompts) == 1:
+            return [self.generate(prompts[0])]
+        if not self._lazy_init():
+            return [None] * len(prompts)
+        try:
+            import tempfile
+            import torch
+            gen = torch.Generator(self._device or "cpu").manual_seed(42)
+            result = self._pipeline(
+                prompt=list(prompts),
+                height=768,
+                width=768,
+                num_inference_steps=9,
+                guidance_scale=0.0,
+                generator=gen,
+            )
+            images = getattr(result, "images", None)
+            if not images or len(images) != len(prompts):
+                self._last_error = (
+                    f"batched pipeline returned {len(images) if images else 0} "
+                    f"images for {len(prompts)} prompts — falling back to "
+                    "per-prompt generation."
+                )
+                # Fall back per-prompt so the user still gets all
+                # requested PNGs even if batching is wonky on this
+                # pipeline version.
+                return [self.generate(p) for p in prompts]
+            out: list[str | None] = []
+            for image in images:
+                try:
+                    f = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+                    f.close()
+                    image.save(f.name, format="PNG")
+                    out.append(f.name)
+                except Exception as e:
+                    self._last_error = f"save failed: {type(e).__name__}: {e!s}"
+                    out.append(None)
+            return out
+        except Exception as e:
+            import traceback as _tb
+            self._last_error = (
+                f"batched gen failed, falling back to per-prompt: "
+                f"{type(e).__name__}: {e!s} | "
+                f"trace: {_tb.format_exc().splitlines()[-3:]}"
+            )
+            return [self.generate(p) for p in prompts]
 
     def generate(self, prompt: str) -> str | None:
         """Run inference and save a 768×768 PNG to a temp file. Returns
@@ -624,7 +711,7 @@ class Img2ImgGenerator:
             try:
                 import gpu_status as _gs
                 snap = _gs.snapshot_gpus()
-                pick = _gs.pick_least_loaded_cuda_index(snap)
+                pick = _gs.pick_diffuser_cuda_index(snap)
                 if pick is not None:
                     _gs.activate_cuda_device(pick)
             except Exception:
@@ -751,6 +838,15 @@ class Img2ImgGenerator:
 _PRELOADED: Any = None
 
 
+def diffuser_cuda_reuse_index() -> int | None:
+    """Physical CUDA index of a loaded image pipeline (for co-locating audio)."""
+    gen = _PRELOADED
+    if gen is None:
+        return None
+    idx = getattr(gen, "_cuda_device_index", None)
+    return int(idx) if idx is not None else None
+
+
 def preload() -> Any:
     """Eagerly construct + load the Z-Image-Turbo pipeline RIGHT NOW.
 
@@ -792,6 +888,37 @@ def _construct_generator() -> Any:
         return ZImageTurboGenerator()
     except Exception:
         return None
+
+
+def release_preloaded_diffusers() -> list[str]:
+    """Release module-level diffuser pipelines and free CUDA cache.
+
+    Called from chat ``/unload all`` so sprite/img2img VRAM is dropped
+    alongside Ollama models. Returns human labels for what was cleared.
+    """
+    global _PRELOADED, _PRELOADED_IMG2IMG
+    freed: list[str] = []
+    for label, attr in (
+        ("Z-Image-Turbo", "_PRELOADED"),
+        ("SD-Turbo img2img", "_PRELOADED_IMG2IMG"),
+    ):
+        gen = globals().get(attr)
+        if gen is None:
+            continue
+        try:
+            if hasattr(gen, "cleanup"):
+                gen.cleanup()
+        except Exception:
+            pass
+        globals()[attr] = None
+        freed.append(label)
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+    return freed
 
 
 def try_load_image_generator(
@@ -1021,6 +1148,15 @@ def generate_assets(
             stat["gen_seconds"] = round(time.time() - t0, 3)
             _attach_diffuser_stat(stat, image_generator)
             asset_stats.append(stat)
+            # Phase 1C — make progress visible LIVE by publishing
+            # the partial stats list after each asset, so the TUI
+            # poller can render "Sprites: 4/12 · 2.9s avg" while gen
+            # is still running. Caller polls `image_generator.last_stats`
+            # at the existing 1 Hz status tick.
+            try:
+                image_generator.last_stats = list(asset_stats)  # type: ignore[attr-defined]
+            except Exception:
+                pass
             continue
         # Cross-session library lookup — only for root assets (img2img
         # children depend on session-local parents). Returns the path
@@ -1092,6 +1228,15 @@ def generate_assets(
                 else image_generator,
             )
             asset_stats.append(stat)
+            # Phase 1C — make progress visible LIVE by publishing
+            # the partial stats list after each asset, so the TUI
+            # poller can render "Sprites: 4/12 · 2.9s avg" while gen
+            # is still running. Caller polls `image_generator.last_stats`
+            # at the existing 1 Hz status tick.
+            try:
+                image_generator.last_stats = list(asset_stats)  # type: ignore[attr-defined]
+            except Exception:
+                pass
             continue
         try:
             from PIL import Image
@@ -1143,6 +1288,11 @@ def generate_assets(
                 else image_generator,
             )
             asset_stats.append(stat)
+            # Phase 1C — same live-publish for the success branch.
+            try:
+                image_generator.last_stats = list(asset_stats)  # type: ignore[attr-defined]
+            except Exception:
+                pass
     # Stash stats on the generator so the caller can read them out.
     try:
         image_generator.last_stats = asset_stats  # type: ignore[attr-defined]

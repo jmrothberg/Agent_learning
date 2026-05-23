@@ -13,8 +13,11 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 from unittest.mock import MagicMock
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -23,6 +26,12 @@ import backend as backend_mod  # noqa: E402
 from backend import _read_mlx_context_length  # noqa: E402
 from chat import CodingBoxApp  # noqa: E402
 import gpu_status  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def clear_ollama_slot_env(monkeypatch):
+    for key in ("OLLAMA_HOST2", "OLLAMA_HOST3"):
+        monkeypatch.delenv(key, raising=False)
 
 
 def _agent(tmp_path: Path) -> GameAgent:
@@ -84,16 +93,19 @@ def test_chat_process_gpu_vram() -> None:
 
 def test_activity_header_includes_role() -> None:
     app = CodingBoxApp()
+    app._session_backend3 = object()
     app._model3_is_streaming = True
+    app._model3_stream_tokens = 50
     app._session_role3 = "architect"
+    app._session_model3 = "qwen3.6:27b"
     app._activity_label = "architect note"
     app._activity_role = "architect"
-    app._model3_stream_started_at = 1000.0
-    import time
     app._model3_stream_started_at = time.monotonic() - 5.0
+    app._model3_last_token_at = time.monotonic() - 1.0
     line = app._render_activity_line()
     assert "Activity (architect):" in line
-    assert "Activity (coder):" not in line
+    assert "50 tok" in line
+    assert "Activity (coder):" in line
 
 
 def test_role_slot_for_stream_maps_sidecars() -> None:
@@ -213,6 +225,56 @@ def test_pick_least_loaded_skips_llm_gpus() -> None:
     assert gpu_status.pick_least_loaded_cuda_index(snap) == 2
 
 
+def _four_gpu_workstation_snap(
+    *,
+    used: tuple[int, int, int, int] = (1000, 2000, 2000, 43000),
+    processes: list | None = None,
+) -> gpu_status.GpuSnapshot:
+    name = "NVIDIA RTX 6000 Ada Generation"
+    return gpu_status.GpuSnapshot(
+        gpus=[
+            gpu_status.GpuInfo(i, name, memory_used_mib=used[i], memory_total_mib=49140)
+            for i in range(4)
+        ],
+        processes=processes or [],
+    )
+
+
+def test_pick_diffuser_prefers_gpu0_on_workstation() -> None:
+    """Empty GPU 1 must not steal diffusers from reserved GPU 0."""
+    snap = _four_gpu_workstation_snap(used=(1000, 500, 2000, 43000))
+    assert gpu_status.pick_diffuser_cuda_index(snap) == 0
+
+
+def test_pick_diffuser_skips_ollama_slot_gpus() -> None:
+    snap = _four_gpu_workstation_snap(
+        used=(1000, 20000, 10000, 43000),
+        processes=[gpu_status.GpuProcess(3, 9, "ollama", 43000)],
+    )
+    assert gpu_status.pick_diffuser_cuda_index(snap) == 0
+
+
+def test_pick_diffuser_reuse_cuda_index() -> None:
+    snap = _four_gpu_workstation_snap()
+    assert gpu_status.pick_diffuser_cuda_index(snap, reuse_cuda_index=0) == 0
+
+
+def test_pick_diffuser_reuses_gpu0_even_when_zimage_makes_it_look_llm() -> None:
+    # Regression: Z-Image-Turbo loaded on GPU 0 (~20 GB python) flags the
+    # card as "LLM-heavy" to the generic detector. Stable-Audio must still
+    # colocate on GPU 0, not flee to a coder/critic/architect slot.
+    snap = _four_gpu_workstation_snap(
+        used=(20500, 39000, 22500, 43000),
+        processes=[
+            gpu_status.GpuProcess(0, 3221355, ".venv/bin/python", 20526),
+            gpu_status.GpuProcess(1, 3606725, "/usr/bin/ollama", 39558),
+            gpu_status.GpuProcess(2, 1835108, "/usr/local/bin/ollama", 22500),
+            gpu_status.GpuProcess(3, 3518139, "/usr/local/bin/ollama", 43836),
+        ],
+    )
+    assert gpu_status.pick_diffuser_cuda_index(snap, reuse_cuda_index=0) == 0
+
+
 def test_format_gpu_indices_label_never_bare_question() -> None:
     assert "GPU ?" not in gpu_status.format_gpu_indices_label([], None, pending=True)
     assert "GPU ?" not in gpu_status.format_gpu_indices_label([], None, vram_gib=20.5)
@@ -310,6 +372,30 @@ def test_ollama_split_tip_short() -> None:
     assert "pid" not in tip.lower()
 
 
+def test_ollama_split_tip_suppressed_for_multi_daemon(monkeypatch) -> None:
+    snap = gpu_status.GpuSnapshot(
+        processes=[
+            gpu_status.GpuProcess(1, 7, "ollama", 28000),
+            gpu_status.GpuProcess(3, 7, "ollama", 27000),
+        ],
+    )
+    monkeypatch.setenv("OLLAMA_HOST2", "http://127.0.0.1:11435")
+    assert gpu_status.ollama_split_tip_short(snap) is None
+
+
+def test_gpu_indices_for_ollama_loaded_model_single_card() -> None:
+    snap = gpu_status.GpuSnapshot(
+        processes=[
+            gpu_status.GpuProcess(2, 10, "ollama", 28000),
+            gpu_status.GpuProcess(1, 11, "ollama", 4000),
+        ],
+    )
+    vram_bytes = 28 * 1024 * 1024 * 1024
+    assert gpu_status.gpu_indices_for_ollama_loaded_model(
+        snap, vram_bytes=vram_bytes,
+    ) == [2]
+
+
 def test_auto_fix_ollama_tensor_split_unloads(monkeypatch) -> None:
     snap = gpu_status.GpuSnapshot(
         gpus=[
@@ -383,6 +469,113 @@ def test_render_gpu_block_three_model_rows(monkeypatch) -> None:
     assert "Z-Image-Turbo" in block
     assert "not loaded" in block
     assert "still split" in block or "/unload" in block
+
+
+def test_render_gpu_block_separate_ollama_endpoints(monkeypatch) -> None:
+    app = CodingBoxApp()
+    tag = "qwen3.6:27b-q8_0"
+    bi1 = backend_mod.BackendInfo(
+        name="ollama", model=tag, source="test",
+        endpoint="http://127.0.0.1:11434",
+    )
+    bi2 = backend_mod.BackendInfo(
+        name="ollama", model=tag, source="test",
+        endpoint="http://127.0.0.1:11435",
+    )
+    bi3 = backend_mod.BackendInfo(
+        name="ollama", model=tag, source="test",
+        endpoint="http://127.0.0.1:11436",
+    )
+    agent = MagicMock()
+    agent.model = tag
+    agent._backend = MagicMock(info=bi1)
+    agent._backend2 = MagicMock(info=bi2)
+    agent._backend3 = MagicMock(info=bi3)
+    agent._model2_role = "critic"
+    agent._model3_role = "architect"
+    agent._asset_generator = None
+    agent._sound_generator = None
+    app.agent = agent
+    app._session_model2 = tag
+    app._session_model3 = tag
+
+    snap = gpu_status.GpuSnapshot(
+        gpus=[
+            gpu_status.GpuInfo(1, "B", memory_used_mib=44000, memory_total_mib=49140),
+            gpu_status.GpuInfo(2, "C", memory_used_mib=33000, memory_total_mib=49140),
+            gpu_status.GpuInfo(3, "D", memory_used_mib=430, memory_total_mib=49140),
+        ],
+    )
+    monkeypatch.setattr(gpu_status, "snapshot_gpus", lambda **_: snap)
+    monkeypatch.setattr(
+        gpu_status,
+        "ollama_endpoint_gpu_index",
+        lambda endpoint: {
+            "http://127.0.0.1:11434": 1,
+            "http://127.0.0.1:11435": 2,
+            "http://127.0.0.1:11436": 3,
+        }.get(endpoint),
+    )
+    monkeypatch.setattr(
+        gpu_status,
+        "ollama_loaded_models",
+        lambda: [
+            {"name": tag, "endpoint": "http://127.0.0.1:11434", "vram_gib": 41.8},
+            {"name": tag, "endpoint": "http://127.0.0.1:11435", "vram_gib": 32.8},
+        ],
+    )
+
+    block = app._render_gpu_placement_block()
+    assert "Model 1 (coder)" in block and "GPU 1" in block
+    assert "Model 2 (critic)" in block and "GPU 2" in block
+    assert "Model 3 (architect)" in block and "GPU 3" in block
+    assert "pinned, not loaded" in block
+    assert "same VRAM" not in block
+
+
+def test_render_activity_lines_all_roles() -> None:
+    app = CodingBoxApp()
+    app.agent = MagicMock()
+    app.agent.model = "qwen3.6:27b"
+    app.agent._backend2 = MagicMock()
+    app.agent._backend3 = MagicMock()
+    app.agent._model2_activity = "proposing playtest"
+    app.agent._model3_activity = "idle"
+    app._session_model2 = "qwen3.6:27b"
+    app._session_model3 = "qwen3.6:27b"
+    app._session_role2 = "critic"
+    app._session_role3 = "architect"
+    app._is_streaming = True
+    app._stream_tokens = 120
+    app._stream_started_at = 1000.0
+    app._last_token_at = 1005.0
+    app._activity_label = "iter 2 reply"
+    app._activity_role = "coder"
+    app._model2_is_streaming = True
+    app._model2_stream_tokens = 40
+    app._model2_stream_started_at = 1001.0
+    app._model2_last_token_at = 1004.0
+    monkeypatch_now = 1010.0
+    orig = time.monotonic
+    try:
+        time.monotonic = lambda: monkeypatch_now
+        block = app._render_activity_line()
+    finally:
+        time.monotonic = orig
+    assert "Activity (coder)" in block
+    assert "Activity (critic)" in block
+    assert "Activity (architect)" in block
+    assert "120 tok" in block
+    assert "40 tok" in block
+    assert "tok/s" in block
+
+
+def test_diffuser_placement_stable_audio_gpu_index() -> None:
+    class StableAudioGenerator:
+        _device = "cuda"
+        _cuda_device_index = 2
+
+    assert "GPU 2" in gpu_status.diffuser_placement(StableAudioGenerator())
 
 
 def test_diffuser_kind_labels() -> None:

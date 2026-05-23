@@ -73,9 +73,15 @@ from memory import (
     DEFAULT_SKELETON,
     DEFAULT_SKELETON_NAME,
     GameMemory,
+    OpeningBookHit,
+    OpeningBookItem,
     Playbook,
+    PLAYTESTS_FILENAME,
+    ASSET_AUDITS_FILENAME,
+    ANIMATION_AUDITS_FILENAME,
     SkeletonHit,
     lookup_bullet,
+    render_opening_book_block,
     render_playbook_block,
     signature_for_report,
 )
@@ -356,6 +362,43 @@ _BLOAT_MIN_BLOCK_BYTES = 200 # skip whitespace-y blocks
 _BLOAT_MAX_REPEATS = 3       # > 3 identical blocks = bloat
 
 
+def _normalize_extracted_html(body: str) -> str | None:
+    """Return HTML starting at the first document anchor.
+
+    Models sometimes put <diagnose> tails or a second <html_file> opener
+    inside the wrapper body (chess trace 20260522_000304 iter 2: the
+    file on disk began with ``was truncated…</diagnose>`` before
+    <!DOCTYPE). Slice from the first <!DOCTYPE or <html so materialize
+    never writes tag garbage ahead of the real document.
+    """
+    if not body:
+        return None
+    body = body.strip()
+    m = re.search(r"<!DOCTYPE\s+html|<html\b", body, re.IGNORECASE)
+    if not m:
+        return None
+    return body[m.start() :].strip()
+
+
+def _baseline_structurally_broken(html: str) -> str | None:
+    """If the HTML cannot pass pre-Chromium checks, return a short reason."""
+    if not html:
+        return "empty file"
+    stripped = html.lstrip()
+    if not stripped.lower().startswith(("<!doctype", "<html")):
+        return (
+            "file does not start with a HTML document "
+            "(leading prose or stray tags before <!DOCTYPE)"
+        )
+    report = run_micro_probes(html)
+    if report.get("ok"):
+        return None
+    errors = report.get("errors") or []
+    if not errors:
+        return None
+    return errors[0][:240]
+
+
 def _truncation_reason(html: str) -> str | None:
     """Return a short human description if `html` looks structurally
     truncated (an open tag with no close), else None.
@@ -401,6 +444,8 @@ def _is_degenerate_baseline(html: str) -> bool:
     if not html or len(html) < 2048:
         return True
     if _truncation_reason(html) is not None:
+        return True
+    if _baseline_structurally_broken(html) is not None:
         return True
     low = html.lower()
     if "<canvas" not in low or "<script" not in low:
@@ -602,10 +647,16 @@ _CODE_LOCK_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bno\s+code\s+(?:change|edit|modification)s?\b", re.I),
     # "no other code", "no other asset or code"
     re.compile(r"\bno\s+other\s+\w+(?:\s+or\s+code)?\b.*\bcode\b", re.I),
-    # "don't change/touch/modify the code", "do not change code"
+    # "don't change/touch/modify the code", "do not change code",
+    # AND "do not change the <noun> code" (e.g. "the game code", "the
+    # player code", "the AI code", "the physics code"). Allowing up to
+    # two intervening words covers natural-English phrasings like
+    # "do not change the chess game code" without firing on neutral
+    # text — _feedback_is_strict_scope still requires the explicit
+    # forbid-verb so loosening the noun slot can't false-positive.
     re.compile(
         r"\b(?:don['’]?t|do\s+not)\s+(?:change|touch|modify|edit)"
-        r"\s+(?:the\s+|any\s+)?code\b",
+        r"\s+(?:the\s+|any\s+)?(?:\w+\s+){0,2}code\b",
         re.I,
     ),
     # "without changing/touching/modifying the code"
@@ -666,6 +717,20 @@ _MEDIA_VERBS: tuple[str, ...] = (
     # "fix the keyboard handler" still correctly stays in code-fix
     # mode (no art noun → no MEDIA-CHANGE).
     "fix", "improve",
+    # Phase 0.11 — descriptive verbs that pair with an art noun to
+    # signal a STYLE rebrand without using an imperative verb. Real
+    # user examples that previously failed classification:
+    #   "all the images need to be animated as fantasy monsters"
+    #   "i want all new graphics so the pieces look like monsters"
+    #   "the sprites should look more like X"
+    # The art-noun + verb gate keeps these from false-firing on
+    # behavior asks ("the player should jump higher" has no art noun
+    # → still classified as behavior, not art).
+    "look", "looks", "looking",
+    "want", "wants", "wanting",
+    "need", "needs", "needing",
+    "should",
+    "feel", "feels", "feeling",
 )
 _ART_NOUNS: tuple[str, ...] = (
     "asset", "assets", "sprite", "sprites", "image", "images",
@@ -871,6 +936,68 @@ def _matched_names_in_text(text_lower: str, names: list[str]) -> set[str]:
     return matched
 
 
+# Tokens that appear as common prefixes/suffixes in asset names and are NOT
+# distinctive on their own — "white" alone shouldn't pull in every white_*
+# sprite in the roster. Used by `_resolve_fuzzy_asset_stems` to skip stems
+# the user almost certainly didn't mean as a piece identifier.
+_NON_DISTINCTIVE_ASSET_STEMS: frozenset[str] = frozenset({
+    "white", "black", "red", "blue", "green", "yellow", "orange",
+    "purple", "pink", "brown", "gray", "grey",
+    "left", "right", "up", "down", "front", "back", "side",
+    "small", "large", "big", "tiny", "huge",
+    "light", "dark", "bright",
+    "player", "enemy", "npc",  # too broad to disambiguate
+    "frame", "anim", "idle", "walk", "run", "attack", "hurt", "die",
+    "1", "2", "3", "4",
+})
+
+
+def _resolve_fuzzy_asset_stems(
+    text: str, asset_names: list[str]
+) -> dict[str, list[str]]:
+    """Map distinctive last-tokens of asset names to the parent assets.
+
+    Example: assets = [white_pawn, black_pawn, white_king, black_king];
+    user text = "make the pawns walk and the king attack". Returns
+    {"pawn": ["white_pawn", "black_pawn"], "king": ["white_king",
+    "black_king"]}.
+
+    Used to surface "user said 'pawn', which maps to [white_pawn,
+    black_pawn] in your asset map" inside the MEDIA-CHANGE directive
+    so the model can emit the right `from_image` chains without having
+    to guess. Token-level match; color/side prefixes ("white", "black")
+    are skipped via `_NON_DISTINCTIVE_ASSET_STEMS`.
+    """
+    if not text or not asset_names:
+        return {}
+    lo = text.lower()
+    out: dict[str, list[str]] = {}
+    for name in asset_names:
+        canon = re.sub(r"[\s\-]+", "_", (name or "").strip().lower())
+        if not canon:
+            continue
+        tokens = [t for t in canon.split("_") if t]
+        if not tokens:
+            continue
+        # Prefer the LAST distinctive token. Walk right-to-left so
+        # ("white", "pawn") picks "pawn"; ("hero", "idle", "1") picks
+        # "hero" (since "idle" and "1" are non-distinctive).
+        stem: str | None = None
+        for tok in reversed(tokens):
+            if len(tok) < 3 or tok in _NON_DISTINCTIVE_ASSET_STEMS:
+                continue
+            stem = tok
+            break
+        if stem is None:
+            continue
+        if not re.search(rf"\b{re.escape(stem)}s?\b", lo):
+            continue
+        out.setdefault(stem, [])
+        if name not in out[stem]:
+            out[stem].append(name)
+    return out
+
+
 def _has_audio_context(text_lower: str) -> bool:
     """True when feedback language is explicitly about audio."""
     if any(re.search(rf"\b{re.escape(n)}\b", text_lower) for n in _SOUND_NOUNS):
@@ -885,14 +1012,23 @@ def _has_audio_context(text_lower: str) -> bool:
 def _feedback_is_art_change(text: str, asset_names: list[str]) -> bool:
     """User feedback is asking to change visual art.
 
-    Heuristic: a known asset name appears in the text, OR text contains
-    an art-noun ("sprite", "image", "art", …) together with a media
-    verb ("change", "redraw", "make", …). Misses are safe (no directive
-    injected, regular flow proceeds). False positives are also safe —
-    the directive only advises the model to prefer <assets>.
+    Heuristic: a known asset name appears in the text (literal OR via
+    fuzzy stem — Phase 0.11), OR text contains an art-noun ("sprite",
+    "image", "art", …) together with a media verb ("change", "redraw",
+    "make", "look", "want", …). Misses are safe (no directive injected,
+    regular flow proceeds). False positives are also safe — the
+    directive only advises the model to prefer <assets>.
+
+    Phase 0.11: when the user says "all the pawns" and the session has
+    `white_pawn_idle, black_pawn_idle` etc., the fuzzy stem match
+    counts. Without this, a session with N-frame entity names (every
+    asset is `<entity>_<state>`) would skip art-change classification
+    even when the user clearly referenced an entity.
     """
     lo = text.lower()
     if _name_in_text(lo, asset_names):
+        return True
+    if _resolve_fuzzy_asset_stems(text, asset_names):
         return True
     has_noun = any(re.search(rf"\b{re.escape(n)}\b", lo) for n in _ART_NOUNS)
     has_verb = any(
@@ -958,6 +1094,65 @@ def _feedback_requests_existing_media(text: str) -> bool:
     if not text:
         return False
     return any(p.search(text) for p in _EXISTING_MEDIA_ONLY_PATTERNS)
+
+
+# Phase 0.1 — phrases that explicitly request img2img CHAINING (seed from
+# an existing sprite, produce variants/animation frames). Distinct from
+# "use the existing PNG verbatim" — the user wants NEW frames seeded from
+# an existing one, which is exactly what SD-Turbo img2img handles. See
+# 2026-05-22 chess trace: "use the existing assets for each pawn... as
+# starting point but then show each walking" — pure img2img.
+_IMG2IMG_CHAIN_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bas\s+(?:a\s+|the\s+)?(?:starting\s+point|base|seed|basis|reference)\b", re.I),
+    re.compile(r"\bbased\s+on\s+(?:the\s+)?(?:existing|current|original)\b", re.I),
+    re.compile(r"\bseed(?:ed)?\s+from\b", re.I),
+    re.compile(r"\b(?:show|showing|make)\s+(?:them|it|each|the\s+\w+\s+)?(?:walking|running|attacking|moving|jumping|dancing|fighting|smashing|killing|dying|capturing)\b", re.I),
+    re.compile(r"\b(?:more|additional|extra|new)\s+(?:frame|frames|variant|variants|version|versions|animation)\b", re.I),
+    re.compile(r"\banimated\s+(?:series|sequence|set|version)\b", re.I),
+    re.compile(r"\banimat(?:e|ing)\s+(?:the\s+)?(?:existing|current|pieces|sprites?|characters?)\b", re.I),
+    re.compile(r"\bwalk(?:ing)?\s+cycle\b", re.I),
+)
+
+
+def _feedback_requests_img2img_chain(text: str) -> bool:
+    """True when the user is asking for animation frames or variants
+    chained from EXISTING sprites — the SD-Turbo `from_image` path."""
+    if not text:
+        return False
+    return any(p.search(text) for p in _IMG2IMG_CHAIN_PATTERNS)
+
+
+# Phase 0.11 — phrases that signal the user wants a STYLE REBRAND of
+# existing assets (regenerate every existing asset NAME with a NEW
+# prompt that bakes in a different style). Distinct from:
+#   - existing_media: "use the existing X, don't regen" (KEEP as-is)
+#   - img2img_chain: "use existing as starting point for animation
+#                     frames" (REGEN as variants via from_image)
+#   - style_rebrand: "ALL of the images need to look like X" /
+#                    "all new graphics, look like monsters" — REGEN
+#                    each name in place via txt2img (NOT from_image,
+#                    because that would carry the old style forward)
+_STYLE_REBRAND_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\blook(?:s|ing)?\s+like\b", re.I),
+    re.compile(r"\binstead\s+of\b", re.I),
+    re.compile(r"\bnot\s+look\s+like\b", re.I),
+    re.compile(r"\bnot\s+(?:regular|standard|normal|plain|generic)\b", re.I),
+    re.compile(r"\b(?:themed?|styled?)\s+(?:as|like)\b", re.I),
+    re.compile(r"\b(?:in\s+the\s+)?style\s+of\b", re.I),
+    re.compile(r"\bnew\s+(?:style|look|theme|art|graphics|design|visuals?)\b", re.I),
+    re.compile(r"\bdifferent\s+(?:style|look|theme|art|design|aesthetic)\b", re.I),
+    re.compile(r"\b(?:all|every)\s+(?:new|fresh)\s+(?:graphics?|sprites?|images?|art|assets?)\b", re.I),
+    re.compile(r"\b(?:re\s*-?\s*)?(?:design|theme|skin|reskin)\s+(?:them|the\s+\w+|all)\b", re.I),
+    re.compile(r"\bmake\s+(?:them|all|every)\b.*\blook\b", re.I | re.DOTALL),
+)
+
+
+def _feedback_requests_style_rebrand(text: str) -> bool:
+    """True when the user wants existing assets re-rendered with a new
+    visual style (txt2img with new prompts, not from_image)."""
+    if not text:
+        return False
+    return any(p.search(text) for p in _STYLE_REBRAND_PATTERNS)
 
 
 def _feedback_requests_size_change(text: str) -> bool:
@@ -1142,6 +1337,85 @@ class AgentEvent:
     data: dict = field(default_factory=dict)
 
 
+# Ollama KV-cache scales linearly with num_ctx. 100K covers typical game
+# sessions (observed prompts ~10–35K); 262K reserves ~10 GB KV on a 27B
+# and collides with diffusers on 48 GB cards. Raise via /ctx or env.
+DEFAULT_NUM_CTX = 100_000
+MIN_NUM_CTX = 8192
+MAX_NUM_CTX = 262_144
+
+_NUM_CTX_PRESETS: dict[str, int] = {
+    "default": DEFAULT_NUM_CTX,
+    "100k": DEFAULT_NUM_CTX,
+    "131k": 131_072,
+    "200k": 200_000,
+    "262k": MAX_NUM_CTX,
+    "full": MAX_NUM_CTX,
+    "max": MAX_NUM_CTX,
+    "native": MAX_NUM_CTX,
+}
+
+
+def default_num_ctx() -> int:
+    """Resolve Ollama num_ctx: env CODING_BOX_NUM_CTX overrides the default."""
+    raw = (os.environ.get("CODING_BOX_NUM_CTX") or "").strip()
+    if not raw:
+        return DEFAULT_NUM_CTX
+    return parse_num_ctx_arg(raw)
+
+
+def parse_num_ctx_arg(arg: str) -> int:
+    """Parse /ctx or env values: 100000, 100k, 262k, full, native, …"""
+    s = (arg or "").strip().lower().replace("_", "").replace(",", "")
+    if not s:
+        raise ValueError("empty num_ctx")
+    if s in _NUM_CTX_PRESETS:
+        return _NUM_CTX_PRESETS[s]
+    if s.endswith("k"):
+        try:
+            n = float(s[:-1])
+        except ValueError as e:
+            raise ValueError(f"invalid num_ctx: {arg!r}") from e
+        v = int(n * 1000)
+    else:
+        try:
+            v = int(s)
+        except ValueError as e:
+            raise ValueError(f"invalid num_ctx: {arg!r}") from e
+    if v < MIN_NUM_CTX or v > MAX_NUM_CTX:
+        raise ValueError(
+            f"num_ctx {v} out of range [{MIN_NUM_CTX}, {MAX_NUM_CTX}]"
+        )
+    return v
+
+
+def _parse_ollama_keep_alive_env() -> float | str:
+    """Ollama chat keep_alive override.
+
+    Default -1 keeps local models resident between feedback turns. Reject 0
+    because it immediately evicts after every call and recreates the stall.
+    """
+    raw = (os.environ.get("OLLAMA_KEEP_ALIVE") or "").strip()
+    if not raw:
+        return -1
+    low = raw.lower()
+    if re.fullmatch(r"0+(?:\.0+)?(?:ms|s|m|h)?", low):
+        raise ValueError(
+            "OLLAMA_KEEP_ALIVE=0 would unload the model after every call; "
+            "use -1, 10m, 1h, or unset it for the default -1."
+        )
+    try:
+        numeric = float(raw)
+    except ValueError:
+        return raw
+    if numeric == 0:
+        raise ValueError(
+            "OLLAMA_KEEP_ALIVE=0 would unload the model after every call; "
+            "use -1, 10m, 1h, or unset it for the default -1."
+        )
+    return int(numeric) if numeric.is_integer() else numeric
+
+
 class GameAgent:
     """Drives the planning/coding/critique loop. One instance per session."""
 
@@ -1158,7 +1432,13 @@ class GameAgent:
         # (and unit tests that pass `model="stub"` without ever streaming)
         # keep working unchanged.
         backend: Backend | None = None,
-        best_of_n: int = 1,
+        # Phase 0.6 — bumped from 1 to 3. The 2026-05-22 chess trace had
+        # `best_of_n=1` and burned 1356s on three scrapped fix iters that
+        # would likely have shipped under best-of-3 sampling. Sequential
+        # sampling with early-exit (score=100) keeps cost bounded: a
+        # passing first candidate ships immediately, only stuck turns
+        # spend the extra token budget. Set to 1 to disable.
+        best_of_n: int = 3,
         # Ollama context window. qwen3.6:27b/35b natively supports 128K+,
         # gpt-oss supports 128K — at 8K we were truncating mid-<assets>
         # block on long planning turns (see games/traces/make-a-small-
@@ -1176,13 +1456,11 @@ class GameAgent:
         # would hit the wall (the original 16384 cap caused exactly
         # this in classic-doom 20260512_101944).
         # Memory cost note: Ollama KV-cache scales linearly with
-        # num_ctx — 256K on a 27B model is ~10 GB of VRAM, which is
-        # fine on a 64+ GB Mac but tight on a 32 GB laptop. Override
-        # downward via the CODING_BOX_NUM_CTX env var if you hit OOM.
-        # Note: changing num_ctx between calls forces an Ollama model
-        # reload — to avoid that, preload at the desired size with
-        # `ollama run --ctx-size 262144 <model>` before starting.
-        num_ctx: int = 262144,
+        # num_ctx — 100K default (~4 GB KV on a 27B) fits 48 GB-class
+        # multi-slot boxes; 262K is ~10 GB. Override via CODING_BOX_NUM_CTX,
+        # chat /ctx, or coder --num-ctx. Changing num_ctx forces an Ollama
+        # reload — preload with `ollama run --ctx-size N <model>` first.
+        num_ctx: int | None = None,
         # Per-stream stall budget (no-activity quiet window) — single
         # generous value for every model. Activity-aware MLX watchdog
         # bumps this on prefill progress and every emitted token,
@@ -1290,9 +1568,10 @@ class GameAgent:
         self.browser = browser
         self.max_iters = max_iters
         self.best_of_n = max(1, best_of_n)
-        self.num_ctx = num_ctx
+        self.num_ctx = num_ctx if num_ctx is not None else default_num_ctx()
         self.stall_seconds = stall_seconds
         self.overall_seconds = overall_seconds
+        self._ollama_keep_alive: float | str = _parse_ollama_keep_alive_env()
         self.seed_file: Path | None = Path(seed_file) if seed_file else None
         self._messages: list[dict] = []
         self._pending_feedback: list[str] = []
@@ -1331,6 +1610,12 @@ class GameAgent:
         self._pending_probe_quarantine_notices: list[str] = []
         # Last few raw feedback strings for repeated-request detection.
         self._recent_feedback_texts: list[str] = []
+        # Phase 0.2 — keyword signatures of feedback items that have been
+        # deferred behind a blocker. When the same intent shows up for the
+        # 3rd time, escalation kicks in and bypasses the deferral so the
+        # user doesn't get silently swallowed across turns (the chess
+        # 2026-05-22 trace had 3 deferrals of the same ask).
+        self._recent_deferred_signatures: list[str] = []
         self._pending_answer: str | None = None
         # A2: short coaching strings queued when the deliberation detector
         # aborts the last stream or another agent-side guard wants the
@@ -1357,6 +1642,15 @@ class GameAgent:
         # iters rejecting it. Cleared after one materialization
         # attempt — does NOT persist across extension turns.
         self._allow_one_rewrite: bool = False
+        # Phase 1b: set when a continuation turn loaded a corrupt on-disk
+        # baseline. Lets the fix-prompt + turn_contract surface the fault
+        # to the model so it can rewrite cleanly instead of patching garbage.
+        self._continuation_baseline_corrupt: bool = False
+        # Phase 3: set by the exit-decision turn when the model emitted
+        # <done/> while the on-disk file was still structurally broken.
+        # Overrides session_outcome so a confident-but-wrong <notes> handoff
+        # can't masquerade as success.
+        self._exit_done_over_broken_file: bool = False
         self._user_force_done = False
         # Plan-only loop detector: counts consecutive iterations where the
         # model emitted <plan> but neither <patch> nor <html_file>. The
@@ -1468,6 +1762,7 @@ class GameAgent:
         # the writeback feedback loop to credit/blame them after the next
         # test result.
         self._active_bullet_ids: list[str] = []
+        self._active_opening_book_recipes: list[dict] = []
         self._active_skeleton: str | None = None
         self._skeleton_mode = skeleton_mode
         self._prompt_version = prompt_version
@@ -1640,6 +1935,33 @@ class GameAgent:
         # Resolved asset paths from Phase A (name → absolute path); used
         # by the first-build prompt assembler.
         self._session_assets: dict[str, Path] = {}
+        # Phase 0.10 — per-session cap on assets generated per <assets>
+        # block. Default `None` means "use module default" (24). Raised
+        # at session start when the goal explicitly asks for multi-frame
+        # rosters via `prompts_v1._detect_multi_frame_intent`. The raise
+        # lets a user-requested N entities × M frames roster land in one
+        # turn instead of getting silently truncated to 24.
+        self._session_asset_cap: int | None = None
+        # Phase 1.5 — autonomous self-feedback loop. Mirrors the chat.py
+        # toggle so the agent can check this flag without depending on
+        # the TUI. Default ON; one slash command (/feedback off) flips it.
+        # The standard error-reporting paths (test reports, patch
+        # diagnostics, visual critic) are NOT gated by this — only the
+        # extra autonomous direction.
+        self._use_autonomous_feedback: bool = True
+        # Cycle counter for the budget governor. Resets per session.
+        # Capped at _AUTONOMOUS_MAX_CYCLES; auto-stops if two consecutive
+        # playtests find nothing new.
+        self._autonomous_playtest_cycle: int = 0
+        self._autonomous_no_findings_streak: int = 0
+        # Phase 1A — background task handle for the non-blocking visual
+        # critic. When the critic backend is a DIFFERENT slot than the
+        # coder, the critic runs as an asyncio.Task overlapping iter N+1's
+        # coder stream prefill + early tokens, and its coaching lands in
+        # `_pending_coaching` whenever the task completes. When critic
+        # backend == coder backend (single-slot fallback), we await
+        # inline (no benefit, no extra complexity).
+        self._critic_task: "asyncio.Task | None" = None
         # Same lazy-load pattern for Stable Audio Open. Only loaded when
         # the model emits a <sounds> block in Phase A.
         self._sound_generator: Any = None
@@ -1696,7 +2018,18 @@ class GameAgent:
                 return self._backend3
             if getattr(self, "_model2_role", None) == "critic" and getattr(self, "_backend2", None) is not None:
                 return self._backend2
+            # Single-LLM "all roles" path: when the user opted into VLM critique
+            # but no dedicated critic slot exists, run the critic on slot 1.
+            # Gated on the toggle so the default-off path keeps returning None
+            # (which lets _run_vision_judge take over when a local VLM is on disk).
+            if getattr(self, "_use_vlm_critique", False):
+                return self._backend
             return None  # Fallback to standard non-visual automated testing
+
+    def _keep_alive_for_backend(self, backend: Backend | None) -> float | str | None:
+        if backend is not None and getattr(backend, "info", None) and backend.info.name == "ollama":
+            return self._ollama_keep_alive
+        return None
 
     def _set_role_activity(self, role: str, activity: str) -> None:
         """Set TUI status panel text for Model 2 and Model 3 dynamically."""
@@ -1740,6 +2073,7 @@ class GameAgent:
         prior_loop_kind: str | None = None,
         prior_loop_line: str | None = None,
         is_local_backend: bool = False,
+        materialize_reject_reason: str = "",
     ) -> tuple[str, bool]:
         """Pick the fallback message + decide whether to reset the
         plan-only streak counter.
@@ -1775,6 +2109,37 @@ class GameAgent:
         same broken shape because the generic fallback gave the model
         no signal to change strategy.
         """
+        # Phase 4: duplicate-decl-aware coaching. When `_materialize`
+        # rejected the reply because the inbound HTML had concatenated
+        # drafts (duplicate top-level `const` / `function`), naming the
+        # specific shape lets the model emit ONE single-pass body next
+        # turn instead of guessing why it was rejected. Trace 1 (chess
+        # 20260522_000304) burned several iters on this exact shape.
+        reject_low = (materialize_reject_reason or "").lower()
+        if (
+            "duplicate" in reject_low
+            and "declaration" in reject_low
+        ):
+            fallback = (
+                "Your last reply was rejected because the <html_file> "
+                "body contained DUPLICATE TOP-LEVEL DECLARATIONS — two "
+                "drafts of the same function or const got concatenated "
+                "in one stream. The browser would refuse to run that "
+                f"file (\"{materialize_reject_reason[:200]}\").\n\n"
+                "Recovery for THIS turn:\n"
+                "  - Emit ONE complete <html_file>...</html_file> as a "
+                "single coherent body. No duplicate `const ctx`, no "
+                "duplicate `function loop()`, no second `(() => { ... })()` "
+                "below the first.\n"
+                "  - If you were running out of room, narrow scope: "
+                "build the core skeleton this turn and defer extra "
+                "polish to a later <patch>.\n"
+                "  - If you genuinely cannot fit the file in one stream, "
+                "emit a <question> asking the user to narrow scope "
+                "instead of shipping concatenated drafts.\n"
+                "Do NOT include <plan>, <criteria>, or <probes>."
+            )
+            return fallback, False
         if consecutive_plan_only >= 2:
             fallback = (
                 "LOOP DETECTED: you have emitted only <plan> for "
@@ -2065,6 +2430,7 @@ class GameAgent:
                 messages,
                 on_token=None,
                 options={"temperature": 0.1, "num_ctx": self.num_ctx},
+                keep_alive=self._keep_alive_for_backend(self._backend),
                 stall_seconds=doctor_stall_seconds,
                 overall_seconds=doctor_overall_seconds,
                 max_retries=0,
@@ -2232,6 +2598,68 @@ class GameAgent:
         except Exception:
             return ""
 
+    def _retrieve_opening_book_block(
+        self,
+        goal: str,
+        *,
+        stage: str = "plan",
+    ) -> tuple[str, list[dict]]:
+        """Retrieve compact root/live opening-book recipes with hard caps."""
+        try:
+            mod_toks: list[str] = []
+            try:
+                from memory import (
+                    _detect_3d_intent, _detect_board_intent, _detect_dom_intent,
+                )
+                mod_toks = (
+                    _detect_3d_intent(goal)
+                    + _detect_board_intent(goal)
+                    + _detect_dom_intent(goal)
+                )
+            except Exception:
+                mod_toks = []
+            outline = self._memory.retrieve_implementation_outline(goal, mod_toks)
+            playtests = self._memory.retrieve_playtests(
+                goal, mod_toks, k=3 if stage == "plan" else 1,
+            )
+            asset_audits = self._memory.retrieve_asset_audits(
+                goal, mod_toks, k=2 if stage == "plan" else 1,
+            )
+            animation_audits = self._memory.retrieve_animation_audits(
+                goal, mod_toks, k=2 if stage == "plan" else 1,
+            )
+            block = render_opening_book_block(
+                outline, playtests, asset_audits, animation_audits,
+                char_budget=2600 if stage == "plan" else 1400,
+            )
+
+            def _row(kind: str, hit: OpeningBookHit) -> dict:
+                return {
+                    "kind": kind,
+                    "id": hit.item.id,
+                    "tier": hit.item.source_tier,
+                    "score": round(hit.score, 4),
+                    "recipe": hit.item.recipe,
+                }
+
+            hits: list[dict] = []
+            if outline:
+                hits.append(_row("outline", outline))
+            hits.extend(_row("playtest", h) for h in playtests)
+            hits.extend(_row("asset_audit", h) for h in asset_audits)
+            hits.extend(_row("animation_audit", h) for h in animation_audits)
+            if hits:
+                self._trace({
+                    "kind": "opening_book_retrieved",
+                    "stage": stage,
+                    "hits": hits,
+                    "modality_tokens": mod_toks,
+                })
+            return block, hits
+        except Exception as e:
+            self._trace({"kind": "opening_book_error", "stage": stage, "err": str(e)})
+            return "", []
+
     def _extract_and_queue_lookups(self, reply: str) -> None:
         """Find <lookup_bullet>id</lookup_bullet> tags in an assistant reply,
         resolve each against the playbook, and queue rendered bodies for
@@ -2289,6 +2717,35 @@ class GameAgent:
             self._pending_feedback.append(text)
             self._feedback_deferred_last_turn = False
             self._trace({"kind": "feedback_queued", "text": text})
+            # Fix #2 (2026-05-22 Pac-Man trace) — refresh the autonomous
+            # playtest budget when the user types fresh feedback. The
+            # 12-iter Pac-Man session exhausted the 3-cycle cap by iter
+            # 6-7 and then ran 5 more iters with no autonomous oversight
+            # even after the user typed two new bug reports. New
+            # feedback is a strong "verify again" signal — refresh the
+            # cycle counter by one and clear the no-findings streak.
+            # Model-agnostic; works regardless of session length.
+            try:
+                prior_cycle = getattr(self, "_autonomous_playtest_cycle", 0)
+                prior_streak = getattr(self, "_autonomous_no_findings_streak", 0)
+                refreshed = False
+                if prior_cycle > 0:
+                    self._autonomous_playtest_cycle = max(0, prior_cycle - 1)
+                    refreshed = True
+                if prior_streak > 0:
+                    self._autonomous_no_findings_streak = 0
+                    refreshed = True
+                if refreshed:
+                    self._trace({
+                        "kind": "autonomous_budget_refreshed_on_feedback",
+                        "prior_cycle": prior_cycle,
+                        "new_cycle": getattr(self, "_autonomous_playtest_cycle", 0),
+                        "prior_no_findings_streak": prior_streak,
+                    })
+            except Exception:
+                # Field may not exist on every agent path (early-init,
+                # tests). Refresh is advisory; never block feedback.
+                pass
 
     def add_user_answer(self, text: str) -> None:
         self._pending_answer = text.strip()
@@ -2789,9 +3246,24 @@ class GameAgent:
             # First build: complete file expected.
             return (["<html_file>"], [])
         # Mid-session: patches preferred; rewrite only when armed.
+        # Phase 2: also allow rewrite when the on-disk baseline is itself
+        # degenerate — `_materialize` already opens this carve-out via
+        # `_is_degenerate_baseline`, but `turn_contract` was reporting
+        # rewrite_allowed=False which left the model guessing why its
+        # rewrites were getting rejected. Surface the carve-out here so
+        # the model and the trace agree.
         allowed = ["<patch>"]
         forbidden: list[str] = []
-        if self._allow_one_rewrite:
+        rewrite_via_arm = bool(self._allow_one_rewrite)
+        rewrite_via_degenerate = False
+        try:
+            rewrite_via_degenerate = bool(
+                self._current_file
+                and _is_degenerate_baseline(self._current_file)
+            )
+        except Exception:
+            rewrite_via_degenerate = False
+        if rewrite_via_arm or rewrite_via_degenerate:
             allowed.append("<html_file>")
         else:
             forbidden.append("<html_file>")
@@ -2830,6 +3302,17 @@ class GameAgent:
                 self._token_cb(piece)
             except Exception:
                 pass
+
+    def _role_token_cb(self, role: str):
+        """Token callback that tags stream pieces for the TUI status panel."""
+        def _cb(piece: str) -> None:
+            self._last_stream_role = role
+            self._token_cb_wrapper(piece)
+        return _cb
+
+    @staticmethod
+    def _activity_idle_event(role: str = "coder") -> AgentEvent:
+        return AgentEvent("activity", "idle", {"role": role})
 
     # -- trace / snapshot helpers ------------------------------------------
 
@@ -3454,16 +3937,41 @@ class GameAgent:
                 # A real falsy result breaks the eval-error streak.
                 self._probe_eval_error_streak[name] = 0
 
-        quarantine_names = {
-            str(p.get("name") or "probe")
-            for p in eval_failing
-            if self._probe_eval_error_streak.get(str(p.get("name") or "probe"), 0) >= 2
-        }
+        # Two-strike rule for general eval errors, ONE-STRIKE for
+        # SyntaxError. Syntax errors mean the probe expression itself
+        # is malformed JavaScript — re-evaluating it next iter cannot
+        # produce a different result; the only way it would "pass" is
+        # if the model re-emits a corrected probe. Holding the broken
+        # probe in the active set for a second iter just lets the
+        # syntax error mask other harness signals (the 2026-05-23
+        # chess trace's iter 2/3 chased a `new Promise(r=>{...})`
+        # parser error for two iters while the actual
+        # ASSETS_LOADED_BUT_UNDRAWN problem was hidden behind it).
+        # Model-agnostic: any model that emits unparseable JS triggers
+        # the fast-path; legitimate runtime-eval errors still get the
+        # tolerant 2-strike treatment.
+        def _is_syntax_error(p: dict) -> bool:
+            err_class = (p.get("error_class") or "").lower()
+            err_text = (p.get("err") or "").lower()
+            return (
+                "syntaxerror" in err_class
+                or "syntaxerror" in err_text
+                or "unexpected token" in err_text
+                or "unexpected identifier" in err_text
+                or "unterminated" in err_text
+            )
+        quarantine_names: set[str] = set()
+        for p in eval_failing:
+            name = str(p.get("name") or "probe")
+            streak = self._probe_eval_error_streak.get(name, 0)
+            if streak >= 2 or _is_syntax_error(p):
+                quarantine_names.add(name)
         if quarantine_names:
             for p in eval_failing:
                 name = str(p.get("name") or "probe")
                 if name not in quarantine_names:
                     continue
+                is_syntax = _is_syntax_error(p)
                 self._trace({
                     "kind": "probe_quarantined",
                     "iteration": iteration,
@@ -3471,12 +3979,23 @@ class GameAgent:
                     "expr_preview": (p.get("expr") or "")[:120],
                     "eval_error_class": p.get("error_class") or "eval_error",
                     "streak": self._probe_eval_error_streak.get(name, 0),
+                    "fast_path": "syntax_error" if is_syntax else None,
                 })
-                notice = (
-                    f"PROBE {name} QUARANTINED: had eval errors twice; "
-                    "re-emit <probes>...</probes> to replace, or leave it "
-                    "dropped if it was not testing real behavior."
-                )
+                if is_syntax:
+                    notice = (
+                        f"PROBE {name} QUARANTINED IMMEDIATELY: the "
+                        "expression is unparseable JavaScript (syntax "
+                        "error). Re-emit <probes>...</probes> with a "
+                        "corrected expression — re-running malformed "
+                        "JS cannot produce a different result and "
+                        "would mask other harness signals."
+                    )
+                else:
+                    notice = (
+                        f"PROBE {name} QUARANTINED: had eval errors twice; "
+                        "re-emit <probes>...</probes> to replace, or leave it "
+                        "dropped if it was not testing real behavior."
+                    )
                 if notice not in self._pending_probe_quarantine_notices:
                     self._pending_probe_quarantine_notices.append(notice)
 
@@ -3561,6 +4080,14 @@ class GameAgent:
             return None
         return "→ applying your input to next turn: " + "; ".join(bits)
 
+    # Phrases that count as a user override of the blocker-first deferral.
+    # The narrow explicit forms ("ignore the test", "ship as-is") are joined
+    # by natural-language signals — the chess trace had the user say "the
+    # game works great" / "the game plays fine" / "do not change the GAME"
+    # three times and none matched the original regex, so all three asks
+    # were deferred. False positives here are safe: an override only stops
+    # the deferral, it does not silence the test report the model still
+    # sees. False negatives are the actual user-facing failure.
     _BLOCKER_OVERRIDE_RE = re.compile(
         r"\b("
         r"ignore\s+(?:the\s+)?(?:test|tests|harness|failure|blocker|error)|"
@@ -3569,7 +4096,16 @@ class GameAgent:
         r"skip\s+(?:the\s+)?(?:test|tests|harness|failure|blocker|error)|"
         r"ship\s+(?:it\s+)?(?:as[- ]is|anyway)|"
         r"ship\s+the\s+partial|"
-        r"accept\s+(?:the\s+)?(?:known\s+)?failure"
+        r"accept\s+(?:the\s+)?(?:known\s+)?failure|"
+        r"(?:the\s+)?(?:game|it)\s+(?:works|plays|runs)"
+        r"(?:\s+(?:great|fine|well|now|again|already|just\s+fine))?|"
+        r"(?:the\s+)?(?:game|it)\s+is\s+(?:fine|great|working|playing|ok|okay)|"
+        r"do(?:es)?\s*n[o']?t?\s+change\s+(?:the\s+)?"
+        r"(?:game|code|behavior|gameplay|logic|mechanics)|"
+        r"(?:leave|keep)\s+(?:the\s+)?(?:game|code|gameplay)\s+"
+        r"(?:as[- ]is|alone|the\s+same)|"
+        r"perfectly\s+working\s+(?:game|build)|"
+        r"working\s+(?:perfectly|fine|great)"
         r")\b",
         re.I,
     )
@@ -3608,6 +4144,35 @@ class GameAgent:
             w for w in re.findall(r"[a-z0-9]+", (text or "").lower())
             if len(w) > 2 and w not in stop
         }
+
+    def _deferral_signature(self, text: str) -> str:
+        """Compact keyword signature for cross-turn deferral matching.
+
+        Keyword bag drops stop-words and length-2 tokens (`_feedback_keywords`).
+        Sorted + joined into a stable key. Two phrasings of the same ask
+        ("make new pawn frames" vs "more frames of the pawn please") will
+        produce highly overlapping signatures.
+        """
+        kw = self._feedback_keywords(text)
+        return " ".join(sorted(kw))
+
+    def _count_recent_deferrals(self, text: str) -> int:
+        """How many recent deferrals share intent with `text`."""
+        if not self._recent_deferred_signatures:
+            return 0
+        cur_set = set(self._deferral_signature(text).split())
+        if not cur_set:
+            return 0
+        count = 0
+        for prev_sig in self._recent_deferred_signatures:
+            prev_set = set(prev_sig.split())
+            if not prev_set:
+                continue
+            union = cur_set | prev_set
+            overlap = len(cur_set & prev_set) / max(1, len(union))
+            if overlap >= 0.5:
+                count += 1
+        return count
 
     def _detect_repeated_feedback(self, text: str) -> dict | None:
         """Return overlap metadata when latest feedback repeats a recent ask."""
@@ -3700,13 +4265,70 @@ class GameAgent:
         # status panel reflects the queue draining — the left-hand log
         # (where the user's eye lives) shows nothing, leaving them
         # uncertain whether their typing actually reached the model.
+        # Phase 0.1 — partition feedback before the deferral decision so
+        # MEDIA-ONLY items (art/sound regen, animation frame chains via
+        # `from_image`) bypass the blocker-first deferral. They run on
+        # GPU 0 / Z-Image / Stable-Audio / SD-Turbo; the coder runs on
+        # slot 1. They don't compete. The 2026-05-22 chess trace had the
+        # user ask three times for img2img animation frames from existing
+        # piece sprites; all three were deferred behind an irrelevant
+        # `kbCursor` draw warning and the session shipped without ever
+        # honoring the asset ask. See memory `feedback-media-requests-
+        # never-defer.md`.
+        defer_predicate = self._should_defer_feedback_for_blocker()
+        _session_assets = getattr(self, "_session_assets", None) or {}
+        _session_sounds = getattr(self, "_session_sounds", None) or {}
+        asset_names = list(_session_assets.keys())
+        sound_names = list(_session_sounds.keys())
+        media_to_process_now: list[str] = []
+        code_to_defer: list[str] = []
+        force_honor_via_escalation: list[str] = []
+        if defer_predicate and self._pending_feedback:
+            for fb in self._pending_feedback:
+                is_art = _feedback_is_art_change(fb, asset_names)
+                is_sound = _feedback_is_sound_change(fb, sound_names)
+                is_bug = _feedback_is_behavior_bug(fb)
+                is_orient = _feedback_is_orientation_change(fb)
+                if (is_art or is_sound) and not is_bug and not is_orient:
+                    media_to_process_now.append(fb)
+                    continue
+                # Phase 0.2 — same intent deferred ≥2 times before? Force
+                # it through. The model is told the user has asked N
+                # times; the test report still appears so the blocker
+                # isn't silently dropped, but the user's input is no
+                # longer swallowed for a third turn in a row.
+                prior_defer_count = self._count_recent_deferrals(fb)
+                if prior_defer_count >= 2:
+                    force_honor_via_escalation.append(fb)
+                    self._trace({
+                        "kind": "feedback_deferral_escalated",
+                        "prior_defer_count": prior_defer_count,
+                        "text": fb[:240],
+                    })
+                else:
+                    code_to_defer.append(fb)
+            # Rewrite the queue so the downstream "process feedback" block
+            # consumes media items + force-honored items this turn. The
+            # plain code items get re-queued at the end of this method so
+            # they remain pending for the next turn.
+            self._pending_feedback = list(media_to_process_now) + list(force_honor_via_escalation)
+            if media_to_process_now:
+                self._trace({
+                    "kind": "media_only_parallel_inject",
+                    "media_count": len(media_to_process_now),
+                    "code_deferred_count": len(code_to_defer),
+                    "escalated_count": len(force_honor_via_escalation),
+                    "asset_names": asset_names,
+                    "sound_names": sound_names,
+                    "preview": "\n- ".join(media_to_process_now)[:400],
+                })
+        defer_block_active = defer_predicate and bool(code_to_defer)
+
         consumed_items: list[str] = []
         if self._pending_answer is not None:
             consumed_items.append(f"answer: {self._pending_answer[:120]}")
-        defer_feedback_for_blocker = self._should_defer_feedback_for_blocker()
-        if not defer_feedback_for_blocker:
-            for fb in self._pending_feedback:
-                consumed_items.append(f"feedback: {fb[:120]}")
+        for fb in self._pending_feedback:
+            consumed_items.append(f"feedback: {fb[:120]}")
 
         self._feedback_deferred_last_turn = False
         if self._pending_answer is not None:
@@ -3718,15 +4340,25 @@ class GameAgent:
             )
             self._trace({"kind": "answer_injected", "text": ans})
             self._pending_answer = None
-        if defer_feedback_for_blocker:
+        if defer_block_active:
             self._feedback_deferred_last_turn = True
-            feedback_items = list(self._pending_feedback)
+            feedback_items = list(code_to_defer)
             preview = "\n- ".join(fb[:240] for fb in feedback_items)
+            parallel_note = ""
+            if media_to_process_now:
+                parallel_note = (
+                    "\nNOTE: media-only items in the same user feedback "
+                    "(art/sound regen / animation frames) are being processed "
+                    "in parallel via the diffuser pipeline on GPU 0 this turn. "
+                    "The block above lists ONLY the code-touching items that "
+                    "wait on the blocker.\n"
+                )
             parts.append(
                 "================ BLOCKER-FIRST FEEDBACK DEFERRAL ================\n"
                 "The previous browser/micro-probe report is still failing, so\n"
-                "fresh user feedback is queued for after the blocker is clean.\n"
-                "THIS turn must fix the failing test report below first.\n"
+                "code-touching user feedback is queued for after the blocker\n"
+                "is clean. THIS turn must fix the failing test report below first.\n"
+                f"{parallel_note}"
                 f"\nDeferred feedback:\n- {preview}\n"
                 "================================================================="
             )
@@ -3736,9 +4368,35 @@ class GameAgent:
                 "count": len(feedback_items),
                 "previous_report_ok": self._previous_report_ok,
                 "fix_mode": self._fix_mode,
+                "media_parallel_count": len(media_to_process_now),
                 "preview": "\n- ".join(feedback_items)[:400],
             })
-        elif self._pending_feedback:
+            # Phase 0.2 — record each deferred item's signature so the
+            # next-turn escalation count is accurate.
+            for fb in feedback_items:
+                sig = self._deferral_signature(fb)
+                if sig:
+                    self._recent_deferred_signatures.append(sig)
+            # Cap the history at 6 entries — enough to span ~3 ask-defer
+            # cycles; older signatures shed naturally.
+            self._recent_deferred_signatures = self._recent_deferred_signatures[-6:]
+        if force_honor_via_escalation:
+            # Phase 0.2 — escalation directive prepends the regular USER
+            # FEEDBACK block. The model gets the test report AND the
+            # user's persistent ask; it must address both this turn.
+            parts.append(
+                "================ FEEDBACK ESCALATION (USER REPEATED) ================\n"
+                "The user has stated the following request three or more times "
+                "across recent turns; it was deferred twice behind a code "
+                "blocker. The blocker is real and still appears below — fix it. "
+                "AT THE SAME TIME, address the user's ask in this turn or "
+                "explicitly explain in <notes> why a single turn cannot do "
+                "both. Do not defer again.\n"
+                f"\nRepeated ask(s):\n- "
+                + "\n- ".join(fb[:240] for fb in force_honor_via_escalation)
+                + "\n=================================================================="
+            )
+        if self._pending_feedback:
             feedback_items = list(self._pending_feedback)
             strict_idxs = [
                 i for (i, fb) in enumerate(feedback_items)
@@ -3823,14 +4481,32 @@ class GameAgent:
                 if self._session_sounds else []
             )
             locks_code = _feedback_locks_code(joined)
-            art_change = bool(asset_names) and _feedback_is_art_change(
-                joined, asset_names,
-            )
-            sound_change = bool(sound_names) and _feedback_is_sound_change(
-                joined, sound_names,
-            )
+            # Drop the bool(asset_names) / bool(sound_names) short-circuits
+            # so first-time art/audio requests can route to the MEDIA-CHANGE
+            # directive ladder. The classifiers themselves require an art
+            # noun + media verb (and audio noun + media verb), so neutral
+            # feedback like "fix the bug" still won't fire here. The
+            # directive renderer below already branches on whether asset/
+            # sound names exist when picking which recipe to emit.
+            art_change = _feedback_is_art_change(joined, asset_names)
+            sound_change = _feedback_is_sound_change(joined, sound_names)
             existing_media_request = _feedback_requests_existing_media(joined)
-            if existing_media_request and (art_change or sound_change):
+            # Phase 0.1 — when the user says BOTH "use the existing X" AND
+            # "as a starting point" / "show them walking" / "more frames",
+            # they want img2img CHAINING (new frames seeded from existing
+            # sprites), not "use the existing PNG verbatim". The old
+            # suppression treated all "use existing" mentions as the
+            # latter and killed the MEDIA-CHANGE directive entirely; the
+            # 2026-05-22 chess trace shows the user asked for img2img
+            # animation chains three times and got nothing.
+            img2img_chain_request = _feedback_requests_img2img_chain(joined)
+            style_rebrand_request = _feedback_requests_style_rebrand(joined)
+            if (
+                existing_media_request
+                and (art_change or sound_change)
+                and not img2img_chain_request
+                and not style_rebrand_request
+            ):
                 self._trace({
                     "kind": "media_change_directive_suppressed",
                     "reason": "use_existing_media",
@@ -3839,6 +4515,42 @@ class GameAgent:
                 })
                 art_change = False
                 sound_change = False
+            elif img2img_chain_request and (art_change or sound_change):
+                self._trace({
+                    "kind": "img2img_chain_directive_active",
+                    "existing_media_request": existing_media_request,
+                    "art_change": art_change,
+                    "sound_change": sound_change,
+                })
+            if style_rebrand_request and (art_change or sound_change):
+                self._trace({
+                    "kind": "style_rebrand_directive_active",
+                    "art_change": art_change,
+                    "sound_change": sound_change,
+                })
+            # Phase 0.10b — multi-frame intent in MID-SESSION feedback
+            # ("make 3 walk frames for each character", "use existing
+            # images for X to seed an animation"). When the goal text
+            # at session start didn't trigger the cap-raise, a later
+            # animation ask would silently hit the default 24 cap. Mirror
+            # the session-start path: detect multi-frame intent on the
+            # feedback text and raise the session cap if it triggers.
+            # General behavior — no genre logic.
+            try:
+                from prompts_v1 import _detect_multi_frame_intent as _mfi_mid
+                mf_mid = _mfi_mid(joined)
+            except Exception:
+                mf_mid = []
+            _prior_mid_cap = getattr(self, "_session_asset_cap", None)
+            if mf_mid and (_prior_mid_cap is None or _prior_mid_cap < 72):
+                self._session_asset_cap = 72
+                self._trace({
+                    "kind": "multi_frame_intent_detected",
+                    "trigger": "mid_session_feedback",
+                    "matched_keywords": mf_mid,
+                    "asset_cap_raised_to": 72,
+                    "prior_cap": _prior_mid_cap,
+                })
             behavior_bug = _feedback_is_behavior_bug(joined)
             behavior_scope = _feedback_mentions_scoped_behavior_change(joined)
             orientation_change = _feedback_is_orientation_change(joined)
@@ -3915,56 +4627,180 @@ class GameAgent:
             # drawImage size patch — same regenerated PNGs at the same
             # canvas size achieve nothing visible). The new SCOPED-CHANGE
             # block below handles the code-lock case directly.
+            #
+            # Two branches:
+            #   - has_existing_media: regen using the existing name(s).
+            #   - else: emit a fresh <assets>/<sounds> block (NEW ART) +
+            #     ONE small <patch> wiring the loader. The 2026-05-21
+            #     chess trace is the motivating case — first-time art
+            #     request after a working game shipped, no sprites yet,
+            #     model defaulted to inline SVG instead of the diffuser.
+            has_existing_media = bool(asset_names or sound_names)
             if (
-                (asset_names or sound_names)
-                and (art_change or sound_change)
+                (art_change or sound_change)
                 and not behavior_bug
                 and not (locks_code and behavior_scope)
                 and not orientation_change
             ):
-                lines: list[str] = [
-                    "================ MEDIA-CHANGE DIRECTIVE ================",
-                    "The feedback above is about ART/SOUND, not code. The",
-                    "harness can regenerate any sprite or sound in place:",
-                    "emit a fresh block with the EXISTING name and a new",
-                    "prompt — no JS edit needed. The existing drawSprite()",
-                    "/ new Audio() call already in the file automatically",
-                    "picks up the regenerated file.",
-                ]
-                if asset_names:
-                    asset_list = ", ".join(sorted(asset_names))
+                if has_existing_media:
+                    lines: list[str] = [
+                        "================ MEDIA-CHANGE DIRECTIVE ================",
+                        "The feedback above is about ART/SOUND, not code. The",
+                        "harness can regenerate any sprite or sound in place:",
+                        "emit a fresh block with the EXISTING name and a new",
+                        "prompt — no JS edit needed. The existing drawSprite()",
+                        "/ new Audio() call already in the file automatically",
+                        "picks up the regenerated file.",
+                    ]
+                    # Phase 0.1 — surface the user's fuzzy asset stems
+                    # ("pawn" → [white_pawn, black_pawn]) so the model
+                    # emits the right `from_image` chains for animation
+                    # frames seeded from existing pieces.
+                    stem_map = _resolve_fuzzy_asset_stems(joined, asset_names)
+                    if asset_names:
+                        asset_list = ", ".join(sorted(asset_names))
+                        lines.extend([
+                            "",
+                            "Sprites — use <assets> to re-render:",
+                            "  <assets>[{\"name\":\"<existing_name>\","
+                            "\"prompt\":\"<new visual prompt>\"}]</assets>",
+                            f"  Existing asset names: {asset_list}",
+                        ])
+                        if stem_map:
+                            lines.append("")
+                            lines.append("Stems the user referenced map to existing assets:")
+                            for stem, names in sorted(stem_map.items()):
+                                joined_names = ", ".join(sorted(names))
+                                lines.append(f"  '{stem}' → [{joined_names}]")
+                            lines.append(
+                                "When the user asks for animation FRAMES or"
+                                " VARIANTS of these existing sprites (e.g."
+                                " walk1/walk2/capture), declare each new"
+                                " frame with `from_image: <existing_name>`"
+                                " and `strength: 0.35-0.55` so SD-Turbo"
+                                " img2img chains it from the parent. Do NOT"
+                                " regenerate from scratch via txt2img — the"
+                                " new frames will look like different"
+                                " characters and break visual continuity."
+                            )
+                        # Phase 0.11 — STYLE REBRAND branch. User wants
+                        # EVERY existing asset re-rendered with a new
+                        # visual style (e.g. "all the images should look
+                        # like monsters, not regular chess pieces").
+                        # Different from img2img chains: this is full
+                        # txt2img regeneration with NEW prompts, because
+                        # from_image would carry the OLD style forward.
+                        if style_rebrand_request:
+                            lines.append("")
+                            lines.append("STYLE REBRAND DETECTED:")
+                            lines.append(
+                                "The user wants ALL existing assets re-rendered"
+                                " with a new visual style. For EACH existing"
+                                " asset name, emit one entry in <assets> with"
+                                " the SAME name + a NEW prompt that bakes in"
+                                " the requested style. Do NOT use `from_image`"
+                                " — chaining would carry the OLD style forward."
+                                " The harness regenerates each PNG in place."
+                            )
+                            lines.append(
+                                "Roster-size note: a full rebrand of N existing"
+                                " assets = N new <assets> entries. If your"
+                                " session has many entries, split the LAST"
+                                " batch into a follow-up turn — never silently"
+                                " regenerate only a subset."
+                            )
+                        lines.extend([
+                            "",
+                            "If the user says an animation/image is MISSING",
+                            "and no existing name matches that state, you may",
+                            "emit a NEW same-pattern sprite name plus ONE small",
+                            "<patch> that only adds the name to the existing",
+                            "asset loader/list. Do not rewrite gameplay code.",
+                        ])
+                    if sound_names:
+                        sound_list = ", ".join(sorted(sound_names))
+                        lines.extend([
+                            "",
+                            "Sounds — use <sounds> to re-render:",
+                            "  <sounds>[{\"name\":\"<existing_name>\","
+                            "\"prompt\":\"<new audio prompt>\","
+                            "\"duration\":1.0}]</sounds>",
+                            f"  Existing sound names: {sound_list}",
+                        ])
                     lines.extend([
                         "",
-                        "Sprites — use <assets> to re-render:",
-                        "  <assets>[{\"name\":\"<existing_name>\","
-                        "\"prompt\":\"<new visual prompt>\"}]</assets>",
-                        f"  Existing asset names: {asset_list}",
-                        "",
-                        "If the user says an animation/image is MISSING",
-                        "and no existing name matches that state, you may",
-                        "emit a NEW same-pattern sprite name plus ONE small",
-                        "<patch> that only adds the name to the existing",
-                        "asset loader/list. Do not rewrite gameplay code.",
+                        "Do NOT swap an existing drawSprite(name,…) or",
+                        "new Audio(path) call for inline procedural code here —",
+                        "that loses the media path and regresses. If the user",
+                        "truly asked for code changes too, address those with a",
+                        "small <patch>.",
+                        "========================================================",
                     ])
-                if sound_names:
-                    sound_list = ", ".join(sorted(sound_names))
+                else:
+                    # NEW MEDIA branch — session has no generated assets/
+                    # sounds yet. Tell the model to emit a fresh <assets>
+                    # / <sounds> block + ONE small <patch> that loads
+                    # them. Without this branch, the directive ladder
+                    # was suppressed entirely and the model fell back to
+                    # inline SVG / ctx.fillRect / AudioContext beeps.
+                    lines = [
+                        "================ MEDIA-CHANGE DIRECTIVE (NEW MEDIA) ================",
+                        "The feedback above is asking for generated MEDIA, but",
+                        "this session has no sprites/sounds yet. The harness",
+                        "runs Z-Image-Turbo (sprites) and Stable-Audio-Open",
+                        "(sounds) locally — emit the right block this turn",
+                        "and the PNG/OGG paths arrive in the next user turn.",
+                    ]
+                    if art_change:
+                        lines.extend([
+                            "",
+                            "Sprites — emit fresh names:",
+                            "  <assets>[",
+                            "    {\"name\":\"<short_id>\",",
+                            "     \"prompt\":\"<one short visual sentence,"
+                            " transparent bg>\"},",
+                            "    ...one entry per visual entity the player"
+                            " sees...",
+                            "  ]</assets>",
+                            "",
+                            "Then ONE small <patch> that:",
+                            "  1. Adds `const ASSETS = { name: new Image(),"
+                            " ... }` and `await Promise.all(Object.values("
+                            "ASSETS).map(i => i.decode()))` before the loop"
+                            " starts.",
+                            "  2. Replaces the procedural drawing site with"
+                            " `ctx.drawImage(ASSETS.<name>, x, y, w, h)`.",
+                            "Do NOT draw the entities with inline SVG, ctx",
+                            "primitives, Unicode glyphs, or emoji — the user",
+                            "explicitly asked for generated art and that's",
+                            "exactly the failure mode this directive prevents.",
+                        ])
+                    if sound_change:
+                        lines.extend([
+                            "",
+                            "Sounds — emit fresh names:",
+                            "  <sounds>[",
+                            "    {\"name\":\"<short_id>\",",
+                            "     \"prompt\":\"<one short audio sentence>\",",
+                            "     \"duration\":<0.3-1.5>},",
+                            "    ...one entry per discrete audible event...",
+                            "  ]</sounds>",
+                            "",
+                            "Then ONE small <patch> that does",
+                            "`new Audio('./<dir>/<name>.ogg').play()` on the",
+                            "matching event. Do NOT synthesize beeps with",
+                            "AudioContext oscillators — the user asked for",
+                            "real sound.",
+                        ])
                     lines.extend([
                         "",
-                        "Sounds — use <sounds> to re-render:",
-                        "  <sounds>[{\"name\":\"<existing_name>\","
-                        "\"prompt\":\"<new audio prompt>\","
-                        "\"duration\":1.0}]</sounds>",
-                        f"  Existing sound names: {sound_list}",
+                        "Path conventions (the harness sets these for you):",
+                        "  - Sprites land in `./<session>_assets/<name>.png`.",
+                        "  - Sounds land in `./<session>_sounds/<name>.ogg`.",
+                        "Reference the names you emit; the next user turn",
+                        "will surface the exact relative paths.",
+                        "===================================================================",
                     ])
-                lines.extend([
-                    "",
-                    "Do NOT swap an existing drawSprite(name,…) or",
-                    "new Audio(path) call for inline procedural code here —",
-                    "that loses the media path and regresses. If the user",
-                    "truly asked for code changes too, address those with a",
-                    "small <patch>.",
-                    "========================================================",
-                ])
                 parts.append("\n".join(lines))
                 self._trace({
                     "kind": "media_change_directive_injected",
@@ -3974,6 +4810,9 @@ class GameAgent:
                     "behavior_scope": behavior_scope,
                     "asset_count": len(asset_names),
                     "sound_count": len(sound_names),
+                    # Tag the branch so offline analysis can tell first-
+                    # time art requests from regen requests at a glance.
+                    "branch": "existing" if has_existing_media else "new",
                 })
 
             # ORIENTATION-CHANGE DIRECTIVE — when the user wants a
@@ -4296,6 +5135,14 @@ class GameAgent:
             except Exception:
                 pass
 
+        # Phase 0.1 — restore code-touching feedback that was partitioned
+        # out for parallel media processing. These items remain pending
+        # behind the code blocker; they re-evaluate next turn.
+        if code_to_defer:
+            for fb in code_to_defer:
+                if fb not in self._pending_feedback:
+                    self._pending_feedback.append(fb)
+
         return "\n\n".join(parts)
 
     # -- streaming ----------------------------------------------------------
@@ -4393,10 +5240,18 @@ class GameAgent:
                 "model": backend.info.model,
                 "image_count": len(images),
             })
+            critic_role = getattr(self, "_model3_role", None)
+            if critic_role != "critic":
+                critic_role = getattr(self, "_model2_role", None) or "critic"
+            on_tok = (
+                self._role_token_cb(critic_role)
+                if self._token_cb is not None else None
+            )
             result = await backend.stream_chat(
                 messages,
-                on_token=lambda _t: None,
+                on_token=on_tok,
                 options={"temperature": 0.2, "num_ctx": 4096},
+                keep_alive=self._keep_alive_for_backend(backend),
                 stall_seconds=120.0,
                 overall_seconds=300.0,
                 max_retries=1,
@@ -4409,6 +5264,654 @@ class GameAgent:
             return None
         finally:
             self._set_role_activity("critic", "idle")
+
+    async def _run_opening_book_sidecars(self, report: dict, iteration: int):
+        """Let warm side models propose live recipes; store only after browser evidence.
+
+        Yields activity events so the TUI can show per-role tok/s while sidecars run.
+        """
+        if not report.get("ok"):
+            return
+        sidecars: list[tuple[str, str, str]] = []
+        if self.get_backend("architect") is not self._backend:
+            sidecars.append(("architect", PLAYTESTS_FILENAME, "playtest"))
+        critic_bk = self.get_backend("critic")
+        if critic_bk is not None and critic_bk is not self._backend:
+            sidecars.append(("critic", ASSET_AUDITS_FILENAME, "asset_audit"))
+            sidecars.append(("critic", ANIMATION_AUDITS_FILENAME, "animation_audit"))
+        if not sidecars:
+            return
+        for role, filename, kind in sidecars:
+            backend = self.get_backend(role)
+            if backend is None:
+                continue
+            self._set_role_activity(role, f"proposing {kind}")
+            yield self._record(AgentEvent(
+                "activity",
+                "streaming",
+                {"label": f"proposing {kind}", "role": role},
+            ))
+            prompt = (
+                "You are proposing one compact reusable opening-book memory "
+                "item for a single-file HTML game agent. Only propose a "
+                "generic, transferable, executable or audit-style recipe. "
+                "Do not mention this specific session name. Output STRICT JSON "
+                "ONLY with keys: id, content, tags, recipe.\n\n"
+                f"GOAL: {self._goal}\n"
+                f"ITERATION: {iteration}\n"
+                "BROWSER REPORT SUMMARY:\n"
+                f"{format_report_for_model(report)[:1600]}\n"
+            )
+            try:
+                on_tok = (
+                    self._role_token_cb(role)
+                    if self._token_cb is not None else None
+                )
+                result = await backend.stream_chat(
+                    [{"role": "user", "content": prompt}],
+                    on_token=on_tok,
+                    options={"temperature": 0.2, "num_ctx": 4096},
+                    keep_alive=self._keep_alive_for_backend(backend),
+                    stall_seconds=120.0,
+                    overall_seconds=300.0,
+                    max_retries=0,
+                )
+                text = (result.text or "").strip()
+                m = re.search(r"\{.*\}", text, re.DOTALL)
+                if not m:
+                    continue
+                rec = json.loads(m.group(0))
+                item = OpeningBookItem(
+                    id=str(rec.get("id") or "").strip()[:80],
+                    kind=kind,
+                    content=str(rec.get("content") or "").strip()[:800],
+                    tags=[str(t).strip() for t in (rec.get("tags") or [])[:8] if str(t).strip()],
+                    source_tier="live",
+                    verified=True,
+                    helpful=0,
+                    harmful=0,
+                    recipe=dict(rec.get("recipe") or {}),
+                    trace_ids=[self._session_id],
+                    pass_count=1,
+                    false_positive_count=0,
+                    last_verified_at=datetime.utcnow().isoformat() + "Z",
+                )
+                if item.id and item.content:
+                    ok = self._memory.append_live_opening_book_item(filename, item)
+                    self._trace({
+                        "kind": "opening_book_sidecar_proposal",
+                        "role": role,
+                        "filename": filename,
+                        "id": item.id,
+                        "stored": ok,
+                    })
+            except Exception as e:
+                self._trace({
+                    "kind": "opening_book_sidecar_error",
+                    "role": role,
+                    "kind_name": kind,
+                    "err": str(e)[:200],
+                })
+            finally:
+                self._set_role_activity(role, "idle")
+                yield self._record(self._activity_idle_event(role))
+
+    # ---- Phase 1B — diffuser pre-warm during Phase A --------------------
+
+    def _maybe_prewarm_diffusers_during_phase_a(self) -> None:
+        """Background-load Z-Image-Turbo + Stable Audio Open during the
+        architect's streaming window — but ONLY when the diffuser GPU
+        is independent of any LLM slot.
+
+        On the 4-GPU workstation the diffusers run on GPU 0 and the
+        LLM on GPUs 1-3, so the warmup is pure speedup (~30-60 s
+        hidden). On a single-GPU box the diffuser and the architect
+        share VRAM, so pre-warming would steal VRAM from the in-flight
+        plan stream — skip in that case.
+
+        Fires-and-forgets: each pipeline's `ensure_loaded()` runs in
+        `asyncio.to_thread`; if loading raises, we trace + move on.
+        The user-facing wins are captured by `prefill_warm` trace
+        events tagged with `target: "z_image" | "stable_audio"`.
+        """
+        try:
+            import gpu_status as _gs
+            snap = _gs.snapshot_gpus()
+            if not _gs.diffuser_has_dedicated_gpu(snap):
+                self._trace({
+                    "kind": "diffuser_prewarm_skipped",
+                    "reason": "no_dedicated_gpu",
+                    "n_gpus": len(snap.gpus) if snap and snap.gpus else 0,
+                })
+                return
+        except Exception as e:
+            self._trace({
+                "kind": "diffuser_prewarm_skipped",
+                "reason": "gpu_probe_error",
+                "err": str(e)[:200],
+            })
+            return
+
+        async def _prewarm_image() -> None:
+            import time as _t
+            t0 = _t.monotonic()
+            try:
+                import assets as _assets
+                gen = self._asset_generator or _assets.ZImageTurboGenerator()
+                self._asset_generator = gen
+                ok = await asyncio.to_thread(gen._lazy_init)
+                self._trace({
+                    "kind": "prefill_warm",
+                    "target": "z_image",
+                    "elapsed_s": round(_t.monotonic() - t0, 2),
+                    "ok": bool(ok),
+                    "hidden_under_phase_a": True,
+                })
+            except Exception as e:
+                self._trace({
+                    "kind": "prefill_warm",
+                    "target": "z_image",
+                    "elapsed_s": round(_t.monotonic() - t0, 2),
+                    "ok": False,
+                    "err": str(e)[:200],
+                })
+
+        async def _prewarm_audio() -> None:
+            import time as _t
+            t0 = _t.monotonic()
+            try:
+                import sounds as _sounds
+                gen = self._sound_generator or _sounds.StableAudioGenerator()
+                self._sound_generator = gen
+                ok = await asyncio.to_thread(gen._lazy_init)
+                self._trace({
+                    "kind": "prefill_warm",
+                    "target": "stable_audio",
+                    "elapsed_s": round(_t.monotonic() - t0, 2),
+                    "ok": bool(ok),
+                    "hidden_under_phase_a": True,
+                })
+            except Exception as e:
+                self._trace({
+                    "kind": "prefill_warm",
+                    "target": "stable_audio",
+                    "elapsed_s": round(_t.monotonic() - t0, 2),
+                    "ok": False,
+                    "err": str(e)[:200],
+                })
+
+        # Fire-and-forget. We don't await — these run concurrently with
+        # the architect's streaming. The tasks complete on their own
+        # schedule; the next `<assets>` / `<sounds>` block uses the
+        # already-loaded pipeline.
+        try:
+            asyncio.create_task(_prewarm_image())
+            asyncio.create_task(_prewarm_audio())
+        except Exception:
+            pass
+
+    # ---- Phase 1A — non-blocking visual critic --------------------------
+    #
+    # When the critic role is bound to a SEPARATE Ollama slot from the
+    # coder (the normal multi-GPU configuration), running the critic
+    # serially after each iter wastes 20-300 s of wall-clock — the
+    # critic compute could overlap with the next iter's coder stream.
+    # Spawning it as `asyncio.Task` lets that overlap happen and lets
+    # the coaching land in `_pending_coaching` whenever the task
+    # finishes (one-turn lag at worst). When the critic backend is the
+    # SAME as the coder backend (single-slot / single-GPU fallback),
+    # concurrent runs just queue at the daemon — no benefit, so we
+    # fall back to the existing blocking await.
+
+    @staticmethod
+    def _endpoint_supports_concurrency(endpoint: str) -> bool:
+        """Fix #5 — does this endpoint accept concurrent requests in
+        parallel, or do they queue at a single local daemon?
+
+        Heuristic: **loopback URLs serialize** (a single Ollama daemon
+        on 127.0.0.1:11434 handles one stream at a time). **Non-loopback
+        HTTP(S) endpoints are assumed to support concurrency** — cloud
+        provider APIs (Anthropic, OpenAI, future providers) accept many
+        concurrent requests per account, and self-hosted multi-worker
+        inference servers on a LAN typically do too.
+
+        Detection is by ENDPOINT SHAPE, not provider name. Adding a
+        new provider in the future works automatically; no string-match
+        on `"anthropic"` or `"openai"` anywhere.
+        """
+        if not endpoint:
+            return False
+        ep = endpoint.lower()
+        # Loopback patterns — single-daemon, serialize.
+        loopback_markers = ("127.", "localhost", "[::1]", "0.0.0.0")
+        return not any(m in ep for m in loopback_markers)
+
+    def _critic_runs_on_independent_slot(self, critic_backend) -> bool:
+        """True when the critic backend is a different slot than the
+        coder, AND either points at a different endpoint OR shares a
+        concurrent-capable endpoint (cloud / LAN inference server).
+
+        The 2026-05-23 SOTA chess trace showed all three roles pointing
+        at the same Anthropic endpoint; the pre-fix-#5 check then forced
+        sequential best-of-N because endpoints matched. For cloud APIs,
+        concurrent requests against the same account run in parallel
+        just fine — fall-through to sequential there is over-conservative.
+        """
+        if critic_backend is None or critic_backend is self._backend:
+            return False
+        try:
+            ce = getattr(getattr(critic_backend, "info", None), "endpoint", "")
+            be = getattr(getattr(self._backend, "info", None), "endpoint", "")
+            if ce and be and ce == be:
+                # Same endpoint — concurrent only if the endpoint shape
+                # supports it (cloud / LAN multi-worker).
+                return self._endpoint_supports_concurrency(ce)
+        except Exception:
+            pass
+        return True
+
+    async def _drain_pending_critic_task(self, *, wait: bool) -> bool:
+        """Optionally await the in-flight critic task and surface its
+        coaching. Returns True if a task was drained (whether it
+        produced coaching or not). Used at iter-boundary cleanup."""
+        task = self._critic_task
+        if task is None:
+            return False
+        if not wait and not task.done():
+            return False
+        try:
+            if not task.done():
+                await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            self._trace({"kind": "visual_critic_error", "error": str(e)[:240]})
+        finally:
+            self._critic_task = None
+        return True
+
+    async def _spawn_visual_critic(
+        self,
+        after_bytes: bytes,
+        before_bytes: bytes | None,
+        iteration: int,
+        vc_role: str,
+    ) -> None:
+        """Background worker that runs the visual critic and appends to
+        `_pending_coaching` on completion. Errors are swallowed +
+        traced so a critic crash never kills the iter loop."""
+        try:
+            critique = await self.run_visual_critic(after_bytes, before_bytes)
+        except Exception as exc:
+            self._trace({
+                "kind": "visual_critic_error",
+                "iteration": iteration,
+                "error": str(exc)[:240],
+            })
+            return
+        if not critique:
+            return
+        cleaned = critique.strip()
+        if not cleaned or "ok" in cleaned.lower()[:30]:
+            return
+        prefix = "VISUAL CRITIC (looked at the screenshot of your last iteration): "
+        self._pending_coaching.append(prefix + cleaned)
+        self._trace({
+            "kind": "visual_critic_concurrent_completed",
+            "iteration": iteration,
+            "vc_role": vc_role,
+            "critique_preview": cleaned[:240],
+        })
+
+    # ---- Phase 1.5 — autonomous self-feedback ---------------------------
+    #
+    # `_run_autonomous_playtest` is the per-iter hook that:
+    #   1. Reads the root-playbook "behavior_playtest" recipes
+    #   2. Skips any whose `applies_when` JS gate evaluates falsy in the
+    #      current page (so a turn-based board game never runs the
+    #      directional-movement recipe and vice versa — applicability
+    #      is observable, not genre-named)
+    #   3. Runs the surviving recipes via LiveBrowser.record_playtest
+    #   4. Evaluates the per-recipe `check_kind` against the timeline
+    #   5. If any recipe produced a finding, asks the critic slot for ONE
+    #      paragraph of user-style feedback, prepends "[AUTONOMOUS PLAYTEST]"
+    #      and routes it into _pending_feedback so Phase 0.1's partitioner
+    #      handles it like a real user message
+    # The budget governor (3 cycles/session, 2-no-finding auto-stop) and
+    # the `/feedback off` kill-switch are both checked first; this method
+    # is a no-op when either gate is closed.
+
+    _AUTONOMOUS_MAX_CYCLES = 3
+    _AUTONOMOUS_FACING_TOLERANCE_DEG = 25.0
+    _AUTONOMOUS_MIN_MOVE_PX = 6.0
+
+    def _autonomous_playtest_disabled(self) -> tuple[bool, str]:
+        """Gate check: return (disabled, reason)."""
+        if not getattr(self, "_use_autonomous_feedback", True):
+            return True, "feedback_off"
+        if self._user_force_done:
+            return True, "force_done"
+        if self._autonomous_playtest_cycle >= self._AUTONOMOUS_MAX_CYCLES:
+            return True, "budget_exhausted"
+        if self._autonomous_no_findings_streak >= 2:
+            return True, "no_findings_streak"
+        return False, ""
+
+    def _evaluate_behavior_playtest_check(
+        self,
+        recipe: dict,
+        timeline: dict,
+    ) -> dict | None:
+        """Apply the recipe's `check_kind` to the captured timeline.
+
+        Returns a finding dict {check_kind, finding_label, evidence} or
+        None when the check passed. Each `check_kind` is genre-free —
+        the recipe owns its applicability gate AND the human-readable
+        finding label; this method just turns sampled state into a
+        pass/fail call.
+        """
+        check_kind = (recipe.get("check_kind") or "").lower()
+        samples = timeline.get("samples") or []
+        if not samples or not check_kind:
+            return None
+        label = recipe.get("finding_label") or check_kind
+
+        def _player_xy(state: dict | None) -> tuple[float, float] | None:
+            if not state:
+                return None
+            for px, py in (
+                ("player.x", "player.y"), ("ship.x", "ship.y"),
+                ("hero.x", "hero.y"), ("x", "y"),
+            ):
+                if isinstance(state.get(px), (int, float)) and isinstance(state.get(py), (int, float)):
+                    return float(state[px]), float(state[py])
+            return None
+
+        def _player_facing_rad(state: dict | None) -> float | None:
+            if not state:
+                return None
+            for path in (
+                "player.facing", "player.angle", "player.heading",
+                "player.rot", "player.rotation",
+                "ship.facing", "ship.angle", "ship.heading",
+                "hero.facing", "hero.angle", "hero.heading",
+                "facing", "angle", "heading", "rot", "rotation",
+            ):
+                v = state.get(path)
+                if isinstance(v, (int, float)):
+                    # If the value is > ~6.5 we assume degrees; convert
+                    # to radians so the comparison is consistent. Generic
+                    # heuristic; doesn't matter which the game uses.
+                    import math
+                    return math.radians(v) if abs(v) > 6.5 else float(v)
+            return None
+
+        if check_kind == "any_progress":
+            # No new info in 10s of observation = the game is stuck.
+            base_hash = samples[0].get("canvas_hash")
+            base_state = samples[0].get("state") or {}
+            changed = False
+            for s in samples[1:]:
+                if s.get("canvas_hash") and s["canvas_hash"] != base_hash:
+                    changed = True
+                    break
+                s_state = s.get("state") or {}
+                # Any numeric leaf differing from baseline counts as progress.
+                for k, v in s_state.items():
+                    if isinstance(v, (int, float)) and base_state.get(k) != v:
+                        changed = True
+                        break
+                if changed:
+                    break
+            if not changed:
+                return {
+                    "check_kind": check_kind,
+                    "finding_label": label,
+                    "evidence": "no canvas/state delta across 10s of observation",
+                }
+            return None
+
+        if check_kind == "facing_matches_movement":
+            import math
+            s0 = samples[0]
+            s1 = samples[-1]
+            xy0 = _player_xy(s0.get("state"))
+            xy1 = _player_xy(s1.get("state"))
+            facing = _player_facing_rad(s0.get("state"))
+            if xy0 is None or xy1 is None or facing is None:
+                return None  # game stopped exposing state mid-test
+            dx = xy1[0] - xy0[0]
+            dy = xy1[1] - xy0[1]
+            mag = (dx * dx + dy * dy) ** 0.5
+            if mag < self._AUTONOMOUS_MIN_MOVE_PX:
+                # No movement at all — different recipe will catch this.
+                return None
+            move_angle = math.atan2(-dy, dx)  # screen-Y flipped to math-Y
+            diff = abs(((move_angle - facing) + math.pi) % (2 * math.pi) - math.pi)
+            tol = math.radians(self._AUTONOMOUS_FACING_TOLERANCE_DEG)
+            if diff > tol:
+                evidence = (
+                    f"facing≈{math.degrees(facing):.0f}°, "
+                    f"movement≈{math.degrees(move_angle):.0f}° "
+                    f"(Δ={math.degrees(diff):.0f}°), |move|={mag:.1f}px"
+                )
+                return {
+                    "check_kind": check_kind,
+                    "finding_label": label,
+                    "evidence": evidence,
+                }
+            return None
+
+        if check_kind == "stays_in_canvas":
+            # Player left the canvas during a 3s held-key window.
+            # Canvas size sampled via custom_expr in the recipe would
+            # be cleaner; here we approximate by checking the largest
+            # observed coordinate against a generous bound (4000 px).
+            # Real games rarely have canvases bigger than that.
+            xy_last = _player_xy((samples[-1].get("state") or {}))
+            if xy_last is None:
+                return None
+            x, y = xy_last
+            if not (-50.0 <= x <= 4000.0 and -50.0 <= y <= 4000.0):
+                return {
+                    "check_kind": check_kind,
+                    "finding_label": label,
+                    "evidence": f"player ended at ({x:.0f},{y:.0f}) — out of plausible canvas range",
+                }
+            return None
+
+        # Unknown check_kind — log + skip rather than throw.
+        return None
+
+    async def _run_autonomous_playtest(
+        self,
+        iteration: int,
+        report: dict,
+    ):
+        """One cycle of the autonomous self-feedback loop.
+
+        Caller is the iter loop; we only run when:
+          - /feedback is on (default)
+          - probes passed this iter (report.ok is True)
+          - the budget governor allows another cycle
+          - no Ctrl+D in flight
+
+        Yields AgentEvents for status panel; queues findings into
+        _pending_feedback for the NEXT iter's _flush_user_injections.
+        """
+        # Phase 1.5.2 — single skip-reason trace event so we can see WHY
+        # the loop didn't run in future sessions. The 2026-05-22 Pac-Man
+        # session had no autonomous events at all and we couldn't tell
+        # whether the loop disabled, the iter failed, or recipes were
+        # missing. Every silent return now leaves a breadcrumb.
+        disabled, reason = self._autonomous_playtest_disabled()
+        if disabled:
+            self._trace({
+                "kind": "autonomous_playtest_skipped",
+                "reason": f"disabled:{reason}",
+                "iteration": iteration,
+            })
+            return
+        if not report.get("ok"):
+            self._trace({
+                "kind": "autonomous_playtest_skipped",
+                "reason": "iter_failed",
+                "iteration": iteration,
+            })
+            return
+        if self.browser is None:
+            self._trace({
+                "kind": "autonomous_playtest_skipped",
+                "reason": "no_browser",
+                "iteration": iteration,
+            })
+            return
+        try:
+            # Load directly from the seed function — guarantees we see
+            # the behavior_playtest recipes even on a fresh install where
+            # the on-disk root playbook hasn't been hydrated yet. The
+            # heavier in-memory `OpeningBookStore` is used by the model-
+            # facing render path, but for an in-process check the seed
+            # list is faster and avoids file-IO timing flakes in tests.
+            from memory import _opening_book_seed_items, PLAYTESTS_FILENAME
+            seed = _opening_book_seed_items()
+            recipes = seed.get(PLAYTESTS_FILENAME, [])
+        except Exception as e:
+            self._trace({
+                "kind": "autonomous_playtest_skipped",
+                "reason": "recipe_load_error",
+                "err": str(e)[:200],
+                "iteration": iteration,
+            })
+            return
+        behavior_recipes = [
+            r for r in recipes
+            if isinstance(getattr(r, "recipe", None), dict)
+            and (r.recipe.get("type") or "").lower() == "behavior_playtest"
+        ]
+        if not behavior_recipes:
+            self._trace({
+                "kind": "autonomous_playtest_skipped",
+                "reason": "no_behavior_recipes",
+                "iteration": iteration,
+                "total_recipes": len(recipes),
+            })
+            return
+
+        self._autonomous_playtest_cycle += 1
+        yield self._record(AgentEvent(
+            "info",
+            f"[dim]autonomous playtest: cycle {self._autonomous_playtest_cycle}/{self._AUTONOMOUS_MAX_CYCLES} "
+            f"({len(behavior_recipes)} recipes available)[/dim]",
+        ))
+
+        # Fix #3 — diagnostic probes evaluated only when a recipe's
+        # applies_when gate fails. Each entry is a small structural
+        # check the gate is likely testing for; the boolean map gets
+        # stashed on the skip event so future trace mining can see
+        # which specific condition was false (no state global, no
+        # canvas, no exposed player.x/.y, etc.) without re-running
+        # the session. Genre-free, applies to any HTML game shape.
+        _GATE_DIAGNOSTICS_JS = (
+            "(()=>{const out={};"
+            "out.has_state=!!window.state;"
+            "out.has_gameState=!!window.gameState;"
+            "const s=window.state||window.gameState||null;"
+            "out.has_state_or_gameState=!!s;"
+            "out.has_canvas=!!document.querySelector('canvas');"
+            "out.canvas_has_dims=(()=>{const c=document.querySelector('canvas');"
+            "return !!c&&c.width>0&&c.height>0;})();"
+            "out.has_player_xy=!!(s&&(typeof s.player?.x==='number'&&typeof s.player?.y==='number'));"
+            "out.has_player_facing=!!(s&&(typeof s.player?.facing==='number'||"
+            "typeof s.player?.angle==='number'||typeof s.player?.heading==='number'||"
+            "typeof s.player?.rot==='number'||typeof s.player?.rotation==='number'));"
+            "out.top_level_xy_count=(()=>{if(!s||typeof s!=='object')return 0;let n=0;"
+            "for(const k in s){try{const v=s[k];if(v&&typeof v==='object'&&"
+            "typeof v.x==='number'&&typeof v.y==='number')n++}catch(e){}};return n;})();"
+            "return out;})()"
+        )
+
+        findings: list[dict] = []
+        for rec in behavior_recipes:
+            r = rec.recipe
+            applies_js = r.get("applies_when") or "true"
+            try:
+                applies = await self.browser._safe_eval(applies_js)
+            except Exception:
+                applies = False
+            if not applies:
+                # Run the diagnostic probes so the trace shows WHICH
+                # condition was missing on this game's state shape.
+                try:
+                    diag = await self.browser._safe_eval(_GATE_DIAGNOSTICS_JS)
+                except Exception as e:
+                    diag = {"diag_error": str(e)[:120]}
+                self._trace({
+                    "kind": "autonomous_recipe_skipped",
+                    "recipe_id": getattr(rec, "id", ""),
+                    "reason": "applicability_gate_falsy",
+                    "diagnostics": diag if isinstance(diag, dict) else {},
+                })
+                continue
+            timeline = await self.browser.record_playtest(
+                input_script=r.get("input_script") or [],
+                sample_times_s=r.get("sample_times_s") or [0.0],
+            )
+            self._trace({
+                "kind": "autonomous_recipe_ran",
+                "recipe_id": getattr(rec, "id", ""),
+                "samples": len(timeline.get("samples") or []),
+                "errors": timeline.get("errors") or [],
+            })
+            try:
+                finding = self._evaluate_behavior_playtest_check(r, timeline)
+            except Exception as e:
+                self._trace({
+                    "kind": "autonomous_check_error",
+                    "recipe_id": getattr(rec, "id", ""),
+                    "err": str(e)[:200],
+                })
+                finding = None
+            if finding:
+                finding["recipe_id"] = getattr(rec, "id", "")
+                findings.append(finding)
+
+        self._trace({
+            "kind": "autonomous_playtest_summary",
+            "iteration": iteration,
+            "cycle": self._autonomous_playtest_cycle,
+            "ran": len(behavior_recipes),
+            "findings": len(findings),
+            "finding_ids": [f.get("recipe_id") for f in findings],
+        })
+
+        if not findings:
+            self._autonomous_no_findings_streak += 1
+            return
+        self._autonomous_no_findings_streak = 0
+
+        # Build the user-style feedback string. Keep this TIGHT — local
+        # 27B models lose focus past ~200 tokens of pre-amble. We don't
+        # call the critic at all in this round; instead we synthesize
+        # one paragraph from the recipe-supplied finding_labels +
+        # evidence. A future enhancement can route to the critic slot
+        # for a freer-form summary, but the trade-off is cost + drift.
+        bullets = []
+        for f in findings:
+            bullets.append(f"- {f['finding_label']} ({f['evidence']})")
+        feedback_text = (
+            "[AUTONOMOUS PLAYTEST] I ran a short scripted playtest after "
+            "iter {iter} passed probes and noticed:\n{body}\n"
+            "Treat this as one user observation, not a hard failure — "
+            "address what's actionable; ignore what's already correct."
+        ).format(iter=iteration, body="\n".join(bullets))
+        self._pending_feedback.append(feedback_text)
+        yield self._record(AgentEvent(
+            "info",
+            f"[magenta]autonomous feedback queued[/magenta] "
+            f"({len(findings)} finding(s) from cycle "
+            f"{self._autonomous_playtest_cycle})",
+        ))
 
     async def _run_vision_judge(self, current_png: bytes, iteration: int) -> None:
         """Ask a vision model whether this iter made visible progress
@@ -4663,7 +6166,17 @@ class GameAgent:
                 "fix_mode": self._fix_mode,
                 "continuation": bool(getattr(self, "_continuation", False)),
                 "scoped_mode": scoped_mode,
-                "rewrite_allowed": bool(self._allow_one_rewrite),
+                # Phase 2: rewrite is also allowed when the on-disk
+                # baseline is structurally broken (`_is_degenerate_baseline`).
+                # Surface BOTH paths so the trace truthfully shows the
+                # gate state the materializer will actually use.
+                "rewrite_allowed": bool(
+                    self._allow_one_rewrite
+                    or (
+                        self._current_file
+                        and _is_degenerate_baseline(self._current_file)
+                    )
+                ),
                 "scoped_change_active": bool(self._scoped_change_active),
                 "force_question": self._force_question_subsystem is not None,
                 "snapshot_n": self._snapshot_n,
@@ -4673,10 +6186,16 @@ class GameAgent:
             allowed, forbidden = self._derive_allowed_forbidden_tags()
             contract["allowed_tags"] = allowed
             contract["forbidden_tags"] = forbidden
+            contract["keep_alive"] = self._keep_alive_for_backend(active_backend)
             self._trace(contract)
         except Exception:
             pass
-        self._trace({"kind": "stream_start", "temperature": temp, "fix_mode": self._fix_mode})
+        self._trace({
+            "kind": "stream_start",
+            "temperature": temp,
+            "fix_mode": self._fix_mode,
+            "keep_alive": self._keep_alive_for_backend(active_backend),
+        })
 
         # Heartbeat wrapper around the caller's on_token. Every
         # _STREAM_HEARTBEAT_SECONDS of wall clock, we trace a
@@ -4693,9 +6212,31 @@ class GameAgent:
             "last_hb": _time.monotonic(),
             "tokens": 0,
             "tail": "",
+            # Phase 0.7 — fire-once flag so the slow-prefill surprise
+            # event only emits once per stream when the condition first
+            # holds; subsequent regular heartbeats keep flowing.
+            "slow_prefill_emitted": False,
+            # Phase 0.14 — fire-once flag for runaway-stream warning.
+            "runaway_warned": False,
         }
         _STREAM_HEARTBEAT_SECONDS = 30.0
         _STREAM_HEARTBEAT_TAIL_CHARS = 120
+        # Phase 0.7 — cold KV-cache stalls (cross-slot role switches with
+        # no warm_prefix) produce minutes of near-zero token output. The
+        # 2026-05-22 chess trace had iter 2 emit 1 token in 740s before
+        # ramping. Threshold below auto-flags this for the learner so
+        # future trace mining doesn't have to grep heartbeats by hand.
+        _SLOW_PREFILL_TOK_FLOOR = 5
+        _SLOW_PREFILL_ELAPSED_FLOOR = 120.0
+        # Phase 0.14 — runaway-generation watchdog. The 2026-05-22 third
+        # chess trace had a coder stream emit 36,736 completion tokens
+        # over 25 minutes. The user couldn't tell whether the model was
+        # making progress or stuck in a loop; their queued feedback sat
+        # invisible the entire time. Threshold below is intentionally
+        # conservative — a typical iter is 1–4k tokens, a giant
+        # legitimate rewrite is ~10k. Past 15k something has usually
+        # gone wrong. Fires-once, no behavior change — pure visibility.
+        _RUNAWAY_TOKEN_FLOOR = 15000
 
         def _heartbeat_on_token(piece: str) -> None:
             if on_token is not None:
@@ -4721,6 +6262,54 @@ class GameAgent:
                     "tok_per_s": round(tok_per_s, 2),
                     "tail": hb_state["tail"][-_STREAM_HEARTBEAT_TAIL_CHARS:],
                 })
+                if (
+                    not hb_state["slow_prefill_emitted"]
+                    and hb_state["tokens"] < _SLOW_PREFILL_TOK_FLOOR
+                    and elapsed >= _SLOW_PREFILL_ELAPSED_FLOOR
+                ):
+                    hb_state["slow_prefill_emitted"] = True
+                    self._trace({
+                        "kind": "slow_prefill",
+                        "tokens": hb_state["tokens"],
+                        "elapsed_s": round(elapsed, 1),
+                        "model_role": role,
+                        "model_name": getattr(
+                            getattr(active_backend, "info", None),
+                            "model",
+                            "unknown",
+                        ),
+                        "hint": (
+                            "tokens<5 after 120s+ usually means a cold KV "
+                            "cache after a cross-slot role switch — "
+                            "Backend.warm_prefix on the next role's slot "
+                            "during the prior role's stream avoids it."
+                        ),
+                    })
+                if (
+                    not hb_state["runaway_warned"]
+                    and hb_state["tokens"] >= _RUNAWAY_TOKEN_FLOOR
+                ):
+                    hb_state["runaway_warned"] = True
+                    self._trace({
+                        "kind": "runaway_stream_warning",
+                        "tokens": hb_state["tokens"],
+                        "elapsed_s": round(elapsed, 1),
+                        "tok_per_s": round(tok_per_s, 2),
+                        "model_role": role,
+                        "model_name": getattr(
+                            getattr(active_backend, "info", None),
+                            "model",
+                            "unknown",
+                        ),
+                        "hint": (
+                            f"completion >{_RUNAWAY_TOKEN_FLOOR} tokens — "
+                            "typical iter is 1-4k. Likely a token-repetition "
+                            "loop, an oversized rewrite, or the model "
+                            "concatenating multiple drafts. Press Ctrl+D to "
+                            "ship the current best build and re-queue your "
+                            "feedback if waiting feels wrong."
+                        ),
+                    })
 
         # Backend-reported pre-token progress (today only MLX surfaces
         # it — parsed from mlx_lm.server's SSE keepalive frames during
@@ -4773,6 +6362,7 @@ class GameAgent:
                 self._messages,
                 on_token=_heartbeat_on_token,
                 options=opts,
+                keep_alive=self._keep_alive_for_backend(active_backend),
                 stall_seconds=self.stall_seconds,
                 overall_seconds=effective_overall_seconds,
                 max_retries=1,
@@ -4831,6 +6421,52 @@ class GameAgent:
             "completion_tokens": result.completion_tokens,
             "max_tokens_hit": result.max_tokens_hit,
         })
+        # Short-stream warning — symmetric to runaway_stream_warning.
+        # Counterpart to the 2026-05-23 SOTA chess trace where a coder
+        # role emitted 8 tokens in 1.74s and the agent accepted it as
+        # a clean reply. Local 27B models also produce abnormally short
+        # replies (cold KV cache, prompt formatting confusion, refusal
+        # patterns). Model-agnostic: signal is the token count + role
+        # combination, no model name involved.
+        try:
+            ctokens = (
+                result.completion_tokens
+                if result.completion_tokens is not None
+                else result.tokens
+            )
+        except Exception:
+            ctokens = result.tokens
+        _SHORT_STREAM_FLOOR = 50
+        _is_done_reply = (
+            "<confirm_done/>" in result.text
+            or "<done/>" in result.text
+            or result.text.strip() == ""
+        )
+        if (
+            role in ("coder", "architect")
+            and not result.stalled
+            and not result.looped
+            and not result.crashed
+            and not _is_done_reply
+            and ctokens is not None
+            and ctokens < _SHORT_STREAM_FLOOR
+        ):
+            self._trace({
+                "kind": "short_stream_warning",
+                "role": role,
+                "completion_tokens": ctokens,
+                "duration_s": round(result.duration_s, 2),
+                "len": len(result.text),
+                "tail": (result.text or "")[-160:],
+                "hint": (
+                    f"stream emitted <{_SHORT_STREAM_FLOOR} completion "
+                    "tokens with no stall/loop/crash flag and no <done/> "
+                    "marker. Likely a degenerate reply — context "
+                    "confusion, format refusal, or the model declared "
+                    "completion implicitly. Worth a coaching nudge or "
+                    "Ctrl+D if this repeats."
+                ),
+            })
         if bool(getattr(result, "loop_grace_used", False)):
             self._trace({
                 "kind": "loop_grace_used",
@@ -4970,7 +6606,7 @@ class GameAgent:
                 "single line:variable responsible, then ONE <patch>...</patch> "
                 "or <html_file>...</html_file>. No preamble, no exploration."
             )
-        if result.stalled and not result.text.strip():
+        if (result.stalled or result.crashed) and not result.text.strip():
             # Backend-aware recovery hint. "num_ctx" is Ollama-specific;
             # MLX has its own knobs (MLX_MAX_TOKENS, Metal wired-memory
             # limit); cloud backends rarely zero-stall but if they do
@@ -5000,9 +6636,19 @@ class GameAgent:
                 )
             else:
                 hint = "Try a different model or restart the backend."
+            # Phase 5b: report ACTUAL stream wall-clock, not the configured
+            # stall ceiling. Trace 2 (chess 20260522_104235) had a 0.48s
+            # Anthropic API failure surface as "stalling at 600.0s" because
+            # we used self.stall_seconds. Real duration is far more useful
+            # for diagnosis.
+            actual_seconds = round(getattr(result, "duration_s", 0.0) or 0.0, 2)
+            cause = ""
+            if getattr(result, "error_message", None):
+                cause = f" cause: {result.error_message}."
             raise RuntimeError(
                 f"Model produced no tokens before stalling at "
-                f"{self.stall_seconds}s on backend={backend_name}. {hint}"
+                f"{actual_seconds}s on backend={backend_name}.{cause} "
+                f"{hint}"
             )
         # Prepend the prefill so downstream parsers (regex for <plan>,
         # <diagnose>, etc.) match against the full intended output.
@@ -5010,12 +6656,76 @@ class GameAgent:
 
     # -- best-of-N for fix iterations --------------------------------------
 
+    # ---- Phase 2A — independent-slot detection for fan-out ----------
+
+    def _available_sampler_slots(self) -> list[tuple["Backend", str]]:
+        """List of (backend, label) tuples that can run a best-of-N
+        candidate independently of slot 1. Excludes any slot whose
+        endpoint matches slot 1's (would queue at the same daemon)
+        AND any slot currently busy with a concurrent critic task.
+
+        Always returns slot 1 first; slots 2 and 3 only when truly
+        independent. On a single-slot / single-GPU config this returns
+        just slot 1, which lets the caller fall back to the existing
+        sequential best_of_n path.
+        """
+        out: list[tuple["Backend", str]] = [(self._backend, "slot1")]
+        seen_endpoints: set[str] = set()
+        try:
+            ep1 = getattr(getattr(self._backend, "info", None), "endpoint", "") or ""
+            if ep1:
+                seen_endpoints.add(ep1)
+        except Exception:
+            pass
+
+        # Detect which slot the critic is currently using so we don't
+        # steal it from a concurrent visual-critic task spawned by Phase 1A.
+        critic_busy_backend = None
+        if self._critic_task is not None and not self._critic_task.done():
+            try:
+                critic_busy_backend = self.get_backend("critic")
+            except Exception:
+                critic_busy_backend = None
+
+        for label, bk in (
+            ("slot2", getattr(self, "_backend2", None)),
+            ("slot3", getattr(self, "_backend3", None)),
+        ):
+            if bk is None or bk is self._backend:
+                continue
+            try:
+                ep = getattr(getattr(bk, "info", None), "endpoint", "") or ""
+            except Exception:
+                ep = ""
+            if (
+                ep
+                and ep in seen_endpoints
+                and not self._endpoint_supports_concurrency(ep)
+            ):
+                # Same loopback daemon as another slot — would just
+                # queue. Fix #5: for non-loopback endpoints (cloud
+                # APIs, LAN inference servers) concurrent requests
+                # run in parallel and we DO want both slots in the
+                # fan-out set.
+                continue
+            if critic_busy_backend is not None and bk is critic_busy_backend:
+                continue
+            if ep:
+                seen_endpoints.add(ep)
+            out.append((bk, label))
+        return out
+
     async def _generate_and_score_candidates(
         self,
         n: int,
     ) -> tuple[Candidate, list[Candidate]]:
         """Sample N completions and score each by running its result through
         the test harness against a temp file. Used when fixing a failed iter.
+
+        Phase 2A: when multiple independent slots are available, fan out
+        across them in parallel. When only slot 1 is independent (single-
+        slot / single-GPU / critic holding the others), fall back to the
+        existing sequential path.
 
         Scorer is a continuous quality score in [0, 100] from
         `score_test_report` so partial-credit candidates ("almost works")
@@ -5043,6 +6753,7 @@ class GameAgent:
                 report = await self.browser.load_and_test(
                     tmp_path, screenshot_path=None,
                     probes=self._probes or None,
+                    opening_book_recipes=getattr(self, "_active_opening_book_recipes", []),
                     # todo #2: pass criteria so the harness can flag
                     # coverage gaps even on best-of-N candidate scoring.
                     criteria=self._criteria or None,
@@ -5056,10 +6767,20 @@ class GameAgent:
                 # broken" but better than "didn't apply".
                 return 10.0, extra
 
+        # Phase 2A — parallel fan-out across independent slots.
+        slots = self._available_sampler_slots()
+        if len(slots) >= 2 and n >= 2:
+            winner, all_cands = await self._fan_out_best_of_n_across_slots(
+                slots=slots, n=n, scorer=scorer,
+            )
+            return winner, all_cands
+
+        # Single-slot fallback — preserved exactly as before.
         winner, all_cands = await self._backend.best_of_n(
             self._messages,
             n=n,
             options={"num_ctx": self.num_ctx},
+            keep_alive=self._keep_alive_for_backend(self._backend),
             stall_seconds=self.stall_seconds,
             overall_seconds=self.overall_seconds,
             scorer=scorer,
@@ -5075,6 +6796,154 @@ class GameAgent:
             cancel_event=self._ensure_stop_event(),
         )
         return winner, all_cands
+
+    async def _fan_out_best_of_n_across_slots(
+        self,
+        *,
+        slots: list[tuple["Backend", str]],
+        n: int,
+        scorer,
+    ) -> tuple[Candidate, list[Candidate]]:
+        """Phase 2A — sample N candidates in parallel across `slots`.
+
+        Each candidate runs on a different slot with a different
+        temperature (and optional alternate fix-strategy prompt for
+        2B). Slot endpoints are independent — verified by
+        `_available_sampler_slots` — so the LLM daemons don't queue
+        the requests. Candidates are scored sequentially against the
+        SAME Chromium browser (single LiveBrowser instance) to avoid
+        race conditions on the test harness; only the LLM generation
+        is parallel. That's where the time savings live anyway
+        (generation: 30-120 s vs scoring: 5-10 s).
+        """
+        from backend import Candidate as _Candidate
+        # Pair each candidate with a slot + temperature. When n > len(slots),
+        # subsequent candidates wrap back to slot 1 to keep total count = n.
+        temps = [0.2, 0.6, 0.9]
+        while len(temps) < n:
+            temps.append(temps[-1])
+        pairs: list[tuple["Backend", str, float]] = []
+        for i in range(n):
+            bk, label = slots[i % len(slots)]
+            pairs.append((bk, label, temps[i]))
+
+        cancel = self._ensure_stop_event()
+
+        async def _run_one(idx: int, backend, label: str, temp: float):
+            t0 = asyncio.get_event_loop().time()
+            try:
+                result = await backend.stream_chat(
+                    self._messages,
+                    on_token=None,
+                    options={"num_ctx": self.num_ctx, "temperature": temp},
+                    keep_alive=self._keep_alive_for_backend(backend),
+                    stall_seconds=self.stall_seconds,
+                    overall_seconds=self.overall_seconds,
+                    max_retries=0,
+                    cancel_event=cancel,
+                )
+            except Exception as e:
+                self._trace({
+                    "kind": "best_of_n_candidate_error",
+                    "candidate": idx,
+                    "slot": label,
+                    "temperature": temp,
+                    "err": str(e)[:200],
+                })
+                return _Candidate(
+                    text="", score=-100.0,
+                    extra={"slot": label, "err": str(e)[:200]},
+                    tokens=0, duration_s=0.0, stalled=True,
+                )
+            duration = asyncio.get_event_loop().time() - t0
+            self._trace({
+                "kind": "best_of_n_candidate_generated",
+                "candidate": idx,
+                "slot": label,
+                "temperature": temp,
+                "tokens": result.tokens,
+                "duration_s": round(duration, 2),
+            })
+            return _Candidate(
+                text=result.text,
+                score=0.0,  # scored below
+                extra={"slot": label, "temperature": temp},
+                tokens=result.tokens,
+                duration_s=duration,
+                stalled=result.stalled,
+            )
+
+        # Phase: fan out generations in parallel.
+        gen_tasks = [
+            _run_one(i, bk, label, temp)
+            for i, (bk, label, temp) in enumerate(pairs)
+        ]
+        candidates_raw = await asyncio.gather(*gen_tasks, return_exceptions=False)
+
+        # Phase: score sequentially (single Chromium).
+        scored: list[_Candidate] = []
+        for i, c in enumerate(candidates_raw):
+            if not c.text:
+                scored.append(c)
+                continue
+            try:
+                score, extra = await scorer(c.text)
+            except Exception as e:
+                score = -1.0
+                extra = {"scorer_error": str(e)[:200]}
+            extra = {**(c.extra or {}), **extra}
+            scored.append(_Candidate(
+                text=c.text, score=score, extra=extra,
+                tokens=c.tokens, duration_s=c.duration_s, stalled=c.stalled,
+            ))
+            self._trace({
+                "kind": "best_of_n_candidate_scored",
+                "candidate": i,
+                "slot": (c.extra or {}).get("slot"),
+                "score": round(score, 2),
+                "report_ok": extra.get("report_ok"),
+            })
+
+        # Highest score wins; tie-break by shorter text (smaller diff).
+        scored.sort(key=lambda c: (c.score, -len(c.text)), reverse=True)
+        winner = scored[0] if scored else None
+        if winner is not None:
+            winning_slot = (winner.extra or {}).get("slot", "?")
+            # Phase 3 surprise: a non-slot-1 candidate winning is a
+            # signal worth surfacing — it means the alternate slots'
+            # extra capacity is actually pulling its weight, and
+            # justifies the multi-slot configuration.
+            self._trace({
+                "kind": "best_of_n_attempt",
+                "n": n,
+                "winner_slot": winning_slot,
+                "winner_score": round(winner.score, 2),
+                "winner_temperature": (winner.extra or {}).get("temperature"),
+                "candidate_summary": [
+                    {
+                        "slot": (c.extra or {}).get("slot"),
+                        "temperature": (c.extra or {}).get("temperature"),
+                        "score": round(c.score, 2),
+                        "tokens": c.tokens,
+                    }
+                    for c in scored
+                ],
+            })
+            if winning_slot != "slot1":
+                self._trace({
+                    "kind": "surprise",
+                    "category": "non_slot1_bon_winner",
+                    "winner_slot": winning_slot,
+                    "winner_score": round(winner.score, 2),
+                    "hint": (
+                        "An alternate slot won the fan-out — the "
+                        "additional slot capacity is generating better "
+                        "candidates than slot 1 alone. Worth comparing "
+                        "the winning temperature against slot 1's for "
+                        "schedule tuning."
+                    ),
+                })
+        return winner, scored
 
     # -- text → file: extract patches OR <html_file> -----------------------
 
@@ -5099,6 +6968,56 @@ class GameAgent:
                 # No baseline yet — we shouldn't be using patches. Reject.
                 return None, "patch reply but no baseline file yet"
             res = apply_patches(base, patches)
+            # Phase 0.5 — structured per-block outcome trace for the
+            # learner. The patch_retry_instruction prompt already shows
+            # the model nearest-anchor diagnostics; this records the
+            # same info in JSONL so cross-session pattern mining (e.g.
+            # "the same SEARCH for `let kbCursor` failed in 3 sessions
+            # — the model has a persistent blind spot here") works.
+            if not dry_run:
+                try:
+                    from patches import find_anchor as _find_anchor
+                    failed_idxs = {i for (i, _p, _r) in res.failed}
+                    blocks = []
+                    for idx, p in enumerate(patches):
+                        if idx in failed_idxs:
+                            reason = next(r for (i, _p, r) in res.failed if i == idx)
+                            search_head = (p.search or "").splitlines()[0] if p.search else ""
+                            entry = {
+                                "idx": idx,
+                                "applied": False,
+                                "kind": (
+                                    "prepend" if p.is_prepend
+                                    else ("delete" if p.is_delete else "edit")
+                                ),
+                                "search_head": search_head[:120],
+                                "reason": reason.replace("\n", " ").strip()[:240],
+                            }
+                            if (p.search or "").strip():
+                                anchor = _find_anchor(base, p.search)
+                                if anchor:
+                                    entry["nearest_anchor_preview"] = (
+                                        anchor.splitlines()[0][:160]
+                                    )
+                            blocks.append(entry)
+                        else:
+                            blocks.append({
+                                "idx": idx,
+                                "applied": True,
+                                "kind": (
+                                    "prepend" if p.is_prepend
+                                    else ("delete" if p.is_delete else "edit")
+                                ),
+                            })
+                    self._trace({
+                        "kind": "patch_outcome",
+                        "applied": res.applied,
+                        "failed": len(res.failed),
+                        "total": len(patches),
+                        "blocks": blocks,
+                    })
+                except Exception as e:
+                    self._trace({"kind": "patch_outcome_error", "err": str(e)})
             if res.applied == 0:
                 # Surface the FIRST per-patch reason in the materialize
                 # message so the user log shows WHY (the model already
@@ -5127,6 +7046,19 @@ class GameAgent:
 
         html = self._extract_html(reply)
         if html is not None:
+            normalized = _normalize_extracted_html(html)
+            if normalized:
+                html = normalized
+            broken = _baseline_structurally_broken(html)
+            if broken is not None:
+                return None, (
+                    f"<html_file> rejected: {broken}. "
+                    "Emit ONE complete document with a single <script> "
+                    "body (no concatenated drafts, no prose before "
+                    "<!DOCTYPE). If the on-disk file is already broken, "
+                    "a full rewrite is allowed when the baseline is "
+                    "degenerate — otherwise use <patch>."
+                )
             if _looks_like_placeholder_html_payload(html):
                 return None, (
                     "<html_file> rejected: extracted body is a tiny placeholder "
@@ -5286,17 +7218,22 @@ class GameAgent:
                 body = re.sub(r"^```[a-zA-Z]*\n?", "", body)
                 body = re.sub(r"\n?```$", "", body)
             body = body.strip()
-            if body:
-                return body
+            normalized = _normalize_extracted_html(body)
+            if normalized:
+                return normalized
         # 2/3. <html_file> opener but no proper close — pull the embedded doc.
         m = _UNCLOSED_HTML_FILE_RE.search(reply)
         if m:
-            return m.group(1).strip()
+            normalized = _normalize_extracted_html(m.group(1).strip())
+            if normalized:
+                return normalized
         # 4. Markdown fence whose contents look like HTML.
         for fm in _HTML_FENCE_RE.finditer(reply):
             inner = fm.group(1).strip()
             if "<html" in inner.lower() and "</html" in inner.lower():
-                return inner
+                normalized = _normalize_extracted_html(inner)
+                if normalized:
+                    return normalized
         # 5. Bare doctype...html fragment anywhere in the reply.
         m = _BARE_DOCTYPE_RE.search(reply)
         if m:
@@ -6435,11 +8372,29 @@ class GameAgent:
         stall: dict | None,
         iteration: int,
     ) -> tuple[bool, str]:
-        """Try one local fallback (MLX -> Ollama) for extension turns."""
+        """Try one local fallback (Anthropic -> Ollama) on extension stalls.
+
+        MLX is intentionally NOT included: a user who picked MLX wants the
+        local model, and silently switching to Ollama on a transient Metal
+        / Ctrl+D stall produces a confusing cross-backend error cascade
+        (DK trace 20260523_081532 — MLX stall at 0.0s after Ctrl+D fell
+        through to Ollama gemma4:e4b which the user had never asked for).
+        MLX failures now surface with the MLX-specific recovery hint and
+        stop there; the cloud→local safety net for Anthropic remains.
+        """
         info = getattr(self._backend, "info", None)
         backend_name = getattr(info, "name", None)
-        if backend_name != "mlx":
-            return False, "fallback skipped: current backend is not MLX"
+        if backend_name == "mlx":
+            return False, (
+                "MLX stall — staying on MLX (no silent fallback to Ollama). "
+                "Use the MLX recovery hint above, or switch backends explicitly "
+                "with /backend ollama + /load <N>."
+            )
+        if backend_name not in ("anthropic",):
+            return False, (
+                f"fallback skipped: current backend is {backend_name} "
+                "(only anthropic falls back to local Ollama)"
+            )
         if not stall or stall.get("kind") != "no_tokens_stall":
             return False, "fallback skipped: stall shape is not no-token"
 
@@ -6550,8 +8505,76 @@ class GameAgent:
         sprite when count is small, summary line when >5 to avoid log
         spam. Failure reasons are surfaced one-per-line either way.
         """
-        asset_specs, dropped_asset_names = parse_assets_block_with_meta(reply)
+        # Phase 0.10 — per-session asset cap. Defaults to module-level
+        # _MAX_ASSETS_PER_TURN; raised at session start when the goal
+        # text explicitly asks for multi-frame rosters
+        # (`prompts_v1._detect_multi_frame_intent`). The raise lets a
+        # user-requested N entities × M frames roster land in one turn
+        # instead of getting silently truncated.
+        session_cap = getattr(self, "_session_asset_cap", None)
+        asset_specs, dropped_asset_names = parse_assets_block_with_meta(
+            reply, max_assets=session_cap,
+        )
         sound_specs = parse_sounds_block(reply)
+        # Phase 0.13 — when the model emits a mid-session <assets> block
+        # BUT the user has queued feedback asking for a style rebrand,
+        # the model is about to generate sprites guaranteed to be
+        # discarded next turn. Defer the asset gen and queue a coaching
+        # note so the next user-turn re-emits the same <assets> with the
+        # user's style baked in. Prevents the "model emitted 14 wrong-
+        # style sprites while user feedback waited 25 minutes" failure
+        # mode from the 2026-05-22 trace. General behavior — fires only
+        # on the conjunction of mid-session model-driven asset gen AND
+        # style-rebrand intent in pending feedback.
+        if (
+            trigger == "mid_session"
+            and asset_specs
+            and self._pending_feedback
+        ):
+            joined_pending = "\n".join(self._pending_feedback)
+            try:
+                wants_rebrand = _feedback_requests_style_rebrand(joined_pending)
+            except Exception:
+                wants_rebrand = False
+            if wants_rebrand:
+                # Echo the asset names back so the model knows what to
+                # re-emit; include the user feedback preview so the
+                # coaching is grounded in their own words.
+                deferred_names = [str(s.get("name", "")) for s in asset_specs]
+                fb_preview = joined_pending[:240].replace("\n", " | ")
+                self._trace({
+                    "kind": "mid_session_assets_deferred_for_user_style",
+                    "deferred_names": deferred_names,
+                    "feedback_preview": fb_preview,
+                })
+                yield self._record(AgentEvent(
+                    "info",
+                    f"[yellow]mid-session <assets> deferred[/yellow] — "
+                    f"user has queued style-rebrand feedback. "
+                    f"{len(deferred_names)} asset spec(s) will be re-emitted "
+                    "next turn with the user's style applied.",
+                ))
+                # Coaching note carried into the next user-turn so the
+                # model knows the prior <assets> got dropped and must be
+                # re-emitted with the new style.
+                self._pending_coaching.append(
+                    "MID-SESSION ASSET DEFERRAL — your last reply emitted "
+                    f"<assets> for {len(deferred_names)} entries "
+                    f"({', '.join(deferred_names[:6])}"
+                    f"{'…' if len(deferred_names) > 6 else ''}) but the user "
+                    "had QUEUED feedback asking for a style rebrand. The "
+                    "asset gen was SKIPPED so you don't burn GPU on sprites "
+                    "guaranteed to be replaced. Re-emit the SAME asset "
+                    "names in THIS turn's <assets> block but with NEW "
+                    "prompts that bake in the style the user described. "
+                    "Do NOT use `from_image` for the rebrand (it would "
+                    "carry the old style forward)."
+                )
+                # Bail out — no gen, no path injection, no session-asset
+                # bookkeeping. The next iter's flush will inject user
+                # feedback + this coaching note + the regular MEDIA-CHANGE
+                # / STYLE-REBRAND directive.
+                return
         # Strict scoped-media lock: when the user said "regenerate only the
         # existing media", reject additive names early (before generation).
         scoped = self._scoped_constraints or {}
@@ -7076,6 +9099,29 @@ class GameAgent:
         if not continuation:
             self._goal = goal
             self._continuation_feedback = ""
+            # Phase 0.10 — when the goal explicitly asks for multi-frame
+            # rosters, raise this session's asset cap so the architect
+            # can fit base + variant frames in one turn. Default cap is
+            # 24 (`_MAX_ASSETS_PER_TURN`); the raised cap allows ~12
+            # entities × 3 frames = 36, with headroom up to 72 for
+            # larger rosters. Genre-free intent detection in
+            # `prompts_v1._detect_multi_frame_intent`.
+            try:
+                from prompts_v1 import _detect_multi_frame_intent as _mfi
+                mf_kws = _mfi(goal)
+                if mf_kws:
+                    self._session_asset_cap = 72
+                    self._trace({
+                        "kind": "multi_frame_intent_detected",
+                        "matched_keywords": mf_kws,
+                        "asset_cap_raised_to": 72,
+                    })
+                else:
+                    self._session_asset_cap = None
+            except Exception as e:
+                # Detector is advisory; never block session start on it.
+                self._session_asset_cap = None
+                self._trace({"kind": "multi_frame_intent_error", "err": str(e)})
         # Persist for `turn_contract` trace event; reset per call so a
         # fresh session after an extension does not inherit True.
         self._continuation = bool(continuation)
@@ -7091,6 +9137,56 @@ class GameAgent:
                         "error", f"can't extend: no current file ({e})"
                     ))
                     return
+            # Phase 1b: sanitize a corrupt on-disk baseline before extension.
+            # Trace 1 (chess 20260522_000304) ended a session with a file
+            # whose bytes started with diagnose preamble before <!DOCTYPE,
+            # making every patch attempt useless. If we can recover real
+            # HTML from the corrupt blob, rewrite the file in place; if not,
+            # leave the bytes alone but tell the model the baseline is broken
+            # and a clean <html_file> rewrite is permitted this turn.
+            self._continuation_baseline_corrupt = False
+            try:
+                broken_reason = _baseline_structurally_broken(self._current_file)
+            except Exception:
+                broken_reason = None
+            if broken_reason:
+                normalized = _normalize_extracted_html(self._current_file)
+                if normalized and not _baseline_structurally_broken(normalized):
+                    try:
+                        self.out_path.write_text(normalized, encoding="utf-8")
+                        self._current_file = normalized
+                        self._save_snapshot(normalized)
+                        yield self._record(AgentEvent(
+                            "info",
+                            "[continuation] on-disk baseline had leading garbage; "
+                            "sanitized to start at <!DOCTYPE> before resuming.",
+                        ))
+                        self._trace({
+                            "kind": "continuation_baseline_sanitized",
+                            "reason": broken_reason[:180],
+                            "size_after": len(normalized),
+                        })
+                    except Exception as e:
+                        self._trace({
+                            "kind": "continuation_baseline_sanitize_failed",
+                            "err": str(e)[:180],
+                        })
+                        self._continuation_baseline_corrupt = True
+                else:
+                    # Could not recover by normalization (truly broken/empty).
+                    # Arm the rewrite-exemption flag so the next turn can emit
+                    # a fresh <html_file> without hitting "baseline exists".
+                    self._continuation_baseline_corrupt = True
+                    self._allow_one_rewrite = True
+                    yield self._record(AgentEvent(
+                        "info",
+                        f"[continuation] on-disk baseline is unrecoverable "
+                        f"({broken_reason[:120]}); rewrite permitted this turn.",
+                    ))
+                    self._trace({
+                        "kind": "continuation_baseline_unrecoverable",
+                        "reason": broken_reason[:180],
+                    })
             # Reset transient state so the loop runs again fresh.
             self._user_force_done = False
             if self._stop_event is not None:
@@ -7304,6 +9400,15 @@ class GameAgent:
 
             # ---- PHASE A: planning ------------------------------------------
             yield self._record(AgentEvent("phase", "planning"))
+            # Phase 1B — when the diffuser pipeline lives on a GPU that
+            # is NOT shared with any LLM slot, pre-warm it during
+            # architect streaming so the cold-load (~30-60 s) is hidden
+            # under the plan stream. The 2026-05-22 chess traces showed
+            # ~37 s wasted between phase-A end and first asset gen.
+            # SKIPPED on single-GPU systems where pre-warm would
+            # compete with the architect for VRAM and slow it down.
+            # General behavior — observable detection, no genre logic.
+            self._maybe_prewarm_diffusers_during_phase_a()
             yield self._record(AgentEvent(
                 "activity", "streaming",
                 {"label": "planning reply", "role": "architect"},
@@ -7469,6 +9574,42 @@ class GameAgent:
                 self._dump_conversation()
                 yield self._record(AgentEvent("plan", plan_reply))
 
+            # Phase 0.4 — pre-warm the coder slot's KV cache while asset
+            # / sound generation runs on GPU 0. The architect just ran on
+            # slot 3 (GPU 3); slot 1 (GPU 1, coder) has never seen this
+            # conversation. Without this, iter 1's first request pays
+            # a full prefill before any token streams; the 2026-05-22
+            # chess trace had a 740 s prefill stall on iter 2 (cold
+            # cross-slot cache + a fix-mode prompt that embedded the
+            # full file). Fires-and-forgets — emits a `prefill_warm`
+            # trace event on completion. Coder slot may differ from
+            # architect slot only on the 4-GPU workstation; otherwise
+            # `get_backend('coder')` returns the same backend as the
+            # architect just used and warm_prefix is a no-op cache hit.
+            coder_backend = self.get_backend("coder")
+            architect_backend = self.get_backend("architect")
+            if (
+                coder_backend is not None
+                and architect_backend is not None
+                and coder_backend is not architect_backend
+            ):
+                snapshot_messages = list(self._messages)
+                async def _warm_coder_slot() -> None:
+                    res = await coder_backend.warm_prefix(
+                        snapshot_messages,
+                        options={"num_ctx": self.num_ctx},
+                        keep_alive=self._keep_alive_for_backend(coder_backend),
+                        timeout_s=120.0,
+                    )
+                    self._trace({
+                        "kind": "prefill_warm",
+                        "slot": "coder",
+                        "trigger": "phase_a_end",
+                        **res,
+                    })
+                # Background task — runs concurrent with asset/sound gen.
+                self._coder_warm_task = asyncio.create_task(_warm_coder_slot())
+
             # ---- Phase A → first-build: optional asset + sound generation --
             # Delegated to a shared helper so the same code path also
             # runs mid-session when the model emits a fresh <assets>/
@@ -7535,10 +9676,21 @@ class GameAgent:
                 pb_block = self._retrieve_playbook_block(
                     goal, code=seed_html, stage="plan",
                 )
+                opening_block, opening_hits = self._retrieve_opening_book_block(
+                    goal, stage="plan",
+                )
+                self._active_opening_book_recipes = opening_hits
                 pb_kwargs = {"playbook_block": pb_block} if pb_block else {}
                 build_msg = self._p.seed_build_instruction(
                     seed_html, str(self.seed_file), **pb_kwargs,
                 )
+                if opening_block:
+                    build_msg = (
+                        f"{opening_block}\n\n"
+                        "Use the opening-book recipes above as verified "
+                        "implementation and test guidance.\n\n"
+                        + build_msg
+                    )
                 asset_block = render_asset_paths_block(
                     self._session_assets, self.out_path,
                 )
@@ -7637,6 +9789,10 @@ class GameAgent:
                 pb_block = self._retrieve_playbook_block(
                     goal, stage="plan",
                 )
+                opening_block, opening_hits = self._retrieve_opening_book_block(
+                    goal, stage="plan",
+                )
+                self._active_opening_book_recipes = opening_hits
                 pb_kwargs = {"playbook_block": pb_block} if pb_block else {}
 
                 # Optional architect step — produce an English design
@@ -7730,6 +9886,13 @@ class GameAgent:
                     current_sound_dir=cur_sound_dir,
                     **pb_kwargs,
                 )
+                if opening_block:
+                    build_msg = (
+                        f"{opening_block}\n\n"
+                        "Use the opening-book recipes above as verified "
+                        "implementation and test guidance.\n\n"
+                        + build_msg
+                    )
                 if architect_note:
                     build_msg = (
                         "ARCHITECT NOTE (your own plan from the previous turn — "
@@ -7798,6 +9961,17 @@ class GameAgent:
             # new stream after the user asked to stop, even when probes
             # haven't passed. Whatever's in best.html (or out_path) ships.
             if self._user_force_done:
+                # Phase 1A — cancel any in-flight background critic
+                # before exiting. The critic generates coaching for an
+                # iter that's not going to run; finishing it wastes
+                # 20-300 s of user wait time.
+                if self._critic_task is not None and not self._critic_task.done():
+                    self._critic_task.cancel()
+                    try:
+                        await self._critic_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    self._critic_task = None
                 yield self._record(AgentEvent(
                     "info", "user requested ship - exiting iteration loop",
                 ))
@@ -7862,6 +10036,12 @@ class GameAgent:
             # because there's no test signal yet to score against.
             use_bon = self._fix_mode and self.best_of_n > 1
             fallback_attempted = False
+            # Phase 5d: one transparent retry of the SAME backend on a
+            # crashed cloud result before swapping to local Ollama.
+            # Trace 2 (chess 20260522_104235) showed transient Anthropic
+            # overloads usually clear in seconds; retrying once is much
+            # cheaper than hot-swapping the whole backend.
+            cloud_retry_attempted = False
             while True:
                 try:
                     if use_bon:
@@ -7921,10 +10101,42 @@ class GameAgent:
                             "mlx_stall", err_msg,
                             {**stall, "phase": "iterate", "iteration": iteration},
                         ))
-                    if (
-                        continuation
-                        and not fallback_attempted
-                    ):
+                    # Phase 5d: one transparent retry on a transient cloud
+                    # crash (Anthropic / OpenAI). Recognized by the same
+                    # error-text shape produced by the backend's catch
+                    # block: `cause: <ExceptionClass>: ...`.
+                    backend_name = getattr(
+                        getattr(self._backend, "info", None),
+                        "name",
+                        None,
+                    )
+                    is_cloud_crash = (
+                        backend_name in ("anthropic", "openai")
+                        and "cause:" in str(e).lower()
+                        and not cloud_retry_attempted
+                    )
+                    if is_cloud_crash:
+                        cloud_retry_attempted = True
+                        self._trace({
+                            "kind": "cloud_crash_retry",
+                            "iteration": iteration,
+                            "backend": backend_name,
+                            "err": str(e)[:200],
+                        })
+                        yield self._record(AgentEvent(
+                            "info",
+                            f"[dim]{backend_name} returned a transient "
+                            "error; retrying same backend once before "
+                            "falling back to local Ollama.[/dim]",
+                        ))
+                        continue
+                    # Phase 5c: drop the `continuation`-only guard. Trace 2
+                    # (chess 20260522_104235) had a clean iter 1 then iter
+                    # 2 hit a 0.48s Anthropic crash on the INITIAL run
+                    # (continuation=False) — fallback was never attempted
+                    # and the whole session was killed despite working
+                    # iter 1 code on disk. Allow fallback on any iter.
+                    if not fallback_attempted:
                         fallback_attempted = True
                         switched, note = await self._try_extension_backend_fallback(
                             stall=stall,
@@ -8628,6 +10840,7 @@ class GameAgent:
                             is_local_backend=(
                                 self._backend.info.name in {"mlx", "ollama"}
                             ),
+                            materialize_reject_reason=materialize_msg or "",
                         )
                     )
                     if reset_streak:
@@ -8923,6 +11136,7 @@ class GameAgent:
                     self.out_path, screenshot_path=shot_path,
                     screenshot_before_path=shot_before_path,
                     probes=self._probes or None,
+                    opening_book_recipes=getattr(self, "_active_opening_book_recipes", []),
                     # todo #2: pass criteria so the harness can flag
                     # coverage gaps as a soft_warning (forces the model
                     # to add probes that actually test what it promised).
@@ -8969,6 +11183,88 @@ class GameAgent:
             self._last_test_report = report
             self._last_tested_iter = iteration
             yield self._record(AgentEvent("test", report_text, report))
+
+            # Phase 3 — per-iter summary for the learner. Structured,
+            # one record per iter, with enough signal to spot patterns
+            # across sessions without re-grepping heartbeats. The
+            # learner.py reflector consumes these alongside the
+            # existing per-stream trace events.
+            try:
+                probes_list = report.get("probes") or []
+                probes_passed = sum(1 for p in probes_list if p.get("ok"))
+                probes_total = len(probes_list)
+                soft_warnings = report.get("soft_warnings") or []
+                page_errors = report.get("page_errors") or []
+                console_errors = report.get("console_errors") or []
+                fail_reasons: list[str] = []
+                if page_errors:
+                    fail_reasons.append(f"page_errors:{len(page_errors)}")
+                if console_errors:
+                    fail_reasons.append(f"console_errors:{len(console_errors)}")
+                if soft_warnings:
+                    fail_reasons.append(f"soft_warnings:{len(soft_warnings)}")
+                if report.get("frozen_canvas"):
+                    fail_reasons.append("frozen_canvas")
+                entity_check = report.get("entity_render_check") or {}
+                missing_entities = (entity_check.get("missing") or []) if isinstance(entity_check, dict) else []
+                summary_payload = {
+                    "kind": "iter_summary",
+                    "iteration": iteration,
+                    "ok": bool(report.get("ok")),
+                    "probes_passed": probes_passed,
+                    "probes_total": probes_total,
+                    "soft_warnings_count": len(soft_warnings),
+                    "page_errors_count": len(page_errors),
+                    "console_errors_count": len(console_errors),
+                    "frozen_canvas": bool(report.get("frozen_canvas")),
+                    "entity_missing_count": len(missing_entities),
+                    "fail_reason": ",".join(fail_reasons) or "ok",
+                }
+                self._trace(summary_payload)
+                # Phase 3 surprise rules — fire on signals worth a
+                # learner pass. Surprise events are a separate kind
+                # so the reflector can prioritise them.
+                if missing_entities and report.get("ok"):
+                    # Probes passed but entity-render check found gaps.
+                    # This is the Pac-Man-without-Pac-Man shape.
+                    self._trace({
+                        "kind": "surprise",
+                        "category": "state_vs_render_gap",
+                        "iteration": iteration,
+                        "missing_entities": [
+                            m.get("name") for m in missing_entities
+                            if isinstance(m, dict)
+                        ],
+                        "hint": (
+                            "Probes passed but the entity-render check "
+                            "flagged entities that exist in state but "
+                            "aren't drawn on the canvas. Strong signal "
+                            "to add a dynamic probe that samples canvas "
+                            "pixels at the player position."
+                        ),
+                    })
+                if not report.get("ok") and self._previous_report_ok is True:
+                    # Last iter was clean; this one regressed.
+                    self._trace({
+                        "kind": "surprise",
+                        "category": "regression_after_clean_iter",
+                        "iteration": iteration,
+                        "fail_reason": summary_payload["fail_reason"],
+                        "hint": (
+                            "Iter N-1 passed all probes; iter N "
+                            "regressed. The fix-mode prompt should "
+                            "favour reverting recent edits, not "
+                            "elaborating on them. Common cause: model "
+                            "rewrote working code while trying to add "
+                            "a feature."
+                        ),
+                    })
+            except Exception as e:
+                self._trace({
+                    "kind": "iter_summary_error",
+                    "iteration": iteration,
+                    "err": str(e)[:200],
+                })
 
             # Auto-arm step-mode on the FIRST failing iter. Rationale
             # (donkey-kong trace 20260513_122154): iter 2 burned 7 min
@@ -9144,28 +11440,97 @@ class GameAgent:
             # <model>` in chat.py. Disable entirely with VISION_JUDGE=0.
             if after_bytes is not None:
                 critic_backend = self.get_backend("critic")
+                # Fast-path: if the user has already requested ship (Ctrl+D),
+                # skip the post-iter visual critic. The critic is advisory
+                # — it generates coaching for a hypothetical NEXT iter that
+                # is never going to run. Without this skip, a force-done
+                # waits the full critic duration (~20–300 s in observed
+                # traces) before the iter-boundary check at the top of
+                # the loop can fire. General behavior, not a per-genre
+                # heuristic.
+                if critic_backend is not None and self._user_force_done:
+                    yield self._record(AgentEvent(
+                        "info",
+                        "[dim]skipping visual critic — user requested ship[/dim]",
+                    ))
+                    self._trace({
+                        "kind": "critic_skipped_for_force_done",
+                        "iteration": iteration,
+                    })
+                    critic_backend = None
                 if critic_backend is not None:
-                    try:
-                        critique = await self.run_visual_critic(
-                            after_bytes,
-                            before_bytes,
-                        )
-                        if critique:
-                            cleaned = critique.strip()
-                            if cleaned and "ok" not in cleaned.lower()[:30]:
-                                prefix = "VISUAL CRITIC (looked at the screenshot of your last iteration): "
-                                self._pending_coaching.append(prefix + cleaned)
-                                # Also log a visible event so the TUI logs show it!
-                                yield self._record(AgentEvent(
-                                    "info",
-                                    f"[magenta]visual critic[/magenta] (iter {iteration}): {cleaned}"
-                                ))
-                    except Exception as exc:
+                    critic_bk = self.get_backend("critic")
+                    if critic_bk is getattr(self, "_backend3", None):
+                        vc_role = getattr(self, "_model3_role", None) or "critic"
+                    elif critic_bk is getattr(self, "_backend2", None):
+                        vc_role = getattr(self, "_model2_role", None) or "critic"
+                    else:
+                        vc_role = "critic"
+                    # Phase 1A — when the critic is on a separate slot
+                    # from the coder, spawn it as a background task so its
+                    # compute overlaps with iter N+1's coder stream. The
+                    # coaching lands in `_pending_coaching` whenever the
+                    # task completes (one-turn lag at worst) and is
+                    # drained at the next user-turn boundary. On
+                    # single-slot configs (critic backend == coder
+                    # backend) we await inline — concurrent runs would
+                    # just queue at the daemon, no benefit.
+                    if self._critic_runs_on_independent_slot(critic_backend):
+                        # If a previous critic task is still in flight,
+                        # let it finish first (or drain non-blocking).
+                        # We don't pile up tasks — one critic at a time.
+                        await self._drain_pending_critic_task(wait=False)
+                        yield self._record(AgentEvent(
+                            "info",
+                            f"[dim]visual critic spawned on slot ({vc_role}) — "
+                            f"runs in parallel with iter {iteration + 1}[/dim]",
+                        ))
                         self._trace({
-                            "kind": "visual_critic_error",
+                            "kind": "visual_critic_spawned_concurrent",
                             "iteration": iteration,
-                            "error": str(exc),
+                            "vc_role": vc_role,
                         })
+                        try:
+                            self._critic_task = asyncio.create_task(
+                                self._spawn_visual_critic(
+                                    after_bytes, before_bytes, iteration, vc_role,
+                                )
+                            )
+                        except Exception as exc:
+                            self._trace({
+                                "kind": "visual_critic_spawn_error",
+                                "iteration": iteration,
+                                "error": str(exc)[:240],
+                            })
+                    else:
+                        # Blocking inline path — preserved for single-slot
+                        # / single-GPU configurations.
+                        try:
+                            yield self._record(AgentEvent(
+                                "activity",
+                                "streaming",
+                                {"label": "visual critic", "role": vc_role},
+                            ))
+                            critique = await self.run_visual_critic(
+                                after_bytes,
+                                before_bytes,
+                            )
+                            yield self._record(self._activity_idle_event(vc_role))
+                            if critique:
+                                cleaned = critique.strip()
+                                if cleaned and "ok" not in cleaned.lower()[:30]:
+                                    prefix = "VISUAL CRITIC (looked at the screenshot of your last iteration): "
+                                    self._pending_coaching.append(prefix + cleaned)
+                                    yield self._record(AgentEvent(
+                                        "info",
+                                        f"[magenta]visual critic[/magenta] (iter {iteration}): {cleaned}"
+                                    ))
+                        except Exception as exc:
+                            self._trace({
+                                "kind": "visual_critic_error",
+                                "iteration": iteration,
+                                "error": str(exc),
+                            })
                 else:
                     try:
                         await self._run_vision_judge(after_bytes, iteration)
@@ -9175,6 +11540,29 @@ class GameAgent:
                             "iteration": iteration,
                             "error": str(exc),
                         })
+            try:
+                async for _ob_ev in self._run_opening_book_sidecars(report, iteration):
+                    yield _ob_ev
+            except Exception as exc:
+                self._trace({
+                    "kind": "opening_book_sidecars_failed",
+                    "iteration": iteration,
+                    "error": str(exc),
+                })
+            # Phase 1.5 — autonomous self-feedback. Only fires on clean
+            # iters (probes_ok) and respects the /feedback toggle + the
+            # budget governor + the Ctrl+D fast-path. Findings flow into
+            # _pending_feedback so Phase 0.1's partitioner handles them
+            # like real user feedback.
+            try:
+                async for _af_ev in self._run_autonomous_playtest(iteration, report):
+                    yield _af_ev
+            except Exception as exc:
+                self._trace({
+                    "kind": "autonomous_playtest_error",
+                    "iteration": iteration,
+                    "error": str(exc)[:240],
+                })
             if (
                 self._use_double_screenshot
                 and before_path is not None
@@ -9355,21 +11743,22 @@ class GameAgent:
                     self._last_diagnose = None
 
             # ---- USER force-done shortcut ------------------------------
+            # Ctrl+D wins unconditionally: ship the current passing build.
+            # Earlier behavior tried to apply autonomous/typed feedback that
+            # had landed concurrently with the ship request, which (a)
+            # contradicted the user's explicit intent and (b) re-entered the
+            # iter loop while _stop_event was still set from request_done(),
+            # causing the next stream to bail at 0.0s with no tokens.
             if self._user_force_done and report["ok"]:
-                if self.has_pending_user_input():
+                dropped = len(self._pending_feedback) + (1 if self._pending_answer else 0)
+                if dropped:
+                    self._pending_feedback.clear()
+                    self._pending_answer = None
                     yield self._record(AgentEvent(
                         "info",
-                        "Ship requested but new user feedback arrived - applying it before shipping.",
+                        f"[dim]shipping per Ctrl+D — dropping {dropped} queued "
+                        f"feedback item(s) (re-send after ship if still wanted)[/dim]",
                     ))
-                    self._user_force_done = False
-                    self._messages.append({
-                        "role": "user",
-                        "content": self._flush_user_injections(
-                            "The user wanted to ship but then sent the feedback above. "
-                            "Address that feedback. Send a <patch>."
-                        ),
-                    })
-                    continue
                 yield self._record(AgentEvent("done", "User confirmed - shipping current build."))
                 self._record_session_outcome(ok=True)
                 return
@@ -9661,6 +12050,29 @@ class GameAgent:
                 "iter cap reached with failing build — asking the "
                 "model to ship-or-ask before exiting silently.",
             ))
+            # Phase 3: tell the model NOT to ship if the on-disk file is
+            # structurally broken. Trace 1 (chess 20260522_000304) ended
+            # with a confident <done/> + <notes> over a file that wouldn't
+            # even parse. The post-done verification below also catches
+            # this, but warning the model up front avoids the wasted turn.
+            broken_now = None
+            try:
+                broken_now = _baseline_structurally_broken(
+                    self._current_file or ""
+                )
+            except Exception:
+                broken_now = None
+            ship_warning = ""
+            if broken_now:
+                ship_warning = (
+                    "\nWARNING: micro-probes report the on-disk file is "
+                    f"structurally broken ({broken_now[:160]}). "
+                    "Do NOT use <done/> over a broken file — the harness "
+                    "will record the session as failed. Use <question> "
+                    "to ask the user to narrow scope, OR ship anyway "
+                    "with explicit acknowledgement in <notes> that the "
+                    "file does not run.\n"
+                )
             exit_prompt = (
                 "EXIT DECISION TURN — the iteration cap has been "
                 "reached and the last test was not clean. THIS TURN "
@@ -9678,6 +12090,7 @@ class GameAgent:
                 "genuinely don't know how to proceed and a one-line "
                 "answer would unblock you. Be concrete; name the "
                 "specific decision.\n\n"
+                f"{ship_warning}"
                 "Do NOT emit <patch>, <html_file>, <plan>, "
                 "<diagnose>, or any other tag this turn. The "
                 "session ends after this reply."
@@ -9717,6 +12130,30 @@ class GameAgent:
                             f"{notes[:400]}",
                         ))
                     self._trace({"kind": "exit_decision_done"})
+                    # Phase 3: post-done structural verification. If the
+                    # on-disk file fails micro-probes, override the model's
+                    # ship-it claim with a hard error event AND mark the
+                    # session as failed regardless of <notes>. Trace 1
+                    # ended with confident notes over an unplayable file.
+                    try:
+                        on_disk = ""
+                        if self.out_path.exists():
+                            on_disk = self.out_path.read_text(encoding="utf-8")
+                        broken_at_done = _baseline_structurally_broken(on_disk)
+                    except Exception as e:
+                        broken_at_done = f"could not read out_path: {e}"
+                    if broken_at_done:
+                        self._exit_done_over_broken_file = True
+                        self._trace({
+                            "kind": "exit_decision_done_over_broken_file",
+                            "reason": (broken_at_done or "")[:200],
+                        })
+                        yield self._record(AgentEvent(
+                            "error",
+                            "shipped broken — file on disk fails "
+                            f"structural checks ({broken_at_done[:160]}). "
+                            "Session will be recorded as failed.",
+                        ))
                 # Handle <question>: surface to user, wait for one
                 # answer, then exit. The session ends regardless of
                 # what the user types — this is a "what blocker?"
@@ -9752,7 +12189,11 @@ class GameAgent:
         async for ev in self._final_iter_test_if_needed():
             yield ev
         # Outcome: ok if best.html exists (we passed at least once).
-        self._record_session_outcome(ok=self.best_path.exists())
+        # Phase 3: a <done/> over a structurally broken file flips this
+        # to ok=False even when an earlier iter happened to ship a best.
+        # The model's notes claimed success; the file says otherwise.
+        ok_outcome = self.best_path.exists() and not self._exit_done_over_broken_file
+        self._record_session_outcome(ok=ok_outcome)
         yield self._record(AgentEvent("done", "Iteration cap reached."))
 
     async def run_with_restarts(
@@ -9931,6 +12372,7 @@ class GameAgent:
         self._last_screenshot_before = None
         self._last_screenshot_after = None
         self._active_bullet_ids = []
+        self._active_opening_book_recipes = []
         self._restart_attempt_idx = 0
         self._restart_attempt_seed = None
         self._force_first_build_prefill = False
@@ -10118,6 +12560,30 @@ class GameAgent:
                 broken_size_bytes=len(self._current_file),
             )
 
+        # Phase 2: structural-broken recovery for non-truncation shapes —
+        # concatenated drafts (duplicate top-level declarations), wrapper
+        # preamble before <!DOCTYPE, etc. _is_degenerate_baseline opens
+        # the rewrite gate in `_materialize`; route the same recovery
+        # prompt so the model knows WHY patches will fail to anchor.
+        # Trace 1 (chess 20260522_000304) sat in this state for 4 iters.
+        try:
+            structural_reason = _baseline_structurally_broken(
+                self._current_file
+            )
+        except Exception:
+            structural_reason = None
+        if structural_reason and _is_degenerate_baseline(self._current_file):
+            self._trace({
+                "kind": "structural_recovery",
+                "reason": structural_reason[:200],
+                "broken_file_bytes": len(self._current_file),
+            })
+            return self._p.truncation_recovery_instruction(
+                report_text=report_text,
+                truncation_reason=structural_reason,
+                broken_size_bytes=len(self._current_file),
+            )
+
         # Failed: combined diagnose+fix prompt with memory hints inline.
         sig = signature_for_report(report)
         hints_list = self._memory.retrieve_mistakes(sig, k=3) if sig else []
@@ -10137,6 +12603,10 @@ class GameAgent:
         pb_block = self._retrieve_playbook_block(
             self._goal, code=self._current_file, stage="code",
         )
+        opening_block, opening_hits = self._retrieve_opening_book_block(
+            self._goal, stage="code",
+        )
+        self._active_opening_book_recipes = opening_hits
         fix_kwargs: dict = {}
         if pb_block:
             fix_kwargs["playbook_block"] = pb_block
@@ -10169,6 +12639,13 @@ class GameAgent:
         fix = self._p.fix_instruction(
             report_text, self._current_file, hints, **fix_kwargs,
         )
+        if opening_block:
+            fix = (
+                f"{opening_block}\n\n"
+                "Use only opening-book recipes that directly match this failure; "
+                "do not add unrelated scope.\n\n"
+                + fix
+            )
         repeat_fastpath = self._repeat_error_fastpath_block(report)
         if partial_failed:
             fix += "\n\n" + self._partial_patch_recovery_block(partial_failed)
@@ -10270,6 +12747,7 @@ class GameAgent:
                 screenshot_path=None,
                 screenshot_before_path=None,
                 probes=self._probes or None,
+                opening_book_recipes=getattr(self, "_active_opening_book_recipes", []),
                 criteria=self._criteria or None,
             )
         except Exception as e:

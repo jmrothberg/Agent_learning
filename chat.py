@@ -102,7 +102,15 @@ from textual.widgets import Footer, Header, Input, OptionList, RichLog, Static
 from textual.widgets._option_list import Option
 
 import backend as backend_mod
-from agent import AgentEvent, GameAgent
+from agent import (
+    AgentEvent,
+    DEFAULT_NUM_CTX,
+    MAX_NUM_CTX,
+    MIN_NUM_CTX,
+    GameAgent,
+    default_num_ctx,
+    parse_num_ctx_arg,
+)
 from tools import LiveBrowser
 
 # xterm SGR uses 2 for right press; some stacks report 3.
@@ -883,8 +891,14 @@ class CodingBoxApp(App):
     # can skip full driver teardown, leaving the tty with echo disabled. Use
     # ctrl+q instead (common TUI convention).
     BINDINGS = [
-        # Priority keeps focused input widgets from swallowing Ctrl+D
-        # before the app can turn it into a ship/stop request.
+        # priority=True is REQUIRED — Textual's Input widget has its own
+        # `Binding('delete,ctrl+d', 'delete_right')` that captures Ctrl+D
+        # whenever focus is on the input box (which is ~all of the time
+        # in a chat-style TUI). Without `priority=True`, Ctrl+D silently
+        # deletes a character from the input instead of shipping the
+        # build. User-visible symptom before this fix: "Ctrl+D never
+        # works." Ctrl+Q escapes the same way (Input has no Ctrl+Q
+        # binding) so we keep that one normal.
         Binding("ctrl+d", "ship_it", "Ship game / done", priority=True),
         Binding("ctrl+q", "quit_app", "Quit"),
         # Ctrl+L: re-print where the FULL log files live. Useful when you
@@ -950,6 +964,12 @@ class CodingBoxApp(App):
         self._model3_last_token_at: float = 0.0
         self._model3_is_streaming: bool = False
         self._assets_summary: str = ""        # sticky summary of last batch
+        # Phase 1C — in-flight totals so the status panel can render
+        # live "Sprites: 4/12 · 2.9s avg · ~24s ETA" rows. Set when
+        # the agent emits `activity:generating_assets`, cleared when
+        # the `assets` completion event fires.
+        self._assets_in_flight_total: int = 0
+        self._sounds_in_flight_total: int = 0
         # Sticky sounds summary — same pattern as assets. Populated from
         # the `sounds` event payload; cleared on session reset. Looping
         # entries surface a `(loop)` suffix in the rendered list.
@@ -1016,9 +1036,12 @@ class CodingBoxApp(App):
         self._session_backend_info3: backend_mod.BackendInfo | None = None
         self._session_model3: str | None = None
         self._session_role3: str | None = None
+        self._ollama_placement_status: str = ""
         # /iters lets the user change the max-iters cap before starting a
         # session or extending. Default matches GameAgent's default.
         self._max_iters: int = 6
+        # /ctx sets Ollama num_ctx (KV reservation). Sticky across /new.
+        self._num_ctx: int = default_num_ctx()
         # /seed stages an existing HTML file as the baseline for the next
         # /new session. Cleared once consumed.
         self._next_seed: Path | None = None
@@ -1063,6 +1086,15 @@ class CodingBoxApp(App):
         # Advanced agent behavior bundles (toggled dynamically via slash commands)
         self._use_prefill: bool = True
         self._use_vlm_critique: bool = False
+        # Phase 1.5 — autonomous self-feedback loop. After each clean
+        # iter, runs a short scripted playtest, captures multi-window
+        # screenshots, evaluates genre-free behavior recipes, and queues
+        # user-style feedback into _pending_feedback. Default ON; one
+        # slash command (/feedback off) disables if it ever causes
+        # regressions. Existing test reports + visual critic + patch
+        # diagnostics are NOT gated by this — only the extra autonomous
+        # direction is.
+        self._use_autonomous_feedback: bool = True
         # Auto-staff flags (2026-05-21): True when the matching feature
         # was flipped by auto-enable (sidecar role or local-VLM detect)
         # rather than by an explicit toggle. Surfaced in the status panel
@@ -1071,6 +1103,10 @@ class CodingBoxApp(App):
         self._use_double_screenshot: bool = False
         self._use_architect_split: bool = False
         self._architect_split_auto: bool = False
+        # Bundle toggle: /allroles flips architect-split + vlm-critique together
+        # so a single loaded LLM covers coder + critic + architect roles
+        # without needing /model2 / /model3 staging or extra GPUs.
+        self._all_roles_enabled: bool = False
 
     # ----------------------------- layout ---------------------------------
 
@@ -1325,7 +1361,13 @@ class CodingBoxApp(App):
              session reset clears it.
         """
         if self._status_manual_body is not None:
-            body = self._status_manual_body
+            # Always prepend live activity + mode so the user can still
+            # see what the agent is doing while /help is on screen. The
+            # pre-fix behavior replaced the entire panel with help text
+            # — a session in flight became invisible and the user
+            # couldn't tell whether to wait, ship, or quit.
+            live_prefix = self._render_activity_line() + self._render_mode_row()
+            body = live_prefix + "\n" + self._status_manual_body
             if extra is not None:
                 self._last_test_block = extra
             self._status_plain = self._MARKUP_RE.sub("", body)
@@ -1368,6 +1410,10 @@ class CodingBoxApp(App):
                 agent.trace_status({
                     "activity": self._activity_label or "idle",
                     "is_streaming": bool(self._is_streaming),
+                    "model2_streaming": bool(self._model2_is_streaming),
+                    "model3_streaming": bool(self._model3_is_streaming),
+                    "model2_tokens": self._model2_stream_tokens,
+                    "model3_tokens": self._model3_stream_tokens,
                     "phase": self._phase_label,
                     "iteration": self._iteration_label,
                     "streak_clean": int(self._streak_clean or 0),
@@ -1433,89 +1479,61 @@ class CodingBoxApp(App):
             f"last {since_last:.1f}s ago {tag}"
         )
 
-    def _render_model_slot_activity(
+    def _slot_stream_state(
         self,
-        slot: int,
-        role: str,
-        *,
-        color: str,
-    ) -> str:
-        """One status line for Model 2 or Model 3 with live stream stats."""
-        tag = getattr(self.agent, f"_model{slot}_activity", None) or "idle"
-        label = tag if tag != "idle" else role
-        if slot == 2 and self._model2_is_streaming:
-            body = self._format_stream_activity_detail(
-                label=label,
-                tokens=self._model2_stream_tokens,
-                stream_started_at=self._model2_stream_started_at,
-                last_token_at=self._model2_last_token_at,
-                is_streaming=True,
-            )
-        elif slot == 3 and self._model3_is_streaming:
-            body = self._format_stream_activity_detail(
-                label=label,
-                tokens=self._model3_stream_tokens,
-                stream_started_at=self._model3_stream_started_at,
-                last_token_at=self._model3_last_token_at,
-                is_streaming=True,
-            )
-        elif tag in ("crashed",) or tag.startswith("failed"):
-            body = f"[red]{_esc(tag)}[/red]"
-        else:
-            body = f"[dim]{_esc(tag)}[/dim]"
-        model_tag = ""
-        if slot == 2 and self._session_model2:
-            model_tag = f" · {_esc(self._session_model2)}"
-        elif slot == 3 and self._session_model3:
-            model_tag = f" · {_esc(self._session_model3)}"
-        return (
-            f"[bold {color}]Model {slot} ({role})[/bold {color}]{model_tag}: {body}\n"
-        )
-
-    def _primary_activity_stream(self) -> tuple[str, str, int, float, float, bool]:
-        """Role, label, tokens, started_at, last_token_at, is_streaming for top line."""
-        role = self._activity_role or "coder"
-        label = self._activity_label or "idle"
-        if self._model3_is_streaming:
-            role = self._session_role3 or "architect"
-            tag = (
-                getattr(self.agent, "_model3_activity", None) if self.agent else None
-            ) or label
+        slot: int | None,
+    ) -> tuple[bool, int, float, float, str]:
+        """(is_streaming, tokens, started_at, last_token_at, idle_label) per slot."""
+        if slot == 2:
             return (
-                role, tag,
-                self._model3_stream_tokens,
-                self._model3_stream_started_at,
-                self._model3_last_token_at,
-                True,
-            )
-        if self._model2_is_streaming:
-            role = self._session_role2 or "critic"
-            tag = (
-                getattr(self.agent, "_model2_activity", None) if self.agent else None
-            ) or label
-            return (
-                role, tag,
+                self._model2_is_streaming,
                 self._model2_stream_tokens,
                 self._model2_stream_started_at,
                 self._model2_last_token_at,
-                True,
+                (
+                    getattr(self.agent, "_model2_activity", None)
+                    if self.agent else None
+                ) or "idle",
             )
-        if self._is_streaming:
+        if slot == 3:
             return (
-                "coder", label,
-                self._stream_tokens,
-                self._stream_started_at,
-                self._last_token_at,
-                True,
+                self._model3_is_streaming,
+                self._model3_stream_tokens,
+                self._model3_stream_started_at,
+                self._model3_last_token_at,
+                (
+                    getattr(self.agent, "_model3_activity", None)
+                    if self.agent else None
+                ) or "idle",
             )
-        return (role, label, 0, 0.0, 0.0, False)
+        return (
+            self._is_streaming,
+            self._stream_tokens,
+            self._stream_started_at,
+            self._last_token_at,
+            self._activity_label or "idle",
+        )
 
-    def _render_activity_line(self) -> str:
-        """Top line: the heartbeat. Always shows which role (coder/critic/architect)."""
-        now = time.monotonic()
-        role, label, tokens, started, last_tok, streaming = self._primary_activity_stream()
+    def _render_role_activity_line(
+        self,
+        role: str,
+        *,
+        slot: int | None = None,
+        color: str = "cyan",
+        model_name: str | None = None,
+    ) -> str:
+        """One Activity row per role — same tok/tok/s display as the coder line."""
+        streaming, tokens, started, last_tok, idle_tag = self._slot_stream_state(slot)
         hdr = self._activity_header(role)
         if streaming:
+            if slot is None:
+                label = self._activity_label or f"streaming {role}"
+            elif (self._activity_role or "") == role:
+                label = self._activity_label or idle_tag
+            else:
+                label = idle_tag if idle_tag not in ("idle", role) else f"streaming {role}"
+            if label in ("idle", role):
+                label = f"streaming {role}"
             body = self._format_stream_activity_detail(
                 label=label,
                 tokens=tokens,
@@ -1523,22 +1541,77 @@ class CodingBoxApp(App):
                 last_token_at=last_tok,
                 is_streaming=True,
             )
-            return f"{hdr} {body}\n"
-        if self._activity_label and self._activity_label != "idle":
-            age = now - self._activity_started_at if self._activity_started_at else 0.0
-            return f"{hdr} {_esc(self._activity_label)} [dim]({age:.0f}s)[/dim]\n"
-        ret = f"{hdr} [dim]idle[/dim]\n"
+        elif idle_tag and idle_tag != "idle":
+            age = (
+                time.monotonic() - self._activity_started_at
+                if self._activity_started_at and slot is None
+                else 0.0
+            )
+            if idle_tag in ("crashed",) or str(idle_tag).startswith("failed"):
+                body = f"[red]{_esc(idle_tag)}[/red]"
+            else:
+                suffix = f" [dim]({age:.0f}s)[/dim]" if age > 0 else ""
+                body = f"{_esc(idle_tag)}{suffix}"
+        else:
+            body = "[dim]idle[/dim]"
+        model_tag = f" · {_esc(model_name)}" if model_name else ""
+        return f"{hdr}{model_tag} {body}\n"
 
+    def _render_activity_line(self) -> str:
+        """Per-role activity rows: coder + model2 + model3 when configured."""
+        lines: list[str] = []
+        coder_model = None
         if self.agent is not None:
-            if self._session_backend2:
-                ret += self._render_model_slot_activity(
-                    2, self._session_role2 or "critic", color="green",
+            coder_model = getattr(self.agent, "model", None)
+        elif self._session_model:
+            coder_model = self._session_model
+        lines.append(self._render_role_activity_line(
+            "coder", slot=None, color="cyan", model_name=coder_model,
+        ))
+        if self._session_backend2 or (
+            self.agent is not None and getattr(self.agent, "_backend2", None)
+        ):
+            lines.append(self._render_role_activity_line(
+                self._session_role2 or "critic",
+                slot=2,
+                color="green",
+                model_name=self._session_model2,
+            ))
+        if self._session_backend3 or (
+            self.agent is not None and getattr(self.agent, "_backend3", None)
+        ):
+            lines.append(self._render_role_activity_line(
+                self._session_role3 or "architect",
+                slot=3,
+                color="magenta",
+                model_name=self._session_model3,
+            ))
+        # Phase 0.12 — queued-feedback banner right under the activity
+        # rows so users can see "my feedback IS pending" during a long
+        # stream. The 2026-05-22 trace had 25 minutes of silent waiting
+        # while a stream finished and the queued feedback was invisible
+        # at the top of the panel — the existing `Queued (N):` section
+        # only appears further down. This banner is high-visibility
+        # (bold yellow) and shows when ANY input is queued for the next
+        # user-turn boundary.
+        if self.agent is not None:
+            pending_count = len(getattr(self.agent, "_pending_feedback", []) or [])
+            pending_ans = getattr(self.agent, "_pending_answer", None)
+            if pending_ans or pending_count:
+                bits: list[str] = []
+                if pending_ans:
+                    bits.append("1 answer")
+                if pending_count:
+                    bits.append(
+                        f"{pending_count} feedback item{'s' if pending_count != 1 else ''}"
+                    )
+                summary = " + ".join(bits)
+                lines.append(
+                    f"[bold yellow]⚠ Queued for next user-turn:[/bold yellow] "
+                    f"{summary} [dim](inject at iter boundary — current stream "
+                    f"finishes first)[/dim]\n"
                 )
-            if self._session_backend3:
-                ret += self._render_model_slot_activity(
-                    3, self._session_role3 or "architect", color="magenta",
-                )
-        return ret
+        return "".join(lines)
 
     def _render_mode_row(self) -> str:
         """Render the colored Mode row in the right-hand status panel.
@@ -1609,6 +1682,21 @@ class CodingBoxApp(App):
             return bool(getattr(self.agent, "_step_mode", False))
         return self._run_profile == "local_manual"
 
+    def _wants_three_ollama_slots(self) -> bool:
+        """True when the staged session needs coder + two Ollama sidecars."""
+        primary_backend = (self._next_backend or "auto").lower()
+        if primary_backend in ("mlx", "openai", "anthropic", "claude"):
+            return False
+        for backend_name, model_name in (
+            (self._next_backend2, self._next_model2),
+            (self._next_backend3, self._next_model3),
+        ):
+            if not model_name:
+                return False
+            if (backend_name or "ollama").lower() != "ollama":
+                return False
+        return True
+
     def _render_iteration_block(self) -> str:
         """Phase / iteration / streak / probes / ctx / model / goal / queued."""
         out = (
@@ -1648,6 +1736,8 @@ class CodingBoxApp(App):
         if self._session_model3:
             out += f"[b]Model 3:[/b] {self._session_model3}\n"
         out += f"[b]Run profile:[/b] {self._format_run_profile()}\n"
+        if self._ollama_placement_status:
+            out += f"[b]Ollama placement:[/b] {_esc(self._ollama_placement_status)}\n"
         if self._run_profile == "local_plus_review" and self._profile_review_model:
             apply_hint = "auto-apply in AUTO mode" if self._profile_review_auto_apply else "manual apply"
             out += (
@@ -1824,7 +1914,11 @@ class CodingBoxApp(App):
             body = "[dim]idle — type a new goal or /help[/dim]"
         elif self._session_done:
             body = "[dim]session ended — type feedback to extend, or /new[/dim]"
-        elif self._is_streaming:
+        elif (
+            self._is_streaming
+            or self._model2_is_streaming
+            or self._model3_is_streaming
+        ):
             body = "[bold green]RUNNING:[/bold green] streaming — feedback queues for next turn"
         else:
             body = "[bold green]RUNNING:[/bold green] feedback queues for next turn"
@@ -1917,13 +2011,21 @@ class CodingBoxApp(App):
                     ))
             return out
 
-        def _ollama_ps_entry(tag: str | None) -> dict | None:
+        def _ollama_ps_entry(
+            tag: str | None,
+            endpoint: str | None = None,
+        ) -> dict | None:
             if not tag:
                 return None
             want = tag.strip()
+            ep = (endpoint or "").strip().rstrip("/")
             for m in ollama_ps:
-                if (m.get("name") or "").strip() == want:
-                    return m
+                if (m.get("name") or "").strip() != want:
+                    continue
+                row_ep = (m.get("endpoint") or "").strip().rstrip("/")
+                if ep and row_ep and row_ep != ep:
+                    continue
+                return m
             return None
 
         def _slot_gpu_line(
@@ -1933,12 +2035,28 @@ class CodingBoxApp(App):
             if bi is None and not model:
                 return "not loaded"
             if bi and bi.name == "ollama":
-                entry = _ollama_ps_entry(model)
+                endpoint_gpu = gs.ollama_endpoint_gpu_index(bi.endpoint or "")
+                entry = _ollama_ps_entry(
+                    model,
+                    bi.endpoint if bi else None,
+                )
                 vram_gib = entry.get("vram_gib") if entry else None
+                vram_bytes = entry.get("size_vram_bytes") if entry else None
                 if entry is None:
+                    if endpoint_gpu is not None:
+                        placed = gs.format_model_gpu_placement([endpoint_gpu], snap)
+                        return f"{placed} [dim](pinned, not loaded)[/dim]"
                     return gs.format_model_gpu_placement([], snap, not_loaded=True)
+                slot_gpus = (
+                    [endpoint_gpu] if endpoint_gpu is not None
+                    else gs.gpu_indices_for_ollama_loaded_model(
+                        snap,
+                        vram_bytes=vram_bytes,
+                        vram_gib=vram_gib,
+                    )
+                )
                 return gs.format_model_gpu_placement(
-                    ollama_gpus, snap, vram_gib=vram_gib,
+                    slot_gpus, snap, vram_gib=vram_gib,
                 )
             if bi and bi.name == "mlx":
                 gpus = gs.pids_on_gpus(snap, pid=my_pid) or gs.large_python_gpu_indices(
@@ -1964,16 +2082,29 @@ class CodingBoxApp(App):
             return (
                 bi.name == b1.name
                 and (model or "").strip() == (m1 or "").strip()
+                and (
+                    bi.name != "ollama"
+                    or (bi.endpoint or "").rstrip("/") == (b1.endpoint or "").rstrip("/")
+                )
             )
+
+        def _slot_is_streaming(slot_i: int) -> bool:
+            if slot_i == 1:
+                return self._is_streaming
+            if slot_i == 2:
+                return self._model2_is_streaming
+            if slot_i == 3:
+                return self._model3_is_streaming
+            return False
 
         slots = _collect_slots()
         ollama_ps = gs.ollama_loaded_models()
-        ollama_gpus = gs.infer_ollama_gpu_indices(snap)
 
         if slots:
             rows.append("  [b]LLM[/b]")
             m1_model, _, m1_bi = slots[0]
             m1_gpu = _slot_gpu_line(m1_model, m1_bi)
+            live_gpus: list[str] = []
             for slot_i, (model, role, bi) in enumerate(slots, start=1):
                 if bi is None and not model:
                     continue
@@ -1983,9 +2114,21 @@ class CodingBoxApp(App):
                 suffix = ""
                 if _same_physical_as_slot1(slot_i, model, bi, m1_model, m1_bi):
                     suffix = " · [dim]same VRAM[/dim]"
+                live = ""
+                if _slot_is_streaming(slot_i):
+                    live = " · [green]live[/green]"
+                    m = re.search(r"GPU\s*(\d+)", gpu_line)
+                    if m:
+                        live_gpus.append(f"GPU {m.group(1)} ({role or '?'})")
+                    elif "not loaded" not in gpu_line.lower():
+                        live_gpus.append(role or f"slot{slot_i}")
                 rows.append(
                     f"  Model {slot_i}{role_s} · {_esc(model or '—')} · {bname} · "
-                    f"{gpu_line}{suffix}"
+                    f"{gpu_line}{suffix}{live}"
+                )
+            if live_gpus:
+                rows.append(
+                    "  [green]busy now:[/green] " + ", ".join(live_gpus)
                 )
             split_tip = gs.ollama_split_tip_short(snap)
             if split_tip:
@@ -2033,17 +2176,97 @@ class CodingBoxApp(App):
 
     def _render_assets_block(self) -> str:
         """Sticky multi-line summary of the most recent asset batch.
-        Empty when no assets have been generated this session."""
+
+        Phase 1C — when a gen is IN-FLIGHT (the `last_stats` count on
+        the generator is rising but no `assets_generated` event has
+        fired yet), render a live progress row instead of the sticky
+        summary so the user sees the rate + ETA in real time.
+        Empty when no assets have been generated this session.
+        """
+        live = self._format_assets_live_progress()
+        if live:
+            return f"\n{live}\n"
         if not self._assets_summary:
             return ""
         return f"\n{self._assets_summary}\n"
 
     def _render_sounds_block(self) -> str:
         """Sticky compact summary of the most recent sound batch.
-        Empty when no sounds have been generated this session."""
+
+        Phase 1C — same live-progress treatment as the assets block.
+        Empty when no sounds have been generated this session.
+        """
+        live = self._format_sounds_live_progress()
+        if live:
+            return f"\n{live}\n"
         if not self._sounds_summary:
             return ""
         return f"\n{self._sounds_summary}\n"
+
+    def _format_assets_live_progress(self) -> str:
+        """Phase 1C — render `Sprites: 4/12 · 2.9s avg · 0.34/s · ~24s ETA`
+        when an assets gen is mid-flight. Detection: the generator has
+        `last_stats` but the in-flight `_assets_in_flight_total` is set
+        and > len(last_stats). Returns "" when no gen is in flight."""
+        agent = getattr(self, "agent", None)
+        if agent is None:
+            return ""
+        total = getattr(self, "_assets_in_flight_total", 0) or 0
+        if total <= 0:
+            return ""
+        gen = getattr(agent, "_asset_generator", None)
+        stats = list(getattr(gen, "last_stats", None) or []) if gen else []
+        produced = len(stats)
+        if produced >= total:
+            # Done — let the sticky summary take over on next tick.
+            return ""
+        avg_s = 0.0
+        if stats:
+            secs = [
+                s.get("gen_seconds", 0.0)
+                for s in stats
+                if isinstance(s.get("gen_seconds"), (int, float))
+            ]
+            if secs:
+                avg_s = sum(secs) / len(secs)
+        rate = (1.0 / avg_s) if avg_s > 0.0 else 0.0
+        remaining = max(0, total - produced)
+        eta_s = remaining * avg_s if avg_s > 0.0 else 0.0
+        return (
+            f"[b]Sprites:[/b] {produced}/{total} "
+            f"[dim]· {avg_s:.1f}s avg · {rate:.2f}/s · "
+            f"~{eta_s:.0f}s ETA[/dim]"
+        )
+
+    def _format_sounds_live_progress(self) -> str:
+        agent = getattr(self, "agent", None)
+        if agent is None:
+            return ""
+        total = getattr(self, "_sounds_in_flight_total", 0) or 0
+        if total <= 0:
+            return ""
+        gen = getattr(agent, "_sound_generator", None)
+        stats = list(getattr(gen, "last_stats", None) or []) if gen else []
+        produced = len(stats)
+        if produced >= total:
+            return ""
+        avg_s = 0.0
+        if stats:
+            secs = [
+                s.get("gen_seconds", 0.0)
+                for s in stats
+                if isinstance(s.get("gen_seconds"), (int, float))
+            ]
+            if secs:
+                avg_s = sum(secs) / len(secs)
+        rate = (1.0 / avg_s) if avg_s > 0.0 else 0.0
+        remaining = max(0, total - produced)
+        eta_s = remaining * avg_s if avg_s > 0.0 else 0.0
+        return (
+            f"[b]Sounds:[/b] {produced}/{total} "
+            f"[dim]· {avg_s:.1f}s avg · {rate:.2f}/s · "
+            f"~{eta_s:.0f}s ETA[/dim]"
+        )
 
     def _render_playbook_block(self) -> str:
         """Show which playbook bullets are currently injected in prompts,
@@ -2684,6 +2907,8 @@ class CodingBoxApp(App):
                 self._cmd_set_model2(arg)
             elif cmd == "model3":
                 self._cmd_set_model3(arg)
+            elif cmd in ("modelall", "loadall"):
+                self._cmd_set_model_all(arg)
             elif cmd == "retry":
                 await self._cmd_retry(arg)
             elif cmd == "backend":
@@ -2705,6 +2930,8 @@ class CodingBoxApp(App):
                 self._log_mirror_lines = []
             elif cmd == "iters":
                 self._cmd_set_iters(arg)
+            elif cmd == "ctx":
+                self._cmd_set_ctx(arg)
             elif cmd == "seed":
                 self._cmd_set_seed(arg)
             elif cmd == "reset":
@@ -2741,6 +2968,10 @@ class CodingBoxApp(App):
                 self._cmd_toggle_double_screenshot(arg)
             elif cmd in ("vlm-critique", "vlmcritique", "vc"):
                 self._cmd_toggle_vlm_critique(arg)
+            elif cmd in ("allroles", "all-roles"):
+                self._cmd_toggle_allroles(arg)
+            elif cmd == "feedback":
+                self._cmd_toggle_autonomous_feedback(arg)
             else:
                 self._log_info(f"unknown command /{cmd} — type /help")
         except Exception as e:
@@ -2753,6 +2984,7 @@ class CodingBoxApp(App):
             "  [b]small change to what shipped[/b]  just type it — no slash needed",
             "                                  e.g. [italic]ship is too slow, double the thrust[/italic]",
             "  [b]ship as-is, stop[/b]              type [b]done[/b] / [b]looks good[/b] / [b]ship[/b] (or Ctrl+D)",
+            "                                  [dim]Ctrl+D wins: any queued feedback (incl. autonomous playtest) is dropped — re-send after ship if still wanted[/dim]",
             "  [b]brand-new unrelated game[/b]      [b]/new <goal>[/b]",
             "  [b]start from an existing .html[/b]  [b]/seed <path>[/b]  then  [b]/new <goal>[/b]",
             "  [b]paste in input[/b]                [b]Ctrl+V[/b] or terminal Edit→Paste ([b]Cmd+V[/b] on macOS)",
@@ -2799,13 +3031,19 @@ class CodingBoxApp(App):
             "  [b]/load <N|name>[/b]           pick model #N from /list (any backend) · STICKY across /new (also /model)",
             "  [b]/model2 <N|name> [--role critic|architect][/b]  configure and stage secondary model 2",
             "  [b]/model3 <N|name> [--role critic|architect][/b]  configure and stage tertiary model 3",
+            "  [b]/modelall <N|name>[/b]      stage the SAME model on all 3 slots (coder + critic + architect) · alias /loadall",
+            "                                  [dim]4-GPU workstation: 11434→GPU1, 11435→GPU2, 11436→GPU3 — one command for all three[/dim]",
             "  [b]/retry[/b]                   re-run after a bad model (keeps game file + trace; uses /model pick first)",
             "  [b]/launch <N|name|path>[/b]   stage an MLX model for next /new (loads in-process on first request)",
+            "                                  [dim]MLX stalls no longer auto-fall-back to Ollama — surface the MLX hint and stop (use /backend ollama + /load <N> to switch deliberately)[/dim]",
             "  [b]/backend <auto|ollama|mlx|openai|anthropic>[/b]  stage default backend when no specific model is staged",
             "                                  [dim]cloud backends require OPENAI_API_KEY / ANTHROPIC_API_KEY in shell env[/dim]",
             "  [b]/unload [N|name|all|mlx][/b]  free VRAM · #N from /list · bare = active session · all = every Ollama · mlx = drop the in-process MLX model",
             "  [b]/seed <path>[/b]             stage a baseline .html (STICKY across /new) · /seed alone clears",
             "  [b]/iters <N>[/b]               set max iterations (sticky)",
+            "  [b]/ctx [N|100k|131k|262k|full][/b]  Ollama context window (sticky · default 100k · /ctx alone shows current)",
+            "                                  [dim]raises KV VRAM; Ollama reloads on next request — preload with[/dim]",
+            "                                  [dim]`ollama run --ctx-size N <model>` to avoid a stall[/dim]",
             "  [b]/restarts <N>[/b]            independent full restarts when iter-1 score < 60 (sticky · default 2 · 1=off)",
             "  [b]/model-class <auto|small|mid|large>[/b]  override prompt-size trim (sticky · default 'small' = lean ~5KB)",
             "  [b]/reset[/b]                   wipe ALL staged state (seed + model + iters → defaults)",
@@ -2824,8 +3062,14 @@ class CodingBoxApp(App):
             "  [b]/playbook[/b] [on|off]        toggle playbook bullet injection (alias /memory) - A/B vs one-shot when iters feel worse than no agent",
             "  [b]/prefill[/b] [on|off]         toggle forcing assistant prefill tags (default ON; forces XML syntax compliance)",
             "  [b]/architect[/b] [on|off]       toggle architect/editor split on complex first-builds (Aider's 2-call pattern; default off)",
+            "                                  [dim]this is the Phase B split — for the slot tag use [b]/model2 ... --role architect[/b][/dim]",
+            "  [b]/allroles[/b]                 turn on all roles (critic + architect) using your one loaded LLM — no extra GPUs, no args",
+            "                                  [dim]bundles /architect on + /vlm-critique on; safe with /modelall (staged slots still win)[/dim]",
             "  [b]/double-screenshot[/b] [on|off] toggle capturing startup + after-input screenshots (default off; helps debugging movement)",
-            "  [b]/vlm-critique[/b] [on|off]    toggle attaching screenshot to Phase C self-critique turns (default off; VLM-only)",
+            "  [b]/vlm-critique[/b] [on|off]    toggle attaching screenshot to Phase C self-critique turns (default off)",
+            "                                  [dim]needs a VLM as the loaded model; uses slot 1 when no critic slot is staged[/dim]",
+            "  [b]/feedback[/b] [on|off]        toggle autonomous self-feedback loop (default ON · multi-screenshot playtest + genre-free behavior recipes)",
+            "                                  [dim]only the extra direction is gated; test reports, patch diagnostics, and the critic still run when off[/dim]",
             "  [b]/audit[/b]                     print per-bullet earnings (fires, pass-rate, avg-iter) from trace history",
             "  [b]/check[/b] [<N|model>]       visual review + guidance using model #N from /list or a model name",
             "                                  [dim]bare /check uses your active session model if it's a VLM (no API cost)[/dim]",
@@ -2899,7 +3143,7 @@ class CodingBoxApp(App):
         self._log("[bold cyan]── available models ──[/bold cyan]")
         self._log(
             "[dim]  [O]llama / [M]LX / open[X]AI / [C]laude  ·  "
-            "* = loaded right now  ·  ← active = this session  ·  "
+            "* = loaded in Ollama VRAM now  ·  ← active = bound to this session  ·  "
             "← staged = next /new  ·  "
             "[magenta]VLM[/magenta] = can read screenshots (vision-language) · "
             "[dim]text[/dim] = text-only[/dim]"
@@ -3015,14 +3259,30 @@ class CodingBoxApp(App):
             return
 
         if norm_lc == "all":
+            bases = backend_mod.ollama_unload_probe_bases()
+            ports = ", ".join(b.rsplit(":", 1)[-1] for b in bases)
             results = backend_mod.unload_all_ollama_models()
             if not results:
-                self._log_info("[dim]no Ollama models currently loaded[/dim]")
-                return
-            for name, ok, msg in results:
-                tag = "[green]✓[/green]" if ok else "[red]✗[/red]"
-                self._log_info(f"  {tag} {_esc(name)} — {_esc(msg)}")
+                self._log_info(
+                    f"[dim]probed Ollama on port(s) {ports}; "
+                    "no model was resident in VRAM (/api/ps empty on each).[/dim]"
+                )
+            else:
+                for name, ok, msg in results:
+                    tag = "[green]✓[/green]" if ok else "[red]✗[/red]"
+                    self._log_info(f"  {tag} {_esc(name)} — {_esc(msg)}")
+            freed_diff = self._unload_diffusers_vram()
+            if freed_diff:
+                self._log_info(
+                    f"[green]✓[/green] released diffuser VRAM: {_esc(', '.join(freed_diff))}"
+                )
             self._log_info("[dim](MLX untouched — /unload mlx for that.)[/dim]")
+            self._log_info(
+                "[dim]← active in /list = this session's model picks (coder/model2/model3); "
+                "that does not change after unload. Use * to see VRAM residency; "
+                "run /list again.[/dim]"
+            )
+            self._log_post_unload_vram_hint()
             return
 
         if norm_lc == "model2":
@@ -3139,6 +3399,65 @@ class CodingBoxApp(App):
                 "[dim]Session is still bound to that tag in VRAM terms — "
                 "use [b]/model <N>[/b] to point the agent at a working model "
                 "(your game file and trace are kept).[/dim]"
+            )
+
+    def _unload_diffusers_vram(self) -> list[str]:
+        """Drop in-process Z-Image / img2img pipelines (chat preload + agent)."""
+        freed: list[str] = []
+        try:
+            from assets import release_preloaded_diffusers
+            freed.extend(release_preloaded_diffusers())
+        except Exception:
+            pass
+        agent = self.agent
+        if agent is not None:
+            gen = getattr(agent, "_asset_generator", None)
+            if gen is not None and hasattr(gen, "cleanup"):
+                try:
+                    gen.cleanup()
+                    if "Z-Image-Turbo (session)" not in freed:
+                        freed.append("Z-Image-Turbo (session)")
+                except Exception:
+                    pass
+        return freed
+
+    def _log_post_unload_vram_hint(self) -> None:
+        """After /unload all, show remaining GPU use so 'still full' is actionable."""
+        try:
+            import gpu_status as gs
+            snap = gs.snapshot_gpus(force=True)
+        except Exception:
+            return
+        if snap is None:
+            return
+        footer = gs.format_vram_footer(snap)
+        if footer:
+            self._log_info(f"[dim]GPU VRAM now: {footer}[/dim]")
+        split = gs.ollama_tensor_split_gpu_indices(snap)
+        if split and not gs.ollama_multi_daemon_setup():
+            self._log_info(
+                f"[yellow]Ollama still split across GPU "
+                f"{'+'.join(str(i) for i in split)} — "
+                "try again or stop stray `ollama serve` processes.[/yellow]"
+            )
+        elif gs.ollama_multi_daemon_setup():
+            loaded = gs.ollama_loaded_models()
+            if loaded:
+                rows = ", ".join(
+                    f"{m['name']}@{m['endpoint'].rsplit(':', 1)[-1]}"
+                    for m in loaded[:4]
+                )
+                self._log_info(
+                    f"[yellow]Still loaded in Ollama: {rows} — "
+                    "re-run /unload all[/yellow]"
+                )
+        # chat.py / diffusers often hold a separate Python allocation (not /api/ps).
+        py_vram = gs.chat_process_gpu_vram(snap, os.getpid(), min_mib=4000)
+        if py_vram:
+            gpus = "+".join(str(g) for g, _ in py_vram)
+            self._log_info(
+                f"[dim]This chat process still uses GPU {gpus} "
+                f"(diffusers/MLX) — /unload mlx or quit chat to drop that.[/dim]"
             )
 
     def _print_mlx_kill_hint(self) -> None:
@@ -3262,9 +3581,19 @@ class CodingBoxApp(App):
         self, chosen_backend: str, chosen_name: str, slot: int, role: str | None, *, source: str,
     ) -> bool:
         """Point the live agent's slots at a new backend. Returns False on init error."""
+        if chosen_backend == "mlx":
+            desired_endpoint = backend_mod.mlx_endpoint_url()
+        elif chosen_backend == "openai":
+            desired_endpoint = backend_mod.openai_endpoint_url()
+        elif chosen_backend == "anthropic":
+            desired_endpoint = backend_mod.anthropic_endpoint_url()
+        else:
+            desired_endpoint = backend_mod.ollama_endpoint_url(slot)
+
         # Check if the requested model name & backend match what is already loaded in any other slot,
         # and reuse the Backend and BackendInfo instances directly. This avoids double-allocations,
-        # redundant in-VRAM loading, and cold-start pauses on Apple Silicon or local Ollama.
+        # redundant in-VRAM loading, and cold-start pauses on Apple Silicon. For Ollama,
+        # the endpoint must also match so auto-pinned slots do not collapse to one daemon.
         reused_backend = None
         reused_info = None
         # Use getattr with a default of None in case attributes are not yet initialized (e.g. mock objects or partial setups)
@@ -3277,7 +3606,15 @@ class CodingBoxApp(App):
             b_info = getattr(self, info_attr, None)
             b_inst = getattr(self, inst_attr, None)
             if b_info is not None and b_inst is not None:
-                if b_info.name == chosen_backend and b_info.model == chosen_name:
+                same_endpoint = (
+                    chosen_backend != "ollama"
+                    or (b_info.endpoint or "").rstrip("/") == desired_endpoint.rstrip("/")
+                )
+                if (
+                    b_info.name == chosen_backend
+                    and b_info.model == chosen_name
+                    and same_endpoint
+                ):
                     reused_backend = b_inst
                     reused_info = b_info
                     break
@@ -3287,18 +3624,10 @@ class CodingBoxApp(App):
             new_info = reused_info
         else:
             try:
-                if chosen_backend == "mlx":
-                    endpoint = backend_mod.mlx_endpoint_url()
-                elif chosen_backend == "openai":
-                    endpoint = backend_mod.openai_endpoint_url()
-                elif chosen_backend == "anthropic":
-                    endpoint = backend_mod.anthropic_endpoint_url()
-                else:
-                    endpoint = backend_mod.ollama_endpoint_url()
                 new_info = backend_mod.BackendInfo(
                     name=chosen_backend, model=chosen_name,
                     source=source,
-                    endpoint=endpoint,
+                    endpoint=desired_endpoint,
                 )
                 new_backend = backend_mod.make_backend(new_info)
             except Exception as e:
@@ -3338,7 +3667,7 @@ class CodingBoxApp(App):
             elif chosen_backend == "anthropic":
                 endpoint = backend_mod.anthropic_endpoint_url()
             else:
-                endpoint = backend_mod.ollama_endpoint_url()
+                endpoint = backend_mod.ollama_endpoint_url(1)
             new_info = backend_mod.BackendInfo(
                 name=chosen_backend, model=chosen_name,
                 source=source,
@@ -3390,6 +3719,51 @@ class CodingBoxApp(App):
     def _cmd_set_model3(self, arg: str) -> None:
         """/model3 <N|name> [--role critic|architect] — pick and configure role for Model 3."""
         self._cmd_set_model_slot(arg, 3)
+
+    def _cmd_set_model_all(self, arg: str) -> None:
+        """/modelall <N|name> — stage the SAME model into slots 1, 2, and 3.
+
+        Convenience for the multi-slot Ollama topology (auto-pin on the
+        4×48 GB workstation: 11434→GPU1, 11435→GPU2, 11436→GPU3). Useful
+        when you want three identical model instances ready for:
+          - parallel best-of-N candidate sampling
+          - non-blocking critic on the architect's idle slot
+          - any future fan-out work that benefits from identical capacity
+            across all three GPUs
+
+        Roles default to coder / critic / architect on slots 1 / 2 / 3
+        via the same smart-default logic /model2 and /model3 use; pass
+        per-slot `/model2` or `/model3 --role X` afterward to override.
+        Bare /modelall clears all three staged slots.
+        """
+        if not arg.strip():
+            # Clear all three slots — matches the bare /model behavior.
+            for slot in (1, 2, 3):
+                slot_str = "" if slot == 1 else str(slot)
+                next_model_attr = f"_next_model{slot_str}"
+                next_backend_attr = f"_next_backend{slot_str}"
+                next_role_attr = f"_next_role{slot_str}"
+                setattr(self, next_model_attr, None)
+                setattr(self, next_backend_attr, None)
+                setattr(self, next_role_attr, None)
+            self._log_info(
+                "cleared staged model on all 3 slots "
+                "(usage: /modelall <number-from-/list-or-name>)"
+            )
+            self._update_status()
+            return
+        # Stage slot 1 first (no role flag — coder is the default).
+        self._cmd_set_model_slot(arg, 1)
+        # Slots 2 and 3 get explicit critic/architect roles so the
+        # auto-staff side-effects (vlm-critique on, architect-split on)
+        # fire deterministically regardless of how the smart-default
+        # logic would have picked them.
+        self._cmd_set_model_slot(f"{arg} --role critic", 2)
+        self._cmd_set_model_slot(f"{arg} --role architect", 3)
+        self._log_info(
+            "[green]/modelall[/green] — same model staged on all 3 slots "
+            "(slot 1: coder · slot 2: critic · slot 3: architect)"
+        )
 
     def _cmd_set_model_slot(self, arg: str, slot: int) -> None:
         slot_str = "" if slot == 1 else str(slot)
@@ -3753,6 +4127,52 @@ class CodingBoxApp(App):
         self._log_info(
             f"max iterations set to [b]{self._max_iters}[/b] for next session/extension"
         )
+
+    def _cmd_set_ctx(self, arg: str) -> None:
+        """/ctx [N|100k|131k|262k|full] — Ollama num_ctx (KV reservation)."""
+        if not arg:
+            self._log_info(
+                f"Ollama context: [b]{self._num_ctx:,}[/b] tokens "
+                f"(default {DEFAULT_NUM_CTX:,}). "
+                "usage: /ctx <N|100k|131k|262k|full|native>"
+            )
+            if self.agent is not None:
+                self._log_info(
+                    f"[dim]active session agent.num_ctx={self.agent.num_ctx:,}[/dim]"
+                )
+            return
+        try:
+            new_ctx = parse_num_ctx_arg(arg)
+        except ValueError as e:
+            self._log_error(str(e))
+            self._log_info(
+                "usage: /ctx <N|100k|131k|262k|full>  "
+                f"(range {MIN_NUM_CTX:,}–{MAX_NUM_CTX:,})"
+            )
+            return
+        old = self._num_ctx
+        self._num_ctx = new_ctx
+        self._ctx_max = new_ctx
+        if self.agent is not None:
+            self.agent.num_ctx = new_ctx
+        self._log_info(
+            f"Ollama context set to [b]{new_ctx:,}[/b] "
+            f"(was {old:,}) for next turns"
+        )
+        if (
+            self._session_backend_info is not None
+            and self._session_backend_info.name == "ollama"
+        ):
+            self._log_info(
+                "[dim]Ollama will reload the model on the next request when "
+                "num_ctx changes. Preload to avoid a stall: "
+                f"`ollama run --ctx-size {new_ctx} "
+                f"{self._session_model or '<model>'}`[/dim]"
+            )
+        elif self.agent is not None:
+            self._log_info(
+                "[dim]num_ctx applies to Ollama backends; MLX ignores it.[/dim]"
+            )
 
     def _cmd_set_restarts(self, arg: str) -> None:
         """/restarts N — when iter 1 of a session ends below the score
@@ -4199,20 +4619,35 @@ class CodingBoxApp(App):
         had_model = self._next_model
         had_backend = self._next_backend
         had_iters = self._max_iters
+        had_ctx = self._num_ctx
         had_restarts = self._restart_n
         had_class = self._model_class
         had_ref = self._staged_ref_image_name
+        had_allroles = self._all_roles_enabled
         self._next_seed = None
         self._next_model = None
         self._next_backend = None
         self._staged_ref_image_bytes = None
         self._staged_ref_image_name = None
         self._max_iters = 6
+        self._num_ctx = default_num_ctx()
+        self._ctx_max = self._num_ctx
         self._restart_n = 2
         self._model_class = None
         self._run_profile = "custom"
         self._profile_review_model = None
         self._profile_review_auto_apply = False
+        if had_allroles:
+            self._all_roles_enabled = False
+            self._use_architect_split = False
+            self._use_vlm_critique = False
+            self._architect_split_auto = False
+            self._vlm_critique_auto = False
+            if self.agent is not None:
+                self.agent._use_architect_split = False
+                self.agent._use_vlm_critique = False
+                self.agent._architect_split_auto = False
+                self.agent._vlm_critique_auto = False
         bits: list[str] = []
         if had_seed is not None:
             bits.append(f"seed={had_seed}")
@@ -4222,12 +4657,16 @@ class CodingBoxApp(App):
             bits.append(f"backend={had_backend}")
         if had_iters != 6:
             bits.append(f"iters={had_iters}→6")
+        if had_ctx != default_num_ctx():
+            bits.append(f"ctx={had_ctx}→{self._num_ctx}")
         if had_restarts != 2:
             bits.append(f"restarts={had_restarts}→2")
         if had_class:
             bits.append(f"model-class={had_class}→auto")
         if had_ref:
             bits.append(f"ref={had_ref}→cleared")
+        if had_allroles:
+            bits.append("allroles=on→off")
         if not bits:
             self._log_info("nothing to reset (no staged seed/model, iters at default)")
             return
@@ -4261,6 +4700,7 @@ class CodingBoxApp(App):
             f"  phase:                {_esc(self._phase_label)}",
             f"  iteration:            {_esc(self._iteration_label)}",
             f"  max iters:            {self._max_iters}",
+            f"  Ollama ctx (next):    {self._num_ctx:,}",
             f"  restart-N:            {self._restart_n if self._restart_n > 1 else '1 (off)'}",
             f"  model-class:          {self._model_class or 'auto (= small, lean ~5KB schema)'}",
             f"  step-mode (/wait):    {step_label}",
@@ -4268,6 +4708,8 @@ class CodingBoxApp(App):
             f"  architect-split:      {'ON' if self._use_architect_split else 'off'}{' [auto]' if self._architect_split_auto and self._use_architect_split else ''}",
             f"  double-screenshot:    {'ON' if self._use_double_screenshot else 'off'}",
             f"  vlm-critique:         {'ON' if self._use_vlm_critique else 'off'}{' [auto]' if self._vlm_critique_auto and self._use_vlm_critique else ''}",
+            f"  /allroles bundle:     {'ON' if self._all_roles_enabled else 'off'}",
+            f"  autonomous /feedback: {'ON' if self._use_autonomous_feedback else 'OFF'}  [dim](multi-shot playtest + recipe checks; /feedback off to disable)[/dim]",
             f"  iter detail:          {self._iter_decision_verbose}",
             f"  run profile:          {self._format_run_profile()}",
             f"  review hook:          {self._profile_review_model or '—'}",
@@ -4603,6 +5045,48 @@ class CodingBoxApp(App):
         self._log_info(f"double screenshot capturing set to {status}")
         self._update_status()
 
+    def _cmd_toggle_autonomous_feedback(self, arg: str) -> None:
+        """/feedback [on|off] — toggle the autonomous self-feedback loop.
+
+        When ON (default): after each clean iter, the agent runs a short
+        scripted playtest (multi-window screenshot capture + genre-free
+        behavior recipes from the root playbook), and if something looks
+        wrong it generates one paragraph of user-style feedback and
+        queues it into the same input pipeline real user feedback uses.
+
+        When OFF: existing test reports, patch diagnostics, and the
+        visual critic continue running unchanged. Only the extra
+        autonomous direction is suppressed.
+
+        Sticky across /new. Safe to toggle mid-session.
+        """
+        arg_lc = arg.strip().lower()
+        if arg_lc in ("on", "true", "1", "enable"):
+            new_state = True
+        elif arg_lc in ("off", "false", "0", "disable"):
+            new_state = False
+        elif arg_lc == "":
+            # Show current state instead of flipping when called bare —
+            # autonomous mode has bigger consequences than a vlm-critique
+            # toggle, so we don't silently flip on bare invocation.
+            cur = "[green]ON[/green]" if self._use_autonomous_feedback else "[yellow]OFF[/yellow]"
+            self._log_info(
+                f"autonomous self-feedback is {cur} "
+                "(usage: /feedback on  ·  /feedback off)"
+            )
+            return
+        else:
+            new_state = not self._use_autonomous_feedback
+        self._use_autonomous_feedback = new_state
+        if self.agent is not None:
+            self.agent._use_autonomous_feedback = new_state
+        status = "[green]ON[/green]" if new_state else "[yellow]OFF[/yellow]"
+        self._log_info(
+            f"autonomous self-feedback set to {status} "
+            "(standard error reporting unaffected)"
+        )
+        self._update_status()
+
     def _cmd_toggle_vlm_critique(self, arg: str) -> None:
         """/vlm-critique [on|off] — toggle attaching screenshot to Phase C self-critique turns."""
         arg_lc = arg.strip().lower()
@@ -4623,6 +5107,43 @@ class CodingBoxApp(App):
         self._log_info(f"VLM critique screenshot attachment set to {status}")
         self._update_status()
 
+    def _cmd_toggle_allroles(self, arg: str) -> None:
+        """/allroles — toggle ON/OFF: run coder + critic + architect on the single loaded LLM.
+
+        Bundles architect-split and vlm-critique so one bare command covers
+        every role without /model2 / /model3 staging or a second GPU. If a
+        critic- or architect-tagged slot 2/3 IS staged, the router still
+        prefers it — this toggle just turns the role-using features on.
+        """
+        arg_lc = arg.strip().lower()
+        if arg_lc in ("on", "true", "1", "enable"):
+            new_state = True
+        elif arg_lc in ("off", "false", "0", "disable"):
+            new_state = False
+        else:
+            new_state = not self._all_roles_enabled
+        self._all_roles_enabled = new_state
+        self._use_architect_split = new_state
+        self._use_vlm_critique = new_state
+        # Explicit user toggle — clear auto-staff flags so the state sticks.
+        self._architect_split_auto = False
+        self._vlm_critique_auto = False
+        if self.agent is not None:
+            self.agent._use_architect_split = new_state
+            self.agent._use_vlm_critique = new_state
+            self.agent._architect_split_auto = False
+            self.agent._vlm_critique_auto = False
+        if new_state:
+            self._log_info(
+                "[green]/allroles ON[/green] — coder + critic + architect "
+                "all running on the loaded LLM (architect-split + vlm-critique on)"
+            )
+        else:
+            self._log_info(
+                "[yellow]/allroles OFF[/yellow] — architect-split and vlm-critique disabled"
+            )
+        self._update_status()
+
     # ----------------------------- session --------------------------------
 
     async def _start_session(self, goal: str) -> None:
@@ -4632,6 +5153,26 @@ class CodingBoxApp(App):
         self._session_seed = (
             Path(self._next_seed).resolve() if self._next_seed is not None else None
         )
+        try:
+            placement = backend_mod.ensure_ollama_slot_daemons_for_chat(
+                enabled=self._wants_three_ollama_slots(),
+                prefer=self._next_backend,
+            )
+            if placement.mode == "auto-pinned":
+                self._ollama_placement_status = (
+                    "auto-pinned · 11434→GPU1 · 11435→GPU2 · 11436→GPU3"
+                )
+                self._log_info(f"[dim]Ollama placement: {_esc(self._ollama_placement_status)}[/dim]")
+            elif placement.mode == "manual":
+                self._ollama_placement_status = "manual HOST2/HOST3"
+            elif placement.mode == "fallback" and self._wants_three_ollama_slots():
+                self._ollama_placement_status = f"single daemon fallback · {placement.message}"
+                self._log_info(f"[yellow]Ollama placement:[/yellow] {_esc(self._ollama_placement_status)}")
+            elif self._wants_three_ollama_slots():
+                self._ollama_placement_status = f"single daemon fallback · {placement.message}"
+        except Exception as e:
+            self._ollama_placement_status = f"single daemon fallback · autopin error: {e}"
+            self._log_info(f"[yellow]Ollama placement:[/yellow] {_esc(self._ollama_placement_status)}")
         self._update_status()
 
         if self.browser is None:
@@ -4665,7 +5206,7 @@ class CodingBoxApp(App):
             elif self._next_backend == "anthropic":
                 endpoint = backend_mod.anthropic_endpoint_url()
             else:
-                endpoint = backend_mod.ollama_endpoint_url()
+                endpoint = backend_mod.ollama_endpoint_url(1)
             info = backend_mod.BackendInfo(
                 name=self._next_backend, model=self._next_model,
                 source=f"/load staged: {self._next_backend} (sticky)",
@@ -4675,7 +5216,7 @@ class CodingBoxApp(App):
             info = backend_mod.BackendInfo(
                 name="ollama", model=self._next_model,
                 source="/model staged (sticky)",
-                endpoint=backend_mod.ollama_endpoint_url(),
+                endpoint=backend_mod.ollama_endpoint_url(1),
             )
         else:
             try:
@@ -4700,7 +5241,20 @@ class CodingBoxApp(App):
         self._session_model2 = None
         self._session_role2 = self._next_role2
         if self._next_backend2 and self._next_model2:
-            if self._next_backend2 == info.name and self._next_model2 == info.model:
+            endpoint2 = (
+                backend_mod.ollama_endpoint_url(2)
+                if self._next_backend2 == "ollama"
+                else None
+            )
+            can_reuse_slot2 = (
+                self._next_backend2 == info.name
+                and self._next_model2 == info.model
+                and (
+                    self._next_backend2 != "ollama"
+                    or (endpoint2 or "").rstrip("/") == (info.endpoint or "").rstrip("/")
+                )
+            )
+            if can_reuse_slot2:
                 self._session_backend2 = self._session_backend
                 self._session_backend_info2 = info
                 self._session_model2 = info.model
@@ -4712,7 +5266,7 @@ class CodingBoxApp(App):
                 elif self._next_backend2 == "anthropic":
                     endpoint = backend_mod.anthropic_endpoint_url()
                 else:
-                    endpoint = backend_mod.ollama_endpoint_url()
+                    endpoint = backend_mod.ollama_endpoint_url(2)
                 info2 = backend_mod.BackendInfo(
                     name=self._next_backend2, model=self._next_model2,
                     source=f"/model2 staged: {self._next_backend2} (sticky)",
@@ -4730,11 +5284,35 @@ class CodingBoxApp(App):
         self._session_model3 = None
         self._session_role3 = self._next_role3
         if self._next_backend3 and self._next_model3:
-            if self._next_backend3 == info.name and self._next_model3 == info.model:
+            endpoint3 = (
+                backend_mod.ollama_endpoint_url(3)
+                if self._next_backend3 == "ollama"
+                else None
+            )
+            can_reuse_primary_for_slot3 = (
+                self._next_backend3 == info.name
+                and self._next_model3 == info.model
+                and (
+                    self._next_backend3 != "ollama"
+                    or (endpoint3 or "").rstrip("/") == (info.endpoint or "").rstrip("/")
+                )
+            )
+            can_reuse_slot2_for_slot3 = (
+                self._session_backend_info2
+                and self._next_backend3 == self._session_backend_info2.name
+                and self._next_model3 == self._session_backend_info2.model
+                and (
+                    self._next_backend3 != "ollama"
+                    or (endpoint3 or "").rstrip("/") == (
+                        self._session_backend_info2.endpoint or ""
+                    ).rstrip("/")
+                )
+            )
+            if can_reuse_primary_for_slot3:
                 self._session_backend3 = self._session_backend
                 self._session_backend_info3 = info
                 self._session_model3 = info.model
-            elif self._session_backend_info2 and self._next_backend3 == self._session_backend_info2.name and self._next_model3 == self._session_backend_info2.model:
+            elif can_reuse_slot2_for_slot3:
                 self._session_backend3 = self._session_backend2
                 self._session_backend_info3 = self._session_backend_info2
                 self._session_model3 = self._session_backend_info2.model
@@ -4746,7 +5324,7 @@ class CodingBoxApp(App):
                 elif self._next_backend3 == "anthropic":
                     endpoint = backend_mod.anthropic_endpoint_url()
                 else:
-                    endpoint = backend_mod.ollama_endpoint_url()
+                    endpoint = backend_mod.ollama_endpoint_url(3)
                 info3 = backend_mod.BackendInfo(
                     name=self._next_backend3, model=self._next_model3,
                     source=f"/model3 staged: {self._next_backend3} (sticky)",
@@ -4775,8 +5353,24 @@ class CodingBoxApp(App):
                 f"as [cyan]{self._session_role3}[/cyan]"
             )
 
+        for bi in (
+            self._session_backend_info,
+            self._session_backend_info2,
+            self._session_backend_info3,
+        ):
+            if (
+                bi is not None
+                and bi.name == "ollama"
+                and not bi.context_length
+            ):
+                cl = backend_mod.ollama_context_length(bi.endpoint, bi.model)
+                if cl:
+                    bi.context_length = cl
+
         # Large workstation: auto-unload tensor-split Ollama VRAM on /new so
         # the user does not need manual /unload or Ollama service env edits.
+        # Probe each distinct Ollama endpoint (3-slot runs use HOST/HOST2/HOST3).
+        seen_endpoints: set[str] = set()
         for bi in (
             self._session_backend_info,
             self._session_backend_info2,
@@ -4784,15 +5378,16 @@ class CodingBoxApp(App):
         ):
             if bi is None or bi.name != "ollama":
                 continue
+            ep = (bi.endpoint or "").rstrip("/")
+            if not ep or ep in seen_endpoints:
+                continue
+            seen_endpoints.add(ep)
             try:
-                fixed, fix_msg = backend_mod.auto_fix_ollama_tensor_split(
-                    bi.endpoint,
-                )
+                fixed, fix_msg = backend_mod.auto_fix_ollama_tensor_split(ep)
                 if fixed and fix_msg:
                     self._log_info(f"[dim]{_esc(fix_msg)}[/dim]")
-                break
             except Exception:
-                break
+                pass
 
         self._update_status()
 
@@ -4875,10 +5470,17 @@ class CodingBoxApp(App):
             seed_file=seed,
             stall_seconds=stall_s,
             overall_seconds=overall_s,
+            num_ctx=self._num_ctx,
             # v1 prompt: includes <playbook> retrieval, <criteria>,
             # <probes>, stuck-loop ladder. Real sessions need this on
             # so the offline learner has rich traces to reflect over.
             prompt_version="v1",
+            # Pass the resolved chat model name so GameAgent._classify_model
+            # can map it to "small"/"mid"/"large". Without this, model=None
+            # falls through to "small" and silently strips <assets>/<sounds>/
+            # <todos>/<lookup_bullet> from the system prompt for every local
+            # 14B-35B coder, hiding the diffuser pipeline from the model.
+            model=self._session_model,
             model_class=self._model_class or "auto",
             restart_n=self._restart_n,
             restart_score_threshold=self._restart_threshold,
@@ -4900,6 +5502,12 @@ class CodingBoxApp(App):
             backend3=self._session_backend3,
             model3_role=self._session_role3,
         )
+        # Phase 1.5 — autonomous-feedback flag is set on the agent
+        # AFTER construction so we don't have to thread it through
+        # GameAgent.__init__'s long kwargs list (every existing test
+        # that constructs GameAgent would otherwise need updating).
+        # Default on the agent is True; the App's runtime toggle wins.
+        self.agent._use_autonomous_feedback = self._use_autonomous_feedback
         # Apply run-profile step policy on session start.
         if self._run_profile == "local_manual":
             self.agent.set_step_mode(True)
@@ -4947,6 +5555,8 @@ class CodingBoxApp(App):
             backend = getattr(self.agent, "_backend", None)
             info = getattr(backend, "info", None) if backend else None
             self._ctx_max = getattr(info, "context_length", None) if info else None
+            if self._ctx_max is None and self.agent is not None:
+                self._ctx_max = int(getattr(self.agent, "num_ctx", 0) or 0) or None
         except Exception:
             self._ctx_max = None
 
@@ -5022,8 +5632,9 @@ class CodingBoxApp(App):
             combined = f"{self._goal} — {feedback}" if self._goal else feedback
             await self._new_session(combined)
             return
-        # Apply any /iters change before extending.
+        # Apply any /iters or /ctx change before extending.
         self.agent.max_iters = self._max_iters
+        self.agent.num_ctx = self._num_ctx
         self._session_done = False
         self._phase_label = "extending"
         self.sub_title = "agent is working (extension)"
@@ -5373,47 +5984,77 @@ class CodingBoxApp(App):
             label = data.get("label", "")
             stream_role = data.get("role", "coder")
             now = time.monotonic()
+            slot = self._role_slot_for_stream(stream_role)
+
+            def _any_slot_streaming() -> bool:
+                return (
+                    self._is_streaming
+                    or self._model2_is_streaming
+                    or self._model3_is_streaming
+                )
+
             if state == "idle":
-                self._activity_label = ""
-                self._activity_role = "coder"
-                self._activity_started_at = 0.0
-                self._is_streaming = False
-                self._model2_is_streaming = False
-                self._model3_is_streaming = False
-                self._model2_stream_tokens = 0
-                self._model3_stream_tokens = 0
+                if "role" not in data:
+                    # Legacy bare idle — end every slot's stream display.
+                    self._is_streaming = False
+                    self._model2_is_streaming = False
+                    self._model3_is_streaming = False
+                elif slot == 2:
+                    self._model2_is_streaming = False
+                elif slot == 3:
+                    self._model3_is_streaming = False
+                else:
+                    self._is_streaming = False
+                if not _any_slot_streaming():
+                    self._activity_label = ""
+                    self._activity_role = "coder"
+                    self._activity_started_at = 0.0
             else:
-                slot = self._role_slot_for_stream(stream_role)
                 display = label or state.replace("_", " ")
                 self._activity_role = stream_role
                 self._activity_label = display
                 self._activity_started_at = now
+                # Phase 1C — record in-flight totals so the live
+                # progress row in the status panel can show "Sprites:
+                # N/total · X.Ys avg · ~Y ETA". The agent emits the
+                # `requested` count alongside the activity event.
+                if state == "generating_assets":
+                    req = data.get("requested", 0)
+                    if isinstance(req, int) and req > 0:
+                        self._assets_in_flight_total = req
+                elif state == "generating_sounds":
+                    req = data.get("requested", 0)
+                    if isinstance(req, int) and req > 0:
+                        self._sounds_in_flight_total = req
                 if state == "streaming":
                     if slot == 2:
                         self._model2_is_streaming = True
                         self._model2_stream_tokens = 0
                         self._model2_stream_started_at = now
                         self._model2_last_token_at = 0.0
-                        self._is_streaming = False
                     elif slot == 3:
                         self._model3_is_streaming = True
                         self._model3_stream_tokens = 0
                         self._model3_stream_started_at = now
                         self._model3_last_token_at = 0.0
-                        self._is_streaming = False
                     else:
                         self._is_streaming = True
                         self._stream_tokens = 0
                         self._stream_started_at = now
                         self._last_token_at = 0.0
-                        self._model2_is_streaming = False
-                        self._model3_is_streaming = False
+                elif slot == 2:
+                    self._model2_is_streaming = False
+                elif slot == 3:
+                    self._model3_is_streaming = False
                 else:
                     self._is_streaming = False
             self._update_status()
 
         elif ev.kind == "assets":
             self._assets_summary = self._format_assets_summary(ev.data or {})
+            # Phase 1C — completion clears the in-flight total so the
+            # live progress row stops rendering on the next tick.
+            self._assets_in_flight_total = 0
             session_dir = (ev.data or {}).get("session_dir")
             if session_dir:
                 try:
@@ -5433,6 +6074,8 @@ class CodingBoxApp(App):
             # names are what you reference in feedback ("make shoot less
             # harsh"); per-sound timing stays in .log / .jsonl.
             self._sounds_summary = self._format_sounds_summary(ev.data or {})
+            # Phase 1C — same clear pattern for sounds.
+            self._sounds_in_flight_total = 0
             session_dir = (ev.data or {}).get("session_dir")
             if session_dir:
                 try:

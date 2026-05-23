@@ -41,7 +41,15 @@ from typing import Any
 
 import backend as backend_mod
 from backend import Backend
-from memory import Bullet, Playbook
+from memory import (
+    ANIMATION_AUDITS_FILENAME,
+    ASSET_AUDITS_FILENAME,
+    PLAYTESTS_FILENAME,
+    Bullet,
+    GameMemory,
+    OpeningBookItem,
+    Playbook,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -298,6 +306,35 @@ ULTRA IMPORTANT rules:
   - Bullets should be ONE PARAGRAPH. Be concrete: name functions,
     variables, conventions, with code-snippet phrasing where helpful.
   - If nothing learnable came out of this session, return empty arrays.
+
+Trace event kinds you may encounter (Phase 0–3 instrumentation):
+  - `iter_summary`         per-iter probe / soft-warning / error counts +
+                            a `fail_reason` string. Walk these to find
+                            the first iter that regressed.
+  - `surprise`             pre-flagged class of failure (category field):
+                            `state_vs_render_gap` (entity in state, not
+                            drawn), `regression_after_clean_iter`,
+                            `non_slot1_bon_winner` (alternate slot won
+                            the fan-out). When present, weight these
+                            observations higher than the regular
+                            per-stream events.
+  - `best_of_n_attempt`    per-candidate score + slot + temperature.
+                            Look for candidates that scored highest
+                            despite low temperature, or vice versa.
+  - `patch_outcome`        per-block applied / ambiguous / no_match
+                            with a nearest-anchor preview when no_match.
+  - `slow_prefill`         tokens<5 after 120s — cross-slot KV cache
+                            stall. The hint string explains how
+                            Backend.warm_prefix avoids it.
+  - `mid_session_assets_deferred_for_user_style` user wanted a rebrand;
+                            agent skipped GPU work to save it for the
+                            next turn.
+  - `autonomous_playtest_skipped` reason field tells you why the
+                            multi-screenshot playtest didn't run.
+  - `multi_frame_intent_detected`, `media_only_parallel_inject`,
+    `prefill_warm`, `runaway_stream_warning` — additional Phase 0–1
+                            visibility events the reflector can ignore
+                            unless they cluster with a failure.
 
 Output STRICT JSON ONLY. No prose outside the JSON. Schema:
 
@@ -681,6 +718,79 @@ def detect_failure_shapes(trace_path: Path) -> list[dict]:
     return out
 
 
+def promote_verified_opening_book_candidates(
+    sessions: list[Session],
+    memory: GameMemory,
+    *,
+    apply: bool = False,
+) -> list[str]:
+    """Write only browser-verified, generic recipe candidates to live memory."""
+    promoted: list[str] = []
+    for s in sessions:
+        if not s.final_ok:
+            continue
+        goal = (s.goal or "").lower()
+        trace_id = s.session_id or s.trace_path.stem
+        if any(w in goal for w in ("move", "player", "control", "keyboard", "arrow", "wasd")):
+            item = OpeningBookItem(
+                id="live-controllable-input-delta",
+                kind="playtest",
+                content=(
+                    "Verified session showed that controllable games need an "
+                    "input-delta check: hold movement/action keys and require "
+                    "state or canvas change attributable to input."
+                ),
+                tags=["input", "movement", "controls", "playtest"],
+                source_tier="live",
+                verified=True,
+                helpful=0,
+                harmful=0,
+                recipe={"type": "input_delta", "expect": "state_or_canvas_delta"},
+                trace_ids=[trace_id],
+                pass_count=1,
+            )
+            promoted.append(f"{PLAYTESTS_FILENAME}:{item.id}")
+            if apply:
+                memory.append_live_opening_book_item(PLAYTESTS_FILENAME, item)
+        if any(w in goal for w in ("asset", "sprite", "art", "generated", "draw")):
+            item = OpeningBookItem(
+                id="live-generated-assets-usage",
+                kind="asset_audit",
+                content=(
+                    "Verified asset sessions should audit generated media by "
+                    "checking loader entries and drawImage usage for requested sprites."
+                ),
+                tags=["assets", "sprites", "drawImage", "audit"],
+                source_tier="live",
+                verified=True,
+                recipe={"type": "asset_usage", "expect": "loader_and_drawimage"},
+                trace_ids=[trace_id],
+                pass_count=1,
+            )
+            promoted.append(f"{ASSET_AUDITS_FILENAME}:{item.id}")
+            if apply:
+                memory.append_live_opening_book_item(ASSET_AUDITS_FILENAME, item)
+        if any(w in goal for w in ("animate", "animated", "animation", "smooth")):
+            item = OpeningBookItem(
+                id="live-animation-midframe-check",
+                kind="animation_audit",
+                content=(
+                    "Verified animation sessions should audit before/mid/after "
+                    "frames so smooth motion is not implemented as teleporting."
+                ),
+                tags=["animation", "midframe", "smooth", "audit"],
+                source_tier="live",
+                verified=True,
+                recipe={"type": "before_mid_after", "expect": "intermediate_delta"},
+                trace_ids=[trace_id],
+                pass_count=1,
+            )
+            promoted.append(f"{ANIMATION_AUDITS_FILENAME}:{item.id}")
+            if apply:
+                memory.append_live_opening_book_item(ANIMATION_AUDITS_FILENAME, item)
+    return promoted
+
+
 async def cmd_reflect(args) -> int:
     return await _run_reflect_apply(args, apply=False)
 
@@ -751,6 +861,11 @@ async def _run_reflect_apply(args, *, apply: bool) -> int:
 
     log = curate(proposals, playbook, apply=apply,
                  allow_overwrite_seed=args.allow_overwrite_seed)
+    opening_memory = GameMemory(root=pb_root)
+    opening_memory.ensure()
+    opening_promoted = promote_verified_opening_book_candidates(
+        sessions, opening_memory, apply=apply,
+    )
 
     print()
     print(f"== curator log ({'applied' if apply else 'dry-run'}) ==")
@@ -768,6 +883,10 @@ async def _run_reflect_apply(args, *, apply: bool) -> int:
             print(f"    - {bid}: {reason}")
     if not (log.added or log.updated_counters or log.skipped):
         print("  (no changes)")
+    if opening_promoted:
+        print(f"  opening-book live candidates ({len(opening_promoted)}):")
+        for x in opening_promoted:
+            print(f"    + {x}")
     print(f"\nplaybook: {playbook.path}")
     return 0
 

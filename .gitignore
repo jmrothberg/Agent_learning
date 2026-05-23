@@ -21,6 +21,7 @@ memory/*
 !memory/playbook.jsonl
 games/test_*.html
 games/tune/
+games/system-tests/run_*/
 # Asset-pipeline artifacts (PNGs are 50-200KB each; cache grows over time)
 games/_asset_cache/
 games/_smoke/
@@ -28,6 +29,9 @@ games/*_assets/
 # Sound-pipeline artifacts (OGGs are 5-50KB each; cache grows over time)
 games/_sound_cache/
 games/*_sounds/
+# Per-machine learned memory (won skeletons, live playbook overlay, mistakes).
+# Canonical playbook for git is memory/playbook.jsonl only.
+games/game-memory/
 
 # Editor / OS noise
 .vscode/

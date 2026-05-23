@@ -201,18 +201,35 @@ ASSETS_FORMAT = FormatSpec(
         "Optional `size` is a string (\"64x64\", \"128x96\") or an int "
         "(square). Default 128 px square. Keep sprites small — 32–128 px "
         "is typical; over-large sprites blur when drawn small.",
-        "ANIMATION FRAMES: when you need a coherent sprite sequence "
-        "(walk cycle, attack windup, flap, idle bob), declare frame 1 "
-        "normally, then add `\"from_image\": \"<name-of-frame-1>\"` and "
-        "`\"strength\": 0.35-0.55` on subsequent frames. The harness "
-        "runs SD-Turbo img2img with the previous frame as the init "
-        "image, so frame 2 inherits frame 1's silhouette + palette and "
-        "only the pose changes. Without `from_image` each frame is an "
-        "independent txt2img and the result looks like two different "
-        "characters. Example: "
-        "{\"name\":\"alien_walk1\", \"prompt\":\"8-bit alien, legs together\"}, "
-        "{\"name\":\"alien_walk2\", \"prompt\":\"8-bit alien, legs apart\", "
-        "\"from_image\":\"alien_walk1\", \"strength\":0.45}.",
+        "ANIMATION FRAMES & ROSTER LIMITS: When you need coherent "
+        "animation sequences (walk cycles, idle bobs, attacks, shatters, "
+        "impact effects), declare frame 1 normally, then add "
+        "`\"from_image\": \"<name-of-frame-1>\"` and `\"strength\": 0.35-0.55` "
+        "on subsequent frames to run local SD-Turbo img2img. This chains "
+        "frames so they preserve the silhouette + palette, whereas "
+        "independent txt2img rolls look like different characters. "
+        "If the user explicitly asks for animation frames or variants "
+        "seeded from an EXISTING sprite (\"use the existing pawn as a "
+        "starting point\", \"make the king walk\", \"animate each piece\"), "
+        "ALWAYS chain with `from_image: <existing_name>` — never "
+        "regenerate the base from scratch. The MEDIA-CHANGE DIRECTIVE "
+        "block in your user turn will surface stem→asset mappings (e.g. "
+        "\"pawn → [white_pawn, black_pawn]\") so you can chain each "
+        "side's frames in one <assets> block. "
+        "Examples: "
+        "{\"name\":\"hero_idle\", \"prompt\":\"8-bit hero holding sword\"}, "
+        "{\"name\":\"hero_walk1\", \"prompt\":\"8-bit hero walking, legs together\", \"from_image\":\"hero_idle\", \"strength\":0.40}, "
+        "{\"name\":\"hero_walk2\", \"prompt\":\"8-bit hero walking, legs apart\", \"from_image\":\"hero_walk1\", \"strength\":0.45}. "
+        "ROSTER PLANNING & TURNS: The local generator is capped at 24 assets per "
+        "turn to prevent runaway loops. If your full planned roster (e.g. idle states, "
+        "movement animations, and impact VFX for many pieces/characters) exceeds "
+        "this limit, do NOT compromise on variety or shrink the visual scope. Instead, "
+        "split generation across turns: prioritize base idles and core icons "
+        "on the first build turn, then emit subsequent mid-session <assets> blocks "
+        "on later turns for specialized walk/attack/VFX frames. Write your JS loading "
+        "code in a structured, extensible way (e.g., loading lists/arrays of sprites) "
+        "and handle missing or generating frames gracefully with fallback drawing so "
+        "each turn remains playable and testable while the diffuser catches up.",
         "SKIP <assets> ONLY for pure-DOM apps where text + emojis are "
         "enough — todo lists, calculators, tic-tac-toe, color pickers. "
         "If the canvas has any rendered entity with visual character, "
@@ -758,6 +775,45 @@ def _detect_3d_intent(goal: str) -> list[str]:
     return out
 
 
+# Phase 4: heavy-logic keyword set. These describe game-rule depth or
+# AI/search complexity that — when COMBINED with an art-heavy goal —
+# tends to push weak local LLMs into concatenating two drafts in one
+# stream. Trace 1 (chess 20260522_000304) hit exactly this combo: 24
+# sprites + 3-ply minimax + full chess rules in a single iter. Genre-free
+# by design (no "chess" / "rts" / "pacman" terms); the entries describe
+# computational shape, not subject matter.
+_HEAVY_LOGIC_KEYWORDS = frozenset({
+    "ai", "minimax", "alpha", "beta", "ply", "search", "depth",
+    "pathfinding", "astar", "negamax", "evaluation", "heuristic",
+    "rules", "ruleset", "turn-based", "turnbased", "physics",
+    "simulation", "multiplayer", "networking", "persistent",
+    "save", "savegame", "load", "loadgame", "undo", "redo",
+    "replay", "opponent", "computer", "cpu", "bot",
+})
+
+
+def _detect_heavy_logic_intent(goal: str) -> list[str]:
+    """Return a list of heavy-logic keywords found in `goal`. Empty list
+    means the goal is plain action / arcade and needs no scope-pacing
+    nudge.
+
+    Used in combination with `_detect_art_intent` to detect the
+    art + complex-logic shape that risks weak-LLM one-shot overload.
+    Genre-free single-token matching.
+    """
+    if not goal:
+        return []
+    import re
+    words = re.findall(r"[a-zA-Z]+", goal.lower())
+    seen: set[str] = set()
+    out: list[str] = []
+    for w in words:
+        if w in _HEAVY_LOGIC_KEYWORDS and w not in seen:
+            seen.add(w)
+            out.append(w)
+    return out
+
+
 def _detect_art_intent(goal: str) -> list[str]:
     """Return a list of art-modality keywords found in `goal`. Empty
     list means no intent detected; non-empty triggers a stronger
@@ -779,6 +835,133 @@ def _detect_art_intent(goal: str) -> list[str]:
             seen.add(w)
             out.append(w)
     return out
+
+
+# Phase 0.8 — single-token keywords that, alone, signal the user wants
+# more than one frame per visual entity (walk cycles, idle bobs, attack
+# sequences, multi-state animations). Combined with `_MULTI_FRAME_PHRASES`
+# below for two-word matches. Same shape as `_ART_KEYWORDS`: lowercased
+# token match, no genre / NER / model lookup.
+_MULTI_FRAME_KEYWORDS = frozenset({
+    # Frame-count nouns
+    "frames", "framesets", "spritesheet", "spritesheets", "tilesheet",
+    # Animation-state nouns (when paired with an art noun in the goal,
+    # these are direct asks for multiple frames per entity)
+    "walking", "walkcycle",
+    "running", "jumping", "falling", "attacking", "shooting", "casting",
+    "dying", "death", "dead", "hurt", "damaged",
+    "idle", "bobbing", "bobbed", "swinging", "punching", "kicking",
+    "crouching", "ducking", "blocking",
+    "animated", "animating",
+    # Destruction / impact action states — general, not genre-specific
+    # ("smash the captured piece", "shatter on hit", "explode on death").
+    # These describe per-entity destroy frames, not just game mechanics.
+    "smash", "smashed", "smashing",
+    "destroy", "destroyed", "destroying", "destruction",
+    "shatter", "shattering", "shattered",
+    "explode", "exploding", "exploded", "explosion",
+    # Quantity hint
+    "multiple", "several",
+    # Multi-state directive
+    "states", "poses",
+})
+
+# Multi-word phrases that strongly indicate multi-frame intent. The
+# detector joins adjacent goal tokens (raw + hyphenated) and tests for
+# membership; this catches "walk stride", "walk cycle", "3 frames",
+# "animation states", "animated series" etc.
+_MULTI_FRAME_PHRASES = frozenset({
+    "walkcycle", "walkstride", "walkframes",
+    "runcycle", "runframes",
+    "idlebob", "idleframes",
+    "attackframes", "deathframes", "hurtframes",
+    "animationstates", "animationsequence", "animationseries",
+    "animationframes", "animationsequences", "framespattern",
+    "animatedseries", "animatedsequence",
+    "spriteset", "spritesheet",
+    "movecycle", "actioncycle",
+})
+
+# Numeric-prefixed phrase patterns: "3 frames each", "two sprites per",
+# "N animations for each". A compiled regex covers these without
+# enumerating every numeral; one pattern per phrasing.
+import re as _re
+_MULTI_FRAME_REGEXES = (
+    _re.compile(
+        r"\b(?:two|three|four|five|six|2|3|4|5|6|\d+)\s+"
+        r"(?:frames?|sprites?|images?|poses?|states?|animations?|variants?)"
+        r"(?:\s+(?:for|per|each)\b|\s+of\s+each\b)?",
+        _re.I,
+    ),
+    _re.compile(
+        r"\b(?:walk|run|jump|attack|hurt|death|idle|swing|punch|kick|smash|destroy|shatter|explode)"
+        r"[-\s]?(?:cycle|cycles|frame|frames|sequence|stride|strides|animation|animations)\b",
+        _re.I,
+    ),
+    _re.compile(
+        r"\banim(?:ation|ate|ated)\s+(?:states?|frames?|series|sequence|cycle)\b",
+        _re.I,
+    ),
+    _re.compile(
+        r"\bidle\s+(?:and|\+|,)\s*(?:walk|run|attack|hurt|death)\b",
+        _re.I,
+    ),
+    _re.compile(
+        r"\bmulti(?:ple|-)?\s*(?:frames?|sprites?|poses?|states?|animations?)\b",
+        _re.I,
+    ),
+)
+
+
+def _detect_multi_frame_intent(goal: str) -> list[str]:
+    """Return matched multi-frame keywords/phrases. Empty list means no
+    multi-frame intent — the agent's default "one sprite per entity"
+    behavior is appropriate.
+
+    Examples of goals that match (general — no genre logic):
+      - "make each piece animated walking and attacking"
+      - "3 sprites for each character with idle and walk states"
+      - "smooth interpolated piece movement with idle bob and walk
+         stride animations"
+      - "spritesheet of 4 frames per enemy"
+
+    Examples that DO NOT match:
+      - "shoot space invaders with a single ship sprite"
+      - "minimax chess engine, no animations needed"
+
+    Detection layers (any one triggers a match):
+      1. Single-token presence from `_MULTI_FRAME_KEYWORDS`
+      2. Adjacent-token joined phrase from `_MULTI_FRAME_PHRASES`
+         (handles "walk stride" / "walk cycle" / "animation states")
+      3. Numeric-prefixed regex from `_MULTI_FRAME_REGEXES`
+         ("3 frames per", "two sprites each", "walk-cycle frames")
+    """
+    if not goal:
+        return []
+    import re
+    words = re.findall(r"[a-zA-Z]+", goal.lower())
+    matched: list[str] = []
+    seen: set[str] = set()
+    # Layer 1: single tokens.
+    for w in words:
+        if w in _MULTI_FRAME_KEYWORDS and w not in seen:
+            seen.add(w)
+            matched.append(w)
+    # Layer 2: adjacent-token joins (and hyphenated variants).
+    for i in range(len(words) - 1):
+        joined = words[i] + words[i + 1]
+        if joined in _MULTI_FRAME_PHRASES and joined not in seen:
+            seen.add(joined)
+            matched.append(joined)
+    # Layer 3: numeric / phrase patterns.
+    for rx in _MULTI_FRAME_REGEXES:
+        m = rx.search(goal)
+        if m:
+            phrase = m.group(0).lower().strip()
+            if phrase not in seen:
+                seen.add(phrase)
+                matched.append(phrase)
+    return matched
 
 
 def plan_instruction(*, reference_block: str = "", goal: str = "") -> str:
@@ -862,7 +1045,123 @@ def plan_instruction(*, reference_block: str = "", goal: str = "") -> str:
             "tell you if it is).\n"
         )
 
-    body = PLAN_INSTRUCTION + art_nudge + threed_nudge + audio_nudge
+    # Phase 4: scope-pacing nudge for art-heavy + logic-heavy goals.
+    # Only fires when BOTH art (or 3D) AND heavy-logic keywords match —
+    # so a pure-arcade goal (lots of art, simple rules) and a pure-logic
+    # goal (chess engine, no art) both stay unaffected. The nudge is
+    # PROMPT ONLY and genre-free; it tells the model to ship the core
+    # skeleton first and defer extra walk-cycle / VFX frames to a later
+    # mid-session <assets> turn.
+    #
+    # Phase 0.9 — when the user explicitly asks for multi-frame /
+    # animation rosters in the goal (`_detect_multi_frame_intent`),
+    # the "idle only" rule INVERTS: the architect MUST emit base +
+    # frame chains via `from_image` this turn, because deferring an
+    # explicit user request is the listening bug Phase 0 fixes.
+    heavy_logic_keywords = _detect_heavy_logic_intent(goal)
+    multi_frame_keywords = _detect_multi_frame_intent(goal)
+    scope_nudge = ""
+    if heavy_logic_keywords and (art_keywords or threed_keywords):
+        logic_kws = ", ".join(repr(k) for k in heavy_logic_keywords)
+        if multi_frame_keywords:
+            mf_kws = ", ".join(repr(k) for k in multi_frame_keywords)
+            scope_nudge = (
+                "\n\nSCOPE-PACING NUDGE (multi-frame override) — your "
+                "goal combines visual content (<assets>) with heavy "
+                f"game-rule / AI logic (matched: {logic_kws}) AND "
+                "explicitly asks for multi-frame / animation rosters "
+                f"(matched: {mf_kws}).\n"
+                "Strategy for THIS turn:\n"
+                "  - First, read your own goal text and list the visual "
+                "entity classes (each character/piece/enemy/etc. the "
+                "player will see distinctly) AND the action states the "
+                "user named (e.g. \"walk\", \"smash\", \"die\", "
+                "\"attack\", \"jump\"). The matched keywords above hint "
+                "at this — extend with the exact action verbs from the "
+                "goal text. If the goal said \"walk to new position and "
+                "smash the captured piece\", the state set is at least "
+                "`idle` + `walk` + `smash`.\n"
+                "  - Emit <assets> covering ENTITY × STATE: one entry "
+                "per (entity, state) combination. The base (idle) frame "
+                "is txt2img; every other state for that entity uses "
+                "`\"from_image\": \"<entity>_idle\"` + "
+                "`\"strength\": 0.35-0.55` so SD-Turbo img2img chains it "
+                "from the parent (preserves silhouette + palette, ~2 s "
+                "per chained frame on the warm pipeline). Example shape "
+                "for a 3-state roster across many entities:\n"
+                "      <assets>[\n"
+                "        {\"name\":\"<entity1>_idle\", \"prompt\":\"...\"},\n"
+                "        {\"name\":\"<entity1>_walk\", \"prompt\":\"...\","
+                " \"from_image\":\"<entity1>_idle\", \"strength\":0.40},\n"
+                "        {\"name\":\"<entity1>_smash\", \"prompt\":\"...\","
+                " \"from_image\":\"<entity1>_idle\", \"strength\":0.45},\n"
+                "        ...repeat per entity...\n"
+                "      ]</assets>\n"
+                "  - Roster-size sanity: N entities × M states ≈ N·M "
+                "entries. Count both. The per-turn asset cap is RAISED "
+                "for this session (the agent raised it because of the "
+                "explicit multi-frame ask). If even the raised cap is "
+                "exceeded, split the LAST batch into a follow-up "
+                "<assets> turn — do NOT silently shrink the roster the "
+                "user asked for.\n"
+                "  - Don't defer the variants the user explicitly named; "
+                "defer ONLY entities the user did not name (impact VFX, "
+                "ambient props) to a later turn.\n"
+                "  - In the JS loader, key sprites by `entity_state` "
+                "name and advance the active state per entity based on "
+                "game events (selected → walk, captured → smash, "
+                "settled → idle). Plan the FULL game rules + AI in "
+                "<plan>; you'll write them in iter 1.\n"
+                "This guidance is genre-agnostic; it just makes sure "
+                "the user gets the frames they asked for.\n"
+            )
+        else:
+            scope_nudge = (
+                "\n\nSCOPE-PACING NUDGE — your goal combines visual "
+                "content (<assets>) with heavy game-rule / AI logic "
+                f"(matched: {logic_kws}). When both are present, weak "
+                "local LLMs tend to concatenate two drafts in one "
+                "stream because the file gets too long to keep "
+                "coherent in a single completion.\n"
+                "Strategy for THIS turn:\n"
+                "  - Plan a base roster of <assets>: ONE sprite per "
+                "visual entity (idle pose only). DO NOT add walk-cycle "
+                "frames or death/impact VFX to the roster yet.\n"
+                "  - Plan the FULL game rules + AI in <plan>; you'll "
+                "write them in iter 1.\n"
+                "  - The harness accepts mid-session <assets> blocks — "
+                "you can request walk frames / VFX in a LATER turn "
+                "after iter 1 is verified clean. The asset roster is "
+                "per-turn, not per-session.\n"
+                "This is genre-agnostic guidance, not a rule about your "
+                "specific goal — it just protects the iter-1 stream "
+                "from overload.\n"
+            )
+
+    # Phase 0.9 — multi-frame nudge fires INDEPENDENTLY of scope-pacing
+    # so a pure-art goal (no heavy logic) with explicit multi-frame
+    # intent still gets the directive. Without this, "platformer with
+    # walk and attack frames" would have no animation-specific guidance
+    # because the scope-pacing nudge above only fires when both art and
+    # heavy-logic keywords match.
+    multi_frame_nudge = ""
+    if multi_frame_keywords and not scope_nudge:
+        mf_kws = ", ".join(repr(k) for k in multi_frame_keywords)
+        multi_frame_nudge = (
+            "\n\nMULTI-FRAME INTENT DETECTED — your goal mentions "
+            f"{mf_kws}. The user EXPLICITLY wants more than one frame "
+            "per visual entity (walk cycles, idle bobs, attack frames, "
+            "animation states). Plan a base roster of <assets> covering "
+            "BOTH the base frame AND the requested variants per entity, "
+            "chained with `from_image` + `strength` (0.35-0.55) for the "
+            "variants. SD-Turbo img2img is fast (~2 s/frame on a warm "
+            "pipeline) so a base + 2-3 frame chain per entity is cheap. "
+            "Do NOT silently emit \"one sprite per entity\" — that loses "
+            "what the user explicitly asked for. Genre-agnostic guidance: "
+            "describes rendering shape, not subject matter.\n"
+        )
+
+    body = PLAN_INSTRUCTION + art_nudge + threed_nudge + audio_nudge + scope_nudge + multi_frame_nudge
 
     if not reference_block:
         return body
@@ -1231,6 +1530,23 @@ def continuation_instruction(current_file: str) -> str:
         "a full <html_file> because the feedback changes the game's "
         "runtime shape, also emit a fresh <probes>...</probes> block "
         "for the new behavior; old probes may no longer apply.\n\n"
+        # Surface the diffuser path on every post-ship turn. Without
+        # this reminder the model defaults to a code-only mental model
+        # and substitutes inline SVG / ctx primitives / AudioContext
+        # beeps for what should be generated media (chess trace 2026-
+        # 05-21 is the motivating case — model drew SVG instead of
+        # asking the diffuser for sprites). Genre-free; works for any
+        # goal, any subject matter.
+        "If the feedback asks for ART / sprites / new visual entities "
+        "(any genre, any subject), emit a fresh <assets> block in "
+        "this turn — the harness runs Z-Image-Turbo and writes PNGs "
+        "next to the HTML — plus ONE small <patch> that loads and "
+        "draws them with `new Image()` + `ctx.drawImage`. Same shape "
+        "for AUDIO: emit a <sounds> block + a small <patch> that "
+        "plays `new Audio(path)` on the matching event. Do NOT "
+        "substitute inline SVG, Unicode glyphs, ctx.fillRect, or "
+        "synthesized AudioContext beeps for generated media when "
+        "the user explicitly asked for art or sound.\n\n"
         f"{file_block}"
     )
 

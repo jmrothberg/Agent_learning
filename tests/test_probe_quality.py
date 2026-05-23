@@ -211,6 +211,12 @@ def test_probe_bait_flag_empty_inputs():
 
 
 def _eval_error_report() -> dict:
+    # Non-syntax transient eval error — this kind (TypeError from a
+    # property read against a not-yet-initialised state field) is
+    # exactly the case the 2-strike policy was designed for. It often
+    # clears on the next iter once the game is fully loaded. The
+    # one-strike fast-path for syntax errors (added 2026-05-23) is
+    # tested by `test_syntax_error_probe_quarantined_immediately` below.
     return {
         "ok": False,
         "errors": [],
@@ -225,21 +231,60 @@ def _eval_error_report() -> dict:
         "probes": [
             {
                 "name": "move_right",
-                "expr": "(()=>{const x0=state.player.x;return true;});",
+                "expr": "state.player.x > 0",
                 "ok": False,
-                "err": "SyntaxError: missing ) after argument list",
+                "err": "TypeError: Cannot read properties of undefined (reading 'x')",
+                "kind": "eval_error",
+                "error_class": "type_error",
+            },
+            {"name": "frame_alive", "expr": "state.frame > 1", "ok": True, "err": ""},
+        ],
+        "probe_errors": ["move_right: TypeError: Cannot read properties of undefined (reading 'x')"],
+        "probe_eval_errors": [
+            {
+                "name": "move_right",
+                "expr_preview": "state.player.x > 0",
+                "error_class": "type_error",
+                "err": "TypeError: Cannot read properties of undefined (reading 'x')",
+            },
+        ],
+    }
+
+
+def _syntax_error_report() -> dict:
+    # Unparseable JS expression — the probe will NEVER evaluate
+    # differently on re-run. Quarantine immediately to avoid masking
+    # other harness signals across iters (the 2026-05-23 chess trace
+    # had iters 2 + 3 chasing this same syntax error).
+    return {
+        "ok": False,
+        "errors": [],
+        "warnings": [],
+        "soft_warnings": [
+            "PROBE BROKEN [stress_20_moves_layout_holds]: bad",
+        ],
+        "page_errors": [],
+        "console_errors": [],
+        "canvas": {"blank": False},
+        "input_test": {"ran": True, "any_change": True},
+        "probes": [
+            {
+                "name": "stress_20_moves_layout_holds",
+                "expr": "new Promise(r=>{window.game.reset();let i=0;",  # unterminated
+                "ok": False,
+                "err": "SyntaxError: Unexpected token ')'",
                 "kind": "eval_error",
                 "error_class": "syntax_error",
             },
             {"name": "frame_alive", "expr": "state.frame > 1", "ok": True, "err": ""},
         ],
-        "probe_errors": ["move_right: SyntaxError: missing ) after argument list"],
+        "probe_errors": ["stress_20_moves_layout_holds: SyntaxError: Unexpected token ')'"],
         "probe_eval_errors": [
             {
-                "name": "move_right",
-                "expr_preview": "(()=>{const x0=state.player.x;return true;});",
+                "name": "stress_20_moves_layout_holds",
+                "expr_preview": "new Promise(r=>{window.game.reset();let i=0;",
                 "error_class": "syntax_error",
-                "err": "SyntaxError: missing ) after argument list",
+                "err": "SyntaxError: Unexpected token ')'",
             },
         ],
     }
@@ -283,6 +328,58 @@ def test_probe_eval_error_shape_can_soften_before_quarantine(tmp_path: Path):
     assert report["ok"] is True
     assert report["probes"][0]["ok"] is True
     assert "downgraded" in report["probes"][0]
+
+
+def test_syntax_error_probe_quarantined_immediately(tmp_path: Path):
+    """One-strike fast-path: a probe with a JavaScript SyntaxError
+    cannot evaluate differently on a re-run (the expression itself is
+    unparseable). Quarantine on the FIRST occurrence rather than the
+    second so the broken probe doesn't mask other harness signals.
+
+    The 2026-05-23 chess trace had iters 2 and 3 both reporting
+    `PROBE BROKEN [stress_20_moves_layout_holds]: SyntaxError:
+    Unexpected token ')'`; the real bug (assets loaded but never
+    drawn) was hidden behind the syntax error for two iters. With
+    the fast-path, iter 1 already quarantines the broken probe
+    and iter 2 sees the real signal.
+    """
+    a = _make_agent(tmp_path)
+    a._probes = list(_syntax_error_report()["probes"])
+    report = _syntax_error_report()
+    a._handle_probe_eval_errors(report, iteration=1)
+    # Quarantined on iter 1 — no second iter required.
+    assert all(
+        p["name"] != "stress_20_moves_layout_holds"
+        for p in report["probes"]
+    )
+    assert all(
+        p["name"] != "stress_20_moves_layout_holds"
+        for p in a._probes
+    )
+    # Notice carries the fast-path-specific wording so the model
+    # knows it needs to re-emit the probe with valid JS.
+    assert a._pending_probe_quarantine_notices
+    notice = a._pending_probe_quarantine_notices[0]
+    assert "QUARANTINED IMMEDIATELY" in notice
+    assert "syntax error" in notice.lower()
+
+
+def test_non_syntax_first_eval_error_stays_two_strike(tmp_path: Path):
+    """The one-strike fast-path is SCOPED to syntax errors. A runtime
+    TypeError (state.player.x against an undefined state — common
+    transient on iter 1 before the game finishes initialising) still
+    gets the tolerant two-strike treatment so the harness doesn't
+    over-quarantine probes that would clear on their own."""
+    a = _make_agent(tmp_path)
+    a._probes = list(_eval_error_report()["probes"])
+    report = _eval_error_report()
+    a._handle_probe_eval_errors(report, iteration=1)
+    # NOT quarantined on iter 1 — the probe stays in the active list.
+    assert any(p["name"] == "move_right" for p in report["probes"])
+    assert any(p["name"] == "move_right" for p in a._probes)
+    # Streak counter ticks but no notice yet.
+    assert a._probe_eval_error_streak.get("move_right") == 1
+    assert not a._pending_probe_quarantine_notices
 
 
 def test_signature_focus_identifiers_filters_browser_internals():

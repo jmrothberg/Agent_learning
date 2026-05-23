@@ -143,6 +143,15 @@ CANVAS_BOARD_TURN_SKELETON_SIDECAR = '{"goal": "turn based board click cell sele
 # playbook bullet pointed in this direction but provided no starter shape.
 CANVAS_DOM_SKELETON_NAME = "canvas_dom_basic.html"
 CANVAS_DOM_SKELETON_SIDECAR = '{"goal": "dom html buttons table calculator todo word puzzle text form input click no canvas tic tac toe simple"}'
+
+# Opening-book memory: root `memory/` stores trusted, precomputed recipes;
+# live `games/game-memory/` stores learned candidates that must earn trust.
+PLAYTESTS_FILENAME = "playtests.jsonl"
+ASSET_AUDITS_FILENAME = "asset_audits.jsonl"
+ANIMATION_AUDITS_FILENAME = "animation_audits.jsonl"
+IMPLEMENTATION_OUTLINES_FILENAME = "implementation_outlines.jsonl"
+VERIFIED_FINDINGS_FILENAME = "verified_findings.jsonl"
+
 DEFAULT_SKELETON = """<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -2384,6 +2393,452 @@ class MistakeHit:
     score: float
 
 
+@dataclass
+class OpeningBookItem:
+    """Trusted root or lower-confidence live recipe/outline memory."""
+
+    id: str
+    kind: str
+    content: str
+    tags: list[str] = field(default_factory=list)
+    source_tier: str = "root"  # root | live
+    verified: bool = False
+    helpful: int = 0
+    harmful: int = 0
+    recipe: dict[str, Any] = field(default_factory=dict)
+    trace_ids: list[str] = field(default_factory=list)
+    pass_count: int = 0
+    false_positive_count: int = 0
+    last_verified_at: str = ""
+
+    def score(self) -> int:
+        return int(self.helpful) - int(self.harmful)
+
+    def evidence_score(self) -> int:
+        return self.score() + int(self.pass_count) - int(self.false_positive_count)
+
+    def to_record(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "kind": self.kind,
+            "content": self.content,
+            "tags": list(self.tags),
+            "source_tier": self.source_tier,
+            "verified": bool(self.verified),
+            "helpful": int(self.helpful),
+            "harmful": int(self.harmful),
+            "recipe": dict(self.recipe or {}),
+            "trace_ids": list(self.trace_ids),
+            "pass_count": int(self.pass_count),
+            "false_positive_count": int(self.false_positive_count),
+            "last_verified_at": self.last_verified_at,
+        }
+
+    @classmethod
+    def from_record(cls, rec: dict[str, Any], *, source_tier: str) -> "OpeningBookItem":
+        return cls(
+            id=str(rec.get("id") or "").strip(),
+            kind=str(rec.get("kind") or "").strip(),
+            content=str(rec.get("content") or "").strip(),
+            tags=[str(t).strip() for t in (rec.get("tags") or []) if str(t).strip()],
+            source_tier=str(rec.get("source_tier") or source_tier),
+            verified=bool(rec.get("verified", source_tier == "root")),
+            helpful=int(rec.get("helpful") or 0),
+            harmful=int(rec.get("harmful") or 0),
+            recipe=dict(rec.get("recipe") or {}),
+            trace_ids=[str(t) for t in (rec.get("trace_ids") or [])],
+            pass_count=int(rec.get("pass_count") or 0),
+            false_positive_count=int(rec.get("false_positive_count") or 0),
+            last_verified_at=str(rec.get("last_verified_at") or ""),
+        )
+
+
+@dataclass
+class PlaytestRecipe(OpeningBookItem):
+    pass
+
+
+@dataclass
+class AssetAuditRecipe(OpeningBookItem):
+    pass
+
+
+@dataclass
+class AnimationAuditRecipe(OpeningBookItem):
+    pass
+
+
+@dataclass
+class ImplementationOutline(OpeningBookItem):
+    pass
+
+
+@dataclass
+class OpeningBookHit:
+    item: OpeningBookItem
+    score: float
+
+
+def _opening_book_seed_items() -> dict[str, list[OpeningBookItem]]:
+    """Small universal root opening book. No generated artifacts or traces."""
+    return {
+        PLAYTESTS_FILENAME: [
+            PlaytestRecipe(
+                id="controllable-movement-delta",
+                kind="playtest",
+                content=(
+                    "For controllable canvas games, hold movement keys and assert "
+                    "that an exposed player position field or canvas pixels change "
+                    "because of input, not ambient animation."
+                ),
+                tags=["input", "movement", "controls", "player", "canvas"],
+                verified=True,
+                helpful=1,
+                pass_count=1,
+                recipe={
+                    "type": "input_delta",
+                    "keys": ["ArrowRight", "ArrowLeft", "KeyD", "KeyA"],
+                    "duration_ms": 250,
+                    "expect": "state_or_canvas_delta",
+                },
+            ),
+            PlaytestRecipe(
+                id="turn-based-select-commit",
+                kind="playtest",
+                content=(
+                    "For board or card games, test that selecting a legal object "
+                    "creates visible selection state, then committing a legal move "
+                    "changes board/current-player state."
+                ),
+                tags=["board", "turn-based", "click", "select", "move", "commit"],
+                verified=True,
+                helpful=1,
+                pass_count=1,
+                recipe={
+                    "type": "state_delta",
+                    "actions": ["click_select", "click_commit"],
+                    "expect": "selection_then_board_delta",
+                },
+            ),
+            PlaytestRecipe(
+                id="projectile-action-spawns",
+                kind="playtest",
+                content=(
+                    "For action/shooter games, press the primary action key and "
+                    "assert that projectile/action state or visible pixels change."
+                ),
+                tags=["action", "projectile", "fire", "space", "attack", "spawn"],
+                verified=True,
+                helpful=1,
+                pass_count=1,
+                recipe={
+                    "type": "input_delta",
+                    "keys": ["Space", "KeyX", "Enter"],
+                    "duration_ms": 150,
+                    "expect": "entity_count_or_canvas_delta",
+                },
+            ),
+            PlaytestRecipe(
+                id="restart-resets-state",
+                kind="playtest",
+                content=(
+                    "For every game, trigger restart and assert score, timers, "
+                    "game-over flags, pending effects, and active entities return "
+                    "to a clean initial state."
+                ),
+                tags=["restart", "reset", "state", "timer", "game-over"],
+                verified=True,
+                helpful=1,
+                pass_count=1,
+                recipe={
+                    "type": "restart_reset",
+                    "selectors": ["#restart", "#restartBtn", "button"],
+                    "expect": "state_returns_initial",
+                },
+            ),
+            # Phase 1.5 — autonomous-mode recipes. Driven by the agent's
+            # _run_autonomous_playtest hook, NOT the standard harness
+            # check pass. Each recipe carries a `type: "behavior_playtest"`
+            # marker so the existing opening-book pipeline ignores it
+            # (it only handles the legacy `input_delta` / `state_delta`
+            # / `restart_reset` types). Every recipe is GENRE-FREE —
+            # applicability gates filter on observable structure (state
+            # exposure, canvas presence) and never on subject matter.
+            PlaytestRecipe(
+                id="entity-progress-over-time",
+                kind="playtest",
+                content=(
+                    "For any game with self-driven motion (animations, AI, "
+                    "projectiles, timers), with no user input, the game "
+                    "state or canvas pixels should advance over a 10-second "
+                    "observation window. If nothing changes the game is "
+                    "stuck and the user can't tell because the page didn't "
+                    "crash. Catches the 'agent shipped a frozen game' bug."
+                ),
+                tags=["progress", "motion", "stuck", "frozen", "ai", "timer"],
+                verified=True,
+                helpful=1,
+                pass_count=1,
+                recipe={
+                    "type": "behavior_playtest",
+                    "applies_when": (
+                        "(()=>{const c=document.querySelector('canvas');"
+                        "return !!c && c.width>0 && c.height>0;})()"
+                    ),
+                    "input_script": [{"type": "wait", "ms": 10000}],
+                    "sample_times_s": [0.0, 2.0, 5.0, 9.5],
+                    "check_kind": "any_progress",
+                    "finding_label": (
+                        "After 10 seconds with no user input, neither the "
+                        "canvas pixels nor any exposed game-state field "
+                        "changed. The game appears frozen — likely no RAF "
+                        "loop, no AI tick, or a stuck game-state."
+                    ),
+                },
+            ),
+            PlaytestRecipe(
+                id="input-axis-matches-facing",
+                kind="playtest",
+                content=(
+                    "For controllable games that expose a player position "
+                    "AND a facing/angle, holding the 'forward' control "
+                    "should produce a position delta whose angle matches "
+                    "the rendered facing (±15°). Catches the bug where "
+                    "the forward key is mapped to a world axis instead of "
+                    "the facing-vector projection (cos/sin of facing)."
+                ),
+                tags=["controls", "facing", "direction", "movement", "forward"],
+                verified=True,
+                helpful=1,
+                pass_count=1,
+                recipe={
+                    "type": "behavior_playtest",
+                    "applies_when": (
+                        "(()=>{const s=window.state||window.gameState;"
+                        "if(!s)return false;"
+                        "const p=s.player||s.ship||s.hero||s;"
+                        "const hasPos=typeof p.x==='number'&&typeof p.y==='number';"
+                        "const hasFace=typeof p.facing==='number'||"
+                        "typeof p.angle==='number'||typeof p.heading==='number'||"
+                        "typeof p.rot==='number'||typeof p.rotation==='number';"
+                        "return hasPos&&hasFace;})()"
+                    ),
+                    "input_script": [
+                        {"type": "wait", "ms": 200},
+                        {"type": "keydown", "key": "ArrowUp", "duration_ms": 1000},
+                    ],
+                    "sample_times_s": [0.05, 1.30],
+                    "check_kind": "facing_matches_movement",
+                    "finding_label": (
+                        "Held the forward control for 1 s. The position "
+                        "moved, but in a direction that doesn't match the "
+                        "facing/angle exposed on the player. The forward "
+                        "control is likely mapped to a fixed world axis "
+                        "(world-X or world-Y) instead of cos/sin of the "
+                        "player's facing. Project velocity through the "
+                        "facing in the movement update."
+                    ),
+                },
+            ),
+            PlaytestRecipe(
+                id="held-key-stays-in-bounds",
+                kind="playtest",
+                content=(
+                    "For controllable games that expose a player position "
+                    "and a canvas, holding any directional control for "
+                    "3 seconds should NOT carry the player outside the "
+                    "canvas viewport. Out-of-bounds means the boundary or "
+                    "wall logic is missing — the entity flies off-map. "
+                    "Generic version of the 'ghosts walk through walls' "
+                    "shape."
+                ),
+                tags=["bounds", "wall", "collision", "boundary", "off-screen"],
+                verified=True,
+                helpful=1,
+                pass_count=1,
+                recipe={
+                    "type": "behavior_playtest",
+                    "applies_when": (
+                        "(()=>{const c=document.querySelector('canvas');"
+                        "if(!c||!c.width||!c.height)return false;"
+                        "const s=window.state||window.gameState;if(!s)return false;"
+                        "const p=s.player||s.ship||s.hero||s;"
+                        "return typeof p.x==='number'&&typeof p.y==='number';})()"
+                    ),
+                    "input_script": [
+                        {"type": "wait", "ms": 200},
+                        {"type": "keydown", "key": "ArrowRight", "duration_ms": 3000},
+                    ],
+                    "sample_times_s": [0.05, 3.20],
+                    "check_kind": "stays_in_canvas",
+                    "finding_label": (
+                        "Held ArrowRight for 3 s. The player position "
+                        "left the canvas bounds entirely. Either there's "
+                        "no boundary / wall logic in the movement update, "
+                        "or the entity clamp is missing. Add a clamp or "
+                        "wall-collision test in the update step."
+                    ),
+                },
+            ),
+        ],
+        ASSET_AUDITS_FILENAME: [
+            AssetAuditRecipe(
+                id="generated-assets-loaded-and-drawn",
+                kind="asset_audit",
+                content=(
+                    "When assets are generated, audit that each requested asset "
+                    "appears in a loader table, decodes into an Image, and is "
+                    "eventually used by drawImage rather than replaced by a "
+                    "procedural placeholder."
+                ),
+                tags=["assets", "sprites", "drawImage", "loader", "generated"],
+                verified=True,
+                helpful=1,
+                pass_count=1,
+                recipe={"type": "asset_usage", "expect": "loader_and_drawimage"},
+            ),
+            AssetAuditRecipe(
+                id="sprite-alpha-and-distinctness",
+                kind="asset_audit",
+                content=(
+                    "Audit generated sprites for sane alpha coverage and visual "
+                    "distinctness between entity classes; flag blank/opaque cards "
+                    "and accidental same-looking role sprites."
+                ),
+                tags=["assets", "alpha", "distinct", "sprites", "visual"],
+                verified=True,
+                helpful=1,
+                pass_count=1,
+                recipe={"type": "asset_stats", "expect": "alpha_and_distinct"},
+            ),
+        ],
+        ANIMATION_AUDITS_FILENAME: [
+            AnimationAuditRecipe(
+                id="movement-has-midframe",
+                kind="animation_audit",
+                content=(
+                    "For promised movement animation, capture before/mid/after "
+                    "frames and verify the object has a real intermediate frame "
+                    "instead of teleporting from source to destination."
+                ),
+                tags=["animation", "movement", "midframe", "lerp", "teleport"],
+                verified=True,
+                helpful=1,
+                pass_count=1,
+                recipe={"type": "before_mid_after", "expect": "intermediate_delta"},
+            ),
+            AnimationAuditRecipe(
+                id="hit-effect-visible-window",
+                kind="animation_audit",
+                content=(
+                    "For capture/hit/explosion effects, verify the effect appears "
+                    "during the short event window and disappears afterward."
+                ),
+                tags=["animation", "effect", "hit", "capture", "particles"],
+                verified=True,
+                helpful=1,
+                pass_count=1,
+                recipe={"type": "event_window", "expect": "effect_transient"},
+            ),
+        ],
+        IMPLEMENTATION_OUTLINES_FILENAME: [
+            ImplementationOutline(
+                id="outline-controllable-canvas-game",
+                kind="implementation_outline",
+                content=(
+                    "For a controllable canvas game: define state first, expose it "
+                    "on window, wire input to a single keys/pressed object, update "
+                    "movement with capped dt, draw layers in order, then add restart "
+                    "and game-over. Keep input/update/draw reading the same state."
+                ),
+                tags=["canvas", "input", "movement", "state", "arcade"],
+                verified=True,
+                helpful=1,
+                pass_count=1,
+            ),
+            ImplementationOutline(
+                id="outline-turn-based-board",
+                kind="implementation_outline",
+                content=(
+                    "For a turn-based board game: store board[r][c], render row/col "
+                    "only at draw boundaries, implement select then legal-target "
+                    "commit, block input while animating/AI thinking, and expose a "
+                    "small game API for probes."
+                ),
+                tags=["board", "turn-based", "grid", "select", "legal", "ai"],
+                verified=True,
+                helpful=1,
+                pass_count=1,
+            ),
+            ImplementationOutline(
+                id="outline-asset-backed-animation",
+                kind="implementation_outline",
+                content=(
+                    "For an asset-backed animated game: request base sprites early, "
+                    "load/decode them before first draw, use drawImage for generated "
+                    "entities, track animation timers in state, and provide procedural "
+                    "fallbacks only when asset generation is unavailable."
+                ),
+                tags=["assets", "animation", "sprites", "drawImage", "loader"],
+                verified=True,
+                helpful=1,
+                pass_count=1,
+            ),
+        ],
+        VERIFIED_FINDINGS_FILENAME: [],
+    }
+
+
+def render_opening_book_block(
+    outline: OpeningBookHit | None,
+    playtests: list[OpeningBookHit],
+    asset_audits: list[OpeningBookHit],
+    animation_audits: list[OpeningBookHit],
+    *,
+    char_budget: int = 2600,
+) -> str:
+    """Compact trusted/lower-confidence recipes for prompts."""
+    sections: list[str] = []
+    if outline:
+        item = outline.item
+        sections.append(
+            f"OUTLINE [{item.id}] tier={item.source_tier} score={outline.score:.3f}\n"
+            f"{item.content}"
+        )
+
+    def _line(label: str, hits: list[OpeningBookHit]) -> str:
+        rows = []
+        for h in hits:
+            item = h.item
+            rows.append(
+                f"- {label} [{item.id}] tier={item.source_tier} "
+                f"score={h.score:.3f}: {item.content}"
+            )
+        return "\n".join(rows)
+
+    for label, hits in (
+        ("PLAYTEST", playtests),
+        ("ASSET_AUDIT", asset_audits),
+        ("ANIMATION_AUDIT", animation_audits),
+    ):
+        if hits:
+            sections.append(_line(label, hits))
+    if not sections:
+        return ""
+    body = "\n\n".join(sections)
+    if len(body) > char_budget:
+        body = body[:char_budget].rstrip() + "\n[opening book truncated by budget]"
+    return (
+        "<opening_book>\n"
+        "Root `memory/` entries are trusted opening-book recipes. Live "
+        "`games/game-memory/` entries are lower-confidence and should only be "
+        "used when they directly match the goal. Do not copy traces; use these "
+        "as compact implementation/test guidance.\n\n"
+        f"{body}\n"
+        "</opening_book>"
+    )
+
+
 class GameMemory:
     """Filesystem-backed memory for the agent.
 
@@ -2412,6 +2867,20 @@ class GameMemory:
         self.goals_dir = self.short_term_root / "goals"
         self.base_mistakes_path = self.base_root / "mistakes.jsonl"
         self.live_mistakes_path = self.live_root / "mistakes.jsonl"
+        self.base_opening_book_paths = {
+            PLAYTESTS_FILENAME: self.base_root / PLAYTESTS_FILENAME,
+            ASSET_AUDITS_FILENAME: self.base_root / ASSET_AUDITS_FILENAME,
+            ANIMATION_AUDITS_FILENAME: self.base_root / ANIMATION_AUDITS_FILENAME,
+            IMPLEMENTATION_OUTLINES_FILENAME: self.base_root / IMPLEMENTATION_OUTLINES_FILENAME,
+            VERIFIED_FINDINGS_FILENAME: self.base_root / VERIFIED_FINDINGS_FILENAME,
+        }
+        self.live_opening_book_paths = {
+            PLAYTESTS_FILENAME: self.live_root / PLAYTESTS_FILENAME,
+            ASSET_AUDITS_FILENAME: self.live_root / ASSET_AUDITS_FILENAME,
+            ANIMATION_AUDITS_FILENAME: self.live_root / ANIMATION_AUDITS_FILENAME,
+            IMPLEMENTATION_OUTLINES_FILENAME: self.live_root / IMPLEMENTATION_OUTLINES_FILENAME,
+            VERIFIED_FINDINGS_FILENAME: self.live_root / VERIFIED_FINDINGS_FILENAME,
+        }
 
         # Compatibility properties for legacy accesses
         self.skeletons_dir = self.live_skeletons_dir
@@ -2461,10 +2930,178 @@ class GameMemory:
                     sidecar_file = html_file.with_suffix(".json")
                     if not sidecar_file.exists():
                         sidecar_file.write_text(sidecar, encoding="utf-8")
+            self._ensure_opening_book_seed_files()
         except Exception:
             # If memory is broken (read-only fs etc) the agent should still
             # run — retrieval just returns empty results.
             pass
+
+    def _ensure_opening_book_seed_files(self) -> None:
+        seeds = _opening_book_seed_items()
+        for filename, items in seeds.items():
+            path = self.base_opening_book_paths[filename]
+            if path.exists():
+                continue
+            with path.open("w", encoding="utf-8") as f:
+                for item in items:
+                    rec = item.to_record()
+                    rec["source_tier"] = "root"
+                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+    # --- opening-book retrieval -------------------------------------------
+
+    def _opening_book_path_pair(self, filename: str) -> tuple[Path, Path]:
+        return self.base_opening_book_paths[filename], self.live_opening_book_paths[filename]
+
+    def _load_opening_book_file(
+        self,
+        path: Path,
+        *,
+        source_tier: str,
+        cls: type[OpeningBookItem] = OpeningBookItem,
+    ) -> list[OpeningBookItem]:
+        if not path.exists():
+            return []
+        out: list[OpeningBookItem] = []
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                        item = cls.from_record(rec, source_tier=source_tier)
+                    except Exception:
+                        continue
+                    if item.id and item.content:
+                        out.append(item)
+        except Exception:
+            return []
+        return out
+
+    def _load_opening_book(
+        self,
+        filename: str,
+        *,
+        cls: type[OpeningBookItem] = OpeningBookItem,
+    ) -> list[OpeningBookItem]:
+        self.ensure()
+        base_path, live_path = self._opening_book_path_pair(filename)
+        same_path = False
+        try:
+            same_path = base_path.resolve() == live_path.resolve()
+        except Exception:
+            same_path = str(base_path) == str(live_path)
+        merged: dict[str, OpeningBookItem] = {}
+        ordered: list[str] = []
+        for item in self._load_opening_book_file(base_path, source_tier="root", cls=cls):
+            if same_path and item.source_tier == "live":
+                continue
+            merged[item.id] = item
+            ordered.append(item.id)
+        live_items = [] if same_path else self._load_opening_book_file(
+            live_path, source_tier="live", cls=cls,
+        )
+        for item in live_items:
+            if item.id not in merged:
+                ordered.append(item.id)
+            else:
+                # Keep root as the trusted opening book; live items with the
+                # same id must earn promotion rather than shadowing root.
+                item.id = f"live-{item.id}"
+                ordered.append(item.id)
+            merged[item.id] = item
+        return [merged[i] for i in ordered if i in merged]
+
+    @staticmethod
+    def _opening_book_similarity(item: OpeningBookItem, query_tokens: list[str]) -> float:
+        toks = _tokenize(" ".join([item.id, item.kind, item.content, " ".join(item.tags)]))
+        return _score_similarity(query_tokens, toks)
+
+    def _retrieve_opening_book(
+        self,
+        filename: str,
+        *,
+        goal: str,
+        modality: str | list[str] | None = None,
+        k: int = 3,
+        cls: type[OpeningBookItem] = OpeningBookItem,
+    ) -> list[OpeningBookHit]:
+        mod_text = " ".join(modality) if isinstance(modality, list) else (modality or "")
+        q = _tokenize(goal) + _tokenize(mod_text)
+        if not q:
+            return []
+        hits: list[OpeningBookHit] = []
+        for item in self._load_opening_book(filename, cls=cls):
+            sim = self._opening_book_similarity(item, q)
+            if sim <= 0:
+                continue
+            if item.source_tier == "live":
+                if sim < 0.08:
+                    continue
+                if not item.verified or item.evidence_score() <= 0:
+                    continue
+            quality = 1.0 + 0.10 * _tanh(item.evidence_score() / 5.0)
+            tier_bonus = 0.02 if item.source_tier == "root" else 0.0
+            hits.append(OpeningBookHit(item=item, score=sim * quality + tier_bonus))
+        hits.sort(key=lambda h: (h.score, 1 if h.item.source_tier == "root" else 0), reverse=True)
+        return hits[:k]
+
+    def load_playtests(self) -> list[OpeningBookItem]:
+        return self._load_opening_book(PLAYTESTS_FILENAME, cls=PlaytestRecipe)
+
+    def retrieve_playtests(
+        self, goal: str, modality: str | list[str] | None = None, k: int = 3
+    ) -> list[OpeningBookHit]:
+        return self._retrieve_opening_book(
+            PLAYTESTS_FILENAME, goal=goal, modality=modality, k=k, cls=PlaytestRecipe,
+        )
+
+    def load_asset_audits(self) -> list[OpeningBookItem]:
+        return self._load_opening_book(ASSET_AUDITS_FILENAME, cls=AssetAuditRecipe)
+
+    def retrieve_asset_audits(
+        self, goal: str, modality: str | list[str] | None = None, k: int = 2
+    ) -> list[OpeningBookHit]:
+        return self._retrieve_opening_book(
+            ASSET_AUDITS_FILENAME, goal=goal, modality=modality, k=k, cls=AssetAuditRecipe,
+        )
+
+    def load_animation_audits(self) -> list[OpeningBookItem]:
+        return self._load_opening_book(ANIMATION_AUDITS_FILENAME, cls=AnimationAuditRecipe)
+
+    def retrieve_animation_audits(
+        self, goal: str, modality: str | list[str] | None = None, k: int = 2
+    ) -> list[OpeningBookHit]:
+        return self._retrieve_opening_book(
+            ANIMATION_AUDITS_FILENAME, goal=goal, modality=modality, k=k, cls=AnimationAuditRecipe,
+        )
+
+    def retrieve_implementation_outline(
+        self, goal: str, modality: str | list[str] | None = None
+    ) -> OpeningBookHit | None:
+        hits = self._retrieve_opening_book(
+            IMPLEMENTATION_OUTLINES_FILENAME,
+            goal=goal,
+            modality=modality,
+            k=1,
+            cls=ImplementationOutline,
+        )
+        return hits[0] if hits else None
+
+    def append_live_opening_book_item(self, filename: str, item: OpeningBookItem) -> bool:
+        """Append a verified candidate to live memory only."""
+        try:
+            self.ensure()
+            path = self.live_opening_book_paths[filename]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            item.source_tier = "live"
+            with path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(item.to_record(), ensure_ascii=False) + "\n")
+            return True
+        except Exception:
+            return False
 
     # --- skeleton retrieval ------------------------------------------------
 
@@ -3568,10 +4205,13 @@ class Playbook:
 
         self.base_path = self.base_root / PLAYBOOK_FILENAME
         self.live_path = self.live_root / PLAYBOOK_FILENAME
-        
+
+        # Learner / curator / writeback persist to the root playbook (tracked in
+        # git). games/game-memory/playbook.jsonl is optional local overlay on read
+        # only — not committed.
+        self.path = self.base_path
         # Compatibility properties for legacy calls
-        self.path = self.live_path
-        self.root = self.live_root
+        self.root = self.base_root
 
     # --- bootstrap ---------------------------------------------------------
 

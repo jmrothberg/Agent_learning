@@ -17,8 +17,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agent import (  # noqa: E402
+    GameAgent,
+    _baseline_structurally_broken,
     _detect_block_bloat,
     _is_degenerate_baseline,
+    _normalize_extracted_html,
     _truncation_reason,
 )
 from ollama_io import RepetitionDetector  # noqa: E402
@@ -176,7 +179,9 @@ def test_repdetector_adjacent_line_spam_triggers():
     assert fired_at is not None
     assert fired_at <= 4, f"adjacency should fire by line 4, got line {fired_at}"
     assert det.stall_reason == "adjacent_line_spam"
-    assert det.loop_line == "p.onGirder = false;"
+    # Trailing `;` is now a statement delimiter (see
+    # `_STATEMENT_BOUNDARY_RE`), so it's stripped from the captured line.
+    assert det.loop_line == "p.onGirder = false"
 
 
 # ---------------------------------------------------------------------------
@@ -364,6 +369,85 @@ def test_truncation_reports_outermost_first():
     # <body> and <script> unclosed but <html> closed (unusual but possible):
     body_script = "<!DOCTYPE html><html><body><canvas></canvas><script>const x=1;</html>"
     assert _truncation_reason(body_script) == "unclosed <body>"
+
+
+def test_normalize_extracted_html_strips_diagnose_preamble():
+    """Chess trace 20260522_000304 iter 2: wrapper body had diagnose
+    tail + nested <html_file> before the real document."""
+    body = (
+        "was truncated mid-generation at ~6KB because the full chess "
+        "implementation exceeded the output token budget.\n"
+        "</diagnose>\n\n"
+        "<html_file>\n"
+        "<!DOCTYPE html>\n<html><body><canvas id='c'></canvas>"
+        "<script>const x = 1;</script></body></html>\n"
+        "</html_file>"
+    )
+    out = _normalize_extracted_html(body)
+    assert out is not None
+    assert out.lower().startswith("<!doctype")
+    assert "was truncated" not in out
+    assert "</diagnose>" not in out
+
+
+def test_baseline_structurally_broken_detects_leading_prose():
+    html = (
+        "Fixing the board next.\n"
+        "<!DOCTYPE html><html><body><canvas id='c'></canvas>"
+        "<script>const x = 1;</script></body></html>"
+    )
+    assert _baseline_structurally_broken(html) is not None
+    assert _is_degenerate_baseline(html) is True
+
+
+def test_baseline_structurally_broken_detects_concatenated_drafts():
+    """Duplicate top-level decls must mark baseline degenerate so full
+    rewrites are allowed instead of forcing patch-only mode."""
+    html = (
+        "<!DOCTYPE html><html><body><canvas id='c' width='480' height='480'>"
+        "</canvas><script>"
+        "(() => {\n"
+        "  const ctx = document.getElementById('c').getContext('2d');\n"
+        "  const state = { score: 0 };\n"
+        "  const ctx = document.getElementById('c').getContext('2d');\n"
+        "  const state = { score: 0 };\n"
+        "})();\n"
+        "</script></body></html>"
+    )
+    reason = _baseline_structurally_broken(html)
+    assert reason is not None
+    assert "duplicate" in reason.lower()
+    assert _is_degenerate_baseline(html) is True
+
+
+def test_materialize_rejects_structurally_broken_html_file(tmp_path):
+    """Pre-write rejection: do not land concatenated drafts on disk."""
+    import asyncio
+    from unittest.mock import MagicMock
+
+    out = tmp_path / "game.html"
+    a = GameAgent(
+        model="stub:1b",
+        out_path=out,
+        browser=MagicMock(),
+        max_iters=3,
+        memory_root=str(tmp_path / "memory"),
+    )
+    dup_html = (
+        "<!DOCTYPE html><html><body><canvas id='c' width='480' height='480'>"
+        "</canvas><script>"
+        "(() => {\n"
+        "  const a = 1;\n"
+        "  const a = 2;\n"
+        + "  const pad = 'x';\n" * 120
+        + "})();\n"
+        "</script></body></html>"
+    )
+    reply = f"<html_file>\n{dup_html}\n</html_file>"
+    materialized, msg = asyncio.run(a._materialize(reply, dry_run=False))
+    assert materialized is None
+    assert "rejected" in msg.lower()
+    assert "duplicate" in msg.lower()
 
 
 def test_real_game_with_close_tags_is_not_truncated():

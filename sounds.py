@@ -312,6 +312,8 @@ class StableAudioGenerator:
         self.model_path = model_path or _resolve_stable_audio_path()
         self._pipeline: Any = None
         self._device: str | None = None
+        # Physical CUDA index after .to("cuda"); status panel (gpu_status).
+        self._cuda_device_index: int | None = None
         self._sample_rate: int = 44100   # set after pipeline load
         self._last_error: str | None = None
 
@@ -395,6 +397,22 @@ class StableAudioGenerator:
         if torch.cuda.is_available():
             device = "cuda"
             dtype = torch.float16
+            try:
+                import gpu_status as _gs
+                snap = _gs.snapshot_gpus()
+                reuse = None
+                try:
+                    import assets as _assets
+                    reuse = _assets.diffuser_cuda_reuse_index()
+                except Exception:
+                    pass
+                pick = _gs.pick_diffuser_cuda_index(
+                    snap, reuse_cuda_index=reuse,
+                )
+                if pick is not None:
+                    _gs.activate_cuda_device(pick)
+            except Exception:
+                pass
         elif (
             hasattr(torch.backends, "mps")
             and torch.backends.mps.is_available()
@@ -442,6 +460,10 @@ class StableAudioGenerator:
                 pass
             self._pipeline.to(device)
             self._device = device
+            self._cuda_device_index = (
+                int(torch.cuda.current_device())
+                if device == "cuda" else None
+            )
             # Pipeline exposes the model's native sample rate via its
             # vae. Cache it so generate() can hand it to soundfile.
             try:
@@ -460,6 +482,7 @@ class StableAudioGenerator:
             )
             self._pipeline = None
             self._device = None
+            self._cuda_device_index = None
             return False
 
     def generate(self, prompt: str, duration_s: float = 1.0) -> str | None:
@@ -663,6 +686,12 @@ def generate_sounds(
             stat["cache_hit"] = True
             stat["gen_seconds"] = round(time.time() - t0, 3)
             sound_stats.append(stat)
+            # Phase 1C — live publish so the TUI can show
+            # "Sounds: 2/5 · 1.8s avg" while gen is running.
+            try:
+                audio_generator.last_stats = list(sound_stats)  # type: ignore[attr-defined]
+            except Exception:
+                pass
             continue
         # Cross-session library lookup before paying the GPU.
         if library is not None:
@@ -697,6 +726,12 @@ def generate_sounds(
             )
             stat["gen_seconds"] = round(time.time() - t0, 3)
             sound_stats.append(stat)
+            # Phase 1C — live publish so the TUI can show
+            # "Sounds: 2/5 · 1.8s avg" while gen is running.
+            try:
+                audio_generator.last_stats = list(sound_stats)  # type: ignore[attr-defined]
+            except Exception:
+                pass
             continue
         try:
             # Move temp OGG into cache, then link/copy into session dir.
@@ -721,6 +756,11 @@ def generate_sounds(
         finally:
             stat["gen_seconds"] = round(time.time() - t0, 3)
             sound_stats.append(stat)
+            # Phase 1C — same live-publish for the success path.
+            try:
+                audio_generator.last_stats = list(sound_stats)  # type: ignore[attr-defined]
+            except Exception:
+                pass
             # Best-effort cleanup of the temp file the pipeline wrote.
             try:
                 _os.unlink(gen_path)

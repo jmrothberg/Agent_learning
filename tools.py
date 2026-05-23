@@ -528,6 +528,55 @@ if (typeof OscillatorNode !== "undefined" && OscillatorNode.prototype) {
         };
     }
 }
+// drawImage shim — records every CanvasRenderingContext2D.drawImage call
+// so the harness can detect "asset loaded into an Image but never drawn".
+// The 2026-05-23 chess trace had the model populate `ASSETS[name] = new
+// Image(); img.src = ...; await img.decode()` AND then draw chess pieces
+// procedurally via ctx.fillText() Unicode glyphs — the existing
+// sprite-alpha-and-distinctness check tests loader existence, not actual
+// drawImage usage, so it passed. Recording one event per call (with a
+// best-effort source identifier) lets the harness diff loaded names
+// against drawn names without re-parsing the file. Mirrors the
+// __audioEvents shape: {t, src, kind} so probes can filter cheaply.
+window.__drawImageEvents = [];
+if (typeof CanvasRenderingContext2D !== "undefined"
+    && CanvasRenderingContext2D.prototype) {
+    const _origDrawImage = CanvasRenderingContext2D.prototype.drawImage;
+    if (_origDrawImage) {
+        CanvasRenderingContext2D.prototype.drawImage = function(image, ...rest) {
+            try {
+                // Best-effort source identifier — full URL preferred,
+                // currentSrc as fallback for HTMLImageElement, "<canvas>"
+                // or "<bitmap>" for non-image draw sources.
+                let src = "<unknown>";
+                if (image) {
+                    if (typeof image.src === "string" && image.src) {
+                        src = image.src;
+                    } else if (typeof image.currentSrc === "string" && image.currentSrc) {
+                        src = image.currentSrc;
+                    } else if (image instanceof HTMLCanvasElement) {
+                        src = "<canvas>";
+                    } else if (typeof ImageBitmap !== "undefined" && image instanceof ImageBitmap) {
+                        src = "<bitmap>";
+                    } else if (typeof image.tagName === "string") {
+                        src = "<" + image.tagName.toLowerCase() + ">";
+                    }
+                }
+                // Cap the buffer so a long-running game with many sprite
+                // calls per frame doesn't grow window.__drawImageEvents
+                // unboundedly. The harness only needs to know WHICH
+                // sources have been seen, not the count per source.
+                if (window.__drawImageEvents.length < 4000) {
+                    window.__drawImageEvents.push({
+                        t: Date.now(),
+                        src: src,
+                    });
+                }
+            } catch (e) { /* ignore - keep draw call intact */ }
+            return _origDrawImage.call(this, image, ...rest);
+        };
+    }
+}
 """
 
 # Downsampled canvas hash. We sample a 32x32 grid spread across the canvas
@@ -594,6 +643,104 @@ _CANVAS_HASH_JS = """
 # sample would all hit the uniform background and miss the centered
 # content. With 1024 samples, even small centered text / a single
 # rendered sprite produces colors.size >= 2 → not blank.
+# Phase 1.5.1 — detect "state has the entity but canvas doesn't render
+# it". General, no genre logic: scans top-level fields on window.state
+# / window.gameState for objects with numeric .x/.y; tries both raw-
+# pixel and inferred-tile coordinate interpretations; samples a 16×16
+# patch around each candidate position; flags entities where >80% of
+# the patch pixels are background-colored (low alpha OR close to the
+# top-left corner color). Catches the failure shape from the 2026-05-22
+# Pac-Man trace where pacman_exists passed on state but no Pac-Man
+# was drawn. Returns None when nothing to check, else
+# {checked: N, missing: [{name, x, y, bg_fraction, position_kind}]}.
+_ENTITY_RENDERED_JS = """
+(() => {
+  const s = window.state || window.gameState;
+  if (!s || typeof s !== 'object') return null;
+  const c = document.querySelector('canvas');
+  if (!c || !c.width || !c.height) return null;
+  let ctx;
+  try {
+    ctx = c.getContext('2d', {willReadFrequently: true});
+  } catch (e) { return null; }
+  if (!ctx) return null;
+  let bg;
+  try {
+    bg = ctx.getImageData(0, 0, 4, 4).data;
+  } catch (e) { return null; }
+  const bgR = bg[0], bgG = bg[1], bgB = bg[2];
+
+  // Find candidate entities: top-level state fields whose value is an
+  // object with numeric .x AND .y. Skip the state object itself.
+  const candidates = [];
+  for (const k in s) {
+    if (k.startsWith('_')) continue;
+    let v;
+    try { v = s[k]; } catch (e) { continue; }
+    if (v && typeof v === 'object' && !Array.isArray(v)
+        && typeof v.x === 'number' && typeof v.y === 'number'
+        && isFinite(v.x) && isFinite(v.y)) {
+      candidates.push({name: k, x: v.x, y: v.y});
+    }
+  }
+  if (candidates.length === 0) return null;
+
+  // Tile-size inference: many grid games store coords in tile units
+  // (e.g. entity.x = 14 = column 14). We don't know the grid count
+  // generically, so we try a few common arcade widths and pick the
+  // interpretation with the lowest background fraction for each entity.
+  const tileCandidates = [28, 32, 20, 16, 8];
+
+  const missing = [];
+  for (const ent of candidates) {
+    const positions = [{kind: 'pixel', px: ent.x, py: ent.y}];
+    for (const n of tileCandidates) {
+      const t = c.width / n;
+      positions.push({
+        kind: `tile${n}`,
+        px: ent.x * t + t / 2,
+        py: ent.y * t + t / 2,
+      });
+    }
+    let bestPos = null, bestBgFrac = 1.0;
+    for (const p of positions) {
+      if (p.px < 4 || p.px > c.width - 4
+          || p.py < 4 || p.py > c.height - 4) continue;
+      let patch;
+      try {
+        patch = ctx.getImageData(
+          Math.max(0, Math.round(p.px) - 8),
+          Math.max(0, Math.round(p.py) - 8),
+          16, 16
+        ).data;
+      } catch (e) { continue; }
+      let bgCount = 0, total = 0;
+      for (let i = 0; i < patch.length; i += 4) {
+        total++;
+        const r = patch[i], g = patch[i+1], b = patch[i+2], a = patch[i+3];
+        const delta = Math.abs(r - bgR) + Math.abs(g - bgG) + Math.abs(b - bgB);
+        if (a < 32 || delta < 30) bgCount++;
+      }
+      const bgFrac = total > 0 ? bgCount / total : 1.0;
+      if (bestPos === null || bgFrac < bestBgFrac) {
+        bestPos = p;
+        bestBgFrac = bgFrac;
+      }
+    }
+    if (bestPos !== null && bestBgFrac > 0.80) {
+      missing.push({
+        name: ent.name,
+        x: ent.x, y: ent.y,
+        bg_fraction: Math.round(bestBgFrac * 100) / 100,
+        position_kind: bestPos.kind,
+      });
+    }
+  }
+  return {checked: candidates.length, missing: missing};
+})();
+"""
+
+
 _CANVAS_PROBE_JS = """
 () => {
     const c = document.querySelector('canvas');
@@ -1825,6 +1972,14 @@ def format_report_for_model(report: dict[str, Any]) -> str:
             tag = "ok " if p.get("ok") else "FAIL"
             err = f"  ({p['err']})" if p.get("err") else ""
             lines.append(f"  {tag} {p.get('name','probe')}: {p.get('expr','')[:80]}{err}")
+    if report.get("opening_book_checks"):
+        checks = report["opening_book_checks"]
+        n_pass = sum(1 for c in checks if c.get("ok"))
+        lines.append(f"Opening-book checks: {n_pass}/{len(checks)} pass")
+        for c in checks[:6]:
+            tag = "ok " if c.get("ok") else "FAIL"
+            err = f"  ({c.get('err','')})" if c.get("err") else ""
+            lines.append(f"  {tag} {c.get('id','recipe')}: {c.get('type','')}{err}")
     if report["logs"] and not report["errors"]:
         # Only show logs when there are no errors - otherwise the model focuses
         # on the wrong thing.
@@ -1958,6 +2113,7 @@ class LiveBrowser:
         screenshot_path: str | Path | None = None,
         *,
         probes: list[dict] | None = None,
+        opening_book_recipes: list[dict] | None = None,
         screenshot_before_path: str | Path | None = None,
         criteria: str | None = None,
     ) -> dict[str, Any]:
@@ -2151,12 +2307,150 @@ class LiveBrowser:
         report["frozen_canvas"] = frozen
         report["input_test"] = input_test
         report["probes"] = probe_results
+        # Phase fix #4 (2026-05-23 traces) — a frozen canvas was being
+        # set on the report but never feeding into the ok decision, so
+        # iters could ship with `ok=True, frozen_canvas=True`. The
+        # 2026-05-22 Pac-Man trace iter 7 is the case study. Soft
+        # warnings already flip ok to False; this is a one-line wire-up.
+        # Model-agnostic — applies to anything that renders to canvas.
+        if frozen is True:
+            report["soft_warnings"].append(
+                "FROZEN-CANVAS: 32×32 canvas hash unchanged between "
+                "t=0.5s and t=1.0s while RAF was firing. The render "
+                "loop is alive but drawing the same frame — likely a "
+                "stuck game-state, a draw() function that early-returns "
+                "before the entity layer, or all entity update timers "
+                "stopped advancing."
+            )
         # 2.4: split error sources so the model + trace can tell apart
         # "console.error('...')" (game-logged, often informational) from
         # "UNCAUGHT TypeError" (real crash). Existing report["errors"]
         # is the union — kept for backward compat with downstream code.
         report["console_errors"] = list(self._console_errors)
         report["page_errors"] = list(self._page_errors)
+        report["opening_book_checks"] = await self._run_opening_book_recipes(
+            path, opening_book_recipes or [], input_test=input_test,
+            canvas_info=canvas_info, frozen=frozen,
+        )
+        for chk in report["opening_book_checks"]:
+            if chk.get("ok") is False and chk.get("hard"):
+                report["soft_warnings"].append(
+                    f"OPENING BOOK CHECK FAILED [{chk.get('id','recipe')}]: "
+                    f"{chk.get('err','')[:180]}"
+                )
+        # Phase 1.5.1 — state-has-entity-but-canvas-doesn't-render-it.
+        # Detects the failure shape from the 2026-05-22 Pac-Man trace:
+        # gameState.pacman.x exists, the probe `gameState.pacman.x !==
+        # undefined` passes, the canvas is NOT blank (maze + ghosts +
+        # dots render), but the Pac-Man itself is invisible because the
+        # draw() function never references the sprite.
+        # General: works on any game whose state exposes a top-level
+        # field with numeric .x/.y. Tries both raw-pixel and inferred-
+        # tile-coordinate interpretations. Soft warning so the model
+        # sees it in the report and the harness ok flag flips.
+        try:
+            entity_render_result = await self._safe_eval(_ENTITY_RENDERED_JS)
+        except Exception:
+            entity_render_result = None
+        if isinstance(entity_render_result, dict):
+            missing = entity_render_result.get("missing") or []
+            report["entity_render_check"] = entity_render_result
+            for m in missing:
+                if not isinstance(m, dict):
+                    continue
+                name = m.get("name", "?")
+                bg_frac = m.get("bg_fraction", 0)
+                pk = m.get("position_kind", "?")
+                ex = m.get("x", 0)
+                ey = m.get("y", 0)
+                report["soft_warnings"].append(
+                    f"ENTITY-NOT-RENDERED [{name}]: gameState.{name} is "
+                    f"at ({ex},{ey}) but the canvas at that position is "
+                    f"{int(bg_frac * 100)}% background "
+                    f"(position interpreted as {pk}). The entity is "
+                    "in state but not drawn — check the draw() / render "
+                    "function references this entity, and that any "
+                    "sprite/image is decoded before drawImage is called."
+                )
+        # Drawn-asset detector — read the drawImage shim's event buffer
+        # and diff against the session's known asset filenames. Catches
+        # "model loaded the PNG into ASSETS[name] but never called
+        # drawImage on it" — the failure shape from the 2026-05-23 chess
+        # trace where the model wrote `await img.decode()` then drew
+        # chess pieces with ctx.fillText Unicode glyphs.
+        try:
+            draw_events = await self._safe_eval(
+                "window.__drawImageEvents || []"
+            )
+        except Exception:
+            draw_events = None
+        if isinstance(draw_events, list):
+            drawn_sources = []
+            for ev in draw_events:
+                if isinstance(ev, dict):
+                    s = ev.get("src") or ""
+                    if isinstance(s, str):
+                        drawn_sources.append(s)
+            drawn_blob = "\n".join(drawn_sources).lower()
+            # Find every PNG path the HTML references (already on disk,
+            # already in the resolved-asset-paths report field if the
+            # caller set it). We derive the candidate name list from
+            # the HTML file's relative-path mentions to stay agent-
+            # independent — the harness doesn't need to know which
+            # session_dir produced the assets.
+            try:
+                html_text = Path(path).read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                html_text = ""
+            import re as _re
+            asset_path_re = _re.compile(
+                r"['\"]\./([A-Za-z0-9_\-]+_assets/[A-Za-z0-9_\-]+\.png)['\"]"
+            )
+            referenced_assets: dict[str, str] = {}
+            for m in asset_path_re.finditer(html_text):
+                rel_path = m.group(1)
+                stem = rel_path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+                referenced_assets[stem] = rel_path
+            undrawn: list[str] = []
+            for stem, rel_path in referenced_assets.items():
+                # Drawn-sources match if the path's filename appears in
+                # the recorded src URL (drawImage sees a file:// URL).
+                fname = rel_path.rsplit("/", 1)[-1].lower()
+                if fname not in drawn_blob:
+                    undrawn.append(stem)
+            report["drawn_asset_check"] = {
+                "loaded_referenced_count": len(referenced_assets),
+                "drawn_event_count": len(drawn_sources),
+                "undrawn": undrawn,
+            }
+            # Only flag when SOME assets exist AND a significant fraction
+            # are unused. Genuine all-undrawn (because the page just
+            # loaded and no frames rendered) shouldn't false-alarm — we
+            # already gate via RAF-fired/non-blank canvas; if those held
+            # and we still have undrawn assets, the gap is real.
+            if (
+                referenced_assets
+                and undrawn
+                and len(undrawn) >= max(1, len(referenced_assets) // 3)
+                and canvas_info
+                and canvas_info.get("raf_ran")
+                and canvas_info.get("blank") is False
+            ):
+                preview = ", ".join(undrawn[:8])
+                if len(undrawn) > 8:
+                    preview += f", … (+{len(undrawn) - 8} more)"
+                report["soft_warnings"].append(
+                    f"ASSETS_LOADED_BUT_UNDRAWN [{preview}]: "
+                    f"{len(undrawn)}/{len(referenced_assets)} asset PNG(s) "
+                    "are referenced by the HTML's asset loader but no "
+                    "ctx.drawImage call was recorded with their URL "
+                    "during this run. The model likely added "
+                    "`new Image() + img.decode()` (so the loader-presence "
+                    "check passes) but is still drawing entities "
+                    "procedurally via ctx.fillText / ctx.fillRect / "
+                    "Unicode glyphs. Replace those drawing sites with "
+                    "ctx.drawImage(ASSETS.<name>, x, y, w, h)."
+                )
         # Probe errors are derived from probe_results (entries with
         # ok=False AND non-empty err).
         report["probe_errors"] = [
@@ -2455,6 +2749,251 @@ class LiveBrowser:
             return await self._page.evaluate(js)
         except Exception:
             return None
+
+    # ---- Phase 1.5 — multi-window playtest capture --------------------
+    #
+    # Generalises _input_smoke_test into a scripted timeline: drive
+    # synthetic input across multiple time windows and sample
+    # screenshots + game state at requested times. Used by the
+    # autonomous self-feedback loop to detect bugs a single-frame
+    # critic cannot — entity-stuck, input-axis-mismatch, out-of-bounds.
+    #
+    # Genre-free by design: no recipe-specific code lives here. Recipes
+    # in the root playbook supply their own `input_script` (list of
+    # action dicts) and `sample_times_s` (when to capture state); this
+    # method just executes them and returns the timeline.
+
+    async def record_playtest(
+        self,
+        input_script: list[dict],
+        sample_times_s: list[float],
+        *,
+        capture_screenshots: bool = False,
+        state_expr: str | None = None,
+    ) -> dict[str, Any]:
+        """Drive a scripted input timeline and sample state at intervals.
+
+        `input_script` items support:
+          {"type": "wait", "ms": 1000}
+          {"type": "keydown", "key": "ArrowUp", "duration_ms": 1000}
+            — fires keydown, sleeps duration_ms, fires keyup.
+          {"type": "press", "key": "Space"}
+            — single press event (~50 ms hold internally).
+          {"type": "click", "x": 100, "y": 100}
+            — mouse click at canvas-relative coords (clamped to viewport).
+
+        `sample_times_s` lists offsets from the start of the script at
+        which to capture state. Each sample carries:
+          {
+            "t_s": float,         # actual elapsed time
+            "canvas_hash": str?,  # 32x32 downsample hash, None on failure
+            "state": dict?,       # window.state / window.gameState
+                                  #   flattened to {dotted: number}
+            "screenshot_b64": str?,  # only when capture_screenshots=True
+            "custom": Any?,       # `state_expr` evaluated against page
+          }
+
+        Returns: {"ok": bool, "samples": [...], "errors": [...],
+                  "input_script_replay": <echoed for the trace>}.
+
+        Never raises — caller treats the timeline as advisory and
+        gracefully skips findings on incomplete captures.
+        """
+        import asyncio
+        import base64
+        import time as _t
+        result: dict[str, Any] = {
+            "ok": False,
+            "samples": [],
+            "errors": [],
+            "input_script_replay": list(input_script or []),
+        }
+        if self._page is None:
+            result["errors"].append("no page open")
+            return result
+        if not sample_times_s:
+            result["errors"].append("no sample_times_s requested")
+            return result
+
+        try:
+            await self._page.bring_to_front()
+            await self._page.evaluate("if (document.body) document.body.focus();")
+        except Exception:
+            pass
+
+        # Snapshot helper. State expression mirrors _input_smoke_test's
+        # numeric-leaf flatten; we keep it inline here so the recipe
+        # contract doesn't depend on private helpers.
+        _STATE_JS = (
+            "(()=>{const s=window.state||window.gameState||null;"
+            "if(!s||typeof s!=='object')return null;"
+            "const out={};const stack=[['',s,0]];const MAXD=4;const MAXN=80;"
+            "while(stack.length){const[pref,obj,depth]=stack.pop();"
+            "if(depth>MAXD)continue;let n=0;"
+            "for(const k in obj){if(n++>MAXN)break;let v;try{v=obj[k]}catch(e){continue}"
+            "if(typeof v==='number'&&Number.isFinite(v))out[pref?pref+'.'+k:k]=v;"
+            "else if(typeof v==='boolean')out[pref?pref+'.'+k:k]=v?1:0;"
+            "else if(v&&typeof v==='object'&&!Array.isArray(v))stack.push([pref?pref+'.'+k:k,v,depth+1]);}}"
+            "return out;})()"
+        )
+        _CANVAS_HASH_LITERAL = (
+            "(()=>{const c=document.querySelector('canvas');if(!c||!c.width||!c.height)return null;"
+            "try{const tmp=document.createElement('canvas');tmp.width=32;tmp.height=32;"
+            "const tctx=tmp.getContext('2d',{willReadFrequently:true});"
+            "tctx.drawImage(c,0,0,32,32);"
+            "const d=tctx.getImageData(0,0,32,32).data;let h=0;"
+            "for(let i=0;i<d.length;i+=4){h=((h*131)+(d[i]<<16)+(d[i+1]<<8)+d[i+2])>>>0;}"
+            "return h.toString(16);}catch(e){return null}})()"
+        )
+
+        async def _sample(at_t: float) -> dict[str, Any]:
+            entry: dict[str, Any] = {"t_s": round(at_t, 3)}
+            try:
+                entry["canvas_hash"] = await self._safe_eval(_CANVAS_HASH_LITERAL)
+            except Exception as e:
+                entry["canvas_hash"] = None
+                entry["errors"] = [f"hash:{e}"]
+            try:
+                entry["state"] = await self._safe_eval(_STATE_JS)
+            except Exception as e:
+                entry["state"] = None
+                entry.setdefault("errors", []).append(f"state:{e}")
+            if state_expr:
+                try:
+                    entry["custom"] = await self._safe_eval(state_expr)
+                except Exception as e:
+                    entry["custom"] = None
+                    entry.setdefault("errors", []).append(f"custom:{e}")
+            if capture_screenshots:
+                try:
+                    raw = await self._page.screenshot(full_page=False)
+                    entry["screenshot_b64"] = base64.b64encode(raw).decode("ascii")
+                except Exception as e:
+                    entry["screenshot_b64"] = None
+                    entry.setdefault("errors", []).append(f"shot:{e}")
+            return entry
+
+        # Run the input script and sampler concurrently. We schedule each
+        # sample as a sleep + capture task so input + sampling run on the
+        # same event loop without stepping on each other.
+        started_at = _t.monotonic()
+
+        async def _run_script() -> None:
+            for action in input_script or []:
+                kind = (action.get("type") or "").lower()
+                try:
+                    if kind == "wait":
+                        await asyncio.sleep((action.get("ms") or 0) / 1000.0)
+                    elif kind == "keydown":
+                        key = action.get("key") or "ArrowRight"
+                        dur = (action.get("duration_ms") or 1000) / 1000.0
+                        await self._page.keyboard.down(key)
+                        try:
+                            await asyncio.sleep(dur)
+                        finally:
+                            await self._page.keyboard.up(key)
+                    elif kind == "press":
+                        key = action.get("key") or "Space"
+                        await self._page.keyboard.press(key, delay=50)
+                    elif kind == "click":
+                        x = int(action.get("x") or 0)
+                        y = int(action.get("y") or 0)
+                        await self._page.mouse.click(x, y)
+                except Exception as e:
+                    result["errors"].append(f"action {kind}:{e}")
+
+        async def _run_samples() -> None:
+            for t in sample_times_s:
+                target = float(t)
+                # Sleep until at least `target` seconds after start.
+                while True:
+                    elapsed = _t.monotonic() - started_at
+                    if elapsed >= target:
+                        break
+                    await asyncio.sleep(max(0.01, target - elapsed))
+                entry = await _sample(_t.monotonic() - started_at)
+                result["samples"].append(entry)
+
+        try:
+            await asyncio.gather(_run_script(), _run_samples())
+            result["ok"] = True
+        except Exception as e:
+            result["errors"].append(f"gather:{e}")
+        return result
+
+    async def _run_opening_book_recipes(
+        self,
+        path: Path,
+        recipes: list[dict],
+        *,
+        input_test: dict[str, Any],
+        canvas_info: dict[str, Any] | None,
+        frozen: bool | None,
+    ) -> list[dict[str, Any]]:
+        """Execute compact verified-memory recipes against the loaded page.
+
+        Recipes are intentionally conservative: they either reuse existing
+        harness evidence or inspect source for generated-asset wiring.
+        """
+        out: list[dict[str, Any]] = []
+        if not recipes:
+            return out
+        try:
+            html_text = Path(path).read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            html_text = ""
+        for rec in recipes[:8]:
+            rid = str(rec.get("id") or rec.get("kind") or "recipe")[:80]
+            kind = str(rec.get("kind") or "")
+            recipe = rec.get("recipe") if isinstance(rec.get("recipe"), dict) else {}
+            rtype = str(recipe.get("type") or "")
+            check = {"id": rid, "kind": kind, "type": rtype, "ok": True, "hard": False}
+            if rtype == "input_delta":
+                ok = bool(input_test.get("ran") and input_test.get("any_change") is True)
+                check.update({
+                    "ok": ok,
+                    "hard": True,
+                    "err": "" if ok else "expected input to cause state or canvas delta",
+                })
+            elif rtype == "asset_usage":
+                has_assets = "_assets/" in html_text or "ASSET_LIST" in html_text or "const ASSETS" in html_text
+                uses_draw = "drawImage" in html_text
+                ok = (not has_assets) or uses_draw
+                check.update({
+                    "ok": ok,
+                    "hard": has_assets,
+                    "err": "" if ok else "generated assets present but no drawImage usage found",
+                })
+            elif rtype == "asset_stats":
+                has_assets = "_assets/" in html_text or "ASSET_LIST" in html_text or "const ASSETS" in html_text
+                ok = (not has_assets) or ("new Image" in html_text and "decode" in html_text)
+                check.update({
+                    "ok": ok,
+                    "hard": has_assets,
+                    "err": "" if ok else "asset loader does not clearly decode generated images",
+                })
+            elif rtype in {"before_mid_after", "event_window"}:
+                animated_or_input = (
+                    (frozen is False)
+                    or bool(input_test.get("ran") and input_test.get("any_change") is True)
+                    or "requestAnimationFrame" in html_text
+                )
+                check.update({
+                    "ok": bool(animated_or_input),
+                    "hard": False,
+                    "err": "" if animated_or_input else "no visible animation evidence",
+                })
+            elif rtype == "restart_reset":
+                has_reset = any(s in html_text for s in ("resetGame", "function reset", ".reset(", "restart"))
+                check.update({
+                    "ok": bool(has_reset),
+                    "hard": False,
+                    "err": "" if has_reset else "no obvious restart/reset hook found",
+                })
+            else:
+                check.update({"ok": True, "skipped": True, "err": "unsupported recipe type"})
+            out.append(check)
+        return out
 
     async def _run_probe(self, expr: str) -> tuple[bool, str, str | None]:
         """Run one model-proposed probe expression in the page; return
