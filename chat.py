@@ -1113,6 +1113,16 @@ class CodingBoxApp(App):
         # standing rule: the agent must beat zero-shot, not lose value
         # to regex misroutes. Sticky across /new.
         self._use_feedback_directives: bool = False
+        # Remembered vlm-critique state captured when /wait turns ON.
+        # Rationale (2026-05-24 mortal kombat trace): when the user is
+        # actively reviewing each iter and typing their own feedback,
+        # the auto visual critic emits ~400 chars of paraphrased
+        # observations the user already saw — pure prompt noise. On
+        # /wait on we save the current state and force vlm-critique
+        # off; on /wait off we restore it. Explicit /vlm-critique
+        # while in wait mode clears this so the auto-restore doesn't
+        # override the user's deliberate choice.
+        self._vlm_critique_pre_wait: bool | None = None
         # Auto-staff flags (2026-05-21): True when the matching feature
         # was flipped by auto-enable (sidecar role or local-VLM detect)
         # rather than by an explicit toggle. Surfaced in the status panel
@@ -3132,6 +3142,7 @@ class CodingBoxApp(App):
             "  [b]/clear[/b]                   clear the agent log pane (does not affect staged state)",
             "  [b]/status[/b]                  print model, phase, iteration, paths, what's staged",
             "  [b]/wait[/b] [on|off]            toggle step-mode: pause after each iter; Enter or feedback to continue",
+            "                                  [dim]when YOU are the reviewer (wait ON), /vlm-critique auto-toggles OFF to avoid noisy critic notes — restored on /wait off; override with /vlm-critique mid-wait[/dim]",
             "  [b]/iter-detail[/b] [on|off]     optional extra blocker details after each iter decision (default off)",
             "  [b]/mode[/b] [local_manual|local_auto|local_plus_review with <model> [--auto-apply]|custom]",
             "                                  set run contract; local_plus_review can auto-run /check in AUTO mode",
@@ -3145,6 +3156,7 @@ class CodingBoxApp(App):
             "  [b]/double-screenshot[/b] [on|off] toggle capturing startup + after-input screenshots (default off; helps debugging movement)",
             "  [b]/vlm-critique[/b] [on|off]    toggle attaching screenshot to Phase C self-critique turns (default off)",
             "                                  [dim]needs a VLM as the loaded model; uses slot 1 when no critic slot is staged[/dim]",
+            "                                  [dim]RECOMMENDED: turn OFF when YOU are reviewing each iter and giving feedback — auto critic adds paraphrased noise about issues you already see (auto-handled by /wait toggle)[/dim]",
             "  [b]/feedback[/b] [on|off]        toggle autonomous self-feedback loop (default ON · multi-screenshot playtest + genre-free behavior recipes)",
             "  [b]/rawfeedback[/b] [on|off]     YOUR typed feedback goes to the model verbatim (default ON · classifier directives suppressed)",
             "                                  [dim]machine bug feedback (Chromium test reports, console errors, probes), playbook, and autonomous playtest are UNAFFECTED — they always run[/dim]",
@@ -4970,6 +4982,43 @@ class CodingBoxApp(App):
         # Mirror explicit /wait intent for auto-step behavior: when the
         # user turns wait OFF, don't auto-re-enable pauses later.
         self.agent.set_auto_step_on_failure(new_state)
+        # Auto-toggle vlm-critique with wait mode. When the user is
+        # reviewing each iter themselves, the auto critic is pure
+        # noise (mortal-kombat 2026-05-24 trace: 6 paraphrased
+        # complaints in 6 iters about the same visual issue). Save
+        # the current state on /wait on and restore on /wait off.
+        # User can still flip /vlm-critique explicitly mid-wait —
+        # that clears the saved state so the auto-restore doesn't
+        # override their choice.
+        if new_state:
+            # Entering wait mode.
+            if self._vlm_critique_pre_wait is None and self._use_vlm_critique:
+                self._vlm_critique_pre_wait = True
+                self._use_vlm_critique = False
+                self._vlm_critique_auto = False
+                if self.agent is not None:
+                    self.agent._use_vlm_critique = False
+                    self.agent._vlm_critique_auto = False
+                self._log_info(
+                    "[dim]vlm-critique auto-off while in wait mode — "
+                    "you're the visual critic now. Toggle /vlm-critique "
+                    "explicitly if you want the auto critic back; it'll "
+                    "restore to ON when you /wait off.[/dim]"
+                )
+        else:
+            # Leaving wait mode — restore prior vlm-critique state.
+            if self._vlm_critique_pre_wait is not None:
+                prior = self._vlm_critique_pre_wait
+                self._vlm_critique_pre_wait = None
+                if self._use_vlm_critique != prior:
+                    self._use_vlm_critique = prior
+                    if self.agent is not None:
+                        self.agent._use_vlm_critique = prior
+                    state_word = "ON" if prior else "off"
+                    self._log_info(
+                        f"[dim]vlm-critique restored to {state_word} "
+                        "(was saved when you entered wait mode).[/dim]"
+                    )
         if new_state:
             self._log_info(
                 "[yellow]step-mode ON[/yellow] — agent will pause after each "
@@ -5223,6 +5272,15 @@ class CodingBoxApp(App):
         # Explicit toggle clears auto-staff so a user "off" sticks even if
         # _detect_vlm runs again and would otherwise re-enable.
         self._vlm_critique_auto = False
+        # Explicit toggle while in wait mode clears the auto-restore-on-
+        # wait-off memory. Without this, /vlm-critique on during wait
+        # mode would be overridden when the user later runs /wait off
+        # (we'd restore the saved-at-wait-on state, ignoring the new
+        # explicit one). Same applies to explicit off. getattr() so
+        # test fixtures that use App.__new__ (bypassing __init__) don't
+        # AttributeError when the field hasn't been initialized.
+        if getattr(self, "_vlm_critique_pre_wait", None) is not None:
+            self._vlm_critique_pre_wait = None
         if self.agent is not None:
             self.agent._use_vlm_critique = new_state
             self.agent._vlm_critique_auto = False
