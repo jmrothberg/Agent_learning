@@ -1335,16 +1335,22 @@ class AgentEvent:
     data: dict = field(default_factory=dict)
 
 
-# Ollama KV-cache scales linearly with num_ctx. 100K covers typical game
-# sessions (observed prompts ~10–35K); 262K reserves ~10 GB KV on a 27B
-# and collides with diffusers on 48 GB cards. Raise via /ctx or env.
-DEFAULT_NUM_CTX = 100_000
+# Ollama KV-cache scales linearly with num_ctx AND many kernels pick
+# sub-optimal batching above ~32K, slowing prefill even when actual
+# context is small. 32K covers iters 1-3 of typical game sessions with
+# headroom; longer sessions raise via /ctx (or env) and pay the reload
+# tax once. Observed prompts: ~10-18K iter 1, growing to ~25-35K by
+# iter 5-6. The 100K default we used to ship was 3x oversized and
+# silently quadrupled prefill latency.
+DEFAULT_NUM_CTX = 32_768
 MIN_NUM_CTX = 8192
 MAX_NUM_CTX = 262_144
 
 _NUM_CTX_PRESETS: dict[str, int] = {
     "default": DEFAULT_NUM_CTX,
-    "100k": DEFAULT_NUM_CTX,
+    "32k": DEFAULT_NUM_CTX,
+    "64k": 65_536,
+    "100k": 100_000,
     "131k": 131_072,
     "200k": 200_000,
     "262k": MAX_NUM_CTX,
@@ -9788,10 +9794,16 @@ class GameAgent:
             # Prune older turns before generating, so we don't hit context.
             self._prune_messages()
 
-            # Best-of-N is only used in fix mode (iter 2+ after a failure)
-            # AND only when we have N>1. The first build is always single
-            # because there's no test signal yet to score against.
-            use_bon = self._fix_mode and self.best_of_n > 1
+            # Best-of-N fan-out fires whenever we have N>1 candidates
+            # to sample. Originally gated on `_fix_mode` (iter 2+) under
+            # the assumption that iter 1 had no test signal to score
+            # against, but the scorer at _generate_and_score_candidates
+            # IS the test harness itself (Chromium + probes + structural
+            # checks) — every iter has that signal, including iter 1.
+            # Removing the gate uses the multi-slot GPU capacity from
+            # session start; on the 4-GPU box this means GPUs 2 and 3
+            # are hot during the first build instead of sitting idle.
+            use_bon = self.best_of_n > 1
             fallback_attempted = False
             # Phase 5d: one transparent retry of the SAME backend on a
             # crashed cloud result before swapping to local Ollama.

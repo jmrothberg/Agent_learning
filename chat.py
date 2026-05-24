@@ -1738,19 +1738,45 @@ class CodingBoxApp(App):
         return self._run_profile == "local_manual"
 
     def _wants_three_ollama_slots(self) -> bool:
-        """True when the staged session needs coder + two Ollama sidecars."""
+        """True when the staged session needs coder + two Ollama sidecars.
+
+        Returns True in two cases:
+          (a) user explicitly staged a model on slots 2 AND 3 (legacy
+              behavior — explicit /model2 /model3 or /modelall), or
+          (b) the box is the 4-GPU workstation shape AND the primary
+              backend is Ollama. The autopin function is a no-op on any
+              other hardware, so this default-open gate gives single-
+              slot users no extra cost while making sure the 4-GPU box
+              actually USES its idle GPUs without the user having to
+              remember /modelall every session.
+        """
         primary_backend = (self._next_backend or "auto").lower()
         if primary_backend in ("mlx", "openai", "anthropic", "claude"):
             return False
+        # Case (a): explicit per-slot staging.
+        all_slots_staged = True
         for backend_name, model_name in (
             (self._next_backend2, self._next_model2),
             (self._next_backend3, self._next_model3),
         ):
             if not model_name:
-                return False
+                all_slots_staged = False
+                break
             if (backend_name or "ollama").lower() != "ollama":
                 return False
-        return True
+        if all_slots_staged:
+            return True
+        # Case (b): default-on for the 4-GPU workstation. The autopin
+        # function itself has the strict hardware gate; calling it on
+        # other shapes returns "off" cleanly. So this is safe to leave
+        # default-true on any Linux+Ollama box — only the 4-GPU shape
+        # actually spawns daemons.
+        try:
+            import backend as _bk
+            ok, _ = _bk._is_four_gpu_linux_nvidia_workstation()
+            return ok
+        except Exception:
+            return False
 
     def _render_iteration_block(self) -> str:
         """Phase / iteration / streak / probes / ctx / model / goal / queued."""
