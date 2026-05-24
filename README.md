@@ -516,23 +516,32 @@ a passing probe, not a false failure.
 | Recipe | Mechanism | Has auto-probe |
 | --- | --- | --- |
 | `canvas-controllable-player` | Any game with a player avatar | ✓ `auto_player_within_canvas_bounds` |
-| `canvas-grid-navigation` | Maze / tile / sokoban / dungeon | ✓ `auto_player_not_in_wall` |
-| `canvas-two-actors-facing` | Fighters, duels, side-by-side multi | ✓ `auto_actors_face_each_other` |
-| `canvas-side-scroll-platformer` | Mario / Sonic / Metroid family | — |
-| `canvas-3d-first-person` | Doom / Wolfenstein / Quake | — |
-| `canvas-top-down-action` | Asteroids / Galaga / Robotron | — |
+| `canvas-grid-navigation` | Maze / tile / sokoban / dungeon / stealth / tank-battle | ✓ `auto_player_not_in_wall` |
+| `canvas-two-actors-facing` | Fighters, duels, boxing, side-by-side multi | ✓ `auto_actors_face_each_other` |
+| `canvas-side-scroll-platformer` | Mario / Sonic / Metroid / Donkey Kong / Prince of Persia / Bubble Bobble | — |
+| `canvas-3d-first-person` | Doom / Wolfenstein / Quake / Dungeon Master | — |
+| `canvas-top-down-action` | Asteroids / Galaga / Robotron / Gauntlet | — |
 | `canvas-board-game` | Chess / Checkers / TTT / Go | — |
 | `canvas-puzzle-grid` | Tetris / Bejeweled / Columns | — |
 | `canvas-racing-perspective` | Pole Position / Out Run / Lotus | — |
 | `canvas-vfx-fluid` | Particle / firework / fluid demos | — |
+| `canvas-paddle-ball` | Breakout / Arkanoid / Pong / Brickball | ✓ `auto_ball_within_canvas_bounds` |
+| `canvas-lane-crossing` | Frogger / Crossy Road / river-crossing / highway-dodge | — |
+| `canvas-point-and-click` | Maniac Mansion / Monkey Island / King's Quest / Sierra-style | — |
+| `canvas-isometric-tile` | Q*bert / Marble Madness / iso puzzle hoppers | — |
+| `canvas-overworld-rpg` | Ultima / Zelda overworld / Dragon Quest / Final Fantasy field | — |
+| `canvas-city-builder` | SimCity / Theme Park / RollerCoaster Tycoon / Cities Skylines | — |
+| `canvas-space-trading` | Elite / Star Control / Privateer / EVE-lite | — |
 | `generic-canvas-game-baseline` | Fallback when no mechanism matches | — |
 
-11 recipes cover the top-100 games via keyword overlap. Same pattern
-as `memory/skeletons/` (17 mechanism templates cover hundreds of
-games) and `memory/playbook.jsonl` (hand-curated bullets).
-**No per-game recipes.** Adding a recipe for a new mechanism = append
-one line to `memory/visual_playtests.jsonl` — matches automatically
-next session, no Python edit needed.
+17 mechanism recipes + 1 generic fallback. Cover the user's 25
+archetype list at 100% (no fallback hits) — see
+`tests/test_visual_playtest_coverage.py` for the pinned coverage
+check. Same pattern as `memory/skeletons/` (17 mechanism templates
+cover hundreds of games) and `memory/playbook.jsonl` (hand-curated
+bullets). **No per-game recipes.** Adding a recipe for a new mechanism
+= append one line to `memory/visual_playtests.jsonl` — matches
+automatically next session, no Python edit needed.
 
 **Auto-probes are intentionally NOT on every recipe.** Mechanisms
 without a clean universal state-shape assertion (puzzle, racing, 3D
