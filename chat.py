@@ -4759,6 +4759,23 @@ class CodingBoxApp(App):
         # Step-mode shows up here so users can confirm whether the
         # agent will pause between iters or run continuously.
         step_label = "ON" if self._effective_step_mode() else "off"
+        # Prefer the live agent's feature flags when a session is
+        # running — the agent can AUTO-staff vlm-critique on local-VLM
+        # detection (agent.py:5355) and architect-split on complex
+        # first-builds without touching the App's flags. Without this
+        # `/status` shows the stale chat-level value while the right-
+        # side status panel (which already reads from the agent)
+        # correctly shows "vlm-critique ON".
+        if self.agent is not None:
+            eff_vlm_critique = bool(getattr(self.agent, "_use_vlm_critique", self._use_vlm_critique))
+            eff_vlm_auto = bool(getattr(self.agent, "_vlm_critique_auto", self._vlm_critique_auto))
+            eff_arch_split = bool(getattr(self.agent, "_use_architect_split", self._use_architect_split))
+            eff_arch_auto = bool(getattr(self.agent, "_architect_split_auto", self._architect_split_auto))
+        else:
+            eff_vlm_critique = self._use_vlm_critique
+            eff_vlm_auto = self._vlm_critique_auto
+            eff_arch_split = self._use_architect_split
+            eff_arch_auto = self._architect_split_auto
         lines = [
             "[bold cyan]── status ──[/bold cyan]",
             f"  backend (active):     {_esc(self._session_backend_info.name if self._session_backend_info else '—')}",
@@ -4785,9 +4802,9 @@ class CodingBoxApp(App):
             f"  model-class:          {self._model_class or 'auto (= small, lean ~5KB schema)'}",
             f"  step-mode (/wait):    {step_label}",
             f"  prefill:              {'ON' if self._use_prefill else 'off'}",
-            f"  architect-split:      {'ON' if self._use_architect_split else 'off'}{' [auto]' if self._architect_split_auto and self._use_architect_split else ''}",
+            f"  architect-split:      {'ON' if eff_arch_split else 'off'}{' [auto]' if eff_arch_auto and eff_arch_split else ''}",
             f"  double-screenshot:    {'ON' if self._use_double_screenshot else 'off'}",
-            f"  vlm-critique:         {'ON' if self._use_vlm_critique else 'off'}{' [auto]' if self._vlm_critique_auto and self._use_vlm_critique else ''}",
+            f"  vlm-critique:         {'ON' if eff_vlm_critique else 'off'}{' [auto]' if eff_vlm_auto and eff_vlm_critique else ''}",
             f"  /allroles bundle:     {'ON' if self._all_roles_enabled else 'off'}",
             f"  autonomous /feedback: {'ON' if self._use_autonomous_feedback else 'OFF'}  [dim](multi-shot playtest + recipe checks; /feedback off to disable)[/dim]",
             f"  raw user feedback:    {'ON · directives suppressed (default)' if not self._use_feedback_directives else 'off · classifier wrapping ACTIVE'}  [dim](/rawfeedback on|off — bypass MEDIA-CHANGE / ORIENTATION / SCOPE wrappers; machine bug feedback always on)[/dim]",
