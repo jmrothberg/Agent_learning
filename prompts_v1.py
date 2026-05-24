@@ -1692,7 +1692,13 @@ def truncation_recovery_instruction(
     )
 
 
-def patch_retry_instruction(failures: list, current_file: str) -> str:
+def patch_retry_instruction(
+    failures: list,
+    current_file: str,
+    *,
+    repeat_anchors: set[str] | None = None,
+    anchor_fingerprint=None,
+) -> str:
     """Re-prompt after one or more <patch> blocks failed to apply.
 
     For each failure, we attach an "anchor" — the small region of the
@@ -1702,22 +1708,63 @@ def patch_retry_instruction(failures: list, current_file: str) -> str:
     the closest hit) is far more useful than the bare reason string.
     Anchor lookup is best-effort; when it returns None the bullet just
     carries the reason as before.
+
+    `repeat_anchors`: fingerprints of SEARCH blocks that ALSO failed
+    on the previous retry turn. When a current failure matches one of
+    these, prepend [REPEATED FAILURE] to the bullet so the model gets
+    a louder signal than "re-read the file" — that signal already
+    fires every turn and clearly isn't enough on its own. Motivating
+    trace: doom 2026-05-23 extensions 1/2/3 where the same
+    `spriteNames=[...]` SEARCH failed three turns in a row because
+    the FIRST patch already changed that line.
     """
     from patches import find_anchor  # local import: avoid cycle at module load
 
+    repeat_anchors = repeat_anchors or set()
     bullets: list[str] = []
+    repeat_count = 0
     for (i, p, reason) in failures:
-        line = f"  - patch #{i+1}: {reason}"
+        fp = ""
+        if anchor_fingerprint is not None:
+            try:
+                fp = anchor_fingerprint(getattr(p, "search", "") or "")
+            except Exception:
+                fp = ""
+        is_repeat = bool(fp) and fp in repeat_anchors
+        if is_repeat:
+            repeat_count += 1
+            line = (
+                f"  - patch #{i+1} [REPEATED FAILURE — same SEARCH "
+                f"failed last turn]: {reason}"
+            )
+        else:
+            line = f"  - patch #{i+1}: {reason}"
         anchor = find_anchor(current_file, getattr(p, "search", "") or "")
         if anchor:
             line += "\n    nearest match in current file:\n"
             line += "\n".join(f"      {ln}" for ln in anchor.splitlines())
         bullets.append(line)
     bullets_block = "\n".join(bullets)
-    return (
+    header = (
         "Some of your <patch> blocks did not apply because the SEARCH "
         "text was not found verbatim in the file. The CURRENT FILE "
         "below is the truth — match it character-for-character:\n\n"
+    )
+    if repeat_count:
+        header = (
+            "================ REPEATED PATCH FAILURE ================\n"
+            f"{repeat_count} of your <patch> blocks re-emitted the SAME "
+            "SEARCH text that already failed last turn. The file CHANGED "
+            "between then and now (likely a sibling patch in the prior "
+            "reply landed and shifted lines, OR you copied from a stale "
+            "memory of the file). DO NOT re-send the same SEARCH; read "
+            "the CURRENT FILE below FIRST, find the actual lines you "
+            "want to change as they exist NOW, then write a fresh "
+            "SEARCH block from those lines.\n"
+            "========================================================\n\n"
+        ) + header
+    return (
+        f"{header}"
         f"{bullets_block}\n\n"
         "Re-send corrected <patch> blocks against the file as it ACTUALLY "
         "is now (line numbers above are 1-based; '>' marks the closest hit). "

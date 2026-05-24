@@ -2573,7 +2573,12 @@ def _opening_book_seed_items() -> dict[str, list[OpeningBookItem]]:
                     "state or canvas pixels should advance over a 10-second "
                     "observation window. If nothing changes the game is "
                     "stuck and the user can't tell because the page didn't "
-                    "crash. Catches the 'agent shipped a frozen game' bug."
+                    "crash. Catches the 'agent shipped a frozen game' bug. "
+                    "Skips when no self-driven-motion signal is present "
+                    "(score, moving enemies, projectiles, particles, timer) — "
+                    "otherwise it false-positives on input-driven arcade "
+                    "games waiting for the player to act. Doom 2026-05-23 "
+                    "trace burned 2 iters fixing this false positive."
                 ),
                 tags=["progress", "motion", "stuck", "frozen", "ai", "timer"],
                 verified=True,
@@ -2581,9 +2586,45 @@ def _opening_book_seed_items() -> dict[str, list[OpeningBookItem]]:
                 pass_count=1,
                 recipe={
                     "type": "behavior_playtest",
+                    # Gate requires: canvas exists AND there's at least one
+                    # observable self-driven-motion signal in window.state /
+                    # window.gameState. When the gate returns false the
+                    # recipe is skipped (trace event:
+                    # autonomous_recipe_skipped, reason
+                    # applicability_gate_falsy) so input-driven games where
+                    # nothing is supposed to move without user input don't
+                    # false-positive as "frozen". Genre-free — keyed on
+                    # observable state shape, not subject matter.
                     "applies_when": (
-                        "(()=>{const c=document.querySelector('canvas');"
-                        "return !!c && c.width>0 && c.height>0;})()"
+                        "(()=>{"
+                        "const c=document.querySelector('canvas');"
+                        "if(!c||c.width<=0||c.height<=0)return false;"
+                        "const s=window.state||window.gameState;"
+                        # No exposed state → run conservatively (don't skip).
+                        # The "agent shipped a frozen game" failure mode
+                        # commonly hides behind unstructured state.
+                        "if(!s)return true;"
+                        # Enemies / NPCs / opponents with non-zero velocity.
+                        "const enemies=s.enemies||s.npcs||s.opponents;"
+                        "if(Array.isArray(enemies)){"
+                        "for(const e of enemies){if(!e)continue;"
+                        "const vx=+e.vx||+e.velocityX||+e.dx||0;"
+                        "const vy=+e.vy||+e.velocityY||+e.vz||+e.dy||0;"
+                        "if(vx!==0||vy!==0)return true;}}"
+                        # Live projectiles / bullets / shots.
+                        "const proj=s.projectiles||s.bullets||s.shots;"
+                        "if(Array.isArray(proj)&&proj.length>0)return true;"
+                        # Live particles / fx.
+                        "const parts=s.particles||s.fx;"
+                        "if(Array.isArray(parts)&&parts.length>0)return true;"
+                        # Score already moving.
+                        "if(typeof s.score==='number'&&s.score>0)return true;"
+                        # Game timer / clock.
+                        "if(typeof s.time==='number'&&s.time>0)return true;"
+                        "if(typeof s.timer==='number'&&s.timer>0)return true;"
+                        # No self-driven-motion signal → input-driven; skip.
+                        "return false;"
+                        "})()"
                     ),
                     "input_script": [{"type": "wait", "ms": 10000}],
                     "sample_times_s": [0.0, 2.0, 5.0, 9.5],

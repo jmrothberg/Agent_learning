@@ -368,6 +368,64 @@ token count alone. While a stream is running, the status panel shows a
 is waiting for the next user-turn boundary (input always drains after
 the current stream finishes).
 
+**Silent-stream guard (2026-05-24, doom trace).** Separate from the
+runaway-warning above, a stream that produces ZERO non-empty `content`
+pieces for **180 seconds** is force-aborted with a
+**`stream_silent_aborted`** trace and a tailored recovery prompt
+("start your reply directly with an opening tag, skip the reasoning
+preamble"). Motivating trace burned 1356 s wall-clock generating
+32 777 completion tokens that all surfaced as empty `content` (likely
+all sent through a reasoning/thinking channel) — the existing
+deliberation / repetition detectors only feed on visible content and
+never tripped. Both Ollama and MLX paths share the guard. Threshold
+is wall-clock + zero visible content, NOT token count, because Ollama
+doesn't surface the running eval_count mid-stream.
+
+**Cross-turn patch-SEARCH-failure memory.** When the same `<patch>`
+SEARCH block fails to apply in two consecutive turns (typical cause:
+a sibling patch in the prior reply landed and shifted lines, but the
+model copied a stale view of the file), the retry prompt now prepends
+a **`[REPEATED PATCH FAILURE]`** banner naming the exact problem and
+re-shows the current file so the model writes a fresh SEARCH from
+the live state instead of re-trying yesterday's text. Trace event:
+`patch_search_repeat_detected`. Doom 2026-05-23 extensions 1/2/3 hit
+the same SEARCH failure three turns in a row; this guard catches it
+on turn 2.
+
+**Classifier overrule auto-disable.** When the scoped feedback
+classifier expects mode X but the model emits mode Y (e.g. classifier
+said `media_only` but model correctly chose `<patch>`), the agent
+counts the overrule. At **2 overrules in a session** the harness
+auto-flips `_use_feedback_directives = False` for the rest of the
+session and emits
+**`classifier_auto_disabled_after_repeated_overrules`**. Per-session
+only — resets on `/new`. Equivalent to the user manually running
+`/rawfeedback on` once the classifier has demonstrated it's
+misrouting typed feedback.
+
+**Visual-critic cross-turn dedup.** Same critic note across turns
+(normalized fingerprint match on the first 120 chars) is suppressed
+with a `coaching_suppressed_repeated` trace. Stops the "critic
+flagged low-res walls in iters 1, 3, 5, 7" prompt-noise pattern
+from the doom trace.
+
+**Synthetic coverage-gap probe fencing.** Probes the harness
+synthesizes when a `<criteria>` line has no matching model-authored
+probe are now wrapped in **`[HARNESS NOTE — NOT FILE CONTENT, DO NOT
+<patch>]`** fences so the model can't mistake the diagnostic text
+for file content and emit a `<patch>` targeting it (doom extension
+1 trace did exactly that).
+
+**Autonomous playtest input-driven skip.** The
+`entity-progress-over-time` recipe (the "no canvas/state delta after
+10 s = frozen game" check) now skips with
+`autonomous_recipe_skipped reason=applicability_gate_falsy` when the
+exposed `window.state` shows no self-driven-motion signals (no moving
+enemies / projectiles / particles / score / timer). Input-driven
+arcade games (most FPS, platformers, puzzlers) genuinely do nothing
+without input; flagging them as "frozen" was a false positive that
+forced coders to add busy-work idle animations to defeat the probe.
+
 **Ctrl+D wins unconditionally.** A ship request (first Ctrl+D, the `/ship`
 command, or typing `done` / `looks good`) ends the session at the next
 iter boundary on the current passing build. Any feedback that landed in

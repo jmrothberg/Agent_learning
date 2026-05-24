@@ -540,6 +540,14 @@ class StreamResult:
     loop_grace_used: bool = False
     # Textual reason for the grace event (currently one value).
     loop_grace_reason: str | None = None
+    # Silent-stream signal — see _SILENT_STREAM_SECONDS_FLOOR in
+    # `stream_chat`. True when the model produced ZERO non-empty
+    # content pieces for the full wall-clock floor, indicating its
+    # entire generation went to a reasoning/thinking channel that
+    # surfaces as empty content. Folded into `stalled` for back-compat;
+    # standalone field so the agent can route to a specific recovery
+    # ("emit a tag immediately, skip the reasoning preamble").
+    silent: bool = False
 
 
 async def stream_chat(
@@ -573,6 +581,7 @@ async def stream_chat(
     n_tokens = 0
     stalled = False
     looped = False
+    silent = False
     stall_at: int | None = None
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
@@ -585,6 +594,17 @@ async def stream_chat(
     deliberated = False
     loop_grace_used = False
     loop_grace_reason: str | None = None
+    # Silent-stream guard. The DeliberationDetector and RepetitionDetector
+    # both feed on the message *content* (`piece`). When a model emits
+    # ALL of its tokens via a reasoning/thinking channel that surfaces as
+    # empty `content` strings — observed on qwen3.6:27b 2026-05-23 doom
+    # iter 4: 32,777 completion tokens, ZERO non-empty pieces, 1356 s
+    # wall-clock — neither detector ever fires. This guard catches that
+    # exact shape: no visible content after a generous wall-clock budget.
+    # Threshold is wall-clock not token-count because Ollama's
+    # mid-stream API doesn't surface the running eval_count; we only see
+    # it on the final done=True frame.
+    _SILENT_STREAM_SECONDS_FLOOR = 180.0
 
     # ollama.AsyncClient.chat returns an async iterator of dicts. We pull
     # .__aiter__() so we can wrap each .__anext__() in asyncio.wait_for.
@@ -622,6 +642,19 @@ async def stream_chat(
 
             piece = chunk.get("message", {}).get("content", "") or ""
             if not piece:
+                # Silent-stream guard — see _SILENT_STREAM_SECONDS_FLOOR
+                # comment block above. Fires only when n_tokens == 0
+                # (no visible content has EVER arrived) AND we've burned
+                # past the wall-clock floor. Once even one content piece
+                # has landed the normal repetition/deliberation detectors
+                # take over.
+                if (
+                    n_tokens == 0
+                    and (time.monotonic() - started) >= _SILENT_STREAM_SECONDS_FLOOR
+                ):
+                    silent = True
+                    stall_at = 0
+                    break
                 continue
             parts.append(piece)
             n_tokens += 1
@@ -672,7 +705,7 @@ async def stream_chat(
         # for back-compat with callers that only check `.stalled`. Each
         # specific cause is also exposed as its own boolean so the agent
         # can route to a tailored recovery message.
-        stalled=stalled or looped or deliberated,
+        stalled=stalled or looped or deliberated or silent,
         stall_at_token=stall_at,
         looped=looped,
         deliberated=deliberated,
@@ -682,6 +715,7 @@ async def stream_chat(
         loop_line=repeat.loop_line if looped else None,
         loop_grace_used=loop_grace_used,
         loop_grace_reason=loop_grace_reason,
+        silent=silent,
     )
 
 

@@ -1872,6 +1872,55 @@ class GameAgent:
         self._last_stream_looped: bool = False
         self._last_stream_stalled: bool = False
         self._last_stream_deliberated: bool = False
+        # True when the most recent stream produced ZERO non-empty
+        # content pieces past the wall-clock floor — the ollama_io /
+        # MLX silent-stream guard fired. Indicates the model burned
+        # tokens through a reasoning/thinking channel that surfaces
+        # as empty `content`. Tracked separately so the recovery
+        # prompt can call out "start with an opening tag, skip the
+        # silent reasoning preamble" instead of generic stall coach.
+        self._last_stream_silent: bool = False
+        # Cross-turn patch-SEARCH-failure memory. Stores fingerprints
+        # (sha1 of normalized first 80 chars) of every SEARCH block that
+        # failed to apply on the most recent retry turn. When the next
+        # turn re-emits a SEARCH that matches one of these fingerprints,
+        # the retry prompt marks it [REPEATED FAILURE] so the model
+        # gets a clearer signal than the generic "re-read the file"
+        # nudge. Motivating trace: doom 2026-05-23 extensions 1/2/3
+        # where the same `spriteNames=['imp_idle'...]` SEARCH failed
+        # three turns in a row because the FIRST patch already changed
+        # those lines and the model didn't read the updated file.
+        # Updated by the no_usable_code retry branch in run(); set is
+        # bounded by the per-turn failure count, no explicit cap needed.
+        self._last_failed_patch_anchors: set[str] = set()
+        # Visual-critic cross-turn dedup. Bounded deque of fingerprints
+        # (sha1 of normalized first 120 chars) for critic notes injected
+        # in the last few turns. Before queueing a new critic note we
+        # check this; matches are suppressed (with a
+        # `coaching_suppressed_repeated` trace) so the same observation
+        # doesn't bloat the prompt iter after iter. Motivating trace:
+        # doom 2026-05-23 where the critic flagged "low-resolution wall
+        # textures" in iters 1, 3, 5, 7 — each repeat added ~400 chars
+        # of prompt noise for zero new information.
+        from collections import deque as _deque
+        self._recent_critic_note_fingerprints: _deque = _deque(maxlen=3)
+        # Per-session scoped-classifier overrule counter. When the
+        # model picks a different output mode than the classifier
+        # expected (patch when classifier said media_only, etc.), this
+        # ticks up. At threshold (2) we auto-flip
+        # `_use_feedback_directives = False` for the rest of this
+        # session — the classifier has demonstrated it's misroutíng
+        # the user's typed feedback, and per the standing rule
+        # "agent must beat zero-shot" we step out of the way. Resets
+        # to 0 on /new (since this object is reconstructed). The
+        # threshold is intentionally low so it kicks in fast on
+        # iter-position-tweak sessions like doom 2026-05-23 where the
+        # model overruled the classifier twice in a row on
+        # pixel-shift feedback ("move gun 75 pixels right, no asset
+        # changes" → classifier=media_only, model emitted a code
+        # patch).
+        self._classifier_overrule_count: int = 0
+        self._classifier_auto_disabled: bool = False
         # When the previous stream looped, which RepetitionDetector window
         # fired and (if captured) what line was looping. Surfaced in the
         # format-rejection fallback so coaching can name the failure shape
@@ -2129,6 +2178,102 @@ class GameAgent:
         if getattr(self, "_model3_role", None) == role:
             self._model3_activity = activity
 
+    _CLASSIFIER_AUTO_DISABLE_THRESHOLD = 2
+
+    def _record_classifier_overrule(self, *, expected_mode: str, model_emitted: str, feedback_preview: str) -> None:
+        """Bump the overrule counter + auto-disable directives at threshold.
+
+        Centralizes the bookkeeping so both overrule emit sites stay in
+        sync. When the running count reaches the threshold we flip
+        `_use_feedback_directives = False` for the rest of the session
+        (a per-session decision; new sessions start fresh).
+        """
+        self._trace({
+            "kind": "scoped_classifier_overruled_by_model",
+            "expected_mode": expected_mode,
+            "model_emitted": model_emitted,
+            "feedback_preview": feedback_preview,
+            "count": self._classifier_overrule_count + 1,
+        })
+        self._classifier_overrule_count += 1
+        if (
+            not self._classifier_auto_disabled
+            and self._classifier_overrule_count >= self._CLASSIFIER_AUTO_DISABLE_THRESHOLD
+            and getattr(self, "_use_feedback_directives", True)
+        ):
+            self._use_feedback_directives = False
+            self._classifier_auto_disabled = True
+            self._trace({
+                "kind": "classifier_auto_disabled_after_repeated_overrules",
+                "count": self._classifier_overrule_count,
+                "threshold": self._CLASSIFIER_AUTO_DISABLE_THRESHOLD,
+                "reason": (
+                    "model overruled the scoped classifier "
+                    f"{self._classifier_overrule_count} times this session; "
+                    "switching to raw feedback mode for the rest of the "
+                    "session per the agent-must-beat-zero-shot rule. "
+                    "Resets next /new."
+                ),
+            })
+
+    @staticmethod
+    def _critic_note_fingerprint(text: str) -> str:
+        """Deterministic short fingerprint for a visual-critic note.
+
+        Used by `_recent_critic_note_fingerprints` to detect cross-turn
+        repeats. Normalizes whitespace + lowercases + takes first 120
+        chars so semantically-identical notes ("the wall textures are
+        low-resolution" vs "Wall textures appear low-resolution") with
+        small wording shifts still match.
+        """
+        import hashlib as _hashlib
+        normalized = " ".join((text or "").lower().split())
+        head = normalized[:120].encode("utf-8", "ignore")
+        return _hashlib.sha1(head).hexdigest()[:12]
+
+    def _queue_visual_critic_coaching(self, cleaned: str, *, iteration: int, vc_role: str = "critic") -> bool:
+        """Append a visual-critic note to `_pending_coaching` with cross-turn dedup.
+
+        Returns True when the note was queued, False when suppressed as
+        a repeat of one we already queued in the last 3 critic turns.
+        """
+        prefix = "VISUAL CRITIC (looked at the screenshot of your last iteration): "
+        full = prefix + cleaned
+        fp = self._critic_note_fingerprint(cleaned)
+        if fp in self._recent_critic_note_fingerprints:
+            self._trace({
+                "kind": "coaching_suppressed_repeated",
+                "iteration": iteration,
+                "vc_role": vc_role,
+                "fingerprint": fp,
+                "preview": cleaned[:200],
+                "reason": (
+                    "visual critic emitted the same observation in the "
+                    "last 3 critic turns; suppressing to avoid prompt "
+                    "bloat. The coder either can't fix it (asset-side) "
+                    "or already addressed it and the critic misread the "
+                    "new screenshot."
+                ),
+            })
+            return False
+        self._pending_coaching.append(full)
+        self._recent_critic_note_fingerprints.append(fp)
+        return True
+
+    @staticmethod
+    def _patch_anchor_fingerprint(search: str) -> str:
+        """Deterministic short fingerprint for a patch SEARCH block.
+
+        Used by `_last_failed_patch_anchors` to detect cross-turn repeats
+        of the same failing SEARCH. Normalizes whitespace + takes first
+        ~80 chars so a model that re-emits the same SEARCH with slightly
+        different indentation or trailing spaces still matches.
+        """
+        import hashlib as _hashlib
+        normalized = " ".join((search or "").split())
+        head = normalized[:80].encode("utf-8", "ignore")
+        return _hashlib.sha1(head).hexdigest()[:12]
+
     @staticmethod
     def _should_skip_format_doctor(
         *,
@@ -2161,6 +2306,7 @@ class GameAgent:
         probes_only: bool = False,
         media_only: bool = False,
         prior_stream_looped: bool = False,
+        prior_stream_silent: bool = False,
         prior_loop_kind: str | None = None,
         prior_loop_line: str | None = None,
         is_local_backend: bool = False,
@@ -2200,6 +2346,35 @@ class GameAgent:
         same broken shape because the generic fallback gave the model
         no signal to change strategy.
         """
+        # Silent-stream recovery — when ollama_io / MLX aborted the
+        # previous stream because it produced ZERO non-empty content
+        # for >=180s (all output went to a reasoning/thinking channel
+        # that surfaces as empty `content`). Motivating trace: doom
+        # 2026-05-23 iter 4 — 1356s wall-clock, 32,777 completion
+        # tokens, ZERO visible pieces, deliberation detector didn't
+        # fire because it feeds on `piece` content. The recovery
+        # message tells the model EXPLICITLY to start with an opening
+        # tag and skip any reasoning preamble.
+        if prior_stream_silent:
+            fallback = (
+                "SILENT STREAM RECOVERY: your previous reply produced "
+                "ZERO visible content for the entire wall-clock budget. "
+                "Either the model spent all of its tokens inside a "
+                "reasoning/thinking channel that surfaces as empty "
+                "content, or it generated only whitespace.\n\n"
+                "Recovery for THIS turn:\n"
+                "  - Start your reply DIRECTLY with one of the opening "
+                "tags: <patch>, <html_file>, <plan>, or <done/>. The "
+                "very first non-whitespace text MUST be a tag.\n"
+                "  - Do NOT begin with `<think>`, prose, or any "
+                "explanatory preamble. Skip reasoning entirely if your "
+                "model has a reasoning mode — go straight to the tag.\n"
+                "  - Keep this reply small: one focused <patch> if the "
+                "file is healthy, or a complete <html_file> if you "
+                "need a fresh draft. Either way, the first token "
+                "matters more than the length."
+            )
+            return fallback, False
         # Phase 4: duplicate-decl-aware coaching. When `_materialize`
         # rejected the reply because the inbound HTML had concatenated
         # drafts (duplicate top-level `const` / `function`), naming the
@@ -3874,19 +4049,17 @@ class GameAgent:
         # classifier's expectation. Useful for postmortem to spot
         # patterns without us having to enumerate them in regex.
         if mode == "media_only" and patch_count > 0 and not (has_assets or has_sounds):
-            self._trace({
-                "kind": "scoped_classifier_overruled_by_model",
-                "expected_mode": mode,
-                "model_emitted": "patch_only",
-                "feedback_preview": str(cfg.get("feedback_preview") or "")[:200],
-            })
+            self._record_classifier_overrule(
+                expected_mode=mode,
+                model_emitted="patch_only",
+                feedback_preview=str(cfg.get("feedback_preview") or "")[:200],
+            )
         elif mode == "single_patch" and (has_assets or has_sounds) and patch_count == 0:
-            self._trace({
-                "kind": "scoped_classifier_overruled_by_model",
-                "expected_mode": mode,
-                "model_emitted": "media_only",
-                "feedback_preview": str(cfg.get("feedback_preview") or "")[:200],
-            })
+            self._record_classifier_overrule(
+                expected_mode=mode,
+                model_emitted="media_only",
+                feedback_preview=str(cfg.get("feedback_preview") or "")[:200],
+            )
         if bool(cfg.get("require_scope_probe")):
             probes = self._extract_probes(reply)
             if not probes:
@@ -5740,13 +5913,15 @@ class GameAgent:
         cleaned = critique.strip()
         if not cleaned or "ok" in cleaned.lower()[:30]:
             return
-        prefix = "VISUAL CRITIC (looked at the screenshot of your last iteration): "
-        self._pending_coaching.append(prefix + cleaned)
+        queued = self._queue_visual_critic_coaching(
+            cleaned, iteration=iteration, vc_role=vc_role,
+        )
         self._trace({
             "kind": "visual_critic_concurrent_completed",
             "iteration": iteration,
             "vc_role": vc_role,
             "critique_preview": cleaned[:240],
+            "queued": queued,
         })
 
     # ---- Phase 1.5 — autonomous self-feedback ---------------------------
@@ -6576,6 +6751,7 @@ class GameAgent:
         self._last_stream_stalled = bool(result.stalled)
         self._last_stream_deliberated = bool(result.deliberated)
         self._last_stream_crashed = bool(result.crashed)
+        self._last_stream_silent = bool(getattr(result, "silent", False))
         self._last_stream_loop_kind = (
             getattr(result, "loop_kind", None) if result.looped else None
         )
@@ -6590,6 +6766,7 @@ class GameAgent:
             "looped": result.looped,
             "deliberated": result.deliberated,
             "crashed": result.crashed,
+            "silent": bool(getattr(result, "silent", False)),
             "len": len(result.text),
             # Backend-reported BPE counts when available. `tokens` above is
             # streaming chunk count; these are the real cost numbers used
@@ -6599,6 +6776,33 @@ class GameAgent:
             "completion_tokens": result.completion_tokens,
             "max_tokens_hit": result.max_tokens_hit,
         })
+        # Silent-stream surface — when the new ollama_io / MLX guard
+        # aborts a stream that produced ZERO visible content for >=180s
+        # (all output went to a reasoning channel that surfaces as empty
+        # `content`), emit a dedicated trace so the doom-iter-4 failure
+        # class is visible in postmortem analysis. Recovery flows
+        # through the existing "no usable code" path below since the
+        # reply text is empty.
+        if getattr(result, "silent", False):
+            self._trace({
+                "kind": "stream_silent_aborted",
+                "duration_s": round(result.duration_s, 2),
+                "completion_tokens": result.completion_tokens,
+                "prompt_tokens": result.prompt_tokens,
+                "model_role": role,
+                "model_name": getattr(
+                    getattr(active_backend, "info", None),
+                    "model",
+                    "unknown",
+                ),
+                "hint": (
+                    "Stream produced zero visible content for >=180s. "
+                    "Likely all generation went to a reasoning/thinking "
+                    "channel that surfaces as empty `content`. The model "
+                    "should be coached to start replies directly with an "
+                    "opening tag like <patch> or <html_file>."
+                ),
+            })
         # Short-stream warning — symmetric to runaway_stream_warning.
         # Counterpart to the 2026-05-23 SOTA chess trace where a coder
         # role emitted 8 tokens in 1.74s and the agent accepted it as
@@ -10652,13 +10856,40 @@ class GameAgent:
                 # If the reply had patches but they failed to apply, give the
                 # model the specific failures + current file so it can retry.
                 if patches_in_reply and self._current_file:
+                    # Snapshot prior-turn failures BEFORE this turn's
+                    # re-apply so the [REPEATED FAILURE] marker reflects
+                    # cross-turn repeats, not within-turn duplicates.
+                    prior_failed_anchors = set(self._last_failed_patch_anchors)
                     res = apply_patches(self._current_file, patches_in_reply)
+                    # Current-turn failures → fingerprints for next turn.
+                    new_failed_anchors = {
+                        self._patch_anchor_fingerprint(p.search or "")
+                        for (_i, p, _r) in res.failed
+                    }
+                    # Intersection = SEARCH blocks that failed last turn
+                    # AND failed again this turn. patch_retry_instruction
+                    # uses this to flag those bullets.
+                    repeat_anchors = prior_failed_anchors & new_failed_anchors
+                    if repeat_anchors:
+                        self._trace({
+                            "kind": "patch_search_repeat_detected",
+                            "count": len(repeat_anchors),
+                            "anchors": sorted(repeat_anchors),
+                        })
                     self._messages.append({
                         "role": "user",
                         "content": self._flush_user_injections(
-                            self._p.patch_retry_instruction(res.failed, self._current_file)
+                            self._p.patch_retry_instruction(
+                                res.failed,
+                                self._current_file,
+                                repeat_anchors=repeat_anchors,
+                                anchor_fingerprint=self._patch_anchor_fingerprint,
+                            )
                         ),
                     })
+                    # Remember THIS turn's failures so the next retry
+                    # can flag repeats again.
+                    self._last_failed_patch_anchors = new_failed_anchors
                 else:
                     # Detect "plan-only" — the model emitted <plan> but no
                     # code. This is the failure mode from the
@@ -10703,6 +10934,7 @@ class GameAgent:
                             probes_only=probes_only,
                             media_only=media_only,
                             prior_stream_looped=self._last_stream_looped,
+                            prior_stream_silent=self._last_stream_silent,
                             prior_loop_kind=self._last_stream_loop_kind,
                             prior_loop_line=self._last_stream_loop_line,
                             is_local_backend=(
@@ -11306,12 +11538,19 @@ class GameAgent:
                             if critique:
                                 cleaned = critique.strip()
                                 if cleaned and "ok" not in cleaned.lower()[:30]:
-                                    prefix = "VISUAL CRITIC (looked at the screenshot of your last iteration): "
-                                    self._pending_coaching.append(prefix + cleaned)
-                                    yield self._record(AgentEvent(
-                                        "info",
-                                        f"[magenta]visual critic[/magenta] (iter {iteration}): {cleaned}"
-                                    ))
+                                    queued = self._queue_visual_critic_coaching(
+                                        cleaned, iteration=iteration, vc_role=vc_role,
+                                    )
+                                    if queued:
+                                        yield self._record(AgentEvent(
+                                            "info",
+                                            f"[magenta]visual critic[/magenta] (iter {iteration}): {cleaned}"
+                                        ))
+                                    else:
+                                        yield self._record(AgentEvent(
+                                            "info",
+                                            f"[dim]visual critic (iter {iteration}): same observation as a recent turn — suppressed[/dim]"
+                                        ))
                         except Exception as exc:
                             self._trace({
                                 "kind": "visual_critic_error",

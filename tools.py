@@ -2672,20 +2672,37 @@ class LiveBrowser:
             # replaces self._probes with the new set).
             for gap in coverage_gaps:
                 slug = _slugify_criterion(gap)
+                # [HARNESS NOTE] fence (2026-05-24) — without this, the
+                # 27B-class coder mistakes synthetic coverage_gap probe
+                # text for file content and emits a <patch> trying to
+                # DELETE it. Doom 2026-05-23 extension 1 trace shows
+                # exactly that: model SEARCH'd for the literal
+                # "FAIL coverage_gap__player_movement... /* synthetic */"
+                # line (which only exists in the harness report, never
+                # in the .html file), patch failed, wasted an iter.
+                # The fence + explicit "DO NOT <patch> this text"
+                # instruction makes the distinction unmistakable.
                 probe_results.append({
                     "name": f"coverage_gap__{slug}",
                     "expr": "false  /* synthetic - no model-authored probe for this criterion */",
                     "ok": False,
                     "err": (
-                        f"criterion has no probe: {gap[:160]}. "
-                        f"In your NEXT reply, keep doing your normal "
-                        f"fix work (<patch> or <html_file>) AND include "
-                        f"an updated <probes>...</probes> block that "
-                        f"adds one entry referencing this criterion "
-                        f"(name OR expr should share words with the "
-                        f"criterion text). The probes block is "
-                        f"re-parsed only when accompanied by code — "
-                        f"don't emit probes alone."
+                        "[HARNESS NOTE — NOT FILE CONTENT, DO NOT <patch>]\n"
+                        f"This is a SYNTHETIC harness probe — it does NOT "
+                        f"exist anywhere in your .html file. It was added "
+                        f"automatically because your Phase A <criteria> "
+                        f"included this line but no model-authored probe "
+                        f"in your <probes> block references it:\n\n"
+                        f"  criterion: {gap[:200]}\n\n"
+                        f"Recovery: in your NEXT reply, do your normal fix "
+                        f"work (<patch> or <html_file>) AND include an "
+                        f"updated <probes>...</probes> block that adds "
+                        f"ONE entry whose name OR expr shares words with "
+                        f"the criterion text. The probes block is re-parsed "
+                        f"only when accompanied by code — don't emit "
+                        f"probes alone. Do NOT emit a <patch> targeting "
+                        f"this text; it isn't in any file.\n"
+                        "[/HARNESS NOTE]"
                     ),
                     "synthetic": True,
                 })
