@@ -5536,6 +5536,142 @@ class GameAgent:
                 })
         return val
 
+    def _build_visual_playtest_prompt(self, recipe, before_png: bytes | None) -> str:
+        """Build a structured-checklist VLM prompt from a recipe.
+
+        Small VLMs answer closed-class yes/no questions much more
+        reliably than open-ended "what's wrong?" prompts (mortal-
+        kombat 2026-05-24 trace had 6 paraphrased complaints in 6
+        iters). The recipe carries 6-9 high-signal questions; we
+        wrap them in a strict response format and tell the VLM to
+        stop after the list.
+        """
+        checklist = recipe.recipe.get("checklist") or []
+        # Render as Q1..Qn so the response parser can match without
+        # depending on exact question text.
+        numbered = "\n".join(
+            f"Q{i+1}: {q}" for i, q in enumerate(checklist)
+        )
+        intro = (
+            "You are reviewing one screenshot of a game called: "
+            f"{self._goal[:300] or '(no goal specified)'}\n\n"
+            "Answer each numbered question below by RE-EMITTING the "
+            "question's number with YES, NO, or UNCLEAR, plus an "
+            "optional short remark after a dash. ONE LINE per "
+            "question, in order. Stop after the last question. Do "
+            "NOT add prose, do NOT guess at code causes, do NOT "
+            "describe the background unless a question asks.\n\n"
+        )
+        if before_png is not None:
+            intro = (
+                "You are reviewing TWO screenshots of a game called: "
+                f"{self._goal[:300] or '(no goal specified)'}\n\n"
+                "Image 1: BEFORE simulated input. Image 2: AFTER.\n\n"
+                "Answer each numbered question by RE-EMITTING the "
+                "question's number with YES, NO, or UNCLEAR. ONE "
+                "LINE per question, in order. Refer to Image 2 (the "
+                "AFTER image) for each answer. Stop after the last "
+                "question.\n\n"
+            )
+        example = (
+            "Example response shape:\n"
+            "Q1: yes\n"
+            "Q2: no — player overlaps the right wall\n"
+            "Q3: unclear\n"
+            "...\n\n"
+        )
+        return intro + numbered + "\n\n" + example
+
+    @staticmethod
+    def _parse_visual_playtest_response(text: str, recipe) -> dict:
+        """Parse a structured-checklist response into {q_index: (answer, remark)}.
+
+        Tolerant: accepts YES/NO/UNCLEAR in any case, with or without
+        leading whitespace; accepts `Qn:`, `Qn.`, `Qn -`, etc. Lines
+        that don't match the pattern are skipped silently. Returns a
+        dict keyed by 1-based question index.
+
+        Returns also a `parse_rate` (matched / expected) so the
+        caller can detect low-quality responses and fall back.
+        """
+        if not text or not recipe:
+            return {"answers": {}, "parse_rate": 0.0, "n_questions": 0}
+        checklist = recipe.recipe.get("checklist") or []
+        n_q = len(checklist)
+        answers: dict[int, tuple[str, str]] = {}
+        import re as _re
+        # Match `Q1: yes — remark` / `Q12. NO` / `q3 - unclear` / etc.
+        # The `\b` after the answer alternation forces a word break, but
+        # emoji code-points don't trigger \b in Python's re — so we split
+        # the alternation into two branches: ASCII words (need \b) and
+        # symbols (no \b).
+        pat = _re.compile(
+            r"^\s*Q?\s*(\d+)\s*[:.\-)]\s*"
+            r"(?:(yes|no|unclear|y|n|u)\b|([✅❌✔✖✓✗✘]))"
+            r"\s*[\-—]?\s*(.*)$",
+            _re.IGNORECASE,
+        )
+        for line in text.splitlines():
+            m = pat.match(line)
+            if not m:
+                continue
+            idx = int(m.group(1))
+            if idx < 1 or idx > n_q:
+                continue
+            ans_word = m.group(2)
+            ans_sym = m.group(3)
+            ans = (ans_word or ans_sym or "").strip().lower()
+            remark = (m.group(4) or "").strip()
+            # Normalize to yes/no/unclear.
+            if ans in ("y", "yes", "✅", "✔", "✓"):
+                norm = "yes"
+            elif ans in ("n", "no", "❌", "✖", "✗", "✘"):
+                norm = "no"
+            else:
+                norm = "unclear"
+            answers[idx] = (norm, remark)
+        return {
+            "answers": answers,
+            "parse_rate": (len(answers) / n_q) if n_q else 0.0,
+            "n_questions": n_q,
+        }
+
+    @staticmethod
+    def _format_visual_playtest_critique(parsed: dict, recipe) -> str | None:
+        """Turn the parsed checklist results into a single critique
+        string. Returns None when EVERY check passed (no coaching
+        needed — same shape as the legacy "Visual Critic: OK" path).
+        """
+        answers = parsed.get("answers") or {}
+        n_q = parsed.get("n_questions") or 0
+        if not answers or not n_q:
+            return None
+        checklist = recipe.recipe.get("checklist") or []
+        failures: list[str] = []
+        unclears: list[str] = []
+        for i, q in enumerate(checklist, start=1):
+            entry = answers.get(i)
+            if entry is None:
+                continue
+            ans, remark = entry
+            line_intro = f"Q{i} ({q[:80]}{'...' if len(q) > 80 else ''})"
+            if ans == "no":
+                tail = f" — {remark}" if remark else ""
+                failures.append(f"{line_intro} FAILED{tail}")
+            elif ans == "unclear":
+                tail = f" — {remark}" if remark else ""
+                unclears.append(f"{line_intro} UNCLEAR{tail}")
+        if not failures and not unclears:
+            return None  # all-pass; caller treats as "OK"
+        head = (
+            f"[VISUAL PLAYTEST — {recipe.id}] "
+            f"{len(failures)} of {n_q} check(s) failed"
+            + (f" + {len(unclears)} unclear" if unclears else "")
+            + ":"
+        )
+        body = "\n".join(failures + unclears)
+        return head + "\n" + body
+
     async def run_visual_critic(
         self,
         current_png: bytes,
@@ -5547,9 +5683,38 @@ class GameAgent:
             return None
             
         self._set_role_activity("critic", "Auditing screenshot...")
+        # Try the structured-checklist path first (2026-05-24). Match a
+        # mechanism recipe via goal + plan-grade criteria text + asset
+        # names; if one resolves, build a closed-class yes/no prompt
+        # from the recipe's checklist. The VLM's answer is parsed
+        # line-by-line into a structured critique. If retrieval misses
+        # OR the response doesn't parse cleanly, we fall back to the
+        # legacy open-ended prompt below.
+        recipe = None
+        recipe_diag: dict = {}
         try:
-            # We construct a highly structured prompt for Model 2/3 (Visual Critic)
-            if before_png is not None:
+            recipe, recipe_diag = self._memory.find_visual_playtest_for(
+                goal=self._goal or "",
+                plan_text=self._criteria or "",
+                asset_names=list(self._session_assets.keys()),
+            )
+        except Exception as _vp_e:
+            self._trace({
+                "kind": "visual_playtest_retrieval_error",
+                "error": str(_vp_e)[:200],
+            })
+            recipe = None
+        try:
+            using_recipe = recipe is not None
+            if using_recipe:
+                prompt = self._build_visual_playtest_prompt(recipe, before_png)
+                self._trace({
+                    "kind": "visual_playtest_recipe_used",
+                    "id": recipe.id,
+                    "top_candidates": recipe_diag.get("top_candidates", []),
+                    "match_tokens_sample": recipe_diag.get("match_tokens_sample", []),
+                })
+            elif before_png is not None:
                 prompt = (
                     "You are an expert out-of-band Visual PlayTester and Critic "
                     "for a game development sandbox.\n"
@@ -5574,7 +5739,11 @@ class GameAgent:
                     "evidence, and state what likely needs adjusting. Do NOT "
                     "output code or patches."
                 )
-                images = [before_png, current_png]
+                self._trace({
+                    "kind": "visual_playtest_recipe_generic",
+                    "reason": "no_recipe_matched",
+                    "top_candidates": recipe_diag.get("top_candidates", []),
+                })
             else:
                 prompt = (
                     "You are an expert out-of-band Visual PlayTester and Critic for a game development sandbox. "
@@ -5590,7 +5759,12 @@ class GameAgent:
                     "Keep it objective, name the specific visual evidence (e.g., 'character facing right but attack rendering to the left'), "
                     "and state what likely needs adjusting. Do NOT output code or patches."
                 )
-                images = [current_png]
+                self._trace({
+                    "kind": "visual_playtest_recipe_generic",
+                    "reason": "no_recipe_matched",
+                    "top_candidates": recipe_diag.get("top_candidates", []),
+                })
+            images = [before_png, current_png] if before_png is not None else [current_png]
             messages = [
                 {"role": "user", "content": prompt, "images": images}
             ]
@@ -5598,6 +5772,7 @@ class GameAgent:
                 "kind": "visual_critic_start",
                 "model": backend.info.model,
                 "image_count": len(images),
+                "recipe_id": recipe.id if recipe else None,
             })
             critic_role = getattr(self, "_model3_role", None)
             if critic_role != "critic":
@@ -5615,9 +5790,47 @@ class GameAgent:
                 overall_seconds=300.0,
                 max_retries=1,
             )
-            critique = (result.text or "").strip()
-            self._trace({"kind": "visual_critic_end", "critique": critique})
-            return critique
+            critique_raw = (result.text or "").strip()
+            # If we used a recipe, parse the structured response and
+            # format the failures into a single coaching string. Fall
+            # back to the raw text when the VLM didn't follow the
+            # format (parse_rate below threshold) — small VLMs
+            # occasionally skip the Q1: prefix and revert to prose,
+            # but we still want to surface whatever they said.
+            if using_recipe and recipe is not None:
+                parsed = self._parse_visual_playtest_response(critique_raw, recipe)
+                parse_rate = parsed.get("parse_rate", 0.0)
+                if parse_rate >= 0.5:
+                    formatted = self._format_visual_playtest_critique(parsed, recipe)
+                    self._trace({
+                        "kind": "visual_playtest_parsed",
+                        "recipe_id": recipe.id,
+                        "parse_rate": round(parse_rate, 2),
+                        "n_questions": parsed.get("n_questions", 0),
+                        "n_answered": len(parsed.get("answers", {})),
+                        "n_failures": sum(
+                            1 for (a, _r) in parsed["answers"].values()
+                            if a == "no"
+                        ),
+                    })
+                    # All-pass returns None — same shape as "Visual
+                    # Critic: OK" in the legacy path.
+                    if formatted is None:
+                        self._trace({"kind": "visual_critic_end", "critique": "(all checks passed)"})
+                        return None
+                    self._trace({"kind": "visual_critic_end", "critique": formatted})
+                    return formatted
+                else:
+                    self._trace({
+                        "kind": "visual_playtest_unparseable",
+                        "recipe_id": recipe.id,
+                        "parse_rate": round(parse_rate, 2),
+                        "raw_preview": critique_raw[:200],
+                    })
+                    # Fall through to legacy return so the raw text
+                    # still surfaces (better than nothing).
+            self._trace({"kind": "visual_critic_end", "critique": critique_raw})
+            return critique_raw
         except Exception as e:
             self._trace({"kind": "visual_critic_failed", "error": str(e)})
             return None
