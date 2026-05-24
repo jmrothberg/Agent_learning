@@ -1096,6 +1096,13 @@ class CodingBoxApp(App):
         # diagnostics are NOT gated by this — only the extra autonomous
         # direction is.
         self._use_autonomous_feedback: bool = True
+        # /rawfeedback toggle. When True (default), the harness wraps
+        # user feedback with classifier-driven directives (MEDIA-CHANGE,
+        # ORIENTATION-CHANGE, SCOPE ARBITRATION, asset stem mapping).
+        # When False, the model sees the raw USER FEEDBACK block only —
+        # use when the classifier is misrouting your guidance. Sticky
+        # across /new so a session escape doesn't silently disarm.
+        self._use_feedback_directives: bool = True
         # Auto-staff flags (2026-05-21): True when the matching feature
         # was flipped by auto-enable (sidecar role or local-VLM detect)
         # rather than by an explicit toggle. Surfaced in the status panel
@@ -1738,45 +1745,25 @@ class CodingBoxApp(App):
         return self._run_profile == "local_manual"
 
     def _wants_three_ollama_slots(self) -> bool:
-        """True when the staged session needs coder + two Ollama sidecars.
+        """True only when the user explicitly staged slots 2 AND 3.
 
-        Returns True in two cases:
-          (a) user explicitly staged a model on slots 2 AND 3 (legacy
-              behavior — explicit /model2 /model3 or /modelall), or
-          (b) the box is the 4-GPU workstation shape AND the primary
-              backend is Ollama. The autopin function is a no-op on any
-              other hardware, so this default-open gate gives single-
-              slot users no extra cost while making sure the 4-GPU box
-              actually USES its idle GPUs without the user having to
-              remember /modelall every session.
+        Default-on autopin for 4-GPU boxes was reverted on 2026-05-23
+        after it crashed the workstation: three Ollama daemons plus the
+        iter-1 best-of-N fan-out hammered every GPU at once. Multi-slot
+        is now strictly opt-in via /model2 /model3 /modelall.
         """
         primary_backend = (self._next_backend or "auto").lower()
         if primary_backend in ("mlx", "openai", "anthropic", "claude"):
             return False
-        # Case (a): explicit per-slot staging.
-        all_slots_staged = True
         for backend_name, model_name in (
             (self._next_backend2, self._next_model2),
             (self._next_backend3, self._next_model3),
         ):
             if not model_name:
-                all_slots_staged = False
-                break
+                return False
             if (backend_name or "ollama").lower() != "ollama":
                 return False
-        if all_slots_staged:
-            return True
-        # Case (b): default-on for the 4-GPU workstation. The autopin
-        # function itself has the strict hardware gate; calling it on
-        # other shapes returns "off" cleanly. So this is safe to leave
-        # default-true on any Linux+Ollama box — only the 4-GPU shape
-        # actually spawns daemons.
-        try:
-            import backend as _bk
-            ok, _ = _bk._is_four_gpu_linux_nvidia_workstation()
-            return ok
-        except Exception:
-            return False
+        return True
 
     def _render_iteration_block(self) -> str:
         """Phase / iteration / streak / probes / ctx / model / goal / queued."""
@@ -3051,6 +3038,8 @@ class CodingBoxApp(App):
                 self._cmd_toggle_allroles(arg)
             elif cmd == "feedback":
                 self._cmd_toggle_autonomous_feedback(arg)
+            elif cmd in ("rawfeedback", "raw-feedback", "raw"):
+                self._cmd_toggle_raw_feedback(arg)
             else:
                 self._log_info(f"unknown command /{cmd} — type /help")
         except Exception as e:
@@ -3147,6 +3136,8 @@ class CodingBoxApp(App):
             "  [b]/vlm-critique[/b] [on|off]    toggle attaching screenshot to Phase C self-critique turns (default off)",
             "                                  [dim]needs a VLM as the loaded model; uses slot 1 when no critic slot is staged[/dim]",
             "  [b]/feedback[/b] [on|off]        toggle autonomous self-feedback loop (default ON · multi-screenshot playtest + genre-free behavior recipes)",
+            "  [b]/rawfeedback[/b] [on|off]     pass YOUR feedback through verbatim (default OFF · skip MEDIA-CHANGE / ORIENTATION / SCOPE directives)",
+            "                                  [dim]use when the classifier misroutes you — e.g. 'down key moves you forward' wrapped as ART/SOUND[/dim]",
             "                                  [dim]only the extra direction is gated; test reports, patch diagnostics, and the critic still run when off[/dim]",
             "  [b]/audit[/b]                     print per-bullet earnings (fires, pass-rate, avg-iter) from trace history",
             "  [b]/check[/b] [<N|model>]       visual review + guidance using model #N from /list or a model name",
@@ -4788,6 +4779,7 @@ class CodingBoxApp(App):
             f"  vlm-critique:         {'ON' if self._use_vlm_critique else 'off'}{' [auto]' if self._vlm_critique_auto and self._use_vlm_critique else ''}",
             f"  /allroles bundle:     {'ON' if self._all_roles_enabled else 'off'}",
             f"  autonomous /feedback: {'ON' if self._use_autonomous_feedback else 'OFF'}  [dim](multi-shot playtest + recipe checks; /feedback off to disable)[/dim]",
+            f"  raw user feedback:    {'ON · directives suppressed' if not self._use_feedback_directives else 'off'}  [dim](/rawfeedback on/off — bypass MEDIA-CHANGE / ORIENTATION classifiers)[/dim]",
             f"  iter detail:          {self._iter_decision_verbose}",
             f"  run profile:          {self._format_run_profile()}",
             f"  review hook:          {self._profile_review_model or '—'}",
@@ -5125,6 +5117,56 @@ class CodingBoxApp(App):
             f"autonomous self-feedback set to {status} "
             "(standard error reporting unaffected)"
         )
+        self._update_status()
+
+    def _cmd_toggle_raw_feedback(self, arg: str) -> None:
+        """/rawfeedback [on|off] — pass user feedback through verbatim.
+
+        Default OFF: the harness wraps every user feedback note with
+        classifier-driven directives (MEDIA-CHANGE, ORIENTATION-CHANGE,
+        SCOPE ARBITRATION, asset stem mapping, scoped constraint
+        config). Helpful when the classifier reads the user correctly.
+
+        ON: every directive block is suppressed. The model sees ONLY
+        the basic USER FEEDBACK (HIGHEST PRIORITY) wrapper around your
+        literal text and decides for itself whether to emit <patch>
+        or <assets>. Use when the classifier is misrouting your
+        guidance — e.g. when you type "down key moves you forward"
+        and the harness wraps it with "the feedback above is about
+        ART/SOUND, not code".
+
+        Sticky across /new. Safe to toggle mid-session. Equivalent to
+        /raw or /raw-feedback.
+        """
+        arg_lc = arg.strip().lower()
+        if arg_lc in ("on", "true", "1", "enable"):
+            raw_on = True
+        elif arg_lc in ("off", "false", "0", "disable"):
+            raw_on = False
+        elif arg_lc == "":
+            cur = (
+                "[yellow]ON[/yellow]" if not self._use_feedback_directives
+                else "[green]OFF[/green]"
+            )
+            self._log_info(
+                f"raw-feedback mode is {cur} "
+                "(usage: /rawfeedback on  ·  /rawfeedback off)"
+            )
+            return
+        else:
+            raw_on = self._use_feedback_directives  # currently directives-on → flip to raw-on
+        # raw_on=True  → suppress directives → _use_feedback_directives=False
+        # raw_on=False → keep directives      → _use_feedback_directives=True
+        new_state = not raw_on
+        self._use_feedback_directives = new_state
+        if self.agent is not None:
+            self.agent._use_feedback_directives = new_state
+        status = (
+            "[yellow]ON[/yellow] — directives suppressed, model sees your literal text"
+            if not new_state else
+            "[green]OFF[/green] — directives active (default)"
+        )
+        self._log_info(f"raw-feedback mode set to {status}")
         self._update_status()
 
     def _cmd_toggle_vlm_critique(self, arg: str) -> None:
@@ -5536,6 +5578,7 @@ class CodingBoxApp(App):
         # that constructs GameAgent would otherwise need updating).
         # Default on the agent is True; the App's runtime toggle wins.
         self.agent._use_autonomous_feedback = self._use_autonomous_feedback
+        self.agent._use_feedback_directives = self._use_feedback_directives
         # Apply run-profile step policy on session start.
         if self._run_profile == "local_manual":
             self.agent.set_step_mode(True)

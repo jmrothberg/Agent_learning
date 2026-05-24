@@ -317,12 +317,12 @@ def main() -> int:
         action="store_false",
         help="Freeze playbook scores (for A/B baseline comparisons).",
     )
-    p.add_argument("--best-of-n", type=int, default=3,
+    p.add_argument("--best-of-n", type=int, default=1,
                    help="Sample N candidates per fix, sequentially with early exit "
-                        "(score=100 ships immediately). Default 3 — the 2026-05-22 "
-                        "chess trace had `best_of_n=1` and burned 1356s on three "
-                        "scrapped iters; flipping to 3 amortises the local model's "
-                        "first-try variance. Set 1 to disable; set 2 to halve cost.")
+                        "(score=100 ships immediately). Default 1 — multi-candidate "
+                        "fan-out oversubscribed the 4-GPU box on first build "
+                        "(2026-05-23). Opt in with --best-of-n 2 or 3 when you have "
+                        "spare staged slots.")
     p.add_argument("--num-ctx", type=int, default=None,
                    help="Ollama context window. Default 100000 (or "
                         "CODING_BOX_NUM_CTX env: supports 100k, 262k, full). "

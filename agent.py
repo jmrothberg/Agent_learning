@@ -874,10 +874,60 @@ _BEHAVIOR_BUG_COMPLAINT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# INVERTED-BEHAVIOR patterns — the user is reporting that behavior IS
+# happening but in the WRONG way (reversed/swapped/inverted). The
+# existing negation regex only catches "X doesn't Y", not "X does the
+# opposite of Y". Doom trace 2026-05-23: user wrote "down key moves
+# you forward" and "directions and views getting reversed" — clear
+# code bugs that slipped past the classifier and got misrouted to
+# MEDIA-CHANGE because no behavior_bug suppression fired.
+#
+# These patterns intentionally pair an INPUT/CONTROL noun with a
+# WRONG-DIRECTION qualifier so they don't false-positive on art
+# language ("the sprite is inverted" stays orientation-only).
+_BEHAVIOR_BUG_INVERTED_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # "direction(s) ... reversed/wrong/inverted/swapped/backwards" within ~6 words
+    re.compile(
+        r"\bdirection(?:s)?\b[\w\s,]{0,40}\b"
+        r"(?:reversed?|invert(?:ed|ing)?|wrong|opposite|swapped|"
+        r"flipped|backwards?)\b",
+        re.I,
+    ),
+    # Symmetric: "reversed/wrong/... ... direction(s)" within ~6 words
+    re.compile(
+        r"\b(?:reversed?|invert(?:ed|ing)?|wrong|opposite|swapped|flipped)\b"
+        r"[\w\s,]{0,40}\bdirection(?:s)?\b",
+        re.I,
+    ),
+    # "movement / controls / motion / input / axis ... wrong-shape"
+    re.compile(
+        r"\b(?:movement|controls?|motion|input|axis|axes)\b[\w\s,]{0,40}\b"
+        r"(?:reversed?|invert(?:ed|ing)?|wrong|opposite|swapped|"
+        r"flipped|backwards?)\b",
+        re.I,
+    ),
+    # "wrong way" or "opposite way" as a standalone control complaint
+    # (already covered by orientation_change for sprite contexts; here
+    # we add it to behavior_bug so the input-mismatch case routes too).
+    re.compile(r"\b(?:wrong|opposite)\s+(?:way|direction)\b", re.I),
+    # Input key + verb + opposite output: "down key moves you forward",
+    # "up arrow goes backwards", "left button sends you right".
+    re.compile(
+        r"\b(?:up|down|left|right|forward|back|backwards?|w|a|s|d)\s+"
+        r"(?:key|arrow|button)\b[\w\s,]{0,40}\b"
+        r"(?:moves?|sends?|goes|going|turns?|takes?|points?)\b"
+        r"[\w\s,]{0,20}\b"
+        r"(?:up|down|left|right|forward|back|backwards?|opposite|wrong)\b",
+        re.I,
+    ),
+)
+
 
 def _feedback_is_behavior_bug(text: str) -> bool:
     """User is reporting a behavior / code bug — "X doesn't Y",
-    "nothing happens when …", "the game is broken / frozen / crashing".
+    "nothing happens when …", "the game is broken / frozen / crashing",
+    OR "X is happening but in the WRONG / REVERSED way" (input-control
+    mismatch).
 
     DK trace 20260514_104131 fix: the existing art-change classifier
     fires True whenever an asset name appears in feedback, which
@@ -886,11 +936,18 @@ def _feedback_is_behavior_bug(text: str) -> bool:
     behavior-bug language lets the directive injector suppress the
     misrouting.
 
+    Doom trace 2026-05-23 fix: also detect INVERTED-behavior complaints
+    ("down key moves you forward", "directions getting reversed"). The
+    old negation regex only matched "X doesn't Y", missing the "X does
+    the OPPOSITE of Y" failure class entirely.
+
     Patterns matched:
       - negation + behavior verb within 3 words ("does not climb",
         "won't reset", "isn't responding")
       - explicit complaint nouns ("bug", "broken", "crashing",
         "frozen", "stuck", "glitching")
+      - inverted-behavior pairs ("direction(s) reversed", "movement
+        inverted", "down key moves you forward")
 
     Visual-only verbs (look, appear, render, show) are NOT in the
     behavior-verb set, so "the dragon doesn't look right" stays on
@@ -901,6 +958,8 @@ def _feedback_is_behavior_bug(text: str) -> bool:
     if _BEHAVIOR_BUG_COMPLAINT_RE.search(text):
         return True
     if _BEHAVIOR_BUG_NEGATION_RE.search(text):
+        return True
+    if any(p.search(text) for p in _BEHAVIOR_BUG_INVERTED_PATTERNS):
         return True
     return False
 
@@ -941,7 +1000,7 @@ def _matched_names_in_text(text_lower: str, names: list[str]) -> set[str]:
 _NON_DISTINCTIVE_ASSET_STEMS: frozenset[str] = frozenset({
     "white", "black", "red", "blue", "green", "yellow", "orange",
     "purple", "pink", "brown", "gray", "grey",
-    "left", "right", "up", "down", "front", "back", "side",
+    "left", "right", "up", "down", "front", "back", "side", "view",
     "small", "large", "big", "tiny", "huge",
     "light", "dark", "bright",
     "player", "enemy", "npc",  # too broad to disambiguate
@@ -1185,21 +1244,45 @@ _ORIENTATION_REGEN_BLOCKERS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bdifferent\s+style\b", re.I),
 )
 
+# Negation tokens that, when they precede a blocker phrase, INVERT the
+# blocker's meaning ("do NOT make a new asset" forbids regen — the
+# opposite of the bare blocker's "user wants regen" reading). The
+# doom trace 2026-05-23 was the motivating case: user wrote "do not
+# make a NEW asset, i think the pistal maybe facing the wrong way"
+# and the literal `\bnew\s+asset\b` blocker fired, suppressing the
+# orientation route and letting MEDIA-CHANGE re-render the pistol —
+# exactly what the user forbade.
+_BLOCKER_NEGATION_RE = re.compile(
+    r"\b(?:not|no|don['’]?t|doesn['’]?t|never|without|please\s+don['’]?t)\b",
+    re.I,
+)
+
+
+def _phrase_is_negated(text: str, match_start: int, window_chars: int = 30) -> bool:
+    """True when a negation word appears within `window_chars` BEFORE match_start."""
+    pre = text[max(0, match_start - window_chars): match_start]
+    return bool(_BLOCKER_NEGATION_RE.search(pre))
+
 
 def _feedback_is_orientation_change(text: str) -> bool:
     """Classifier heuristic: user wants a sprite mirrored/flipped on
     the canvas (one small <patch>), not regenerated. False positives
     push a code patch path when the user actually wanted regen, so
-    blockers like "new asset" / "redraw" suppress the route.
+    blockers like "new asset" / "redraw" suppress the route — UNLESS
+    those blocker phrases are themselves negated ("do NOT make a new
+    asset"), in which case the user is forbidding regen and the
+    orientation route should fire.
 
     Genre-free: vocabulary describes rendering modality, not subject
     matter. Returns True only when an orientation verb fires AND no
-    explicit regen blocker fires.
+    un-negated regen blocker fires.
     """
     if not text:
         return False
-    if any(p.search(text) for p in _ORIENTATION_REGEN_BLOCKERS):
-        return False
+    for p in _ORIENTATION_REGEN_BLOCKERS:
+        for m in p.finditer(text):
+            if not _phrase_is_negated(text, m.start()):
+                return False
     return any(p.search(text) for p in _ORIENTATION_VERB_PATTERNS)
 
 
@@ -1436,13 +1519,12 @@ class GameAgent:
         # (and unit tests that pass `model="stub"` without ever streaming)
         # keep working unchanged.
         backend: Backend | None = None,
-        # Phase 0.6 — bumped from 1 to 3. The 2026-05-22 chess trace had
-        # `best_of_n=1` and burned 1356s on three scrapped fix iters that
-        # would likely have shipped under best-of-3 sampling. Sequential
-        # sampling with early-exit (score=100) keeps cost bounded: a
-        # passing first candidate ships immediately, only stuck turns
-        # spend the extra token budget. Set to 1 to disable.
-        best_of_n: int = 3,
+        # Default 1: single candidate per turn. Best-of-N was briefly
+        # default-3 (Phase 0.6 after the 2026-05-22 chess trace) but
+        # combined with the multi-slot autopin it oversubscribed the
+        # 4-GPU box on first build (2026-05-23). Opt in with --best-of-n
+        # when you actually have spare slots staged.
+        best_of_n: int = 1,
         # Ollama context window. qwen3.6:27b/35b natively supports 128K+,
         # gpt-oss supports 128K — at 8K we were truncating mid-<assets>
         # block on long planning turns (see games/traces/make-a-small-
@@ -1930,6 +2012,16 @@ class GameAgent:
         # diagnostics, visual critic) are NOT gated by this — only the
         # extra autonomous direction.
         self._use_autonomous_feedback: bool = True
+        # When False, every harness-added directive that wraps USER
+        # feedback (MEDIA-CHANGE, ORIENTATION-CHANGE, FEEDBACK SCOPE
+        # ARBITRATION, asset stem mappings, scoped constraint config)
+        # is suppressed and the user's text is passed through with only
+        # the basic USER FEEDBACK (HIGHEST PRIORITY) wrapper. Use when
+        # the classifier is misrouting your guidance (Doom trace
+        # 2026-05-23: "down key moves you forward" got wrapped with
+        # "the feedback above is about ART/SOUND, not code"). Flip via
+        # /rawfeedback in the TUI.
+        self._use_feedback_directives: bool = True
         # Cycle counter for the budget governor. Resets per session.
         # Capped at _AUTONOMOUS_MAX_CYCLES; auto-stops if two consecutive
         # playtests find nothing new.
@@ -1979,6 +2071,24 @@ class GameAgent:
     @property
     def model(self) -> str:
         return self._backend.info.model
+
+    def _planning_role(self) -> str:
+        """Role label for planning / exit-decision turns.
+
+        Returns 'architect' only when planning will actually run on a
+        distinct backend — i.e. the user explicitly staged a slot with
+        role=architect, OR `_use_architect_split` (/allroles bundle)
+        is on. Otherwise returns 'coder' so the UI and trace don't
+        claim a role the user never enabled. (Bug observed 2026-05-23
+        doom run: UI showed "Activity (architect)" when only coder +
+        critic were staged.)
+        """
+        if getattr(self, "_use_architect_split", False):
+            return "architect"
+        arch_backend = self.get_backend("architect")
+        if arch_backend is not None and arch_backend is not self._backend:
+            return "architect"
+        return "coder"
 
     def get_backend(self, role: str) -> Backend:
         """Dynamic hierarchical routing for multi-GPU configurations."""
@@ -4390,7 +4500,49 @@ class GameAgent:
                 + "\n- ".join(fb[:240] for fb in force_honor_via_escalation)
                 + "\n=================================================================="
             )
-        if self._pending_feedback:
+        if self._pending_feedback and not getattr(self, "_use_feedback_directives", True):
+            # RAW FEEDBACK MODE — /rawfeedback on. Pass every queued
+            # user note through verbatim, with ONLY the basic USER
+            # FEEDBACK (HIGHEST PRIORITY) wrapper. Skip strict-scope
+            # arbitration, classifier calls, MEDIA-CHANGE / ORIENTATION-
+            # CHANGE / SCOPE ARBITRATION directives, asset stem mapping,
+            # and scoped-constraint configuration. The model sees what
+            # the user typed and decides for itself whether to <patch>
+            # or <assets>. Use when the classifier is misrouting your
+            # guidance (Doom trace 2026-05-23 was the motivating case).
+            feedback_items = list(self._pending_feedback)
+            joined_raw = "\n- ".join(feedback_items)
+            parts.append(
+                "================ USER FEEDBACK (HIGHEST PRIORITY) ================\n"
+                "The user just typed this while watching your game. It OVERRIDES\n"
+                "any plan or default behavior. Address it explicitly in this turn:\n"
+                f"\n[USER NOTE]\n- {joined_raw}\n[/USER NOTE]\n"
+                "=================================================================="
+            )
+            for fb in feedback_items:
+                self._trace({"kind": "feedback_injected", "text": fb, "raw_mode": True})
+            self._trace({
+                "kind": "feedback_directives_suppressed",
+                "reason": "raw_feedback_mode",
+                "count": len(feedback_items),
+            })
+            self._last_drained_feedback = list(feedback_items)
+            self._recent_feedback_texts.extend(feedback_items)
+            self._recent_feedback_texts = self._recent_feedback_texts[-3:]
+            self._pending_feedback.clear()
+            self._clear_scoped_constraints()
+            self._last_turn_contract.update({
+                "had_feedback": True,
+                "locks_code": False,
+                "art_change": False,
+                "sound_change": False,
+                "behavior_scope": False,
+                "behavior_bug": False,
+                "orientation_change": False,
+                "existing_media_request": False,
+                "raw_feedback_mode": True,
+            })
+        elif self._pending_feedback:
             feedback_items = list(self._pending_feedback)
             strict_idxs = [
                 i for (i, fb) in enumerate(feedback_items)
@@ -9172,12 +9324,13 @@ class GameAgent:
             # compete with the architect for VRAM and slow it down.
             # General behavior — observable detection, no genre logic.
             self._maybe_prewarm_diffusers_during_phase_a()
+            planning_role = self._planning_role()
             yield self._record(AgentEvent(
                 "activity", "streaming",
-                {"label": "planning reply", "role": "architect"},
+                {"label": "planning reply", "role": planning_role},
             ))
             try:
-                plan_reply = await self._stream(self._token_cb_wrapper, role="architect")
+                plan_reply = await self._stream(self._token_cb_wrapper, role=planning_role)
             except Exception as e:
                 yield self._record(AgentEvent("activity", "idle"))
                 err_msg = (
@@ -9196,8 +9349,8 @@ class GameAgent:
             self._messages.append({
                 "role": "assistant",
                 "content": plan_reply,
-                "model_role": "architect",
-                "model_name": self.get_backend("architect").info.model
+                "model_role": planning_role,
+                "model_name": self.get_backend(planning_role).info.model
             })
             self._extract_and_queue_lookups(plan_reply)
             self._capture_todos(plan_reply)
@@ -9306,12 +9459,13 @@ class GameAgent:
                         "is sufficient to plan."
                     ),
                 })
+                planning_role = self._planning_role()
                 yield self._record(AgentEvent(
                     "activity", "streaming",
-                    {"label": "streaming plan after question", "role": "architect"},
+                    {"label": "streaming plan after question", "role": planning_role},
                 ))
                 try:
-                    plan_reply = await self._stream(self._token_cb_wrapper, role="architect")
+                    plan_reply = await self._stream(self._token_cb_wrapper, role=planning_role)
                 except Exception as e:
                     yield self._record(AgentEvent("activity", "idle"))
                     err_msg = (
@@ -9329,8 +9483,8 @@ class GameAgent:
                 self._messages.append({
                     "role": "assistant",
                     "content": plan_reply,
-                    "model_role": "architect",
-                    "model_name": self.get_backend("architect").info.model
+                    "model_role": planning_role,
+                    "model_name": self.get_backend(planning_role).info.model
                 })
                 self._extract_and_queue_lookups(plan_reply)
                 self._capture_todos(plan_reply)
@@ -11733,18 +11887,19 @@ class GameAgent:
                 "content": self._flush_user_injections(exit_prompt),
             })
             self._trace({"kind": "exit_decision_turn_prompted"})
+            exit_role = self._planning_role()
             yield self._record(AgentEvent(
                 "activity", "streaming",
-                {"label": "exit decision", "role": "architect"},
+                {"label": "exit decision", "role": exit_role},
             ))
             try:
-                exit_reply = await self._stream(self._token_cb_wrapper, role="architect")
+                exit_reply = await self._stream(self._token_cb_wrapper, role=exit_role)
                 yield self._record(AgentEvent("activity", "idle"))
                 self._messages.append({
                     "role": "assistant",
                     "content": exit_reply,
-                    "model_role": "architect",
-                    "model_name": self.get_backend("architect").info.model
+                    "model_role": exit_role,
+                    "model_name": self.get_backend(exit_role).info.model
                 })
                 self._dump_conversation()
                 self._trace({

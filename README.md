@@ -770,6 +770,7 @@ is data the agent will see, not just developer notes.
 | `/double-screenshot <on\|off>` | Toggle capturing dual screenshots (startup and post-input) to help the model see movement/animation (default off). |
 | `/vlm-critique <on\|off>` | Toggle VLM screenshot attachment during Phase C successful critique turns for layout and UI polishing (default off). Needs a VLM as the loaded model; uses slot 1 when no critic slot is staged. |
 | `/feedback [on\|off]` | Toggle autonomous playtest loop (default **on**). Bare `/feedback` prints state without flipping. When on: after clean iters, genre-free behavior recipes may queue `[AUTONOMOUS PLAYTEST]` coaching. Test reports and the critic still run when off. |
+| `/rawfeedback [on\|off]` | Pass YOUR typed feedback through verbatim (default **off** — directives active). When on, the harness suppresses MEDIA-CHANGE / ORIENTATION-CHANGE / SCOPE ARBITRATION / asset-stem-mapping directives and the model sees only the basic USER FEEDBACK block around your literal text. Flip on when the classifier misroutes your guidance (e.g. typing "down key moves you forward" gets wrapped as "the feedback above is about ART/SOUND, not code"). Sticky across `/new`. Aliases: `/raw`, `/raw-feedback`. |
 | `/audit` | Per-bullet playbook earnings from trace history (fires, pass-rate, avg-iter). |
 | `/restarts <N>` | Independent full restarts when iter-1 score is below 60 (sticky; default 2; `1` = off). |
 | `/model-class <auto\|small\|mid\|large>` | Override system-prompt trim (sticky; default `auto` → lean ~5 KB schema). |
