@@ -1096,13 +1096,23 @@ class CodingBoxApp(App):
         # diagnostics are NOT gated by this — only the extra autonomous
         # direction is.
         self._use_autonomous_feedback: bool = True
-        # /rawfeedback toggle. When True (default), the harness wraps
-        # user feedback with classifier-driven directives (MEDIA-CHANGE,
-        # ORIENTATION-CHANGE, SCOPE ARBITRATION, asset stem mapping).
-        # When False, the model sees the raw USER FEEDBACK block only —
-        # use when the classifier is misrouting your guidance. Sticky
-        # across /new so a session escape doesn't silently disarm.
-        self._use_feedback_directives: bool = True
+        # /rawfeedback toggle — DEFAULT FALSE (raw mode is ON).
+        # When False (default): the model sees your typed feedback under
+        # only the basic USER FEEDBACK (HIGHEST PRIORITY) wrapper and
+        # decides for itself whether to patch or re-render. Machine bug
+        # feedback (Chromium test reports, console errors, frozen-canvas
+        # detector, probes), playbook retrieval, and autonomous playtest
+        # are UNAFFECTED — they all still run.
+        # When True: the harness wraps your typed text with classifier-
+        # driven directives (MEDIA-CHANGE, ORIENTATION-CHANGE, SCOPE
+        # ARBITRATION, asset stem mapping). Opt in with /rawfeedback off
+        # when the classifier reads your phrasing correctly.
+        # Default flipped 2026-05-23 — the wrapping classifier had over-
+        # ridden user guidance in the doom session ("down key moves you
+        # forward" got tagged as ART/SOUND feedback). Per the user's
+        # standing rule: the agent must beat zero-shot, not lose value
+        # to regex misroutes. Sticky across /new.
+        self._use_feedback_directives: bool = False
         # Auto-staff flags (2026-05-21): True when the matching feature
         # was flipped by auto-enable (sidecar role or local-VLM detect)
         # rather than by an explicit toggle. Surfaced in the status panel
@@ -3136,8 +3146,9 @@ class CodingBoxApp(App):
             "  [b]/vlm-critique[/b] [on|off]    toggle attaching screenshot to Phase C self-critique turns (default off)",
             "                                  [dim]needs a VLM as the loaded model; uses slot 1 when no critic slot is staged[/dim]",
             "  [b]/feedback[/b] [on|off]        toggle autonomous self-feedback loop (default ON · multi-screenshot playtest + genre-free behavior recipes)",
-            "  [b]/rawfeedback[/b] [on|off]     pass YOUR feedback through verbatim (default OFF · skip MEDIA-CHANGE / ORIENTATION / SCOPE directives)",
-            "                                  [dim]use when the classifier misroutes you — e.g. 'down key moves you forward' wrapped as ART/SOUND[/dim]",
+            "  [b]/rawfeedback[/b] [on|off]     YOUR typed feedback goes to the model verbatim (default ON · classifier directives suppressed)",
+            "                                  [dim]machine bug feedback (Chromium test reports, console errors, probes), playbook, and autonomous playtest are UNAFFECTED — they always run[/dim]",
+            "                                  [dim]flip /rawfeedback off to opt-in to the MEDIA-CHANGE / ORIENTATION-CHANGE / SCOPE ARBITRATION classifier wrappers[/dim]",
             "                                  [dim]only the extra direction is gated; test reports, patch diagnostics, and the critic still run when off[/dim]",
             "  [b]/audit[/b]                     print per-bullet earnings (fires, pass-rate, avg-iter) from trace history",
             "  [b]/check[/b] [<N|model>]       visual review + guidance using model #N from /list or a model name",
@@ -4779,7 +4790,7 @@ class CodingBoxApp(App):
             f"  vlm-critique:         {'ON' if self._use_vlm_critique else 'off'}{' [auto]' if self._vlm_critique_auto and self._use_vlm_critique else ''}",
             f"  /allroles bundle:     {'ON' if self._all_roles_enabled else 'off'}",
             f"  autonomous /feedback: {'ON' if self._use_autonomous_feedback else 'OFF'}  [dim](multi-shot playtest + recipe checks; /feedback off to disable)[/dim]",
-            f"  raw user feedback:    {'ON · directives suppressed' if not self._use_feedback_directives else 'off'}  [dim](/rawfeedback on/off — bypass MEDIA-CHANGE / ORIENTATION classifiers)[/dim]",
+            f"  raw user feedback:    {'ON · directives suppressed (default)' if not self._use_feedback_directives else 'off · classifier wrapping ACTIVE'}  [dim](/rawfeedback on|off — bypass MEDIA-CHANGE / ORIENTATION / SCOPE wrappers; machine bug feedback always on)[/dim]",
             f"  iter detail:          {self._iter_decision_verbose}",
             f"  run profile:          {self._format_run_profile()}",
             f"  review hook:          {self._profile_review_model or '—'}",
@@ -5120,20 +5131,33 @@ class CodingBoxApp(App):
         self._update_status()
 
     def _cmd_toggle_raw_feedback(self, arg: str) -> None:
-        """/rawfeedback [on|off] — pass user feedback through verbatim.
+        """/rawfeedback [on|off] — your typed feedback goes to the model verbatim.
 
-        Default OFF: the harness wraps every user feedback note with
-        classifier-driven directives (MEDIA-CHANGE, ORIENTATION-CHANGE,
-        SCOPE ARBITRATION, asset stem mapping, scoped constraint
-        config). Helpful when the classifier reads the user correctly.
+        Default ON: every directive block is suppressed. The model
+        sees ONLY the basic USER FEEDBACK (HIGHEST PRIORITY) wrapper
+        around your literal text and decides for itself whether to
+        emit <patch> or <assets>. This is the default because the
+        classifier-driven wrappers actively misrouted typed feedback
+        in past sessions ("down key moves you forward" got wrapped
+        with "the feedback above is about ART/SOUND, not code").
 
-        ON: every directive block is suppressed. The model sees ONLY
-        the basic USER FEEDBACK (HIGHEST PRIORITY) wrapper around your
-        literal text and decides for itself whether to emit <patch>
-        or <assets>. Use when the classifier is misrouting your
-        guidance — e.g. when you type "down key moves you forward"
-        and the harness wraps it with "the feedback above is about
-        ART/SOUND, not code".
+        OFF: opt-in to classifier wrapping. The harness reads your
+        typed text, classifies it (art change / orientation change /
+        scope lock / etc.), and adds directives like MEDIA-CHANGE,
+        ORIENTATION-CHANGE, SCOPE ARBITRATION, asset stem mapping.
+        Useful when the classifier reads your phrasing correctly and
+        the extra coaching helps the model.
+
+        UNAFFECTED by this toggle — always runs regardless:
+          - Chromium browser test reports each iter (console errors,
+            page errors, frozen-canvas check, RAF firing, probes,
+            input smoke test). This is the load-bearing bug signal.
+          - Patch failure diagnostics.
+          - Playbook retrieval (/playbook off to disable separately).
+          - Autonomous self-playtest after clean iters (/feedback
+            off to disable separately).
+          - Visual critic on screenshots (/vlm-critique off to
+            disable separately).
 
         Sticky across /new. Safe to toggle mid-session. Equivalent to
         /raw or /raw-feedback.

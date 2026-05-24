@@ -402,6 +402,28 @@ gap** check (below) can also emit `surprise` events with category
 `state_vs_render_gap` when probes pass but an entity with `x`/`y` in
 `window.state` is not visibly drawn.
 
+### "Feedback" — four distinct flows, four separate switches
+
+The word *feedback* is overloaded in this codebase. There are four
+distinct flows, all controlled separately, and confusing them was the
+source of multiple frustrating sessions:
+
+| Flow | What it is | Switch | Default |
+| --- | --- | --- | --- |
+| **1. Machine bug feedback** | Real Chromium loads your HTML each iter and reports console errors, page errors, frozen-canvas state, RAF firing, listener counts, input smoke-test results, and every `<probe>` the model defined in Phase A. This is the load-bearing verifier signal — what makes the agent better than zero-shot. | **always on** (unconditional) | ON |
+| **2. Playbook retrieval** | Top-K most relevant bullets from `memory/playbook.jsonl` (hand-curated recipes — e.g. FPS camera basis vectors, asteroid jitter, image-load race) injected into the prompt each turn. The model reads them and uses what's relevant. | `/playbook on\|off` | ON |
+| **3. Autonomous self-playtest** | After each **clean** iter the agent runs a SECOND playtest using playbook recipes (`memory/playtests.jsonl`) and queues `[AUTONOMOUS PLAYTEST]` feedback if it finds something the probes missed. Uses #2 to know what to check. | `/feedback on\|off` | ON |
+| **4. Directive wrapping on YOUR typed feedback** | When you type a feedback note into the TUI, a classifier reads your text and adds injected instructions (MEDIA-CHANGE / ORIENTATION-CHANGE / SCOPE ARBITRATION / asset-stem mapping). The model sees those instructions wrapping your literal text. When the classifier is wrong, these wrappers override your guidance. | `/rawfeedback on\|off` | **ON = directives suppressed** (raw mode) |
+
+The agent's value-add comes from #1, #2, #3. #4 is the part that has
+historically misrouted user guidance — e.g. typing "down key moves you
+forward" got wrapped with "the feedback above is about ART/SOUND, not
+code" because the classifier matched "view" in "maze view" as a reference
+to the `pistol_view` sprite. As of 2026-05-23 the default is **raw mode
+on** (wrapping suppressed) so the model sees what you typed. Flip
+`/rawfeedback off` to opt in to the wrappers when the classifier reads
+you correctly.
+
 ### Patch engine
 
 [`patches.py`](patches.py) defines a SEARCH/REPLACE format with a
@@ -770,7 +792,7 @@ is data the agent will see, not just developer notes.
 | `/double-screenshot <on\|off>` | Toggle capturing dual screenshots (startup and post-input) to help the model see movement/animation (default off). |
 | `/vlm-critique <on\|off>` | Toggle VLM screenshot attachment during Phase C successful critique turns for layout and UI polishing (default off). Needs a VLM as the loaded model; uses slot 1 when no critic slot is staged. |
 | `/feedback [on\|off]` | Toggle autonomous playtest loop (default **on**). Bare `/feedback` prints state without flipping. When on: after clean iters, genre-free behavior recipes may queue `[AUTONOMOUS PLAYTEST]` coaching. Test reports and the critic still run when off. |
-| `/rawfeedback [on\|off]` | Pass YOUR typed feedback through verbatim (default **off** — directives active). When on, the harness suppresses MEDIA-CHANGE / ORIENTATION-CHANGE / SCOPE ARBITRATION / asset-stem-mapping directives and the model sees only the basic USER FEEDBACK block around your literal text. Flip on when the classifier misroutes your guidance (e.g. typing "down key moves you forward" gets wrapped as "the feedback above is about ART/SOUND, not code"). Sticky across `/new`. Aliases: `/raw`, `/raw-feedback`. |
+| `/rawfeedback [on\|off]` | Your typed feedback goes to the model verbatim (default **on** as of 2026-05-23). The model sees only the basic USER FEEDBACK block around your literal text and decides for itself whether to `<patch>` or `<assets>`. Machine bug feedback (browser test reports, console errors, probes), playbook retrieval, autonomous playtest, and visual critic are UNAFFECTED — they always run. Flip to `off` to opt in to the classifier wrappers (MEDIA-CHANGE / ORIENTATION-CHANGE / SCOPE ARBITRATION / asset-stem-mapping). Sticky across `/new`. Aliases: `/raw`, `/raw-feedback`. |
 | `/audit` | Per-bullet playbook earnings from trace history (fires, pass-rate, avg-iter). |
 | `/restarts <N>` | Independent full restarts when iter-1 score is below 60 (sticky; default 2; `1` = off). |
 | `/model-class <auto\|small\|mid\|large>` | Override system-prompt trim (sticky; default `auto` → lean ~5 KB schema). |
