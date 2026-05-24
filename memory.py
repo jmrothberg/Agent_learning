@@ -3060,6 +3060,24 @@ def _opening_book_seed_items() -> dict[str, list[OpeningBookItem]]:
                         "Is the canvas non-blank (clearly rendering something, not all one color)?",
                     ],
                     "format": "yes_no_per_line",
+                    # Auto-probe: player within canvas bounds. Conservative
+                    # — returns true (passes) when the relevant state
+                    # shape isn't exposed. Catches the "player flew off
+                    # the edge" regression deterministically without
+                    # depending on the VLM.
+                    "auto_probes": [
+                        {
+                            "name": "auto_player_within_canvas_bounds",
+                            "expr": (
+                                "(()=>{const c=document.querySelector('canvas');"
+                                "const s=window.state||window.gameState;"
+                                "if(!c||!s)return true;"
+                                "const p=s.player||s.hero||s.ship||s.avatar;"
+                                "if(!p||typeof p.x!=='number'||typeof p.y!=='number')return true;"
+                                "return p.x>=-10&&p.x<=c.width+10&&p.y>=-10&&p.y<=c.height+10;})()"
+                            ),
+                        }
+                    ],
                 },
             ),
             VisualPlaytestRecipe(
@@ -3091,6 +3109,28 @@ def _opening_book_seed_items() -> dict[str, list[OpeningBookItem]]:
                         "Is the canvas mostly filled by the maze (not 90% blank space)?",
                     ],
                     "format": "yes_no_per_line",
+                    # Auto-probe: player not inside a wall cell. Tries
+                    # common state-shape names (maze/grid/map; player/
+                    # pacman/hero); returns true conservatively when the
+                    # shape doesn't match. Walls tested against the two
+                    # common encodings: numeric 1, char '#', char 'W'.
+                    "auto_probes": [
+                        {
+                            "name": "auto_player_not_in_wall",
+                            "expr": (
+                                "(()=>{const s=window.state||window.gameState;"
+                                "if(!s)return true;"
+                                "const p=s.player||s.pacman||s.hero||s.avatar;"
+                                "if(!p||typeof p.x!=='number'||typeof p.y!=='number')return true;"
+                                "const m=s.maze||s.grid||s.map||s.tiles;"
+                                "if(!Array.isArray(m)||!Array.isArray(m[0]))return true;"
+                                "const tx=Math.floor(p.x);const ty=Math.floor(p.y);"
+                                "if(!m[ty]||m[ty][tx]===undefined)return true;"
+                                "const cell=m[ty][tx];"
+                                "return cell!==1&&cell!=='#'&&cell!=='W'&&cell!=='wall';})()"
+                            ),
+                        }
+                    ],
                 },
             ),
             VisualPlaytestRecipe(
@@ -3123,6 +3163,39 @@ def _opening_book_seed_items() -> dict[str, list[OpeningBookItem]]:
                         "Are both characters within the visible canvas bounds (not clipped at edges)?",
                     ],
                     "format": "yes_no_per_line",
+                    # Auto-probes (2026-05-24, mortal-kombat regression).
+                    # Catches the wholesale-facing-flip class of bug
+                    # DETERMINISTICALLY — even if the VLM critic misses
+                    # it on the screenshot, the probe fails the iter
+                    # and the harness reports it in the next user turn.
+                    # Iter 12 of the user's mortal-kombat session flipped
+                    # `facing === -1` to `facing === 1` globally, making
+                    # BOTH actors face the same direction. That state
+                    # shape (both .facing same sign) is what this probe
+                    # catches.
+                    "auto_probes": [
+                        {
+                            "name": "auto_actors_face_each_other",
+                            "expr": (
+                                "(()=>{const s=window.state||window.gameState;"
+                                "if(!s)return true;"
+                                "const p1=s.p1||s.player1||s.fighter1||"
+                                "(Array.isArray(s.players)&&s.players[0])||"
+                                "(Array.isArray(s.fighters)&&s.fighters[0]);"
+                                "const p2=s.p2||s.player2||s.fighter2||"
+                                "(Array.isArray(s.players)&&s.players[1])||"
+                                "(Array.isArray(s.fighters)&&s.fighters[1]);"
+                                "if(!p1||!p2)return true;"
+                                "if(typeof p1.facing!=='number'||typeof p2.facing!=='number')return true;"
+                                # Opposite signs OR both nonzero — they
+                                # must face DIFFERENT directions. A pair
+                                # both at 0 also fails (not a meaningful
+                                # facing).
+                                "if(p1.facing===0&&p2.facing===0)return false;"
+                                "return Math.sign(p1.facing)!==Math.sign(p2.facing);})()"
+                            ),
+                        }
+                    ],
                 },
             ),
             VisualPlaytestRecipe(

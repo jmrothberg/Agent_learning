@@ -5536,6 +5536,65 @@ class GameAgent:
                 })
         return val
 
+    def _maybe_inject_visual_playtest_auto_probes(self) -> None:
+        """Inject auto-probes from the matched visual_playtest recipe
+        into `self._probes`. Idempotent — checks names against the
+        existing probe set so repeated calls don't duplicate entries.
+
+        Auto-probes are the DETERMINISTIC layer paired with the VLM
+        checklist: the VLM might miss "both characters face the same
+        direction" on a screenshot, but the `auto_actors_face_each_other`
+        probe asserts `Math.sign(p1.facing) !== Math.sign(p2.facing)`
+        directly against state — fails any iter where the wholesale
+        flip lands. Mortal-kombat 2026-05-24 iter 12 is the motivating
+        case.
+
+        Conservative: each probe returns `true` (passes) when the
+        relevant state shape isn't exposed. Never fails a game that
+        simply doesn't have e.g. `state.player.facing`.
+
+        Called once at end of Phase A (after the model's own probes
+        are parsed) and again after first-build materializes (in case
+        the planning phase had no probes but assets give a stronger
+        recipe match).
+        """
+        try:
+            recipe, diag = self._memory.find_visual_playtest_for(
+                goal=self._goal or "",
+                plan_text=self._criteria or "",
+                asset_names=list(self._session_assets.keys()),
+            )
+        except Exception as e:
+            self._trace({
+                "kind": "visual_playtest_auto_probes_error",
+                "error": str(e)[:200],
+            })
+            return
+        if recipe is None:
+            return
+        auto = recipe.recipe.get("auto_probes") or []
+        if not auto:
+            return
+        existing_names = {(p.get("name") or "") for p in (self._probes or [])}
+        added: list[str] = []
+        for ap in auto:
+            name = (ap.get("name") or "").strip()
+            expr = (ap.get("expr") or "").strip()
+            if not name or not expr or name in existing_names:
+                continue
+            if self._probes is None:
+                self._probes = []
+            self._probes.append({"name": name, "expr": expr})
+            existing_names.add(name)
+            added.append(name)
+        if added:
+            self._trace({
+                "kind": "visual_playtest_auto_probes_injected",
+                "recipe_id": recipe.id,
+                "added": added,
+                "total_probes": len(self._probes or []),
+            })
+
     def _build_visual_playtest_prompt(self, recipe, before_png: bytes | None) -> str:
         """Build a structured-checklist VLM prompt from a recipe.
 
@@ -9858,6 +9917,14 @@ class GameAgent:
                             "info",
                             f"[yellow]probe lint[/yellow] {f['message']}",
                         ))
+            # Visual-playtest auto-probes injection. Run AFTER the
+            # model's own <probes> are parsed (or skipped) so the
+            # injected probes ride alongside whatever the model wrote.
+            # Deterministic safety net for the mechanism — even if the
+            # model's probes miss the failure class (e.g. mortal-
+            # kombat 2026-05-24 had no facing assertion), the injected
+            # probe catches it. See VisualPlaytestRecipe.auto_probes.
+            self._maybe_inject_visual_playtest_auto_probes()
 
             q = self._extract_question(plan_reply)
             if q is not None:
