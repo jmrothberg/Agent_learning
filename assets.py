@@ -42,9 +42,16 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Per-asset default target size. Sprites are typically 32-128 px; 128
-# is a good middle ground, can be overridden per-asset by the model.
-_DEFAULT_TARGET_SIZE = 128
+# Per-asset default target size. Bumped 2026-05-23 from 128 → 512:
+# user feedback "why are the .png always tiny" — 128 px PNGs looked
+# postage-stamp on modern displays, especially at 4K, and shrinking
+# from 768 native to 128 threw away most of the diffuser's detail.
+# 512 keeps the detail (drawImage downscales cheaply at draw time
+# if the game wants a smaller render size) without inflating disk
+# usage past a few MB per session. Power-of-2 so WebGL textures
+# don't need padding. Can still be overridden per-asset by the model
+# via "size":"32x32" / "size":256 etc.
+_DEFAULT_TARGET_SIZE = 512
 
 # Where Z-Image-Turbo's weights live on disk. Cross-platform — works on
 # Linux (Models_Diffusers convention) and macOS (Diffusion_Models

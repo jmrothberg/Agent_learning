@@ -625,7 +625,10 @@ Pipeline per spec:
 3. **Cross-session library lookup** (production path only). See
    [Cross-session asset library](#cross-session-asset-library) below.
 4. Cache miss + library miss → generate at native 768×768.
-5. PIL Lanczos downscale to per-asset target size (default 128 px).
+5. PIL Lanczos downscale to per-asset target size (default **512 px**
+   as of 2026-05-23 — was 128 px, but tiny PNGs looked postage-stamp
+   on modern displays and threw away most of the diffuser's detail;
+   `drawImage` downscales at draw time if the game wants smaller).
 6. `_chroma_key_to_rgba` samples 8 corner+edge points; if ≥6/8 agree
    on a dominant color, alpha-mask within tolerance → save RGBA PNG.
 7. Per-asset stats stash on `image_generator.last_stats`.
@@ -1359,9 +1362,12 @@ hand.
   verify `backend.discover_local_vlm()` returns a path (run
   `.venv/bin/python -c "from backend import discover_local_vlm;
   print(discover_local_vlm())"`).
-- **`Sprites blur when drawn small`**: the asset generator's default
-  output size is 128 px; ask for a smaller `size` (`"size": "32x32"`)
-  for icons rendered at < 64 px.
+- **`Sprites blur or look postage-stamp tiny`**: default output size
+  is 512 px (was 128 px before 2026-05-23). `drawImage` downscales
+  cheaply if the game uses a smaller render rect. Ask for a smaller
+  `size` only when you want tiny on-disk files (HUD icons:
+  `"size": "32x32"`) or larger for full-screen overlays
+  (`"size": 1024`).
 - **`First-iter games are silent`**: run
   `scripts/build_stock_sounds.py` once. The 8 stock sounds become
   zero-cost on subsequent sessions.

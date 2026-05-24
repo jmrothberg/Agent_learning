@@ -198,9 +198,11 @@ ASSETS_FORMAT = FormatSpec(
         "spaceship facing right, white outline, transparent background\". "
         "Prefer pixel-art / sprite-sheet style with transparent "
         "backgrounds for game sprites.",
-        "Optional `size` is a string (\"64x64\", \"128x96\") or an int "
-        "(square). Default 128 px square. Keep sprites small — 32–128 px "
-        "is typical; over-large sprites blur when drawn small.",
+        "Optional `size` is a string (\"64x64\", \"256x192\") or an int "
+        "(square). Default 512 px square — keeps Z-Image's detail and "
+        "lets the game downscale at draw time as needed. Override per "
+        "asset only when you need something specific (HUD icons 32-64 "
+        "px, full-screen overlays 1024+).",
         "ANIMATION FRAMES & ROSTER LIMITS: When you need coherent "
         "animation sequences (walk cycles, idle bobs, attacks, shatters, "
         "impact effects), declare frame 1 normally, then add "
