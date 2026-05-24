@@ -456,7 +456,10 @@ patch number caused the problem and what to change to fix it.
 | `games/goals/` | **Short-term** — per-session `goal.txt`, `best.html`, `outcome.json` |
 | `games/<stem>.html` (+ `<stem>_assets/`, `<stem>_sounds/`) | **Curated showcases** (tracked when great) — most session HTML is gitignored; promote a winner by restoring/committing the trio and adding matching `!` lines in `.gitignore` (see chess sample below). |
 
-**Curated game in repo:** [`games/mechanics-standard-chess-on-an_20260522_163629.html`](games/mechanics-standard-chess-on-an_20260522_163629.html) — animated sprites, SFX, negamax AI (`AI_SEARCH_DEPTH=4`). Open the file in a browser from `games/` so relative asset paths resolve.
+**Curated games in repo** (open from `games/` so relative asset paths resolve):
+
+- [`games/mechanics-standard-chess-on-an_20260522_163629.html`](games/mechanics-standard-chess-on-an_20260522_163629.html) — animated sprites, SFX, negamax AI (`AI_SEARCH_DEPTH=4`).
+- [`games/game-of-mortal-kombat-fighing_20260524_101226.html`](games/game-of-mortal-kombat-fighing_20260524_101226.html) — two-player fighter (sprites, SFX, HUD). Shipped from session `.best.html`.
 
 - **`GameMemory`** — skeleton retrieval and mistake retrieval.
   - **Premium Default Skeletons (Autobootstrapped on boot)**: The system provides 17 generic, high-fidelity scaffolds in `memory/skeletons/` designed to give local models a perfect first-build template:

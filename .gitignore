@@ -17,6 +17,7 @@ env/
 games/*.html
 # Curated showcases only (not every session) — add ! lines when promoting a winner:
 !games/mechanics-standard-chess-on-an_20260522_163629.html
+!games/game-of-mortal-kombat-fighing_20260524_101226.html
 games/snapshots/
 games/traces/
 memory/*
@@ -30,11 +31,15 @@ games/_smoke/
 games/*_assets/
 !games/mechanics-standard-chess-on-an_20260522_163629_assets/
 !games/mechanics-standard-chess-on-an_20260522_163629_assets/**
+!games/game-of-mortal-kombat-fighing_20260524_101226_assets/
+!games/game-of-mortal-kombat-fighing_20260524_101226_assets/**
 # Sound-pipeline artifacts (OGGs are 5-50KB each; cache grows over time)
 games/_sound_cache/
 games/*_sounds/
 !games/mechanics-standard-chess-on-an_20260522_163629_sounds/
 !games/mechanics-standard-chess-on-an_20260522_163629_sounds/**
+!games/game-of-mortal-kombat-fighing_20260524_101226_sounds/
+!games/game-of-mortal-kombat-fighing_20260524_101226_sounds/**
 # Per-machine learned memory (won skeletons, live playbook overlay, mistakes).
 # Canonical playbook for git is memory/playbook.jsonl only.
 games/game-memory/
