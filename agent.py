@@ -1845,6 +1845,13 @@ class GameAgent:
         self._active_bullet_ids: list[str] = []
         self._active_opening_book_recipes: list[dict] = []
         self._active_skeleton: str | None = None
+        # Visual playtest recipe id matched for this session, plus the
+        # names of any auto_probes injected into self._probes by it.
+        # Surfaced in the TUI status panel so the user can see WHICH
+        # mechanism recipe is guiding the VLM critic + which extra
+        # state-shape assertions are running each iter.
+        self._active_visual_playtest_recipe_id: str | None = None
+        self._active_visual_playtest_auto_probes: list[str] = []
         self._skeleton_mode = skeleton_mode
         self._prompt_version = prompt_version
         self._p = self._load_prompt_module(prompt_version)
@@ -5572,6 +5579,10 @@ class GameAgent:
             return
         if recipe is None:
             return
+        # Record the matched recipe id so the TUI status panel can show
+        # which mechanism is guiding this session, even on recipes that
+        # don't carry any auto_probes.
+        self._active_visual_playtest_recipe_id = recipe.id
         auto = recipe.recipe.get("auto_probes") or []
         if not auto:
             return
@@ -5588,6 +5599,11 @@ class GameAgent:
             existing_names.add(name)
             added.append(name)
         if added:
+            # Append rather than overwrite — same recipe re-matches
+            # on subsequent retrieval calls and we want the union.
+            for n in added:
+                if n not in self._active_visual_playtest_auto_probes:
+                    self._active_visual_playtest_auto_probes.append(n)
             self._trace({
                 "kind": "visual_playtest_auto_probes_injected",
                 "recipe_id": recipe.id,
@@ -5767,6 +5783,12 @@ class GameAgent:
             using_recipe = recipe is not None
             if using_recipe:
                 prompt = self._build_visual_playtest_prompt(recipe, before_png)
+                # Mirror the matched recipe id onto the active field
+                # so the TUI status panel sees the same recipe id that
+                # the VLM is being asked to evaluate against. Idempotent
+                # — same recipe across iters just overwrites with the
+                # same value.
+                self._active_visual_playtest_recipe_id = recipe.id
                 self._trace({
                     "kind": "visual_playtest_recipe_used",
                     "id": recipe.id,
@@ -12680,6 +12702,8 @@ class GameAgent:
         self._last_screenshot_after = None
         self._active_bullet_ids = []
         self._active_opening_book_recipes = []
+        self._active_visual_playtest_recipe_id = None
+        self._active_visual_playtest_auto_probes = []
         self._restart_attempt_idx = 0
         self._restart_attempt_seed = None
         self._force_first_build_prefill = False

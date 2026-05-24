@@ -1410,6 +1410,7 @@ class CodingBoxApp(App):
         body += self._render_gpu_placement_block()
         body += self._render_assets_block()
         body += self._render_sounds_block()
+        body += self._render_memory_block()
         body += self._render_playbook_block()
         body += self._render_files_block()
         if self._last_test_block:
@@ -2355,6 +2356,77 @@ class CodingBoxApp(App):
             f"[dim]· {avg_s:.1f}s avg · {rate:.2f}/s · "
             f"~{eta_s:.0f}s ETA[/dim]"
         )
+
+    def _render_memory_block(self) -> str:
+        """Show which memory items the agent has active for this session.
+
+        Memory layers surfaced (in order, only when non-empty):
+          - Skeleton (selected at session start, used by Phase A)
+          - Visual playtest recipe (matched at end of Phase A; drives
+            the structured VLM checklist + auto-injected probes)
+          - Opening-book hits this turn (outline + playtest +
+            asset_audit + animation_audit IDs retrieved per turn,
+            injected into the model's prompt as <opening_book>)
+
+        The (existing) `_render_playbook_block` shows playbook bullets
+        separately — leaves the visual organization clean.
+
+        Without these rows the user can't tell whether the memory
+        layers are actually firing on their goal; with them, they see
+        which mechanism recipe the agent picked, which probes were
+        added on top of the model's own <probes>, and which recipes
+        the opening book pulled for the current turn.
+        """
+        agent = getattr(self, "agent", None)
+        if agent is None:
+            return ""
+        parts: list[str] = []
+
+        # Skeleton — set once at session start.
+        skel = getattr(agent, "_active_skeleton", None)
+        if skel:
+            parts.append(f"  skeleton: [b]{skel}[/b]")
+
+        # Visual playtest recipe (mechanism-keyed checklist for the
+        # VLM critic). Surface even when no auto-probes — the recipe
+        # still steers the critic prompt.
+        vp_id = getattr(agent, "_active_visual_playtest_recipe_id", None)
+        if vp_id:
+            ap_names = list(
+                getattr(agent, "_active_visual_playtest_auto_probes", []) or []
+            )
+            row = f"  visual playtest: [b]{vp_id}[/b]"
+            if ap_names:
+                row += (
+                    f"  [dim]+ {len(ap_names)} auto-probe(s): "
+                    + ", ".join(ap_names)
+                    + "[/dim]"
+                )
+            parts.append(row)
+
+        # Opening-book hits — these change per turn. Group by kind so
+        # the list reads cleanly when N is small.
+        hits = list(getattr(agent, "_active_opening_book_recipes", []) or [])
+        if hits:
+            by_kind: dict[str, list[str]] = {}
+            for h in hits:
+                kind = str(h.get("kind", "?"))
+                hid = str(h.get("id", "?"))
+                by_kind.setdefault(kind, []).append(hid)
+            kind_rows = []
+            for kind in ("outline", "playtest", "asset_audit", "animation_audit"):
+                ids = by_kind.get(kind)
+                if ids:
+                    kind_rows.append(
+                        f"    {kind}: " + ", ".join(ids)
+                    )
+            if kind_rows:
+                parts.append("  opening book (this turn):")
+                parts.extend(kind_rows)
+
+        if not parts:
+            return ""
+        return "\n[b]Memory in use:[/b]\n" + "\n".join(parts) + "\n"
 
     def _render_playbook_block(self) -> str:
         """Show which playbook bullets are currently injected in prompts,
