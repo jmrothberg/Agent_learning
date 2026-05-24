@@ -557,6 +557,40 @@ if (typeof CanvasRenderingContext2D !== "undefined"
             return _origDrawImage.call(this, image, ...rest);
         };
     }
+    // fillRect shim — records BIG rectangle draws (≥32x32 in BOTH
+    // dimensions) so the harness can detect the procedural-regression
+    // failure mode: model declared N sprites in <assets>, loaded them
+    // into ASSETS, then drew entities as colored rectangles instead of
+    // ctx.drawImage(ASSETS.<name>, ...). Mortal-kombat 2026-05-24 trace
+    // showed P2 rendered as "a massive solid blue rectangle" — the
+    // drawImage shim correctly flagged the missing draw, but the
+    // existing detector had no signal for "and the model drew this
+    // instead". Recording size lets us filter UI elements (HUD bars,
+    // borders) which are typically thin in one dimension.
+    window.__fillRectEvents = [];
+    const _origFillRect = CanvasRenderingContext2D.prototype.fillRect;
+    if (_origFillRect) {
+        CanvasRenderingContext2D.prototype.fillRect = function(x, y, w, h) {
+            try {
+                const aw = Math.abs(+w || 0);
+                const ah = Math.abs(+h || 0);
+                // 32x32 is the entity-vs-UI threshold. HUD bars
+                // (200x16), score backgrounds (300x30), borders
+                // (Wx2) all stay below it on one axis. A sprite
+                // placeholder is typically a square ≥ player size.
+                // Cap the buffer at 4000 like drawImage's.
+                if (aw >= 32 && ah >= 32
+                    && window.__fillRectEvents.length < 4000) {
+                    window.__fillRectEvents.push({
+                        t: Date.now(),
+                        w: aw,
+                        h: ah,
+                    });
+                }
+            } catch (e) { /* ignore - keep draw call intact */ }
+            return _origFillRect.call(this, x, y, w, h);
+        };
+    }
 }
 """
 
@@ -2449,6 +2483,68 @@ class LiveBrowser:
                     "procedurally via ctx.fillText / ctx.fillRect / "
                     "Unicode glyphs. Replace those drawing sites with "
                     "ctx.drawImage(ASSETS.<name>, x, y, w, h)."
+                )
+        # Procedural-regression detector. Independent of (but coordinated
+        # with) ASSETS_LOADED_BUT_UNDRAWN above. The drawImage shim says
+        # WHICH assets weren't drawn; this says WHAT was drawn instead.
+        # Combined signal: "sprites declared + N big rectangles drawn +
+        # few/no drawImage calls" → strong evidence the model regressed
+        # entities to colored boxes. Mortal-kombat 2026-05-24 trace had
+        # P2 rendered as "a massive solid blue rectangle"; today's
+        # detector would have had no signal for that shape until the
+        # critic happened to mention it.
+        #
+        # Conservative gate: must have ≥3 referenced assets AND ≥30 big
+        # fillRect calls AND drawImage_count < big_fillRect_count // 5.
+        # That ratio means big rectangles outnumber drawImage calls 5:1,
+        # which only happens in true regression. Tile-based backgrounds
+        # (e.g. a maze drawn as 30x30 fillRect tiles) also draw sprites
+        # for entities, keeping the ratio under 5:1.
+        try:
+            fill_events = await self._safe_eval(
+                "window.__fillRectEvents || []"
+            )
+        except Exception:
+            fill_events = None
+        if isinstance(fill_events, list) and isinstance(draw_events, list):
+            big_rect_count = len(fill_events)
+            draw_image_count = len(draw_events)
+            if (
+                len(referenced_assets) >= 3
+                and big_rect_count >= 30
+                and draw_image_count < max(1, big_rect_count // 5)
+                and canvas_info
+                and canvas_info.get("raf_ran")
+                and canvas_info.get("blank") is False
+            ):
+                # Median rect size for the report so the model knows
+                # what scale the placeholders are at.
+                sizes = sorted(
+                    (int(ev.get("w", 0)) * int(ev.get("h", 0)))
+                    for ev in fill_events
+                    if isinstance(ev, dict)
+                )
+                median_area = sizes[len(sizes) // 2] if sizes else 0
+                report["procedural_regression"] = {
+                    "referenced_assets": len(referenced_assets),
+                    "big_rect_count": big_rect_count,
+                    "draw_image_count": draw_image_count,
+                    "median_rect_area_px": median_area,
+                }
+                report["soft_warnings"].append(
+                    f"PROCEDURAL_REGRESSION_SUSPECTED: "
+                    f"{len(referenced_assets)} sprite asset(s) are "
+                    f"declared and loaded, but the canvas drew "
+                    f"{big_rect_count} big rectangles "
+                    f"(≥32×32 px; median area ≈ {median_area} px²) "
+                    f"while only making {draw_image_count} ctx.drawImage "
+                    f"call(s). Big rectangles outnumber sprite draws "
+                    f"5:1, which is the signature of entities being "
+                    f"rendered as colored placeholders instead of art. "
+                    "Replace ctx.fillRect(x, y, w, h) entity draws with "
+                    "ctx.drawImage(ASSETS.<name>, x, y, w, h). UI "
+                    "elements (HUD bars, borders) are not counted — "
+                    "the 32×32 minimum filters them out."
                 )
         # Probe errors are derived from probe_results (entries with
         # ok=False AND non-empty err).
