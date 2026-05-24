@@ -29,8 +29,34 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from agent import GameAgent  # noqa: E402
 import memory as memory_mod  # noqa: E402
 
+# The visual-playtest library is a hand-edited data file at the repo's
+# `memory/visual_playtests.jsonl` (not seeded from Python). Tests load
+# from the canonical committed file so they exercise the real library
+# the agent uses in production.
+_REPO_MEMORY = Path(__file__).parent.parent / "memory"
+
+
+def _load_seeded_recipes() -> list[memory_mod.VisualPlaytestRecipe]:
+    """Read the canonical committed visual_playtests.jsonl directly."""
+    import json
+    path = _REPO_MEMORY / memory_mod.VISUAL_PLAYTESTS_FILENAME
+    out: list[memory_mod.VisualPlaytestRecipe] = []
+    if not path.exists():
+        return out
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        rec = json.loads(line)
+        out.append(
+            memory_mod.VisualPlaytestRecipe.from_record(rec, source_tier="root")
+        )
+    return out
+
 
 def _make_agent(tmp_path: Path, *, goal: str = "") -> GameAgent:
+    """Construct an agent pointed at the REPO `memory/` so it sees the
+    canonical visual_playtests.jsonl (and all other shipped recipes)."""
     out = tmp_path / "g.html"
     out.write_text("<html></html>")
     a = GameAgent(
@@ -38,7 +64,7 @@ def _make_agent(tmp_path: Path, *, goal: str = "") -> GameAgent:
         out_path=out,
         browser=MagicMock(),
         max_iters=2,
-        memory_root=str(tmp_path / "memory"),
+        memory_root=str(_REPO_MEMORY),
     )
     a._goal = goal
     return a
@@ -53,8 +79,7 @@ def test_seeded_recipes_with_auto_probes_are_balanced() -> None:
     """For every recipe that declares auto_probes, the JS expressions
     must be syntactically balanced (parens / braces) so they don't
     crash the browser eval."""
-    items = memory_mod._opening_book_seed_items()
-    recipes = items[memory_mod.VISUAL_PLAYTESTS_FILENAME]
+    recipes = _load_seeded_recipes()
     found_any = False
     for r in recipes:
         auto = r.recipe.get("auto_probes") or []
@@ -81,8 +106,7 @@ def test_seeded_recipes_with_auto_probes_are_balanced() -> None:
 def test_two_actors_facing_recipe_has_facing_probe() -> None:
     """The mortal-kombat regression recipe MUST have an auto-probe
     that asserts opposite-sign facing."""
-    items = memory_mod._opening_book_seed_items()
-    recipes = items[memory_mod.VISUAL_PLAYTESTS_FILENAME]
+    recipes = _load_seeded_recipes()
     fighter = [r for r in recipes if r.id == "canvas-two-actors-facing"][0]
     auto = fighter.recipe.get("auto_probes") or []
     assert auto, "canvas-two-actors-facing must have auto_probes"
@@ -97,8 +121,7 @@ def test_two_actors_facing_recipe_has_facing_probe() -> None:
 def test_grid_navigation_recipe_has_wall_probe() -> None:
     """canvas-grid-navigation must have a probe asserting the player
     isn't standing inside a wall cell."""
-    items = memory_mod._opening_book_seed_items()
-    recipes = items[memory_mod.VISUAL_PLAYTESTS_FILENAME]
+    recipes = _load_seeded_recipes()
     grid = [r for r in recipes if r.id == "canvas-grid-navigation"][0]
     auto = grid.recipe.get("auto_probes") or []
     names = [ap["name"] for ap in auto]
@@ -106,8 +129,7 @@ def test_grid_navigation_recipe_has_wall_probe() -> None:
 
 
 def test_controllable_player_recipe_has_bounds_probe() -> None:
-    items = memory_mod._opening_book_seed_items()
-    recipes = items[memory_mod.VISUAL_PLAYTESTS_FILENAME]
+    recipes = _load_seeded_recipes()
     ctrl = [r for r in recipes if r.id == "canvas-controllable-player"][0]
     auto = ctrl.recipe.get("auto_probes") or []
     names = [ap["name"] for ap in auto]
@@ -118,8 +140,7 @@ def test_auto_probes_are_conservative_default_true() -> None:
     """Every auto-probe expression must contain at least one
     `return true` so it doesn't fail games that simply don't expose
     the relevant state shape. Conservative-by-default rule."""
-    items = memory_mod._opening_book_seed_items()
-    recipes = items[memory_mod.VISUAL_PLAYTESTS_FILENAME]
+    recipes = _load_seeded_recipes()
     for r in recipes:
         for ap in (r.recipe.get("auto_probes") or []):
             expr = ap.get("expr") or ""
@@ -137,8 +158,7 @@ def test_no_auto_probes_on_unsuitable_recipes() -> None:
     should NOT carry auto_probes — better to leave the VLM as the
     sole signal than add a probe that fires unpredictably across
     legitimate state shapes."""
-    items = memory_mod._opening_book_seed_items()
-    recipes = items[memory_mod.VISUAL_PLAYTESTS_FILENAME]
+    recipes = _load_seeded_recipes()
     # vfx-fluid: no canonical state shape ("particles" array varies
     # too much across implementations).
     vfx = [r for r in recipes if r.id == "canvas-vfx-fluid"][0]

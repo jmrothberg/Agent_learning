@@ -22,6 +22,7 @@ games/snapshots/
 games/traces/
 memory/*
 !memory/playbook.jsonl
+!memory/visual_playtests.jsonl
 games/test_*.html
 games/tune/
 games/system-tests/run_*/

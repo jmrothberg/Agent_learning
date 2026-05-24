@@ -242,10 +242,11 @@ def test_format_no_answers_returns_none() -> None:
 
 
 def test_e2e_real_goals_pick_expected_recipe(tmp_path: Path) -> None:
-    """Sanity check: the seeded library resolves the user's actual past
+    """Sanity check: the canonical committed library
+    `memory/visual_playtests.jsonl` resolves the user's actual past
     goals to the right mechanism recipe."""
-    mem = memory_mod.GameMemory(root=str(tmp_path / "mem"))
-    mem.ensure()
+    repo_memory = Path(__file__).parent.parent / "memory"
+    mem = memory_mod.GameMemory(root=str(repo_memory))
     cases = [
         ("write a game of doom, first person shooter", "canvas-3d-first-person"),
         ("mortal kombat / street fighter two player versus", "canvas-two-actors-facing"),
@@ -266,8 +267,8 @@ def test_e2e_real_goals_pick_expected_recipe(tmp_path: Path) -> None:
 def test_e2e_novel_goal_returns_none(tmp_path: Path) -> None:
     """Goals genuinely outside the mechanism library return None;
     caller falls back to the legacy generic critic prompt."""
-    mem = memory_mod.GameMemory(root=str(tmp_path / "mem"))
-    mem.ensure()
+    repo_memory = Path(__file__).parent.parent / "memory"
+    mem = memory_mod.GameMemory(root=str(repo_memory))
     r, _ = mem.find_visual_playtest_for(
         goal="a breathing meditation timer with calming sounds"
     )

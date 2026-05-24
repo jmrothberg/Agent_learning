@@ -493,8 +493,9 @@ face the same direction, with no probe to catch it.
 The structured critic now does two things in parallel:
 
 **(a) Closed-class yes/no checklist** built from a hand-curated
-mechanism recipe in `memory/visual_playtests.jsonl` (seeded from
-`memory.py:_opening_book_seed_items`). The matcher uses
+mechanism recipe in **`memory/visual_playtests.jsonl`** (data file,
+same pattern as `memory/playbook.jsonl` and `memory/skeletons/` —
+hand-edited, no Python seed). The matcher uses
 `goal + plan_text + asset_names` as combined context so it works even
 when you don't name the game — *"collect dots while avoiding ghosts in
 corridors"* resolves to `canvas-grid-navigation` via mechanic-word
@@ -528,10 +529,10 @@ a passing probe, not a false failure.
 
 11 recipes cover the top-100 games via keyword overlap. Same pattern
 as `memory/skeletons/` (17 mechanism templates cover hundreds of
-games) and `memory/playtests.jsonl` (6 behavior-playtest recipes).
-**No per-game recipes.** Adding a recipe for a new mechanism = one
-entry in `_opening_book_seed_items` — matches automatically next
-session.
+games) and `memory/playbook.jsonl` (hand-curated bullets).
+**No per-game recipes.** Adding a recipe for a new mechanism = append
+one line to `memory/visual_playtests.jsonl` — matches automatically
+next session, no Python edit needed.
 
 **Auto-probes are intentionally NOT on every recipe.** Mechanisms
 without a clean universal state-shape assertion (puzzle, racing, 3D
@@ -550,13 +551,44 @@ player rendered inside a wall, player off-screen.
 
 **Performance cost:** ~1 ms recipe-match (token overlap) + ~10 ms per auto-probe per iter (one extra `_safe_eval`). Negligible vs the per-iter Chromium load (~3-10 s) and optional VLM call (~5-10 s).
 
-**Adding a new recipe:** edit `memory.py:_opening_book_seed_items` →
-`VISUAL_PLAYTESTS_FILENAME` list. Each entry needs `id`,
-`applies_keywords` (mechanic nouns + game names), optional
-`strong_hooks` (game names that win on 1 hit), and a `checklist`
-of 6–9 yes/no questions. Optional `auto_probes` for state-shape
-assertions. The matcher and prompt builder are recipe-agnostic —
-the new recipe matches automatically based on its keywords.
+**Adding a new recipe:** append one JSONL line to
+**`memory/visual_playtests.jsonl`** (file is tracked in git). Each
+entry is one JSON object on its own line with keys:
+
+```json
+{
+  "id": "canvas-<mechanism-id>",
+  "kind": "visual_playtest",
+  "content": "Mechanism: one-line description.",
+  "tags": ["short", "categorization", "tags"],
+  "source_tier": "root",
+  "verified": true,
+  "helpful": 0, "harmful": 0,
+  "recipe": {
+    "applies_keywords": ["mechanic", "nouns", "and", "game", "names"],
+    "strong_hooks": ["decisive", "game", "names"],
+    "applies_min_matches": 2,
+    "checklist": [
+      "Is X visible?",
+      "Are A and B distinct from each other?"
+    ],
+    "format": "yes_no_per_line",
+    "auto_probes": [
+      {"name": "auto_<assertion_id>", "expr": "(()=>{ ... })()"}
+    ]
+  },
+  "trace_ids": [],
+  "pass_count": 0,
+  "false_positive_count": 0,
+  "last_verified_at": ""
+}
+```
+
+The matcher and prompt builder are recipe-agnostic — the new recipe
+matches automatically based on its keywords. `auto_probes` must
+return `true` conservatively when the relevant state shape isn't
+exposed (don't fail games that don't have e.g. `state.player.facing`).
+No agent code changes needed.
 
 ### Patch engine
 
