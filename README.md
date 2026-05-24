@@ -482,6 +482,82 @@ on** (wrapping suppressed) so the model sees what you typed. Flip
 `/rawfeedback off` to opt in to the wrappers when the classifier reads
 you correctly.
 
+### Visual playtest recipes — mechanism-keyed checklists for the VLM critic
+
+Added 2026-05-24 after the mortal-kombat trace where the open-ended
+visual critic emitted six paraphrased complaints across six iters
+about the same sprite-render bug (pure prompt noise) — and where a
+wholesale facing-flip regression at iter 12 turned both fighters to
+face the same direction, with no probe to catch it.
+
+The structured critic now does two things in parallel:
+
+**(a) Closed-class yes/no checklist** built from a hand-curated
+mechanism recipe in `memory/visual_playtests.jsonl` (seeded from
+`memory.py:_opening_book_seed_items`). The matcher uses
+`goal + plan_text + asset_names` as combined context so it works even
+when you don't name the game — *"collect dots while avoiding ghosts in
+corridors"* resolves to `canvas-grid-navigation` via mechanic-word
+overlap. Small VLMs answer closed-class checklists much more reliably
+than open-ended "what's wrong?" prompts; the response parses into
+specific failure bullets instead of paraphrased prose.
+
+**(b) Deterministic auto-probes** (some recipes only). Pure JS state
+assertions that ride alongside the model's own `<probes>` and run
+every iter. They catch state-shape regressions even when the VLM
+misses them on the screenshot. Conservative-by-default: each probe
+returns `true` (passes) when the relevant state shape isn't exposed
+so games that legitimately don't have e.g. `state.player.facing` get
+a passing probe, not a false failure.
+
+**Recipe library (mechanism-keyed, NOT game-keyed):**
+
+| Recipe | Mechanism | Has auto-probe |
+| --- | --- | --- |
+| `canvas-controllable-player` | Any game with a player avatar | ✓ `auto_player_within_canvas_bounds` |
+| `canvas-grid-navigation` | Maze / tile / sokoban / dungeon | ✓ `auto_player_not_in_wall` |
+| `canvas-two-actors-facing` | Fighters, duels, side-by-side multi | ✓ `auto_actors_face_each_other` |
+| `canvas-side-scroll-platformer` | Mario / Sonic / Metroid family | — |
+| `canvas-3d-first-person` | Doom / Wolfenstein / Quake | — |
+| `canvas-top-down-action` | Asteroids / Galaga / Robotron | — |
+| `canvas-board-game` | Chess / Checkers / TTT / Go | — |
+| `canvas-puzzle-grid` | Tetris / Bejeweled / Columns | — |
+| `canvas-racing-perspective` | Pole Position / Out Run / Lotus | — |
+| `canvas-vfx-fluid` | Particle / firework / fluid demos | — |
+| `generic-canvas-game-baseline` | Fallback when no mechanism matches | — |
+
+11 recipes cover the top-100 games via keyword overlap. Same pattern
+as `memory/skeletons/` (17 mechanism templates cover hundreds of
+games) and `memory/playtests.jsonl` (6 behavior-playtest recipes).
+**No per-game recipes.** Adding a recipe for a new mechanism = one
+entry in `_opening_book_seed_items` — matches automatically next
+session.
+
+**Auto-probes are intentionally NOT on every recipe.** Mechanisms
+without a clean universal state-shape assertion (puzzle, racing, 3D
+FPS, particle demos) keep only the VLM checklist; adding probes that
+fire on legitimate state-shape variations would do more harm than
+good. The three recipes that DO have auto-probes target the failure
+modes the user has actually hit: actors flipped to same facing,
+player rendered inside a wall, player off-screen.
+
+**Trace events for postmortem:**
+- `visual_playtest_recipe_used {id, top_candidates, match_tokens_sample}`
+- `visual_playtest_recipe_generic {reason, top_candidates}` — no recipe matched, generic fallback used
+- `visual_playtest_parsed {recipe_id, parse_rate, n_failures}`
+- `visual_playtest_unparseable {recipe_id, parse_rate, raw_preview}` — VLM didn't follow format; legacy critique surfaced as fallback
+- `visual_playtest_auto_probes_injected {recipe_id, added, total_probes}`
+
+**Performance cost:** ~1 ms recipe-match (token overlap) + ~10 ms per auto-probe per iter (one extra `_safe_eval`). Negligible vs the per-iter Chromium load (~3-10 s) and optional VLM call (~5-10 s).
+
+**Adding a new recipe:** edit `memory.py:_opening_book_seed_items` →
+`VISUAL_PLAYTESTS_FILENAME` list. Each entry needs `id`,
+`applies_keywords` (mechanic nouns + game names), optional
+`strong_hooks` (game names that win on 1 hit), and a `checklist`
+of 6–9 yes/no questions. Optional `auto_probes` for state-shape
+assertions. The matcher and prompt builder are recipe-agnostic —
+the new recipe matches automatically based on its keywords.
+
 ### Patch engine
 
 [`patches.py`](patches.py) defines a SEARCH/REPLACE format with a
