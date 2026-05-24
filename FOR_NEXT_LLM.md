@@ -371,6 +371,19 @@ The user's standing principle: *"never make changes for one game, anything helpi
 
 Reverse chronological; each commit message has the full rationale.
 
+- **(next commit after this doc)** Memory-only updates from
+  donkey-kong 2026-05-24 trace: new `canvas-vertical-platformer`
+  visual playtest recipe (ladders + cascading hazards +
+  bottom-to-top progression, distinct from horizontal side-scroll);
+  three new playbook bullets — `sprite-corner-vs-state-position-render-check`
+  (fixes the iter-1-2-3 trap where transparent sprite padding made
+  the harness report ENTITY-NOT-RENDERED for an entity that WAS
+  being drawn), `cascading-hazard-spawn-loop`, `ladder-snap-to-platform-y`.
+  Stripped `ladder`/`barrel`/`donkey-kong`/`rescue` keywords from
+  `canvas-side-scroll-platformer` so DK routes to the new vertical
+  recipe. Playbook → 78 bullets; visual playtests → 19 recipes;
+  `test_visual_playtest_coverage` pins DK + BurgerTime to the new
+  vertical recipe.
 - `a7e1368` Status panel "Memory in use" — skeleton + visual playtest recipe + opening-book hits surfaced live so the user can see which memory layers fired.
 - `5e2778a` Visual playtest library: 25-archetype coverage at 100%. Added 7 new mechanism recipes (paddle-ball, lane-crossing, point-and-click, isometric-tile, overworld-rpg, city-builder, space-trading) + broadened keywords on 4 existing recipes. `tests/test_visual_playtest_coverage.py` pins the guarantee.
 - `a3c759b` Moved `visual_playtests.jsonl` from Python-seeded to committed JSONL data file. Same pattern as `playbook.jsonl` and `skeletons/`. New recipes are now a one-line JSONL append, no Python change.

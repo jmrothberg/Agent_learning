@@ -34,6 +34,10 @@ REPO_MEMORY = Path(__file__).parent.parent / "memory"
 # actually type as a /new goal.
 ARCHETYPES_25 = [
     ("Pac-Man",             "maze chase pellets ghosts"),
+    # Donkey Kong now routes to canvas-vertical-platformer (added
+    # 2026-05-24 after the DK trace showed canvas-side-scroll-platformer's
+    # checklist missed the vertical-specific failure modes: player not
+    # at bottom, ladders not snapped to floors, barrels not cascading).
     ("Donkey Kong",         "vertical platformer ladders barrels jumping rescue"),
     ("Galaga",              "space shooter enemy waves player ship"),
     ("Tetris",              "falling block puzzle rotation line clearing"),
@@ -126,6 +130,13 @@ def test_known_assignments() -> None:
         "space trading combat ship pirates upgrades": "canvas-space-trading",
         "isometric tile puzzle hop change colors": "canvas-isometric-tile",
         "first-person grid-based 3D dungeon party monsters items": "canvas-3d-first-person",
+        # Vertical platformers (donkey-kong 2026-05-24 trace). Distinct
+        # from canvas-side-scroll-platformer: ladders + cascading
+        # hazards + bottom-to-top progression are the signal.
+        "vertical platformer ladders barrels jumping rescue": "canvas-vertical-platformer",
+        "burger maker climbing ladders dodging cooks": "canvas-vertical-platformer",
+        # Horizontal platformers stay with side-scroll-platformer.
+        "side scrolling platformer hero jumping on platforms": "canvas-side-scroll-platformer",
     }
     for goal, expected_id in expected.items():
         r, diag = mem.find_visual_playtest_for(goal=goal)
@@ -148,6 +159,7 @@ def test_library_has_at_least_one_recipe_per_mechanism_family() -> None:
         "canvas-grid-navigation",
         "canvas-two-actors-facing",
         "canvas-side-scroll-platformer",
+        "canvas-vertical-platformer",  # NEW 2026-05-24 (donkey-kong trace)
         "canvas-3d-first-person",
         "canvas-top-down-action",
         "canvas-board-game",

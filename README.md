@@ -518,7 +518,8 @@ a passing probe, not a false failure.
 | `canvas-controllable-player` | Any game with a player avatar | ✓ `auto_player_within_canvas_bounds` |
 | `canvas-grid-navigation` | Maze / tile / sokoban / dungeon / stealth / tank-battle | ✓ `auto_player_not_in_wall` |
 | `canvas-two-actors-facing` | Fighters, duels, boxing, side-by-side multi | ✓ `auto_actors_face_each_other` |
-| `canvas-side-scroll-platformer` | Mario / Sonic / Metroid / Donkey Kong / Prince of Persia / Bubble Bobble | — |
+| `canvas-side-scroll-platformer` | Mario / Sonic / Metroid / Prince of Persia / Bubble Bobble / Ghosts'n Goblins | — |
+| `canvas-vertical-platformer` | Donkey Kong / BurgerTime / Lode Runner / Crazy Climber (multi-floor + ladders + cascading hazards) | — |
 | `canvas-3d-first-person` | Doom / Wolfenstein / Quake / Dungeon Master | — |
 | `canvas-top-down-action` | Asteroids / Galaga / Robotron / Gauntlet | — |
 | `canvas-board-game` | Chess / Checkers / TTT / Go | — |
@@ -534,7 +535,7 @@ a passing probe, not a false failure.
 | `canvas-space-trading` | Elite / Star Control / Privateer / EVE-lite | — |
 | `generic-canvas-game-baseline` | Fallback when no mechanism matches | — |
 
-17 mechanism recipes + 1 generic fallback. Cover the user's 25
+18 mechanism recipes + 1 generic fallback. Cover the user's 25
 archetype list at 100% (no fallback hits) — see
 `tests/test_visual_playtest_coverage.py` for the pinned coverage
 check. Same pattern as `memory/skeletons/` (17 mechanism templates
