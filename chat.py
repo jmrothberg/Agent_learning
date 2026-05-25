@@ -3077,6 +3077,8 @@ class CodingBoxApp(App):
                 self._cmd_unload(arg)
             elif cmd == "new":
                 await self._cmd_new(arg)
+            elif cmd in ("goodgame", "good"):
+                self._cmd_goodgame()
             elif cmd == "ship":
                 await self.action_ship_it()
             elif cmd == "quit":
@@ -3193,6 +3195,7 @@ class CodingBoxApp(App):
             # =====================================================================
             "[bold cyan]── session lifecycle ──[/bold cyan]",
             "  [b]/new <goal>[/b]                end current session, start fresh (uses staged seed/model)",
+            "  [b]/goodgame[/b]                  copy best.html + *_assets/ + *_sounds/ → goodgame/ [dim](not gitignored)[/dim]",
             "  [b]/ship[/b]                      ship current build [dim](= Ctrl+D, or type 'done' / 'looks good')[/dim]",
             "  [b]/retry[/b]                     re-run after a bad model (keeps game file + trace)",
             "  [b]/reset[/b]                     wipe ALL staged state → defaults (seed, model, iters, ctx)",
@@ -4220,6 +4223,30 @@ class CodingBoxApp(App):
             self._log_info(f"opened {url}")
         except Exception as e:
             self._log_error(f"could not open browser: {e}")
+
+    def _cmd_goodgame(self) -> None:
+        """/goodgame — copy current session HTML + asset dirs into goodgame/."""
+        if self._out_path is None:
+            self._log_info("no session yet — build a game first, then /goodgame")
+            return
+        from goodgame import promote_session_game
+
+        try:
+            copied = promote_session_game(
+                out_path=self._out_path,
+                best_path=self._best_path,
+                assets_dir=self._assets_dir,
+                sounds_dir=self._sounds_dir,
+            )
+        except FileNotFoundError as e:
+            self._log_error(str(e))
+            return
+        stem = self._out_path.stem
+        self._log(f"[bold green]goodgame[/bold green] saved [b]{stem}[/b] → {copied['html']}")
+        if not copied.get("assets") and not copied.get("sounds"):
+            self._log_info(
+                "[dim]no *_assets/ or *_sounds/ on disk (HTML only is fine)[/dim]"
+            )
 
     def _cmd_attach_ref_image(self, arg: str) -> None:
         """/ref <path> — attach a reference image to the NEXT user turn.

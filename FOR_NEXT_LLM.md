@@ -21,10 +21,16 @@ propose changes.
 > the bottom. The mental model worth internalizing up front: the four
 > separate "feedback" flows (machine bug feedback / playbook /
 > autonomous playtest / directive wrapping). Sections below cover it.
+>
+> **For the highest-impact 2026-05-25 lesson** — read rule **5** in
+> the TL;DR below before you propose any change to a stream-abort
+> threshold. "Length is not a fail signal once the stream is
+> producing" was learned the hard way. The DeliberationDetector
+> story under "Recent ships" is the case study.
 
 ---
 
-## TL;DR — the four rules that bind every change
+## TL;DR — the five rules that bind every change
 
 1. **The model is fixed. Tune the agent.** Don't propose "try a bigger model". Every improvement must be in prompts, retrieval, harness checks, scoring, slot scheduling, or the playbook. The user runs ~27-35 B params on local GPUs; the work is making *that* class of model ship working games.
 
@@ -33,6 +39,8 @@ propose changes.
 3. **Multi-slot is opt-in.** GPU 0 = diffusers; GPUs 1/2/3 = Ollama daemons (coder/critic/architect on ports 11434/11435/11436) **only when explicitly staged** via `/model2` / `/model3` / `/modelall`. Default-on autopin was reverted 2026-05-23 — it crashed the workstation when combined with iter-1 best-of-N fan-out. Parallelism features gate on observable independence (different backends, different endpoints) so they fall back cleanly on single-GPU. Memory: `four-gpu-workstation-topology`.
 
 4. **Listening before speed.** Every "ship faster" idea has to clear "did the user's last three messages get honored?" first. Phase 0 is the listening layer; if it regresses, the agent feels broken regardless of how fast iter 1 runs.
+
+5. **Length is not a fail signal once the stream is producing.** This is the rule the 2026-05-25 Wolfenstein round-3 fix locked in after a painful regression. The DeliberationDetector existed to catch *pre-tag rambling* (model deliberates 6000+ chars without ever starting output), not to kill a working 20+ KB first-build stream. If you ever find yourself wanting to **bump a stream-abort threshold from X to Y** to make a long but legitimate stream survive, **STOP** — that is the wrong shape. The right fix is to *latch on observable code-emission* (`<html_file>`, `<patch>`, `<!DOCTYPE`, `<script`, `<canvas`, `function foo(`, lowercase `let/const/var foo =`) so length stops mattering once real output has begun. See `ollama_io.py:_HTML_OPENER_RE` / `_JS_OPENER_RE` and the round-3 detector tests in `test_wolfenstein_stuck_loop_fixes.py::test_deliberation_detector_*`. The user's exact pushback worth re-reading: *"if it takes 20k to get first pass how is threshold to 12000 fucking helping! it should only stop if there is an issue! not because its a long solution!"*
 
 ---
 
@@ -222,6 +230,15 @@ require model changes; they all read existing state.
 | Classifier overrule auto-disable | `classifier_auto_disabled_after_repeated_overrules` | Model overrules scoped classifier 2+ times in a session → `_use_feedback_directives` auto-flips False for the rest of the session. |
 | `entity-progress-over-time` recipe gate | `autonomous_recipe_skipped reason=applicability_gate_falsy` | Recipe was false-positiving on input-driven games. Now requires a self-driven-motion signal in state (moving enemies / projectiles / score / timer). |
 | Visual playtest auto-probes | `visual_playtest_auto_probes_injected` | Mechanism-recipe-injected JS assertions. `auto_actors_face_each_other`, `auto_player_not_in_wall`, `auto_player_within_canvas_bounds`. Conservative — return `true` when relevant state shape absent. |
+| Identical-reply loop | `identical_reply_loop_detected` | Same `no_usable_code` reply (sha1 of normalized first 4 KB + length bucket) twice in a row. `_no_usable_code_fallback` returns a scope-reduction escalation: "stop re-emitting the file, send one tiny `<patch>`". Wolfenstein 2026-05-24 trace burned 5 iters before this existed. |
+| Context-pressure | `context_pressure_warning` + `context_pressure_mitigation_applied` | `prompt_tokens / num_ctx >= 0.85` after a `stream_done`. Next `fix_instruction` call gets `context_pressure=True` and drops the inlined CURRENT FILE block + demands a 3-5-line-anchor patch. Prevents the model from emitting a full-file rewrite into 500 tokens of headroom. |
+| Dead-first-build | `dead_first_build_detected` + `dead_first_build_attempt_aborted` | Iter ≤ 2 ships a file with `canvas.raf_ran=false` AND `input_test.any_change=false`. Next fix turn routes through `scope_reduction_instruction` ("ship a smaller intentionally-minimal rewrite"). After 2 such recoveries in one attempt, the iteration loop breaks so the restart loop can apply a fresh seed. |
+| Restart-signature-repeat | `restart_signature_repeat` + `force_minimal_first_build_applied` | Two restart attempts in a row produce the same `_attempt_failure_signature` (`dead_first_build`, `identical_reply_loop`, `format_rejection_iter1`, `low_score`). Next attempt's `plan_instruction` gets `force_minimal_first_build=True` — 2-3 acceptance bullets, defer everything else. |
+| Bare-html salvage | extraction variant 6 in `_extract_html_inner` | Reply contains `<html>...</html>` (≥ 200 bytes) but no `<!DOCTYPE>`. Salvages by prepending a synthetic doctype line instead of asking the model to retry. |
+| Compaction-marker echo | `format_rejection` with `kind="compaction_marker_echoed"` | Model parroted the harness's own compaction marker (`[omitted: N bytes ...]` legacy or `HARNESS-OMITTED-PRIOR-*` current) back as if it were code. Specific recovery prompt names the cause. ROOT CAUSE FIX: new compaction marker uses an HTML comment with NO `<html_file>` / `<patch>` substrings so it can't be copied as a fresh tag. |
+| Model-give-up | `model_give_up_detected` | `<done/>` + `<notes>` containing failure-confession phrases ("consistently failing", "manually copy", "harness parsing"). Treated as recovery request, not ship. Injects a "stop emitting `<done/>`, send a small `<patch>`" prompt. Wolfenstein 2026-05-24 trace turn [04] is the canonical case. |
+| DeliberationDetector — latch on code (round 3) | NONE (no abort once latched) | Once the stream emits a real opener tag OR substantive HTML/JS (`<!DOCTYPE`, `<script`, `<canvas`, `function foo(`, `class X {`, lowercase `let/const/var foo =`), the detector latches and length stops being a fail signal — a 20-50 KB first build streams to completion. Threshold still fires on streams that emit ONLY pre-tag prose. The line-start-anchor requirement was DROPPED; negative-lookbehind for backtick preserves the doom 2026-05-17 "inline `<html_file>` mention" protection. |
+| Patch breadcrumb anchor (Codex `@@`) | enriched error message names the `@@` option when SEARCH is ambiguous and no breadcrumb used | `<patch>` SEARCH can be prefixed with `@@ function_or_class_name` (stacked: `@@ class Foo` + `@@ def bar`) to scope an otherwise-ambiguous match. Parsed by `patches.py:_parse_breadcrumb_lines`; matches narrowed by `_narrow_to_breadcrumb_scope`. Advisory — if the name isn't in source, normal matching falls back. Mid-tier models reliably name functions; the breadcrumb is more actionable than "add more context." |
 
 These are the cheap wins. Before adding a NEW guard, check this list
 — the failure class may already be covered.
@@ -345,6 +362,18 @@ The user's standing principle: *"never make changes for one game, anything helpi
   multi-slot revert, current "What's open" backlog, donkey-kong
   trace lessons, "playbook noise floor" pattern, trimmed "Recent
   ships" to load-bearing lessons only)
+— Claude Opus 4.7, 2026-05-25 (Wolfenstein stuck-loop fix bundle:
+  6 new universal harness gates + reshaped compaction marker so
+  the model can't parrot it back; 3 new broad playbook bullets;
+  see verifier-guards table additions and Recent Ships entry)
+— Claude Opus 4.7, 2026-05-25 LATE (rule 5 added — "length is not a
+  fail signal once the stream is producing": DeliberationDetector
+  latches on real code openers too, not just `<html_file>`; bumping
+  the abort threshold is the wrong shape. Plus regression-test
+  discipline for trace events emitted from prompt builders — they
+  MUST source iteration from `self._last_tested_iter`, not a free
+  variable. Plus Codex review slice 1 — `@@` breadcrumb anchor,
+  plan-quality examples, "don't re-emit Phase-A" hard-rule.)
 
 ---
 
@@ -386,6 +415,99 @@ above; this section adds lessons that are NOT in another section.
 - **DO NOT reintroduce default-on multi-slot autopin** (`ecfe067`
   reverted in `a205cd7`). It crashed the workstation when combined
   with iter-1 best-of-N fan-out. Multi-slot is opt-in only.
+- **Wolfenstein 2026-05-24 stuck-loop fix bundle** (2026-05-25). A
+  single ambitious-goal session burned 3.5 wall-clock hours across 3
+  restart attempts and shipped nothing. Three independent harness
+  gaps caused it; six new gates ship together. Read them in this
+  order — they compound:
+  1. Compaction marker no longer wraps itself in `<html_file>` tags
+     (was: `<html_file>[omitted: N bytes ...]</html_file>`; now: HTML
+     comment). The confused model literally cannot copy a fresh tag
+     from a comment. Tests pin both shape and absence of `<html_file>`
+     / `<patch>` substrings in the marker.
+  2. `compaction_marker_echoed` detector in `classify_format_failure`
+     catches any future leak of either old or new marker.
+  3. `identical_reply_loop_detected` — sha1 fingerprint of normalized
+     first 4 KB + length bucket. Two `no_usable_code` in a row with
+     matching fingerprints → escalation prompt that demands a tiny
+     `<patch>`, not another rewrite.
+  4. `context_pressure_warning` — `prompt_tokens / num_ctx >= 0.85`
+     sets a one-shot flag so the next `fix_instruction` drops the
+     inlined CURRENT FILE block. Prevents the model from trying to
+     emit a 30 KB rewrite into 50 tokens of headroom.
+  5. `dead_first_build_detected` — iter ≤ 2 ships a file with
+     `raf_ran=false` AND `input_test.any_change=false`. Routes
+     through `scope_reduction_instruction` (ship a smaller
+     intentionally-minimal rewrite). Two such recoveries in one
+     attempt abort the attempt so the restart loop applies a
+     fresh seed.
+  6. `model_give_up_detected` — `<done/>` + `<notes>` confessing
+     harness / parse trouble ("consistently failing", "manually
+     copy") is treated as recovery request, not ship. Wolfenstein
+     trace turn [04] is the canonical case.
+  Plus `restart_signature_repeat` — two attempts with the same
+  `_attempt_failure_signature` set `force_minimal_first_build=True`
+  for the next attempt's `plan_instruction`. Plus three new playbook
+  bullets: `first-build-scope-discipline`,
+  `patch-only-when-context-fills`, `dual-state-exposure-for-probes`.
+  Plus extraction variant 6: bare `<html>...</html>` with ≥ 200 byte
+  body gets a synthetic doctype prepended. All gates are observable-
+  signal-keyed (no goal text, no genre, no model name).
+
+- **DeliberationDetector latch-on-code, not just on-tags** (2026-05-25
+  round 3). The detector used to require `(?:^|\n)\s*<tag\b` at
+  line-start to latch — chunking + 4 KB buffer trim ate the boundary
+  on real long first-build streams and aborted them at exactly 6001
+  chars. Wolfenstein-class FPS needs 20-30 KB of code; the gate killed
+  it on the way up. Fix: (a) drop the line-start anchor (negative
+  lookbehind for backtick still excludes prose `` `<html_file>` ``
+  mentions per the doom 2026-05-17 protection), (b) add a SECOND latch
+  family for HTML/JS code openers (`<!DOCTYPE`, `<script`, `<canvas`,
+  `<body`, `function foo(`, `class Foo {`, lowercase `let/const/var
+  foo =` — case-sensitive on purpose so "Let me think" doesn't match).
+  Once latched, length stops being a fail signal. Threshold (6000) is
+  still the backstop for streams that emit ONLY prose. Tests in
+  `test_wolfenstein_stuck_loop_fixes.py::test_deliberation_*` pin all
+  seven scenarios (latch on `<html_file>` at start, latch inline after
+  prose, latch on bare DOCTYPE, latch on function decl, pure-prose
+  still aborts, opener inside unclosed `<think>` doesn't latch, opener
+  after `</think>` does latch).
+- **Trace events from prompt builders must use in-scope vars** (the
+  round-1 follow-up). Two `_trace(...)` calls inside `_build_fix_prompt`
+  referenced `iteration` as a free variable; `_build_fix_prompt`'s
+  signature has no `iteration` parameter. Detector unit tests passed —
+  the gate fired its trace correctly in isolation — but the agent
+  crashed with `NameError: name 'iteration' is not defined` the moment
+  either flag fired in a real session. Fix: source iteration from
+  `self._last_tested_iter` (the iter whose report this prompt is
+  reacting to). Lesson now in root memory as
+  [exercise-codepaths-not-just-detectors] and in two regression tests
+  that exercise `_build_fix_prompt` with each flag set.
+- **Codex review slice 1** (2026-05-25). Reviewed OpenAI's open-source
+  Codex CLI (`github.com/openai/codex`) for transferable ideas. Three
+  prompt-only changes shipped: (1) `@@ function_or_class_name`
+  breadcrumb anchor in `<patch>` SEARCH blocks for disambiguating
+  ambiguous matches — `patches.py:_parse_breadcrumb_lines` strips
+  leading `@@ ident` lines and uses them to narrow `_locate` matches
+  to that scope; stacked breadcrumbs supported; advisory (graceful
+  fallback when the name isn't in source). (2) Good/bad plan-quality
+  examples in `PLAN_INSTRUCTION` (mechanism-named GOOD examples vs
+  vague LOW-QUALITY ones; all genre-free — earlier draft leaked
+  "chess" / "snake" and was caught by the existing genre-free guard
+  test). (3) New always-on hard-rule: *"Phase-A signals (plan,
+  criteria, probes, media) persist once accepted; fix turns emit
+  `<patch>` only"* — prevents `probes_only` / `media_only`
+  `no_usable_code` shape before the model wastes a turn. Codex's
+  `compact_remote_v2.rs` independently arrived at the same compaction
+  fix shipped in round 2 (store summaries as user-role, not assistant)
+  — confirms the round-2 reshape was the right call.
+- **Two-failure-mode discipline for trace events** (carries forward).
+  Every gate emits a trace event AND a coaching prompt downstream. The
+  test for that gate MUST exercise BOTH paths: detector fires + prompt
+  builder consumes the flag without crash. Unit tests on the detector
+  alone miss the second path. Pattern is documented in the new memory
+  file and the two regression tests added today (one each for
+  context-pressure and dead-first-build).
 
 **Where to start when picking this up:** run a fresh session against
 any of the 25 archetypes. Watch the right-side status panel —

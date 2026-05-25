@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mortal Kombat Fighter</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;overflow:hidden;background:#000}
+canvas{display:block;width:100%;height:100%;image-rendering:pixelated}
+#hud{position:fixed;top:0;left:0;right:0;display:flex;justify-content:space-between;align-items:center;padding:8px 20px;pointer-events:none;z-index:10}
+.health-wrap{width:38%;display:flex;flex-direction:column}
+.health-wrap.p2{align-items:flex-end}
+.player-name{color:#fff;font:bold 14px/1 monospace;margin-bottom:3px;text-shadow:0 0 6px #f00}
+.health-bar{width:100%;height:22px;background:#333;border:2px solid #888;border-radius:3px;overflow:hidden}
+.health-fill{height:100%;transition:width 0.15s}
+.p1-fill{background:linear-gradient(90deg,#ff0,#f80);width:100%}
+.p2-fill{background:linear-gradient(90deg,#0af,#08f);width:100%;float:right}
+#overlay{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;pointer-events:none;z-index:20}
+#overlay .title{font:bold 72px/1 'Impact',sans-serif;text-transform:uppercase;text-shadow:0 0 30px #f00,0 0 60px #f00}
+#overlay .subtitle{font:bold 24px/1 'Impact',sans-serif;color:#fff;margin-top:12px}
+#overlay .restart{font:18px/1 sans-serif;color:#ff0;margin-top:30px}
+#controls{position:fixed;bottom:8px;left:50%;transform:translateX(-50%);color:#666;font:12px/1.4 monospace;text-align:center;pointer-events:none}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">
+  <div class="health-wrap p1">
+    <div class="player-name">SCORPION</div>
+    <div class="health-bar"><div class="health-fill p1-fill" id="hp1"></div></div>
+  </div>
+  <div class="health-wrap p2">
+    <div class="player-name">SUB-ZERO</div>
+    <div class="health-bar"><div class="health-fill p2-fill" id="hp2"></div></div>
+  </div>
+</div>
+<div id="overlay">
+  <div class="title" id="overlayTitle"></div>
+  <div class="subtitle" id="overlaySub"></div>
+  <div class="restart" id="overlayRestart"></div>
+</div>
+<div id="controls">← → Move | ↑ Jump | ↓ Duck | J Punch | K Kick | L Block | U Fireball | Space Restart</div>
+<script>
+"use strict";
+(() => {
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const W = 960, H = 540;
+const GROUND = H - 90;
+const GRAVITY = 1800;
+const MOVE_SPEED = 220;
+const JUMP_VEL = -520;
+const FIGHTER_W = 70, FIGHTER_H = 130;
+
+// Asset paths
+const ASSET_DIR = './game-of-mortal-kombat-fighing_20260524_101226_assets/';
+const SOUND_DIR = './game-of-mortal-kombat-fighing_20260524_101226_sounds/';
+
+const ASSETS = {};
+const SOUNDS = {};
+let audioStarted = false;
+
+// Sprite name maps per player
+const P1_SPRITES = {
+  idle:'p1_idle', walk:'p1_walk', jump:'p1_jump', duck:'p1_duck',
+  punch:'p1_punch', kick:'p1_kick', block:'p1_block', hurt:'p1_hurt',
+  fireball_throw:'p1_fireball_throw', fireball:'p1_fireball', death:'p1_death'
+};
+const P2_SPRITES = {
+  idle:'p2_idle', walk:'p2_walk', jump:'p2_jump', duck:'p2_duck',
+  punch:'p2_punch', kick:'p2_kick', block:'p2_block', hurt:'p2_hurt',
+  fireball_throw:'p2_fireball_throw', fireball:'p2_fireball', death:'p2_death'
+};
+
+async function loadAssets() {
+  const names = ['p1_idle','p1_walk','p1_jump','p1_duck','p1_punch','p1_kick','p1_block','p1_hurt','p1_fireball_throw','p1_fireball','p1_death',
+    'p2_idle','p2_walk','p2_jump','p2_duck','p2_punch','p2_kick','p2_block','p2_hurt','p2_fireball_throw','p2_fireball','p2_death','arena_bg'];
+  for (const n of names) {
+    const img = new Image();
+    img.src = ASSET_DIR + n + '.png';
+    try { await img.decode(); } catch(e) { /* fallback ok */ }
+    ASSETS[n] = img;
+  }
+}
+
+function loadSounds() {
+  const entries = [
+    ['punch','punch'],['kick','kick'],['fireball','fireball'],['hit','hit'],
+    ['death','death'],['round_start','round_start'],['fatality','fatality'],['block','block']
+  ];
+  for (const [k, f] of entries) {
+    const a = new Audio(SOUND_DIR + f + '.ogg');
+    SOUNDS[k] = a;
+  }
+}
+
+function playSound(name) {
+  if (!audioStarted) return;
+  const base = SOUNDS[name];
+  if (!base) return;
+  try { const inst = base.cloneNode(); inst.play(); } catch(e) {}
+}
+
+function startAudio() {
+  if (audioStarted) return;
+  audioStarted = true;
+}
+
+window.addEventListener('keydown', startAudio, {once:true});
+window.addEventListener('pointerdown', startAudio, {once:true});
+
+// Input
+const keys = {};
+window.addEventListener('keydown', e => {
+  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) e.preventDefault();
+  keys[e.code] = true;
+});
+window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+// Game state
+let gameState = {
+  p1: null, p2: null,
+  fireballs: [],
+  frameCount: 0,
+  phase: 'intro', // intro, fight, death, fatality
+  introTimer: 0,
+  deathTimer: 0,
+  winner: null
+};
+
+function createFighter(id, x, facing) {
+  return {
+    id, x, y: GROUND, vx: 0, vy: 0,
+    w: FIGHTER_W, h: FIGHTER_H,
+    hp: 100, maxHp: 100,
+    facing, // 1=right, -1=left
+    state: 'idle',
+    stateTimer: 0,
+    animFrame: 0,
+    grounded: true,
+    attacking: false,
+    hitCooldown: 0,
+    fireballCooldown: 0,
+    invincible: 0
+  };
+}
+
+let activeTimeouts = [];
+
+function reset() {
+  // Clear all pending timeouts to prevent stale callbacks
+  for (const t of activeTimeouts) clearTimeout(t);
+  activeTimeouts = [];
+  
+  gameState.p1 = createFighter(1, 200, 1);
+  gameState.p2 = createFighter(2, 700, -1);
+  gameState.fireballs = [];
+  gameState.frameCount = 0;
+  gameState.phase = 'intro';
+  gameState.introTimer = 90;
+  gameState.deathTimer = 0;
+  gameState.winner = null;
+  document.getElementById('hp1').style.width = '100%';
+  document.getElementById('hp2').style.width = '100%';
+  document.getElementById('overlayTitle').textContent = '';
+  document.getElementById('overlaySub').textContent = '';
+  document.getElementById('overlayRestart').textContent = '';
+}
+
+// Resize
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width = '100%';
+  canvas.style.height = '100%';
+}
+window.addEventListener('resize', resize);
+
+// AI
+function updateAI(ai, player, dt) {
+  if (gameState.phase !== 'fight') return;
+  if (ai.state === 'death') return;
+  
+  const dist = Math.abs(ai.x - player.x);
+  const facingPlayer = (player.x > ai.x && ai.facing === 1) || (player.x < ai.x && ai.facing === -1);
+  
+  // Update facing
+  ai.facing = player.x > ai.x ? 1 : -1;
+  
+  // Cooldowns
+  if (ai.hitCooldown > 0) ai.hitCooldown -= dt;
+  if (ai.fireballCooldown > 0) ai.fireballCooldown -= dt;
+  
+  // Decision making
+  const r = Math.random();
+  
+  // If player has fireball coming, try to block
+  let incomingFireball = false;
+  for (const fb of gameState.fireballs) {
+    if (fb.owner !== ai.id && Math.abs(fb.x - ai.x) < 300 && Math.abs(fb.y - ai.y) < 60) {
+      incomingFireball = true;
+      break;
+    }
+  }
+  
+  if (incomingFireball && dist > 80 && r < 0.7) {
+    ai.state = 'block';
+    ai.stateTimer = 0.5;
+    return;
+  }
+  
+  // If close enough to attack
+  if (dist < 130 && ai.hitCooldown <= 0 && !ai.attacking) {
+    if (r < 0.35) {
+      ai.state = 'punch';
+      ai.stateTimer = 0.3;
+      ai.attacking = true;
+      ai.hitCooldown = 0.4;
+      activeTimeouts.push(setTimeout(() => { ai.attacking = false; }, 300));
+      checkAttackHit(ai, player);
+      return;
+    } else if (r < 0.6) {
+      ai.state = 'kick';
+      ai.stateTimer = 0.35;
+      ai.attacking = true;
+      ai.hitCooldown = 0.5;
+      activeTimeouts.push(setTimeout(() => { ai.attacking = false; }, 350));
+      checkAttackHit(ai, player);
+      return;
+    } else if (r < 0.75 && ai.fireballCooldown <= 0) {
+      ai.state = 'fireball_throw';
+      ai.stateTimer = 0.4;
+      ai.fireballCooldown = 2.0;
+      activeTimeouts.push(setTimeout(() => { ai.attacking = false; }, 400));
+      spawnFireball(ai);
+      return;
+    }
+  }
+  
+  // If too far, move closer
+  if (dist > 140) {
+    ai.state = 'walk';
+    ai.vx = ai.facing * MOVE_SPEED * 0.7;
+    return;
+  }
+  
+  // If too close and not attacking, maybe back off or block
+  if (dist < 70 && !ai.attacking) {
+    if (r < 0.4) {
+      ai.state = 'block';
+      ai.stateTimer = 0.6;
+      return;
+    }
+    ai.vx = -ai.facing * MOVE_SPEED * 0.3;
+    ai.state = 'walk';
+    return;
+  }
+  
+  // Sometimes jump
+  if (r < 0.05 && ai.grounded) {
+    ai.vy = JUMP_VEL;
+    ai.grounded = false;
+    ai.state = 'jump';
+    return;
+  }
+  
+  // Default idle
+  ai.state = 'idle';
+  ai.vx = 0;
+}
+
+function checkAttackHit(attacker, defender) {
+  const dist = Math.abs(attacker.x - defender.x);
+  const yDist = Math.abs(attacker.y - defender.y);
+  
+  if (dist < 120 && yDist < 80 && defender.invincible <= 0) {
+    const isBlocking = defender.state === 'block';
+    const dmg = isBlocking ? 3 : (attacker.state === 'kick' ? 12 : 8);
+    
+    if (isBlocking) {
+      playSound('block');
+      defender.hp = Math.max(0, defender.hp - dmg);
+    } else {
+      defender.hp = Math.max(0, defender.hp - dmg);
+      defender.state = 'hurt';
+      defender.stateTimer = 0.35;
+      defender.vx = attacker.facing * 150;
+      playSound('hit');
+      
+      if (defender.hp <= 0) {
+        defender.state = 'death';
+        defender.stateTimer = 999;
+        gameState.winner = attacker.id;
+        gameState.phase = 'death';
+        gameState.deathTimer = 0;
+        playSound('death');
+      }
+    }
+  }
+}
+
+function spawnFireball(fighter) {
+  const opponent = fighter.id === 1 ? gameState.p2 : gameState.p1;
+  const dir = opponent.x > fighter.x ? 1 : -1;
+  const fb = {
+    x: fighter.x + dir * 40,
+    y: fighter.y - 40,
+    vx: dir * 350,
+    owner: fighter.id,
+    sprite: fighter.id === 1 ? 'p1_fireball' : 'p2_fireball',
+    life: 3
+  };
+  gameState.fireballs.push(fb);
+  playSound('fireball');
+}
+
+function updateFighter(f, dt) {
+  // Physics
+  if (!f.grounded) {
+    f.vy += GRAVITY * dt;
+  }
+  f.x += f.vx * dt;
+  f.y += f.vy * dt;
+  
+  // Ground collision
+  if (f.y >= GROUND) {
+    f.y = GROUND;
+    f.vy = 0;
+    f.grounded = true;
+    if (f.state === 'jump') f.state = 'idle';
+  }
+  
+  // Screen bounds
+  f.x = Math.max(30, Math.min(W - 30, f.x));
+  
+  // Cooldowns
+  if (f.hitCooldown > 0) f.hitCooldown -= dt;
+  if (f.fireballCooldown > 0) f.fireballCooldown -= dt;
+  if (f.invincible > 0) f.invincible -= dt;
+  
+  // State timer
+  if (f.stateTimer > 0 && f.state !== 'death') {
+    f.stateTimer -= dt;
+    if (f.stateTimer <= 0 && f.state !== 'idle' && f.state !== 'walk') {
+      f.state = 'idle';
+      f.attacking = false;
+    }
+  }
+  
+  // Friction
+  if (f.grounded && !f.attacking) {
+    f.vx *= 0.85;
+  }
+}
+
+function updateFireballs(dt) {
+  for (let i = gameState.fireballs.length - 1; i >= 0; i--) {
+    const fb = gameState.fireballs[i];
+    fb.x += fb.vx * dt;
+    fb.life -= dt;
+    
+    // Check hit on fighters
+    for (const f of [gameState.p1, gameState.p2]) {
+      if (f.id !== fb.owner && f.invincible <= 0 && f.state !== 'death') {
+        const dist = Math.abs(fb.x - f.x);
+        const yDist = Math.abs(fb.y - (f.y - 40));
+        if (dist < 50 && yDist < 60) {
+          const isBlocking = f.state === 'block';
+          const dmg = isBlocking ? 4 : 15;
+          f.hp = Math.max(0, f.hp - dmg);
+          if (isBlocking) {
+            playSound('block');
+          } else {
+            f.state = 'hurt';
+            f.stateTimer = 0.35;
+            f.vx = (fb.vx > 0 ? 1 : -1) * 200;
+            playSound('hit');
+            if (f.hp <= 0) {
+              f.state = 'death';
+              f.stateTimer = 999;
+              gameState.winner = fb.owner;
+              gameState.phase = 'death';
+              gameState.deathTimer = 0;
+              playSound('death');
+            }
+          }
+          gameState.fireballs.splice(i, 1);
+          break;
+        }
+      }
+    }
+    
+    // Remove if off screen or expired
+    if (fb.x < -50 || fb.x > W + 50 || fb.life <= 0) {
+      gameState.fireballs.splice(i, 1);
+    }
+  }
+}
+
+function drawSprite(spriteName, x, y, w, h, flip) {
+  const img = ASSETS[spriteName];
+  if (!img || !img.complete || img.naturalWidth === 0) {
+    // Fallback: draw colored rectangle
+    ctx.fillStyle = spriteName.includes('p1') ? '#f80' : '#0af';
+    ctx.fillRect(x - w/2, y - h/2, w, h);
+    return;
+  }
+  ctx.save();
+  ctx.translate(x, y);
+  if (flip) ctx.scale(-1, 1);
+  ctx.drawImage(img, -w/2, -h/2, w, h);
+  ctx.restore();
+}
+
+function draw() {
+  const dpr = window.devicePixelRatio || 1;
+  
+  // Always fill background first so no blank pixels exist
+  ctx.fillStyle = '#0a0a1a';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  
+  ctx.save();
+  ctx.scale(dpr, dpr);
+  
+  // Draw arena background
+  const bg = ASSETS['arena_bg'];
+  if (bg && bg.complete && bg.naturalWidth > 0) {
+    ctx.drawImage(bg, 0, 0, W, H);
+  } else {
+    // Fallback gradient
+    const grad = ctx.createLinearGradient(0, 0, 0, H);
+    grad.addColorStop(0, '#1a0a2e');
+    grad.addColorStop(0.5, '#2d1b4e');
+    grad.addColorStop(1, '#0d0d1a');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
+    
+    // Ground
+    ctx.fillStyle = '#3a2a1a';
+    ctx.fillRect(0, GROUND, W, H - GROUND);
+    ctx.fillStyle = '#4a3a2a';
+    ctx.fillRect(0, GROUND, W, 4);
+  }
+  
+  // Draw fireballs
+  for (const fb of gameState.fireballs) {
+    drawSprite(fb.sprite, fb.x, fb.y, 40, 40, fb.vx < 0);
+  }
+  
+  // Draw fighters
+  const p1 = gameState.p1;
+  const p2 = gameState.p2;
+  
+  if (p1) {
+    const spriteMap = P1_SPRITES;
+    const spriteName = spriteMap[p1.state] || spriteMap.idle;
+    const flip = p1.facing === -1;
+    drawSprite(spriteName, p1.x, p1.y - p1.h/2, p1.w, p1.h, flip);
+  }
+  
+  if (p2) {
+    const spriteMap = P2_SPRITES;
+    const spriteName = spriteMap[p2.state] || spriteMap.idle;
+    // P2 sprites were generated facing left; flip when facing right
+    const flip = p2.facing === 1;
+    drawSprite(spriteName, p2.x, p2.y - p2.h/2, p2.w, p2.h, flip);
+  }
+  
+  ctx.restore();
+}
+
+function updateHUD() {
+  const p1 = gameState.p1;
+  const p2 = gameState.p2;
+  if (p1) document.getElementById('hp1').style.width = (p1.hp / p1.maxHp * 100) + '%';
+  if (p2) document.getElementById('hp2').style.width = (p2.hp / p2.maxHp * 100) + '%';
+}
+
+function updateOverlay() {
+  const title = document.getElementById('overlayTitle');
+  const sub = document.getElementById('overlaySub');
+  const restart = document.getElementById('overlayRestart');
+  
+  if (gameState.phase === 'intro') {
+    title.textContent = 'FIGHT!';
+    title.style.color = '#f00';
+    title.style.textShadow = '0 0 30px #f00, 0 0 60px #f00';
+    sub.textContent = '';
+    restart.textContent = '';
+  } else if (gameState.phase === 'death') {
+    title.textContent = 'FATALITY';
+    title.style.color = '#f00';
+    title.style.textShadow = '0 0 30px #f00, 0 0 60px #f00';
+    const winnerName = gameState.winner === 1 ? 'SCORPION' : 'SUB-ZERO';
+    sub.textContent = winnerName + ' WINS';
+    sub.style.color = '#ff0';
+    restart.textContent = 'Press SPACE to restart';
+  } else {
+    title.textContent = '';
+    sub.textContent = '';
+    restart.textContent = '';
+  }
+}
+
+let lastTime = performance.now();
+
+function frame(now) {
+  try {
+    const dt = Math.min(0.05, (now - lastTime) / 1000);
+    lastTime = now;
+    gameState.frameCount++;
+    
+    const p1 = gameState.p1;
+    const p2 = gameState.p2;
+    
+    if (gameState.phase === 'intro') {
+      gameState.introTimer--;
+      if (gameState.introTimer <= 0) {
+        gameState.phase = 'fight';
+        if (audioStarted) playSound('round_start');
+      }
+      updateOverlay();
+    }
+    
+    if (gameState.phase === 'fight' && p1 && p2) {
+      // Update facing
+      p1.facing = p2.x > p1.x ? 1 : -1;
+      p2.facing = p1.x > p2.x ? 1 : -1;
+      
+      // Player 1 input
+      if (p1.state !== 'hurt' && p1.state !== 'death') {
+        p1.vx = 0;
+        if (keys['ArrowLeft']) { p1.vx = -MOVE_SPEED; p1.state = 'walk'; }
+        if (keys['ArrowRight']) { p1.vx = MOVE_SPEED; p1.state = 'walk'; }
+        if (keys['ArrowDown'] && p1.grounded) { p1.state = 'duck'; p1.vx *= 0.3; }
+        if (keys['ArrowUp'] && p1.grounded) { p1.vy = JUMP_VEL; p1.grounded = false; p1.state = 'jump'; }
+        if (keys['KeyJ'] && p1.hitCooldown <= 0 && !p1.attacking) {
+          p1.state = 'punch'; p1.stateTimer = 0.25; p1.attacking = true;
+          p1.hitCooldown = 0.35;
+          activeTimeouts.push(setTimeout(() => { p1.attacking = false; }, 250));
+          checkAttackHit(p1, p2);
+          playSound('punch');
+        }
+        if (keys['KeyK'] && p1.hitCooldown <= 0 && !p1.attacking) {
+          p1.state = 'kick'; p1.stateTimer = 0.3; p1.attacking = true;
+          p1.hitCooldown = 0.45;
+          activeTimeouts.push(setTimeout(() => { p1.attacking = false; }, 300));
+          checkAttackHit(p1, p2);
+          playSound('kick');
+        }
+        if (keys['KeyL']) { p1.state = 'block'; }
+        if (keys['KeyU'] && p1.fireballCooldown <= 0 && !p1.attacking) {
+          p1.state = 'fireball_throw'; p1.stateTimer = 0.35;
+          p1.fireballCooldown = 1.5;
+          activeTimeouts.push(setTimeout(() => { p1.attacking = false; }, 350));
+          spawnFireball(p1);
+        }
+      }
+      
+      // If not in special state and no input, return to idle
+      if (p1.state === 'walk' && !keys['ArrowLeft'] && !keys['ArrowRight'] && p1.grounded) {
+        p1.state = 'idle';
+      }
+      if (p1.state === 'duck' && !keys['ArrowDown']) {
+        p1.state = 'idle';
+      }
+      if (p1.state === 'block' && !keys['KeyL']) {
+        p1.state = 'idle';
+      }
+      
+      // AI for P2
+      updateAI(p2, p1, dt);
+      
+      // If P2 walk but no movement needed
+      if (p2.state === 'walk' && Math.abs(p2.x - p1.x) > 140) {
+        // keep walking
+      } else if (p2.state === 'walk' && Math.abs(p2.x - p1.x) <= 140) {
+        p2.state = 'idle';
+      }
+      
+      updateFighter(p1, dt);
+      updateFighter(p2, dt);
+      updateFireballs(dt);
+      
+      // Push fighters apart if overlapping
+      const dist = Math.abs(p1.x - p2.x);
+      if (dist < 50) {
+        const push = (50 - dist) / 2;
+        if (p1.x < p2.x) { p1.x -= push; p2.x += push; }
+        else { p1.x += push; p2.x -= push; }
+      }
+      
+      updateOverlay();
+    }
+    
+    if (gameState.phase === 'death') {
+      gameState.deathTimer += dt;
+      updateFighter(p1, dt);
+      updateFighter(p2, dt);
+      
+      if (gameState.deathTimer > 2.5) {
+        updateOverlay();
+      }
+      
+      // Restart on space
+      if (gameState.deathTimer > 2.5 && (keys['Space'] || keys['Enter'])) {
+        keys['Space'] = false;
+        keys['Enter'] = false;
+        reset();
+      }
+    }
+    
+    updateHUD();
+    draw();
+    
+    window.gameState = gameState;
+  } catch(e) {
+    console.error('Frame error:', e);
+  }
+  
+  requestAnimationFrame(frame);
+}
+
+// Init
+async function init() {
+  resize();
+  loadSounds();
+  await loadAssets();
+  reset();
+  
+  // Expose for probes
+  window.gameState = gameState;
+  window.game = { reset };
+  
+  // Start audio on first interaction
+  window.addEventListener('keydown', () => {
+    if (!audioStarted) { audioStarted = true; playSound('round_start'); }
+  }, { once: false });
+  
+  requestAnimationFrame(frame);
+}
+
+init();
+})();
+</script>
+</body>
+</html>

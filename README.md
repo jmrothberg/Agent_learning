@@ -115,45 +115,140 @@ library compounds them; nothing replaces them.
 
 ## Compared to other coding agents
 
-This is a specialist tool. The comparison table below lists what each
-agent is *built for*, not which is "better." For general coding,
-prefer the generalists; for local HTML games with visual + audible
-quality gates, prefer this.
+This is a specialist tool. The generalists below are excellent for
+their target — multi-file project work driven by **frontier cloud
+models**. This repo's target is the *opposite shape*: **one HTML file,
+a weak local model, a visible Chromium**. The thesis below isn't
+"this is better"; it's **"this is better for *this* job, and the
+others are better for their jobs."**
 
-| Agent | Built for | Local-only | Browser verifier | Asset gen (sprites + sounds) | Cross-session learning |
-|---|---|---|---|---|---|
-| **This repo** | Single-file HTML5 games | yes | yes (Playwright Chromium) | yes (Z-Image-Turbo + Stable Audio + img2img) | yes (playbook + asset library) |
-| [opencode](https://github.com/anomalyco/opencode) (TS, MIT) | General coding assistant | optional | no | no | no |
-| [Claude Code](https://www.claude.com/product/claude-code) | General coding via Anthropic API | no (cloud) | no | no | no |
-| [Aider](https://aider.chat) | General Git-aware coding | optional | no | no | no |
-| [pi-mono coding-agent](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent) | General coding (TS, multi-provider, function-call native) | optional | no | no | no |
-| [OpenCoder](https://opencoder-llm.github.io/) | Training recipe for a code LLM (not an agent) | — | — | — | — |
+### Why this agent ships great games with weaker local VLMs
 
-What was borrowed from where:
+Every other agent in the table treats the model as the reliable
+component and the harness as a thin wrapper. This repo flips it: the
+model (qwen3.6:27b-q8_0 — mid-tier local, 32 K context, no tool-use
+training to speak of) is the *unreliable* component, and the harness
+absorbs its failure modes. That changes everything downstream:
 
-- **From pi-mono**: the SEARCH/REPLACE patch matcher cascade, per-format
+- **The verifier is a real browser**, not a unit-test runner or a
+  read-only static analyzer. RAF firing, listener counts, canvas
+  pixel deltas, console errors, frame-over-frame freeze detection,
+  state-vs-render gap (entity exists in `state` but no pixels at its
+  `x/y`) all gate `ok=True`. A weak model that wrote a syntactically
+  fine but visually dead game cannot ship.
+- **Generated media is in-process**, not a separate service. Z-Image-
+  Turbo (sprites, 768×768 → chroma-keyed to RGBA), SD-Turbo img2img
+  (animation frame chains via `from_image`), Stable Audio Open
+  (OGG, 0.2–12 s). Weak models often skip art when wired to a
+  generic file-edit tool; here `<assets>` and `<sounds>` are
+  first-class tags the planner is *coached* to emit, the diffuser is
+  *pre-warmed* on a dedicated GPU, and the load pattern is *injected
+  into the first-build prompt*. No "go install a sprite library" step.
+- **15+ weak-model defenses** live in the harness, not the prompt.
+  Identical-reply loop detector (sha1 fingerprint of consecutive
+  rejected replies), context-pressure detector (omit inlined file at
+  `prompt_tokens/num_ctx ≥ 0.85`), dead-first-build detector (RAF
+  dead + input dead → scope-reduction prompt, not patch-and-pray),
+  restart-signature-repeat (two attempts with same failure shape →
+  next attempt's plan demands a minimal first build), compaction
+  marker that *literally cannot* be parroted back (HTML comment, no
+  `<html_file>`/`<patch>` substrings), DeliberationDetector that
+  latches on real code (`<!DOCTYPE`, `<script`, `function foo(`) so
+  20+ KB first builds aren't killed by length, and more (full table
+  in [FOR_NEXT_LLM.md § Verifier guards](FOR_NEXT_LLM.md#verifier-guards-the-2026-05-23--24-layer)).
+  None of these patterns appear in the generalist agents because the
+  generalists trust the model to recover; with qwen3.6:27b, you
+  cannot.
+- **Cross-session memory is hand-curated**, not vector-embedding-
+  driven. Playbook bullets are JSONL the user edits directly,
+  retrieved by Jaccard × quality multiplier; visual playtest recipes
+  ship 25-archetype coverage; the asset library compounds successful
+  generations across sessions. A weak model gets context-window
+  benefit (small targeted hits) without paying for a full embedding
+  service.
+- **Genre-free architecture** is enforced by tests. The user's
+  standing rule: no `if "chess" in goal:` branches anywhere.
+  Mechanism / structural signals only (canvas dims, exposed state
+  shape, RAF state, three-signal recipe match on goal + plan +
+  asset-name tokens). This is the discipline that makes the agent
+  work on novel-genre games, not just the 25-archetype list.
+
+### Side-by-side
+
+Each column is a feature dimension that matters for "shipping a
+playable game with a weak local model"; row is what the agent
+provides today. **Bold = unique among the four.**
+
+| Dimension | **This repo** | OpenAI Codex CLI | pi-mono coding-agent | opencode (sst.dev) |
+|---|---|---|---|---|
+| Built for | **Single-file HTML5 games** | General terminal coding | General multi-provider coding | General multi-file coding |
+| Target model class | **Mid-tier local (qwen3.6:27b/35b, MLX/Ollama)** | Frontier cloud (GPT-5.1/5.2 codex) | Frontier cloud + local | Cloud + local Ollama |
+| Network at runtime | **none in main loop** | OpenAI API | provider-dependent | provider-dependent |
+| Verifier | **Real Chromium via Playwright** | none (relies on model + shell exec) | none built-in | none built-in |
+| Media generation | **Z-Image-Turbo + SD-Turbo img2img + Stable Audio Open in-process** | none | none | none |
+| Visual judge (VLM) | **Local VLM auto-discovered; 25-archetype playtest recipe library; auto-probes per recipe** | none | none | none |
+| Cross-session learning | **Playbook (Jaccard × quality) + asset library + skeleton promotion** | none (per-session only) | none | none |
+| Failure recovery | **Identical-reply detector, context-pressure detector, dead-first-build detector, model-give-up detector, restart-signature escalation, compaction-marker-echo classifier, 6-variant HTML salvage** | format-doctor on patch failure | retry on apply error | retry on apply error |
+| Patch format | **`<patch><<<<<<< SEARCH ... >>>>>>> REPLACE</patch>` + optional `@@ scope` breadcrumb (Codex-style anchor)** | `*** Begin Patch / @@ / +/- / *** End Patch` | SEARCH/REPLACE blocks | provider-tool-dependent |
+| Stream-abort discipline | **Latches on observable code emission (HTML tags, JS keywords); length is not a fail signal once producing** | server-side limits only | server-side limits | server-side limits |
+| Genre-free architecture | **enforced by tests** (`test_phase4_scope_nudge.py`) | n/a (general) | n/a (general) | n/a (general) |
+| Sandboxing | none (Chromium runs the output; flags allow `file://`) | landlock / bwrap / Windows sandbox for shell | provider-dependent | provider-dependent |
+| Multi-step planning | **`<todos>` checklist, persisted across compaction** | `update_plan` tool | provider-tool-dependent | provider-tool-dependent |
+| MCP / tool ecosystem | not exposed (single-file games don't need it) | full MCP tool server | provider-dependent | provider-dependent |
+| TUI | **Textual TUI with Chromium beside, live tok/s + GPU map + memory-in-use panel** | TUI | TUI | TUI |
+
+### What was borrowed (and what's distinctively ours)
+
+- **From pi-mono**: SEARCH/REPLACE patch matcher cascade, per-format
   prompt assembly with deduped guidelines, structured compaction with
   state-anchor messages, "prescriptive errors" (tell the model EXACTLY
   what was wrong, not "syntax error").
 - **From OpenCoder**: quality-ranked + deduped + budgeted retrieval
   (Jaccard × `1 + 0.10·tanh(score/5)` quality multiplier), the
   two-stage plan/code distinction that maps to our `<plan>` /
-  `<patch>` phases, the educational-execution-filter pattern that maps
-  to micro-probes.
+  `<patch>` phases, the educational-execution-filter pattern that
+  maps to micro-probes.
 - **From opencode** (the comparison target for the most recent moat-
   widening pass): the idea of static analysis *before* the browser
   (we don't run a real LSP — we run a regex-based receiver-method
   allowlist that catches the highest-frequency hallucinations).
+- **From OpenAI Codex** (2026-05-25 review): `@@ function_or_class`
+  breadcrumb anchor in `<patch>` SEARCH to scope ambiguous matches;
+  good-vs-low-quality plan examples in `PLAN_INSTRUCTION`; the
+  always-on "Phase-A signals persist once accepted, fix turns emit
+  `<patch>` only" rule. Codex's `compact_remote_v2.rs` independently
+  arrived at the same fix this repo shipped for the Wolfenstein
+  compaction-marker echo loop (store summaries as user-role, never
+  as assistant content) — confirms the design.
 
-What is **not** in this repo and is intentionally not planned:
+**Distinctively ours** (no equivalent in the others):
 
-- A client/server architecture (opencode has one — we explicitly want
-  local-only).
-- Provider plugin sprawl. The backends are: Ollama, MLX in-process,
-  optional cloud providers (Anthropic/OpenAI) with explicit calls only.
-- A generalist coding mode. The system prompt, the retrieval index,
-  the probes, the asset pipeline, and the playbook are all tuned for
-  one thing: **a playable HTML5 game in a single file**.
+- The Chromium verifier + state-vs-render gap detector (catches
+  Pac-Man-without-a-Pac-Man — entity in `state` but not drawn).
+- The in-process diffuser pipeline with chroma-key + `from_image`
+  animation chains.
+- The visual playtest recipe library (mechanism-keyed YAML/JSONL
+  with `auto_probes` — deterministic JS assertions that fire even
+  if the VLM misses the issue visually).
+- The 15+ weak-model defense layer (identical-reply, context-
+  pressure, dead-first-build, model-give-up, restart-signature,
+  DeliberationDetector with code-emission latch, etc) — all gated
+  on observable signals from the trace stream, no model name or
+  genre coupling anywhere.
+- The hand-curated playbook (~80 bullets at this writing) edited as
+  JSONL, retrieved per-turn against the goal text.
+
+### What is *not* in this repo and is intentionally not planned
+
+- A client/server architecture (opencode has one — we explicitly
+  want local-only).
+- Provider plugin sprawl. Backends are: Ollama, MLX in-process,
+  optional cloud (Anthropic/OpenAI) for explicit calls only.
+- A generalist coding mode. The system prompt, retrieval index,
+  probes, asset pipeline, and playbook are all tuned for one thing:
+  **a playable HTML5 game in a single file**.
+- OS-level sandboxing. The harness runs HTML in Chromium with
+  `file://` flags; there is no shell-exec surface to sandbox.
 
 ---
 
@@ -630,12 +725,14 @@ patch number caused the problem and what to change to fix it.
 | `memory/` | **Tracked reference** — `playbook.jsonl`, `playtests.jsonl` (behavior playtest recipes for `/feedback`), bundled skeletons, asset library index |
 | `games/game-memory/` | **Local learned** (gitignored) — optional live playbook overlay, `won_*` skeletons, `mistakes.jsonl` |
 | `games/goals/` | **Short-term** — per-session `goal.txt`, `best.html`, `outcome.json` |
-| `games/<stem>.html` (+ `<stem>_assets/`, `<stem>_sounds/`) | **Curated showcases** (tracked when great) — most session HTML is gitignored; promote a winner by restoring/committing the trio and adding matching `!` lines in `.gitignore` (see chess sample below). |
+| `goodgame/<stem>.html` (+ `<stem>_assets/`, `<stem>_sounds/`) | **Curated showcases (easy path)** — not gitignored (unlike `games/` session output). TUI **`/goodgame`** copies `.best.html` (or live `.html`) plus asset folders into `goodgame/`; your usual git update/commit workflow picks them up with everything else. |
+| `games/<stem>.html` (+ `<stem>_assets/`, `<stem>_sounds/`) | **Legacy curated path** — most session HTML under `games/` is gitignored; you can still promote into `games/` and add matching `!` lines in `.gitignore` (chess sample). Prefer `goodgame/` unless you need the file to live beside other `games/` artifacts. |
 
-**Curated games in repo** (open from `games/` so relative asset paths resolve):
+**Curated games in repo** (open from `goodgame/` so relative asset paths resolve):
 
-- [`games/mechanics-standard-chess-on-an_20260522_163629.html`](games/mechanics-standard-chess-on-an_20260522_163629.html) — animated sprites, SFX, negamax AI (`AI_SEARCH_DEPTH=4`).
-- [`games/game-of-mortal-kombat-fighing_20260524_101226.html`](games/game-of-mortal-kombat-fighing_20260524_101226.html) — two-player fighter (sprites, SFX, HUD). Shipped from session `.best.html`.
+- [`goodgame/mechanics-standard-chess-on-an_20260522_163629.html`](goodgame/mechanics-standard-chess-on-an_20260522_163629.html) — animated sprites, SFX, negamax AI (`AI_SEARCH_DEPTH=4`).
+- [`goodgame/game-of-mortal-kombat-fighing_20260524_101226.html`](goodgame/game-of-mortal-kombat-fighing_20260524_101226.html) — two-player fighter (sprites, SFX, HUD).
+- [`goodgame/a-game-of-street-figher-a-two_20260525_151525.html`](goodgame/a-game-of-street-figher-a-two_20260525_151525.html) — two-player Street Fighter-style fighter (from session `.best.html`).
 
 - **`GameMemory`** — skeleton retrieval and mistake retrieval.
   - **Premium Default Skeletons (Autobootstrapped on boot)**: The system provides 17 generic, high-fidelity scaffolds in `memory/skeletons/` designed to give local models a perfect first-build template:
@@ -956,6 +1053,7 @@ is data the agent will see, not just developer notes.
 | `/backend <auto\|ollama\|mlx\|openai\|anthropic>` | Switch the backend (cloud choices are explicit and billable). |
 | `/unload` | Free VRAM: bare `/unload` evicts the active session tag; `/unload all` walks **every** Ollama slot (11434–11436) plus diffusers preload, not only `OLLAMA_HOST`; `/unload mlx` drops in-process MLX. |
 | `/new` | Start a new session in the same workspace. |
+| `/goodgame` | Copy `.best.html` (or live `.html`) plus `*_assets/` / `*_sounds/` into `goodgame/`. Alias: `/good`. |
 | `/ship` | Force `<confirm_done/>` on the next critique turn. |
 | `/quit` | Exit. |
 | `/open` | Reveal the current HTML in the file browser. |

@@ -486,3 +486,124 @@ def test_repair_reply_marker_spaces():
     assert parsed[0].search.strip() == "old code"
     assert parsed[0].replace.strip() == "new code"
 
+
+
+# ---------------------------------------------------------------------------
+# Codex `@@ breadcrumb` anchor (slice 1.1 from Codex review)
+# ---------------------------------------------------------------------------
+
+
+from patches import _parse_breadcrumb_lines, apply_patches  # noqa: E402
+
+
+def test_parse_breadcrumb_lines_strips_leading_anchors():
+    """Leading `@@ identifier` lines are split off the SEARCH and
+    surfaced as breadcrumbs; the residual SEARCH starts at the first
+    non-breadcrumb, non-blank line.
+    """
+    search = "@@ function reset\n@@ inner block\n  state.score = 0;\n"
+    residual, breadcrumbs = _parse_breadcrumb_lines(search)
+    assert breadcrumbs == ["function reset", "inner block"]
+    assert residual == "  state.score = 0;\n"
+
+
+def test_parse_breadcrumb_no_anchors_returns_search_unchanged():
+    """No leading `@@` lines means no breadcrumbs and SEARCH is
+    returned verbatim.
+    """
+    search = "foo bar\nbaz\n"
+    residual, breadcrumbs = _parse_breadcrumb_lines(search)
+    assert breadcrumbs == []
+    assert residual == search
+
+
+def test_parse_breadcrumb_malformed_anchor_not_consumed():
+    """`@@` without an identifier following is not a valid breadcrumb
+    — treat as part of SEARCH text (graceful degrade).
+    """
+    search = "@@\nfoo\n"
+    residual, breadcrumbs = _parse_breadcrumb_lines(search)
+    assert breadcrumbs == []
+    assert residual == search
+
+
+def test_breadcrumb_resolves_ambiguous_search():
+    """Two identical code blocks; SEARCH alone would match both. With
+    a `@@ function_name` breadcrumb, the matcher narrows to the
+    function's scope and the patch applies cleanly.
+    """
+    source = (
+        "function setup() {\n"
+        "  state.score = 0;\n"
+        "  state.player.x = 0;\n"
+        "}\n"
+        "\n"
+        "function resetGame() {\n"
+        "  state.score = 0;\n"
+        "  state.player.x = 0;\n"
+        "}\n"
+    )
+    patch_with_breadcrumb = Patch(
+        search="@@ function resetGame\n  state.score = 0;\n  state.player.x = 0;\n",
+        replace="  state.score = 0;\n  state.player.x = 100;\n",
+    )
+    res = apply_patches(source, [patch_with_breadcrumb])
+    assert res.applied == 1, f"failed: {res.failed}"
+    assert "state.player.x = 100" in res.text
+    # The setup() copy must remain untouched.
+    setup_block = res.text.split("function setup()")[1].split("function resetGame")[0]
+    assert "state.player.x = 0" in setup_block
+    assert "state.player.x = 100" not in setup_block
+
+
+def test_breadcrumb_without_match_falls_back_gracefully():
+    """If the breadcrumb identifier isn't found in source, normal
+    matching proceeds against the residual SEARCH. A unique residual
+    still applies; an ambiguous residual fails normally.
+    """
+    source = "function foo() {\n  return 42;\n}\n"
+    patch = Patch(
+        search="@@ function bar\n  return 42;\n",  # bar doesn't exist
+        replace="  return 99;\n",
+    )
+    res = apply_patches(source, [patch])
+    assert res.applied == 1, f"failed: {res.failed}"
+    assert "return 99" in res.text
+
+
+def test_breadcrumb_residual_ambiguity_still_fails_with_helpful_hint():
+    """When breadcrumb narrowing kills all matches, fall back to
+    original matches and surface the standard ambiguity error. The
+    rejection should NOT suggest emitting another `@@` line (the
+    model already did) and should still be actionable.
+    """
+    source = (
+        "function a() {\n  x = 1;\n}\n"
+        "function b() {\n  x = 1;\n}\n"
+    )
+    patch = Patch(
+        search="@@ function nonexistent\n  x = 1;\n",
+        replace="  x = 2;\n",
+    )
+    res = apply_patches(source, [patch])
+    # Breadcrumb didn't resolve; residual matches twice; expect ambiguity.
+    assert res.applied == 0
+    assert len(res.failed) == 1
+    _, _, msg = res.failed[0]
+    assert "ambiguous" in msg.lower() or "matched" in msg.lower()
+
+
+def test_no_breadcrumb_ambiguous_search_suggests_breadcrumb_in_error():
+    """When the model didn't use a breadcrumb AND the SEARCH is
+    ambiguous, the error message should mention the `@@` option so
+    the model knows the tool exists for next turn.
+    """
+    source = (
+        "function a() {\n  x = 1;\n}\n"
+        "function b() {\n  x = 1;\n}\n"
+    )
+    patch = Patch(search="  x = 1;\n", replace="  x = 2;\n")
+    res = apply_patches(source, [patch])
+    assert res.applied == 0
+    _, _, msg = res.failed[0]
+    assert "@@" in msg, f"error should mention @@ breadcrumb option; got: {msg!r}"

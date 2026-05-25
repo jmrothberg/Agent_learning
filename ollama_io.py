@@ -349,42 +349,100 @@ class RepetitionDetector:
 # fail to materialize regardless of whether the detector latches).
 # ` ```html ` fences are kept because they're how the model legitimately
 # delivers code in seed-build paths and rarely appear in reasoning prose.
-# Match only at line starts (allowing leading whitespace). Inline mentions
-# like "I need to emit `<html_file>`" are prose, not a real output start,
-# and must NOT latch the detector.
+# Latch when the model has clearly started producing real output. The
+# previous version required line-start (`^` or `\n`) to avoid latching
+# on inline prose mentions like "I need to emit `<html_file>`", but that
+# was over-strict: it killed real long first-build streams whose chunking
+# happened to put the opener mid-buffer after a buffer trim. Wolfenstein
+# 2026-05-25 trace [04] is the canonical case — `<html_file>` was at
+# position 0 of the visible reply but the detector still fired at 6001
+# chars.
+#
+# Two latch families now:
+#   _TAG_OPENER_RE  — the canonical agent output tags. Match anywhere
+#                     in the buffer; an honest mention of one of these
+#                     means the model is engaged with the task, not
+#                     rambling in pre-tag deliberation.
+#   _CODE_OPENER_RE — substantive HTML/JS/CSS produced text. Once the
+#                     model has emitted `<!DOCTYPE html>`, `<script>`,
+#                     `<canvas`, a `function` declaration, etc, it is
+#                     past deliberation and writing code. Length stops
+#                     being a useful fail signal.
 _TAG_OPENER_RE = _re.compile(
-    r"(?:^|\n)\s*(?:"
+    # Output tag — anywhere in buffer, but NOT preceded by a backtick.
+    # `(?<!`)` excludes inline markdown code spans like
+    # `` `<html_file>` `` where the model is referring to the tag in
+    # prose rather than emitting it (doom 2026-05-17 trace protection).
+    # A bare `<html_file>` after non-backtick prose (Wolfenstein
+    # 2026-05-25 trace) still latches.
+    r"(?<!`)"
     r"<(?:plan|patch|html_file|diagnose|notes|criteria|probes|assets|sounds|"
     r"done|confirm_done|lookup_bullet)\b"
-    r"|```(?:html|js)?\b"
-    r")",
+    r"|```(?:html|js)?\b",
     _re.IGNORECASE,
+)
+# HTML structural openers — case-insensitive (model may write
+# `<!doctype HTML>` or `<HTML>`).
+_HTML_OPENER_RE = _re.compile(
+    r"<!DOCTYPE\s+html\b"
+    r"|<html\b"
+    r"|<script\b"
+    r"|<style\b"
+    r"|<canvas\b"
+    r"|<body\b",
+    _re.IGNORECASE,
+)
+# JavaScript code openers — case-sensitive. `let`/`const`/`var`/`function`/
+# `class` are reserved words and only valid as code when lowercase. The
+# patterns also require code-shaped context (identifier or `=` next) so
+# prose like "Let me think" or "function of the game" doesn't latch.
+# No IGNORECASE flag — case-sensitive on purpose.
+_JS_OPENER_RE = _re.compile(
+    r"\bfunction\s+[A-Za-z_$][A-Za-z0-9_$]*\s*\("
+    r"|\bclass\s+[A-Za-z_$][A-Za-z0-9_$]*\s*[{<]"
+    r"|\b(?:const|let|var)\s+[a-zA-Z_$][a-zA-Z0-9_$]*\s*="
 )
 
 
 class DeliberationDetector:
-    """Abort a stream that has not produced any output-tag opener after
-    `threshold_chars` characters. Disabled if the env var
-    DISABLE_DELIBERATION_DETECTOR=1 is set.
+    """Abort a stream that is rambling in pre-tag deliberation —
+    NOT a stream that is doing work.
+
+    The detector fires only when, after `threshold_chars` characters,
+    NEITHER a canonical agent output tag (<html_file>, <patch>, etc)
+    NOR substantive code content (<!DOCTYPE html>, <script>, <canvas,
+    `function foo`, class declarations, top-level const/let/var) has
+    appeared outside any `<think>` block. Once any of those land, the
+    detector latches and length stops being a fail signal — the model
+    can stream a 20 KB+ first build to completion without interruption.
+
+    Wolfenstein 2026-05-25 lesson: an earlier version required the
+    opener regex to match at line-start (`(?:^|\\n)\\s*<html_file\\b`)
+    and only matched the agent-format tags. That killed real first
+    builds whose chunking happened to put the opener mid-buffer after
+    a 4 KB trim. Current version (a) drops the line-start anchor —
+    inline `<html_file>` is still a real signal that the model is
+    engaged with the task — and (b) adds a second latch family for
+    raw HTML/JS/CSS so a model that goes straight into `<!DOCTYPE>`
+    without wrapping in `<html_file>` still latches.
+
+    Disabled if env var DISABLE_DELIBERATION_DETECTOR=1 is set.
 
     Why character-count rather than token-count: streaming pieces from
     Ollama/MLX vary wildly in size (sometimes one BPE token = 4 chars,
     sometimes a single piece = a whole 60-char line). Char-count gives
-    a backend-agnostic budget. Empirically the qwen3.6:27b deliberation
-    chains produce ~4–5 chars per piece, so 6000 chars ≈ 1500 pieces.
+    a backend-agnostic budget for the pre-tag rambling case.
 
     <think>-awareness (from classic-doom-style 20260512_111015 trace):
     a reasoning-mode model emits its chain-of-thought inside
-    <think>...</think> first. When the CoT mentions output-tag literals
-    in prose ("I'd write <!DOCTYPE html>\n<html lang='en'>..."), the
-    naive opener regex used to latch on those as if real output had
-    begun — and the detector then sat silent while the model burned
-    42096 BPE tokens / 37 wall-clock minutes producing zero usable code.
-    Fix: track open `<think>` count incrementally; while inside one,
-    skip the opener latch AND use a higher per-piece char budget
-    (`think_threshold_chars`) before aborting. Outside `<think>`, the
-    original 6000-char limit catches pre-tag rambling that isn't even
-    wrapped in a reasoning block.
+    <think>...</think> first. Opener literals INSIDE a think block are
+    reasoning prose ("the spec says <!DOCTYPE html> is required") and
+    don't latch — otherwise the detector would sleep while the model
+    burned tens of thousands of tokens producing zero real output.
+    Higher `think_threshold_chars` lets reasoning take more room before
+    we call it a deliberation loop. Outside `<think>`, the regular
+    `threshold_chars` catches pre-tag rambling that isn't even wrapped
+    in a reasoning block.
     """
 
     __slots__ = (
@@ -460,10 +518,25 @@ class DeliberationDetector:
         if len(self._buf) > 4096:
             self._buf = self._buf[-2048:]
         # --- latch check --------------------------------------------
-        # Only count opener literals when we're outside <think>. Inside
-        # <think> they're reasoning prose ("the spec says <!DOCTYPE html>
-        # is required") rather than real output.
-        if self._think_depth == 0 and _TAG_OPENER_RE.search(self._buf):
+        # Latch on either: (a) a canonical agent output tag (<html_file>,
+        # <patch>, <plan>, etc), or (b) substantive HTML/JS/CSS that
+        # signals the model is past deliberation and into producing real
+        # code (<!DOCTYPE html>, <script>, function foo, ...). Either is
+        # sufficient evidence the stream is doing work; length should
+        # stop being a fail signal.
+        #
+        # Only outside <think>: inside the thinking channel these
+        # literals are reasoning prose ("the spec says <!DOCTYPE html>
+        # is required"), not real output. The original doom 20260512
+        # trace failure was exactly this — model emitted opener literals
+        # in thinking that latched falsely, then never produced real
+        # output. After </think>, the buf may contain post-think content
+        # where a fresh opener will latch normally.
+        if self._think_depth == 0 and (
+            _TAG_OPENER_RE.search(self._buf)
+            or _HTML_OPENER_RE.search(self._buf)
+            or _JS_OPENER_RE.search(self._buf)
+        ):
             self._seen_tag = True
             return False
         # --- abort check --------------------------------------------

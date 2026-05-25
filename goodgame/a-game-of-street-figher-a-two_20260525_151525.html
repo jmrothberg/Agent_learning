@@ -1,0 +1,827 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Street Fighter - Muscular Women Fighting</title>
+<style>
+  :root { color-scheme: dark; --bg:#0b1020; --fg:#e7ecff; --panel:#1a2348; --accent:#3b62ff; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--fg); font:16px/1.4 system-ui,sans-serif; overflow:hidden; user-select:none; }
+  #wrap { position:fixed; inset:0; display:grid; place-items:center; }
+  canvas { background:#10162e; border-radius:12px; box-shadow:0 10px 40px #0008; max-width:96vw; max-height:90vh; touch-action:none; }
+  #help { position:fixed; bottom:8px; left:50%; transform:translateX(-50%); opacity:.8; font-size:12px; pointer-events:none; text-align:center; white-space:nowrap; }
+  #modal { position:fixed; inset:0; display:none; place-items:center; background:#000a; backdrop-filter:blur(4px); z-index:10; }
+  #modal .card { background:var(--panel); padding:24px 28px; border-radius:14px; text-align:center; box-shadow:0 20px 60px #000a; min-width:280px; }
+  #modal h2 { margin:0 0 8px; font-size:28px; }
+  #modal p { margin:4px 0 16px; }
+  #errOverlay { position:fixed; inset:auto 12px 12px 12px; max-height:30%; overflow:auto; background:#400; color:#fdd; padding:8px 12px; font:12px/1.3 monospace; border-radius:6px; display:none; pointer-events:none; }
+  button { background:var(--accent); color:#fff; border:0; padding:10px 18px; border-radius:8px; font-size:15px; cursor:pointer; }
+  button:hover { filter:brightness(1.1); }
+  .health-bar { position:fixed; top:10px; height:32px; border:2px solid #fff; border-radius:4px; overflow:hidden; }
+  .health-bar .fill { height:100%; transition:width 0.15s; }
+  #p1bar { left:10px; width:calc(50% - 80px); }
+  #p1bar .fill { background:linear-gradient(90deg,#22c55e,#4ade80); }
+  #p2bar { right:10px; width:calc(50% - 80px); }
+  #p2bar .fill { background:linear-gradient(90deg,#ef4444,#f87171); float:right; }
+  #timer { position:fixed; top:6px; left:50%; transform:translateX(-50%); font-size:36px; font-weight:bold; color:#fbbf24; pointer-events:none; text-shadow:0 0 10px #000; }
+  #roundInfo { position:fixed; top:44px; left:50%; transform:translateX(-50%); font-size:14px; color:#ccc; pointer-events:none; }
+  #name1 { position:fixed; top:44px; left:12px; font-size:14px; color:#4ade80; pointer-events:none; }
+  #name2 { position:fixed; top:44px; right:12px; font-size:14px; color:#f87171; pointer-events:none; text-align:right; }
+</style></head>
+<body>
+<div id="wrap"><canvas id="c" width="800" height="600"></canvas></div>
+<div class="health-bar" id="p1bar"><div class="fill" id="p1fill" style="width:100%"></div></div>
+<div class="health-bar" id="p2bar"><div class="fill" id="p2fill" style="width:100%"></div></div>
+<div id="timer">60</div>
+<div id="roundInfo">Round 1</div>
+<div id="name1">PLAYER</div>
+<div id="name2">CPU</div>
+<div id="help">← → Move · ↑ Jump · ↓ Duck · J Punch · K Kick · L Fireball · I Block · R Restart</div>
+<div id="modal"><div class="card">
+  <h2 id="endTitle">Game Over</h2>
+  <p id="endMsg"></p>
+  <button id="restart">Play Again</button>
+</div></div>
+<div id="errOverlay"></div>
+<script>
+(() => {
+  "use strict";
+
+  const cvs = document.getElementById("c");
+  const ctx = cvs.getContext("2d");
+  const W = 800, H = 600;
+  const modal = document.getElementById("modal");
+  const endTitle = document.getElementById("endTitle");
+  const endMsg = document.getElementById("endMsg");
+  const errBox = document.getElementById("errOverlay");
+  const p1fill = document.getElementById("p1fill");
+  const p2fill = document.getElementById("p2fill");
+  const timerEl = document.getElementById("timer");
+  const roundEl = document.getElementById("roundInfo");
+
+  function fit() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    cvs.width = W * dpr; cvs.height = H * dpr;
+    cvs.style.width = W + "px"; cvs.style.height = H + "px";
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  fit();
+  window.addEventListener("resize", fit);
+
+  // ---- Asset loading ----
+  const ASSET_NAMES = [
+    "fighter_idle1","fighter_idle2","fighter_idle3",
+    "fighter_walk1","fighter_walk2","fighter_walk3",
+    "fighter_punch1","fighter_punch2","fighter_punch3",
+    "fighter_kick1","fighter_kick2","fighter_kick3",
+    "fighter_fireball1","fighter_fireball2","fighter_fireball3",
+    "fighter_block1","fighter_block2","fighter_block3",
+    "fighter_hit1","fighter_hit2","fighter_hit3",
+    "fighter_jump1","fighter_jump2","fighter_duck1",
+    "fireball_projectile"
+  ];
+  const ASSET_DIR = "./a-game-of-street-figher-a-two_20260525_151525_assets/";
+  const ASSETS = {};
+  let assetsReady = false;
+
+  async function loadAssets() {
+    for (const name of ASSET_NAMES) {
+      const img = new Image();
+      img.src = ASSET_DIR + name + ".png";
+      try { await img.decode(); } catch(e) { /* fallback to procedural */ }
+      ASSETS[name] = img;
+    }
+    assetsReady = true;
+  }
+
+  // ---- Sound loading ----
+  const SOUND_NAMES = ["punch","kick","fireball","hit","block","jump","ko","music"];
+  const SOUND_DIR = "./a-game-of-street-figher-a-two_20260525_151525_sounds/";
+  const SOUNDS = {};
+  let _audioStarted = false;
+
+  function loadSounds() {
+    for (const name of SOUND_NAMES) {
+      const a = new Audio(SOUND_DIR + name + ".ogg");
+      a.loop = (name === "music");
+      SOUNDS[name] = a;
+    }
+  }
+  loadSounds();
+
+  function playSFX(name) {
+    const base = SOUNDS[name];
+    if (!base) return;
+    if (name === "music") { base.play().catch(()=>{}); return; }
+    const inst = base.cloneNode(); inst.volume = 0.5; inst.play().catch(()=>{});
+  }
+
+  function startAudio() {
+    if (_audioStarted) return;
+    _audioStarted = true;
+    if (SOUNDS.music) SOUNDS.music.play().catch(()=>{});
+  }
+  window.addEventListener("keydown", startAudio, {once:true});
+  window.addEventListener("pointerdown", startAudio, {once:true});
+
+  // ---- Input ----
+  const keys = Object.create(null);
+  const pressed = Object.create(null);
+  function onKey(e, down) {
+    if (down) {
+      if (!keys[e.code]) pressed[e.code] = true;
+      keys[e.code] = true;
+      e.preventDefault();
+    } else {
+      if (keys[e.code]) pressed[e.code] = false;
+      keys[e.code] = false;
+    }
+  }
+  window.addEventListener("keydown", e => onKey(e, true), {passive:false});
+  window.addEventListener("keyup", e => onKey(e, false), {passive:false});
+
+  // ---- Constants ----
+  const GROUND_Y = 480;
+  const GRAVITY = 1800;
+  const JUMP_VEL = -400; // Lower jump
+  const MOVE_SPEED = 250;
+  const FIGHTER_W = 120;
+  const FIGHTER_H = 180;
+  const MAX_HP = 100;
+  const ROUND_TIME = 60;
+  const ROUNDS_TO_WIN = 2;
+  const PUNCH_DMG = 12;
+  const KICK_DMG = 18;
+  const FIREBALL_DMG = 15;
+  const BLOCK_REDUCTION = 0.7;
+  const FIREBALL_SPEED = 350;
+
+  // ---- Animation frame definitions ----
+  // Each state: { frames: [sprite names], timings: [ms per frame], activeFrames: [frame indices with hitboxes], startup: frames, recovery: frames }
+  const ANIM = {
+    idle: { frames: ["fighter_idle1","fighter_idle2","fighter_idle3"], timings: [300,300,300], activeFrames: [] },
+    walk: { frames: ["fighter_walk1","fighter_walk2","fighter_walk3"], timings: [120,120,120], activeFrames: [] },
+    jump: { frames: ["fighter_jump1","fighter_jump2"], timings: [400,400], activeFrames: [] },
+    duck: { frames: ["fighter_duck1","fighter_duck1","fighter_duck1"], timings: [100,100,100], activeFrames: [] },
+    punch: { frames: ["fighter_punch1","fighter_punch2","fighter_punch3"], timings: [100,100,150], activeFrames: [1] },
+    kick: { frames: ["fighter_kick1","fighter_kick2","fighter_kick3"], timings: [120,120,180], activeFrames: [1] },
+    fireball: { frames: ["fighter_fireball1","fighter_fireball2","fighter_fireball3"], timings: [200,150,200], activeFrames: [1] },
+    block: { frames: ["fighter_block1","fighter_block2","fighter_block3"], timings: [200,200,200], activeFrames: [] },
+    hit: { frames: ["fighter_hit1","fighter_hit2","fighter_hit3"], timings: [100,150,200], activeFrames: [] }
+  };
+
+  // ---- Fighter class ----
+  class Fighter {
+    constructor(x, facing, isAI) {
+      this.x = x;
+      this.y = GROUND_Y;
+      this.vx = 0;
+      this.vy = 0;
+      this.facing = facing; // 1 = right, -1 = left
+      this.isAI = isAI;
+      this.hp = MAX_HP;
+      this.state = "idle";
+      this.animFrame = 0;
+      this.animTimer = 0;
+      this.stateTimer = 0;
+      this.hitStunTimer = 0;
+      this.blocking = false;
+      this.hasHit = false;
+      this.fireballs = [];
+      this.width = FIGHTER_W;
+      this.height = FIGHTER_H;
+      // AI state
+      this.aiTimer = 0;
+      this.aiAction = "idle";
+      this.aiReactionDelay = 300;
+    }
+
+    getSprite() {
+      const a = ANIM[this.state];
+      if (!a) return ASSETS["fighter_idle1"];
+      return ASSETS[a.frames[this.animFrame % a.frames.length]] || ASSETS["fighter_idle1"];
+    }
+
+    getHurtbox() {
+      const duckScale = this.state === "duck" ? 0.6 : 1;
+      const h = this.height * duckScale;
+      const yOff = this.state === "duck" ? this.height * 0.4 : 0;
+      return {
+        x: this.x - this.width / 2,
+        y: this.y - h + yOff,
+        w: this.width,
+        h: h
+      };
+    }
+
+    getHitbox() {
+      const a = ANIM[this.state];
+      if (!a || !a.activeFrames.includes(this.animFrame)) return null;
+      const reach = this.state === "kick" ? 55 : this.state === "punch" ? 45 : 0;
+      if (reach <= 0) return null;
+      return {
+        x: this.facing === 1 ? this.x + this.width / 2 : this.x - this.width / 2 - reach,
+        y: this.y - this.height * 0.6,
+        w: reach,
+        h: 30
+      };
+    }
+
+    canAct() {
+      return this.state !== "hit" && this.hitStunTimer <= 0 &&
+             !["punch","kick","fireball"].includes(this.state);
+    }
+
+    setState(newState) {
+      if (this.state === "hit" && this.hitStunTimer > 0) return;
+      this.state = newState;
+      this.animFrame = 0;
+      this.animTimer = 0;
+      this.hasHit = false;
+      if (newState === "hit") this.hitStunTimer = 400;
+    }
+
+    spawnFireball() {
+      const dir = this.facing;
+      this.fireballs.push({
+        x: this.x + dir * 50,
+        y: this.y - this.height * 0.5,
+        vx: FIREBALL_SPEED * dir,
+        vy: 0,
+        w: 50, h: 50,
+        life: 4000,
+        damage: FIREBALL_DMG
+      });
+      playSFX("fireball");
+    }
+
+    takeDamage(dmg, type) {
+      if (this.blocking) {
+        dmg = Math.floor(dmg * (1 - BLOCK_REDUCTION));
+        playSFX("block");
+      } else {
+        playSFX("hit");
+        this.setState("hit");
+      }
+      this.hp = Math.max(0, this.hp - dmg);
+    }
+
+    update(dt, opponent) {
+      // Update fireballs
+      for (let i = this.fireballs.length - 1; i >= 0; i--) {
+        const fb = this.fireballs[i];
+        fb.x += fb.vx * dt;
+        fb.life -= dt * 1000;
+        if (fb.life <= 0 || fb.x < -50 || fb.x > W + 50) {
+          this.fireballs.splice(i, 1);
+          continue;
+        }
+        // Check fireball vs opponent hurtbox
+        const ohb = opponent.getHurtbox();
+        if (rectsOverlap(fb.x, fb.y, fb.w, fb.h, ohb.x, ohb.y, ohb.w, ohb.h)) {
+          opponent.takeDamage(fb.damage, "fireball");
+          this.fireballs.splice(i, 1);
+        }
+      }
+
+      // Animation frame timing
+      const a = ANIM[this.state];
+      if (a) {
+        this.animTimer += dt * 1000;
+        if (this.animTimer >= a.timings[this.animFrame % a.timings.length]) {
+          this.animTimer = 0;
+          this.animFrame++;
+          // Check if animation complete
+          if (this.animFrame >= a.frames.length) {
+            if (this.state === "hit") {
+              this.setState("idle");
+            } else if (["punch","kick","fireball"].includes(this.state)) {
+              this.setState("idle");
+            } else {
+              this.animFrame = 0; // loop
+            }
+          }
+        }
+      }
+
+      // Hitstun decay
+      if (this.hitStunTimer > 0) {
+        this.hitStunTimer -= dt * 1000;
+        if (this.hitStunTimer <= 0) {
+          this.setState("idle");
+        }
+      }
+
+      // Physics
+      if (this.state !== "jump") {
+        this.vy += GRAVITY * dt;
+      }
+      this.x += this.vx * dt;
+      this.y += this.vy * dt;
+
+      // Ground collision
+      if (this.y >= GROUND_Y) {
+        this.y = GROUND_Y;
+        this.vy = 0;
+        if (this.state === "jump") this.setState("idle");
+      }
+
+      // Ceiling clamp — keep character on screen
+      const minY = this.height + 10;
+      if (this.y < minY) {
+        this.y = minY;
+        this.vy = 0;
+      }
+
+      // Bounds
+      this.x = Math.max(this.width / 2, Math.min(W - this.width / 2, this.x));
+
+      // Facing
+      if (opponent) {
+        this.facing = opponent.x > this.x ? 1 : -1;
+      }
+
+      // Attack hitbox check
+      if (this.getHitbox() && !this.hasHit) {
+        const hb = this.getHitbox();
+        const ohb = opponent.getHurtbox();
+        if (rectsOverlap(hb.x, hb.y, hb.w, hb.h, ohb.x, ohb.y, ohb.w, ohb.h)) {
+          const dmg = this.state === "kick" ? KICK_DMG : PUNCH_DMG;
+          opponent.takeDamage(dmg, this.state);
+          this.hasHit = true;
+          playSFX(this.state === "kick" ? "kick" : "punch");
+        }
+      }
+
+      // Blocking
+      this.blocking = false;
+    }
+
+    handleInput(dt) {
+      if (this.hitStunTimer > 0) return;
+      if (["punch","kick","fireball"].includes(this.state)) return;
+
+      // Block
+      if (keys["KeyI"]) {
+        if (this.state !== "block") this.setState("block");
+        return;
+      } else if (this.state === "block") {
+        this.setState("idle");
+      }
+
+      // Duck
+      if (keys["ArrowDown"]) {
+        if (this.state !== "duck") this.setState("duck");
+        this.vx = 0;
+        return;
+      } else if (this.state === "duck") {
+        this.setState("idle");
+      }
+
+      // Jump
+      if (keys["ArrowUp"] && this.y >= GROUND_Y) {
+        this.vy = JUMP_VEL;
+        this.setState("jump");
+        playSFX("jump");
+        return;
+      }
+
+      // Punch
+      if (pressed["KeyJ"]) {
+        this.setState("punch");
+        return;
+      }
+
+      // Kick
+      if (pressed["KeyK"]) {
+        this.setState("kick");
+        return;
+      }
+
+      // Fireball
+      if (pressed["KeyL"]) {
+        this.setState("fireball");
+        this.spawnFireball();
+        return;
+      }
+
+      // Movement
+      let moving = false;
+      if (keys["ArrowLeft"]) { this.vx = -MOVE_SPEED; moving = true; }
+      else if (keys["ArrowRight"]) { this.vx = MOVE_SPEED; moving = true; }
+      else { this.vx = 0; }
+
+      if (moving && this.state !== "walk" && this.state !== "jump") {
+        this.setState("walk");
+      } else if (!moving && this.state === "walk") {
+        this.setState("idle");
+      }
+    }
+
+    updateAI(dt, opponent) {
+      if (this.hitStunTimer > 0) return;
+      if (["punch","kick","fireball"].includes(this.state)) return;
+
+      this.aiTimer -= dt * 1000;
+
+      const dist = Math.abs(this.x - opponent.x);
+      const inRange = dist < 120;
+      const midRange = dist >= 120 && dist < 250;
+      const farRange = dist >= 250;
+
+      if (this.aiTimer <= 0) {
+        this.aiTimer = 200 + Math.random() * 600;
+
+        // React to incoming fireballs
+        const hasFB = opponent.fireballs.some(fb => {
+          const dir = (fb.vx > 0 && fb.x < this.x) || (fb.vx < 0 && fb.x > this.x);
+          return dir && Math.abs(fb.y - (this.y - this.height * 0.5)) < 40;
+        });
+
+        if (hasFB) {
+          this.aiAction = Math.random() < 0.6 ? "block" : "jump";
+        } else if (inRange) {
+          const r = Math.random();
+          if (r < 0.35) this.aiAction = "punch";
+          else if (r < 0.6) this.aiAction = "kick";
+          else if (r < 0.8) this.aiAction = "block";
+          else this.aiAction = "retreat";
+        } else if (midRange) {
+          const r = Math.random();
+          if (r < 0.4) this.aiAction = "approach";
+          else if (r < 0.65) this.aiAction = "fireball";
+          else if (r < 0.85) this.aiAction = "block";
+          else this.aiAction = "jump";
+        } else {
+          const r = Math.random();
+          if (r < 0.5) this.aiAction = "approach";
+          else if (r < 0.75) this.aiAction = "fireball";
+          else this.aiAction = "jump";
+        }
+      }
+
+      // Execute AI action
+      switch (this.aiAction) {
+        case "approach":
+          this.vx = this.facing * MOVE_SPEED * 0.8;
+          if (this.state !== "walk" && this.state !== "jump") this.setState("walk");
+          break;
+        case "retreat":
+          this.vx = -this.facing * MOVE_SPEED * 0.7;
+          if (this.state !== "walk" && this.state !== "jump") this.setState("walk");
+          break;
+        case "punch":
+          if (inRange) { this.setState("punch"); this.vx = 0; this.aiAction = "idle"; }
+          else { this.aiAction = "approach"; }
+          break;
+        case "kick":
+          if (inRange || midRange) { this.setState("kick"); this.vx = 0; this.aiAction = "idle"; }
+          else { this.aiAction = "approach"; }
+          break;
+        case "fireball":
+          this.setState("fireball"); this.vx = 0; this.aiAction = "idle";
+          this.spawnFireball();
+          break;
+        case "block":
+          if (this.state !== "block") this.setState("block");
+          this.vx = 0;
+          break;
+        case "jump":
+          if (this.y >= GROUND_Y) {
+            this.vy = JUMP_VEL;
+            this.setState("jump");
+            this.vx = this.facing * MOVE_SPEED * 0.5;
+            playSFX("jump");
+            this.aiAction = "idle";
+          }
+          break;
+        default:
+          this.vx = 0;
+          if (this.state !== "idle" && this.state !== "jump") this.setState("idle");
+      }
+
+      this.blocking = this.state === "block";
+    }
+
+    draw(ctx) {
+      const sprite = this.getSprite();
+      const w = this.width;
+      const h = this.state === "duck" ? this.height * 0.6 : this.height;
+      const yOff = this.state === "duck" ? this.height * 0.4 : 0;
+      const drawX = this.x - w / 2;
+      const drawY = this.y - h + yOff;
+
+      ctx.save();
+      ctx.translate(this.x, drawY + h / 2);
+      const attackStates = ["punch", "kick", "fireball"];
+      const flip = attackStates.includes(this.state) ? (this.facing === 1) : (this.facing === -1);
+      if (flip) {
+        ctx.scale(-1, 1);
+      }
+      ctx.drawImage(sprite, -w / 2, -h / 2, w, h);
+      ctx.restore();
+
+      // Draw fireballs
+      const fbSprite = ASSETS["fireball_projectile"];
+      for (const fb of this.fireballs) {
+        ctx.save();
+        ctx.shadowColor = "#ff4400";
+        ctx.shadowBlur = 15;
+        if (fbSprite && fbSprite.complete && fbSprite.naturalWidth > 0) {
+          ctx.drawImage(fbSprite, fb.x - fb.w/2, fb.y - fb.h/2, fb.w, fb.h);
+        } else {
+          ctx.fillStyle = "#ff4400";
+          ctx.beginPath();
+          ctx.arc(fb.x + fb.w/2, fb.y + fb.h/2, fb.w/2, 0, Math.PI*2);
+          ctx.fill();
+        }
+        ctx.restore();
+      }
+    }
+  }
+
+  // ---- Utility ----
+  function rectsOverlap(x1, y1, w1, h1, x2, y2, w2, h2) {
+    return x1 < x2 + w2 && x1 + w1 > x2 && y1 < y2 + h2 && y1 + h1 > y2;
+  }
+
+  // ---- Game state ----
+  const gameState = {
+    p1: null,
+    p2: null,
+    round: 1,
+    p1Wins: 0,
+    p2Wins: 0,
+    timer: ROUND_TIME,
+    roundActive: false,
+    roundResult: "",
+    frame: 0,
+    particles: []
+  };
+
+  function reset() {
+    gameState.p1 = new Fighter(200, 1, false);
+    gameState.p2 = new Fighter(600, -1, true);
+    gameState.round = 1;
+    gameState.p1Wins = 0;
+    gameState.p2Wins = 0;
+    gameState.timer = ROUND_TIME;
+    gameState.roundActive = false;
+    gameState.roundResult = "";
+    gameState.frame = 0;
+    gameState.particles = [];
+    paused = false;
+    modal.style.display = "none";
+    errBox.style.display = "none";
+    errBox.textContent = "";
+    if (rafHandle) cancelAnimationFrame(rafHandle);
+    last = performance.now();
+    rafHandle = requestAnimationFrame(frame);
+    updateHUD();
+  }
+
+  function startRound() {
+    gameState.p1.x = 200; gameState.p1.y = GROUND_Y; gameState.p1.vx = 0; gameState.p1.vy = 0;
+    gameState.p2.x = 600; gameState.p2.y = GROUND_Y; gameState.p2.vx = 0; gameState.p2.vy = 0;
+    gameState.p1.hp = MAX_HP; gameState.p2.hp = MAX_HP;
+    gameState.p1.state = "idle"; gameState.p2.state = "idle";
+    gameState.p1.animFrame = 0; gameState.p2.animFrame = 0;
+    gameState.p1.fireballs = []; gameState.p2.fireballs = [];
+    gameState.p1.hitStunTimer = 0; gameState.p2.hitStunTimer = 0;
+    gameState.timer = ROUND_TIME;
+    gameState.roundActive = true;
+    gameState.roundResult = "";
+    gameState.particles = [];
+    roundEl.textContent = "Round " + gameState.round;
+  }
+
+  function endRound(winner) {
+    gameState.roundActive = false;
+    playSFX("ko");
+    if (winner === "p1") {
+      gameState.p1Wins++;
+      gameState.roundResult = "Player wins the round!";
+    } else if (winner === "p2") {
+      gameState.p2Wins++;
+      gameState.roundResult = "CPU wins the round!";
+    } else {
+      gameState.roundResult = "Draw!";
+    }
+
+    if (gameState.p1Wins >= ROUNDS_TO_WIN || gameState.p2Wins >= ROUNDS_TO_WIN) {
+      setTimeout(() => {
+        const p1Wins = gameState.p1Wins >= ROUNDS_TO_WIN;
+        endTitle.textContent = p1Wins ? "YOU WIN!" : "YOU LOSE!";
+        endMsg.textContent = gameState.p1Wins + " - " + gameState.p2Wins;
+        modal.style.display = "grid";
+      }, 1500);
+    } else {
+      gameState.round++;
+      setTimeout(() => startRound(), 2000);
+    }
+  }
+
+  function spawnParticles(x, y, color, count) {
+    for (let i = 0; i < count; i++) {
+      gameState.particles.push({
+        x, y,
+        vx: (Math.random() - 0.5) * 300,
+        vy: (Math.random() - 0.5) * 300 - 100,
+        life: 0.5 + Math.random() * 0.3,
+        color: color,
+        size: 2 + Math.random() * 4
+      });
+    }
+  }
+
+  function updateHUD() {
+    const p1 = gameState.p1;
+    const p2 = gameState.p2;
+    if (!p1 || !p2) return;
+    p1fill.style.width = (p1.hp / MAX_HP * 100) + "%";
+    p2fill.style.width = (p2.hp / MAX_HP * 100) + "%";
+    timerEl.textContent = Math.ceil(gameState.timer);
+    roundEl.textContent = "Round " + gameState.round + "  (" + gameState.p1Wins + "-" + gameState.p2Wins + ")";
+  }
+
+  // ---- Drawing ----
+  function drawBackground() {
+    // Sky gradient
+    const grad = ctx.createLinearGradient(0, 0, 0, H);
+    grad.addColorStop(0, "#1a0a2e");
+    grad.addColorStop(0.5, "#2d1b69");
+    grad.addColorStop(1, "#0f0f23");
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
+
+    // City silhouette
+    ctx.fillStyle = "#1a1040";
+    for (let i = 0; i < W; i += 60) {
+      const bh = 80 + Math.sin(i * 0.05) * 40 + Math.cos(i * 0.13) * 25;
+      ctx.fillRect(i, GROUND_Y - bh, 55, bh);
+    }
+
+    // Ground
+    ctx.fillStyle = "#2a2a3a";
+    ctx.fillRect(0, GROUND_Y, W, H - GROUND_Y);
+    ctx.fillStyle = "#3a3a5a";
+    ctx.fillRect(0, GROUND_Y, W, 4);
+
+    // Grid lines on ground
+    ctx.strokeStyle = "#4a4a6a";
+    ctx.lineWidth = 1;
+    for (let i = 0; i < W; i += 40) {
+      ctx.beginPath();
+      ctx.moveTo(i, GROUND_Y + 4);
+      ctx.lineTo(i - 20, H);
+      ctx.stroke();
+    }
+  }
+
+  function drawParticles() {
+    for (const p of gameState.particles) {
+      ctx.globalAlpha = Math.min(1, p.life * 2);
+      ctx.fillStyle = p.color;
+      ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // ---- Main loop ----
+  let paused = false;
+  let rafHandle = 0;
+  let last = performance.now();
+
+  function update(dt) {
+    gameState.frame++;
+
+    if (pressed["KeyR"]) {
+      reset();
+      return;
+    }
+
+    if (paused) return;
+    if (!gameState.roundActive) return;
+
+    const p1 = gameState.p1;
+    const p2 = gameState.p2;
+
+    // Timer
+    gameState.timer -= dt;
+    if (gameState.timer <= 0) {
+      gameState.timer = 0;
+      if (p1.hp > p2.hp) endRound("p1");
+      else if (p2.hp > p1.hp) endRound("p2");
+      else endRound("draw");
+      return;
+    }
+
+    // Player input
+    p1.handleInput(dt);
+
+    // AI
+    p2.updateAI(dt, p1);
+
+    // Update fighters
+    p1.update(dt, p2);
+    p2.update(dt, p1);
+
+    // Push apart if overlapping
+    const dx = p2.x - p1.x;
+    const overlap = FIGHTER_W - Math.abs(dx);
+    if (overlap > 0 && Math.abs(p1.y - p2.y) < FIGHTER_H * 0.8) {
+      const push = overlap / 2;
+      if (dx > 0) { p1.x -= push; p2.x += push; }
+      else { p1.x += push; p2.x -= push; }
+    }
+
+    // Particles
+    for (let i = gameState.particles.length - 1; i >= 0; i--) {
+      const p = gameState.particles[i];
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.vy += 400 * dt;
+      p.life -= dt;
+      if (p.life <= 0) gameState.particles.splice(i, 1);
+    }
+
+    // Check round end
+    if (p1.hp <= 0) { endRound("p2"); return; }
+    if (p2.hp <= 0) { endRound("p1"); return; }
+
+    // Hit particles
+    if (p1.state === "hit" && p1.animFrame === 0) spawnParticles(p1.x, p1.y - p1.height * 0.5, "#ff4444", 8);
+    if (p2.state === "hit" && p2.animFrame === 0) spawnParticles(p2.x, p2.y - p2.height * 0.5, "#ff4444", 8);
+
+    updateHUD();
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    drawBackground();
+
+    if (!gameState.p1 || !gameState.p2) {
+      ctx.fillStyle = "#fff";
+      ctx.font = "24px system-ui";
+      ctx.textAlign = "center";
+      ctx.fillText("Loading...", W / 2, H / 2);
+      return;
+    }
+
+    // Draw fighters
+    gameState.p1.draw(ctx);
+    gameState.p2.draw(ctx);
+
+    // Draw particles
+    drawParticles();
+
+    // Round result overlay
+    if (!gameState.roundActive && gameState.roundResult) {
+      ctx.fillStyle = "#000a";
+      ctx.fillRect(0, H / 2 - 40, W, 80);
+      ctx.fillStyle = "#fbbf24";
+      ctx.font = "bold 32px system-ui";
+      ctx.textAlign = "center";
+      ctx.fillText(gameState.roundResult, W / 2, H / 2 + 10);
+    }
+
+    // Round start prompt
+    if (!gameState.roundActive && !gameState.roundResult && gameState.frame < 60) {
+      ctx.fillStyle = "#fff";
+      ctx.font = "bold 36px system-ui";
+      ctx.textAlign = "center";
+      ctx.fillText("ROUND " + gameState.round, W / 2, H / 2);
+    }
+  }
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    try {
+      update(dt);
+      draw();
+      window.__rafFiring = true;
+    } catch (err) {
+      console.error("game crashed:", err);
+      errBox.textContent = "crash: " + (err && err.message || err);
+      errBox.style.display = "block";
+    } finally {
+      for (const k in pressed) pressed[k] = false;
+    }
+    rafHandle = requestAnimationFrame(frame);
+  }
+
+  // ---- Expose for probes ----
+  window.gameState = gameState;
+  window.game = { reset };
+
+  // ---- Start ----
+  loadAssets().then(() => {
+    reset();
+    setTimeout(() => startRound(), 1000);
+  }).catch(() => {
+    reset();
+    setTimeout(() => startRound(), 1000);
+  });
+
+})();
+</script>
+</body></html>

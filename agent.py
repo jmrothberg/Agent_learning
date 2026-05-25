@@ -318,6 +318,17 @@ _BARE_DOCTYPE_RE = re.compile(
     r"(<!DOCTYPE\s+html[^>]*>.*?</html\s*>)",
     re.DOTALL | re.IGNORECASE,
 )
+# Reply emits a complete <html>...</html> document without <!DOCTYPE>. The
+# Wolfenstein 2026-05-24 stuck-loop trace burned 5 consecutive iters because
+# the model emitted text the parser rejected; one rejection class is the
+# "html element with no doctype" shape that classify_format_failure flags
+# (wrong_tag_html) but doesn't salvage. Extraction variant 6 below recovers
+# the document by prepending a synthetic <!DOCTYPE html>. Stays universal:
+# any goal where the model omits the doctype benefits identically.
+_BARE_HTML_ELEMENT_RE = re.compile(
+    r"(<html\b[^>]*>.*?</html\s*>)",
+    re.DOTALL | re.IGNORECASE,
+)
 # Some models also write <html_file> with a stray opening but never close it
 # (especially after a stall). If we see an opener and a complete <html>
 # document inside, we accept the document.
@@ -1900,6 +1911,58 @@ class GameAgent:
         # Updated by the no_usable_code retry branch in run(); set is
         # bounded by the per-turn failure count, no explicit cap needed.
         self._last_failed_patch_anchors: set[str] = set()
+        # Cross-turn identical-reply detector. Wolfenstein 2026-05-24
+        # trace burned 5 consecutive iters where the model emitted
+        # bit-identical 7838-token replies and the agent kept sending
+        # the same generic "no <patch> or <html_file>" fallback. We
+        # fingerprint each reply that triggers `no_usable_code` (sha1
+        # of normalized first 4 KB) and remember the previous one.
+        # When the SAME fingerprint fires twice in a row we know the
+        # loop is genuine and standard fallback won't move the model
+        # — escalate unconditionally to format_doctor + scope-reduction
+        # coaching. Reset on any successful materialize so a real
+        # cycle of "fail → fix → fail differently" isn't punished.
+        self._last_no_usable_code_fingerprint: str | None = None
+        # Context-pressure detector. Wolfenstein 2026-05-24 trace had
+        # prompt_tokens pinned at 32711 / num_ctx=32768 across the
+        # whole stuck-loop tail — the model literally had ~50 tokens
+        # of headroom to emit a complete <html_file>. Universal fix:
+        # when stream_done reports prompt_tokens >= 85% of num_ctx,
+        # set this flag so the NEXT fix_instruction call omits the
+        # inlined CURRENT FILE block and coaches the model to send
+        # a minimal patch only. Flag is one-shot (cleared after the
+        # mitigated prompt is built). `_context_pressure_streak`
+        # tracks consecutive high-pressure turns so the trace event
+        # fires once per streak rather than every turn.
+        self._context_pressure_pending: bool = False
+        self._context_pressure_streak: int = 0
+        # Dead-first-build detector. Wolfenstein 2026-05-24 trace iter 2
+        # loaded a file but RAF never fired AND the input smoke test
+        # registered zero state/canvas delta — the file is structurally
+        # broken. Patches on top of a dead first build deepen the hole.
+        # When detected on iter <= 2, the next fix turn uses a
+        # scope-reduction prompt ("ship a smaller intentionally minimal
+        # html_file") instead of diagnose-then-fix. Counter caps
+        # recoveries per attempt — after 2, the agent ends the attempt
+        # so the restart loop can apply a fresh seed/recipe.
+        self._dead_first_build_pending: bool = False
+        self._dead_first_build_recoveries: int = 0
+        self._dead_first_build_abort_attempt: bool = False
+        # Per-attempt counters used by the restart loop to compute a
+        # failure signature. When two consecutive attempts hit the SAME
+        # signature, the next attempt's plan_instruction is given
+        # `force_minimal_first_build=True` so the model writes a
+        # smaller first build rather than re-attempting the same
+        # ambitious one. Universal: keys on observable counter shape,
+        # not goal text. All three reset in `_reset_attempt_state`.
+        self._identical_reply_loops_this_attempt: int = 0
+        self._format_rejections_iter1_this_attempt: int = 0
+        # Carries the previous attempt's signature into the next
+        # attempt's run_with_restarts loop so plan_instruction can
+        # detect "same failure shape twice in a row". None on the
+        # first attempt of a session.
+        self._prev_attempt_signature: str | None = None
+        self._force_minimal_first_build: bool = False
         # Visual-critic cross-turn dedup. Bounded deque of fingerprints
         # (sha1 of normalized first 120 chars) for critic notes injected
         # in the last few turns. Before queueing a new critic note we
@@ -2281,6 +2344,76 @@ class GameAgent:
         head = normalized[:80].encode("utf-8", "ignore")
         return _hashlib.sha1(head).hexdigest()[:12]
 
+    # Phrases inside <notes> that indicate the model has given up —
+    # it's emitting <done/> not because the game ships but because it
+    # can't escape a parse / harness loop. Wolfenstein 2026-05-24 trace
+    # turn [04] is the canonical case: model said `<done/>` with notes
+    # "The <html_file> tag has been consistently failing to parse...
+    # The user can manually copy the complete HTML code..." — the
+    # agent took the <done/> at face value and shipped a broken file.
+    # Universal: keys on the model's own confession of harness trouble,
+    # not on goal text or genre. Detector below is intentionally narrow
+    # (must combine a "failing to ship" verb with a harness/parse/manual
+    # noun) so it doesn't false-fire on legitimate cosmetic notes.
+    _GIVE_UP_NOTES_PATTERNS: tuple[str, ...] = (
+        "consistently failing",
+        "consistently fail",
+        "failing to parse",
+        "fails to parse",
+        "cannot parse",
+        "can't parse",
+        "parser keeps rejecting",
+        "manually copy",
+        "manual copy",
+        "user can manually",
+        "harness parsing",
+        "harness rejected",
+        "harness issue",
+        "broken parser",
+    )
+
+    @staticmethod
+    def _notes_signal_give_up(notes_text: str | None) -> bool:
+        """Return True when <notes> text indicates the model is asking
+        for help (parse loop, manual-copy workaround) rather than
+        legitimately shipping a working game.
+
+        Single-phrase match is enough — the give-up phrases are
+        distinctive and don't show up in normal "what works / what's
+        still broken" notes.
+        """
+        if not notes_text:
+            return False
+        low = notes_text.lower()
+        return any(p in low for p in GameAgent._GIVE_UP_NOTES_PATTERNS)
+
+    @staticmethod
+    def _reply_fingerprint(reply: str) -> str:
+        """Deterministic short fingerprint for a full model reply.
+
+        Used by `_last_no_usable_code_fingerprint` to detect when the
+        model emits a bit-identical (or near-identical) unparseable reply
+        twice in a row. Wolfenstein 2026-05-24 trace: same 7838-token
+        reply on 5 consecutive iters, all rejected with the same generic
+        fallback. The generic fallback gives the model no new signal, so
+        the loop is self-reinforcing.
+
+        Normalization: lowercased + whitespace-collapsed + first 4 KB.
+        Stable across cosmetic reshuffles (trailing spaces, line
+        ending shifts) so two replies with the same content but a
+        different whitespace tail still fingerprint together.
+        """
+        import hashlib as _hashlib
+        normalized = " ".join((reply or "").lower().split())
+        head = normalized[:4000].encode("utf-8", "ignore")
+        # Salt with the length bucket so a stream that gets cut short
+        # at exactly the same point fingerprints separately from one
+        # that fully completed at a different length — protects against
+        # false positives when the model genuinely changed its mind.
+        length_bucket = str(len(reply or "") // 100)
+        head = head + b"|len:" + length_bucket.encode("ascii")
+        return _hashlib.sha1(head).hexdigest()[:12]
+
     @staticmethod
     def _should_skip_format_doctor(
         *,
@@ -2318,6 +2451,7 @@ class GameAgent:
         prior_loop_line: str | None = None,
         is_local_backend: bool = False,
         materialize_reject_reason: str = "",
+        identical_repeat: bool = False,
     ) -> tuple[str, bool]:
         """Pick the fallback message + decide whether to reset the
         plan-only streak counter.
@@ -2353,6 +2487,40 @@ class GameAgent:
         same broken shape because the generic fallback gave the model
         no signal to change strategy.
         """
+        # Identical-reply loop escalation. When the model emits a
+        # bit-identical (or near-identical) unparseable reply twice in
+        # a row, the standard fallback prompt is also identical and the
+        # model has no new signal to change behavior. Wolfenstein
+        # 2026-05-24 trace: 5 consecutive iters with 7838-token
+        # identical replies, each burning ~340s of GPU. Universal
+        # escalation: drop any thought of re-emitting the file, demand
+        # a minimal patch keyed on a single named symptom. Reset the
+        # plan-only streak so this branch only fires once before
+        # routing back to other handlers — if the next reply is ALSO
+        # identical, we'll have fingerprinted differently because the
+        # prompt changed; if it isn't, we want the normal branches.
+        if identical_repeat:
+            fallback = (
+                "IDENTICAL-REPLY LOOP DETECTED: your previous two "
+                "replies were byte-identical (or near-identical) and "
+                "the parser rejected BOTH. Re-emitting the same text "
+                "will be rejected again — you must change shape.\n\n"
+                "Recovery for THIS turn:\n"
+                "  - Do NOT re-emit <html_file>. The file you keep "
+                "trying to send is either too large for what remains "
+                "of the context window, or contains a parse-defeating "
+                "pattern (stray markdown fence, unclosed tag, "
+                "duplicated declaration).\n"
+                "  - Pick the SINGLE most important symptom from the "
+                "most recent test report below (frozen canvas, RAF "
+                "dead, console error, failing probe) and emit ONE "
+                "<patch>...</patch> with at most 5-10 lines of SEARCH "
+                "context that addresses just that one thing.\n"
+                "  - Start your reply immediately with <patch> as the "
+                "first non-whitespace text. No preamble, no <diagnose>, "
+                "no <plan>, no <html_file>."
+            )
+            return fallback, True
         # Silent-stream recovery — when ollama_io / MLX aborted the
         # previous stream because it produced ZERO non-empty content
         # for >=180s (all output went to a reasoning/thinking channel
@@ -3695,18 +3863,50 @@ class GameAgent:
     )
 
     def _summarize_content(self, c: str) -> str:
-        """Replace embedded HTML blobs with size markers — keep tags + notes."""
+        """Replace embedded HTML blobs with size markers — keep tags + notes.
+
+        Wolfenstein 2026-05-24 trace lesson: the OLD marker
+        `<html_file>[omitted: N bytes of HTML; see snapshot]</html_file>`
+        was shaped like a valid output tag, so a confused model parroted
+        it back verbatim in its next reply (turns [02], [06], [08] of
+        that trace's conversation.md). The parser saw an `<html_file>`
+        wrapper around prose, the body didn't normalize to a document,
+        materialize failed, and the agent entered an identical-reply
+        loop sending the generic "no <patch> or <html_file>" fallback.
+
+        The new marker uses an HTML COMMENT — no `<html_file>` /
+        `<patch>` / markdown-fence wrapper. The model literally cannot
+        copy-paste it as a fresh tag emission, and the embedded
+        instruction tells the model what to do instead of just naming
+        a byte count. Universal: no goal text, no genre.
+        """
         def html_repl(m):
             n = len(m.group(1))
             if n < _SUMMARIZE_MIN_HTML_BYTES:
                 return m.group(0)
-            return f"<html_file>[omitted: {n} bytes of HTML; see snapshot]</html_file>"
+            # Marker intentionally uses no `<html_file>` / `<patch>`
+            # substrings (not even inside prose) so a stressed model
+            # has nothing to copy-paste as a fresh tag emission. The
+            # comment shape also can't extract through the html
+            # regex variants 1-6 since none of them match comments.
+            return (
+                f"<!-- HARNESS-OMITTED-PRIOR-HTML: {n} bytes of HTML "
+                f"body written to disk in this earlier turn. The "
+                f"current file is shown inline below in the CURRENT "
+                f"FILE ON DISK block; patch against that, do NOT "
+                f"re-emit this marker. -->"
+            )
 
         def fence_repl(m):
             n = len(m.group(1))
             if n < _SUMMARIZE_MIN_HTML_BYTES:
                 return m.group(0)
-            return f"```html\n[omitted: {n} bytes of HTML; see snapshot]\n```"
+            return (
+                f"<!-- HARNESS-OMITTED-PRIOR-FENCE: {n} bytes of "
+                f"fenced HTML written to disk in this earlier turn. "
+                f"Do NOT re-emit this marker; patch against the "
+                f"CURRENT FILE ON DISK block below. -->"
+            )
 
         c = self._SUMMARIZE_HTML_RE.sub(html_repl, c)
         c = self._SUMMARIZE_FENCE_RE.sub(fence_repl, c)
@@ -7070,6 +7270,46 @@ class GameAgent:
             "completion_tokens": result.completion_tokens,
             "max_tokens_hit": result.max_tokens_hit,
         })
+        # Context-pressure detector. When prompt_tokens approaches
+        # num_ctx, the model has no headroom to emit a complete
+        # <html_file>; output truncates, parser rejects, the agent
+        # falls into an identical-reply loop. Universal mitigation:
+        # set a one-shot flag the next fix_instruction call reads to
+        # omit the inlined CURRENT FILE block and coach a minimal
+        # patch. Trace fires only on the FIRST turn of a high-pressure
+        # streak — subsequent turns in the same streak suppress the
+        # trace to avoid log spam.
+        try:
+            _ptokens = (
+                int(result.prompt_tokens) if result.prompt_tokens is not None
+                else 0
+            )
+            _num_ctx = int(getattr(self, "num_ctx", 0) or 0)
+        except Exception:
+            _ptokens, _num_ctx = 0, 0
+        if _ptokens > 0 and _num_ctx > 0 and role == "coder":
+            _pressure = _ptokens / _num_ctx
+            if _pressure >= 0.85:
+                self._context_pressure_streak += 1
+                self._context_pressure_pending = True
+                if self._context_pressure_streak == 1:
+                    self._trace({
+                        "kind": "context_pressure_warning",
+                        "prompt_tokens": _ptokens,
+                        "num_ctx": _num_ctx,
+                        "pressure": round(_pressure, 3),
+                        "streak": self._context_pressure_streak,
+                        "hint": (
+                            "prompt_tokens >= 85% of num_ctx; the next "
+                            "fix turn will omit the inlined CURRENT "
+                            "FILE block and require a minimal patch. "
+                            "This prevents the identical-reply loop "
+                            "the Wolfenstein 2026-05-24 trace burned "
+                            "5 iters on."
+                        ),
+                    })
+            else:
+                self._context_pressure_streak = 0
         # Silent-stream surface — when the new ollama_io / MLX guard
         # aborts a stream that produced ZERO visible content for >=180s
         # (all output went to a reasoning channel that surfaces as empty
@@ -7874,7 +8114,7 @@ class GameAgent:
     def _extract_html_inner(reply: str) -> str | None:
         """Pull a complete HTML game out of a model reply.
 
-        We accept four formats so we never throw away a valid game just
+        We accept six formats so we never throw away a valid game just
         because the model ignored the <html_file> anchor (a common failure
         mode of smaller models like qwen3.6:27b — they wrap output in a
         markdown fence or emit bare <!DOCTYPE>):
@@ -7885,6 +8125,7 @@ class GameAgent:
              — common after stream stalls truncate the closing tag
           4. ```html\\n<!DOCTYPE html>...</html>\\n```   ← markdown fence only
           5. <!DOCTYPE html>...</html>             ← bare document
+          6. <html>...</html>                       ← no doctype; we prepend
         """
         # 1. Canonical wrapper.
         m = _HTML_RE.search(reply)
@@ -7914,6 +8155,21 @@ class GameAgent:
         m = _BARE_DOCTYPE_RE.search(reply)
         if m:
             return m.group(1).strip()
+        # 6. Bare <html>...</html> document with NO <!DOCTYPE> — salvage by
+        # prepending a synthetic doctype line so the browser doesn't enter
+        # quirks mode. Wolfenstein 2026-05-24 trace lesson: the model
+        # occasionally emits a complete html element without the doctype
+        # anchor; today classify_format_failure flags it (wrong_tag_html)
+        # but the iter is wasted asking the model to retry. Salvaging here
+        # turns the wasted iter into a working file.
+        m = _BARE_HTML_ELEMENT_RE.search(reply)
+        if m:
+            body = m.group(1).strip()
+            # Guard against picking up something tiny like an empty
+            # <html></html> probe expression — a real document is at least
+            # a few hundred bytes once script/style content is in it.
+            if len(body) >= 200:
+                return "<!DOCTYPE html>\n" + body
         return None
 
     @staticmethod
@@ -9710,15 +9966,35 @@ class GameAgent:
                 # keywords ("sprite", "art", "graphics") and escalate
                 # the <assets> directive to REQUIRED for that turn.
                 # Tolerant of older signatures: try with goal first,
-                # fall through to the reference-only call.
+                # then with force_minimal_first_build (if the restart
+                # loop set it after a same-signature attempt), then
+                # fall back to the simplest reference-only call.
+                fmfb = bool(getattr(self, "_force_minimal_first_build", False))
                 try:
                     plan_msg = self._p.plan_instruction(
-                        reference_block=reference_block, goal=goal,
-                    )
-                except TypeError:
-                    plan_msg = self._p.plan_instruction(
                         reference_block=reference_block,
+                        goal=goal,
+                        force_minimal_first_build=fmfb,
                     )
+                    if fmfb:
+                        self._trace({
+                            "kind": "force_minimal_first_build_applied",
+                            "attempt_idx": getattr(
+                                self, "_restart_attempt_idx", 0,
+                            ),
+                            "prev_signature": getattr(
+                                self, "_prev_attempt_signature", None,
+                            ),
+                        })
+                except TypeError:
+                    try:
+                        plan_msg = self._p.plan_instruction(
+                            reference_block=reference_block, goal=goal,
+                        )
+                    except TypeError:
+                        plan_msg = self._p.plan_instruction(
+                            reference_block=reference_block,
+                        )
             elif reference_block:
                 # v0 prompt module — no plan_instruction() helper. Manually
                 # prepend the reference and an authority sentence.
@@ -10367,6 +10643,23 @@ class GameAgent:
         for iteration in range(start_iter, hard_max + 1):
             if iteration > end_iter + self._iter_budget_bonus:
                 break
+            # Dead-first-build attempt-abort. After 2 dead first builds
+            # in this attempt, the detector flips this flag so the
+            # iteration loop exits cleanly and the restart loop can
+            # apply a fresh seed/recipe. Universal: keys on observable
+            # raf_ran=false + input dead structural signal, no genre.
+            if getattr(self, "_dead_first_build_abort_attempt", False):
+                self._trace({
+                    "kind": "dead_first_build_attempt_aborted",
+                    "iteration": iteration,
+                    "recoveries": self._dead_first_build_recoveries,
+                    "hint": (
+                        "Aborting this attempt after 2 dead first "
+                        "builds so the restart loop can try a fresh "
+                        "seed/scope."
+                    ),
+                })
+                break
             # Reset per-iter flags so the media-only-bonus check sees
             # only THIS iter's regen state.
             self._media_regenerated_this_iter = False
@@ -10905,6 +11198,59 @@ class GameAgent:
                 or (self._previous_report_ok is True and streak_ok)
                 or single_clean_ship_ok
             )
+            # Model-gives-up gate (Wolfenstein 2026-05-24 trace [04]).
+            # When the model emits <done/> with <notes> that confess
+            # harness / parse trouble ("consistently failing to parse",
+            # "user can manually copy"), it is NOT shipping a working
+            # game — it's asking for help. Override the ship gate and
+            # route through a recovery prompt that explicitly tells the
+            # model the prior loop is the agent's bug to break, and that
+            # it should send a fresh minimal <patch> targeting the
+            # specific failing symptom rather than another <done/>.
+            give_up_notes_text = self._extract_notes(reply) or ""
+            model_gave_up = (
+                said_done_or_confirm
+                and GameAgent._notes_signal_give_up(give_up_notes_text)
+            )
+            if model_gave_up:
+                self._trace({
+                    "kind": "model_give_up_detected",
+                    "iteration": iteration,
+                    "notes_preview": give_up_notes_text[:240],
+                    "hint": (
+                        "Model emitted <done/> with notes confessing "
+                        "harness/parse trouble. Treating as recovery "
+                        "request instead of ship."
+                    ),
+                })
+                # Drop the <done/> intent for THIS turn and inject a
+                # recovery user message. The next iter will receive a
+                # fresh stream prompt; the ship branch below is
+                # bypassed because we `continue` here.
+                recovery = (
+                    "MODEL GIVE-UP DETECTED: your previous <notes> "
+                    "block said the harness was failing to parse / the "
+                    "user should manually copy the file. That is the "
+                    "harness's bug to fix, not yours — you should not "
+                    "ship with `<done/>` while the file is broken.\n\n"
+                    "Recovery for THIS turn:\n"
+                    "  - Read the CURRENT FILE ON DISK block in the "
+                    "most recent fix prompt; it is the truth source.\n"
+                    "  - Pick the ONE most concrete symptom from the "
+                    "most recent test report and emit ONE small "
+                    "<patch> with 3-5 lines of SEARCH context that "
+                    "fixes only that one thing.\n"
+                    "  - Do NOT emit <done/> again until the test "
+                    "report comes back clean.\n"
+                    "  - Do NOT emit a full <html_file> rewrite this "
+                    "turn — the loop you were stuck in was caused by "
+                    "re-emitting large bodies."
+                )
+                self._messages.append({
+                    "role": "user",
+                    "content": self._flush_user_injections(recovery),
+                })
+                continue
             if (
                 said_done_or_confirm
                 and html_in_reply is None
@@ -10980,6 +11326,12 @@ class GameAgent:
                 format_rejection = classify_format_failure(reply)
                 if format_rejection is not None:
                     self._format_stuck_streak += 1
+                    # Track iter-1 format rejections for the restart-
+                    # signature comparison. Repeated iter-1 format
+                    # failures are the strongest signal the model is
+                    # over-scoped for what it can emit in one stream.
+                    if iteration == 1:
+                        self._format_rejections_iter1_this_attempt += 1
                     self._trace({
                         "kind": "format_rejection",
                         "rejection_kind": format_rejection.kind,
@@ -11218,6 +11570,28 @@ class GameAgent:
                         (has_assets or has_sounds) and not has_probes
                         and not plan_only
                     )
+                    # Cross-turn identical-reply detector. When the SAME
+                    # rejected reply lands twice in a row, the standard
+                    # fallback (which is also identical) won't move the
+                    # model — pass the signal into the fallback so it
+                    # picks the scope-reduction escalation branch.
+                    current_fp = GameAgent._reply_fingerprint(reply)
+                    identical_repeat = (
+                        current_fp != ""
+                        and self._last_no_usable_code_fingerprint == current_fp
+                    )
+                    if identical_repeat:
+                        self._identical_reply_loops_this_attempt += 1
+                        self._trace({
+                            "kind": "identical_reply_loop_detected",
+                            "fingerprint": current_fp,
+                            "reply_len": len(reply or ""),
+                            "iteration": iteration,
+                            "count_this_attempt": (
+                                self._identical_reply_loops_this_attempt
+                            ),
+                        })
+                    self._last_no_usable_code_fingerprint = current_fp
                     self._trace({
                         "kind": "no_usable_code",
                         "plan_only": plan_only,
@@ -11225,6 +11599,7 @@ class GameAgent:
                         "media_only": media_only,
                         "consecutive_plan_only": self._consecutive_plan_only,
                         "has_existing_file": bool(self._current_file),
+                        "identical_repeat": identical_repeat,
                     })
                     fallback, reset_streak = (
                         GameAgent._no_usable_code_fallback(
@@ -11243,10 +11618,17 @@ class GameAgent:
                                 self._backend.info.name in {"mlx", "ollama"}
                             ),
                             materialize_reject_reason=materialize_msg or "",
+                            identical_repeat=identical_repeat,
                         )
                     )
                     if reset_streak:
                         self._consecutive_plan_only = 0
+                        # Clear the fingerprint too: the escalation
+                        # changed the prompt, the model should reply
+                        # differently. Resetting prevents re-triggering
+                        # on the next turn's reply even if the model
+                        # ignores the escalation.
+                        self._last_no_usable_code_fingerprint = None
                     self._messages.append({
                         "role": "user",
                         "content": self._flush_user_injections(fallback),
@@ -11269,6 +11651,9 @@ class GameAgent:
             self._force_first_build_prefill = False
             self._consecutive_plan_only = 0
             self._format_stuck_streak = 0
+            # Successful materialize means the model emitted a parseable
+            # reply — any previous identical-reply loop has been broken.
+            self._last_no_usable_code_fingerprint = None
             self._last_materialized_iter = iteration
 
             # Track partial-patch failures for the next prompt even on
@@ -11579,6 +11964,76 @@ class GameAgent:
                             "rewrote working code while trying to add "
                             "a feature."
                         ),
+                    })
+                # Dead-first-build detector (universal). On iter 1 or 2,
+                # if the file loaded but RAF never fired AND the input
+                # smoke test registered no state/canvas change, the file
+                # is structurally dead — patches will not save it. Set
+                # a one-shot flag so the next fix turn uses the scope-
+                # reduction prompt instead of diagnose-then-fix. Wolfenstein
+                # 2026-05-24 trace burned 6+ iters trying to patch a dead
+                # first build before timing out.
+                try:
+                    canv = report.get("canvas") or {}
+                    input_test = report.get("input_test") or {}
+                    raf_dead = (
+                        isinstance(canv, dict)
+                        and canv.get("raf_ran") is False
+                    )
+                    input_dead = (
+                        isinstance(input_test, dict)
+                        and input_test.get("ran") is True
+                        and input_test.get("any_change") is False
+                    )
+                    if (
+                        iteration <= 2
+                        and not report.get("ok")
+                        and raf_dead
+                        and input_dead
+                    ):
+                        self._dead_first_build_recoveries += 1
+                        self._dead_first_build_pending = True
+                        self._trace({
+                            "kind": "dead_first_build_detected",
+                            "iteration": iteration,
+                            "raf_ran": canv.get("raf_ran"),
+                            "input_any_change": input_test.get("any_change"),
+                            "recoveries_this_attempt": (
+                                self._dead_first_build_recoveries
+                            ),
+                            "hint": (
+                                "First build loaded but RAF never fired "
+                                "and input did nothing — structurally "
+                                "dead file. Next turn will request a "
+                                "smaller intentionally-minimal rewrite "
+                                "instead of patching."
+                            ),
+                        })
+                        # Two recoveries in one attempt: the model can't
+                        # ship a working minimal build either. Flag for
+                        # the restart loop to apply a fresh seed/recipe
+                        # rather than wasting more of this attempt's
+                        # iteration budget.
+                        if self._dead_first_build_recoveries >= 2:
+                            self._dead_first_build_abort_attempt = True
+                            self._trace({
+                                "kind": "dead_first_build_abort_attempt",
+                                "iteration": iteration,
+                                "recoveries": (
+                                    self._dead_first_build_recoveries
+                                ),
+                                "hint": (
+                                    "Two dead first builds in one "
+                                    "attempt; ending the attempt "
+                                    "early so the restart loop picks "
+                                    "up with a different seed."
+                                ),
+                            })
+                except Exception as e:
+                    self._trace({
+                        "kind": "dead_first_build_detector_error",
+                        "iteration": iteration,
+                        "err": str(e)[:200],
                     })
             except Exception as e:
                 self._trace({
@@ -12604,10 +13059,44 @@ class GameAgent:
             except Exception as e:
                 self._trace({"kind": "restart_snapshot_failed", "err": str(e)})
                 attempts.append((score, k, canonical_best))
+            # Restart-signature-repeat escalation. Compute the dominant
+            # failure shape of THIS attempt and compare to the previous
+            # attempt's. When two attempts in a row hit the same shape,
+            # the next attempt's plan_instruction is given
+            # `force_minimal_first_build=True` so the model scopes
+            # down rather than re-attempting the same ambitious build.
+            # Universal: signature is derived from counters that fired
+            # on observable failure events, no goal-text branching.
+            current_signature = self._attempt_failure_signature(score=score)
+            signature_repeat = (
+                self._prev_attempt_signature is not None
+                and current_signature == self._prev_attempt_signature
+                and current_signature != "ok"
+            )
+            if signature_repeat:
+                self._force_minimal_first_build = True
+                self._trace({
+                    "kind": "restart_signature_repeat",
+                    "attempt_idx": k,
+                    "signature": current_signature,
+                    "score": score,
+                    "hint": (
+                        "Two consecutive attempts hit the same failure "
+                        "shape; next attempt's plan_instruction will "
+                        "demand a smaller intentionally-minimal first "
+                        "build."
+                    ),
+                })
+            else:
+                # Same-signature streak broken — clear any prior force
+                # so a future re-occurrence triggers fresh.
+                self._force_minimal_first_build = False
+            self._prev_attempt_signature = current_signature
             self._trace({
                 "kind": "restart_attempt_end",
                 "attempt_idx": k,
                 "score": score,
+                "signature": current_signature,
             })
             yield self._record(AgentEvent(
                 "restart",
@@ -12661,6 +13150,32 @@ class GameAgent:
             },
         ))
 
+    def _attempt_failure_signature(self, *, score: float) -> str:
+        """Reduce the per-attempt counters to a single short signature
+        so the restart loop can detect "same shape twice."
+
+        Priority order — pick the FIRST that fired:
+          1. `dead_first_build` — file ran but RAF + input both dead.
+          2. `identical_reply_loop` — model emitted byte-identical
+             unparseable reply twice in a row.
+          3. `format_rejection_iter1` — iter-1 reply structurally
+             malformed (unclosed tag, fence trap, bare markers).
+          4. `low_score` — attempt finished without any flagged
+             condition but score is below the restart threshold.
+          5. `ok` — attempt finished cleanly enough that the restart
+             loop will probably accept it; signature reset.
+        Universal: no goal text, no genre.
+        """
+        if getattr(self, "_dead_first_build_recoveries", 0) >= 1:
+            return "dead_first_build"
+        if getattr(self, "_identical_reply_loops_this_attempt", 0) >= 1:
+            return "identical_reply_loop"
+        if getattr(self, "_format_rejections_iter1_this_attempt", 0) >= 1:
+            return "format_rejection_iter1"
+        if score < getattr(self, "restart_score_threshold", 60):
+            return "low_score"
+        return "ok"
+
     def _reset_attempt_state(self) -> None:
         """Reset the per-attempt mutable state so a fresh restart begins
         from a clean slate. Keeps cross-attempt resources (browser,
@@ -12708,6 +13223,16 @@ class GameAgent:
         self._restart_attempt_seed = None
         self._force_first_build_prefill = False
         self._first_build_retry_bonus_used = False
+        # Per-attempt failure-signature counters. Cleared so the next
+        # attempt's signature reflects only its own behavior.
+        self._dead_first_build_recoveries = 0
+        self._dead_first_build_pending = False
+        self._dead_first_build_abort_attempt = False
+        self._identical_reply_loops_this_attempt = 0
+        self._format_rejections_iter1_this_attempt = 0
+        # NOTE: _prev_attempt_signature and _force_minimal_first_build
+        # are set BY the restart loop AFTER an attempt ends, so they
+        # must NOT be reset here.
 
     def _score_attempt(self) -> float:
         """Score the just-finished attempt. Reuses tools.score_test_report
@@ -12877,6 +13402,33 @@ class GameAgent:
                 broken_size_bytes=len(self._current_file),
             )
 
+        # Dead-first-build recovery (Wolfenstein 2026-05-24 lesson):
+        # iter 1 or 2 loaded a file with raf_ran=false AND input dead.
+        # Patching can't fix a fundamentally non-running file. Route to
+        # the scope-reduction prompt that asks for a smaller intentional
+        # rewrite. The flag is consumed so this only fires once per
+        # detection; if the model ships another dead first build the
+        # detector will set it again and the attempt-abort counter will
+        # eventually flag the restart loop.
+        if (
+            getattr(self, "_dead_first_build_pending", False)
+            and hasattr(self._p, "scope_reduction_instruction")
+        ):
+            self._dead_first_build_pending = False
+            self._trace({
+                "kind": "dead_first_build_recovery_prompt_used",
+                # `_build_fix_prompt` runs after the iter's test report
+                # lands, so `_last_tested_iter` is the iteration this
+                # recovery is responding to. `iteration` is NOT in
+                # scope here — earlier draft referenced the loop var
+                # by name and crashed with NameError.
+                "iteration": self._last_tested_iter,
+                "recoveries_this_attempt": (
+                    self._dead_first_build_recoveries
+                ),
+            })
+            return self._p.scope_reduction_instruction(report_text)
+
         # Failed: combined diagnose+fix prompt with memory hints inline.
         sig = signature_for_report(report)
         hints_list = self._memory.retrieve_mistakes(sig, k=3) if sig else []
@@ -12929,6 +13481,22 @@ class GameAgent:
                 "slice_bytes": len(slice_text),
                 "full_bytes": len(self._current_file),
             })
+        # Context-pressure one-shot: when the prior stream pinned >=85%
+        # of num_ctx, omit the CURRENT FILE block from the fix prompt
+        # this turn and force a minimal patch. Consumed once then
+        # cleared so a transient spike doesn't lock the agent into
+        # patch-only mode forever.
+        if getattr(self, "_context_pressure_pending", False):
+            fix_kwargs["context_pressure"] = True
+            self._trace({
+                "kind": "context_pressure_mitigation_applied",
+                # Same scope bug as dead_first_build above — `iteration`
+                # is not local to `_build_fix_prompt`. Use the tracked
+                # iteration of the test report this prompt is reacting to.
+                "iteration": self._last_tested_iter,
+                "streak": self._context_pressure_streak,
+            })
+            self._context_pressure_pending = False
         fix = self._p.fix_instruction(
             report_text, self._current_file, hints, **fix_kwargs,
         )
