@@ -17,19 +17,10 @@ propose changes.
 > directive; canonical repo is `https://github.com/jmrothberg/Agent_learning`.
 > Memory file: `repo-main-is-upstream`.
 
-> **What changed in the 2026-05-23 → 2026-05-24 session (post the
-> original handoff date below):** scroll to the "Recent ships" section
-> for the changelog. Highlights: visual playtest recipe library
-> (`memory/visual_playtests.jsonl`, 18 mechanism recipes),
-> deterministic auto-probes paired with VLM checklists,
-> `/rawfeedback on` is now the default (classifier directive wrapping
-> off), procedural-regression detector via `fillRect` shim,
-> silent-stream guard, cross-turn patch-failure memory, status panel
-> "Memory in use" block, `/wait` auto-toggles `/vlm-critique`. The
-> mental model called "four distinct feedback flows" (#machine bug
-> feedback / playbook / autonomous playtest / directive wrapping) is
-> now the canonical framing — see README §"Feedback — four distinct
-> flows, four separate switches".
+> **For changes since the 2026-05-22 byline** — see "Recent ships" at
+> the bottom. The mental model worth internalizing up front: the four
+> separate "feedback" flows (machine bug feedback / playbook /
+> autonomous playtest / directive wrapping). Sections below cover it.
 
 ---
 
@@ -39,8 +30,7 @@ propose changes.
 
 2. **Genre-free or it doesn't ship.** No `if "chess" in goal:` style branches anywhere. Detection runs on **observable shape** — exposed `state.player.x`, canvas dimensions, image-noun + verb co-occurrence, recipe applicability gates. Adding a genre string anywhere reintroduces the listening bug Phase 0 was built to fix.
 
-3. **GPU assignment is fixed when multi-slot is explicitly staged** — GPU 0 = diffusers (Z-Image-Turbo, SD-Turbo, Stable-Audio), GPUs 1/2/3 = three Ollama daemons (coder/critic/architect on ports 11434/11435/11436). Phase 1 parallelism gates on **observable independence** (different backend objects, different endpoints), so it falls back gracefully on single-GPU.
-   **Important (2026-05-23 revert):** the autopin feature that spawned slots 2 + 3 automatically on 4-GPU boxes was reverted — multi-slot is now **opt-in only** via `/model2`, `/model3`, or `/modelall`. Combined with the iter-1 best-of-N fan-out (also reverted to `best_of_n=1` default), the default-on autopin crashed the workstation. Do not reintroduce default-on multi-slot without first proving the fan-out path can't oversubscribe. Memory file: `four-gpu-workstation-topology`.
+3. **Multi-slot is opt-in.** GPU 0 = diffusers; GPUs 1/2/3 = Ollama daemons (coder/critic/architect on ports 11434/11435/11436) **only when explicitly staged** via `/model2` / `/model3` / `/modelall`. Default-on autopin was reverted 2026-05-23 — it crashed the workstation when combined with iter-1 best-of-N fan-out. Parallelism features gate on observable independence (different backends, different endpoints) so they fall back cleanly on single-GPU. Memory: `four-gpu-workstation-topology`.
 
 4. **Listening before speed.** Every "ship faster" idea has to clear "did the user's last three messages get honored?" first. Phase 0 is the listening layer; if it regresses, the agent feels broken regardless of how fast iter 1 runs.
 
@@ -55,8 +45,8 @@ GameAgent.run(goal)            ← agent.py — async event-stream loop
         ↓
    Phase A (planning)          ← architect slot streams <plan>, <criteria>,
         ↓                        <probes>, optional <assets>, <sounds>.
-                                 Phase 1B pre-warms diffusers in parallel
-                                 on dedicated-GPU configs.
+                                 Diffusers pre-warm in parallel on
+                                 dedicated-GPU configs.
    <assets>, <sounds> gen      ← assets.py (Z-Image-Turbo), sounds.py
    on GPU 0 (lazy load)         (Stable Audio Open). Live `Sprites: N/M`
                                  in the status panel.
@@ -71,11 +61,11 @@ GameAgent.run(goal)            ← agent.py — async event-stream loop
                                     - probe expressions in page
                                     - opening-book recipe checks
                                     - State-vs-render entity check
-                                      (Phase 1.5.1)
                                  4. score_test_report → 0-100
-                                 5. visual critic (non-blocking on
-                                    independent slot, Phase 1A)
-                                 6. autonomous playtest (Phase 1.5)
+                                 5. visual critic (non-blocking when
+                                    on independent slot)
+                                 6. autonomous playtest (after clean
+                                    iters)
         ↓
    Phase C (self-critique)     ← <confirm_done/> or one more <patch>
         ↓
@@ -114,9 +104,9 @@ Read the `MEMORY.md` index before touching code. Each rule was learned the hard 
 
 ### Changes that historically pay off
 
-1. **Better harness signals.** A new probe-quality lint, an always-on render check, a structured trace event for an existing failure shape. These compound: every future session reads the new signal too. The Pac-Man-without-a-Pac-Man fix (Phase 1.5.1) is exactly this shape.
+1. **Better harness signals.** A new probe-quality lint, an always-on render check, a structured trace event for an existing failure shape. These compound: every future session reads the new signal too. The state-vs-render gap detector (Pac-Man-without-a-Pac-Man) is exactly this shape.
 
-2. **Listening fixes.** Anything that prevents the agent from swallowing what the user typed. Every iter the user can intervene is an iter that can recover. Phase 0.1 / 0.2 / 0.11 / 0.12 / 0.13 are all in this bucket.
+2. **Listening fixes.** Anything that prevents the agent from swallowing what the user typed. Every iter the user can intervene is an iter that can recover. `/rawfeedback` defaults ON for this reason.
 
 3. **Generalizable playbook bullets.** Hand-curated entries in `memory/playbook.jsonl` that get retrieved on future goals. A bullet that says "for any canvas game, expose `window.state.player.x` so the input smoke test detects movement" pays you back forever. A bullet that says "in chess games…" doesn't.
 
@@ -132,7 +122,7 @@ Read the `MEMORY.md` index before touching code. Each rule was learned the hard 
 
 3. **Adding always-on system-prompt rules.** Prompts past ~3-5 KB hurt mid-tier models. Use `FormatSpec.guidelines` (deduped per enabled format) or a goal-keyword detector that makes the rule conditional.
 
-4. **Refactoring the per-spec asset loop.** It handles caching, chroma-keying, library admission, fuzzy parent lookup, multiple fallbacks. Risk-to-win ratio is poor unless there's a specific bug to fix. (Phase 2C `generate_batch` shipped as available infrastructure for exactly this reason — wire-in is deferred.)
+4. **Refactoring the per-spec asset loop.** It handles caching, chroma-keying, library admission, fuzzy parent lookup, multiple fallbacks. Risk-to-win ratio is poor unless there's a specific bug to fix.
 
 5. **Cross-slot KV cache "fixes" that don't account for separate daemons.** Each Ollama daemon has its own KV cache. The fix is `warm_prefix` on the target slot, not a clever cache-sharing scheme (impossible across daemons).
 
@@ -143,7 +133,7 @@ Read the `MEMORY.md` index before touching code. Each rule was learned the hard 
 | File | Format | What goes here | When to add |
 |---|---|---|---|
 | `memory/playbook.jsonl` | committed JSONL (gitignored exception) | Hand-curated rules-of-thumb for code. Bullets retrieved by Jaccard against the goal each turn and injected into the prompt. Example: FPS camera basis vectors. | When you find a recurring code pattern the model gets wrong without it. Body should be actionable and complete. |
-| `memory/visual_playtests.jsonl` | committed JSONL (gitignored exception) | Mechanism-keyed VLM checklists (yes/no questions). Matched by goal+plan+asset-name keyword overlap. **18 recipes today** cover the user's 25-archetype list at 100% (verified by `tests/test_visual_playtest_coverage.py`). Some carry `auto_probes` — deterministic JS state assertions that fail if the recipe's invariant breaks. | When a NEW mechanism shape appears (not a new game — mechanism). Adding a recipe is one JSONL line; no Python changes. |
+| `memory/visual_playtests.jsonl` | committed JSONL (gitignored exception) | Mechanism-keyed VLM checklists (yes/no questions). Matched by goal+plan+asset-name keyword overlap. **19 recipes today** cover the user's 25-archetype list at 100% (verified by `tests/test_visual_playtest_coverage.py`). Some carry `auto_probes` — deterministic JS state assertions that fail if the recipe's invariant breaks. | When a NEW mechanism shape appears (not a new game — mechanism). Adding a recipe is one JSONL line; no Python changes. |
 | `memory/skeletons/` | committed `.html` + sibling `.json` | 17 mechanism-keyed first-build templates (`canvas_basic_v2`, `canvas_3d_basic`, `canvas_grid_basic`, `canvas_platformer_basic`, etc.). `retrieve_skeleton(goal)` picks one. | When a mechanism class genuinely needs a different scaffolding shape from what exists. Rare. |
 | `memory/playtests.jsonl` | auto-seeded from Python | Behavioral playtest recipes the autonomous loop runs after clean iters. 6 today. **Different pattern from visual_playtests** — seeded from `_opening_book_seed_items` in `memory.py`. | When you find a behavior class the model regresses on AND it has a clean observable check (input + sample times → state delta). |
 | `memory/asset_audits.jsonl` / `memory/animation_audits.jsonl` | auto-seeded | Asset / animation usage rules retrieved per turn into the `<opening_book>` block. | Rarely — most asset insights belong in the playbook instead. |
@@ -169,6 +159,21 @@ If you want to see WHICH recipe matched a session, the status panel's
 "Memory in use" block shows it live. Trace events:
 `visual_playtest_recipe_used`, `visual_playtest_auto_probes_injected`,
 `opening_book_retrieved`.
+
+**Playbook retrieval has a 0.02 Jaccard noise floor.** When you add a
+new bullet, it must share enough words with typical goal text to
+score above 0.02 — otherwise it's excluded and never reaches the
+prompt. Symptom: the bullet exists, the failure class fires, but the
+trace's `playbook_retrieved` event doesn't include the bullet's id.
+Fix: broaden the bullet's tags (tags weight 2× content in the
+Jaccard) with mechanism family words (`platformer`, `arcade`,
+`shooter`), game-object words (`character`, `player`, `enemy`,
+`boss`, `barrel`, `ghost`), failure-signal words from harness
+reports (`entity`, `render`, `rendered`, `missing`, `invisible`),
+and any specific game names that historically trigger the failure
+(`donkey-kong`, `pacman`, `mario` — same pattern existing bullets
+use). Keep bullet content tight (smaller union → higher Jaccard for
+the same intersection). Lesson from `d6a4e38`.
 
 ---
 
@@ -228,7 +233,7 @@ These are the cheap wins. Before adding a NEW guard, check this list
 Most session failures look like agent failures but are actually **verifier failures**. The harness gates `report["ok"]`; if a broken game can pass the gates, every downstream improvement is wasted. The biggest wins this project has shipped are gate fixes:
 
 - **`window.gameState` vs `window.state` bug** (2026-05-16, before this conversation): the input smoke test was reading the wrong global for the entire history of the code. Silently fell back to canvas-hash, which is degenerate for any auto-animating game. Fixed in `tools.py` — now the gate detects actual input response.
-- **State-vs-render gap** (2026-05-22, Phase 1.5.1): probes that check `state.pacman.x !== undefined` pass on a game where the player isn't drawn. New always-on check samples canvas pixels at exposed entity positions.
+- **State-vs-render gap detector** (2026-05-22): probes that check `state.pacman.x !== undefined` pass on a game where the player isn't drawn. The always-on check samples canvas pixels at exposed entity positions.
 
 When you find yourself adding agent-loop machinery to handle a failure pattern, **first** ask: is the gate detecting this correctly? If the gate flips `ok=False` reliably, the existing fix-mode loop is usually sufficient.
 
@@ -246,7 +251,7 @@ Frontier models tolerate verbose, multi-objective prompts. Qwen3.6:27b does not.
 
 4. **Surface the matched keywords back to the model.** `(matched: 'idle', 'walkstride', 'smash')` in the SCOPE-PACING NUDGE tells the model what triggered the rule. Without that, the model treats the rule as opaque.
 
-5. **Tight prompts beat smart prompts.** Phase 1.5's self-feedback paragraph is *deterministically* built from `recipe.finding_label + evidence` — no extra LLM call. Adding a critic call to "synthesize" it would cost a second slot stream for marginal wording improvement.
+5. **Tight prompts beat smart prompts.** The autonomous-playtest self-feedback paragraph is *deterministically* built from `recipe.finding_label + evidence` — no extra LLM call. Adding a critic call to "synthesize" it would cost a second slot stream for marginal wording improvement.
 
 ---
 
@@ -268,81 +273,53 @@ Frontier models tolerate verbose, multi-objective prompts. Qwen3.6:27b does not.
 
 ## What's open and worth picking up
 
-(Honest deferred items, current as of 2026-05-24. Not "future work"
-handwaving — each one has a concrete starting point.)
-
-### Visual playtest / VLM critic improvements (refs: `~/.claude/plans/vlm-critic-smarter-without-bigger.md` + `vlm-critic-memory-driven-checklist.md`)
+Concrete starting points, ranked by expected value. Full plans live
+at `~/.claude/plans/vlm-critic-smarter-without-bigger.md` and
+`vlm-critic-memory-driven-checklist.md`.
 
 1. **Scope-your-fix prompt suffix.** When typed feedback contains
    direction keywords (`flipped`, `inverted`, `180`, `wrong
    direction`) AND a specific state name (`kick`, `punch`, `walk`),
    append a SCOPED-CHANGE coaching block telling the model not to
-   flip a global condition. Directly addresses the mortal-kombat
-   2026-05-24 iter 12 wholesale-flip regression that motivated the
-   `auto_actors_face_each_other` probe. ~30 lines in
-   `prompts_v1.fix_instruction` (or wherever the per-fix user turn
-   is built).
+   flip a global condition. Catches the mortal-kombat-style
+   wholesale-flip regression. ~30 lines in `prompts_v1`.
 
-2. **Multi-image regression check** in `run_visual_critic`. When the
-   loaded VLM supports 2-image input (LLaVA-1.6, MiniCPM-V-2.6,
-   Qwen-VL), send the before/after screenshot pair with three
-   closed-class questions (ART_REGRESSION / ORIENTATION_FLIP /
-   PROGRESS). Capability-gated. Pair with the existing
-   `_last_screenshot_before` / `_last_screenshot_after` capture.
+2. **Critic dedup hardening.** Today's dedup is sha1 of first 120
+   normalized chars (`_critic_note_fingerprint`). Paraphrased
+   complaints slip through. Swap in content-keyword Jaccard ≥ 0.45
+   using the existing `_feedback_keywords` helper. ~10 LoC.
 
 3. **Recipe `helpful` / `harmful` writeback.** When a visual playtest
-   recipe's checklist finding leads to a clean iter on the next
-   turn → `helpful++`; when the model fixes one thing and breaks
-   another → `harmful++`. Same scoring infrastructure
-   `memory.Playbook` already uses. Lets bad recipes silently fall out
-   of retrieval; good ones surface more often.
+   recipe's finding leads to a clean iter next turn → `helpful++`;
+   regression after → `harmful++`. Same scoring infrastructure
+   `memory.Playbook` already uses. Bad recipes silently fall out of
+   retrieval; good ones surface more often.
 
 4. **Multi-recipe-per-session checklist merging.** When 2+ recipes
    score above the floor (e.g. Pacman = grid-navigation +
    controllable-player), merge their checklists capped at ~10 total
-   questions. The matcher already returns top candidates; just feed
-   the top-2 into prompt construction.
+   questions. Matcher already returns top candidates.
 
-5. **Critic dedup hardening.** Today's dedup is sha1 of first 120
-   normalized chars (`_critic_note_fingerprint`). The mortal-kombat
-   trace had 6 paraphrased complaints that slipped through. Replace
-   with content-keyword Jaccard ≥ 0.45 using the existing
-   `_feedback_keywords` helper. ~10 LoC.
+5. **Multi-image regression check** in `run_visual_critic`. When
+   the loaded VLM supports 2-image input (LLaVA-1.6, MiniCPM-V-2.6,
+   Qwen-VL), send before/after screenshots with three closed-class
+   questions (ART_REGRESSION / ORIENTATION_FLIP / PROGRESS).
+   `_last_screenshot_before` + `_last_screenshot_after` already exist.
 
-### Infrastructure
+6. **More behavioral playtest recipes** in `memory/playtests.jsonl`.
+   Three shipped (`entity-progress-over-time`,
+   `input-axis-matches-facing`, `held-key-stays-in-bounds`); the
+   spec listed four more (`held-key-changes-state-twice`,
+   `released-key-stops-action`, `ai-opponent-makes-a-move`,
+   `game-over-actually-ends`). One recipe entry + one `check_kind`
+   case per addition.
 
-6. **Phase 2C wire-in.** `ZImageTurboGenerator.generate_batch(prompts)`
-   is shipped and tested. Wire it into `generate_assets` for
-   txt2img-only specs grouped by size. Win: ~10 s on 12-asset batches.
-   Risk: the per-spec cache/chroma-key/library flow has side effects
-   that need careful preservation.
-
-7. **More behavioral playtest recipes** in
-   `memory/playtests.jsonl`. Three shipped:
-   `entity-progress-over-time`, `input-axis-matches-facing`,
-   `held-key-stays-in-bounds`. The spec listed four more:
-   `held-key-changes-state-twice`, `released-key-stops-action`,
-   `ai-opponent-makes-a-move`, `game-over-actually-ends`. Each is a
-   one-recipe-entry + one `check_kind` case in
-   `_evaluate_behavior_playtest_check`. Recipes stay genre-free.
-
-8. **Async autonomous playtest on slot 3.** The Phase 1.5 loop runs
-   sequentially after the critic. Once Phase 1A's non-blocking critic
-   stabilises, the playtest could move to a parallel slot 3 task.
-   Only meaningful on 3-slot configs (which are now opt-in only —
-   see GPU section).
-
-9. **Cross-session embeddings retrieval for the playbook.** Currently
-   Jaccard-weighted. Vector retrieval (sentence-transformers, fully
-   local) would catch semantic matches Jaccard misses. The bullet
-   schema is stable; this is a swap inside `memory.Playbook.retrieve`.
-
-10. **More visual playtest recipes for the long tail.** 18 mechanism
-    recipes cover the user's 25-archetype list at 100% today. New
-    mechanism classes (VR / spatial / multiplayer-shared-screen /
-    text-adventure) would each be one JSONL line in
-    `memory/visual_playtests.jsonl`. The matcher + critic both pick
-    new entries up automatically — no Python edit needed.
+7. **Cross-session embeddings retrieval for the playbook.** Current
+   Jaccard ranking has a 0.02 noise floor that excludes
+   semantically-relevant bullets with low keyword overlap (see the
+   "Playbook retrieval has a noise floor" note in Memory layers).
+   Vector retrieval (local sentence-transformers) would fix this.
+   Bullet schema is stable; swap inside `memory.Playbook.retrieve`.
 
 ---
 
@@ -362,46 +339,56 @@ This codebase has been shaped by hundreds of trace iterations against a small se
 
 The user's standing principle: *"never make changes for one game, anything helping a type of game should be in our root level memory, but needs to be very general."* That's the bar. Hold it.
 
-— Claude Opus 4.7, 2026-05-22 (original)
-— Claude Opus 4.7, 2026-05-24 (revision: added memory-layers reference, four-feedback-flows section, verifier-guards table; updated GPU + push target + standing rules; replaced "what's open" with current backlog)
+— Claude Opus 4.7, 2026-05-22 (original handoff)
+— Claude Opus 4.7, 2026-05-24 (revision: memory layers reference,
+  four-feedback-flows + verifier-guards sections, push target +
+  multi-slot revert, current "What's open" backlog, donkey-kong
+  trace lessons, "playbook noise floor" pattern, trimmed "Recent
+  ships" to load-bearing lessons only)
 
 ---
 
-## Recent ships — 2026-05-23 → 2026-05-24
+## Recent ships — lessons worth carrying forward
 
-Reverse chronological; each commit message has the full rationale.
+Patterns from the 2026-05-23 → 2026-05-24 commits that aren't
+obvious from the rest of the doc. Verifier guards already covered
+above; this section adds lessons that are NOT in another section.
 
-- **(next commit after this doc)** Memory-only updates from
-  donkey-kong 2026-05-24 trace: new `canvas-vertical-platformer`
-  visual playtest recipe (ladders + cascading hazards +
-  bottom-to-top progression, distinct from horizontal side-scroll);
-  three new playbook bullets — `sprite-corner-vs-state-position-render-check`
-  (fixes the iter-1-2-3 trap where transparent sprite padding made
-  the harness report ENTITY-NOT-RENDERED for an entity that WAS
-  being drawn), `cascading-hazard-spawn-loop`, `ladder-snap-to-platform-y`.
-  Stripped `ladder`/`barrel`/`donkey-kong`/`rescue` keywords from
-  `canvas-side-scroll-platformer` so DK routes to the new vertical
-  recipe. Playbook → 78 bullets; visual playtests → 19 recipes;
-  `test_visual_playtest_coverage` pins DK + BurgerTime to the new
-  vertical recipe.
-- `a7e1368` Status panel "Memory in use" — skeleton + visual playtest recipe + opening-book hits surfaced live so the user can see which memory layers fired.
-- `5e2778a` Visual playtest library: 25-archetype coverage at 100%. Added 7 new mechanism recipes (paddle-ball, lane-crossing, point-and-click, isometric-tile, overworld-rpg, city-builder, space-trading) + broadened keywords on 4 existing recipes. `tests/test_visual_playtest_coverage.py` pins the guarantee.
-- `a3c759b` Moved `visual_playtests.jsonl` from Python-seeded to committed JSONL data file. Same pattern as `playbook.jsonl` and `skeletons/`. New recipes are now a one-line JSONL append, no Python change.
-- `806eb09` README + `/help` reorganized into 6 grouped sections; added a "Visual playtest recipes" doc section.
-- `a18fea9` Auto-probes — deterministic state-shape assertions paired with VLM checklists. 3 recipes have them: `canvas-two-actors-facing` → `auto_actors_face_each_other`, `canvas-grid-navigation` → `auto_player_not_in_wall`, `canvas-controllable-player` → `auto_player_within_canvas_bounds`. Catches the mortal-kombat wholesale-facing-flip class deterministically.
-- `b403eef` Wired VLM critic to structured mechanism checklists. Closed-class yes/no questions replace open-ended "what's wrong?". Mid-tier VLMs answer the structured form ~6× more reliably (mortal-kombat trace).
-- `1d1fd92` VLM visual-playtest matcher (`memory.find_best_visual_playtest`). Three-signal context: goal + plan text + asset names. Strong-hook bypass for game names + overlap-count for mechanic vocabulary. Tolerates vague goals (`"collect dots while avoiding ghosts in corridors"` resolves to grid-navigation).
-- `3adac3d` Procedural-regression detector — `fillRect` shim records big rectangles; soft-warning when sprites are declared but canvas draws many big rects with few `drawImage` calls. Catches "model regressed entities to colored blocks" without VLM.
-- `93b2a4a` `/wait on` auto-disables `/vlm-critique`; `/wait off` restores. When the user reviews each iter themselves, the auto critic adds paraphrased noise.
-- `522633a` Six general-purpose improvements from the doom trace: silent-stream guard, cross-turn patch-failure memory, coverage-gap fence, critic dedup, classifier overrule auto-disable, `entity-progress` recipe input-driven skip. All `tests/test_doom_general_improvements.py`.
-- `961bac7` Default sprite size 128 → 512 px.
-- `64148ae` `/status` reads agent's live `_use_vlm_critique` / `_use_architect_split` (was reading the App's stale copy — drifted on auto-staff).
-- `58701ec` Default `/rawfeedback` flipped to ON (raw mode = classifier directive wrapping suppressed). Per [agent-must-beat-zero-shot].
-- `a205cd7` Three feedback-classifier patches (negation-aware orientation blockers, inverted-behavior patterns, `'view'` as non-distinctive stem) + `/rawfeedback` kill switch.
-- `ecfe067` (reverted in `a205cd7`) — autopin multi-slot default-on. **Crashed the workstation; do not reintroduce.**
+- **`/rawfeedback` default ON** (`58701ec`). Classifier directive
+  wrapping on user-typed feedback is now suppressed by default.
+  Anchor for the [agent-must-beat-zero-shot] rule. If you propose
+  another classifier patch on typed feedback, read that memory file
+  first.
+- **Visual playtest library lives in JSONL** (`a3c759b`). Recipes
+  used to be Python-seeded; now they're a hand-edited committed
+  data file (`memory/visual_playtests.jsonl`). Adding a recipe is
+  one JSONL line. The same pattern applies to playbook bullets —
+  data file, no Python edit.
+- **Structured VLM critic + auto-probes** (`b403eef`, `a18fea9`).
+  Closed-class yes/no checklists replaced "what's wrong?".
+  Mid-tier VLMs follow the structured form much more reliably.
+  Three recipes also carry `auto_probes` — deterministic JS state
+  assertions that catch the failure-class even if the VLM misses
+  it visually.
+- **Three-signal matching** (`1d1fd92`). The recipe matcher uses
+  goal + plan text + asset names — not just goal. That's why
+  *"collect dots while avoiding ghosts in corridors"* resolves to
+  `canvas-grid-navigation` without the word "pacman" appearing.
+- **25-archetype coverage at 100%** (`5e2778a` + `c2db88c`). The
+  user supplied a 25-game list; `tests/test_visual_playtest_coverage.py`
+  pins that every entry routes to a real mechanism recipe. When that
+  test fails, that's the signal to add a recipe (one JSONL line),
+  NOT to relax the test.
+- **Playbook noise floor lesson** (`d6a4e38`). A relevant bullet can
+  fail to retrieve because its tags don't overlap typical goal text.
+  Covered in the Memory-layers section. Watch out when authoring new
+  bullets.
+- **DO NOT reintroduce default-on multi-slot autopin** (`ecfe067`
+  reverted in `a205cd7`). It crashed the workstation when combined
+  with iter-1 best-of-N fan-out. Multi-slot is opt-in only.
 
-If you're picking this up and want one place to start: run a fresh
-session against any of the user's 25 archetypes. Watch the right
-status panel — "Memory in use" should show a skeleton + visual
-playtest recipe + opening-book hits within ~30 s of `/new`. If it
-doesn't, that's where the next bug is.
+**Where to start when picking this up:** run a fresh session against
+any of the 25 archetypes. Watch the right-side status panel —
+"Memory in use" should show a skeleton + visual playtest recipe +
+opening-book hits within ~30 s of `/new`. If it doesn't, that's the
+next bug.
