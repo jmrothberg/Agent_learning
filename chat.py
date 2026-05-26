@@ -3081,6 +3081,8 @@ class CodingBoxApp(App):
                 self._cmd_goodgame()
             elif cmd == "ship":
                 await self.action_ship_it()
+            elif cmd in ("revert", "rewind"):
+                self._cmd_revert(arg)
             elif cmd == "quit":
                 await self.action_quit_app()
             elif cmd in ("log", "paths", "files"):
@@ -3197,6 +3199,8 @@ class CodingBoxApp(App):
             "  [b]/new <goal>[/b]                end current session, start fresh (uses staged seed/model)",
             "  [b]/goodgame[/b]                  copy best.html + *_assets/ + *_sounds/ → goodgame/ [dim](not gitignored)[/dim]",
             "  [b]/ship[/b]                      ship current build [dim](= Ctrl+D, or type 'done' / 'looks good')[/dim]",
+            "  [b]/revert [N][/b]               roll the game file back to the last clean iter [dim](or iter N specifically; aliases /rewind)[/dim]",
+            "                                  [dim]use this when the model breaks something — one keystroke beats typing 'undo that'[/dim]",
             "  [b]/retry[/b]                     re-run after a bad model (keeps game file + trace)",
             "  [b]/reset[/b]                     wipe ALL staged state → defaults (seed, model, iters, ctx)",
             "  [b]/open[/b]                      open the current game in your default browser",
@@ -4247,6 +4251,61 @@ class CodingBoxApp(App):
             self._log_info(
                 "[dim]no *_assets/ or *_sounds/ on disk (HTML only is fine)[/dim]"
             )
+
+    def _cmd_revert(self, arg: str) -> None:
+        """/revert [N] — roll the on-disk game file back to a previous iter.
+
+        No-arg: most-recent clean iter (last `iter_summary` with ok=True),
+                falling back to best.html if no clean iter snapshot exists.
+        With N: revert to iter N specifically (snapshot file iter_NN.html).
+
+        The iter counter does NOT reset — this rewinds the FILE, not the
+        conversation. The model's next turn will see the reverted bytes
+        as CURRENT FILE ON DISK and any feedback you type.
+
+        Audit context: built 2026-05-25 after a 10-trace audit showed
+        harness gates catch only ~5-10% of "model takes liberty beyond
+        user scope" failures. Cheaper to give the user a one-keystroke
+        rollback than to build more clever gates that don't catch most
+        of the failure shape.
+        """
+        if self.agent is None:
+            self._log_info("no session yet — start one before /revert")
+            return
+        requested = None
+        if arg.strip():
+            try:
+                requested = int(arg.strip())
+                if requested < 1:
+                    raise ValueError
+            except ValueError:
+                self._log_info(
+                    f"/revert takes a positive iter number; got {arg!r}. "
+                    "Use /revert with no arg for the most-recent clean iter."
+                )
+                return
+        try:
+            result = self.agent.revert_to_iter(requested)
+        except Exception as e:
+            self._log_error(f"/revert failed: {e}")
+            return
+        if not result.get("ok"):
+            self._log_error(f"/revert: {result.get('error', 'unknown error')}")
+            return
+        to_iter = result.get("to_iter")
+        source = result.get("source", "?")
+        from_iter = result.get("from_iter") or 0
+        file_bytes = result.get("file_bytes", 0)
+        if source == "snapshot":
+            target_label = f"iter {to_iter}"
+        else:
+            target_label = "best.html"
+        self._log(
+            f"[bold green]reverted[/bold green] from iter {from_iter} "
+            f"→ [b]{target_label}[/b] ({file_bytes:,} bytes). "
+            "The on-disk file is now the working version. Type new "
+            "feedback to continue."
+        )
 
     def _cmd_attach_ref_image(self, arg: str) -> None:
         """/ref <path> — attach a reference image to the NEXT user turn.

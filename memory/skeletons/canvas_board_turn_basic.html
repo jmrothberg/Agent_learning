@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Board Game</title>
+<style>
+  html,body { margin:0; height:100%; background:#1a1a2e; color:#e7ecff;
+    font:16px/1.4 system-ui,sans-serif; overflow:hidden; user-select:none; }
+  #wrap { position:fixed; inset:0; display:grid; place-items:center; gap:12px;
+    grid-template-rows:auto auto auto; }
+  canvas { background:#2a2a3e; border-radius:8px; touch-action:none;
+    box-shadow:0 10px 40px #0008; image-rendering:pixelated; }
+  #hud { font-size:18px; opacity:.9; pointer-events:none; }
+  #ctrls { display:flex; gap:8px; }
+  button { background:#3b62ff; color:#fff; border:0; padding:8px 14px;
+    border-radius:6px; font-size:14px; cursor:pointer; }
+  button:hover { filter:brightness(1.1); }
+</style></head>
+<body>
+<div id="wrap">
+  <div id="hud">Turn: <span id="turn">White</span> &nbsp; <span id="msg"></span></div>
+  <canvas id="c" width="480" height="480"></canvas>
+  <div id="ctrls"><button id="restart">Restart</button></div>
+</div>
+<script>
+(() => {
+  "use strict";
+  const cvs = document.getElementById("c");
+  const ctx = cvs.getContext("2d");
+  const turnEl = document.getElementById("turn");
+  const msgEl  = document.getElementById("msg");
+  const SIZE = 8, TILE = 60;
+
+  // ---- State (exposed on window so probes can read it) ------------------
+  const state = {
+    board: [],            // board[r][c] = null | { kind, owner: 'W'|'B' }
+    currentPlayer: "W",   // 'W' or 'B'
+    selected: null,       // { r, c } or null
+    legalTargets: [],     // [{r,c}, ...] for the selected piece
+    over: false,
+    winner: null,
+  };
+  window.gameState = state;
+  window.game = { reset, currentPlayer: () => state.currentPlayer };
+
+  // ---- Init / reset -----------------------------------------------------
+  function reset() {
+    state.board = Array.from({ length: SIZE }, () => Array(SIZE).fill(null));
+    // Demo placement: model REPLACES this with real piece setup.
+    state.board[0][0] = { kind: "piece", owner: "B" };
+    state.board[7][7] = { kind: "piece", owner: "W" };
+    state.currentPlayer = "W";
+    state.selected = null;
+    state.legalTargets = [];
+    state.over = false;
+    state.winner = null;
+    msgEl.textContent = "";
+    turnEl.textContent = state.currentPlayer === "W" ? "White" : "Black";
+    draw();
+  }
+  document.getElementById("restart").addEventListener("click", reset);
+
+  // ---- Rules stub (model REPLACES with real logic) ----------------------
+  function legalMoves(from) {
+    // Demo: any empty cell is "legal". Real games override this entirely.
+    const out = [];
+    for (let r = 0; r < SIZE; r++) for (let c = 0; c < SIZE; c++) {
+      if (!state.board[r][c]) out.push({ r, c });
+    }
+    return out;
+  }
+
+  function applyMove(from, to) {
+    state.board[to.r][to.c] = state.board[from.r][from.c];
+    state.board[from.r][from.c] = null;
+    state.currentPlayer = state.currentPlayer === "W" ? "B" : "W";
+    turnEl.textContent = state.currentPlayer === "W" ? "White" : "Black";
+  }
+
+  // ---- Pointer -> cell --------------------------------------------------
+  function cellFromPointer(e) {
+    const rect = cvs.getBoundingClientRect();
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    const c = Math.floor(mx / TILE), r = Math.floor(my / TILE);
+    if (r < 0 || r >= SIZE || c < 0 || c >= SIZE) return null;
+    return { r, c };
+  }
+
+  cvs.addEventListener("pointerdown", e => {
+    if (state.over) return;
+    const cell = cellFromPointer(e);
+    if (!cell) return;
+
+    if (state.selected) {
+      const ok = state.legalTargets.some(t => t.r === cell.r && t.c === cell.c);
+      if (ok) {
+        applyMove(state.selected, cell);
+        state.selected = null;
+        state.legalTargets = [];
+      } else {
+        // Clicking own piece reselects; otherwise deselect.
+        const p = state.board[cell.r][cell.c];
+        if (p && p.owner === state.currentPlayer) {
+          state.selected = cell;
+          state.legalTargets = legalMoves(cell);
+        } else {
+          state.selected = null;
+          state.legalTargets = [];
+        }
+      }
+    } else {
+      const p = state.board[cell.r][cell.c];
+      if (p && p.owner === state.currentPlayer) {
+        state.selected = cell;
+        state.legalTargets = legalMoves(cell);
+      }
+    }
+    draw();
+  });
+
+  // ---- Draw -------------------------------------------------------------
+  function draw() {
+    try {
+      for (let r = 0; r < SIZE; r++) for (let c = 0; c < SIZE; c++) {
+        ctx.fillStyle = ((r + c) % 2 === 0) ? "#e6d3a8" : "#7a5a3a";
+        ctx.fillRect(c * TILE, r * TILE, TILE, TILE);
+      }
+      if (state.selected) {
+        ctx.strokeStyle = "#ffd84a"; ctx.lineWidth = 3;
+        ctx.strokeRect(state.selected.c * TILE + 2, state.selected.r * TILE + 2,
+                       TILE - 4, TILE - 4);
+      }
+      for (const t of state.legalTargets) {
+        ctx.fillStyle = "rgba(80,200,120,0.45)";
+        ctx.beginPath();
+        ctx.arc(t.c * TILE + TILE / 2, t.r * TILE + TILE / 2, TILE * 0.18, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      for (let r = 0; r < SIZE; r++) for (let c = 0; c < SIZE; c++) {
+        const p = state.board[r][c];
+        if (!p) continue;
+        ctx.fillStyle = p.owner === "W" ? "#fafafa" : "#1a1a1a";
+        ctx.beginPath();
+        ctx.arc(c * TILE + TILE / 2, r * TILE + TILE / 2, TILE * 0.35, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = "#444"; ctx.lineWidth = 2; ctx.stroke();
+      }
+    } catch (err) { console.error("draw failed:", err); }
+  }
+
+  reset();
+})();
+</script>
+</body></html>

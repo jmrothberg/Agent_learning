@@ -3016,8 +3016,46 @@ class GameAgent:
                 )
             except Exception:
                 mod_toks = []
+            # Fix B (2026-05-25): include the most recent user feedback
+            # in the retrieval query so scope-discipline bullets
+            # (scope-locked-by-user-language, patch-budget-when-scope-
+            # locked, vlm-critic-can-mislead-on-orientation, etc.) fire
+            # when the user types scope-lock language like "JUST do X"
+            # or "do not touch other code". Without this, those bullets
+            # only retrieve when the GOAL itself contains scope vocab —
+            # which it never does, so the bullets sit unused across the
+            # whole session. The doom trace 2026-05-25 made this gap
+            # visible: user typed "JUST change the direction the player
+            # moves with the arrow keys they are REVERSED" four times
+            # in a row, and the scope-locked / patch-budget bullets
+            # never surfaced because retrieval keyed only on the goal.
+            #
+            # Source of feedback text: prefer `_last_drained_feedback`
+            # (the feedback that just landed in this turn's user-turn
+            # message) over `_pending_feedback` (queued for next turn).
+            # On a fix-prompt build the feedback for THIS turn has
+            # already been drained, so `_last_drained_feedback` is the
+            # right scope. Fall back to `_pending_feedback` when the
+            # call site runs before drain.
+            recent_feedback = (
+                getattr(self, "_last_drained_feedback", None)
+                or getattr(self, "_pending_feedback", None)
+                or []
+            )
+            feedback_text = " ".join(str(f) for f in recent_feedback[-2:])
+            # For small/mid model classes the playbook surfaces k=1 hit;
+            # the goal text dominates the query by sheer length, so any
+            # bullet matched only by feedback words gets buried. We
+            # repeat the feedback 3x so its tokens compete on count
+            # with the longer goal. Larger model classes already get
+            # k=3-6 retrievals and don't need the boost as much.
+            if feedback_text and self._model_class in ("mid", "small"):
+                feedback_weighted = " ".join([feedback_text] * 3)
+            else:
+                feedback_weighted = feedback_text
+            query = goal if not feedback_text else f"{goal} {feedback_weighted}"
             hits = self._playbook.retrieve(
-                goal, code=code, k=k, stage=stage,
+                query, code=code, k=k, stage=stage,
                 modality_tokens=mod_toks,
             )
             if hits:
@@ -3028,6 +3066,8 @@ class GameAgent:
                     "ids": ids,
                     "scores": [round(h.score, 4) for h in hits],
                     "goal_preview": goal[:120],
+                    "feedback_in_query": bool(feedback_text),
+                    "feedback_preview": feedback_text[:200] if feedback_text else "",
                     "char_budget": budget,
                     "render_mode": render_mode,
                 })
@@ -3779,6 +3819,178 @@ class GameAgent:
             return p
         except Exception:
             return None
+
+    # ------------------------------------------------------------------ revert
+    #
+    # User-triggered escape hatch for "the model just broke a working game."
+    # Audit of 10 recent traces (2026-05-25) showed harness gates catch only
+    # ~5-10% of "model takes liberty beyond user scope" failures across the
+    # full feedback shape. The cheaper, higher-leverage answer is to let the
+    # user roll back a regression in one keystroke rather than typing "you
+    # broke X, fix it" and watching the model break more.
+    #
+    # `/revert` calls revert_to_iter(None) → pick the most-recent iter whose
+    # `iter_summary` event had ok=True. `/revert N` calls revert_to_iter(N)
+    # → pick that specific snapshot. Both fall back to best.html when no
+    # clean snapshot is available; both error cleanly when neither exists.
+    #
+    # Iter counter is intentionally NOT reset — we're rewinding the FILE,
+    # not the conversation history. The next turn will see the reverted
+    # bytes as CURRENT FILE ON DISK and any feedback the user types.
+
+    def _clean_iters_from_trace(self) -> list[int]:
+        """Read the trace JSONL and return iter numbers whose iter_summary
+        event had ok=True, in chronological order. Source of truth is the
+        trace file (not in-memory state) so /revert works even after a
+        restart inside the same artifact.
+        """
+        out: list[int] = []
+        try:
+            if not self.trace_path.exists():
+                return out
+            with self.trace_path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or '"iter_summary"' not in line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        continue
+                    if obj.get("kind") != "iter_summary":
+                        continue
+                    if not obj.get("ok"):
+                        continue
+                    it = obj.get("iteration")
+                    if isinstance(it, int):
+                        out.append(it)
+        except Exception:
+            return out
+        return out
+
+    def _resolve_revert_source(
+        self, requested_iter: int | None,
+    ) -> tuple[Path | None, int | None, str, str | None]:
+        """Resolve the revert target. Returns (source_path, iter_n, source_kind, error_msg).
+
+        - requested_iter=None → most-recent clean iter snapshot, else best.html
+        - requested_iter=N    → snapshot for iter N specifically
+        - error_msg non-None → callers surface to user; source_path is None
+        """
+        if requested_iter is not None:
+            snap = self.snapshots_dir / f"iter_{requested_iter:02d}.html"
+            if not snap.exists():
+                available = sorted(
+                    int(p.stem.split("_", 1)[1])
+                    for p in self.snapshots_dir.glob("iter_*.html")
+                    if p.stem.split("_", 1)[1].isdigit()
+                ) if self.snapshots_dir.exists() else []
+                avail_str = (
+                    ", ".join(str(i) for i in available) if available
+                    else "(none — no iters have completed yet)"
+                )
+                return None, None, "", (
+                    f"iter {requested_iter} snapshot not found at "
+                    f"{snap}. Available iters: {avail_str}"
+                )
+            return snap, requested_iter, "snapshot", None
+
+        clean_iters = self._clean_iters_from_trace()
+        if clean_iters:
+            target_iter = clean_iters[-1]
+            snap = self.snapshots_dir / f"iter_{target_iter:02d}.html"
+            if snap.exists():
+                return snap, target_iter, "snapshot", None
+            # Fall through — clean iter was recorded but snapshot is gone
+
+        if self.best_path.exists():
+            return self.best_path, None, "best", None
+
+        return None, None, "", (
+            "no clean iter snapshot AND no best.html — nothing to revert to. "
+            "(this can happen if no iter has shipped cleanly yet in this session.)"
+        )
+
+    def revert_to_iter(
+        self, requested_iter: int | None = None,
+    ) -> dict[str, Any]:
+        """Roll back the on-disk game file to a previous iter's snapshot.
+
+        Returns a dict the caller (TUI / CLI) can render:
+            {
+                "ok": bool,
+                "error": str | None,       # set when ok is False
+                "to_iter": int | None,     # iter we landed on, or None for best.html
+                "source": "snapshot" | "best",
+                "source_path": str,        # absolute path of the source file
+                "from_iter": int | None,   # last iter that ran, for the banner
+                "file_bytes": int,         # size of the file after revert
+            }
+        """
+        source_path, to_iter, source_kind, err = self._resolve_revert_source(
+            requested_iter,
+        )
+        if err is not None:
+            return {
+                "ok": False, "error": err, "to_iter": None,
+                "source": "", "source_path": "", "from_iter": None,
+                "file_bytes": 0,
+            }
+        try:
+            content = source_path.read_text(encoding="utf-8")
+            self.out_path.parent.mkdir(parents=True, exist_ok=True)
+            self.out_path.write_text(content, encoding="utf-8")
+        except Exception as e:
+            return {
+                "ok": False, "error": f"failed to write {self.out_path}: {e}",
+                "to_iter": None, "source": "", "source_path": "",
+                "from_iter": None, "file_bytes": 0,
+            }
+        from_iter = max(
+            self._last_tested_iter or 0,
+            self._last_materialized_iter or 0,
+            self._snapshot_n or 0,
+        )
+        # Update in-memory file mirror so the next fix-prompt's CURRENT
+        # FILE block reflects what's actually on disk.
+        self._current_file = content
+        # Reset stale per-iter state that would mislead the next turn.
+        # We don't touch _messages or counters — the conversation
+        # continues; only iter-local signals get cleared.
+        self._previous_report_ok = None
+        self._previous_report = None
+        self._last_test_report = None
+        self._last_failed_patch_anchors = set()
+        self._pending_coaching = []
+        self._last_no_usable_code_fingerprint = None
+        # Recovery-flag flags from the round-1/2 Wolfenstein fix bundle —
+        # any pending recovery prompt is stale because the file changed.
+        self._dead_first_build_pending = False
+        self._context_pressure_pending = False
+        self._context_pressure_streak = 0
+        # Format-stuck streak and stream-status flags reset too — the
+        # last failure's evidence no longer reflects current state.
+        self._format_stuck_streak = 0
+        self._last_stream_looped = False
+        self._last_stream_stalled = False
+        self._last_stream_silent = False
+        self._last_stream_crashed = False
+        file_bytes = len(content)
+        self._trace({
+            "kind": "user_revert",
+            "from_iter": from_iter,
+            "to_iter": to_iter,
+            "source": source_kind,
+            "source_path": str(source_path),
+            "file_bytes": file_bytes,
+        })
+        return {
+            "ok": True, "error": None,
+            "to_iter": to_iter, "source": source_kind,
+            "source_path": str(source_path),
+            "from_iter": from_iter,
+            "file_bytes": file_bytes,
+        }
 
     def _save_best(self, html: str) -> Path | None:
         try:
@@ -5945,6 +6157,16 @@ class GameAgent:
             + ":"
         )
         body = "\n".join(failures + unclears)
+        # Optional `fix_hint` (added 2026-05-25 from the agent-memory
+        # critique review): when a recipe carries a per-failure-class
+        # minimal-fix shape, append it so the model sees not just
+        # WHAT'S WRONG but the smallest correct change shape. Reduces
+        # the "VLM critic complaint → model invents structural rewrite"
+        # failure pattern. fix_hint only renders when failures exist
+        # (no point coaching on a passing check).
+        fix_hint = (recipe.recipe.get("fix_hint") or "").strip() if failures else ""
+        if fix_hint:
+            return head + "\n" + body + "\n\nMinimal fix shape: " + fix_hint
         return head + "\n" + body
 
     async def run_visual_critic(

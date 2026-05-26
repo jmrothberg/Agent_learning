@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Game</title>
+<style>
+  :root { color-scheme: dark; --bg:#0b1020; --fg:#e7ecff; --panel:#1a2348;
+          --accent:#3b62ff; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font:16px/1.4 system-ui,sans-serif; overflow:hidden;
+    -webkit-tap-highlight-color:transparent; user-select:none; }
+  #wrap { position:fixed; inset:0; display:grid; place-items:center; }
+  canvas { background:#10162e; border-radius:12px; box-shadow:0 10px 40px #0008;
+    max-width:96vw; max-height:90vh; touch-action:none; }
+  #hud { position:fixed; top:12px; left:12px; background:#0008; padding:8px 12px;
+    border-radius:8px; pointer-events:none; font-variant-numeric:tabular-nums; }
+  #hud span { margin-right:14px; }
+  #help { position:fixed; bottom:12px; left:12px; opacity:.75; font-size:13px;
+    pointer-events:none; }
+  #modal { position:fixed; inset:0; display:none; place-items:center;
+    background:#000a; backdrop-filter:blur(4px); }
+  #modal .card { background:var(--panel); padding:24px 28px; border-radius:14px;
+    text-align:center; box-shadow:0 20px 60px #000a; min-width:240px; }
+  #modal h2 { margin:0 0 8px; }
+  #pauseTag { position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
+    background:#000c; padding:14px 22px; border-radius:10px; display:none;
+    font-size:24px; pointer-events:none; }
+  #errOverlay { position:fixed; inset:auto 12px 12px 12px; max-height:30%;
+    overflow:auto; background:#400; color:#fdd; padding:8px 12px; font:12px/1.3 monospace;
+    border-radius:6px; display:none; pointer-events:none; }
+  button { background:var(--accent); color:#fff; border:0; padding:10px 18px;
+    border-radius:8px; font-size:15px; cursor:pointer; }
+  button:hover { filter:brightness(1.1); }
+</style></head>
+<body>
+<div id="wrap"><canvas id="c" width="800" height="600"></canvas></div>
+<div id="hud">
+  <span>Score: <b id="score">0</b></span>
+  <span>Lives: <b id="lives">3</b></span>
+</div>
+<div id="help">Arrows / WASD to move · Space to act · P to pause</div>
+<div id="pauseTag">PAUSED</div>
+<div id="modal"><div class="card">
+  <h2 id="endTitle">Game Over</h2>
+  <p id="endMsg">Final score: <span id="endScore">0</span></p>
+  <button id="restart">Play again</button>
+</div></div>
+<div id="errOverlay"></div>
+<script>
+(() => {
+  "use strict";
+
+  // ---- DOM refs (cached once) ------------------------------------------
+  const cvs   = document.getElementById("c");
+  const ctx   = cvs.getContext("2d");
+  const W = 800, H = 600;
+  const scoreEl = document.getElementById("score");
+  const livesEl = document.getElementById("lives");
+  const modal   = document.getElementById("modal");
+  const endTitle = document.getElementById("endTitle");
+  const endScoreEl = document.getElementById("endScore");
+  const pauseTag = document.getElementById("pauseTag");
+  const errBox  = document.getElementById("errOverlay");
+
+  // ---- DPR scaling — set on init, re-apply on resize -------------------
+  function fit() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    cvs.width  = W * dpr;
+    cvs.height = H * dpr;
+    cvs.style.width  = W + "px";
+    cvs.style.height = H + "px";
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  fit();
+  window.addEventListener("resize", fit);
+
+  // ---- Input — held + pressed + released, on window, with preventDefault
+  // pressed/released fire ONCE per key transition; cleared at end of frame.
+  const KEYMAP = {
+    ArrowUp:"up", ArrowDown:"down", ArrowLeft:"left", ArrowRight:"right",
+    KeyW:"up",    KeyS:"down",     KeyA:"left",     KeyD:"right",
+    Space:"act",  Enter:"act",     KeyP:"pause",    Escape:"pause",
+  };
+  const keys     = Object.create(null);
+  const pressed  = Object.create(null);
+  const released = Object.create(null);
+  function onKey(e, down) {
+    const k = KEYMAP[e.code];
+    if (!k) return;
+    if (down) {
+      if (!keys[k]) pressed[k] = true;
+      keys[k] = true;
+      // Stop arrow keys from scrolling, space from page-jumping etc.
+      e.preventDefault();
+    } else {
+      if (keys[k]) released[k] = true;
+      keys[k] = false;
+    }
+  }
+  window.addEventListener("keydown", e => onKey(e, true),  { passive:false });
+  window.addEventListener("keyup",   e => onKey(e, false), { passive:false });
+  // Mobile / touch — same `act` event as Space.
+  cvs.addEventListener("pointerdown", () => { pressed.act = true; }, { passive:true });
+
+  // ---- Focus / visibility — pause on tab-out, clear keys, reset dt -----
+  let paused = false;
+  function clearKeys() {
+    for (const k in keys) keys[k] = false;
+    for (const k in pressed) pressed[k] = false;
+  }
+  window.addEventListener("blur",  () => { paused = true;  clearKeys(); });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) { paused = true; clearKeys(); }
+    else                 { last = performance.now(); }   // reset dt anchor
+  });
+
+  // ---- Lazy audio — first user gesture creates / resumes the context ---
+  let audio = null;
+  function ensureAudio() {
+    if (audio) return audio;
+    try { audio = new (window.AudioContext || window.webkitAudioContext)(); }
+    catch (e) { return null; }
+    return audio;
+  }
+  function unlockAudio() { const a = ensureAudio(); if (a && a.state === "suspended") a.resume(); }
+  window.addEventListener("keydown",     unlockAudio, { once:true });
+  window.addEventListener("pointerdown", unlockAudio, { once:true });
+
+  // ---- State + restart cleanup -----------------------------------------
+  // game-specific globals go here. Replace freely.
+  const state = { score: 0, lives: 3, over: false, t: 0,
+                  player: { x: W/2, y: H/2, r: 12 } };
+  let rafHandle = 0;
+  function reset() {
+    state.score = 0; state.lives = 3; state.over = false; state.t = 0;
+    state.player.x = W/2; state.player.y = H/2;
+    paused = false;
+    modal.style.display = "none";
+    errBox.style.display = "none"; errBox.textContent = "";
+    if (rafHandle) cancelAnimationFrame(rafHandle);
+    last = performance.now();
+    rafHandle = requestAnimationFrame(frame);
+  }
+  document.getElementById("restart").addEventListener("click", reset);
+
+  // ---- Game logic — replace these with your update/draw ----------------
+  function update(dt) {
+    if (state.over) return;
+    if (pressed.pause) paused = !paused;
+    if (paused) return;
+    state.t += dt;
+    const speed = 220;
+    const p = state.player;
+    if (keys.left)  p.x -= speed * dt;
+    if (keys.right) p.x += speed * dt;
+    if (keys.up)    p.y -= speed * dt;
+    if (keys.down)  p.y += speed * dt;
+    p.x = Math.max(p.r, Math.min(W - p.r, p.x));
+    p.y = Math.max(p.r, Math.min(H - p.r, p.y));
+    if (pressed.act) state.score += 1;
+  }
+  function draw() {
+    // Layer 0 — clear / background
+    ctx.clearRect(0, 0, W, H);
+    // Layer 1 — entities (drawn first so HUD goes on top)
+    const p = state.player;
+    ctx.fillStyle = "#7ab6ff";
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
+    // Layer 2 — effects (particles, etc.) — none in skeleton
+    // Layer 3 — HUD overlays (in-canvas; outer DOM HUD is its own layer)
+  }
+  function gameOver(reason) {
+    state.over = true;
+    endTitle.textContent = reason || "Game Over";
+    endScoreEl.textContent = state.score;
+    modal.style.display = "grid";
+  }
+
+  // ---- Frame loop with try/catch + dt cap + resume reset ---------------
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    try {
+      update(dt);
+      draw();
+      // Update DOM HUD (cheap; tabular-nums prevents reflow jitter).
+      scoreEl.textContent = state.score;
+      livesEl.textContent = state.lives;
+      pauseTag.style.display = paused && !state.over ? "block" : "none";
+    } catch (err) {
+      console.error("game crashed:", err);
+      errBox.textContent = "crash: " + (err && err.message || err);
+      errBox.style.display = "block";
+      // Continue the loop so the user can see the error overlay.
+    } finally {
+      // Clear one-shot inputs at frame end.
+      for (const k in pressed)  pressed[k]  = false;
+      for (const k in released) released[k] = false;
+    }
+    rafHandle = requestAnimationFrame(frame);
+  }
+  rafHandle = requestAnimationFrame(frame);
+})();
+</script>
+</body></html>

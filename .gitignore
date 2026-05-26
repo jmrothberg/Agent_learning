@@ -23,6 +23,16 @@ games/traces/
 memory/*
 !memory/playbook.jsonl
 !memory/visual_playtests.jsonl
+# Precomputed architect opening library — hand-curated mechanism outlines
+# retrieved by retrieve_implementation_outline (k=1, no prompt-bloat risk).
+# Distinct from games/game-memory/ which is per-machine learned memory.
+!memory/implementation_outlines.jsonl
+# Precomputed playtest + audit seeds — also committed as opening-library data.
+!memory/playtests.jsonl
+!memory/asset_audits.jsonl
+!memory/animation_audits.jsonl
+!memory/skeletons/
+!memory/skeletons/*
 games/test_*.html
 games/tune/
 games/system-tests/run_*/

@@ -1055,6 +1055,7 @@ is data the agent will see, not just developer notes.
 | `/new` | Start a new session in the same workspace. |
 | `/goodgame` | Copy `.best.html` (or live `.html`) plus `*_assets/` / `*_sounds/` into `goodgame/`. Alias: `/good`. |
 | `/ship` | Force `<confirm_done/>` on the next critique turn. |
+| `/revert [N]`, `/rewind [N]` | Roll the on-disk game file back to the last clean iter (bare) or to iter `N` specifically. Falls back to `best.html` when no clean iter snapshot exists. The iter counter does NOT reset — only the **file** rewinds; the conversation continues and your next feedback applies to the reverted file. Use this when the model breaks something on the latest turn instead of typing "undo that" and watching it break more. Added 2026-05-25 after a 10-trace audit showed harness gates catch only ~5-10% of "model takes liberty beyond user scope" failures across the full feedback shape — a one-keystroke escape hatch beats more clever gates. Emits a `user_revert` trace event for postmortem analysis. |
 | `/quit` | Exit. |
 | `/open` | Reveal the current HTML in the file browser. |
 | `/log`, `/paths`, `/files` | Print log + artifact paths. |
@@ -1631,6 +1632,13 @@ hand.
 
 - **`Playwright Chromium missing`**: run `env -u PLAYWRIGHT_BROWSERS_PATH
   .venv/bin/python -m playwright install chromium`.
+- **Open HTML like `chat.py` (no regular-Chrome `file://` blocks)** — same
+  Playwright Chromium + flags as the TUI verifier. One-shot:
+  `./scripts/open-game-html.sh games/your_game.html` (no arg = file picker).
+  App-menu icon (Linux): run once
+  `./scripts/install-coding-box-chromium-launcher.sh`, then pin **Chromium
+  Test** (Chromium logo + TEST badge; separate dock entry from system Chrome).
+  Mac equivalent: “Chrome for Testing” when `chat.py` runs.
 - **`MLX out of memory`**: lower the wired-memory cap or pick a smaller
   quant. `MLX_PREFILL_STEP_SIZE=512` if you OOM mid-generation.
   DeepSeek-V4 Flash specifically requires 512 (auto-detected via path
