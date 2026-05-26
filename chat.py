@@ -2959,7 +2959,7 @@ class CodingBoxApp(App):
         # Clear manual /help status content on the next non-help input.
         if self._status_manual_body is not None:
             lower = text.lower()
-            if lower not in {"/help", "/h", "/?"}:
+            if not lower.startswith("/help") and lower not in {"/h", "/?"}:
                 self._status_manual_body = None
 
         # Step-mode (Stop-Losing-To-OneShot todo #1): when the agent has
@@ -3058,7 +3058,7 @@ class CodingBoxApp(App):
         self._log(f"[bold cyan]>[/bold cyan] /{cmd}{(' ' + arg) if arg else ''}")
         try:
             if cmd in ("help", "h", "?"):
-                self._cmd_help()
+                self._cmd_help(arg)
             elif cmd in ("list", "models"):
                 self._cmd_list_models()
             elif cmd in ("model", "load"):
@@ -3141,7 +3141,19 @@ class CodingBoxApp(App):
         except Exception as e:
             self._log_error(f"/{cmd} failed: {e}")
 
-    def _cmd_help(self) -> None:
+    def _cmd_help(self, arg: str = "") -> None:
+        import tui_help as _tui_help
+
+        topic_id = _tui_help.normalize_help_topic(arg)
+        if arg.strip() and topic_id is None:
+            for line in _tui_help.format_unknown_topic_message(arg):
+                self._log_info(line)
+            return
+        if topic_id is not None:
+            lines = _tui_help.help_topic_lines(topic_id) or []
+            self._render_help_lines(lines)
+            return
+
         lines = [
             "[bold cyan]── what to type when ──[/bold cyan]",
             "  [b]first run[/b]                  describe the game you want, press Enter",
@@ -3263,7 +3275,8 @@ class CodingBoxApp(App):
             "  [b]/ref <path>[/b]               attach a reference image (PNG/JPEG/WebP) to the NEXT user turn",
             "                                  [dim]works before /new too; drag a file from Finder into the terminal to fill the path[/dim]",
             "                                  [dim]VLM-only — say 'make the game look like this' on the next line[/dim]",
-            "  [b]/help[/b]                     show this help [dim](aliases /h /?)[/dim]",
+            "  [b]/help[/b]                     command list [dim](aliases /h /?)[/dim]",
+            "  [b]/help <topic>[/b]             detail: [b]feedback[/b], [b]vlm-critique[/b], [b]rawfeedback[/b]",
             "",
             "[bold cyan]── visual playtest recipes (auto-applied) ──[/bold cyan]",
             "  Hand-curated MECHANISM-keyed checklists the VLM critic uses. The matcher",
@@ -3286,6 +3299,10 @@ class CodingBoxApp(App):
             "[dim]Example: /seed games/asteroids.html  →  /new add multiplayer  "
             "→  /new add boss  ▸ both use asteroids.html[/dim]",
         ]
+        lines.extend(_tui_help.help_topics_index_lines())
+        self._render_help_lines(lines)
+
+    def _render_help_lines(self, lines: list[str]) -> None:
         for line in lines:
             self._log(line)
         # Mirror /help in the right status panel so command guidance is

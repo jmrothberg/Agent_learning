@@ -1043,7 +1043,7 @@ is data the agent will see, not just developer notes.
 
 | Command | What it does |
 |---|---|
-| `/help`, `/h`, `/?` | Show command list. |
+| `/help`, `/h`, `/?` | Show command list. `/help topics` — full index; `/help <topic>` — static detail pages (no LLM), e.g. `feedback`, `vlm-critique`, `feedback-flows`, `models`, `gpu`, `session`, `assets`. Source: `tui_help.py`. |
 | `/list`, `/models` | Inventory of MLX + Ollama models, with `[VLM]` / `[text]` labels. `*` = loaded in Ollama VRAM on any slot (11434–11436); `← active` = bound to this session (coder/model2/model3), not VRAM. |
 | `/model <N\|name>`, `/load <N\|name>` | Stage the coder model (sticky across `/new`). |
 | `/modelall <N\|name>`, `/loadall` | Stage the **same** model on all three Ollama slots (coder + critic + architect). Bare `/modelall` clears all three. |
