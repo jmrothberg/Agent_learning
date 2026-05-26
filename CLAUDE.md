@@ -40,6 +40,7 @@ TORCH_CUDA=121 ./scripts/install_diffuser.sh    # older NVIDIA only
 
 # Run the TUI (recommended)
 .venv/bin/python chat.py
+# In the TUI: /help (commands) · /help topics · /help feedback-flows (static detail, tui_help.py)
 
 # One-shot CLI
 .venv/bin/python coder.py "build me a snake game with a wraparound board"

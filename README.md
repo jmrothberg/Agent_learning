@@ -1082,6 +1082,22 @@ is data the agent will see, not just developer notes.
 | `/model-class <auto\|small\|mid\|large>` | Override system-prompt trim (sticky; default `auto` → lean ~5 KB schema). |
 | `/check [<N\|model>]` | Run visual review on the latest screenshot. `N` selects by `/list` number. Bare `/check` uses the active VLM session model. `claude-…` routes Anthropic, `gpt-…` routes OpenAI, and other names resolve local MLX VLMs. In wait mode ON, suggestion is prefilled in input for edit/Enter; in wait mode OFF, coaching auto-queues to the next coding turn. |
 
+### TUI help topics (static, no LLM)
+
+Beyond the slash-command table, the TUI serves **topic help** from
+`tui_help.py` (committed, tested in `tests/test_tui_help.py`):
+
+- **`/help`** — full command list (unchanged role) plus a short pointer to topics.
+- **`/help topics`** — categorized index of all topic pages.
+- **`/help <topic>`** — detail page, e.g. `feedback`, `vlm-critique`,
+  `feedback-flows`, `rawfeedback`, `models`, `gpu`, `session`, `assets`,
+  `check`, `revert`, `ship`, …
+
+Aliases work (`/help vc`, `/help rewind`, `/help memory` → playbook, …).
+Unknown topics list valid names. This is the intended **corpus** for a
+future optional `/helpme` (retrieve chunks + idle-gated short LLM
+paraphrase) — see [FOR_NEXT_LLM.md — TUI help](FOR_NEXT_LLM.md#tui-help-tui_helppy--shipped-foundation-for-smarter-help-later).
+
 ### Model topologies (1, 2, and 3 model runs)
 
 The TUI always has one **coder** model: `/model` or `/load` selects the

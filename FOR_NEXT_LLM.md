@@ -10,12 +10,11 @@ we keep improving.
 This document is the **brief** for that work. Read it before you
 propose changes.
 
-> **Push target (corrected 2026-05-23):** `git push upstream main`.
-> The local `origin` remote points at `jmrothberg/Agent_learning_overlay`
-> which does NOT exist on GitHub. The CLAUDE.md "repo identity" note
-> at the top of the project is wrong and has been overridden by user
-> directive; canonical repo is `https://github.com/jmrothberg/Agent_learning`.
-> Memory file: `repo-main-is-upstream`.
+> **Push target:** Harness / overlay work → **`git push origin main`**
+> on `https://github.com/jmrothberg/Agent_learning_overlay` (local
+> `origin`). **`upstream`** (`jmrothberg/Agent_learning`) is the program
+> line — do not push overlay-only commits there unless the user explicitly
+> retargets. See `CLAUDE.md` repo identity and README remote URLs.
 
 > **For changes since the 2026-05-22 byline** — see "Recent ships" at
 > the bottom. The mental model worth internalizing up front: the four
@@ -94,7 +93,7 @@ Read the `MEMORY.md` index before touching code. Each rule was learned the hard 
 | Rule | What it forbids |
 |---|---|
 | [agent-must-beat-zero-shot] | **The North Star (2026-05-23).** The agent must improve on raw-LLM-plus-user-feedback. If a classifier / regex / directive ever OVERRIDES the user's typed words, the change is wrong — even if it "fixes" a specific trace. The accumulated regex patches that wrap user feedback caused the Doom misroute incident; `/rawfeedback` defaults ON now and is the structural answer. Before adding ANY classifier patch, ask: "does this help the model do something it wouldn't have done with the raw text? Or am I just patching the LAST regex's misfire?" |
-| [repo-main-is-upstream] | Treating `origin` as authoritative. Push target is `git push upstream main`. The local `origin` (`Agent_learning_overlay`) does not exist on GitHub. |
+| [repo-main-is-upstream] | Pushing harness-only work to `upstream` (`Agent_learning`) and overwriting the program line. Default push is `origin` → `Agent_learning_overlay`. |
 | [feedback-media-requests-never-defer] | Letting blocker-first deferral swallow art/sound asks. Media runs on GPU 0, code runs on slot 1. Independent paths. |
 | [multi-frame-intent-must-be-honored] | Silently emitting "idle only" when the goal asks for walk/attack/idle frames. The planner inverts to `from_image` chains. |
 | [descriptive-verbs-are-art-change] | Treating "the sprites should look like X" as not-art-change. Verb set includes `look`, `want`, `need`, `should`. Fuzzy entity stems too. |
@@ -210,6 +209,45 @@ When a user complains "the agent ignored what I said", check whether
 flow #4 was on (`/rawfeedback off`). When the agent doesn't seem to
 self-test, check #3. When the prompt is huge, check #2 + the
 opening-book block size.
+
+**TUI help for humans:** `/help` is the command cheat sheet; **`/help
+<topic>`** pulls static pages from **`tui_help.py`** (30 topics:
+`feedback-flows`, `feedback`, `vlm-critique`, `models`, `gpu`,
+`session`, `assets`, …). **`/help topics`** is the full index. No LLM,
+no GPU — works on Mac and single-GPU the same as on the 4-GPU box.
+Point confused users at `/help feedback-flows` before they toggle the
+wrong switch.
+
+---
+
+## TUI help (`tui_help.py`) — shipped, foundation for smarter help later
+
+**Shipped 2026-05-26.** Static topic pages only — intentionally **not**
+built with an LLM yet.
+
+| Piece | Role |
+|---|---|
+| `tui_help.py` | `_HELP_TOPICS` (Rich-markup lines per topic), `_TOPIC_ALIASES`, `help_topics_index_lines()` |
+| `chat.py` | `/help [topic]` → `_cmd_help(arg)` → `_render_help_lines()` (status panel mirror) |
+| `tests/test_tui_help.py` | Aliases, topic content, app wiring |
+
+**Design choices worth preserving when adding `/helpme` later:**
+
+1. **Curated chunks, not README-at-runtime.** README stays long-form;
+   `tui_help.py` is the retrieval corpus (one topic = one help unit).
+2. **Retrieve-first, LLM-second (future).** Strong topic/alias match →
+   print chunk as today. Weak free-text question + **agent idle** →
+   optional small `stream_chat` with top 2–3 chunks as SOURCES only
+   (2–4 sentences; say "not in help" if missing). Never route through
+   `GameAgent.run()` — no feedback queue, no HTML, no session messages.
+3. **GPU etiquette (future).** Retrieval always free. LLM help only when
+   no slot is streaming; prefer architect slot / GPU 3 when staged, else
+   coder slot when idle; never load a model just for help.
+4. **Extend by editing data.** New topic = add `_HELP_TOPICS` entry +
+   aliases + blurb; no prompt bloat.
+
+**Do not build `/helpme` unless asked** — the static layer is the
+foundation; see "What's open" item 8 below.
 
 ---
 
@@ -338,15 +376,22 @@ at `~/.claude/plans/vlm-critic-smarter-without-bigger.md` and
    Vector retrieval (local sentence-transformers) would fix this.
    Bullet schema is stable; swap inside `memory.Playbook.retrieve`.
 
+8. **Smarter TUI help (`/helpme` or free-text `/help`).** **Not built.**
+   Foundation is in place (`tui_help.py`). Planned shape: Jaccard/keyword
+   retrieve top chunks → optional idle-gated paraphrase on sidecar slot;
+   never `GameAgent`, never whole README. Human-in-the-loop topic authoring
+   stays the default (append to `_HELP_TOPICS` when behavior changes).
+
 ---
 
 ## When in doubt — read these files in order
 
 1. **`CLAUDE.md`** — the operational summary the user wrote. Loaded into every session by `agent._read_project_config`.
 2. **`README.md`** — the deep walkthrough. Has a `Major future improvements` section with the project's own backlog.
-3. **`~/.claude/projects/-home-jonathan-Agent-learning/memory/MEMORY.md`** — the index of standing rules. Every entry is a hard-learned constraint.
-4. **`HARNESS_DEBUG.md`** — what the verifier does AND doesn't catch. The blunt version.
-5. **Recent traces in `games/traces/`** — the empirical truth. If your proposed change doesn't relate to a real trace pattern, you're probably making the prompt longer for no payoff.
+3. **`tui_help.py`** — TUI topic help the human reads via `/help <topic>` (and the corpus for a future `/helpme`).
+4. **`~/.claude/projects/-home-jonathan-Agent-learning/memory/MEMORY.md`** — the index of standing rules. Every entry is a hard-learned constraint.
+5. **`HARNESS_DEBUG.md`** — what the verifier does AND doesn't catch. The blunt version.
+6. **Recent traces in `games/traces/`** — the empirical truth. If your proposed change doesn't relate to a real trace pattern, you're probably making the prompt longer for no payoff.
 
 ---
 
@@ -374,6 +419,9 @@ The user's standing principle: *"never make changes for one game, anything helpi
   MUST source iteration from `self._last_tested_iter`, not a free
   variable. Plus Codex review slice 1 — `@@` breadcrumb anchor,
   plan-quality examples, "don't re-emit Phase-A" hard-rule.)
+— Composer, 2026-05-26 (`tui_help.py` static `/help <topic>` pages;
+  push target note fixed for `Agent_learning_overlay`; smarter `/helpme`
+  documented as future work only — not implemented.)
 
 ---
 
@@ -508,6 +556,12 @@ above; this section adds lessons that are NOT in another section.
   alone miss the second path. Pattern is documented in the new memory
   file and the two regression tests added today (one each for
   context-pressure and dead-first-build).
+- **Static TUI help topics** (2026-05-26). `tui_help.py` + `/help
+  <topic>` / `/help topics` — 30 curated pages (feedback vs
+  vlm-critique, GPU topology, session sticky state, assets, …). No LLM.
+  Intended corpus for a future idle-gated `/helpme`; see the dedicated
+  section above. When you change toggle behavior, update `tui_help.py`
+  in the same PR — do not rely on README alone for operator confusion.
 
 **Where to start when picking this up:** run a fresh session against
 any of the 25 archetypes. Watch the right-side status panel —
