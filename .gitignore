@@ -69,3 +69,7 @@ games/game-memory/
 .env
 .env.*
 !.env.example
+
+# Local vLLM vs Ollama bench (machine-specific; never publish)
+scripts/bench_vllm_vs_ollama.py
+games/bench/
