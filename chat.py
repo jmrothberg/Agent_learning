@@ -102,7 +102,6 @@ from textual.widgets import Footer, Header, Input, OptionList, RichLog, Static
 from textual.widgets._option_list import Option
 
 import backend as backend_mod
-from overlay_identity import PRODUCT_NAME
 from agent import (
     AgentEvent,
     DEFAULT_NUM_CTX,
@@ -113,6 +112,10 @@ from agent import (
     parse_num_ctx_arg,
 )
 from tools import LiveBrowser
+
+# Shown in the Textual window header (top bar). Bump when verifying a fresh git pull.
+CHAT_APP_VERSION = "1.1"
+CHAT_APP_TITLE = f"Coding Agent v{CHAT_APP_VERSION}"
 
 # xterm SGR uses 2 for right press; some stacks report 3.
 _RIGHT_CLICK_BUTTONS = frozenset({2, 3})
@@ -1168,7 +1171,7 @@ class CodingBoxApp(App):
             yield Footer()
 
     async def on_mount(self) -> None:
-        self.title = PRODUCT_NAME
+        self.title = CHAT_APP_TITLE
         self.sub_title = "type your game idea below, then Enter"
         self._update_status()
         # Periodic refresh so the activity line ages naturally — tok/s,
@@ -3104,6 +3107,8 @@ class CodingBoxApp(App):
                 self._cmd_status()
             elif cmd == "wait":
                 self._cmd_toggle_wait(arg)
+            elif cmd == "wiki":
+                self._cmd_toggle_wiki(arg)
             elif cmd in ("iter-detail", "iterdetail"):
                 self._cmd_iter_detail(arg)
             elif cmd == "mode":
@@ -3223,7 +3228,9 @@ class CodingBoxApp(App):
             "  [b]/list[/b]                      unified Ollama + MLX (+ cloud if keys set) list with numbers [dim](alias /models)[/dim]",
             "  [b]/load <N|name>[/b]             pick model #N from /list (any backend); sticky across /new [dim](alias /model)[/dim]",
             "  [b]/model2 <N|name> [--role critic|architect][/b]   stage sidecar slot 2",
+            "                                  [dim]omit N to inherit staged model 1: /model2 --role critic or /model2 --critic[/dim]",
             "  [b]/model3 <N|name> [--role critic|architect][/b]   stage sidecar slot 3",
+            "                                  [dim]omit N to inherit model 1: /model3 --role architect or /model3 --architect[/dim]",
             "  [b]/modelall <N|name>[/b]         stage SAME model on all 3 slots (coder + critic + architect) [dim](alias /loadall)[/dim]",
             "  [b]/backend <auto|ollama|mlx|openai|anthropic>[/b]  default backend when no specific model is staged",
             "                                  [dim]cloud backends require OPENAI_API_KEY / ANTHROPIC_API_KEY in shell env[/dim]",
@@ -3897,22 +3904,31 @@ class CodingBoxApp(App):
         self._session_model = chosen_name
         if getattr(self, "_id", None) is not None:
             self.title = (
-                f"{PRODUCT_NAME} — {new_info.name.upper()} · {chosen_name}"
+                f"{CHAT_APP_TITLE} — {new_info.name.upper()} · {chosen_name}"
             )
         return True
 
     def _parse_model_and_role(self, arg: str) -> tuple[str, str | None]:
         role = None
-        # Support `--role critic` or `-r critic` etc. (case-insensitive)
-        match = re.search(r"\s+--(?:role|r)\s+(\w+)", arg, re.IGNORECASE)
+        # `--role critic` may follow the model token ("6 --role critic") or
+        # stand alone at the start ("--role critic") when inheriting model 1.
+        match = re.search(r"(?:^|\s+)--(?:role|r)\s+(\w+)", arg, re.IGNORECASE)
         if match:
             role = match.group(1).lower()
             arg = arg[:match.start()].strip()
         else:
-            match_short = re.search(r"\s+-r\s+(\w+)", arg, re.IGNORECASE)
+            match_short = re.search(r"(?:^|\s+)-r\s+(\w+)", arg, re.IGNORECASE)
             if match_short:
                 role = match_short.group(1).lower()
                 arg = arg[:match_short.start()].strip()
+            else:
+                # Shorthand: /model2 --critic | /model3 --architect (inherit model 1)
+                match_role_flag = re.search(
+                    r"(?:^|\s+)--(critic|architect)\b", arg, re.IGNORECASE
+                )
+                if match_role_flag:
+                    role = match_role_flag.group(1).lower()
+                    arg = arg[:match_role_flag.start()].strip()
         return arg, role
 
     def _cmd_set_model(self, arg: str) -> None:
@@ -5232,6 +5248,44 @@ class CodingBoxApp(App):
         # at the next iter-pause event.
         self._update_mode_bar()
 
+    def _cmd_toggle_wiki(self, arg: str) -> None:
+        """/wiki — toggle the Wikipedia research lookup that prepends
+        a <reference> block to the planning turn. Default OFF: empirical
+        test 2026-05-19 returned 0/10 hits on common game goals
+        (asteroids, pacman, donkey kong, space invaders, missile
+        command, street fighter, doom, snake, 2d roguelike, tetris) so
+        the lookup is pure latency unless the operator opts in to test
+        or improve the matcher. /wiki on or /wiki off for explicit
+        set; bare /wiki toggles. Mirrors /wait shape.
+        """
+        if self.agent is None:
+            self._log_info(
+                "no active session — start one and try /wiki again "
+                "(it applies once an agent is running)"
+            )
+            return
+        arg_lc = arg.strip().lower()
+        if arg_lc in ("on", "true", "1"):
+            new_state = True
+        elif arg_lc in ("off", "false", "0"):
+            new_state = False
+        else:
+            new_state = not bool(getattr(self.agent, "_research_enabled", False))
+        self.agent.set_research_enabled(new_state)
+        if new_state:
+            self._log_info(
+                "[yellow]/wiki ON[/yellow] — agent will look up the goal "
+                "on Wikipedia before planning (8s/request; cumulative "
+                "wait visible in trace as `research_attempted`). Empirical "
+                "hit rate is currently ~0/10 on common goals; opt in "
+                "only when testing the matcher."
+            )
+        else:
+            self._log_info(
+                "/wiki off — research lookup skipped before planning."
+            )
+        self._update_status()
+
     def _cmd_audit_playbook(self) -> None:
         """/audit — shell out to scripts/audit_playbook.py and print
         the table inline so the user can judge bullet earnings without
@@ -5718,7 +5772,7 @@ class CodingBoxApp(App):
                 except Exception as e:
                     self._log_error(f"could not initialize backend3: {e}")
 
-        self.title = f"{PRODUCT_NAME} — {info.name.upper()} · {model_name}"
+        self.title = f"{CHAT_APP_TITLE} — {info.name.upper()} · {model_name}"
         self._log_info(
             f"Using [b]{info.name.upper()}[/b] · [b]{_esc(model_name)}[/b] "
             f"[dim]({_esc(info.source)})[/dim]"
@@ -5820,9 +5874,17 @@ class CodingBoxApp(App):
         # guess model size to set the watchdog. See
         # resolve_session_timeouts for rationale.
         stall_s, overall_s = resolve_session_timeouts(model_name)
+        # `overall_seconds` no longer caps active generation — that
+        # cutoff was removed from ollama_io.stream_chat and
+        # MLXBackend._stream_once after street-fighter trace
+        # 20260518_220003 cut a still-producing 1800s MLX stream. The
+        # value is now used only as the MLX cold-load timeout (waiting
+        # for the model to land in VRAM before any tokens arrive). Log
+        # message and trace event updated to reflect actual behavior.
         self._log_info(
-            f"[dim]stream timeouts: stall={stall_s:.0f}s "
-            f"overall={overall_s:.0f}s (model-agnostic)[/dim]"
+            f"[dim]stream guards: no-activity stall={stall_s:.0f}s, "
+            f"mlx cold-load cap={overall_s:.0f}s "
+            f"(active streams not capped by wall-clock)[/dim]"
         )
         # Trace emission is deferred until just after GameAgent is
         # constructed — see the timeouts_resolved trace event below.
@@ -5830,6 +5892,9 @@ class CodingBoxApp(App):
             "kind": "timeouts_resolved",
             "stall_seconds": stall_s,
             "overall_seconds": overall_s,
+            "stall_seconds_role": "no_activity_abort",
+            "overall_seconds_role": "mlx_cold_load_cap_only",
+            "active_stream_wallclock_cap": False,
         }
 
         self.agent = GameAgent(

@@ -1611,7 +1611,10 @@ def continuation_instruction(current_file: str) -> str:
         "below is the exact text on disk right now — patch against it "
         "character-for-character. Reply with one or more <patch> "
         "blocks that address the feedback. Use a full <html_file> "
-        "only if patches truly cannot express the change.\n\n"
+        "only if patches truly cannot express the change. If you emit "
+        "a full <html_file> because the feedback changes the game's "
+        "runtime shape, also emit a fresh <probes>...</probes> block "
+        "for the new behavior; old probes may no longer apply.\n\n"
         # Surface the diffuser path on every post-ship turn. Without
         # this reminder the model defaults to a code-only mental model
         # and substitutes inline SVG / ctx primitives / AudioContext

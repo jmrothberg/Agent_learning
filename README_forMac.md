@@ -16,11 +16,16 @@ To prevent having to load multiple copies or specify model names repeatedly, you
 # 1. Stage your main model on Model 1 (this is the baseline Coder)
 /model qwen3.6:27b
 
-# 2. Stage Model 2 as the Visual Critic by inheriting Model 1 directly (just pass the role!)
-/model2 --role critic
+# 2. Stage Model 1 first (required — model2 inherits from it when you omit N)
+/model 6
 
-# 3. Stage Model 3 as the Architect by inheriting Model 1 directly
+# 3. Stage Model 2 as the Visual Critic by inheriting Model 1 (role only, no number)
+/model2 --role critic
+# Same thing: /model2 --critic
+
+# 4. Stage Model 3 as the Architect by inheriting Model 1 (role only, no number)
 /model3 --role architect
+# Same thing: /model3 --architect
 ```
 
 ### Why this is incredibly optimized:
@@ -61,15 +66,16 @@ The right-hand status panel scroll-pane in `chat.py` will render distinct, paral
    .venv/bin/python chat.py
    ```
 2. Run `/list` to ensure your models are registered.
-3. Type the inheritance commands:
+3. Stage model 1, then inherit roles (order matters — model2 cannot inherit without model 1 staged):
    ```bash
-   /model <number_for_qwen_27b_vlm>
+   /model 6
    /model2 --role critic
    /model3 --role architect
    ```
+   Shorthand: `/model2 --critic` and `/model3 --architect`. Both slots share the same parser as model2 (fixed 2026-05-21).
 4. Verify the staged roles are correct via `/status`.
 5. Run `/new build a platformer` to start the game development loop.
 6. Verify in the logs that:
-   - **Model 2 (Architect)** coordinates high-level planning.
    - **Model 1 (Coder)** writes raw code.
-   - **Model 3 (Critic)** playtests screenshots out-of-band and feeds back visual bugs.
+   - **Model 2 (Critic)** playtests screenshots out-of-band and feeds back visual bugs.
+   - **Model 3 (Architect)** coordinates high-level planning when staged with `--role architect`.

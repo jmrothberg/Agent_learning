@@ -38,18 +38,46 @@ from __future__ import annotations
 
 import json
 import re
+import ssl
 import time
 import urllib.parse
 import urllib.request
 from typing import Optional
 
 
+# Live-debug 2026-05-19 (build-a-complete-playable-2d-r trace): every
+# research.fetch call returned None on representative goals because
+# Python 3.12's framework build ships an empty CA bundle path
+# (/Library/Frameworks/Python.framework/Versions/3.12/etc/openssl/cert.pem
+# is missing on the user's machine), so every HTTPS handshake to
+# en.wikipedia.org failed with CERTIFICATE_VERIFY_FAILED. _http_json
+# silently swallowed the SSLError, returned None, and the caller saw
+# zero opensearch hits across "asteroids", "pacman", "tetris",
+# "donkey kong", "space invaders", etc. Use certifi's bundled CA
+# certs when available — same approach the requests/httpx libraries
+# take. Falls back to the platform default if certifi isn't installed
+# (the agent's venv installs it transitively via diffusers).
+def _build_ssl_context() -> ssl.SSLContext:
+    try:
+        import certifi  # type: ignore
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
+
+
+_SSL_CONTEXT = _build_ssl_context()
+
 _TIMEOUT = 8.0
 _MAX_REFERENCE_CHARS = 1800
-# Wikipedia silently returns empty results when we make ~5+ requests in a
-# few hundred ms. A small spacer between requests fixes it; the whole
-# fetch is still well under 3s in the typical case.
-_REQUEST_SPACING_S = 0.6
+# Wikipedia silently returns empty results (HTTP 200, but `[]` titles)
+# when anonymous requests come in too fast. Live-debug 2026-05-19: 0.6s
+# spacing tripped the rate limiter after ~5 calls. Empirical floor that
+# survives a 26-query test burst: 1.5s. Costs at most a few extra
+# seconds on a single-game lookup; sessions only run research once.
+# If you see "MISS" on titles that you know exist (Joust, Defender,
+# Mr. Do!, etc.), bump this to 2.0s — Wikimedia's anonymous quota
+# fluctuates by region and time of day.
+_REQUEST_SPACING_S = 1.5
 _LAST_REQUEST_AT: list[float] = [0.0]
 # A real UA is required by Wikimedia; a generic one gets 403'd.
 _USER_AGENT = "Agent-Learning/1.0 (local-llm coding harness)"
@@ -111,7 +139,9 @@ def _http_json(url: str, *, timeout: float = _TIMEOUT):
     _LAST_REQUEST_AT[0] = time.monotonic()
     try:
         req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(
+            req, timeout=timeout, context=_SSL_CONTEXT,
+        ) as resp:
             return json.loads(resp.read().decode("utf-8", errors="replace"))
     except Exception:
         return None

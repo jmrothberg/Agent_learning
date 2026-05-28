@@ -44,6 +44,7 @@ history every turn so context stays bounded regardless of iteration count.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -1773,6 +1774,11 @@ class GameAgent:
         # (coder.py). Off by default; existing autonomous behavior is
         # preserved when the flag stays False.
         self._step_mode: bool = False
+        # Wikipedia research toggle. OFF by default — empirical test
+        # 2026-05-19 returned 0/10 hits on common game goals. /wiki on
+        # in chat.py (or set _research_enabled=True on the agent) opts
+        # in for users who want to test the matcher.
+        self._research_enabled: bool = False
         # Auto-step-mode (DK trace 20260513_122154): when the first
         # iter fails, the harness auto-arms /wait so the user can
         # intervene before the cascade. Fires exactly once per session;
@@ -2020,6 +2026,20 @@ class GameAgent:
         # final-iter test guarantee to fold the late test into the
         # outcome record.
         self._last_test_report: dict | None = None
+        # Persistence counter for harness `warnings`. Each non-empty
+        # warning string in a test report counts as +1 per consecutive
+        # iter; absent strings reset to 0. When the count reaches
+        # _WARNING_COMPACT_THRESHOLD (3rd consecutive appearance), the
+        # model-facing rendering replaces the body with a one-line
+        # collapsed form. The full warning text stays in `report` (and
+        # therefore in the trace JSONL) for postmortem.
+        # Evidence: fighing-game trace 20260519_153115 — 8 unused-asset
+        # warnings (~1.6 KB) repeated verbatim every iter for 4 iters
+        # while the model stopped reacting. Carrying that text into
+        # the working set after it has clearly been seen wastes
+        # context. Domain-neutral by construction — the dedup is keyed
+        # by exact-string equality, not by warning content.
+        self._warning_persistence: dict[str, int] = {}
         self._use_prefill = bool(use_prefill)
         self._use_vlm_critique = bool(use_vlm_critique)
         # Auto-staff flag (2026-05-21): True when _use_vlm_critique was
@@ -2079,6 +2099,10 @@ class GameAgent:
         # join the report. Empty list = no model probes (universal probes
         # still run).
         self._probes: list[dict] = []
+        # Latest continuation request. Kept separate from `_goal` so an
+        # extension can change the requested runtime shape without
+        # rewriting the original session label.
+        self._continuation_feedback: str = ""
         # Classification of the most-recent probe set into structural-
         # vs-dynamic. {"dynamic": [...], "structural": [...], "ratio":
         # float}. Populated after Phase A; consumed when assembling
@@ -3285,6 +3309,19 @@ class GameAgent:
         No-op when no wait is active."""
         self._step_continue = True
         self._trace({"kind": "step_continue_signal"})
+
+    def set_research_enabled(self, on: bool) -> None:
+        """Toggle Wikipedia research lookup before planning. OFF by
+        default per /wiki slash command in chat.py — empirical test
+        2026-05-19 returned 0/10 hits on common game goals so the
+        lookup is pure latency unless the operator opts in to test or
+        improve the matcher.
+        """
+        self._research_enabled = bool(on)
+        self._trace({
+            "kind": "research_enabled_set",
+            "on": self._research_enabled,
+        })
 
     def set_auto_step_on_failure(self, on: bool) -> None:
         """Enable/disable auto step-mode arming on first failed iter."""
@@ -7090,7 +7127,15 @@ class GameAgent:
         # Queue the "what's still missing" line for the next user turn
         # so the building model gets concrete visual feedback. Only when
         # it's actionable (non-empty, and not "nothing obvious").
-        note = (verdict.note or "").strip()
+        raw_note = (verdict.note or "").strip()
+        note = self._clean_actionable_vision_note(raw_note)
+        if raw_note and not note:
+            self._trace({
+                "kind": "vision_judge_coaching_suppressed",
+                "iteration": iteration,
+                "reason": "non_actionable_fragment",
+                "note": raw_note[:160],
+            })
         if note and note.lower().strip(".") != "nothing obvious":
             prefix = (
                 "VISUAL JUDGE (looked at the screenshot of your last "
@@ -8406,6 +8451,178 @@ class GameAgent:
         m = _DIAGNOSE_RE.search(reply)
         return m.group(1).strip() if m else None
 
+    # ---- harness `warnings` persistence dedup --------------------------
+    #
+    # See `_warning_persistence` docstring in __init__. Threshold is the
+    # iter on which we START compacting (so warnings are shown in full
+    # for the first two iters, then compacted from the third onward).
+    _WARNING_COMPACT_THRESHOLD: int = 3
+
+    @staticmethod
+    def _hash_warning(text: str) -> str:
+        """Stable short hash for warning-string equality keying."""
+        h = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
+        return h[:16]
+
+    def _advance_warning_persistence(self, warnings: list[str]) -> None:
+        """Update per-warning consecutive-iter counts for the current
+        iter's harness warnings. Call EXACTLY ONCE per iter — usually
+        right after the test report is computed and before
+        `_format_report_for_model` is called. Streak resets to zero
+        when a previously-seen warning is absent this iter.
+        """
+        seen: set[str] = set()
+        for w in warnings or []:
+            h = self._hash_warning(str(w))
+            seen.add(h)
+            self._warning_persistence[h] = self._warning_persistence.get(h, 0) + 1
+        # Drop counters for warnings not present this iter (streak broken).
+        self._warning_persistence = {
+            h: c for h, c in self._warning_persistence.items() if h in seen
+        }
+
+    def _compact_warnings_for_prompt(self, warnings: list[str]) -> list[str]:
+        """Return a model-facing warnings list with persistent items
+        replaced by a one-line collapsed form. Does NOT advance
+        counters — call `_advance_warning_persistence` separately
+        once per iter. Original `warnings` list is not mutated.
+        """
+        out: list[str] = []
+        for w in warnings or []:
+            text = str(w)
+            count = self._warning_persistence.get(self._hash_warning(text), 0)
+            if count >= self._WARNING_COMPACT_THRESHOLD:
+                # First non-empty line, capped — enough for the model to
+                # remember which warning this is without re-reading the
+                # full body each iter.
+                first_line = text.strip().splitlines()[0] if text.strip() else ""
+                preview = first_line[:80].rstrip()
+                out.append(
+                    f"persistent warning [seen {count}× in a row]: {preview}…"
+                )
+            else:
+                out.append(text)
+        return out
+
+    def _format_report_for_model(self, report: dict) -> str:
+        """Wrapper around `tools.format_report_for_model` that compacts
+        persistent harness warnings before formatting. Trace and any
+        other consumers of the original `report` see full warnings;
+        only the prompt-rendering path uses the compacted view.
+        """
+        if not report:
+            return format_report_for_model(report)
+        compacted = self._compact_warnings_for_prompt(
+            report.get("warnings") or []
+        )
+        rfp = dict(report)
+        rfp["warnings"] = compacted
+        return format_report_for_model(rfp)
+
+    # Generic, domain-neutral tokens that indicate the VLM note is
+    # ACTIONABLE coaching rather than pure screenshot narration. Used
+    # by `_clean_actionable_vision_note` below as a relevance gate
+    # alongside the existing structural filters.
+    #
+    # Evidence: fighing-game trace 20260519_153115 surfaced two purely
+    # descriptive notes that the prior filter let through:
+    #   iter 3: "Controls are listed at the bottom"
+    #   iter 4: "Both images show very low-resolution, pixel-art style"
+    # Both told the model nothing it could act on. The first iter's
+    # useful note ("look very basic ... There are no complex super…")
+    # passes this gate via the negation token "no".
+    #
+    # The list is intentionally short and general — not goal-derived,
+    # not genre-specific. False negatives (dropping a legitimately
+    # useful note) are preferable to false positives (injecting
+    # descriptive narration as coaching) on local 27B-class models
+    # that already have limited context to spend on guidance.
+    _VISION_NOTE_ACTIONABLE_TOKENS: frozenset[str] = frozenset({
+        # Negation / absence.
+        "no", "none", "nothing", "without", "missing", "lacks",
+        "lack", "never",
+        # Direct change verbs.
+        "add", "fix", "make", "replace", "remove", "move", "change",
+        "improve",
+        # Need / should / want.
+        "needs", "need", "should", "must",
+        # Comparative-implies-change.
+        "too", "over", "under",
+    })
+
+    @classmethod
+    def _clean_actionable_vision_note(cls, note: str) -> str:
+        """Return a model-facing vision note, or '' for fragments.
+
+        The local VLM sometimes returns analysis scraps ("Image 1",
+        "compare with the goal", unmatched parentheses). Those are
+        useful in raw traces but harmful as prompt coaching for small
+        local coding models. Keep this structural and domain-neutral.
+
+        Beyond the structural filters, also drop notes that contain no
+        actionable token (negation, change verb, modal, or comparative
+        — see `_VISION_NOTE_ACTIONABLE_TOKENS`). Pure screenshot
+        narration is one of the dominant noise sources from local VLMs
+        and the model cannot act on it.
+        """
+        text = str(note or "").strip()
+        text = re.sub(r"^\s*(?:[-*]|\d+[.)])\s*", "", text).strip()
+        if not text:
+            return ""
+        low = text.lower()
+        if (
+            low.startswith(("image ", "wait,", "let me "))
+            or "compare with the goal" in low
+            or "re-read the prompt" in low
+        ):
+            return ""
+        words = re.findall(r"[A-Za-z0-9]+", text)
+        if len(words) < 3:
+            return ""
+        if text.count("(") != text.count(")") or text.count("[") != text.count("]"):
+            return ""
+        if words[-1].lower() in {
+            "the", "a", "an", "and", "or", "but", "with", "from",
+            "to", "of", "in", "on", "went", "is", "are",
+        }:
+            return ""
+        # Relevance gate: keep only notes with at least one actionable
+        # token. Generic list, not goal-derived. See class docstring
+        # for `_VISION_NOTE_ACTIONABLE_TOKENS`.
+        low_words = {w.lower() for w in words}
+        if not (cls._VISION_NOTE_ACTIONABLE_TOKENS & low_words):
+            return ""
+        return text
+
+    @staticmethod
+    def _mark_unused_media_as_stale_for_continuation(mp: dict) -> int:
+        """Rewrite unused-media warnings for full continuation rewrites.
+
+        When a full rewrite changes the runtime shape, generated media
+        from the previous build may simply be stale. In that context,
+        "wire it in" is the wrong instruction; the model should use or
+        request media that fits the current request.
+
+        Returns the number of old unused-media warnings suppressed.
+        """
+        if not (mp.get("stats") or {}).get("unused_assets"):
+            return 0
+        old_warnings = list(mp.get("warnings") or [])
+        kept = [
+            w for w in old_warnings
+            if "NEVER referenced in the HTML" not in str(w)
+        ]
+        suppressed = len(old_warnings) - len(kept)
+        if suppressed:
+            kept.append(
+                "Generated media from the previous build appears stale "
+                "after this full rewrite. Ignore old asset/sound names "
+                "unless they still fit the current request; request or "
+                "wire media for the current game shape instead."
+            )
+            mp["warnings"] = kept
+        return suppressed
+
     # Threshold above which we consider the current file too large to
     # inject in full on every fix turn. Below this, full-file inject is
     # cheap and removes any risk of the slice missing context.
@@ -8609,7 +8826,55 @@ class GameAgent:
             return None
         if used > len(html) * 0.6:
             return None
-        return "\n\n".join(kept)
+
+        # If the selected logic reads `state.foo`, also show nearby writes
+        # to `state.foo` elsewhere in the file. Game bugs often hide in
+        # reset/init code that silently overwrites the value the model is
+        # trying to fix in update/draw logic.
+        kept_text = "\n\n".join(kept)
+        state_props = {
+            p for p in re.findall(r"\bstate\.([A-Za-z_$][\w$]*)\b", kept_text)
+            if len(p) >= 3
+        }
+        assignment_snips: list[str] = []
+        seen_windows: set[tuple[int, int, int]] = set()
+        if state_props:
+            prop_alt = "|".join(re.escape(p) for p in sorted(state_props))
+            state_write_re = re.compile(
+                rf"\bstate\.({prop_alt})(?:\.[A-Za-z_$][\w$]*)*\s*(?:[+\-*/%]?=|\+\+|--)"
+                rf"|\b({prop_alt})\s*:",
+            )
+            for script_idx, (_open, body, _close) in enumerate(scripts):
+                lines = body.splitlines()
+                for line_idx, line in enumerate(lines):
+                    if not state_write_re.search(line):
+                        continue
+                    stripped = line.strip()
+                    if stripped and stripped in kept_text:
+                        continue
+                    start = max(0, line_idx - 2)
+                    end = min(len(lines), line_idx + 3)
+                    key = (script_idx, start, end)
+                    if key in seen_windows:
+                        continue
+                    seen_windows.add(key)
+                    snippet = "\n".join(lines[start:end])
+                    if len("\n\n".join(assignment_snips + [snippet])) > 1600:
+                        break
+                    assignment_snips.append(snippet)
+                if len("\n\n".join(assignment_snips)) > 1500:
+                    break
+        if assignment_snips:
+            self._trace({
+                "kind": "focused_slice_state_assignments_added",
+                "state_props": sorted(state_props),
+                "count": len(assignment_snips),
+            })
+            kept_text += (
+                "\n\n// --- related state assignments (focused slice) ---\n"
+                + "\n\n".join(assignment_snips)
+            )
+        return kept_text
 
     @staticmethod
     def _diagnose_is_shotgun(diag: str) -> bool:
@@ -10032,6 +10297,7 @@ class GameAgent:
         """
         if not continuation:
             self._goal = goal
+            self._continuation_feedback = ""
             # Phase 0.10 — when the goal explicitly asks for multi-frame
             # rosters, raise this session's asset cap so the architect
             # can fit base + variant frames in one turn. Default cap is
@@ -10130,6 +10396,7 @@ class GameAgent:
             # folds it into the next prompt with the standard "USER FEEDBACK"
             # banner the model already knows how to react to.
             self.add_user_feedback(goal)
+            self._continuation_feedback = goal
             self._trace({"kind": "continuation_start", "feedback": goal})
             yield self._record(AgentEvent(
                 "info", f"continuing on existing file with new request: {goal[:160]}"
@@ -10175,13 +10442,54 @@ class GameAgent:
             # worker thread to keep the TUI responsive. Total budget
             # ~3s for a typical hit, ~6s worst case.
             reference_block = ""
-            try:
-                import research as _research
-                reference_block = await asyncio.to_thread(_research.fetch, goal) or ""
-            except Exception as e:
+            # Wikipedia research is OFF by default — empirical test on
+            # 10 representative goals (asteroids, pacman, donkey kong,
+            # space invaders, missile command, street fighter, doom,
+            # snake, 2d roguelike, tetris) returned 0 matches in ~38s
+            # cumulative latency. Filter is too strict: opensearch +
+            # word-overlap rejection drops everything. Until the matcher
+            # is rewritten, the lookup is pure tax with no benefit.
+            # Toggle via the `/wiki on` slash command in chat.py
+            # (mirrors `/wait` style). Trace 20260519_111209
+            # (build-a-complete-playable-2d-r) is the canonical "agent
+            # looked frozen for ~110s with no trace events" case this
+            # guards against — see the visibility events below for the
+            # opt-in path.
+            if self._research_enabled:
                 yield self._record(AgentEvent(
-                    "info", f"research lookup failed: {e!r}"
+                    "phase", "research",
                 ))
+                yield self._record(AgentEvent(
+                    "activity", "research",
+                    {"label": "looking up reference"},
+                ))
+                yield self._record(AgentEvent(
+                    "info",
+                    "researching goal on Wikipedia "
+                    "(/wiki on; 8s/request, 6s typical)…",
+                ))
+                try:
+                    import research as _research
+                    reference_block = await asyncio.to_thread(
+                        _research.fetch, goal,
+                    ) or ""
+                except Exception as e:
+                    yield self._record(AgentEvent(
+                        "info", f"research lookup failed: {e!r}"
+                    ))
+                yield self._record(AgentEvent("activity", "idle"))
+                self._trace({
+                    "kind": "research_attempted",
+                    "enabled_via": "/wiki on",
+                    "got_reference": bool(reference_block),
+                    "reference_chars": len(reference_block),
+                })
+            else:
+                self._trace({
+                    "kind": "research_skipped",
+                    "reason": "disabled_by_default",
+                    "hint": "type /wiki on to enable",
+                })
 
             if hasattr(self._p, "plan_instruction"):
                 # v1+ planner takes goal so it can detect art-modality
@@ -11177,6 +11485,11 @@ class GameAgent:
             # the probe surface to mask regressions.
             reply_low = reply.lower()
             has_code = ("<patch>" in reply_low) or ("<html_file>" in reply_low)
+            continuation_full_rewrite = bool(
+                getattr(self, "_continuation", False)
+                and "<html_file>" in reply_low
+            )
+            continuation_probe_refresh_adopted = False
             prev_report = self._previous_report or {}
             prev_probes = prev_report.get("probes") or []
             prev_probe_failures = sum(
@@ -11188,6 +11501,7 @@ class GameAgent:
                 or prev_probe_failures > 0
                 or seed_iter1
                 or bool((self._scoped_constraints or {}).get("require_scope_probe"))
+                or continuation_full_rewrite
             )
             if (
                 allow_probe_reparse
@@ -11226,8 +11540,25 @@ class GameAgent:
                             continue
                         seen.add(sig)
                         adopted_probes.append(p)
-                if adopted_probes and len(adopted_probes) >= len(self._probes):
+                if (
+                    adopted_probes
+                    and (
+                        continuation_full_rewrite
+                        or len(adopted_probes) >= len(self._probes)
+                    )
+                ):
                     from tools import _criteria_coverage_gaps as _gaps_fn
+                    fresh_criteria = self._extract_criteria(reply)
+                    if continuation_full_rewrite:
+                        if fresh_criteria:
+                            self._criteria = fresh_criteria
+                            self._trace({
+                                "kind": "continuation_criteria_refreshed",
+                                "iteration": iteration,
+                                "chars": len(fresh_criteria),
+                            })
+                        else:
+                            self._criteria = ""
                     new_gaps = _gaps_fn(self._criteria or "", adopted_probes)
                     self._trace({
                         "kind": "probes_reparsed",
@@ -11237,7 +11568,8 @@ class GameAgent:
                         "scoped_merged": merged_scoped,
                         "remaining_gaps": new_gaps[:6],
                         "trigger": (
-                            "coverage_gap" if self._planning_coverage_gaps
+                            "continuation_full_rewrite" if continuation_full_rewrite
+                            else "coverage_gap" if self._planning_coverage_gaps
                             else "prev_probe_failures" if prev_probe_failures > 0
                             else "seed_iter1" if seed_iter1
                             else "scoped_probe"
@@ -11250,6 +11582,7 @@ class GameAgent:
                         f"{len(new_gaps)}",
                     ))
                     self._probes = adopted_probes
+                    continuation_probe_refresh_adopted = continuation_full_rewrite
                     self._planning_coverage_gaps = new_gaps[:6]
 
             # ---- diagnose extraction (logged + memory-keyed) -----------
@@ -11630,7 +11963,37 @@ class GameAgent:
                             d_html, _d_msg = await self._materialize(
                                 doctor_reply, dry_run=True,
                             )
+                            # Trace 20260518_220003 (street-fighter): the
+                            # doctor stream itself was cut off mid-output
+                            # and produced a 183-byte stub. The dry-run
+                            # materializer accepted it as non-None; the
+                            # recovery branch declared `format_doctor_recovered`;
+                            # only the downstream micro-probe pass caught
+                            # the empty file. Validate the doctor's HTML
+                            # the same way the regular pre-flight does
+                            # before declaring recovery — if it would
+                            # immediately fail micro-probes (essentially
+                            # empty / unclosed / no <script>), reject the
+                            # recovery here so the existing truncation-
+                            # recovery path can take over without the
+                            # misleading "recovered" trace event.
+                            d_validation_ok = d_html is not None
+                            d_validation_errors: list[str] = []
                             if d_html is not None:
+                                d_mp = run_micro_probes(d_html)
+                                d_validation_ok = bool(d_mp.get("ok", False))
+                                if not d_validation_ok:
+                                    d_validation_errors = list(
+                                        d_mp.get("errors") or []
+                                    )
+                                    self._trace({
+                                        "kind": "format_doctor_validation_failed",
+                                        "rejection_kind": format_rejection.kind,
+                                        "iteration": iteration,
+                                        "size_bytes": len(d_html or ""),
+                                        "errors": d_validation_errors[:3],
+                                    })
+                            if d_html is not None and d_validation_ok:
                                 yield self._record(AgentEvent(
                                     "info",
                                     "[format-doctor] reformatted "
@@ -11878,6 +12241,41 @@ class GameAgent:
             self._last_no_usable_code_fingerprint = None
             self._last_materialized_iter = iteration
 
+            if continuation_full_rewrite and not continuation_probe_refresh_adopted:
+                old_probe_count = len(self._probes)
+                fresh_criteria = self._extract_criteria(reply)
+                if fresh_criteria:
+                    self._criteria = fresh_criteria
+                    self._trace({
+                        "kind": "continuation_criteria_refreshed",
+                        "iteration": iteration,
+                        "chars": len(fresh_criteria),
+                    })
+                else:
+                    self._criteria = ""
+                if old_probe_count:
+                    self._probes = []
+                    self._planning_coverage_gaps = []
+                    self._probe_lint_findings = [
+                        f for f in self._probe_lint_findings
+                        if f.get("kind") not in (
+                            "unassigned_property_read",
+                            "probe_bait_flag",
+                        )
+                    ]
+                    self._trace({
+                        "kind": "continuation_stale_probes_retired",
+                        "iteration": iteration,
+                        "old_count": old_probe_count,
+                        "reason": "full_html_rewrite_without_fresh_probes",
+                    })
+                    yield self._record(AgentEvent(
+                        "info",
+                        "continuation rewrote the game shape; retired old "
+                        "probes so stale checks do not force compatibility "
+                        "with the previous build.",
+                    ))
+
             # Track partial-patch failures for the next prompt even on
             # successful materialize.
             partial_failed: list[tuple[int, object, str]] = []
@@ -11908,6 +12306,32 @@ class GameAgent:
                 baited = GameAgent._probes_baited_by_patches(
                     self._probes, applied_replaces,
                 )
+                if continuation_full_rewrite and unassigned:
+                    stale_names = {
+                        str(f.get("name") or "")
+                        for f in unassigned
+                        if f.get("name")
+                    }
+                    before_count = len(self._probes)
+                    self._probes = [
+                        p for p in self._probes
+                        if str(p.get("name") or "") not in stale_names
+                    ]
+                    removed_count = before_count - len(self._probes)
+                    if removed_count:
+                        self._trace({
+                            "kind": "continuation_stale_probes_removed",
+                            "iteration": iteration,
+                            "removed": sorted(stale_names),
+                            "remaining": len(self._probes),
+                        })
+                        yield self._record(AgentEvent(
+                            "info",
+                            "continuation rewrite removed stale probes that "
+                            "referenced runtime fields absent from the new "
+                            "game shape.",
+                        ))
+                    unassigned = []
                 if unassigned or baited:
                     # Combine with the tautological findings from Phase A;
                     # both flow to the model the same way.
@@ -11990,6 +12414,19 @@ class GameAgent:
             # the browser; warnings pass through and Chromium gets the
             # final word.
             mp = run_micro_probes(new_html, out_path=self.out_path)
+            if continuation_full_rewrite:
+                suppressed = (
+                    self._mark_unused_media_as_stale_for_continuation(mp)
+                )
+                if suppressed:
+                    self._trace({
+                        "kind": "continuation_stale_media_context",
+                        "iteration": iteration,
+                        "unused_assets": (
+                            (mp.get("stats") or {}).get("unused_assets")
+                        ),
+                        "suppressed_warning_count": suppressed,
+                    })
             self._trace({
                 "kind": "micro_probes",
                 "ok": mp.get("ok", False),
@@ -12108,7 +12545,12 @@ class GameAgent:
                 })
             self._handle_probe_eval_errors(report, iteration)
             self._apply_scoped_check_to_report(report)
-            report_text = format_report_for_model(report)
+            # Advance the warnings-persistence counter ONCE per iter,
+            # before any format_report_for_model rendering. Compaction
+            # is then applied uniformly to the test event text and to
+            # the next user turn's report block.
+            self._advance_warning_persistence(report.get("warnings") or [])
+            report_text = self._format_report_for_model(report)
             self._last_report_summary = report_text
             self._last_test_report = report
             self._last_tested_iter = iteration
@@ -13445,6 +13887,11 @@ class GameAgent:
         self._restart_attempt_seed = None
         self._force_first_build_prefill = False
         self._first_build_retry_bonus_used = False
+        # Reset warnings-persistence so a restart attempt starts the
+        # streak counter fresh — otherwise a warning seen in attempt 0
+        # would already be in the "compact" state on attempt 1's iter 1
+        # and the model would see it as already-stale on first contact.
+        self._warning_persistence = {}
         # Per-attempt failure-signature counters. Cleared so the next
         # attempt's signature reflects only its own behavior.
         self._dead_first_build_recoveries = 0
@@ -13531,10 +13978,10 @@ class GameAgent:
                 "session will resume after the user answers. The "
                 "most recent test report (for context — do NOT "
                 "act on it this turn):\n\n"
-                f"{format_report_for_model(report)}"
+                f"{self._format_report_for_model(report)}"
             )
 
-        report_text = format_report_for_model(report)
+        report_text = self._format_report_for_model(report)
 
         # SCOPED-CHANGE override: when the user explicitly locked the
         # turn ("no code changes", "only X"), the failing-probes report
@@ -13574,7 +14021,40 @@ class GameAgent:
             self._scoped_change_active = False
 
         if report["ok"]:
-            return self._p.post_clean_instruction(report_text)
+            # Truth-source inject for post-clean follow-up turns.
+            # Evidence: fighing-game trace 20260519_153115 iter 3→4 — the
+            # post_clean instruction does NOT inline the current file, so
+            # when the user gave feedback after a clean iter the model
+            # patched against memory, hallucinated drawFighter's structure,
+            # and SEARCH failed (1/2 patches applied). Same pattern as
+            # continuation_instruction / fix_instruction — give the model
+            # the on-disk truth so its <patch> SEARCH matches.
+            base = self._p.post_clean_instruction(report_text)
+            cf = self._current_file or ""
+            # Only inject when (a) feedback is queued or pending so a
+            # <patch> is likely this turn, AND (b) the file is non-empty
+            # and not so huge it would blow the context. Keep the cap
+            # generous so we rarely skip.
+            file_likely_used = bool(self._pending_feedback) or bool(
+                getattr(self, "_pending_answer", None)
+            )
+            if cf and file_likely_used and len(cf) <= 60_000:
+                self._trace({
+                    "kind": "post_clean_truth_source_injected",
+                    "file_bytes": len(cf),
+                    "reason": "pending_feedback",
+                })
+                return (
+                    f"{base}\n\n"
+                    "CURRENT FILE ON DISK (this is the SOURCE OF TRUTH — "
+                    "if you emit a <patch>, its SEARCH must match THIS "
+                    "exact text, character-for-character; earlier turns' "
+                    "code may be stale):\n"
+                    "```html\n"
+                    f"{cf}\n"
+                    "```\n"
+                )
+            return base
 
         if regressed:
             best = self._read_best_or_empty()
