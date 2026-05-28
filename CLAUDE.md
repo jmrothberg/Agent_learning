@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-**Repo identity:** This checkout is **Coding Box Overlay** (`Agent_learning_overlay` on GitHub). Do not treat pushes as updates to `jmrothberg/Agent_learning` unless the user explicitly retargets `origin`.
+**Repo identity:** This checkout is **Coding Box Overlay** — GitHub `jmrothberg/Agent_learning_overlay` only. User updates with `./scripts/update.sh` or `git pull` (one remote: `origin`). Do not add a second remote unless the user asks.
 
 ---
 

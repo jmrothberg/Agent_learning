@@ -1,12 +1,8 @@
 # Coding Box Overlay — Local HTML Game Agent (harness fork)
 
-> **This repo is not `Agent_learning` on GitHub.** It is the **overlay /
-> harness** line (feedback routing, playtests, multi-slot fan-out, TUI
-> polish). Push here: **`jmrothberg/Agent_learning_overlay`** so you do not
-> overwrite the upstream program at `jmrothberg/Agent_learning`.
-> Clone: `git clone https://github.com/jmrothberg/Agent_learning_overlay.git`
-> Remote setup: `git remote set-url origin https://github.com/jmrothberg/Agent_learning_overlay.git`
-> and optionally `git remote add upstream https://github.com/jmrothberg/Agent_learning.git`
+> **GitHub repo:** https://github.com/jmrothberg/Agent_learning_overlay  
+> **Get newest code:** `./scripts/update.sh` (same as `git pull` in this folder).
+> Clone once: `git clone https://github.com/jmrothberg/Agent_learning_overlay.git`
 
 A specialist agent that drives a **small local LLM** (Ollama or MLX
 in-process) to write, test, and iteratively fix **single-file HTML5
@@ -32,10 +28,8 @@ cached. A cross-session **asset library** under `memory/` lets
 admitted assets compound across sessions exactly the way the playbook
 does.
 
-**Remote (this fork):** https://github.com/jmrothberg/Agent_learning_overlay  
-**Upstream program (do not push overlay work here):** https://github.com/jmrothberg/Agent_learning
-
 ---
+
 
 ## Contents
 
