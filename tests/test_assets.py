@@ -74,7 +74,7 @@ def test_parse_basic():
     assert len(out) == 2
     assert out[0]["name"] == "ship"
     assert out[0]["prompt"] == "pixel ship facing right"
-    assert out[0]["size"] == (128, 128)  # default
+    assert out[0]["size"] == (512, 512)  # default (bumped 2026-05-23 from 128)
     assert out[1]["size"] == (64, 64)
 
 

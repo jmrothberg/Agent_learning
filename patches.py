@@ -477,6 +477,100 @@ def find_anchor(source: str, search: str, *, ctx_lines: int = 4) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Breadcrumb anchoring (Codex `@@ class Foo` / `@@ def bar` pattern)
+# ---------------------------------------------------------------------------
+#
+# When a model's SEARCH block is ambiguous (matches >1 places in the file),
+# Codex's apply_patch format lets the model prefix the hunk with a single
+# `@@ identifier` line that narrows the match to a specific scope — the
+# enclosing class, function, or other named code region. Stacked breadcrumbs
+# (`@@ class Foo` then `@@ def bar`) drill into nested scopes.
+#
+# A 27 B local model can identify function/class names reliably; emitting
+# `@@ resetGame` is simpler than "copy more surrounding lines until the
+# match is unique." This module preserves the existing SEARCH/REPLACE
+# format and additively recognizes leading `@@ <text>` lines, stripping
+# them from the SEARCH and using them as a positional hint when locating.
+#
+# Universal: keyed on text-shape, no goal/genre coupling.
+
+
+_BREADCRUMB_RE = re.compile(r"^\s*@@\s+(.+?)\s*$")
+
+
+def _parse_breadcrumb_lines(search: str) -> tuple[str, list[str]]:
+    """Strip leading `@@ <ident>` lines from a SEARCH block.
+
+    Returns (residual_search, breadcrumbs). `breadcrumbs` is the ordered
+    list of breadcrumb texts (without the `@@ ` prefix). Stops at the
+    first non-breadcrumb non-blank line.
+
+    Blank lines BETWEEN breadcrumbs are tolerated (some models add
+    cosmetic spacing); blank lines AFTER breadcrumbs but before the
+    SEARCH content are also stripped so the residual matches cleanly.
+    """
+    if not search:
+        return search, []
+    lines = search.splitlines(keepends=True)
+    breadcrumbs: list[str] = []
+    consumed = 0
+    for ln in lines:
+        if not ln.strip():
+            # Blank line — only skip if we're still in the breadcrumb
+            # header section (no real content has started). Don't peek
+            # ahead; just count it and let the next iteration decide.
+            consumed += 1
+            continue
+        m = _BREADCRUMB_RE.match(ln)
+        if m:
+            breadcrumbs.append(m.group(1).strip())
+            consumed += 1
+            continue
+        # First non-breadcrumb non-blank line — stop.
+        break
+    if not breadcrumbs:
+        return search, []
+    residual = "".join(lines[consumed:])
+    # Strip any leading blank lines from the residual so the search
+    # matches against real content from the top.
+    residual = residual.lstrip("\n")
+    return residual, breadcrumbs
+
+
+def _narrow_to_breadcrumb_scope(
+    source: str,
+    matches: list[tuple[int, int]],
+    breadcrumbs: list[str],
+) -> list[tuple[int, int]]:
+    """Filter `matches` to those occurring within the breadcrumb's scope.
+
+    Scope = the byte range starting at the FIRST occurrence of each
+    breadcrumb (applied sequentially: outer → inner) and ending at EOF.
+    Stacked breadcrumbs progressively narrow the window.
+
+    A breadcrumb whose literal text doesn't appear in source is ignored
+    (graceful degrade — the breadcrumb was a hint, not a hard match).
+    Returns the original `matches` unchanged when no breadcrumb resolved.
+    """
+    if not breadcrumbs or not matches:
+        return matches
+    scope_start = 0
+    for crumb in breadcrumbs:
+        # Search for the breadcrumb text starting from the current scope.
+        idx = source.find(crumb, scope_start)
+        if idx < 0:
+            # Crumb not found — skip it. Other crumbs may still narrow.
+            continue
+        scope_start = idx
+    if scope_start <= 0:
+        return matches
+    narrowed = [(s, e) for (s, e) in matches if s >= scope_start]
+    # Return narrowed only if it actually helps. If narrowing kills all
+    # matches, fall back to original (the breadcrumb misled the matcher).
+    return narrowed if narrowed else matches
+
+
+# ---------------------------------------------------------------------------
 # Extraction
 # ---------------------------------------------------------------------------
 
@@ -689,23 +783,56 @@ def apply_patches(source: str, patches: list[Patch]) -> PatchResult:
             prepend_buf.append((i, p.replace))
             continue
 
+        # --- breadcrumb parse (Codex `@@ identifier` anchor) ---------
+        # Strip leading `@@ ident` lines off the SEARCH and use them
+        # as scope hints. When the residual SEARCH would otherwise be
+        # ambiguous (>1 match), narrowing to the breadcrumb's scope
+        # picks the right occurrence without forcing the model to copy
+        # more surrounding lines. The breadcrumbs are advisory — if
+        # they don't resolve to anything in source, normal matching
+        # proceeds against the residual.
+        residual_search, breadcrumbs = _parse_breadcrumb_lines(p.search)
+
         # --- locate ----------------------------------------------------
-        matches, layer = _locate(source, p.search)
+        matches, layer = _locate(source, residual_search)
+        if breadcrumbs:
+            matches = _narrow_to_breadcrumb_scope(
+                source, matches, breadcrumbs,
+            )
         if not matches:
-            snippet = (p.search[:120] + "...") if len(p.search) > 120 else p.search
+            snippet = (
+                (residual_search[:120] + "...")
+                if len(residual_search) > 120 else residual_search
+            )
+            crumb_note = ""
+            if breadcrumbs:
+                crumb_note = (
+                    f" (breadcrumbs tried: {', '.join(repr(c) for c in breadcrumbs)})"
+                )
             failed.append((i, p, (
-                f"SEARCH block not found in file: {snippet!r}. The CURRENT "
-                "FILE ON DISK is the truth — re-copy the lines exactly, "
-                "including indentation."
+                f"SEARCH block not found in file: {snippet!r}.{crumb_note} "
+                "The CURRENT FILE ON DISK is the truth — re-copy the lines "
+                "exactly, including indentation."
             )))
             continue
         if len(matches) > 1:
-            snippet = (p.search[:80] + "...") if len(p.search) > 80 else p.search
+            snippet = (
+                (residual_search[:80] + "...")
+                if len(residual_search) > 80 else residual_search
+            )
+            hint = (
+                "Add more SURROUNDING CONTEXT (e.g. the function name "
+                "above and a unique line below) so it matches exactly once."
+            )
+            if not breadcrumbs:
+                hint += (
+                    " Alternative: prepend a single line `@@ "
+                    "function_or_class_name` immediately above your SEARCH "
+                    "to scope the match to one region."
+                )
             failed.append((i, p, (
                 f"SEARCH block matched {len(matches)} places in the file — "
-                "ambiguous. Add more SURROUNDING CONTEXT (e.g. the function "
-                f"name above and a unique line below) so it matches exactly "
-                f"once. SEARCH was: {snippet!r}"
+                f"ambiguous. {hint} SEARCH was: {snippet!r}"
             )))
             continue
 
@@ -791,6 +918,22 @@ _BARE_REPLACE_RE = re.compile(r"^[ \t]*>{5,}\s*REPLACE\s*$", re.MULTILINE | re.I
 # the "model emitted bare HTML element with no doctype" variant.
 _BARE_HTML_RE = re.compile(r"<html\b[^>]*>", re.IGNORECASE)
 _BARE_HTML_CLOSE_RE = re.compile(r"</html\s*>", re.IGNORECASE)
+# Echoed compaction marker (Wolfenstein 2026-05-24). The old
+# compaction marker was `<html_file>[omitted: N bytes ...]</html_file>`;
+# a confused model parroted it back as if it were a fresh tag. The
+# new marker uses an HTML comment (HARNESS-OMITTED-PRIOR-*) that can't
+# be copied as a fresh tag, but legacy sessions may still surface
+# either shape. Detector below names both forms so the model gets a
+# specific recovery prompt instead of the generic "no <patch>/
+# <html_file>".
+_OMITTED_LEGACY_RE = re.compile(
+    r"\[omitted:\s*\d+\s*bytes",
+    re.IGNORECASE,
+)
+_OMITTED_HARNESS_COMMENT_RE = re.compile(
+    r"HARNESS-OMITTED-PRIOR-(?:HTML|FENCE)",
+    re.IGNORECASE,
+)
 
 
 def classify_format_failure(reply: str) -> FormatRejection | None:
@@ -802,6 +945,8 @@ def classify_format_failure(reply: str) -> FormatRejection | None:
     there's evidence the model TRIED to emit code but the shape was off.
 
     Detectors, in priority order:
+      * compaction_marker_echoed — model parroted [omitted: N bytes ...]
+                                   or HARNESS-OMITTED-PRIOR-* back as code
       * tags_in_fence       — <patch>/<html_file> inside ``` fence
       * bare_markers        — SEARCH/REPLACE markers without <patch> wrapper
       * unclosed_patch      — <patch> with no </patch>
@@ -812,6 +957,46 @@ def classify_format_failure(reply: str) -> FormatRejection | None:
     if not reply:
         return None
     low = reply.lower()
+
+    # 0. Compaction-marker echo. Wolfenstein 2026-05-24 trace cause: the
+    # model parroted the harness's own `<html_file>[omitted: N bytes ...]
+    # </html_file>` summarization marker back as if it were a real tag.
+    # The current marker shape uses HARNESS-OMITTED-PRIOR-* in an HTML
+    # comment, but legacy sessions and a confused model may still echo
+    # either form. Naming the specific cause lets the model fix the
+    # actual mistake instead of guessing why parsing failed.
+    if (
+        _OMITTED_LEGACY_RE.search(reply) is not None
+        or _OMITTED_HARNESS_COMMENT_RE.search(reply) is not None
+    ):
+        return FormatRejection(
+            kind="compaction_marker_echoed",
+            hint=(
+                "Your reply quoted the harness's compaction marker as "
+                "if it were code."
+            ),
+            detail=(
+                "PARSE ERROR: your reply included a literal HARNESS "
+                "compaction marker (either `[omitted: N bytes ...]` "
+                "or `HARNESS-OMITTED-PRIOR-*`). Those markers appear in "
+                "EARLIER assistant turns to indicate that a previous "
+                "<html_file> body was abbreviated for context — they "
+                "are NOT a valid output shape and the parser cannot "
+                "extract code from them.\n\n"
+                "Recovery for THIS turn:\n"
+                "  - The CURRENT FILE ON DISK block in your user-turn "
+                "prompt is the truth source. Read it, find the lines "
+                "you actually want to change, and emit a real <patch> "
+                "block with a SEARCH that matches the on-disk text "
+                "character-for-character.\n"
+                "  - If patching truly cannot express the change, "
+                "emit a fresh complete <html_file>...</html_file> "
+                "body (no placeholder text, no omitted-marker "
+                "shorthand).\n"
+                "  - Do NOT copy or paraphrase the omitted marker; "
+                "the harness produced it for context economy only."
+            ),
+        )
 
     # 1. <patch> or <html_file> trapped inside a markdown fence. We check
     # AFTER repair_reply has already stripped outer fences whose body

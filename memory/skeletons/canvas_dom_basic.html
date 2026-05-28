@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DOM App</title>
+<style>
+  html,body { margin:0; min-height:100%; background:#1a1a2e; color:#e7ecff;
+    font:16px/1.4 system-ui,sans-serif; }
+  #app { max-width:520px; margin:32px auto; padding:24px;
+    background:#2a2a3e; border-radius:12px; box-shadow:0 10px 40px #0008; }
+  h1 { margin:0 0 16px; font-size:22px; }
+  #hud { display:flex; justify-content:space-between; margin-bottom:12px;
+    font-size:16px; opacity:.9; }
+  table { border-collapse:collapse; margin:8px auto; }
+  td button { width:64px; height:64px; font-size:28px; cursor:pointer;
+    background:#1a1a2e; color:#e7ecff; border:2px solid #3b62ff;
+    border-radius:8px; user-select:none; }
+  td button:hover:not(:disabled) { filter:brightness(1.2); }
+  td button:disabled { opacity:.7; cursor:default; }
+  #ctrls { display:flex; gap:8px; justify-content:center; margin-top:12px; }
+  button.action { background:#3b62ff; color:#fff; border:0; padding:8px 14px;
+    border-radius:6px; font-size:14px; cursor:pointer; }
+</style></head>
+<body>
+<div id="app">
+  <h1>App</h1>
+  <div id="hud"><span id="turn">Turn: X</span><span id="msg"></span></div>
+  <table id="board"></table>
+  <div id="ctrls"><button class="action" id="restart">Restart</button></div>
+</div>
+<script>
+(() => {
+  "use strict";
+  const SIZE = 3;
+  const boardEl = document.getElementById("board");
+  const turnEl  = document.getElementById("turn");
+  const msgEl   = document.getElementById("msg");
+
+  // ---- State (exposed on window so probes can read it) ------------------
+  const state = {
+    cells: [],           // flat length SIZE*SIZE; "" | "X" | "O"
+    currentPlayer: "X",  // "X" or "O"
+    over: false,
+    winner: null,
+    score: 0,            // common probe target
+  };
+  window.gameState = state;
+  window.game = { reset, currentPlayer: () => state.currentPlayer };
+
+  function buildBoard() {
+    boardEl.innerHTML = "";
+    for (let r = 0; r < SIZE; r++) {
+      const tr = document.createElement("tr");
+      for (let c = 0; c < SIZE; c++) {
+        const td = document.createElement("td");
+        const b = document.createElement("button");
+        b.dataset.r = String(r); b.dataset.c = String(c);
+        td.appendChild(b); tr.appendChild(td);
+      }
+      boardEl.appendChild(tr);
+    }
+  }
+
+  function reset() {
+    state.cells = Array(SIZE * SIZE).fill("");
+    state.currentPlayer = "X";
+    state.over = false;
+    state.winner = null;
+    state.score = 0;
+    msgEl.textContent = "";
+    turnEl.textContent = "Turn: " + state.currentPlayer;
+    render();
+  }
+  document.getElementById("restart").addEventListener("click", reset);
+
+  // Event delegation on the table — one listener for the whole board.
+  boardEl.addEventListener("click", e => {
+    const btn = e.target.closest("button");
+    if (!btn || state.over) return;
+    const r = +btn.dataset.r, c = +btn.dataset.c;
+    const idx = r * SIZE + c;
+    if (state.cells[idx]) return;
+    state.cells[idx] = state.currentPlayer;
+    state.score += 1;
+    if (checkWin(state.currentPlayer)) {
+      state.over = true; state.winner = state.currentPlayer;
+      msgEl.textContent = state.currentPlayer + " wins!";
+    } else if (state.cells.every(x => x)) {
+      state.over = true;
+      msgEl.textContent = "Draw";
+    } else {
+      state.currentPlayer = state.currentPlayer === "X" ? "O" : "X";
+      turnEl.textContent = "Turn: " + state.currentPlayer;
+    }
+    render();
+  });
+
+  function checkWin(p) {
+    const lines = [
+      [0,1,2],[3,4,5],[6,7,8],          // rows
+      [0,3,6],[1,4,7],[2,5,8],          // cols
+      [0,4,8],[2,4,6],                  // diagonals
+    ];
+    return lines.some(L => L.every(i => state.cells[i] === p));
+  }
+
+  function render() {
+    try {
+      const btns = boardEl.querySelectorAll("button");
+      btns.forEach(b => {
+        const idx = (+b.dataset.r) * SIZE + (+b.dataset.c);
+        b.textContent = state.cells[idx];
+        b.disabled = !!state.cells[idx] || state.over;
+      });
+    } catch (err) { console.error("render failed:", err); }
+  }
+
+  buildBoard();
+  reset();
+})();
+</script>
+</body></html>

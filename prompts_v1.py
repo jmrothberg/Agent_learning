@@ -198,9 +198,11 @@ ASSETS_FORMAT = FormatSpec(
         "spaceship facing right, white outline, transparent background\". "
         "Prefer pixel-art / sprite-sheet style with transparent "
         "backgrounds for game sprites.",
-        "Optional `size` is a string (\"64x64\", \"128x96\") or an int "
-        "(square). Default 128 px square. Keep sprites small — 32–128 px "
-        "is typical; over-large sprites blur when drawn small.",
+        "Optional `size` is a string (\"64x64\", \"256x192\") or an int "
+        "(square). Default 512 px square — keeps Z-Image's detail and "
+        "lets the game downscale at draw time as needed. Override per "
+        "asset only when you need something specific (HUD icons 32-64 "
+        "px, full-screen overlays 1024+).",
         "ANIMATION FRAMES & ROSTER LIMITS: When you need coherent "
         "animation sequences (walk cycles, idle bobs, attacks, shatters, "
         "impact effects), declare frame 1 normally, then add "
@@ -272,10 +274,9 @@ PATCH_FORMAT = FormatSpec(
         "SEARCH must appear in the current file character-for-character "
         "(whitespace inside lines matters). The harness will tell you "
         "exactly what didn't match if it fails.",
-        "If your SEARCH would match more than one place in the file, the "
-        "patch is rejected as ambiguous — add MORE surrounding context "
-        "(e.g. the function name above and a unique line below) so it "
-        "matches exactly once.",
+        "If SEARCH matches >1 place: add unique surrounding context OR "
+        "prepend `@@ function_or_class_name` above SEARCH to scope it "
+        "(stack two for nested scopes).",
         "Do not emit overlapping or nested patches. SEARCH text is matched "
         "against the ORIGINAL file (not after earlier patches in the same "
         "reply); if two changes touch the same region, MERGE them into "
@@ -433,6 +434,11 @@ HARD_RULES: list[str] = [
     "Expose state on window: `window.gameState = state; window.game = "
     "{ reset }`. Probes call `window.gameState.score`, `window.game.reset()` "
     "— un-exposed state fails probes even when the game works.",
+    # Added 2026-05-25 from OpenAI Codex review. Prevents the `probes_only` /
+    # `media_only` `no_usable_code` failure shape. Tag names omitted so the
+    # small-class prompt-size + drops-optional-tags asserts still hold.
+    "Phase-A signals (plan, criteria, probes, media) persist once accepted; "
+    "fix turns emit <patch> only.",
 ]
 
 ANTI_PATTERNS: list[str] = [
@@ -964,7 +970,12 @@ def _detect_multi_frame_intent(goal: str) -> list[str]:
     return matched
 
 
-def plan_instruction(*, reference_block: str = "", goal: str = "") -> str:
+def plan_instruction(
+    *,
+    reference_block: str = "",
+    goal: str = "",
+    force_minimal_first_build: bool = False,
+) -> str:
     """Phase A planning prompt, optionally prefixed with a Wikipedia
     reference block fetched by research.fetch().
 
@@ -1161,7 +1172,35 @@ def plan_instruction(*, reference_block: str = "", goal: str = "") -> str:
             "describes rendering shape, not subject matter.\n"
         )
 
-    body = PLAN_INSTRUCTION + art_nudge + threed_nudge + audio_nudge + scope_nudge + multi_frame_nudge
+    minimal_nudge = ""
+    if force_minimal_first_build:
+        minimal_nudge = (
+            "\n\nRESTART RECOVERY — MINIMAL FIRST BUILD: a previous attempt "
+            "at this goal failed at the first-build stage (dead canvas, "
+            "identical-reply loop, or parse rejection on a too-large file). "
+            "For THIS attempt, scope the FIRST <html_file> deliberately "
+            "smaller:\n"
+            "  - <criteria>: 2-3 acceptance bullets MAXIMUM, covering "
+            "renderer + ONE input + ONE moving entity. Defer enemies, "
+            "pickups, HUD, sounds wiring, animation states, win/lose "
+            "polish to <todos> for later patch turns.\n"
+            "  - <probes>: 3-4 short JS probes against the small core "
+            "(window.gameState exists, raf_ran, player position changes "
+            "on keydown). No probes for features you're not shipping yet.\n"
+            "  - <assets>: emit the SAME asset names you used before — "
+            "the diffuser cache will return them instantly. Add no new "
+            "names this turn. If a previous attempt asked for 24 sprites "
+            "and the file still doesn't run, the issue isn't art.\n"
+            "  - The plan SHOULD list the deferred features in <plan>'s "
+            "'Risky bits' section so iter 1 stays focused.\n"
+            "Genre-agnostic; this nudge fires from observable restart "
+            "history, not the goal text.\n"
+        )
+
+    body = (
+        PLAN_INSTRUCTION + art_nudge + threed_nudge + audio_nudge
+        + scope_nudge + multi_frame_nudge + minimal_nudge
+    )
 
     if not reference_block:
         return body
@@ -1261,6 +1300,30 @@ the first-build prompt; load with `new Audio(path)` and play on events.
 
 SKIP <sounds> only for pure-DOM apps where audio adds nothing.
 Otherwise, emit sounds by default.
+
+PLAN QUALITY — examples (good vs low-quality):
+
+GOOD plans name the mechanism + specific controls + win/lose + risky bits.
+Each line carries something testable. Two verbatim examples (not templates,
+no game names — describe shape, not subject):
+
+  Mechanics: DDA raycaster over a 16x16 tile grid; entities as billboard sprites.
+  Controls: ArrowUp/Down forward/back along facing; mouse yaw under pointer lock; Space fires.
+  Win/lose: reach exit tile = win; health=0 = lose; R restarts.
+  Risky bits: floor/ceiling perf, sprite z-sort, listener cleanup on restart.
+
+  Mechanics: 2D side-scrolling platformer with gravity + jump physics; two enemy types patrolling on platforms.
+  Controls: ArrowLeft/Right walk; Space jump; R restart.
+  Win/lose: reach right edge of last level = win; touch enemy = lose.
+  Risky bits: corner-snap collision, double-jump guard, restart resets enemy positions.
+
+LOW-QUALITY plans (these all fail because nothing is testable):
+  - "Build a 3D first-person game."
+  - "Add a side-scroller with platforms and enemies."
+  - "Make it playable with arrow keys."
+
+If your <plan> reads more like the LOW-QUALITY examples, rewrite before
+sending. Specificity here saves iterations later.
 
 No <html_file> yet. No prose outside tags.
 """
@@ -1470,6 +1533,52 @@ PATCH_REMINDER = (
 )
 
 
+def scope_reduction_instruction(report_text: str) -> str:
+    """Replace diagnose-then-fix when the first build is structurally dead.
+
+    Triggered by the dead-first-build detector when iter <= 2 ships a
+    file but RAF never fires AND the input smoke test recorded no
+    state/canvas delta. Patching a dead file is wasteful — the better
+    move is to ship a smaller intentionally-minimal rewrite.
+
+    Universal: keys on observable structural signals (raf_ran=false,
+    input_test.any_change=false), no genre keywords. Reuses any prior
+    <assets> / <sounds> on disk by reference; the model just emits new
+    code that loads them.
+    """
+    return (
+        f"{report_text}\n\n"
+        "DEAD-FIRST-BUILD DETECTED: your file loaded in the browser "
+        "but requestAnimationFrame NEVER fired AND the input smoke "
+        "test produced zero state or canvas change. Nothing in the "
+        "file is actually running. Patching on top of this will not "
+        "fix it — the wiring is wrong at a level patches can't reach.\n\n"
+        "Recovery for THIS turn (skip diagnose, skip patches):\n"
+        "  - Emit ONE complete <html_file>...</html_file> that is "
+        "INTENTIONALLY SMALLER than your previous attempt: pick the "
+        "1-2 most essential features from your Phase A <plan> "
+        "(renderer + one input is enough), and DEFER everything else "
+        "to subsequent <patch> turns.\n"
+        "  - Aim for at most ~10 KB of HTML — half what you wrote last "
+        "time. A simpler scaffolding that actually runs beats an "
+        "ambitious scaffolding that does nothing.\n"
+        "  - Reuse the SAME asset / sound filenames as before — the "
+        "diffuser already wrote those PNGs and OGGs, your loader "
+        "code just needs to load and draw the ones you actually use "
+        "this turn.\n"
+        "  - Make sure (a) at least one `requestAnimationFrame(loop)` "
+        "is called UNCONDITIONALLY at the end of init, (b) the "
+        "keydown listener is on `window` (not the canvas), (c) "
+        "`window.gameState = window.state = state` is set after init.\n"
+        "  - Re-emit <probes> ONLY if you change which globals you "
+        "expose. Otherwise leave them alone — they live in session "
+        "state.\n\n"
+        "Open <todos> items from the deferred features will guide "
+        "later patch turns. Do not enumerate them in this reply — "
+        "just ship the minimal core."
+    )
+
+
 def continuation_instruction(current_file: str) -> str:
     """User-feedback turn after `<done/>` (or restart of a previously
     finished session).
@@ -1536,6 +1645,7 @@ def fix_instruction(
     stuck_streak: int = 0,
     criteria_block: str = "",
     focused_slice: str = "",
+    context_pressure: bool = False,
 ) -> str:
     """Combined diagnose + fix turn.
 
@@ -1597,7 +1707,34 @@ def fix_instruction(
             "list of possibilities. Then ONE <patch> targeting that "
             "site. No prose before <diagnose>.\n\n"
         )
-    if focused_slice:
+    if context_pressure:
+        # Context-pressure escape hatch (Wolfenstein 2026-05-24 trace
+        # lesson): the prior stream's prompt_tokens hit >=85% of the
+        # model's context window. Including the full CURRENT FILE
+        # block on top of that leaves the model no token budget to
+        # emit a complete reply — output truncates, parser rejects,
+        # the agent falls into an identical-reply loop. Drop the file
+        # entirely and force a minimal patch. The matcher applies
+        # SEARCH against the on-disk file regardless of whether the
+        # model saw it inline; the model only needs enough context
+        # to write a unique 3-5 line anchor.
+        file_block = (
+            "CONTEXT IS FULL: the previous turn used >=85% of the "
+            "context window, so the CURRENT FILE ON DISK block has "
+            "been OMITTED from this prompt to give your reply room "
+            "to fit. Recovery shape for this turn:\n"
+            "  - Emit ONE <patch>...</patch> with at most 3-5 lines "
+            "of SEARCH context.\n"
+            "  - Do NOT emit <html_file> — re-emitting the full file "
+            "with this little headroom WILL truncate mid-stream and "
+            "the parser will reject the result.\n"
+            "  - Do NOT re-emit <probes> / <assets> / <sounds>; "
+            "those live in session state.\n"
+            "  - The patch matcher applies SEARCH against the file "
+            "on disk regardless of whether you can see it here, so "
+            "write a short distinctive anchor from memory.\n\n"
+        )
+    elif focused_slice:
         file_block = (
             "FOCUSED SLICE OF THE CURRENT FILE (the regions implicated by "
             "the failing report, biased by your own <criteria>). Patch "
@@ -1693,7 +1830,13 @@ def truncation_recovery_instruction(
     )
 
 
-def patch_retry_instruction(failures: list, current_file: str) -> str:
+def patch_retry_instruction(
+    failures: list,
+    current_file: str,
+    *,
+    repeat_anchors: set[str] | None = None,
+    anchor_fingerprint=None,
+) -> str:
     """Re-prompt after one or more <patch> blocks failed to apply.
 
     For each failure, we attach an "anchor" — the small region of the
@@ -1703,22 +1846,63 @@ def patch_retry_instruction(failures: list, current_file: str) -> str:
     the closest hit) is far more useful than the bare reason string.
     Anchor lookup is best-effort; when it returns None the bullet just
     carries the reason as before.
+
+    `repeat_anchors`: fingerprints of SEARCH blocks that ALSO failed
+    on the previous retry turn. When a current failure matches one of
+    these, prepend [REPEATED FAILURE] to the bullet so the model gets
+    a louder signal than "re-read the file" — that signal already
+    fires every turn and clearly isn't enough on its own. Motivating
+    trace: doom 2026-05-23 extensions 1/2/3 where the same
+    `spriteNames=[...]` SEARCH failed three turns in a row because
+    the FIRST patch already changed that line.
     """
     from patches import find_anchor  # local import: avoid cycle at module load
 
+    repeat_anchors = repeat_anchors or set()
     bullets: list[str] = []
+    repeat_count = 0
     for (i, p, reason) in failures:
-        line = f"  - patch #{i+1}: {reason}"
+        fp = ""
+        if anchor_fingerprint is not None:
+            try:
+                fp = anchor_fingerprint(getattr(p, "search", "") or "")
+            except Exception:
+                fp = ""
+        is_repeat = bool(fp) and fp in repeat_anchors
+        if is_repeat:
+            repeat_count += 1
+            line = (
+                f"  - patch #{i+1} [REPEATED FAILURE — same SEARCH "
+                f"failed last turn]: {reason}"
+            )
+        else:
+            line = f"  - patch #{i+1}: {reason}"
         anchor = find_anchor(current_file, getattr(p, "search", "") or "")
         if anchor:
             line += "\n    nearest match in current file:\n"
             line += "\n".join(f"      {ln}" for ln in anchor.splitlines())
         bullets.append(line)
     bullets_block = "\n".join(bullets)
-    return (
+    header = (
         "Some of your <patch> blocks did not apply because the SEARCH "
         "text was not found verbatim in the file. The CURRENT FILE "
         "below is the truth — match it character-for-character:\n\n"
+    )
+    if repeat_count:
+        header = (
+            "================ REPEATED PATCH FAILURE ================\n"
+            f"{repeat_count} of your <patch> blocks re-emitted the SAME "
+            "SEARCH text that already failed last turn. The file CHANGED "
+            "between then and now (likely a sibling patch in the prior "
+            "reply landed and shifted lines, OR you copied from a stale "
+            "memory of the file). DO NOT re-send the same SEARCH; read "
+            "the CURRENT FILE below FIRST, find the actual lines you "
+            "want to change as they exist NOW, then write a fresh "
+            "SEARCH block from those lines.\n"
+            "========================================================\n\n"
+        ) + header
+    return (
+        f"{header}"
         f"{bullets_block}\n\n"
         "Re-send corrected <patch> blocks against the file as it ACTUALLY "
         "is now (line numbers above are 1-based; '>' marks the closest hit). "

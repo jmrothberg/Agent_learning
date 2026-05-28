@@ -13,8 +13,8 @@ from agent import (
 )
 
 
-def test_default_num_ctx_is_100k() -> None:
-    assert DEFAULT_NUM_CTX == 100_000
+def test_default_num_ctx_is_32k() -> None:
+    assert DEFAULT_NUM_CTX == 32_768
 
 
 def test_parse_num_ctx_presets() -> None:

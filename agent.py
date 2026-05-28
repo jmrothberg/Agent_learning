@@ -319,6 +319,17 @@ _BARE_DOCTYPE_RE = re.compile(
     r"(<!DOCTYPE\s+html[^>]*>.*?</html\s*>)",
     re.DOTALL | re.IGNORECASE,
 )
+# Reply emits a complete <html>...</html> document without <!DOCTYPE>. The
+# Wolfenstein 2026-05-24 stuck-loop trace burned 5 consecutive iters because
+# the model emitted text the parser rejected; one rejection class is the
+# "html element with no doctype" shape that classify_format_failure flags
+# (wrong_tag_html) but doesn't salvage. Extraction variant 6 below recovers
+# the document by prepending a synthetic <!DOCTYPE html>. Stays universal:
+# any goal where the model omits the doctype benefits identically.
+_BARE_HTML_ELEMENT_RE = re.compile(
+    r"(<html\b[^>]*>.*?</html\s*>)",
+    re.DOTALL | re.IGNORECASE,
+)
 # Some models also write <html_file> with a stray opening but never close it
 # (especially after a stall). If we see an opener and a complete <html>
 # document inside, we accept the document.
@@ -875,10 +886,60 @@ _BEHAVIOR_BUG_COMPLAINT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# INVERTED-BEHAVIOR patterns — the user is reporting that behavior IS
+# happening but in the WRONG way (reversed/swapped/inverted). The
+# existing negation regex only catches "X doesn't Y", not "X does the
+# opposite of Y". Doom trace 2026-05-23: user wrote "down key moves
+# you forward" and "directions and views getting reversed" — clear
+# code bugs that slipped past the classifier and got misrouted to
+# MEDIA-CHANGE because no behavior_bug suppression fired.
+#
+# These patterns intentionally pair an INPUT/CONTROL noun with a
+# WRONG-DIRECTION qualifier so they don't false-positive on art
+# language ("the sprite is inverted" stays orientation-only).
+_BEHAVIOR_BUG_INVERTED_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # "direction(s) ... reversed/wrong/inverted/swapped/backwards" within ~6 words
+    re.compile(
+        r"\bdirection(?:s)?\b[\w\s,]{0,40}\b"
+        r"(?:reversed?|invert(?:ed|ing)?|wrong|opposite|swapped|"
+        r"flipped|backwards?)\b",
+        re.I,
+    ),
+    # Symmetric: "reversed/wrong/... ... direction(s)" within ~6 words
+    re.compile(
+        r"\b(?:reversed?|invert(?:ed|ing)?|wrong|opposite|swapped|flipped)\b"
+        r"[\w\s,]{0,40}\bdirection(?:s)?\b",
+        re.I,
+    ),
+    # "movement / controls / motion / input / axis ... wrong-shape"
+    re.compile(
+        r"\b(?:movement|controls?|motion|input|axis|axes)\b[\w\s,]{0,40}\b"
+        r"(?:reversed?|invert(?:ed|ing)?|wrong|opposite|swapped|"
+        r"flipped|backwards?)\b",
+        re.I,
+    ),
+    # "wrong way" or "opposite way" as a standalone control complaint
+    # (already covered by orientation_change for sprite contexts; here
+    # we add it to behavior_bug so the input-mismatch case routes too).
+    re.compile(r"\b(?:wrong|opposite)\s+(?:way|direction)\b", re.I),
+    # Input key + verb + opposite output: "down key moves you forward",
+    # "up arrow goes backwards", "left button sends you right".
+    re.compile(
+        r"\b(?:up|down|left|right|forward|back|backwards?|w|a|s|d)\s+"
+        r"(?:key|arrow|button)\b[\w\s,]{0,40}\b"
+        r"(?:moves?|sends?|goes|going|turns?|takes?|points?)\b"
+        r"[\w\s,]{0,20}\b"
+        r"(?:up|down|left|right|forward|back|backwards?|opposite|wrong)\b",
+        re.I,
+    ),
+)
+
 
 def _feedback_is_behavior_bug(text: str) -> bool:
     """User is reporting a behavior / code bug — "X doesn't Y",
-    "nothing happens when …", "the game is broken / frozen / crashing".
+    "nothing happens when …", "the game is broken / frozen / crashing",
+    OR "X is happening but in the WRONG / REVERSED way" (input-control
+    mismatch).
 
     DK trace 20260514_104131 fix: the existing art-change classifier
     fires True whenever an asset name appears in feedback, which
@@ -887,11 +948,18 @@ def _feedback_is_behavior_bug(text: str) -> bool:
     behavior-bug language lets the directive injector suppress the
     misrouting.
 
+    Doom trace 2026-05-23 fix: also detect INVERTED-behavior complaints
+    ("down key moves you forward", "directions getting reversed"). The
+    old negation regex only matched "X doesn't Y", missing the "X does
+    the OPPOSITE of Y" failure class entirely.
+
     Patterns matched:
       - negation + behavior verb within 3 words ("does not climb",
         "won't reset", "isn't responding")
       - explicit complaint nouns ("bug", "broken", "crashing",
         "frozen", "stuck", "glitching")
+      - inverted-behavior pairs ("direction(s) reversed", "movement
+        inverted", "down key moves you forward")
 
     Visual-only verbs (look, appear, render, show) are NOT in the
     behavior-verb set, so "the dragon doesn't look right" stays on
@@ -902,6 +970,8 @@ def _feedback_is_behavior_bug(text: str) -> bool:
     if _BEHAVIOR_BUG_COMPLAINT_RE.search(text):
         return True
     if _BEHAVIOR_BUG_NEGATION_RE.search(text):
+        return True
+    if any(p.search(text) for p in _BEHAVIOR_BUG_INVERTED_PATTERNS):
         return True
     return False
 
@@ -942,7 +1012,7 @@ def _matched_names_in_text(text_lower: str, names: list[str]) -> set[str]:
 _NON_DISTINCTIVE_ASSET_STEMS: frozenset[str] = frozenset({
     "white", "black", "red", "blue", "green", "yellow", "orange",
     "purple", "pink", "brown", "gray", "grey",
-    "left", "right", "up", "down", "front", "back", "side",
+    "left", "right", "up", "down", "front", "back", "side", "view",
     "small", "large", "big", "tiny", "huge",
     "light", "dark", "bright",
     "player", "enemy", "npc",  # too broad to disambiguate
@@ -1186,21 +1256,45 @@ _ORIENTATION_REGEN_BLOCKERS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bdifferent\s+style\b", re.I),
 )
 
+# Negation tokens that, when they precede a blocker phrase, INVERT the
+# blocker's meaning ("do NOT make a new asset" forbids regen — the
+# opposite of the bare blocker's "user wants regen" reading). The
+# doom trace 2026-05-23 was the motivating case: user wrote "do not
+# make a NEW asset, i think the pistal maybe facing the wrong way"
+# and the literal `\bnew\s+asset\b` blocker fired, suppressing the
+# orientation route and letting MEDIA-CHANGE re-render the pistol —
+# exactly what the user forbade.
+_BLOCKER_NEGATION_RE = re.compile(
+    r"\b(?:not|no|don['’]?t|doesn['’]?t|never|without|please\s+don['’]?t)\b",
+    re.I,
+)
+
+
+def _phrase_is_negated(text: str, match_start: int, window_chars: int = 30) -> bool:
+    """True when a negation word appears within `window_chars` BEFORE match_start."""
+    pre = text[max(0, match_start - window_chars): match_start]
+    return bool(_BLOCKER_NEGATION_RE.search(pre))
+
 
 def _feedback_is_orientation_change(text: str) -> bool:
     """Classifier heuristic: user wants a sprite mirrored/flipped on
     the canvas (one small <patch>), not regenerated. False positives
     push a code patch path when the user actually wanted regen, so
-    blockers like "new asset" / "redraw" suppress the route.
+    blockers like "new asset" / "redraw" suppress the route — UNLESS
+    those blocker phrases are themselves negated ("do NOT make a new
+    asset"), in which case the user is forbidding regen and the
+    orientation route should fire.
 
     Genre-free: vocabulary describes rendering modality, not subject
     matter. Returns True only when an orientation verb fires AND no
-    explicit regen blocker fires.
+    un-negated regen blocker fires.
     """
     if not text:
         return False
-    if any(p.search(text) for p in _ORIENTATION_REGEN_BLOCKERS):
-        return False
+    for p in _ORIENTATION_REGEN_BLOCKERS:
+        for m in p.finditer(text):
+            if not _phrase_is_negated(text, m.start()):
+                return False
     return any(p.search(text) for p in _ORIENTATION_VERB_PATTERNS)
 
 
@@ -1336,16 +1430,22 @@ class AgentEvent:
     data: dict = field(default_factory=dict)
 
 
-# Ollama KV-cache scales linearly with num_ctx. 100K covers typical game
-# sessions (observed prompts ~10–35K); 262K reserves ~10 GB KV on a 27B
-# and collides with diffusers on 48 GB cards. Raise via /ctx or env.
-DEFAULT_NUM_CTX = 100_000
+# Ollama KV-cache scales linearly with num_ctx AND many kernels pick
+# sub-optimal batching above ~32K, slowing prefill even when actual
+# context is small. 32K covers iters 1-3 of typical game sessions with
+# headroom; longer sessions raise via /ctx (or env) and pay the reload
+# tax once. Observed prompts: ~10-18K iter 1, growing to ~25-35K by
+# iter 5-6. The 100K default we used to ship was 3x oversized and
+# silently quadrupled prefill latency.
+DEFAULT_NUM_CTX = 32_768
 MIN_NUM_CTX = 8192
 MAX_NUM_CTX = 262_144
 
 _NUM_CTX_PRESETS: dict[str, int] = {
     "default": DEFAULT_NUM_CTX,
-    "100k": DEFAULT_NUM_CTX,
+    "32k": DEFAULT_NUM_CTX,
+    "64k": 65_536,
+    "100k": 100_000,
     "131k": 131_072,
     "200k": 200_000,
     "262k": MAX_NUM_CTX,
@@ -1431,13 +1531,12 @@ class GameAgent:
         # (and unit tests that pass `model="stub"` without ever streaming)
         # keep working unchanged.
         backend: Backend | None = None,
-        # Phase 0.6 — bumped from 1 to 3. The 2026-05-22 chess trace had
-        # `best_of_n=1` and burned 1356s on three scrapped fix iters that
-        # would likely have shipped under best-of-3 sampling. Sequential
-        # sampling with early-exit (score=100) keeps cost bounded: a
-        # passing first candidate ships immediately, only stuck turns
-        # spend the extra token budget. Set to 1 to disable.
-        best_of_n: int = 3,
+        # Default 1: single candidate per turn. Best-of-N was briefly
+        # default-3 (Phase 0.6 after the 2026-05-22 chess trace) but
+        # combined with the multi-slot autopin it oversubscribed the
+        # 4-GPU box on first build (2026-05-23). Opt in with --best-of-n
+        # when you actually have spare slots staged.
+        best_of_n: int = 1,
         # Ollama context window. qwen3.6:27b/35b natively supports 128K+,
         # gpt-oss supports 128K — at 8K we were truncating mid-<assets>
         # block on long planning turns (see games/traces/make-a-small-
@@ -1763,6 +1862,13 @@ class GameAgent:
         self._active_bullet_ids: list[str] = []
         self._active_opening_book_recipes: list[dict] = []
         self._active_skeleton: str | None = None
+        # Visual playtest recipe id matched for this session, plus the
+        # names of any auto_probes injected into self._probes by it.
+        # Surfaced in the TUI status panel so the user can see WHICH
+        # mechanism recipe is guiding the VLM critic + which extra
+        # state-shape assertions are running each iter.
+        self._active_visual_playtest_recipe_id: str | None = None
+        self._active_visual_playtest_auto_probes: list[str] = []
         self._skeleton_mode = skeleton_mode
         self._prompt_version = prompt_version
         self._p = self._load_prompt_module(prompt_version)
@@ -1790,6 +1896,107 @@ class GameAgent:
         self._last_stream_looped: bool = False
         self._last_stream_stalled: bool = False
         self._last_stream_deliberated: bool = False
+        # True when the most recent stream produced ZERO non-empty
+        # content pieces past the wall-clock floor — the ollama_io /
+        # MLX silent-stream guard fired. Indicates the model burned
+        # tokens through a reasoning/thinking channel that surfaces
+        # as empty `content`. Tracked separately so the recovery
+        # prompt can call out "start with an opening tag, skip the
+        # silent reasoning preamble" instead of generic stall coach.
+        self._last_stream_silent: bool = False
+        # Cross-turn patch-SEARCH-failure memory. Stores fingerprints
+        # (sha1 of normalized first 80 chars) of every SEARCH block that
+        # failed to apply on the most recent retry turn. When the next
+        # turn re-emits a SEARCH that matches one of these fingerprints,
+        # the retry prompt marks it [REPEATED FAILURE] so the model
+        # gets a clearer signal than the generic "re-read the file"
+        # nudge. Motivating trace: doom 2026-05-23 extensions 1/2/3
+        # where the same `spriteNames=['imp_idle'...]` SEARCH failed
+        # three turns in a row because the FIRST patch already changed
+        # those lines and the model didn't read the updated file.
+        # Updated by the no_usable_code retry branch in run(); set is
+        # bounded by the per-turn failure count, no explicit cap needed.
+        self._last_failed_patch_anchors: set[str] = set()
+        # Cross-turn identical-reply detector. Wolfenstein 2026-05-24
+        # trace burned 5 consecutive iters where the model emitted
+        # bit-identical 7838-token replies and the agent kept sending
+        # the same generic "no <patch> or <html_file>" fallback. We
+        # fingerprint each reply that triggers `no_usable_code` (sha1
+        # of normalized first 4 KB) and remember the previous one.
+        # When the SAME fingerprint fires twice in a row we know the
+        # loop is genuine and standard fallback won't move the model
+        # — escalate unconditionally to format_doctor + scope-reduction
+        # coaching. Reset on any successful materialize so a real
+        # cycle of "fail → fix → fail differently" isn't punished.
+        self._last_no_usable_code_fingerprint: str | None = None
+        # Context-pressure detector. Wolfenstein 2026-05-24 trace had
+        # prompt_tokens pinned at 32711 / num_ctx=32768 across the
+        # whole stuck-loop tail — the model literally had ~50 tokens
+        # of headroom to emit a complete <html_file>. Universal fix:
+        # when stream_done reports prompt_tokens >= 85% of num_ctx,
+        # set this flag so the NEXT fix_instruction call omits the
+        # inlined CURRENT FILE block and coaches the model to send
+        # a minimal patch only. Flag is one-shot (cleared after the
+        # mitigated prompt is built). `_context_pressure_streak`
+        # tracks consecutive high-pressure turns so the trace event
+        # fires once per streak rather than every turn.
+        self._context_pressure_pending: bool = False
+        self._context_pressure_streak: int = 0
+        # Dead-first-build detector. Wolfenstein 2026-05-24 trace iter 2
+        # loaded a file but RAF never fired AND the input smoke test
+        # registered zero state/canvas delta — the file is structurally
+        # broken. Patches on top of a dead first build deepen the hole.
+        # When detected on iter <= 2, the next fix turn uses a
+        # scope-reduction prompt ("ship a smaller intentionally minimal
+        # html_file") instead of diagnose-then-fix. Counter caps
+        # recoveries per attempt — after 2, the agent ends the attempt
+        # so the restart loop can apply a fresh seed/recipe.
+        self._dead_first_build_pending: bool = False
+        self._dead_first_build_recoveries: int = 0
+        self._dead_first_build_abort_attempt: bool = False
+        # Per-attempt counters used by the restart loop to compute a
+        # failure signature. When two consecutive attempts hit the SAME
+        # signature, the next attempt's plan_instruction is given
+        # `force_minimal_first_build=True` so the model writes a
+        # smaller first build rather than re-attempting the same
+        # ambitious one. Universal: keys on observable counter shape,
+        # not goal text. All three reset in `_reset_attempt_state`.
+        self._identical_reply_loops_this_attempt: int = 0
+        self._format_rejections_iter1_this_attempt: int = 0
+        # Carries the previous attempt's signature into the next
+        # attempt's run_with_restarts loop so plan_instruction can
+        # detect "same failure shape twice in a row". None on the
+        # first attempt of a session.
+        self._prev_attempt_signature: str | None = None
+        self._force_minimal_first_build: bool = False
+        # Visual-critic cross-turn dedup. Bounded deque of fingerprints
+        # (sha1 of normalized first 120 chars) for critic notes injected
+        # in the last few turns. Before queueing a new critic note we
+        # check this; matches are suppressed (with a
+        # `coaching_suppressed_repeated` trace) so the same observation
+        # doesn't bloat the prompt iter after iter. Motivating trace:
+        # doom 2026-05-23 where the critic flagged "low-resolution wall
+        # textures" in iters 1, 3, 5, 7 — each repeat added ~400 chars
+        # of prompt noise for zero new information.
+        from collections import deque as _deque
+        self._recent_critic_note_fingerprints: _deque = _deque(maxlen=3)
+        # Per-session scoped-classifier overrule counter. When the
+        # model picks a different output mode than the classifier
+        # expected (patch when classifier said media_only, etc.), this
+        # ticks up. At threshold (2) we auto-flip
+        # `_use_feedback_directives = False` for the rest of this
+        # session — the classifier has demonstrated it's misroutíng
+        # the user's typed feedback, and per the standing rule
+        # "agent must beat zero-shot" we step out of the way. Resets
+        # to 0 on /new (since this object is reconstructed). The
+        # threshold is intentionally low so it kicks in fast on
+        # iter-position-tweak sessions like doom 2026-05-23 where the
+        # model overruled the classifier twice in a row on
+        # pixel-shift feedback ("move gun 75 pixels right, no asset
+        # changes" → classifier=media_only, model emitted a code
+        # patch).
+        self._classifier_overrule_count: int = 0
+        self._classifier_auto_disabled: bool = False
         # When the previous stream looped, which RepetitionDetector window
         # fired and (if captured) what line was looping. Surfaced in the
         # format-rejection fallback so coaching can name the failure shape
@@ -1948,6 +2155,16 @@ class GameAgent:
         # diagnostics, visual critic) are NOT gated by this — only the
         # extra autonomous direction.
         self._use_autonomous_feedback: bool = True
+        # When False, every harness-added directive that wraps USER
+        # feedback (MEDIA-CHANGE, ORIENTATION-CHANGE, FEEDBACK SCOPE
+        # ARBITRATION, asset stem mappings, scoped constraint config)
+        # is suppressed and the user's text is passed through with only
+        # the basic USER FEEDBACK (HIGHEST PRIORITY) wrapper. Use when
+        # the classifier is misrouting your guidance (Doom trace
+        # 2026-05-23: "down key moves you forward" got wrapped with
+        # "the feedback above is about ART/SOUND, not code"). Flip via
+        # /rawfeedback in the TUI.
+        self._use_feedback_directives: bool = True
         # Cycle counter for the budget governor. Resets per session.
         # Capped at _AUTONOMOUS_MAX_CYCLES; auto-stops if two consecutive
         # playtests find nothing new.
@@ -1998,6 +2215,24 @@ class GameAgent:
     def model(self) -> str:
         return self._backend.info.model
 
+    def _planning_role(self) -> str:
+        """Role label for planning / exit-decision turns.
+
+        Returns 'architect' only when planning will actually run on a
+        distinct backend — i.e. the user explicitly staged a slot with
+        role=architect, OR `_use_architect_split` (/allroles bundle)
+        is on. Otherwise returns 'coder' so the UI and trace don't
+        claim a role the user never enabled. (Bug observed 2026-05-23
+        doom run: UI showed "Activity (architect)" when only coder +
+        critic were staged.)
+        """
+        if getattr(self, "_use_architect_split", False):
+            return "architect"
+        arch_backend = self.get_backend("architect")
+        if arch_backend is not None and arch_backend is not self._backend:
+            return "architect"
+        return "coder"
+
     def get_backend(self, role: str) -> Backend:
         """Dynamic hierarchical routing for multi-GPU configurations."""
         if role == "coder":
@@ -2037,6 +2272,172 @@ class GameAgent:
         if getattr(self, "_model3_role", None) == role:
             self._model3_activity = activity
 
+    _CLASSIFIER_AUTO_DISABLE_THRESHOLD = 2
+
+    def _record_classifier_overrule(self, *, expected_mode: str, model_emitted: str, feedback_preview: str) -> None:
+        """Bump the overrule counter + auto-disable directives at threshold.
+
+        Centralizes the bookkeeping so both overrule emit sites stay in
+        sync. When the running count reaches the threshold we flip
+        `_use_feedback_directives = False` for the rest of the session
+        (a per-session decision; new sessions start fresh).
+        """
+        self._trace({
+            "kind": "scoped_classifier_overruled_by_model",
+            "expected_mode": expected_mode,
+            "model_emitted": model_emitted,
+            "feedback_preview": feedback_preview,
+            "count": self._classifier_overrule_count + 1,
+        })
+        self._classifier_overrule_count += 1
+        if (
+            not self._classifier_auto_disabled
+            and self._classifier_overrule_count >= self._CLASSIFIER_AUTO_DISABLE_THRESHOLD
+            and getattr(self, "_use_feedback_directives", True)
+        ):
+            self._use_feedback_directives = False
+            self._classifier_auto_disabled = True
+            self._trace({
+                "kind": "classifier_auto_disabled_after_repeated_overrules",
+                "count": self._classifier_overrule_count,
+                "threshold": self._CLASSIFIER_AUTO_DISABLE_THRESHOLD,
+                "reason": (
+                    "model overruled the scoped classifier "
+                    f"{self._classifier_overrule_count} times this session; "
+                    "switching to raw feedback mode for the rest of the "
+                    "session per the agent-must-beat-zero-shot rule. "
+                    "Resets next /new."
+                ),
+            })
+
+    @staticmethod
+    def _critic_note_fingerprint(text: str) -> str:
+        """Deterministic short fingerprint for a visual-critic note.
+
+        Used by `_recent_critic_note_fingerprints` to detect cross-turn
+        repeats. Normalizes whitespace + lowercases + takes first 120
+        chars so semantically-identical notes ("the wall textures are
+        low-resolution" vs "Wall textures appear low-resolution") with
+        small wording shifts still match.
+        """
+        import hashlib as _hashlib
+        normalized = " ".join((text or "").lower().split())
+        head = normalized[:120].encode("utf-8", "ignore")
+        return _hashlib.sha1(head).hexdigest()[:12]
+
+    def _queue_visual_critic_coaching(self, cleaned: str, *, iteration: int, vc_role: str = "critic") -> bool:
+        """Append a visual-critic note to `_pending_coaching` with cross-turn dedup.
+
+        Returns True when the note was queued, False when suppressed as
+        a repeat of one we already queued in the last 3 critic turns.
+        """
+        prefix = "VISUAL CRITIC (looked at the screenshot of your last iteration): "
+        full = prefix + cleaned
+        fp = self._critic_note_fingerprint(cleaned)
+        if fp in self._recent_critic_note_fingerprints:
+            self._trace({
+                "kind": "coaching_suppressed_repeated",
+                "iteration": iteration,
+                "vc_role": vc_role,
+                "fingerprint": fp,
+                "preview": cleaned[:200],
+                "reason": (
+                    "visual critic emitted the same observation in the "
+                    "last 3 critic turns; suppressing to avoid prompt "
+                    "bloat. The coder either can't fix it (asset-side) "
+                    "or already addressed it and the critic misread the "
+                    "new screenshot."
+                ),
+            })
+            return False
+        self._pending_coaching.append(full)
+        self._recent_critic_note_fingerprints.append(fp)
+        return True
+
+    @staticmethod
+    def _patch_anchor_fingerprint(search: str) -> str:
+        """Deterministic short fingerprint for a patch SEARCH block.
+
+        Used by `_last_failed_patch_anchors` to detect cross-turn repeats
+        of the same failing SEARCH. Normalizes whitespace + takes first
+        ~80 chars so a model that re-emits the same SEARCH with slightly
+        different indentation or trailing spaces still matches.
+        """
+        import hashlib as _hashlib
+        normalized = " ".join((search or "").split())
+        head = normalized[:80].encode("utf-8", "ignore")
+        return _hashlib.sha1(head).hexdigest()[:12]
+
+    # Phrases inside <notes> that indicate the model has given up —
+    # it's emitting <done/> not because the game ships but because it
+    # can't escape a parse / harness loop. Wolfenstein 2026-05-24 trace
+    # turn [04] is the canonical case: model said `<done/>` with notes
+    # "The <html_file> tag has been consistently failing to parse...
+    # The user can manually copy the complete HTML code..." — the
+    # agent took the <done/> at face value and shipped a broken file.
+    # Universal: keys on the model's own confession of harness trouble,
+    # not on goal text or genre. Detector below is intentionally narrow
+    # (must combine a "failing to ship" verb with a harness/parse/manual
+    # noun) so it doesn't false-fire on legitimate cosmetic notes.
+    _GIVE_UP_NOTES_PATTERNS: tuple[str, ...] = (
+        "consistently failing",
+        "consistently fail",
+        "failing to parse",
+        "fails to parse",
+        "cannot parse",
+        "can't parse",
+        "parser keeps rejecting",
+        "manually copy",
+        "manual copy",
+        "user can manually",
+        "harness parsing",
+        "harness rejected",
+        "harness issue",
+        "broken parser",
+    )
+
+    @staticmethod
+    def _notes_signal_give_up(notes_text: str | None) -> bool:
+        """Return True when <notes> text indicates the model is asking
+        for help (parse loop, manual-copy workaround) rather than
+        legitimately shipping a working game.
+
+        Single-phrase match is enough — the give-up phrases are
+        distinctive and don't show up in normal "what works / what's
+        still broken" notes.
+        """
+        if not notes_text:
+            return False
+        low = notes_text.lower()
+        return any(p in low for p in GameAgent._GIVE_UP_NOTES_PATTERNS)
+
+    @staticmethod
+    def _reply_fingerprint(reply: str) -> str:
+        """Deterministic short fingerprint for a full model reply.
+
+        Used by `_last_no_usable_code_fingerprint` to detect when the
+        model emits a bit-identical (or near-identical) unparseable reply
+        twice in a row. Wolfenstein 2026-05-24 trace: same 7838-token
+        reply on 5 consecutive iters, all rejected with the same generic
+        fallback. The generic fallback gives the model no new signal, so
+        the loop is self-reinforcing.
+
+        Normalization: lowercased + whitespace-collapsed + first 4 KB.
+        Stable across cosmetic reshuffles (trailing spaces, line
+        ending shifts) so two replies with the same content but a
+        different whitespace tail still fingerprint together.
+        """
+        import hashlib as _hashlib
+        normalized = " ".join((reply or "").lower().split())
+        head = normalized[:4000].encode("utf-8", "ignore")
+        # Salt with the length bucket so a stream that gets cut short
+        # at exactly the same point fingerprints separately from one
+        # that fully completed at a different length — protects against
+        # false positives when the model genuinely changed its mind.
+        length_bucket = str(len(reply or "") // 100)
+        head = head + b"|len:" + length_bucket.encode("ascii")
+        return _hashlib.sha1(head).hexdigest()[:12]
+
     @staticmethod
     def _should_skip_format_doctor(
         *,
@@ -2069,10 +2470,12 @@ class GameAgent:
         probes_only: bool = False,
         media_only: bool = False,
         prior_stream_looped: bool = False,
+        prior_stream_silent: bool = False,
         prior_loop_kind: str | None = None,
         prior_loop_line: str | None = None,
         is_local_backend: bool = False,
         materialize_reject_reason: str = "",
+        identical_repeat: bool = False,
     ) -> tuple[str, bool]:
         """Pick the fallback message + decide whether to reset the
         plan-only streak counter.
@@ -2108,6 +2511,69 @@ class GameAgent:
         same broken shape because the generic fallback gave the model
         no signal to change strategy.
         """
+        # Identical-reply loop escalation. When the model emits a
+        # bit-identical (or near-identical) unparseable reply twice in
+        # a row, the standard fallback prompt is also identical and the
+        # model has no new signal to change behavior. Wolfenstein
+        # 2026-05-24 trace: 5 consecutive iters with 7838-token
+        # identical replies, each burning ~340s of GPU. Universal
+        # escalation: drop any thought of re-emitting the file, demand
+        # a minimal patch keyed on a single named symptom. Reset the
+        # plan-only streak so this branch only fires once before
+        # routing back to other handlers — if the next reply is ALSO
+        # identical, we'll have fingerprinted differently because the
+        # prompt changed; if it isn't, we want the normal branches.
+        if identical_repeat:
+            fallback = (
+                "IDENTICAL-REPLY LOOP DETECTED: your previous two "
+                "replies were byte-identical (or near-identical) and "
+                "the parser rejected BOTH. Re-emitting the same text "
+                "will be rejected again — you must change shape.\n\n"
+                "Recovery for THIS turn:\n"
+                "  - Do NOT re-emit <html_file>. The file you keep "
+                "trying to send is either too large for what remains "
+                "of the context window, or contains a parse-defeating "
+                "pattern (stray markdown fence, unclosed tag, "
+                "duplicated declaration).\n"
+                "  - Pick the SINGLE most important symptom from the "
+                "most recent test report below (frozen canvas, RAF "
+                "dead, console error, failing probe) and emit ONE "
+                "<patch>...</patch> with at most 5-10 lines of SEARCH "
+                "context that addresses just that one thing.\n"
+                "  - Start your reply immediately with <patch> as the "
+                "first non-whitespace text. No preamble, no <diagnose>, "
+                "no <plan>, no <html_file>."
+            )
+            return fallback, True
+        # Silent-stream recovery — when ollama_io / MLX aborted the
+        # previous stream because it produced ZERO non-empty content
+        # for >=180s (all output went to a reasoning/thinking channel
+        # that surfaces as empty `content`). Motivating trace: doom
+        # 2026-05-23 iter 4 — 1356s wall-clock, 32,777 completion
+        # tokens, ZERO visible pieces, deliberation detector didn't
+        # fire because it feeds on `piece` content. The recovery
+        # message tells the model EXPLICITLY to start with an opening
+        # tag and skip any reasoning preamble.
+        if prior_stream_silent:
+            fallback = (
+                "SILENT STREAM RECOVERY: your previous reply produced "
+                "ZERO visible content for the entire wall-clock budget. "
+                "Either the model spent all of its tokens inside a "
+                "reasoning/thinking channel that surfaces as empty "
+                "content, or it generated only whitespace.\n\n"
+                "Recovery for THIS turn:\n"
+                "  - Start your reply DIRECTLY with one of the opening "
+                "tags: <patch>, <html_file>, <plan>, or <done/>. The "
+                "very first non-whitespace text MUST be a tag.\n"
+                "  - Do NOT begin with `<think>`, prose, or any "
+                "explanatory preamble. Skip reasoning entirely if your "
+                "model has a reasoning mode — go straight to the tag.\n"
+                "  - Keep this reply small: one focused <patch> if the "
+                "file is healthy, or a complete <html_file> if you "
+                "need a fresh draft. Either way, the first token "
+                "matters more than the length."
+            )
+            return fallback, False
         # Phase 4: duplicate-decl-aware coaching. When `_materialize`
         # rejected the reply because the inbound HTML had concatenated
         # drafts (duplicate top-level `const` / `function`), naming the
@@ -2574,8 +3040,46 @@ class GameAgent:
                 )
             except Exception:
                 mod_toks = []
+            # Fix B (2026-05-25): include the most recent user feedback
+            # in the retrieval query so scope-discipline bullets
+            # (scope-locked-by-user-language, patch-budget-when-scope-
+            # locked, vlm-critic-can-mislead-on-orientation, etc.) fire
+            # when the user types scope-lock language like "JUST do X"
+            # or "do not touch other code". Without this, those bullets
+            # only retrieve when the GOAL itself contains scope vocab —
+            # which it never does, so the bullets sit unused across the
+            # whole session. The doom trace 2026-05-25 made this gap
+            # visible: user typed "JUST change the direction the player
+            # moves with the arrow keys they are REVERSED" four times
+            # in a row, and the scope-locked / patch-budget bullets
+            # never surfaced because retrieval keyed only on the goal.
+            #
+            # Source of feedback text: prefer `_last_drained_feedback`
+            # (the feedback that just landed in this turn's user-turn
+            # message) over `_pending_feedback` (queued for next turn).
+            # On a fix-prompt build the feedback for THIS turn has
+            # already been drained, so `_last_drained_feedback` is the
+            # right scope. Fall back to `_pending_feedback` when the
+            # call site runs before drain.
+            recent_feedback = (
+                getattr(self, "_last_drained_feedback", None)
+                or getattr(self, "_pending_feedback", None)
+                or []
+            )
+            feedback_text = " ".join(str(f) for f in recent_feedback[-2:])
+            # For small/mid model classes the playbook surfaces k=1 hit;
+            # the goal text dominates the query by sheer length, so any
+            # bullet matched only by feedback words gets buried. We
+            # repeat the feedback 3x so its tokens compete on count
+            # with the longer goal. Larger model classes already get
+            # k=3-6 retrievals and don't need the boost as much.
+            if feedback_text and self._model_class in ("mid", "small"):
+                feedback_weighted = " ".join([feedback_text] * 3)
+            else:
+                feedback_weighted = feedback_text
+            query = goal if not feedback_text else f"{goal} {feedback_weighted}"
             hits = self._playbook.retrieve(
-                goal, code=code, k=k, stage=stage,
+                query, code=code, k=k, stage=stage,
                 modality_tokens=mod_toks,
             )
             if hits:
@@ -2586,6 +3090,8 @@ class GameAgent:
                     "ids": ids,
                     "scores": [round(h.score, 4) for h in hits],
                     "goal_preview": goal[:120],
+                    "feedback_in_query": bool(feedback_text),
+                    "feedback_preview": feedback_text[:200] if feedback_text else "",
                     "char_budget": budget,
                     "render_mode": render_mode,
                 })
@@ -3351,6 +3857,178 @@ class GameAgent:
         except Exception:
             return None
 
+    # ------------------------------------------------------------------ revert
+    #
+    # User-triggered escape hatch for "the model just broke a working game."
+    # Audit of 10 recent traces (2026-05-25) showed harness gates catch only
+    # ~5-10% of "model takes liberty beyond user scope" failures across the
+    # full feedback shape. The cheaper, higher-leverage answer is to let the
+    # user roll back a regression in one keystroke rather than typing "you
+    # broke X, fix it" and watching the model break more.
+    #
+    # `/revert` calls revert_to_iter(None) → pick the most-recent iter whose
+    # `iter_summary` event had ok=True. `/revert N` calls revert_to_iter(N)
+    # → pick that specific snapshot. Both fall back to best.html when no
+    # clean snapshot is available; both error cleanly when neither exists.
+    #
+    # Iter counter is intentionally NOT reset — we're rewinding the FILE,
+    # not the conversation history. The next turn will see the reverted
+    # bytes as CURRENT FILE ON DISK and any feedback the user types.
+
+    def _clean_iters_from_trace(self) -> list[int]:
+        """Read the trace JSONL and return iter numbers whose iter_summary
+        event had ok=True, in chronological order. Source of truth is the
+        trace file (not in-memory state) so /revert works even after a
+        restart inside the same artifact.
+        """
+        out: list[int] = []
+        try:
+            if not self.trace_path.exists():
+                return out
+            with self.trace_path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or '"iter_summary"' not in line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        continue
+                    if obj.get("kind") != "iter_summary":
+                        continue
+                    if not obj.get("ok"):
+                        continue
+                    it = obj.get("iteration")
+                    if isinstance(it, int):
+                        out.append(it)
+        except Exception:
+            return out
+        return out
+
+    def _resolve_revert_source(
+        self, requested_iter: int | None,
+    ) -> tuple[Path | None, int | None, str, str | None]:
+        """Resolve the revert target. Returns (source_path, iter_n, source_kind, error_msg).
+
+        - requested_iter=None → most-recent clean iter snapshot, else best.html
+        - requested_iter=N    → snapshot for iter N specifically
+        - error_msg non-None → callers surface to user; source_path is None
+        """
+        if requested_iter is not None:
+            snap = self.snapshots_dir / f"iter_{requested_iter:02d}.html"
+            if not snap.exists():
+                available = sorted(
+                    int(p.stem.split("_", 1)[1])
+                    for p in self.snapshots_dir.glob("iter_*.html")
+                    if p.stem.split("_", 1)[1].isdigit()
+                ) if self.snapshots_dir.exists() else []
+                avail_str = (
+                    ", ".join(str(i) for i in available) if available
+                    else "(none — no iters have completed yet)"
+                )
+                return None, None, "", (
+                    f"iter {requested_iter} snapshot not found at "
+                    f"{snap}. Available iters: {avail_str}"
+                )
+            return snap, requested_iter, "snapshot", None
+
+        clean_iters = self._clean_iters_from_trace()
+        if clean_iters:
+            target_iter = clean_iters[-1]
+            snap = self.snapshots_dir / f"iter_{target_iter:02d}.html"
+            if snap.exists():
+                return snap, target_iter, "snapshot", None
+            # Fall through — clean iter was recorded but snapshot is gone
+
+        if self.best_path.exists():
+            return self.best_path, None, "best", None
+
+        return None, None, "", (
+            "no clean iter snapshot AND no best.html — nothing to revert to. "
+            "(this can happen if no iter has shipped cleanly yet in this session.)"
+        )
+
+    def revert_to_iter(
+        self, requested_iter: int | None = None,
+    ) -> dict[str, Any]:
+        """Roll back the on-disk game file to a previous iter's snapshot.
+
+        Returns a dict the caller (TUI / CLI) can render:
+            {
+                "ok": bool,
+                "error": str | None,       # set when ok is False
+                "to_iter": int | None,     # iter we landed on, or None for best.html
+                "source": "snapshot" | "best",
+                "source_path": str,        # absolute path of the source file
+                "from_iter": int | None,   # last iter that ran, for the banner
+                "file_bytes": int,         # size of the file after revert
+            }
+        """
+        source_path, to_iter, source_kind, err = self._resolve_revert_source(
+            requested_iter,
+        )
+        if err is not None:
+            return {
+                "ok": False, "error": err, "to_iter": None,
+                "source": "", "source_path": "", "from_iter": None,
+                "file_bytes": 0,
+            }
+        try:
+            content = source_path.read_text(encoding="utf-8")
+            self.out_path.parent.mkdir(parents=True, exist_ok=True)
+            self.out_path.write_text(content, encoding="utf-8")
+        except Exception as e:
+            return {
+                "ok": False, "error": f"failed to write {self.out_path}: {e}",
+                "to_iter": None, "source": "", "source_path": "",
+                "from_iter": None, "file_bytes": 0,
+            }
+        from_iter = max(
+            self._last_tested_iter or 0,
+            self._last_materialized_iter or 0,
+            self._snapshot_n or 0,
+        )
+        # Update in-memory file mirror so the next fix-prompt's CURRENT
+        # FILE block reflects what's actually on disk.
+        self._current_file = content
+        # Reset stale per-iter state that would mislead the next turn.
+        # We don't touch _messages or counters — the conversation
+        # continues; only iter-local signals get cleared.
+        self._previous_report_ok = None
+        self._previous_report = None
+        self._last_test_report = None
+        self._last_failed_patch_anchors = set()
+        self._pending_coaching = []
+        self._last_no_usable_code_fingerprint = None
+        # Recovery-flag flags from the round-1/2 Wolfenstein fix bundle —
+        # any pending recovery prompt is stale because the file changed.
+        self._dead_first_build_pending = False
+        self._context_pressure_pending = False
+        self._context_pressure_streak = 0
+        # Format-stuck streak and stream-status flags reset too — the
+        # last failure's evidence no longer reflects current state.
+        self._format_stuck_streak = 0
+        self._last_stream_looped = False
+        self._last_stream_stalled = False
+        self._last_stream_silent = False
+        self._last_stream_crashed = False
+        file_bytes = len(content)
+        self._trace({
+            "kind": "user_revert",
+            "from_iter": from_iter,
+            "to_iter": to_iter,
+            "source": source_kind,
+            "source_path": str(source_path),
+            "file_bytes": file_bytes,
+        })
+        return {
+            "ok": True, "error": None,
+            "to_iter": to_iter, "source": source_kind,
+            "source_path": str(source_path),
+            "from_iter": from_iter,
+            "file_bytes": file_bytes,
+        }
+
     def _save_best(self, html: str) -> Path | None:
         try:
             self.best_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3434,18 +4112,50 @@ class GameAgent:
     )
 
     def _summarize_content(self, c: str) -> str:
-        """Replace embedded HTML blobs with size markers — keep tags + notes."""
+        """Replace embedded HTML blobs with size markers — keep tags + notes.
+
+        Wolfenstein 2026-05-24 trace lesson: the OLD marker
+        `<html_file>[omitted: N bytes of HTML; see snapshot]</html_file>`
+        was shaped like a valid output tag, so a confused model parroted
+        it back verbatim in its next reply (turns [02], [06], [08] of
+        that trace's conversation.md). The parser saw an `<html_file>`
+        wrapper around prose, the body didn't normalize to a document,
+        materialize failed, and the agent entered an identical-reply
+        loop sending the generic "no <patch> or <html_file>" fallback.
+
+        The new marker uses an HTML COMMENT — no `<html_file>` /
+        `<patch>` / markdown-fence wrapper. The model literally cannot
+        copy-paste it as a fresh tag emission, and the embedded
+        instruction tells the model what to do instead of just naming
+        a byte count. Universal: no goal text, no genre.
+        """
         def html_repl(m):
             n = len(m.group(1))
             if n < _SUMMARIZE_MIN_HTML_BYTES:
                 return m.group(0)
-            return f"<html_file>[omitted: {n} bytes of HTML; see snapshot]</html_file>"
+            # Marker intentionally uses no `<html_file>` / `<patch>`
+            # substrings (not even inside prose) so a stressed model
+            # has nothing to copy-paste as a fresh tag emission. The
+            # comment shape also can't extract through the html
+            # regex variants 1-6 since none of them match comments.
+            return (
+                f"<!-- HARNESS-OMITTED-PRIOR-HTML: {n} bytes of HTML "
+                f"body written to disk in this earlier turn. The "
+                f"current file is shown inline below in the CURRENT "
+                f"FILE ON DISK block; patch against that, do NOT "
+                f"re-emit this marker. -->"
+            )
 
         def fence_repl(m):
             n = len(m.group(1))
             if n < _SUMMARIZE_MIN_HTML_BYTES:
                 return m.group(0)
-            return f"```html\n[omitted: {n} bytes of HTML; see snapshot]\n```"
+            return (
+                f"<!-- HARNESS-OMITTED-PRIOR-FENCE: {n} bytes of "
+                f"fenced HTML written to disk in this earlier turn. "
+                f"Do NOT re-emit this marker; patch against the "
+                f"CURRENT FILE ON DISK block below. -->"
+            )
 
         c = self._SUMMARIZE_HTML_RE.sub(html_repl, c)
         c = self._SUMMARIZE_FENCE_RE.sub(fence_repl, c)
@@ -3795,19 +4505,17 @@ class GameAgent:
         # classifier's expectation. Useful for postmortem to spot
         # patterns without us having to enumerate them in regex.
         if mode == "media_only" and patch_count > 0 and not (has_assets or has_sounds):
-            self._trace({
-                "kind": "scoped_classifier_overruled_by_model",
-                "expected_mode": mode,
-                "model_emitted": "patch_only",
-                "feedback_preview": str(cfg.get("feedback_preview") or "")[:200],
-            })
+            self._record_classifier_overrule(
+                expected_mode=mode,
+                model_emitted="patch_only",
+                feedback_preview=str(cfg.get("feedback_preview") or "")[:200],
+            )
         elif mode == "single_patch" and (has_assets or has_sounds) and patch_count == 0:
-            self._trace({
-                "kind": "scoped_classifier_overruled_by_model",
-                "expected_mode": mode,
-                "model_emitted": "media_only",
-                "feedback_preview": str(cfg.get("feedback_preview") or "")[:200],
-            })
+            self._record_classifier_overrule(
+                expected_mode=mode,
+                model_emitted="media_only",
+                feedback_preview=str(cfg.get("feedback_preview") or "")[:200],
+            )
         if bool(cfg.get("require_scope_probe")):
             probes = self._extract_probes(reply)
             if not probes:
@@ -4421,7 +5129,49 @@ class GameAgent:
                 + "\n- ".join(fb[:240] for fb in force_honor_via_escalation)
                 + "\n=================================================================="
             )
-        if self._pending_feedback:
+        if self._pending_feedback and not getattr(self, "_use_feedback_directives", True):
+            # RAW FEEDBACK MODE — /rawfeedback on. Pass every queued
+            # user note through verbatim, with ONLY the basic USER
+            # FEEDBACK (HIGHEST PRIORITY) wrapper. Skip strict-scope
+            # arbitration, classifier calls, MEDIA-CHANGE / ORIENTATION-
+            # CHANGE / SCOPE ARBITRATION directives, asset stem mapping,
+            # and scoped-constraint configuration. The model sees what
+            # the user typed and decides for itself whether to <patch>
+            # or <assets>. Use when the classifier is misrouting your
+            # guidance (Doom trace 2026-05-23 was the motivating case).
+            feedback_items = list(self._pending_feedback)
+            joined_raw = "\n- ".join(feedback_items)
+            parts.append(
+                "================ USER FEEDBACK (HIGHEST PRIORITY) ================\n"
+                "The user just typed this while watching your game. It OVERRIDES\n"
+                "any plan or default behavior. Address it explicitly in this turn:\n"
+                f"\n[USER NOTE]\n- {joined_raw}\n[/USER NOTE]\n"
+                "=================================================================="
+            )
+            for fb in feedback_items:
+                self._trace({"kind": "feedback_injected", "text": fb, "raw_mode": True})
+            self._trace({
+                "kind": "feedback_directives_suppressed",
+                "reason": "raw_feedback_mode",
+                "count": len(feedback_items),
+            })
+            self._last_drained_feedback = list(feedback_items)
+            self._recent_feedback_texts.extend(feedback_items)
+            self._recent_feedback_texts = self._recent_feedback_texts[-3:]
+            self._pending_feedback.clear()
+            self._clear_scoped_constraints()
+            self._last_turn_contract.update({
+                "had_feedback": True,
+                "locks_code": False,
+                "art_change": False,
+                "sound_change": False,
+                "behavior_scope": False,
+                "behavior_bug": False,
+                "orientation_change": False,
+                "existing_media_request": False,
+                "raw_feedback_mode": True,
+            })
+        elif self._pending_feedback:
             feedback_items = list(self._pending_feedback)
             strict_idxs = [
                 i for (i, fb) in enumerate(feedback_items)
@@ -5242,6 +5992,220 @@ class GameAgent:
                 })
         return val
 
+    def _maybe_inject_visual_playtest_auto_probes(self) -> None:
+        """Inject auto-probes from the matched visual_playtest recipe
+        into `self._probes`. Idempotent — checks names against the
+        existing probe set so repeated calls don't duplicate entries.
+
+        Auto-probes are the DETERMINISTIC layer paired with the VLM
+        checklist: the VLM might miss "both characters face the same
+        direction" on a screenshot, but the `auto_actors_face_each_other`
+        probe asserts `Math.sign(p1.facing) !== Math.sign(p2.facing)`
+        directly against state — fails any iter where the wholesale
+        flip lands. Mortal-kombat 2026-05-24 iter 12 is the motivating
+        case.
+
+        Conservative: each probe returns `true` (passes) when the
+        relevant state shape isn't exposed. Never fails a game that
+        simply doesn't have e.g. `state.player.facing`.
+
+        Called once at end of Phase A (after the model's own probes
+        are parsed) and again after first-build materializes (in case
+        the planning phase had no probes but assets give a stronger
+        recipe match).
+        """
+        try:
+            recipe, diag = self._memory.find_visual_playtest_for(
+                goal=self._goal or "",
+                plan_text=self._criteria or "",
+                asset_names=list(self._session_assets.keys()),
+            )
+        except Exception as e:
+            self._trace({
+                "kind": "visual_playtest_auto_probes_error",
+                "error": str(e)[:200],
+            })
+            return
+        if recipe is None:
+            return
+        # Record the matched recipe id so the TUI status panel can show
+        # which mechanism is guiding this session, even on recipes that
+        # don't carry any auto_probes.
+        self._active_visual_playtest_recipe_id = recipe.id
+        auto = recipe.recipe.get("auto_probes") or []
+        if not auto:
+            return
+        existing_names = {(p.get("name") or "") for p in (self._probes or [])}
+        added: list[str] = []
+        for ap in auto:
+            name = (ap.get("name") or "").strip()
+            expr = (ap.get("expr") or "").strip()
+            if not name or not expr or name in existing_names:
+                continue
+            if self._probes is None:
+                self._probes = []
+            self._probes.append({"name": name, "expr": expr})
+            existing_names.add(name)
+            added.append(name)
+        if added:
+            # Append rather than overwrite — same recipe re-matches
+            # on subsequent retrieval calls and we want the union.
+            for n in added:
+                if n not in self._active_visual_playtest_auto_probes:
+                    self._active_visual_playtest_auto_probes.append(n)
+            self._trace({
+                "kind": "visual_playtest_auto_probes_injected",
+                "recipe_id": recipe.id,
+                "added": added,
+                "total_probes": len(self._probes or []),
+            })
+
+    def _build_visual_playtest_prompt(self, recipe, before_png: bytes | None) -> str:
+        """Build a structured-checklist VLM prompt from a recipe.
+
+        Small VLMs answer closed-class yes/no questions much more
+        reliably than open-ended "what's wrong?" prompts (mortal-
+        kombat 2026-05-24 trace had 6 paraphrased complaints in 6
+        iters). The recipe carries 6-9 high-signal questions; we
+        wrap them in a strict response format and tell the VLM to
+        stop after the list.
+        """
+        checklist = recipe.recipe.get("checklist") or []
+        # Render as Q1..Qn so the response parser can match without
+        # depending on exact question text.
+        numbered = "\n".join(
+            f"Q{i+1}: {q}" for i, q in enumerate(checklist)
+        )
+        intro = (
+            "You are reviewing one screenshot of a game called: "
+            f"{self._goal[:300] or '(no goal specified)'}\n\n"
+            "Answer each numbered question below by RE-EMITTING the "
+            "question's number with YES, NO, or UNCLEAR, plus an "
+            "optional short remark after a dash. ONE LINE per "
+            "question, in order. Stop after the last question. Do "
+            "NOT add prose, do NOT guess at code causes, do NOT "
+            "describe the background unless a question asks.\n\n"
+        )
+        if before_png is not None:
+            intro = (
+                "You are reviewing TWO screenshots of a game called: "
+                f"{self._goal[:300] or '(no goal specified)'}\n\n"
+                "Image 1: BEFORE simulated input. Image 2: AFTER.\n\n"
+                "Answer each numbered question by RE-EMITTING the "
+                "question's number with YES, NO, or UNCLEAR. ONE "
+                "LINE per question, in order. Refer to Image 2 (the "
+                "AFTER image) for each answer. Stop after the last "
+                "question.\n\n"
+            )
+        example = (
+            "Example response shape:\n"
+            "Q1: yes\n"
+            "Q2: no — player overlaps the right wall\n"
+            "Q3: unclear\n"
+            "...\n\n"
+        )
+        return intro + numbered + "\n\n" + example
+
+    @staticmethod
+    def _parse_visual_playtest_response(text: str, recipe) -> dict:
+        """Parse a structured-checklist response into {q_index: (answer, remark)}.
+
+        Tolerant: accepts YES/NO/UNCLEAR in any case, with or without
+        leading whitespace; accepts `Qn:`, `Qn.`, `Qn -`, etc. Lines
+        that don't match the pattern are skipped silently. Returns a
+        dict keyed by 1-based question index.
+
+        Returns also a `parse_rate` (matched / expected) so the
+        caller can detect low-quality responses and fall back.
+        """
+        if not text or not recipe:
+            return {"answers": {}, "parse_rate": 0.0, "n_questions": 0}
+        checklist = recipe.recipe.get("checklist") or []
+        n_q = len(checklist)
+        answers: dict[int, tuple[str, str]] = {}
+        import re as _re
+        # Match `Q1: yes — remark` / `Q12. NO` / `q3 - unclear` / etc.
+        # The `\b` after the answer alternation forces a word break, but
+        # emoji code-points don't trigger \b in Python's re — so we split
+        # the alternation into two branches: ASCII words (need \b) and
+        # symbols (no \b).
+        pat = _re.compile(
+            r"^\s*Q?\s*(\d+)\s*[:.\-)]\s*"
+            r"(?:(yes|no|unclear|y|n|u)\b|([✅❌✔✖✓✗✘]))"
+            r"\s*[\-—]?\s*(.*)$",
+            _re.IGNORECASE,
+        )
+        for line in text.splitlines():
+            m = pat.match(line)
+            if not m:
+                continue
+            idx = int(m.group(1))
+            if idx < 1 or idx > n_q:
+                continue
+            ans_word = m.group(2)
+            ans_sym = m.group(3)
+            ans = (ans_word or ans_sym or "").strip().lower()
+            remark = (m.group(4) or "").strip()
+            # Normalize to yes/no/unclear.
+            if ans in ("y", "yes", "✅", "✔", "✓"):
+                norm = "yes"
+            elif ans in ("n", "no", "❌", "✖", "✗", "✘"):
+                norm = "no"
+            else:
+                norm = "unclear"
+            answers[idx] = (norm, remark)
+        return {
+            "answers": answers,
+            "parse_rate": (len(answers) / n_q) if n_q else 0.0,
+            "n_questions": n_q,
+        }
+
+    @staticmethod
+    def _format_visual_playtest_critique(parsed: dict, recipe) -> str | None:
+        """Turn the parsed checklist results into a single critique
+        string. Returns None when EVERY check passed (no coaching
+        needed — same shape as the legacy "Visual Critic: OK" path).
+        """
+        answers = parsed.get("answers") or {}
+        n_q = parsed.get("n_questions") or 0
+        if not answers or not n_q:
+            return None
+        checklist = recipe.recipe.get("checklist") or []
+        failures: list[str] = []
+        unclears: list[str] = []
+        for i, q in enumerate(checklist, start=1):
+            entry = answers.get(i)
+            if entry is None:
+                continue
+            ans, remark = entry
+            line_intro = f"Q{i} ({q[:80]}{'...' if len(q) > 80 else ''})"
+            if ans == "no":
+                tail = f" — {remark}" if remark else ""
+                failures.append(f"{line_intro} FAILED{tail}")
+            elif ans == "unclear":
+                tail = f" — {remark}" if remark else ""
+                unclears.append(f"{line_intro} UNCLEAR{tail}")
+        if not failures and not unclears:
+            return None  # all-pass; caller treats as "OK"
+        head = (
+            f"[VISUAL PLAYTEST — {recipe.id}] "
+            f"{len(failures)} of {n_q} check(s) failed"
+            + (f" + {len(unclears)} unclear" if unclears else "")
+            + ":"
+        )
+        body = "\n".join(failures + unclears)
+        # Optional `fix_hint` (added 2026-05-25 from the agent-memory
+        # critique review): when a recipe carries a per-failure-class
+        # minimal-fix shape, append it so the model sees not just
+        # WHAT'S WRONG but the smallest correct change shape. Reduces
+        # the "VLM critic complaint → model invents structural rewrite"
+        # failure pattern. fix_hint only renders when failures exist
+        # (no point coaching on a passing check).
+        fix_hint = (recipe.recipe.get("fix_hint") or "").strip() if failures else ""
+        if fix_hint:
+            return head + "\n" + body + "\n\nMinimal fix shape: " + fix_hint
+        return head + "\n" + body
+
     async def run_visual_critic(
         self,
         current_png: bytes,
@@ -5253,9 +6217,44 @@ class GameAgent:
             return None
             
         self._set_role_activity("critic", "Auditing screenshot...")
+        # Try the structured-checklist path first (2026-05-24). Match a
+        # mechanism recipe via goal + plan-grade criteria text + asset
+        # names; if one resolves, build a closed-class yes/no prompt
+        # from the recipe's checklist. The VLM's answer is parsed
+        # line-by-line into a structured critique. If retrieval misses
+        # OR the response doesn't parse cleanly, we fall back to the
+        # legacy open-ended prompt below.
+        recipe = None
+        recipe_diag: dict = {}
         try:
-            # We construct a highly structured prompt for Model 2/3 (Visual Critic)
-            if before_png is not None:
+            recipe, recipe_diag = self._memory.find_visual_playtest_for(
+                goal=self._goal or "",
+                plan_text=self._criteria or "",
+                asset_names=list(self._session_assets.keys()),
+            )
+        except Exception as _vp_e:
+            self._trace({
+                "kind": "visual_playtest_retrieval_error",
+                "error": str(_vp_e)[:200],
+            })
+            recipe = None
+        try:
+            using_recipe = recipe is not None
+            if using_recipe:
+                prompt = self._build_visual_playtest_prompt(recipe, before_png)
+                # Mirror the matched recipe id onto the active field
+                # so the TUI status panel sees the same recipe id that
+                # the VLM is being asked to evaluate against. Idempotent
+                # — same recipe across iters just overwrites with the
+                # same value.
+                self._active_visual_playtest_recipe_id = recipe.id
+                self._trace({
+                    "kind": "visual_playtest_recipe_used",
+                    "id": recipe.id,
+                    "top_candidates": recipe_diag.get("top_candidates", []),
+                    "match_tokens_sample": recipe_diag.get("match_tokens_sample", []),
+                })
+            elif before_png is not None:
                 prompt = (
                     "You are an expert out-of-band Visual PlayTester and Critic "
                     "for a game development sandbox.\n"
@@ -5280,7 +6279,11 @@ class GameAgent:
                     "evidence, and state what likely needs adjusting. Do NOT "
                     "output code or patches."
                 )
-                images = [before_png, current_png]
+                self._trace({
+                    "kind": "visual_playtest_recipe_generic",
+                    "reason": "no_recipe_matched",
+                    "top_candidates": recipe_diag.get("top_candidates", []),
+                })
             else:
                 prompt = (
                     "You are an expert out-of-band Visual PlayTester and Critic for a game development sandbox. "
@@ -5296,7 +6299,12 @@ class GameAgent:
                     "Keep it objective, name the specific visual evidence (e.g., 'character facing right but attack rendering to the left'), "
                     "and state what likely needs adjusting. Do NOT output code or patches."
                 )
-                images = [current_png]
+                self._trace({
+                    "kind": "visual_playtest_recipe_generic",
+                    "reason": "no_recipe_matched",
+                    "top_candidates": recipe_diag.get("top_candidates", []),
+                })
+            images = [before_png, current_png] if before_png is not None else [current_png]
             messages = [
                 {"role": "user", "content": prompt, "images": images}
             ]
@@ -5304,6 +6312,7 @@ class GameAgent:
                 "kind": "visual_critic_start",
                 "model": backend.info.model,
                 "image_count": len(images),
+                "recipe_id": recipe.id if recipe else None,
             })
             critic_role = getattr(self, "_model3_role", None)
             if critic_role != "critic":
@@ -5321,9 +6330,47 @@ class GameAgent:
                 overall_seconds=300.0,
                 max_retries=1,
             )
-            critique = (result.text or "").strip()
-            self._trace({"kind": "visual_critic_end", "critique": critique})
-            return critique
+            critique_raw = (result.text or "").strip()
+            # If we used a recipe, parse the structured response and
+            # format the failures into a single coaching string. Fall
+            # back to the raw text when the VLM didn't follow the
+            # format (parse_rate below threshold) — small VLMs
+            # occasionally skip the Q1: prefix and revert to prose,
+            # but we still want to surface whatever they said.
+            if using_recipe and recipe is not None:
+                parsed = self._parse_visual_playtest_response(critique_raw, recipe)
+                parse_rate = parsed.get("parse_rate", 0.0)
+                if parse_rate >= 0.5:
+                    formatted = self._format_visual_playtest_critique(parsed, recipe)
+                    self._trace({
+                        "kind": "visual_playtest_parsed",
+                        "recipe_id": recipe.id,
+                        "parse_rate": round(parse_rate, 2),
+                        "n_questions": parsed.get("n_questions", 0),
+                        "n_answered": len(parsed.get("answers", {})),
+                        "n_failures": sum(
+                            1 for (a, _r) in parsed["answers"].values()
+                            if a == "no"
+                        ),
+                    })
+                    # All-pass returns None — same shape as "Visual
+                    # Critic: OK" in the legacy path.
+                    if formatted is None:
+                        self._trace({"kind": "visual_critic_end", "critique": "(all checks passed)"})
+                        return None
+                    self._trace({"kind": "visual_critic_end", "critique": formatted})
+                    return formatted
+                else:
+                    self._trace({
+                        "kind": "visual_playtest_unparseable",
+                        "recipe_id": recipe.id,
+                        "parse_rate": round(parse_rate, 2),
+                        "raw_preview": critique_raw[:200],
+                    })
+                    # Fall through to legacy return so the raw text
+                    # still surfaces (better than nothing).
+            self._trace({"kind": "visual_critic_end", "critique": critique_raw})
+            return critique_raw
         except Exception as e:
             self._trace({"kind": "visual_critic_failed", "error": str(e)})
             return None
@@ -5619,13 +6666,15 @@ class GameAgent:
         cleaned = critique.strip()
         if not cleaned or "ok" in cleaned.lower()[:30]:
             return
-        prefix = "VISUAL CRITIC (looked at the screenshot of your last iteration): "
-        self._pending_coaching.append(prefix + cleaned)
+        queued = self._queue_visual_critic_coaching(
+            cleaned, iteration=iteration, vc_role=vc_role,
+        )
         self._trace({
             "kind": "visual_critic_concurrent_completed",
             "iteration": iteration,
             "vc_role": vc_role,
             "critique_preview": cleaned[:240],
+            "queued": queued,
         })
 
     # ---- Phase 1.5 — autonomous self-feedback ---------------------------
@@ -6463,6 +7512,7 @@ class GameAgent:
         self._last_stream_stalled = bool(result.stalled)
         self._last_stream_deliberated = bool(result.deliberated)
         self._last_stream_crashed = bool(result.crashed)
+        self._last_stream_silent = bool(getattr(result, "silent", False))
         self._last_stream_loop_kind = (
             getattr(result, "loop_kind", None) if result.looped else None
         )
@@ -6477,6 +7527,7 @@ class GameAgent:
             "looped": result.looped,
             "deliberated": result.deliberated,
             "crashed": result.crashed,
+            "silent": bool(getattr(result, "silent", False)),
             "len": len(result.text),
             # Backend-reported BPE counts when available. `tokens` above is
             # streaming chunk count; these are the real cost numbers used
@@ -6486,6 +7537,73 @@ class GameAgent:
             "completion_tokens": result.completion_tokens,
             "max_tokens_hit": result.max_tokens_hit,
         })
+        # Context-pressure detector. When prompt_tokens approaches
+        # num_ctx, the model has no headroom to emit a complete
+        # <html_file>; output truncates, parser rejects, the agent
+        # falls into an identical-reply loop. Universal mitigation:
+        # set a one-shot flag the next fix_instruction call reads to
+        # omit the inlined CURRENT FILE block and coach a minimal
+        # patch. Trace fires only on the FIRST turn of a high-pressure
+        # streak — subsequent turns in the same streak suppress the
+        # trace to avoid log spam.
+        try:
+            _ptokens = (
+                int(result.prompt_tokens) if result.prompt_tokens is not None
+                else 0
+            )
+            _num_ctx = int(getattr(self, "num_ctx", 0) or 0)
+        except Exception:
+            _ptokens, _num_ctx = 0, 0
+        if _ptokens > 0 and _num_ctx > 0 and role == "coder":
+            _pressure = _ptokens / _num_ctx
+            if _pressure >= 0.85:
+                self._context_pressure_streak += 1
+                self._context_pressure_pending = True
+                if self._context_pressure_streak == 1:
+                    self._trace({
+                        "kind": "context_pressure_warning",
+                        "prompt_tokens": _ptokens,
+                        "num_ctx": _num_ctx,
+                        "pressure": round(_pressure, 3),
+                        "streak": self._context_pressure_streak,
+                        "hint": (
+                            "prompt_tokens >= 85% of num_ctx; the next "
+                            "fix turn will omit the inlined CURRENT "
+                            "FILE block and require a minimal patch. "
+                            "This prevents the identical-reply loop "
+                            "the Wolfenstein 2026-05-24 trace burned "
+                            "5 iters on."
+                        ),
+                    })
+            else:
+                self._context_pressure_streak = 0
+        # Silent-stream surface — when the new ollama_io / MLX guard
+        # aborts a stream that produced ZERO visible content for >=180s
+        # (all output went to a reasoning channel that surfaces as empty
+        # `content`), emit a dedicated trace so the doom-iter-4 failure
+        # class is visible in postmortem analysis. Recovery flows
+        # through the existing "no usable code" path below since the
+        # reply text is empty.
+        if getattr(result, "silent", False):
+            self._trace({
+                "kind": "stream_silent_aborted",
+                "duration_s": round(result.duration_s, 2),
+                "completion_tokens": result.completion_tokens,
+                "prompt_tokens": result.prompt_tokens,
+                "model_role": role,
+                "model_name": getattr(
+                    getattr(active_backend, "info", None),
+                    "model",
+                    "unknown",
+                ),
+                "hint": (
+                    "Stream produced zero visible content for >=180s. "
+                    "Likely all generation went to a reasoning/thinking "
+                    "channel that surfaces as empty `content`. The model "
+                    "should be coached to start replies directly with an "
+                    "opening tag like <patch> or <html_file>."
+                ),
+            })
         # Short-stream warning — symmetric to runaway_stream_warning.
         # Counterpart to the 2026-05-23 SOTA chess trace where a coder
         # role emitted 8 tokens in 1.74s and the agent accepted it as
@@ -7263,7 +8381,7 @@ class GameAgent:
     def _extract_html_inner(reply: str) -> str | None:
         """Pull a complete HTML game out of a model reply.
 
-        We accept four formats so we never throw away a valid game just
+        We accept six formats so we never throw away a valid game just
         because the model ignored the <html_file> anchor (a common failure
         mode of smaller models like qwen3.6:27b — they wrap output in a
         markdown fence or emit bare <!DOCTYPE>):
@@ -7274,6 +8392,7 @@ class GameAgent:
              — common after stream stalls truncate the closing tag
           4. ```html\\n<!DOCTYPE html>...</html>\\n```   ← markdown fence only
           5. <!DOCTYPE html>...</html>             ← bare document
+          6. <html>...</html>                       ← no doctype; we prepend
         """
         # 1. Canonical wrapper.
         m = _HTML_RE.search(reply)
@@ -7303,6 +8422,21 @@ class GameAgent:
         m = _BARE_DOCTYPE_RE.search(reply)
         if m:
             return m.group(1).strip()
+        # 6. Bare <html>...</html> document with NO <!DOCTYPE> — salvage by
+        # prepending a synthetic doctype line so the browser doesn't enter
+        # quirks mode. Wolfenstein 2026-05-24 trace lesson: the model
+        # occasionally emits a complete html element without the doctype
+        # anchor; today classify_format_failure flags it (wrong_tag_html)
+        # but the iter is wasted asking the model to retry. Salvaging here
+        # turns the wasted iter into a working file.
+        m = _BARE_HTML_ELEMENT_RE.search(reply)
+        if m:
+            body = m.group(1).strip()
+            # Guard against picking up something tiny like an empty
+            # <html></html> probe expression — a real document is at least
+            # a few hundred bytes once script/style content is in it.
+            if len(body) >= 200:
+                return "<!DOCTYPE html>\n" + body
         return None
 
     @staticmethod
@@ -9362,15 +10496,35 @@ class GameAgent:
                 # keywords ("sprite", "art", "graphics") and escalate
                 # the <assets> directive to REQUIRED for that turn.
                 # Tolerant of older signatures: try with goal first,
-                # fall through to the reference-only call.
+                # then with force_minimal_first_build (if the restart
+                # loop set it after a same-signature attempt), then
+                # fall back to the simplest reference-only call.
+                fmfb = bool(getattr(self, "_force_minimal_first_build", False))
                 try:
                     plan_msg = self._p.plan_instruction(
-                        reference_block=reference_block, goal=goal,
-                    )
-                except TypeError:
-                    plan_msg = self._p.plan_instruction(
                         reference_block=reference_block,
+                        goal=goal,
+                        force_minimal_first_build=fmfb,
                     )
+                    if fmfb:
+                        self._trace({
+                            "kind": "force_minimal_first_build_applied",
+                            "attempt_idx": getattr(
+                                self, "_restart_attempt_idx", 0,
+                            ),
+                            "prev_signature": getattr(
+                                self, "_prev_attempt_signature", None,
+                            ),
+                        })
+                except TypeError:
+                    try:
+                        plan_msg = self._p.plan_instruction(
+                            reference_block=reference_block, goal=goal,
+                        )
+                    except TypeError:
+                        plan_msg = self._p.plan_instruction(
+                            reference_block=reference_block,
+                        )
             elif reference_block:
                 # v0 prompt module — no plan_instruction() helper. Manually
                 # prepend the reference and an authority sentence.
@@ -9474,12 +10628,13 @@ class GameAgent:
             # compete with the architect for VRAM and slow it down.
             # General behavior — observable detection, no genre logic.
             self._maybe_prewarm_diffusers_during_phase_a()
+            planning_role = self._planning_role()
             yield self._record(AgentEvent(
                 "activity", "streaming",
-                {"label": "planning reply", "role": "architect"},
+                {"label": "planning reply", "role": planning_role},
             ))
             try:
-                plan_reply = await self._stream(self._token_cb_wrapper, role="architect")
+                plan_reply = await self._stream(self._token_cb_wrapper, role=planning_role)
             except Exception as e:
                 yield self._record(AgentEvent("activity", "idle"))
                 err_msg = (
@@ -9498,8 +10653,8 @@ class GameAgent:
             self._messages.append({
                 "role": "assistant",
                 "content": plan_reply,
-                "model_role": "architect",
-                "model_name": self.get_backend("architect").info.model
+                "model_role": planning_role,
+                "model_name": self.get_backend(planning_role).info.model
             })
             self._extract_and_queue_lookups(plan_reply)
             self._capture_todos(plan_reply)
@@ -9590,6 +10745,14 @@ class GameAgent:
                             "info",
                             f"[yellow]probe lint[/yellow] {f['message']}",
                         ))
+            # Visual-playtest auto-probes injection. Run AFTER the
+            # model's own <probes> are parsed (or skipped) so the
+            # injected probes ride alongside whatever the model wrote.
+            # Deterministic safety net for the mechanism — even if the
+            # model's probes miss the failure class (e.g. mortal-
+            # kombat 2026-05-24 had no facing assertion), the injected
+            # probe catches it. See VisualPlaytestRecipe.auto_probes.
+            self._maybe_inject_visual_playtest_auto_probes()
 
             q = self._extract_question(plan_reply)
             if q is not None:
@@ -9608,12 +10771,13 @@ class GameAgent:
                         "is sufficient to plan."
                     ),
                 })
+                planning_role = self._planning_role()
                 yield self._record(AgentEvent(
                     "activity", "streaming",
-                    {"label": "streaming plan after question", "role": "architect"},
+                    {"label": "streaming plan after question", "role": planning_role},
                 ))
                 try:
-                    plan_reply = await self._stream(self._token_cb_wrapper, role="architect")
+                    plan_reply = await self._stream(self._token_cb_wrapper, role=planning_role)
                 except Exception as e:
                     yield self._record(AgentEvent("activity", "idle"))
                     err_msg = (
@@ -9631,8 +10795,8 @@ class GameAgent:
                 self._messages.append({
                     "role": "assistant",
                     "content": plan_reply,
-                    "model_role": "architect",
-                    "model_name": self.get_backend("architect").info.model
+                    "model_role": planning_role,
+                    "model_name": self.get_backend(planning_role).info.model
                 })
                 self._extract_and_queue_lookups(plan_reply)
                 self._capture_todos(plan_reply)
@@ -10009,6 +11173,23 @@ class GameAgent:
         for iteration in range(start_iter, hard_max + 1):
             if iteration > end_iter + self._iter_budget_bonus:
                 break
+            # Dead-first-build attempt-abort. After 2 dead first builds
+            # in this attempt, the detector flips this flag so the
+            # iteration loop exits cleanly and the restart loop can
+            # apply a fresh seed/recipe. Universal: keys on observable
+            # raf_ran=false + input dead structural signal, no genre.
+            if getattr(self, "_dead_first_build_abort_attempt", False):
+                self._trace({
+                    "kind": "dead_first_build_attempt_aborted",
+                    "iteration": iteration,
+                    "recoveries": self._dead_first_build_recoveries,
+                    "hint": (
+                        "Aborting this attempt after 2 dead first "
+                        "builds so the restart loop can try a fresh "
+                        "seed/scope."
+                    ),
+                })
+                break
             # Reset per-iter flags so the media-only-bonus check sees
             # only THIS iter's regen state.
             self._media_regenerated_this_iter = False
@@ -10096,10 +11277,16 @@ class GameAgent:
             # Prune older turns before generating, so we don't hit context.
             self._prune_messages()
 
-            # Best-of-N is only used in fix mode (iter 2+ after a failure)
-            # AND only when we have N>1. The first build is always single
-            # because there's no test signal yet to score against.
-            use_bon = self._fix_mode and self.best_of_n > 1
+            # Best-of-N fan-out fires whenever we have N>1 candidates
+            # to sample. Originally gated on `_fix_mode` (iter 2+) under
+            # the assumption that iter 1 had no test signal to score
+            # against, but the scorer at _generate_and_score_candidates
+            # IS the test harness itself (Chromium + probes + structural
+            # checks) — every iter has that signal, including iter 1.
+            # Removing the gate uses the multi-slot GPU capacity from
+            # session start; on the 4-GPU box this means GPUs 2 and 3
+            # are hot during the first build instead of sitting idle.
+            use_bon = self.best_of_n > 1
             fallback_attempted = False
             # Phase 5d: one transparent retry of the SAME backend on a
             # crashed cloud result before swapping to local Ollama.
@@ -10566,6 +11753,59 @@ class GameAgent:
                 or (self._previous_report_ok is True and streak_ok)
                 or single_clean_ship_ok
             )
+            # Model-gives-up gate (Wolfenstein 2026-05-24 trace [04]).
+            # When the model emits <done/> with <notes> that confess
+            # harness / parse trouble ("consistently failing to parse",
+            # "user can manually copy"), it is NOT shipping a working
+            # game — it's asking for help. Override the ship gate and
+            # route through a recovery prompt that explicitly tells the
+            # model the prior loop is the agent's bug to break, and that
+            # it should send a fresh minimal <patch> targeting the
+            # specific failing symptom rather than another <done/>.
+            give_up_notes_text = self._extract_notes(reply) or ""
+            model_gave_up = (
+                said_done_or_confirm
+                and GameAgent._notes_signal_give_up(give_up_notes_text)
+            )
+            if model_gave_up:
+                self._trace({
+                    "kind": "model_give_up_detected",
+                    "iteration": iteration,
+                    "notes_preview": give_up_notes_text[:240],
+                    "hint": (
+                        "Model emitted <done/> with notes confessing "
+                        "harness/parse trouble. Treating as recovery "
+                        "request instead of ship."
+                    ),
+                })
+                # Drop the <done/> intent for THIS turn and inject a
+                # recovery user message. The next iter will receive a
+                # fresh stream prompt; the ship branch below is
+                # bypassed because we `continue` here.
+                recovery = (
+                    "MODEL GIVE-UP DETECTED: your previous <notes> "
+                    "block said the harness was failing to parse / the "
+                    "user should manually copy the file. That is the "
+                    "harness's bug to fix, not yours — you should not "
+                    "ship with `<done/>` while the file is broken.\n\n"
+                    "Recovery for THIS turn:\n"
+                    "  - Read the CURRENT FILE ON DISK block in the "
+                    "most recent fix prompt; it is the truth source.\n"
+                    "  - Pick the ONE most concrete symptom from the "
+                    "most recent test report and emit ONE small "
+                    "<patch> with 3-5 lines of SEARCH context that "
+                    "fixes only that one thing.\n"
+                    "  - Do NOT emit <done/> again until the test "
+                    "report comes back clean.\n"
+                    "  - Do NOT emit a full <html_file> rewrite this "
+                    "turn — the loop you were stuck in was caused by "
+                    "re-emitting large bodies."
+                )
+                self._messages.append({
+                    "role": "user",
+                    "content": self._flush_user_injections(recovery),
+                })
+                continue
             if (
                 said_done_or_confirm
                 and html_in_reply is None
@@ -10641,6 +11881,12 @@ class GameAgent:
                 format_rejection = classify_format_failure(reply)
                 if format_rejection is not None:
                     self._format_stuck_streak += 1
+                    # Track iter-1 format rejections for the restart-
+                    # signature comparison. Repeated iter-1 format
+                    # failures are the strongest signal the model is
+                    # over-scoped for what it can emit in one stream.
+                    if iteration == 1:
+                        self._format_rejections_iter1_this_attempt += 1
                     self._trace({
                         "kind": "format_rejection",
                         "rejection_kind": format_rejection.kind,
@@ -10849,13 +12095,40 @@ class GameAgent:
                 # If the reply had patches but they failed to apply, give the
                 # model the specific failures + current file so it can retry.
                 if patches_in_reply and self._current_file:
+                    # Snapshot prior-turn failures BEFORE this turn's
+                    # re-apply so the [REPEATED FAILURE] marker reflects
+                    # cross-turn repeats, not within-turn duplicates.
+                    prior_failed_anchors = set(self._last_failed_patch_anchors)
                     res = apply_patches(self._current_file, patches_in_reply)
+                    # Current-turn failures → fingerprints for next turn.
+                    new_failed_anchors = {
+                        self._patch_anchor_fingerprint(p.search or "")
+                        for (_i, p, _r) in res.failed
+                    }
+                    # Intersection = SEARCH blocks that failed last turn
+                    # AND failed again this turn. patch_retry_instruction
+                    # uses this to flag those bullets.
+                    repeat_anchors = prior_failed_anchors & new_failed_anchors
+                    if repeat_anchors:
+                        self._trace({
+                            "kind": "patch_search_repeat_detected",
+                            "count": len(repeat_anchors),
+                            "anchors": sorted(repeat_anchors),
+                        })
                     self._messages.append({
                         "role": "user",
                         "content": self._flush_user_injections(
-                            self._p.patch_retry_instruction(res.failed, self._current_file)
+                            self._p.patch_retry_instruction(
+                                res.failed,
+                                self._current_file,
+                                repeat_anchors=repeat_anchors,
+                                anchor_fingerprint=self._patch_anchor_fingerprint,
+                            )
                         ),
                     })
+                    # Remember THIS turn's failures so the next retry
+                    # can flag repeats again.
+                    self._last_failed_patch_anchors = new_failed_anchors
                 else:
                     # Detect "plan-only" — the model emitted <plan> but no
                     # code. This is the failure mode from the
@@ -10882,6 +12155,28 @@ class GameAgent:
                         (has_assets or has_sounds) and not has_probes
                         and not plan_only
                     )
+                    # Cross-turn identical-reply detector. When the SAME
+                    # rejected reply lands twice in a row, the standard
+                    # fallback (which is also identical) won't move the
+                    # model — pass the signal into the fallback so it
+                    # picks the scope-reduction escalation branch.
+                    current_fp = GameAgent._reply_fingerprint(reply)
+                    identical_repeat = (
+                        current_fp != ""
+                        and self._last_no_usable_code_fingerprint == current_fp
+                    )
+                    if identical_repeat:
+                        self._identical_reply_loops_this_attempt += 1
+                        self._trace({
+                            "kind": "identical_reply_loop_detected",
+                            "fingerprint": current_fp,
+                            "reply_len": len(reply or ""),
+                            "iteration": iteration,
+                            "count_this_attempt": (
+                                self._identical_reply_loops_this_attempt
+                            ),
+                        })
+                    self._last_no_usable_code_fingerprint = current_fp
                     self._trace({
                         "kind": "no_usable_code",
                         "plan_only": plan_only,
@@ -10889,6 +12184,7 @@ class GameAgent:
                         "media_only": media_only,
                         "consecutive_plan_only": self._consecutive_plan_only,
                         "has_existing_file": bool(self._current_file),
+                        "identical_repeat": identical_repeat,
                     })
                     fallback, reset_streak = (
                         GameAgent._no_usable_code_fallback(
@@ -10900,16 +12196,24 @@ class GameAgent:
                             probes_only=probes_only,
                             media_only=media_only,
                             prior_stream_looped=self._last_stream_looped,
+                            prior_stream_silent=self._last_stream_silent,
                             prior_loop_kind=self._last_stream_loop_kind,
                             prior_loop_line=self._last_stream_loop_line,
                             is_local_backend=(
                                 self._backend.info.name in {"mlx", "ollama"}
                             ),
                             materialize_reject_reason=materialize_msg or "",
+                            identical_repeat=identical_repeat,
                         )
                     )
                     if reset_streak:
                         self._consecutive_plan_only = 0
+                        # Clear the fingerprint too: the escalation
+                        # changed the prompt, the model should reply
+                        # differently. Resetting prevents re-triggering
+                        # on the next turn's reply even if the model
+                        # ignores the escalation.
+                        self._last_no_usable_code_fingerprint = None
                     self._messages.append({
                         "role": "user",
                         "content": self._flush_user_injections(fallback),
@@ -10932,6 +12236,9 @@ class GameAgent:
             self._force_first_build_prefill = False
             self._consecutive_plan_only = 0
             self._format_stuck_streak = 0
+            # Successful materialize means the model emitted a parseable
+            # reply — any previous identical-reply loop has been broken.
+            self._last_no_usable_code_fingerprint = None
             self._last_materialized_iter = iteration
 
             if continuation_full_rewrite and not continuation_probe_refresh_adopted:
@@ -11322,6 +12629,76 @@ class GameAgent:
                             "a feature."
                         ),
                     })
+                # Dead-first-build detector (universal). On iter 1 or 2,
+                # if the file loaded but RAF never fired AND the input
+                # smoke test registered no state/canvas change, the file
+                # is structurally dead — patches will not save it. Set
+                # a one-shot flag so the next fix turn uses the scope-
+                # reduction prompt instead of diagnose-then-fix. Wolfenstein
+                # 2026-05-24 trace burned 6+ iters trying to patch a dead
+                # first build before timing out.
+                try:
+                    canv = report.get("canvas") or {}
+                    input_test = report.get("input_test") or {}
+                    raf_dead = (
+                        isinstance(canv, dict)
+                        and canv.get("raf_ran") is False
+                    )
+                    input_dead = (
+                        isinstance(input_test, dict)
+                        and input_test.get("ran") is True
+                        and input_test.get("any_change") is False
+                    )
+                    if (
+                        iteration <= 2
+                        and not report.get("ok")
+                        and raf_dead
+                        and input_dead
+                    ):
+                        self._dead_first_build_recoveries += 1
+                        self._dead_first_build_pending = True
+                        self._trace({
+                            "kind": "dead_first_build_detected",
+                            "iteration": iteration,
+                            "raf_ran": canv.get("raf_ran"),
+                            "input_any_change": input_test.get("any_change"),
+                            "recoveries_this_attempt": (
+                                self._dead_first_build_recoveries
+                            ),
+                            "hint": (
+                                "First build loaded but RAF never fired "
+                                "and input did nothing — structurally "
+                                "dead file. Next turn will request a "
+                                "smaller intentionally-minimal rewrite "
+                                "instead of patching."
+                            ),
+                        })
+                        # Two recoveries in one attempt: the model can't
+                        # ship a working minimal build either. Flag for
+                        # the restart loop to apply a fresh seed/recipe
+                        # rather than wasting more of this attempt's
+                        # iteration budget.
+                        if self._dead_first_build_recoveries >= 2:
+                            self._dead_first_build_abort_attempt = True
+                            self._trace({
+                                "kind": "dead_first_build_abort_attempt",
+                                "iteration": iteration,
+                                "recoveries": (
+                                    self._dead_first_build_recoveries
+                                ),
+                                "hint": (
+                                    "Two dead first builds in one "
+                                    "attempt; ending the attempt "
+                                    "early so the restart loop picks "
+                                    "up with a different seed."
+                                ),
+                            })
+                except Exception as e:
+                    self._trace({
+                        "kind": "dead_first_build_detector_error",
+                        "iteration": iteration,
+                        "err": str(e)[:200],
+                    })
             except Exception as e:
                 self._trace({
                     "kind": "iter_summary_error",
@@ -11582,12 +12959,19 @@ class GameAgent:
                             if critique:
                                 cleaned = critique.strip()
                                 if cleaned and "ok" not in cleaned.lower()[:30]:
-                                    prefix = "VISUAL CRITIC (looked at the screenshot of your last iteration): "
-                                    self._pending_coaching.append(prefix + cleaned)
-                                    yield self._record(AgentEvent(
-                                        "info",
-                                        f"[magenta]visual critic[/magenta] (iter {iteration}): {cleaned}"
-                                    ))
+                                    queued = self._queue_visual_critic_coaching(
+                                        cleaned, iteration=iteration, vc_role=vc_role,
+                                    )
+                                    if queued:
+                                        yield self._record(AgentEvent(
+                                            "info",
+                                            f"[magenta]visual critic[/magenta] (iter {iteration}): {cleaned}"
+                                        ))
+                                    else:
+                                        yield self._record(AgentEvent(
+                                            "info",
+                                            f"[dim]visual critic (iter {iteration}): same observation as a recent turn — suppressed[/dim]"
+                                        ))
                         except Exception as exc:
                             self._trace({
                                 "kind": "visual_critic_error",
@@ -12163,18 +13547,19 @@ class GameAgent:
                 "content": self._flush_user_injections(exit_prompt),
             })
             self._trace({"kind": "exit_decision_turn_prompted"})
+            exit_role = self._planning_role()
             yield self._record(AgentEvent(
                 "activity", "streaming",
-                {"label": "exit decision", "role": "architect"},
+                {"label": "exit decision", "role": exit_role},
             ))
             try:
-                exit_reply = await self._stream(self._token_cb_wrapper, role="architect")
+                exit_reply = await self._stream(self._token_cb_wrapper, role=exit_role)
                 yield self._record(AgentEvent("activity", "idle"))
                 self._messages.append({
                     "role": "assistant",
                     "content": exit_reply,
-                    "model_role": "architect",
-                    "model_name": self.get_backend("architect").info.model
+                    "model_role": exit_role,
+                    "model_name": self.get_backend(exit_role).info.model
                 })
                 self._dump_conversation()
                 self._trace({
@@ -12338,10 +13723,44 @@ class GameAgent:
             except Exception as e:
                 self._trace({"kind": "restart_snapshot_failed", "err": str(e)})
                 attempts.append((score, k, canonical_best))
+            # Restart-signature-repeat escalation. Compute the dominant
+            # failure shape of THIS attempt and compare to the previous
+            # attempt's. When two attempts in a row hit the same shape,
+            # the next attempt's plan_instruction is given
+            # `force_minimal_first_build=True` so the model scopes
+            # down rather than re-attempting the same ambitious build.
+            # Universal: signature is derived from counters that fired
+            # on observable failure events, no goal-text branching.
+            current_signature = self._attempt_failure_signature(score=score)
+            signature_repeat = (
+                self._prev_attempt_signature is not None
+                and current_signature == self._prev_attempt_signature
+                and current_signature != "ok"
+            )
+            if signature_repeat:
+                self._force_minimal_first_build = True
+                self._trace({
+                    "kind": "restart_signature_repeat",
+                    "attempt_idx": k,
+                    "signature": current_signature,
+                    "score": score,
+                    "hint": (
+                        "Two consecutive attempts hit the same failure "
+                        "shape; next attempt's plan_instruction will "
+                        "demand a smaller intentionally-minimal first "
+                        "build."
+                    ),
+                })
+            else:
+                # Same-signature streak broken — clear any prior force
+                # so a future re-occurrence triggers fresh.
+                self._force_minimal_first_build = False
+            self._prev_attempt_signature = current_signature
             self._trace({
                 "kind": "restart_attempt_end",
                 "attempt_idx": k,
                 "score": score,
+                "signature": current_signature,
             })
             yield self._record(AgentEvent(
                 "restart",
@@ -12395,6 +13814,32 @@ class GameAgent:
             },
         ))
 
+    def _attempt_failure_signature(self, *, score: float) -> str:
+        """Reduce the per-attempt counters to a single short signature
+        so the restart loop can detect "same shape twice."
+
+        Priority order — pick the FIRST that fired:
+          1. `dead_first_build` — file ran but RAF + input both dead.
+          2. `identical_reply_loop` — model emitted byte-identical
+             unparseable reply twice in a row.
+          3. `format_rejection_iter1` — iter-1 reply structurally
+             malformed (unclosed tag, fence trap, bare markers).
+          4. `low_score` — attempt finished without any flagged
+             condition but score is below the restart threshold.
+          5. `ok` — attempt finished cleanly enough that the restart
+             loop will probably accept it; signature reset.
+        Universal: no goal text, no genre.
+        """
+        if getattr(self, "_dead_first_build_recoveries", 0) >= 1:
+            return "dead_first_build"
+        if getattr(self, "_identical_reply_loops_this_attempt", 0) >= 1:
+            return "identical_reply_loop"
+        if getattr(self, "_format_rejections_iter1_this_attempt", 0) >= 1:
+            return "format_rejection_iter1"
+        if score < getattr(self, "restart_score_threshold", 60):
+            return "low_score"
+        return "ok"
+
     def _reset_attempt_state(self) -> None:
         """Reset the per-attempt mutable state so a fresh restart begins
         from a clean slate. Keeps cross-attempt resources (browser,
@@ -12436,6 +13881,8 @@ class GameAgent:
         self._last_screenshot_after = None
         self._active_bullet_ids = []
         self._active_opening_book_recipes = []
+        self._active_visual_playtest_recipe_id = None
+        self._active_visual_playtest_auto_probes = []
         self._restart_attempt_idx = 0
         self._restart_attempt_seed = None
         self._force_first_build_prefill = False
@@ -12445,6 +13892,16 @@ class GameAgent:
         # would already be in the "compact" state on attempt 1's iter 1
         # and the model would see it as already-stale on first contact.
         self._warning_persistence = {}
+        # Per-attempt failure-signature counters. Cleared so the next
+        # attempt's signature reflects only its own behavior.
+        self._dead_first_build_recoveries = 0
+        self._dead_first_build_pending = False
+        self._dead_first_build_abort_attempt = False
+        self._identical_reply_loops_this_attempt = 0
+        self._format_rejections_iter1_this_attempt = 0
+        # NOTE: _prev_attempt_signature and _force_minimal_first_build
+        # are set BY the restart loop AFTER an attempt ends, so they
+        # must NOT be reset here.
 
     def _score_attempt(self) -> float:
         """Score the just-finished attempt. Reuses tools.score_test_report
@@ -12647,6 +14104,33 @@ class GameAgent:
                 broken_size_bytes=len(self._current_file),
             )
 
+        # Dead-first-build recovery (Wolfenstein 2026-05-24 lesson):
+        # iter 1 or 2 loaded a file with raf_ran=false AND input dead.
+        # Patching can't fix a fundamentally non-running file. Route to
+        # the scope-reduction prompt that asks for a smaller intentional
+        # rewrite. The flag is consumed so this only fires once per
+        # detection; if the model ships another dead first build the
+        # detector will set it again and the attempt-abort counter will
+        # eventually flag the restart loop.
+        if (
+            getattr(self, "_dead_first_build_pending", False)
+            and hasattr(self._p, "scope_reduction_instruction")
+        ):
+            self._dead_first_build_pending = False
+            self._trace({
+                "kind": "dead_first_build_recovery_prompt_used",
+                # `_build_fix_prompt` runs after the iter's test report
+                # lands, so `_last_tested_iter` is the iteration this
+                # recovery is responding to. `iteration` is NOT in
+                # scope here — earlier draft referenced the loop var
+                # by name and crashed with NameError.
+                "iteration": self._last_tested_iter,
+                "recoveries_this_attempt": (
+                    self._dead_first_build_recoveries
+                ),
+            })
+            return self._p.scope_reduction_instruction(report_text)
+
         # Failed: combined diagnose+fix prompt with memory hints inline.
         sig = signature_for_report(report)
         hints_list = self._memory.retrieve_mistakes(sig, k=3) if sig else []
@@ -12699,6 +14183,22 @@ class GameAgent:
                 "slice_bytes": len(slice_text),
                 "full_bytes": len(self._current_file),
             })
+        # Context-pressure one-shot: when the prior stream pinned >=85%
+        # of num_ctx, omit the CURRENT FILE block from the fix prompt
+        # this turn and force a minimal patch. Consumed once then
+        # cleared so a transient spike doesn't lock the agent into
+        # patch-only mode forever.
+        if getattr(self, "_context_pressure_pending", False):
+            fix_kwargs["context_pressure"] = True
+            self._trace({
+                "kind": "context_pressure_mitigation_applied",
+                # Same scope bug as dead_first_build above — `iteration`
+                # is not local to `_build_fix_prompt`. Use the tracked
+                # iteration of the test report this prompt is reacting to.
+                "iteration": self._last_tested_iter,
+                "streak": self._context_pressure_streak,
+            })
+            self._context_pressure_pending = False
         fix = self._p.fix_instruction(
             report_text, self._current_file, hints, **fix_kwargs,
         )

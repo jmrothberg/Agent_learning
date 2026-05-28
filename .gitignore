@@ -15,10 +15,24 @@ env/
 # Sessions now write games/<goal-slug>_<ts>.html (+ .best.html sibling),
 # so a single glob covers them all.
 games/*.html
+# Curated showcases only (not every session) — add ! lines when promoting a winner:
+!games/mechanics-standard-chess-on-an_20260522_163629.html
+!games/game-of-mortal-kombat-fighing_20260524_101226.html
 games/snapshots/
 games/traces/
 memory/*
 !memory/playbook.jsonl
+!memory/visual_playtests.jsonl
+# Precomputed architect opening library — hand-curated mechanism outlines
+# retrieved by retrieve_implementation_outline (k=1, no prompt-bloat risk).
+# Distinct from games/game-memory/ which is per-machine learned memory.
+!memory/implementation_outlines.jsonl
+# Precomputed playtest + audit seeds — also committed as opening-library data.
+!memory/playtests.jsonl
+!memory/asset_audits.jsonl
+!memory/animation_audits.jsonl
+!memory/skeletons/
+!memory/skeletons/*
 games/test_*.html
 games/tune/
 games/system-tests/run_*/
@@ -26,9 +40,17 @@ games/system-tests/run_*/
 games/_asset_cache/
 games/_smoke/
 games/*_assets/
+!games/mechanics-standard-chess-on-an_20260522_163629_assets/
+!games/mechanics-standard-chess-on-an_20260522_163629_assets/**
+!games/game-of-mortal-kombat-fighing_20260524_101226_assets/
+!games/game-of-mortal-kombat-fighing_20260524_101226_assets/**
 # Sound-pipeline artifacts (OGGs are 5-50KB each; cache grows over time)
 games/_sound_cache/
 games/*_sounds/
+!games/mechanics-standard-chess-on-an_20260522_163629_sounds/
+!games/mechanics-standard-chess-on-an_20260522_163629_sounds/**
+!games/game-of-mortal-kombat-fighing_20260524_101226_sounds/
+!games/game-of-mortal-kombat-fighing_20260524_101226_sounds/**
 # Per-machine learned memory (won skeletons, live playbook overlay, mistakes).
 # Canonical playbook for git is memory/playbook.jsonl only.
 games/game-memory/

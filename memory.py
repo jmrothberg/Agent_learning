@@ -151,6 +151,12 @@ ASSET_AUDITS_FILENAME = "asset_audits.jsonl"
 ANIMATION_AUDITS_FILENAME = "animation_audits.jsonl"
 IMPLEMENTATION_OUTLINES_FILENAME = "implementation_outlines.jsonl"
 VERIFIED_FINDINGS_FILENAME = "verified_findings.jsonl"
+# 2026-05-24: VLM-driven visual playtest checklists, mechanism-keyed
+# (NOT per-game). 10-12 mechanism recipes cover the top-100 games via
+# keyword overlap on goal + plan + asset names. Same loader / scoring
+# infrastructure as playtests.jsonl. Designed alongside the
+# vlm-critic-memory-driven-checklist plan.
+VISUAL_PLAYTESTS_FILENAME = "visual_playtests.jsonl"
 
 DEFAULT_SKELETON = """<!DOCTYPE html>
 <html lang="en"><head>
@@ -2360,6 +2366,164 @@ def _detect_3d_intent(goal: str) -> list[str]:
     return out
 
 
+# Stopwords for visual-playtest matching context tokenization. These
+# words appear in almost every game goal/plan and would dilute the
+# overlap signal. Genre-free — pure English stop words + game-meta
+# words that don't disambiguate mechanism (`game`, `build`, `make`,
+# `want`, etc.).
+_VISUAL_MATCH_STOPWORDS: frozenset[str] = frozenset({
+    "the", "a", "an", "and", "or", "but", "to", "in", "on", "at",
+    "for", "with", "of", "is", "are", "be", "by", "as", "it", "its",
+    "this", "that", "their", "they", "them", "we", "you", "i",
+    "about", "into", "from", "between", "through", "during", "after",
+    "before", "above", "below", "than", "then", "when", "where", "why",
+    "how", "what", "which", "who", "some", "any", "every", "all",
+    "make", "makes", "making", "build", "builds", "building",
+    "create", "creates", "creating", "want", "wants", "wanting",
+    "need", "needs", "needing", "should", "would", "could", "can",
+    "do", "does", "doing", "use", "using", "used", "uses",
+    "have", "has", "had", "get", "gets", "got",
+    "game", "games", "like", "type", "kind", "version", "clone",
+    "style", "sort", "way", "ways", "thing", "things", "stuff",
+    "good", "great", "nice", "cool", "fun", "best", "better",
+    "small", "large", "big", "tiny", "huge",
+    "really", "very", "just", "also", "even", "only", "still",
+    "please", "ok", "yes", "now", "here", "there",
+})
+
+
+def _visual_match_tokens(text: str) -> set[str]:
+    """Tokenize matching context into a keyword set for visual-playtest
+    recipe retrieval.
+
+    Aggressive shape (more permissive than `_modality_tokens` because
+    we WANT to catch mechanic verbs like "navigate" / "shoot" /
+    "stack" / "race" that game descriptions use without naming the
+    game). Behavior:
+
+      - Lowercase, extract `[a-z0-9]+` words.
+      - Drop stopwords (see `_VISUAL_MATCH_STOPWORDS`) and tokens <3 chars.
+      - Emit 2-gram and 3-gram joined forms (without and with hyphens)
+        so phrases like "first person" / "tile based" / "side scroll"
+        match recipe keywords like `firstperson` / `tile-based`.
+
+    Used against the goal text, the model's <plan> text (when
+    available), and asset names — combined into one string before
+    tokenization.
+    """
+    if not text:
+        return set()
+    raw = re.findall(r"[a-z0-9]+", text.lower())
+    if not raw:
+        return set()
+    toks: set[str] = set()
+    for w in raw:
+        if len(w) >= 3 and w not in _VISUAL_MATCH_STOPWORDS:
+            toks.add(w)
+    # 2-grams (joined + hyphenated). Length-6 floor avoids "of-the" cruft.
+    for i in range(len(raw) - 1):
+        a, b = raw[i], raw[i + 1]
+        joined = a + b
+        if len(joined) >= 6 and joined not in _VISUAL_MATCH_STOPWORDS:
+            toks.add(joined)
+        toks.add(a + "-" + b)
+    # 3-grams (joined + hyphenated). Length-9 floor.
+    for i in range(len(raw) - 2):
+        a, b, c = raw[i], raw[i + 1], raw[i + 2]
+        joined3 = a + b + c
+        if len(joined3) >= 9:
+            toks.add(joined3)
+        toks.add(a + "-" + b + "-" + c)
+    return toks
+
+
+def find_best_visual_playtest(
+    recipes: list[VisualPlaytestRecipe],
+    *,
+    goal: str = "",
+    plan_text: str = "",
+    asset_names: list[str] | None = None,
+    default_min_matches: int = 2,
+) -> tuple[VisualPlaytestRecipe | None, dict]:
+    """Pick the best-matching visual playtest recipe for the current
+    session, or (None, diag) when no recipe scores above its floor.
+
+    Matching context = goal + plan_text + asset_names joined by
+    spaces. By the time the visual critic fires (after Phase A), all
+    three are populated. Even a vague goal like "collect dots while
+    avoiding ghosts in corridors" gets a strong match via plan-text
+    + asset-name keyword overlap.
+
+    Two-stage matcher:
+
+      1. **Strong-hook bypass.** If the recipe declares any tokens in
+         its `strong_hooks` (game-name level: "doom", "chess",
+         "pacman") AND any of those appear in the matching context,
+         return immediately with score = len(hits). Decisive single
+         token wins (mirrors the existing `_modality_skeleton`
+         strong-hook pattern).
+      2. **Overlap count.** For each remaining recipe, count overlap
+         between its `applies_keywords` and the matching token set.
+         Recipe with the highest overlap wins, must be
+         >= `applies_min_matches` (default 2).
+
+    Returns (recipe_or_None, diag_dict). `diag_dict` carries:
+      - `top_candidates`: list of (recipe_id, score) for the top 3
+        scorers — visible in the trace so it's clear WHY a recipe
+        was/wasn't chosen.
+      - `match_tokens_sample`: first 20 tokens from the matching
+        context for postmortem analysis.
+    """
+    asset_names = asset_names or []
+    context = " ".join([
+        goal or "",
+        plan_text or "",
+        " ".join(asset_names),
+    ])
+    ctx_toks = _visual_match_tokens(context)
+    diag: dict = {
+        "top_candidates": [],
+        "match_tokens_sample": sorted(ctx_toks)[:20],
+        "context_token_count": len(ctx_toks),
+    }
+    if not recipes or not ctx_toks:
+        return None, diag
+
+    scored: list[tuple[float, int, VisualPlaytestRecipe, str]] = []
+    for r in recipes:
+        rec_dict = r.recipe if isinstance(r.recipe, dict) else {}
+        kws = rec_dict.get("applies_keywords") or []
+        strong = set(str(x).lower() for x in (rec_dict.get("strong_hooks") or []))
+        min_matches = int(
+            rec_dict.get("applies_min_matches", default_min_matches)
+        )
+        # Strong-hook bypass.
+        if strong:
+            strong_hits = strong & ctx_toks
+            if strong_hits:
+                # Score strong hits very high (1000+) so they beat
+                # any overlap-based match.
+                scored.append(
+                    (1000.0 + len(strong_hits), min_matches, r, "strong_hook")
+                )
+                continue
+        # Overlap count.
+        kw_set = set(str(k).lower() for k in kws)
+        overlap = kw_set & ctx_toks
+        score = len(overlap)
+        if score >= min_matches:
+            scored.append((float(score), min_matches, r, "overlap"))
+
+    if not scored:
+        return None, diag
+    scored.sort(key=lambda t: (-t[0], t[2].id))  # highest score, then stable
+    diag["top_candidates"] = [
+        {"id": r.id, "score": round(s, 2), "via": via}
+        for (s, _m, r, via) in scored[:3]
+    ]
+    return scored[0][2], diag
+
+
 def _score_similarity(a_tokens: list[str], b_tokens: list[str]) -> float:
     """Weighted Jaccard on tokens. Identical = 1.0, disjoint = 0.0.
 
@@ -2469,6 +2633,34 @@ class AnimationAuditRecipe(OpeningBookItem):
 
 
 @dataclass
+class VisualPlaytestRecipe(OpeningBookItem):
+    """Hand-curated structured checklist a VLM can answer about a
+    screenshot. Each recipe targets a MECHANISM (grid navigation,
+    two-actor facing, first-person perspective) — NOT a specific
+    game — so ~10 recipes cover the top-100 games via keyword overlap.
+
+    Matched against (goal + plan + asset names) at critic time. By
+    then all three are populated, so even goals that don't name a
+    game ("collect dots while avoiding ghosts in corridors") still
+    resolve via plan-text + asset-name keyword hits.
+
+    The `recipe` dict carries:
+      - applies_keywords: list[str]  — vocabulary the matcher overlaps
+        against. Include game names AND mechanic nouns AND action
+        verbs so phrasings without genre names still match.
+      - strong_hooks: list[str]      — game-name-level tokens that
+        win on 1 hit (chess, doom, pacman). Optional.
+      - applies_min_matches: int     — keyword-overlap threshold for
+        non-strong-hook matches. Default 2.
+      - checklist: list[str]         — yes/no questions the VLM
+        answers. 6-10 high-signal questions per recipe.
+      - format: str                  — output shape, currently
+        "yes_no_per_line".
+    """
+    pass
+
+
+@dataclass
 class ImplementationOutline(OpeningBookItem):
     pass
 
@@ -2573,7 +2765,12 @@ def _opening_book_seed_items() -> dict[str, list[OpeningBookItem]]:
                     "state or canvas pixels should advance over a 10-second "
                     "observation window. If nothing changes the game is "
                     "stuck and the user can't tell because the page didn't "
-                    "crash. Catches the 'agent shipped a frozen game' bug."
+                    "crash. Catches the 'agent shipped a frozen game' bug. "
+                    "Skips when no self-driven-motion signal is present "
+                    "(score, moving enemies, projectiles, particles, timer) — "
+                    "otherwise it false-positives on input-driven arcade "
+                    "games waiting for the player to act. Doom 2026-05-23 "
+                    "trace burned 2 iters fixing this false positive."
                 ),
                 tags=["progress", "motion", "stuck", "frozen", "ai", "timer"],
                 verified=True,
@@ -2581,9 +2778,45 @@ def _opening_book_seed_items() -> dict[str, list[OpeningBookItem]]:
                 pass_count=1,
                 recipe={
                     "type": "behavior_playtest",
+                    # Gate requires: canvas exists AND there's at least one
+                    # observable self-driven-motion signal in window.state /
+                    # window.gameState. When the gate returns false the
+                    # recipe is skipped (trace event:
+                    # autonomous_recipe_skipped, reason
+                    # applicability_gate_falsy) so input-driven games where
+                    # nothing is supposed to move without user input don't
+                    # false-positive as "frozen". Genre-free — keyed on
+                    # observable state shape, not subject matter.
                     "applies_when": (
-                        "(()=>{const c=document.querySelector('canvas');"
-                        "return !!c && c.width>0 && c.height>0;})()"
+                        "(()=>{"
+                        "const c=document.querySelector('canvas');"
+                        "if(!c||c.width<=0||c.height<=0)return false;"
+                        "const s=window.state||window.gameState;"
+                        # No exposed state → run conservatively (don't skip).
+                        # The "agent shipped a frozen game" failure mode
+                        # commonly hides behind unstructured state.
+                        "if(!s)return true;"
+                        # Enemies / NPCs / opponents with non-zero velocity.
+                        "const enemies=s.enemies||s.npcs||s.opponents;"
+                        "if(Array.isArray(enemies)){"
+                        "for(const e of enemies){if(!e)continue;"
+                        "const vx=+e.vx||+e.velocityX||+e.dx||0;"
+                        "const vy=+e.vy||+e.velocityY||+e.vz||+e.dy||0;"
+                        "if(vx!==0||vy!==0)return true;}}"
+                        # Live projectiles / bullets / shots.
+                        "const proj=s.projectiles||s.bullets||s.shots;"
+                        "if(Array.isArray(proj)&&proj.length>0)return true;"
+                        # Live particles / fx.
+                        "const parts=s.particles||s.fx;"
+                        "if(Array.isArray(parts)&&parts.length>0)return true;"
+                        # Score already moving.
+                        "if(typeof s.score==='number'&&s.score>0)return true;"
+                        # Game timer / clock.
+                        "if(typeof s.time==='number'&&s.time>0)return true;"
+                        "if(typeof s.timer==='number'&&s.timer>0)return true;"
+                        # No self-driven-motion signal → input-driven; skip.
+                        "return false;"
+                        "})()"
                     ),
                     "input_script": [{"type": "wait", "ms": 10000}],
                     "sample_times_s": [0.0, 2.0, 5.0, 9.5],
@@ -2786,6 +3019,15 @@ def _opening_book_seed_items() -> dict[str, list[OpeningBookItem]]:
             ),
         ],
         VERIFIED_FINDINGS_FILENAME: [],
+        # Visual playtest recipes live in `memory/visual_playtests.jsonl`
+        # as a hand-edited data file (same pattern as memory/playbook.jsonl
+        # and memory/skeletons/). NOT seeded from Python here — editing
+        # the .jsonl directly is the supported workflow. The loader at
+        # `_load_opening_book(VISUAL_PLAYTESTS_FILENAME)` reads from disk
+        # and falls back to empty list when the file is missing (which
+        # means the matcher returns None for every goal and the critic
+        # uses its legacy open-ended prompt — safe degradation).
+        VISUAL_PLAYTESTS_FILENAME: [],
     }
 
 
@@ -2873,6 +3115,7 @@ class GameMemory:
             ANIMATION_AUDITS_FILENAME: self.base_root / ANIMATION_AUDITS_FILENAME,
             IMPLEMENTATION_OUTLINES_FILENAME: self.base_root / IMPLEMENTATION_OUTLINES_FILENAME,
             VERIFIED_FINDINGS_FILENAME: self.base_root / VERIFIED_FINDINGS_FILENAME,
+            VISUAL_PLAYTESTS_FILENAME: self.base_root / VISUAL_PLAYTESTS_FILENAME,
         }
         self.live_opening_book_paths = {
             PLAYTESTS_FILENAME: self.live_root / PLAYTESTS_FILENAME,
@@ -2880,6 +3123,7 @@ class GameMemory:
             ANIMATION_AUDITS_FILENAME: self.live_root / ANIMATION_AUDITS_FILENAME,
             IMPLEMENTATION_OUTLINES_FILENAME: self.live_root / IMPLEMENTATION_OUTLINES_FILENAME,
             VERIFIED_FINDINGS_FILENAME: self.live_root / VERIFIED_FINDINGS_FILENAME,
+            VISUAL_PLAYTESTS_FILENAME: self.live_root / VISUAL_PLAYTESTS_FILENAME,
         }
 
         # Compatibility properties for legacy accesses
@@ -3076,6 +3320,39 @@ class GameMemory:
     ) -> list[OpeningBookHit]:
         return self._retrieve_opening_book(
             ANIMATION_AUDITS_FILENAME, goal=goal, modality=modality, k=k, cls=AnimationAuditRecipe,
+        )
+
+    def load_visual_playtests(self) -> list[OpeningBookItem]:
+        """Load all visual-playtest recipes (root + live tiers)."""
+        return self._load_opening_book(
+            VISUAL_PLAYTESTS_FILENAME, cls=VisualPlaytestRecipe,
+        )
+
+    def find_visual_playtest_for(
+        self,
+        *,
+        goal: str = "",
+        plan_text: str = "",
+        asset_names: list[str] | None = None,
+        default_min_matches: int = 2,
+    ) -> tuple[VisualPlaytestRecipe | None, dict]:
+        """Pick the best-matching visual playtest recipe for the
+        current session. Wrapper around the module-level
+        `find_best_visual_playtest` that pulls the recipe list from
+        disk (root + live).
+
+        Returns (recipe_or_None, diag) — `diag` is a dict surfacing
+        the top-3 candidate scores so the trace can record WHY a
+        recipe was/wasn't chosen.
+        """
+        all_items = self.load_visual_playtests()
+        recipes = [r for r in all_items if isinstance(r, VisualPlaytestRecipe)]
+        return find_best_visual_playtest(
+            recipes,
+            goal=goal,
+            plan_text=plan_text,
+            asset_names=asset_names,
+            default_min_matches=default_min_matches,
         )
 
     def retrieve_implementation_outline(

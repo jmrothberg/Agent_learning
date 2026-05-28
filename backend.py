@@ -770,6 +770,7 @@ class MLXBackend(Backend):
         n_tokens = 0
         stalled = False
         looped = False
+        silent = False
         stall_at: int | None = None
         prompt_tokens: int | None = None
         completion_tokens: int | None = None
@@ -1161,6 +1162,19 @@ class MLXBackend(Backend):
                 if isinstance(ct, int):
                     completion_tokens = ct
                 if not piece:
+                    # Silent-stream guard — mirrors ollama_io.stream_chat.
+                    # If the model emits only empty `text` events (e.g. all
+                    # generation goes to a reasoning channel) past the
+                    # wall-clock floor, abort instead of waiting for
+                    # stall_seconds (default 600s) which is too long.
+                    if (
+                        n_tokens == 0
+                        and (time.monotonic() - started) >= 180.0
+                    ):
+                        silent = True
+                        stall_at = 0
+                        worker_cancel.set()
+                        break
                     continue
                 parts.append(piece)
                 n_tokens += 1
@@ -1202,7 +1216,7 @@ class MLXBackend(Backend):
             text="".join(parts),
             tokens=n_tokens,
             duration_s=time.monotonic() - started,
-            stalled=stalled or looped or deliberated,
+            stalled=stalled or looped or deliberated or silent,
             stall_at_token=stall_at,
             looped=looped,
             deliberated=deliberated,
@@ -1213,6 +1227,7 @@ class MLXBackend(Backend):
             loop_line=repeat.loop_line if looped else None,
             loop_grace_used=loop_grace_used,
             loop_grace_reason=loop_grace_reason,
+            silent=silent,
         )
 
     async def is_vlm(self) -> bool:

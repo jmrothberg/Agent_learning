@@ -116,45 +116,140 @@ library compounds them; nothing replaces them.
 
 ## Compared to other coding agents
 
-This is a specialist tool. The comparison table below lists what each
-agent is *built for*, not which is "better." For general coding,
-prefer the generalists; for local HTML games with visual + audible
-quality gates, prefer this.
+This is a specialist tool. The generalists below are excellent for
+their target — multi-file project work driven by **frontier cloud
+models**. This repo's target is the *opposite shape*: **one HTML file,
+a weak local model, a visible Chromium**. The thesis below isn't
+"this is better"; it's **"this is better for *this* job, and the
+others are better for their jobs."**
 
-| Agent | Built for | Local-only | Browser verifier | Asset gen (sprites + sounds) | Cross-session learning |
-|---|---|---|---|---|---|
-| **This repo** | Single-file HTML5 games | yes | yes (Playwright Chromium) | yes (Z-Image-Turbo + Stable Audio + img2img) | yes (playbook + asset library) |
-| [opencode](https://github.com/anomalyco/opencode) (TS, MIT) | General coding assistant | optional | no | no | no |
-| [Claude Code](https://www.claude.com/product/claude-code) | General coding via Anthropic API | no (cloud) | no | no | no |
-| [Aider](https://aider.chat) | General Git-aware coding | optional | no | no | no |
-| [pi-mono coding-agent](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent) | General coding (TS, multi-provider, function-call native) | optional | no | no | no |
-| [OpenCoder](https://opencoder-llm.github.io/) | Training recipe for a code LLM (not an agent) | — | — | — | — |
+### Why this agent ships great games with weaker local VLMs
 
-What was borrowed from where:
+Every other agent in the table treats the model as the reliable
+component and the harness as a thin wrapper. This repo flips it: the
+model (qwen3.6:27b-q8_0 — mid-tier local, 32 K context, no tool-use
+training to speak of) is the *unreliable* component, and the harness
+absorbs its failure modes. That changes everything downstream:
 
-- **From pi-mono**: the SEARCH/REPLACE patch matcher cascade, per-format
+- **The verifier is a real browser**, not a unit-test runner or a
+  read-only static analyzer. RAF firing, listener counts, canvas
+  pixel deltas, console errors, frame-over-frame freeze detection,
+  state-vs-render gap (entity exists in `state` but no pixels at its
+  `x/y`) all gate `ok=True`. A weak model that wrote a syntactically
+  fine but visually dead game cannot ship.
+- **Generated media is in-process**, not a separate service. Z-Image-
+  Turbo (sprites, 768×768 → chroma-keyed to RGBA), SD-Turbo img2img
+  (animation frame chains via `from_image`), Stable Audio Open
+  (OGG, 0.2–12 s). Weak models often skip art when wired to a
+  generic file-edit tool; here `<assets>` and `<sounds>` are
+  first-class tags the planner is *coached* to emit, the diffuser is
+  *pre-warmed* on a dedicated GPU, and the load pattern is *injected
+  into the first-build prompt*. No "go install a sprite library" step.
+- **15+ weak-model defenses** live in the harness, not the prompt.
+  Identical-reply loop detector (sha1 fingerprint of consecutive
+  rejected replies), context-pressure detector (omit inlined file at
+  `prompt_tokens/num_ctx ≥ 0.85`), dead-first-build detector (RAF
+  dead + input dead → scope-reduction prompt, not patch-and-pray),
+  restart-signature-repeat (two attempts with same failure shape →
+  next attempt's plan demands a minimal first build), compaction
+  marker that *literally cannot* be parroted back (HTML comment, no
+  `<html_file>`/`<patch>` substrings), DeliberationDetector that
+  latches on real code (`<!DOCTYPE`, `<script`, `function foo(`) so
+  20+ KB first builds aren't killed by length, and more (full table
+  in [FOR_NEXT_LLM.md § Verifier guards](FOR_NEXT_LLM.md#verifier-guards-the-2026-05-23--24-layer)).
+  None of these patterns appear in the generalist agents because the
+  generalists trust the model to recover; with qwen3.6:27b, you
+  cannot.
+- **Cross-session memory is hand-curated**, not vector-embedding-
+  driven. Playbook bullets are JSONL the user edits directly,
+  retrieved by Jaccard × quality multiplier; visual playtest recipes
+  ship 25-archetype coverage; the asset library compounds successful
+  generations across sessions. A weak model gets context-window
+  benefit (small targeted hits) without paying for a full embedding
+  service.
+- **Genre-free architecture** is enforced by tests. The user's
+  standing rule: no `if "chess" in goal:` branches anywhere.
+  Mechanism / structural signals only (canvas dims, exposed state
+  shape, RAF state, three-signal recipe match on goal + plan +
+  asset-name tokens). This is the discipline that makes the agent
+  work on novel-genre games, not just the 25-archetype list.
+
+### Side-by-side
+
+Each column is a feature dimension that matters for "shipping a
+playable game with a weak local model"; row is what the agent
+provides today. **Bold = unique among the four.**
+
+| Dimension | **This repo** | OpenAI Codex CLI | pi-mono coding-agent | opencode (sst.dev) |
+|---|---|---|---|---|
+| Built for | **Single-file HTML5 games** | General terminal coding | General multi-provider coding | General multi-file coding |
+| Target model class | **Mid-tier local (qwen3.6:27b/35b, MLX/Ollama)** | Frontier cloud (GPT-5.1/5.2 codex) | Frontier cloud + local | Cloud + local Ollama |
+| Network at runtime | **none in main loop** | OpenAI API | provider-dependent | provider-dependent |
+| Verifier | **Real Chromium via Playwright** | none (relies on model + shell exec) | none built-in | none built-in |
+| Media generation | **Z-Image-Turbo + SD-Turbo img2img + Stable Audio Open in-process** | none | none | none |
+| Visual judge (VLM) | **Local VLM auto-discovered; 25-archetype playtest recipe library; auto-probes per recipe** | none | none | none |
+| Cross-session learning | **Playbook (Jaccard × quality) + asset library + skeleton promotion** | none (per-session only) | none | none |
+| Failure recovery | **Identical-reply detector, context-pressure detector, dead-first-build detector, model-give-up detector, restart-signature escalation, compaction-marker-echo classifier, 6-variant HTML salvage** | format-doctor on patch failure | retry on apply error | retry on apply error |
+| Patch format | **`<patch><<<<<<< SEARCH ... >>>>>>> REPLACE</patch>` + optional `@@ scope` breadcrumb (Codex-style anchor)** | `*** Begin Patch / @@ / +/- / *** End Patch` | SEARCH/REPLACE blocks | provider-tool-dependent |
+| Stream-abort discipline | **Latches on observable code emission (HTML tags, JS keywords); length is not a fail signal once producing** | server-side limits only | server-side limits | server-side limits |
+| Genre-free architecture | **enforced by tests** (`test_phase4_scope_nudge.py`) | n/a (general) | n/a (general) | n/a (general) |
+| Sandboxing | none (Chromium runs the output; flags allow `file://`) | landlock / bwrap / Windows sandbox for shell | provider-dependent | provider-dependent |
+| Multi-step planning | **`<todos>` checklist, persisted across compaction** | `update_plan` tool | provider-tool-dependent | provider-tool-dependent |
+| MCP / tool ecosystem | not exposed (single-file games don't need it) | full MCP tool server | provider-dependent | provider-dependent |
+| TUI | **Textual TUI with Chromium beside, live tok/s + GPU map + memory-in-use panel** | TUI | TUI | TUI |
+
+### What was borrowed (and what's distinctively ours)
+
+- **From pi-mono**: SEARCH/REPLACE patch matcher cascade, per-format
   prompt assembly with deduped guidelines, structured compaction with
   state-anchor messages, "prescriptive errors" (tell the model EXACTLY
   what was wrong, not "syntax error").
 - **From OpenCoder**: quality-ranked + deduped + budgeted retrieval
   (Jaccard × `1 + 0.10·tanh(score/5)` quality multiplier), the
   two-stage plan/code distinction that maps to our `<plan>` /
-  `<patch>` phases, the educational-execution-filter pattern that maps
-  to micro-probes.
+  `<patch>` phases, the educational-execution-filter pattern that
+  maps to micro-probes.
 - **From opencode** (the comparison target for the most recent moat-
   widening pass): the idea of static analysis *before* the browser
   (we don't run a real LSP — we run a regex-based receiver-method
   allowlist that catches the highest-frequency hallucinations).
+- **From OpenAI Codex** (2026-05-25 review): `@@ function_or_class`
+  breadcrumb anchor in `<patch>` SEARCH to scope ambiguous matches;
+  good-vs-low-quality plan examples in `PLAN_INSTRUCTION`; the
+  always-on "Phase-A signals persist once accepted, fix turns emit
+  `<patch>` only" rule. Codex's `compact_remote_v2.rs` independently
+  arrived at the same fix this repo shipped for the Wolfenstein
+  compaction-marker echo loop (store summaries as user-role, never
+  as assistant content) — confirms the design.
 
-What is **not** in this repo and is intentionally not planned:
+**Distinctively ours** (no equivalent in the others):
 
-- A client/server architecture (opencode has one — we explicitly want
-  local-only).
-- Provider plugin sprawl. The backends are: Ollama, MLX in-process,
-  optional cloud providers (Anthropic/OpenAI) with explicit calls only.
-- A generalist coding mode. The system prompt, the retrieval index,
-  the probes, the asset pipeline, and the playbook are all tuned for
-  one thing: **a playable HTML5 game in a single file**.
+- The Chromium verifier + state-vs-render gap detector (catches
+  Pac-Man-without-a-Pac-Man — entity in `state` but not drawn).
+- The in-process diffuser pipeline with chroma-key + `from_image`
+  animation chains.
+- The visual playtest recipe library (mechanism-keyed YAML/JSONL
+  with `auto_probes` — deterministic JS assertions that fire even
+  if the VLM misses the issue visually).
+- The 15+ weak-model defense layer (identical-reply, context-
+  pressure, dead-first-build, model-give-up, restart-signature,
+  DeliberationDetector with code-emission latch, etc) — all gated
+  on observable signals from the trace stream, no model name or
+  genre coupling anywhere.
+- The hand-curated playbook (~80 bullets at this writing) edited as
+  JSONL, retrieved per-turn against the goal text.
+
+### What is *not* in this repo and is intentionally not planned
+
+- A client/server architecture (opencode has one — we explicitly
+  want local-only).
+- Provider plugin sprawl. Backends are: Ollama, MLX in-process,
+  optional cloud (Anthropic/OpenAI) for explicit calls only.
+- A generalist coding mode. The system prompt, retrieval index,
+  probes, asset pipeline, and playbook are all tuned for one thing:
+  **a playable HTML5 game in a single file**.
+- OS-level sandboxing. The harness runs HTML in Chromium with
+  `file://` flags; there is no shell-exec surface to sandbox.
 
 ---
 
@@ -369,6 +464,64 @@ token count alone. While a stream is running, the status panel shows a
 is waiting for the next user-turn boundary (input always drains after
 the current stream finishes).
 
+**Silent-stream guard (2026-05-24, doom trace).** Separate from the
+runaway-warning above, a stream that produces ZERO non-empty `content`
+pieces for **180 seconds** is force-aborted with a
+**`stream_silent_aborted`** trace and a tailored recovery prompt
+("start your reply directly with an opening tag, skip the reasoning
+preamble"). Motivating trace burned 1356 s wall-clock generating
+32 777 completion tokens that all surfaced as empty `content` (likely
+all sent through a reasoning/thinking channel) — the existing
+deliberation / repetition detectors only feed on visible content and
+never tripped. Both Ollama and MLX paths share the guard. Threshold
+is wall-clock + zero visible content, NOT token count, because Ollama
+doesn't surface the running eval_count mid-stream.
+
+**Cross-turn patch-SEARCH-failure memory.** When the same `<patch>`
+SEARCH block fails to apply in two consecutive turns (typical cause:
+a sibling patch in the prior reply landed and shifted lines, but the
+model copied a stale view of the file), the retry prompt now prepends
+a **`[REPEATED PATCH FAILURE]`** banner naming the exact problem and
+re-shows the current file so the model writes a fresh SEARCH from
+the live state instead of re-trying yesterday's text. Trace event:
+`patch_search_repeat_detected`. Doom 2026-05-23 extensions 1/2/3 hit
+the same SEARCH failure three turns in a row; this guard catches it
+on turn 2.
+
+**Classifier overrule auto-disable.** When the scoped feedback
+classifier expects mode X but the model emits mode Y (e.g. classifier
+said `media_only` but model correctly chose `<patch>`), the agent
+counts the overrule. At **2 overrules in a session** the harness
+auto-flips `_use_feedback_directives = False` for the rest of the
+session and emits
+**`classifier_auto_disabled_after_repeated_overrules`**. Per-session
+only — resets on `/new`. Equivalent to the user manually running
+`/rawfeedback on` once the classifier has demonstrated it's
+misrouting typed feedback.
+
+**Visual-critic cross-turn dedup.** Same critic note across turns
+(normalized fingerprint match on the first 120 chars) is suppressed
+with a `coaching_suppressed_repeated` trace. Stops the "critic
+flagged low-res walls in iters 1, 3, 5, 7" prompt-noise pattern
+from the doom trace.
+
+**Synthetic coverage-gap probe fencing.** Probes the harness
+synthesizes when a `<criteria>` line has no matching model-authored
+probe are now wrapped in **`[HARNESS NOTE — NOT FILE CONTENT, DO NOT
+<patch>]`** fences so the model can't mistake the diagnostic text
+for file content and emit a `<patch>` targeting it (doom extension
+1 trace did exactly that).
+
+**Autonomous playtest input-driven skip.** The
+`entity-progress-over-time` recipe (the "no canvas/state delta after
+10 s = frozen game" check) now skips with
+`autonomous_recipe_skipped reason=applicability_gate_falsy` when the
+exposed `window.state` shows no self-driven-motion signals (no moving
+enemies / projectiles / particles / score / timer). Input-driven
+arcade games (most FPS, platformers, puzzlers) genuinely do nothing
+without input; flagging them as "frozen" was a false positive that
+forced coders to add busy-work idle animations to defeat the probe.
+
 **Ctrl+D wins unconditionally.** A ship request (first Ctrl+D, the `/ship`
 command, or typing `done` / `looks good`) ends the session at the next
 iter boundary on the current passing build. Any feedback that landed in
@@ -402,6 +555,146 @@ Harness failures, patch diagnostics, and the visual critic are
 gap** check (below) can also emit `surprise` events with category
 `state_vs_render_gap` when probes pass but an entity with `x`/`y` in
 `window.state` is not visibly drawn.
+
+### "Feedback" — four distinct flows, four separate switches
+
+The word *feedback* is overloaded in this codebase. There are four
+distinct flows, all controlled separately, and confusing them was the
+source of multiple frustrating sessions:
+
+| Flow | What it is | Switch | Default |
+| --- | --- | --- | --- |
+| **1. Machine bug feedback** | Real Chromium loads your HTML each iter and reports console errors, page errors, frozen-canvas state, RAF firing, listener counts, input smoke-test results, and every `<probe>` the model defined in Phase A. This is the load-bearing verifier signal — what makes the agent better than zero-shot. | **always on** (unconditional) | ON |
+| **2. Playbook retrieval** | Top-K most relevant bullets from `memory/playbook.jsonl` (hand-curated recipes — e.g. FPS camera basis vectors, asteroid jitter, image-load race) injected into the prompt each turn. The model reads them and uses what's relevant. | `/playbook on\|off` | ON |
+| **3. Autonomous self-playtest** | After each **clean** iter the agent runs a SECOND playtest using playbook recipes (`memory/playtests.jsonl`) and queues `[AUTONOMOUS PLAYTEST]` feedback if it finds something the probes missed. Uses #2 to know what to check. | `/feedback on\|off` | ON |
+| **4. Directive wrapping on YOUR typed feedback** | When you type a feedback note into the TUI, a classifier reads your text and adds injected instructions (MEDIA-CHANGE / ORIENTATION-CHANGE / SCOPE ARBITRATION / asset-stem mapping). The model sees those instructions wrapping your literal text. When the classifier is wrong, these wrappers override your guidance. | `/rawfeedback on\|off` | **ON = directives suppressed** (raw mode) |
+
+The agent's value-add comes from #1, #2, #3. #4 is the part that has
+historically misrouted user guidance — e.g. typing "down key moves you
+forward" got wrapped with "the feedback above is about ART/SOUND, not
+code" because the classifier matched "view" in "maze view" as a reference
+to the `pistol_view` sprite. As of 2026-05-23 the default is **raw mode
+on** (wrapping suppressed) so the model sees what you typed. Flip
+`/rawfeedback off` to opt in to the wrappers when the classifier reads
+you correctly.
+
+### Visual playtest recipes — mechanism-keyed checklists for the VLM critic
+
+Added 2026-05-24 after the mortal-kombat trace where the open-ended
+visual critic emitted six paraphrased complaints across six iters
+about the same sprite-render bug (pure prompt noise) — and where a
+wholesale facing-flip regression at iter 12 turned both fighters to
+face the same direction, with no probe to catch it.
+
+The structured critic now does two things in parallel:
+
+**(a) Closed-class yes/no checklist** built from a hand-curated
+mechanism recipe in **`memory/visual_playtests.jsonl`** (data file,
+same pattern as `memory/playbook.jsonl` and `memory/skeletons/` —
+hand-edited, no Python seed). The matcher uses
+`goal + plan_text + asset_names` as combined context so it works even
+when you don't name the game — *"collect dots while avoiding ghosts in
+corridors"* resolves to `canvas-grid-navigation` via mechanic-word
+overlap. Small VLMs answer closed-class checklists much more reliably
+than open-ended "what's wrong?" prompts; the response parses into
+specific failure bullets instead of paraphrased prose.
+
+**(b) Deterministic auto-probes** (some recipes only). Pure JS state
+assertions that ride alongside the model's own `<probes>` and run
+every iter. They catch state-shape regressions even when the VLM
+misses them on the screenshot. Conservative-by-default: each probe
+returns `true` (passes) when the relevant state shape isn't exposed
+so games that legitimately don't have e.g. `state.player.facing` get
+a passing probe, not a false failure.
+
+**Recipe library (mechanism-keyed, NOT game-keyed):**
+
+| Recipe | Mechanism | Has auto-probe |
+| --- | --- | --- |
+| `canvas-controllable-player` | Any game with a player avatar | ✓ `auto_player_within_canvas_bounds` |
+| `canvas-grid-navigation` | Maze / tile / sokoban / dungeon / stealth / tank-battle | ✓ `auto_player_not_in_wall` |
+| `canvas-two-actors-facing` | Fighters, duels, boxing, side-by-side multi | ✓ `auto_actors_face_each_other` |
+| `canvas-side-scroll-platformer` | Mario / Sonic / Metroid / Prince of Persia / Bubble Bobble / Ghosts'n Goblins | — |
+| `canvas-vertical-platformer` | Donkey Kong / BurgerTime / Lode Runner / Crazy Climber (multi-floor + ladders + cascading hazards) | — |
+| `canvas-3d-first-person` | Doom / Wolfenstein / Quake / Dungeon Master | — |
+| `canvas-top-down-action` | Asteroids / Galaga / Robotron / Gauntlet | — |
+| `canvas-board-game` | Chess / Checkers / TTT / Go | — |
+| `canvas-puzzle-grid` | Tetris / Bejeweled / Columns | — |
+| `canvas-racing-perspective` | Pole Position / Out Run / Lotus | — |
+| `canvas-vfx-fluid` | Particle / firework / fluid demos | — |
+| `canvas-paddle-ball` | Breakout / Arkanoid / Pong / Brickball | ✓ `auto_ball_within_canvas_bounds` |
+| `canvas-lane-crossing` | Frogger / Crossy Road / river-crossing / highway-dodge | — |
+| `canvas-point-and-click` | Maniac Mansion / Monkey Island / King's Quest / Sierra-style | — |
+| `canvas-isometric-tile` | Q*bert / Marble Madness / iso puzzle hoppers | — |
+| `canvas-overworld-rpg` | Ultima / Zelda overworld / Dragon Quest / Final Fantasy field | — |
+| `canvas-city-builder` | SimCity / Theme Park / RollerCoaster Tycoon / Cities Skylines | — |
+| `canvas-space-trading` | Elite / Star Control / Privateer / EVE-lite | — |
+| `generic-canvas-game-baseline` | Fallback when no mechanism matches | — |
+
+18 mechanism recipes + 1 generic fallback. Cover the user's 25
+archetype list at 100% (no fallback hits) — see
+`tests/test_visual_playtest_coverage.py` for the pinned coverage
+check. Same pattern as `memory/skeletons/` (17 mechanism templates
+cover hundreds of games) and `memory/playbook.jsonl` (hand-curated
+bullets). **No per-game recipes.** Adding a recipe for a new mechanism
+= append one line to `memory/visual_playtests.jsonl` — matches
+automatically next session, no Python edit needed.
+
+**Auto-probes are intentionally NOT on every recipe.** Mechanisms
+without a clean universal state-shape assertion (puzzle, racing, 3D
+FPS, particle demos) keep only the VLM checklist; adding probes that
+fire on legitimate state-shape variations would do more harm than
+good. The three recipes that DO have auto-probes target the failure
+modes the user has actually hit: actors flipped to same facing,
+player rendered inside a wall, player off-screen.
+
+**Trace events for postmortem:**
+- `visual_playtest_recipe_used {id, top_candidates, match_tokens_sample}`
+- `visual_playtest_recipe_generic {reason, top_candidates}` — no recipe matched, generic fallback used
+- `visual_playtest_parsed {recipe_id, parse_rate, n_failures}`
+- `visual_playtest_unparseable {recipe_id, parse_rate, raw_preview}` — VLM didn't follow format; legacy critique surfaced as fallback
+- `visual_playtest_auto_probes_injected {recipe_id, added, total_probes}`
+
+**Performance cost:** ~1 ms recipe-match (token overlap) + ~10 ms per auto-probe per iter (one extra `_safe_eval`). Negligible vs the per-iter Chromium load (~3-10 s) and optional VLM call (~5-10 s).
+
+**Adding a new recipe:** append one JSONL line to
+**`memory/visual_playtests.jsonl`** (file is tracked in git). Each
+entry is one JSON object on its own line with keys:
+
+```json
+{
+  "id": "canvas-<mechanism-id>",
+  "kind": "visual_playtest",
+  "content": "Mechanism: one-line description.",
+  "tags": ["short", "categorization", "tags"],
+  "source_tier": "root",
+  "verified": true,
+  "helpful": 0, "harmful": 0,
+  "recipe": {
+    "applies_keywords": ["mechanic", "nouns", "and", "game", "names"],
+    "strong_hooks": ["decisive", "game", "names"],
+    "applies_min_matches": 2,
+    "checklist": [
+      "Is X visible?",
+      "Are A and B distinct from each other?"
+    ],
+    "format": "yes_no_per_line",
+    "auto_probes": [
+      {"name": "auto_<assertion_id>", "expr": "(()=>{ ... })()"}
+    ]
+  },
+  "trace_ids": [],
+  "pass_count": 0,
+  "false_positive_count": 0,
+  "last_verified_at": ""
+}
+```
+
+The matcher and prompt builder are recipe-agnostic — the new recipe
+matches automatically based on its keywords. `auto_probes` must
+return `true` conservatively when the relevant state shape isn't
+exposed (don't fail games that don't have e.g. `state.player.facing`).
+No agent code changes needed.
 
 ### Patch engine
 
@@ -494,6 +787,14 @@ still flow through. Suppressed notes still trace as
 | `memory/` | **Tracked reference** — `playbook.jsonl`, `playtests.jsonl` (behavior playtest recipes for `/feedback`), bundled skeletons, asset library index |
 | `games/game-memory/` | **Local learned** (gitignored) — optional live playbook overlay, `won_*` skeletons, `mistakes.jsonl` |
 | `games/goals/` | **Short-term** — per-session `goal.txt`, `best.html`, `outcome.json` |
+| `goodgame/<stem>.html` (+ `<stem>_assets/`, `<stem>_sounds/`) | **Curated showcases (easy path)** — not gitignored (unlike `games/` session output). TUI **`/goodgame`** copies `.best.html` (or live `.html`) plus asset folders into `goodgame/`; your usual git update/commit workflow picks them up with everything else. |
+| `games/<stem>.html` (+ `<stem>_assets/`, `<stem>_sounds/`) | **Legacy curated path** — most session HTML under `games/` is gitignored; you can still promote into `games/` and add matching `!` lines in `.gitignore` (chess sample). Prefer `goodgame/` unless you need the file to live beside other `games/` artifacts. |
+
+**Curated games in repo** (open from `goodgame/` so relative asset paths resolve):
+
+- [`goodgame/mechanics-standard-chess-on-an_20260522_163629.html`](goodgame/mechanics-standard-chess-on-an_20260522_163629.html) — animated sprites, SFX, negamax AI (`AI_SEARCH_DEPTH=4`).
+- [`goodgame/game-of-mortal-kombat-fighing_20260524_101226.html`](goodgame/game-of-mortal-kombat-fighing_20260524_101226.html) — two-player fighter (sprites, SFX, HUD).
+- [`goodgame/a-game-of-street-figher-a-two_20260525_151525.html`](goodgame/a-game-of-street-figher-a-two_20260525_151525.html) — two-player Street Fighter-style fighter (from session `.best.html`).
 
 - **`GameMemory`** — skeleton retrieval and mistake retrieval.
   - **Premium Default Skeletons (Autobootstrapped on boot)**: The system provides 17 generic, high-fidelity scaffolds in `memory/skeletons/` designed to give local models a perfect first-build template:
@@ -665,7 +966,10 @@ Pipeline per spec:
 3. **Cross-session library lookup** (production path only). See
    [Cross-session asset library](#cross-session-asset-library) below.
 4. Cache miss + library miss → generate at native 768×768.
-5. PIL Lanczos downscale to per-asset target size (default 128 px).
+5. PIL Lanczos downscale to per-asset target size (default **512 px**
+   as of 2026-05-23 — was 128 px, but tiny PNGs looked postage-stamp
+   on modern displays and threw away most of the diffuser's detail;
+   `drawImage` downscales at draw time if the game wants smaller).
 6. `_chroma_key_to_rgba` samples 8 corner+edge points; if ≥6/8 agree
    on a dominant color, alpha-mask within tolerance → save RGBA PNG.
 7. Per-asset stats stash on `image_generator.last_stats`.
@@ -811,7 +1115,9 @@ is data the agent will see, not just developer notes.
 | `/backend <auto\|ollama\|mlx\|openai\|anthropic>` | Switch the backend (cloud choices are explicit and billable). |
 | `/unload` | Free VRAM: bare `/unload` evicts the active session tag; `/unload all` walks **every** Ollama slot (11434–11436) plus diffusers preload, not only `OLLAMA_HOST`; `/unload mlx` drops in-process MLX. |
 | `/new` | Start a new session in the same workspace. |
+| `/goodgame` | Copy `.best.html` (or live `.html`) plus `*_assets/` / `*_sounds/` into `goodgame/`. Alias: `/good`. |
 | `/ship` | Force `<confirm_done/>` on the next critique turn. |
+| `/revert [N]`, `/rewind [N]` | Roll the on-disk game file back to the last clean iter (bare) or to iter `N` specifically. Falls back to `best.html` when no clean iter snapshot exists. The iter counter does NOT reset — only the **file** rewinds; the conversation continues and your next feedback applies to the reverted file. Use this when the model breaks something on the latest turn instead of typing "undo that" and watching it break more. Added 2026-05-25 after a 10-trace audit showed harness gates catch only ~5-10% of "model takes liberty beyond user scope" failures across the full feedback shape — a one-keystroke escape hatch beats more clever gates. Emits a `user_revert` trace event for postmortem analysis. |
 | `/quit` | Exit. |
 | `/open` | Reveal the current HTML in the file browser. |
 | `/log`, `/paths`, `/files` | Print log + artifact paths. |
@@ -831,8 +1137,9 @@ is data the agent will see, not just developer notes.
 | `/architect <on\|off>` | Toggle architect/editor split (Aider's 2-call pattern) on complex first-builds — planning pass before the coder writes HTML (default off). Distinct from `/model2 … --role architect`, which assigns a **sidecar slot**. |
 | `/allroles` [on\|off] | Toggle **architect-split + vlm-critique** together for **one** loaded LLM (no `/model2` / `/model3`, no extra GPUs). Bare `/allroles` flips on/off. Staged critic/architect slots still win when present. `/reset` clears the bundle. |
 | `/double-screenshot <on\|off>` | Toggle capturing dual screenshots (startup and post-input) to help the model see movement/animation (default off). |
-| `/vlm-critique <on\|off>` | Toggle VLM screenshot attachment during Phase C successful critique turns for layout and UI polishing (default off). Needs a VLM as the loaded model; uses slot 1 when no critic slot is staged. |
+| `/vlm-critique <on\|off>` | Toggle VLM screenshot attachment during Phase C successful critique turns for layout and UI polishing (default off). Needs a VLM as the loaded model; uses slot 1 when no critic slot is staged. **Auto-toggles with `/wait`**: on `/wait on` we save the current state and force OFF (you're the visual critic now — auto critic adds paraphrased noise about issues you already see); on `/wait off` we restore. Explicit `/vlm-critique on\|off` mid-wait clears the saved state so your choice sticks across the next `/wait` toggle. |
 | `/feedback [on\|off]` | Toggle autonomous playtest loop (default **on**). Bare `/feedback` prints state without flipping. When on: after clean iters, genre-free behavior recipes may queue `[AUTONOMOUS PLAYTEST]` coaching. Test reports and the critic still run when off. |
+| `/rawfeedback [on\|off]` | Your typed feedback goes to the model verbatim (default **on** as of 2026-05-23). The model sees only the basic USER FEEDBACK block around your literal text and decides for itself whether to `<patch>` or `<assets>`. Machine bug feedback (browser test reports, console errors, probes), playbook retrieval, autonomous playtest, and visual critic are UNAFFECTED — they always run. Flip to `off` to opt in to the classifier wrappers (MEDIA-CHANGE / ORIENTATION-CHANGE / SCOPE ARBITRATION / asset-stem-mapping). Sticky across `/new`. Aliases: `/raw`, `/raw-feedback`. |
 | `/audit` | Per-bullet playbook earnings from trace history (fires, pass-rate, avg-iter). |
 | `/restarts <N>` | Independent full restarts when iter-1 score is below 60 (sticky; default 2; `1` = off). |
 | `/model-class <auto\|small\|mid\|large>` | Override system-prompt trim (sticky; default `auto` → lean ~5 KB schema). |
@@ -1390,6 +1697,13 @@ hand.
 
 - **`Playwright Chromium missing`**: run `env -u PLAYWRIGHT_BROWSERS_PATH
   .venv/bin/python -m playwright install chromium`.
+- **Open HTML like `chat.py` (no regular-Chrome `file://` blocks)** — same
+  Playwright Chromium + flags as the TUI verifier. One-shot:
+  `./scripts/open-game-html.sh games/your_game.html` (no arg = file picker).
+  App-menu icon (Linux): run once
+  `./scripts/install-coding-box-chromium-launcher.sh`, then pin **Chromium
+  Test** (Chromium logo + TEST badge; separate dock entry from system Chrome).
+  Mac equivalent: “Chrome for Testing” when `chat.py` runs.
 - **`MLX out of memory`**: lower the wired-memory cap or pick a smaller
   quant. `MLX_PREFILL_STEP_SIZE=512` if you OOM mid-generation.
   DeepSeek-V4 Flash specifically requires 512 (auto-detected via path
@@ -1401,9 +1715,12 @@ hand.
   verify `backend.discover_local_vlm()` returns a path (run
   `.venv/bin/python -c "from backend import discover_local_vlm;
   print(discover_local_vlm())"`).
-- **`Sprites blur when drawn small`**: the asset generator's default
-  output size is 128 px; ask for a smaller `size` (`"size": "32x32"`)
-  for icons rendered at < 64 px.
+- **`Sprites blur or look postage-stamp tiny`**: default output size
+  is 512 px (was 128 px before 2026-05-23). `drawImage` downscales
+  cheaply if the game uses a smaller render rect. Ask for a smaller
+  `size` only when you want tiny on-disk files (HUD icons:
+  `"size": "32x32"`) or larger for full-screen overlays
+  (`"size": 1024`).
 - **`First-iter games are silent`**: run
   `scripts/build_stock_sounds.py` once. The 8 stock sounds become
   zero-cost on subsequent sessions.

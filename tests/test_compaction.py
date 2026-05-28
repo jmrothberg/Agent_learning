@@ -130,16 +130,23 @@ def test_prune_messages_default_elision_path(tmp_path):
     assert len(a._messages) == n_before  # elision keeps shape
     # Older ASSISTANT turns no longer carry inline HTML; user turns are
     # preserved verbatim so instruction examples are not mutated.
+    # Marker shape is the HTML comment introduced by the Wolfenstein
+    # 2026-05-24 fix — model can't parrot it back as a fresh tag because
+    # there is no <html_file> wrapper inside the comment.
+    OMIT_MARKER = "HARNESS-OMITTED-PRIOR-HTML"
     older = a._messages[1:1 + (n_before - 1 - _PRUNE_KEEP_RECENT_TURNS)]
     for m in older:
         if m["role"] == "assistant":
-            assert "[omitted:" in m["content"]
+            assert OMIT_MARKER in m["content"]
+            # Critical: the marker must NOT wrap itself in <html_file>
+            # tags — that was the bug that caused the Wolfenstein loop.
+            assert "<html_file>" not in m["content"]
         else:
-            assert "[omitted:" not in m["content"]
+            assert OMIT_MARKER not in m["content"]
     # Most-recent K turns untouched.
     recent = a._messages[-_PRUNE_KEEP_RECENT_TURNS:]
     for m in recent:
-        assert "[omitted:" not in m["content"]
+        assert OMIT_MARKER not in m["content"]
 
 
 def test_prune_messages_structured_path(tmp_path):

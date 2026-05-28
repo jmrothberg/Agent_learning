@@ -1096,6 +1096,33 @@ class CodingBoxApp(App):
         # diagnostics are NOT gated by this — only the extra autonomous
         # direction is.
         self._use_autonomous_feedback: bool = True
+        # /rawfeedback toggle — DEFAULT FALSE (raw mode is ON).
+        # When False (default): the model sees your typed feedback under
+        # only the basic USER FEEDBACK (HIGHEST PRIORITY) wrapper and
+        # decides for itself whether to patch or re-render. Machine bug
+        # feedback (Chromium test reports, console errors, frozen-canvas
+        # detector, probes), playbook retrieval, and autonomous playtest
+        # are UNAFFECTED — they all still run.
+        # When True: the harness wraps your typed text with classifier-
+        # driven directives (MEDIA-CHANGE, ORIENTATION-CHANGE, SCOPE
+        # ARBITRATION, asset stem mapping). Opt in with /rawfeedback off
+        # when the classifier reads your phrasing correctly.
+        # Default flipped 2026-05-23 — the wrapping classifier had over-
+        # ridden user guidance in the doom session ("down key moves you
+        # forward" got tagged as ART/SOUND feedback). Per the user's
+        # standing rule: the agent must beat zero-shot, not lose value
+        # to regex misroutes. Sticky across /new.
+        self._use_feedback_directives: bool = False
+        # Remembered vlm-critique state captured when /wait turns ON.
+        # Rationale (2026-05-24 mortal kombat trace): when the user is
+        # actively reviewing each iter and typing their own feedback,
+        # the auto visual critic emits ~400 chars of paraphrased
+        # observations the user already saw — pure prompt noise. On
+        # /wait on we save the current state and force vlm-critique
+        # off; on /wait off we restore it. Explicit /vlm-critique
+        # while in wait mode clears this so the auto-restore doesn't
+        # override the user's deliberate choice.
+        self._vlm_critique_pre_wait: bool | None = None
         # Auto-staff flags (2026-05-21): True when the matching feature
         # was flipped by auto-enable (sidecar role or local-VLM detect)
         # rather than by an explicit toggle. Surfaced in the status panel
@@ -1383,6 +1410,7 @@ class CodingBoxApp(App):
         body += self._render_gpu_placement_block()
         body += self._render_assets_block()
         body += self._render_sounds_block()
+        body += self._render_memory_block()
         body += self._render_playbook_block()
         body += self._render_files_block()
         if self._last_test_block:
@@ -1738,7 +1766,13 @@ class CodingBoxApp(App):
         return self._run_profile == "local_manual"
 
     def _wants_three_ollama_slots(self) -> bool:
-        """True when the staged session needs coder + two Ollama sidecars."""
+        """True only when the user explicitly staged slots 2 AND 3.
+
+        Default-on autopin for 4-GPU boxes was reverted on 2026-05-23
+        after it crashed the workstation: three Ollama daemons plus the
+        iter-1 best-of-N fan-out hammered every GPU at once. Multi-slot
+        is now strictly opt-in via /model2 /model3 /modelall.
+        """
         primary_backend = (self._next_backend or "auto").lower()
         if primary_backend in ("mlx", "openai", "anthropic", "claude"):
             return False
@@ -2322,6 +2356,77 @@ class CodingBoxApp(App):
             f"[dim]· {avg_s:.1f}s avg · {rate:.2f}/s · "
             f"~{eta_s:.0f}s ETA[/dim]"
         )
+
+    def _render_memory_block(self) -> str:
+        """Show which memory items the agent has active for this session.
+
+        Memory layers surfaced (in order, only when non-empty):
+          - Skeleton (selected at session start, used by Phase A)
+          - Visual playtest recipe (matched at end of Phase A; drives
+            the structured VLM checklist + auto-injected probes)
+          - Opening-book hits this turn (outline + playtest +
+            asset_audit + animation_audit IDs retrieved per turn,
+            injected into the model's prompt as <opening_book>)
+
+        The (existing) `_render_playbook_block` shows playbook bullets
+        separately — leaves the visual organization clean.
+
+        Without these rows the user can't tell whether the memory
+        layers are actually firing on their goal; with them, they see
+        which mechanism recipe the agent picked, which probes were
+        added on top of the model's own <probes>, and which recipes
+        the opening book pulled for the current turn.
+        """
+        agent = getattr(self, "agent", None)
+        if agent is None:
+            return ""
+        parts: list[str] = []
+
+        # Skeleton — set once at session start.
+        skel = getattr(agent, "_active_skeleton", None)
+        if skel:
+            parts.append(f"  skeleton: [b]{skel}[/b]")
+
+        # Visual playtest recipe (mechanism-keyed checklist for the
+        # VLM critic). Surface even when no auto-probes — the recipe
+        # still steers the critic prompt.
+        vp_id = getattr(agent, "_active_visual_playtest_recipe_id", None)
+        if vp_id:
+            ap_names = list(
+                getattr(agent, "_active_visual_playtest_auto_probes", []) or []
+            )
+            row = f"  visual playtest: [b]{vp_id}[/b]"
+            if ap_names:
+                row += (
+                    f"  [dim]+ {len(ap_names)} auto-probe(s): "
+                    + ", ".join(ap_names)
+                    + "[/dim]"
+                )
+            parts.append(row)
+
+        # Opening-book hits — these change per turn. Group by kind so
+        # the list reads cleanly when N is small.
+        hits = list(getattr(agent, "_active_opening_book_recipes", []) or [])
+        if hits:
+            by_kind: dict[str, list[str]] = {}
+            for h in hits:
+                kind = str(h.get("kind", "?"))
+                hid = str(h.get("id", "?"))
+                by_kind.setdefault(kind, []).append(hid)
+            kind_rows = []
+            for kind in ("outline", "playtest", "asset_audit", "animation_audit"):
+                ids = by_kind.get(kind)
+                if ids:
+                    kind_rows.append(
+                        f"    {kind}: " + ", ".join(ids)
+                    )
+            if kind_rows:
+                parts.append("  opening book (this turn):")
+                parts.extend(kind_rows)
+
+        if not parts:
+            return ""
+        return "\n[b]Memory in use:[/b]\n" + "\n".join(parts) + "\n"
 
     def _render_playbook_block(self) -> str:
         """Show which playbook bullets are currently injected in prompts,
@@ -2972,8 +3077,12 @@ class CodingBoxApp(App):
                 self._cmd_unload(arg)
             elif cmd == "new":
                 await self._cmd_new(arg)
+            elif cmd in ("goodgame", "good"):
+                self._cmd_goodgame()
             elif cmd == "ship":
                 await self.action_ship_it()
+            elif cmd in ("revert", "rewind"):
+                self._cmd_revert(arg)
             elif cmd == "quit":
                 await self.action_quit_app()
             elif cmd in ("log", "paths", "files"):
@@ -3027,6 +3136,8 @@ class CodingBoxApp(App):
                 self._cmd_toggle_allroles(arg)
             elif cmd == "feedback":
                 self._cmd_toggle_autonomous_feedback(arg)
+            elif cmd in ("rawfeedback", "raw-feedback", "raw"):
+                self._cmd_toggle_raw_feedback(arg)
             else:
                 self._log_info(f"unknown command /{cmd} — type /help")
         except Exception as e:
@@ -3036,7 +3147,7 @@ class CodingBoxApp(App):
         lines = [
             "[bold cyan]── what to type when ──[/bold cyan]",
             "  [b]first run[/b]                  describe the game you want, press Enter",
-            "  [b]small change to what shipped[/b]  just type it — no slash needed",
+            "  [b]small change to shipped game[/b]  just type it — no slash needed",
             "                                  e.g. [italic]ship is too slow, double the thrust[/italic]",
             "  [b]ship as-is, stop[/b]              type [b]done[/b] / [b]looks good[/b] / [b]ship[/b] (or Ctrl+D)",
             "                                  [dim]Ctrl+D wins: any queued feedback (incl. autonomous playtest) is dropped — re-send after ship if still wanted[/dim]",
@@ -3080,67 +3191,99 @@ class CodingBoxApp(App):
             "  [b]smoke tests[/b]              [b]scripts/_smoke_doom.py[/b] (sprite), [b]_smoke_img2img.py[/b]",
             "                                  (animation), [b]_smoke_audio.py[/b] (sound) — run after install.",
             "",
-            "[bold cyan]── slash commands ──[/bold cyan]",
-            "  [b]/help[/b]                    show this help (also /h, /?)",
-            "  [b]/list[/b]                    unified Ollama + MLX list with numbers (also /models)",
-            "  [b]/load <N|name>[/b]           pick model #N from /list (any backend) · STICKY across /new (also /model)",
-            "  [b]/model2 <N|name> [--role critic|architect][/b]  configure and stage secondary model 2",
-            "  [b]/model3 <N|name> [--role critic|architect][/b]  configure and stage tertiary model 3",
-            "  [b]/modelall <N|name>[/b]      stage the SAME model on all 3 slots (coder + critic + architect) · alias /loadall",
-            "                                  [dim]4-GPU workstation: 11434→GPU1, 11435→GPU2, 11436→GPU3 — one command for all three[/dim]",
-            "  [b]/retry[/b]                   re-run after a bad model (keeps game file + trace; uses /model pick first)",
-            "  [b]/launch <N|name|path>[/b]   stage an MLX model for next /new (loads in-process on first request)",
-            "                                  [dim]MLX stalls no longer auto-fall-back to Ollama — surface the MLX hint and stop (use /backend ollama + /load <N> to switch deliberately)[/dim]",
-            "  [b]/backend <auto|ollama|mlx|openai|anthropic>[/b]  stage default backend when no specific model is staged",
+            # =====================================================================
+            # SLASH COMMANDS — grouped by purpose so the user can scan one section
+            # instead of hunting through a flat list. Aliases shown in [dim] after
+            # the canonical name; bare command (no args) usually shows current
+            # state or clears, where relevant.
+            # =====================================================================
+            "[bold cyan]── session lifecycle ──[/bold cyan]",
+            "  [b]/new <goal>[/b]                end current session, start fresh (uses staged seed/model)",
+            "  [b]/goodgame[/b]                  copy best.html + *_assets/ + *_sounds/ → goodgame/ [dim](not gitignored)[/dim]",
+            "  [b]/ship[/b]                      ship current build [dim](= Ctrl+D, or type 'done' / 'looks good')[/dim]",
+            "  [b]/revert [N][/b]               roll the game file back to the last clean iter [dim](or iter N specifically; aliases /rewind)[/dim]",
+            "                                  [dim]use this when the model breaks something — one keystroke beats typing 'undo that'[/dim]",
+            "  [b]/retry[/b]                     re-run after a bad model (keeps game file + trace)",
+            "  [b]/reset[/b]                     wipe ALL staged state → defaults (seed, model, iters, ctx)",
+            "  [b]/open[/b]                      open the current game in your default browser",
+            "  [b]/clear[/b]                     clear the agent log pane (no effect on staged state)",
+            "  [b]/quit[/b]                      quit the TUI [dim](= Ctrl+Q)[/dim]",
+            "",
+            "[bold cyan]── models ──[/bold cyan]",
+            "  [b]/list[/b]                      unified Ollama + MLX (+ cloud if keys set) list with numbers [dim](alias /models)[/dim]",
+            "  [b]/load <N|name>[/b]             pick model #N from /list (any backend); sticky across /new [dim](alias /model)[/dim]",
+            "  [b]/model2 <N|name> [--role critic|architect][/b]   stage sidecar slot 2",
+            "  [b]/model3 <N|name> [--role critic|architect][/b]   stage sidecar slot 3",
+            "  [b]/modelall <N|name>[/b]         stage SAME model on all 3 slots (coder + critic + architect) [dim](alias /loadall)[/dim]",
+            "  [b]/backend <auto|ollama|mlx|openai|anthropic>[/b]  default backend when no specific model is staged",
             "                                  [dim]cloud backends require OPENAI_API_KEY / ANTHROPIC_API_KEY in shell env[/dim]",
-            "  [b]/unload [N|name|all|mlx][/b]  free VRAM · #N from /list · bare = active session · all = every Ollama · mlx = drop the in-process MLX model",
-            "  [b]/seed <path>[/b]             stage a baseline .html (STICKY across /new) · /seed alone clears",
-            "  [b]/iters <N>[/b]               set max iterations (sticky)",
-            "  [b]/ctx [N|100k|131k|262k|full][/b]  Ollama context window (sticky · default 100k · /ctx alone shows current)",
+            "  [b]/launch <N|name|path>[/b]     stage an MLX model for next /new (loads in-process on first request)",
+            "                                  [dim]MLX stalls don't auto-fall-back to Ollama — use /backend ollama + /load to switch[/dim]",
+            "  [b]/unload [N|name|all|mlx][/b]  free VRAM · bare = active session · all = every Ollama · mlx = drop in-process MLX",
+            "",
+            "[bold cyan]── run knobs (all sticky across /new) ──[/bold cyan]",
+            "  [b]/seed <path>[/b]               stage a baseline .html · bare = clear",
+            "  [b]/iters <N>[/b]                 max iterations per session",
+            "  [b]/ctx [N|100k|131k|262k|full][/b]   Ollama context window · default 100k · bare = show current",
             "                                  [dim]raises KV VRAM; Ollama reloads on next request — preload with[/dim]",
             "                                  [dim]`ollama run --ctx-size N <model>` to avoid a stall[/dim]",
-            "  [b]/restarts <N>[/b]            independent full restarts when iter-1 score < 60 (sticky · default 2 · 1=off)",
-            "  [b]/model-class <auto|small|mid|large>[/b]  override prompt-size trim (sticky · default 'small' = lean ~5KB)",
-            "  [b]/reset[/b]                   wipe ALL staged state (seed + model + iters → defaults)",
-            "  [b]/new <goal>[/b]              end current session, start a fresh one (uses staged seed/model)",
-            "  [b]/ship[/b]                    ship current build (= Ctrl+D, or type 'done')",
-            "  [b]/open[/b]                    open the current game in your default browser",
-            "  [b]/log[/b]                     print all session artifact paths (= Ctrl+L; also /paths, /files)",
-            "  [b]/clear[/b]                   clear the agent log pane (does not affect staged state)",
-            "  [b]/status[/b]                  print model, phase, iteration, paths, what's staged",
-            "  [b]/wait[/b] [on|off]            toggle step-mode: pause after each iter; Enter or feedback to continue",
-            "  [b]/wiki[/b] [on|off]            toggle Wikipedia research lookup before planning (default OFF; ~5-10s per session when ON; grounds plans for named titles like Asteroids/Pac-Man/Mr. Do!)",
-            "  [b]/iter-detail[/b] [on|off]     optional extra blocker details after each iter decision (default off)",
-            "  [b]/mode[/b] [local_manual|local_auto|local_plus_review with <model> [--auto-apply]|custom]",
-            "                                  set run contract; local_plus_review can auto-run /check in AUTO mode",
-            "                                  [dim]IMPORTANT: reviewer auto-apply runs only when WAIT mode is OFF (/wait off)[/dim]",
-            "  [b]/playbook[/b] [on|off]        toggle playbook bullet injection (alias /memory) - A/B vs one-shot when iters feel worse than no agent",
-            "  [b]/prefill[/b] [on|off]         toggle forcing assistant prefill tags (default ON; forces XML syntax compliance)",
-            "  [b]/architect[/b] [on|off]       toggle architect/editor split on complex first-builds (Aider's 2-call pattern; default off)",
-            "                                  [dim]this is the Phase B split — for the slot tag use [b]/model2 ... --role architect[/b][/dim]",
-            "  [b]/allroles[/b]                 turn on all roles (critic + architect) using your one loaded LLM — no extra GPUs, no args",
-            "                                  [dim]bundles /architect on + /vlm-critique on; safe with /modelall (staged slots still win)[/dim]",
-            "  [b]/double-screenshot[/b] [on|off] toggle capturing startup + after-input screenshots (default off; helps debugging movement)",
-            "  [b]/vlm-critique[/b] [on|off]    toggle attaching screenshot to Phase C self-critique turns (default off)",
+            "  [b]/restarts <N>[/b]              independent full restarts when iter-1 score < 60 · default 2 · 1=off",
+            "  [b]/model-class <auto|small|mid|large>[/b]   prompt-size trim · default 'small' = lean ~5 KB",
+            "  [b]/mode <local_manual|local_auto|local_plus_review with <model> [--auto-apply]|custom>[/b]",
+            "                                  run contract preset · [dim]reviewer auto-apply runs only with /wait off[/dim]",
+            "",
+            "[bold cyan]── feature toggles ──[/bold cyan]",
+            "  [b]/wait [on|off][/b]             step-mode: pause after each iter; Enter or feedback to continue",
+            "                                  [dim]/wait on auto-disables /vlm-critique (you're the reviewer); restored on /wait off[/dim]",
+            "  [b]/vlm-critique [on|off][/b]    attach screenshot to Phase C critique · default off",
             "                                  [dim]needs a VLM as the loaded model; uses slot 1 when no critic slot is staged[/dim]",
-            "  [b]/feedback[/b] [on|off]        toggle autonomous self-feedback loop (default ON · multi-screenshot playtest + genre-free behavior recipes)",
-            "                                  [dim]only the extra direction is gated; test reports, patch diagnostics, and the critic still run when off[/dim]",
-            "  [b]/audit[/b]                     print per-bullet earnings (fires, pass-rate, avg-iter) from trace history",
-            "  [b]/check[/b] [<N|model>]       visual review + guidance using model #N from /list or a model name",
-            "                                  [dim]bare /check uses your active session model if it's a VLM (no API cost)[/dim]",
+            "                                  [dim]RECOMMENDED: OFF when YOU review each iter — auto critic adds paraphrased noise[/dim]",
+            "  [b]/feedback [on|off][/b]        autonomous self-feedback loop · default ON",
+            "                                  [dim]after each clean iter, runs playtest recipes + queues findings as feedback[/dim]",
+            "                                  [dim]test reports, patch diagnostics, and the critic still run when off[/dim]",
+            "  [b]/rawfeedback [on|off][/b]     YOUR typed feedback goes to the model verbatim · default ON",
+            "                                  [dim]flip OFF to opt-in to MEDIA-CHANGE / ORIENTATION / SCOPE wrappers on your feedback[/dim]",
+            "                                  [dim]machine bug feedback (test reports, console errors, probes) is UNAFFECTED[/dim]",
+            "  [b]/playbook [on|off][/b]        playbook bullet injection · default ON [dim](alias /memory)[/dim]",
+            "                                  [dim]A/B vs one-shot when iters feel worse than no agent[/dim]",
+            "  [b]/architect [on|off][/b]       architect/editor split on complex first-builds · default off [dim](alias /arch)[/dim]",
+            "                                  [dim]Phase B split — for the slot use /model2 … --role architect instead[/dim]",
+            "  [b]/allroles[/b]                  bundle: /architect on + /vlm-critique on, all on your one loaded LLM",
+            "                                  [dim]no extra GPUs; staged /model2 / /model3 slots still win[/dim]",
+            "  [b]/prefill [on|off][/b]         force assistant prefill tags · default ON [dim](XML syntax compliance)[/dim]",
+            "  [b]/double-screenshot [on|off][/b]  capture startup + after-input screenshots · default off [dim](alias /ds)[/dim]",
+            "                                  [dim]helps debug movement; needs /vlm-critique on to be useful[/dim]",
+            "  [b]/iter-detail [on|off][/b]    extra blocker details after each iter decision · default off",
+            "",
+            "[bold cyan]── inspection ──[/bold cyan]",
+            "  [b]/status[/b]                    model, phase, iteration, paths, what's staged",
+            "  [b]/log[/b]                       print all session artifact paths [dim](= Ctrl+L; aliases /paths /files)[/dim]",
+            "  [b]/audit[/b]                     per-playbook-bullet earnings (fires, pass-rate, avg-iter) from trace history",
+            "  [b]/check [<N|name>][/b]         visual review on latest screenshot · bare uses active session VLM",
             "                                  [dim]WAIT ON: loads suggested feedback into input for edit/Enter[/dim]",
             "                                  [dim]WAIT OFF: auto-queues guidance into the next coding turn[/dim]",
-            "  [b]/ref <path>[/b]              attach a reference image (PNG/JPEG/WebP) to the NEXT user turn",
-            "                                  [dim]works before /new too — it stages for the first turn[/dim]",
+            "  [b]/ref <path>[/b]               attach a reference image (PNG/JPEG/WebP) to the NEXT user turn",
+            "                                  [dim]works before /new too; drag a file from Finder into the terminal to fill the path[/dim]",
             "                                  [dim]VLM-only — say 'make the game look like this' on the next line[/dim]",
-            "                                  [dim]drag a file from Finder into the terminal to fill in the path[/dim]",
-            "  [b]/quit[/b]                    quit (= Ctrl+Q)",
+            "  [b]/help[/b]                     show this help [dim](aliases /h /?)[/dim]",
+            "",
+            "[bold cyan]── visual playtest recipes (auto-applied) ──[/bold cyan]",
+            "  Hand-curated MECHANISM-keyed checklists the VLM critic uses. The matcher",
+            "  picks a recipe from your goal + the model's <plan> text + asset names so",
+            "  it works even when you don't name the game ([italic]'collect dots while avoiding[/italic]",
+            "  [italic]ghosts in corridors'[/italic] → canvas-grid-navigation). ~11 mechanism recipes",
+            "  cover the top-100 games — Pacman, Doom, fighters, Mario, chess, Tetris, etc.",
+            "  Three of them also carry [b]auto-probes[/b] — deterministic JS assertions that",
+            "  catch state-shape regressions even if the VLM misses them (two-actor",
+            "  facing flip, player-in-wall, player off-screen). Trace events:",
+            "  [b]visual_playtest_recipe_used[/b], [b]visual_playtest_auto_probes_injected[/b].",
+            "  Library file: [b]memory/visual_playtests.jsonl[/b] (hand-edited data file, tracked in git).",
+            "  Adding a new recipe = append one JSONL line — no Python code change, matches next session.",
             "",
             "[bold cyan]── sticky staging ──[/bold cyan]",
-            "  /seed, /model, /iters PERSIST across multiple /new calls. Set once,",
-            "  reuse forever. Clear individually with the bare command "
-            "(e.g. [b]/seed[/b] alone),",
-            "  or wipe all of them with [b]/reset[/b].",
+            "  Run-knob commands (/seed, /load, /iters, /ctx, /restarts, /model-class, /mode)",
+            "  PERSIST across multiple /new calls. Set once, reuse forever. Clear individually",
+            "  with the bare command (e.g. [b]/seed[/b] alone), or wipe everything with [b]/reset[/b].",
             "",
             "[dim]Example: /seed games/asteroids.html  →  /new add multiplayer  "
             "→  /new add boss  ▸ both use asteroids.html[/dim]",
@@ -4087,6 +4230,85 @@ class CodingBoxApp(App):
         except Exception as e:
             self._log_error(f"could not open browser: {e}")
 
+    def _cmd_goodgame(self) -> None:
+        """/goodgame — copy current session HTML + asset dirs into goodgame/."""
+        if self._out_path is None:
+            self._log_info("no session yet — build a game first, then /goodgame")
+            return
+        from goodgame import promote_session_game
+
+        try:
+            copied = promote_session_game(
+                out_path=self._out_path,
+                best_path=self._best_path,
+                assets_dir=self._assets_dir,
+                sounds_dir=self._sounds_dir,
+            )
+        except FileNotFoundError as e:
+            self._log_error(str(e))
+            return
+        stem = self._out_path.stem
+        self._log(f"[bold green]goodgame[/bold green] saved [b]{stem}[/b] → {copied['html']}")
+        if not copied.get("assets") and not copied.get("sounds"):
+            self._log_info(
+                "[dim]no *_assets/ or *_sounds/ on disk (HTML only is fine)[/dim]"
+            )
+
+    def _cmd_revert(self, arg: str) -> None:
+        """/revert [N] — roll the on-disk game file back to a previous iter.
+
+        No-arg: most-recent clean iter (last `iter_summary` with ok=True),
+                falling back to best.html if no clean iter snapshot exists.
+        With N: revert to iter N specifically (snapshot file iter_NN.html).
+
+        The iter counter does NOT reset — this rewinds the FILE, not the
+        conversation. The model's next turn will see the reverted bytes
+        as CURRENT FILE ON DISK and any feedback you type.
+
+        Audit context: built 2026-05-25 after a 10-trace audit showed
+        harness gates catch only ~5-10% of "model takes liberty beyond
+        user scope" failures. Cheaper to give the user a one-keystroke
+        rollback than to build more clever gates that don't catch most
+        of the failure shape.
+        """
+        if self.agent is None:
+            self._log_info("no session yet — start one before /revert")
+            return
+        requested = None
+        if arg.strip():
+            try:
+                requested = int(arg.strip())
+                if requested < 1:
+                    raise ValueError
+            except ValueError:
+                self._log_info(
+                    f"/revert takes a positive iter number; got {arg!r}. "
+                    "Use /revert with no arg for the most-recent clean iter."
+                )
+                return
+        try:
+            result = self.agent.revert_to_iter(requested)
+        except Exception as e:
+            self._log_error(f"/revert failed: {e}")
+            return
+        if not result.get("ok"):
+            self._log_error(f"/revert: {result.get('error', 'unknown error')}")
+            return
+        to_iter = result.get("to_iter")
+        source = result.get("source", "?")
+        from_iter = result.get("from_iter") or 0
+        file_bytes = result.get("file_bytes", 0)
+        if source == "snapshot":
+            target_label = f"iter {to_iter}"
+        else:
+            target_label = "best.html"
+        self._log(
+            f"[bold green]reverted[/bold green] from iter {from_iter} "
+            f"→ [b]{target_label}[/b] ({file_bytes:,} bytes). "
+            "The on-disk file is now the working version. Type new "
+            "feedback to continue."
+        )
+
     def _cmd_attach_ref_image(self, arg: str) -> None:
         """/ref <path> — attach a reference image to the NEXT user turn.
 
@@ -4734,6 +4956,23 @@ class CodingBoxApp(App):
         # Step-mode shows up here so users can confirm whether the
         # agent will pause between iters or run continuously.
         step_label = "ON" if self._effective_step_mode() else "off"
+        # Prefer the live agent's feature flags when a session is
+        # running — the agent can AUTO-staff vlm-critique on local-VLM
+        # detection (agent.py:5355) and architect-split on complex
+        # first-builds without touching the App's flags. Without this
+        # `/status` shows the stale chat-level value while the right-
+        # side status panel (which already reads from the agent)
+        # correctly shows "vlm-critique ON".
+        if self.agent is not None:
+            eff_vlm_critique = bool(getattr(self.agent, "_use_vlm_critique", self._use_vlm_critique))
+            eff_vlm_auto = bool(getattr(self.agent, "_vlm_critique_auto", self._vlm_critique_auto))
+            eff_arch_split = bool(getattr(self.agent, "_use_architect_split", self._use_architect_split))
+            eff_arch_auto = bool(getattr(self.agent, "_architect_split_auto", self._architect_split_auto))
+        else:
+            eff_vlm_critique = self._use_vlm_critique
+            eff_vlm_auto = self._vlm_critique_auto
+            eff_arch_split = self._use_architect_split
+            eff_arch_auto = self._architect_split_auto
         lines = [
             "[bold cyan]── status ──[/bold cyan]",
             f"  backend (active):     {_esc(self._session_backend_info.name if self._session_backend_info else '—')}",
@@ -4760,11 +4999,12 @@ class CodingBoxApp(App):
             f"  model-class:          {self._model_class or 'auto (= small, lean ~5KB schema)'}",
             f"  step-mode (/wait):    {step_label}",
             f"  prefill:              {'ON' if self._use_prefill else 'off'}",
-            f"  architect-split:      {'ON' if self._use_architect_split else 'off'}{' [auto]' if self._architect_split_auto and self._use_architect_split else ''}",
+            f"  architect-split:      {'ON' if eff_arch_split else 'off'}{' [auto]' if eff_arch_auto and eff_arch_split else ''}",
             f"  double-screenshot:    {'ON' if self._use_double_screenshot else 'off'}",
-            f"  vlm-critique:         {'ON' if self._use_vlm_critique else 'off'}{' [auto]' if self._vlm_critique_auto and self._use_vlm_critique else ''}",
+            f"  vlm-critique:         {'ON' if eff_vlm_critique else 'off'}{' [auto]' if eff_vlm_auto and eff_vlm_critique else ''}",
             f"  /allroles bundle:     {'ON' if self._all_roles_enabled else 'off'}",
             f"  autonomous /feedback: {'ON' if self._use_autonomous_feedback else 'OFF'}  [dim](multi-shot playtest + recipe checks; /feedback off to disable)[/dim]",
+            f"  raw user feedback:    {'ON · directives suppressed (default)' if not self._use_feedback_directives else 'off · classifier wrapping ACTIVE'}  [dim](/rawfeedback on|off — bypass MEDIA-CHANGE / ORIENTATION / SCOPE wrappers; machine bug feedback always on)[/dim]",
             f"  iter detail:          {self._iter_decision_verbose}",
             f"  run profile:          {self._format_run_profile()}",
             f"  review hook:          {self._profile_review_model or '—'}",
@@ -4927,6 +5167,43 @@ class CodingBoxApp(App):
         # Mirror explicit /wait intent for auto-step behavior: when the
         # user turns wait OFF, don't auto-re-enable pauses later.
         self.agent.set_auto_step_on_failure(new_state)
+        # Auto-toggle vlm-critique with wait mode. When the user is
+        # reviewing each iter themselves, the auto critic is pure
+        # noise (mortal-kombat 2026-05-24 trace: 6 paraphrased
+        # complaints in 6 iters about the same visual issue). Save
+        # the current state on /wait on and restore on /wait off.
+        # User can still flip /vlm-critique explicitly mid-wait —
+        # that clears the saved state so the auto-restore doesn't
+        # override their choice.
+        if new_state:
+            # Entering wait mode.
+            if self._vlm_critique_pre_wait is None and self._use_vlm_critique:
+                self._vlm_critique_pre_wait = True
+                self._use_vlm_critique = False
+                self._vlm_critique_auto = False
+                if self.agent is not None:
+                    self.agent._use_vlm_critique = False
+                    self.agent._vlm_critique_auto = False
+                self._log_info(
+                    "[dim]vlm-critique auto-off while in wait mode — "
+                    "you're the visual critic now. Toggle /vlm-critique "
+                    "explicitly if you want the auto critic back; it'll "
+                    "restore to ON when you /wait off.[/dim]"
+                )
+        else:
+            # Leaving wait mode — restore prior vlm-critique state.
+            if self._vlm_critique_pre_wait is not None:
+                prior = self._vlm_critique_pre_wait
+                self._vlm_critique_pre_wait = None
+                if self._use_vlm_critique != prior:
+                    self._use_vlm_critique = prior
+                    if self.agent is not None:
+                        self.agent._use_vlm_critique = prior
+                    state_word = "ON" if prior else "off"
+                    self._log_info(
+                        f"[dim]vlm-critique restored to {state_word} "
+                        "(was saved when you entered wait mode).[/dim]"
+                    )
         if new_state:
             self._log_info(
                 "[yellow]step-mode ON[/yellow] — agent will pause after each "
@@ -5142,6 +5419,69 @@ class CodingBoxApp(App):
         )
         self._update_status()
 
+    def _cmd_toggle_raw_feedback(self, arg: str) -> None:
+        """/rawfeedback [on|off] — your typed feedback goes to the model verbatim.
+
+        Default ON: every directive block is suppressed. The model
+        sees ONLY the basic USER FEEDBACK (HIGHEST PRIORITY) wrapper
+        around your literal text and decides for itself whether to
+        emit <patch> or <assets>. This is the default because the
+        classifier-driven wrappers actively misrouted typed feedback
+        in past sessions ("down key moves you forward" got wrapped
+        with "the feedback above is about ART/SOUND, not code").
+
+        OFF: opt-in to classifier wrapping. The harness reads your
+        typed text, classifies it (art change / orientation change /
+        scope lock / etc.), and adds directives like MEDIA-CHANGE,
+        ORIENTATION-CHANGE, SCOPE ARBITRATION, asset stem mapping.
+        Useful when the classifier reads your phrasing correctly and
+        the extra coaching helps the model.
+
+        UNAFFECTED by this toggle — always runs regardless:
+          - Chromium browser test reports each iter (console errors,
+            page errors, frozen-canvas check, RAF firing, probes,
+            input smoke test). This is the load-bearing bug signal.
+          - Patch failure diagnostics.
+          - Playbook retrieval (/playbook off to disable separately).
+          - Autonomous self-playtest after clean iters (/feedback
+            off to disable separately).
+          - Visual critic on screenshots (/vlm-critique off to
+            disable separately).
+
+        Sticky across /new. Safe to toggle mid-session. Equivalent to
+        /raw or /raw-feedback.
+        """
+        arg_lc = arg.strip().lower()
+        if arg_lc in ("on", "true", "1", "enable"):
+            raw_on = True
+        elif arg_lc in ("off", "false", "0", "disable"):
+            raw_on = False
+        elif arg_lc == "":
+            cur = (
+                "[yellow]ON[/yellow]" if not self._use_feedback_directives
+                else "[green]OFF[/green]"
+            )
+            self._log_info(
+                f"raw-feedback mode is {cur} "
+                "(usage: /rawfeedback on  ·  /rawfeedback off)"
+            )
+            return
+        else:
+            raw_on = self._use_feedback_directives  # currently directives-on → flip to raw-on
+        # raw_on=True  → suppress directives → _use_feedback_directives=False
+        # raw_on=False → keep directives      → _use_feedback_directives=True
+        new_state = not raw_on
+        self._use_feedback_directives = new_state
+        if self.agent is not None:
+            self.agent._use_feedback_directives = new_state
+        status = (
+            "[yellow]ON[/yellow] — directives suppressed, model sees your literal text"
+            if not new_state else
+            "[green]OFF[/green] — directives active (default)"
+        )
+        self._log_info(f"raw-feedback mode set to {status}")
+        self._update_status()
+
     def _cmd_toggle_vlm_critique(self, arg: str) -> None:
         """/vlm-critique [on|off] — toggle attaching screenshot to Phase C self-critique turns."""
         arg_lc = arg.strip().lower()
@@ -5155,6 +5495,15 @@ class CodingBoxApp(App):
         # Explicit toggle clears auto-staff so a user "off" sticks even if
         # _detect_vlm runs again and would otherwise re-enable.
         self._vlm_critique_auto = False
+        # Explicit toggle while in wait mode clears the auto-restore-on-
+        # wait-off memory. Without this, /vlm-critique on during wait
+        # mode would be overridden when the user later runs /wait off
+        # (we'd restore the saved-at-wait-on state, ignoring the new
+        # explicit one). Same applies to explicit off. getattr() so
+        # test fixtures that use App.__new__ (bypassing __init__) don't
+        # AttributeError when the field hasn't been initialized.
+        if getattr(self, "_vlm_critique_pre_wait", None) is not None:
+            self._vlm_critique_pre_wait = None
         if self.agent is not None:
             self.agent._use_vlm_critique = new_state
             self.agent._vlm_critique_auto = False
@@ -5562,6 +5911,7 @@ class CodingBoxApp(App):
         # that constructs GameAgent would otherwise need updating).
         # Default on the agent is True; the App's runtime toggle wins.
         self.agent._use_autonomous_feedback = self._use_autonomous_feedback
+        self.agent._use_feedback_directives = self._use_feedback_directives
         # Apply run-profile step policy on session start.
         if self._run_profile == "local_manual":
             self.agent.set_step_mode(True)
