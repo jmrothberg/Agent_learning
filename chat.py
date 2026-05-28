@@ -3213,7 +3213,9 @@ class CodingBoxApp(App):
             "  [b]/list[/b]                      unified Ollama + MLX (+ cloud if keys set) list with numbers [dim](alias /models)[/dim]",
             "  [b]/load <N|name>[/b]             pick model #N from /list (any backend); sticky across /new [dim](alias /model)[/dim]",
             "  [b]/model2 <N|name> [--role critic|architect][/b]   stage sidecar slot 2",
+            "                                  [dim]omit N to inherit staged model 1: /model2 --role critic or /model2 --critic[/dim]",
             "  [b]/model3 <N|name> [--role critic|architect][/b]   stage sidecar slot 3",
+            "                                  [dim]omit N to inherit model 1: /model3 --role architect or /model3 --architect[/dim]",
             "  [b]/modelall <N|name>[/b]         stage SAME model on all 3 slots (coder + critic + architect) [dim](alias /loadall)[/dim]",
             "  [b]/backend <auto|ollama|mlx|openai|anthropic>[/b]  default backend when no specific model is staged",
             "                                  [dim]cloud backends require OPENAI_API_KEY / ANTHROPIC_API_KEY in shell env[/dim]",
@@ -3888,16 +3890,25 @@ class CodingBoxApp(App):
 
     def _parse_model_and_role(self, arg: str) -> tuple[str, str | None]:
         role = None
-        # Support `--role critic` or `-r critic` etc. (case-insensitive)
-        match = re.search(r"\s+--(?:role|r)\s+(\w+)", arg, re.IGNORECASE)
+        # `--role critic` may follow the model token ("6 --role critic") or
+        # stand alone at the start ("--role critic") when inheriting model 1.
+        match = re.search(r"(?:^|\s+)--(?:role|r)\s+(\w+)", arg, re.IGNORECASE)
         if match:
             role = match.group(1).lower()
             arg = arg[:match.start()].strip()
         else:
-            match_short = re.search(r"\s+-r\s+(\w+)", arg, re.IGNORECASE)
+            match_short = re.search(r"(?:^|\s+)-r\s+(\w+)", arg, re.IGNORECASE)
             if match_short:
                 role = match_short.group(1).lower()
                 arg = arg[:match_short.start()].strip()
+            else:
+                # Shorthand: /model2 --critic | /model3 --architect (inherit model 1)
+                match_role_flag = re.search(
+                    r"(?:^|\s+)--(critic|architect)\b", arg, re.IGNORECASE
+                )
+                if match_role_flag:
+                    role = match_role_flag.group(1).lower()
+                    arg = arg[:match_role_flag.start()].strip()
         return arg, role
 
     def _cmd_set_model(self, arg: str) -> None:

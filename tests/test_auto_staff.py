@@ -65,6 +65,53 @@ def _app_stub() -> CodingBoxApp:
 # ---------------------------------------------------------------------------
 
 
+def test_model2_role_only_inherits_staged_model1() -> None:
+    """README_forMac: /model2 --role critic must inherit model 1 when no N."""
+    app = _app_stub()
+    app._next_model = "Qwen3.6-27B-mxfp8"
+    app._next_backend = "mlx"
+
+    app._cmd_set_model2("--role critic")
+
+    assert app._next_model2 == "Qwen3.6-27B-mxfp8"
+    assert app._next_backend2 == "mlx"
+    assert app._next_role2 == "critic"
+
+
+def test_model2_shorthand_critic_inherits_model1() -> None:
+    app = _app_stub()
+    app._next_model = "Qwen3.6-27B-mxfp8"
+    app._next_backend = "mlx"
+
+    app._cmd_set_model2("--critic")
+
+    assert app._next_model2 == "Qwen3.6-27B-mxfp8"
+    assert app._next_role2 == "critic"
+
+
+def test_model3_role_only_inherits_staged_model1() -> None:
+    app = _app_stub()
+    app._next_model = "Qwen3.6-27B-mxfp8"
+    app._next_backend = "mlx"
+
+    app._cmd_set_model3("--role architect")
+
+    assert app._next_model3 == "Qwen3.6-27B-mxfp8"
+    assert app._next_backend3 == "mlx"
+    assert app._next_role3 == "architect"
+
+
+def test_model3_shorthand_architect_inherits_model1() -> None:
+    app = _app_stub()
+    app._next_model = "Qwen3.6-27B-mxfp8"
+    app._next_backend = "mlx"
+
+    app._cmd_set_model3("--architect")
+
+    assert app._next_model3 == "Qwen3.6-27B-mxfp8"
+    assert app._next_role3 == "architect"
+
+
 def test_model2_role_critic_auto_enables_vlm_critique() -> None:
     app = _app_stub()
     assert app._use_vlm_critique is False
