@@ -102,7 +102,6 @@ from textual.widgets import Footer, Header, Input, OptionList, RichLog, Static
 from textual.widgets._option_list import Option
 
 import backend as backend_mod
-from overlay_identity import PRODUCT_NAME
 from agent import (
     AgentEvent,
     DEFAULT_NUM_CTX,
@@ -113,6 +112,10 @@ from agent import (
     parse_num_ctx_arg,
 )
 from tools import LiveBrowser
+
+# Shown in the Textual window header (top bar). Bump when verifying a fresh git pull.
+CHAT_APP_VERSION = "1.1"
+CHAT_APP_TITLE = f"Coding Agent v{CHAT_APP_VERSION}"
 
 # xterm SGR uses 2 for right press; some stacks report 3.
 _RIGHT_CLICK_BUTTONS = frozenset({2, 3})
@@ -1168,7 +1171,7 @@ class CodingBoxApp(App):
             yield Footer()
 
     async def on_mount(self) -> None:
-        self.title = PRODUCT_NAME
+        self.title = CHAT_APP_TITLE
         self.sub_title = "type your game idea below, then Enter"
         self._update_status()
         # Periodic refresh so the activity line ages naturally — tok/s,
@@ -3884,7 +3887,7 @@ class CodingBoxApp(App):
         self._session_model = chosen_name
         if getattr(self, "_id", None) is not None:
             self.title = (
-                f"{PRODUCT_NAME} — {new_info.name.upper()} · {chosen_name}"
+                f"{CHAT_APP_TITLE} — {new_info.name.upper()} · {chosen_name}"
             )
         return True
 
@@ -5752,7 +5755,7 @@ class CodingBoxApp(App):
                 except Exception as e:
                     self._log_error(f"could not initialize backend3: {e}")
 
-        self.title = f"{PRODUCT_NAME} — {info.name.upper()} · {model_name}"
+        self.title = f"{CHAT_APP_TITLE} — {info.name.upper()} · {model_name}"
         self._log_info(
             f"Using [b]{info.name.upper()}[/b] · [b]{_esc(model_name)}[/b] "
             f"[dim]({_esc(info.source)})[/dim]"
