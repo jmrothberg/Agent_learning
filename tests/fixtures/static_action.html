@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>static action fixture</title></head>
+<body style="margin:0;background:#111">
+<canvas id="c" width="320" height="240"></canvas>
+<script>
+// Fixture (i): KeyF triggers a PUNCH pose that is held STATIC for the whole
+// move — exactly the non-animated attack the harness must now flag. Only a
+// tiny corner pixel blinks (minimal ambient motion) so the frozen character
+// region dominates the in-hold canvas-motion measurement.
+(() => {
+  const c = document.getElementById("c"), ctx = c.getContext("2d");
+  const keys = Object.create(null);
+  // punchT increments ONLY while KeyF is held → input-attributable state leaf
+  // so the smoke test marks KeyF responsive (without any canvas motion).
+  window.state = { punchT: 0, blink: 0 };
+  addEventListener("keydown", e => { keys[e.code] = true; });
+  addEventListener("keyup",   e => { keys[e.code] = false; });
+  function frame() {
+    // tiny ambient motion: a small dot that CONTINUOUSLY slides along the top
+    // edge (always differs between any two samples → reliable
+    // ambient_canvas_changed, but a ~1-cell footprint so it never masks a
+    // frozen character region).
+    ctx.fillStyle = "#111"; ctx.fillRect(0, 0, 320, 240);
+    const dotX = Math.floor((Date.now() / 8) % 300);
+    ctx.fillStyle = "#0f0";
+    ctx.fillRect(dotX, 2, 6, 6);
+    const punching = !!keys["KeyF"];
+    if (punching) state.punchT++;          // state changes; pixels do NOT
+    // character: idle rect vs a SINGLE static punch rect (no per-frame change)
+    ctx.fillStyle = "#39f";
+    if (punching) {
+      ctx.fillRect(120, 90, 110, 90);      // same punch pose every frame
+    } else {
+      ctx.fillRect(140, 90, 60, 90);       // idle pose
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body></html>

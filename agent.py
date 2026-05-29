@@ -642,6 +642,16 @@ _PRUNE_KEEP_RECENT_TURNS = 4
 # but a long extension session does.
 _STRUCTURED_PRUNE_THRESHOLD = 14
 
+# Token-aware compaction gate. The lossy structured anchor only fires when the
+# last coder prompt used >= this fraction of num_ctx — NOT merely past a
+# message count. Local models with a 200k window keep full history (playbook,
+# every prior user-feedback item, diagnoses) through long feedback sessions
+# instead of compacting at message 15 while 90% of the window is unused.
+_COMPACT_PRESSURE = 0.70
+# Hard safety cap on total messages, used ONLY when token stats are missing
+# (pressure defaults 0.0) so a pathological run can't grow unbounded.
+_COMPACT_MESSAGE_CAP = 60
+
 # Only elide genuinely large inline HTML blobs during message compaction.
 # Small examples (e.g. `<html_file>...</html_file>` in instructions) must
 # remain verbatim or we mutate the semantics of prior user guidance.
@@ -1952,6 +1962,11 @@ class GameAgent:
         # fires once per streak rather than every turn.
         self._context_pressure_pending: bool = False
         self._context_pressure_streak: int = 0
+        # Last observed coder prompt size, for token-aware compaction. 0.0
+        # until the first coder turn reports usage — _prune_messages then
+        # falls back to the message-count safety cap only.
+        self._last_prompt_tokens: int = 0
+        self._last_prompt_pressure: float = 0.0
         # Dead-first-build detector. Wolfenstein 2026-05-24 trace iter 2
         # loaded a file but RAF never fired AND the input smoke test
         # registered zero state/canvas delta — the file is structurally
@@ -3106,9 +3121,21 @@ class GameAgent:
                     "render_mode": render_mode,
                 })
                 self._active_bullet_ids = list(ids)
-            return render_playbook_block(
+            block = render_playbook_block(
                 hits, char_budget=budget, mode=render_mode, full_top_n=full_top_n_val,
             )
+            # Injection observability: distinguishes "retrieved but rendered
+            # empty" from "actually placed in the prompt". In the 2026-05-29
+            # fighting trace it was impossible to tell whether the animation
+            # bullets ever reached the model — this makes it one grep.
+            self._trace({
+                "kind": "playbook_injected",
+                "stage": stage,
+                "ids": [h.bullet.id for h in hits] if hits else [],
+                "chars": len(block or ""),
+                "rendered": bool(block),
+            })
+            return block
         except Exception:
             return ""
 
@@ -4409,7 +4436,20 @@ class GameAgent:
         if n <= 1 + _PRUNE_KEEP_RECENT_TURNS:
             return
 
-        if n > _STRUCTURED_PRUNE_THRESHOLD:
+        # Token-aware gate: only do the LOSSY structured compaction when the
+        # context window is actually filling (last coder prompt >=
+        # _COMPACT_PRESSURE of num_ctx), OR as a hard safety cap when token
+        # stats are unavailable. A high message count alone no longer triggers
+        # it — so a big-context local model keeps full history (playbook +
+        # every prior user ask) until the window is genuinely under pressure.
+        pressure = float(getattr(self, "_last_prompt_pressure", 0.0) or 0.0)
+        compact_reason = None
+        if pressure >= _COMPACT_PRESSURE:
+            compact_reason = "token_pressure"
+        elif n > _COMPACT_MESSAGE_CAP:
+            compact_reason = "count_cap"
+
+        if compact_reason is not None:
             cutoff = n - _PRUNE_KEEP_RECENT_TURNS
             summary = self._build_structured_summary()
             anchor_msg = {
@@ -4427,6 +4467,10 @@ class GameAgent:
             new_messages = [self._messages[0], anchor_msg] + self._messages[cutoff:]
             self._trace({
                 "kind": "structured_compaction",
+                "reason": compact_reason,
+                "prompt_tokens": getattr(self, "_last_prompt_tokens", 0),
+                "num_ctx": getattr(self, "num_ctx", 0),
+                "pressure": round(pressure, 3),
                 "original_messages": n,
                 "kept_recent": _PRUNE_KEEP_RECENT_TURNS,
                 "summary_chars": len(summary),
@@ -6191,6 +6235,25 @@ class GameAgent:
                 "Image 2 and commit to YES or NO rather than UNCLEAR. Stop "
                 "after the last question.\n\n"
             )
+        # Anti-rubber-stamp: when NO mid-action frame was captured but the
+        # goal/criteria imply the game has actions (attacks/abilities), the
+        # VLM must NOT confirm an action is visible from two resting frames —
+        # that is exactly how a static, never-animated attack got "Q5: YES"
+        # every iteration in the 2026-05-29 fighting-game trace.
+        if action_png is None:
+            try:
+                from tools import expects_game_controls as _egc
+                _actions_expected = _egc(self._goal or "", self._criteria or "")
+            except Exception:
+                _actions_expected = False
+            if _actions_expected:
+                intro = intro + (
+                    "NOTE: no active-input (mid-action) frame was captured this "
+                    "run. If a question asks whether an ACTION / ATTACK / "
+                    "ABILITY / animation is VISIBLE or PLAYING, answer NO or "
+                    "UNCLEAR — do NOT answer YES, because there is no "
+                    "mid-action frame here to confirm it.\n\n"
+                )
         example = (
             "Example response shape:\n"
             "Q1: yes\n"
@@ -7764,6 +7827,13 @@ class GameAgent:
             _ptokens, _num_ctx = 0, 0
         if _ptokens > 0 and _num_ctx > 0 and role == "coder":
             _pressure = _ptokens / _num_ctx
+            # Persist for token-aware compaction (_prune_messages): we only
+            # throw away conversation history when the context window is
+            # actually filling, not at an arbitrary message count. Lets a
+            # 200k-ctx local model keep full history through a long feedback
+            # session instead of losing the playbook / earlier user asks.
+            self._last_prompt_tokens = _ptokens
+            self._last_prompt_pressure = _pressure
             if _pressure >= 0.85:
                 self._context_pressure_streak += 1
                 self._context_pressure_pending = True
@@ -12951,6 +13021,7 @@ class GameAgent:
                     fail_reasons.append("frozen_canvas")
                 entity_check = report.get("entity_render_check") or {}
                 missing_entities = (entity_check.get("missing") or []) if isinstance(entity_check, dict) else []
+                _static_action = report.get("static_action")
                 summary_payload = {
                     "kind": "iter_summary",
                     "iteration": iteration,
@@ -12962,6 +13033,11 @@ class GameAgent:
                     "console_errors_count": len(console_errors),
                     "frozen_canvas": bool(report.get("frozen_canvas")),
                     "entity_missing_count": len(missing_entities),
+                    # Verification observability (so a future trace answers
+                    # "did the critic even see an action?" with one grep):
+                    "action_frame_captured": bool(report.get("screenshot_action")),
+                    "action_key": report.get("action_key"),
+                    "static_action": _static_action,
                     "fail_reason": ",".join(fail_reasons) or "ok",
                 }
                 self._trace(summary_payload)

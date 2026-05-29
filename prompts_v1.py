@@ -2006,6 +2006,15 @@ can't score, controls dead). Cosmetic improvements, "nice to have"
 features, polish, balance tweaks, color changes, and refactors do NOT
 qualify — say <confirm_done/> instead.
 
+EXCEPTION — unmet user requests are NOT "nice to have": before you
+confirm, re-read the user's most recent feedback and check that EVERY
+distinct item they explicitly asked for is actually implemented AND
+still works in the current file (e.g. "animate the kick" AND "add a CPU
+opponent" is two items). An item the user explicitly requested that is
+missing, broken, or silently dropped DOES qualify for a <patch> — fix it
+rather than confirming done. Animation that renders as a single static
+held pose counts as unmet if the user asked for animation.
+
 When in doubt, ship. Working > perfect. Reply with EXACTLY ONE of:
 
   (a) <confirm_done/>          — default; the game works, we are done.

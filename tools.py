@@ -272,6 +272,43 @@ def expects_game_controls(*texts: str) -> bool:
     return False
 
 
+# KeyboardEvent.code tokens a game might bind. Matched STRICTLY (so prose
+# "press F" does NOT false-press an unrelated key) — the system prompt and
+# won-skeletons instruct models to write `event.code` tokens in <criteria>.
+_KEY_CODE_RE = re.compile(
+    r"\b(?:Key[A-Z]|Arrow(?:Up|Down|Left|Right)|Space|Digit[0-9]"
+    r"|Numpad[0-9]|Enter|ShiftLeft|ShiftRight|Tab)\b"
+)
+
+
+# Max in-hold canvas-hash distance (fraction of 1024 cells) below which an
+# action's rendered region is considered a STATIC held pose, not animated.
+# 0.01 ≈ 10 cells: a genuine multi-frame swap or continuous motion moves far
+# more across 250ms; <10 cells is the same pose with only AA/sub-pixel jitter.
+_STATIC_POSE_MAX_INHOLD = 0.01
+
+
+def _parse_action_keys(*texts: str) -> list[str]:
+    """Extract the literal KeyboardEvent.code tokens declared in the supplied
+    texts (typically the model's <criteria>), in first-seen order, deduped.
+
+    The input smoke test presses movement keys by default; a fighting game's
+    attack keys (KeyF/KeyG/KeyK/KeyL), an ability key (KeyZ), etc. are never
+    pressed otherwise, so an attack animation is never triggered and never
+    captured as an action frame. Pressing the keys the SPEC names is
+    input-derived, not a genre key-table.
+    """
+    seen: list[str] = []
+    for text in texts:
+        if not text:
+            continue
+        for m in _KEY_CODE_RE.finditer(text):
+            tok = m.group(0)
+            if tok not in seen:
+                seen.append(tok)
+    return seen
+
+
 def _slugify_criterion(text: str) -> str:
     """Compact identifier-safe slug for a criterion line, used as the
     suffix of a synthetic coverage-gap probe name. Keeps the slug short
@@ -2291,7 +2328,7 @@ class LiveBrowser:
         # Most small-model bugs we miss are "controls don't work". Fire a few
         # standard inputs and check if pixels change. Captured pre/post
         # snapshots are compared via a key-set hash from the same probe.
-        input_test = await self._input_smoke_test()
+        input_test = await self._input_smoke_test(criteria=criteria)
 
         # ---- action frame (peak input-attributable transient) -------------
         # The smoke test captures one screenshot at the moment a held key was
@@ -2400,6 +2437,21 @@ class LiveBrowser:
         report["action_key"] = (
             input_test.get("action_key") if isinstance(input_test, dict) else None
         )
+        # Animation-liveness gate: a responsive action that renders a single
+        # held pose (not animated) is a hard "must fix" — appended as a
+        # soft_warning so the final ok-recompute flips report["ok"]=False and
+        # the agent cannot ship a non-animated action. Objective + genre-free.
+        _sa = input_test.get("static_action") if isinstance(input_test, dict) else None
+        if isinstance(_sa, dict) and _sa.get("key"):
+            report["static_action"] = _sa
+            report["soft_warnings"].append(
+                f"STATIC-ACTION: {_sa['key']} is responsive but renders as a "
+                f"single held pose (in-hold canvas motion {_sa['delta']} < "
+                f"{_STATIC_POSE_MAX_INHOLD}) while the rest of the canvas "
+                f"animates. Animate it: cycle >=2 distinct frames or apply "
+                f"continuous motion (translate/rotate/scale) during the "
+                f"active window — do not hold one static frame."
+            )
         report["frozen_canvas"] = frozen
         report["input_test"] = input_test
         report["probes"] = probe_results
@@ -3190,7 +3242,7 @@ class LiveBrowser:
             err = str(e)[:200]
             return False, err, _classify_probe_eval_error(err)
 
-    async def _input_smoke_test(self) -> dict[str, Any]:
+    async def _input_smoke_test(self, criteria: str | None = None) -> dict[str, Any]:
         """Hold each test key for a few frames; report whether the canvas changed.
 
         Two big differences vs the original 9-pixel version:
@@ -3225,7 +3277,14 @@ class LiveBrowser:
         if not has_canvas:
             return {"ran": False, "reason": "no canvas"}
 
-        keys = ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space", "KeyW", "KeyA", "KeyS", "KeyD"]
+        # Movement defaults (always tried), plus the actual action keys the
+        # model declared in <criteria> (KeyF punch, KeyG kick, KeyZ ability,
+        # …) so attack/ability animations actually fire and get captured as an
+        # action frame. Genre-free: we press the input tokens the spec names.
+        default_keys = ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space", "KeyW", "KeyA", "KeyS", "KeyD"]
+        keys = list(dict.fromkeys(default_keys + _parse_action_keys(criteria or "")))[:16]
+        if not keys:
+            keys = default_keys
         tried: list[str] = []
         any_change = False
         first_responsive_key: str | None = None
@@ -3336,6 +3395,11 @@ class LiveBrowser:
         best_action_delta = 0.0
         best_action_key: str | None = None
         action_frame_png: bytes | None = None
+        # Per-key "in-hold motion": max pairwise canvas-hash distance across
+        # frames sampled WHILE the key is held. A real animation keeps
+        # changing (>0); a single static pose held for the move stays ~0.
+        # Used to flag attacks/abilities that render as a frozen pose.
+        per_key_hold_motion: dict[str, float] = {}
 
         # Track WHICH state fields move on WHICH key — names the
         # exact wiring path that works, so the report can say
@@ -3351,9 +3415,25 @@ class LiveBrowser:
                 return {"ran": False, "reason": "canvas not sampleable", "keys_tried": tried}
             try:
                 await self._page.keyboard.down(k)
-                await asyncio.sleep(0.25)  # hold long enough for thrust to move ship
-                after_held = await self._safe_eval(_CANVAS_HASH_JS)
+                # Sample the canvas 3× across the ~250ms hold (same total wall
+                # time). The last sample is `after_held` (preserves prior
+                # semantics); the max pairwise distance among the 3 is the
+                # "in-hold motion" — whether the rendered scene keeps changing
+                # WHILE the key is held (real animation) vs holds one pose.
+                hold_hashes: list[str | None] = []
+                for _ in range(3):
+                    await asyncio.sleep(0.083)
+                    hold_hashes.append(await self._safe_eval(_CANVAS_HASH_JS))
+                after_held = hold_hashes[-1]
                 after_gs = await self._safe_eval(_GAMESTATE_SNAPSHOT_JS)
+                _hold_pairs = [
+                    _canvas_hash_distance(hold_hashes[0], hold_hashes[1]),
+                    _canvas_hash_distance(hold_hashes[0], hold_hashes[2]),
+                    _canvas_hash_distance(hold_hashes[1], hold_hashes[2]),
+                ]
+                _hold_pairs = [d for d in _hold_pairs if d is not None]
+                if _hold_pairs:
+                    per_key_hold_motion[k] = max(_hold_pairs)
                 # Action-frame capture: while the key is STILL down, if this
                 # key's held-frame canvas change beats the running best AND
                 # the ambient drift floor, grab the screenshot. Validated for
@@ -3422,6 +3502,22 @@ class LiveBrowser:
             best_action_key = None
             best_action_delta = 0.0
 
+        # Animation-liveness: if the winning action key is responsive but the
+        # scene barely changed WHILE it was held (a single static pose) — and
+        # yet the canvas IS animating elsewhere (so it's not a paused/static
+        # game) — the action renders as a frozen pose, not an animation.
+        # Genre-free: no notion of punch/jump; just "did the input's rendered
+        # result keep moving while held, given the game is otherwise live."
+        static_action: dict[str, Any] | None = None
+        if best_action_key is not None:
+            _m = per_key_hold_motion.get(best_action_key)
+            if (
+                _m is not None
+                and _m < _STATIC_POSE_MAX_INHOLD
+                and ambient_canvas_changed
+            ):
+                static_action = {"key": best_action_key, "delta": round(_m, 4)}
+
         # Concise summary line for the report. Two shapes:
         #   PASS — "ArrowRight→[player.x, player.facing], Space→[bullets.length]"
         #   FAIL — "had window.state but zero fields moved across [keys]"
@@ -3459,6 +3555,11 @@ class LiveBrowser:
             "action_frame_png_bytes": action_frame_png,
             "action_key": best_action_key,
             "action_delta": round(best_action_delta, 4),
+            # Animation-liveness verdict: set when the responsive action key
+            # renders a single held pose (not animated). None otherwise.
+            "static_action": static_action,
+            # In-hold canvas motion per key (diagnostic / trace observability).
+            "hold_motion": {k: round(v, 4) for k, v in per_key_hold_motion.items()},
         }
 
     async def show_status(self, title: str, message: str = "") -> None:

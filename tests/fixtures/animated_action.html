@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>animated action fixture</title></head>
+<body style="margin:0;background:#111">
+<canvas id="c" width="320" height="240"></canvas>
+<script>
+// Fixture (ii): KeyF triggers a PUNCH that genuinely ANIMATES — the arm
+// position cycles every frame during the hold — so in-hold canvas motion is
+// large and the static-action gate must NOT fire.
+(() => {
+  const c = document.getElementById("c"), ctx = c.getContext("2d");
+  const keys = Object.create(null);
+  window.state = { punchT: 0, blink: 0 };
+  addEventListener("keydown", e => { keys[e.code] = true; });
+  addEventListener("keyup",   e => { keys[e.code] = false; });
+  function frame() {
+    ctx.fillStyle = "#111"; ctx.fillRect(0, 0, 320, 240);
+    const dotX = Math.floor((Date.now() / 8) % 300);
+    ctx.fillStyle = "#0f0";
+    ctx.fillRect(dotX, 2, 6, 6);
+    ctx.fillStyle = "#39f";
+    ctx.fillRect(140, 90, 60, 90);                 // body
+    if (keys["KeyF"]) {
+      state.punchT++;
+      // A large punch region that sweeps SMOOTHLY as a function of time, so
+      // any two samples (even 83ms apart) differ by many cells regardless of
+      // phase — i.e. unmistakably animated, no per-frame-toggle aliasing.
+      const y = 40 + Math.floor(120 * Math.abs(Math.sin(Date.now() / 120)));
+      ctx.fillStyle = "#f93";
+      ctx.fillRect(110, y, 120, 70);
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body></html>
