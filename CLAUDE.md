@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-**Repo identity:** This checkout is **Coding Box Overlay** (`Agent_learning_overlay` on GitHub). Do not treat pushes as updates to `jmrothberg/Agent_learning` unless the user explicitly retargets `origin`.
+**Repo:** `jmrothberg/Agent_learning` (`origin`). Single source of truth — commit and push to `main`.
 
 ---
 
