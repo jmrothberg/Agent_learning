@@ -19,16 +19,34 @@ Pure-function coverage only — no network calls. Verifies:
      where the Anthropic API differs from OpenAI/Ollama and where a
      bug would silently corrupt the prompt.
 
+  5. P0a (MK trace 20260528) — Trailing assistant tag-opener prefill is
+     FOLDED into the preceding user message as a format hint before the
+     API call. Opus 4.7+ models hard-reject `{"role":"assistant",
+     "content":"<diagnose>"}` with a 400, regardless of whitespace
+     trimming. The previous "rstrip()" sanitizer is replaced by a fold.
+
+  6. P0a safety net — _anthropic_prepare_messages itself folds short
+     tag-opener trailing assistant turns even if the caller forgot.
+
+  7. P0b — _ANTHROPIC_NON_RETRYABLE_400_PHRASES lists the exact strings
+     the agent retry classifier matches against; verifies the agent
+     won't burn a same-payload retry on a known shape error.
+
+  8. P0c — _try_extension_backend_fallback accepts mlx OR ollama as the
+     local fallback target (previously: ollama-only, which rejected MLX
+     in the MK trace despite MLX being the loaded local backend).
+
 The key text itself is never written into the test fixtures — tests use
 "sk-test" sentinels so a CI log dump can't leak anything sensitive.
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -182,10 +200,8 @@ def test_anthropic_splits_system_message_from_history() -> None:
             {"role": "assistant", "content": "<plan>...</plan>"},
             {"role": "user", "content": "Continue."},
         ]
-        # Mirror backend's split.
-        system_parts = [m["content"] for m in messages if m["role"] == "system"]
-        msgs = [m for m in messages if m["role"] != "system"]
-        system_text = "\n\n".join(system_parts).strip()
+        # Mirror backend's split via the shared helper.
+        system_text, msgs = backend_mod._anthropic_prepare_messages(messages)
 
         # The combined system text must include both fragments.
         assert "You are an agent." in system_text
@@ -197,3 +213,165 @@ def test_anthropic_splits_system_message_from_history() -> None:
 
         # Sanity — the backend wired AsyncAnthropic correctly.
         assert b._client is not None
+
+
+# ---------------------------------------------------------------------------
+# P0a — Tag-opener fold (MK trace 20260528)
+# ---------------------------------------------------------------------------
+
+def test_anthropic_prefill_folded_into_user_message() -> None:
+    """P0a safety net: a trailing assistant `<diagnose>` opener must be
+    folded into the preceding user message as a format hint, because
+    Opus 4.7+ rejects ALL assistant-final messages with a 400.
+    """
+    _, msgs = backend_mod._anthropic_prepare_messages([
+        {"role": "user", "content": "Fix the game."},
+        {"role": "assistant", "content": "<diagnose>\n"},
+    ])
+    # No trailing assistant — fold happened.
+    assert msgs[-1]["role"] == "user"
+    # The user message now carries the format hint with the tag opener.
+    assert "<diagnose>" in msgs[-1]["content"]
+    assert "Fix the game." in msgs[-1]["content"]
+    assert "FORMAT" in msgs[-1]["content"].upper()
+
+
+def test_anthropic_prefill_fold_handles_html_file_opener() -> None:
+    """The first-build rescue prefill is multi-line (`<html_file>\\n
+    <!DOCTYPE html>\\n`). Only the first line (the tag) should land in
+    the format hint."""
+    _, msgs = backend_mod._anthropic_prepare_messages([
+        {"role": "user", "content": "Rebuild the game."},
+        {"role": "assistant", "content": "<html_file>\n<!DOCTYPE html>\n"},
+    ])
+    assert msgs[-1]["role"] == "user"
+    assert "<html_file>" in msgs[-1]["content"]
+    # The DOCTYPE noise should NOT leak into the hint.
+    assert "<!DOCTYPE" not in msgs[-1]["content"]
+
+
+def test_anthropic_does_not_fold_long_assistant_reply() -> None:
+    """A real model reply (>200 chars or not starting with `<`) must be
+    preserved verbatim — only short tag openers are folded."""
+    long_reply = "x" * 400
+    _, msgs = backend_mod._anthropic_prepare_messages([
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": long_reply},
+    ])
+    # Trailing assistant still present (real reply).
+    assert msgs[-1]["role"] == "assistant"
+    assert msgs[-1]["content"] == long_reply
+
+
+def test_anthropic_stream_chat_folds_prefill_into_user() -> None:
+    """End-to-end: stream_chat passes a payload with NO trailing
+    assistant message; the fold places the tag opener as a hint inside
+    the last user turn."""
+    info = backend_mod.BackendInfo(
+        name="anthropic",
+        model=backend_mod._ANTHROPIC_DEFAULT_MODEL,
+        source="test",
+        endpoint=backend_mod.anthropic_endpoint_url(),
+    )
+    b = backend_mod.AnthropicBackend.__new__(backend_mod.AnthropicBackend)
+    b.info = info
+
+    captured: dict = {}
+
+    class _FakeStream:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        @property
+        def text_stream(self):
+            return self._empty()
+
+        async def _empty(self):
+            return
+            yield  # pragma: no cover — makes this an async generator
+
+        async def get_final_message(self):
+            msg = MagicMock()
+            msg.usage = None
+            msg.stop_reason = "end_turn"
+            return msg
+
+    fake_messages = MagicMock()
+
+    def _capture_stream(**kwargs):
+        captured.update(kwargs)
+        return _FakeStream()
+
+    fake_messages.stream = MagicMock(side_effect=_capture_stream)
+    b._client = MagicMock()
+    b._client.messages = fake_messages
+
+    asyncio.run(
+        b.stream_chat(
+            messages=[
+                {"role": "user", "content": "Continue."},
+                {"role": "assistant", "content": "<diagnose>\n"},
+            ],
+        )
+    )
+
+    sent = captured["messages"]
+    # MK-trace bug: trailing assistant prefill was sent and rejected
+    # with 400. Fold replaces that with a user message carrying the
+    # opener hint.
+    assert sent[-1]["role"] == "user"
+    assert "<diagnose>" in sent[-1]["content"]
+    assert "Continue." in sent[-1]["content"]
+
+
+# ---------------------------------------------------------------------------
+# P0b — Non-retryable Anthropic 400 phrases
+# ---------------------------------------------------------------------------
+
+def test_anthropic_non_retryable_400_phrases_present() -> None:
+    """The agent retry classifier must match the exact substrings
+    Anthropic returns for assistant-prefill payload-shape 400s."""
+    import agent as agent_mod
+    phrases = agent_mod._ANTHROPIC_NON_RETRYABLE_400_PHRASES
+    assert isinstance(phrases, tuple)
+    assert "does not support assistant message prefill" in phrases
+    assert "must end with a user message" in phrases
+    # All phrases must be lower-cased so the err_str.lower() match works.
+    for p in phrases:
+        assert p == p.lower(), f"phrase must be lowercase: {p!r}"
+
+
+# ---------------------------------------------------------------------------
+# P0c — Extension fallback accepts MLX or Ollama
+# ---------------------------------------------------------------------------
+
+def test_extension_fallback_accepts_mlx() -> None:
+    """When Anthropic stalls and detect_backend resolves MLX, the
+    fallback must accept it (MK trace previously rejected MLX with
+    `(not ollama)`)."""
+    import agent as agent_mod
+    src = __import__("inspect").getsource(
+        agent_mod.GameAgent._try_extension_backend_fallback
+    )
+    # The new loop accepts mlx OR ollama, not ollama-only.
+    assert 'resolved.name in ("mlx", "ollama")' in src
+    # Old failure mode string is gone (so trace mining can grep for the
+    # new "no local MLX or Ollama" phrasing instead).
+    assert "no local Ollama backend could" not in src
+
+
+def test_extension_fallback_skips_when_not_cloud() -> None:
+    """The fallback should still only trigger from cloud backends, not
+    from a local backend stall."""
+    import agent as agent_mod
+    src = __import__("inspect").getsource(
+        agent_mod.GameAgent._try_extension_backend_fallback
+    )
+    # MLX-source guard preserved (no silent switch on MLX stalls).
+    assert "MLX stall — staying on MLX" in src
+    # Cloud-source allowlist now covers anthropic AND openai (both
+    # benefit from local fallback on transient outage).
+    assert 'backend_name not in ("anthropic", "openai")' in src

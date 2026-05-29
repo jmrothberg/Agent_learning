@@ -339,6 +339,15 @@ _UNCLOSED_HTML_FILE_RE = re.compile(
 )
 _DONE_RE = re.compile(r"<done\s*/?>", re.IGNORECASE)
 _CONFIRM_RE = re.compile(r"<confirm[_-]?done\s*/?>", re.IGNORECASE)
+
+# Anthropic 400s that are payload-SHAPE errors — retrying the same
+# payload cannot fix them. The MK trace 20260528 burned two identical
+# requests on "does not support assistant message prefill" before the
+# fallback logic kicked in. Match against the lowercased error text.
+_ANTHROPIC_NON_RETRYABLE_400_PHRASES: tuple[str, ...] = (
+    "does not support assistant message prefill",
+    "must end with a user message",
+)
 _QUESTION_RE = re.compile(r"<question>\s*(.*?)\s*</question>", re.DOTALL | re.IGNORECASE)
 _DIAGNOSE_RE = re.compile(r"<diagnose>\s*(.*?)\s*</diagnose>", re.DOTALL | re.IGNORECASE)
 _NOTES_RE = re.compile(r"<notes>\s*(.*?)\s*</notes>", re.DOTALL | re.IGNORECASE)
@@ -3448,6 +3457,56 @@ class GameAgent:
             "hide the load failure, they don't fix it."
         )
         return missing
+
+    def _early_rehydrate_seed_media(self) -> tuple[int, int]:
+        """Populate `_session_assets` / `_session_sounds` from the seed
+        BEFORE Phase A asset generation runs.
+
+        P1 (MK trace 20260528): the previous run loop rehydrated AFTER
+        `_maybe_generate_assets_and_sounds(trigger="phase_a")` had
+        already regenerated every sprite the model re-requested in its
+        plan. By rehydrating first, the skip-guard inside
+        `_maybe_generate_assets_and_sounds` can short-circuit phase_a
+        generation when on-disk media already covers the game.
+
+        Idempotent: a second call from the existing later branch is a
+        no-op (dict.update with the same paths). Returns (n_assets,
+        n_sounds) found on disk, or (0, 0) when there is no seed.
+        """
+        if not self.seed_file:
+            return 0, 0
+        try:
+            seed_html = self.seed_file.read_text(encoding="utf-8")
+        except Exception as e:
+            self._trace({
+                "kind": "seed_media_early_rehydrate_failed",
+                "err": str(e)[:200],
+                "seed_file": str(self.seed_file),
+            })
+            return 0, 0
+        try:
+            seed_assets, seed_sounds, _, _ = _scan_seed_media(
+                seed_html, self.out_path
+            )
+        except Exception as e:
+            self._trace({
+                "kind": "seed_media_early_rehydrate_failed",
+                "err": str(e)[:200],
+                "stage": "_scan_seed_media",
+            })
+            return 0, 0
+        if seed_assets:
+            self._session_assets.update(seed_assets)
+        if seed_sounds:
+            self._session_sounds.update(seed_sounds)
+        self._trace({
+            "kind": "seed_media_early_rehydrate",
+            "assets": len(seed_assets),
+            "sounds": len(seed_sounds),
+            "asset_names": sorted(seed_assets.keys())[:24],
+            "sound_names": sorted(seed_sounds.keys())[:24],
+        })
+        return len(seed_assets), len(seed_sounds)
 
     def _render_seed_media_contract(
         self,
@@ -7245,16 +7304,69 @@ class GameAgent:
         # when feature is on AND `prefill` is provided. We insert a
         # trailing assistant message; Ollama's chat API treats it as a
         # partial completion to extend.
+        #
+        # Anthropic exception (MK trace 20260528, iter 2): newer Claude
+        # models (Opus 4.7+) hard-reject ANY trailing assistant prefill
+        # with a 400 "does not support assistant message prefill" — even
+        # whitespace-stripped. For backend=anthropic we FOLD the tag
+        # opener into the last user message as a format hint instead,
+        # and still prepend it locally to the returned text so the
+        # downstream <plan>/<diagnose> regex parsers see the same shape.
         prefill_used = False
+        anthropic_prefill_folded = False
+        _orig_last_user_content: str | None = None
         prefill_enabled = bool(prefill) and (self._use_prefill or prefill_force)
         if prefill_enabled:
-            self._messages.append({"role": "assistant", "content": prefill})
-            prefill_used = True
-            self._trace({
-                "kind": "prefill",
-                "len": len(prefill),
-                "forced": bool(prefill_force and not self._use_prefill),
-            })
+            is_anthropic = (
+                getattr(getattr(active_backend, "info", None), "name", "") == "anthropic"
+            )
+            if is_anthropic:
+                # Fold: append a hint to the last user message (in place).
+                # If there is no trailing user message we cannot fold —
+                # fall back to skipping prefill on Anthropic entirely
+                # rather than re-introducing the 400.
+                if (
+                    self._messages
+                    and self._messages[-1].get("role") == "user"
+                ):
+                    _orig_last_user_content = self._messages[-1].get("content", "") or ""
+                    # Use just the first non-whitespace line of the prefill
+                    # as the literal opener the model must reproduce.
+                    first_line = prefill.strip().split("\n", 1)[0].strip()
+                    hint = (
+                        "\n\nFORMAT: begin your reply with exactly `"
+                        + first_line
+                        + "` (no prose before it; no extra whitespace)."
+                    )
+                    self._messages[-1] = {
+                        **self._messages[-1],
+                        "content": _orig_last_user_content + hint,
+                    }
+                    anthropic_prefill_folded = True
+                    prefill_used = True
+                    self._trace({
+                        "kind": "anthropic_prefill_folded",
+                        "tag": first_line[:120],
+                        "len": len(prefill),
+                        "forced": bool(prefill_force and not self._use_prefill),
+                    })
+                else:
+                    # No user turn to fold into — skip prefill on this
+                    # turn rather than risk a 400. Local prepend below
+                    # is gated by prefill_used so it also does not run.
+                    self._trace({
+                        "kind": "anthropic_prefill_skipped",
+                        "reason": "no trailing user message to fold into",
+                        "len": len(prefill),
+                    })
+            else:
+                self._messages.append({"role": "assistant", "content": prefill})
+                prefill_used = True
+                self._trace({
+                    "kind": "prefill",
+                    "len": len(prefill),
+                    "forced": bool(prefill_force and not self._use_prefill),
+                })
 
         temp = override_temp if override_temp is not None else (
             0.25 if self._fix_mode else 0.7
@@ -7496,7 +7608,16 @@ class GameAgent:
             # Always remove our prefill scaffolding before returning so
             # the message history we save & feed to subsequent turns
             # contains a single coherent assistant message.
-            if prefill_used and self._messages and self._messages[-1].get("role") == "assistant":
+            if anthropic_prefill_folded and _orig_last_user_content is not None:
+                # Restore the user message we mutated in place so the
+                # saved history doesn't drift with appended format hints
+                # across turns.
+                if self._messages and self._messages[-1].get("role") == "user":
+                    self._messages[-1] = {
+                        **self._messages[-1],
+                        "content": _orig_last_user_content,
+                    }
+            elif prefill_used and self._messages and self._messages[-1].get("role") == "assistant":
                 self._messages.pop()
             if result is not None:
                 if getattr(result, "crashed", False):
@@ -9571,15 +9692,24 @@ class GameAgent:
         stall: dict | None,
         iteration: int,
     ) -> tuple[bool, str]:
-        """Try one local fallback (Anthropic -> Ollama) on extension stalls.
+        """Try one local fallback (cloud -> mlx OR ollama) on extension stalls.
 
-        MLX is intentionally NOT included: a user who picked MLX wants the
-        local model, and silently switching to Ollama on a transient Metal
-        / Ctrl+D stall produces a confusing cross-backend error cascade
-        (DK trace 20260523_081532 — MLX stall at 0.0s after Ctrl+D fell
-        through to Ollama gemma4:e4b which the user had never asked for).
-        MLX failures now surface with the MLX-specific recovery hint and
-        stop there; the cloud→local safety net for Anthropic remains.
+        P0c (MK trace 20260528): when Anthropic / OpenAI fails, fall back
+        to ANY available local backend, not just Ollama. The original
+        loop only accepted `resolved.name == "ollama"`, so MK trace
+        landed on `resolved mlx:DeepSeek-V4-Flash (not ollama)` and gave
+        up — even though MLX was the active local backend the user had
+        loaded. The new loop accepts mlx OR ollama (whichever the host
+        detection resolves first), matching the original intent of the
+        function: escape a transient cloud outage by switching to
+        whatever local model is available.
+
+        MLX stays excluded as the SOURCE backend: a user who picked MLX
+        wants the local model, and silently switching to Ollama on a
+        transient Metal / Ctrl+D stall produces a confusing cross-
+        backend error cascade (DK trace 20260523_081532). MLX failures
+        still surface with the MLX-specific recovery hint and stop
+        there; only the cloud→local safety net is broadened.
         """
         info = getattr(self._backend, "info", None)
         backend_name = getattr(info, "name", None)
@@ -9589,38 +9719,42 @@ class GameAgent:
                 "Use the MLX recovery hint above, or switch backends explicitly "
                 "with /backend ollama + /load <N>."
             )
-        if backend_name not in ("anthropic",):
+        if backend_name not in ("anthropic", "openai"):
             return False, (
                 f"fallback skipped: current backend is {backend_name} "
-                "(only anthropic falls back to local Ollama)"
+                "(only cloud backends fall back to a local model)"
             )
         if not stall or stall.get("kind") != "no_tokens_stall":
             return False, "fallback skipped: stall shape is not no-token"
 
+        # Accept any local backend (mlx OR ollama). detect_backend(prefer="auto")
+        # already implements the host's preference order; we just stop
+        # rejecting a non-ollama result.
         candidate = None
         errs: list[str] = []
-        for prefer in ("auto", "ollama"):
+        for prefer in ("auto", "mlx", "ollama"):
             try:
                 resolved = detect_backend(prefer=prefer)
             except Exception as e:
                 errs.append(f"{prefer}: {e}")
                 continue
-            if resolved.name == "ollama":
+            if resolved.name in ("mlx", "ollama"):
                 candidate = resolved
                 break
             errs.append(
-                f"{prefer}: resolved {resolved.name}:{resolved.model} (not ollama)"
+                f"{prefer}: resolved {resolved.name}:{resolved.model} "
+                "(not a local backend)"
             )
         if candidate is None:
-            reason = " | ".join(errs) if errs else "no ollama backend available"
+            reason = " | ".join(errs) if errs else "no local backend available"
             self._trace({
                 "kind": "extension_backend_fallback_unavailable",
                 "iteration": iteration,
                 "reason": reason[:500],
             })
             return False, (
-                "Extension fallback unavailable: no local Ollama backend could "
-                f"be resolved ({reason[:220]})."
+                "Extension fallback unavailable: no local MLX or Ollama "
+                f"backend could be resolved ({reason[:220]})."
             )
 
         old = self._backend
@@ -9631,11 +9765,11 @@ class GameAgent:
             self._trace({
                 "kind": "extension_backend_fallback_failed",
                 "iteration": iteration,
-                "reason": f"make_backend failed: {e}",
+                "reason": f"make_backend failed ({candidate.name}): {e}",
             })
             return False, (
-                "Extension fallback failed while initializing Ollama backend: "
-                f"{e}"
+                f"Extension fallback failed while initializing "
+                f"{candidate.name} backend: {e}"
             )
         try:
             await old.close()
@@ -9647,6 +9781,7 @@ class GameAgent:
             "iteration": iteration,
             "from": old_name,
             "to": f"{candidate.name}:{candidate.model}",
+            "local_kind": candidate.name,
         })
         return True, (
             f"Extension fallback: switched backend from {old_name} to "
@@ -9715,6 +9850,39 @@ class GameAgent:
             reply, max_assets=session_cap,
         )
         sound_specs = parse_sounds_block(reply)
+
+        # P1 (MK trace 20260528): on a seed restart with on-disk media,
+        # SKIP phase_a generation entirely. The model can still emit
+        # <assets> in its plan, but we won't burn 90+ seconds re-
+        # rendering sprites the user already has. Mid-session triggers
+        # are unaffected — explicit user requests like "add a new boss
+        # sprite" still flow through the generator below.
+        if (
+            trigger == "phase_a"
+            and self.seed_file is not None
+            and (self._session_assets or self._session_sounds)
+            and (asset_specs or sound_specs)
+        ):
+            self._trace({
+                "kind": "seed_phase_a_media_skipped",
+                "have_assets": len(self._session_assets),
+                "have_sounds": len(self._session_sounds),
+                "requested_assets": [
+                    str(s.get("name") or "") for s in asset_specs
+                ],
+                "requested_sounds": [
+                    str(s.get("name") or "") for s in sound_specs
+                ],
+            })
+            yield self._record(AgentEvent(
+                "info",
+                f"[dim]phase_a asset/sound generation skipped — seed has "
+                f"{len(self._session_assets)} asset(s) and "
+                f"{len(self._session_sounds)} sound(s) on disk; "
+                f"reusing existing media.[/dim]",
+            ))
+            return
+
         # Phase 0.13 — when the model emits a mid-session <assets> block
         # BUT the user has queued feedback asking for a style rebrand,
         # the model is about to generate sprites guaranteed to be
@@ -10491,6 +10659,19 @@ class GameAgent:
                     "hint": "type /wiki on to enable",
                 })
 
+            # P1 (MK trace 20260528): rehydrate seed media BEFORE the
+            # planning prompt is built so the planner can see existing
+            # asset/sound names and suppress the "MUST emit <assets>"
+            # directive. Without this, the model emitted a fresh asset
+            # roster every seed restart and the harness regenerated
+            # every sprite — wiping the user's existing art.
+            early_seed_assets = 0
+            early_seed_sounds = 0
+            if self.seed_file is not None:
+                early_seed_assets, early_seed_sounds = (
+                    self._early_rehydrate_seed_media()
+                )
+
             if hasattr(self._p, "plan_instruction"):
                 # v1+ planner takes goal so it can detect art-modality
                 # keywords ("sprite", "art", "graphics") and escalate
@@ -10500,11 +10681,24 @@ class GameAgent:
                 # loop set it after a same-signature attempt), then
                 # fall back to the simplest reference-only call.
                 fmfb = bool(getattr(self, "_force_minimal_first_build", False))
+                # P1: seed continuation — pass discovered names so
+                # plan_instruction can suppress the MUST-emit <assets>
+                # directive and tell the model to reuse existing media.
+                from_seed_kwargs = {}
+                if self.seed_file is not None and (
+                    early_seed_assets or early_seed_sounds
+                ):
+                    from_seed_kwargs = {
+                        "from_seed": True,
+                        "seed_asset_names": sorted(self._session_assets.keys()),
+                        "seed_sound_names": sorted(self._session_sounds.keys()),
+                    }
                 try:
                     plan_msg = self._p.plan_instruction(
                         reference_block=reference_block,
                         goal=goal,
                         force_minimal_first_build=fmfb,
+                        **from_seed_kwargs,
                     )
                     if fmfb:
                         self._trace({
@@ -11325,7 +11519,9 @@ class GameAgent:
                         reply_prefill = ""
                         prefill_force = False
                         if self._use_prefill and self._fix_mode:
-                            reply_prefill = "<diagnose>\n"
+                            # No trailing newline — Anthropic 400s on final
+                            # assistant whitespace; backend also rstrip()s.
+                            reply_prefill = "<diagnose>"
                         elif (not self._current_file) and self._force_first_build_prefill:
                             # First-build rescue after a no-code turn.
                             reply_prefill = "<html_file>\n<!DOCTYPE html>\n"
@@ -11362,10 +11558,47 @@ class GameAgent:
                         "name",
                         None,
                     )
+                    # P0b (MK trace 20260528): some Anthropic 400s are
+                    # payload-shape errors that retrying the SAME payload
+                    # can never fix. The trace burned two identical
+                    # requests on "does not support assistant message
+                    # prefill" before falling back. Detect those and
+                    # skip the retry — go straight to local fallback.
+                    err_str_lower = str(e).lower()
+                    is_anthropic_shape_400 = (
+                        backend_name == "anthropic"
+                        and any(
+                            phrase in err_str_lower
+                            for phrase in _ANTHROPIC_NON_RETRYABLE_400_PHRASES
+                        )
+                    )
+                    if is_anthropic_shape_400:
+                        self._trace({
+                            "kind": "anthropic_payload_shape_error",
+                            "iteration": iteration,
+                            "matched": next(
+                                (
+                                    p for p in _ANTHROPIC_NON_RETRYABLE_400_PHRASES
+                                    if p in err_str_lower
+                                ),
+                                "",
+                            ),
+                            "err": str(e)[:300],
+                        })
+                        yield self._record(AgentEvent(
+                            "info",
+                            "[yellow]anthropic payload-shape 400[/yellow] — "
+                            "skipping same-payload retry (would 400 again); "
+                            "falling back to local backend if available.",
+                        ))
+                        # Do NOT consume the cloud_retry_attempted budget —
+                        # leave it for an actual transient outage on a
+                        # later iteration.
                     is_cloud_crash = (
                         backend_name in ("anthropic", "openai")
                         and "cause:" in str(e).lower()
                         and not cloud_retry_attempted
+                        and not is_anthropic_shape_400
                     )
                     if is_cloud_crash:
                         cloud_retry_attempted = True
@@ -11379,7 +11612,7 @@ class GameAgent:
                             "info",
                             f"[dim]{backend_name} returned a transient "
                             "error; retrying same backend once before "
-                            "falling back to local Ollama.[/dim]",
+                            "falling back to a local backend.[/dim]",
                         ))
                         continue
                     # Phase 5c: drop the `continuation`-only guard. Trace 2

@@ -975,6 +975,9 @@ def plan_instruction(
     reference_block: str = "",
     goal: str = "",
     force_minimal_first_build: bool = False,
+    from_seed: bool = False,
+    seed_asset_names: list[str] | None = None,
+    seed_sound_names: list[str] | None = None,
 ) -> str:
     """Phase A planning prompt, optionally prefixed with a Wikipedia
     reference block fetched by research.fetch().
@@ -991,8 +994,28 @@ def plan_instruction(
     must emit an <assets> block this turn or be wrong. Stops qwen3.6
     from politely skipping the asset pipeline when the user explicitly
     asks for sprites.
+
+    P1 (MK trace 20260528): on a `/seed` continuation where
+    `<basename>_assets/` already has sprites on disk, art/audio
+    "MUST emit <assets>/<sounds>" nudges flip from REQUIRED to
+    FORBIDDEN — the model should reuse existing media, not request
+    fresh generation. `from_seed=True` suppresses those nudges and
+    inserts a seed-continuation directive listing available media.
     """
-    art_keywords = _detect_art_intent(goal)
+    # P1: seed continuation flips art / audio "MUST emit" nudges off.
+    # Detection is opt-in via the from_seed kwarg so non-seed sessions
+    # stay byte-for-byte identical (the existing test suite still passes).
+    if from_seed:
+        # Suppress art / audio MUST-emit nudges; the seed already has
+        # media on disk and re-emitting <assets> wastes generator time
+        # AND can wipe the user's existing art if a name collides.
+        art_keywords = ()
+        threed_keywords = _detect_3d_intent(goal)
+        audio_keywords = ()
+    else:
+        art_keywords = _detect_art_intent(goal)
+        threed_keywords = _detect_3d_intent(goal)
+        audio_keywords = _detect_audio_intent(goal)
     art_nudge = ""
     if art_keywords:
         kws = ", ".join(repr(k) for k in art_keywords)
@@ -1010,7 +1033,8 @@ def plan_instruction(
             "tell you if it is).\n"
         )
 
-    threed_keywords = _detect_3d_intent(goal)
+    # `threed_keywords` is already set at the top of the function so a
+    # from_seed continuation still keeps 3D detection but loses art/audio.
     threed_nudge = ""
     if threed_keywords:
         kws = ", ".join(repr(k) for k in threed_keywords)
@@ -1039,7 +1063,7 @@ def plan_instruction(
             "use the library.\n"
         )
 
-    audio_keywords = _detect_audio_intent(goal)
+    # `audio_keywords` is also set up top so from_seed suppression sticks.
     audio_nudge = ""
     if audio_keywords:
         kws = ", ".join(repr(k) for k in audio_keywords)
@@ -1172,6 +1196,48 @@ def plan_instruction(
             "describes rendering shape, not subject matter.\n"
         )
 
+    # P1 (MK trace 20260528): seed continuation directive.
+    # When the harness is restarting a session against an EXISTING game
+    # file, the on-disk `<basename>_assets/` and `<basename>_sounds/`
+    # folders already contain this game's media. The model's job this
+    # turn is to PATCH the existing code, not redesign the asset roster.
+    seed_nudge = ""
+    if from_seed:
+        seed_a = sorted(seed_asset_names or [])
+        seed_s = sorted(seed_sound_names or [])
+
+        def _fmt_names(names: list[str], cap: int = 24) -> str:
+            if not names:
+                return "(none)"
+            shown = names[:cap]
+            more = f" (+{len(names) - cap} more)" if len(names) > cap else ""
+            return ", ".join(shown) + more
+
+        seed_nudge = (
+            "\n\nSEED CONTINUATION — this is an EXISTING game the user "
+            "is asking you to ADAPT. The harness has rehydrated this "
+            "session's media from disk already; new generation in this "
+            "turn would WIPE the user's existing art and is BLOCKED.\n"
+            "\n"
+            "ULTRA IMPORTANT — Phase A constraints for seed runs:\n"
+            "  - DO NOT emit <assets> in this turn. The on-disk roster "
+            "is the truth source.\n"
+            "  - DO NOT emit <sounds> in this turn. Same reason.\n"
+            "  - DO emit <plan>, <criteria>, <probes> focused on the "
+            "code fix the user is requesting.\n"
+            "  - Refer to existing media by their EXACT names; do not "
+            "invent new names — the loader entries already map them.\n"
+            "\n"
+            f"Existing assets on disk: {_fmt_names(seed_a)}\n"
+            f"Existing sounds on disk: {_fmt_names(seed_s)}\n"
+            "\n"
+            "If you genuinely need a brand-new visual entity the seed "
+            "doesn't already have (rare on a seed restart — the user "
+            "usually wants behavior/animation fixes, not new sprites), "
+            "you can request it in a LATER mid-session <assets> turn "
+            "AFTER iter 1 confirms the fix is working. Not now.\n"
+        )
+
     minimal_nudge = ""
     if force_minimal_first_build:
         minimal_nudge = (
@@ -1199,7 +1265,7 @@ def plan_instruction(
 
     body = (
         PLAN_INSTRUCTION + art_nudge + threed_nudge + audio_nudge
-        + scope_nudge + multi_frame_nudge + minimal_nudge
+        + scope_nudge + multi_frame_nudge + minimal_nudge + seed_nudge
     )
 
     if not reference_block:

@@ -3167,7 +3167,8 @@ class CodingBoxApp(App):
             "  [b]ship as-is, stop[/b]              type [b]done[/b] / [b]looks good[/b] / [b]ship[/b] (or Ctrl+D)",
             "                                  [dim]Ctrl+D wins: any queued feedback (incl. autonomous playtest) is dropped — re-send after ship if still wanted[/dim]",
             "  [b]brand-new unrelated game[/b]      [b]/new <goal>[/b]",
-            "  [b]start from an existing .html[/b]  [b]/seed <path>[/b]  then  [b]/new <goal>[/b]",
+            "  [b]start from an existing .html[/b]  [b]/seed <path>[/b]  then type your request (or [b]/new <goal>[/b] for a new game)",
+            "                                  [dim]existing sprites/sounds are reused — the planner won't regenerate them[/dim]",
             "  [b]paste in input[/b]                [b]Ctrl+V[/b] or terminal Edit→Paste ([b]Cmd+V[/b] on macOS)",
             "",
             "[bold cyan]── redraw ONE asset (no code change) ──[/bold cyan]",
@@ -3303,8 +3304,9 @@ class CodingBoxApp(App):
             "  PERSIST across multiple /new calls. Set once, reuse forever. Clear individually",
             "  with the bare command (e.g. [b]/seed[/b] alone), or wipe everything with [b]/reset[/b].",
             "",
-            "[dim]Example: /seed games/asteroids.html  →  /new add multiplayer  "
-            "→  /new add boss  ▸ both use asteroids.html[/dim]",
+            "[dim]Example: /seed games/asteroids.html  →  type "
+            "[italic]add multiplayer[/italic]  →  type [italic]add boss[/italic]  "
+            "▸ both use asteroids.html and its existing assets/sounds[/dim]",
         ]
         lines.extend(_tui_help.help_topics_index_lines())
         self._render_help_lines(lines)
@@ -4907,8 +4909,8 @@ class CodingBoxApp(App):
         size = candidate.stat().st_size
         self._next_seed = candidate.resolve()
         self._log_info(
-            f"staged seed for next /new: [b]{_esc(str(self._next_seed))}[/b] "
-            f"[dim]({size:,} bytes)[/dim]"
+            f"staged seed for next session: [b]{_esc(str(self._next_seed))}[/b] "
+            f"[dim]({size:,} bytes) — type your request, or /new <goal>[/dim]"
         )
 
     def _cmd_reset(self) -> None:

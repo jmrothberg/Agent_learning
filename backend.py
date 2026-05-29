@@ -1437,6 +1437,73 @@ class OpenAIBackend(Backend):
             pass
 
 
+def _anthropic_prepare_messages(
+    messages: list[dict],
+) -> tuple[str | None, list[dict[str, str]]]:
+    """Split system prompts from history and sanitize for Anthropic API rules.
+
+    Belt-and-suspenders safety net for tag-opener assistant prefill:
+    newer Claude models (Opus 4.7+) hard-reject ANY trailing assistant
+    message — they require the final message to be from the user. The
+    agent-level fix in `agent._stream()` folds tag prefills into the
+    last user message for backend=anthropic. If a caller forgets that,
+    this layer detects a SHORT tag-opener assistant turn and folds it
+    into the preceding user message here instead of letting the API
+    return a 400 'does not support assistant message prefill'.
+    """
+    system_parts: list[str] = []
+    msgs: list[dict[str, str]] = []
+    for m in messages:
+        role = m.get("role")
+        content = m.get("content", "")
+        if role == "system":
+            if content:
+                system_parts.append(content)
+        else:
+            msgs.append({"role": role, "content": content})
+    system_text = "\n\n".join(system_parts).strip() or None
+
+    # Safety-net fold: trailing assistant tag opener -> user format hint.
+    # Trigger ONLY when the trailing assistant message looks like a bare
+    # tag opener (short + starts with `<`). Longer assistant content is
+    # a real model reply we must preserve verbatim.
+    if (
+        len(msgs) >= 2
+        and msgs[-1].get("role") == "assistant"
+        and msgs[-2].get("role") == "user"
+    ):
+        tail = str(msgs[-1].get("content") or "").rstrip()
+        looks_like_opener = (
+            tail.startswith("<")
+            and len(tail) <= 200
+            # First non-space line should be the bare opener.
+            and tail.split("\n", 1)[0].strip().endswith(">")
+        )
+        if looks_like_opener:
+            first_line = tail.split("\n", 1)[0].strip()
+            hint = (
+                "\n\nFORMAT: begin your reply with exactly `"
+                + first_line
+                + "` (no prose before it; no extra whitespace)."
+            )
+            user_content = str(msgs[-2].get("content") or "")
+            msgs[-2] = {
+                "role": "user",
+                "content": user_content + hint,
+            }
+            msgs = msgs[:-1]
+            return system_text, msgs
+
+    # Fix-mode assistant prefill ends with "\n" (e.g. "<diagnose>\n"); Anthropic
+    # 400s when the final assistant turn has trailing whitespace.
+    if msgs and msgs[-1].get("role") == "assistant":
+        msgs[-1] = {
+            "role": "assistant",
+            "content": str(msgs[-1].get("content") or "").rstrip(),
+        }
+    return system_text, msgs
+
+
 class AnthropicBackend(Backend):
     """Anthropic Messages backend. Streaming, async."""
 
@@ -1470,21 +1537,7 @@ class AnthropicBackend(Backend):
         on_progress: Callable[[str, int, int], None] | None = None,
         cancel_event: asyncio.Event | None = None,
     ) -> StreamResult:
-        # Anthropic's API requires the system prompt as a separate
-        # parameter — strip it out of the messages array. Multiple
-        # system messages get concatenated (rare but possible after
-        # compaction).
-        system_parts: list[str] = []
-        msgs: list[dict] = []
-        for m in messages:
-            role = m.get("role")
-            content = m.get("content", "")
-            if role == "system":
-                if content:
-                    system_parts.append(content)
-            else:
-                msgs.append({"role": role, "content": content})
-        system_text = "\n\n".join(system_parts).strip() or None
+        system_text, msgs = _anthropic_prepare_messages(messages)
 
         opts = dict(options or {})
         # Anthropic max_tokens is REQUIRED.
