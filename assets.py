@@ -1025,6 +1025,42 @@ def _topo_sort_specs(specs: list[dict]) -> list[dict]:
 
 _UNSET: Any = object()  # sentinel: "argument not provided"
 
+# Below this mean per-pixel RGB delta (0..1), a `from_image`-derived frame is
+# treated as "near-identical to its parent" — i.e. the diffusion model likely
+# ignored the requested pose change (a common silent failure: a "punch" frame
+# that looks exactly like idle). Heuristic; surfaced to the model as a warning,
+# never a hard error.
+_DERIVED_FRAME_MIN_DELTA = 0.03
+
+
+def _derived_frame_delta(new_path: Path | str, parent_path: Path | str) -> float | None:
+    """Mean per-pixel RGB delta between a derived frame and its parent.
+
+    Both images are composited over a neutral gray before differencing so
+    transparent (chroma-keyed) regions don't register as spurious change, then
+    resized to 128×128 — the same comparison shape as tools.screenshot_delta.
+    Returns None if PIL is unavailable or either image can't be read.
+    """
+    try:
+        from PIL import Image
+    except Exception:
+        return None
+    try:
+        def _flat(p: Path | str):
+            im = Image.open(p).convert("RGBA")
+            bg = Image.new("RGBA", im.size, (128, 128, 128, 255))
+            return Image.alpha_composite(bg, im).convert("RGB").resize((128, 128))
+        a = _flat(new_path)
+        b = _flat(parent_path)
+    except Exception:
+        return None
+    pa = a.tobytes()
+    pb = b.tobytes()
+    if len(pa) != len(pb) or not pa:
+        return None
+    total = sum(x - y if x >= y else y - x for x, y in zip(pa, pb))
+    return total / (len(pa) * 255.0)
+
 
 def generate_assets(
     specs: list[dict],
@@ -1270,6 +1306,14 @@ def generate_assets(
                 keyed.save(cache_path, format="PNG")
             _link_or_copy(cache_path, target_path)
             out[name] = target_path.resolve()
+            # Derived-frame sanity: if this asset was chained from a parent
+            # (from_image) and looks near-identical to it, the requested pose
+            # change probably didn't render. Record the delta; the caller
+            # turns a small value into a model-facing warning.
+            if from_image and from_image in out:
+                pdelta = _derived_frame_delta(target_path, out[from_image])
+                if pdelta is not None:
+                    stat["parent_delta"] = round(pdelta, 4)
             # Admit root-prompt sprites to the cross-session library.
             # We skip img2img children because their value is tied to a
             # session-specific parent that isn't admitted.

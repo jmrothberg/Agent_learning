@@ -54,6 +54,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 from assets import (
+    _DERIVED_FRAME_MIN_DELTA,
     generate_assets,
     parse_assets_block,
     parse_assets_block_with_meta,
@@ -6119,7 +6120,9 @@ class GameAgent:
                 "total_probes": len(self._probes or []),
             })
 
-    def _build_visual_playtest_prompt(self, recipe, before_png: bytes | None) -> str:
+    def _build_visual_playtest_prompt(
+        self, recipe, before_png: bytes | None, action_png: bytes | None = None,
+    ) -> str:
         """Build a structured-checklist VLM prompt from a recipe.
 
         Small VLMs answer closed-class yes/no questions much more
@@ -6128,6 +6131,11 @@ class GameAgent:
         iters). The recipe carries 6-9 high-signal questions; we
         wrap them in a strict response format and tell the VLM to
         stop after the list.
+
+        When `action_png` is present, a third image (the game captured
+        mid-ACTION at peak input-attributable change) is appended by the
+        caller. The prompt then routes action/animation questions to that
+        image so a brief attack/ability is no longer invisible.
         """
         checklist = recipe.recipe.get("checklist") or []
         # Render as Q1..Qn so the response parser can match without
@@ -6145,7 +6153,22 @@ class GameAgent:
             "NOT add prose, do NOT guess at code causes, do NOT "
             "describe the background unless a question asks.\n\n"
         )
-        if before_png is not None:
+        if before_png is not None and action_png is not None:
+            intro = (
+                "You are reviewing THREE screenshots of a game called: "
+                f"{self._goal[:300] or '(no goal specified)'}\n\n"
+                "Image 1: BEFORE simulated input. Image 2: AFTER (resting "
+                "state). Image 3: the PEAK ACTION frame, captured mid-input "
+                "when on-screen change was largest.\n\n"
+                "Answer each numbered question by RE-EMITTING the question's "
+                "number with YES, NO, or UNCLEAR. ONE LINE per question, in "
+                "order. Judge ACTION / ANIMATION / attack questions against "
+                "Image 3; judge LAYOUT / HUD / resting-position questions "
+                "against Image 2. Image 3 IS the active-input frame, so for "
+                "'is the action visible' questions, commit to YES or NO rather "
+                "than UNCLEAR. Stop after the last question.\n\n"
+            )
+        elif before_png is not None:
             intro = (
                 "You are reviewing TWO screenshots of a game called: "
                 f"{self._goal[:300] or '(no goal specified)'}\n\n"
@@ -6155,6 +6178,18 @@ class GameAgent:
                 "LINE per question, in order. Refer to Image 2 (the "
                 "AFTER image) for each answer. Stop after the last "
                 "question.\n\n"
+            )
+        elif action_png is not None:
+            intro = (
+                "You are reviewing TWO screenshots of a game called: "
+                f"{self._goal[:300] or '(no goal specified)'}\n\n"
+                "Image 1: the resting state. Image 2: the PEAK ACTION frame, "
+                "captured mid-input when on-screen change was largest.\n\n"
+                "Answer each numbered question by RE-EMITTING the question's "
+                "number with YES, NO, or UNCLEAR. ONE LINE per question, in "
+                "order. Judge ACTION / ANIMATION / attack questions against "
+                "Image 2 and commit to YES or NO rather than UNCLEAR. Stop "
+                "after the last question.\n\n"
             )
         example = (
             "Example response shape:\n"
@@ -6269,8 +6304,16 @@ class GameAgent:
         self,
         current_png: bytes,
         before_png: bytes | None = None,
+        action_png: bytes | None = None,
     ) -> str | None:
-        """Run the configured out-of-band Visual Critic model on current_png."""
+        """Run the configured out-of-band Visual Critic model on current_png.
+
+        `action_png`, when present, is the frame the harness captured at the
+        moment a held control produced its largest canvas change — the game
+        mid-ACTION rather than at rest. It is supplied as a 3rd image so the
+        critic can judge whether a deliberate action animation actually
+        renders, instead of forever returning UNCLEAR on a resting frame.
+        """
         backend = self.get_backend("critic")
         if backend is None:
             return None
@@ -6300,7 +6343,9 @@ class GameAgent:
         try:
             using_recipe = recipe is not None
             if using_recipe:
-                prompt = self._build_visual_playtest_prompt(recipe, before_png)
+                prompt = self._build_visual_playtest_prompt(
+                    recipe, before_png, action_png=action_png,
+                )
                 # Mirror the matched recipe id onto the active field
                 # so the TUI status panel sees the same recipe id that
                 # the VLM is being asked to evaluate against. Idempotent
@@ -6314,19 +6359,41 @@ class GameAgent:
                     "match_tokens_sample": recipe_diag.get("match_tokens_sample", []),
                 })
             elif before_png is not None:
+                action_clause = (
+                    ""
+                    if action_png is None else
+                    "3. Image 3 is captured at the moment of PEAK on-screen "
+                    "change while a control was held — it shows the game "
+                    "mid-ACTION (e.g. an attack, jump, or ability animation), "
+                    "NOT a resting pose.\n"
+                )
+                action_guidance = (
+                    ""
+                    if action_png is None else
+                    "  - Action visibility: use Image 3 to judge whether a "
+                    "deliberate action animation actually renders. Image 3 IS "
+                    "the active-input frame, so do not answer 'unclear' on "
+                    "whether an action is visible — commit. If the goal implies "
+                    "attacks/abilities and Image 3 shows no distinct action "
+                    "pose (e.g. no extended arm / raised leg / projectile), "
+                    "that absence is itself the finding.\n"
+                )
                 prompt = (
                     "You are an expert out-of-band Visual PlayTester and Critic "
                     "for a game development sandbox.\n"
-                    "You are looking at TWO screenshots of the latest generated "
+                    "You are looking at screenshots of the latest generated "
                     "HTML5 canvas game:\n"
                     "1. Image 1 is taken before simulated inputs/playtesting.\n"
-                    "2. Image 2 is taken after simulated inputs/playtesting.\n\n"
+                    "2. Image 2 is taken after simulated inputs/playtesting "
+                    "(resting state).\n"
+                    f"{action_clause}\n"
                     f"GOAL FROM THE USER: {self._goal}\n\n"
-                    "Compare the two screenshots carefully for:\n"
+                    "Compare the screenshots carefully for:\n"
                     "  - Lack of player locomotion or unresponsiveness: if the "
                     "goal implies a controllable player and simulated inputs "
                     "should move it, does the player appear stuck in the same "
                     "place across both images?\n"
+                    f"{action_guidance}"
                     "  - Visual, positioning, or rendering bugs: wrong facing "
                     "direction, misaligned sprites, overlapping/clipped HUD, "
                     "blank canvas, or visibly frozen gameplay.\n\n"
@@ -6344,11 +6411,22 @@ class GameAgent:
                     "top_candidates": recipe_diag.get("top_candidates", []),
                 })
             else:
+                action_intro = (
+                    "You are looking at a screenshot of the latest generated "
+                    "HTML5 canvas game.\n\n"
+                    if action_png is None else
+                    "You are looking at TWO screenshots of the latest generated "
+                    "HTML5 canvas game: Image 1 is the resting state; Image 2 "
+                    "is captured at the moment of PEAK on-screen change while a "
+                    "control was held (the game mid-ACTION). Use Image 2 to "
+                    "judge whether a deliberate action animation actually "
+                    "renders — commit, do not answer 'unclear'.\n\n"
+                )
                 prompt = (
                     "You are an expert out-of-band Visual PlayTester and Critic for a game development sandbox. "
-                    "You are looking at a screenshot of the latest generated HTML5 canvas game.\n\n"
-                    f"GOAL FROM THE USER: {self._goal}\n\n"
-                    "Review the attached screenshot carefully for visual, positioning, or rendering bugs. Examples:\n"
+                    + action_intro
+                    + f"GOAL FROM THE USER: {self._goal}\n\n"
+                    "Review the attached screenshot(s) carefully for visual, positioning, or rendering bugs. Examples:\n"
                     "  - Are projectiles spawning in the wrong direction?\n"
                     "  - Are character sprites misaligned or offset?\n"
                     "  - Are HUD elements overlapping or clipped?\n"
@@ -6363,7 +6441,13 @@ class GameAgent:
                     "reason": "no_recipe_matched",
                     "top_candidates": recipe_diag.get("top_candidates", []),
                 })
-            images = [before_png, current_png] if before_png is not None else [current_png]
+            # Ordered to match the prompt's "Image 1/2/3" numbering.
+            if before_png is not None:
+                images = [before_png, current_png]
+            else:
+                images = [current_png]
+            if action_png is not None:
+                images.append(action_png)
             messages = [
                 {"role": "user", "content": prompt, "images": images}
             ]
@@ -6707,12 +6791,15 @@ class GameAgent:
         before_bytes: bytes | None,
         iteration: int,
         vc_role: str,
+        action_bytes: bytes | None = None,
     ) -> None:
         """Background worker that runs the visual critic and appends to
         `_pending_coaching` on completion. Errors are swallowed +
         traced so a critic crash never kills the iter loop."""
         try:
-            critique = await self.run_visual_critic(after_bytes, before_bytes)
+            critique = await self.run_visual_critic(
+                after_bytes, before_bytes, action_png=action_bytes,
+            )
         except Exception as exc:
             self._trace({
                 "kind": "visual_critic_error",
@@ -10180,6 +10267,55 @@ class GameAgent:
                                 f"  - {name}: {err_line}"
                             ))
 
+                # Derived-frame sanity: any sprite chained from a parent
+                # (from_image) that came out near-identical to that parent
+                # probably did NOT render the requested pose change — the
+                # classic "punch sprite looks like idle" silent failure. The
+                # model can't see its own art, so log it AND queue it as
+                # actionable feedback for the next turn. Genre-free.
+                near_identical = [
+                    s for s in per_asset
+                    if isinstance(s, dict)
+                    and s.get("name") in produced
+                    and s.get("from_image")
+                    and isinstance(s.get("parent_delta"), (int, float))
+                    and s["parent_delta"] < _DERIVED_FRAME_MIN_DELTA
+                ]
+                if near_identical:
+                    self._trace({
+                        "kind": "derived_frame_near_identical",
+                        "trigger": trigger,
+                        "assets": [
+                            {"name": s["name"], "from_image": s["from_image"],
+                             "parent_delta": s["parent_delta"]}
+                            for s in near_identical
+                        ],
+                    })
+                    warn_lines = [
+                        "ASSET SANITY WARNING — these generated sprites came "
+                        "out nearly identical to the `from_image` parent they "
+                        "were derived from, so the requested pose change "
+                        "likely did NOT render (e.g. a 'punch' frame that "
+                        "looks just like idle). The pixels barely differ:",
+                    ]
+                    for s in near_identical:
+                        pct = round((1.0 - float(s["parent_delta"])) * 100)
+                        line = (
+                            f"  - `{s['name']}` ≈{pct}% identical to parent "
+                            f"`{s['from_image']}` (delta "
+                            f"{s['parent_delta']:.3f})"
+                        )
+                        warn_lines.append(line)
+                        yield self._record(AgentEvent("info", line.strip()))
+                    warn_lines.append(
+                        "Fix options: re-prompt the frame with a more "
+                        "explicit, exaggerated pose; raise its `strength`; or "
+                        "render the moving part (arm/leg/effect) in code "
+                        "during the action window instead of relying on the "
+                        "sprite."
+                    )
+                    self._pending_feedback.append("\n".join(warn_lines))
+
         if sound_specs:
             yield self._record(AgentEvent(
                 "info",
@@ -12732,6 +12868,10 @@ class GameAgent:
                 if (snap_path and self._use_double_screenshot)
                 else None
             )
+            shot_action_path = (
+                snap_path.with_name(snap_path.stem + "_action.png")
+                if snap_path else None
+            )
             yield self._record(AgentEvent(
                 "activity", "browser",
                 {"label": f"loading iter {iteration} in Chromium"},
@@ -12740,6 +12880,7 @@ class GameAgent:
                 report = await self.browser.load_and_test(
                     self.out_path, screenshot_path=shot_path,
                     screenshot_before_path=shot_before_path,
+                    screenshot_action_path=shot_action_path,
                     probes=self._probes or None,
                     opening_book_recipes=getattr(self, "_active_opening_book_recipes", []),
                     # todo #2: pass criteria so the harness can flag
@@ -13004,6 +13145,19 @@ class GameAgent:
                 except Exception:
                     before_bytes = None
 
+            # Action frame: the harness captured this at the moment a held key
+            # produced its largest canvas change (game mid-ACTION, not at
+            # rest). Handed to the visual critic as a 3rd image so it can judge
+            # whether a deliberate action animation actually renders.
+            action_bytes: bytes | None = None
+            if shot_path is not None and report.get("screenshot_action"):
+                try:
+                    action_bytes = Path(
+                        str(report["screenshot_action"])
+                    ).read_bytes()
+                except Exception:
+                    action_bytes = None
+
             # Compute the screenshot delta BEFORE the vision judge runs
             # — the judge rotates `_prev_judge_png` to the current frame
             # at the end of its call, so we need to read against the
@@ -13167,6 +13321,7 @@ class GameAgent:
                             self._critic_task = asyncio.create_task(
                                 self._spawn_visual_critic(
                                     after_bytes, before_bytes, iteration, vc_role,
+                                    action_bytes=action_bytes,
                                 )
                             )
                         except Exception as exc:
@@ -13187,6 +13342,7 @@ class GameAgent:
                             critique = await self.run_visual_critic(
                                 after_bytes,
                                 before_bytes,
+                                action_png=action_bytes,
                             )
                             yield self._record(self._activity_idle_event(vc_role))
                             if critique:

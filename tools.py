@@ -165,6 +165,28 @@ def screenshot_delta(prev_png: bytes | None, curr_png: bytes | None) -> float | 
     return total / (len(pa) * 255.0)
 
 
+def _canvas_hash_distance(a: str | None, b: str | None) -> float | None:
+    """Fraction of cells that differ between two `_CANVAS_HASH_JS` strings.
+
+    `_CANVAS_HASH_JS` returns a comma-joined string of 1024 (32×32) base36
+    color tokens. This returns the share of those cells whose token changed,
+    in [0, 1] — a genre-free *magnitude* of canvas change.
+
+    Returns None when either input is missing/empty or the two have a
+    different cell count (different canvas → not comparable). Used to find
+    the frame of PEAK input-attributable visual change (the "action frame")
+    inside the input smoke test, with no PIL and no extra JS.
+    """
+    if not a or not b:
+        return None
+    ca = a.split(",")
+    cb = b.split(",")
+    if len(ca) != len(cb) or not ca:
+        return None
+    diff = sum(1 for x, y in zip(ca, cb) if x != y)
+    return diff / len(ca)
+
+
 # Stop-Losing-To-OneShot todo #2 — criteria coverage helper.
 # Stop-words drop generic prose ("the player should be able to move")
 # and keep meaningful tokens ("rotate", "thrust", "shoot"). Genre-free:
@@ -2167,6 +2189,7 @@ class LiveBrowser:
         probes: list[dict] | None = None,
         opening_book_recipes: list[dict] | None = None,
         screenshot_before_path: str | Path | None = None,
+        screenshot_action_path: str | Path | None = None,
         criteria: str | None = None,
     ) -> dict[str, Any]:
         """Navigate to the file, let it run, return the report.
@@ -2270,6 +2293,23 @@ class LiveBrowser:
         # snapshots are compared via a key-set hash from the same probe.
         input_test = await self._input_smoke_test()
 
+        # ---- action frame (peak input-attributable transient) -------------
+        # The smoke test captures one screenshot at the moment a held key was
+        # producing its largest canvas change — the game mid-ACTION rather
+        # than at rest. Write it to disk if a path was given, then pop the raw
+        # bytes so the report stays paths/booleans only.
+        screenshot_action_saved: str | None = None
+        action_png_bytes = input_test.pop("action_frame_png_bytes", None) \
+            if isinstance(input_test, dict) else None
+        if action_png_bytes and screenshot_action_path is not None:
+            try:
+                ap = Path(screenshot_action_path)
+                ap.parent.mkdir(parents=True, exist_ok=True)
+                ap.write_bytes(action_png_bytes)
+                screenshot_action_saved = str(ap)
+            except Exception:
+                screenshot_action_saved = None
+
         # ---- model-proposed probes ----------------------------------------
         # Agent emits <probes> in Phase A — JSON list of {name, expr} where
         # expr is a JS expression that should evaluate truthy on the running
@@ -2356,6 +2396,10 @@ class LiveBrowser:
         # and small booleans / counts via format_report_for_model.
         report["screenshot"] = screenshot_saved
         report["screenshot_before"] = screenshot_before_saved
+        report["screenshot_action"] = screenshot_action_saved
+        report["action_key"] = (
+            input_test.get("action_key") if isinstance(input_test, dict) else None
+        )
         report["frozen_canvas"] = frozen
         report["input_test"] = input_test
         report["probes"] = probe_results
@@ -3280,6 +3324,19 @@ class LiveBrowser:
         ambient_gs_changes = _gs_changed_leaves(ambient_gs_a, ambient_gs_b)
         has_gamestate = ambient_gs_a is not None
 
+        # ---- action-frame capture ----------------------------------------
+        # Genre-free: capture ONE screenshot at the moment a held key is
+        # producing its largest canvas change (a transient action animation
+        # — punch, jump, ability — appears while held then reverts). The
+        # ambient floor below ensures a continuously-animating game's
+        # baseline drift never wins. The captured frame is kept only if its
+        # winning key turns out to be input-attributable (in
+        # responsive_evidence); otherwise it is discarded after the loop.
+        ambient_floor = _canvas_hash_distance(ambient_a, ambient_b) or 0.0
+        best_action_delta = 0.0
+        best_action_key: str | None = None
+        action_frame_png: bytes | None = None
+
         # Track WHICH state fields move on WHICH key — names the
         # exact wiring path that works, so the report can say
         # "ArrowRight → state.player.x changed" instead of just
@@ -3297,6 +3354,24 @@ class LiveBrowser:
                 await asyncio.sleep(0.25)  # hold long enough for thrust to move ship
                 after_held = await self._safe_eval(_CANVAS_HASH_JS)
                 after_gs = await self._safe_eval(_GAMESTATE_SNAPSHOT_JS)
+                # Action-frame capture: while the key is STILL down, if this
+                # key's held-frame canvas change beats the running best AND
+                # the ambient drift floor, grab the screenshot. Validated for
+                # input-attribution after the loop.
+                held_dist = _canvas_hash_distance(before, after_held)
+                if (
+                    held_dist is not None
+                    and held_dist > best_action_delta
+                    and held_dist > ambient_floor
+                ):
+                    try:
+                        action_frame_png = await self._page.screenshot(
+                            full_page=False
+                        )
+                        best_action_delta = held_dist
+                        best_action_key = k
+                    except Exception:
+                        pass
                 await self._page.keyboard.up(k)
             except Exception:
                 continue
@@ -3338,6 +3413,15 @@ class LiveBrowser:
                 if first_responsive_key is None:
                     first_responsive_key = k
 
+        # Discard the action frame unless its winning key proved
+        # input-attributable (in responsive_evidence). This guarantees we
+        # never surface a frame from an unresponsive key or pure ambient
+        # animation — degrading cleanly to the before/after-only behavior.
+        if best_action_key is None or best_action_key not in responsive_evidence:
+            action_frame_png = None
+            best_action_key = None
+            best_action_delta = 0.0
+
         # Concise summary line for the report. Two shapes:
         #   PASS — "ArrowRight→[player.x, player.facing], Space→[bullets.length]"
         #   FAIL — "had window.state but zero fields moved across [keys]"
@@ -3369,6 +3453,12 @@ class LiveBrowser:
             "ambient_canvas_motion": ambient_canvas_changed,
             "ambient_gs_motion": bool(ambient_gs_changes),
             "had_gamestate": has_gamestate,
+            # Action frame (peak input-attributable transient). Raw bytes are
+            # internal — load_and_test writes them to disk and pops the key
+            # before assembling the report JSON.
+            "action_frame_png_bytes": action_frame_png,
+            "action_key": best_action_key,
+            "action_delta": round(best_action_delta, 4),
         }
 
     async def show_status(self, title: str, message: str = "") -> None:
