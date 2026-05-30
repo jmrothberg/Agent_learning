@@ -116,7 +116,9 @@ def test_load_and_test_appends_static_action_soft_warning():
 
 def test_critic_prompt_refuses_yes_without_action_frame():
     src = inspect.getsource(agent.GameAgent._build_visual_playtest_prompt)
-    assert "expects_game_controls" in src
+    # "actions expected" is now the broader `_animation_expected()` signal
+    # (covers walk/kick/etc., not just attack keywords).
+    assert "_animation_expected" in src
     assert "no active-input" in src.lower()
     assert "do NOT answer YES" in src
 
@@ -132,3 +134,43 @@ def test_iter_summary_logs_action_and_static_fields():
 def test_playbook_injected_trace_present():
     src = inspect.getsource(agent.GameAgent._retrieve_playbook_block)
     assert '"kind": "playbook_injected"' in src
+
+
+# ---- stuck-player detection ("doesn't move") -------------------------------
+
+def test_position_leaf_helper():
+    assert tools._is_position_leaf("player.x")
+    assert tools._is_position_leaf("pacman.tileY")
+    assert tools._is_position_leaf("s.gridX")
+    assert tools._is_position_leaf("hero.row")
+    assert not tools._is_position_leaf("player.dir")
+    assert not tools._is_position_leaf("player.nextDir")
+    assert not tools._is_position_leaf("score")
+    assert not tools._is_position_leaf("")
+
+
+def test_movement_keys_are_arrows_and_wasd():
+    for k in ("ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
+              "KeyW", "KeyA", "KeyS", "KeyD"):
+        assert k in tools._MOVEMENT_KEYS
+    # action keys must NOT count as movement
+    assert "KeyF" not in tools._MOVEMENT_KEYS
+    assert "Space" not in tools._MOVEMENT_KEYS
+
+
+def test_smoke_test_distinguishes_move_from_registered():
+    src = _smoke_src()
+    assert "movement_position_changed" in src
+    assert "movement_registered_without_move" in src
+    assert "has_position_state" in src
+    assert '"input_registered_without_move"' in src
+    # only movement keys, only when the game has position state
+    assert "_MOVEMENT_KEYS" in src
+    assert "_is_position_leaf" in src
+
+
+def test_load_and_test_gates_on_stuck_player():
+    src = inspect.getsource(tools.LiveBrowser.load_and_test)
+    assert "PLAYER-STUCK" in src
+    assert 'input_test.get("input_registered_without_move")' in src
+    assert 'report["soft_warnings"].append' in src

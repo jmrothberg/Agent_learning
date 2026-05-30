@@ -1,12 +1,7 @@
-# Coding Box Overlay — Local HTML Game Agent (harness fork)
+# Coding Box — Local HTML Game Agent
 
-> **This repo is not `Agent_learning` on GitHub.** It is the **overlay /
-> harness** line (feedback routing, playtests, multi-slot fan-out, TUI
-> polish). Push here: **`jmrothberg/Agent_learning_overlay`** so you do not
-> overwrite the upstream program at `jmrothberg/Agent_learning`.
-> Clone: `git clone https://github.com/jmrothberg/Agent_learning_overlay.git`
-> Remote setup: `git remote set-url origin https://github.com/jmrothberg/Agent_learning_overlay.git`
-> and optionally `git remote add upstream https://github.com/jmrothberg/Agent_learning.git`
+> Repo: **`jmrothberg/Agent_learning`** (`origin`). Single source of truth —
+> commit and push to `main`.
 
 A specialist agent that drives a **small local LLM** (Ollama or MLX
 in-process) to write, test, and iteratively fix **single-file HTML5
@@ -26,14 +21,15 @@ back the next time you launch it.
 The asset pipeline is fully self-contained: **Z-Image-Turbo** for
 sprites (txt2img, 768×768 native, downscaled and chroma-keyed to RGBA)
 and **Stable Audio Open** for sounds (OGG, 0.2–12 s), with optional
-**SD-Turbo img2img** for animation frame chains via the `from_image`
-field. None of those touch the network at runtime once weights are
+**img2img** (Z-Image, SD-Turbo fallback) via the `from_image` field for
+recolors/restyles — animation POSE frames are best done as txt2img with a
+shared character description (see Animation frames). None of those touch the
+network at runtime once weights are
 cached. A cross-session **asset library** under `memory/` lets
 admitted assets compound across sessions exactly the way the playbook
 does.
 
-**Remote (this fork):** https://github.com/jmrothberg/Agent_learning_overlay  
-**Upstream program (do not push overlay work here):** https://github.com/jmrothberg/Agent_learning
+**Remote:** https://github.com/jmrothberg/Agent_learning (`origin`, push to `main`)
 
 ---
 
@@ -51,7 +47,7 @@ does.
   - [Verification harness](#verification-harness-multi-layered)
   - [Visual-progress judge (local VLM)](#visual-progress-judge-local-vlm)
   - [Sprite generation](#sprite-generation-z-image-turbo)
-  - [Animation frame chains](#animation-frame-chains-sd-turbo-img2img)
+  - [Animation frames (txt2img with a shared description)](#animation-frames-txt2img-with-a-shared-description)
   - [Sound generation](#sound-generation-stable-audio-open)
   - [Cross-session asset library](#cross-session-asset-library)
   - [Prompt assembly](#prompt-assembly-data-driven-not-a-string-blob)
@@ -59,10 +55,9 @@ does.
   - [Project-config injection](#project-config-injection)
 - [TUI and CLI reference](#tui-and-cli-reference)
   - [Model topologies](#model-topologies-1-2-and-3-model-runs)
-  - [Status panel & GPU map](#status-panel-right-column)
-- [Tuning rig and playbook commands](#tuning-rig-and-playbook-commands)
+- [System tests and memory hygiene](#system-tests-and-memory-hygiene)
 - [Standing rules and design constraints](#standing-rules-and-design-constraints)
-- [Major future improvements](#major-future-improvements)
+- [Open ideas](#open-ideas-not-yet-built)
 - [Troubleshooting](#troubleshooting)
 - [Dependencies](#dependencies)
 - [License](#license)
@@ -156,7 +151,7 @@ absorbs its failure modes. That changes everything downstream:
   `<html_file>`/`<patch>` substrings), DeliberationDetector that
   latches on real code (`<!DOCTYPE`, `<script`, `function foo(`) so
   20+ KB first builds aren't killed by length, and more (full table
-  in [FOR_NEXT_LLM.md § Verifier guards](FOR_NEXT_LLM.md#verifier-guards-the-2026-05-23--24-layer)).
+  in `FOR_NEXT_LLM.md`).
   None of these patterns appear in the generalist agents because the
   generalists trust the model to recover; with qwen3.6:27b, you
   cannot.
@@ -213,7 +208,7 @@ provides today. **Bold = unique among the four.**
   widening pass): the idea of static analysis *before* the browser
   (we don't run a real LSP — we run a regex-based receiver-method
   allowlist that catches the highest-frequency hallucinations).
-- **From OpenAI Codex** (2026-05-25 review): `@@ function_or_class`
+- **From OpenAI Codex:** `@@ function_or_class`
   breadcrumb anchor in `<patch>` SEARCH to scope ambiguous matches;
   good-vs-low-quality plan examples in `PLAN_INSTRUCTION`; the
   always-on "Phase-A signals persist once accepted, fix turns emit
@@ -464,7 +459,7 @@ token count alone. While a stream is running, the status panel shows a
 is waiting for the next user-turn boundary (input always drains after
 the current stream finishes).
 
-**Silent-stream guard (2026-05-24, doom trace).** Separate from the
+**Silent-stream guard.** Separate from the
 runaway-warning above, a stream that produces ZERO non-empty `content`
 pieces for **180 seconds** is force-aborted with a
 **`stream_silent_aborted`** trace and a tailored recovery prompt
@@ -484,9 +479,7 @@ model copied a stale view of the file), the retry prompt now prepends
 a **`[REPEATED PATCH FAILURE]`** banner naming the exact problem and
 re-shows the current file so the model writes a fresh SEARCH from
 the live state instead of re-trying yesterday's text. Trace event:
-`patch_search_repeat_detected`. Doom 2026-05-23 extensions 1/2/3 hit
-the same SEARCH failure three turns in a row; this guard catches it
-on turn 2.
+`patch_search_repeat_detected`. Catches the model re-trying an identical failing SEARCH instead of re-reading the live file.
 
 **Classifier overrule auto-disable.** When the scoped feedback
 classifier expects mode X but the model emits mode Y (e.g. classifier
@@ -569,18 +562,13 @@ source of multiple frustrating sessions:
 | **3. Autonomous self-playtest** | After each **clean** iter the agent runs a SECOND playtest using playbook recipes (`memory/playtests.jsonl`) and queues `[AUTONOMOUS PLAYTEST]` feedback if it finds something the probes missed. Uses #2 to know what to check. | `/feedback on\|off` | ON |
 | **4. Directive wrapping on YOUR typed feedback** | When you type a feedback note into the TUI, a classifier reads your text and adds injected instructions (MEDIA-CHANGE / ORIENTATION-CHANGE / SCOPE ARBITRATION / asset-stem mapping). The model sees those instructions wrapping your literal text. When the classifier is wrong, these wrappers override your guidance. | `/rawfeedback on\|off` | **ON = directives suppressed** (raw mode) |
 
-The agent's value-add comes from #1, #2, #3. #4 is the part that has
-historically misrouted user guidance — e.g. typing "down key moves you
-forward" got wrapped with "the feedback above is about ART/SOUND, not
-code" because the classifier matched "view" in "maze view" as a reference
-to the `pistol_view` sprite. As of 2026-05-23 the default is **raw mode
-on** (wrapping suppressed) so the model sees what you typed. Flip
+The agent's value-add comes from #1, #2, #3. #4 is the part that can misroute user guidance — a classifier wrapping typed feedback with the wrong category. The default is **raw mode on** (wrapping suppressed) so the model sees what you typed. Flip
 `/rawfeedback off` to opt in to the wrappers when the classifier reads
 you correctly.
 
 ### Visual playtest recipes — mechanism-keyed checklists for the VLM critic
 
-Added 2026-05-24 after the mortal-kombat trace where the open-ended
+Used when the open-ended
 visual critic emitted six paraphrased complaints across six iters
 about the same sprite-render bug (pure prompt noise) — and where a
 wholesale facing-flip regression at iter 12 turned both fighters to
@@ -798,8 +786,8 @@ still flow through. Suppressed notes still trace as
 
 - **`GameMemory`** — skeleton retrieval and mistake retrieval.
   - **Premium Default Skeletons (Autobootstrapped on boot)**: The system provides 17 generic, high-fidelity scaffolds in `memory/skeletons/` designed to give local models a perfect first-build template:
-    - `canvas_basic.html`: Clean 2D canvas with DPR scaling, frame loops, and window keyboard handlers. Kept for `skeleton_mode="default"` baseline; **no longer the retrieval fallback** (2026-05-21).
-    - `canvas_basic_v2.html`: **New fallback (2026-05-21)** — denser bug-hardened scaffold pre-empting focus-blur, dt-cap, restart-cleanup, DPR-resize, lazy-audio, and HUD pointer-events failures. Used when no modality or sidecar scaffold matches.
+    - `canvas_basic.html`: Clean 2D canvas with DPR scaling, frame loops, and window keyboard handlers. Kept for `skeleton_mode="default"` baseline; **no longer the retrieval fallback**.
+    - `canvas_basic_v2.html`: denser bug-hardened scaffold pre-empting focus-blur, dt-cap, restart-cleanup, DPR-resize, lazy-audio, and HUD pointer-events failures. Used when no modality or sidecar scaffold matches.
     - `canvas_3d_basic.html`: Full 3D perspective setup utilizing CDN Three.js, lights, camera, and aspect-ratio fits.
     - `canvas_grid_basic.html`: Continuous tile-aligned corridor movement and corner snapping (e.g., Pac-Man, Sokoban).
     - `canvas_platformer_basic.html`: Gravity jumps, vertical ladder alignments, climbing, and platform landings (e.g., Donkey Kong).
@@ -814,15 +802,15 @@ still flow through. Suppressed notes still trace as
     - `canvas_ar_flick_basic.html`: Pointer flick/swipe gestures with spin and gravity (e.g., Pokémon-Go-style throws).
     - `canvas_lit_dungeon_basic.html`: Composite-mode dynamic lighting + shadow gradients for top-down dungeons.
     - `canvas_vfx_particles_basic.html`: Pooled particle effects + screen shake + damage numbers.
-    - `canvas_board_turn_basic.html`: **New (2026-05-21)** — 8×8 grid with click-to-select / click-to-move state machine, alternating `currentPlayer`, exposed `window.gameState` (e.g., Chess, Checkers, Go, Reversi).
-    - `canvas_dom_basic.html`: **New (2026-05-21)** — DOM-only `<table>` + event delegation for UI-style apps (e.g., Tic-Tac-Toe, Calculator, Todo).
-  - **Modality detector (added 2026-05-21)**: short goals like "chess" or "doom" tokenize to 1-2 non-stopword tokens — too sparse for Jaccard to clear the 0.30 sidecar threshold. `retrieve_skeleton()` now runs `_detect_board_intent` / `_detect_dom_intent` / `_detect_3d_intent` FIRST; a single strong-hook token (e.g. `chess`, `doom`, `tictactoe`, `calculator`) or ≥2 modality keywords commits the matching scaffold without going through Jaccard.
+    - `canvas_board_turn_basic.html`: 8×8 grid with click-to-select / click-to-move state machine, alternating `currentPlayer`, exposed `window.gameState` (e.g., Chess, Checkers, Go, Reversi).
+    - `canvas_dom_basic.html`: DOM-only `<table>` + event delegation for UI-style apps (e.g., Tic-Tac-Toe, Calculator, Todo).
+  - **Modality detector**: short goals like "chess" or "doom" tokenize to 1-2 non-stopword tokens — too sparse for Jaccard to clear the 0.30 sidecar threshold. `retrieve_skeleton()` now runs `_detect_board_intent` / `_detect_dom_intent` / `_detect_3d_intent` FIRST; a single strong-hook token (e.g. `chess`, `doom`, `tictactoe`, `calculator`) or ≥2 modality keywords commits the matching scaffold without going through Jaccard.
 - **`Playbook`** — JSONL of bullets with `helpful` / `harmful`
-  counters. Features elite math and physics rules for retro classics (Mode 7 scanning, wall-sliding, segmented follow, angle biasing, mobile joysticks, aspect ratio letterboxing) alongside the standard set, plus 2026-05-21 additions for turn-based board mechanics (`turn-based-select-move`, `board-grid-indexing`, `click-cell-from-pointer`) and the `expose-state-on-window` rule promoted from learned. Retrieval is weighted Jaccard × quality multiplier `1 + 0.10·tanh(score/5)`. `stage="plan"` returns broader top-K; `stage="code"` drops bullets with score ≤ -2. On-demand expansion via `<lookup_bullet>id</lookup_bullet>`.
-- **Modality token expansion (added 2026-05-21)**: when retrieving for a goal that hits a modality detector, the matched keywords are appended to the query. Pac-man's `corner-sliding-alignment` jumps from 0.026 → 0.076 (~3×); doom's `tetris-matrix-rotation` retrieval noise disappears. Backwards-compatible: pass `modality_tokens=[]` or omit to get default behavior.
+  counters. Features elite math and physics rules for retro classics (Mode 7 scanning, wall-sliding, segmented follow, angle biasing, mobile joysticks, aspect ratio letterboxing) alongside the standard set, plus turn-based board mechanics (`turn-based-select-move`, `board-grid-indexing`, `click-cell-from-pointer`) and the `expose-state-on-window` rule promoted from learned. Retrieval is weighted Jaccard × quality multiplier `1 + 0.10·tanh(score/5)`. `stage="plan"` returns broader top-K; `stage="code"` drops bullets with score ≤ -2. On-demand expansion via `<lookup_bullet>id</lookup_bullet>`.
+- **Modality token expansion**: when retrieving for a goal that hits a modality detector, the matched keywords are appended to the query. Pac-man's `corner-sliding-alignment` jumps from 0.026 → 0.076 (~3×); doom's `tetris-matrix-rotation` retrieval noise disappears. Backwards-compatible: pass `modality_tokens=[]` or omit to get default behavior.
 - **Dedup + budget capping**: `dedup_hits` (5-gram Jaccard ≥ 0.85) +
   `cap_hits_by_budget` run inside `render_playbook_block` by default.
-- **Mistake memory (`games/game-memory/mistakes.jsonl`)**: seeded 2026-05-21 with 8 trace-derived signatures (window-state exposure, pointer-lock target, missing HUD elements, restart probe, partial-patch apply, duplicate top-level declarations). The diagnose prompt retrieves matching signatures so the model gets "you've seen this before — here's what worked" hints instead of re-diagnosing from scratch.
+- **Mistake memory (`games/game-memory/mistakes.jsonl`)**: 8 trace-derived signatures (window-state exposure, pointer-lock target, missing HUD elements, restart probe, partial-patch apply, duplicate top-level declarations). The diagnose prompt retrieves matching signatures so the model gets "you've seen this before — here's what worked" hints instead of re-diagnosing from scratch.
 - **Won-skeleton promotion**: after `<confirm_done/>`, the agent
   copies the working HTML to `games/game-memory/skeletons/won_<session>.html`
   and indexes it so future sessions with similar goals can use it as
@@ -905,6 +893,31 @@ default):
   *shape* (object with numeric x/y), not by name. The check flips
   `report["ok"]` to False so the model gets a fix turn with the
   warning visible.
+- **PLAYER-STUCK check** (always-on): a movement key
+  (arrows/WASD) that registers input but never changes any POSITION leaf
+  (x/y/tx/ty/gridX/col/row) on the player means the player is stuck —
+  spawned in a wall, or collision blocking every direction. Before this,
+  setting `player.dir` on keypress counted as "responsive," so a frozen
+  Pac-Man passed. Now it appends `PLAYER-STUCK` and flips `ok=False`.
+  Guarded by `has_position_state` so menu/quiz games (arrows aren't
+  motion) don't false-positive. Helpers `_is_position_leaf` /
+  `_MOVEMENT_KEYS` in `tools.py`. This is the "your tests reported the
+  controls work but the game doesn't move" fix.
+- **Action frame + STATIC-ACTION check** (always-on): the
+  smoke test also presses the keys the model declared in `<criteria>`
+  (`_parse_action_keys`) so attacks/abilities actually fire, then captures
+  the frame at peak input-attributable canvas change — choosing only a key
+  whose effect is TRANSIENT (reverts after release, so `KeyR` restart never
+  wins) — and feeds it to the visual critic as a 3rd "action" image. If a
+  responsive action renders a single held pose while the canvas animates
+  elsewhere, appends `STATIC-ACTION` and flips `ok=False` (an attack that
+  swaps to one static frame is not "animated"). Constants
+  `_ACTION_TRANSIENT_MAX_RATIO`, `_STATIC_POSE_MAX_INHOLD`.
+- **Derived-frame sanity** (`assets.py`): when an animation frame is
+  generated via `from_image`, its pixel delta from the parent is measured;
+  a near-identical result warns the model the pose did not render. (But
+  prefer txt2img-per-pose over `from_image` for pose changes — see the
+  animation-frames section above.)
 
 **Multi-window playtest capture** (`LiveBrowser.record_playtest`): executes
 a recipe's `input_script` and samples state (and optional screenshots) at
@@ -967,7 +980,7 @@ Pipeline per spec:
    [Cross-session asset library](#cross-session-asset-library) below.
 4. Cache miss + library miss → generate at native 768×768.
 5. PIL Lanczos downscale to per-asset target size (default **512 px**
-   as of 2026-05-23 — was 128 px, but tiny PNGs looked postage-stamp
+   (tiny PNGs looked postage-stamp at 128 px)
    on modern displays and threw away most of the diffuser's detail;
    `drawImage` downscales at draw time if the game wants smaller).
 6. `_chroma_key_to_rgba` samples 8 corner+edge points; if ≥6/8 agree
@@ -978,17 +991,29 @@ Pipeline per spec:
 the first-build user message, with the literal loader pattern (`const
 ASSETS = {}; await img.decode(); ctx.drawImage(...)`) inline.
 
-### Animation frame chains (SD-Turbo img2img)
+### Animation frames (txt2img with a shared description)
 
-`assets.py` supports `from_image` chaining: a spec with
-`"from_image": "<name-of-prior-spec>"` becomes an SD-Turbo img2img
-generation seeded from that prior frame at controllable `strength`
-(default 0.45, range 0.05–1.0). Frame 1 ships as txt2img; frames 2..N
-inherit silhouette + palette while only the pose changes. This is the
-recipe for walk cycles, attack windups, idle bobs.
+**For a real POSE change (punch arm-out, kick leg-up), generate each frame as
+its own `txt2img` that shares ONE detailed character description and changes
+only the pose clause** — NOT `from_image` img2img. This was learned the hard
+way (by generating frames and *looking* at them): img2img from the idle sprite
+cannot change a pose. At low `strength` it returns the idle pose unchanged (a
+"punch" that is literally idle); at high `strength` it changes the *character*
+instead of the pose. The pipeline uses a fixed seed, so the same character
+description renders a consistent character across different pose prompts —
+consistency comes from the shared prompt + seed, not from chaining off the idle
+image. See playbook bullet `animation-frames-consistent-character`.
 
-Topologically sorted so children always render after parents. Falls
-back to txt2img cleanly if img2img isn't available.
+`assets.py` still supports `from_image` chaining (now routed through **Z-Image
+img2img** — the same model as the base txt2img, sharing its loaded VRAM via
+`ZImageTurboGenerator.generate_img2img`; SD-Turbo is only a fallback). It's
+useful for a recolor or a tiny restyle, but **not for a pose change** — img2img
+preserves the existing pose. Topologically sorted so children render after
+parents. If a sprite comes out facing/limb-wrong, **flip it 180° in code**
+(an extra `ctx.scale(-1,1)` per state) rather than regenerating — see
+`prefer-code-fix-over-asset-regen`. The `<assets>` loader block hard-forbids
+drawing character limbs with `ctx.fillRect`/`arc`/`lineTo` on top of a sprite
+(users consistently reject code-drawn "limbs").
 
 ### Sound generation (Stable Audio Open)
 
@@ -1117,7 +1142,7 @@ is data the agent will see, not just developer notes.
 | `/new` | Start a new session in the same workspace. |
 | `/goodgame` | Copy `.best.html` (or live `.html`) plus `*_assets/` / `*_sounds/` into `goodgame/`. Alias: `/good`. |
 | `/ship` | Force `<confirm_done/>` on the next critique turn. |
-| `/revert [N]`, `/rewind [N]` | Roll the on-disk game file back to the last clean iter (bare) or to iter `N` specifically. Falls back to `best.html` when no clean iter snapshot exists. The iter counter does NOT reset — only the **file** rewinds; the conversation continues and your next feedback applies to the reverted file. Use this when the model breaks something on the latest turn instead of typing "undo that" and watching it break more. Added 2026-05-25 after a 10-trace audit showed harness gates catch only ~5-10% of "model takes liberty beyond user scope" failures across the full feedback shape — a one-keystroke escape hatch beats more clever gates. Emits a `user_revert` trace event for postmortem analysis. |
+| `/revert [N]`, `/rewind [N]` | Roll the on-disk game file back to the last clean iter (bare) or to iter `N` specifically. Falls back to `best.html` when no clean iter snapshot exists. The iter counter does NOT reset — only the **file** rewinds; the conversation continues and your next feedback applies to the reverted file. Use this when the model breaks something on the latest turn instead of typing "undo that" and watching it break more. Emits a `user_revert` trace event. |
 | `/quit` | Exit. |
 | `/open` | Reveal the current HTML in the file browser. |
 | `/log`, `/paths`, `/files` | Print log + artifact paths. |
@@ -1139,7 +1164,7 @@ is data the agent will see, not just developer notes.
 | `/double-screenshot <on\|off>` | Toggle capturing dual screenshots (startup and post-input) to help the model see movement/animation (default off). |
 | `/vlm-critique <on\|off>` | Toggle VLM screenshot attachment during Phase C successful critique turns for layout and UI polishing (default off). Needs a VLM as the loaded model; uses slot 1 when no critic slot is staged. **Auto-toggles with `/wait`**: on `/wait on` we save the current state and force OFF (you're the visual critic now — auto critic adds paraphrased noise about issues you already see); on `/wait off` we restore. Explicit `/vlm-critique on\|off` mid-wait clears the saved state so your choice sticks across the next `/wait` toggle. |
 | `/feedback [on\|off]` | Toggle autonomous playtest loop (default **on**). Bare `/feedback` prints state without flipping. When on: after clean iters, genre-free behavior recipes may queue `[AUTONOMOUS PLAYTEST]` coaching. Test reports and the critic still run when off. |
-| `/rawfeedback [on\|off]` | Your typed feedback goes to the model verbatim (default **on** as of 2026-05-23). The model sees only the basic USER FEEDBACK block around your literal text and decides for itself whether to `<patch>` or `<assets>`. Machine bug feedback (browser test reports, console errors, probes), playbook retrieval, autonomous playtest, and visual critic are UNAFFECTED — they always run. Flip to `off` to opt in to the classifier wrappers (MEDIA-CHANGE / ORIENTATION-CHANGE / SCOPE ARBITRATION / asset-stem-mapping). Sticky across `/new`. Aliases: `/raw`, `/raw-feedback`. |
+| `/rawfeedback [on\|off]` | Your typed feedback goes to the model verbatim (default **on**). The model sees only the basic USER FEEDBACK block around your literal text and decides for itself whether to `<patch>` or `<assets>`. Machine bug feedback (browser test reports, console errors, probes), playbook retrieval, autonomous playtest, and visual critic are UNAFFECTED — they always run. Flip to `off` to opt in to the classifier wrappers (MEDIA-CHANGE / ORIENTATION-CHANGE / SCOPE ARBITRATION / asset-stem-mapping). Sticky across `/new`. Aliases: `/raw`, `/raw-feedback`. |
 | `/audit` | Per-bullet playbook earnings from trace history (fires, pass-rate, avg-iter). |
 | `/restarts <N>` | Independent full restarts when iter-1 score is below 60 (sticky; default 2; `1` = off). |
 | `/model-class <auto\|small\|mid\|large>` | Override system-prompt trim (sticky; default `auto` → lean ~5 KB schema). |
@@ -1192,7 +1217,7 @@ critic` or `/model2 ... --role architect` for one sidecar:
   design pass before the coder writes HTML. The architect role is also
   used for the final exit-decision turn when available.
 
-**Auto-staff (added 2026-05-21).** Setting `/model2 N --role critic` (or
+**Auto-staff.** Setting `/model2 N --role critic` (or
 `--role architect`) automatically enables the matching feature
 (`vlm-critique` or `architect-split`) in one step — no separate toggle
 needed. The same hook fires when a local VLM is loaded on **any** slot,
@@ -1295,8 +1320,7 @@ The TUI starts missing same-user daemons as:
 ```
 
 GPU 0 is left for the TUI / diffusers path. Z-Image-Turbo and Stable-Audio
-load on **GPU 0** on this box (not “whichever card has the most free
-VRAM” — that used to pick empty GPU 1 and collide with the coder).
+load on **GPU 0** (not “whichever card has the most free VRAM”, which can collide with the coder).
 Override with `DIFFUSER_CUDA_DEVICE=N`. `CODING_BOX_NUM_CTX` defaults to
 **100000** (or **`/ctx`** in the TUI — e.g. `/ctx 262k` for long extensions). If an old
 same-user single daemon on 11434 has a split model loaded, the TUI unloads
@@ -1438,174 +1462,16 @@ These have evidence behind them and should not be broken silently.
 
 ---
 
-## Major future improvements
+## Open ideas (not yet built)
 
-Concrete, research-grounded directions for moving small local LLMs
-from "playable" to "great" at writing HTML games. Each item lists the
-problem it addresses, the proposed change, and the rough effort. The
-ranking is intent, not commitment; pick the ones that match your
-machine and time budget.
-
-### 1. Vision-judge gating of `<done/>`
-
-**Problem.** Probes verify *correctness*; the vision judge today
-contributes *coaching* but does not gate ship. A game can pass probes
-with a blank canvas or invisible player and still get `<confirm_done/>`.
-
-**Change.** Require the last clean iter's vision verdict to be
-`PROGRESS: yes` (or `unclear` with non-empty `MISSING: nothing
-obvious`) before `<done/>` is honored. Falls back to current behavior
-if no local VLM is discoverable.
-
-**Why this is the highest-leverage next move.** It is the cleanest
-way to make "looks like the user asked for" a hard precondition rather
-than a hint. The infrastructure is already in place; the change is a
-single guard in `agent.py`'s done-detection block.
-
-### 3. Semantic-embedding retrieval (replace Jaccard)
-
-**Problem.** Playbook and asset-library retrieval today use Jaccard
-on a tokenized prompt. This works at small scale but degrades fast as
-the library grows past ~500 entries — synonymy and paraphrase miss.
-
-**Change.** Wire a local embedding model (Sentence-Transformers
-all-MiniLM, BGE-small, or a similarly tiny model on MLX/MPS) to embed
-prompts at admit time and at query time. Cosine similarity replaces
-Jaccard. Keep the Jaccard path as a fallback when embeddings aren't
-available.
-
-**Effect.** "explosion sprite" and "boom particle effect" hit each
-other even with no token overlap. Playbook retrieval gets less brittle
-to paraphrase. Asset library scales to 10–100k entries.
-
-### 4. Make critic findings harder to ignore
-
-**Problem.** Sidecar critics and the local vision judge can now feed
-coaching into the next coder turn, but most findings are still advisory.
-A game can pass structural probes while the visual reviewer spots a
-real playability problem, such as a player that appears stuck.
-
-**Change.** Promote only high-confidence, generic critic findings into
-harder gates: static before/after screenshots, missing player
-locomotion after input simulation, blank or clipped canvas, and clear
-asset/sound mismatches. Keep subjective art taste as coaching so weak
-critics cannot block a working game.
-
-**Effect.** One-, two-, and three-model runs all get stricter where the
-evidence is objective, without turning the critic into an unreliable
-second coder.
-
-### 5. Best-of-N at the iter level, not the session level
-
-**Problem.** `--best-of-n N` today samples N completions for one turn
-and picks the best by ranker. Sessions are still serial.
-
-**Change.** On clean iters, fork two short branches: one tries a
-small refinement, one tries a larger structural change. Run both
-through the verifier in parallel. Keep the winner; discard the loser.
-Costs 2× GPU on clean iters only; clean iters are cheap (no fix
-needed).
-
-**Effect.** The agent stops getting stuck in local optima of the
-form "this works fine and I have no reason to change it but it
-doesn't look great."
-
-### 6. Per-phase model policy
-
-**Problem.** The TUI already supports coder, architect, and critic
-roles, but selection is still mostly manual. Some goals benefit from a
-stronger architect, while others need the fastest patch model or the
-best VLM critic.
-
-**Change.** Add a lightweight policy layer that can recommend a role
-assignment from local model inventory, VRAM budget, and goal modality.
-The policy should only suggest local models unless the user explicitly
-selects a cloud backend.
-
-**Effect.** Users keep the current 1/2/3-model controls, but common
-setups become one command instead of manual role assignment.
-
-### 7. Game-feel benchmarks
-
-**Problem.** "Great game" is currently judged on visual appearance
-and audible feedback. *Game feel* (input lag, juice, screen shake,
-hitstop) is invisible to the harness.
-
-**Change.** Extend the audio-events shim pattern to capture:
-
-- **Input → state delta latency.** Synthesize keydown; measure ms
-  until the next RAF tick mutates a tracked variable.
-- **Frame timing.** Record per-RAF timestamps; report mean FPS,
-  longest stall, jank counts.
-- **Juice signals.** Track screen shake (canvas transform deltas
-  around game events), hitstop (RAF idleness in a tracked window
-  around damage events).
-
-Add a few model-proposed probes that gate on these (e.g. "input → ship
-moves in <33 ms"). The agent gets explicit feedback on the
-hard-to-articulate dimensions of "good".
-
-### 8. WebGL / three.js verifier coverage
-
-**Problem.** Today's harness is strongest on Canvas2D. WebGL games
-(first-person, voxel, true 3D) pass the harness loosely — the canvas-
-hash sampler covers WebGL but the probes the model writes default to
-2D patterns.
-
-**Change.** Prompt-side: extend `<probes>` examples with WebGL/three.js
-patterns (camera position read, scene graph child counts, render-loop
-fired). Harness-side: a tiny shim that exposes `THREE.WebGLRenderer.
-render` call counts on `window.__threeRenderCount` so probes can
-assert the loop runs.
-
-**Effect.** 3D games stop being a second-class citizen.
-
-### 9. Active-learning asset hints
-
-**Problem.** The model writes a generic prompt for a sprite; Z-Image-
-Turbo produces a mediocre rendering; the model has no signal that the
-sprite is the weak link.
-
-**Change.** After generation, the vision judge gets a per-sprite
-question: "does this sprite match the prompt? would a small change to
-the prompt produce something more readable at this size?" If the
-judge says "smaller, higher contrast, cleaner silhouette", the agent
-prepends that to the prompt and regenerates *once* (capped).
-
-**Effect.** First-iter sprites improve materially without growing the
-model context.
-
-### 11. Local LoRA adapter from session traces
-
-**Problem.** The playbook compounds *retrieval-time* knowledge, not
-*model-time* knowledge. The base MLX model never gets better at the
-patterns it sees succeed.
-
-**Change.** Once `games/traces/` contains enough confirmed-good
-sessions (say, 50 won + 50 fixed-regression pairs), train a small
-LoRA on the trace pairs. Default to a quantized adapter so it lands
-under 200 MB on disk and adds <50 ms to per-token latency on Apple
-Silicon. The agent loads the adapter alongside the base model.
-
-**Effect.** The base model itself starts shipping cleaner first
-patches on the patterns it has seen many times. The playbook still
-covers the long tail.
-
-### 12. Multi-modal compaction with real images
-
-**Problem.** Today's state-anchor preserves a *text description* of
-the visual state from the vision judge. VLM-capable backends could in
-principle handle a 128×128 thumbnail embedded as a real image content
-block.
-
-**Change.** When the discovered backend is a VLM, the state-anchor
-becomes a multi-modal message: text sections + one base64 PNG
-thumbnail of the last clean iter's screenshot. Falls back to text
-when the backend is text-only.
-
-**Effect.** Long-session visual coherence improves measurably; the
-model "remembers" the look of the game across compactions, not just
-the words.
+- **Vision-judge gating of `<done/>`** — make the VLM's "looks right" verdict a hard precondition, not just coaching.
+- **Semantic-embedding retrieval** — replace Jaccard with a tiny local embedding model so paraphrases match as the library grows.
+- **Iter-level best-of-N** — on clean iters, fork a refinement branch and a structural branch, verify both, keep the winner.
+- **Per-phase model policy** — auto-recommend coder/architect/critic roles from local inventory + VRAM + goal modality (local-only unless cloud is explicitly chosen).
+- **Game-feel benchmarks** — extend the audio-events shim to measure input→state latency, FPS/jank, screen-shake/hitstop; gate probes on them.
+- **WebGL/three.js verifier coverage** — expose render-loop call counts and add 3D `<probes>` examples.
+- **Local LoRA from traces** — once enough won/fixed pairs exist, train a small adapter so the base model ships cleaner first patches.
+- **Multi-modal compaction** — when the backend is a VLM, embed a 128×128 screenshot in the state-anchor instead of only a text description.
 
 ---
 
@@ -1732,7 +1598,7 @@ hand.
   `.venv/bin/python -c "from backend import discover_local_vlm;
   print(discover_local_vlm())"`).
 - **`Sprites blur or look postage-stamp tiny`**: default output size
-  is 512 px (was 128 px before 2026-05-23). `drawImage` downscales
+  is 512 px. `drawImage` downscales
   cheaply if the game uses a smaller render rect. Ask for a smaller
   `size` only when you want tiny on-disk files (HUD icons:
   `"size": "32x32"`) or larger for full-screen overlays

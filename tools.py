@@ -51,6 +51,38 @@ def _input_evidence_is_plausible(path: str) -> bool:
     return True
 
 
+# Leaf names that represent a movable entity's POSITION. A movement key that
+# registers input (sets a direction/flag) but never changes any of these means
+# the entity is STUCK (spawned in a wall, collision blocking every move) — the
+# Pac-Man "starts in a wall and doesn't move" failure that read as "responsive"
+# because a `dir`/`nextDir` field changed. Genre-free: position field names are
+# universal across tile and pixel games.
+_POSITION_LEAF_NAMES = {
+    "x", "y", "tx", "ty", "gx", "gy", "gridx", "gridy", "col", "row",
+    "px", "py", "posx", "posy", "cx", "cy", "tilex", "tiley",
+    "worldx", "worldy", "left", "top", "row", "column",
+}
+
+
+def _is_position_leaf(path: str) -> bool:
+    """True when the final component of a dotted state path is a position field
+    (x/y/tx/ty/gridX/col/row/...). Used to tell 'the player actually moved'
+    from 'a key registered but the player is stuck'."""
+    parts = [p for p in str(path or "").split(".") if p]
+    if not parts:
+        return False
+    return parts[-1].lower() in _POSITION_LEAF_NAMES
+
+
+# Keys that should MOVE a controllable player. If one of these registers input
+# (a direction/flag changes) but no position leaf ever changes, the player is
+# stuck. Attack/ability keys are deliberately excluded.
+_MOVEMENT_KEYS = frozenset({
+    "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
+    "KeyW", "KeyA", "KeyS", "KeyD",
+})
+
+
 _PROBE_EVAL_ERROR_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("syntax_error", re.compile(r"\bSyntaxError\b|missing \) after argument list", re.I)),
     ("reference_error", re.compile(r"\bReferenceError\b", re.I)),
@@ -286,6 +318,17 @@ _KEY_CODE_RE = re.compile(
 # 0.01 ≈ 10 cells: a genuine multi-frame swap or continuous motion moves far
 # more across 250ms; <10 cells is the same pose with only AA/sub-pixel jitter.
 _STATIC_POSE_MAX_INHOLD = 0.01
+
+# An "action" (attack/ability) is a TRANSIENT: it changes the canvas while held
+# and largely REVERTS after release. Keys whose effect persists — restart
+# (wipes/redraws the whole screen), pause, walk (moves to a new lasting
+# position) — are NOT actions and must not become the captured action frame.
+# A key is transient when its after-release residual is below this fraction of
+# its in-hold change. (Restart: residual ≈ in-hold change → excluded. Punch:
+# residual ≈ 0 → eligible.)
+_ACTION_TRANSIENT_MAX_RATIO = 0.5
+# Bound the number of per-key action-frame screenshots held in memory.
+_ACTION_FRAME_KEYCAP = 16
 
 
 def _parse_action_keys(*texts: str) -> list[str]:
@@ -2452,6 +2495,22 @@ class LiveBrowser:
                 f"continuous motion (translate/rotate/scale) during the "
                 f"active window — do not hold one static frame."
             )
+        # Stuck-player gate: a movement key registered input but the player's
+        # position never changed → the player can't move (spawned in a wall,
+        # collision blocking every direction). This read as "responsive" before
+        # — the Pac-Man "starts in a wall and doesn't move" failure. Genre-free.
+        if isinstance(input_test, dict) and input_test.get("input_registered_without_move"):
+            report["player_stuck"] = True
+            report["soft_warnings"].append(
+                "PLAYER-STUCK: a movement key (arrows/WASD) registers input (a "
+                "direction/state field changes) but the player's POSITION "
+                "(x/y/tile) never changes on ANY direction — the player cannot "
+                "move. Common causes: it spawned inside a wall, or the "
+                "wall-collision check blocks every move (wrong coordinate units "
+                "— pixel vs tile, or off-by-one). Spawn the player on a known "
+                "corridor cell and make at least one direction actually change "
+                "its position."
+            )
         report["frozen_canvas"] = frozen
         report["input_test"] = input_test
         report["probes"] = probe_results
@@ -3184,12 +3243,21 @@ class LiveBrowser:
                 })
             elif rtype == "asset_usage":
                 has_assets = "_assets/" in html_text or "ASSET_LIST" in html_text or "const ASSETS" in html_text
+                # 2D canvas consumes art via drawImage; WebGL/three.js (which
+                # the prompt steers 3D goals toward) NEVER calls drawImage — it
+                # binds the image as a texture. Accept either so a real 3D game
+                # is not hard-failed for using the correct API.
                 uses_draw = "drawImage" in html_text
-                ok = (not has_assets) or uses_draw
+                uses_texture = any(s in html_text for s in (
+                    "CanvasTexture", "TextureLoader", "THREE.Texture",
+                    "SpriteMaterial", "new THREE.Sprite", ".map =", ".map=",
+                    "texImage2D",
+                ))
+                ok = (not has_assets) or uses_draw or uses_texture
                 check.update({
                     "ok": ok,
                     "hard": has_assets,
-                    "err": "" if ok else "generated assets present but no drawImage usage found",
+                    "err": "" if ok else "generated assets present but neither a drawImage call nor a WebGL texture binding uses them",
                 })
             elif rtype == "asset_stats":
                 has_assets = "_assets/" in html_text or "ASSET_LIST" in html_text or "const ASSETS" in html_text
@@ -3200,16 +3268,26 @@ class LiveBrowser:
                     "err": "" if ok else "asset loader does not clearly decode generated images",
                 })
             elif rtype in {"before_mid_after", "event_window"}:
-                animated_or_input = (
-                    (frozen is False)
-                    or bool(input_test.get("ran") and input_test.get("any_change") is True)
-                    or "requestAnimationFrame" in html_text
+                # Honest signal, not a RAF-in-source rubber-stamp: a responsive
+                # action that renders a single HELD pose (static_action, set by
+                # the in-hold canvas-hash sampler) is not real animation; a
+                # frozen canvas is not either. Otherwise we lack contrary
+                # evidence and don't over-coach. (Dead from_image SPRITE frames
+                # are gated separately by the near-idle check in agent.py.)
+                static_action = (
+                    input_test.get("static_action")
+                    if isinstance(input_test, dict) else None
                 )
-                check.update({
-                    "ok": bool(animated_or_input),
-                    "hard": False,
-                    "err": "" if animated_or_input else "no visible animation evidence",
-                })
+                if static_action:
+                    ok, err = False, (
+                        "action renders a single held pose — no intermediate "
+                        "frames between start and end (teleport/held, not animated)"
+                    )
+                elif frozen is True:
+                    ok, err = False, "canvas frozen — no animation evidence"
+                else:
+                    ok, err = True, ""
+                check.update({"ok": ok, "hard": False, "err": err})
             elif rtype == "restart_reset":
                 has_reset = any(s in html_text for s in ("resetGame", "function reset", ".reset(", "restart"))
                 check.update({
@@ -3382,6 +3460,12 @@ class LiveBrowser:
         )
         ambient_gs_changes = _gs_changed_leaves(ambient_gs_a, ambient_gs_b)
         has_gamestate = ambient_gs_a is not None
+        # Does the game even HAVE a spatial entity (position fields)? Only then
+        # is "a movement key didn't change any position" meaningful — guards the
+        # stuck-player check against menu/quiz games where arrows aren't motion.
+        has_position_state = isinstance(ambient_gs_a, dict) and any(
+            _is_position_leaf(leaf) for leaf in ambient_gs_a
+        )
 
         # ---- action-frame capture ----------------------------------------
         # Genre-free: capture ONE screenshot at the moment a held key is
@@ -3395,6 +3479,13 @@ class LiveBrowser:
         best_action_delta = 0.0
         best_action_key: str | None = None
         action_frame_png: bytes | None = None
+        # Per-key action-frame candidates: key -> (held_dist, screenshot bytes),
+        # captured during the hold for any key that beat the ambient floor. The
+        # WINNER is chosen AFTER the loop among keys that are both responsive
+        # and TRANSIENT (revert after release), so a screen-wiping restart key
+        # never becomes the "action" frame.
+        action_candidates: dict[str, tuple[float, bytes]] = {}
+        per_key_release_dist: dict[str, float | None] = {}
         # Per-key "in-hold motion": max pairwise canvas-hash distance across
         # frames sampled WHILE the key is held. A real animation keeps
         # changing (>0); a single static pose held for the move stays ~0.
@@ -3407,6 +3498,10 @@ class LiveBrowser:
         # "input test passed." When nothing moves we get the dual:
         # "ArrowRight: zero numeric fields on window.state changed."
         responsive_evidence: dict[str, list[str]] = {}
+        # "Player moved" vs "stuck": did a movement key change a POSITION leaf
+        # (real movement) or only a direction/flag (input registered, no move)?
+        movement_position_changed = False
+        movement_registered_without_move = False
 
         for k in keys:
             before = await self._safe_eval(_CANVAS_HASH_JS)
@@ -3434,22 +3529,20 @@ class LiveBrowser:
                 _hold_pairs = [d for d in _hold_pairs if d is not None]
                 if _hold_pairs:
                     per_key_hold_motion[k] = max(_hold_pairs)
-                # Action-frame capture: while the key is STILL down, if this
-                # key's held-frame canvas change beats the running best AND
-                # the ambient drift floor, grab the screenshot. Validated for
-                # input-attribution after the loop.
+                # Action-frame capture: while the key is STILL down, grab a
+                # screenshot for any key whose held-frame change beats the
+                # ambient floor. The winner is selected after the loop
+                # (responsive AND transient), so restart/persistent keys don't
+                # win just by having the biggest delta.
                 held_dist = _canvas_hash_distance(before, after_held)
                 if (
                     held_dist is not None
-                    and held_dist > best_action_delta
                     and held_dist > ambient_floor
+                    and len(action_candidates) < _ACTION_FRAME_KEYCAP
                 ):
                     try:
-                        action_frame_png = await self._page.screenshot(
-                            full_page=False
-                        )
-                        best_action_delta = held_dist
-                        best_action_key = k
+                        _png = await self._page.screenshot(full_page=False)
+                        action_candidates[k] = (held_dist, _png)
                     except Exception:
                         pass
                 await self._page.keyboard.up(k)
@@ -3459,6 +3552,9 @@ class LiveBrowser:
             # Wait one more frame for any post-release tween / momentum.
             await asyncio.sleep(0.05)
             after_release = await self._safe_eval(_CANVAS_HASH_JS)
+            # Residual change after release — small for a transient action that
+            # reverts to idle, large for a persistent change (restart/walk).
+            per_key_release_dist[k] = _canvas_hash_distance(before, after_release)
 
             # Decide responsiveness with the strongest available signal.
             # (1) state input-only delta: leaves that changed during
@@ -3478,6 +3574,15 @@ class LiveBrowser:
                 or (after_release is not None and after_release != before)
             ) and not ambient_canvas_changed
 
+            # Movement-vs-stuck tracking: on a MOVEMENT key (arrows/WASD), did
+            # any POSITION leaf change (player actually moved) or only a
+            # direction/flag leaf (input registered but entity stuck)?
+            if k in _MOVEMENT_KEYS and input_only_leaves:
+                if any(_is_position_leaf(leaf) for leaf in input_only_leaves):
+                    movement_position_changed = True
+                elif any(not _is_position_leaf(leaf) for leaf in input_only_leaves):
+                    movement_registered_without_move = True
+
             if input_only_leaves:
                 # Sort + cap so the report stays bounded.
                 responsive_evidence[k] = sorted(input_only_leaves)[:5]
@@ -3493,14 +3598,25 @@ class LiveBrowser:
                 if first_responsive_key is None:
                     first_responsive_key = k
 
-        # Discard the action frame unless its winning key proved
-        # input-attributable (in responsive_evidence). This guarantees we
-        # never surface a frame from an unresponsive key or pure ambient
-        # animation — degrading cleanly to the before/after-only behavior.
-        if best_action_key is None or best_action_key not in responsive_evidence:
-            action_frame_png = None
-            best_action_key = None
-            best_action_delta = 0.0
+        # Select the action frame: among captured candidates, keep only keys
+        # that are (a) input-attributable (in responsive_evidence) and (b)
+        # TRANSIENT — the canvas largely reverted after release. Pick the
+        # highest in-hold delta among those. This excludes restart/pause/menu
+        # keys (whose effect persists) and walk (moves to a lasting position),
+        # so the static-pose gate evaluates the real attack/ability. Degrades
+        # cleanly to no-action-frame when nothing qualifies.
+        for _k, (_hd, _png) in action_candidates.items():
+            if _k not in responsive_evidence:
+                continue
+            _rel = per_key_release_dist.get(_k)
+            if _rel is None:
+                continue  # can't prove it reverted → exclude
+            if _rel >= _hd * _ACTION_TRANSIENT_MAX_RATIO:
+                continue  # persistent change (restart/walk) → not an action
+            if _hd > best_action_delta:
+                best_action_delta = _hd
+                best_action_key = _k
+                action_frame_png = _png
 
         # Animation-liveness: if the winning action key is responsive but the
         # scene barely changed WHILE it was held (a single static pose) — and
@@ -3560,6 +3676,15 @@ class LiveBrowser:
             "static_action": static_action,
             # In-hold canvas motion per key (diagnostic / trace observability).
             "hold_motion": {k: round(v, 4) for k, v in per_key_hold_motion.items()},
+            # Stuck-player verdict: a movement key registered input (set a
+            # direction/flag) but NO position leaf ever changed → the player is
+            # stuck (spawned in a wall / collision blocks every move). True only
+            # when nothing actually moved the player's position.
+            "input_registered_without_move": bool(
+                movement_registered_without_move
+                and not movement_position_changed
+                and has_position_state
+            ),
         }
 
     async def show_status(self, title: str, message: str = "") -> None:

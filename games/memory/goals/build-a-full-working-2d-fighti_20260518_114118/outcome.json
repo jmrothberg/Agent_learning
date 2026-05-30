@@ -1,0 +1,9 @@
+{
+  "session_id": "build-a-full-working-2d-fighti_20260518_114118",
+  "goal": "build a full working 2D fighting game with player vs CPU, including turn-around facing kicks and varied CPU actions",
+  "model": "qwen3.6:27b-coding-mxfp8",
+  "iterations": 3,
+  "ok": true,
+  "last_report_summary": "OK: True\nTitle: '2D Fighting Game'\nCanvas: 800x600, RAF ran: True, blank: False\nInput listeners: total=6 (doc=0, win=5, body=0, other=1)\nInput test: PASS \u2014 ArrowUp\u2192[cpu.vx, cpu.x, cpuX, frame, t]; ArrowDown\u2192[cpu.grounded, cpu.vx, cpu.vy, cpu.x, cpu.y]; ArrowLeft\u2192[cpu.vy, cpu.x, cpu.y, cpuX, frame]; ArrowRight\u2192[cpu.vy, cpu.x, cpu.y, cpuX, frame]\nFrozen canvas: YES (same pixels at t=half and t=full)\nBody text length: 94 chars\nBody sample: 'PLAYER\\nVS\\nCPU\\n\u2190 \u2192 Move \\xa0|\\xa0 \u2191 Jump \\xa0|\\xa0 J Punch \\xa0|\\xa0 K Kick \\xa0|\\xa0 L Block \\xa0|\\xa0 Enter / Space Restart'\nWarnings:\n  - Canvas2D: Multiple readback operations using getImageData are faster with the willReadFrequently attribute set to true. See: https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently\nAcceptance probes: 6/7 pass\n  ok  canvas_present: !!document.querySelector('canvas')\n  ok  fighters_visible: window.state && typeof state.playerHealth === 'number' && typeof state.cpuHealth\n  ok  health_",
+  "ts": "2026-05-18T15:55:09.374623Z"
+}

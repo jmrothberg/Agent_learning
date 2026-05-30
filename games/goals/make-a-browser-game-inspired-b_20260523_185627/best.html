@@ -1,0 +1,1007 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DOOM-LIKE</title>
+<style>
+  :root { color-scheme: dark; }
+  html,body { margin:0; height:100%; background:#000; color:#e7ecff;
+    font:14px/1.4 'Courier New',monospace; overflow:hidden; user-select:none; }
+  #wrap { position:fixed; inset:0; display:grid; place-items:center; background:#000; }
+  canvas { display:block; image-rendering:pixelated; cursor:crosshair; background:#000; }
+  #hud { position:fixed; left:0; right:0; bottom:0; padding:8px 16px;
+    background:linear-gradient(to top,#000c,#0000); color:#ffb84d;
+    font-weight:bold; pointer-events:none; display:flex; justify-content:space-between;
+    text-shadow:2px 2px 0 #000; font-size:18px; z-index:10; letter-spacing:1px; }
+  #hud .stat { padding:0 12px; }
+  #hud .hp { color:#ff5040; }
+  #hud .ammo { color:#ffd840; }
+  #hud .score { color:#40ff60; }
+  #help { position:fixed; top:8px; left:8px; opacity:.7; font-size:12px;
+    color:#aaa; pointer-events:none; text-shadow:1px 1px 0 #000; z-index:10;}
+  #modal { position:fixed; inset:0; display:none; place-items:center;
+    background:#000c; z-index:100; }
+  #modal .card { background:#1a0808; padding:24px 36px; border-radius:8px;
+    text-align:center; border:2px solid #ff5040; box-shadow:0 0 30px #ff5040; }
+  #modal h2 { margin:0 0 12px; color:#ff5040; font-size:32px; letter-spacing:3px; }
+  #modal.win h2 { color:#40ff60; }
+  #modal.win .card { border-color:#40ff60; box-shadow:0 0 30px #40ff60; }
+  button { background:#aa2010; color:#fff; border:0; padding:10px 24px;
+    border-radius:4px; font-size:16px; cursor:pointer; font-family:inherit;
+    letter-spacing:2px; margin-top:10px; }
+  button:hover { filter:brightness(1.3); }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c" width="960" height="600"></canvas></div>
+<div id="hud">
+  <div class="stat hp">HP <span id="hp">100</span></div>
+  <div class="stat ammo">AMMO <span id="ammo">30</span></div>
+  <div class="stat score">SCORE <span id="score">0</span></div>
+  <div class="stat">KILLS <span id="kills">0</span>/<span id="totalk">0</span></div>
+  <div class="stat">LVL <span id="lvl">1</span></div>
+</div>
+<div id="help">↑↓ walk, ←→ turn · WASD strafe · Mouse aim · LClick fire · R restart · Click canvas to lock pointer</div>
+<div id="modal"><div class="card">
+  <h2 id="endTitle">YOU DIED</h2>
+  <p id="endMsg">Final score: <span id="endScore">0</span></p>
+  <button id="restart">RESTART</button>
+</div></div>
+<script>
+(() => {
+"use strict";
+
+// ============ ASSET LOADING ============
+const ASSET_DIR = "./make-a-browser-game-inspired-b_20260523_185627_assets/";
+const SOUND_DIR = "./make-a-browser-game-inspired-b_20260523_185627_sounds/";
+const ASSETS = {};
+const ASSET_LIST = [
+  'wall_brick','wall_stone','wall_metal','wall_door','wall_exit',
+  'floor_tex','ceiling_tex','gun_idle','gun_fire',
+  'monster_idle','monster_walk1','monster_walk2','monster_attack',
+  'monster_pain','monster_death1','monster_death2',
+  'pickup_health','pickup_ammo','muzzle_flash'
+];
+// Per-sprite anchor info: where the visual "tip" / focal point lives in
+// normalized [0..1] image coords. Detected at load time for gun sprites
+// by scanning the alpha channel — the topmost opaque row's x-centroid is
+// the barrel tip. Falls back to (0.5, 0.0) (top-center) when detection
+// can't run (e.g. a tainted canvas).
+const ASSET_ANCHOR = {};
+function detectGunAnchor(img) {
+  try {
+    const c = document.createElement('canvas');
+    c.width = img.naturalWidth; c.height = img.naturalHeight;
+    const g = c.getContext('2d');
+    g.drawImage(img, 0, 0);
+    const data = g.getImageData(0, 0, c.width, c.height).data;
+    // Scan rows top->bottom for the first row with meaningful opaque pixels;
+    // within that row, take the x-centroid of opaque pixels = barrel tip.
+    const W = c.width, H = c.height;
+    for (let y = 0; y < H; y++) {
+      let sumX = 0, count = 0;
+      for (let x = 0; x < W; x++) {
+        const a = data[(y * W + x) * 4 + 3];
+        if (a > 32) { sumX += x; count++; }
+      }
+      if (count >= 3) {
+        return { x: (sumX / count) / W, y: y / H };
+      }
+    }
+  } catch (e) { /* tainted canvas or other — fall through */ }
+  return { x: 0.5, y: 0.0 };
+}
+async function loadAssets() {
+  await Promise.all(ASSET_LIST.map(async (n) => {
+    const img = new Image();
+    img.src = ASSET_DIR + n + '.png';
+    try { await img.decode(); ASSETS[n] = img; }
+    catch(e){ console.warn('asset failed', n, e); ASSETS[n] = null; }
+  }));
+  // Detect barrel-tip anchor for the gun frames so the sprite can be
+  // drawn with its barrel exactly on canvas center X regardless of how
+  // the diffuser framed the PNG.
+  for (const n of ['gun_idle', 'gun_fire']) {
+    if (ASSETS[n]) ASSET_ANCHOR[n] = detectGunAnchor(ASSETS[n]);
+  }
+}
+
+const SOUNDS = {};
+function loadSounds() {
+  const entries = [
+    ['shoot',false],['empty',false],['hit',false],
+    ['monster_growl',false],['monster_die',false],
+    ['player_hurt',false],['pickup',false],['door',false],
+  ];
+  for (const [name, loop] of entries) {
+    try {
+      const a = new Audio(SOUND_DIR + name + '.ogg');
+      a.loop = loop;
+      a.preload = 'auto';
+      SOUNDS[name] = a;
+    } catch(e) { SOUNDS[name] = null; }
+  }
+}
+loadSounds();
+function play(name) {
+  const base = SOUNDS[name]; if (!base) return;
+  try {
+    if (base.loop) { base.play().catch(()=>{}); return; }
+    const inst = base.cloneNode();
+    inst.volume = 0.7;
+    inst.play().catch(()=>{});
+  } catch(e){}
+}
+
+// ============ CANVAS ============
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+ctx.imageSmoothingEnabled = false;
+
+function fitCanvas() {
+  const W = Math.min(window.innerWidth, 1280);
+  const H = Math.min(window.innerHeight, 800);
+  const aspect = 16/10;
+  let cw = W, ch = W/aspect;
+  if (ch > H) { ch = H; cw = H*aspect; }
+  canvas.style.width = cw + 'px';
+  canvas.style.height = ch + 'px';
+  // internal resolution fixed for raycaster perf
+  canvas.width = 640;
+  canvas.height = 400;
+  ctx.imageSmoothingEnabled = false;
+}
+fitCanvas();
+window.addEventListener('resize', fitCanvas);
+
+const W = () => canvas.width;
+const H = () => canvas.height;
+
+// ============ MAP ============
+// 0=empty, 1=brick, 2=stone, 3=metal, 4=door, 5=exit
+const RAW_MAP = [
+  "1111111111111111111111",
+  "1......1.........1...1",
+  "1.111..1.222222..1.5.1",
+  "1.1.1..4.2....2..4...1",
+  "1.1.1..1.2.PP.2..1.111",
+  "1.1....1.2.PP.2..1.A.1",
+  "1.111..1.2....2..1...1",
+  "1......1.222.22..1.111",
+  "1.1111.1...........2.1",
+  "1.1H...4...3333....2.1",
+  "1.1.11.1...3..3....2.1",
+  "1.1....1...3..3....2.1",
+  "1.1.11.1...3333....2.1",
+  "1.1....1...........2.1",
+  "1.1111.1.111111...22.1",
+  "1......1.1H..A1......1",
+  "1.222..1.1....4......1",
+  "1.2.2..1.111111...P..1",
+  "1.2.2..1.............1",
+  "1......1......H......1",
+  "1111111111111111111111",
+];
+const MAP_H = RAW_MAP.length;
+const MAP_W = RAW_MAP[0].length;
+
+// parse map: walls + entity spawn list
+let MAP = null;
+let SPAWN_PLAYER = {x:2.5, y:2.5};
+let SPAWN_MONSTERS = [];
+let SPAWN_PICKUPS = [];
+function parseMap() {
+  MAP = [];
+  SPAWN_MONSTERS = [];
+  SPAWN_PICKUPS = [];
+  for (let y=0;y<MAP_H;y++) {
+    const row = [];
+    for (let x=0;x<MAP_W;x++) {
+      const ch = RAW_MAP[y][x];
+      if (ch==='1') row.push(1);
+      else if (ch==='2') row.push(2);
+      else if (ch==='3') row.push(3);
+      else if (ch==='4') row.push(4);
+      else if (ch==='5') row.push(5);
+      else {
+        row.push(0);
+        if (ch==='H') SPAWN_PICKUPS.push({x:x+0.5,y:y+0.5,type:'health'});
+        else if (ch==='A') SPAWN_PICKUPS.push({x:x+0.5,y:y+0.5,type:'ammo'});
+        else if (ch==='P') {
+          // player spawn or pickup pair? use first as player
+          if (!parseMap._gotPlayer) {
+            SPAWN_PLAYER = {x:x+0.5,y:y+0.5};
+            parseMap._gotPlayer = true;
+          } else {
+            SPAWN_MONSTERS.push({x:x+0.5,y:y+0.5});
+          }
+        }
+      }
+    }
+    MAP.push(row);
+  }
+  parseMap._gotPlayer = false;
+  // Cap total monster count to keep the level fun, not a swarm.
+  const MAX_MONSTERS = 6;
+  if (SPAWN_MONSTERS.length > MAX_MONSTERS) {
+    // keep the ones furthest from player so close-spawns vanish first
+    SPAWN_MONSTERS.sort((a,b)=>{
+      const da=(a.x-SPAWN_PLAYER.x)**2+(a.y-SPAWN_PLAYER.y)**2;
+      const db=(b.x-SPAWN_PLAYER.x)**2+(b.y-SPAWN_PLAYER.y)**2;
+      return db-da;
+    });
+    SPAWN_MONSTERS = SPAWN_MONSTERS.slice(0, MAX_MONSTERS);
+  }
+}
+parseMap();
+
+// Safety: if the parsed player spawn ended up on a wall tile (map edit
+// goofs), scan for the nearest open cell so the player never starts
+// stuck inside geometry — that would freeze movement entirely.
+(function ensureSpawnOpen(){
+  const ix = Math.floor(SPAWN_PLAYER.x), iy = Math.floor(SPAWN_PLAYER.y);
+  const t = (MAP[iy] && MAP[iy][ix]);
+  if (t === 0) return;
+  outer: for (let r = 1; r < Math.max(MAP_W, MAP_H); r++) {
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (Math.abs(dx) !== r && Math.abs(dy) !== r) continue;
+        const nx = ix + dx, ny = iy + dy;
+        if (ny>=0 && ny<MAP_H && nx>=0 && nx<MAP_W && MAP[ny][nx] === 0) {
+          SPAWN_PLAYER = { x: nx + 0.5, y: ny + 0.5 };
+          break outer;
+        }
+      }
+    }
+  }
+})();
+
+function tileAt(x,y) {
+  const ix = Math.floor(x), iy = Math.floor(y);
+  if (ix<0||ix>=MAP_W||iy<0||iy>=MAP_H) return 1;
+  return MAP[iy][ix];
+}
+function isWall(x,y) {
+  const t = tileAt(x,y);
+  return t!==0 && t!==5; // exit is walkable
+}
+
+// ============ STATE ============
+const state = {
+  player: { x:SPAWN_PLAYER.x, y:SPAWN_PLAYER.y, angle:0, hp:200, ammo:30, score:0, kills:0 },
+  keys: {},
+  mouseDx: 0,
+  fireQueued: false,
+  fireCooldown: 0,
+  gunFlash: 0,
+  recoil: 0,
+  bullets: [],
+  monsters: [],
+  pickups: [],
+  particles: [],
+  level: 1,
+  totalMonsters: 0,
+  over: false,
+  won: false,
+  time: 0,
+  pointerLocked: false,
+};
+window.gameState = state;
+
+function spawnEntities() {
+  state.monsters = SPAWN_MONSTERS.map(s => ({
+    x:s.x, y:s.y, angle:0, hp:30,
+    state:'idle', // idle,chase,attack,pain,dead,dying
+    frame:0, frameT:0, anim:'idle',
+    moveT:0, lastSeen:0, atkCd:0, painT:0, dieT:0,
+    vx:0, vy:0,
+  }));
+  state.pickups = SPAWN_PICKUPS.map(p => ({...p, taken:false}));
+  state.totalMonsters = state.monsters.length;
+}
+spawnEntities();
+
+function reset() {
+  parseMap();
+  state.player.x = SPAWN_PLAYER.x;
+  state.player.y = SPAWN_PLAYER.y;
+  state.player.angle = 0;
+  state.player.hp = 200;
+  state.player.ammo = 30;
+  state.player.score = 0;
+  state.player.kills = 0;
+  state.bullets = [];
+  state.particles = [];
+  state.fireCooldown = 0;
+  state.gunFlash = 0;
+  state.recoil = 0;
+  state.fireQueued = false;
+  state.mouseDx = 0;
+  state.over = false;
+  state.won = false;
+  state.time = 0;
+  spawnEntities();
+  document.getElementById('modal').style.display = 'none';
+  document.getElementById('modal').classList.remove('win');
+}
+window.game = { reset };
+
+// ============ INPUT ============
+const KEYMAP = {
+  KeyW:'up', ArrowUp:'up',
+  KeyS:'down', ArrowDown:'down',
+  KeyA:'left',  ArrowLeft:'turnLeft',
+  KeyD:'right', ArrowRight:'turnRight',
+  KeyQ:'turnLeft', KeyE:'turnRight',
+};
+window.addEventListener('keydown', e => {
+  const k = KEYMAP[e.code];
+  if (k) { state.keys[k] = true; e.preventDefault(); }
+  if (e.code === 'KeyR') { reset(); }
+  if (e.code === 'Space') { state.fireQueued = true; e.preventDefault(); }
+}, {passive:false});
+window.addEventListener('keyup', e => {
+  const k = KEYMAP[e.code];
+  if (k) state.keys[k] = false;
+});
+
+canvas.addEventListener('mousedown', e => {
+  if (e.button === 0) state.fireQueued = true;
+});
+canvas.addEventListener('click', () => {
+  if (!document.pointerLockElement) canvas.requestPointerLock?.();
+});
+document.addEventListener('pointerlockchange', () => {
+  state.pointerLocked = document.pointerLockElement === canvas;
+});
+window.addEventListener('mousemove', e => {
+  if (state.pointerLocked) {
+    state.mouseDx += e.movementX;
+  }
+});
+
+// Mouse-wheel rotates the player in place (scroll right/down = turn right).
+window.addEventListener('wheel', e => {
+  // deltaX is horizontal scroll (trackpads); deltaY is vertical scroll.
+  // Use whichever has the larger magnitude so any scroll axis rotates.
+  const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+  state.mouseDx += d * 0.5;
+  e.preventDefault();
+}, { passive:false });
+
+document.getElementById('restart').onclick = reset;
+
+// audio gesture
+let _audioStarted = false;
+function _startAudio() { _audioStarted = true; }
+window.addEventListener('keydown', _startAudio, {once:true});
+window.addEventListener('pointerdown', _startAudio, {once:true});
+
+// ============ COLLISION ============
+function moveWithCollision(ent, nx, ny, r=0.25) {
+  // slide on axes
+  if (!isWall(nx, ent.y)) ent.x = nx;
+  else if (!isWall(nx+Math.sign(nx-ent.x)*r, ent.y)) { /* nope */ }
+  if (!isWall(ent.x, ny)) ent.y = ny;
+}
+function tryMove(x, y, nx, ny, r=0.2) {
+  let rx = x, ry = y;
+  // x axis
+  const tx = nx + Math.sign(nx-x)*r;
+  if (!isWall(tx, y - r) && !isWall(tx, y + r)) rx = nx;
+  const ty = ny + Math.sign(ny-y)*r;
+  if (!isWall(rx - r, ty) && !isWall(rx + r, ty)) ry = ny;
+  return {x:rx, y:ry};
+}
+
+// ============ AI: line of sight ============
+function lineOfSight(x1,y1,x2,y2) {
+  const dx=x2-x1, dy=y2-y1;
+  const dist = Math.hypot(dx,dy);
+  const steps = Math.ceil(dist*8);
+  for (let i=1;i<steps;i++) {
+    const t = i/steps;
+    const x = x1+dx*t, y=y1+dy*t;
+    if (isWall(x,y)) return false;
+  }
+  return true;
+}
+
+// ============ UPDATE ============
+function update(dt) {
+  if (state.over) return;
+  state.time += dt;
+
+  const p = state.player;
+
+  // turning
+  const mouseSens = 0.003;
+  p.angle += state.mouseDx * mouseSens;
+  state.mouseDx = 0;
+  const turnSpeed = 2.4;
+  if (state.keys.turnLeft) p.angle -= turnSpeed*dt;
+  if (state.keys.turnRight) p.angle += turnSpeed*dt;
+
+  // movement: forward/back along facing, strafe sideways
+  const speed = 3.2;
+  let fwd = 0, strafe = 0;
+  if (state.keys.up) fwd += 1;
+  if (state.keys.down) fwd -= 1;
+  if (state.keys.left) strafe -= 1;
+  if (state.keys.right) strafe += 1;
+  if (fwd || strafe) {
+    const mag = Math.hypot(fwd,strafe);
+    fwd/=mag; strafe/=mag;
+    const cs=Math.cos(p.angle), sn=Math.sin(p.angle);
+    const vx = (cs*fwd - sn*strafe)*speed*dt;
+    const vy = (sn*fwd + cs*strafe)*speed*dt;
+    const m = tryMove(p.x, p.y, p.x+vx, p.y+vy, 0.22);
+    p.x = m.x; p.y = m.y;
+  }
+
+  // exit detection
+  if (tileAt(p.x,p.y)===5) {
+    winLevel();
+    return;
+  }
+
+  // pickups
+  for (const pk of state.pickups) {
+    if (pk.taken) continue;
+    const dx=pk.x-p.x, dy=pk.y-p.y;
+    if (dx*dx+dy*dy < 0.18) {
+      pk.taken = true;
+      if (pk.type==='health') { p.hp = Math.min(200, p.hp+50); }
+      else if (pk.type==='ammo') { p.ammo += 15; }
+      play('pickup');
+    }
+  }
+
+  // fire
+  state.fireCooldown -= dt;
+  if (state.fireQueued && state.fireCooldown<=0) {
+    state.fireQueued = false;
+    if (p.ammo>0) {
+      p.ammo--;
+      state.fireCooldown = 0.35;
+      state.gunFlash = 0.12;
+      state.recoil = 1.0;
+      play('shoot');
+      doShot();
+    } else {
+      state.fireCooldown = 0.25;
+      play('empty');
+    }
+  }
+  state.fireQueued = false;
+  state.gunFlash = Math.max(0, state.gunFlash - dt);
+  state.recoil = Math.max(0, state.recoil - dt*4);
+
+  // monsters
+  for (const m of state.monsters) {
+    m.frameT += dt;
+    if (m.state==='dead') continue;
+    if (m.state==='dying') {
+      m.dieT += dt;
+      if (m.dieT>0.5) m.state='dead';
+      continue;
+    }
+    if (m.state==='pain') {
+      m.painT -= dt;
+      if (m.painT<=0) m.state='chase';
+      continue;
+    }
+    const dx = p.x - m.x, dy = p.y - m.y;
+    const dist = Math.hypot(dx,dy);
+    const sees = dist<14 && lineOfSight(m.x,m.y,p.x,p.y);
+
+    if (sees || m.state==='chase' || dist<3) {
+      if (m.state==='idle' && sees) { play('monster_growl'); }
+      m.state = 'chase';
+      m.anim = 'walk';
+      m.angle = Math.atan2(dy,dx);
+      // attack range
+      if (dist<1.2) {
+        m.atkCd -= dt;
+        m.anim = 'attack';
+        if (m.atkCd<=0 && lineOfSight(m.x,m.y,p.x,p.y)) {
+          m.atkCd = 1.2;
+          p.hp -= 8 + Math.random()*5;
+          play('player_hurt');
+          if (p.hp<=0) { p.hp=0; gameOver(); return; }
+        }
+      } else {
+        // greedy move toward player with wall slide
+        const sp = 1.5*dt;
+        const vx = Math.cos(m.angle)*sp;
+        const vy = Math.sin(m.angle)*sp;
+        const nm = tryMove(m.x,m.y,m.x+vx,m.y+vy,0.25);
+        // anti-stuck wiggle
+        if (Math.hypot(nm.x-m.x, nm.y-m.y)<sp*0.5) {
+          // try perpendicular
+          const aw = m.angle + (Math.random()<0.5?Math.PI/2:-Math.PI/2);
+          const nx = m.x + Math.cos(aw)*sp;
+          const ny = m.y + Math.sin(aw)*sp;
+          const n2 = tryMove(m.x,m.y,nx,ny,0.25);
+          m.x = n2.x; m.y = n2.y;
+        } else {
+          m.x = nm.x; m.y = nm.y;
+        }
+        // range attack: occasional
+        m.atkCd -= dt;
+        if (dist<8 && dist>1.5 && m.atkCd<=0 && Math.random()<0.005) {
+          m.atkCd = 2.0;
+          // hitscan with falloff
+          if (Math.random()<0.4) {
+            p.hp -= 5;
+            play('player_hurt');
+            if (p.hp<=0) { p.hp=0; gameOver(); return; }
+          }
+        }
+      }
+    } else {
+      m.anim = 'idle';
+    }
+  }
+
+  // particles
+  for (const pt of state.particles) {
+    pt.life -= dt;
+    pt.x += pt.vx*dt;
+    pt.y += pt.vy*dt;
+    pt.vx *= 0.9;
+    pt.vy *= 0.9;
+  }
+  state.particles = state.particles.filter(p=>p.life>0);
+
+  // check win
+  // (winLevel triggered by exit tile)
+}
+
+function doShot() {
+  const p = state.player;
+  // hitscan along view direction; find nearest monster within wall dist
+  const cs=Math.cos(p.angle), sn=Math.sin(p.angle);
+  // wall distance
+  let wallDist = castRay(p.x,p.y,p.angle).dist;
+  // find monster intersection
+  let best = null, bestT = wallDist;
+  for (const m of state.monsters) {
+    if (m.state==='dead'||m.state==='dying') continue;
+    const dx = m.x-p.x, dy = m.y-p.y;
+    const t = dx*cs + dy*sn; // distance along ray
+    if (t<0 || t>bestT) continue;
+    // perpendicular dist
+    const perp = Math.abs(-dy*cs + dx*sn);
+    const radius = 0.35 + 0.15*(1/Math.max(0.5,t));
+    if (perp < radius && t < bestT) { bestT = t; best = m; }
+  }
+  if (best) {
+    best.hp -= 18 + Math.random()*8;
+    play('hit');
+    // blood particles
+    for (let i=0;i<8;i++) {
+      state.particles.push({
+        x:best.x, y:best.y, vx:(Math.random()-0.5)*2, vy:(Math.random()-0.5)*2,
+        life:0.5, col:'#a00'
+      });
+    }
+    if (best.hp<=0) {
+      best.state = 'dying';
+      best.dieT = 0;
+      best.anim = 'die';
+      state.player.score += 100;
+      state.player.kills += 1;
+      play('monster_die');
+    } else {
+      best.state = 'pain';
+      best.painT = 0.18;
+      best.anim = 'pain';
+    }
+  }
+}
+
+function gameOver() {
+  state.over = true;
+  document.getElementById('endTitle').textContent = 'YOU DIED';
+  document.getElementById('endScore').textContent = state.player.score;
+  document.getElementById('modal').classList.remove('win');
+  document.getElementById('modal').style.display = 'grid';
+}
+function winLevel() {
+  state.over = true;
+  state.won = true;
+  document.getElementById('endTitle').textContent = 'LEVEL CLEAR';
+  document.getElementById('endScore').textContent = state.player.score;
+  document.getElementById('modal').classList.add('win');
+  document.getElementById('modal').style.display = 'grid';
+}
+
+// ============ RAYCASTER ============
+const FOV = Math.PI/3;
+let zBuffer = new Float32Array(0);
+
+function castRay(px,py,angle) {
+  // DDA
+  const dx = Math.cos(angle), dy = Math.sin(angle);
+  let mapX = Math.floor(px), mapY = Math.floor(py);
+  const deltaX = Math.abs(1/dx), deltaY = Math.abs(1/dy);
+  let stepX, stepY, sideDistX, sideDistY;
+  if (dx<0) { stepX=-1; sideDistX = (px-mapX)*deltaX; }
+  else { stepX=1; sideDistX = (mapX+1-px)*deltaX; }
+  if (dy<0) { stepY=-1; sideDistY = (py-mapY)*deltaY; }
+  else { stepY=1; sideDistY = (mapY+1-py)*deltaY; }
+  let side = 0;
+  for (let i=0;i<128;i++) {
+    if (sideDistX<sideDistY) {
+      sideDistX += deltaX; mapX += stepX; side = 0;
+    } else {
+      sideDistY += deltaY; mapY += stepY; side = 1;
+    }
+    if (mapX<0||mapY<0||mapX>=MAP_W||mapY>=MAP_H) {
+      return { dist:50, side, mapX, mapY, tile:1, hitX:0 };
+    }
+    const t = MAP[mapY][mapX];
+    if (t!==0 && t!==5) {
+      let dist;
+      if (side===0) dist = (mapX - px + (1-stepX)/2) / dx;
+      else dist = (mapY - py + (1-stepY)/2) / dy;
+      let hitX;
+      if (side===0) hitX = py + dist*dy;
+      else hitX = px + dist*dx;
+      hitX -= Math.floor(hitX);
+      return { dist:Math.max(0.01,dist), side, mapX, mapY, tile:t, hitX };
+    }
+  }
+  return { dist:50, side:0, mapX, mapY, tile:1, hitX:0 };
+}
+
+// ============ RENDER ============
+function tileTexture(t) {
+  switch (t) {
+    case 1: return ASSETS.wall_brick;
+    case 2: return ASSETS.wall_stone;
+    case 3: return ASSETS.wall_metal;
+    case 4: return ASSETS.wall_door;
+    case 5: return ASSETS.wall_exit;
+    default: return ASSETS.wall_brick;
+  }
+}
+
+function render() {
+  const w = W(), h = H();
+
+  // sky/ceiling and floor: use a textured floor with horizontal scanline mapping
+  // simple gradient for speed + texture overlay strips
+  // Draw ceiling
+  const cg = ctx.createLinearGradient(0,0,0,h/2);
+  cg.addColorStop(0,'#1a1a22'); cg.addColorStop(1,'#0a0a10');
+  ctx.fillStyle = cg;
+  ctx.fillRect(0,0,w,h/2);
+  // Draw floor
+  const fg = ctx.createLinearGradient(0,h/2,0,h);
+  fg.addColorStop(0,'#1a1208'); fg.addColorStop(1,'#0a0805');
+  ctx.fillStyle = fg;
+  ctx.fillRect(0,h/2,w,h/2);
+
+  // overlay floor texture cheaply with low alpha tiles
+  if (ASSETS.floor_tex) {
+    const pat = ctx.createPattern(ASSETS.floor_tex, 'repeat');
+    if (pat) {
+      ctx.globalAlpha = 0.18;
+      ctx.fillStyle = pat;
+      ctx.save();
+      ctx.translate(0, h/2);
+      ctx.fillRect(0, 0, w, h/2);
+      ctx.restore();
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  if (zBuffer.length !== w) zBuffer = new Float32Array(w);
+
+  const p = state.player;
+  const pa = p.angle;
+
+  // raycast walls
+  for (let x=0; x<w; x++) {
+    const cameraX = 2*x/w - 1;
+    const rayAngle = pa + Math.atan(cameraX*Math.tan(FOV/2));
+    const r = castRay(p.x, p.y, rayAngle);
+    // correct fisheye
+    const corr = Math.cos(rayAngle - pa);
+    const dist = r.dist * corr;
+    zBuffer[x] = dist;
+
+    const lineH = Math.min(h*4, (h / dist));
+    const y0 = (h - lineH)/2;
+    const tex = tileTexture(r.tile);
+
+    if (tex && tex.complete && tex.naturalWidth>0) {
+      const tw = tex.naturalWidth;
+      let texX = Math.floor(r.hitX * tw);
+      if (r.side===0 && Math.cos(rayAngle)>0) texX = tw-texX-1;
+      if (r.side===1 && Math.sin(rayAngle)<0) texX = tw-texX-1;
+      texX = Math.max(0, Math.min(tw-1, texX));
+      ctx.drawImage(tex, texX, 0, 1, tex.naturalHeight, x, y0, 1, lineH);
+    } else {
+      // fallback
+      const col = r.tile===5 ? '#0f0' : r.tile===4 ? '#a52' : r.tile===3 ? '#666' : r.tile===2 ? '#888' : '#a73';
+      ctx.fillStyle = col; ctx.fillRect(x, y0, 1, lineH);
+    }
+
+    // distance shading
+    const shade = Math.min(0.85, dist*0.08);
+    if (shade>0.02) {
+      ctx.fillStyle = `rgba(0,0,0,${shade})`;
+      ctx.fillRect(x, y0, 1, lineH);
+    }
+    if (r.side===1) {
+      ctx.fillStyle = 'rgba(0,0,0,0.18)';
+      ctx.fillRect(x, y0, 1, lineH);
+    }
+  }
+
+  // ============ SPRITES (monsters + pickups + particles) ============
+  const sprites = [];
+  for (const m of state.monsters) {
+    const dx = m.x - p.x, dy = m.y - p.y;
+    sprites.push({ kind:'monster', ref:m, dx, dy, dist:dx*dx+dy*dy });
+  }
+  for (const pk of state.pickups) {
+    if (pk.taken) continue;
+    const dx = pk.x - p.x, dy = pk.y - p.y;
+    sprites.push({ kind:'pickup', ref:pk, dx, dy, dist:dx*dx+dy*dy });
+  }
+  for (const pt of state.particles) {
+    const dx = pt.x - p.x, dy = pt.y - p.y;
+    sprites.push({ kind:'particle', ref:pt, dx, dy, dist:dx*dx+dy*dy });
+  }
+  sprites.sort((a,b)=>b.dist-a.dist);
+
+  const cs = Math.cos(-pa), sn = Math.sin(-pa);
+  for (const s of sprites) {
+    // transform to camera space
+    const tx = s.dx*cs - s.dy*sn;
+    const ty = s.dx*sn + s.dy*cs;
+    if (ty<=0.1) continue;
+    const screenX = (w/2) * (1 + tx/(ty*Math.tan(FOV/2)));
+    const size = (h/ty);
+    let sw, sh, img, vOff = 0;
+    if (s.kind==='monster') {
+      const m = s.ref;
+      sw = sh = size*0.9;
+      img = monsterFrame(m);
+      vOff = 0;
+    } else if (s.kind==='pickup') {
+      sw = sh = size*0.4;
+      img = s.ref.type==='health' ? ASSETS.pickup_health : ASSETS.pickup_ammo;
+      vOff = size*0.25;
+    } else {
+      sw = sh = size*0.05;
+      img = null;
+    }
+    const drawX = screenX - sw/2;
+    const drawY = (h-sh)/2 + vOff;
+
+    // clip per column via zBuffer
+    const startX = Math.max(0, Math.floor(drawX));
+    const endX = Math.min(w-1, Math.floor(drawX + sw));
+    for (let cx=startX; cx<=endX; cx++) {
+      if (ty < zBuffer[cx]) {
+        // draw column strip
+        const stripFrac = (cx - drawX)/sw;
+        if (img && img.complete && img.naturalWidth>0) {
+          const srcX = Math.floor(stripFrac * img.naturalWidth);
+          ctx.drawImage(img, srcX, 0, 1, img.naturalHeight, cx, drawY, 1, sh);
+        } else if (s.kind==='particle') {
+          const a = Math.max(0, s.ref.life/0.5);
+          ctx.fillStyle = `rgba(180,0,0,${a})`;
+          ctx.fillRect(cx, drawY, 1, sh);
+        }
+      }
+    }
+
+    // distance shading for sprite
+    const shade = Math.min(0.7, ty*0.07);
+    if (shade>0.02) {
+      ctx.fillStyle = `rgba(0,0,0,${shade})`;
+      for (let cx=startX; cx<=endX; cx++) {
+        if (ty < zBuffer[cx]) ctx.fillRect(cx, drawY, 1, sh);
+      }
+    }
+  }
+
+  // ============ GUN (centered) ============
+  drawGun();
+  // ============ CROSSHAIR ============
+  ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(w/2-6, h/2); ctx.lineTo(w/2+6, h/2);
+  ctx.moveTo(w/2, h/2-6); ctx.lineTo(w/2, h/2+6);
+  ctx.stroke();
+
+  // ============ MINIMAP ============
+  drawMinimap();
+
+  // ============ DAMAGE FLASH ============
+  if (p.hp < 30) {
+    ctx.fillStyle = `rgba(180,0,0,${0.15+Math.sin(state.time*8)*0.05})`;
+    ctx.fillRect(0,0,w,h);
+  }
+}
+
+function monsterFrame(m) {
+  if (m.state==='dead') return ASSETS.monster_death2;
+  if (m.state==='dying') {
+    return m.dieT<0.25 ? ASSETS.monster_death1 : ASSETS.monster_death2;
+  }
+  if (m.state==='pain') return ASSETS.monster_pain;
+  if (m.anim==='attack') return ASSETS.monster_attack;
+  if (m.anim==='walk') {
+    const idx = Math.floor(m.frameT*4) % 2;
+    return idx===0 ? ASSETS.monster_walk1 : ASSETS.monster_walk2;
+  }
+  return ASSETS.monster_idle;
+}
+
+function drawGun() {
+  const w = W(), h = H();
+  const firing = state.gunFlash>0;
+  const img = firing ? (ASSETS.gun_fire || ASSETS.gun_idle) : ASSETS.gun_idle;
+  const gw = w*0.42;
+  const gh = gw * 0.75;
+  // Always-on idle breathing sway + larger walking bob so the scene is
+  // never frozen even when standing still (probes look for pixel deltas).
+  const moving = (state.keys.up||state.keys.down||state.keys.left||state.keys.right);
+  const idleSway = Math.sin(state.time*1.6) * 2;
+  const walkBob = Math.sin(state.time*8) * 4 * (moving?1:0);
+  const bob = idleSway + walkBob;
+  const swayX = Math.cos(state.time*1.2) * 2;
+  const recoilY = state.recoil * 18;
+  // Use detected barrel-tip anchor (image-space [0..1]) so the actual
+  // barrel pixel column lands on canvas center X regardless of the
+  // sprite's internal framing. Fall back to top-center if unknown.
+  const anchorName = firing ? 'gun_fire' : 'gun_idle';
+  const detected = ASSET_ANCHOR[anchorName] || ASSET_ANCHOR.gun_idle || {x:0.5, y:0.0};
+  // The gun PNGs are prompted to be horizontally symmetric with the
+  // barrel at image-center, so we IGNORE the detected x-anchor (which
+  // can be skewed by asymmetric silhouette antialiasing) and force the
+  // sprite to be centered on the canvas. Only the detected y-anchor is
+  // used, for vertical muzzle-flash placement.
+  const anchor = { x: 0.5, y: detected.y };
+  const x = w/2 - anchor.x * gw + swayX;
+  const y = h - gh + recoilY + bob;
+  // Barrel-tip screen position (where muzzle flash + crosshair line up).
+  const tipX = w/2 + swayX;
+  const tipY = y + anchor.y * gh;
+  if (img && img.complete && img.naturalWidth>0) {
+    ctx.drawImage(img, x, y, gw, gh);
+  } else {
+    // procedural gun fallback so barrel is still centered
+    ctx.fillStyle = '#222';
+    ctx.fillRect(w/2 - gw*0.35, y + gh*0.3, gw*0.7, gh*0.55);
+    ctx.fillStyle = '#555';
+    ctx.fillRect(w/2 - 8, y + gh*0.05, 16, gh*0.3);
+    ctx.fillStyle = '#111';
+    ctx.fillRect(w/2 - 4, y, 8, 10);
+  }
+  // muzzle flash centered exactly on the detected barrel tip.
+  if (firing) {
+    const fa = state.gunFlash/0.12;
+    const fs = gh*0.55 * (1.0 + (1-fa)*0.5);
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    if (ASSETS.muzzle_flash && ASSETS.muzzle_flash.complete) {
+      ctx.globalAlpha = fa;
+      ctx.drawImage(ASSETS.muzzle_flash, tipX - fs/2, tipY - fs/2, fs, fs);
+    } else {
+      const grd = ctx.createRadialGradient(tipX, tipY, 0, tipX, tipY, fs/2);
+      grd.addColorStop(0, `rgba(255,240,180,${fa})`);
+      grd.addColorStop(0.5,`rgba(255,140,40,${fa*0.7})`);
+      grd.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = grd;
+      ctx.beginPath(); ctx.arc(tipX, tipY, fs/2, 0, Math.PI*2); ctx.fill();
+    }
+    ctx.restore();
+    // light up scene briefly
+    ctx.fillStyle = `rgba(255,180,80,${fa*0.08})`;
+    ctx.fillRect(0,0,w,h);
+  }
+}
+
+function drawMinimap() {
+  const w = W(), h = H();
+  const size = 140;
+  const pad = 10;
+  const ox = w - size - pad;
+  const oy = pad;
+  const cellW = size/MAP_W;
+  const cellH = size/MAP_H;
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.fillRect(ox-2, oy-2, size+4, size+4);
+  for (let y=0;y<MAP_H;y++) {
+    for (let x=0;x<MAP_W;x++) {
+      const t = MAP[y][x];
+      if (t===0) {
+        ctx.fillStyle = '#222';
+      } else if (t===5) {
+        ctx.fillStyle = '#0f0';
+      } else if (t===4) {
+        ctx.fillStyle = '#a52';
+      } else {
+        ctx.fillStyle = '#666';
+      }
+      ctx.fillRect(ox+x*cellW, oy+y*cellH, cellW+0.5, cellH+0.5);
+    }
+  }
+  // pickups
+  for (const pk of state.pickups) {
+    if (pk.taken) continue;
+    ctx.fillStyle = pk.type==='health' ? '#f44' : '#fd0';
+    ctx.fillRect(ox+pk.x*cellW-1, oy+pk.y*cellH-1, 3, 3);
+  }
+  // monsters
+  for (const m of state.monsters) {
+    if (m.state==='dead') continue;
+    ctx.fillStyle = '#f60';
+    ctx.fillRect(ox+m.x*cellW-1.5, oy+m.y*cellH-1.5, 3.5, 3.5);
+  }
+  // player
+  const p = state.player;
+  const px = ox + p.x*cellW, py = oy + p.y*cellH;
+  // FOV cone
+  ctx.fillStyle = 'rgba(255,255,80,0.25)';
+  ctx.beginPath();
+  ctx.moveTo(px,py);
+  ctx.arc(px, py, 18, p.angle - FOV/2, p.angle + FOV/2);
+  ctx.closePath(); ctx.fill();
+  // arrow
+  ctx.fillStyle = '#ff0';
+  ctx.beginPath();
+  ctx.moveTo(px+Math.cos(p.angle)*5, py+Math.sin(p.angle)*5);
+  ctx.lineTo(px+Math.cos(p.angle+2.5)*3, py+Math.sin(p.angle+2.5)*3);
+  ctx.lineTo(px+Math.cos(p.angle-2.5)*3, py+Math.sin(p.angle-2.5)*3);
+  ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+
+// ============ HUD ============
+function updateHUD() {
+  document.getElementById('hp').textContent = Math.max(0,Math.floor(state.player.hp));
+  document.getElementById('ammo').textContent = state.player.ammo;
+  document.getElementById('score').textContent = state.player.score;
+  document.getElementById('kills').textContent = state.player.kills;
+  document.getElementById('totalk').textContent = state.totalMonsters;
+  document.getElementById('lvl').textContent = state.level;
+}
+
+// ============ FRAME LOOP ============
+let last = performance.now();
+let booted = false;
+
+function frame(now) {
+  const dt = Math.min(0.05, (now-last)/1000);
+  last = now;
+  try {
+    update(dt);
+    render();
+    updateHUD();
+  } catch(err) {
+    console.error('frame crashed:', err);
+  }
+  requestAnimationFrame(frame);
+}
+
+// boot
+(async () => {
+  await loadAssets();
+  booted = true;
+  last = performance.now();
+  requestAnimationFrame(frame);
+})();
+
+})();
+</script>
+</body></html>

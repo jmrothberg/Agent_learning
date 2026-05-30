@@ -1,0 +1,1 @@
+a super graphical adventure game where all the players and all their actions are fully annimated, with the characters walking on a 3D game field. highest resolution for all the characters, the player and MPCs, and the backgrounds. use the arrow key to move around

@@ -4643,7 +4643,7 @@ class CodingBoxApp(App):
         aliases = {
             "claude": "claude-sonnet-4-6",
             "sonnet": "claude-sonnet-4-6",
-            "opus": "claude-opus-4-7",
+            "opus": "claude-opus-4-8",
             "haiku": "claude-haiku-4-5",
             "gpt": "gpt-5",
             "openai": "gpt-5",

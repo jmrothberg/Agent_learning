@@ -1,0 +1,9 @@
+{
+  "session_id": "street-fighter-game-with-super_20260518_220003",
+  "goal": "Street-fighter game with super large player and opponent, with large amounts of annimations for kicking, punching, jumping, ducking, blocking, throwing fireball, getting hit by a blow or a fire ball.  Always the highes resultion and large size, and well annomated.  figher always facing the computer controlled opponent. graphics copied from the game of Street-fighter. Make graphics as detailed and as large as reasonable, and characters modeled after the original street-fighter game",
+  "model": "/Users/jonathanrothberg/MLX_Models/Qwen3.6-27B-bf16",
+  "iterations": 14,
+  "ok": true,
+  "last_report_summary": "OK: False\nTitle: 'Street Fighter'\nCanvas: 1200x675, RAF ran: True, blank: False\nInput listeners: total=3 (doc=0, win=3, body=0, other=0)\nInput test: PASS \u2014 ArrowUp\u2192[player.grounded, player.vx, player.vy, player.x, player.y]; ArrowDown\u2192[cpu.cd, player.vy, player.x, player.y, projectiles.0.life]; ArrowLeft\u2192[cpu.cd, cpu.vx, cpu.x, player.hp, player.vx]; ArrowRight\u2192[cpu.cd, cpu.vx, cpu.x, player.vx, player.x]\nFrozen canvas: no (pixels changed during run)\nBody text length: 71 chars\nBody sample: '94\\n\u2190 \u2192 Move | \u2191 Jump | \u2193 Duck | J Punch | K Kick | L Fireball | U Block'\nISSUES (must fix):\n  - partial patch apply: 1 patch block(s) did not apply; fix not complete.\nWarnings:\n  - Canvas2D: Multiple readback operations using getImageData are faster with the willReadFrequently attribute set to true. See: https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently\nAcceptance probes: 7/7 pass\n  ok  canvas_present: !!document.querySelector('canvas')\n  ok  both_characters_vis",
+  "ts": "2026-05-19T14:45:10.315207Z"
+}

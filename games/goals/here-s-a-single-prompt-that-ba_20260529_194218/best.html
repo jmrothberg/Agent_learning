@@ -1,0 +1,665 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ryu vs Ken</title>
+<style>
+  :root { color-scheme: dark; --bg:#0b1020; --fg:#e7ecff; --accent:#3b62ff; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font:16px/1.4 system-ui,sans-serif; overflow:hidden;
+    -webkit-tap-highlight-color:transparent; user-select:none; }
+  #wrap { position:fixed; inset:0; display:grid; place-items:center; }
+  canvas { background:#10162e; border-radius:12px; box-shadow:0 10px 40px #0008;
+    max-width:98vw; max-height:92vh; touch-action:none; }
+  #help { position:fixed; bottom:8px; left:12px; opacity:.8; font-size:12px;
+    pointer-events:none; text-shadow:0 1px 2px #000; }
+  #cpuBtn { position:fixed; top:12px; right:12px; z-index:5; }
+  button { background:var(--accent); color:#fff; border:0; padding:8px 14px;
+    border-radius:8px; font-size:14px; cursor:pointer; }
+  button:hover { filter:brightness(1.1); }
+  #errOverlay { position:fixed; inset:auto 12px 12px 12px; max-height:30%;
+    overflow:auto; background:#400; color:#fdd; padding:8px 12px; font:12px/1.3 monospace;
+    border-radius:6px; display:none; pointer-events:none; }
+  #loading { position:fixed; inset:0; display:grid; place-items:center;
+    font-size:22px; background:#0b1020; z-index:9; }
+</style></head>
+<body>
+<div id="wrap"><canvas id="c" width="960" height="540"></canvas></div>
+<button id="cpuBtn">CPU: OFF (M)</button>
+<div id="help">P1: A/D move · W jump · S crouch · F punch · G kick · T fireball · &nbsp; P2: ←/→ move · ↑ jump · ↓ crouch · K punch · L kick · P fireball · &nbsp; R restart · M CPU</div>
+<div id="errOverlay"></div>
+<div id="loading">Loading…</div>
+<script>
+(() => {
+  "use strict";
+
+  const cvs = document.getElementById("c");
+  const ctx = cvs.getContext("2d");
+  const W = 960, H = 540;
+  const GROUND = H - 70;
+  const errBox = document.getElementById("errOverlay");
+  const cpuBtn = document.getElementById("cpuBtn");
+  const loadingEl = document.getElementById("loading");
+
+  function fit() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    cvs.width = W * dpr; cvs.height = H * dpr;
+    cvs.style.width = W + "px"; cvs.style.height = H + "px";
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  fit();
+  window.addEventListener("resize", fit);
+
+  // ---- Assets ----------------------------------------------------------
+  const DIR = "./here-s-a-single-prompt-that-ba_20260529_194218_assets/";
+  const SND = "./here-s-a-single-prompt-that-ba_20260529_194218_sounds/";
+  const ASSETS = {};
+  const ASSET_LIST = [
+    "ryu_idle","ryu_walk","ryu_crouch","ryu_jump","ryu_block",
+    "ryu_punch","ryu_punch2","ryu_punch3","ryu_punch4","ryu_kick","ryu_kick2","ryu_kick3",
+    "ryu_hurt","ryu_ko","ryu_throw",
+    "ken_idle","ken_walk","ken_crouch","ken_jump","ken_block",
+    "ken_punch","ken_punch2","ken_punch3","ken_punch4","ken_kick","ken_kick2","ken_kick3",
+    "ken_hurt","ken_ko","ken_throw",
+    "fireball","stage"
+  ];
+  async function loadAssets() {
+    await Promise.all(ASSET_LIST.map(async name => {
+      try {
+        const img = new Image();
+        img.src = DIR + name + ".png";
+        await img.decode();
+        ASSETS[name] = img;
+      } catch (e) { ASSETS[name] = null; }
+    }));
+  }
+
+  // ---- Sounds ----------------------------------------------------------
+  const SOUNDS = {};
+  function loadSounds() {
+    const entries = [
+      ["hit", SND+"hit.ogg", false],
+      ["kick", SND+"kick.ogg", false],
+      ["fireball", SND+"fireball.ogg", false],
+      ["ko", SND+"ko.ogg", false],
+      ["music", SND+"music.ogg", true],
+    ];
+    for (const [name, src, loop] of entries) {
+      try { const a = new Audio(src); a.loop = loop; if (loop) a.volume = 0.4; SOUNDS[name] = a; }
+      catch (e) {}
+    }
+  }
+  function play(name) {
+    const base = SOUNDS[name]; if (!base) return;
+    try {
+      if (base.loop) { base.play().catch(()=>{}); return; }
+      const inst = base.cloneNode(); inst.volume = 0.7; inst.play().catch(()=>{});
+    } catch (e) {}
+  }
+  let _audioStarted = false;
+  function startAudio() {
+    if (_audioStarted) return; _audioStarted = true;
+    if (SOUNDS.music) SOUNDS.music.play().catch(()=>{});
+  }
+  window.addEventListener("keydown", startAudio, { once:true });
+  window.addEventListener("pointerdown", startAudio, { once:true });
+
+  // ---- Animation definitions -------------------------------------------
+  // Each move is one base PNG; we synthesize sub-frames by easing
+  // scale/offset/glow so the move VISIBLY animates through a sequence
+  // while staying the same drawn character.
+  // def: { sprite, frames, fps, loop, returnTo, attack:{start,end}, throw, hurtLock }
+  const ANIM = {
+    idle:   { sprite:"idle",   frames:4, fps:6,  loop:true },
+    walk:   { sprite:"walk",   frames:4, fps:9,  loop:true },
+    jump:   { sprite:"jump",   frames:4, fps:8,  loop:true },
+    crouch: { sprite:"crouch", frames:2, fps:6,  loop:true },
+    block:  { sprite:"block",  frames:2, fps:6,  loop:true },
+    punch:  { sprite:"punch",  frames:5, fps:16, loop:false, returnTo:"idle", attack:{start:1,end:2, dmg:7, kind:"hit"},
+              seq:["punch","punch2","punch3","punch4","punch4"] },
+    kick:   { sprite:"kick",   frames:5, fps:14, loop:false, returnTo:"idle", attack:{start:2,end:3, dmg:10, kind:"kick", reach:1.4},
+              seq:["kick","kick2","kick2","kick3","kick3"] },
+    hurt:   { sprite:"hurt",   frames:4, fps:14, loop:false, returnTo:"idle", hurtLock:true },
+    ko:     { sprite:"ko",     frames:5, fps:8,  loop:false, returnTo:"ko" },
+    throw:  { sprite:"throw",  frames:6, fps:13, loop:false, returnTo:"idle", throw:true },
+  };
+
+  // ---- Fighter ---------------------------------------------------------
+  const FW = 150, FH = 210;            // draw box
+  const SPEED = 165, JUMP_V = -560, GRAV = 1500;
+
+  function makeFighter(opts) {
+    const f = {
+      prefix: opts.prefix,
+      x: opts.x, y: GROUND, vy: 0,
+      facing: opts.facing,             // +1 faces right, -1 faces left
+      native: 1,                       // sprites drawn facing right
+      state: "idle", frame: 0, frameTime: 0,
+      onGround: true, hp: 100, maxHp: 100,
+      everPunched: false, hasHit: false,
+      flashT: 0,
+    };
+    f.kickFlip = 1; // all attack sprites now drawn facing right
+    f.queue = function(st) { setState(f, st); };
+    return f;
+  }
+
+  function setState(f, st) {
+    if (f.state === "ko") return;
+    f.state = st; f.frame = 0; f.frameTime = 0; f.hasHit = false;
+    if (st === "punch") f.everPunched = true;
+  }
+
+  // Action states that lock out movement input
+  const LOCKED = { punch:1, kick:1, hurt:1, throw:1, ko:1 };
+  const isLocked = (f) => !!LOCKED[f.state];
+
+  // ---- Game state ------------------------------------------------------
+  let state, rafHandle = 0;
+  function newState() {
+    return {
+      p1: makeFighter({ prefix:"ryu", x:280, facing:1 }),
+      p2: makeFighter({ prefix:"ken", x:680, facing:-1 }),
+      projectiles: [],
+      effects: [],
+      cpu: false,
+      over: false, winner: null,
+      frameCount: 0, t: 0,
+      cpuTimer: 0, cpuAction: 0,
+    };
+  }
+
+  function reset() {
+    state = newState();
+    errBox.style.display = "none"; errBox.textContent = "";
+    cpuBtn.textContent = "CPU: OFF (M)";
+    if (rafHandle) cancelAnimationFrame(rafHandle);
+    last = performance.now();
+    rafHandle = requestAnimationFrame(frame);
+    window.gameState = state;
+  }
+  function toggleCPU() {
+    if (!state) return;
+    state.cpu = !state.cpu;
+    cpuBtn.textContent = "CPU: " + (state.cpu ? "ON" : "OFF") + " (M)";
+    // when enabling CPU, return p2 to a neutral state
+    if (state.cpu && !isLocked(state.p2) && state.p2.state !== "ko") setState(state.p2, "idle");
+  }
+  cpuBtn.addEventListener("click", toggleCPU);
+
+  // ---- Input -----------------------------------------------------------
+  const keys = Object.create(null);
+  const pressed = Object.create(null);
+  const P1_KEYS = {
+    KeyA:"p1_left", KeyD:"p1_right", KeyW:"p1_jump", KeyS:"p1_crouch",
+    KeyF:"p1_punch", KeyG:"p1_kick", KeyT:"p1_fire",
+  };
+  const P2_KEYS = {
+    ArrowLeft:"p2_left", ArrowRight:"p2_right", ArrowUp:"p2_jump", ArrowDown:"p2_crouch",
+    KeyK:"p2_punch", KeyL:"p2_kick", KeyP:"p2_fire",
+  };
+  const ALL_KEYS = Object.assign({}, P1_KEYS, P2_KEYS);
+  function onKey(e, down) {
+    if (e.code === "KeyR" && down) { reset(); e.preventDefault(); return; }
+    if (e.code === "KeyM" && down) { toggleCPU(); e.preventDefault(); return; }
+    const k = ALL_KEYS[e.code];
+    if (!k) return;
+    if (down) { if (!keys[k]) pressed[k] = true; keys[k] = true; e.preventDefault(); }
+    else keys[k] = false;
+  }
+  window.addEventListener("keydown", e => onKey(e, true), { passive:false });
+  window.addEventListener("keyup", e => onKey(e, false), { passive:false });
+  window.addEventListener("blur", () => { for (const k in keys) keys[k]=false; });
+
+  // ---- Per-fighter control ---------------------------------------------
+  function controlFighter(f, ph, dt) {
+    // ph = "p1" or "p2"; uses keys[ph+"_..."]
+    if (f.state === "ko") return;
+    const opp = (f === state.p1) ? state.p2 : state.p1;
+    // facing toward opponent (only when grounded / not mid-action)
+    if (f.onGround && !isLocked(f)) {
+      f.facing = (opp.x >= f.x) ? 1 : -1;
+    }
+
+    const crouchKey = keys[ph+"_crouch"];
+    const leftKey = keys[ph+"_left"];
+    const rightKey = keys[ph+"_right"];
+    const jumpKey = keys[ph+"_jump"];
+
+    // start actions (only when not already locked, and grounded for most)
+    if (!isLocked(f)) {
+      if (pressed[ph+"_punch"]) { setState(f, "punch"); play("hit"); return; }
+      if (pressed[ph+"_kick"])  { setState(f, "kick");  play("kick"); return; }
+      if (pressed[ph+"_fire"])  { setState(f, "throw"); return; }
+    }
+
+    if (isLocked(f)) return;
+
+    if (f.onGround) {
+      if (jumpKey) {
+        f.vy = JUMP_V; f.onGround = false; setState(f, "jump"); return;
+      }
+      if (crouchKey) {
+        if (f.state !== "crouch" && f.state !== "block") setState(f, "crouch");
+        return;
+      }
+      // block when holding back (away from opponent)
+      const backKey = (f.facing === 1) ? leftKey : rightKey;
+      const fwdKey  = (f.facing === 1) ? rightKey : leftKey;
+      if (backKey && !fwdKey) {
+        if (f.state !== "block") setState(f, "block");
+        return;
+      }
+      // movement: only forward (toward opponent); backward holds block instead
+      const fwdPressed = (f.facing === 1) ? rightKey : leftKey;
+      if (fwdPressed) {
+        f.x += f.facing * SPEED * dt;
+        if (f.state !== "walk") setState(f, "walk");
+      } else {
+        if (f.state !== "idle") setState(f, "idle");
+      }
+    }
+  }
+
+  // ---- CPU AI ----------------------------------------------------------
+  function cpuControl(f, dt) {
+    if (f.state === "ko" || state.over) return;
+    const opp = state.p1;
+    if (f.onGround && !isLocked(f)) f.facing = (opp.x >= f.x) ? 1 : -1;
+    if (isLocked(f)) return;
+
+    state.cpuTimer -= dt;
+    const dist = Math.abs(opp.x - f.x);
+    const dir = (opp.x >= f.x) ? 1 : -1;
+
+    if (state.cpuTimer <= 0) {
+      state.cpuTimer = 0.4 + Math.random() * 0.7;
+      // pick an action based on distance
+      if (dist < 130) {
+        const r = Math.random();
+        if (r < 0.4) { setState(f, "punch"); play("hit"); return; }
+        else if (r < 0.75) { setState(f, "kick"); play("kick"); return; }
+        else { setState(f, "block"); state.cpuAction = 0.4; return; }
+      } else {
+        const r = Math.random();
+        if (r < 0.25 && f.onGround) { f.vy = JUMP_V; f.onGround = false; setState(f, "jump"); return; }
+        else if (r < 0.45) { setState(f, "throw"); return; }
+        else { state.cpuAction = 0.4; }  // walk toward
+      }
+    }
+    // approach toward opponent
+    if (f.onGround && dist > 110) {
+      f.x += dir * SPEED * 0.85 * dt;
+      if (f.state !== "walk") setState(f, "walk");
+    } else if (f.onGround && f.state === "walk") {
+      setState(f, "idle");
+    }
+  }
+
+  // ---- Attack hit detection --------------------------------------------
+  function fighterBox(f) {
+    return { x: f.x - FW*0.28, y: f.y - FH, w: FW*0.56, h: FH };
+  }
+  function attackBox(f) {
+    const def = ANIM[f.state];
+    if (!def || !def.attack) return null;
+    if (f.frame < def.attack.start || f.frame > def.attack.end) return null;
+    const reach = def.attack.reach || 1.0;
+    const aw = FW * 0.45 * reach;
+    const ay = (f.state === "kick") ? f.y - FH*0.85 : f.y - FH*0.65;
+    // attack reaches forward (toward opponent) in facing direction
+    const ax = (f.facing === 1) ? f.x + FW*0.12 : f.x - FW*0.12 - aw;
+    return { x: ax, y: ay, w: aw, h: FH*0.45, def };
+  }
+  function overlap(a, b) {
+    return a.x < b.x+b.w && a.x+a.w > b.x && a.y < b.y+b.h && a.y+a.h > b.y;
+  }
+
+  function applyHit(target, dmg, knock) {
+    if (target.state === "ko") return;
+    const blocking = (target.state === "block");
+    const real = blocking ? Math.max(1, Math.floor(dmg*0.25)) : dmg;
+    target.hp = Math.max(0, target.hp - real);
+    target.flashT = 0.12;
+    target.x += knock;
+    if (!blocking) setState(target, "hurt");
+    if (target.hp <= 0) {
+      setState(target, "ko");
+      target.hp = 0;
+    }
+  }
+
+  // ---- Fireball spawn at end of throw ----------------------------------
+  function spawnFireball(f) {
+    const handY = f.y - FH*0.55;
+    const handX = (f.facing === 1) ? f.x + FW*0.30 : f.x - FW*0.30;
+    state.projectiles.push({
+      x: handX, y: handY, vx: f.facing * 420,
+      owner: f, r: 34, life: 4,
+    });
+    play("fireball");
+  }
+
+  // ---- Per-fighter update ----------------------------------------------
+  function updateFighter(f, dt) {
+    if (f.flashT > 0) f.flashT -= dt;
+    // physics
+    if (!f.onGround) {
+      f.vy += GRAV * dt;
+      f.y += f.vy * dt;
+      if (f.y >= GROUND) {
+        f.y = GROUND; f.vy = 0; f.onGround = true;
+        if (f.state === "jump") setState(f, "idle");
+      }
+    }
+    // animation timing
+    const def = ANIM[f.state] || ANIM.idle;
+    f.frameTime += dt;
+    const frameDur = 1 / def.fps;
+    while (f.frameTime >= frameDur) {
+      f.frameTime -= frameDur;
+      const prevFrame = f.frame;
+      f.frame++;
+      if (f.frame >= def.frames) {
+        if (def.loop) {
+          f.frame = 0;
+        } else {
+          // finished a one-shot action
+          f.frame = def.frames - 1;
+          if (def.throw) { spawnFireball(f); }
+          if (def.returnTo && f.state !== "ko") {
+            const rt = def.returnTo;
+            setState(f, rt);
+          }
+          break;
+        }
+      }
+      // attack: deal damage during active window once
+      const opp = (f === state.p1) ? state.p2 : state.p1;
+      if (def.attack && !f.hasHit) {
+        const ab = attackBox(f);
+        if (ab) {
+          const tb = fighterBox(opp);
+          if (overlap(ab, tb)) {
+            f.hasHit = true;
+            applyHit(opp, def.attack.dmg, f.facing * 24);
+            play(def.attack.kind === "kick" ? "kick" : "hit");
+          }
+        }
+      }
+    }
+  }
+
+  // ---- Update ----------------------------------------------------------
+  function update(dt) {
+    if (state.over) {
+      // keep ticking KO animations
+      updateFighter(state.p1, dt);
+      updateFighter(state.p2, dt);
+      return;
+    }
+    state.t += dt; state.frameCount++;
+
+    controlFighter(state.p1, "p1", dt);
+    if (state.cpu) cpuControl(state.p2, dt);
+    else controlFighter(state.p2, "p2", dt);
+
+    updateFighter(state.p1, dt);
+    updateFighter(state.p2, dt);
+
+    // clamp to stage
+    const margin = 40;
+    state.p1.x = Math.max(margin, Math.min(W-margin, state.p1.x));
+    state.p2.x = Math.max(margin, Math.min(W-margin, state.p2.x));
+
+    // projectiles
+    for (const pr of state.projectiles) {
+      pr.x += pr.vx * dt;
+      pr.life -= dt;
+      const target = (pr.owner === state.p1) ? state.p2 : state.p1;
+      if (target.state !== "ko") {
+        const tb = fighterBox(target);
+        const pb = { x: pr.x - pr.r, y: pr.y - pr.r, w: pr.r*2, h: pr.r*2 };
+        if (overlap(pb, tb)) {
+          applyHit(target, 9, pr.vx > 0 ? 18 : -18);
+          play("hit");
+          pr.life = 0;
+        }
+      }
+    }
+    state.projectiles = state.projectiles.filter(p => p.life > 0 && p.x > -60 && p.x < W+60);
+
+    // win check
+    if (state.p1.hp <= 0 || state.p2.hp <= 0) {
+      state.over = true;
+      state.winner = (state.p1.hp <= 0) ? "KEN" : "RYU";
+      if (state.p1.hp <= 0 && state.p1.state !== "ko") setState(state.p1, "ko");
+      if (state.p2.hp <= 0 && state.p2.state !== "ko") setState(state.p2, "ko");
+      play("ko");
+    }
+  }
+
+  // ---- Drawing ---------------------------------------------------------
+  // Synthesized per-frame transforms so the single base PNG visibly
+  // animates through the move.
+  function frameTransform(f) {
+    const def = ANIM[f.state] || ANIM.idle;
+    const n = def.frames;
+    const p = n > 1 ? f.frame / (n-1) : 0; // 0..1 progress
+    let dx = 0, dy = 0, sx = 1, sy = 1, glow = 0;
+    switch (f.state) {
+      case "idle": {
+        const bob = Math.sin(f.frame/ n * Math.PI*2);
+        dy = bob * 2; break;
+      }
+      case "walk": {
+        dx = Math.sin(f.frame/n * Math.PI*2) * 6;
+        dy = -Math.abs(Math.sin(f.frame/n*Math.PI*2)) * 4; break;
+      }
+      case "jump": { sy = 1.04; dy = -Math.sin(p*Math.PI)*4; break; }
+      case "crouch": { sy = 0.7; sx = 1.12; dy = 0; break; }
+      case "block": { sx = 0.96; break; }
+      case "punch": {
+        // sprite frames carry the motion; no code-painted offset/glow
+        break;
+      }
+      case "kick": {
+        // sprite frames carry the motion; no code-painted offset/glow
+        break;
+      }
+      case "hurt": {
+        dx = -Math.sin(p*Math.PI) * 16;
+        dy = -Math.sin(p*Math.PI*2) * 4; break;
+      }
+      case "throw": {
+        const ease = Math.sin(p*Math.PI);
+        dx = (p<0.5? p*10 : (1-p)*20+10);
+        glow = (p>0.45) ? (p) : 0;
+        break;
+      }
+      case "ko": { dy = p*20; sy = 1 - p*0.15; break; }
+    }
+    return { dx, dy, sx, sy, glow };
+  }
+
+  function spriteFor(f) {
+    const def = ANIM[f.state] || ANIM.idle;
+    let sub = def.sprite;
+    if (def.seq) {
+      const idx = Math.max(0, Math.min(def.seq.length - 1, f.frame));
+      sub = def.seq[idx];
+    }
+    const key = f.prefix + "_" + sub;
+    return ASSETS[key] || ASSETS[f.prefix + "_" + def.sprite] || ASSETS[f.prefix + "_idle"];
+  }
+
+  function drawFighter(f) {
+    const img = spriteFor(f);
+    const t = frameTransform(f);
+    // each sprite is drawn facing right; flip so it points at the opponent
+    const flip = (f.facing !== f.native); // native is right(+1)
+    const baseX = f.x;
+    const baseY = f.y;            // feet baseline
+    const w = FW, h = FH;
+    const drawW = w * t.sx, drawH = h * t.sy;
+
+    ctx.save();
+    ctx.translate(baseX, baseY);
+    if (flip) ctx.scale(-1, 1);
+    // dx applies in facing direction (after flip, +x is forward)
+    ctx.translate(t.dx, t.dy);
+
+    // shadow
+    ctx.save();
+    ctx.scale(1,1);
+    ctx.fillStyle = "rgba(0,0,0,0.35)";
+    ctx.beginPath();
+    ctx.ellipse(0, 2, FW*0.30, 12, 0, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+
+    if (f.flashT > 0) {
+      ctx.globalAlpha = 0.9;
+    }
+
+    if (img && img.complete !== false) {
+      if (f.flashT > 0) ctx.globalAlpha = 0.55 + 0.45*Math.abs(Math.sin(f.flashT*60));
+      ctx.drawImage(img, -drawW/2, -drawH, drawW, drawH);
+    } else {
+      ctx.fillStyle = f.prefix === "ryu" ? "#dde" : "#d44";
+      ctx.fillRect(-drawW/2, -drawH, drawW, drawH);
+    }
+
+    // glow at hand for throw only (fireball charge)
+    if (t.glow > 0 && (f.state === "throw")) {
+      const gx = FW*0.32, gy = -FH*0.55;
+      const grd = ctx.createRadialGradient(gx, gy, 2, gx, gy, 30);
+      const col = f.prefix === "ryu" ? "120,180,255" : "255,140,80";
+      grd.addColorStop(0, "rgba("+col+",0.9)");
+      grd.addColorStop(1, "rgba("+col+",0)");
+      ctx.fillStyle = grd;
+      ctx.beginPath(); ctx.arc(gx, gy, 30, 0, Math.PI*2); ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawFireball(pr) {
+    const img = ASSETS.fireball;
+    ctx.save();
+    ctx.translate(pr.x, pr.y);
+    if (pr.vx < 0) ctx.scale(-1,1);
+    const wob = Math.sin(state.t*20)*4;
+    if (img) {
+      ctx.drawImage(img, -pr.r-wob, -pr.r-wob, (pr.r+wob)*2, (pr.r+wob)*2);
+    } else {
+      const grd = ctx.createRadialGradient(0,0,4,0,0,pr.r);
+      grd.addColorStop(0,"#fff"); grd.addColorStop(0.5,"#8cf"); grd.addColorStop(1,"rgba(80,140,255,0)");
+      ctx.fillStyle = grd; ctx.beginPath(); ctx.arc(0,0,pr.r,0,Math.PI*2); ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawHealthBar(f, side, name) {
+    const barW = 380, barH = 24, pad = 24;
+    const x = side === "left" ? pad : W - pad - barW;
+    const y = 24;
+    ctx.fillStyle = "#000a";
+    ctx.fillRect(x-3, y-3, barW+6, barH+6);
+    ctx.fillStyle = "#3a0d0d";
+    ctx.fillRect(x, y, barW, barH);
+    const frac = f.hp / f.maxHp;
+    const fillW = barW * frac;
+    const fx = side === "left" ? x : x + (barW - fillW);
+    const grd = ctx.createLinearGradient(0, y, 0, y+barH);
+    grd.addColorStop(0, "#ffe26b"); grd.addColorStop(1, "#ff8a1e");
+    ctx.fillStyle = grd;
+    ctx.fillRect(fx, y, fillW, barH);
+    ctx.strokeStyle = "#fff8"; ctx.lineWidth = 2;
+    ctx.strokeRect(x, y, barW, barH);
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 18px system-ui,sans-serif";
+    ctx.textBaseline = "alphabetic";
+    if (side === "left") { ctx.textAlign = "left"; ctx.fillText(name, x, y+barH+20); }
+    else { ctx.textAlign = "right"; ctx.fillText(name, x+barW, y+barH+20); }
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    // background
+    if (ASSETS.stage) {
+      ctx.drawImage(ASSETS.stage, 0, 0, W, H);
+    } else {
+      const grd = ctx.createLinearGradient(0,0,0,H);
+      grd.addColorStop(0,"#243b6b"); grd.addColorStop(1,"#0e1430");
+      ctx.fillStyle = grd; ctx.fillRect(0,0,W,H);
+    }
+    // ground line
+    ctx.fillStyle = "rgba(20,15,30,0.5)";
+    ctx.fillRect(0, GROUND, W, H-GROUND);
+
+    // fighters (draw the back one first by x for slight depth)
+    const order = [state.p1, state.p2];
+    for (const f of order) drawFighter(f);
+
+    // fireballs
+    for (const pr of state.projectiles) drawFireball(pr);
+
+    // HUD
+    drawHealthBar(state.p1, "left", "RYU (P1)");
+    drawHealthBar(state.p2, "right", state.cpu ? "KEN (CPU)" : "KEN (P2)");
+
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 26px system-ui,sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(Math.max(0, Math.ceil(99 - state.t)) + "", W/2, 36);
+
+    if (state.over) {
+      ctx.fillStyle = "rgba(0,0,0,0.55)";
+      ctx.fillRect(0, H/2-70, W, 140);
+      ctx.fillStyle = "#ffe26b";
+      ctx.font = "bold 56px system-ui,sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText(state.winner + " WINS!", W/2, H/2);
+      ctx.fillStyle = "#fff";
+      ctx.font = "20px system-ui,sans-serif";
+      ctx.fillText("Press R to restart", W/2, H/2 + 38);
+    }
+    ctx.textAlign = "left";
+  }
+
+  // ---- Frame loop ------------------------------------------------------
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    try {
+      update(dt);
+      draw();
+      for (const k in pressed) pressed[k] = false;
+    } catch (err) {
+      console.error("game crashed:", err);
+      errBox.textContent = "crash: " + (err && err.message || err);
+      errBox.style.display = "block";
+    }
+    rafHandle = requestAnimationFrame(frame);
+  }
+
+  // ---- Expose for probes ----------------------------------------------
+  window.game = { reset, toggleCPU };
+  window.state = null; // alias set after newState below for legacy probes
+
+  // ---- Boot ------------------------------------------------------------
+  loadSounds();
+  state = newState();
+  window.gameState = state;
+  loadAssets().then(() => {
+    loadingEl.style.display = "none";
+    last = performance.now();
+    rafHandle = requestAnimationFrame(frame);
+  }).catch(() => {
+    loadingEl.style.display = "none";
+    last = performance.now();
+    rafHandle = requestAnimationFrame(frame);
+  });
+})();
+</script>
+</body></html>

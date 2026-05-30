@@ -209,7 +209,7 @@ class OllamaAutopinResult:
 # below) to expose more variants. API keys are read from env at request
 # time — never from disk, never embedded in BackendInfo.
 _OPENAI_DEFAULT_MODEL = "gpt-5"
-_ANTHROPIC_DEFAULT_MODEL = "claude-opus-4-7"
+_ANTHROPIC_DEFAULT_MODEL = "claude-opus-4-8"
 _OPENAI_MODELS: tuple[str, ...] = (_OPENAI_DEFAULT_MODEL,)
 _ANTHROPIC_MODELS: tuple[str, ...] = (_ANTHROPIC_DEFAULT_MODEL,)
 
@@ -1547,7 +1547,7 @@ class AnthropicBackend(Backend):
         # truncated <html_file> rewrites where Claude generated exactly
         # 8192 completion tokens and got cut off mid-document. Iter 1
         # was a 17,654-byte stream missing every closing tag.
-        # Sonnet 4.6 supports 64K output, Opus 4.7 supports 32K. 32768
+        # Sonnet 4.6 supports 64K output, Opus 4.8 supports 32K. 32768
         # is the safe-everywhere ceiling for "write a full HTML game
         # file in one go" and covers ~120 KB of output. Override via
         # options["max_tokens"] or env ANTHROPIC_MAX_TOKENS for runs

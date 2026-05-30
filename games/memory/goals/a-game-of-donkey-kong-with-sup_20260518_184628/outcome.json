@@ -1,0 +1,9 @@
+{
+  "session_id": "a-game-of-donkey-kong-with-sup_20260518_184628",
+  "goal": "A game of donkey-kong with super large and well annimated characters, all the characters actions are well animated. make sure barrels roll, with end of barrel round and flat, rolling down ramps and sometimes down the laders.  fous on large and great graphics and annimation",
+  "model": "claude-opus-4-7",
+  "iterations": 5,
+  "ok": true,
+  "last_report_summary": "OK: True\nTitle: 'DONKEY KONG'\nCanvas: 640x720, RAF ran: True, blank: False\nInput listeners: total=5 (doc=0, win=5, body=0, other=0)\nInput test: PASS \u2014 ArrowUp\u2192[player.climbing, player.ladderRef.rampLow, player.ladderRef.x, player.ladderRef.yBottom, player.ladderRef.yTop]; ArrowDown\u2192[player.vx]; ArrowLeft\u2192[ape.throwing, player.facing, player.vx]; ArrowRight\u2192[ape.throwing, player.facing, player.vx]\nFrozen canvas: no (pixels changed during run)\nBody text length: 82 chars\nBody sample: 'SCORE 0\\nLIVES 3\\nL 1\\n\u25c4 \u25ba run \u00b7 \u25b2 \u25bc climb ladders \u00b7 SPACE jump \u00b7 R restart \u00b7 P pause'\nWarnings:\n  - Canvas2D: Multiple readback operations using getImageData are faster with the willReadFrequently attribute set to true. See: https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently\nAcceptance probes: 8/8 pass\n  ok  canvas_present: !!document.querySelector('canvas') && document.querySelector('canvas').width>0\n  ok  state_exposed: !!window.state && !!state.player && typeof state.p",
+  "ts": "2026-05-19T00:04:59.439516Z"
+}

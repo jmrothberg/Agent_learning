@@ -411,6 +411,9 @@ class ZImageTurboGenerator:
     def __init__(self, model_path: str | None = None) -> None:
         self.model_path = model_path or _resolve_zimage_path()
         self._pipeline: Any = None  # lazy-init in .generate()
+        # Img2img pipeline built lazily from _pipeline.components (shared VRAM)
+        # in .generate_img2img(); used for from_image animation frames.
+        self._img2img_pipeline: Any = None
         # Resolved at first .generate() call; "cuda", "mps", or None.
         self._device: str | None = None
         # Physical/logical CUDA index after .to("cuda"); status panel only.
@@ -422,16 +425,20 @@ class ZImageTurboGenerator:
         self._last_error: str | None = None
 
     def cleanup(self) -> None:
-        if self._pipeline is None:
+        if self._pipeline is None and self._img2img_pipeline is None:
             return
         try:
             import torch
+            # The img2img pipeline shares _pipeline's components — drop the
+            # wrapper reference before freeing the underlying modules.
+            self._img2img_pipeline = None
             del self._pipeline
             self._pipeline = None
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
         except Exception:
             self._pipeline = None
+            self._img2img_pipeline = None
 
     def _lazy_init(self) -> bool:
         if self._pipeline is not None:
@@ -631,6 +638,74 @@ class ZImageTurboGenerator:
             import traceback as _tb
             self._last_error = (
                 f"{type(e).__name__}: {e!s} | "
+                f"trace: {_tb.format_exc().splitlines()[-3:]}"
+            )
+            return None
+
+    def generate_img2img(
+        self,
+        prompt: str,
+        init_image_path: str,
+        *,
+        strength: float = 0.5,
+    ) -> str | None:
+        """Img2img using the SAME Z-Image-Turbo model as txt2img.
+
+        Animation frames MUST be drawn by the same model as the base/idle
+        sprite, or they won't match it (the old pipeline used a foreign
+        SD-Turbo model for `from_image`, so derived frames were visibly
+        inconsistent with the character — 2026-05-29 trace). We build a
+        `ZImageImg2ImgPipeline` from the already-loaded txt2img pipeline's
+        components, so it shares the transformer/VAE/text-encoder and costs
+        NO extra VRAM. Returns a temp PNG path, or None (sets _last_error).
+        """
+        self._last_error = None
+        if not self._lazy_init():
+            return None
+        try:
+            import tempfile
+            import torch
+            from PIL import Image
+            from diffusers import ZImageImg2ImgPipeline
+
+            if getattr(self, "_img2img_pipeline", None) is None:
+                # Reuse the loaded components — no second model in VRAM.
+                self._img2img_pipeline = ZImageImg2ImgPipeline(
+                    **self._pipeline.components
+                )
+                self._img2img_pipeline.to(self._device or "cpu")
+
+            init_img = Image.open(init_image_path).convert("RGB")
+            if init_img.size != (768, 768):
+                init_img = init_img.resize((768, 768), Image.LANCZOS)
+            strength = max(0.05, min(1.0, float(strength)))
+            # Turbo DiT: actual denoising steps ≈ num_inference_steps * strength.
+            # Aim for ~8 actual steps so the pose moves while the character holds.
+            steps = max(9, int(round(8.0 / strength)))
+            gen = torch.Generator(self._device or "cpu").manual_seed(42)
+            result = self._img2img_pipeline(
+                prompt=prompt,
+                image=init_img,
+                strength=strength,
+                num_inference_steps=steps,
+                guidance_scale=0.0,
+                generator=gen,
+            )
+            images = getattr(result, "images", None)
+            if not images:
+                self._last_error = (
+                    "Z-Image img2img returned no images "
+                    f"(type={type(result).__name__})."
+                )
+                return None
+            f = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+            f.close()
+            images[0].save(f.name, format="PNG")
+            return f.name
+        except Exception as e:
+            import traceback as _tb
+            self._last_error = (
+                f"Z-Image img2img failed: {type(e).__name__}: {e!s} | "
                 f"trace: {_tb.format_exc().splitlines()[-3:]}"
             )
             return None
@@ -1027,10 +1102,15 @@ _UNSET: Any = object()  # sentinel: "argument not provided"
 
 # Below this mean per-pixel RGB delta (0..1), a `from_image`-derived frame is
 # treated as "near-identical to its parent" — i.e. the diffusion model likely
-# ignored the requested pose change (a common silent failure: a "punch" frame
-# that looks exactly like idle). Heuristic; surfaced to the model as a warning,
-# never a hard error.
-_DERIVED_FRAME_MIN_DELTA = 0.03
+# ignored the requested pose change (a "punch" frame that looks exactly like
+# idle). Calibrated on real Z-Image img2img (2026-05-29 GPU sweep): a genuine
+# but CONSISTENT pose change (an extended arm — a small fraction of pixels)
+# scores ~0.016–0.028 at strength 0.5–0.65, while a frame where the pose did
+# not render at all scores well under 0.01. 0.03 false-positived the good
+# consistent frames and pushed the model toward code-drawn limbs; 0.012 passes
+# them while still catching a truly flat frame. Heuristic warning, never a
+# hard error.
+_DERIVED_FRAME_MIN_DELTA = 0.012
 
 
 def _derived_frame_delta(new_path: Path | str, parent_path: Path | str) -> float | None:
@@ -1234,13 +1314,28 @@ def generate_assets(
         # Cache miss — generate. img2img path when from_image resolves;
         # txt2img otherwise.
         gen_path: str | None = None
-        if from_image and from_image in out and img2img_generator is not None:
+        if from_image and from_image in out:
             init_path = str(out[from_image])
-            gen_path = _safe_img2img(
-                img2img_generator, prompt, init_path, strength or 0.45,
-            )
+            # PREFER Z-Image img2img on the MAIN generator — animation frames
+            # must be drawn by the SAME model as the base/idle sprite, or they
+            # won't match the character (the foreign SD-Turbo path produced
+            # visibly inconsistent frames — 2026-05-29 trace). Fall back to the
+            # SD-Turbo img2img generator, then txt2img, so an asset is never lost.
+            zi_img2img = getattr(image_generator, "generate_img2img", None)
+            if callable(zi_img2img):
+                gen_path = _safe_call_img2img(
+                    zi_img2img, prompt, init_path, strength or 0.5,
+                )
+                if gen_path is not None:
+                    stat["img2img_model"] = "z-image"
+            if gen_path is None and img2img_generator is not None:
+                gen_path = _safe_img2img(
+                    img2img_generator, prompt, init_path, strength or 0.45,
+                )
+                if gen_path is not None:
+                    stat["img2img_model"] = "sd-turbo"
             if gen_path is None and image_generator is not None:
-                # img2img failed; fall back to txt2img so the asset isn't lost.
+                # both img2img paths failed; fall back to txt2img.
                 stat["fallback_to_txt2img"] = True
                 gen_path = _safe_generate(image_generator, prompt)
         else:
@@ -1387,6 +1482,21 @@ def _safe_generate(gen: Any, prompt: str) -> str | None:
             )
         except Exception:
             pass
+        return None
+
+
+def _safe_call_img2img(
+    fn: Any,
+    prompt: str,
+    init_image_path: str,
+    strength: float,
+) -> str | None:
+    """Like _safe_img2img but for a bound img2img METHOD (e.g. the main
+    Z-Image generator's `generate_img2img`), which takes the same args but
+    is not the generator's `.generate`. Never propagates."""
+    try:
+        return fn(prompt, init_image_path, strength=strength)
+    except Exception:
         return None
 
 
@@ -1627,6 +1737,19 @@ def render_asset_paths_block(
         "a sprite above, you have FAILED THIS TURN. The seed code is "
         "procedural by default — REPLACE its draw bodies with "
         "drawImage() calls."
+    )
+    lines.append("")
+    lines.append(
+        "ANIMATION — sprites only, no code-drawn limbs: to animate a move "
+        "(punch/kick/etc), CYCLE its sprite frames with drawImage over the "
+        "active window. NEVER draw a character's arm/leg/fist/body with "
+        "ctx.fillRect/arc/lineTo on top of the sprite — those code-drawn "
+        "limbs are exactly what users reject. To make NEW pose frames, emit "
+        "<assets> as txt2img with the SAME detailed character description "
+        "(same hair/gi/headband/build/style) and only change the pose clause "
+        "('arm fully extended', 'leg raised high') — do NOT use `from_image` "
+        "for a pose change: it returns the idle pose at low strength and a "
+        "different character at high strength."
     )
     lines.append("")
     lines.append(

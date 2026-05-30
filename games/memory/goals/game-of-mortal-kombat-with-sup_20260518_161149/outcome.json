@@ -1,0 +1,9 @@
+{
+  "session_id": "game-of-mortal-kombat-with-sup_20260518_161149",
+  "goal": "Game of Mortal Kombat, with super annimated fighters, showing all the frames in kicking, punching, jumping, ducking, blocking, shooting fireballs.  Super detailed background, and super detailed large annimation.",
+  "model": "/Users/jonathanrothberg/MLX_Models/Qwen3.6-27B-mxfp8",
+  "iterations": 6,
+  "ok": true,
+  "last_report_summary": "OK: True\nTitle: 'Mortal Kombat'\nCanvas: 800x500, RAF ran: True, blank: False\nInput listeners: total=5 (doc=0, win=5, body=0, other=0)\nInput test: PASS \u2014 ArrowUp\u2192[p2.jumping, p2.vy, p2.y]; ArrowDown\u2192[p2.ducking]; ArrowLeft\u2192[p2.vy, p2.x, p2.y]; ArrowRight\u2192[p2.jumping, p2.vy, p2.x, p2.y]\nFrozen canvas: no (pixels changed during run)\nBody text length: 222 chars\nBody sample: 'P1 - SCORPION\\n100\\nP2 - SUB-ZERO\\n100\\n93\\nROUND 1\\nP1: A/D move | W jump | S duck | F punch | G kick | H fireball | J block \\xa0\\xa0|\\xa0\\xa0 P2: \u2190/\u2192 move | \u2191 jump | \u2193 duck | L punch | K kick | U fireball | I block |...[+22 chars]'\nWarnings:\n  - Canvas2D: Multiple readback operations using getImageData are faster with the willReadFrequently attribute set to true. See: https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently\nAcceptance probes: 8/8 pass\n  ok  canvas_present: !!document.querySelector('canvas')\n  ok  non_blank: (()=>{const c=document.querySelector('canvas');if(!c||!c.width||",
+  "ts": "2026-05-18T21:25:42.706623Z"
+}

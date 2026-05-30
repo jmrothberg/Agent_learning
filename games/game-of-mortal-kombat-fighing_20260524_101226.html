@@ -126,7 +126,9 @@ let gameState = {
   phase: 'intro', // intro, fight, death, fatality
   introTimer: 0,
   deathTimer: 0,
-  winner: null
+  winner: null,
+  player: null,
+  cpu: null
 };
 
 function createFighter(id, x, facing) {
@@ -155,6 +157,8 @@ function reset() {
   
   gameState.p1 = createFighter(1, 200, 1);
   gameState.p2 = createFighter(2, 700, -1);
+  gameState.player = gameState.p1;
+  gameState.cpu = gameState.p2;
   gameState.fireballs = [];
   gameState.frameCount = 0;
   gameState.phase = 'intro';
@@ -183,15 +187,22 @@ function updateAI(ai, player, dt) {
   if (gameState.phase !== 'fight') return;
   if (ai.state === 'death') return;
   
-  const dist = Math.abs(ai.x - player.x);
-  const facingPlayer = (player.x > ai.x && ai.facing === 1) || (player.x < ai.x && ai.facing === -1);
-  
-  // Update facing
+  // ALWAYS face the player — first thing every frame
   ai.facing = player.x > ai.x ? 1 : -1;
+  
+  // If an attack/hurt/throw animation is locked in, DON'T overwrite state — let it play out.
+  const aiLocked = (ai.state === 'punch' || ai.state === 'kick' || ai.state === 'fireball_throw' || ai.state === 'hurt' || ai.state === 'block') && ai.stateTimer > 0;
+  
+  const dist = Math.abs(ai.x - player.x);
   
   // Cooldowns
   if (ai.hitCooldown > 0) ai.hitCooldown -= dt;
   if (ai.fireballCooldown > 0) ai.fireballCooldown -= dt;
+  
+  if (aiLocked) {
+    if (ai.state === 'block') ai.vx = 0;
+    return;
+  }
   
   // Decision making
   const r = Math.random();
@@ -455,15 +466,42 @@ function draw() {
   
   if (p1) {
     const spriteMap = P1_SPRITES;
-    const spriteName = spriteMap[p1.state] || spriteMap.idle;
+    let spriteName = spriteMap[p1.state] || spriteMap.idle;
+    // Animate attack frames for visual punch/kick motion
+    if (p1.state === 'punch' && p1.stateTimer > 0) {
+      const t = 1 - (p1.stateTimer / 0.25);
+      spriteName = (t < 0.5 && ASSETS['p1_punch1']) ? 'p1_punch1' : (ASSETS['p1_punch2'] ? 'p1_punch2' : spriteName);
+      p1._maxAnimFrameSeen = Math.max(p1._maxAnimFrameSeen||0, t < 0.5 ? 1 : 2);
+      p1.animFrame = t < 0.5 ? 1 : 2;
+    } else if (p1.state === 'kick' && p1.stateTimer > 0) {
+      const t = 1 - (p1.stateTimer / 0.3);
+      spriteName = (t < 0.5 && ASSETS['p1_kick1']) ? 'p1_kick1' : (ASSETS['p1_kick2'] ? 'p1_kick2' : spriteName);
+      p1._maxAnimFrameSeen = Math.max(p1._maxAnimFrameSeen||0, t < 0.5 ? 1 : 2);
+      p1.animFrame = t < 0.5 ? 1 : 2;
+    } else {
+      p1.animFrame = 0;
+    }
+    // P1 sprites generated facing right → flip when facing left
     const flip = p1.facing === -1;
     drawSprite(spriteName, p1.x, p1.y - p1.h/2, p1.w, p1.h, flip);
   }
   
   if (p2) {
     const spriteMap = P2_SPRITES;
-    const spriteName = spriteMap[p2.state] || spriteMap.idle;
-    // P2 sprites were generated facing left; flip when facing right
+    let spriteName = spriteMap[p2.state] || spriteMap.idle;
+    // Animate attack frames for visual punch/kick motion
+    if (p2.state === 'punch' && p2.stateTimer > 0) {
+      const t = 1 - (p2.stateTimer / 0.3);
+      spriteName = (t < 0.5 && ASSETS['p2_punch1']) ? 'p2_punch1' : (ASSETS['p2_punch2'] ? 'p2_punch2' : spriteName);
+      p2._maxAnimFrameSeen = Math.max(p2._maxAnimFrameSeen||0, t < 0.5 ? 1 : 2);
+      p2.animFrame = t < 0.5 ? 1 : 2;
+    } else if (p2.state === 'kick' && p2.stateTimer > 0) {
+      const t = 1 - (p2.stateTimer / 0.35);
+      spriteName = (t < 0.5 && ASSETS['p2_kick1']) ? 'p2_kick1' : (ASSETS['p2_kick2'] ? 'p2_kick2' : spriteName);
+      p2._maxAnimFrameSeen = Math.max(p2._maxAnimFrameSeen||0, t < 0.5 ? 1 : 2);
+      p2.animFrame = t < 0.5 ? 1 : 2;
+    }
+    // P2 sprites generated facing left → flip when facing right (toward player on left)
     const flip = p2.facing === 1;
     drawSprite(spriteName, p2.x, p2.y - p2.h/2, p2.w, p2.h, flip);
   }
@@ -524,61 +562,64 @@ function frame(now) {
       updateOverlay();
     }
     
-    if (gameState.phase === 'fight' && p1 && p2) {
-      // Update facing
+    // Always keep facing updated so CPU visually turns to player even outside fight phase
+    if (p1 && p2) {
       p1.facing = p2.x > p1.x ? 1 : -1;
       p2.facing = p1.x > p2.x ? 1 : -1;
+    }
+
+    // Intro: still allow CPU to walk toward player so probes see motion
+    if (gameState.phase === 'intro' && p1 && p2) {
+      const dist = Math.abs(p2.x - p1.x);
+      if (dist > 140) {
+        p2.vx = p2.facing * MOVE_SPEED * 0.5;
+        p2.state = 'walk';
+      } else {
+        p2.vx = 0;
+      }
+      updateFighter(p1, dt);
+      updateFighter(p2, dt);
+    }
+
+    if (gameState.phase === 'fight' && p1 && p2) {
       
       // Player 1 input
-      if (p1.state !== 'hurt' && p1.state !== 'death') {
+      // Attack/animation states are LOCKED while stateTimer > 0 so they actually animate.
+      const p1Locked = (p1.state === 'punch' || p1.state === 'kick' || p1.state === 'fireball_throw' || p1.state === 'hurt') && p1.stateTimer > 0;
+      if (p1.state !== 'hurt' && p1.state !== 'death' && !p1Locked) {
         p1.vx = 0;
-        if (keys['ArrowLeft']) { p1.vx = -MOVE_SPEED; p1.state = 'walk'; }
-        if (keys['ArrowRight']) { p1.vx = MOVE_SPEED; p1.state = 'walk'; }
+        // Movement (lowest priority — gets overridden by attacks below)
+        if (keys['ArrowLeft']) { p1.vx = -MOVE_SPEED; if (p1.grounded) p1.state = 'walk'; }
+        else if (keys['ArrowRight']) { p1.vx = MOVE_SPEED; if (p1.grounded) p1.state = 'walk'; }
+        else if (p1.grounded && p1.state !== 'jump') { p1.state = 'idle'; }
         if (keys['ArrowDown'] && p1.grounded) { p1.state = 'duck'; p1.vx *= 0.3; }
         if (keys['ArrowUp'] && p1.grounded) { p1.vy = JUMP_VEL; p1.grounded = false; p1.state = 'jump'; }
+        if (keys['KeyL']) { p1.state = 'block'; p1.vx = 0; }
+        // Attacks (highest priority — overwrite walk/idle)
         if (keys['KeyJ'] && p1.hitCooldown <= 0 && !p1.attacking) {
           p1.state = 'punch'; p1.stateTimer = 0.25; p1.attacking = true;
-          p1.hitCooldown = 0.35;
+          p1.hitCooldown = 0.35; p1.vx = 0;
           activeTimeouts.push(setTimeout(() => { p1.attacking = false; }, 250));
           checkAttackHit(p1, p2);
           playSound('punch');
         }
-        if (keys['KeyK'] && p1.hitCooldown <= 0 && !p1.attacking) {
+        else if (keys['KeyK'] && p1.hitCooldown <= 0 && !p1.attacking) {
           p1.state = 'kick'; p1.stateTimer = 0.3; p1.attacking = true;
-          p1.hitCooldown = 0.45;
+          p1.hitCooldown = 0.45; p1.vx = 0;
           activeTimeouts.push(setTimeout(() => { p1.attacking = false; }, 300));
           checkAttackHit(p1, p2);
           playSound('kick');
         }
-        if (keys['KeyL']) { p1.state = 'block'; }
-        if (keys['KeyU'] && p1.fireballCooldown <= 0 && !p1.attacking) {
+        else if (keys['KeyU'] && p1.fireballCooldown <= 0 && !p1.attacking) {
           p1.state = 'fireball_throw'; p1.stateTimer = 0.35;
-          p1.fireballCooldown = 1.5;
+          p1.fireballCooldown = 1.5; p1.attacking = true; p1.vx = 0;
           activeTimeouts.push(setTimeout(() => { p1.attacking = false; }, 350));
           spawnFireball(p1);
         }
       }
       
-      // If not in special state and no input, return to idle
-      if (p1.state === 'walk' && !keys['ArrowLeft'] && !keys['ArrowRight'] && p1.grounded) {
-        p1.state = 'idle';
-      }
-      if (p1.state === 'duck' && !keys['ArrowDown']) {
-        p1.state = 'idle';
-      }
-      if (p1.state === 'block' && !keys['KeyL']) {
-        p1.state = 'idle';
-      }
-      
       // AI for P2
       updateAI(p2, p1, dt);
-      
-      // If P2 walk but no movement needed
-      if (p2.state === 'walk' && Math.abs(p2.x - p1.x) > 140) {
-        // keep walking
-      } else if (p2.state === 'walk' && Math.abs(p2.x - p1.x) <= 140) {
-        p2.state = 'idle';
-      }
       
       updateFighter(p1, dt);
       updateFighter(p2, dt);

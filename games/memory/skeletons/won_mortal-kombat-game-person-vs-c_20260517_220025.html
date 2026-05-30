@@ -1,0 +1,708 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mortal Kombat - Person vs Computer</title>
+<style>
+  :root { color-scheme: dark; }
+  html,body { margin:0; height:100%; background:#050510; color:#e7ecff;
+    font:16px/1.4 system-ui,sans-serif; overflow:hidden; user-select:none; }
+  #wrap { position:fixed; inset:0; display:grid; place-items:center; }
+  canvas { background:#0a0a20; border-radius:8px; box-shadow:0 0 60px #2008;
+    max-width:96vw; max-height:92vh; touch-action:none; }
+  #hud { position:fixed; top:8px; left:50%; transform:translateX(-50%);
+    display:flex; gap:20px; align-items:center; z-index:10; }
+  .hp-bar { width:280px; height:28px; background:#222; border:2px solid #555;
+    border-radius:4px; overflow:hidden; position:relative; }
+  .hp-fill { height:100%; transition:width 0.15s; }
+  .hp-label { position:absolute; inset:0; display:flex; align-items:center;
+    justify-content:center; font-size:13px; font-weight:700; text-shadow:1px 1px 2px #000;
+    z-index:2; }
+  #hud .hp-bar:first-child .hp-fill { background:linear-gradient(90deg,#cc2222,#ff5533); }
+  #hud .hp-bar:last-child .hp-fill { background:linear-gradient(90deg,#2255cc,#3388ff); }
+  #hud .hp-bar:first-child { flex-direction:row-reverse; }
+  #hud .hp-bar:first-child .hp-fill { float:right; }
+  #hud .hp-bar:first-child .hp-label { justify-content:flex-end; padding-right:8px; }
+  #hud .hp-bar:last-child .hp-label { justify-content:flex-start; padding-left:8px; }
+  #round { font-size:20px; font-weight:900; color:#ffcc00;
+    text-shadow:0 0 10px #ff8800; min-width:80px; text-align:center; }
+  #help { position:fixed; bottom:8px; left:50%; transform:translateX(-50%);
+    opacity:.65; font-size:12px; text-align:center; white-space:nowrap; z-index:10; }
+  #modal { position:fixed; inset:0; display:none; place-items:center;
+    background:#000c; backdrop-filter:blur(6px); z-index:20; }
+  #modal .card { background:linear-gradient(135deg,#1a0a0a,#2a1520);
+    padding:32px 40px; border-radius:16px; text-align:center;
+    box-shadow:0 0 80px #ff000033; border:2px solid #ff333355; }
+  #modal h2 { font-size:36px; margin:0 0 8px; }
+  #modal p { font-size:18px; margin:0 0 20px; }
+  button { background:linear-gradient(135deg,#cc2222,#ff5533); color:#fff;
+    border:0; padding:12px 28px; border-radius:8px; font-size:16px;
+    cursor:pointer; font-weight:700; }
+  button:hover { filter:brightness(1.2); }
+  #startOverlay { position:fixed; inset:0; display:grid; place-items:center;
+    background:#050510; z-index:30; }
+  #startOverlay .card { text-align:center; }
+  #startOverlay h1 { font-size:42px; color:#ff3333;
+    text-shadow:0 0 30px #ff000088; margin:0 0 12px; }
+  #startOverlay p { color:#aaa; margin:0 0 20px; }
+  #startOverlay button { font-size:20px; padding:14px 36px; }
+  .fatality-text { font-size:52px; color:#ff0000;
+    text-shadow:0 0 40px #ff0000, 0 0 80px #cc0000;
+    animation: pulse 0.5s infinite alternate; }
+  @keyframes pulse { from{transform:scale(1)} to{transform:scale(1.05)} }
+  .win-text { font-size:32px; color:#00ff88;
+    text-shadow:0 0 20px #00ff88; }
+  .lose-text { font-size:32px; color:#ff3333;
+    text-shadow:0 0 20px #ff3333; }
+</style></head>
+<body>
+<div id="startOverlay"><div class="card">
+  <h1>⚔️ MORTAL KOMBAT ⚔️</h1>
+  <p>Person vs Computer</p>
+  <p style="font-size:13px;color:#888;margin-bottom:16px">
+    ← → Move &nbsp;|&nbsp; ↑ Jump &nbsp;|&nbsp; Z Punch &nbsp;|&nbsp; X Kick
+    &nbsp;|&nbsp; Space Block &nbsp;|&nbsp; C Fireball
+  </p>
+  <button id="startBtn">FIGHT!</button>
+</div></div>
+<div id="hud">
+  <div class="hp-bar"><div class="hp-fill" id="hpP" style="width:100%"></div>
+    <div class="hp-label">YOU</div></div>
+  <div id="round">ROUND 1</div>
+  <div class="hp-bar"><div class="hp-fill" id="hpC" style="width:100%"></div>
+    <div class="hp-label">CPU</div></div>
+</div>
+<div id="help">← → Move | ↑ Jump | Z Punch | X Kick | Space Block | C Fireball | R Restart</div>
+<div id="modal"><div class="card">
+  <h2 id="endTitle">Game Over</h2>
+  <p id="endMsg"></p>
+  <button id="restart">FIGHT AGAIN</button>
+</div></div>
+<canvas id="c" width="800" height="600"></canvas>
+<script>
+(() => {
+  "use strict";
+  const cvs = document.getElementById("c");
+  const ctx = cvs.getContext("2d");
+  const hpPEl = document.getElementById("hpP");
+  const hpCEl = document.getElementById("hpC");
+  const roundEl = document.getElementById("round");
+  const modal = document.getElementById("modal");
+  const endTitle = document.getElementById("endTitle");
+  const endMsg = document.getElementById("endMsg");
+  const startOverlay = document.getElementById("startOverlay");
+  const startBtn = document.getElementById("startBtn");
+  const restartBtn = document.getElementById("restart");
+  const helpEl = document.getElementById("help");
+  const W = 800, H = 600, GROUND = 500;
+  const ASSETS = {}, SOUNDS = {};
+  let _audioStarted = false, _assetsReady = false;
+  const _startAudio = () => {
+    if (_audioStarted) return;
+    _audioStarted = true;
+    if (SOUNDS.music) SOUNDS.music.play().catch(() => {});
+  };
+  const ASSET_PATHS = [
+    ['player_warrior', './mortal-kombat-game-person-vs-c_20260517_220025_assets/player_warrior.png'],
+    ['cpu_warrior', './mortal-kombat-game-person-vs-c_20260517_220025_assets/cpu_warrior.png'],
+    ['fireball', './mortal-kombat-game-person-vs-c_20260517_220025_assets/fireball.png'],
+    ['temple_background', './mortal-kombat-game-person-vs-c_20260517_220025_assets/temple_background.png'],
+    ['hit_spark', './mortal-kombat-game-person-vs-c_20260517_220025_assets/hit_spark.png'],
+    ['fatality_text', './mortal-kombat-game-person-vs-c_20260517_220025_assets/fatality_text.png'],
+    ['player_punch', './mortal-kombat-game-person-vs-c_20260517_220025_assets/player_punch.png'],
+    ['player_kick', './mortal-kombat-game-person-vs-c_20260517_220025_assets/player_kick.png'],
+    ['player_jump', './mortal-kombat-game-person-vs-c_20260517_220025_assets/player_jump.png'],
+    ['cpu_punch', './mortal-kombat-game-person-vs-c_20260517_220025_assets/cpu_punch.png'],
+    ['cpu_kick', './mortal-kombat-game-person-vs-c_20260517_220025_assets/cpu_kick.png'],
+    ['cpu_jump', './mortal-kombat-game-person-vs-c_20260517_220025_assets/cpu_jump.png']
+  ];
+  const SOUND_PATHS = [
+    ['punch', './mortal-kombat-game-person-vs-c_20260517_220025_sounds/punch.ogg', false],
+    ['kick', './mortal-kombat-game-person-vs-c_20260517_220025_sounds/kick.ogg', false],
+    ['fireball_launch', './mortal-kombat-game-person-vs-c_20260517_220025_sounds/fireball_launch.ogg', false],
+    ['fireball_hit', './mortal-kombat-game-person-vs-c_20260517_220025_sounds/fireball_hit.ogg', false],
+    ['fatality', './mortal-kombat-game-person-vs-c_20260517_220025_sounds/fatality.ogg', false],
+    ['block', './mortal-kombat-game-person-vs-c_20260517_220025_sounds/block.ogg', false],
+    ['music', './mortal-kombat-game-person-vs-c_20260517_220025_sounds/music.ogg', true]
+  ];
+  async function loadAssets() {
+    for (const [name, src] of ASSET_PATHS) {
+      const img = new Image();
+      img.src = src;
+      try { await img.decode(); } catch(e) {
+        console.warn("Asset load failed for " + name + ", using fallback");
+      }
+      ASSETS[name] = img;
+    }
+    _assetsReady = true;
+  }
+  function loadSounds() {
+    for (const [name, src, loop] of SOUND_PATHS) {
+      const a = new Audio(src);
+      a.loop = loop;
+      SOUNDS[name] = a;
+    }
+  }
+  function play(name) {
+    const base = SOUNDS[name];
+    if (!base) return;
+    if (base.loop) { base.currentTime = 0; base.play().catch(() => {}); return; }
+    const inst = base.cloneNode();
+    inst.currentTime = 0;
+    inst.play().catch(() => {});
+  }
+  loadAssets();
+  loadSounds();
+  function fit() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    cvs.width = W * dpr; cvs.height = H * dpr;
+    cvs.style.width = W + "px"; cvs.style.height = H + "px";
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  fit();
+  addEventListener("resize", fit);
+  const keys = Object.create(null), pressed = Object.create(null);
+  const KEYMAP = {
+    ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right",
+    KeyW: "up", KeyS: "down", KeyA: "left", KeyD: "right",
+    Space: "block", KeyZ: "punch", KeyX: "kick", KeyC: "fireball",
+    KeyP: "pause", KeyR: "restart"
+  };
+  addEventListener("keydown", e => {
+    _startAudio();
+    const k = KEYMAP[e.code];
+    if (!k) return;
+    if (!keys[k]) pressed[k] = true;
+    keys[k] = true;
+    e.preventDefault();
+  }, { passive: false });
+  addEventListener("keyup", e => {
+    const k = KEYMAP[e.code];
+    if (k) keys[k] = false;
+  });
+  cvs.addEventListener("pointerdown", () => { _startAudio(); pressed.block = true; });
+  cvs.addEventListener("pointerup", () => { keys.block = false; });
+  const MAX_HP = 100;
+  const FIGHTER_W = 80, FIGHTER_H = 120;
+  const ATTACK_RANGES = { punch: 65, kick: 85, fireball: 0 };
+  const ATTACK_DMG = { punch: 8, kick: 12, fireball: 15 };
+  const ATTACK_CD = { punch: 0.35, kick: 0.5, fireball: 1.5 };
+  const BLOCK_REDUCTION = 0.85;
+  let state, particles, projectiles, animFrame, lastAttackTime;
+  function createFighter(x, facing) {
+    return {
+      x, y: GROUND, vx: 0, vy: 0,
+      hp: MAX_HP, facing,
+      state: "idle",
+      animTimer: 0,
+      attackCooldown: 0,
+      hitStun: 0,
+      blocking: false,
+      width: FIGHTER_W,
+      height: FIGHTER_H
+    };
+  }
+  function reset() {
+    state = {
+      player: createFighter(200, 1),
+      cpu: createFighter(600, -1),
+      round: 1,
+      paused: false,
+      over: false,
+      t: 0,
+      frame: 0,
+      announce: "",
+      announceTimer: 0,
+      shakeX: 0,
+      shakeY: 0,
+      shakeTimer: 0,
+      cpuPunchFlipped: true
+    };
+    particles = [];
+    projectiles = [];
+    lastAttackTime = { punch: 0, kick: 0, fireball: 0 };
+    modal.style.display = "none";
+    helpEl.style.opacity = "0.65";
+  }
+  reset();
+  window.game = {
+    restart: () => {
+      reset();
+      helpEl.style.opacity = "0.65";
+    }
+  };
+  window.state = state;
+  startBtn.addEventListener("click", () => {
+    _startAudio();
+    startOverlay.style.display = "none";
+    helpEl.style.opacity = "0.65";
+  });
+  restartBtn.addEventListener("click", () => {
+    _startAudio();
+    reset();
+  });
+  function spawnParticles(x, y, color, count) {
+    for (let i = 0; i < count; i++) {
+      particles.push({
+        x, y,
+        vx: (Math.random() - 0.5) * 300,
+        vy: (Math.random() - 0.5) * 300 - 100,
+        life: 0.3 + Math.random() * 0.5,
+        maxLife: 0.3 + Math.random() * 0.5,
+        color,
+        size: 2 + Math.random() * 4
+      });
+    }
+  }
+  function spawnHitSpark(x, y) {
+    spawnParticles(x, y, "#ffff00", 8);
+    spawnParticles(x, y, "#ff8800", 5);
+    spawnParticles(x, y, "#ffffff", 3);
+  }
+  function triggerShake(intensity) {
+    state.shakeTimer = 0.15;
+    state.shakeX = 0;
+    state.shakeY = 0;
+    state._shakeIntensity = intensity;
+  }
+  function launchProjectile(owner) {
+    const dir = owner.facing;
+    projectiles.push({
+      x: owner.x + owner.width / 2 + dir * 30,
+      y: owner.y - 50,
+      vx: dir * 350,
+      owner,
+      life: 3,
+      size: 32
+    });
+    play("fireball_launch");
+  }
+  function tryAttack(fighter, type) {
+    const t = state.t;
+    if (fighter.attackCooldown > 0) return;
+    if (fighter.hitStun > 0) return;
+    if (fighter.blocking) return;
+    const opponent = fighter === state.player ? state.cpu : state.player;
+    if (type === "fireball") {
+      launchProjectile(fighter);
+      fighter.attackCooldown = ATTACK_CD.fireball;
+      lastAttackTime.fireball = t;
+      return;
+    }
+    const range = ATTACK_RANGES[type];
+    const dx = opponent.x - fighter.x;
+    const dist = Math.abs(dx);
+    fighter.attackCooldown = ATTACK_CD[type];
+    lastAttackTime[type] = t;
+    if (dist <= range) {
+      let dmg = ATTACK_DMG[type];
+      if (opponent.blocking) {
+        dmg = Math.floor(dmg * (1 - BLOCK_REDUCTION));
+        play("block");
+        spawnParticles(opponent.x + opponent.width / 2, opponent.y - 50, "#88ccff", 5);
+      } else {
+        if (type === "punch") play("punch");
+        else play("kick");
+        spawnHitSpark(opponent.x + opponent.width / 2, opponent.y - 50);
+        triggerShake(type === "kick" ? 6 : 3);
+      }
+      opponent.hp = Math.max(0, opponent.hp - dmg);
+      opponent.hitStun = 0.25;
+    }
+  }
+  function updateAI(dt) {
+    const cpu = state.cpu;
+    const player = state.player;
+    if (cpu.hitStun > 0) return;
+    
+    // Always face the player
+    const dx = player.x - cpu.x;
+    const dist = Math.abs(dx);
+    cpu.facing = dx > 0 ? 1 : -1;
+    
+    cpu.blocking = false;
+    const t = state.t;
+    
+    if (dist > 200) {
+      cpu.x += cpu.facing * 150 * dt;
+      if (Math.random() < 0.01 && t - lastAttackTime.fireball > ATTACK_CD.fireball) {
+        launchProjectile(cpu);
+        lastAttackTime.fireball = t;
+      }
+    } else if (dist > 100) {
+      cpu.x += cpu.facing * 180 * dt;
+    } else {
+      const r = Math.random();
+      if (r < 0.10 && t - lastAttackTime.punch > ATTACK_CD.punch) {
+        tryAttack(cpu, "punch");
+      } else if (r < 0.20 && t - lastAttackTime.kick > ATTACK_CD.kick) {
+        tryAttack(cpu, "kick");
+      } else if (r < 0.25) {
+        cpu.blocking = true;
+        setTimeout(() => { cpu.blocking = false; }, 500 + Math.random() * 500);
+      }
+    }
+    
+    if (Math.random() < 0.005) {
+      cpu.vy = -400;
+    }
+  }
+  function update(dt) {
+    if (state.over || state.paused) return;
+    state.t += dt;
+    state.frame++;
+    const p = state.player;
+    const c = state.cpu;
+    
+    // Always face each other
+    p.facing = c.x > p.x ? 1 : -1;
+    c.facing = p.x > c.x ? 1 : -1;
+    
+    // Player movement
+    const moveSpeed = 250;
+    if (p.hitStun <= 0 && !p.blocking) {
+      if (keys.left) p.x -= moveSpeed * dt;
+      if (keys.right) p.x += moveSpeed * dt;
+    }
+    if (pressed.up && p.y >= GROUND) {
+      p.vy = -450;
+    }
+    // Player attacks
+    if (pressed.punch) tryAttack(p, "punch");
+    if (pressed.kick) tryAttack(p, "kick");
+    if (pressed.fireball) tryAttack(p, "fireball");
+    // Blocking
+    p.blocking = keys.block && p.hitStun <= 0;
+    // Cooldowns
+    [p, c].forEach(f => {
+      if (f.attackCooldown > 0) f.attackCooldown = Math.max(0, f.attackCooldown - dt);
+      if (f.hitStun > 0) f.hitStun = Math.max(0, f.hitStun - dt);
+    });
+    // Physics
+    [p, c].forEach(f => {
+      f.vy += 1200 * dt;
+      f.y += f.vy * dt;
+      if (f.y >= GROUND) {
+        f.y = GROUND;
+        f.vy = 0;
+      }
+      f.x = Math.max(10, Math.min(W - 10 - f.width, f.x));
+    });
+    // Push apart — allow them to stand side-by-side (touching)
+    const minDist = p.width; // 80px = exactly touching
+    const actualDist = Math.abs(p.x - c.x);
+    if (actualDist < minDist) {
+      const push = (minDist - actualDist) / 2;
+      if (p.x < c.x) {
+        p.x -= push;
+        c.x += push;
+      } else {
+        p.x += push;
+        c.x -= push;
+      }
+    }
+    // AI
+    updateAI(dt);
+    // Projectiles
+    for (let i = projectiles.length - 1; i >= 0; i--) {
+      const proj = projectiles[i];
+      proj.x += proj.vx * dt;
+      proj.life -= dt;
+      const target = proj.owner === state.player ? state.cpu : state.player;
+      const dx = proj.x - (target.x + target.width / 2);
+      const dy = proj.y - (target.y - 50);
+      if (Math.abs(dx) < 30 && Math.abs(dy) < 50) {
+        let dmg = ATTACK_DMG.fireball;
+        if (target.blocking) {
+          dmg = Math.floor(dmg * (1 - BLOCK_REDUCTION));
+          play("block");
+        } else {
+          play("fireball_hit");
+          spawnHitSpark(target.x + target.width / 2, target.y - 50);
+          triggerShake(8);
+        }
+        target.hp = Math.max(0, target.hp - dmg);
+        target.hitStun = 0.35;
+        projectiles.splice(i, 1);
+        continue;
+      }
+      if (proj.life <= 0 || proj.x < -50 || proj.x > W + 50) {
+        projectiles.splice(i, 1);
+      }
+    }
+    // Particles
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const pt = particles[i];
+      pt.x += pt.vx * dt;
+      pt.y += pt.vy * dt;
+      pt.vy += 300 * dt;
+      pt.life -= dt;
+      if (pt.life <= 0) particles.splice(i, 1);
+    }
+    // Screen shake
+    if (state.shakeTimer > 0) {
+      state.shakeTimer -= dt;
+      const intensity = state._shakeIntensity || 5;
+      state.shakeX = (Math.random() - 0.5) * intensity;
+      state.shakeY = (Math.random() - 0.5) * intensity;
+    } else {
+      state.shakeX = 0;
+      state.shakeY = 0;
+    }
+    // Announce
+    if (state.announceTimer > 0) {
+      state.announceTimer -= dt;
+    }
+    // Check KO
+    if (p.hp <= 0) {
+      state.over = true;
+      state.announce = "FATALITY";
+      state.announceTimer = 3;
+      endTitle.innerHTML = '<span class="fatality-text">FATALITY</span>';
+      endMsg.innerHTML = '<span class="lose-text">YOU LOSE</span>';
+      endMsg.style.color = "#ff3333";
+      play("fatality");
+      helpEl.style.opacity = "0";
+      setTimeout(() => { modal.style.display = "grid"; }, 1500);
+    }
+    if (c.hp <= 0) {
+      state.over = true;
+      state.announce = "FATALITY";
+      state.announceTimer = 3;
+      endTitle.innerHTML = '<span class="fatality-text">FATALITY</span>';
+      endMsg.innerHTML = '<span class="win-text">YOU WIN!</span>';
+      endMsg.style.color = "#00ff88";
+      play("fatality");
+      helpEl.style.opacity = "0";
+      setTimeout(() => { modal.style.display = "grid"; }, 1500);
+    }
+    // Update HUD
+    hpPEl.style.width = (p.hp / MAX_HP * 100) + "%";
+    hpCEl.style.width = (c.hp / MAX_HP * 100) + "%";
+  }
+  function drawFighter(f, spriteName) {
+    const x = f.x, y = f.y;
+    const w = f.width, h = f.height;
+    
+    // Determine animation pose
+    let pose = "idle";
+    if (f.hitStun > 0) pose = "hit";
+    else if (f.blocking) pose = "block";
+    else if (f.vy < 0) pose = "jump";
+    else if (f.vy > 0) pose = "fall";
+    else if (f.attackCooldown > 0) {
+      pose = f.attackCooldown > 1.0 ? "fireball" :
+             f.attackCooldown > 0.4 ? "kick" : "punch";
+    }
+    
+    // Select the correct sprite for the pose
+    let currentSpriteName = spriteName;
+    if (pose === "punch") currentSpriteName = spriteName === "player_warrior" ? "player_punch" : "cpu_punch";
+    else if (pose === "kick") currentSpriteName = spriteName === "player_warrior" ? "player_kick" : "cpu_kick";
+    else if (pose === "jump" || pose === "fall") currentSpriteName = spriteName === "player_warrior" ? "player_jump" : "cpu_jump";
+    
+    // Draw the fighter
+    ctx.save();
+    
+    // Hit flash
+    if (f.hitStun > 0) {
+      ctx.globalAlpha = 0.5 + 0.5 * Math.sin(state.t * 30);
+    }
+    
+    // Draw sprite
+    const sprite = ASSETS[currentSpriteName];
+    if (sprite && sprite.complete && sprite.naturalWidth > 0) {
+      // Calculate pose offsets
+      let ox = 0, oy = 0, scale = 1;
+      
+      // Apply pose-specific transformations
+      if (pose === "jump" || pose === "fall") {
+        oy = -20;
+        scale = 0.95;
+      }
+      if (pose === "punch") {
+        ox = 15;
+        scale = 1.05;
+      }
+      if (pose === "kick") {
+        ox = 20 * f.facing;
+        scale = 1.05;
+      }
+      if (pose === "fireball") {
+        ox = 10;
+        scale = 1.05;
+      }
+      if (pose === "hit") {
+        ox = -10;
+        scale = 0.95;
+      }
+      if (pose === "block") {
+        ox = -5;
+        scale = 0.95;
+      }
+      
+      // Draw with pose offset
+      const cpuPunchFlip = currentSpriteName === "cpu_punch" && f === state.cpu;
+      if (cpuPunchFlip) {
+        ctx.save();
+        ctx.scale(-1, 1);
+        ctx.drawImage(sprite, -(x + ox) - w * scale, y - h + oy, w * scale, h * scale);
+        ctx.restore();
+      } else if (f.facing === -1) {
+        ctx.save();
+        ctx.scale(-1, 1);
+        ctx.drawImage(sprite, -(x + ox) - w * scale, y - h + oy, w * scale, h * scale);
+        ctx.restore();
+      } else {
+        ctx.drawImage(sprite, x + ox, y - h + oy, w * scale, h * scale);
+      }
+    } else {
+      // Fallback
+      const col = spriteName === "player_warrior" ? "#cc3333" : "#3355cc";
+      ctx.fillStyle = col;
+      ctx.fillRect(x, y - h, w, h);
+      ctx.fillStyle = "#ffe0b2";
+      ctx.fillRect(x + w / 2 - 8, y - h - 5, 16, 16);
+    }
+    
+    // Draw pose indicators
+    if (pose === "punch") {
+      ctx.fillStyle = "#ffcc00";
+      ctx.beginPath();
+      ctx.arc(x + w + 5, y - h / 2, 12, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    if (pose === "kick") {
+      ctx.fillStyle = "#ff8800";
+      ctx.beginPath();
+      ctx.arc(x + w + 10, y - 30, 15, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    if (pose === "fireball") {
+      ctx.fillStyle = "#ff6600";
+      ctx.beginPath();
+      ctx.arc(x + w + 5, y - h / 2, 10, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    
+    ctx.restore();
+  }
+  function draw() {
+    ctx.save();
+    ctx.clearRect(0, 0, W, H);
+    ctx.translate(state.shakeX, state.shakeY);
+    // Background
+    const bg = ASSETS.temple_background;
+    if (bg && bg.complete && bg.naturalWidth > 0) {
+      ctx.drawImage(bg, 0, 0, W, H);
+    } else {
+      // Fallback background
+      const grad = ctx.createLinearGradient(0, 0, 0, H);
+      grad.addColorStop(0, "#0a0520");
+      grad.addColorStop(0.5, "#151030");
+      grad.addColorStop(1, "#1a1535");
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, W, H);
+      // Moon
+      ctx.fillStyle = "#ddd8cc";
+      ctx.beginPath();
+      ctx.arc(650, 80, 40, 0, Math.PI * 2);
+      ctx.fill();
+      // Ground
+      ctx.fillStyle = "#2a2035";
+      ctx.fillRect(0, GROUND, W, H - GROUND);
+      ctx.fillStyle = "#3a3050";
+      ctx.fillRect(0, GROUND, W, 3);
+      // Pillars
+      for (let i = 0; i < 5; i++) {
+        const px = 80 + i * 170;
+        ctx.fillStyle = "#1a1530";
+        ctx.fillRect(px, 100, 30, GROUND - 100);
+        ctx.fillStyle = "#252040";
+        ctx.fillRect(px - 5, 95, 40, 15);
+        ctx.fillRect(px - 5, GROUND - 15, 40, 15);
+      }
+    }
+    // Projectiles
+    for (const proj of projectiles) {
+      const fb = ASSETS.fireball;
+      if (fb && fb.complete && fb.naturalWidth > 0) {
+        ctx.save();
+        ctx.globalAlpha = 0.8 + 0.2 * Math.sin(state.t * 20);
+        ctx.drawImage(fb, proj.x - 16, proj.y - 16, 32, 32);
+        ctx.restore();
+      } else {
+        ctx.fillStyle = "#ff6600";
+        ctx.beginPath();
+        ctx.arc(proj.x, proj.y, 12, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "#ffcc00";
+        ctx.beginPath();
+        ctx.arc(proj.x, proj.y, 6, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    // Fighters
+    drawFighter(state.player, "player_warrior");
+    drawFighter(state.cpu, "cpu_warrior");
+    // Particles
+    for (const pt of particles) {
+      const alpha = pt.life / pt.maxLife;
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = pt.color;
+      ctx.fillRect(pt.x - pt.size / 2, pt.y - pt.size / 2, pt.size, pt.size);
+    }
+    ctx.globalAlpha = 1;
+    // Announce
+    if (state.announceTimer > 0) {
+      const ft = ASSETS.fatality_text;
+      if (ft && ft.complete && ft.naturalWidth > 0) {
+        ctx.drawImage(ft, W / 2 - 128, H / 2 - 32, 256, 64);
+      } else {
+        ctx.fillStyle = "#ff0000";
+        ctx.font = "bold 52px system-ui";
+        ctx.textAlign = "center";
+        ctx.shadowColor = "#ff0000";
+        ctx.shadowBlur = 30;
+        ctx.fillText(state.announce, W / 2, H / 2);
+        ctx.shadowBlur = 0;
+      }
+    }
+    // Paused
+    if (state.paused) {
+      ctx.fillStyle = "#000a";
+      ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = "#fff";
+      ctx.font = "bold 36px system-ui";
+      ctx.textAlign = "center";
+      ctx.fillText("PAUSED", W / 2, H / 2);
+    }
+    ctx.restore();
+  }
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    try {
+      update(dt);
+      draw();
+    } catch (err) {
+      console.error("game crashed:", err);
+    }
+    for (const k in pressed) pressed[k] = false;
+    requestAnimationFrame(frame);
+  }
+  // Start the loop
+  requestAnimationFrame(frame);
+  // Expose for probes
+  window.state = state;
+  window.game = window.game || { restart: () => { reset(); helpEl.style.opacity = "0.65"; } };
+  // R key restart
+  addEventListener("keydown", e => {
+    if (e.code === "KeyR" && state && state.over) {
+      reset();
+      helpEl.style.opacity = "0.65";
+    }
+  });
+})();
+</script>
+</body></html>

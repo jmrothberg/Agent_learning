@@ -1,0 +1,9 @@
+{
+  "session_id": "make-a-high-res-fully-sprite-a_20260530_064931",
+  "goal": "Make a high-res, fully sprite-animated Street Fighter-style fighting game, Ryu vs Ken. Animate punch and kick as real sprite poses (arm fully extended for punch, leg raised high for kick) \u2014 generate each pose as its own image with the same character description so frames stay consistent; never code-drawn limbs. Controls: KeyA/KeyD move, KeyF punch, KeyG kick, KeyR restart. Fighters always face each other.",
+  "model": "/Users/jonathanrothberg/MLX_Models/Qwen3.6-27B-mxfp8",
+  "iterations": 2,
+  "ok": false,
+  "last_report_summary": "OK: False\nTitle: 'Street Fighter: Ryu vs Ken'\nCanvas: 800x600, RAF ran: True, blank: False\nInput listeners: total=22 (doc=1, win=19, body=0, other=2)\nInput test: PASS \u2014 KeyA\u2192[p1.x]; KeyD\u2192[p1.health, p1.x]\nFrozen canvas: no (pixels changed during run)\nBody text length: 55 chars\nBody sample: 'Player 1 (Ryu): A/D move \u00b7 F punch \u00b7 G kick \u00b7 R restart'\nISSUES (must fix):\n  - PROBE FAILED [restart_after_ko_resets_state]: `(()=>{const g=window.game;if(!g||!g.reset)return false;g.reset();const s=window.` \u2014 evaluated falsy. Your Phase A acceptance criterion is unmet; fix the game so it evaluates truthy.\nWarnings:\n  - Canvas2D: Multiple readback operations using getImageData are faster with the willReadFrequently attribute set to true. See: https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently\nAcceptance probes: 7/8 pass\n  ok  canvas_present: !!document.querySelector('canvas')\n  ok  state_exposed: !!window.gameState && !!window.game && typeof window.game.reset ===",
+  "ts": "2026-05-30T11:07:40.019302Z"
+}

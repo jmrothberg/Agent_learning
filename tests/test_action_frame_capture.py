@@ -72,20 +72,22 @@ def test_smoke_test_captures_action_frame_while_held():
     # An ambient floor is computed so baseline drift never wins.
     assert "ambient_floor" in src
     assert "_canvas_hash_distance(ambient_a, ambient_b)" in src
-    # A screenshot is taken inside the hold when the held delta is the best.
-    assert "best_action_delta" in src
+    # A per-key candidate screenshot is taken inside the hold.
+    assert "action_candidates[k]" in src
     assert "self._page.screenshot(" in src
     # The capture must happen BEFORE the key is released (still held).
-    cap = src.find("action_frame_png = await self._page.screenshot")
+    cap = src.find("action_candidates[k] = (held_dist, _png)")
     up = src.find("keyboard.up(k)", cap)
     assert cap > -1 and up > cap, "action frame must be captured while key held"
 
 
-def test_smoke_test_discards_unattributable_action_frame():
+def test_smoke_test_selects_responsive_transient_action_frame():
     src = _smoke_src()
-    # The frame is kept only if its winning key proved input-attributable.
-    assert "best_action_key not in responsive_evidence" in src
-    assert "action_frame_png = None" in src
+    # Winner must be input-attributable (responsive) AND transient (reverts
+    # after release) — so a screen-wiping restart key never wins.
+    assert "responsive_evidence" in src
+    assert "_ACTION_TRANSIENT_MAX_RATIO" in src
+    assert "per_key_release_dist" in src
 
 
 def test_smoke_test_returns_action_fields():

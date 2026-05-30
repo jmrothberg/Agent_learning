@@ -30,7 +30,7 @@ def test_anthropic_default_max_tokens_is_32k():
     """The DK trace caught the 8192 default cutting 17KB rewrites off
     mid-stream. The new default must be high enough for a full HTML
     game in one go but inside cloud-side per-model limits (Sonnet 4.6:
-    64K, Opus 4.7: 32K)."""
+    64K, Opus 4.8: 32K)."""
     import inspect
     from backend import AnthropicBackend
     src = inspect.getsource(AnthropicBackend.stream_chat)

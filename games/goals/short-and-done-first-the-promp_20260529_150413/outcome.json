@@ -1,0 +1,9 @@
+{
+  "session_id": "short-and-done-first-the-promp_20260529_150413",
+  "goal": "Short and done. First the prompt \u2014 one line, identical for both LLMs: > **Make a Street Fighter\u2013style fighting game with high-res, well-animated sprites where I can clearly see each punch and kick, and the two fighters always face each other.",
+  "model": "claude-opus-4-7",
+  "iterations": 8,
+  "ok": true,
+  "last_report_summary": "OK: True\nTitle: 'Street Brawlers'\nCanvas: 1024x576, RAF ran: True, blank: False\nInput listeners: total=20 (doc=0, win=19, body=0, other=1)\nInput test: PASS \u2014 ArrowUp\u2192[p1.hp, p1.vx, p1.x, p2.attackHit]; ArrowDown\u2192[p2.cooldown]; ArrowLeft\u2192[p2.cooldown]; Space\u2192[fx.length, p1.hitFlash, p1.vx, p1.x, p2.attackHit]\nFrozen canvas: no (pixels changed during run)\nBody text length: 171 chars\nBody sample: 'P1: A/D move \u00b7 W jump \u00b7 S block \u00b7 F punch \u00b7 G kick \u00b7 T fireball \\xa0|\\xa0 P2: \u2190/\u2192 move \u00b7 \u2191 jump \u00b7 \u2193 block \u00b7 K punch \u00b7 L kick \u00b7 J fireball \\xa0|\\xa0 R restart \\xa0|\\xa0 M toggle CPU\\nKEN: CPU'\nWarnings:\n  - persistent warning [seen 7\u00d7 in a row]: Canvas2D: Multiple readback operations using getImageData are faster with the wi\u2026\nAcceptance probes: 8/10 pass\n  ok  probe_1: !!document.querySelector('canvas') && document.querySelector('canvas').width>0\n  ok  probe_2: !!(window.gameState && window.gameState.p1 && window.gameState.p2)\n  ok  probe_3: window.gameState.p1.hp>0 && window.gameState.p2.hp>0 &&",
+  "ts": "2026-05-29T20:46:35.690769Z"
+}

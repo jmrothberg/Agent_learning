@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>restart vs attack fixture</title></head>
+<body style="margin:0;background:#111">
+<canvas id="c" width="320" height="240"></canvas>
+<script>
+// Reproduces the trace failure: KeyR (restart) wipes/redraws the WHOLE screen
+// (biggest delta, but PERSISTENT) while KeyF is a static-pose attack (smaller
+// delta, but TRANSIENT — reverts on keyup). The action frame must select KeyF,
+// not KeyR, and flag KeyF as a static pose.
+(() => {
+  const c = document.getElementById("c"), ctx = c.getContext("2d");
+  const keys = Object.create(null);
+  // bgColor flips permanently on each restart → KeyR's change persists.
+  window.state = { punchT: 0, restarts: 0, bg: 0 };
+  addEventListener("keydown", e => {
+    if (e.code === "KeyR" && !keys["KeyR"]) { state.restarts++; state.bg ^= 1; }
+    keys[e.code] = true;
+  });
+  addEventListener("keyup", e => { keys[e.code] = false; });
+  function frame() {
+    // small ambient motion (continuously sliding dot)
+    const base = state.bg ? "#202840" : "#111";
+    ctx.fillStyle = base; ctx.fillRect(0, 0, 320, 240);
+    const dotX = Math.floor((Date.now() / 8) % 300);
+    ctx.fillStyle = "#0f0"; ctx.fillRect(dotX, 2, 6, 6);
+    // KeyR mid-hold: paint the whole screen white (huge, and it persists via bg)
+    if (keys["KeyR"]) { ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, 320, 240); }
+    // KeyF: static punch pose (state changes; pixels held constant)
+    ctx.fillStyle = "#39f";
+    if (keys["KeyF"]) { state.punchT++; ctx.fillRect(110, 90, 110, 90); }
+    else { ctx.fillRect(140, 90, 60, 90); }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body></html>

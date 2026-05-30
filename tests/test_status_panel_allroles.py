@@ -1,7 +1,7 @@
 """Tests for the /allroles status-panel visibility fix.
 
 When a user runs `/allroles` ON with a single backend loaded (the
-common Claude Opus 4.7 / single-cloud-model case), the architect and
+common Claude Opus 4.8 / single-cloud-model case), the architect and
 critic roles run on the coder backend via the fallthrough in
 `agent.GameAgent.get_backend(role)`. Before this fix, the status
 panel still hardcoded the slot-1 header as "Activity (coder):" so

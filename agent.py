@@ -44,6 +44,7 @@ history every turn so context stays bounded regardless of iteration count.
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import os
@@ -1450,14 +1451,18 @@ class AgentEvent:
     data: dict = field(default_factory=dict)
 
 
-# Ollama KV-cache scales linearly with num_ctx AND many kernels pick
-# sub-optimal batching above ~32K, slowing prefill even when actual
-# context is small. 32K covers iters 1-3 of typical game sessions with
-# headroom; longer sessions raise via /ctx (or env) and pay the reload
-# tax once. Observed prompts: ~10-18K iter 1, growing to ~25-35K by
-# iter 5-6. The 100K default we used to ship was 3x oversized and
-# silently quadrupled prefill latency.
-DEFAULT_NUM_CTX = 32_768
+# Default context window. This value is ALSO the denominator for the
+# compaction pressure check (prompt_tokens / num_ctx). The old 32K default
+# made that ratio exceed 1.0 within a couple of feedback turns, so the lossy
+# state-anchor compaction fired EVERY turn and shredded the playbook + prior
+# user-feedback + the model's view of the file (observed 2026-05-29
+# fighting-game trace: pressure 1.19 at 8 messages on a 200K-context model).
+# 100K is the speed/headroom sweet spot: observed coder prompts run ~10-45K
+# even deep into a feedback session, so pressure stays well under the 0.70
+# compaction trigger (full history retained), while keeping Ollama KV-cache /
+# prefill cost far lower than a 250K reservation. Raise toward 200K for very
+# long sessions, or lower on tight-VRAM hosts, via CODING_BOX_NUM_CTX / /ctx.
+DEFAULT_NUM_CTX = 100_000
 MIN_NUM_CTX = 8192
 MAX_NUM_CTX = 262_144
 
@@ -1693,6 +1698,17 @@ class GameAgent:
         self.seed_file: Path | None = Path(seed_file) if seed_file else None
         self._messages: list[dict] = []
         self._pending_feedback: list[str] = []
+        # Animation frames that came back near-identical to their from_image
+        # parent (dead animation: the limbs never moved). name -> parent_delta.
+        # Populated during asset generation; cleared when the frame is later
+        # regenerated distinctly. While non-empty it HARD-BLOCKS <done/> via
+        # _apply_dead_animation_check_to_report — a sliding static sprite is
+        # not the animation the user asked for.
+        self._dead_anim_frames: dict[str, float] = {}
+        # True once the model has declared any from_image-derived (animation)
+        # frame this session — a signal-driven "the user wants motion" flag
+        # the visual critic uses to add a context-specific animation question.
+        self._declared_anim_frames: bool = False
         self._feedback_deferred_last_turn: bool = False
         # Most recent feedback batch consumed by _flush_user_injections.
         # Used to restore feedback if a stream fails before any assistant
@@ -4682,6 +4698,33 @@ class GameAgent:
             report["soft_warnings"] = sw
             report["ok"] = False
 
+    def _apply_dead_animation_check_to_report(self, report: dict[str, Any]) -> None:
+        """Hard-block <done/> while any requested animation frame is still dead.
+
+        A `from_image` frame that came back near-identical to its idle parent
+        (tracked in `self._dead_anim_frames`) means the limbs never moved — the
+        character will just slide as a static image. That is not the animation
+        the user asked for, so flip ok=False and tell the model exactly how to
+        fix it (the set clears automatically when the frame regenerates with a
+        real delta). Objective + genre-free.
+        """
+        dead = self._dead_anim_frames
+        if not dead:
+            return
+        names = ", ".join(f"`{n}`" for n in sorted(dead))
+        sw = list(report.get("soft_warnings") or [])
+        sw.append(
+            "DEAD ANIMATION: these frames came back near-identical to their "
+            f"idle parent so their limbs never move — {names}. Re-emit them "
+            "with `from_image` from the IDLE base, `strength` 0.55-0.65, and "
+            "the moved body parts named in the prompt. A character that slides "
+            "as a static sprite is not animated; the game is not done until "
+            "these frames visibly differ from idle."
+        )
+        report["soft_warnings"] = sw
+        report["ok"] = False
+        report["dead_anim_frames"] = dict(dead)
+
     @staticmethod
     def _probe_shape_key(p: dict[str, Any]) -> str:
         name = str(p.get("name") or "probe").strip().lower()
@@ -6164,6 +6207,57 @@ class GameAgent:
                 "total_probes": len(self._probes or []),
             })
 
+    def _animation_expected(self) -> bool:
+        """True when the goal/session implies animated character motion.
+
+        Signal-driven: the model declared from_image frames, frames came back
+        dead, OR the goal/criteria imply game actions. No genre/verb table.
+        """
+        if self._declared_anim_frames or self._dead_anim_frames:
+            return True
+        try:
+            from tools import expects_game_controls as _egc
+            return bool(_egc(self._goal or "", self._criteria or ""))
+        except Exception:
+            return False
+
+    def _augment_recipe_for_animation(self, recipe):
+        """Append a context-specific animation question to a recipe's checklist.
+
+        The VLM (not a hard-wired rule) identifies the motion the GOAL describes
+        — walk, kick, punch, … — and judges whether the body pose actually
+        changes vs. the same sprite sliding. Returns a CLONE so the cached
+        recipe is untouched; returns the original when no animation is expected
+        or the recipe already asks about it.
+        """
+        if recipe is None or not self._animation_expected():
+            return recipe
+        existing = " ".join(recipe.recipe.get("checklist") or []).lower()
+        if "same sprite" in existing or "mid-stride" in existing or "same character mid-move" in existing:
+            return recipe  # recipe already covers animation (e.g. fighters)
+        q = (
+            "When the character moves or acts, do its body/limbs visibly change "
+            "pose between the resting frame and the action frame — performing the "
+            "SPECIFIC motion the goal describes (walking: legs in a different "
+            "mid-stride position; kicking: a leg extended; punching: an arm "
+            "extended) — rather than the SAME sprite image just repositioned? "
+            "Answer NO if it is the identical picture slid across the screen."
+        )
+        clone = copy.copy(recipe)
+        base = dict(recipe.recipe or {})
+        base["checklist"] = list(base.get("checklist") or []) + [q]
+        anim_hint = (
+            "Sliding/dead animation: do NOT redraw limbs in code. Re-emit the "
+            "motion frames with from_image from the IDLE base, strength "
+            "0.55-0.65, naming the moved body parts in the prompt; cycle >=2 "
+            "frames over the active window."
+        )
+        base["fix_hint"] = (
+            (base.get("fix_hint") or "").strip() + "\n" + anim_hint
+        ).strip()
+        clone.recipe = base
+        return clone
+
     def _build_visual_playtest_prompt(
         self, recipe, before_png: bytes | None, action_png: bytes | None = None,
     ) -> str:
@@ -6240,20 +6334,26 @@ class GameAgent:
         # VLM must NOT confirm an action is visible from two resting frames —
         # that is exactly how a static, never-animated attack got "Q5: YES"
         # every iteration in the 2026-05-29 fighting-game trace.
-        if action_png is None:
-            try:
-                from tools import expects_game_controls as _egc
-                _actions_expected = _egc(self._goal or "", self._criteria or "")
-            except Exception:
-                _actions_expected = False
-            if _actions_expected:
-                intro = intro + (
-                    "NOTE: no active-input (mid-action) frame was captured this "
-                    "run. If a question asks whether an ACTION / ATTACK / "
-                    "ABILITY / animation is VISIBLE or PLAYING, answer NO or "
-                    "UNCLEAR — do NOT answer YES, because there is no "
-                    "mid-action frame here to confirm it.\n\n"
-                )
+        if action_png is None and self._animation_expected():
+            intro = intro + (
+                "NOTE: no active-input (mid-action) frame was captured this "
+                "run. If a question asks whether an ACTION / ATTACK / "
+                "ABILITY / animation (e.g. a walk cycle, kick, punch) is "
+                "VISIBLE or PLAYING, answer NO or UNCLEAR —"
+                " do NOT answer YES, because there is no mid-action frame "
+                "here to confirm it.\n\n"
+            )
+        # Pixel analysis already measured the generated animation frames; if
+        # any came back near-identical to idle, tell the VLM so its judgment
+        # and the objective floor reinforce each other.
+        if self._dead_anim_frames:
+            names = ", ".join(sorted(self._dead_anim_frames))
+            intro = intro + (
+                "NOTE: pixel analysis found these animation frames nearly "
+                f"identical to the idle pose — {names}. Their limbs likely do "
+                "not move, so the character would slide as a static image. "
+                "Weigh that when judging any animation question.\n\n"
+            )
         example = (
             "Example response shape:\n"
             "Q1: yes\n"
@@ -6403,6 +6503,10 @@ class GameAgent:
                 "error": str(_vp_e)[:200],
             })
             recipe = None
+        # Context-specific animation check: when motion is expected, append a
+        # goal-driven "is it actually walking/kicking?" question to a clone of
+        # the recipe so the prompt + parser + formatter all see it.
+        recipe = self._augment_recipe_for_animation(recipe)
         try:
             using_recipe = recipe is not None
             if using_recipe:
@@ -6573,8 +6677,14 @@ class GameAgent:
                         "parse_rate": round(parse_rate, 2),
                         "raw_preview": critique_raw[:200],
                     })
-                    # Fall through to legacy return so the raw text
-                    # still surfaces (better than nothing).
+                    # The VLM ignored the format (e.g. rambled for paragraphs
+                    # on one question — the 2026-05-30 adventure trace). Do
+                    # NOT forward that raw chain-of-thought into the coder
+                    # prompt; surface only whatever DID parse, else nothing.
+                    formatted = self._format_visual_playtest_critique(parsed, recipe)
+                    self._trace({"kind": "visual_critic_end",
+                                 "critique": formatted or "(unparseable — dropped)"})
+                    return formatted
             self._trace({"kind": "visual_critic_end", "critique": critique_raw})
             return critique_raw
         except Exception as e:
@@ -10343,14 +10453,28 @@ class GameAgent:
                 # classic "punch sprite looks like idle" silent failure. The
                 # model can't see its own art, so log it AND queue it as
                 # actionable feedback for the next turn. Genre-free.
-                near_identical = [
+                derived = [
                     s for s in per_asset
                     if isinstance(s, dict)
                     and s.get("name") in produced
                     and s.get("from_image")
                     and isinstance(s.get("parent_delta"), (int, float))
-                    and s["parent_delta"] < _DERIVED_FRAME_MIN_DELTA
                 ]
+                if derived:
+                    # Signal-driven: the model declared animation frames, so
+                    # the visual critic should verify the motion reads.
+                    self._declared_anim_frames = True
+                near_identical = [
+                    s for s in derived
+                    if s["parent_delta"] < _DERIVED_FRAME_MIN_DELTA
+                ]
+                # Update the done-gate set: a frame that just regenerated
+                # with a real delta clears; a dead one (re)arms the block.
+                for s in derived:
+                    if s["parent_delta"] >= _DERIVED_FRAME_MIN_DELTA:
+                        self._dead_anim_frames.pop(s["name"], None)
+                for s in near_identical:
+                    self._dead_anim_frames[s["name"]] = float(s["parent_delta"])
                 if near_identical:
                     self._trace({
                         "kind": "derived_frame_near_identical",
@@ -10378,11 +10502,15 @@ class GameAgent:
                         warn_lines.append(line)
                         yield self._record(AgentEvent("info", line.strip()))
                     warn_lines.append(
-                        "Fix options: re-prompt the frame with a more "
-                        "explicit, exaggerated pose; raise its `strength`; or "
-                        "render the moving part (arm/leg/effect) in code "
-                        "during the action window instead of relying on the "
-                        "sprite."
+                        "Fix: re-emit these frames with `from_image` seeded "
+                        "from the entity's IDLE base (not the previous frame), "
+                        "RAISE `strength` to 0.55-0.65 (≤0.45 returns the idle "
+                        "pose unchanged), and NAME the moved body parts in the "
+                        "prompt ('right arm fully extended forward, fist out'; "
+                        "'left leg raised high')."
+                        " Keep using sprites — never draw the limb in code."
+                        " Until these frames visibly differ from idle, the "
+                        "game is NOT done."
                     )
                     self._pending_feedback.append("\n".join(warn_lines))
 
@@ -12989,6 +13117,7 @@ class GameAgent:
                 })
             self._handle_probe_eval_errors(report, iteration)
             self._apply_scoped_check_to_report(report)
+            self._apply_dead_animation_check_to_report(report)
             # Advance the warnings-persistence counter ONCE per iter,
             # before any format_report_for_model rendering. Compaction
             # is then applied uniformly to the test event text and to

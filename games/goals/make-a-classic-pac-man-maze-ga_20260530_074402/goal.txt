@@ -1,0 +1,1 @@
+Make a classic Pac-Man maze game: a maze of walls and corridors drawn from a 2D grid, Pac-Man eats dots, ghosts chase him. Pac-Man and the ghosts move along corridors only and cannot pass through walls. Arrow keys move Pac-Man. Pac-Man and ghosts must start inside the maze on corridor cells, not on a wall or outside.

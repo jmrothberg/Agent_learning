@@ -1,0 +1,4 @@
+{
+  "goal": "Polished pixel-art arcade shooter with gorgeous generated sprites (player 256px, enemies 128px, FX 64px), SD-Turbo explosion frames via from_image, full SFX + looping chiptune music, screen shake and particles, tight controls and HUD. Use drawImage at native size. Required <assets> and <sounds>. Strong criteria and probes including audio events. No procedural placeholders for characters.",
+  "session_id": "polished-pixel-art-arcade-shoo_20260517_100323"
+}
