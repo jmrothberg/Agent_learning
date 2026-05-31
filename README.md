@@ -39,6 +39,7 @@ does.
 - [Compared to other coding agents](#compared-to-other-coding-agents)
 - [Prerequisites](#prerequisites)
 - [Quick start](#quick-start)
+- [Testing — three layers](TEST.md)
 - [Architecture — the parts that span multiple files](#architecture--the-parts-that-span-multiple-files)
   - [The agent loop](#the-agent-loop-async-and-event-driven)
   - [Patch engine](#patch-engine)
@@ -310,9 +311,14 @@ VISION_JUDGE=0 .venv/bin/python coder.py "snake"
 
 ### Tests
 
+Three layers, fastest first — full guide in **[TEST.md](TEST.md)**.
+
 ```bash
-.venv/bin/python -m pytest tests/ -q                          # full suite (~2 s, no GPU/browser)
-.venv/bin/python -m pytest tests/test_patches.py -v           # single file
+.venv/bin/python -m pytest tests/ -q              # unit suite (126 files, ~1350 tests; no GPU/browser)
+.venv/bin/python eval/eval_prompts_plan.py --coverage   # memory coverage matrix (no model)
+MLX_MODEL=~/MLX_Models/Qwen3.6-27B-mxfp8 \
+  .venv/bin/python eval/eval_prompts_plan.py      # one planning turn per curated prompt (real model)
+python system_tests.py run --suite smoke --three-model  # full build loop (visible browser)
 ```
 
 ---
@@ -640,7 +646,7 @@ player rendered inside a wall, player off-screen.
 - `visual_playtest_recipe_used {id, top_candidates, match_tokens_sample}`
 - `visual_playtest_recipe_generic {reason, top_candidates}` — no recipe matched, generic fallback used
 - `visual_playtest_parsed {recipe_id, parse_rate, n_failures}`
-- `visual_playtest_unparseable {recipe_id, parse_rate, raw_preview}` — VLM didn't follow format; legacy critique surfaced as fallback
+- `visual_playtest_unparseable {recipe_id, parse_rate, raw_preview}` — VLM didn't follow the checklist format; retried once with a terse reformat, then the open-ended critique is surfaced as fallback
 - `visual_playtest_auto_probes_injected {recipe_id, added, total_probes}`
 
 **Performance cost:** ~1 ms recipe-match (token overlap) + ~10 ms per auto-probe per iter (one extra `_safe_eval`). Negligible vs the per-iter Chromium load (~3-10 s) and optional VLM call (~5-10 s).
@@ -776,7 +782,22 @@ still flow through. Suppressed notes still trace as
 | `games/game-memory/` | **Local learned** (gitignored) — optional live playbook overlay, `won_*` skeletons, `mistakes.jsonl` |
 | `games/goals/` | **Short-term** — per-session `goal.txt`, `best.html`, `outcome.json` |
 | `goodgame/<stem>.html` (+ `<stem>_assets/`, `<stem>_sounds/`) | **Curated showcases (easy path)** — not gitignored (unlike `games/` session output). TUI **`/goodgame`** copies `.best.html` (or live `.html`) plus asset folders into `goodgame/`; your usual git update/commit workflow picks them up with everything else. |
-| `games/<stem>.html` (+ `<stem>_assets/`, `<stem>_sounds/`) | **Legacy curated path** — most session HTML under `games/` is gitignored; you can still promote into `games/` and add matching `!` lines in `.gitignore` (chess sample). Prefer `goodgame/` unless you need the file to live beside other `games/` artifacts. |
+
+**Memory subsystems** — what each file does and when the agent uses it:
+
+| File | Subsystem | Function | Used at |
+|---|---|---|---|
+| `memory/playbook.jsonl` | `Playbook` | HTML/JS rules-of-thumb bullets; weighted-Jaccard × quality retrieval, `helpful`/`harmful` scoring, on-demand `<lookup_bullet>` expansion | plan · code · diagnose |
+| `memory/visual_playtests.jsonl` | VLM-critic recipes | Mechanism-keyed yes/no checklists + auto-probes the visual critic scores a screenshot against | plan (auto-probes) · critique |
+| `memory/implementation_outlines.jsonl` | Opening-book outlines | Per-genre code-structure guidance (state shape, loop, draw order) injected into the plan | plan · code |
+| `memory/playtests.jsonl` | Behavior playtest recipes | Scripted input→assert checks driving `/feedback` autonomous playtests | plan · code |
+| `memory/asset_audits.jsonl` | Asset audits | Checks generated sprites actually load and are drawn / visually distinct | plan · code |
+| `memory/animation_audits.jsonl` | Animation audits | Checks motion has real mid-frames (not a teleport or an idle clone) | plan · code |
+| `memory/skeletons/*.html` (+ `.json`) | `GameMemory` skeletons | 18 bundled first-build scaffolds + promoted `won_*` wins; modality detector then Jaccard picks one | code (iter 1) |
+| `mistakes.jsonl` (live) | Mistake memory | Error-signature → fix-summary recall so the model doesn't re-diagnose a known failure | diagnose |
+| `asset_index.jsonl` (`AssetLibrary`) | Cross-session asset library | Reuse of generated sprites/sounds across sessions by prompt-token match | asset gen |
+| `pose_recipes.jsonl` (`AssetLibrary`) | Pose recipes | Verified txt2img pose prompts that actually moved off idle, reused for animation | plan (hint) · asset gen |
+| `memory/prompt_library.jsonl` | Prompt library (`/games`) | 26 curated game-build prompts, each with an `expect` critical-feature oracle | TUI `/games` · eval harness |
 
 **Curated games in repo** (open from `goodgame/` so relative asset paths resolve):
 
@@ -785,9 +806,8 @@ still flow through. Suppressed notes still trace as
 - [`goodgame/a-game-of-street-figher-a-two_20260525_151525.html`](goodgame/a-game-of-street-figher-a-two_20260525_151525.html) — two-player Street Fighter-style fighter (from session `.best.html`).
 
 - **`GameMemory`** — skeleton retrieval and mistake retrieval.
-  - **Premium Default Skeletons (Autobootstrapped on boot)**: The system provides 17 generic, high-fidelity scaffolds in `memory/skeletons/` designed to give local models a perfect first-build template:
-    - `canvas_basic.html`: Clean 2D canvas with DPR scaling, frame loops, and window keyboard handlers. Kept for `skeleton_mode="default"` baseline; **no longer the retrieval fallback**.
-    - `canvas_basic_v2.html`: denser bug-hardened scaffold pre-empting focus-blur, dt-cap, restart-cleanup, DPR-resize, lazy-audio, and HUD pointer-events failures. Used when no modality or sidecar scaffold matches.
+  - **Premium Default Skeletons (Autobootstrapped on boot)**: The system provides 18 generic, high-fidelity scaffolds in `memory/skeletons/` designed to give local models a perfect first-build template:
+    - `canvas_basic_v2.html`: bug-hardened 2D scaffold (DPR scaling, frame loop, key handlers) pre-empting focus-blur, dt-cap, restart-cleanup, DPR-resize, lazy-audio, and HUD pointer-events failures. The fallback when no modality or sidecar scaffold matches.
     - `canvas_3d_basic.html`: Full 3D perspective setup utilizing CDN Three.js, lights, camera, and aspect-ratio fits.
     - `canvas_grid_basic.html`: Continuous tile-aligned corridor movement and corner snapping (e.g., Pac-Man, Sokoban).
     - `canvas_platformer_basic.html`: Gravity jumps, vertical ladder alignments, climbing, and platform landings (e.g., Donkey Kong).
@@ -1140,6 +1160,7 @@ is data the agent will see, not just developer notes.
 | `/backend <auto\|ollama\|mlx\|openai\|anthropic>` | Switch the backend (cloud choices are explicit and billable). |
 | `/unload` | Free VRAM: bare `/unload` evicts the active session tag; `/unload all` walks **every** Ollama slot (11434–11436) plus diffusers preload, not only `OLLAMA_HOST`; `/unload mlx` drops in-process MLX. |
 | `/new` | Start a new session in the same workspace. |
+| `/games`, `/games <N>` | Bare: list the 26 curated game prompts from `memory/prompt_library.jsonl` by number. `/games <N>` loads prompt #N into the input box (press Enter to build, or edit first). Aliases: `/library`, `/prompts`. |
 | `/goodgame` | Copy `.best.html` (or live `.html`) plus `*_assets/` / `*_sounds/` into `goodgame/`. Alias: `/good`. |
 | `/ship` | Force `<confirm_done/>` on the next critique turn. |
 | `/revert [N]`, `/rewind [N]` | Roll the on-disk game file back to the last clean iter (bare) or to iter `N` specifically. Falls back to `best.html` when no clean iter snapshot exists. The iter counter does NOT reset — only the **file** rewinds; the conversation continues and your next feedback applies to the reverted file. Use this when the model breaks something on the latest turn instead of typing "undo that" and watching it break more. Emits a `user_revert` trace event. |
@@ -1378,6 +1399,10 @@ CODING_BOX_NUM_CTX=262144 .venv/bin/python chat.py
 ---
 
 ## System tests and memory hygiene
+
+System tests are **Layer 3** (visible browser, full build loop) of the three-layer
+test strategy — see **[TEST.md](TEST.md)** for the unit suite and the no-build
+prompt-eval harness (`eval/eval_prompts_plan.py`).
 
 ```bash
 # Visible system tests (multi-GPU plumbing + optional slow Pac-Man benchmark).

@@ -70,6 +70,16 @@ MLX_MODEL=/Users/jonathanrothberg/MLX_Models/Qwen3.6-27B-mxfp8 .venv/bin/python 
 python system_tests.py run --suite smoke --three-model
 python system_tests.py run --suite pacman --yes   # skip slow-run confirmation
 
+# Prompt-library evaluation (memory/prompt_library.jsonl, the /games library)
+# Layer 0 — memory coverage matrix, NO model, instant: which subsystem fires per prompt
+.venv/bin/python eval/eval_prompts_plan.py --coverage
+# Layer 1 — ONE planning turn per prompt vs the local model (no browser, no diffuser):
+#   parses <plan>/<criteria>/<probes>/<assets>, checks each prompt's `expect` block.
+MLX_MODEL=~/MLX_Models/Qwen3.6-27B-mxfp8 .venv/bin/python eval/eval_prompts_plan.py
+.venv/bin/python eval/eval_prompts_plan.py --only 1            # one prompt
+.venv/bin/python eval/eval_prompts_plan.py --names chess,doom  # by name
+# Layer-0 assertions also run in CI: tests/test_prompt_library_coverage.py
+
 # Memory hygiene
 .venv/bin/python scripts/forget_session.py --list
 .venv/bin/python scripts/forget_session.py <session_id>

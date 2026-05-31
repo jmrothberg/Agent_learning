@@ -2990,11 +2990,19 @@ class CodingBoxApp(App):
             return
 
         if self._awaiting_kind == "goal":
-            self._goal = text
-            self._log(f"[bold green]>[/bold green] {text}")
             message.input.placeholder = "feedback · 'done' or Ctrl+D to ship · /help"
             self.sub_title = "agent is working"
-            await self._start_session(text)
+            # A prior session that already finished (e.g. a prompt loaded via
+            # /games after shipping the last game) needs the full re-init
+            # _new_session does — agent reset, log rotate, browser clear —
+            # not a bare _start_session. The first game of a session has
+            # agent is None and takes the simple path.
+            if self.agent is not None and self._session_done:
+                await self._new_session(text)
+            else:
+                self._goal = text
+                self._log(f"[bold green]>[/bold green] {text}")
+                await self._start_session(text)
             self._awaiting_kind = "feedback"
 
         elif self._awaiting_kind == "answer":
@@ -3080,6 +3088,8 @@ class CodingBoxApp(App):
                 self._cmd_unload(arg)
             elif cmd == "new":
                 await self._cmd_new(arg)
+            elif cmd in ("games", "game", "library", "prompts"):
+                self._cmd_games(arg)
             elif cmd in ("goodgame", "good"):
                 self._cmd_goodgame()
             elif cmd == "ship":
@@ -4250,6 +4260,70 @@ class CodingBoxApp(App):
             )
             return
         await self._new_session(arg)
+
+    def _cmd_games(self, arg: str) -> None:
+        """/games — list curated prompts; /games <N> loads prompt #N into input.
+
+        Loaded prompts go into the input box for review/edit; pressing Enter
+        starts the build (the goal path handles a clean relaunch after a
+        finished session). A running session is refused, mirroring /new.
+        """
+        from prompt_library import load_prompt_library
+
+        try:
+            games = load_prompt_library()
+        except Exception as e:
+            self._log_error(f"could not load prompt library: {e}")
+            return
+        if not games:
+            self._log_info(
+                "prompt library is empty — expected memory/prompt_library.jsonl"
+            )
+            return
+        arg = (arg or "").strip()
+        if not arg:
+            self._log_info("[bold]Curated game prompts[/bold] — /games <N> to load:")
+            for g in games:
+                self._log(f"  [cyan]{g['n']:>2}[/cyan]  {_esc(g['title'])}")
+            self._log_info(
+                f"e.g. [b]/games 1[/b] loads prompt #1 into the input — "
+                "press Enter to build, or edit it first."
+            )
+            return
+        try:
+            n = int(arg.split()[0])
+        except ValueError:
+            self._log_error(f"usage: /games <number 1-{len(games)}>")
+            return
+        match = next((g for g in games if g["n"] == n), None)
+        if match is None:
+            self._log_error(
+                f"no prompt #{n} — /games lists the {len(games)} available"
+            )
+            return
+        if self.agent is not None and not self._session_done:
+            self._log_error(
+                "a session is currently running — press Ctrl+D to ship it "
+                f"first, then /games {n}"
+            )
+            return
+        try:
+            inp = self.query_one("#user-input", Input)
+            inp.value = match["prompt"]
+            inp.placeholder = (
+                f"prompt #{n} ({match['title']}) loaded · press Enter to "
+                "build, or edit first"
+            )
+            inp.focus()
+            # Route the next Enter to a fresh build, not feedback/continuation.
+            self._awaiting_kind = "goal"
+            self._update_mode_bar()
+            self._log_info(
+                f"[green]loaded prompt #{n}: {_esc(match['title'])}[/green] — "
+                "press Enter to build, or edit it first."
+            )
+        except Exception as e:
+            self._log_error(f"could not load prompt into input: {e}")
 
     def _cmd_open(self) -> None:
         if self._out_path is None or not self._out_path.exists():

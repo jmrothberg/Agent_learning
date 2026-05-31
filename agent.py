@@ -10876,8 +10876,16 @@ class GameAgent:
         goal: str,
         *,
         continuation: bool = False,
+        plan_only: bool = False,
     ) -> AsyncIterator[AgentEvent]:
         """Drive a planning + iteration session.
+
+        plan_only=True: run ONLY Phase A — plan, criteria, probes, the
+        plan-time memory injection and analysis — then emit a consolidated
+        `plan_summary` trace and return BEFORE any asset/sound generation or
+        build iteration. No diffuser, no browser. Used by the prompt-eval
+        harness (eval/eval_prompts_plan.py) to test a critical feature of each
+        prompt cheaply while keeping a complete, informative trace.
 
         continuation=False (default): fresh session. Resets _messages, runs
         phase A planning, picks a memory skeleton, and seeds the first build.
@@ -11276,6 +11284,7 @@ class GameAgent:
 
             # ---- PHASE A: planning ------------------------------------------
             yield self._record(AgentEvent("phase", "planning"))
+            self._plan_retry_done = False
             # Phase 1B — when the diffuser pipeline lives on a GPU that
             # is NOT shared with any LLM slot, pre-warm it during
             # architect streaming so the cold-load (~30-60 s) is hidden
@@ -11322,6 +11331,77 @@ class GameAgent:
                 self._criteria = crit
                 self._trace({"kind": "criteria", "text": crit[:600]})
             probes = self._extract_probes(plan_reply)
+            # Planning-turn retry on an UNUSABLE plan. A degenerate token-
+            # repetition tail (e.g. "cooldown reset cooldown reset ..." ×100,
+            # or "st.x = st.x + st.x;" ×100) makes the model emit EOS mid-
+            # structured-output — below the RepetitionDetector threshold — so
+            # the plan parses with no <criteria> and/or no <probes>. Proceeding
+            # would burn the whole session on an empty plan. Re-stream ONCE with
+            # a terse corrective reprompt (mirrors the visual-critic reparse
+            # retry). Trace-evidenced 2026-05-31: street-fighter + bomberman
+            # both hit this and both recovered on a fresh attempt. This RECOVERS
+            # empty output — it only fires when the plan parsed empty, so it
+            # never truncates a legitimate long plan (per the no-early-cutoff rule).
+            if (not self._criteria or not probes) and not getattr(
+                self, "_plan_retry_done", False
+            ):
+                self._plan_retry_done = True
+                self._trace({
+                    "kind": "plan_incomplete_retry",
+                    "had_criteria": bool(self._criteria),
+                    "had_probes": bool(probes),
+                    "reply_chars": len(plan_reply or ""),
+                })
+                yield self._record(AgentEvent(
+                    "info",
+                    "planning reply was incomplete (likely a repetition "
+                    "cut-off) — retrying the plan once.",
+                ))
+                self._messages.append({
+                    "role": "user",
+                    "content": (
+                        "Your previous reply was cut off before a complete "
+                        "plan (missing <criteria> and/or <probes>). Re-emit the "
+                        "FULL <plan>, <criteria>, <probes>"
+                        + (", <assets>" if self._animation_expected() else "")
+                        + " now, concisely. Do NOT repeat any word or phrase "
+                        "more than a few times — write each item exactly once."
+                    ),
+                })
+                _retry_role = self._planning_role()
+                yield self._record(AgentEvent(
+                    "activity", "streaming",
+                    {"label": "re-streaming incomplete plan",
+                     "role": _retry_role},
+                ))
+                retry_reply = None
+                try:
+                    retry_reply = await self._stream(
+                        self._token_cb_wrapper, role=_retry_role)
+                except Exception:
+                    retry_reply = None
+                yield self._record(AgentEvent("activity", "idle"))
+                _nc = self._extract_criteria(retry_reply) if retry_reply else None
+                _np = self._extract_probes(retry_reply) if retry_reply else None
+                if retry_reply and (_nc or _np):
+                    self._messages.append({
+                        "role": "assistant", "content": retry_reply,
+                        "model_role": _retry_role,
+                        "model_name": self.get_backend(_retry_role).info.model,
+                    })
+                    self._extract_and_queue_lookups(retry_reply)
+                    self._capture_todos(retry_reply)
+                    self._dump_conversation()
+                    yield self._record(AgentEvent("plan", retry_reply))
+                    plan_reply = retry_reply
+                    if _nc:
+                        self._criteria = _nc
+                        self._trace({"kind": "criteria",
+                                     "text": _nc[:600], "retry": True})
+                    if _np:
+                        probes = _np
+                    self._trace({"kind": "plan_retry_recovered",
+                                 "criteria": bool(_nc), "probes": len(_np or [])})
             if probes:
                 self._probes = probes
                 # 2.1: log full probe text alongside the count so brittle
@@ -11459,6 +11539,33 @@ class GameAgent:
                 self._capture_todos(plan_reply)
                 self._dump_conversation()
                 yield self._record(AgentEvent("plan", plan_reply))
+
+            # Consolidated plan-outcome trace — one event a reviewer (or the
+            # prompt-eval harness) can read to see WHAT planning produced
+            # (criteria size, probe names, coverage gaps, probe quality)
+            # without scanning the whole token stream. Added 2026-05-31 from
+            # the prompt-library eval: a harness that stopped at the `plan`
+            # event lost the criteria/probes traces that fire just after it.
+            self._trace({
+                "kind": "plan_summary",
+                "criteria_chars": len(self._criteria or ""),
+                "probe_count": len(self._probes or []),
+                "probe_names": [p.get("name") for p in (self._probes or [])][:20],
+                "coverage_gaps": getattr(self, "_planning_coverage_gaps", []),
+                "probe_quality_ratio": (
+                    getattr(self, "_probe_quality", {}) or {}
+                ).get("ratio"),
+            })
+            if plan_only:
+                # Dry-run: stop cleanly after Phase A. No coder-warm, no
+                # asset/sound generation (no diffuser), no build loop.
+                self._dump_conversation()
+                yield self._record(AgentEvent(
+                    "info",
+                    "plan-only mode: Phase A complete — stopping before "
+                    "asset generation and build.",
+                ))
+                return
 
             # Phase 0.4 — pre-warm the coder slot's KV cache while asset
             # / sound generation runs on GPU 0. The architect just ran on
