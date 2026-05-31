@@ -1,9 +1,0 @@
-{
-  "session_id": "make-a-classic-pac-man-maze-ga_20260530_091432",
-  "goal": "Make a classic Pac-Man maze game. Use a valid 2D maze grid of walls and corridors. Pac-Man and 4 ghosts must SPAWN ON CORRIDOR cells (never inside a wall). Keep ONE coordinate convention (tile or pixel) for both movement and the wall check so Pac-Man actually moves and cannot pass through walls. Ghosts must be drawn every frame and chase Pac-Man through corridors only. Arrow keys move Pac-Man. Eat dots to score.",
-  "model": "/Users/jonathanrothberg/MLX_Models/Qwen3.6-27B-mxfp8",
-  "iterations": 2,
-  "ok": true,
-  "last_report_summary": "OK: True\nTitle: 'Pac-Man'\nCanvas: 504x504, RAF ran: True, blank: False\nInput listeners: total=18 (doc=0, win=17, body=0, other=1)\nInput test: PASS \u2014 ArrowUp\u2192[player.nextDir.y]; ArrowDown\u2192[player.nextDir.y]; ArrowLeft\u2192[dotsEaten, player.dir.x, player.moveProgress, player.moving, player.nextDir.x]; ArrowRight\u2192[player.moveProgress, player.nextDir.x, player.pixelX]\nFrozen canvas: no (pixels changed during run)\nBody text length: 75 chars\nBody sample: 'Score: 20\\nLives: 3\\nArrow Keys to move \u2022 R to restart \u2022 Eat all dots to win!'\nWarnings:\n  - Canvas2D: Multiple readback operations using getImageData are faster with the willReadFrequently attribute set to true. See: https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently\nAcceptance probes: 6/6 pass\n  ok  canvas_present: !!document.querySelector('canvas')\n  ok  pacman_on_corridor: window.gameState && window.gameState.player && window.gameState.player.tileX >= \n  ok  four_ghosts_exist: window.gameState && window.",
-  "ts": "2026-05-30T13:36:13.646025Z"
-}

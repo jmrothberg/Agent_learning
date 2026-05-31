@@ -1709,6 +1709,13 @@ class GameAgent:
         # frame this session — a signal-driven "the user wants motion" flag
         # the visual critic uses to add a context-specific animation question.
         self._declared_anim_frames: bool = False
+        # An explicit "generate new art" request that the model has NOT yet
+        # honored with an <assets> block. Re-asserted each turn (capped) until
+        # the model emits one — a model distracted by a blocker, or in
+        # raw-feedback mode, otherwise replies with code/diagnose and the new
+        # sprite never gets generated (here-s-a-tight-test 20260530).
+        self._unhonored_asset_request: str | None = None
+        self._asset_reprompt_count: int = 0
         self._feedback_deferred_last_turn: bool = False
         # Most recent feedback batch consumed by _flush_user_injections.
         # Used to restore feedback if a stream fails before any assistant
@@ -2749,6 +2756,7 @@ class GameAgent:
                 "short_line_loop": "the same 1-2 short lines cycling",
                 "near_dup_template_loop": "near-duplicate template lines",
                 "inline_data_bloat": "an 8-line block duplicated 3+ times",
+                "intra_line_repetition": "a short phrase repeated over and over on one line",
             }.get(prior_loop_kind or "", "the same content on repeat")
             line_clue = ""
             if prior_loop_line:
@@ -5158,6 +5166,59 @@ class GameAgent:
         _session_sounds = getattr(self, "_session_sounds", None) or {}
         asset_names = list(_session_assets.keys())
         sound_names = list(_session_sounds.keys())
+        # GENERAL (2026-05-31, genre/model-agnostic): an explicit "generate new
+        # art" request only produces sprites if the model emits an <assets>
+        # block. A model distracted by a test blocker — or in raw-feedback mode
+        # where the media wrapper is suppressed — often replies with code or a
+        # diagnosis and NO <assets>, so the art never gets made (here-s-a-tight
+        # -test 20260530: asked twice for a red fighter, zero new assets). Track
+        # the outstanding request and re-assert "emit <assets>" each turn until
+        # the model actually emits one (capped). This is a machine-level
+        # directive (NOT suppressed by raw mode) and survives the blocker; it
+        # is cleared in _maybe_generate_assets_and_sounds the moment an <assets>
+        # block is parsed.
+        # getattr defaults so partially-constructed test stubs (which skip
+        # __init__) don't AttributeError here.
+        _unhonored = getattr(self, "_unhonored_asset_request", None)
+        _reprompts = getattr(self, "_asset_reprompt_count", 0)
+        _art_reqs = [
+            fb for fb in self._pending_feedback
+            if _feedback_is_art_change(fb, asset_names)
+        ]
+        if _art_reqs:
+            _unhonored = _art_reqs[-1]
+            _reprompts = 0
+        if _unhonored and _reprompts < 3:
+            _reprompts += 1
+            self._unhonored_asset_request = _unhonored
+            self._asset_reprompt_count = _reprompts
+            parts.append(
+                "================ ASSET GENERATION REQUIRED ================\n"
+                "The user asked you to GENERATE NEW ART:\n"
+                f'  "{_unhonored[:300]}"\n'
+                "New art does NOT exist until you emit an <assets> block. THIS "
+                "turn, emit <assets> with a NEW `name` for each new sprite and a "
+                "SHORT prompt for each (for a recolor/variant, reuse the base "
+                "entity's description with the requested change — e.g. a second "
+                "fighter that is the same character in a different color, one "
+                "entry per pose). You MAY also <patch> the code to load and draw "
+                "them. Do NOT reply with only a diagnosis or code — the sprites "
+                "will not appear without an <assets> block.\n"
+                "==========================================================="
+            )
+            self._trace({
+                "kind": "asset_request_reprompt",
+                "attempt": _reprompts,
+                "request": _unhonored[:200],
+            })
+        elif _unhonored and _reprompts >= 3:
+            # Gave it 3 turns; stop nagging so the prompt doesn't bloat.
+            self._trace({
+                "kind": "asset_request_giveup",
+                "request": _unhonored[:200],
+            })
+            self._unhonored_asset_request = None
+            self._asset_reprompt_count = 0
         media_to_process_now: list[str] = []
         code_to_defer: list[str] = []
         force_honor_via_escalation: list[str] = []
@@ -6678,12 +6739,54 @@ class GameAgent:
                         "raw_preview": critique_raw[:200],
                     })
                     # The VLM ignored the format (e.g. rambled for paragraphs
-                    # on one question — the 2026-05-30 adventure trace). Do
-                    # NOT forward that raw chain-of-thought into the coder
-                    # prompt; surface only whatever DID parse, else nothing.
+                    # on one question — adventure/SF traces 2026-05-30). RETRY
+                    # ONCE with a hard "answer ONLY Qn: yes/no" reformat before
+                    # giving up: small VLMs (qwen) ramble on the first pass but
+                    # comply when the format is restated tersely, and losing ALL
+                    # visual feedback (the critic's whole purpose) is worse than
+                    # one extra cheap call. Only drop if the retry also fails.
+                    checklist = recipe.recipe.get("checklist") or []
+                    numbered = "\n".join(
+                        f"Q{i + 1}: {q}" for i, q in enumerate(checklist)
+                    )
+                    reformat = (
+                        "Answer the checklist below for the attached "
+                        "screenshot(s). Output ONLY one line per question in "
+                        "EXACTLY this form, nothing else — no reasoning, no "
+                        "prose, no preamble:\n"
+                        "Q1: yes\nQ2: no\nQ3: unclear\n...\n"
+                        "Use only yes / no / unclear.\n\n" + numbered
+                    )
+                    try:
+                        retry = await backend.stream_chat(
+                            [{"role": "user", "content": reformat,
+                              "images": images}],
+                            on_token=on_tok,
+                            options={"temperature": 0.0, "num_ctx": 4096},
+                            keep_alive=self._keep_alive_for_backend(backend),
+                            stall_seconds=120.0, overall_seconds=300.0,
+                            max_retries=1,
+                        )
+                        reparsed = self._parse_visual_playtest_response(
+                            (retry.text or "").strip(), recipe,
+                        )
+                        if reparsed.get("parse_rate", 0.0) >= 0.5:
+                            parsed = reparsed
+                            self._trace({
+                                "kind": "visual_playtest_reparse_ok",
+                                "recipe_id": recipe.id,
+                                "parse_rate": round(reparsed["parse_rate"], 2),
+                            })
+                    except Exception as _re_e:
+                        self._trace({
+                            "kind": "visual_playtest_reparse_failed",
+                            "error": str(_re_e)[:160],
+                        })
+                    # Surface whatever parsed (from the retry if it worked);
+                    # never the raw chain-of-thought.
                     formatted = self._format_visual_playtest_critique(parsed, recipe)
                     self._trace({"kind": "visual_critic_end",
-                                 "critique": formatted or "(unparseable — dropped)"})
+                                 "critique": formatted or "(unparseable — dropped after retry)"})
                     return formatted
             self._trace({"kind": "visual_critic_end", "critique": critique_raw})
             return critique_raw
@@ -9463,31 +9566,9 @@ class GameAgent:
         m = _CRITERIA_RE.search(reply)
         return m.group(1).strip() if m else None
 
-    _ARCHITECT_KEYWORDS = (
-        "level", "boss", "multi", "stage", "wave", "campaign",
-        "physics", "raycast", "particle", "shader", "3d", "three.js",
-        "phaser", "engine", "ai opponent", "tournament", "tile", "rpg",
-        "platformer", "scrolling", "parallax", "inventory", "puzzle",
-        "minesweeper", "tower defense", "flappy", "endless", "shoot em up",
-    )
-
-    @classmethod
-    def _is_complex_goal(cls, goal: str) -> bool:
-        """Heuristic gate for the architect/editor split. Conservative —
-        prefers single-call when uncertain so we don't double the wall-
-        clock on simple goals.
-        """
-        if not goal:
-            return False
-        g = goal.lower()
-        if len(g) > 90:
-            return True
-        if sum(1 for k in cls._ARCHITECT_KEYWORDS if k in g) >= 1:
-            return True
-        # Multi-clause goals ("X with Y and Z") are usually richer.
-        if g.count(" with ") + g.count(" and ") >= 2:
-            return True
-        return False
+    # (Removed 2026-05-30: `_ARCHITECT_KEYWORDS` + `_is_complex_goal` gated the
+    # separate `<architect>` prose turn, which was merged into the single
+    # planning pass. The architect ROLE and exit-decision turn are unchanged.)
 
     # Properties whose presence/size is established at init, NOT at
     # runtime — comparisons against them aren't dynamic even when they
@@ -10117,6 +10198,12 @@ class GameAgent:
             reply, max_assets=session_cap,
         )
         sound_specs = parse_sounds_block(reply)
+        # The model emitted an <assets> block → any outstanding "generate new
+        # art" request is now honored; stop re-asserting it (see the
+        # ASSET GENERATION REQUIRED directive in _flush_user_injections).
+        if asset_specs and self._unhonored_asset_request is not None:
+            self._unhonored_asset_request = None
+            self._asset_reprompt_count = 0
 
         # P1 (MK trace 20260528): on a seed restart with on-disk media,
         # SKIP phase_a generation entirely. The model can still emit
@@ -10363,6 +10450,16 @@ class GameAgent:
                 per_asset = getattr(
                     self._asset_generator, "last_stats", None,
                 ) or []
+                # At-a-glance "did each pose frame actually move off idle?"
+                # signal (2026-05-31): {name: delta-vs-parent} for from_image
+                # frames. A reviewer can spot a cloned pose (delta < ~0.04)
+                # without digging into per_asset or regenerating. Genre-free.
+                pose_deltas = {
+                    s.get("name"): s.get("parent_delta")
+                    for s in per_asset
+                    if isinstance(s, dict) and s.get("from_image")
+                    and isinstance(s.get("parent_delta"), (int, float))
+                }
                 self._trace({
                     "kind": "assets_generated",
                     "trigger": trigger,
@@ -10370,6 +10467,7 @@ class GameAgent:
                     "produced": len(produced),
                     "names": list(produced.keys()),
                     "session_dir": str(session_assets_dir),
+                    "pose_deltas": pose_deltas,
                     "per_asset": per_asset,
                 })
                 yield self._record(AgentEvent(
@@ -11103,6 +11201,37 @@ class GameAgent:
                     "chars": len(cfg_text),
                 })
 
+            # #5: surface PROVEN pose prompts from past animated sessions.
+            # When this goal implies character motion and we hold recipes whose
+            # pose words overlap it, inject them as a planning hint so the model
+            # reuses txt2img-merged prompts that previously produced a REAL
+            # (moved) pose rather than an idle clone. Best-effort; never blocks.
+            try:
+                if self._animation_expected():
+                    from asset_library import AssetLibrary
+                    _recipes = AssetLibrary().retrieve_pose_recipes(goal, k=4)
+                    if _recipes:
+                        _lines = "\n".join(
+                            f'- {r.get("pose", "?")}: "{r.get("prompt", "")}"'
+                            for r in _recipes
+                        )
+                        plan_msg = (
+                            plan_msg
+                            + "\n\n<proven-pose-prompts>\n"
+                            + "These pose prompts produced REAL distinct poses "
+                            + "(not idle clones) in past animated games. Reuse "
+                            + "or adapt them for matching from_image frames:\n"
+                            + _lines
+                            + "\n</proven-pose-prompts>"
+                        )
+                        self._trace({
+                            "kind": "pose_recipes_injected",
+                            "count": len(_recipes),
+                            "poses": [r.get("pose") for r in _recipes],
+                        })
+            except Exception as e:
+                self._trace({"kind": "pose_recipes_error", "err": str(e)})
+
             self._messages = [
                 {"role": "system", "content": sys_prompt},
                 {"role": "user", "content": plan_msg},
@@ -11552,73 +11681,15 @@ class GameAgent:
                 self._active_opening_book_recipes = opening_hits
                 pb_kwargs = {"playbook_block": pb_block} if pb_block else {}
 
-                # Optional architect step — produce an English design
-                # before code. Only fires on detected complex goals AND
-                # when the feature is on. The architect note becomes
-                # part of the first-build user turn so the editor model
-                # has a concrete plan to execute.
-                architect_note = ""
-                if (
-                    self._use_architect_split
-                    and self._is_complex_goal(goal)
-                ):
-                    yield self._record(AgentEvent(
-                        "phase", "architect",
-                        {"goal_chars": len(goal)},
-                    ))
-                    self._messages.append({
-                        "role": "user",
-                        "content": (
-                            "Before code, do an ARCHITECT pass — describe the "
-                            "implementation in English. No code, no <html_file>, "
-                            "no <patch>. Use this format:\n\n"
-                            "<architect>\n"
-                            "Data: <key globals / state shape>\n"
-                            "Loop: <update / draw responsibilities>\n"
-                            "Layers: <draw order, e.g. bg → entities → fx → hud>\n"
-                            "Risks: <2-3 places this typically goes wrong>\n"
-                            "</architect>\n\n"
-                            "Keep it short — 1-2 sentences per line. The next "
-                            "turn will hand this to the editor model along with "
-                            "the seed code."
-                        ),
-                    })
-                    yield self._record(AgentEvent(
-                        "activity", "streaming",
-                        {"label": "architect note", "role": "architect"},
-                    ))
-                    try:
-                        arch_reply = await self._stream(self._token_cb_wrapper, role="architect")
-                    except Exception as e:
-                        self._set_role_activity("architect", "idle")
-                        yield self._record(AgentEvent("activity", "idle"))
-                        yield self._record(AgentEvent(
-                            "info", f"architect call failed, continuing single-shot: {e}",
-                        ))
-                        # Pop the architect user message so we don't leave
-                        # the conversation in a half-state.
-                        if self._messages and self._messages[-1].get("role") == "user":
-                            self._messages.pop()
-                    else:
-                        yield self._record(AgentEvent("activity", "idle"))
-                        self._messages.append({
-                            "role": "assistant",
-                            "content": arch_reply,
-                            "model_role": "architect",
-                            "model_name": self.get_backend("architect").info.model
-                        })
-                        m = re.search(r"<architect>\s*(.*?)\s*</architect>",
-                                      arch_reply, re.DOTALL | re.IGNORECASE)
-                        if m:
-                            architect_note = m.group(1).strip()
-                            self._trace({
-                                "kind": "architect_note",
-                                "len": len(architect_note),
-                            })
-                            yield self._record(AgentEvent(
-                                "info",
-                                f"architect: {architect_note[:160]}",
-                            ))
+                # Design happens in ONE pass: the planning turn (above, on
+                # the architect role) already emits the full decomposition —
+                # mechanics, controls, risky bits, criteria, probes, media,
+                # and a `Build order` line. The separate `<architect>` prose
+                # turn that used to run here was removed (2026-05-30): it
+                # restated the plan (Risks duplicated, Data/Layers already in
+                # the seed scaffold) and was a second boundary-free prose
+                # generation that ran away on the local model. The architect
+                # ROLE and the exit-decision turn are unchanged.
 
                 # Fix B (model-agnostic): pass the current session's
                 # asset/sound directory basenames so first_build_instruction
@@ -11648,13 +11719,6 @@ class GameAgent:
                         f"{opening_block}\n\n"
                         "Use the opening-book recipes above as verified "
                         "implementation and test guidance.\n\n"
-                        + build_msg
-                    )
-                if architect_note:
-                    build_msg = (
-                        "ARCHITECT NOTE (your own plan from the previous turn — "
-                        "follow it):\n"
-                        f"<architect>\n{architect_note}\n</architect>\n\n"
                         + build_msg
                     )
                 asset_block = render_asset_paths_block(
@@ -13168,6 +13232,17 @@ class GameAgent:
                     "action_key": report.get("action_key"),
                     "static_action": _static_action,
                     "fail_reason": ",".join(fail_reasons) or "ok",
+                    # Higher signal-to-noise debugging (2026-05-31): record WHY
+                    # it blocked (the actual soft-warning texts, not just a
+                    # count), the non-blocking warnings, the frozen-canvas
+                    # false-positive classifier, and any queued feedback that a
+                    # non-ok iter will defer — so "stuck + user request starved"
+                    # is visible from this one event.
+                    "soft_warnings": [str(w)[:160] for w in soft_warnings[:6]],
+                    "warnings": [str(w)[:140] for w in (report.get("warnings") or [])[:4]],
+                    "frozen_canvas_input_responsive": report.get("frozen_canvas_input_responsive"),
+                    "pending_feedback": [fb[:120] for fb in (self._pending_feedback or [])[:4]],
+                    "pending_feedback_count": len(self._pending_feedback or []),
                 }
                 self._trace(summary_payload)
                 # Phase 3 surprise rules — fire on signals worth

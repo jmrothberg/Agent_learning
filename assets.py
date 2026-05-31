@@ -42,16 +42,29 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Per-asset default target size. Bumped 2026-05-23 from 128 → 512:
-# user feedback "why are the .png always tiny" — 128 px PNGs looked
-# postage-stamp on modern displays, especially at 4K, and shrinking
-# from 768 native to 128 threw away most of the diffuser's detail.
-# 512 keeps the detail (drawImage downscales cheaply at draw time
-# if the game wants a smaller render size) without inflating disk
-# usage past a few MB per session. Power-of-2 so WebGL textures
-# don't need padding. Can still be overridden per-asset by the model
-# via "size":"32x32" / "size":256 etc.
-_DEFAULT_TARGET_SIZE = 512
+# Per-asset default target size, chosen PER PROMPT (2026-05-31): a prompt that
+# asks for high-resolution / detailed art defaults to 768 (the diffuser's
+# native size — no downscaling, maximum detail); everything else defaults to
+# 512 (plenty for most sprites, and ~2.25× faster to generate than 768 — a
+# blanket 768 made every project's asset gen slow, e.g. 27 sprites took 7 min).
+# A 128-px postage-stamp default was the original mistake (2026-05-23). Always
+# overridable per-asset via "size":"32x32" / "size":256 for HUD icons etc.
+_DEFAULT_TARGET_SIZE = 512   # back-compat alias; the lo-res default
+_LORES_DEFAULT_SIZE = 512
+_HIRES_DEFAULT_SIZE = 768
+_HIRES_CUES = (
+    "high-res", "high res", "hi-res", "hires", "high resolution",
+    "high-resolution", "high fidelity", "detailed", "hd", "4k",
+    "realistic", "cinematic", "photoreal",
+)
+
+
+def _default_size_for_prompt(prompt: str) -> int:
+    """768 when the prompt asks for high-res/detailed art, else 512. Lets a
+    'highest resolution' goal get native-size sprites while a plain arcade
+    sprite stays fast — without a blanket slowdown for every project."""
+    lo = (prompt or "").lower()
+    return _HIRES_DEFAULT_SIZE if any(c in lo for c in _HIRES_CUES) else _LORES_DEFAULT_SIZE
 
 # Where Z-Image-Turbo's weights live on disk. Cross-platform — works on
 # Linux (Models_Diffusers convention) and macOS (Diffusion_Models
@@ -287,10 +300,11 @@ def parse_assets_block_with_meta(
         prompt = str(item.get("prompt") or "").strip()
         if not name or not prompt:
             continue
+        _size_default = _default_size_for_prompt(prompt)
         try:
-            size = _parse_size(item.get("size", _DEFAULT_TARGET_SIZE))
+            size = _parse_size(item.get("size") or _size_default)
         except Exception:
-            size = (_DEFAULT_TARGET_SIZE, _DEFAULT_TARGET_SIZE)
+            size = (_size_default, _size_default)
         # Normalize prompt the same way the cache key does, so trivial
         # whitespace / case differences don't create duplicate entries
         # that would all map to the same cached PNG anyway.
@@ -1100,17 +1114,16 @@ def _topo_sort_specs(specs: list[dict]) -> list[dict]:
 
 _UNSET: Any = object()  # sentinel: "argument not provided"
 
-# Below this mean per-pixel RGB delta (0..1), a `from_image`-derived frame is
-# treated as "near-identical to its parent" — i.e. the diffusion model likely
-# ignored the requested pose change (a "punch" frame that looks exactly like
-# idle). Calibrated on real Z-Image img2img (2026-05-29 GPU sweep): a genuine
-# but CONSISTENT pose change (an extended arm — a small fraction of pixels)
-# scores ~0.016–0.028 at strength 0.5–0.65, while a frame where the pose did
-# not render at all scores well under 0.01. 0.03 false-positived the good
-# consistent frames and pushed the model toward code-drawn limbs; 0.012 passes
-# them while still catching a truly flat frame. Heuristic warning, never a
-# hard error.
-_DERIVED_FRAME_MIN_DELTA = 0.012
+# Below this mean per-pixel RGB delta (0..1), a `from_image` pose frame is
+# treated as "near-identical to its parent" — the pose didn't change at all.
+# NOTE (2026-05-30): this is only a CHEAP FLOOR for a literally-unchanged frame;
+# delta does NOT measure whether the pose is correct (a style-drifted idle can
+# score 0.3+ while still showing no punch — see animation_ab/). Real pose checks
+# are the VLM's job. Pose frames now render as TXT2IMG from the shared character
+# description (img2img stayed locked to idle at guidance_scale=0), so a genuine
+# pose scores high (~0.3-0.5); 0.04 only catches a frame that came back as the
+# idle. Heuristic warning, never a hard error.
+_DERIVED_FRAME_MIN_DELTA = 0.04
 
 
 def _derived_frame_delta(new_path: Path | str, parent_path: Path | str) -> float | None:
@@ -1198,11 +1211,24 @@ def generate_assets(
     # the _UNSET sentinel that means "not provided"). Saves ~2 GB of
     # VRAM in the common case of all-root assets, and lets tests inject
     # None to assert the fallback path.
-    needs_img2img = any(s.get("from_image") for s in specs)
+    # Pose/animation frames are now generated as TXT2IMG (merged character +
+    # pose prompt, fixed seed) — NOT img2img. Proven 2026-05-30 (A/B in
+    # animation_ab/): img2img at guidance_scale=0 stays locked to the idle pose
+    # at every strength/model; txt2img from the shared character description
+    # produces the real pose AND the same character. So the SD-Turbo img2img
+    # generator is no longer loaded.
+    needs_img2img = False
     if img2img_generator is _UNSET:
         img2img_generator = (
             try_load_img2img_generator() if needs_img2img else None
         )
+    # name -> prompt, so a `from_image` pose frame can be regenerated as
+    # txt2img with the PARENT's character+style description prepended to this
+    # frame's pose clause (keyed by both raw and filesafe name).
+    prompt_by_name: dict[str, str] = {}
+    for s in specs:
+        prompt_by_name[s["name"]] = s["prompt"]
+        prompt_by_name[_safe_filename(s["name"])] = s["prompt"]
 
     out: dict[str, Path] = {}
     # 2.2: per-asset stats accumulated as a side channel. Caller can
@@ -1314,33 +1340,26 @@ def generate_assets(
         # Cache miss — generate. img2img path when from_image resolves;
         # txt2img otherwise.
         gen_path: str | None = None
-        if from_image and from_image in out:
-            init_path = str(out[from_image])
-            # PREFER Z-Image img2img on the MAIN generator — animation frames
-            # must be drawn by the SAME model as the base/idle sprite, or they
-            # won't match the character (the foreign SD-Turbo path produced
-            # visibly inconsistent frames — 2026-05-29 trace). Fall back to the
-            # SD-Turbo img2img generator, then txt2img, so an asset is never lost.
-            zi_img2img = getattr(image_generator, "generate_img2img", None)
-            if callable(zi_img2img):
-                gen_path = _safe_call_img2img(
-                    zi_img2img, prompt, init_path, strength or 0.5,
-                )
-                if gen_path is not None:
-                    stat["img2img_model"] = "z-image"
-            if gen_path is None and img2img_generator is not None:
-                gen_path = _safe_img2img(
-                    img2img_generator, prompt, init_path, strength or 0.45,
-                )
-                if gen_path is not None:
-                    stat["img2img_model"] = "sd-turbo"
-            if gen_path is None and image_generator is not None:
-                # both img2img paths failed; fall back to txt2img.
-                stat["fallback_to_txt2img"] = True
-                gen_path = _safe_generate(image_generator, prompt)
-        else:
-            if from_image and from_image not in out:
+        if from_image:
+            # POSE / ANIMATION FRAME → TXT2IMG, not img2img. img2img (any model,
+            # any strength) stays locked to the idle init at guidance_scale=0
+            # (proven 2026-05-30, animation_ab/). We regenerate the pose from
+            # the SHARED character description (the parent/idle prompt) + this
+            # frame's pose clause, on the FIXED seed — same character, real
+            # pose. parent prompt carries the character + style so the frame
+            # matches; this frame's prompt carries the pose.
+            parent_prompt = (
+                prompt_by_name.get(from_image)
+                or prompt_by_name.get(_safe_filename(from_image))
+                or ""
+            )
+            merged = f"{parent_prompt}, {prompt}" if parent_prompt else prompt
+            if from_image not in out and from_image not in prompt_by_name:
                 stat["parent_missing"] = from_image
+            stat["pose_txt2img"] = True
+            stat["merged_prompt"] = merged[:240]
+            gen_path = _safe_generate(image_generator, merged)
+        else:
             gen_path = _safe_generate(image_generator, prompt)
         if gen_path is None:
             # Pull the real error from the most recently-used generator
@@ -1409,6 +1428,24 @@ def generate_assets(
                 pdelta = _derived_frame_delta(target_path, out[from_image])
                 if pdelta is not None:
                     stat["parent_delta"] = round(pdelta, 4)
+                    # #5: a pose frame that actually MOVED (delta over the
+                    # clone floor) is worth remembering — record the exact
+                    # prompt so future animation games reuse the proven recipe.
+                    # Keyed by entity stem (from the parent) + pose (this
+                    # frame's distinguishing tokens). Library is production-only.
+                    if library is not None:
+                        try:
+                            _stem = (from_image.split("_", 1)[0] or from_image).lower()
+                            _toks = [p for p in name.split("_")
+                                     if p and not p.isdigit() and p.lower() != _stem]
+                            _pose = "_".join(_toks) or name
+                            if library.admit_pose_recipe(
+                                stem=_stem, pose=_pose,
+                                prompt=prompt, delta=pdelta,
+                            ):
+                                stat["pose_recipe_saved"] = True
+                        except Exception:
+                            pass
             # Admit root-prompt sprites to the cross-session library.
             # We skip img2img children because their value is tied to a
             # session-specific parent that isn't admitted.

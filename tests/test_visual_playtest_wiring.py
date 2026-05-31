@@ -273,3 +273,71 @@ def test_e2e_novel_goal_returns_none(tmp_path: Path) -> None:
         goal="a breathing meditation timer with calming sounds"
     )
     assert r is None
+
+
+# ----------------------------------------------------------------------
+# #3 — critic retry-once-with-terse-reformat before dropping unparseable.
+# ----------------------------------------------------------------------
+
+class _StubReply:
+    def __init__(self, text: str):
+        self.text = text
+
+
+class _RetryBackend:
+    """Returns rambling prose first (unparseable), a clean checklist on retry."""
+    info = type("_Info", (), {"model": "stub", "name": "stub"})()
+
+    def __init__(self, first: str, second: str):
+        self._replies = [first, second]
+        self.calls = 0
+
+    async def stream_chat(self, messages, **kwargs):
+        i = min(self.calls, len(self._replies) - 1)
+        self.calls += 1
+        return _StubReply(self._replies[i])
+
+
+def _critic_agent(tmp_path: Path, backend) -> GameAgent:
+    a = _make_agent(tmp_path)
+    a._backend = backend
+    a._use_vlm_critique = True
+    a._goal = ""
+    a._criteria = ""
+    return a
+
+
+import asyncio  # noqa: E402
+
+
+def test_visual_critic_retries_then_uses_reparsed(tmp_path: Path, monkeypatch) -> None:
+    recipe = _stub_recipe()
+    monkeypatch.setattr(
+        memory_mod.GameMemory, "find_visual_playtest_for",
+        lambda self, **kw: (recipe, {}),
+    )
+    # First reply rambles (0 parseable lines); retry answers Q3: no cleanly.
+    backend = _RetryBackend(
+        "Well, let me think about this screenshot in great detail...",
+        "Q1: yes\nQ2: yes\nQ3: no\nQ4: yes",
+    )
+    a = _critic_agent(tmp_path, backend)
+    out = asyncio.run(a.run_visual_critic(b"\x89PNG-current"))
+    # The retry was issued (two backend calls) and its parsed failure surfaced.
+    assert backend.calls == 2
+    assert out is not None
+    assert "enemies" in out.lower() or "Q3" in out or "3" in out
+
+
+def test_visual_critic_drops_when_retry_also_unparseable(tmp_path: Path, monkeypatch) -> None:
+    recipe = _stub_recipe()
+    monkeypatch.setattr(
+        memory_mod.GameMemory, "find_visual_playtest_for",
+        lambda self, **kw: (recipe, {}),
+    )
+    backend = _RetryBackend("rambling one", "still rambling, no Qn lines here")
+    a = _critic_agent(tmp_path, backend)
+    out = asyncio.run(a.run_visual_critic(b"\x89PNG-current"))
+    assert backend.calls == 2
+    # Nothing parseable from either pass -> dropped (never raw chain-of-thought).
+    assert out is None

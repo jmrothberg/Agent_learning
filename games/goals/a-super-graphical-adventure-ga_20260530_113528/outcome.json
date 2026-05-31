@@ -1,9 +1,0 @@
-{
-  "session_id": "a-super-graphical-adventure-ga_20260530_113528",
-  "goal": "a super graphical adventure game where all the players and all their actions are fully annimated, with the characters walking on a 3D game field. highest resolution for all the characters, the player and MPCs, and the backgrounds. use the arrow key to move around",
-  "model": "/Users/jonathanrothberg/MLX_Models/Qwen3.6-27B-bf16",
-  "iterations": 6,
-  "ok": false,
-  "last_report_summary": "OK: False\nTitle: 'Fantasy Adventure 3D'\nCanvas: 800x600, RAF ran: True, blank: True\nInput listeners: total=24 (doc=1, win=19, body=0, other=4)\nInput test: PASS \u2014 ArrowUp\u2192[player.animFrame, player.facing, player.z]; ArrowDown\u2192[player.animFrame, player.facing, player.z]; ArrowLeft\u2192[player.animFrame, player.facing, player.x]; ArrowRight\u2192[player.animFrame, player.facing, player.x]\nFrozen canvas: no (pixels changed during run)\nBody text length: 82 chars\nBody sample: 'Gems: 0/8 Time: 83 Status: Playing\\nArrow Keys: Move \u00b7 Space: Interact \u00b7 R: Restart'\nStrict file:// runtime: unavailable (harness issue)\nISSUES (must fix):\n  - partial patch apply: 1 patch block(s) did not apply; fix not complete.\nWarnings:\n  - persistent warning [seen 3\u00d7 in a row]: Scripts \"build/three.js\" and \"build/three.min.js\" are deprecated with r150+, and\u2026\n  - persistent warning [seen 3\u00d7 in a row]: Strict outside-agent check unavailable: It looks like you are using Playwright S\u2026\nAcceptance probes: 8/9 pass\n  ok  canvas_p",
-  "ts": "2026-05-30T16:30:36.934365Z"
-}

@@ -99,6 +99,51 @@ _BLOCK_MAX_REPEATS = 3        # 3 identical blocks within one response → loop
 # entries, ~3× faster than Window 1 for the donkey-kong shape.
 _ADJACENT_SPAM_REPEATS = 4    # 4 identical consecutive normalized lines
 
+# Window 5 (INTRA-LINE repetition): Windows 1-4 all key off completed
+# lines (split on \n / ;). A stream that NEVER emits a boundary —
+# e.g. a prose enumeration "a menuLoop, a menuLoopStart, a
+# menuLoopStartIndex, …" that degenerates into "StartStartStart…" — has
+# no \n and no ; ever, so feed()'s early return kept buffering forever
+# and the loop ran to ~80k tokens completely unseen (the architect turn
+# in a-animateed-fighing… 20260530). Prose turns (plan/architect/
+# diagnose) are exactly where boundary-free loops live. This window
+# inspects the unterminated buffer's TAIL for a short unit repeated many
+# times consecutively. Length is only the gate to START checking; the
+# repeat is what trips, so a long HEALTHY single line (minified HTML,
+# base64 data URI — high entropy, no 40× consecutive repeat) never fires.
+_INTRA_LINE_MIN_CHARS = 1200   # only scan once the unterminated line is this long
+_INTRA_LINE_SCAN_STEP = 200    # re-scan every +200 chars (cheap amortization)
+_INTRA_LINE_MAX_BUFFER = 4000  # trim buffer to this trailing slice (bound memory)
+_INTRA_LINE_MAX_UNIT = 40      # repeated unit must be ≤ this many chars
+_INTRA_LINE_MIN_REPEATS = 40   # … repeated ≥ this many times consecutively
+_INTRA_LINE_TAIL = 2400        # only inspect this many trailing chars
+
+
+def _degenerate_intra_line_unit(buf: str) -> str | None:
+    """Return the repeated unit if the TAIL of `buf` is one short substring
+    repeated ≥ `_INTRA_LINE_MIN_REPEATS` times back-to-back, else None.
+
+    Tail-only so a long healthy prefix can't dilute the signal; a unit of
+    length L up to `_INTRA_LINE_MAX_UNIT` also covers small 2-3 token cycles
+    (e.g. 'ab'*N collapses to unit 'ab'). Whitespace-only units are ignored.
+    """
+    s = buf[-_INTRA_LINE_TAIL:]
+    n = len(s)
+    for L in range(1, _INTRA_LINE_MAX_UNIT + 1):
+        if n < L * _INTRA_LINE_MIN_REPEATS:
+            break
+        unit = s[-L:]
+        if not unit.strip():
+            continue
+        reps = 0
+        i = n
+        while i >= L and s[i - L:i] == unit:
+            reps += 1
+            i -= L
+        if reps >= _INTRA_LINE_MIN_REPEATS:
+            return unit
+    return None
+
 
 # Strip numeric runs INSIDE identifiers (suffix OR mid-identifier) so
 # near-duplicate template spam collapses regardless of where the counter
@@ -214,11 +259,14 @@ class RepetitionDetector:
     __slots__ = (
         "_line_buf", "_recent_lines", "_recent_lines_norm",
         "_all_lines", "_block_counts", "stall_reason",
-        "_adjacent_tail", "loop_line",
+        "_adjacent_tail", "loop_line", "_intra_scan_at",
     )
 
     def __init__(self) -> None:
         self._line_buf = ""
+        # Window 5 — last buffer length at which we ran the intra-line scan,
+        # so we only re-scan every _INTRA_LINE_SCAN_STEP chars (not per token).
+        self._intra_scan_at = 0
         # Window 1: short-line exact-match. Catches the
         # `</body></html>` × 400 case from the missile-command trace.
         self._recent_lines: list[str] = []
@@ -253,6 +301,26 @@ class RepetitionDetector:
         """
         self._line_buf += piece
         if "\n" not in self._line_buf and ";" not in self._line_buf:
+            # Window 5 — no statement boundary yet. A normal stream flushes
+            # here harmlessly, but a boundary-free degenerate loop (prose
+            # enumeration spiralling into "StartStart…") would grow forever
+            # and escape every line-based window. Scan the unterminated tail.
+            buf_len = len(self._line_buf)
+            if (
+                buf_len >= _INTRA_LINE_MIN_CHARS
+                and buf_len - self._intra_scan_at >= _INTRA_LINE_SCAN_STEP
+            ):
+                self._intra_scan_at = buf_len
+                unit = _degenerate_intra_line_unit(self._line_buf)
+                if unit is not None:
+                    self.stall_reason = "intra_line_repetition"
+                    self.loop_line = unit
+                    return True
+                # Not degenerate — bound memory so a long healthy line
+                # (minified HTML / base64) can't balloon the buffer.
+                if buf_len > _INTRA_LINE_MAX_BUFFER:
+                    self._line_buf = self._line_buf[-_INTRA_LINE_MAX_BUFFER:]
+                    self._intra_scan_at = len(self._line_buf)
             return False
         *complete, self._line_buf = _STATEMENT_BOUNDARY_RE.split(self._line_buf)
         for ln in complete:

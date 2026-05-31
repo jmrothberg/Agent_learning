@@ -1,9 +1,0 @@
-{
-  "session_id": "first-person-shooter-game-of-d_20260521_161747",
-  "goal": "First-person shooter game of DOOM! Animate large monsters. Make cute sprites for powerups.  Use arrow keys to move, and moue to look and turn right and left or look up or down.  the up key then moves you in direction you are looking.  when you draw the gun make the view as if you are holding it and aiming it in the direction you are looking and facing. Make the monsters and tunnels look like they look in the original DOOM first-person shooter",
-  "model": "/Users/jonathanrothberg/MLX_Models/Qwen3.6-27B-mxfp8",
-  "iterations": 6,
-  "ok": false,
-  "last_report_summary": "OK: False\nTitle: 'DOOM FPS'\nCanvas: 800x600, RAF ran: True, blank: True\nInput listeners: total=23 (doc=1, win=19, body=0, other=3)\nInput test: PASS \u2014 ArrowUp\u2192[player.y]; ArrowDown\u2192[player.y]; ArrowLeft\u2192[player.x]; ArrowRight\u2192[player.x]\nFrozen canvas: no (pixels changed during run)\nBody text length: 137 chars\nBody sample: '` with the full DOOM FPS implementation.\\n+\\nArrow keys: move | Mouse: look | Click/Space: shoot | R: restart\\nHEALTH\\n100\\nAMMO\\n47\\nKILLS\\n0/10'\nStrict file:// runtime: unavailable (harness issue)\nPAGE ERRORS (uncaught exceptions \u2014 must fix):\n  - UNCAUGHT: The root document of this element is not valid for pointer lock.\nWarnings:\n  - persistent warning [seen 5\u00d7 in a row]: Strict outside-agent check unavailable: It looks like you are using Playwright S\u2026\nAcceptance probes: 8/8 pass\n  ok  canvas_present: !!document.querySelector('canvas')\n  ok  game_state_exposed: !!window.game && typeof window.game.reset === 'function'\n  ok  gun_visible: (()=>{const c=document.querySe",
-  "ts": "2026-05-22T00:44:45.445756Z"
-}

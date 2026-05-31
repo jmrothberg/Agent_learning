@@ -1,1 +1,0 @@
-Short and done. First the prompt — one line, identical for both LLMs: > **Make a Street Fighter–style fighting game with high-res, well-animated sprites where I can clearly see each punch and kick, and the two fighters always face each other.

@@ -2521,14 +2521,36 @@ class LiveBrowser:
         # warnings already flip ok to False; this is a one-line wire-up.
         # Model-agnostic — applies to anything that renders to canvas.
         if frozen is True:
-            report["soft_warnings"].append(
-                "FROZEN-CANVAS: 32×32 canvas hash unchanged between "
-                "t=0.5s and t=1.0s while RAF was firing. The render "
-                "loop is alive but drawing the same frame — likely a "
-                "stuck game-state, a draw() function that early-returns "
-                "before the entity layer, or all entity update timers "
-                "stopped advancing."
+            # 2026-05-31: distinguish a TRUE freeze from idle-by-design. A
+            # fighting / animation game sits on a static idle sprite until the
+            # player presses a key — the canvas is legitimately unchanged
+            # between t=0.5s and t=1.0s, but it is NOT frozen. If the input
+            # smoke test proved keys DO change the canvas, this is idle-by-
+            # design: report it as a non-blocking warning, do NOT add a
+            # soft_warning (which would flip ok=False and starve the session
+            # on a false positive — see here-s-a-tight-test-prompt 20260530).
+            # A truly frozen game (input changes nothing) still hard-blocks.
+            input_responsive = bool(
+                input_test.get("ran") and input_test.get("any_change") is True
             )
+            report["frozen_canvas_input_responsive"] = input_responsive
+            if input_responsive:
+                report.setdefault("warnings", []).append(
+                    "FROZEN-AT-IDLE (not blocking): canvas is static between "
+                    "t=0.5s and t=1.0s, but the input test confirms keys change "
+                    "the canvas — idle-by-design, not a freeze. Add a subtle "
+                    "continuous idle animation (breathing/bob) to silence this "
+                    "(see playbook ambient-idle-pixel-delta)."
+                )
+            else:
+                report["soft_warnings"].append(
+                    "FROZEN-CANVAS: 32×32 canvas hash unchanged between t=0.5s "
+                    "and t=1.0s while RAF was firing AND input did not change "
+                    "the canvas. The render loop is alive but drawing the same "
+                    "frame — likely a stuck game-state, a draw() that "
+                    "early-returns before the entity layer, or all update "
+                    "timers stopped advancing."
+                )
         # 2.4: split error sources so the model + trace can tell apart
         # "console.error('...')" (game-logged, often informational) from
         # "UNCAUGHT TypeError" (real crash). Existing report["errors"]

@@ -53,16 +53,19 @@ def test_zimage_img2img_shares_components_no_extra_vram():
     assert "self._pipeline.components" in src
 
 
-def test_generate_assets_prefers_zimage_img2img():
+def test_generate_assets_uses_txt2img_merged_for_pose_frames():
     src = inspect.getsource(assets.generate_assets)
-    # from_image routes through the MAIN generator's generate_img2img first,
-    # SD-Turbo only as fallback.
-    assert "generate_img2img" in src
-    i_zi = src.find("generate_img2img")
-    i_sd = src.find("_safe_img2img(")
-    assert i_zi != -1 and i_sd != -1 and i_zi < i_sd, (
-        "Z-Image img2img must be tried before the SD-Turbo fallback"
-    )
+    # 2026-05-30 (proven in animation_ab/): img2img at guidance_scale=0 stays
+    # locked to the idle pose at every strength/model. Pose frames are now
+    # TXT2IMG with the parent's character+style prompt merged with the pose
+    # clause (fixed seed keeps the character). The from_image branch must NOT
+    # call img2img.
+    assert "pose_txt2img" in src
+    # pose frames merge the parent character prompt with the pose clause and
+    # generate via txt2img
+    assert "_safe_generate(image_generator, merged)" in src
+    # img2img is no longer called to generate pose frames
+    assert "_safe_img2img(" not in src and "generate_img2img(" not in src
 
 
 # ---- Fix C: stop steering toward code limbs --------------------------------

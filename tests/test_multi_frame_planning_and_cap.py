@@ -56,27 +56,23 @@ def test_plan_instruction_default_scope_nudge_says_idle_only():
 
 def test_plan_instruction_multi_frame_override_replaces_idle_only_rule():
     """With multi-frame intent + heavy logic, the nudge inverts: emit
-    base + variants with from_image chains. The directive must give the
-    architect a concrete (entity × state) example template so a local
-    27B model can pattern-match the right JSON shape."""
+    base + from_image variants. The directive gives a concrete idle-seeded
+    example template AND mandates a SMALL first roster (idle + one core
+    frame per entity, rest deferred) so the planning turn cannot balloon
+    into a token-repetition runaway (2026-05-30 fighting-game trace)."""
     body = plan_instruction(goal=_HEAVY_LOGIC_ART_GOAL_WITH_MF)
     assert "multi-frame override" in body.lower()
     # The "idle pose only" rule must NOT appear under the override branch.
     assert "ONE sprite per visual entity (idle pose only)" not in body
     # The chain directive MUST appear with concrete from_image guidance.
     assert "from_image" in body
-    # Concrete entity × state pattern must be present so the model knows
-    # what JSON shape to emit (loose match across phrasings).
-    assert (
-        "entity × state" in body.lower()
-        or "(entity, state)" in body.lower()
-        or "entity1>_idle" in body
-        or "<entity>_idle" in body
-    )
+    # A concrete idle-seeded example template must be present.
+    assert "_idle" in body and "strength" in body
     # The matched keywords must be quoted so the model sees what triggered it.
     assert "matched:" in body.lower()
-    # Roster-size sanity directive must be present.
-    assert "n·m" in body.lower() or "n*m" in body.lower() or "n entities" in body.lower()
+    # Small-first-roster directive must be present (prevents the runaway).
+    assert "small" in body.lower()
+    assert "8-10" in body or "later" in body.lower()
 
 
 def test_plan_instruction_multi_frame_nudge_fires_without_heavy_logic():
