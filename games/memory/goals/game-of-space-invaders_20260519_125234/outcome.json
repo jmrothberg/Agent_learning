@@ -1,9 +1,0 @@
-{
-  "session_id": "game-of-space-invaders_20260519_125234",
-  "goal": "game of space-invaders",
-  "model": "/Users/jonathanrothberg/MLX_Models/Qwen3.6-27B-mxfp8",
-  "iterations": 6,
-  "ok": true,
-  "last_report_summary": "OK: True\nTitle: 'Space Invaders'\nCanvas: 800x600, RAF ran: True, blank: False\nInput listeners: total=8 (doc=0, win=6, body=0, other=2)\nInput test: PASS \u2014 ArrowLeft\u2192[player.x, shields.1.alive]; ArrowRight\u2192[player.x]; Space\u2192[alienDir, aliens.0.y, aliens.1.y, aliens.10.y, aliens.11.y]; KeyW\u2192[explosions.0.t, explosions.0.y, particles.10.age, particles.10.life, particles.10.size]\nFrozen canvas: no (pixels changed during run)\nBody text length: 72 chars\nBody sample: 'SCORE 30\\nLIVES 3\\nWAVE\\xa0 1\\n\u2190 \u2192 move \u2022 SPACE fire \u2022 ENTER restart \u2022 P pause'\nAcceptance probes: 7/7 pass\n  ok  canvas_present: !!document.querySelector('canvas')\n  ok  player_exists: window.state && typeof state.player === 'object' && state.player.x > 0 && state.\n  ok  score_visible: document.getElementById('score') && document.getElementById('score').textContent\n  ok  non_blank: (()=>{const c=document.querySelector('canvas');if(!c)return false;try{return c.t\n  ok  game_state_exposed: !!window.state && typeof window.state.alie",
-  "ts": "2026-05-19T17:34:12.980302Z"
-}

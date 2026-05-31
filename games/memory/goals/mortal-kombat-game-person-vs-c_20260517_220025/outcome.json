@@ -1,9 +1,0 @@
-{
-  "session_id": "mortal-kombat-game-person-vs-c_20260517_220025",
-  "goal": "update this game by ROTATING just the CPU punch horizontally make NO other changes.",
-  "model": "/Users/jonathanrothberg/MLX_Models/Qwen3.6-27B-mxfp8",
-  "iterations": 3,
-  "ok": true,
-  "last_report_summary": "OK: True\nTitle: 'Mortal Kombat - Person vs Computer'\nCanvas: 800x600, RAF ran: True, blank: False\nInput listeners: total=8 (doc=0, win=4, body=0, other=4)\nInput test: PASS \u2014 ArrowUp\u2192[player.vy, player.y]; ArrowDown\u2192[player.vy, player.y]; ArrowLeft\u2192[cpu.x, player.vy, player.x, player.y]; ArrowRight\u2192[cpu.x, player.x]\nFrozen canvas: no (pixels changed during run)\nBody text length: 214 chars\nBody sample: '\u2694\ufe0f MORTAL KOMBAT \u2694\ufe0f\\n\\nPerson vs Computer\\n\\n\u2190 \u2192 Move \\xa0|\\xa0 \u2191 Jump \\xa0|\\xa0 Z Punch \\xa0|\\xa0 X Kick \\xa0|\\xa0 Space Block \\xa0|\\xa0 C Fireball\\n\\nFIGHT!\\nYOU\\nROUND 1\\nCPU\\n\u2190 \u2192 Move | \u2191 Jump | Z Punch | X Kick | Space Block | C Fireba...[+14 chars]'\nWarnings:\n  - Canvas2D: Multiple readback operations using getImageData are faster with the willReadFrequently attribute set to true. See: https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently\nAcceptance probes: 6/6 pass\n  ok  canvas_present: !!document.querySelector('canvas')\n  ok  non_blank: (()=>{const",
-  "ts": "2026-05-18T16:45:47.198232Z"
-}

@@ -1,9 +1,0 @@
-{
-  "session_id": "game-of-mortal-kombat-with-inc_20260518_150416",
-  "goal": "game of mortal kombat, with incredible large graphics, and super detailed annimations for the combat, make the characters look like and play like the original arcade game. but this should be PLAYER vs Computer",
-  "model": "claude-opus-4-7",
-  "iterations": 17,
-  "ok": false,
-  "last_report_summary": "OK: False\nTitle: \"JMR's Mortal Kombat\"\nCanvas: 1280x720, RAF ran: True, blank: False\nInput listeners: total=5 (doc=0, win=5, body=0, other=0)\nInput test: PASS \u2014 ArrowUp\u2192[enemy.attackHit]; ArrowDown\u2192[bloods.0.rot, bloods.0.size, bloods.0.vx, bloods.1.rot, bloods.1.size]; ArrowLeft\u2192[bloods.0.rot, bloods.0.size, bloods.0.vx, bloods.1.rot, bloods.1.size]; ArrowRight\u2192[bloods.0.maxLife, bloods.0.rot, bloods.0.size, bloods.0.vx, bloods.1.maxLife]\nFrozen canvas: no (pixels changed during run)\nBody text length: 110 chars\nBody sample: 'A/D MOVE \\xa0|\\xa0 W/SPACE JUMP \\xa0|\\xa0 S CROUCH \\xa0|\\xa0 J PUNCH \\xa0|\\xa0 K KICK \\xa0|\\xa0 L BLOCK \\xa0|\\xa0 C FIRE \\xa0|\\xa0 R RESTART \\xa0|\\xa0 P PAUSE'\nISSUES (must fix):\n  - PROBE FAILED [move_right]: `(()=>{const x0=state.player.x;window.dispatchEvent(new KeyboardEvent('keydown',{` \u2014 Page.evaluate: SyntaxError: missing ) after argument list\n    at eval (<anonymous>)\n    at UtilityScript.evaluate (<anonymous>:302:30)\n    at UtilityScript.<anonymous> (<ano",
-  "ts": "2026-05-18T19:52:51.529469Z"
-}

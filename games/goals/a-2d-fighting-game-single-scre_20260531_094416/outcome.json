@@ -1,9 +1,0 @@
-{
-  "session_id": "a-2d-fighting-game-single-scre_20260531_094416",
-  "goal": "A 2D fighting game, single screen: two large high-resolution detailed fighters facing each other, player (blue gi) vs a red-gi opponent controlled by the computer. Each fighter animates idle, walk, jump, duck, punch, kick, and fireball with at least 2 frames per move. Health bars at top; a round ends when one fighter's health reaches zero with a dramatic death; R restarts; fighters always face each other.",
-  "model": "/Users/jonathanrothberg/MLX_Models/Qwen3.6-27B-mxfp8",
-  "iterations": 4,
-  "ok": false,
-  "last_report_summary": "OK: False\nTitle: '2D Fighting Game'\nCanvas: 960x540, RAF ran: True, blank: False\nInput listeners: total=17 (doc=0, win=17, body=0, other=0)\nInput test: FAIL \u2014 window.state IS exposed but zero numeric fields changed across ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space', 'KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyZ', 'KeyC'] \u2014 the listeners may be wired but the data flow into state is broken.\nFrozen canvas: no (pixels changed during run)\nBody text length: 89 chars\nBody sample: 'PLAYER\\nROUND 2\\nCPU\\n\u2190 \u2192 Move | \u2191 Jump | \u2193 Duck | Z Punch | X Kick | C Fireball | R Restart'\nISSUES (must fix):\n  - HEURISTIC: pressed ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Space, KeyW, KeyA, KeyS, KeyD, KeyZ, KeyC - 17 key listener(s) registered on window AND the RAF loop is rendering, but pressing keys did not produce any visible pixel change. The wiring exists but the data flow between your keydown handler and your draw() is broken. CHECK: (1) your keydown handler writes to the SAME `keys` object th",
-  "ts": "2026-05-31T14:42:19.829787Z"
-}

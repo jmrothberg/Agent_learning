@@ -110,6 +110,33 @@ def test_canvas_pixel_read_is_dynamic():
     assert GameAgent._is_dynamic_probe(expr) is True
 
 
+def test_input_dispatch_then_state_delta_is_dynamic():
+    """The canonical input→delta probe the prompts now hand the model:
+    record a coord, dispatch a KeyboardEvent, await a frame, assert the
+    coord changed. Its `await`+`setTimeout` make it dynamic — this is
+    the probe shape the probe-quality re-prompt asks for, so the
+    classifier MUST recognise it (else the retry would loop or the
+    nudge would mis-fire on a genuinely dynamic plan)."""
+    expr = (
+        "(async()=>{if(!window.state||!state.player)return false;"
+        "const x0=state.player.x;window.dispatchEvent(new KeyboardEvent("
+        "'keydown',{code:'ArrowRight',bubbles:true}));await new Promise("
+        "r=>setTimeout(r,250));window.dispatchEvent(new KeyboardEvent("
+        "'keyup',{code:'ArrowRight',bubbles:true}));return "
+        "state.player.x!==x0;})()"
+    )
+    assert GameAgent._is_dynamic_probe(expr) is True
+    # And in a bulk set alongside structural probes, the ratio is > 0.
+    probes = [
+        {"name": "canvas_present", "expr": "!!document.querySelector('canvas')"},
+        {"name": "state_exists", "expr": "!!window.state"},
+        {"name": "input_moves_player", "expr": expr},
+    ]
+    result = GameAgent._classify_probes_dynamic(probes)
+    assert result["dynamic"] == ["input_moves_player"]
+    assert result["ratio"] > 0.0
+
+
 def test_delta_marker_identifiers_alone_are_not_dynamic():
     """The previous classifier flagged `lastFireTime > 0` and `prev`
     as dynamic on identifier-tokens alone. That's a false positive —

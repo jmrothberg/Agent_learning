@@ -1,1 +1,0 @@
-build a full working 2D fighting game with player vs CPU, including turn-around facing kicks and varied CPU actions

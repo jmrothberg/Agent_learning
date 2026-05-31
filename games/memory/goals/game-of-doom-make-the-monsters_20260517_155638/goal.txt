@@ -1,1 +1,0 @@
-Game of Doom, make the monsters detailed and large, use sprites for the powerups, put map of the maze in upper right corner of the 3D first-person shooter.

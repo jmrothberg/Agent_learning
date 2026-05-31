@@ -11285,6 +11285,7 @@ class GameAgent:
             # ---- PHASE A: planning ------------------------------------------
             yield self._record(AgentEvent("phase", "planning"))
             self._plan_retry_done = False
+            self._probe_quality_retry_done = False
             # Phase 1B — when the diffuser pipeline lives on a GPU that
             # is NOT shared with any LLM slot, pre-warm it during
             # architect streaming so the cold-load (~30-60 s) is hidden
@@ -11402,6 +11403,112 @@ class GameAgent:
                         probes = _np
                     self._trace({"kind": "plan_retry_recovered",
                                  "criteria": bool(_nc), "probes": len(_np or [])})
+
+            # Probe-quality retry: the plan parsed fine (criteria + probes
+            # present) but EVERY probe is structural-only — no input→delta,
+            # no time-based check, no canvas-pixel read. A game that renders
+            # a static HUD passes them all, so the harness `ok=True` signal
+            # would be wrong (CLAUDE.md "harness signal must be right"). The
+            # passive nudge alone (injected into the first-build message)
+            # did NOT move the model: the 2026-05-31 prompt-library sweep
+            # showed 24/26 prompts still emitting 0 dynamic probes
+            # (probe_quality_ratio 0.0). So ESCALATE to a corrective
+            # re-prompt here, mirroring the empty-plan retry above. Bounded
+            # to once; fires only when probes EXIST and ALL are structural,
+            # so a plan that already has one dynamic probe is never
+            # re-streamed (no long-plan regression). The retry is adopted
+            # ONLY if it actually adds a dynamic probe — otherwise the
+            # original probes are kept and the passive nudge below still
+            # fires as a backstop.
+            if (
+                probes
+                and not getattr(self, "_probe_quality_retry_done", False)
+                and self._classify_probes_dynamic(probes)["ratio"] == 0.0
+            ):
+                self._probe_quality_retry_done = True
+                self._trace({
+                    "kind": "probe_quality_retry",
+                    "probe_count": len(probes),
+                    "names": [p.get("name") for p in probes],
+                })
+                yield self._record(AgentEvent(
+                    "info",
+                    "every Phase-A probe is structural-only (a game that "
+                    "renders but never PLAYS would pass them all) — "
+                    "re-prompting the plan once for an input→delta probe.",
+                ))
+                self._messages.append({
+                    "role": "user",
+                    "content": (
+                        "Your <probes> only check structural PRESENCE "
+                        "(elements exist, state is an object, arrays are "
+                        "non-empty). A game that draws a static screen but "
+                        "never responds to input would pass every one of "
+                        "them — so they cannot verify the game actually "
+                        "PLAYS. Re-emit the FULL <probes>...</probes> block "
+                        "now, keeping your structural probes AND adding at "
+                        "least one DYNAMIC probe that simulates an input "
+                        "and asserts a state delta. Copy this shape, "
+                        "swapping in your real control key and state path:\n"
+                        "  {\"name\":\"input_moves_player\",\"expr\":\""
+                        "(async()=>{if(!window.state||!state.player)return "
+                        "false;const x0=state.player.x;window.dispatchEvent("
+                        "new KeyboardEvent('keydown',{code:'ArrowRight',"
+                        "bubbles:true}));await new Promise(r=>setTimeout(r,"
+                        "250));window.dispatchEvent(new KeyboardEvent("
+                        "'keyup',{code:'ArrowRight',bubbles:true}));return "
+                        "state.player.x!==x0;})()\"}\n"
+                        "The exposed state global it reads (window.state, "
+                        "or whatever you expose) MUST exist for the probe "
+                        "to work. Do NOT repeat any word or phrase more "
+                        "than a few times."
+                    ),
+                })
+                _pq_role = self._planning_role()
+                yield self._record(AgentEvent(
+                    "activity", "streaming",
+                    {"label": "re-streaming plan for dynamic probes",
+                     "role": _pq_role},
+                ))
+                pq_reply = None
+                try:
+                    pq_reply = await self._stream(
+                        self._token_cb_wrapper, role=_pq_role)
+                except Exception:
+                    pq_reply = None
+                yield self._record(AgentEvent("activity", "idle"))
+                _np = self._extract_probes(pq_reply) if pq_reply else None
+                _nc = self._extract_criteria(pq_reply) if pq_reply else None
+                # Adopt ONLY if the retry produced probes that now include a
+                # dynamic check — never regress to a worse/empty/still-
+                # structural set.
+                if _np and self._classify_probes_dynamic(_np)["ratio"] > 0.0:
+                    self._messages.append({
+                        "role": "assistant", "content": pq_reply,
+                        "model_role": _pq_role,
+                        "model_name": self.get_backend(_pq_role).info.model,
+                    })
+                    self._extract_and_queue_lookups(pq_reply)
+                    self._capture_todos(pq_reply)
+                    self._dump_conversation()
+                    yield self._record(AgentEvent("plan", pq_reply))
+                    plan_reply = pq_reply
+                    probes = _np
+                    if _nc:
+                        self._criteria = _nc
+                        self._trace({"kind": "criteria", "text": _nc[:600],
+                                     "retry": "probe_quality"})
+                    self._trace({
+                        "kind": "probe_quality_retry_recovered",
+                        "ratio": self._classify_probes_dynamic(probes)["ratio"],
+                        "probes": len(probes),
+                    })
+                else:
+                    self._trace({
+                        "kind": "probe_quality_retry_no_improvement",
+                        "got_probes": len(_np or []),
+                    })
+
             if probes:
                 self._probes = probes
                 # 2.1: log full probe text alongside the count so brittle

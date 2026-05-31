@@ -76,6 +76,49 @@ DEFAULT_SKELETON_NAME = "canvas_basic.html"
 # (shared mechanic words) untouched while filtering coincidental
 # token bleed.
 _SKELETON_MIN_SIM = 0.3
+# Generic skeleton-match tokens (added 2026-05-31). BUNDLED specialized
+# scaffolds (canvas_3d / canvas_lit_dungeon / canvas_crawler / canvas_cards /
+# canvas_rpg / canvas_board_turn …) used to be EXEMPT from any floor — only
+# past-win "won_" files were thresholded. That let a SINGLE incidental shared
+# token route a plain 2D arcade goal to a wrong specialized scaffold (measured:
+# asteroids/galaga/centipede/qbert -> canvas_3d on "space"/"vector"/"game"/
+# "projection"; pong/missile-command -> canvas_lit_dungeon on "light"; breakout
+# -> canvas_crawler on "slide"; snake -> canvas_rpg on "grid"; tetris -> cards
+# on "grid"/"puzzle"; frogger/monkey-island -> board_turn on "move"/"player"/
+# "select"). A raw Jaccard *score* floor can't separate these: a genuine 1-token
+# pick (sokoban -> grid on the DISTINCTIVE token "sokoban") scores the same as a
+# coincidental 1-token pick (pong -> lit_dungeon on the GENERIC token "light").
+# So we gate on token *distinctiveness* instead — a bundled scaffold may only
+# win if the goal shares at least one NON-generic token with its sidecar. The
+# good picks survive (sokoban/pacman -> grid on "sokoban"/"ghost", 1942 ->
+# scrolling on "shooter"); the coincidences fall back to the safe generic v2
+# canvas. Modality picks (chess/doom/minecraft/FPS) bypass this entirely via
+# _modality_skeleton. Genre-free: these are common rendering / mechanic /
+# English words, not subject-matter category names.
+_SKELETON_GENERIC_TOKENS: frozenset[str] = frozenset({
+    "game", "games", "2d", "3d", "top", "down", "side", "move", "moves",
+    "movement", "player", "players", "click", "select", "grid", "light",
+    "lights", "lighting", "space", "vector", "puzzle", "slide", "action",
+    "arcade", "level", "levels", "score", "simple", "basic", "screen",
+    "projection", "coordinate", "control", "controls", "play", "adventure",
+    "multi", "mouse", "look", "pointer", "build", "break",
+})
+# Specialized scaffolds that must clear a HIGHER bar — >= 2 distinctive shared
+# tokens — to win via the Jaccard fallback. One distinctive token is too weak to
+# commit a flat 2D arcade goal to a 3D / board / dungeon / card scaffold (frogger
+# -> board_turn on "cell"; qbert -> voxel on "cube"; tetris -> cards on "drop";
+# missile-command -> cards on "mouse"; pong -> 3d on "first"; monkey-island ->
+# board_turn on "go"). Their legitimate users either route through
+# _modality_skeleton (doom/chess/minecraft) or share several tokens (zelda -> rpg
+# on rpg+tile+based). The safe 2D scaffolds (grid/scrolling/platformer/physics/
+# mode7/…) keep the >= 1 distinctive bar, so pac-man/sokoban -> grid and 1942 ->
+# scrolling still win.
+_SKELETON_SPECIALIZED_STRICT: frozenset[str] = frozenset({
+    "canvas_3d_basic.html", "canvas_voxel_minecraft_basic.html",
+    "canvas_board_turn_basic.html", "canvas_lit_dungeon_basic.html",
+    "canvas_crawler_basic.html", "canvas_cards_basic.html",
+    "canvas_rpg_basic.html",
+})
 CANVAS_SKELETON_V2_NAME = "canvas_basic_v2.html"
 # v2 sidecar: deliberately generic tokens so it wins as the FALLBACK when no
 # modality skeleton matches, NOT so it competes with modality scaffolds. 4/4
@@ -3442,7 +3485,8 @@ class GameMemory:
                     source_goal = None
 
             if source_goal:
-                score = _score_similarity(goal_toks, _tokenize(source_goal))
+                src_toks = _tokenize(source_goal)
+                score = _score_similarity(goal_toks, src_toks)
                 # A 0.0 sidecar match means NO token overlap whatsoever — not
                 # a real candidate. Skip so we don't accidentally win ties
                 # against the v2 fallback by being alphabetically first.
@@ -3450,6 +3494,17 @@ class GameMemory:
                 # at 0.0 because 3d was first in sorted order.)
                 if score <= 0.0:
                     continue
+                # A BUNDLED specialized scaffold may only win on a DISTINCTIVE
+                # shared token — a generic filler word (game/grid/light/space/
+                # move/select/…) is not enough. Otherwise one incidental token
+                # routes a plain 2D arcade goal to a wrong specialized scaffold
+                # (see _SKELETON_GENERIC_TOKENS). Past-win "won_" skeletons keep
+                # the score-floor gate below instead of this distinctiveness one.
+                if not name.startswith("won_"):
+                    distinct = (set(goal_toks) & set(src_toks)) - _SKELETON_GENERIC_TOKENS
+                    need = 2 if name in _SKELETON_SPECIALIZED_STRICT else 1
+                    if len(distinct) < need:
+                        continue
             elif path.name == DEFAULT_SKELETON_NAME:
                 # Default is a no-op match — only picked if nothing else hits.
                 score = 0.0
@@ -3470,15 +3525,13 @@ class GameMemory:
             # bad scaffold on a mismatched goal). If the winner is a
             # past-win match below the threshold, fall back to the
             # bundled empty template — the model builds fresh instead
-            # of fighting wrong structure. BUNDLED skeletons (canvas_*)
-            # with curated sidecars are EXEMPT from the threshold —
-            # their sidecar tokens are deliberately picked, so even a
-            # 0.15 weighted-Jaccard hit (pac-man against the grid sidecar
-            # = 3 of 13 tokens) should win over the bare default. Past-
-            # win files start with "won_" so the prefix-check distinguishes
-            # them deterministically. Added 2026-05-21 after pac-man trace
-            # showed Jaccard at 0.23 (< 0.30) discarding the correct grid
-            # scaffold pick.
+            # of fighting wrong structure. BUNDLED skeletons (canvas_*) are
+            # gated up in the scoring loop instead (they must share a DISTINCTIVE
+            # token to be a candidate at all — see _SKELETON_GENERIC_TOKENS), so
+            # here we only apply the stricter past-win score floor. Past-win
+            # files start with "won_" so the prefix-check distinguishes them
+            # deterministically. Added 2026-05-21 after a pac-man trace showed
+            # Jaccard at 0.23 (< 0.30) discarding the correct grid scaffold pick.
             is_past_win = best.name.startswith("won_")
             below_threshold = (
                 is_past_win

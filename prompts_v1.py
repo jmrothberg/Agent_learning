@@ -1371,16 +1371,31 @@ Stress: <one assertion that catches stress / leak failure modes (e.g.
 ]
 </probes>
 
-PROBES are real code. Examples that work:
+PROBES come in two kinds and you MUST emit BOTH:
+
+STRUCTURAL probes check that things EXIST (cheap sanity). Examples:
   - {"name":"canvas_present", "expr":"!!document.querySelector('canvas')"}
   - {"name":"ship_visible",   "expr":"window.state && state.player && state.player.x>=0 && state.player.x<=800"}
-  - {"name":"score_renders",  "expr":"document.getElementById('score') && document.getElementById('score').textContent.length>0"}
   - {"name":"non_blank",      "expr":"(()=>{const c=document.querySelector('canvas');if(!c||!c.width||!c.height)return false;try{return c.toDataURL().length>200;}catch(e){return true;}})()"}
+
+DYNAMIC probes check that the game actually PLAYS — they simulate an
+input and assert a state DELTA over time. Structural probes alone are
+NOT enough: a game that renders a static HUD and never responds to a
+key passes every structural probe. You MUST include at least 1 to 2
+dynamic probes. Copy this template and swap in your real control key
+and state path:
+  - {"name":"input_moves_player", "expr":"(async()=>{if(!window.state||!state.player)return false;const x0=state.player.x;window.dispatchEvent(new KeyboardEvent('keydown',{code:'ArrowRight',bubbles:true}));await new Promise(r=>setTimeout(r,250));window.dispatchEvent(new KeyboardEvent('keyup',{code:'ArrowRight',bubbles:true}));return state.player.x!==x0;})()"}
+  - {"name":"score_changes",      "expr":"(async()=>{const s0=state.score;await new Promise(r=>setTimeout(r,1500));return state.score!==s0||state.frame>30;})()"}
+A dynamic probe records a value, dispatches the input (KeyboardEvent
+keydown/keyup with the e.code your game listens for, or calls an
+exposed control like window.game.fire()), `await`s a short timeout so a
+frame advances, then returns whether the value changed.
 
 Probes that reference globals (state, player, etc.) MUST exist on
 window — either expose them (e.g. `window.state = state`) or use DOM /
-canvas-pixel checks instead. Aim for 3 to 5 probes that together check
-the criteria above. Keep each expr short.
+canvas-pixel checks instead. Aim for 3 to 5 probes total — mostly
+structural, but at least one input→delta dynamic probe. Keep each expr
+short.
 
 PROBE ROBUSTNESS — test structure and behavior over time, not one
 frame-specific pixel or exact helper names.

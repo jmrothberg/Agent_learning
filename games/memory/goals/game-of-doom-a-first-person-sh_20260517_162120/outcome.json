@@ -1,9 +1,0 @@
-{
-  "session_id": "game-of-doom-a-first-person-sh_20260517_162120",
-  "goal": "game of DOOM, a first person shooter, 3D, make the MONSTERS huge and high resolution, the powerups should be sprites. top right should have a small map of the maze with loation of player, monsters, and powerups",
-  "model": "/Users/jonathanrothberg/MLX_Models/Qwen3.6-27B-mxfp8",
-  "iterations": 6,
-  "ok": true,
-  "last_report_summary": "OK: True\nTitle: 'DOOM - First Person Shooter'\nCanvas: 800x600, RAF ran: True, blank: True\nInput listeners: total=11 (doc=1, win=5, body=0, other=5)\nInput test: PASS \u2014 ArrowUp\u2192[keys.ArrowUp, monsters.6.pos.z, player.pos.z, weaponBob]; ArrowDown\u2192[keys.ArrowDown, monsters.6.pos.z, player.pos.z, weaponBob]; ArrowLeft\u2192[keys.ArrowLeft, monsters.6.pos.z, monsters.7.pos.x, player.pos.x, weaponBob]; ArrowRight\u2192[keys.ArrowRight, monsters.6.pos.z, monsters.7.pos.x, player.pos.x, weaponBob]\nFrozen canvas: no (pixels changed during run)\nBody text length: 41 chars\nBody sample: 'HEALTH\\n84\\nARMOR\\n0\\nAMMO\\n49\\nKILLS\\n0\\nSCORE\\n0'\nWarnings:\n  - Scripts \"build/three.js\" and \"build/three.min.js\" are deprecated with r150+, and will be removed with r160. Please use ES Modules or alternatives: https://threejs.org/docs/index.html#manual/en/introduction/Installation\nAcceptance probes: 8/8 pass\n  ok  canvas_present: !!document.querySelector('canvas')\n  ok  minimap_visible: !!document.getElementById('minimap')",
-  "ts": "2026-05-17T21:37:30.764911Z"
-}

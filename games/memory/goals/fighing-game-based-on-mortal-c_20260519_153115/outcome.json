@@ -1,9 +1,0 @@
-{
-  "session_id": "fighing-game-based-on-mortal-c_20260519_153115",
-  "goal": "Fighing game based on Mortal Combat, with super high resolution, very well annimated fighers, for punch, kick, fireball, jump, duck, block. Fighers always face each other. 1 player vs computer.  Also graphically annimate the players when they get hit and when they get hit by fireball. Focus on great high resulution animated sequences for players fighting actions.",
-  "model": "/Users/jonathanrothberg/MLX_Models/Qwen3.6-27B-mxfp8",
-  "iterations": 6,
-  "ok": true,
-  "last_report_summary": "OK: True\nTitle: 'Mortal Combat - Fighting Game'\nCanvas: 1280x720, RAF ran: True, blank: False\nInput listeners: total=6 (doc=0, win=6, body=0, other=0)\nInput test: PASS \u2014 ArrowUp\u2192[p1.grounded, p1.vy, p1.y, player.grounded, player.vy]; ArrowDown\u2192[p1.vy, p1.y, player.vy, player.y]; ArrowLeft\u2192[p1.grounded, p1.vy, p1.x, p1.y, player.grounded]; ArrowRight\u2192[p1.x, player.x]\nFrozen canvas: no (pixels changed during run)\nBody text length: 103 chars\nBody sample: 'P1\\n93\\nCPU\\n\u2190\u2192/AD: Move | \u2191/W: Jump | \u2193/S: Duck | J/Space: Punch | K: Kick | L: Fireball | I/Shift: Block'\nWarnings:\n  - Canvas2D: Multiple readback operations using getImageData are faster with the willReadFrequently attribute set to true. See: https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-will-read-frequently\nAcceptance probes: 6/6 pass\n  ok  canvas_exists: !!document.querySelector('canvas')\n  ok  health_bars_visible: document.querySelectorAll('.health-bar').length >= 2\n  ok  fighters_on_canvas: (()=>{const c=docum",
-  "ts": "2026-05-19T20:25:39.838912Z"
-}
