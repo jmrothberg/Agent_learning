@@ -15,7 +15,7 @@ _SHIPPED = _REPO / "memory" / "prompt_library.jsonl"
 
 def test_shipped_library_loads_and_is_numbered_contiguously():
     games = load_prompt_library(_SHIPPED)
-    assert len(games) == 26
+    assert len(games) == 27  # 26 + dragons-lair (QTE cutscene), added 2026-06-02
     # Numbered 1..N with no gaps, sorted.
     assert [g["n"] for g in games] == list(range(1, len(games) + 1))
 

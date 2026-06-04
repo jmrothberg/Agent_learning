@@ -712,6 +712,23 @@ if (typeof CanvasRenderingContext2D !== "undefined"
             return _origFillRect.call(this, x, y, w, h);
         };
     }
+    // stroke/line shim — records code-drawn line/path calls (lineTo, stroke,
+    // strokeRect). A model that fakes a "kick" by scribbling a limb in code
+    // (instead of swapping to the kick SPRITE) fires these while NOT adding a
+    // new drawImage source. Counting them lets the harness catch
+    // "lines acting like a kick" (ACTION_DRAWN_NOT_SPRITED). Count only; no
+    // payload. Capped like the others.
+    window.__strokeEvents = window.__strokeEvents || { n: 0 };
+    for (const _m of ["stroke", "strokeRect", "lineTo", "arc", "fill"]) {
+        const _orig = CanvasRenderingContext2D.prototype[_m];
+        if (_orig) {
+            CanvasRenderingContext2D.prototype[_m] = function(...a) {
+                try { if (window.__strokeEvents.n < 1000000) window.__strokeEvents.n++; }
+                catch (e) {}
+                return _orig.apply(this, a);
+            };
+        }
+    }
 }
 """
 
@@ -2390,6 +2407,33 @@ class LiveBrowser:
             except Exception:
                 screenshot_action_saved = None
 
+        # ---- ALL per-action frames (one image per named action key) --------
+        # Save each so the trace is debuggable per action (J-kick, K-kick,
+        # L-fireball …), not just the single peak frame. Named
+        # <action_base>_<KeyCode>.png next to the action screenshot. Pop the
+        # raw bytes; the report keeps paths only.
+        action_frames_bytes = input_test.pop("action_frames_png_bytes", None) \
+            if isinstance(input_test, dict) else None
+        action_frame_paths: dict[str, str] = {}
+        if isinstance(action_frames_bytes, dict) and screenshot_action_path is not None:
+            base = Path(screenshot_action_path)
+            stem = base.stem  # e.g. "iter_03_action"
+            for keycode, png in action_frames_bytes.items():
+                if not png:
+                    continue
+                try:
+                    fp = base.with_name(f"{stem}_{keycode}.png")
+                    fp.write_bytes(png)
+                    action_frame_paths[str(keycode)] = str(fp)
+                except Exception:
+                    pass
+        if action_frame_paths:
+            report["action_frames"] = action_frame_paths
+        # Pop the raw per-key fake-action signal now; the gating decision is made
+        # later (after referenced_assets is computed) — stash it on a local.
+        _fake_actions = input_test.pop("fake_actions", None) \
+            if isinstance(input_test, dict) else None
+
         # ---- model-proposed probes ----------------------------------------
         # Agent emits <probes> in Phase A — JSON list of {name, expr} where
         # expr is a JS expression that should evaluate truthy on the running
@@ -2671,14 +2715,72 @@ class LiveBrowser:
                 report["soft_warnings"].append(
                     f"ASSETS_LOADED_BUT_UNDRAWN [{preview}]: "
                     f"{len(undrawn)}/{len(referenced_assets)} asset PNG(s) "
-                    "are referenced by the HTML's asset loader but no "
-                    "ctx.drawImage call was recorded with their URL "
-                    "during this run. The model likely added "
-                    "`new Image() + img.decode()` (so the loader-presence "
-                    "check passes) but is still drawing entities "
-                    "procedurally via ctx.fillText / ctx.fillRect / "
-                    "Unicode glyphs. Replace those drawing sites with "
-                    "ctx.drawImage(ASSETS.<name>, x, y, w, h)."
+                    "loaded but never drawn this run. The usual cause is a "
+                    "SPRITE-KEY MISMATCH: you build a lookup key (e.g. "
+                    "'left_idle' from name+'_'+state) that does NOT equal the "
+                    "generated asset name (e.g. 'left_fighter_idle'), so "
+                    "ASSETS[key] is undefined and you silently fall back to a "
+                    "fillRect block. The generated names are EXACTLY the ones "
+                    "listed in GENERATED ASSETS. Fix: fetch every sprite via the "
+                    "provided `sprite(key)` resolver (it tolerates key drift and "
+                    "draws a loud MISSING marker on a true miss) — do NOT index "
+                    "ASSETS directly, and do NOT draw a plain fillRect for an "
+                    "entity that has a sprite. The undrawn assets above are: "
+                    f"{preview}."
+                )
+        # ---- fake-action: code-drawn limb pretending to be a sprite --------
+        # Only when the game actually uses sprites. A key that visibly changed
+        # the canvas but added NO new sprite source while code-draw
+        # (fillRect/lineTo/stroke) increased = a faked action (e.g. a kick drawn
+        # with ctx.lineTo over the idle sprite instead of swapping to the kick
+        # sprite). Gating soft_warning so the model must drive actions by sprite.
+        if isinstance(_fake_actions, dict) and referenced_assets:
+            faked = [
+                kc for kc, info in _fake_actions.items()
+                if isinstance(info, dict)
+                and not info.get("new_sprite_src")
+                and int(info.get("code_draw_delta", 0)) > 0
+            ]
+            if faked:
+                preview = ", ".join(faked[:6])
+                report["soft_warnings"].append(
+                    f"ACTION_DRAWN_NOT_SPRITED [{preview}]: pressing "
+                    f"{'these keys' if len(faked) > 1 else 'this key'} changed "
+                    "the canvas by CODE-DRAWING (ctx.fillRect / lineTo / stroke) "
+                    "but did NOT draw a different sprite frame — i.e. the action "
+                    "(kick/punch/etc.) is faked with code lines over the idle "
+                    "sprite, not the real action sprite. Drive the action by "
+                    "swapping to its generated sprite via sprite() (e.g. while "
+                    "state.kicking, draw the *_kick sprite); never scribble a "
+                    "limb with fillRect/lineTo on top of the character."
+                )
+            # ---- code-drawn EFFECT bolted on top of a real sprite action ---
+            # The other half of the fake-action problem: the model DOES swap to
+            # the kick sprite (new_sprite_src True) but ALSO draws a code shape
+            # — a "motion line + flash" / reach-bar / limb — on top of it during
+            # the action. The sprite already conveys the kick; the code overlay
+            # is exactly the "stupid coded object instead of the sprite" the
+            # user rejects (two_kickers test3: a stroke line + growing arc
+            # ball over the kicking sprite). Keyed on STROKE/arc/lineTo delta
+            # (not fillRect — backgrounds use fillRect), with a small threshold
+            # so an incidental single stroke doesn't trip it. Gating: the model
+            # must let the sprite carry the action.
+            over_sprite = [
+                kc for kc, info in _fake_actions.items()
+                if isinstance(info, dict)
+                and info.get("new_sprite_src")
+                and int(info.get("stroke_delta", 0)) >= 2
+            ]
+            if over_sprite:
+                preview = ", ".join(over_sprite[:6])
+                report["soft_warnings"].append(
+                    f"CODE_DRAWN_OVER_SPRITE [{preview}]: the action DID draw its "
+                    "sprite, but ALSO code-drew shapes (ctx.stroke / lineTo / arc "
+                    "— a motion line, reach-bar, flash, or limb) on top of the "
+                    "character. The generated action sprite already conveys the "
+                    "move; do not bolt a code-drawn object onto it. Remove the "
+                    "stroke/arc effect and let the *_kick / *_punch sprite show "
+                    "the action (orient it toward the opponent if needed)."
                 )
         # Procedural-regression detector. Independent of (but coordinated
         # with) ASSETS_LOADED_BUT_UNDRAWN above. The drawImage shim says
@@ -3525,9 +3627,24 @@ class LiveBrowser:
         movement_position_changed = False
         movement_registered_without_move = False
 
+        # Draw-call state snapshot — distinct drawImage SOURCES seen so far,
+        # plus code-draw counts (fillRect + stroke/line). Used to tell a REAL
+        # sprite action (a new sprite src appears during the hold) from a FAKE
+        # one (the model scribbles a limb with lines/rects but draws no new
+        # sprite). See ACTION_DRAWN_NOT_SPRITED.
+        _DRAW_STATE_JS = (
+            "(()=>{const di=window.__drawImageEvents||[];"
+            "const srcs={};for(const e of di){if(e&&e.src)srcs[e.src]=1;}"
+            "return {nSrc:Object.keys(srcs).length,"
+            "nFill:(window.__fillRectEvents||[]).length,"
+            "nStroke:(window.__strokeEvents&&window.__strokeEvents.n)||0};})()"
+        )
+        per_key_fake_action: dict[str, dict] = {}
+
         for k in keys:
             before = await self._safe_eval(_CANVAS_HASH_JS)
             before_gs = await self._safe_eval(_GAMESTATE_SNAPSHOT_JS)
+            draw_before = await self._safe_eval(_DRAW_STATE_JS)
             if before is None:
                 return {"ran": False, "reason": "canvas not sampleable", "keys_tried": tried}
             try:
@@ -3567,6 +3684,26 @@ class LiveBrowser:
                         action_candidates[k] = (held_dist, _png)
                     except Exception:
                         pass
+                # Fake-action detection: this key visibly changed the canvas
+                # (held_dist > floor) — did it draw a NEW sprite source, or just
+                # code-draw (fillRect/lines) over the existing art? A model that
+                # fakes a kick by drawing a limb with ctx.lineTo/fillRect adds NO
+                # new drawImage src. Recorded per key; the gating decision (only
+                # when the game actually uses sprites) is made in load_and_test.
+                if held_dist is not None and held_dist > ambient_floor:
+                    draw_after = await self._safe_eval(_DRAW_STATE_JS)
+                    if isinstance(draw_before, dict) and isinstance(draw_after, dict):
+                        new_src = int(draw_after.get("nSrc", 0)) > int(draw_before.get("nSrc", 0))
+                        fill_delta = int(draw_after.get("nFill", 0)) - int(draw_before.get("nFill", 0))
+                        stroke_delta = int(draw_after.get("nStroke", 0)) - int(draw_before.get("nStroke", 0))
+                        per_key_fake_action[k] = {
+                            "new_sprite_src": bool(new_src),
+                            "code_draw_delta": int(fill_delta + stroke_delta),
+                            # stroke/arc/lineTo specifically — the signature of a
+                            # code-drawn limb or "attack effect" line+ball, as
+                            # opposed to background fillRects. Per ~3 hold frames.
+                            "stroke_delta": int(stroke_delta),
+                        }
                 await self._page.keyboard.up(k)
             except Exception:
                 continue
@@ -3693,6 +3830,15 @@ class LiveBrowser:
             "action_frame_png_bytes": action_frame_png,
             "action_key": best_action_key,
             "action_delta": round(best_action_delta, 4),
+            # ALL per-action frames (one PNG per key that visibly changed the
+            # canvas), so the trace has a debuggable image per named action —
+            # not just the single peak one. load_and_test saves each to disk
+            # and pops this key before the report JSON is assembled.
+            "action_frames_png_bytes": {k: png for k, (_d, png) in action_candidates.items()},
+            # Per-key fake-action signal: {key: {new_sprite_src, code_draw_delta}}
+            # for keys that changed the canvas. Used (only when the game uses
+            # sprites) to flag a code-drawn limb pretending to be a sprite action.
+            "fake_actions": per_key_fake_action,
             # Animation-liveness verdict: set when the responsive action key
             # renders a single held pose (not animated). None otherwise.
             "static_action": static_action,

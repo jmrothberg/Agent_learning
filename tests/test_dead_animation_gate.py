@@ -8,8 +8,15 @@ chained frame-from-previous, so every frame came back ~99% identical to idle
 but only WARNED; the visual critic's movement recipe had no animation question.
 
 Fixes verified here:
-  - `_dead_anim_frames` (near-identical from_image frames) hard-BLOCKS <done/>
-    via `_apply_dead_animation_check_to_report` (flips report["ok"]=False).
+  - `_dead_anim_frames` (near-identical from_image frames) is now ADVISORY:
+    `_apply_dead_animation_check_to_report` surfaces it in `warnings` (the
+    non-gating channel) and does NOT flip report["ok"]=False. Changed
+    2026-06-01 after trace build-a-single-screen-2d-fight_20260531_214215: a
+    cosmetic img2img sprite warning held a behaviorally-correct build hostage
+    across BOTH a local model and Opus 4.8 (probes 8/8, patches applied, input
+    PASS — yet ok stayed False forever because the prescribed img2img fix is
+    the path the user's own A/B finding marks as broken). Behavioral probes
+    gate shipping; cosmetics inform.
   - `_animation_expected` is signal-driven (declared/dead frames or game
     controls), not a genre table.
   - `_augment_recipe_for_animation` appends a context-specific "is it actually
@@ -45,27 +52,51 @@ def _make_agent(tmp_path) -> GameAgent:
     )
 
 
-# ---- dead-animation done-gate ----------------------------------------------
+# ---- dead-animation advisory (NOT a hard gate) ------------------------------
 
-def test_dead_anim_frames_block_done(tmp_path):
+def test_dead_anim_frames_are_advisory_not_blocking(tmp_path):
+    """Dead frames surface in `warnings` and must NOT flip ok=False.
+
+    Regression guard for the unwinnable loop in trace
+    build-a-single-screen-2d-fight_20260531_214215: a behaviorally-correct
+    build (probes passing) must still ship even with a cosmetic dead-sprite
+    warning, because the prescribed img2img remedy is the path the user's A/B
+    finding documents as broken.
+    """
     a = _make_agent(tmp_path)
     a._dead_anim_frames = {"hero_walk1": 0.007, "hero_walk2": 0.006}
-    report = {"ok": True, "soft_warnings": []}
+    report = {"ok": True, "soft_warnings": [], "warnings": []}
     a._apply_dead_animation_check_to_report(report)
-    assert report["ok"] is False
-    joined = "\n".join(report["soft_warnings"])
+    # ok is UNTOUCHED — cosmetics do not gate shipping.
+    assert report["ok"] is True
+    # not routed to the gating channel.
+    assert report["soft_warnings"] == []
+    # but the model still sees it, in the non-gating `warnings` channel.
+    joined = "\n".join(report["warnings"])
     assert "DEAD ANIMATION" in joined
     assert "hero_walk1" in joined and "hero_walk2" in joined
+    # advisory framing so the model knows it is not a blocker.
+    assert "does not block shipping" in joined
     assert report.get("dead_anim_frames") == {"hero_walk1": 0.007, "hero_walk2": 0.006}
+
+
+def test_dead_anim_does_not_flip_a_clean_report(tmp_path):
+    """Even when the only finding is dead frames, a probe-clean report stays ok."""
+    a = _make_agent(tmp_path)
+    a._dead_anim_frames = {"player_block": 0.029}
+    report = {"ok": True, "soft_warnings": [], "warnings": []}
+    a._apply_dead_animation_check_to_report(report)
+    assert report["ok"] is True
 
 
 def test_no_dead_frames_is_noop(tmp_path):
     a = _make_agent(tmp_path)
     a._dead_anim_frames = {}
-    report = {"ok": True, "soft_warnings": []}
+    report = {"ok": True, "soft_warnings": [], "warnings": []}
     a._apply_dead_animation_check_to_report(report)
     assert report["ok"] is True
     assert report["soft_warnings"] == []
+    assert report["warnings"] == []
 
 
 # ---- animation-expected signal ---------------------------------------------
@@ -107,7 +138,18 @@ def test_augment_appends_animation_question_without_mutating_original(tmp_path):
     # clone gained the animation question + an animation fix hint
     assert len(aug.recipe["checklist"]) == 2
     assert "SPECIFIC motion" in aug.recipe["checklist"][-1]
-    assert "from_image" in aug.recipe["fix_hint"]
+    # The fix hint must NOT prescribe regenerating frames (changed 2026-06-01):
+    # img2img can't change a pose and fresh txt2img breaks character
+    # consistency, so the hint is informational/cosmetic only. Guard against
+    # any regen suggestion creeping back in.
+    hint = aug.recipe["fix_hint"]
+    assert "cosmetic" in hint.lower() or "does not block" in hint.lower()
+    assert "from_image" not in hint
+    assert "strength" not in hint.lower()
+    # The hint may MENTION regeneration only to forbid it ("do NOT ...
+    # regenerate"); it must never PRESCRIBE it. Check the actionable verbs.
+    assert "re-emit" not in hint.lower()
+    assert "do not try to regenerate" in hint.lower()
 
 
 def test_augment_skips_when_no_animation_expected(tmp_path):

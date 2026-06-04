@@ -93,3 +93,30 @@ def test_genuine_specialized_picks_still_win(mem):
     assert mem.retrieve_skeleton(
         "pac man with ghosts"
     ).name == "canvas_grid_basic.html"
+
+
+def test_recipe_routed_skeletons_lift_coverage(mem):
+    """Recipe-routed skeleton stage (2026-06-02): classes the modality
+    detector doesn't cover now get a specialized scaffold via the visual-recipe
+    matcher instead of falling to the generic v2 canvas. These mirror the
+    curated prompts' mechanism words."""
+    # platformer (no modality detector for it; routed via the recipe)
+    assert mem.retrieve_skeleton(
+        "a side-scrolling platformer: run and jump across platforms, climb ladders, avoid pits"
+    ).name == "canvas_platformer_basic.html"
+    # pseudo-3D racing
+    assert mem.retrieve_skeleton(
+        "an outrun-style arcade racer down a curving road with roadside scenery rushing by"
+    ).name == "canvas_mode7_basic.html"
+
+
+def test_recipe_routed_stage_does_not_break_arcade_guard(mem):
+    """The new recipe-routed stage must NOT route a flat 2D arcade goal to a
+    forbidden 3D/board/dungeon skeleton (the recipe layer sends those to
+    top-down/paddle/lane recipes, which are absent from _RECIPE_TO_SKELETON)."""
+    for prompt in (
+        "asteroids: fly a ship and shoot drifting rocks in open space",
+        "breakout: bounce a ball off a paddle to break a wall of bricks",
+        "frogger: hop across lanes of traffic and a river",
+    ):
+        assert mem.retrieve_skeleton(prompt).name not in _SPECIALIZED_3D_BOARD_DUNGEON

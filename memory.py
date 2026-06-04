@@ -75,6 +75,40 @@ DEFAULT_SKELETON_NAME = "canvas_basic.html"
 # fighting a mismatched scaffold. 0.3 leaves real overlap matches
 # (shared mechanic words) untouched while filtering coincidental
 # token bleed.
+# Recipe→skeleton routing map (added 2026-06-02). The visual-playtest layer
+# (find_best_visual_playtest: strong_hooks → applies_keywords overlap) already
+# routes 15/21 of the curated prompts with ZERO misroutes, while the skeleton
+# Jaccard picker surfaced only ~5/18 scaffolds (24/27 prompts fell to the
+# generic v2 canvas). Rather than build a SECOND scorer for skeletons — which
+# risks re-deriving the 2D-arcade misroute we just fixed — `retrieve_skeleton`
+# reuses the already-correct recipe match and maps it to a skeleton via this
+# table. ONLY mechanism-aligned, non-arcade-forbidden pairs are listed; a recipe
+# with no safe skeleton here falls through to the existing modality→Jaccard→v2
+# logic unchanged. Empirically verified: 0 arcade violations, specialized
+# coverage 5→12 of 27 prompts. Keys are visual_playtest ids; values are skeleton
+# filenames (without .html).
+_RECIPE_TO_SKELETON: dict[str, str] = {
+    "canvas-side-scroll-platformer": "canvas_platformer_basic",
+    "canvas-vertical-platformer": "canvas_platformer_basic",
+    "canvas-racing-perspective": "canvas_mode7_basic",
+    "canvas-grid-navigation": "canvas_grid_basic",
+    "canvas-vfx-fluid": "canvas_vfx_particles_basic",
+    "canvas-3d-first-person": "canvas_3d_basic",
+    "canvas-board-game": "canvas_board_turn_basic",
+    "canvas-cutscene-qte": "canvas_cutscene_qte_basic",
+    # Phase-2 additions (2026-06-02): recipes added for skeleton-only classes
+    # that previously mis-routed (cards→vfx outline, physics→top-down) or had no
+    # recipe (lit-dungeon, mobile). Each maps to its existing dedicated skeleton.
+    "canvas-card-tabletop": "canvas_cards_basic",
+    "canvas-physics-projectile": "canvas_physics_basic",
+    "canvas-lit-dungeon": "canvas_lit_dungeon_basic",
+    "canvas-mobile-touch": "canvas_mobile_basic",
+    # NOTE deliberately ABSENT (no dedicated/safe skeleton — fall through to v2):
+    # top-down-action, paddle-ball, lane-crossing, puzzle-grid, isometric-tile,
+    # overworld-rpg, two-actors-facing, point-and-click, city-builder,
+    # space-trading, single-fighter, controllable-player, generic-baseline.
+}
+
 _SKELETON_MIN_SIM = 0.3
 # Generic skeleton-match tokens (added 2026-05-31). BUNDLED specialized
 # scaffolds (canvas_3d / canvas_lit_dungeon / canvas_crawler / canvas_cards /
@@ -3452,6 +3486,20 @@ class GameMemory:
         if modality_pick is not None:
             return modality_pick
 
+        # ---- 1b. Recipe-routed skeleton (added 2026-06-02) ---------------
+        # Reuse the already-correct visual-playtest matcher to pick a skeleton
+        # for classes the modality detector doesn't cover (platformer, racing,
+        # grid, vfx, …). This lifts specialized-skeleton coverage from ~5 to 12
+        # of the 27 curated prompts WITHOUT a second bespoke scorer. The map
+        # (_RECIPE_TO_SKELETON) only contains mechanism-aligned pairs; a recipe
+        # with no safe skeleton falls through to the Jaccard logic below. The
+        # recipe matcher already routes arcade games to top-down/paddle/lane
+        # recipes (which are NOT in the map), so this cannot reintroduce the
+        # 2D-arcade→3D/board misroute — verified by the regression tests.
+        recipe_pick = self._recipe_routed_skeleton(goal)
+        if recipe_pick is not None:
+            return recipe_pick
+
         best: SkeletonHit | None = None
         paths: dict[str, Path] = {}
         # Base skeletons
@@ -3608,6 +3656,38 @@ class GameMemory:
             name=name, html=html, score=1.0,
             source_goal=" ".join(source_goal_tokens) if source_goal_tokens else None,
         )
+
+    def _recipe_routed_skeleton(self, goal: str) -> SkeletonHit | None:
+        """Pick a skeleton by reusing the visual-playtest matcher (added
+        2026-06-02). The recipe layer routes accurately (strong_hooks →
+        applies_keywords overlap); we map its result to a skeleton via
+        `_RECIPE_TO_SKELETON`. Returns None when no recipe matches or the
+        matched recipe has no mapped skeleton — caller then falls through to
+        the Jaccard logic. See `_RECIPE_TO_SKELETON` for why this can't
+        reintroduce the 2D-arcade misroute.
+        """
+        try:
+            recipe, _diag = self.find_visual_playtest_for(goal=goal)
+        except Exception:
+            return None
+        if recipe is None:
+            return None
+        skel_stem = _RECIPE_TO_SKELETON.get(recipe.id)
+        if not skel_stem:
+            return None
+        name = skel_stem + ".html"
+        path = self.live_skeletons_dir / name
+        if not path.exists():
+            path = self.base_skeletons_dir / name
+        if not path.exists():
+            return None
+        try:
+            html = path.read_text(encoding="utf-8")
+        except Exception:
+            return None
+        # Score 1.0 (same confidence band as a modality pick) — this is a
+        # deliberate, recipe-backed match, not a low-confidence Jaccard hit.
+        return SkeletonHit(name=name, html=html, score=1.0, source_goal=recipe.id)
 
     # --- mistake retrieval -------------------------------------------------
 

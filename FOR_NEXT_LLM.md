@@ -55,23 +55,43 @@ or it never reaches the prompt. If a relevant bullet doesn't fire, broaden its t
 
 ## Traps that have cost real time (don't repeat these)
 
-- **Compaction denominator.** Compaction pressure = `prompt_tokens / num_ctx`. If `num_ctx` is
-  wrong (it once defaulted to the 32K Ollama output cap for *every* backend), a 40K prompt reads
-  as >100% on a 200K model and the lossy compaction fires **every turn**, shredding the playbook +
-  the user's instructions + the file view → "feedback doesn't stick," patches fail. Default is now
-  100K; only compact near a genuinely full window.
-- **img2img can't change a pose.** For animation frames (punch/kick), use **txt2img per pose with
-  one shared character description** (fixed seed → consistent character). img2img from idle returns
-  idle at low strength, a different character at high strength. (`from_image` is for recolor/restyle.)
-- **Wrong sprite direction → flip in CODE, don't regenerate.** An extra per-state `ctx.scale(-1,1)`
-  beats a model call. General rule: prefer code transforms (flip/rotate/offset/scale) over asset
-  regen for any wrong direction/size/position.
-- **Don't let the harness suggest the rejected pattern.** A warning that said "render the limb in
-  code" caused the procedural-limb relapse users reject. Watch your own coaching text.
+- **CONSISTENT ANIMATION NEEDS AN IMAGE — never a series of txt-only frames.** The whole reason the
+  asset pipeline exists: a character that kicks/punches must be the *same* character across frames.
+  - **img2img can't change a pose** (Z-Image/SD-Turbo at `guidance_scale=0` stay locked to idle at
+    every strength — proven A/B `animation_ab/`). `from_image` is recolor/restyle only.
+  - **A fresh txt2img *replacement* frame breaks consistency** with the character already in the
+    running game — and consistency is the hard constraint. So **don't regenerate a pose frame to
+    "fix" a dead/wrong one** — both routes are dead ends. A near-identical/dead frame is COSMETIC:
+    surfaced as an advisory `warning`, it must NOT flip `ok=False` or defer the user's gameplay
+    feedback. (See `feedback_sprite_animation_from_image.md`; `_apply_dead_animation_check_to_report`.)
+  - At PLAN time, request all named pose frames as **txt2img with one shared character description +
+    fixed seed**. In-session, cycle the frames you have; convey the action with the SPRITE, not code.
+- **Don't draw the action in CODE over the sprite.** A kick = swap to the `*_kick` sprite, never a
+  `ctx.lineTo`/`fillRect` limb or a "motion line + flash" bolted on top. Two gates enforce this:
+  `ACTION_DRAWN_NOT_SPRITED` (action changed the canvas by code-drawing but drew no new sprite) and
+  `CODE_DRAWN_OVER_SPRITE` (drew the sprite AND stroke/arc junk on top).
+- **Sprite-key drift silently shows colored boxes.** The model builds `'left_idle'` but the asset is
+  `'left_fighter_idle'`, so `ASSETS['left_idle']` is undefined → silent `fillRect` block. The injected
+  loader now provides a `sprite(key)` resolver (exact→normalized→token match) + a loud `MISSING`
+  marker; `ASSETS_LOADED_BUT_UNDRAWN` names the mismatch. Don't index `ASSETS` directly.
+- **The visual critic must SEE and must ABSTAIN-not-lie.** qwen3.6 is a real VLM and sees screenshots,
+  but it answers in reasoning prose and never emits `Qn: yes/no` → parse_rate 0 → dropped. Fix: the
+  critic call **prefills the assistant turn with `"Q1: "`** to force the format. And abstain detection
+  is anchored to "can't see the *image*" — a real finding ("I don't see a projectile") must NOT be
+  treated as blindness. Per-question `fix_hints` surface ONLY advice for checks that failed (a
+  blanket fix_hint once made the model flip a correctly-facing sprite → oscillation).
+- **Wrong sprite direction → flip in CODE, don't regenerate.** Per-state `ctx.scale(-1,1)` beats a
+  model call. Prefer code transforms (flip/rotate/offset/scale) over asset regen for any wrong
+  direction/size/position.
+- **Compaction denominator.** Pressure = `prompt_tokens / num_ctx`. A wrong `num_ctx` (it once
+  defaulted to the 32K Ollama output cap for *every* backend) makes a 40K prompt read as >100% on a
+  200K model → lossy compaction every turn, shredding playbook + user instructions + file view →
+  "feedback doesn't stick." Default is now 100K; only compact near a genuinely full window.
 - **Movement units.** Tile-step `moveProgress` is a 0→1 fraction → `+= speed*dt` (tiles/sec); a
   stray `/TILE` makes everything ~20× too slow.
-- **Weak models can't author a maze** (repetition-loop → truncation). Give them one to *copy*
-  (`pacman-maze-copy-dont-generate`).
+- **Weak models can't author a maze** (repetition loop → truncation). Give them one to *copy*.
+  Sampling matters too: the MLX path must pass `top_p`/`top_k` (vendor coding preset
+  temp 0.6/top_p 0.95/top_k 20) — untruncated sampling causes the degenerate line-repeat loop.
 - **Never call cloud silently.** Cloud confirms need the user's API key and explicit opt-in.
   Iterate on free local; expect qwen to truncate/loop on big builds — judge harness signals from
   the trace, not always a finished game.
@@ -80,11 +100,17 @@ or it never reaches the prompt. If a relevant bullet doesn't fire, broaden its t
 
 - **PLAYER-STUCK** — a movement key registers but no *position* leaf changes → stuck (in a wall /
   collision). (`_is_position_leaf`, `_MOVEMENT_KEYS`.)
+- **ACTION_DRAWN_NOT_SPRITED / CODE_DRAWN_OVER_SPRITE** — per action key, snapshots drawImage
+  sources + fillRect/stroke counts around the hold: a real action draws a NEW sprite src; a faked
+  one only code-draws (no sprite), or draws the sprite AND scribbles stroke/arc on top.
+- **ASSETS_LOADED_BUT_UNDRAWN / PROCEDURAL_REGRESSION_SUSPECTED** — sprite loaded but never drawn
+  (key mismatch / fillRect blocks instead of `drawImage`).
 - **Action frame + STATIC-ACTION** — presses the model's `<criteria>` keys, captures the peak
-  *transient* frame (restart/persistent keys excluded), feeds it to the VLM critic; a held-static
-  "animation" is flagged.
-- **State-vs-render** — entity in `state` with x/y but not drawn on canvas (`ENTITY-NOT-RENDERED`).
-- **Frozen-canvas, asset-path-exists, unused-asset, audio-events-fire** — see `load_and_test`.
+  *transient* frame per key (all saved to the trace as `iter_NN_action_<Key>.png`), feeds them to
+  the VLM critic; a held-static "animation" is flagged.
+- **ENTITY-NOT-RENDERED** — entity in `state` with x/y but not drawn on canvas.
+- **Frozen-canvas, asset-path-exists, audio-events-fire** — see `load_and_test`.
+- **Advisory (NOT gating):** dead/near-identical sprite frames — cosmetic, never block shipping.
 
 ## Debug a bad session in 5 greps
 

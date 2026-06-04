@@ -4707,30 +4707,68 @@ class GameAgent:
             report["ok"] = False
 
     def _apply_dead_animation_check_to_report(self, report: dict[str, Any]) -> None:
-        """Hard-block <done/> while any requested animation frame is still dead.
+        """Surface dead animation frames as ADVISORY — never a hard ok=False gate.
 
         A `from_image` frame that came back near-identical to its idle parent
         (tracked in `self._dead_anim_frames`) means the limbs never moved — the
-        character will just slide as a static image. That is not the animation
-        the user asked for, so flip ok=False and tell the model exactly how to
-        fix it (the set clears automatically when the frame regenerates with a
-        real delta). Objective + genre-free.
+        character will just slide as a static image. That's worth telling the
+        model, but it must NOT block shipping or starve the session.
+
+        WHY ADVISORY, NOT BLOCKING (changed 2026-06-01, trace
+        build-a-single-screen-2d-fight_20260531_214215 run_…214215): this used
+        to flip report["ok"]=False, which created an UNWINNABLE loop. The dojo-
+        fight session — with BOTH a local model (qwen3.6-27B) and SOTA
+        (Opus 4.8) — corrected the actual gameplay perfectly (patches applied
+        4/4 then 3/3, behavioral probes 8/8, input test PASS) yet every iter
+        stayed ok=False on this one cosmetic sprite warning. Two compounding
+        traps made it impossible to clear:
+          1. The prescribed fix (re-emit `from_image` strength 0.55-0.65) is
+             the SAME img2img path the user's own A/B finding documents as
+             BROKEN — "pose frames must be TXT2IMG, not img2img" — so the regen
+             came back dead again and RE-armed the block.
+          2. While ok stayed False, the user's real gameplay feedback (slow the
+             animation, flip the CPU facing) was deferred behind this blocker
+             (`_should_defer_feedback_for_blocker`), so the model was never even
+             allowed to make the simple code fix the user asked for.
+        A cosmetic asset-quality signal the model cannot reliably fix must not
+        gate a behaviorally-correct build. Behavioral probes gate; cosmetics
+        inform. The signal still reaches the model three other ways that do NOT
+        hard-fail: the rendered `warnings` block, the coaching channel, and the
+        VLM critic note (see `_build_visual_critic_*`). The set still clears
+        automatically when a frame regenerates with a real delta.
         """
         dead = self._dead_anim_frames
         if not dead:
             return
         names = ", ".join(f"`{n}`" for n in sorted(dead))
-        sw = list(report.get("soft_warnings") or [])
-        sw.append(
-            "DEAD ANIMATION: these frames came back near-identical to their "
-            f"idle parent so their limbs never move — {names}. Re-emit them "
-            "with `from_image` from the IDLE base, `strength` 0.55-0.65, and "
-            "the moved body parts named in the prompt. A character that slides "
-            "as a static sprite is not animated; the game is not done until "
-            "these frames visibly differ from idle."
+        # `warnings` (NOT `soft_warnings`) is the non-gating channel: tools.py
+        # computes ok = (no errors) and (no soft_warnings), so anything in
+        # soft_warnings is a hard fail. Route this advisory to `warnings` so it
+        # is shown to the model without flipping ok. Do NOT touch report["ok"].
+        #
+        # Do NOT tell the model to "regenerate the pose frame" here. Both
+        # regeneration routes are dead ends and suggesting either wastes the
+        # correction loop (see CLAUDE.md "Things to avoid" + the user memory
+        # feedback_sprite_animation_from_image.md):
+        #   - img2img can't change a pose at all (guidance_scale=0 keeps it
+        #     locked to idle — proven A/B 2026-05-30), and
+        #   - a fresh txt2img replacement frame will NOT stay consistent with
+        #     the character already placed in the running game (per the user:
+        #     consistency is the hard constraint), and in the dojo-fight trace
+        #     the txt2img path STILL returned near-idle `block` frames anyway.
+        # So this is purely informational: name the dead frames, say it's
+        # cosmetic, and let the behaviorally-correct build ship.
+        warns = list(report.get("warnings") or [])
+        warns.append(
+            "DEAD ANIMATION (advisory — does not block shipping): these frames "
+            f"came back near-identical to their idle parent — {names}. Their "
+            "limbs barely move, so the character looks near-static for that "
+            "pose. This is a cosmetic sprite-quality note, NOT a code bug: do "
+            "not change game logic for it and do not try to regenerate the "
+            "frames in your patch. It will not stop a behaviorally-correct game "
+            "from shipping."
         )
-        report["soft_warnings"] = sw
-        report["ok"] = False
+        report["warnings"] = warns
         report["dead_anim_frames"] = dict(dead)
 
     @staticmethod
@@ -6308,10 +6346,12 @@ class GameAgent:
         base = dict(recipe.recipe or {})
         base["checklist"] = list(base.get("checklist") or []) + [q]
         anim_hint = (
-            "Sliding/dead animation: do NOT redraw limbs in code. Re-emit the "
-            "motion frames with from_image from the IDLE base, strength "
-            "0.55-0.65, naming the moved body parts in the prompt; cycle >=2 "
-            "frames over the active window."
+            "Sliding/dead animation is a COSMETIC sprite-quality note, not a "
+            "code bug: do NOT redraw limbs in code and do NOT try to regenerate "
+            "the pose frames (img2img can't change a pose, and a fresh txt2img "
+            "frame won't stay consistent with the character already in the "
+            "game). Cycle whatever motion frames exist over the active window "
+            "and keep going — this does not block shipping."
         )
         base["fix_hint"] = (
             (base.get("fix_hint") or "").strip() + "\n" + anim_hint
@@ -6424,6 +6464,46 @@ class GameAgent:
         )
         return intro + numbered + "\n\n" + example
 
+    # Phrases a VLM uses when it did NOT actually receive/see an image. When
+    # any of these appear, the critique is an ABSTAIN, not a judgement — its
+    # Qn: answers (if any) are fabricated and must never be parsed as real
+    # visual failures or fed to the coaching loop. Added 2026-06-02 after the
+    # Street Fighter trace parsed a "can't see the image" reply that ALSO
+    # emitted Q1:no..Q5:no as a genuine "5 of 5 checks FAILED". Genre/model
+    # agnostic — these are generic refusal/blindness phrasings.
+    # TIGHTENED 2026-06-03: the abstain test must fire ONLY when the model says
+    # it can't see the IMAGE/SCREENSHOT itself — never on a legitimate visual
+    # observation about the game's contents. The old `(?:can't|don't) …see`
+    # clause false-matched "I don't see a projectile in the slingshot" (a CORRECT
+    # finding from a model that saw the screenshot fine) and wrongly dropped the
+    # whole critique. Every blindness alternative below is anchored to an
+    # image/screenshot/picture object, so "don't see a <game element>" no longer
+    # trips it. Verified against the angry-birds critic trace where the VLM
+    # described the slingshot accurately yet was being discarded as "blind".
+    _IMG = r"(?:image|images|screenshot|screenshots|picture|pictures|photo|attachment)"
+    _CRITIC_ABSTAIN_RE = __import__("re").compile(
+        r"(?:"
+        rf"no {_IMG}\b|"
+        rf"without (?:a |the |any )?{_IMG}\b|"
+        rf"(?:can(?:no|')t|cannot|could ?n'?t|unable to|do not|don'?t) (?:\w+ ){{0,3}}(?:see|view|access|open|load|analyze|review|make out) (?:\w+ ){{0,3}}{_IMG}\b|"
+        rf"(?:did|do) ?n'?t (?:receive|get|see) (?:the |a |an |any )?{_IMG}\b|"
+        rf"no {_IMG} (?:was |were )?(?:provided|attached|included|shared|uploaded|present)|"
+        rf"(?:please |kindly )?(?:share|attach|provide|upload|re-?upload|send)(?: (?:the|a|an|your))? {_IMG}\b|"
+        rf"i (?:don'?t|do not) have (?:access to )?(?:an? |the |any )?{_IMG}\b|"
+        rf"if you (?:can |could )?(?:share|attach|provide|send)(?: (?:the|a|an|your))? {_IMG}\b|"
+        r"no (?:visual|file) (?:was )?(?:provided|attached|included)"
+        r")",
+        __import__("re").IGNORECASE,
+    )
+
+    @classmethod
+    def _critic_abstained(cls, text: str) -> bool:
+        """True ONLY when the reply indicates the model never received/saw the
+        IMAGE itself — not when it reports not seeing a game element (which is a
+        legitimate visual finding). See _CRITIC_ABSTAIN_RE for why this is
+        anchored to image/screenshot objects."""
+        return bool(text) and bool(cls._CRITIC_ABSTAIN_RE.search(text))
+
     @staticmethod
     def _parse_visual_playtest_response(text: str, recipe) -> dict:
         """Parse a structured-checklist response into {q_index: (answer, remark)}.
@@ -6449,6 +6529,10 @@ class GameAgent:
         # symbols (no \b).
         pat = _re.compile(
             r"^\s*Q?\s*(\d+)\s*[:.\-)]\s*"
+            # Tolerate an optional repeated ordinal the model sometimes emits
+            # after a "Qn: " prefill (e.g. "Q1: 1. YES") — skip a leading
+            # "<num>." / "<num>)" before the answer word. Added 2026-06-03.
+            r"(?:\d+\s*[.)]\s*)?"
             r"(?:(yes|no|unclear|y|n|u)\b|([✅❌✔✖✓✗✘]))"
             r"\s*[\-—]?\s*(.*)$",
             _re.IGNORECASE,
@@ -6491,6 +6575,7 @@ class GameAgent:
         checklist = recipe.recipe.get("checklist") or []
         failures: list[str] = []
         unclears: list[str] = []
+        failed_idxs: list[int] = []
         for i, q in enumerate(checklist, start=1):
             entry = answers.get(i)
             if entry is None:
@@ -6500,6 +6585,7 @@ class GameAgent:
             if ans == "no":
                 tail = f" — {remark}" if remark else ""
                 failures.append(f"{line_intro} FAILED{tail}")
+                failed_idxs.append(i)
             elif ans == "unclear":
                 tail = f" — {remark}" if remark else ""
                 unclears.append(f"{line_intro} UNCLEAR{tail}")
@@ -6512,16 +6598,28 @@ class GameAgent:
             + ":"
         )
         body = "\n".join(failures + unclears)
-        # Optional `fix_hint` (added 2026-05-25 from the agent-memory
-        # critique review): when a recipe carries a per-failure-class
-        # minimal-fix shape, append it so the model sees not just
-        # WHAT'S WRONG but the smallest correct change shape. Reduces
-        # the "VLM critic complaint → model invents structural rewrite"
-        # failure pattern. fix_hint only renders when failures exist
-        # (no point coaching on a passing check).
-        fix_hint = (recipe.recipe.get("fix_hint") or "").strip() if failures else ""
-        if fix_hint:
-            return head + "\n" + body + "\n\nMinimal fix shape: " + fix_hint
+        # Fix-hint. Prefer a PER-QUESTION map (`fix_hints`: {q_index: hint}) so
+        # we surface ONLY the advice for checks that actually FAILED. The old
+        # behavior dumped the whole blob `fix_hint` on any failure — which made
+        # the model apply facing-flip advice (ctx.scale(-1,1)) even when facing
+        # PASSED and only Q4/Q5 failed, breaking correct facing (the iter1✓→
+        # iter2✗→iter3✓ oscillation observed 2026-06-03 on the two-kickers run).
+        # Falls back to the blob `fix_hint` when no per-question map exists.
+        if failures:
+            per_q = recipe.recipe.get("fix_hints")
+            if isinstance(per_q, dict) and per_q:
+                hints = []
+                for i in failed_idxs:
+                    h = (per_q.get(str(i)) or per_q.get(i) or "").strip()
+                    if h and h not in hints:
+                        hints.append(h)
+                if hints:
+                    return head + "\n" + body + "\n\nMinimal fix shape:\n" + "\n".join(
+                        f"  - (Q{idx}) {h}" for idx, h in zip(failed_idxs, hints)
+                    )
+            fix_hint = (recipe.recipe.get("fix_hint") or "").strip()
+            if fix_hint:
+                return head + "\n" + body + "\n\nMinimal fix shape: " + fix_hint
         return head + "\n" + body
 
     async def run_visual_critic(
@@ -6541,7 +6639,30 @@ class GameAgent:
         backend = self.get_backend("critic")
         if backend is None:
             return None
-            
+
+        # Vision guard (added 2026-06-02, dragons-lair /allroles trace). The
+        # visual critic feeds the model screenshots, so the backend MUST
+        # actually serve vision. A text-only model handed an image does not
+        # error — it HALLUCINATES a confident description of pixels it never
+        # saw (verified: DeepSeek-V4-Flash answered a green-on-red circle with
+        # "a single solid black circle"). That fabricated critique then gets
+        # parsed and fed into the coaching loop as if real. So if the backend
+        # can't do vision, skip the visual critic entirely and let the
+        # behavioral probes carry verification. Genre-free, model-agnostic.
+        try:
+            if not await backend.is_vlm():
+                self._trace({
+                    "kind": "visual_critic_skipped",
+                    "reason": "backend_not_vlm",
+                    "model": getattr(getattr(backend, "info", None), "model", None),
+                })
+                return None
+        except Exception:
+            # is_vlm() probe failed — fail safe by skipping rather than
+            # risking a hallucinated critique on an unknown backend.
+            self._trace({"kind": "visual_critic_skipped", "reason": "is_vlm_probe_failed"})
+            return None
+
         self._set_role_activity("critic", "Auditing screenshot...")
         # Try the structured-checklist path first (2026-05-24). Match a
         # mechanism recipe via goal + plan-grade criteria text + asset
@@ -6685,6 +6806,32 @@ class GameAgent:
                 "image_count": len(images),
                 "recipe_id": recipe.id if recipe else None,
             })
+            # Finding-1 instrumentation (2026-06-02): the model SEES images in
+            # isolation yet returned "I can't see the screenshot" every iter in
+            # the live /allroles run. Record exactly what the critic backend is
+            # being handed — message count/roles, content sizes, and the real
+            # byte payload of each image — so the next live trace proves whether
+            # the pixels actually reach stream_chat (vs being empty/str/stripped)
+            # instead of guessing. Pure observability; no behavior change.
+            try:
+                self._trace({
+                    "kind": "visual_critic_payload",
+                    "n_messages": len(messages),
+                    "messages": [
+                        {
+                            "role": m.get("role"),
+                            "content_chars": len(m.get("content") or ""),
+                            "n_images": len(m.get("images") or []),
+                            "image_bytes": [
+                                (len(b) if isinstance(b, (bytes, bytearray)) else f"non-bytes:{type(b).__name__}")
+                                for b in (m.get("images") or [])
+                            ],
+                        }
+                        for m in messages
+                    ],
+                })
+            except Exception:
+                pass
             critic_role = getattr(self, "_model3_role", None)
             if critic_role != "critic":
                 critic_role = getattr(self, "_model2_role", None) or "critic"
@@ -6692,8 +6839,25 @@ class GameAgent:
                 self._role_token_cb(critic_role)
                 if self._token_cb is not None else None
             )
+            # Format-forcing prefill (added 2026-06-03). ROOT CAUSE of the
+            # critic's useless output: qwen3.6-27B (thinking-mode VLM) SEES the
+            # screenshot fine but answers in reasoning prose ("Wait, let me look
+            # closer…") and never emits the Q1: yes/no lines, so parse_rate=0
+            # and the whole critique is dropped — the safety net that should
+            # catch a fighter facing the wrong way never fires. Seeding the
+            # assistant turn with "Q1: " forces generation to START inside the
+            # required format, skipping the reasoning preamble. The backend's
+            # assistant-prefill path appends this to the prompt; we prepend it
+            # back onto the reply before parsing. Recipe path only (the path
+            # that expects the Qn: format). Genre/model-agnostic.
+            _critic_prefill = "Q1: " if (using_recipe and recipe is not None) else None
+            _critic_messages = messages
+            if _critic_prefill:
+                _critic_messages = messages + [
+                    {"role": "assistant", "content": _critic_prefill}
+                ]
             result = await backend.stream_chat(
-                messages,
+                _critic_messages,
                 on_token=on_tok,
                 options={"temperature": 0.2, "num_ctx": 4096},
                 keep_alive=self._keep_alive_for_backend(backend),
@@ -6702,6 +6866,52 @@ class GameAgent:
                 max_retries=1,
             )
             critique_raw = (result.text or "").strip()
+            # Re-attach the format-forcing prefix so the parser sees the full
+            # "Q1: <answer>" first line (the model only generated what FOLLOWS
+            # "Q1: "). Guard against the model having echoed it anyway.
+            if _critic_prefill and not critique_raw[:6].lower().startswith("q1"):
+                critique_raw = _critic_prefill + critique_raw
+            # ABSTAIN guard (added 2026-06-02; TIGHTENED same day after a false
+            # positive). Goal: drop a critique the model fabricated because it
+            # couldn't see the image — WITHOUT dropping a genuine critique that
+            # merely happens to contain a hedging phrase mid-analysis.
+            #
+            # The distinguishing signal is NOT "does it contain a refusal
+            # phrase" (a real analysis can say "I can't see any HUD" etc.) — it
+            # is "did the model actually render a verdict, or did it fall back
+            # to a uniform default because it was blind". So we abstain ONLY
+            # when BOTH hold: (a) a refusal phrase is present, AND (b) the reply
+            # has no genuine verdict — either nothing parsed, OR every parsed
+            # answer is the same fallback value (e.g. all "no"/all "unclear",
+            # the classic "couldn't see → defaulted everything" shape from the
+            # Street Fighter trace). A real critique that judges at least one
+            # check differently (some yes, some no) is KEPT. Verified blind run:
+            # qwen3.6-27B demonstrably saw + reasoned about the screenshots
+            # (coder said "the screenshot shows the drawbridge background IS
+            # drawn…"), so a blanket phrase-match was over-dropping real signal.
+            if self._critic_abstained(critique_raw):
+                _ab_parsed = self._parse_visual_playtest_response(critique_raw, recipe) if recipe else {"answers": {}}
+                _ans = [a for (a, _r) in (_ab_parsed.get("answers") or {}).values()]
+                _degenerate = (not _ans) or (len(set(_ans)) <= 1)
+                if _degenerate:
+                    self._trace({
+                        "kind": "visual_critic_abstained",
+                        "recipe_id": recipe.id if recipe else None,
+                        "n_answers": len(_ans),
+                        "distinct_answers": sorted(set(_ans)),
+                        "raw_preview": critique_raw[:200],
+                    })
+                    self._set_role_activity("critic", "idle")
+                    return None
+                # Refusal phrase present but the model gave a real, MIXED
+                # verdict — treat it as a genuine critique and fall through to
+                # normal parsing/coaching.
+                self._trace({
+                    "kind": "visual_critic_abstain_overridden",
+                    "recipe_id": recipe.id if recipe else None,
+                    "reason": "mixed_verdict_present",
+                    "distinct_answers": sorted(set(_ans)),
+                })
             # If we used a recipe, parse the structured response and
             # format the failures into a single coaching string. Fall
             # back to the raw text when the VLM didn't follow the
@@ -7731,8 +7941,15 @@ class GameAgent:
                     "forced": bool(prefill_force and not self._use_prefill),
                 })
 
+        # Build-turn temperature. 0.6 is the Qwen3.6 vendor "thinking-mode /
+        # precise-coding (WebDev)" preset (temp 0.6, top_p 0.95, top_k 20 —
+        # the tail-truncation half lives in backend.MLXBackend._stream_once).
+        # Was 0.7; lowered 2026-05-31 alongside wiring up top_p/top_k, after
+        # the dojo-fight trace looped at temp 0.7 with NO tail truncation.
+        # Fix-mode patch turns stay tighter (0.25) — surgical edits want
+        # determinism, deliberately below the build preset.
         temp = override_temp if override_temp is not None else (
-            0.25 if self._fix_mode else 0.7
+            0.25 if self._fix_mode else 0.6
         )
         if override_temp is None and self._restart_attempt_idx > 0:
             bias = self._restart_temperature_bias(self._restart_attempt_idx)
@@ -10600,15 +10817,14 @@ class GameAgent:
                         warn_lines.append(line)
                         yield self._record(AgentEvent("info", line.strip()))
                     warn_lines.append(
-                        "Fix: re-emit these frames with `from_image` seeded "
-                        "from the entity's IDLE base (not the previous frame), "
-                        "RAISE `strength` to 0.55-0.65 (≤0.45 returns the idle "
-                        "pose unchanged), and NAME the moved body parts in the "
-                        "prompt ('right arm fully extended forward, fist out'; "
-                        "'left leg raised high')."
-                        " Keep using sprites — never draw the limb in code."
-                        " Until these frames visibly differ from idle, the "
-                        "game is NOT done."
+                        "This is COSMETIC and does not block shipping. Do NOT "
+                        "try to regenerate these frames to fix it: img2img "
+                        "cannot change a pose (it stays locked to idle), and a "
+                        "fresh txt2img frame will not stay consistent with the "
+                        "character already in the game — consistency is the "
+                        "hard constraint. Keep using the sprites you have, "
+                        "never draw the limb in code, and move on to the "
+                        "behavior the user actually asked for."
                     )
                     self._pending_feedback.append("\n".join(warn_lines))
 

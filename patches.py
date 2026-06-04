@@ -368,6 +368,22 @@ def repair_reply(reply: str) -> str:
     # This matches multiple ======= lines separated only by whitespace or newlines.
     reply = re.sub(r"\n=======(?:\s*=======)+", "\n=======", reply)
 
+    # 2b. Drop a STRAY trailing ======= that sits right before the REPLACE
+    # marker. A well-formed block has exactly one '=======' between SEARCH and
+    # REPLACE bodies; a model that emits a SECOND divider just before
+    # '>>>>>>> REPLACE' (with REPLACE-body content between the two dividers)
+    # produces a block the parser can't match, so the whole patch silently
+    # fails to apply and the model burns an iteration before self-correcting
+    # (observed 2026-06-02 dragons-lair trace: ASSET_NAMES + drawPeril patches
+    # both lost to this). Step 2 above only handles ADJACENT dividers; this
+    # removes a `=======` whose next non-empty line is the REPLACE marker.
+    reply = re.sub(
+        r"^[ \t]*=======[ \t]*\n(\s*)>>>>>>> REPLACE",
+        r"\1>>>>>>> REPLACE",
+        reply,
+        flags=re.MULTILINE,
+    )
+
     # 3. Auto-close <patch> blocks that end with the REPLACE marker but are missing </patch>
     # We do this by finding '<patch>' (case-insensitive) where there's no matching '</patch>' ahead
     # before another '<patch>', and we see '>>>>>>> REPLACE'.

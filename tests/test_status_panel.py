@@ -240,8 +240,19 @@ def _four_gpu_workstation_snap(
     )
 
 
-def test_pick_diffuser_prefers_gpu0_on_workstation() -> None:
-    """Empty GPU 1 must not steal diffusers from reserved GPU 0."""
+def test_pick_diffuser_prefers_gpu0_on_workstation(monkeypatch) -> None:
+    """Empty GPU 1 must not steal diffusers from reserved GPU 0.
+
+    The "reserve GPU 0" behavior is gated behind a Linux-only host check
+    (`_is_four_gpu_linux_nvidia_workstation` returns False off-Linux). This
+    test verifies the RESERVATION LOGIC, not the host detection, so we force
+    the detector True — otherwise the test only passes on a Linux box and
+    silently fails on a Mac/CI host (the diffuser logic itself stays
+    untested). Fixed 2026-06-02: was a bare assert that failed on macOS.
+    """
+    monkeypatch.setattr(
+        gpu_status, "_is_four_gpu_linux_nvidia_workstation", lambda snap: True
+    )
     snap = _four_gpu_workstation_snap(used=(1000, 500, 2000, 43000))
     assert gpu_status.pick_diffuser_cuda_index(snap) == 0
 

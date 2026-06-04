@@ -74,13 +74,20 @@ def test_asset_sanity_warning_does_not_suggest_code():
     src = inspect.getsource(agent.GameAgent._maybe_generate_assets_and_sounds)
     # the old wording told the model to "render the moving part ... in code"
     assert "render the moving part" not in src
-    # it explicitly forbids code-drawn limbs
+    # CHANGED 2026-06-01 (trace build-a-single-screen-2d-fight_20260531_214215):
+    # the dead-sprite SANITY WARNING text shown to the model must NOT prescribe
+    # regenerating the frame. img2img can't change a pose, and a fresh txt2img
+    # frame breaks consistency with the character already in the running game
+    # (consistency is the hard constraint). Assert on the warning STRING that is
+    # appended to pending feedback, not the whole orchestration method (which
+    # legitimately uses from_image/regenerate elsewhere).
+    assert "Fix: re-emit these frames" not in src       # old broken prescription
+    assert "RAISE `strength`" not in src
+    # new framing (substrings chosen to survive string-literal line breaks):
+    assert "does not block shipping" in src              # cosmetic, non-gating
+    assert "try to regenerate these frames" in src       # only ever in a "Do NOT" clause
+    assert "consistency is the" in src                   # consistency is the hard constraint
     assert "never draw the limb in code" in src
-    # and steers to the from_image-done-right fix (seed from idle base, raise
-    # strength, name the moved parts) — NOT to txt2img, which only loses the
-    # consistent character (user directive 2026-05-30).
-    assert "from_image" in src and "IDLE base" in src
-    assert "TXT2IMG" not in src
 
 
 def test_asset_block_forbids_code_limbs():

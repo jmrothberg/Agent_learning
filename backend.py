@@ -748,9 +748,44 @@ class MLXBackend(Backend):
             default_max = 131072
         max_tokens = int(sampler_opts.get("max_tokens") or default_max)
         temperature = float(sampler_opts.get("temperature") or 0.0)
-        top_p = float(sampler_opts.get("top_p") or 0.0)
-        top_k = int(sampler_opts.get("top_k") or 0)
-        min_p = float(sampler_opts.get("min_p") or 0.0)
+        # Tail-truncation defaults (added 2026-05-31). PRIOR behavior left
+        # top_p/top_k/min_p at 0 whenever a caller didn't set them — and
+        # callers only ever pass `temperature` (see agent.py), so EVERY MLX
+        # turn sampled at temp>0 over the FULL vocabulary with NO nucleus or
+        # top-k truncation. mlx_lm's make_sampler skips each filter unless
+        # top_p in (0,1) / top_k>0 / min_p>0, so zeros = "no filter". That is
+        # the danger zone Qwen's own docs warn against: "DO NOT use greedy
+        # decoding ... can lead to endless repetitions", and the same applies
+        # to an untruncated tail — once the model emits a structurally
+        # identical line (e.g. `let cpuIsBlocking=false;`) nothing pulls it off
+        # that attractor. The 2026-05-31 dojo-fight trace died exactly this way
+        # twice (run_20260531_214215): repetition-loop abort mid-`<html_file>`,
+        # zero usable builds.
+        #
+        # Defaults are the VENDOR thinking-mode / precise-coding preset for
+        # Qwen3.6 (temp 0.6, top_p 0.95, top_k 20, min_p 0; repetition_penalty
+        # stays 1.0 — a rep penalty HURTS code, which legitimately repeats `}`,
+        # `const`, `ctx.`). These are model-agnostic good hygiene: sane tail
+        # truncation helps every local model, not just Qwen. Per-machine
+        # override via MLX_TOP_P / MLX_TOP_K / MLX_MIN_P; a caller that passes
+        # a positive value still wins. We do NOT inject a temperature default
+        # here — greedy (temp=0) planning stages bypass the sampler entirely
+        # (make_sampler returns argmax), and explicit per-stage temps must
+        # pass through untouched.
+        def _env_float(name: str, fallback: float) -> float:
+            raw = os.environ.get(name, "").strip()
+            try:
+                return float(raw) if raw else fallback
+            except ValueError:
+                return fallback
+
+        def _env_int(name: str, fallback: int) -> int:
+            raw = os.environ.get(name, "").strip()
+            return int(raw) if raw.lstrip("-").isdigit() else fallback
+
+        top_p = float(sampler_opts.get("top_p") or 0.0) or _env_float("MLX_TOP_P", 0.95)
+        top_k = int(sampler_opts.get("top_k") or 0) or _env_int("MLX_TOP_K", 20)
+        min_p = float(sampler_opts.get("min_p") or 0.0) or _env_float("MLX_MIN_P", 0.0)
 
         prefill_step_size = _resolve_prefill_step_size(self.info.model)
 

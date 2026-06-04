@@ -292,6 +292,11 @@ class _RetryBackend:
         self._replies = [first, second]
         self.calls = 0
 
+    async def is_vlm(self):
+        # run_visual_critic now skips non-vision backends (2026-06-02 guard);
+        # this stub stands in for a real VLM so the retry path is exercised.
+        return True
+
     async def stream_chat(self, messages, **kwargs):
         i = min(self.calls, len(self._replies) - 1)
         self.calls += 1

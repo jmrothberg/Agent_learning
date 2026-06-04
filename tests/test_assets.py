@@ -574,3 +574,25 @@ def test_generate_assets_falls_back_to_txt2img_when_img2img_missing(tmp_path):
     assert set(out.keys()) == {"walk1", "walk2"}
     # Both frames went through txt2img — chain unavailable.
     assert len(txt2img.calls) == 2
+
+
+def test_render_block_emits_robust_sprite_resolver(tmp_path):
+    """The injected loader must provide a sprite(key) resolver that tolerates
+    key-naming drift (the #1 cause of 'generated art but game shows boxes':
+    code builds 'left_idle' but asset is 'left_fighter_idle') and a LOUD
+    MISSING marker on a true miss — never a clean fillRect block that hides
+    the bug. Added 2026-06-03 after a two-kickers run rendered solid blocks
+    because spriteKey != generated asset name."""
+    from assets import render_asset_paths_block
+    html = tmp_path / "game.html"
+    html.write_text("<html></html>")
+    ad = tmp_path / "game_assets"
+    ad.mkdir()
+    p = ad / "left_fighter_idle.png"
+    p.write_bytes(b"\x89PNG fake")
+    block = render_asset_paths_block({"left_fighter_idle": p}, html)
+    assert "function sprite(key)" in block          # robust accessor
+    assert "MISSING" in block                        # loud marker, not a tidy block
+    assert "naturalWidth" in block                   # guards against undecoded
+    # normalized/token matching so 'left_idle' resolves to 'left_fighter_idle'
+    assert "norm" in block and "includes" in block

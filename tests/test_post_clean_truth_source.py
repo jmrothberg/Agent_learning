@@ -161,10 +161,29 @@ def test_post_clean_failed_branch_unchanged(tmp_path):
     branch. A failed report still goes through fix_instruction / the
     existing focused-slice + full-file inject path."""
     a = _make_agent(tmp_path)
+    # Baseline must be a REAL game file (>=2KB, has <canvas>, and a <script>
+    # body >=512B of non-comment code) so it is NOT classified as a degenerate/
+    # truncated placeholder by `_is_degenerate_baseline` — otherwise
+    # `_build_fix_prompt` correctly takes the full-rewrite branch instead of the
+    # normal failed branch this test means to exercise. (Fixed 2026-06-02: the
+    # old 111-byte comment-only fixture tripped that carve-out, so the inlined
+    # file body never appeared and the assertion failed against working code.)
+    _real_code = "\n".join(
+        f"  function step{i}(f) {{ ctx.fillRect(f.x+{i}, f.y, 10, 10); f.x += {i}; }}"
+        for i in range(40)
+    )
     a._current_file = (
-        "<!DOCTYPE html><html><body><script>"
-        "function drawFighter(f) { /* FAILED_BRANCH_SENTINEL */ }"
+        "<!DOCTYPE html><html><head><title>G</title></head><body>"
+        "<canvas id='c' width='800' height='600'></canvas><script>\n"
+        "  const ctx = document.getElementById('c').getContext('2d');\n"
+        "  function drawFighter(f) { /* FAILED_BRANCH_SENTINEL */ ctx.fillRect(f.x, f.y, 16, 16); }\n"
+        f"{_real_code}\n"
+        "  requestAnimationFrame(function loop(){ drawFighter({x:1,y:1}); requestAnimationFrame(loop); });\n"
         "</script></body></html>"
+    )
+    import agent as _agent_mod
+    assert not _agent_mod._is_degenerate_baseline(a._current_file), (
+        "fixture must be a non-degenerate baseline to exercise the failed branch"
     )
     a._pending_feedback.append("anything")
 

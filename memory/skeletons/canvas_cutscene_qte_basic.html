@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cutscene QTE</title>
+<style>
+  :root { color-scheme: dark; --bg:#08060e; --fg:#f3e9d2; --panel:#1c1430;
+          --accent:#c8432f; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font:16px/1.4 system-ui,sans-serif; overflow:hidden;
+    -webkit-tap-highlight-color:transparent; user-select:none; }
+  #wrap { position:fixed; inset:0; display:grid; place-items:center; }
+  canvas { background:#000; border-radius:12px; box-shadow:0 10px 40px #000a;
+    max-width:96vw; max-height:90vh; touch-action:none; }
+  #hud { position:fixed; top:12px; left:12px; background:#0008; padding:8px 12px;
+    border-radius:8px; pointer-events:none; font-variant-numeric:tabular-nums; }
+  #hud span { margin-right:14px; }
+  #help { position:fixed; bottom:12px; left:12px; opacity:.75; font-size:13px;
+    pointer-events:none; }
+  #modal { position:fixed; inset:0; display:none; place-items:center;
+    background:#000a; backdrop-filter:blur(4px); }
+  #modal .card { background:var(--panel); padding:24px 28px; border-radius:14px;
+    text-align:center; box-shadow:0 20px 60px #000a; min-width:240px; }
+  #modal h2 { margin:0 0 8px; }
+  #errOverlay { position:fixed; inset:auto 12px 12px 12px; max-height:30%;
+    overflow:auto; background:#400; color:#fdd; padding:8px 12px; font:12px/1.3 monospace;
+    border-radius:6px; display:none; pointer-events:none; }
+  button { background:var(--accent); color:#fff; border:0; padding:10px 18px;
+    border-radius:8px; font-size:15px; cursor:pointer; }
+  button:hover { filter:brightness(1.1); }
+</style></head>
+<body>
+<div id="wrap"><canvas id="c" width="800" height="600"></canvas></div>
+<div id="hud">
+  <span>Scene: <b id="sceneNo">1</b>/<b id="sceneTot">1</b></span>
+  <span>Lives: <b id="lives">3</b></span>
+</div>
+<div id="help">React with Arrow keys + Space when prompted · R restart</div>
+<div id="modal"><div class="card">
+  <h2 id="endTitle">Game Over</h2>
+  <p id="endMsg"></p>
+  <button id="restart">Play again (R)</button>
+</div></div>
+<div id="errOverlay"></div>
+<script>
+(() => {
+  "use strict";
+
+  // ---- DOM refs --------------------------------------------------------
+  const cvs = document.getElementById("c");
+  const ctx = cvs.getContext("2d");
+  const W = 800, H = 600;
+  const sceneNoEl = document.getElementById("sceneNo");
+  const sceneTotEl = document.getElementById("sceneTot");
+  const livesEl = document.getElementById("lives");
+  const modal = document.getElementById("modal");
+  const endTitle = document.getElementById("endTitle");
+  const endMsg = document.getElementById("endMsg");
+  const errBox = document.getElementById("errOverlay");
+
+  // ---- DPR scaling -----------------------------------------------------
+  function fit() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    cvs.width = W * dpr; cvs.height = H * dpr;
+    cvs.style.width = W + "px"; cvs.style.height = H + "px";
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  fit();
+  window.addEventListener("resize", fit);
+
+  // ---- Generated stills load here (replace with the GENERATED ASSETS
+  //      loader block — one PNG per scene frame; cycle them for motion).
+  //      Until assets exist, draw() falls back to a labelled placeholder.
+  const ASSETS = {};
+
+  // ---- The SCRIPT. Each scene cycles `frames` (asset names) for motion,
+  //      and (optionally) opens a timed QTE window expecting one key.
+  //      Replace frames[] with your generated asset names; tune timing.
+  const SCENES = [
+    { id: "drawbridge", frames: ["scene1_a", "scene1_b"],
+      qte: { expectKey: "ArrowLeft", prompt: "LEFT!", windowStartMs: 700, durationMs: 1100 } },
+    { id: "tentacle", frames: ["scene2_a", "scene2_b"],
+      qte: { expectKey: "Space", prompt: "SWORD!", windowStartMs: 600, durationMs: 1000 } },
+    { id: "dragon", frames: ["scene3_a", "scene3_b"],
+      qte: { expectKey: "ArrowUp", prompt: "JUMP!", windowStartMs: 600, durationMs: 900 } },
+  ];
+  const FRAME_MS = 130; // ~7.7 FPS still-frame cadence (Dragon's-Lair-ish)
+
+  // ---- State (exposed on window for probes) ----------------------------
+  const state = {
+    scene: 0,
+    lives: 3,
+    over: false,
+    won: false,
+    sceneEnteredAt: 0,           // performance.now() when current scene began
+    qte: { active: false, windowOpen: false, prompt: "",
+           expectKey: null, tStart: 0, durationMs: 0, result: null },
+    flash: 0,                    // success/fail flash timer (ms remaining)
+    flashColor: "#0f0",
+  };
+  window.state = state;          // harness probes read window.state.*
+
+  let rafHandle = 0, last = performance.now();
+
+  function enterScene(i) {
+    state.scene = i;
+    state.sceneEnteredAt = performance.now();
+    const sc = SCENES[i];
+    const q = sc && sc.qte;
+    state.qte = {
+      active: !!q, windowOpen: false,
+      prompt: q ? q.prompt : "",
+      expectKey: q ? q.expectKey : null,
+      tStart: 0, durationMs: q ? q.durationMs : 0, result: null,
+      windowStartMs: q ? q.windowStartMs : 0,
+    };
+  }
+
+  function reset() {
+    state.over = false; state.won = false; state.lives = 3; state.flash = 0;
+    modal.style.display = "none";
+    errBox.style.display = "none"; errBox.textContent = "";
+    enterScene(0);
+    if (rafHandle) cancelAnimationFrame(rafHandle);
+    last = performance.now();
+    rafHandle = requestAnimationFrame(frame);
+  }
+  document.getElementById("restart").addEventListener("click", reset);
+
+  function succeed() {
+    state.qte.result = "success";
+    state.flash = 250; state.flashColor = "#3f3";
+    const sc = SCENES[state.scene];
+    const next = state.scene + 1;
+    if (next >= SCENES.length) { state.won = true; gameOver("You survived!"); }
+    else enterScene(next);
+  }
+  function fail() {
+    state.qte.result = "fail";
+    state.flash = 300; state.flashColor = "#f33";
+    state.lives -= 1;
+    if (state.lives <= 0) { gameOver("Game Over"); }
+    else enterScene(state.scene); // retry same scene
+  }
+
+  // ---- Input: a single keydown is the QTE reaction ---------------------
+  const REACT_KEYS = ["ArrowLeft","ArrowRight","ArrowUp","ArrowDown","Space"];
+  function onKeyDown(e) {
+    if (e.code === "KeyR") { reset(); e.preventDefault(); return; }
+    if (REACT_KEYS.includes(e.code)) e.preventDefault();
+    if (state.over) return;
+    const q = state.qte;
+    if (!q.active || !q.windowOpen || q.result) return;  // only react in the open window
+    if (e.code === q.expectKey) succeed();
+    else if (REACT_KEYS.includes(e.code)) fail();        // wrong reaction key = miss
+  }
+  window.addEventListener("keydown", onKeyDown, { passive:false });
+
+  // ---- Focus / visibility ---------------------------------------------
+  window.addEventListener("blur", () => { /* timing is wall-clock; nothing to clear */ });
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) last = performance.now();
+  });
+
+  // ---- Lazy audio ------------------------------------------------------
+  let audio = null;
+  function unlockAudio() {
+    if (audio) return;
+    try { audio = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
+    if (audio && audio.state === "suspended") audio.resume();
+  }
+  window.addEventListener("keydown", unlockAudio, { once:true });
+  window.addEventListener("pointerdown", unlockAudio, { once:true });
+
+  // ---- Per-frame update: open/close the timed window, time out misses --
+  function update(now) {
+    if (state.over) return;
+    if (state.flash > 0) state.flash = Math.max(0, state.flash - 16);
+    const q = state.qte;
+    if (q.active && !q.result) {
+      const elapsed = now - state.sceneEnteredAt;
+      const open = elapsed >= q.windowStartMs && elapsed <= q.windowStartMs + q.durationMs;
+      if (open && !q.windowOpen) q.tStart = now;          // window just opened
+      q.windowOpen = open;
+      if (elapsed > q.windowStartMs + q.durationMs) fail(); // missed the window
+    }
+  }
+
+  // ---- Draw: cycle the scene's stills, overlay the prompt --------------
+  function draw(now) {
+    ctx.clearRect(0, 0, W, H);
+    const sc = SCENES[state.scene];
+    // cycle generated stills for motion; placeholder if assets not loaded yet
+    const frames = (sc && sc.frames) || [];
+    const idx = frames.length ? Math.floor((now - state.sceneEnteredAt) / FRAME_MS) % frames.length : 0;
+    const img = frames.length ? ASSETS[frames[idx]] : null;
+    if (img) {
+      ctx.drawImage(img, 0, 0, W, H);
+    } else {
+      ctx.fillStyle = "#241a33"; ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = "#6a5a88"; ctx.font = "20px system-ui"; ctx.textAlign = "center";
+      ctx.fillText("scene " + (state.scene + 1) + " — " + (sc ? sc.id : "?"), W/2, H/2);
+      ctx.fillText("(generated still frames render here)", W/2, H/2 + 28);
+    }
+    // QTE prompt — big, centered, high-contrast, only while the window is open
+    const q = state.qte;
+    if (q.active && q.windowOpen && !q.result) {
+      ctx.save();
+      ctx.font = "bold 84px system-ui"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.lineWidth = 8; ctx.strokeStyle = "#000"; ctx.strokeText(q.prompt, W/2, H*0.42);
+      ctx.fillStyle = "#ffd23f"; ctx.fillText(q.prompt, W/2, H*0.42);
+      ctx.restore();
+    }
+    // success/fail flash
+    if (state.flash > 0) {
+      ctx.save(); ctx.globalAlpha = Math.min(0.5, state.flash / 600);
+      ctx.fillStyle = state.flashColor; ctx.fillRect(0, 0, W, H); ctx.restore();
+    }
+  }
+
+  function gameOver(reason) {
+    state.over = true;
+    endTitle.textContent = reason || "Game Over";
+    endMsg.textContent = state.won ? "All scenes cleared." : ("Scenes cleared: " + state.scene);
+    modal.style.display = "grid";
+  }
+
+  // ---- Frame loop ------------------------------------------------------
+  function frame(now) {
+    const dummyDt = Math.min(0.05, (now - last) / 1000); last = now; void dummyDt;
+    try {
+      update(now);
+      draw(now);
+      sceneNoEl.textContent = Math.min(state.scene + 1, SCENES.length);
+      sceneTotEl.textContent = SCENES.length;
+      livesEl.textContent = state.lives;
+    } catch (err) {
+      console.error("cutscene crashed:", err);
+      errBox.textContent = "crash: " + (err && err.message || err);
+      errBox.style.display = "block";
+    }
+    rafHandle = requestAnimationFrame(frame);
+  }
+  enterScene(0);
+  rafHandle = requestAnimationFrame(frame);
+})();
+</script>
+</body></html>

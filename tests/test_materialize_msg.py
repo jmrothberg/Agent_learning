@@ -32,13 +32,19 @@ def test_materialize_surfaces_malformed_marker_reason(tmp_path):
     baseline = "ALPHA\nBETA\nGAMMA\n"
     agent._current_file = baseline
 
-    # The malformed-patch shape from the trace: two `=======` lines.
+    # A patch with a stray `=======` that is NOT auto-recoverable: there is
+    # REPLACE-body content (OMEGA) AFTER the stray divider, so repair_reply
+    # can't safely collapse it (unlike the simpler "divider directly before
+    # >>>>>>> REPLACE" shape, which is now repaired — see
+    # test_visual_critic_failsafe.test_repair_collapses_doubled_divider_before_replace).
+    # This still trips `_has_embedded_marker` and must surface the specific reason.
     reply = """<patch>
 <<<<<<< SEARCH
 ALPHA
 =======
 ZETA
 =======
+OMEGA
 >>>>>>> REPLACE
 </patch>"""
     new_html, msg = asyncio.run(agent._materialize(reply, dry_run=True))
