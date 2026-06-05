@@ -23,7 +23,7 @@ def test_returns_same_values_for_every_model():
         "qwen3.6:27b-mlx-bf16",
         "llama3:70b",
         "gpt-5",
-        "claude-opus-4-7",
+        "claude-opus-4-8",
         "/Users/anyone/MLX_Models/Some-Future-Model-mxfp8",
         "/Users/anyone/MLX_Models/DeepSeek-V4-Flash-mxfp8",
         "this-model-doesnt-exist-yet",

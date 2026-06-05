@@ -209,7 +209,7 @@ class OllamaAutopinResult:
 # below) to expose more variants. API keys are read from env at request
 # time — never from disk, never embedded in BackendInfo.
 _OPENAI_DEFAULT_MODEL = "gpt-5"
-_ANTHROPIC_DEFAULT_MODEL = "claude-opus-4-7"
+_ANTHROPIC_DEFAULT_MODEL = "claude-opus-4-8"
 _OPENAI_MODELS: tuple[str, ...] = (_OPENAI_DEFAULT_MODEL,)
 _ANTHROPIC_MODELS: tuple[str, ...] = (_ANTHROPIC_DEFAULT_MODEL,)
 
@@ -748,9 +748,44 @@ class MLXBackend(Backend):
             default_max = 131072
         max_tokens = int(sampler_opts.get("max_tokens") or default_max)
         temperature = float(sampler_opts.get("temperature") or 0.0)
-        top_p = float(sampler_opts.get("top_p") or 0.0)
-        top_k = int(sampler_opts.get("top_k") or 0)
-        min_p = float(sampler_opts.get("min_p") or 0.0)
+        # Tail-truncation defaults (added 2026-05-31). PRIOR behavior left
+        # top_p/top_k/min_p at 0 whenever a caller didn't set them — and
+        # callers only ever pass `temperature` (see agent.py), so EVERY MLX
+        # turn sampled at temp>0 over the FULL vocabulary with NO nucleus or
+        # top-k truncation. mlx_lm's make_sampler skips each filter unless
+        # top_p in (0,1) / top_k>0 / min_p>0, so zeros = "no filter". That is
+        # the danger zone Qwen's own docs warn against: "DO NOT use greedy
+        # decoding ... can lead to endless repetitions", and the same applies
+        # to an untruncated tail — once the model emits a structurally
+        # identical line (e.g. `let cpuIsBlocking=false;`) nothing pulls it off
+        # that attractor. The 2026-05-31 dojo-fight trace died exactly this way
+        # twice (run_20260531_214215): repetition-loop abort mid-`<html_file>`,
+        # zero usable builds.
+        #
+        # Defaults are the VENDOR thinking-mode / precise-coding preset for
+        # Qwen3.6 (temp 0.6, top_p 0.95, top_k 20, min_p 0; repetition_penalty
+        # stays 1.0 — a rep penalty HURTS code, which legitimately repeats `}`,
+        # `const`, `ctx.`). These are model-agnostic good hygiene: sane tail
+        # truncation helps every local model, not just Qwen. Per-machine
+        # override via MLX_TOP_P / MLX_TOP_K / MLX_MIN_P; a caller that passes
+        # a positive value still wins. We do NOT inject a temperature default
+        # here — greedy (temp=0) planning stages bypass the sampler entirely
+        # (make_sampler returns argmax), and explicit per-stage temps must
+        # pass through untouched.
+        def _env_float(name: str, fallback: float) -> float:
+            raw = os.environ.get(name, "").strip()
+            try:
+                return float(raw) if raw else fallback
+            except ValueError:
+                return fallback
+
+        def _env_int(name: str, fallback: int) -> int:
+            raw = os.environ.get(name, "").strip()
+            return int(raw) if raw.lstrip("-").isdigit() else fallback
+
+        top_p = float(sampler_opts.get("top_p") or 0.0) or _env_float("MLX_TOP_P", 0.95)
+        top_k = int(sampler_opts.get("top_k") or 0) or _env_int("MLX_TOP_K", 20)
+        min_p = float(sampler_opts.get("min_p") or 0.0) or _env_float("MLX_MIN_P", 0.0)
 
         prefill_step_size = _resolve_prefill_step_size(self.info.model)
 
@@ -1437,6 +1472,73 @@ class OpenAIBackend(Backend):
             pass
 
 
+def _anthropic_prepare_messages(
+    messages: list[dict],
+) -> tuple[str | None, list[dict[str, str]]]:
+    """Split system prompts from history and sanitize for Anthropic API rules.
+
+    Belt-and-suspenders safety net for tag-opener assistant prefill:
+    newer Claude models (Opus 4.7+) hard-reject ANY trailing assistant
+    message — they require the final message to be from the user. The
+    agent-level fix in `agent._stream()` folds tag prefills into the
+    last user message for backend=anthropic. If a caller forgets that,
+    this layer detects a SHORT tag-opener assistant turn and folds it
+    into the preceding user message here instead of letting the API
+    return a 400 'does not support assistant message prefill'.
+    """
+    system_parts: list[str] = []
+    msgs: list[dict[str, str]] = []
+    for m in messages:
+        role = m.get("role")
+        content = m.get("content", "")
+        if role == "system":
+            if content:
+                system_parts.append(content)
+        else:
+            msgs.append({"role": role, "content": content})
+    system_text = "\n\n".join(system_parts).strip() or None
+
+    # Safety-net fold: trailing assistant tag opener -> user format hint.
+    # Trigger ONLY when the trailing assistant message looks like a bare
+    # tag opener (short + starts with `<`). Longer assistant content is
+    # a real model reply we must preserve verbatim.
+    if (
+        len(msgs) >= 2
+        and msgs[-1].get("role") == "assistant"
+        and msgs[-2].get("role") == "user"
+    ):
+        tail = str(msgs[-1].get("content") or "").rstrip()
+        looks_like_opener = (
+            tail.startswith("<")
+            and len(tail) <= 200
+            # First non-space line should be the bare opener.
+            and tail.split("\n", 1)[0].strip().endswith(">")
+        )
+        if looks_like_opener:
+            first_line = tail.split("\n", 1)[0].strip()
+            hint = (
+                "\n\nFORMAT: begin your reply with exactly `"
+                + first_line
+                + "` (no prose before it; no extra whitespace)."
+            )
+            user_content = str(msgs[-2].get("content") or "")
+            msgs[-2] = {
+                "role": "user",
+                "content": user_content + hint,
+            }
+            msgs = msgs[:-1]
+            return system_text, msgs
+
+    # Fix-mode assistant prefill ends with "\n" (e.g. "<diagnose>\n"); Anthropic
+    # 400s when the final assistant turn has trailing whitespace.
+    if msgs and msgs[-1].get("role") == "assistant":
+        msgs[-1] = {
+            "role": "assistant",
+            "content": str(msgs[-1].get("content") or "").rstrip(),
+        }
+    return system_text, msgs
+
+
 class AnthropicBackend(Backend):
     """Anthropic Messages backend. Streaming, async."""
 
@@ -1470,21 +1572,7 @@ class AnthropicBackend(Backend):
         on_progress: Callable[[str, int, int], None] | None = None,
         cancel_event: asyncio.Event | None = None,
     ) -> StreamResult:
-        # Anthropic's API requires the system prompt as a separate
-        # parameter — strip it out of the messages array. Multiple
-        # system messages get concatenated (rare but possible after
-        # compaction).
-        system_parts: list[str] = []
-        msgs: list[dict] = []
-        for m in messages:
-            role = m.get("role")
-            content = m.get("content", "")
-            if role == "system":
-                if content:
-                    system_parts.append(content)
-            else:
-                msgs.append({"role": role, "content": content})
-        system_text = "\n\n".join(system_parts).strip() or None
+        system_text, msgs = _anthropic_prepare_messages(messages)
 
         opts = dict(options or {})
         # Anthropic max_tokens is REQUIRED.
@@ -1494,7 +1582,7 @@ class AnthropicBackend(Backend):
         # truncated <html_file> rewrites where Claude generated exactly
         # 8192 completion tokens and got cut off mid-document. Iter 1
         # was a 17,654-byte stream missing every closing tag.
-        # Sonnet 4.6 supports 64K output, Opus 4.7 supports 32K. 32768
+        # Sonnet 4.6 supports 64K output, Opus 4.8 supports 32K. 32768
         # is the safe-everywhere ceiling for "write a full HTML game
         # file in one go" and covers ~120 KB of output. Override via
         # options["max_tokens"] or env ANTHROPIC_MAX_TOKENS for runs

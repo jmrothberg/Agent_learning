@@ -13,8 +13,14 @@ from agent import (
 )
 
 
-def test_default_num_ctx_is_32k() -> None:
-    assert DEFAULT_NUM_CTX == 32_768
+def test_default_num_ctx_is_100k() -> None:
+    # Raised from 32K → 100K (2026-05-29): 32K was also the compaction pressure
+    # denominator, so the lossy compaction fired every turn and shredded
+    # history. 100K is the speed/headroom sweet spot — coder prompts stay
+    # ~10-45K, so pressure stays under the 0.70 trigger (full history kept)
+    # while KV-cache/prefill cost stays far below a 250K reservation.
+    assert DEFAULT_NUM_CTX == 100_000
+    assert DEFAULT_NUM_CTX <= MAX_NUM_CTX
 
 
 def test_parse_num_ctx_presets() -> None:

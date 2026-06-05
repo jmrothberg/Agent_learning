@@ -165,6 +165,10 @@ def test_prune_messages_structured_path(tmp_path):
         role = "user" if i % 2 == 0 else "assistant"
         msgs.append({"role": role, "content": f"turn-{i}"})
     a._messages = msgs
+    # Compaction is now TOKEN-aware: the lossy structured anchor only fires
+    # under real context pressure, not at a fixed message count. Simulate a
+    # nearly-full window so the structured path is exercised.
+    a._last_prompt_pressure = 0.9
     a._prune_messages()
 
     # System message preserved at index 0.

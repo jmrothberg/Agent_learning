@@ -75,7 +75,84 @@ DEFAULT_SKELETON_NAME = "canvas_basic.html"
 # fighting a mismatched scaffold. 0.3 leaves real overlap matches
 # (shared mechanic words) untouched while filtering coincidental
 # token bleed.
+# Recipe→skeleton routing map (added 2026-06-02). The visual-playtest layer
+# (find_best_visual_playtest: strong_hooks → applies_keywords overlap) already
+# routes 15/21 of the curated prompts with ZERO misroutes, while the skeleton
+# Jaccard picker surfaced only ~5/18 scaffolds (24/27 prompts fell to the
+# generic v2 canvas). Rather than build a SECOND scorer for skeletons — which
+# risks re-deriving the 2D-arcade misroute we just fixed — `retrieve_skeleton`
+# reuses the already-correct recipe match and maps it to a skeleton via this
+# table. ONLY mechanism-aligned, non-arcade-forbidden pairs are listed; a recipe
+# with no safe skeleton here falls through to the existing modality→Jaccard→v2
+# logic unchanged. Empirically verified: 0 arcade violations, specialized
+# coverage 5→12 of 27 prompts. Keys are visual_playtest ids; values are skeleton
+# filenames (without .html).
+_RECIPE_TO_SKELETON: dict[str, str] = {
+    "canvas-side-scroll-platformer": "canvas_platformer_basic",
+    "canvas-vertical-platformer": "canvas_platformer_basic",
+    "canvas-racing-perspective": "canvas_mode7_basic",
+    "canvas-grid-navigation": "canvas_grid_basic",
+    "canvas-vfx-fluid": "canvas_vfx_particles_basic",
+    "canvas-3d-first-person": "canvas_3d_basic",
+    "canvas-board-game": "canvas_board_turn_basic",
+    "canvas-cutscene-qte": "canvas_cutscene_qte_basic",
+    # Phase-2 additions (2026-06-02): recipes added for skeleton-only classes
+    # that previously mis-routed (cards→vfx outline, physics→top-down) or had no
+    # recipe (lit-dungeon, mobile). Each maps to its existing dedicated skeleton.
+    "canvas-card-tabletop": "canvas_cards_basic",
+    "canvas-physics-projectile": "canvas_physics_basic",
+    "canvas-lit-dungeon": "canvas_lit_dungeon_basic",
+    "canvas-mobile-touch": "canvas_mobile_basic",
+    # NOTE deliberately ABSENT (no dedicated/safe skeleton — fall through to v2):
+    # top-down-action, paddle-ball, lane-crossing, puzzle-grid, isometric-tile,
+    # overworld-rpg, two-actors-facing, point-and-click, city-builder,
+    # space-trading, single-fighter, controllable-player, generic-baseline.
+}
+
 _SKELETON_MIN_SIM = 0.3
+# Generic skeleton-match tokens (added 2026-05-31). BUNDLED specialized
+# scaffolds (canvas_3d / canvas_lit_dungeon / canvas_crawler / canvas_cards /
+# canvas_rpg / canvas_board_turn …) used to be EXEMPT from any floor — only
+# past-win "won_" files were thresholded. That let a SINGLE incidental shared
+# token route a plain 2D arcade goal to a wrong specialized scaffold (measured:
+# asteroids/galaga/centipede/qbert -> canvas_3d on "space"/"vector"/"game"/
+# "projection"; pong/missile-command -> canvas_lit_dungeon on "light"; breakout
+# -> canvas_crawler on "slide"; snake -> canvas_rpg on "grid"; tetris -> cards
+# on "grid"/"puzzle"; frogger/monkey-island -> board_turn on "move"/"player"/
+# "select"). A raw Jaccard *score* floor can't separate these: a genuine 1-token
+# pick (sokoban -> grid on the DISTINCTIVE token "sokoban") scores the same as a
+# coincidental 1-token pick (pong -> lit_dungeon on the GENERIC token "light").
+# So we gate on token *distinctiveness* instead — a bundled scaffold may only
+# win if the goal shares at least one NON-generic token with its sidecar. The
+# good picks survive (sokoban/pacman -> grid on "sokoban"/"ghost", 1942 ->
+# scrolling on "shooter"); the coincidences fall back to the safe generic v2
+# canvas. Modality picks (chess/doom/minecraft/FPS) bypass this entirely via
+# _modality_skeleton. Genre-free: these are common rendering / mechanic /
+# English words, not subject-matter category names.
+_SKELETON_GENERIC_TOKENS: frozenset[str] = frozenset({
+    "game", "games", "2d", "3d", "top", "down", "side", "move", "moves",
+    "movement", "player", "players", "click", "select", "grid", "light",
+    "lights", "lighting", "space", "vector", "puzzle", "slide", "action",
+    "arcade", "level", "levels", "score", "simple", "basic", "screen",
+    "projection", "coordinate", "control", "controls", "play", "adventure",
+    "multi", "mouse", "look", "pointer", "build", "break",
+})
+# Specialized scaffolds that must clear a HIGHER bar — >= 2 distinctive shared
+# tokens — to win via the Jaccard fallback. One distinctive token is too weak to
+# commit a flat 2D arcade goal to a 3D / board / dungeon / card scaffold (frogger
+# -> board_turn on "cell"; qbert -> voxel on "cube"; tetris -> cards on "drop";
+# missile-command -> cards on "mouse"; pong -> 3d on "first"; monkey-island ->
+# board_turn on "go"). Their legitimate users either route through
+# _modality_skeleton (doom/chess/minecraft) or share several tokens (zelda -> rpg
+# on rpg+tile+based). The safe 2D scaffolds (grid/scrolling/platformer/physics/
+# mode7/…) keep the >= 1 distinctive bar, so pac-man/sokoban -> grid and 1942 ->
+# scrolling still win.
+_SKELETON_SPECIALIZED_STRICT: frozenset[str] = frozenset({
+    "canvas_3d_basic.html", "canvas_voxel_minecraft_basic.html",
+    "canvas_board_turn_basic.html", "canvas_lit_dungeon_basic.html",
+    "canvas_crawler_basic.html", "canvas_cards_basic.html",
+    "canvas_rpg_basic.html",
+})
 CANVAS_SKELETON_V2_NAME = "canvas_basic_v2.html"
 # v2 sidecar: deliberately generic tokens so it wins as the FALLBACK when no
 # modality skeleton matches, NOT so it competes with modality scaffolds. 4/4
@@ -3409,6 +3486,20 @@ class GameMemory:
         if modality_pick is not None:
             return modality_pick
 
+        # ---- 1b. Recipe-routed skeleton (added 2026-06-02) ---------------
+        # Reuse the already-correct visual-playtest matcher to pick a skeleton
+        # for classes the modality detector doesn't cover (platformer, racing,
+        # grid, vfx, …). This lifts specialized-skeleton coverage from ~5 to 12
+        # of the 27 curated prompts WITHOUT a second bespoke scorer. The map
+        # (_RECIPE_TO_SKELETON) only contains mechanism-aligned pairs; a recipe
+        # with no safe skeleton falls through to the Jaccard logic below. The
+        # recipe matcher already routes arcade games to top-down/paddle/lane
+        # recipes (which are NOT in the map), so this cannot reintroduce the
+        # 2D-arcade→3D/board misroute — verified by the regression tests.
+        recipe_pick = self._recipe_routed_skeleton(goal)
+        if recipe_pick is not None:
+            return recipe_pick
+
         best: SkeletonHit | None = None
         paths: dict[str, Path] = {}
         # Base skeletons
@@ -3442,7 +3533,8 @@ class GameMemory:
                     source_goal = None
 
             if source_goal:
-                score = _score_similarity(goal_toks, _tokenize(source_goal))
+                src_toks = _tokenize(source_goal)
+                score = _score_similarity(goal_toks, src_toks)
                 # A 0.0 sidecar match means NO token overlap whatsoever — not
                 # a real candidate. Skip so we don't accidentally win ties
                 # against the v2 fallback by being alphabetically first.
@@ -3450,6 +3542,17 @@ class GameMemory:
                 # at 0.0 because 3d was first in sorted order.)
                 if score <= 0.0:
                     continue
+                # A BUNDLED specialized scaffold may only win on a DISTINCTIVE
+                # shared token — a generic filler word (game/grid/light/space/
+                # move/select/…) is not enough. Otherwise one incidental token
+                # routes a plain 2D arcade goal to a wrong specialized scaffold
+                # (see _SKELETON_GENERIC_TOKENS). Past-win "won_" skeletons keep
+                # the score-floor gate below instead of this distinctiveness one.
+                if not name.startswith("won_"):
+                    distinct = (set(goal_toks) & set(src_toks)) - _SKELETON_GENERIC_TOKENS
+                    need = 2 if name in _SKELETON_SPECIALIZED_STRICT else 1
+                    if len(distinct) < need:
+                        continue
             elif path.name == DEFAULT_SKELETON_NAME:
                 # Default is a no-op match — only picked if nothing else hits.
                 score = 0.0
@@ -3470,15 +3573,13 @@ class GameMemory:
             # bad scaffold on a mismatched goal). If the winner is a
             # past-win match below the threshold, fall back to the
             # bundled empty template — the model builds fresh instead
-            # of fighting wrong structure. BUNDLED skeletons (canvas_*)
-            # with curated sidecars are EXEMPT from the threshold —
-            # their sidecar tokens are deliberately picked, so even a
-            # 0.15 weighted-Jaccard hit (pac-man against the grid sidecar
-            # = 3 of 13 tokens) should win over the bare default. Past-
-            # win files start with "won_" so the prefix-check distinguishes
-            # them deterministically. Added 2026-05-21 after pac-man trace
-            # showed Jaccard at 0.23 (< 0.30) discarding the correct grid
-            # scaffold pick.
+            # of fighting wrong structure. BUNDLED skeletons (canvas_*) are
+            # gated up in the scoring loop instead (they must share a DISTINCTIVE
+            # token to be a candidate at all — see _SKELETON_GENERIC_TOKENS), so
+            # here we only apply the stricter past-win score floor. Past-win
+            # files start with "won_" so the prefix-check distinguishes them
+            # deterministically. Added 2026-05-21 after a pac-man trace showed
+            # Jaccard at 0.23 (< 0.30) discarding the correct grid scaffold pick.
             is_past_win = best.name.startswith("won_")
             below_threshold = (
                 is_past_win
@@ -3555,6 +3656,38 @@ class GameMemory:
             name=name, html=html, score=1.0,
             source_goal=" ".join(source_goal_tokens) if source_goal_tokens else None,
         )
+
+    def _recipe_routed_skeleton(self, goal: str) -> SkeletonHit | None:
+        """Pick a skeleton by reusing the visual-playtest matcher (added
+        2026-06-02). The recipe layer routes accurately (strong_hooks →
+        applies_keywords overlap); we map its result to a skeleton via
+        `_RECIPE_TO_SKELETON`. Returns None when no recipe matches or the
+        matched recipe has no mapped skeleton — caller then falls through to
+        the Jaccard logic. See `_RECIPE_TO_SKELETON` for why this can't
+        reintroduce the 2D-arcade misroute.
+        """
+        try:
+            recipe, _diag = self.find_visual_playtest_for(goal=goal)
+        except Exception:
+            return None
+        if recipe is None:
+            return None
+        skel_stem = _RECIPE_TO_SKELETON.get(recipe.id)
+        if not skel_stem:
+            return None
+        name = skel_stem + ".html"
+        path = self.live_skeletons_dir / name
+        if not path.exists():
+            path = self.base_skeletons_dir / name
+        if not path.exists():
+            return None
+        try:
+            html = path.read_text(encoding="utf-8")
+        except Exception:
+            return None
+        # Score 1.0 (same confidence band as a modality pick) — this is a
+        # deliberate, recipe-backed match, not a low-confidence Jaccard hit.
+        return SkeletonHit(name=name, html=html, score=1.0, source_goal=recipe.id)
 
     # --- mistake retrieval -------------------------------------------------
 

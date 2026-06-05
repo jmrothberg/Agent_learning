@@ -194,44 +194,65 @@ ASSETS_FORMAT = FormatSpec(
         "on damage, health bars filling up, particle trails). Don't "
         "force everything into one bucket — the typical game has "
         "sprite walls/enemies AND procedural cell-based destructibles.",
-        "Prompts should be SHORT and visual: \"pixel-art retro arcade "
-        "spaceship facing right, white outline, transparent background\". "
-        "Prefer pixel-art / sprite-sheet style with transparent "
-        "backgrounds for game sprites.",
+        "Prompts should be SHORT and visual, and the ART STYLE should "
+        "MATCH THE GOAL. If the user asks for high-resolution / detailed / "
+        "HD / realistic / cinematic art (or just a polished modern look), "
+        "describe DETAILED high-resolution art — 'high-resolution detailed "
+        "2D game character, crisp shading, clean outline, transparent "
+        "background' — NOT blocky '8-bit' / 'pixel-art' (that looks "
+        "low-res and is usually NOT what a 'best graphics / highest "
+        "resolution' request wants). Use pixel-art / 8-bit ONLY when the "
+        "goal explicitly asks for retro / 8-bit / pixel style. Always use "
+        "transparent backgrounds for game sprites.",
         "Optional `size` is a string (\"64x64\", \"256x192\") or an int "
         "(square). Default 512 px square — keeps Z-Image's detail and "
         "lets the game downscale at draw time as needed. Override per "
         "asset only when you need something specific (HUD icons 32-64 "
         "px, full-screen overlays 1024+).",
-        "ANIMATION FRAMES & ROSTER LIMITS: When you need coherent "
-        "animation sequences (walk cycles, idle bobs, attacks, shatters, "
-        "impact effects), declare frame 1 normally, then add "
-        "`\"from_image\": \"<name-of-frame-1>\"` and `\"strength\": 0.35-0.55` "
-        "on subsequent frames to run local SD-Turbo img2img. This chains "
-        "frames so they preserve the silhouette + palette, whereas "
-        "independent txt2img rolls look like different characters. "
-        "If the user explicitly asks for animation frames or variants "
-        "seeded from an EXISTING sprite (\"use the existing pawn as a "
-        "starting point\", \"make the king walk\", \"animate each piece\"), "
-        "ALWAYS chain with `from_image: <existing_name>` — never "
-        "regenerate the base from scratch. The MEDIA-CHANGE DIRECTIVE "
-        "block in your user turn will surface stem→asset mappings (e.g. "
-        "\"pawn → [white_pawn, black_pawn]\") so you can chain each "
-        "side's frames in one <assets> block. "
-        "Examples: "
-        "{\"name\":\"hero_idle\", \"prompt\":\"8-bit hero holding sword\"}, "
-        "{\"name\":\"hero_walk1\", \"prompt\":\"8-bit hero walking, legs together\", \"from_image\":\"hero_idle\", \"strength\":0.40}, "
-        "{\"name\":\"hero_walk2\", \"prompt\":\"8-bit hero walking, legs apart\", \"from_image\":\"hero_walk1\", \"strength\":0.45}. "
-        "ROSTER PLANNING & TURNS: The local generator is capped at 24 assets per "
-        "turn to prevent runaway loops. If your full planned roster (e.g. idle states, "
-        "movement animations, and impact VFX for many pieces/characters) exceeds "
-        "this limit, do NOT compromise on variety or shrink the visual scope. Instead, "
-        "split generation across turns: prioritize base idles and core icons "
-        "on the first build turn, then emit subsequent mid-session <assets> blocks "
-        "on later turns for specialized walk/attack/VFX frames. Write your JS loading "
-        "code in a structured, extensible way (e.g., loading lists/arrays of sprites) "
-        "and handle missing or generating frames gracefully with fallback drawing so "
-        "each turn remains playable and testable while the diffuser catches up.",
+        "ANIMATION FRAMES & ROSTER LIMITS: Real animation is a SERIES of "
+        "frames where the BODY PARTS actually move (legs stride, arm "
+        "extends), cycled at runtime to simulate motion — not one image "
+        "slid across the screen. Declare the idle/base frame normally, "
+        "then declare each motion frame with `\"from_image\": "
+        "\"<entity>_idle\"` — seed EVERY frame from the IDLE BASE, not "
+        "from the previous frame (chaining frame-from-previous compounds "
+        "sameness and the limbs never move). from_image keeps the SAME "
+        "character; what makes the pose actually change is (a) "
+        "`\"strength\": 0.5-0.6` — the limb-moving band; below ~0.45 the "
+        "frame comes back as the idle pose UNCHANGED (verified) — and "
+        "(b) a prompt that NAMES the moved part in a FEW WORDS. Write "
+        "'left leg forward' / 'right arm extended, fist out' / 'leg "
+        "raised high' — NOT vague 'legs apart' and NOT a long paragraph. "
+        "KEEP EACH PROMPT SHORT (≈6-12 words): many long, near-identical "
+        "prompts in one block make a local model fall into a "
+        "token-repetition loop and the turn never finishes. The harness "
+        "measures each derived frame against its parent: a frame that "
+        "came back near-identical to idle is flagged and BLOCKS <done/> "
+        "until the limbs visibly move — raise strength and name the pose "
+        "harder, never draw the limb in code. If the user asks to "
+        "animate an EXISTING sprite (\"make the king walk\", \"animate "
+        "each piece\"), seed from that sprite the same way; the "
+        "MEDIA-CHANGE DIRECTIVE block surfaces stem→asset mappings (e.g. "
+        "\"pawn → [white_pawn, black_pawn]\") so you can do each side in "
+        "one <assets> block. "
+        "Examples (note: every motion frame seeds from `hero_idle`, not "
+        "from the prior frame): "
+        "{\"name\":\"hero_idle\", \"prompt\":\"8-bit hero holding sword, standing\"}, "
+        "{\"name\":\"hero_walk1\", \"prompt\":\"8-bit hero mid-stride, left leg forward, right arm swung back\", \"from_image\":\"hero_idle\", \"strength\":0.55}, "
+        "{\"name\":\"hero_walk2\", \"prompt\":\"8-bit hero mid-stride, right leg forward, left arm swung back\", \"from_image\":\"hero_idle\", \"strength\":0.55}. "
+        "ROSTER PLANNING & TURNS: Keep the FIRST <assets> block SMALL — a "
+        "big first roster of long, repetitive prompts is the main cause of "
+        "a planning turn that loops forever and never ships a game. On the "
+        "first turn emit ONLY each entity's idle + ONE core motion frame "
+        "(roughly ≤8-10 entries total), then add the remaining frames in "
+        "later mid-session <assets> turns (same `name` pattern, seeded from "
+        "the same idle). This does NOT shrink the visual scope — you still "
+        "get every frame, just spread across turns so no single block is "
+        "huge. Write your JS loader as a list/array of sprite names and "
+        "fall back to the idle frame for any not-yet-generated motion frame "
+        "so the game stays playable and testable while later frames catch "
+        "up. (The generator itself caps assets per turn; do not rely on "
+        "that cap — keep the block you TYPE small.)",
         "SKIP <assets> ONLY for pure-DOM apps where text + emojis are "
         "enough — todo lists, calculators, tic-tac-toe, color pickers. "
         "If the canvas has any rendered entity with visual character, "
@@ -975,6 +996,9 @@ def plan_instruction(
     reference_block: str = "",
     goal: str = "",
     force_minimal_first_build: bool = False,
+    from_seed: bool = False,
+    seed_asset_names: list[str] | None = None,
+    seed_sound_names: list[str] | None = None,
 ) -> str:
     """Phase A planning prompt, optionally prefixed with a Wikipedia
     reference block fetched by research.fetch().
@@ -991,8 +1015,28 @@ def plan_instruction(
     must emit an <assets> block this turn or be wrong. Stops qwen3.6
     from politely skipping the asset pipeline when the user explicitly
     asks for sprites.
+
+    P1 (MK trace 20260528): on a `/seed` continuation where
+    `<basename>_assets/` already has sprites on disk, art/audio
+    "MUST emit <assets>/<sounds>" nudges flip from REQUIRED to
+    FORBIDDEN — the model should reuse existing media, not request
+    fresh generation. `from_seed=True` suppresses those nudges and
+    inserts a seed-continuation directive listing available media.
     """
-    art_keywords = _detect_art_intent(goal)
+    # P1: seed continuation flips art / audio "MUST emit" nudges off.
+    # Detection is opt-in via the from_seed kwarg so non-seed sessions
+    # stay byte-for-byte identical (the existing test suite still passes).
+    if from_seed:
+        # Suppress art / audio MUST-emit nudges; the seed already has
+        # media on disk and re-emitting <assets> wastes generator time
+        # AND can wipe the user's existing art if a name collides.
+        art_keywords = ()
+        threed_keywords = _detect_3d_intent(goal)
+        audio_keywords = ()
+    else:
+        art_keywords = _detect_art_intent(goal)
+        threed_keywords = _detect_3d_intent(goal)
+        audio_keywords = _detect_audio_intent(goal)
     art_nudge = ""
     if art_keywords:
         kws = ", ".join(repr(k) for k in art_keywords)
@@ -1010,7 +1054,8 @@ def plan_instruction(
             "tell you if it is).\n"
         )
 
-    threed_keywords = _detect_3d_intent(goal)
+    # `threed_keywords` is already set at the top of the function so a
+    # from_seed continuation still keeps 3D detection but loses art/audio.
     threed_nudge = ""
     if threed_keywords:
         kws = ", ".join(repr(k) for k in threed_keywords)
@@ -1039,7 +1084,7 @@ def plan_instruction(
             "use the library.\n"
         )
 
-    audio_keywords = _detect_audio_intent(goal)
+    # `audio_keywords` is also set up top so from_seed suppression sticks.
     audio_nudge = ""
     if audio_keywords:
         kws = ", ".join(repr(k) for k in audio_keywords)
@@ -1092,32 +1137,46 @@ def plan_instruction(
                 "goal text. If the goal said \"walk to new position and "
                 "smash the captured piece\", the state set is at least "
                 "`idle` + `walk` + `smash`.\n"
-                "  - Emit <assets> covering ENTITY × STATE: one entry "
-                "per (entity, state) combination. The base (idle) frame "
-                "is txt2img; every other state for that entity uses "
-                "`\"from_image\": \"<entity>_idle\"` + "
-                "`\"strength\": 0.35-0.55` so SD-Turbo img2img chains it "
-                "from the parent (preserves silhouette + palette, ~2 s "
-                "per chained frame on the warm pipeline). Example shape "
-                "for a 3-state roster across many entities:\n"
+                "  - This turn, emit each entity's idle (txt2img) PLUS one "
+                "pose frame for EVERY action state the goal named — not "
+                "just one. If the goal says punch, kick, jump, duck, "
+                "fireball, you emit a frame for each, for each fighter, "
+                "THIS turn. The user enumerated those poses; deferring them "
+                "to a later turn is the listening bug this override exists "
+                "to fix. Seed every pose frame from that entity's idle with "
+                "`\"from_image\": \"<entity>_idle\"` (regenerated as the same "
+                "character in the new pose — strength is ignored for pose "
+                "frames, the shared description + fixed seed keep the "
+                "character, the pose clause moves the limbs). There is no "
+                "8-10 cap when the goal names the states: the roster size is "
+                "idle + (one frame per named action) per entity. Defer ONLY "
+                "the SECOND \"≥2 animations\" smoothing frame of each action "
+                "and any pose the goal did NOT name — those go in later "
+                "mid-session <assets> turns (same name pattern, same idle "
+                "parent).\n"
+                "  - KEEP EACH PROMPT SHORT (≈6-12 words) and name the "
+                "moved part in a few words. It is the long, near-identical "
+                "PROMPTS — not the number of frames — that make a local "
+                "model loop and never finish the turn; many SHORT pose "
+                "prompts are fine and are what the user asked for. A frame "
+                "that comes back near-identical to idle is flagged and "
+                "blocks done. Example (short prompts, idle parent, one frame "
+                "per named action):\n"
                 "      <assets>[\n"
-                "        {\"name\":\"<entity1>_idle\", \"prompt\":\"...\"},\n"
-                "        {\"name\":\"<entity1>_walk\", \"prompt\":\"...\","
-                " \"from_image\":\"<entity1>_idle\", \"strength\":0.40},\n"
-                "        {\"name\":\"<entity1>_smash\", \"prompt\":\"...\","
-                " \"from_image\":\"<entity1>_idle\", \"strength\":0.45},\n"
-                "        ...repeat per entity...\n"
+                "        {\"name\":\"<e1>_idle\", \"prompt\":\"... standing\"},\n"
+                "        {\"name\":\"<e1>_punch\", \"prompt\":\"... right arm extended, fist out\","
+                " \"from_image\":\"<e1>_idle\"},\n"
+                "        {\"name\":\"<e1>_kick\", \"prompt\":\"... right leg raised high, foot out\","
+                " \"from_image\":\"<e1>_idle\"},\n"
+                "        {\"name\":\"<e1>_jump\", \"prompt\":\"... legs tucked, mid-air leap\","
+                " \"from_image\":\"<e1>_idle\"},\n"
+                "        {\"name\":\"<e1>_duck\", \"prompt\":\"... crouched low, knees bent\","
+                " \"from_image\":\"<e1>_idle\"},\n"
+                "        {\"name\":\"<e2>_idle\", \"prompt\":\"... standing\"},\n"
+                "        {\"name\":\"<e2>_punch\", \"prompt\":\"... right arm extended, fist out\","
+                " \"from_image\":\"<e2>_idle\"}\n"
+                "        // ...one frame per named action, for EACH entity\n"
                 "      ]</assets>\n"
-                "  - Roster-size sanity: N entities × M states ≈ N·M "
-                "entries. Count both. The per-turn asset cap is RAISED "
-                "for this session (the agent raised it because of the "
-                "explicit multi-frame ask). If even the raised cap is "
-                "exceeded, split the LAST batch into a follow-up "
-                "<assets> turn — do NOT silently shrink the roster the "
-                "user asked for.\n"
-                "  - Don't defer the variants the user explicitly named; "
-                "defer ONLY entities the user did not name (impact VFX, "
-                "ambient props) to a later turn.\n"
                 "  - In the JS loader, key sprites by `entity_state` "
                 "name and advance the active state per entity based on "
                 "game events (selected → walk, captured → smash, "
@@ -1160,16 +1219,74 @@ def plan_instruction(
         mf_kws = ", ".join(repr(k) for k in multi_frame_keywords)
         multi_frame_nudge = (
             "\n\nMULTI-FRAME INTENT DETECTED — your goal mentions "
-            f"{mf_kws}. The user EXPLICITLY wants more than one frame "
-            "per visual entity (walk cycles, idle bobs, attack frames, "
-            "animation states). Plan a base roster of <assets> covering "
-            "BOTH the base frame AND the requested variants per entity, "
-            "chained with `from_image` + `strength` (0.35-0.55) for the "
-            "variants. SD-Turbo img2img is fast (~2 s/frame on a warm "
-            "pipeline) so a base + 2-3 frame chain per entity is cheap. "
-            "Do NOT silently emit \"one sprite per entity\" — that loses "
-            "what the user explicitly asked for. Genre-agnostic guidance: "
-            "describes rendering shape, not subject matter.\n"
+            f"{mf_kws}. The user wants the entity to ANIMATE: a series of "
+            "frames where the body parts move (walk cycle, attack swing), "
+            "cycled at runtime — not one sprite slid around. Seed EVERY "
+            "motion frame from the entity's IDLE base "
+            "(`from_image: <entity>_idle`, NOT the previous frame) — the "
+            "frame is regenerated as the same character in the new pose "
+            "(the shared description + fixed seed keep the character; the "
+            "pose clause moves the limbs). Name the moved part in a FEW "
+            "WORDS ('left leg forward'). A near-identical frame is flagged "
+            "and BLOCKS done.\n"
+            "THIS turn, emit each entity's idle PLUS one pose frame for "
+            "EVERY action state the goal named — if it says punch, kick, "
+            "jump, duck, fireball, emit a frame for each, for each entity, "
+            "NOW. The user enumerated those poses; deferring them to a "
+            "later turn is the listening bug this directive exists to fix. "
+            "There is no 8-10 entry cap when the goal names the states: the "
+            "roster is idle + (one frame per named action) per entity. "
+            "Defer ONLY the SECOND '≥2 animations' smoothing frame of each "
+            "action and any pose the goal did NOT name to later mid-session "
+            "<assets> turns.\n"
+            "KEEP EACH PROMPT SHORT (≈6-12 words). It is the long, "
+            "near-identical PROMPTS — not the number of frames — that make "
+            "a local model loop and never finish the turn; many SHORT pose "
+            "prompts are fine and are exactly what the user asked for. "
+            "Genre-agnostic: describes rendering shape, not subject "
+            "matter.\n"
+        )
+
+    # P1 (MK trace 20260528): seed continuation directive.
+    # When the harness is restarting a session against an EXISTING game
+    # file, the on-disk `<basename>_assets/` and `<basename>_sounds/`
+    # folders already contain this game's media. The model's job this
+    # turn is to PATCH the existing code, not redesign the asset roster.
+    seed_nudge = ""
+    if from_seed:
+        seed_a = sorted(seed_asset_names or [])
+        seed_s = sorted(seed_sound_names or [])
+
+        def _fmt_names(names: list[str], cap: int = 24) -> str:
+            if not names:
+                return "(none)"
+            shown = names[:cap]
+            more = f" (+{len(names) - cap} more)" if len(names) > cap else ""
+            return ", ".join(shown) + more
+
+        seed_nudge = (
+            "\n\nSEED CONTINUATION — this is an EXISTING game the user "
+            "is asking you to ADAPT. The harness has rehydrated this "
+            "session's media from disk already; new generation in this "
+            "turn would WIPE the user's existing art and is BLOCKED.\n"
+            "\n"
+            "ULTRA IMPORTANT — Phase A constraints for seed runs:\n"
+            "  - DO NOT emit <assets> in this turn. The on-disk roster "
+            "is the truth source.\n"
+            "  - DO NOT emit <sounds> in this turn. Same reason.\n"
+            "  - DO emit <plan>, <criteria>, <probes> focused on the "
+            "code fix the user is requesting.\n"
+            "  - Refer to existing media by their EXACT names; do not "
+            "invent new names — the loader entries already map them.\n"
+            "\n"
+            f"Existing assets on disk: {_fmt_names(seed_a)}\n"
+            f"Existing sounds on disk: {_fmt_names(seed_s)}\n"
+            "\n"
+            "If you genuinely need a brand-new visual entity the seed "
+            "doesn't already have (rare on a seed restart — the user "
+            "usually wants behavior/animation fixes, not new sprites), "
+            "you can request it in a LATER mid-session <assets> turn "
+            "AFTER iter 1 confirms the fix is working. Not now.\n"
         )
 
     minimal_nudge = ""
@@ -1199,7 +1316,7 @@ def plan_instruction(
 
     body = (
         PLAN_INSTRUCTION + art_nudge + threed_nudge + audio_nudge
-        + scope_nudge + multi_frame_nudge + minimal_nudge
+        + scope_nudge + multi_frame_nudge + minimal_nudge + seed_nudge
     )
 
     if not reference_block:
@@ -1233,6 +1350,7 @@ Controls: <keys / mouse / touch — use e.code names like KeyW, ArrowUp, Space>
 Win/lose: <how the game ends, how the player restarts>
 Visual style: <colors, vibe, single line>
 Risky bits: <2 to 3 things you'll need to be careful about>
+Build order: <2 to 4 implementation steps, in order, on ONE line — e.g. "scaffold + state → input/movement → collisions → win/lose + restart">
 </plan>
 
 <criteria>
@@ -1253,16 +1371,31 @@ Stress: <one assertion that catches stress / leak failure modes (e.g.
 ]
 </probes>
 
-PROBES are real code. Examples that work:
+PROBES come in two kinds and you MUST emit BOTH:
+
+STRUCTURAL probes check that things EXIST (cheap sanity). Examples:
   - {"name":"canvas_present", "expr":"!!document.querySelector('canvas')"}
   - {"name":"ship_visible",   "expr":"window.state && state.player && state.player.x>=0 && state.player.x<=800"}
-  - {"name":"score_renders",  "expr":"document.getElementById('score') && document.getElementById('score').textContent.length>0"}
   - {"name":"non_blank",      "expr":"(()=>{const c=document.querySelector('canvas');if(!c||!c.width||!c.height)return false;try{return c.toDataURL().length>200;}catch(e){return true;}})()"}
+
+DYNAMIC probes check that the game actually PLAYS — they simulate an
+input and assert a state DELTA over time. Structural probes alone are
+NOT enough: a game that renders a static HUD and never responds to a
+key passes every structural probe. You MUST include at least 1 to 2
+dynamic probes. Copy this template and swap in your real control key
+and state path:
+  - {"name":"input_moves_player", "expr":"(async()=>{if(!window.state||!state.player)return false;const x0=state.player.x;window.dispatchEvent(new KeyboardEvent('keydown',{code:'ArrowRight',bubbles:true}));await new Promise(r=>setTimeout(r,250));window.dispatchEvent(new KeyboardEvent('keyup',{code:'ArrowRight',bubbles:true}));return state.player.x!==x0;})()"}
+  - {"name":"score_changes",      "expr":"(async()=>{const s0=state.score;await new Promise(r=>setTimeout(r,1500));return state.score!==s0||state.frame>30;})()"}
+A dynamic probe records a value, dispatches the input (KeyboardEvent
+keydown/keyup with the e.code your game listens for, or calls an
+exposed control like window.game.fire()), `await`s a short timeout so a
+frame advances, then returns whether the value changed.
 
 Probes that reference globals (state, player, etc.) MUST exist on
 window — either expose them (e.g. `window.state = state`) or use DOM /
-canvas-pixel checks instead. Aim for 3 to 5 probes that together check
-the criteria above. Keep each expr short.
+canvas-pixel checks instead. Aim for 3 to 5 probes total — mostly
+structural, but at least one input→delta dynamic probe. Keep each expr
+short.
 
 PROBE ROBUSTNESS — test structure and behavior over time, not one
 frame-specific pixel or exact helper names.
@@ -1939,6 +2072,15 @@ player would hit (uncaught exception, frozen game state, can't lose,
 can't score, controls dead). Cosmetic improvements, "nice to have"
 features, polish, balance tweaks, color changes, and refactors do NOT
 qualify — say <confirm_done/> instead.
+
+EXCEPTION — unmet user requests are NOT "nice to have": before you
+confirm, re-read the user's most recent feedback and check that EVERY
+distinct item they explicitly asked for is actually implemented AND
+still works in the current file (e.g. "animate the kick" AND "add a CPU
+opponent" is two items). An item the user explicitly requested that is
+missing, broken, or silently dropped DOES qualify for a <patch> — fix it
+rather than confirming done. Animation that renders as a single static
+held pose counts as unmet if the user asked for animation.
 
 When in doubt, ship. Working > perfect. Reply with EXACTLY ONE of:
 

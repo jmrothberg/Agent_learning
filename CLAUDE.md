@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-**Repo identity:** This checkout is **Coding Box Overlay** — GitHub `jmrothberg/Agent_learning_overlay` only. User updates with `./scripts/update.sh` or `git pull` (one remote: `origin`). Do not add a second remote unless the user asks.
+**Repo:** `jmrothberg/Agent_learning` (`origin`). Single source of truth — commit and push to `main`. User updates with `./scripts/update.sh` or `git pull`.
 
 ---
 
@@ -70,6 +70,16 @@ MLX_MODEL=/Users/jonathanrothberg/MLX_Models/Qwen3.6-27B-mxfp8 .venv/bin/python 
 python system_tests.py run --suite smoke --three-model
 python system_tests.py run --suite pacman --yes   # skip slow-run confirmation
 
+# Prompt-library evaluation (memory/prompt_library.jsonl, the /games library)
+# Layer 0 — memory coverage matrix, NO model, instant: which subsystem fires per prompt
+.venv/bin/python eval/eval_prompts_plan.py --coverage
+# Layer 1 — ONE planning turn per prompt vs the local model (no browser, no diffuser):
+#   parses <plan>/<criteria>/<probes>/<assets>, checks each prompt's `expect` block.
+MLX_MODEL=~/MLX_Models/Qwen3.6-27B-mxfp8 .venv/bin/python eval/eval_prompts_plan.py
+.venv/bin/python eval/eval_prompts_plan.py --only 1            # one prompt
+.venv/bin/python eval/eval_prompts_plan.py --names chess,doom  # by name
+# Layer-0 assertions also run in CI: tests/test_prompt_library_coverage.py
+
 # Memory hygiene
 .venv/bin/python scripts/forget_session.py --list
 .venv/bin/python scripts/forget_session.py <session_id>
@@ -84,10 +94,10 @@ python system_tests.py run --suite pacman --yes   # skip slow-run confirmation
 - `MLX_MODEL` — explicit MLX model path or HF id. Loaded in-process via `mlx_lm.load`. If unset, the backend scans `~/MLX_Models/` / `MLX_MODELS_DIR` / HF cache and picks a single discoverable chat model (multi-match → first, with a "set MLX_MODEL to override" hint in `info.source`).
 - `MLX_MODELS_DIR` — `:`-separated list of additional dirs to scan for downloaded MLX models. Defaults: `~/MLX_Models`, `~/Models_MLX`, `~/.cache/huggingface/hub`, `/opt/mlx_models`.
 - `MLX_PREFILL_STEP_SIZE` — chunk size for prompt eval. Per-model defaults applied automatically: **512** if the model path contains `flash` (DeepSeek-V4 Flash crashes mid-generation at >512 — observed 2026-05-15 DK trace), else **1024**. Env override always wins. Raise to `2048` on small models if you want a few % more throughput.
-- `CODING_BOX_NUM_CTX` — Ollama context window (default **100000** — enough for typical 6-iter game sessions; KV-cache scales linearly with ctx). In the TUI use **`/ctx`** to raise (e.g. `262k`, `full`) for long extension chats. Preload at the chosen size with `ollama run --ctx-size N <model>` to avoid a reload on first request.
+- `CODING_BOX_NUM_CTX` — context window (default **100000** — the speed/headroom sweet spot: observed coder prompts stay ~10-45K even deep into feedback sessions, so full history is retained while KV-cache/prefill cost stays low). In the TUI use **`/ctx`** to change it (raise toward 200K for very long sessions, lower on tight-VRAM hosts). Preload Ollama at the chosen size with `ollama run --ctx-size N <model>` to avoid a reload on first request. **Compaction is token-aware:** this value is the denominator for the pressure check — the lossy state-anchor compaction only fires once a coder prompt exceeds ~70% of it (`_COMPACT_PRESSURE`), not at a fixed message count. The old 32K default made that ratio exceed 1.0 within a couple of feedback turns, compacting every turn and shredding the playbook + prior user-feedback.
 - `AGENT_NO_AUTO_OLLAMA_GPU_FIX` — set to `1` to disable automatic unload of tensor-split Ollama VRAM on `/new` (default: auto-fix on 48 GB-class GPUs).
 - `MLX_MAX_TOKENS` — MLX output cap (default **131072**). Sized as a runaway-generation guard, not a working limit — measured peak across observed sessions is ~5.7K completion tokens, so 131K gives ~23× headroom. Raise it (e.g. 262144) only if a future model genuinely needs more output per turn.
-- `ANTHROPIC_MAX_TOKENS` — Anthropic output cap (default 32768, the safe ceiling across Sonnet 4.6 / Opus 4.7). Override only if you hit per-model API limits.
+- `ANTHROPIC_MAX_TOKENS` — Anthropic output cap (default 32768, the safe ceiling across Sonnet 4.6 / Opus 4.8). Override only if you hit per-model API limits.
 - `DIFFUSION_MODELS_DIR` — root override for weights search (sprites + sounds layout); hidden **`~/.Diffusion_Models`** / **`~/.Models_Diffusers`** are tried before visible `~/…` siblings; HuggingFace cache fallback if absent.
 - `DIFFUSER_CUDA_DEVICE` — force Z-Image / Stable-Audio onto a specific CUDA index; on the auto-pinned 4×48 GB Linux box the default is **GPU 0** so Ollama slots 1–3 stay dedicated to coder/critic/architect.
 - `TORCH_CUDA` — CUDA version for `install_diffuser.sh` (`130` default, `121`/`124` for older GPUs)
@@ -162,6 +172,7 @@ These bind decisions across sessions:
 - **All code self-contained in Agent_learning.** No sys.path-injecting sibling repos (pre-existing `Colossal_Cave/diffusion_manager.py` was vendored into `assets.py` for this reason). External *data* at standard system paths (Ollama models, diffusion weights) is fine.
 - **Visible Chromium, not headless.** The TUI default is `headless=False` so the user can watch the game. CLI keeps `--headless` for unattended runs.
 - **Asteroids is the canonical regression check.** Ship-direction (`vx = cos(angle)*speed`) and round-asteroid (must be irregular polygons, not perfect circles) are the failure pair to verify after any change to retrieval / prompts / patches.
+- **Never regenerate a pose/animation frame to "fix" a dead one — and never let a dead-sprite warning block shipping.** Both regen routes are dead ends, so suggesting either is always wrong: **img2img cannot change a pose** (Z-Image / SD-Turbo run at `guidance_scale=0`, so the frame stays locked to idle at every strength — proven A/B 2026-05-30, `animation_ab/`), and a **fresh txt2img replacement frame will not stay consistent** with the character already placed in the running game — and **consistency is the hard constraint**. (In the dojo-fight trace `…214215`, the txt2img path *still* returned near-idle `block` frames.) A near-identical-sprite finding is **cosmetic**: it is surfaced as an advisory `warning`, must never flip `report["ok"]` to False, and must never defer the user's actual gameplay feedback. Behavioral probes gate shipping; cosmetics inform. See user memory `feedback_sprite_animation_from_image.md`.
 - **Iterate autonomously.** Drive build/test/improve loops yourself; research-grounded techniques only.
 - **Do not reintroduce aggressive early cutoffs.** Changes to repetition / deliberation / timeout guards must be trace-backed and must preserve long first-build `<html_file>` completion (no premature guard aborts as the default behavior).
 
@@ -173,4 +184,5 @@ These bind decisions across sessions:
 - Don't bypass `<patch>` once `best.html` exists. Full `<html_file>` rewrites on a working game are a regression-amplification risk.
 - Don't expand the system prompt with always-on rules that only matter sometimes. Use the per-format `FormatSpec.guidelines` (deduped) or a goal-keyword detector (`_detect_*_intent`) to make the rule conditional.
 - Don't tighten repetition/deliberation/timeout abort thresholds without concrete trace evidence and a regression run proving rich first-build streams are not cut mid-output.
+- **Don't tell the model to re-emit / regenerate pose frames, and don't gate `ok` on a dead-sprite warning.** This was a real unwinnable loop (trace `build-a-single-screen-2d-fight_20260531_214215`): a cosmetic img2img dead-sprite warning flipped `ok=False` every iteration, the prescribed "re-emit with `from_image` strength 0.55-0.65" fix is the *proven-broken* img2img path, and while `ok` stayed False the user's gameplay feedback was deferred — so **both qwen3.6-27B and Opus 4.8 corrected the code perfectly yet the harness never accepted the win.** `_apply_dead_animation_check_to_report` now routes the finding to the non-gating `warnings` channel and leaves `ok` alone. Do not reintroduce a regen suggestion (see the rule above) or a hard gate.
 - Don't commit generated artifacts. `.gitignore` excludes routine session outputs under `games/` (`*.html`, `*_assets/`, `*_sounds/`, traces, caches, `game-memory/`). **Exception:** TUI **`/goodgame`** copies the trio into `goodgame/` (tracked, not gitignored — no `git` commands from the agent). Legacy path: commit under `games/` + matching `!` negations (chess sample). `memory/playbook.jsonl` stays hand-curated. Use `scripts/clean_artifacts.sh` to wipe stale session artifacts.

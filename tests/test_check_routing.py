@@ -35,7 +35,7 @@ from vision_judge import _cloud_vendor, _looks_like_local_mlx  # noqa: E402
 def test_cloud_vendor_recognizes_claude_family():
     assert _cloud_vendor("claude") == "anthropic"
     assert _cloud_vendor("claude-sonnet-4-6") == "anthropic"
-    assert _cloud_vendor("claude-opus-4-7") == "anthropic"
+    assert _cloud_vendor("claude-opus-4-8") == "anthropic"
     assert _cloud_vendor("claude-haiku-4-5") == "anthropic"
     assert _cloud_vendor("anthropic-experimental") == "anthropic"
 

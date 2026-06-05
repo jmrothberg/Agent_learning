@@ -304,14 +304,23 @@ def test_every_visual_playtest_recipe_has_fix_hint(tmp_path):
 
 def test_most_visual_playtest_recipes_have_auto_probes(tmp_path):
     """Most recipes should carry auto_probes for deterministic critic
-    backstop. Two recipes (canvas-vfx-fluid, generic-canvas-game-baseline)
-    are intentionally excluded by the project author — state shapes
-    vary too much. Pin coverage at >= 17/19 so any future recipe
-    addition can't skip the auto_probe field without a deliberate
-    exclusion."""
+    backstop. A few recipes are intentionally excluded — their game state
+    shapes vary too much for a meaningful objective probe, so the VLM
+    checklist is the verification:
+      - canvas-vfx-fluid, generic-canvas-game-baseline (original authors)
+      - canvas-lit-dungeon, canvas-mobile-touch (added 2026-06-02): a lighting
+        composite / a touch-control overlay have no canonical numeric state to
+        assert; a `return true` no-op probe would be noise. The checklist
+        ('is most of the screen dark with a lit radius', 'are on-screen touch
+        controls visible') is the real check.
+    Pin coverage at >= 17 so any future recipe addition can't skip the
+    auto_probe field without a deliberate exclusion."""
     import json
     n = 0; with_probes = 0
-    EXCLUDED = {"canvas-vfx-fluid", "generic-canvas-game-baseline"}
+    EXCLUDED = {
+        "canvas-vfx-fluid", "generic-canvas-game-baseline",
+        "canvas-lit-dungeon", "canvas-mobile-touch",
+    }
     with (PROJECT_ROOT / "memory" / "visual_playtests.jsonl").open() as f:
         for line in f:
             line = line.strip()

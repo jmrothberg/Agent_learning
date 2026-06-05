@@ -338,3 +338,82 @@ class AssetLibrary:
                 break
         if changed:
             self._write_all(entries)
+
+    # -- pose-prompt recipes (cross-session animation reuse) -----------
+    # A from_image pose frame whose delta-vs-idle shows it actually MOVED is
+    # worth remembering: the exact prompt that produced a real distinct pose.
+    # Future animation/fighting games reuse it for the same pose (faster, and
+    # consistent). Stored in a separate JSONL so it never collides with the
+    # image index. Keyed by (stem, pose); genre/model-agnostic.
+    @property
+    def pose_recipes_path(self) -> Path:
+        return self.root / "pose_recipes.jsonl"
+
+    def _load_pose_recipes(self) -> list[dict]:
+        p = self.pose_recipes_path
+        if not p.exists():
+            return []
+        out: list[dict] = []
+        try:
+            for ln in p.read_text(encoding="utf-8").splitlines():
+                ln = ln.strip()
+                if ln:
+                    try:
+                        out.append(json.loads(ln))
+                    except Exception:
+                        continue
+        except OSError:
+            return []
+        return out
+
+    def admit_pose_recipe(
+        self, *, stem: str, pose: str, prompt: str, delta: float,
+        min_delta: float = 0.04,
+    ) -> bool:
+        """Record a verified-moved pose prompt. Skips clones (delta < min_delta)
+        and (stem,pose) duplicates that already have an equal/higher delta."""
+        if not (stem and pose and prompt) or delta is None or delta < min_delta:
+            return False
+        key = (stem.strip().lower(), pose.strip().lower())
+        for r in self._load_pose_recipes():
+            if (str(r.get("stem", "")).lower(), str(r.get("pose", "")).lower()) == key \
+                    and float(r.get("delta", 0)) >= delta:
+                return False
+        try:
+            self.root.mkdir(parents=True, exist_ok=True)
+            rec = {"stem": stem, "pose": pose,
+                   "prompt": prompt, "delta": round(float(delta), 4)}
+            with self.pose_recipes_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(rec, separators=(",", ":")) + "\n")
+            return True
+        except OSError:
+            return False
+
+    @staticmethod
+    def _stem_tokens(s: str) -> set:
+        # Light suffix strip so goal gerunds/plurals ("punching", "kicks")
+        # match stored pose words ("punch", "kick"). Genre-free, no table.
+        out = set()
+        for w in re.findall(r"[a-z]+", s.lower()):
+            for suf in ("ing", "ed", "es", "s"):
+                if len(w) > len(suf) + 2 and w.endswith(suf):
+                    w = w[: -len(suf)]
+                    break
+            out.add(w)
+        return out
+
+    def retrieve_pose_recipes(self, text: str, k: int = 4) -> list[dict]:
+        """Proven pose prompts whose pose/stem words overlap `text`, best (most
+        overlap, then highest delta) first. Empty `text` returns all rows."""
+        rows = self._load_pose_recipes()
+        if not text:
+            return rows
+        toks = self._stem_tokens(text)
+        scored = []
+        for r in rows:
+            rt = self._stem_tokens(f"{r.get('pose', '')} {r.get('stem', '')}")
+            ov = len(toks & rt)
+            if ov:
+                scored.append((ov, float(r.get("delta", 0)), r))
+        scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        return [r for _, _, r in scored[:k]]

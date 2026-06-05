@@ -42,16 +42,29 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Per-asset default target size. Bumped 2026-05-23 from 128 → 512:
-# user feedback "why are the .png always tiny" — 128 px PNGs looked
-# postage-stamp on modern displays, especially at 4K, and shrinking
-# from 768 native to 128 threw away most of the diffuser's detail.
-# 512 keeps the detail (drawImage downscales cheaply at draw time
-# if the game wants a smaller render size) without inflating disk
-# usage past a few MB per session. Power-of-2 so WebGL textures
-# don't need padding. Can still be overridden per-asset by the model
-# via "size":"32x32" / "size":256 etc.
-_DEFAULT_TARGET_SIZE = 512
+# Per-asset default target size, chosen PER PROMPT (2026-05-31): a prompt that
+# asks for high-resolution / detailed art defaults to 768 (the diffuser's
+# native size — no downscaling, maximum detail); everything else defaults to
+# 512 (plenty for most sprites, and ~2.25× faster to generate than 768 — a
+# blanket 768 made every project's asset gen slow, e.g. 27 sprites took 7 min).
+# A 128-px postage-stamp default was the original mistake (2026-05-23). Always
+# overridable per-asset via "size":"32x32" / "size":256 for HUD icons etc.
+_DEFAULT_TARGET_SIZE = 512   # back-compat alias; the lo-res default
+_LORES_DEFAULT_SIZE = 512
+_HIRES_DEFAULT_SIZE = 768
+_HIRES_CUES = (
+    "high-res", "high res", "hi-res", "hires", "high resolution",
+    "high-resolution", "high fidelity", "detailed", "hd", "4k",
+    "realistic", "cinematic", "photoreal",
+)
+
+
+def _default_size_for_prompt(prompt: str) -> int:
+    """768 when the prompt asks for high-res/detailed art, else 512. Lets a
+    'highest resolution' goal get native-size sprites while a plain arcade
+    sprite stays fast — without a blanket slowdown for every project."""
+    lo = (prompt or "").lower()
+    return _HIRES_DEFAULT_SIZE if any(c in lo for c in _HIRES_CUES) else _LORES_DEFAULT_SIZE
 
 # Where Z-Image-Turbo's weights live on disk. Cross-platform — works on
 # Linux (Models_Diffusers convention) and macOS (Diffusion_Models
@@ -287,10 +300,11 @@ def parse_assets_block_with_meta(
         prompt = str(item.get("prompt") or "").strip()
         if not name or not prompt:
             continue
+        _size_default = _default_size_for_prompt(prompt)
         try:
-            size = _parse_size(item.get("size", _DEFAULT_TARGET_SIZE))
+            size = _parse_size(item.get("size") or _size_default)
         except Exception:
-            size = (_DEFAULT_TARGET_SIZE, _DEFAULT_TARGET_SIZE)
+            size = (_size_default, _size_default)
         # Normalize prompt the same way the cache key does, so trivial
         # whitespace / case differences don't create duplicate entries
         # that would all map to the same cached PNG anyway.
@@ -411,6 +425,9 @@ class ZImageTurboGenerator:
     def __init__(self, model_path: str | None = None) -> None:
         self.model_path = model_path or _resolve_zimage_path()
         self._pipeline: Any = None  # lazy-init in .generate()
+        # Img2img pipeline built lazily from _pipeline.components (shared VRAM)
+        # in .generate_img2img(); used for from_image animation frames.
+        self._img2img_pipeline: Any = None
         # Resolved at first .generate() call; "cuda", "mps", or None.
         self._device: str | None = None
         # Physical/logical CUDA index after .to("cuda"); status panel only.
@@ -422,16 +439,20 @@ class ZImageTurboGenerator:
         self._last_error: str | None = None
 
     def cleanup(self) -> None:
-        if self._pipeline is None:
+        if self._pipeline is None and self._img2img_pipeline is None:
             return
         try:
             import torch
+            # The img2img pipeline shares _pipeline's components — drop the
+            # wrapper reference before freeing the underlying modules.
+            self._img2img_pipeline = None
             del self._pipeline
             self._pipeline = None
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
         except Exception:
             self._pipeline = None
+            self._img2img_pipeline = None
 
     def _lazy_init(self) -> bool:
         if self._pipeline is not None:
@@ -631,6 +652,74 @@ class ZImageTurboGenerator:
             import traceback as _tb
             self._last_error = (
                 f"{type(e).__name__}: {e!s} | "
+                f"trace: {_tb.format_exc().splitlines()[-3:]}"
+            )
+            return None
+
+    def generate_img2img(
+        self,
+        prompt: str,
+        init_image_path: str,
+        *,
+        strength: float = 0.5,
+    ) -> str | None:
+        """Img2img using the SAME Z-Image-Turbo model as txt2img.
+
+        Animation frames MUST be drawn by the same model as the base/idle
+        sprite, or they won't match it (the old pipeline used a foreign
+        SD-Turbo model for `from_image`, so derived frames were visibly
+        inconsistent with the character — 2026-05-29 trace). We build a
+        `ZImageImg2ImgPipeline` from the already-loaded txt2img pipeline's
+        components, so it shares the transformer/VAE/text-encoder and costs
+        NO extra VRAM. Returns a temp PNG path, or None (sets _last_error).
+        """
+        self._last_error = None
+        if not self._lazy_init():
+            return None
+        try:
+            import tempfile
+            import torch
+            from PIL import Image
+            from diffusers import ZImageImg2ImgPipeline
+
+            if getattr(self, "_img2img_pipeline", None) is None:
+                # Reuse the loaded components — no second model in VRAM.
+                self._img2img_pipeline = ZImageImg2ImgPipeline(
+                    **self._pipeline.components
+                )
+                self._img2img_pipeline.to(self._device or "cpu")
+
+            init_img = Image.open(init_image_path).convert("RGB")
+            if init_img.size != (768, 768):
+                init_img = init_img.resize((768, 768), Image.LANCZOS)
+            strength = max(0.05, min(1.0, float(strength)))
+            # Turbo DiT: actual denoising steps ≈ num_inference_steps * strength.
+            # Aim for ~8 actual steps so the pose moves while the character holds.
+            steps = max(9, int(round(8.0 / strength)))
+            gen = torch.Generator(self._device or "cpu").manual_seed(42)
+            result = self._img2img_pipeline(
+                prompt=prompt,
+                image=init_img,
+                strength=strength,
+                num_inference_steps=steps,
+                guidance_scale=0.0,
+                generator=gen,
+            )
+            images = getattr(result, "images", None)
+            if not images:
+                self._last_error = (
+                    "Z-Image img2img returned no images "
+                    f"(type={type(result).__name__})."
+                )
+                return None
+            f = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+            f.close()
+            images[0].save(f.name, format="PNG")
+            return f.name
+        except Exception as e:
+            import traceback as _tb
+            self._last_error = (
+                f"Z-Image img2img failed: {type(e).__name__}: {e!s} | "
                 f"trace: {_tb.format_exc().splitlines()[-3:]}"
             )
             return None
@@ -1025,6 +1114,46 @@ def _topo_sort_specs(specs: list[dict]) -> list[dict]:
 
 _UNSET: Any = object()  # sentinel: "argument not provided"
 
+# Below this mean per-pixel RGB delta (0..1), a `from_image` pose frame is
+# treated as "near-identical to its parent" — the pose didn't change at all.
+# NOTE (2026-05-30): this is only a CHEAP FLOOR for a literally-unchanged frame;
+# delta does NOT measure whether the pose is correct (a style-drifted idle can
+# score 0.3+ while still showing no punch — see animation_ab/). Real pose checks
+# are the VLM's job. Pose frames now render as TXT2IMG from the shared character
+# description (img2img stayed locked to idle at guidance_scale=0), so a genuine
+# pose scores high (~0.3-0.5); 0.04 only catches a frame that came back as the
+# idle. Heuristic warning, never a hard error.
+_DERIVED_FRAME_MIN_DELTA = 0.04
+
+
+def _derived_frame_delta(new_path: Path | str, parent_path: Path | str) -> float | None:
+    """Mean per-pixel RGB delta between a derived frame and its parent.
+
+    Both images are composited over a neutral gray before differencing so
+    transparent (chroma-keyed) regions don't register as spurious change, then
+    resized to 128×128 — the same comparison shape as tools.screenshot_delta.
+    Returns None if PIL is unavailable or either image can't be read.
+    """
+    try:
+        from PIL import Image
+    except Exception:
+        return None
+    try:
+        def _flat(p: Path | str):
+            im = Image.open(p).convert("RGBA")
+            bg = Image.new("RGBA", im.size, (128, 128, 128, 255))
+            return Image.alpha_composite(bg, im).convert("RGB").resize((128, 128))
+        a = _flat(new_path)
+        b = _flat(parent_path)
+    except Exception:
+        return None
+    pa = a.tobytes()
+    pb = b.tobytes()
+    if len(pa) != len(pb) or not pa:
+        return None
+    total = sum(x - y if x >= y else y - x for x, y in zip(pa, pb))
+    return total / (len(pa) * 255.0)
+
 
 def generate_assets(
     specs: list[dict],
@@ -1082,11 +1211,24 @@ def generate_assets(
     # the _UNSET sentinel that means "not provided"). Saves ~2 GB of
     # VRAM in the common case of all-root assets, and lets tests inject
     # None to assert the fallback path.
-    needs_img2img = any(s.get("from_image") for s in specs)
+    # Pose/animation frames are now generated as TXT2IMG (merged character +
+    # pose prompt, fixed seed) — NOT img2img. Proven 2026-05-30 (A/B in
+    # animation_ab/): img2img at guidance_scale=0 stays locked to the idle pose
+    # at every strength/model; txt2img from the shared character description
+    # produces the real pose AND the same character. So the SD-Turbo img2img
+    # generator is no longer loaded.
+    needs_img2img = False
     if img2img_generator is _UNSET:
         img2img_generator = (
             try_load_img2img_generator() if needs_img2img else None
         )
+    # name -> prompt, so a `from_image` pose frame can be regenerated as
+    # txt2img with the PARENT's character+style description prepended to this
+    # frame's pose clause (keyed by both raw and filesafe name).
+    prompt_by_name: dict[str, str] = {}
+    for s in specs:
+        prompt_by_name[s["name"]] = s["prompt"]
+        prompt_by_name[_safe_filename(s["name"])] = s["prompt"]
 
     out: dict[str, Path] = {}
     # 2.2: per-asset stats accumulated as a side channel. Caller can
@@ -1198,18 +1340,26 @@ def generate_assets(
         # Cache miss — generate. img2img path when from_image resolves;
         # txt2img otherwise.
         gen_path: str | None = None
-        if from_image and from_image in out and img2img_generator is not None:
-            init_path = str(out[from_image])
-            gen_path = _safe_img2img(
-                img2img_generator, prompt, init_path, strength or 0.45,
+        if from_image:
+            # POSE / ANIMATION FRAME → TXT2IMG, not img2img. img2img (any model,
+            # any strength) stays locked to the idle init at guidance_scale=0
+            # (proven 2026-05-30, animation_ab/). We regenerate the pose from
+            # the SHARED character description (the parent/idle prompt) + this
+            # frame's pose clause, on the FIXED seed — same character, real
+            # pose. parent prompt carries the character + style so the frame
+            # matches; this frame's prompt carries the pose.
+            parent_prompt = (
+                prompt_by_name.get(from_image)
+                or prompt_by_name.get(_safe_filename(from_image))
+                or ""
             )
-            if gen_path is None and image_generator is not None:
-                # img2img failed; fall back to txt2img so the asset isn't lost.
-                stat["fallback_to_txt2img"] = True
-                gen_path = _safe_generate(image_generator, prompt)
-        else:
-            if from_image and from_image not in out:
+            merged = f"{parent_prompt}, {prompt}" if parent_prompt else prompt
+            if from_image not in out and from_image not in prompt_by_name:
                 stat["parent_missing"] = from_image
+            stat["pose_txt2img"] = True
+            stat["merged_prompt"] = merged[:240]
+            gen_path = _safe_generate(image_generator, merged)
+        else:
             gen_path = _safe_generate(image_generator, prompt)
         if gen_path is None:
             # Pull the real error from the most recently-used generator
@@ -1270,6 +1420,32 @@ def generate_assets(
                 keyed.save(cache_path, format="PNG")
             _link_or_copy(cache_path, target_path)
             out[name] = target_path.resolve()
+            # Derived-frame sanity: if this asset was chained from a parent
+            # (from_image) and looks near-identical to it, the requested pose
+            # change probably didn't render. Record the delta; the caller
+            # turns a small value into a model-facing warning.
+            if from_image and from_image in out:
+                pdelta = _derived_frame_delta(target_path, out[from_image])
+                if pdelta is not None:
+                    stat["parent_delta"] = round(pdelta, 4)
+                    # #5: a pose frame that actually MOVED (delta over the
+                    # clone floor) is worth remembering — record the exact
+                    # prompt so future animation games reuse the proven recipe.
+                    # Keyed by entity stem (from the parent) + pose (this
+                    # frame's distinguishing tokens). Library is production-only.
+                    if library is not None:
+                        try:
+                            _stem = (from_image.split("_", 1)[0] or from_image).lower()
+                            _toks = [p for p in name.split("_")
+                                     if p and not p.isdigit() and p.lower() != _stem]
+                            _pose = "_".join(_toks) or name
+                            if library.admit_pose_recipe(
+                                stem=_stem, pose=_pose,
+                                prompt=prompt, delta=pdelta,
+                            ):
+                                stat["pose_recipe_saved"] = True
+                        except Exception:
+                            pass
             # Admit root-prompt sprites to the cross-session library.
             # We skip img2img children because their value is tied to a
             # session-specific parent that isn't admitted.
@@ -1343,6 +1519,21 @@ def _safe_generate(gen: Any, prompt: str) -> str | None:
             )
         except Exception:
             pass
+        return None
+
+
+def _safe_call_img2img(
+    fn: Any,
+    prompt: str,
+    init_image_path: str,
+    strength: float,
+) -> str | None:
+    """Like _safe_img2img but for a bound img2img METHOD (e.g. the main
+    Z-Image generator's `generate_img2img`), which takes the same args but
+    is not the generator's `.generate`. Never propagates."""
+    try:
+        return fn(prompt, init_image_path, strength=strength)
+    except Exception:
         return None
 
 
@@ -1560,14 +1751,51 @@ def render_asset_paths_block(
         "    for (const [name, src] of entries) {",
         "      const img = new Image();",
         "      img.src = src;",
-        "      await img.decode();",
+        "      try { await img.decode(); } catch (e) { console.warn('asset failed', name, e); }",
         "      ASSETS[name] = img;",
         "    }",
         "  }",
         "  // 2. Wait for it BEFORE starting the game loop:",
         "  loadAssets().then(() => requestAnimationFrame(frame));",
-        "  // 3. In your draw():",
-        "  ctx.drawImage(ASSETS.<name>, x, y, w, h);",
+        "",
+        "  // 3. ALWAYS fetch sprites through this resolver — NEVER index ASSETS",
+        "  //    directly. It tolerates small key-naming differences, the #1 cause",
+        "  //    of 'I generated art but the game shows colored boxes': you build",
+        "  //    key 'left_idle' but the asset is 'left_fighter_idle', so",
+        "  //    ASSETS['left_idle'] is undefined and you silently draw a rectangle.",
+        "  //    Resolves by exact, then normalized, then token match; caches result.",
+        "  const _spriteCache = {};",
+        "  function sprite(key) {",
+        "    if (_spriteCache[key] !== undefined) return _spriteCache[key];",
+        "    let img = ASSETS[key];",
+        "    if (!img) {",
+        "      const norm = s => String(s).toLowerCase().replace(/[^a-z0-9]/g, '');",
+        "      const want = norm(key), names = Object.keys(ASSETS);",
+        "      let hit = names.find(n => norm(n) === want)",
+        "             || names.find(n => norm(n).includes(want) || want.includes(norm(n)));",
+        "      if (!hit) {",
+        "        const toks = want.match(/[a-z]+|[0-9]+/g) || []; let best = 0;",
+        "        for (const n of names) { const nn = norm(n); let sc = 0;",
+        "          for (const t of toks) if (t.length >= 3 && nn.includes(t)) sc += t.length;",
+        "          if (sc > best) { best = sc; hit = n; } }",
+        "      }",
+        "      img = hit ? ASSETS[hit] : null;",
+        "    }",
+        "    _spriteCache[key] = (img && img.naturalWidth > 0) ? img : null;",
+        "    return _spriteCache[key];",
+        "  }",
+        "",
+        "  // 4. In draw(): use sprite() and, if it EVER misses, draw a LOUD marker",
+        "  //    — NEVER a plain filled rectangle (a tidy box looks intentional and",
+        "  //    hides the bug from you AND the visual critic):",
+        "  const img = sprite(key);",
+        "  if (img) {",
+        "    ctx.drawImage(img, x, y, w, h);",
+        "  } else {",
+        "    ctx.fillStyle = '#f0f'; ctx.fillRect(x, y, w, h);",
+        "    ctx.fillStyle = '#000'; ctx.font = '12px monospace';",
+        "    ctx.fillText('MISSING ' + key, x + 2, y + 14);",
+        "  }",
         "",
         "Available assets — name → relative path:",
     ]
@@ -1583,6 +1811,19 @@ def render_asset_paths_block(
         "a sprite above, you have FAILED THIS TURN. The seed code is "
         "procedural by default — REPLACE its draw bodies with "
         "drawImage() calls."
+    )
+    lines.append("")
+    lines.append(
+        "ANIMATION — sprites only, no code-drawn limbs: to animate a move "
+        "(punch/kick/etc), CYCLE its sprite frames with drawImage over the "
+        "active window. NEVER draw a character's arm/leg/fist/body with "
+        "ctx.fillRect/arc/lineTo on top of the sprite — those code-drawn "
+        "limbs are exactly what users reject. To make NEW pose frames, emit "
+        "<assets> as txt2img with the SAME detailed character description "
+        "(same hair/gi/headband/build/style) and only change the pose clause "
+        "('arm fully extended', 'leg raised high') — do NOT use `from_image` "
+        "for a pose change: it returns the idle pose at low strength and a "
+        "different character at high strength."
     )
     lines.append("")
     lines.append(

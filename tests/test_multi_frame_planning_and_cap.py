@@ -56,37 +56,54 @@ def test_plan_instruction_default_scope_nudge_says_idle_only():
 
 def test_plan_instruction_multi_frame_override_replaces_idle_only_rule():
     """With multi-frame intent + heavy logic, the nudge inverts: emit
-    base + variants with from_image chains. The directive must give the
-    architect a concrete (entity × state) example template so a local
-    27B model can pattern-match the right JSON shape."""
+    idle + a from_image pose frame for EVERY action state the goal named
+    (not one core frame), with no 8-10 entry cap — deferring only the
+    second smoothing frame and unnamed poses. SHORT prompts (not a low
+    entry count) are what prevent the token-repetition runaway. 2026-05-31
+    fix: the user enumerated punch/kick/jump/duck/fireball and the planner
+    deferred them because the old text said 'one core motion frame, defer
+    the rest' (2026-05-31 fighting-game trace)."""
     body = plan_instruction(goal=_HEAVY_LOGIC_ART_GOAL_WITH_MF)
     assert "multi-frame override" in body.lower()
     # The "idle pose only" rule must NOT appear under the override branch.
     assert "ONE sprite per visual entity (idle pose only)" not in body
     # The chain directive MUST appear with concrete from_image guidance.
     assert "from_image" in body
-    # Concrete entity × state pattern must be present so the model knows
-    # what JSON shape to emit (loose match across phrasings).
-    assert (
-        "entity × state" in body.lower()
-        or "(entity, state)" in body.lower()
-        or "entity1>_idle" in body
-        or "<entity>_idle" in body
-    )
+    # A concrete idle-seeded example template must be present.
+    assert "_idle" in body
     # The matched keywords must be quoted so the model sees what triggered it.
     assert "matched:" in body.lower()
-    # Roster-size sanity directive must be present.
-    assert "n·m" in body.lower() or "n*m" in body.lower() or "n entities" in body.lower()
+    # NEW contract: one frame per NAMED action, this turn — not deferred.
+    assert "every action state the goal named" in body.lower()
+    # The old flat 8-10 cap must be gone (it dropped the named poses).
+    assert "no 8-10 cap" in body.lower()
+    # Only the SECOND frame / unnamed poses are deferred to a later turn.
+    assert "later" in body.lower()
+    # Short-prompt discipline (the real runaway guard) must remain.
+    assert "short" in body.lower()
 
 
 def test_plan_instruction_multi_frame_nudge_fires_without_heavy_logic():
     """Pure-art goal with multi-frame intent still gets a directive —
-    the standalone MULTI-FRAME INTENT DETECTED banner."""
+    the standalone MULTI-FRAME INTENT DETECTED banner.
+
+    2026-05-31: this is the branch that fires for a typical fighting-game
+    goal (art detection empty → scope-pacing override never triggers). It
+    must carry the SAME 'one frame per named action, no 8-10 cap' contract
+    as the override, or the enumerated poses get deferred again."""
     body = plan_instruction(goal=_ART_ONLY_GOAL_WITH_MF)
     assert "MULTI-FRAME INTENT DETECTED" in body
     assert "from_image" in body
     # The scope-pacing nudge does NOT fire (no heavy-logic kw match).
     assert "SCOPE-PACING NUDGE" not in body
+    # New contract pinned on the standalone branch too: emit a frame per
+    # NAMED action this turn, with no flat entry cap, deferring only the
+    # second smoothing frame / unnamed poses. Short prompts stay the guard.
+    low = body.lower()
+    assert "every action state the goal named" in low
+    assert "no 8-10 entry cap" in low
+    assert "keep each prompt short" in low
+    assert "second" in low and "later mid-session" in low
 
 
 # ---------------------------------------------------------------------------

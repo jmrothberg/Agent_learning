@@ -201,3 +201,45 @@ def test_jaccard_disjoint_is_zero_identical_is_one():
     assert _jaccard([], []) == 0.0
     assert _jaccard(["a"], ["b"]) == 0.0
     assert _jaccard(["a", "b"], ["a", "b"]) == 1.0
+
+
+# ---- #5: cross-session pose-prompt recipes ---------------------------------
+
+def test_admit_pose_recipe_records_moved_pose_and_retrieves(tmp_path: Path):
+    lib = AssetLibrary(root=tmp_path)
+    assert lib.admit_pose_recipe(
+        stem="fighter", pose="punch",
+        prompt="fighter, arm fully extended forward in a punch", delta=0.21,
+    ) is True
+    hits = lib.retrieve_pose_recipes("a fighting game with punching", k=4)
+    assert any(h["pose"] == "punch" for h in hits)
+    assert hits[0]["prompt"].startswith("fighter")
+
+
+def test_admit_pose_recipe_skips_clones_below_floor(tmp_path: Path):
+    lib = AssetLibrary(root=tmp_path)
+    # A near-idle clone (delta below the move floor) is not worth keeping.
+    assert lib.admit_pose_recipe(
+        stem="fighter", pose="punch", prompt="x", delta=0.01,
+    ) is False
+    assert lib.retrieve_pose_recipes("punch") == []
+
+
+def test_admit_pose_recipe_dedups_keeping_higher_delta(tmp_path: Path):
+    lib = AssetLibrary(root=tmp_path)
+    assert lib.admit_pose_recipe(stem="hero", pose="kick", prompt="a", delta=0.10) is True
+    # Lower delta for the same (stem,pose) is dropped.
+    assert lib.admit_pose_recipe(stem="hero", pose="kick", prompt="b", delta=0.05) is False
+    # Higher delta is admitted (a better example of the pose).
+    assert lib.admit_pose_recipe(stem="hero", pose="kick", prompt="c", delta=0.30) is True
+    all_rows = lib.retrieve_pose_recipes("")  # empty text -> all
+    assert len([r for r in all_rows if r["pose"] == "kick"]) == 2
+
+
+def test_retrieve_pose_recipes_ranks_by_overlap_then_delta(tmp_path: Path):
+    lib = AssetLibrary(root=tmp_path)
+    lib.admit_pose_recipe(stem="ninja", pose="kick", prompt="kick", delta=0.5)
+    lib.admit_pose_recipe(stem="ninja", pose="jump", prompt="jump", delta=0.9)
+    hits = lib.retrieve_pose_recipes("ninja kick attack", k=4)
+    # "kick" shares 2 tokens (ninja+kick) vs jump's 1 (ninja) -> kick first.
+    assert hits[0]["pose"] == "kick"

@@ -44,6 +44,7 @@ history every turn so context stays bounded regardless of iteration count.
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import os
@@ -54,6 +55,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 from assets import (
+    _DERIVED_FRAME_MIN_DELTA,
     generate_assets,
     parse_assets_block,
     parse_assets_block_with_meta,
@@ -339,6 +341,15 @@ _UNCLOSED_HTML_FILE_RE = re.compile(
 )
 _DONE_RE = re.compile(r"<done\s*/?>", re.IGNORECASE)
 _CONFIRM_RE = re.compile(r"<confirm[_-]?done\s*/?>", re.IGNORECASE)
+
+# Anthropic 400s that are payload-SHAPE errors — retrying the same
+# payload cannot fix them. The MK trace 20260528 burned two identical
+# requests on "does not support assistant message prefill" before the
+# fallback logic kicked in. Match against the lowercased error text.
+_ANTHROPIC_NON_RETRYABLE_400_PHRASES: tuple[str, ...] = (
+    "does not support assistant message prefill",
+    "must end with a user message",
+)
 _QUESTION_RE = re.compile(r"<question>\s*(.*?)\s*</question>", re.DOTALL | re.IGNORECASE)
 _DIAGNOSE_RE = re.compile(r"<diagnose>\s*(.*?)\s*</diagnose>", re.DOTALL | re.IGNORECASE)
 _NOTES_RE = re.compile(r"<notes>\s*(.*?)\s*</notes>", re.DOTALL | re.IGNORECASE)
@@ -631,6 +642,16 @@ _PRUNE_KEEP_RECENT_TURNS = 4
 # run rarely triggers it (planning + first build + ~5 fix turns ≈ 12 msgs)
 # but a long extension session does.
 _STRUCTURED_PRUNE_THRESHOLD = 14
+
+# Token-aware compaction gate. The lossy structured anchor only fires when the
+# last coder prompt used >= this fraction of num_ctx — NOT merely past a
+# message count. Local models with a 200k window keep full history (playbook,
+# every prior user-feedback item, diagnoses) through long feedback sessions
+# instead of compacting at message 15 while 90% of the window is unused.
+_COMPACT_PRESSURE = 0.70
+# Hard safety cap on total messages, used ONLY when token stats are missing
+# (pressure defaults 0.0) so a pathological run can't grow unbounded.
+_COMPACT_MESSAGE_CAP = 60
 
 # Only elide genuinely large inline HTML blobs during message compaction.
 # Small examples (e.g. `<html_file>...</html_file>` in instructions) must
@@ -1430,14 +1451,18 @@ class AgentEvent:
     data: dict = field(default_factory=dict)
 
 
-# Ollama KV-cache scales linearly with num_ctx AND many kernels pick
-# sub-optimal batching above ~32K, slowing prefill even when actual
-# context is small. 32K covers iters 1-3 of typical game sessions with
-# headroom; longer sessions raise via /ctx (or env) and pay the reload
-# tax once. Observed prompts: ~10-18K iter 1, growing to ~25-35K by
-# iter 5-6. The 100K default we used to ship was 3x oversized and
-# silently quadrupled prefill latency.
-DEFAULT_NUM_CTX = 32_768
+# Default context window. This value is ALSO the denominator for the
+# compaction pressure check (prompt_tokens / num_ctx). The old 32K default
+# made that ratio exceed 1.0 within a couple of feedback turns, so the lossy
+# state-anchor compaction fired EVERY turn and shredded the playbook + prior
+# user-feedback + the model's view of the file (observed 2026-05-29
+# fighting-game trace: pressure 1.19 at 8 messages on a 200K-context model).
+# 100K is the speed/headroom sweet spot: observed coder prompts run ~10-45K
+# even deep into a feedback session, so pressure stays well under the 0.70
+# compaction trigger (full history retained), while keeping Ollama KV-cache /
+# prefill cost far lower than a 250K reservation. Raise toward 200K for very
+# long sessions, or lower on tight-VRAM hosts, via CODING_BOX_NUM_CTX / /ctx.
+DEFAULT_NUM_CTX = 100_000
 MIN_NUM_CTX = 8192
 MAX_NUM_CTX = 262_144
 
@@ -1673,6 +1698,24 @@ class GameAgent:
         self.seed_file: Path | None = Path(seed_file) if seed_file else None
         self._messages: list[dict] = []
         self._pending_feedback: list[str] = []
+        # Animation frames that came back near-identical to their from_image
+        # parent (dead animation: the limbs never moved). name -> parent_delta.
+        # Populated during asset generation; cleared when the frame is later
+        # regenerated distinctly. While non-empty it HARD-BLOCKS <done/> via
+        # _apply_dead_animation_check_to_report — a sliding static sprite is
+        # not the animation the user asked for.
+        self._dead_anim_frames: dict[str, float] = {}
+        # True once the model has declared any from_image-derived (animation)
+        # frame this session — a signal-driven "the user wants motion" flag
+        # the visual critic uses to add a context-specific animation question.
+        self._declared_anim_frames: bool = False
+        # An explicit "generate new art" request that the model has NOT yet
+        # honored with an <assets> block. Re-asserted each turn (capped) until
+        # the model emits one — a model distracted by a blocker, or in
+        # raw-feedback mode, otherwise replies with code/diagnose and the new
+        # sprite never gets generated (here-s-a-tight-test 20260530).
+        self._unhonored_asset_request: str | None = None
+        self._asset_reprompt_count: int = 0
         self._feedback_deferred_last_turn: bool = False
         # Most recent feedback batch consumed by _flush_user_injections.
         # Used to restore feedback if a stream fails before any assistant
@@ -1942,6 +1985,11 @@ class GameAgent:
         # fires once per streak rather than every turn.
         self._context_pressure_pending: bool = False
         self._context_pressure_streak: int = 0
+        # Last observed coder prompt size, for token-aware compaction. 0.0
+        # until the first coder turn reports usage — _prune_messages then
+        # falls back to the message-count safety cap only.
+        self._last_prompt_tokens: int = 0
+        self._last_prompt_pressure: float = 0.0
         # Dead-first-build detector. Wolfenstein 2026-05-24 trace iter 2
         # loaded a file but RAF never fired AND the input smoke test
         # registered zero state/canvas delta — the file is structurally
@@ -2708,6 +2756,7 @@ class GameAgent:
                 "short_line_loop": "the same 1-2 short lines cycling",
                 "near_dup_template_loop": "near-duplicate template lines",
                 "inline_data_bloat": "an 8-line block duplicated 3+ times",
+                "intra_line_repetition": "a short phrase repeated over and over on one line",
             }.get(prior_loop_kind or "", "the same content on repeat")
             line_clue = ""
             if prior_loop_line:
@@ -3096,9 +3145,21 @@ class GameAgent:
                     "render_mode": render_mode,
                 })
                 self._active_bullet_ids = list(ids)
-            return render_playbook_block(
+            block = render_playbook_block(
                 hits, char_budget=budget, mode=render_mode, full_top_n=full_top_n_val,
             )
+            # Injection observability: distinguishes "retrieved but rendered
+            # empty" from "actually placed in the prompt". In the 2026-05-29
+            # fighting trace it was impossible to tell whether the animation
+            # bullets ever reached the model — this makes it one grep.
+            self._trace({
+                "kind": "playbook_injected",
+                "stage": stage,
+                "ids": [h.bullet.id for h in hits] if hits else [],
+                "chars": len(block or ""),
+                "rendered": bool(block),
+            })
+            return block
         except Exception:
             return ""
 
@@ -3448,6 +3509,56 @@ class GameAgent:
             "hide the load failure, they don't fix it."
         )
         return missing
+
+    def _early_rehydrate_seed_media(self) -> tuple[int, int]:
+        """Populate `_session_assets` / `_session_sounds` from the seed
+        BEFORE Phase A asset generation runs.
+
+        P1 (MK trace 20260528): the previous run loop rehydrated AFTER
+        `_maybe_generate_assets_and_sounds(trigger="phase_a")` had
+        already regenerated every sprite the model re-requested in its
+        plan. By rehydrating first, the skip-guard inside
+        `_maybe_generate_assets_and_sounds` can short-circuit phase_a
+        generation when on-disk media already covers the game.
+
+        Idempotent: a second call from the existing later branch is a
+        no-op (dict.update with the same paths). Returns (n_assets,
+        n_sounds) found on disk, or (0, 0) when there is no seed.
+        """
+        if not self.seed_file:
+            return 0, 0
+        try:
+            seed_html = self.seed_file.read_text(encoding="utf-8")
+        except Exception as e:
+            self._trace({
+                "kind": "seed_media_early_rehydrate_failed",
+                "err": str(e)[:200],
+                "seed_file": str(self.seed_file),
+            })
+            return 0, 0
+        try:
+            seed_assets, seed_sounds, _, _ = _scan_seed_media(
+                seed_html, self.out_path
+            )
+        except Exception as e:
+            self._trace({
+                "kind": "seed_media_early_rehydrate_failed",
+                "err": str(e)[:200],
+                "stage": "_scan_seed_media",
+            })
+            return 0, 0
+        if seed_assets:
+            self._session_assets.update(seed_assets)
+        if seed_sounds:
+            self._session_sounds.update(seed_sounds)
+        self._trace({
+            "kind": "seed_media_early_rehydrate",
+            "assets": len(seed_assets),
+            "sounds": len(seed_sounds),
+            "asset_names": sorted(seed_assets.keys())[:24],
+            "sound_names": sorted(seed_sounds.keys())[:24],
+        })
+        return len(seed_assets), len(seed_sounds)
 
     def _render_seed_media_contract(
         self,
@@ -4349,7 +4460,20 @@ class GameAgent:
         if n <= 1 + _PRUNE_KEEP_RECENT_TURNS:
             return
 
-        if n > _STRUCTURED_PRUNE_THRESHOLD:
+        # Token-aware gate: only do the LOSSY structured compaction when the
+        # context window is actually filling (last coder prompt >=
+        # _COMPACT_PRESSURE of num_ctx), OR as a hard safety cap when token
+        # stats are unavailable. A high message count alone no longer triggers
+        # it — so a big-context local model keeps full history (playbook +
+        # every prior user ask) until the window is genuinely under pressure.
+        pressure = float(getattr(self, "_last_prompt_pressure", 0.0) or 0.0)
+        compact_reason = None
+        if pressure >= _COMPACT_PRESSURE:
+            compact_reason = "token_pressure"
+        elif n > _COMPACT_MESSAGE_CAP:
+            compact_reason = "count_cap"
+
+        if compact_reason is not None:
             cutoff = n - _PRUNE_KEEP_RECENT_TURNS
             summary = self._build_structured_summary()
             anchor_msg = {
@@ -4367,6 +4491,10 @@ class GameAgent:
             new_messages = [self._messages[0], anchor_msg] + self._messages[cutoff:]
             self._trace({
                 "kind": "structured_compaction",
+                "reason": compact_reason,
+                "prompt_tokens": getattr(self, "_last_prompt_tokens", 0),
+                "num_ctx": getattr(self, "num_ctx", 0),
+                "pressure": round(pressure, 3),
                 "original_messages": n,
                 "kept_recent": _PRUNE_KEEP_RECENT_TURNS,
                 "summary_chars": len(summary),
@@ -4577,6 +4705,71 @@ class GameAgent:
             )
             report["soft_warnings"] = sw
             report["ok"] = False
+
+    def _apply_dead_animation_check_to_report(self, report: dict[str, Any]) -> None:
+        """Surface dead animation frames as ADVISORY — never a hard ok=False gate.
+
+        A `from_image` frame that came back near-identical to its idle parent
+        (tracked in `self._dead_anim_frames`) means the limbs never moved — the
+        character will just slide as a static image. That's worth telling the
+        model, but it must NOT block shipping or starve the session.
+
+        WHY ADVISORY, NOT BLOCKING (changed 2026-06-01, trace
+        build-a-single-screen-2d-fight_20260531_214215 run_…214215): this used
+        to flip report["ok"]=False, which created an UNWINNABLE loop. The dojo-
+        fight session — with BOTH a local model (qwen3.6-27B) and SOTA
+        (Opus 4.8) — corrected the actual gameplay perfectly (patches applied
+        4/4 then 3/3, behavioral probes 8/8, input test PASS) yet every iter
+        stayed ok=False on this one cosmetic sprite warning. Two compounding
+        traps made it impossible to clear:
+          1. The prescribed fix (re-emit `from_image` strength 0.55-0.65) is
+             the SAME img2img path the user's own A/B finding documents as
+             BROKEN — "pose frames must be TXT2IMG, not img2img" — so the regen
+             came back dead again and RE-armed the block.
+          2. While ok stayed False, the user's real gameplay feedback (slow the
+             animation, flip the CPU facing) was deferred behind this blocker
+             (`_should_defer_feedback_for_blocker`), so the model was never even
+             allowed to make the simple code fix the user asked for.
+        A cosmetic asset-quality signal the model cannot reliably fix must not
+        gate a behaviorally-correct build. Behavioral probes gate; cosmetics
+        inform. The signal still reaches the model three other ways that do NOT
+        hard-fail: the rendered `warnings` block, the coaching channel, and the
+        VLM critic note (see `_build_visual_critic_*`). The set still clears
+        automatically when a frame regenerates with a real delta.
+        """
+        dead = self._dead_anim_frames
+        if not dead:
+            return
+        names = ", ".join(f"`{n}`" for n in sorted(dead))
+        # `warnings` (NOT `soft_warnings`) is the non-gating channel: tools.py
+        # computes ok = (no errors) and (no soft_warnings), so anything in
+        # soft_warnings is a hard fail. Route this advisory to `warnings` so it
+        # is shown to the model without flipping ok. Do NOT touch report["ok"].
+        #
+        # Do NOT tell the model to "regenerate the pose frame" here. Both
+        # regeneration routes are dead ends and suggesting either wastes the
+        # correction loop (see CLAUDE.md "Things to avoid" + the user memory
+        # feedback_sprite_animation_from_image.md):
+        #   - img2img can't change a pose at all (guidance_scale=0 keeps it
+        #     locked to idle — proven A/B 2026-05-30), and
+        #   - a fresh txt2img replacement frame will NOT stay consistent with
+        #     the character already placed in the running game (per the user:
+        #     consistency is the hard constraint), and in the dojo-fight trace
+        #     the txt2img path STILL returned near-idle `block` frames anyway.
+        # So this is purely informational: name the dead frames, say it's
+        # cosmetic, and let the behaviorally-correct build ship.
+        warns = list(report.get("warnings") or [])
+        warns.append(
+            "DEAD ANIMATION (advisory — does not block shipping): these frames "
+            f"came back near-identical to their idle parent — {names}. Their "
+            "limbs barely move, so the character looks near-static for that "
+            "pose. This is a cosmetic sprite-quality note, NOT a code bug: do "
+            "not change game logic for it and do not try to regenerate the "
+            "frames in your patch. It will not stop a behaviorally-correct game "
+            "from shipping."
+        )
+        report["warnings"] = warns
+        report["dead_anim_frames"] = dict(dead)
 
     @staticmethod
     def _probe_shape_key(p: dict[str, Any]) -> str:
@@ -5011,6 +5204,59 @@ class GameAgent:
         _session_sounds = getattr(self, "_session_sounds", None) or {}
         asset_names = list(_session_assets.keys())
         sound_names = list(_session_sounds.keys())
+        # GENERAL (2026-05-31, genre/model-agnostic): an explicit "generate new
+        # art" request only produces sprites if the model emits an <assets>
+        # block. A model distracted by a test blocker — or in raw-feedback mode
+        # where the media wrapper is suppressed — often replies with code or a
+        # diagnosis and NO <assets>, so the art never gets made (here-s-a-tight
+        # -test 20260530: asked twice for a red fighter, zero new assets). Track
+        # the outstanding request and re-assert "emit <assets>" each turn until
+        # the model actually emits one (capped). This is a machine-level
+        # directive (NOT suppressed by raw mode) and survives the blocker; it
+        # is cleared in _maybe_generate_assets_and_sounds the moment an <assets>
+        # block is parsed.
+        # getattr defaults so partially-constructed test stubs (which skip
+        # __init__) don't AttributeError here.
+        _unhonored = getattr(self, "_unhonored_asset_request", None)
+        _reprompts = getattr(self, "_asset_reprompt_count", 0)
+        _art_reqs = [
+            fb for fb in self._pending_feedback
+            if _feedback_is_art_change(fb, asset_names)
+        ]
+        if _art_reqs:
+            _unhonored = _art_reqs[-1]
+            _reprompts = 0
+        if _unhonored and _reprompts < 3:
+            _reprompts += 1
+            self._unhonored_asset_request = _unhonored
+            self._asset_reprompt_count = _reprompts
+            parts.append(
+                "================ ASSET GENERATION REQUIRED ================\n"
+                "The user asked you to GENERATE NEW ART:\n"
+                f'  "{_unhonored[:300]}"\n'
+                "New art does NOT exist until you emit an <assets> block. THIS "
+                "turn, emit <assets> with a NEW `name` for each new sprite and a "
+                "SHORT prompt for each (for a recolor/variant, reuse the base "
+                "entity's description with the requested change — e.g. a second "
+                "fighter that is the same character in a different color, one "
+                "entry per pose). You MAY also <patch> the code to load and draw "
+                "them. Do NOT reply with only a diagnosis or code — the sprites "
+                "will not appear without an <assets> block.\n"
+                "==========================================================="
+            )
+            self._trace({
+                "kind": "asset_request_reprompt",
+                "attempt": _reprompts,
+                "request": _unhonored[:200],
+            })
+        elif _unhonored and _reprompts >= 3:
+            # Gave it 3 turns; stop nagging so the prompt doesn't bloat.
+            self._trace({
+                "kind": "asset_request_giveup",
+                "request": _unhonored[:200],
+            })
+            self._unhonored_asset_request = None
+            self._asset_reprompt_count = 0
         media_to_process_now: list[str] = []
         code_to_defer: list[str] = []
         force_honor_via_escalation: list[str] = []
@@ -6060,7 +6306,62 @@ class GameAgent:
                 "total_probes": len(self._probes or []),
             })
 
-    def _build_visual_playtest_prompt(self, recipe, before_png: bytes | None) -> str:
+    def _animation_expected(self) -> bool:
+        """True when the goal/session implies animated character motion.
+
+        Signal-driven: the model declared from_image frames, frames came back
+        dead, OR the goal/criteria imply game actions. No genre/verb table.
+        """
+        if self._declared_anim_frames or self._dead_anim_frames:
+            return True
+        try:
+            from tools import expects_game_controls as _egc
+            return bool(_egc(self._goal or "", self._criteria or ""))
+        except Exception:
+            return False
+
+    def _augment_recipe_for_animation(self, recipe):
+        """Append a context-specific animation question to a recipe's checklist.
+
+        The VLM (not a hard-wired rule) identifies the motion the GOAL describes
+        — walk, kick, punch, … — and judges whether the body pose actually
+        changes vs. the same sprite sliding. Returns a CLONE so the cached
+        recipe is untouched; returns the original when no animation is expected
+        or the recipe already asks about it.
+        """
+        if recipe is None or not self._animation_expected():
+            return recipe
+        existing = " ".join(recipe.recipe.get("checklist") or []).lower()
+        if "same sprite" in existing or "mid-stride" in existing or "same character mid-move" in existing:
+            return recipe  # recipe already covers animation (e.g. fighters)
+        q = (
+            "When the character moves or acts, do its body/limbs visibly change "
+            "pose between the resting frame and the action frame — performing the "
+            "SPECIFIC motion the goal describes (walking: legs in a different "
+            "mid-stride position; kicking: a leg extended; punching: an arm "
+            "extended) — rather than the SAME sprite image just repositioned? "
+            "Answer NO if it is the identical picture slid across the screen."
+        )
+        clone = copy.copy(recipe)
+        base = dict(recipe.recipe or {})
+        base["checklist"] = list(base.get("checklist") or []) + [q]
+        anim_hint = (
+            "Sliding/dead animation is a COSMETIC sprite-quality note, not a "
+            "code bug: do NOT redraw limbs in code and do NOT try to regenerate "
+            "the pose frames (img2img can't change a pose, and a fresh txt2img "
+            "frame won't stay consistent with the character already in the "
+            "game). Cycle whatever motion frames exist over the active window "
+            "and keep going — this does not block shipping."
+        )
+        base["fix_hint"] = (
+            (base.get("fix_hint") or "").strip() + "\n" + anim_hint
+        ).strip()
+        clone.recipe = base
+        return clone
+
+    def _build_visual_playtest_prompt(
+        self, recipe, before_png: bytes | None, action_png: bytes | None = None,
+    ) -> str:
         """Build a structured-checklist VLM prompt from a recipe.
 
         Small VLMs answer closed-class yes/no questions much more
@@ -6069,6 +6370,11 @@ class GameAgent:
         iters). The recipe carries 6-9 high-signal questions; we
         wrap them in a strict response format and tell the VLM to
         stop after the list.
+
+        When `action_png` is present, a third image (the game captured
+        mid-ACTION at peak input-attributable change) is appended by the
+        caller. The prompt then routes action/animation questions to that
+        image so a brief attack/ability is no longer invisible.
         """
         checklist = recipe.recipe.get("checklist") or []
         # Render as Q1..Qn so the response parser can match without
@@ -6086,7 +6392,22 @@ class GameAgent:
             "NOT add prose, do NOT guess at code causes, do NOT "
             "describe the background unless a question asks.\n\n"
         )
-        if before_png is not None:
+        if before_png is not None and action_png is not None:
+            intro = (
+                "You are reviewing THREE screenshots of a game called: "
+                f"{self._goal[:300] or '(no goal specified)'}\n\n"
+                "Image 1: BEFORE simulated input. Image 2: AFTER (resting "
+                "state). Image 3: the PEAK ACTION frame, captured mid-input "
+                "when on-screen change was largest.\n\n"
+                "Answer each numbered question by RE-EMITTING the question's "
+                "number with YES, NO, or UNCLEAR. ONE LINE per question, in "
+                "order. Judge ACTION / ANIMATION / attack questions against "
+                "Image 3; judge LAYOUT / HUD / resting-position questions "
+                "against Image 2. Image 3 IS the active-input frame, so for "
+                "'is the action visible' questions, commit to YES or NO rather "
+                "than UNCLEAR. Stop after the last question.\n\n"
+            )
+        elif before_png is not None:
             intro = (
                 "You are reviewing TWO screenshots of a game called: "
                 f"{self._goal[:300] or '(no goal specified)'}\n\n"
@@ -6097,6 +6418,43 @@ class GameAgent:
                 "AFTER image) for each answer. Stop after the last "
                 "question.\n\n"
             )
+        elif action_png is not None:
+            intro = (
+                "You are reviewing TWO screenshots of a game called: "
+                f"{self._goal[:300] or '(no goal specified)'}\n\n"
+                "Image 1: the resting state. Image 2: the PEAK ACTION frame, "
+                "captured mid-input when on-screen change was largest.\n\n"
+                "Answer each numbered question by RE-EMITTING the question's "
+                "number with YES, NO, or UNCLEAR. ONE LINE per question, in "
+                "order. Judge ACTION / ANIMATION / attack questions against "
+                "Image 2 and commit to YES or NO rather than UNCLEAR. Stop "
+                "after the last question.\n\n"
+            )
+        # Anti-rubber-stamp: when NO mid-action frame was captured but the
+        # goal/criteria imply the game has actions (attacks/abilities), the
+        # VLM must NOT confirm an action is visible from two resting frames —
+        # that is exactly how a static, never-animated attack got "Q5: YES"
+        # every iteration in the 2026-05-29 fighting-game trace.
+        if action_png is None and self._animation_expected():
+            intro = intro + (
+                "NOTE: no active-input (mid-action) frame was captured this "
+                "run. If a question asks whether an ACTION / ATTACK / "
+                "ABILITY / animation (e.g. a walk cycle, kick, punch) is "
+                "VISIBLE or PLAYING, answer NO or UNCLEAR —"
+                " do NOT answer YES, because there is no mid-action frame "
+                "here to confirm it.\n\n"
+            )
+        # Pixel analysis already measured the generated animation frames; if
+        # any came back near-identical to idle, tell the VLM so its judgment
+        # and the objective floor reinforce each other.
+        if self._dead_anim_frames:
+            names = ", ".join(sorted(self._dead_anim_frames))
+            intro = intro + (
+                "NOTE: pixel analysis found these animation frames nearly "
+                f"identical to the idle pose — {names}. Their limbs likely do "
+                "not move, so the character would slide as a static image. "
+                "Weigh that when judging any animation question.\n\n"
+            )
         example = (
             "Example response shape:\n"
             "Q1: yes\n"
@@ -6105,6 +6463,46 @@ class GameAgent:
             "...\n\n"
         )
         return intro + numbered + "\n\n" + example
+
+    # Phrases a VLM uses when it did NOT actually receive/see an image. When
+    # any of these appear, the critique is an ABSTAIN, not a judgement — its
+    # Qn: answers (if any) are fabricated and must never be parsed as real
+    # visual failures or fed to the coaching loop. Added 2026-06-02 after the
+    # Street Fighter trace parsed a "can't see the image" reply that ALSO
+    # emitted Q1:no..Q5:no as a genuine "5 of 5 checks FAILED". Genre/model
+    # agnostic — these are generic refusal/blindness phrasings.
+    # TIGHTENED 2026-06-03: the abstain test must fire ONLY when the model says
+    # it can't see the IMAGE/SCREENSHOT itself — never on a legitimate visual
+    # observation about the game's contents. The old `(?:can't|don't) …see`
+    # clause false-matched "I don't see a projectile in the slingshot" (a CORRECT
+    # finding from a model that saw the screenshot fine) and wrongly dropped the
+    # whole critique. Every blindness alternative below is anchored to an
+    # image/screenshot/picture object, so "don't see a <game element>" no longer
+    # trips it. Verified against the angry-birds critic trace where the VLM
+    # described the slingshot accurately yet was being discarded as "blind".
+    _IMG = r"(?:image|images|screenshot|screenshots|picture|pictures|photo|attachment)"
+    _CRITIC_ABSTAIN_RE = __import__("re").compile(
+        r"(?:"
+        rf"no {_IMG}\b|"
+        rf"without (?:a |the |any )?{_IMG}\b|"
+        rf"(?:can(?:no|')t|cannot|could ?n'?t|unable to|do not|don'?t) (?:\w+ ){{0,3}}(?:see|view|access|open|load|analyze|review|make out) (?:\w+ ){{0,3}}{_IMG}\b|"
+        rf"(?:did|do) ?n'?t (?:receive|get|see) (?:the |a |an |any )?{_IMG}\b|"
+        rf"no {_IMG} (?:was |were )?(?:provided|attached|included|shared|uploaded|present)|"
+        rf"(?:please |kindly )?(?:share|attach|provide|upload|re-?upload|send)(?: (?:the|a|an|your))? {_IMG}\b|"
+        rf"i (?:don'?t|do not) have (?:access to )?(?:an? |the |any )?{_IMG}\b|"
+        rf"if you (?:can |could )?(?:share|attach|provide|send)(?: (?:the|a|an|your))? {_IMG}\b|"
+        r"no (?:visual|file) (?:was )?(?:provided|attached|included)"
+        r")",
+        __import__("re").IGNORECASE,
+    )
+
+    @classmethod
+    def _critic_abstained(cls, text: str) -> bool:
+        """True ONLY when the reply indicates the model never received/saw the
+        IMAGE itself — not when it reports not seeing a game element (which is a
+        legitimate visual finding). See _CRITIC_ABSTAIN_RE for why this is
+        anchored to image/screenshot objects."""
+        return bool(text) and bool(cls._CRITIC_ABSTAIN_RE.search(text))
 
     @staticmethod
     def _parse_visual_playtest_response(text: str, recipe) -> dict:
@@ -6131,6 +6529,10 @@ class GameAgent:
         # symbols (no \b).
         pat = _re.compile(
             r"^\s*Q?\s*(\d+)\s*[:.\-)]\s*"
+            # Tolerate an optional repeated ordinal the model sometimes emits
+            # after a "Qn: " prefill (e.g. "Q1: 1. YES") — skip a leading
+            # "<num>." / "<num>)" before the answer word. Added 2026-06-03.
+            r"(?:\d+\s*[.)]\s*)?"
             r"(?:(yes|no|unclear|y|n|u)\b|([✅❌✔✖✓✗✘]))"
             r"\s*[\-—]?\s*(.*)$",
             _re.IGNORECASE,
@@ -6173,6 +6575,7 @@ class GameAgent:
         checklist = recipe.recipe.get("checklist") or []
         failures: list[str] = []
         unclears: list[str] = []
+        failed_idxs: list[int] = []
         for i, q in enumerate(checklist, start=1):
             entry = answers.get(i)
             if entry is None:
@@ -6182,6 +6585,7 @@ class GameAgent:
             if ans == "no":
                 tail = f" — {remark}" if remark else ""
                 failures.append(f"{line_intro} FAILED{tail}")
+                failed_idxs.append(i)
             elif ans == "unclear":
                 tail = f" — {remark}" if remark else ""
                 unclears.append(f"{line_intro} UNCLEAR{tail}")
@@ -6194,28 +6598,71 @@ class GameAgent:
             + ":"
         )
         body = "\n".join(failures + unclears)
-        # Optional `fix_hint` (added 2026-05-25 from the agent-memory
-        # critique review): when a recipe carries a per-failure-class
-        # minimal-fix shape, append it so the model sees not just
-        # WHAT'S WRONG but the smallest correct change shape. Reduces
-        # the "VLM critic complaint → model invents structural rewrite"
-        # failure pattern. fix_hint only renders when failures exist
-        # (no point coaching on a passing check).
-        fix_hint = (recipe.recipe.get("fix_hint") or "").strip() if failures else ""
-        if fix_hint:
-            return head + "\n" + body + "\n\nMinimal fix shape: " + fix_hint
+        # Fix-hint. Prefer a PER-QUESTION map (`fix_hints`: {q_index: hint}) so
+        # we surface ONLY the advice for checks that actually FAILED. The old
+        # behavior dumped the whole blob `fix_hint` on any failure — which made
+        # the model apply facing-flip advice (ctx.scale(-1,1)) even when facing
+        # PASSED and only Q4/Q5 failed, breaking correct facing (the iter1✓→
+        # iter2✗→iter3✓ oscillation observed 2026-06-03 on the two-kickers run).
+        # Falls back to the blob `fix_hint` when no per-question map exists.
+        if failures:
+            per_q = recipe.recipe.get("fix_hints")
+            if isinstance(per_q, dict) and per_q:
+                hints = []
+                for i in failed_idxs:
+                    h = (per_q.get(str(i)) or per_q.get(i) or "").strip()
+                    if h and h not in hints:
+                        hints.append(h)
+                if hints:
+                    return head + "\n" + body + "\n\nMinimal fix shape:\n" + "\n".join(
+                        f"  - (Q{idx}) {h}" for idx, h in zip(failed_idxs, hints)
+                    )
+            fix_hint = (recipe.recipe.get("fix_hint") or "").strip()
+            if fix_hint:
+                return head + "\n" + body + "\n\nMinimal fix shape: " + fix_hint
         return head + "\n" + body
 
     async def run_visual_critic(
         self,
         current_png: bytes,
         before_png: bytes | None = None,
+        action_png: bytes | None = None,
     ) -> str | None:
-        """Run the configured out-of-band Visual Critic model on current_png."""
+        """Run the configured out-of-band Visual Critic model on current_png.
+
+        `action_png`, when present, is the frame the harness captured at the
+        moment a held control produced its largest canvas change — the game
+        mid-ACTION rather than at rest. It is supplied as a 3rd image so the
+        critic can judge whether a deliberate action animation actually
+        renders, instead of forever returning UNCLEAR on a resting frame.
+        """
         backend = self.get_backend("critic")
         if backend is None:
             return None
-            
+
+        # Vision guard (added 2026-06-02, dragons-lair /allroles trace). The
+        # visual critic feeds the model screenshots, so the backend MUST
+        # actually serve vision. A text-only model handed an image does not
+        # error — it HALLUCINATES a confident description of pixels it never
+        # saw (verified: DeepSeek-V4-Flash answered a green-on-red circle with
+        # "a single solid black circle"). That fabricated critique then gets
+        # parsed and fed into the coaching loop as if real. So if the backend
+        # can't do vision, skip the visual critic entirely and let the
+        # behavioral probes carry verification. Genre-free, model-agnostic.
+        try:
+            if not await backend.is_vlm():
+                self._trace({
+                    "kind": "visual_critic_skipped",
+                    "reason": "backend_not_vlm",
+                    "model": getattr(getattr(backend, "info", None), "model", None),
+                })
+                return None
+        except Exception:
+            # is_vlm() probe failed — fail safe by skipping rather than
+            # risking a hallucinated critique on an unknown backend.
+            self._trace({"kind": "visual_critic_skipped", "reason": "is_vlm_probe_failed"})
+            return None
+
         self._set_role_activity("critic", "Auditing screenshot...")
         # Try the structured-checklist path first (2026-05-24). Match a
         # mechanism recipe via goal + plan-grade criteria text + asset
@@ -6238,10 +6685,16 @@ class GameAgent:
                 "error": str(_vp_e)[:200],
             })
             recipe = None
+        # Context-specific animation check: when motion is expected, append a
+        # goal-driven "is it actually walking/kicking?" question to a clone of
+        # the recipe so the prompt + parser + formatter all see it.
+        recipe = self._augment_recipe_for_animation(recipe)
         try:
             using_recipe = recipe is not None
             if using_recipe:
-                prompt = self._build_visual_playtest_prompt(recipe, before_png)
+                prompt = self._build_visual_playtest_prompt(
+                    recipe, before_png, action_png=action_png,
+                )
                 # Mirror the matched recipe id onto the active field
                 # so the TUI status panel sees the same recipe id that
                 # the VLM is being asked to evaluate against. Idempotent
@@ -6255,19 +6708,41 @@ class GameAgent:
                     "match_tokens_sample": recipe_diag.get("match_tokens_sample", []),
                 })
             elif before_png is not None:
+                action_clause = (
+                    ""
+                    if action_png is None else
+                    "3. Image 3 is captured at the moment of PEAK on-screen "
+                    "change while a control was held — it shows the game "
+                    "mid-ACTION (e.g. an attack, jump, or ability animation), "
+                    "NOT a resting pose.\n"
+                )
+                action_guidance = (
+                    ""
+                    if action_png is None else
+                    "  - Action visibility: use Image 3 to judge whether a "
+                    "deliberate action animation actually renders. Image 3 IS "
+                    "the active-input frame, so do not answer 'unclear' on "
+                    "whether an action is visible — commit. If the goal implies "
+                    "attacks/abilities and Image 3 shows no distinct action "
+                    "pose (e.g. no extended arm / raised leg / projectile), "
+                    "that absence is itself the finding.\n"
+                )
                 prompt = (
                     "You are an expert out-of-band Visual PlayTester and Critic "
                     "for a game development sandbox.\n"
-                    "You are looking at TWO screenshots of the latest generated "
+                    "You are looking at screenshots of the latest generated "
                     "HTML5 canvas game:\n"
                     "1. Image 1 is taken before simulated inputs/playtesting.\n"
-                    "2. Image 2 is taken after simulated inputs/playtesting.\n\n"
+                    "2. Image 2 is taken after simulated inputs/playtesting "
+                    "(resting state).\n"
+                    f"{action_clause}\n"
                     f"GOAL FROM THE USER: {self._goal}\n\n"
-                    "Compare the two screenshots carefully for:\n"
+                    "Compare the screenshots carefully for:\n"
                     "  - Lack of player locomotion or unresponsiveness: if the "
                     "goal implies a controllable player and simulated inputs "
                     "should move it, does the player appear stuck in the same "
                     "place across both images?\n"
+                    f"{action_guidance}"
                     "  - Visual, positioning, or rendering bugs: wrong facing "
                     "direction, misaligned sprites, overlapping/clipped HUD, "
                     "blank canvas, or visibly frozen gameplay.\n\n"
@@ -6285,11 +6760,22 @@ class GameAgent:
                     "top_candidates": recipe_diag.get("top_candidates", []),
                 })
             else:
+                action_intro = (
+                    "You are looking at a screenshot of the latest generated "
+                    "HTML5 canvas game.\n\n"
+                    if action_png is None else
+                    "You are looking at TWO screenshots of the latest generated "
+                    "HTML5 canvas game: Image 1 is the resting state; Image 2 "
+                    "is captured at the moment of PEAK on-screen change while a "
+                    "control was held (the game mid-ACTION). Use Image 2 to "
+                    "judge whether a deliberate action animation actually "
+                    "renders — commit, do not answer 'unclear'.\n\n"
+                )
                 prompt = (
                     "You are an expert out-of-band Visual PlayTester and Critic for a game development sandbox. "
-                    "You are looking at a screenshot of the latest generated HTML5 canvas game.\n\n"
-                    f"GOAL FROM THE USER: {self._goal}\n\n"
-                    "Review the attached screenshot carefully for visual, positioning, or rendering bugs. Examples:\n"
+                    + action_intro
+                    + f"GOAL FROM THE USER: {self._goal}\n\n"
+                    "Review the attached screenshot(s) carefully for visual, positioning, or rendering bugs. Examples:\n"
                     "  - Are projectiles spawning in the wrong direction?\n"
                     "  - Are character sprites misaligned or offset?\n"
                     "  - Are HUD elements overlapping or clipped?\n"
@@ -6304,7 +6790,13 @@ class GameAgent:
                     "reason": "no_recipe_matched",
                     "top_candidates": recipe_diag.get("top_candidates", []),
                 })
-            images = [before_png, current_png] if before_png is not None else [current_png]
+            # Ordered to match the prompt's "Image 1/2/3" numbering.
+            if before_png is not None:
+                images = [before_png, current_png]
+            else:
+                images = [current_png]
+            if action_png is not None:
+                images.append(action_png)
             messages = [
                 {"role": "user", "content": prompt, "images": images}
             ]
@@ -6314,6 +6806,32 @@ class GameAgent:
                 "image_count": len(images),
                 "recipe_id": recipe.id if recipe else None,
             })
+            # Finding-1 instrumentation (2026-06-02): the model SEES images in
+            # isolation yet returned "I can't see the screenshot" every iter in
+            # the live /allroles run. Record exactly what the critic backend is
+            # being handed — message count/roles, content sizes, and the real
+            # byte payload of each image — so the next live trace proves whether
+            # the pixels actually reach stream_chat (vs being empty/str/stripped)
+            # instead of guessing. Pure observability; no behavior change.
+            try:
+                self._trace({
+                    "kind": "visual_critic_payload",
+                    "n_messages": len(messages),
+                    "messages": [
+                        {
+                            "role": m.get("role"),
+                            "content_chars": len(m.get("content") or ""),
+                            "n_images": len(m.get("images") or []),
+                            "image_bytes": [
+                                (len(b) if isinstance(b, (bytes, bytearray)) else f"non-bytes:{type(b).__name__}")
+                                for b in (m.get("images") or [])
+                            ],
+                        }
+                        for m in messages
+                    ],
+                })
+            except Exception:
+                pass
             critic_role = getattr(self, "_model3_role", None)
             if critic_role != "critic":
                 critic_role = getattr(self, "_model2_role", None) or "critic"
@@ -6321,8 +6839,25 @@ class GameAgent:
                 self._role_token_cb(critic_role)
                 if self._token_cb is not None else None
             )
+            # Format-forcing prefill (added 2026-06-03). ROOT CAUSE of the
+            # critic's useless output: qwen3.6-27B (thinking-mode VLM) SEES the
+            # screenshot fine but answers in reasoning prose ("Wait, let me look
+            # closer…") and never emits the Q1: yes/no lines, so parse_rate=0
+            # and the whole critique is dropped — the safety net that should
+            # catch a fighter facing the wrong way never fires. Seeding the
+            # assistant turn with "Q1: " forces generation to START inside the
+            # required format, skipping the reasoning preamble. The backend's
+            # assistant-prefill path appends this to the prompt; we prepend it
+            # back onto the reply before parsing. Recipe path only (the path
+            # that expects the Qn: format). Genre/model-agnostic.
+            _critic_prefill = "Q1: " if (using_recipe and recipe is not None) else None
+            _critic_messages = messages
+            if _critic_prefill:
+                _critic_messages = messages + [
+                    {"role": "assistant", "content": _critic_prefill}
+                ]
             result = await backend.stream_chat(
-                messages,
+                _critic_messages,
                 on_token=on_tok,
                 options={"temperature": 0.2, "num_ctx": 4096},
                 keep_alive=self._keep_alive_for_backend(backend),
@@ -6331,6 +6866,52 @@ class GameAgent:
                 max_retries=1,
             )
             critique_raw = (result.text or "").strip()
+            # Re-attach the format-forcing prefix so the parser sees the full
+            # "Q1: <answer>" first line (the model only generated what FOLLOWS
+            # "Q1: "). Guard against the model having echoed it anyway.
+            if _critic_prefill and not critique_raw[:6].lower().startswith("q1"):
+                critique_raw = _critic_prefill + critique_raw
+            # ABSTAIN guard (added 2026-06-02; TIGHTENED same day after a false
+            # positive). Goal: drop a critique the model fabricated because it
+            # couldn't see the image — WITHOUT dropping a genuine critique that
+            # merely happens to contain a hedging phrase mid-analysis.
+            #
+            # The distinguishing signal is NOT "does it contain a refusal
+            # phrase" (a real analysis can say "I can't see any HUD" etc.) — it
+            # is "did the model actually render a verdict, or did it fall back
+            # to a uniform default because it was blind". So we abstain ONLY
+            # when BOTH hold: (a) a refusal phrase is present, AND (b) the reply
+            # has no genuine verdict — either nothing parsed, OR every parsed
+            # answer is the same fallback value (e.g. all "no"/all "unclear",
+            # the classic "couldn't see → defaulted everything" shape from the
+            # Street Fighter trace). A real critique that judges at least one
+            # check differently (some yes, some no) is KEPT. Verified blind run:
+            # qwen3.6-27B demonstrably saw + reasoned about the screenshots
+            # (coder said "the screenshot shows the drawbridge background IS
+            # drawn…"), so a blanket phrase-match was over-dropping real signal.
+            if self._critic_abstained(critique_raw):
+                _ab_parsed = self._parse_visual_playtest_response(critique_raw, recipe) if recipe else {"answers": {}}
+                _ans = [a for (a, _r) in (_ab_parsed.get("answers") or {}).values()]
+                _degenerate = (not _ans) or (len(set(_ans)) <= 1)
+                if _degenerate:
+                    self._trace({
+                        "kind": "visual_critic_abstained",
+                        "recipe_id": recipe.id if recipe else None,
+                        "n_answers": len(_ans),
+                        "distinct_answers": sorted(set(_ans)),
+                        "raw_preview": critique_raw[:200],
+                    })
+                    self._set_role_activity("critic", "idle")
+                    return None
+                # Refusal phrase present but the model gave a real, MIXED
+                # verdict — treat it as a genuine critique and fall through to
+                # normal parsing/coaching.
+                self._trace({
+                    "kind": "visual_critic_abstain_overridden",
+                    "recipe_id": recipe.id if recipe else None,
+                    "reason": "mixed_verdict_present",
+                    "distinct_answers": sorted(set(_ans)),
+                })
             # If we used a recipe, parse the structured response and
             # format the failures into a single coaching string. Fall
             # back to the raw text when the VLM didn't follow the
@@ -6367,8 +6948,56 @@ class GameAgent:
                         "parse_rate": round(parse_rate, 2),
                         "raw_preview": critique_raw[:200],
                     })
-                    # Fall through to legacy return so the raw text
-                    # still surfaces (better than nothing).
+                    # The VLM ignored the format (e.g. rambled for paragraphs
+                    # on one question — adventure/SF traces 2026-05-30). RETRY
+                    # ONCE with a hard "answer ONLY Qn: yes/no" reformat before
+                    # giving up: small VLMs (qwen) ramble on the first pass but
+                    # comply when the format is restated tersely, and losing ALL
+                    # visual feedback (the critic's whole purpose) is worse than
+                    # one extra cheap call. Only drop if the retry also fails.
+                    checklist = recipe.recipe.get("checklist") or []
+                    numbered = "\n".join(
+                        f"Q{i + 1}: {q}" for i, q in enumerate(checklist)
+                    )
+                    reformat = (
+                        "Answer the checklist below for the attached "
+                        "screenshot(s). Output ONLY one line per question in "
+                        "EXACTLY this form, nothing else — no reasoning, no "
+                        "prose, no preamble:\n"
+                        "Q1: yes\nQ2: no\nQ3: unclear\n...\n"
+                        "Use only yes / no / unclear.\n\n" + numbered
+                    )
+                    try:
+                        retry = await backend.stream_chat(
+                            [{"role": "user", "content": reformat,
+                              "images": images}],
+                            on_token=on_tok,
+                            options={"temperature": 0.0, "num_ctx": 4096},
+                            keep_alive=self._keep_alive_for_backend(backend),
+                            stall_seconds=120.0, overall_seconds=300.0,
+                            max_retries=1,
+                        )
+                        reparsed = self._parse_visual_playtest_response(
+                            (retry.text or "").strip(), recipe,
+                        )
+                        if reparsed.get("parse_rate", 0.0) >= 0.5:
+                            parsed = reparsed
+                            self._trace({
+                                "kind": "visual_playtest_reparse_ok",
+                                "recipe_id": recipe.id,
+                                "parse_rate": round(reparsed["parse_rate"], 2),
+                            })
+                    except Exception as _re_e:
+                        self._trace({
+                            "kind": "visual_playtest_reparse_failed",
+                            "error": str(_re_e)[:160],
+                        })
+                    # Surface whatever parsed (from the retry if it worked);
+                    # never the raw chain-of-thought.
+                    formatted = self._format_visual_playtest_critique(parsed, recipe)
+                    self._trace({"kind": "visual_critic_end",
+                                 "critique": formatted or "(unparseable — dropped after retry)"})
+                    return formatted
             self._trace({"kind": "visual_critic_end", "critique": critique_raw})
             return critique_raw
         except Exception as e:
@@ -6648,12 +7277,15 @@ class GameAgent:
         before_bytes: bytes | None,
         iteration: int,
         vc_role: str,
+        action_bytes: bytes | None = None,
     ) -> None:
         """Background worker that runs the visual critic and appends to
         `_pending_coaching` on completion. Errors are swallowed +
         traced so a critic crash never kills the iter loop."""
         try:
-            critique = await self.run_visual_critic(after_bytes, before_bytes)
+            critique = await self.run_visual_critic(
+                after_bytes, before_bytes, action_png=action_bytes,
+            )
         except Exception as exc:
             self._trace({
                 "kind": "visual_critic_error",
@@ -7245,19 +7877,79 @@ class GameAgent:
         # when feature is on AND `prefill` is provided. We insert a
         # trailing assistant message; Ollama's chat API treats it as a
         # partial completion to extend.
+        #
+        # Anthropic exception (MK trace 20260528, iter 2): newer Claude
+        # models (Opus 4.7+) hard-reject ANY trailing assistant prefill
+        # with a 400 "does not support assistant message prefill" — even
+        # whitespace-stripped. For backend=anthropic we FOLD the tag
+        # opener into the last user message as a format hint instead,
+        # and still prepend it locally to the returned text so the
+        # downstream <plan>/<diagnose> regex parsers see the same shape.
         prefill_used = False
+        anthropic_prefill_folded = False
+        _orig_last_user_content: str | None = None
         prefill_enabled = bool(prefill) and (self._use_prefill or prefill_force)
         if prefill_enabled:
-            self._messages.append({"role": "assistant", "content": prefill})
-            prefill_used = True
-            self._trace({
-                "kind": "prefill",
-                "len": len(prefill),
-                "forced": bool(prefill_force and not self._use_prefill),
-            })
+            is_anthropic = (
+                getattr(getattr(active_backend, "info", None), "name", "") == "anthropic"
+            )
+            if is_anthropic:
+                # Fold: append a hint to the last user message (in place).
+                # If there is no trailing user message we cannot fold —
+                # fall back to skipping prefill on Anthropic entirely
+                # rather than re-introducing the 400.
+                if (
+                    self._messages
+                    and self._messages[-1].get("role") == "user"
+                ):
+                    _orig_last_user_content = self._messages[-1].get("content", "") or ""
+                    # Use just the first non-whitespace line of the prefill
+                    # as the literal opener the model must reproduce.
+                    first_line = prefill.strip().split("\n", 1)[0].strip()
+                    hint = (
+                        "\n\nFORMAT: begin your reply with exactly `"
+                        + first_line
+                        + "` (no prose before it; no extra whitespace)."
+                    )
+                    self._messages[-1] = {
+                        **self._messages[-1],
+                        "content": _orig_last_user_content + hint,
+                    }
+                    anthropic_prefill_folded = True
+                    prefill_used = True
+                    self._trace({
+                        "kind": "anthropic_prefill_folded",
+                        "tag": first_line[:120],
+                        "len": len(prefill),
+                        "forced": bool(prefill_force and not self._use_prefill),
+                    })
+                else:
+                    # No user turn to fold into — skip prefill on this
+                    # turn rather than risk a 400. Local prepend below
+                    # is gated by prefill_used so it also does not run.
+                    self._trace({
+                        "kind": "anthropic_prefill_skipped",
+                        "reason": "no trailing user message to fold into",
+                        "len": len(prefill),
+                    })
+            else:
+                self._messages.append({"role": "assistant", "content": prefill})
+                prefill_used = True
+                self._trace({
+                    "kind": "prefill",
+                    "len": len(prefill),
+                    "forced": bool(prefill_force and not self._use_prefill),
+                })
 
+        # Build-turn temperature. 0.6 is the Qwen3.6 vendor "thinking-mode /
+        # precise-coding (WebDev)" preset (temp 0.6, top_p 0.95, top_k 20 —
+        # the tail-truncation half lives in backend.MLXBackend._stream_once).
+        # Was 0.7; lowered 2026-05-31 alongside wiring up top_p/top_k, after
+        # the dojo-fight trace looped at temp 0.7 with NO tail truncation.
+        # Fix-mode patch turns stay tighter (0.25) — surgical edits want
+        # determinism, deliberately below the build preset.
         temp = override_temp if override_temp is not None else (
-            0.25 if self._fix_mode else 0.7
+            0.25 if self._fix_mode else 0.6
         )
         if override_temp is None and self._restart_attempt_idx > 0:
             bias = self._restart_temperature_bias(self._restart_attempt_idx)
@@ -7496,7 +8188,16 @@ class GameAgent:
             # Always remove our prefill scaffolding before returning so
             # the message history we save & feed to subsequent turns
             # contains a single coherent assistant message.
-            if prefill_used and self._messages and self._messages[-1].get("role") == "assistant":
+            if anthropic_prefill_folded and _orig_last_user_content is not None:
+                # Restore the user message we mutated in place so the
+                # saved history doesn't drift with appended format hints
+                # across turns.
+                if self._messages and self._messages[-1].get("role") == "user":
+                    self._messages[-1] = {
+                        **self._messages[-1],
+                        "content": _orig_last_user_content,
+                    }
+            elif prefill_used and self._messages and self._messages[-1].get("role") == "assistant":
                 self._messages.pop()
             if result is not None:
                 if getattr(result, "crashed", False):
@@ -7556,6 +8257,13 @@ class GameAgent:
             _ptokens, _num_ctx = 0, 0
         if _ptokens > 0 and _num_ctx > 0 and role == "coder":
             _pressure = _ptokens / _num_ctx
+            # Persist for token-aware compaction (_prune_messages): we only
+            # throw away conversation history when the context window is
+            # actually filling, not at an arbitrary message count. Lets a
+            # 200k-ctx local model keep full history through a long feedback
+            # session instead of losing the playbook / earlier user asks.
+            self._last_prompt_tokens = _ptokens
+            self._last_prompt_pressure = _pressure
             if _pressure >= 0.85:
                 self._context_pressure_streak += 1
                 self._context_pressure_pending = True
@@ -9075,31 +9783,9 @@ class GameAgent:
         m = _CRITERIA_RE.search(reply)
         return m.group(1).strip() if m else None
 
-    _ARCHITECT_KEYWORDS = (
-        "level", "boss", "multi", "stage", "wave", "campaign",
-        "physics", "raycast", "particle", "shader", "3d", "three.js",
-        "phaser", "engine", "ai opponent", "tournament", "tile", "rpg",
-        "platformer", "scrolling", "parallax", "inventory", "puzzle",
-        "minesweeper", "tower defense", "flappy", "endless", "shoot em up",
-    )
-
-    @classmethod
-    def _is_complex_goal(cls, goal: str) -> bool:
-        """Heuristic gate for the architect/editor split. Conservative —
-        prefers single-call when uncertain so we don't double the wall-
-        clock on simple goals.
-        """
-        if not goal:
-            return False
-        g = goal.lower()
-        if len(g) > 90:
-            return True
-        if sum(1 for k in cls._ARCHITECT_KEYWORDS if k in g) >= 1:
-            return True
-        # Multi-clause goals ("X with Y and Z") are usually richer.
-        if g.count(" with ") + g.count(" and ") >= 2:
-            return True
-        return False
+    # (Removed 2026-05-30: `_ARCHITECT_KEYWORDS` + `_is_complex_goal` gated the
+    # separate `<architect>` prose turn, which was merged into the single
+    # planning pass. The architect ROLE and exit-decision turn are unchanged.)
 
     # Properties whose presence/size is established at init, NOT at
     # runtime — comparisons against them aren't dynamic even when they
@@ -9571,15 +10257,24 @@ class GameAgent:
         stall: dict | None,
         iteration: int,
     ) -> tuple[bool, str]:
-        """Try one local fallback (Anthropic -> Ollama) on extension stalls.
+        """Try one local fallback (cloud -> mlx OR ollama) on extension stalls.
 
-        MLX is intentionally NOT included: a user who picked MLX wants the
-        local model, and silently switching to Ollama on a transient Metal
-        / Ctrl+D stall produces a confusing cross-backend error cascade
-        (DK trace 20260523_081532 — MLX stall at 0.0s after Ctrl+D fell
-        through to Ollama gemma4:e4b which the user had never asked for).
-        MLX failures now surface with the MLX-specific recovery hint and
-        stop there; the cloud→local safety net for Anthropic remains.
+        P0c (MK trace 20260528): when Anthropic / OpenAI fails, fall back
+        to ANY available local backend, not just Ollama. The original
+        loop only accepted `resolved.name == "ollama"`, so MK trace
+        landed on `resolved mlx:DeepSeek-V4-Flash (not ollama)` and gave
+        up — even though MLX was the active local backend the user had
+        loaded. The new loop accepts mlx OR ollama (whichever the host
+        detection resolves first), matching the original intent of the
+        function: escape a transient cloud outage by switching to
+        whatever local model is available.
+
+        MLX stays excluded as the SOURCE backend: a user who picked MLX
+        wants the local model, and silently switching to Ollama on a
+        transient Metal / Ctrl+D stall produces a confusing cross-
+        backend error cascade (DK trace 20260523_081532). MLX failures
+        still surface with the MLX-specific recovery hint and stop
+        there; only the cloud→local safety net is broadened.
         """
         info = getattr(self._backend, "info", None)
         backend_name = getattr(info, "name", None)
@@ -9589,38 +10284,42 @@ class GameAgent:
                 "Use the MLX recovery hint above, or switch backends explicitly "
                 "with /backend ollama + /load <N>."
             )
-        if backend_name not in ("anthropic",):
+        if backend_name not in ("anthropic", "openai"):
             return False, (
                 f"fallback skipped: current backend is {backend_name} "
-                "(only anthropic falls back to local Ollama)"
+                "(only cloud backends fall back to a local model)"
             )
         if not stall or stall.get("kind") != "no_tokens_stall":
             return False, "fallback skipped: stall shape is not no-token"
 
+        # Accept any local backend (mlx OR ollama). detect_backend(prefer="auto")
+        # already implements the host's preference order; we just stop
+        # rejecting a non-ollama result.
         candidate = None
         errs: list[str] = []
-        for prefer in ("auto", "ollama"):
+        for prefer in ("auto", "mlx", "ollama"):
             try:
                 resolved = detect_backend(prefer=prefer)
             except Exception as e:
                 errs.append(f"{prefer}: {e}")
                 continue
-            if resolved.name == "ollama":
+            if resolved.name in ("mlx", "ollama"):
                 candidate = resolved
                 break
             errs.append(
-                f"{prefer}: resolved {resolved.name}:{resolved.model} (not ollama)"
+                f"{prefer}: resolved {resolved.name}:{resolved.model} "
+                "(not a local backend)"
             )
         if candidate is None:
-            reason = " | ".join(errs) if errs else "no ollama backend available"
+            reason = " | ".join(errs) if errs else "no local backend available"
             self._trace({
                 "kind": "extension_backend_fallback_unavailable",
                 "iteration": iteration,
                 "reason": reason[:500],
             })
             return False, (
-                "Extension fallback unavailable: no local Ollama backend could "
-                f"be resolved ({reason[:220]})."
+                "Extension fallback unavailable: no local MLX or Ollama "
+                f"backend could be resolved ({reason[:220]})."
             )
 
         old = self._backend
@@ -9631,11 +10330,11 @@ class GameAgent:
             self._trace({
                 "kind": "extension_backend_fallback_failed",
                 "iteration": iteration,
-                "reason": f"make_backend failed: {e}",
+                "reason": f"make_backend failed ({candidate.name}): {e}",
             })
             return False, (
-                "Extension fallback failed while initializing Ollama backend: "
-                f"{e}"
+                f"Extension fallback failed while initializing "
+                f"{candidate.name} backend: {e}"
             )
         try:
             await old.close()
@@ -9647,6 +10346,7 @@ class GameAgent:
             "iteration": iteration,
             "from": old_name,
             "to": f"{candidate.name}:{candidate.model}",
+            "local_kind": candidate.name,
         })
         return True, (
             f"Extension fallback: switched backend from {old_name} to "
@@ -9715,6 +10415,45 @@ class GameAgent:
             reply, max_assets=session_cap,
         )
         sound_specs = parse_sounds_block(reply)
+        # The model emitted an <assets> block → any outstanding "generate new
+        # art" request is now honored; stop re-asserting it (see the
+        # ASSET GENERATION REQUIRED directive in _flush_user_injections).
+        if asset_specs and self._unhonored_asset_request is not None:
+            self._unhonored_asset_request = None
+            self._asset_reprompt_count = 0
+
+        # P1 (MK trace 20260528): on a seed restart with on-disk media,
+        # SKIP phase_a generation entirely. The model can still emit
+        # <assets> in its plan, but we won't burn 90+ seconds re-
+        # rendering sprites the user already has. Mid-session triggers
+        # are unaffected — explicit user requests like "add a new boss
+        # sprite" still flow through the generator below.
+        if (
+            trigger == "phase_a"
+            and self.seed_file is not None
+            and (self._session_assets or self._session_sounds)
+            and (asset_specs or sound_specs)
+        ):
+            self._trace({
+                "kind": "seed_phase_a_media_skipped",
+                "have_assets": len(self._session_assets),
+                "have_sounds": len(self._session_sounds),
+                "requested_assets": [
+                    str(s.get("name") or "") for s in asset_specs
+                ],
+                "requested_sounds": [
+                    str(s.get("name") or "") for s in sound_specs
+                ],
+            })
+            yield self._record(AgentEvent(
+                "info",
+                f"[dim]phase_a asset/sound generation skipped — seed has "
+                f"{len(self._session_assets)} asset(s) and "
+                f"{len(self._session_sounds)} sound(s) on disk; "
+                f"reusing existing media.[/dim]",
+            ))
+            return
+
         # Phase 0.13 — when the model emits a mid-session <assets> block
         # BUT the user has queued feedback asking for a style rebrand,
         # the model is about to generate sprites guaranteed to be
@@ -9928,6 +10667,16 @@ class GameAgent:
                 per_asset = getattr(
                     self._asset_generator, "last_stats", None,
                 ) or []
+                # At-a-glance "did each pose frame actually move off idle?"
+                # signal (2026-05-31): {name: delta-vs-parent} for from_image
+                # frames. A reviewer can spot a cloned pose (delta < ~0.04)
+                # without digging into per_asset or regenerating. Genre-free.
+                pose_deltas = {
+                    s.get("name"): s.get("parent_delta")
+                    for s in per_asset
+                    if isinstance(s, dict) and s.get("from_image")
+                    and isinstance(s.get("parent_delta"), (int, float))
+                }
                 self._trace({
                     "kind": "assets_generated",
                     "trigger": trigger,
@@ -9935,6 +10684,7 @@ class GameAgent:
                     "produced": len(produced),
                     "names": list(produced.keys()),
                     "session_dir": str(session_assets_dir),
+                    "pose_deltas": pose_deltas,
                     "per_asset": per_asset,
                 })
                 yield self._record(AgentEvent(
@@ -10011,6 +10761,72 @@ class GameAgent:
                                 "info",
                                 f"  - {name}: {err_line}"
                             ))
+
+                # Derived-frame sanity: any sprite chained from a parent
+                # (from_image) that came out near-identical to that parent
+                # probably did NOT render the requested pose change — the
+                # classic "punch sprite looks like idle" silent failure. The
+                # model can't see its own art, so log it AND queue it as
+                # actionable feedback for the next turn. Genre-free.
+                derived = [
+                    s for s in per_asset
+                    if isinstance(s, dict)
+                    and s.get("name") in produced
+                    and s.get("from_image")
+                    and isinstance(s.get("parent_delta"), (int, float))
+                ]
+                if derived:
+                    # Signal-driven: the model declared animation frames, so
+                    # the visual critic should verify the motion reads.
+                    self._declared_anim_frames = True
+                near_identical = [
+                    s for s in derived
+                    if s["parent_delta"] < _DERIVED_FRAME_MIN_DELTA
+                ]
+                # Update the done-gate set: a frame that just regenerated
+                # with a real delta clears; a dead one (re)arms the block.
+                for s in derived:
+                    if s["parent_delta"] >= _DERIVED_FRAME_MIN_DELTA:
+                        self._dead_anim_frames.pop(s["name"], None)
+                for s in near_identical:
+                    self._dead_anim_frames[s["name"]] = float(s["parent_delta"])
+                if near_identical:
+                    self._trace({
+                        "kind": "derived_frame_near_identical",
+                        "trigger": trigger,
+                        "assets": [
+                            {"name": s["name"], "from_image": s["from_image"],
+                             "parent_delta": s["parent_delta"]}
+                            for s in near_identical
+                        ],
+                    })
+                    warn_lines = [
+                        "ASSET SANITY WARNING — these generated sprites came "
+                        "out nearly identical to the `from_image` parent they "
+                        "were derived from, so the requested pose change "
+                        "likely did NOT render (e.g. a 'punch' frame that "
+                        "looks just like idle). The pixels barely differ:",
+                    ]
+                    for s in near_identical:
+                        pct = round((1.0 - float(s["parent_delta"])) * 100)
+                        line = (
+                            f"  - `{s['name']}` ≈{pct}% identical to parent "
+                            f"`{s['from_image']}` (delta "
+                            f"{s['parent_delta']:.3f})"
+                        )
+                        warn_lines.append(line)
+                        yield self._record(AgentEvent("info", line.strip()))
+                    warn_lines.append(
+                        "This is COSMETIC and does not block shipping. Do NOT "
+                        "try to regenerate these frames to fix it: img2img "
+                        "cannot change a pose (it stays locked to idle), and a "
+                        "fresh txt2img frame will not stay consistent with the "
+                        "character already in the game — consistency is the "
+                        "hard constraint. Keep using the sprites you have, "
+                        "never draw the limb in code, and move on to the "
+                        "behavior the user actually asked for."
+                    )
+                    self._pending_feedback.append("\n".join(warn_lines))
 
         if sound_specs:
             yield self._record(AgentEvent(
@@ -10276,8 +11092,16 @@ class GameAgent:
         goal: str,
         *,
         continuation: bool = False,
+        plan_only: bool = False,
     ) -> AsyncIterator[AgentEvent]:
         """Drive a planning + iteration session.
+
+        plan_only=True: run ONLY Phase A — plan, criteria, probes, the
+        plan-time memory injection and analysis — then emit a consolidated
+        `plan_summary` trace and return BEFORE any asset/sound generation or
+        build iteration. No diffuser, no browser. Used by the prompt-eval
+        harness (eval/eval_prompts_plan.py) to test a critical feature of each
+        prompt cheaply while keeping a complete, informative trace.
 
         continuation=False (default): fresh session. Resets _messages, runs
         phase A planning, picks a memory skeleton, and seeds the first build.
@@ -10491,6 +11315,19 @@ class GameAgent:
                     "hint": "type /wiki on to enable",
                 })
 
+            # P1 (MK trace 20260528): rehydrate seed media BEFORE the
+            # planning prompt is built so the planner can see existing
+            # asset/sound names and suppress the "MUST emit <assets>"
+            # directive. Without this, the model emitted a fresh asset
+            # roster every seed restart and the harness regenerated
+            # every sprite — wiping the user's existing art.
+            early_seed_assets = 0
+            early_seed_sounds = 0
+            if self.seed_file is not None:
+                early_seed_assets, early_seed_sounds = (
+                    self._early_rehydrate_seed_media()
+                )
+
             if hasattr(self._p, "plan_instruction"):
                 # v1+ planner takes goal so it can detect art-modality
                 # keywords ("sprite", "art", "graphics") and escalate
@@ -10500,11 +11337,24 @@ class GameAgent:
                 # loop set it after a same-signature attempt), then
                 # fall back to the simplest reference-only call.
                 fmfb = bool(getattr(self, "_force_minimal_first_build", False))
+                # P1: seed continuation — pass discovered names so
+                # plan_instruction can suppress the MUST-emit <assets>
+                # directive and tell the model to reuse existing media.
+                from_seed_kwargs = {}
+                if self.seed_file is not None and (
+                    early_seed_assets or early_seed_sounds
+                ):
+                    from_seed_kwargs = {
+                        "from_seed": True,
+                        "seed_asset_names": sorted(self._session_assets.keys()),
+                        "seed_sound_names": sorted(self._session_sounds.keys()),
+                    }
                 try:
                     plan_msg = self._p.plan_instruction(
                         reference_block=reference_block,
                         goal=goal,
                         force_minimal_first_build=fmfb,
+                        **from_seed_kwargs,
                     )
                     if fmfb:
                         self._trace({
@@ -10575,6 +11425,37 @@ class GameAgent:
                     "chars": len(cfg_text),
                 })
 
+            # #5: surface PROVEN pose prompts from past animated sessions.
+            # When this goal implies character motion and we hold recipes whose
+            # pose words overlap it, inject them as a planning hint so the model
+            # reuses txt2img-merged prompts that previously produced a REAL
+            # (moved) pose rather than an idle clone. Best-effort; never blocks.
+            try:
+                if self._animation_expected():
+                    from asset_library import AssetLibrary
+                    _recipes = AssetLibrary().retrieve_pose_recipes(goal, k=4)
+                    if _recipes:
+                        _lines = "\n".join(
+                            f'- {r.get("pose", "?")}: "{r.get("prompt", "")}"'
+                            for r in _recipes
+                        )
+                        plan_msg = (
+                            plan_msg
+                            + "\n\n<proven-pose-prompts>\n"
+                            + "These pose prompts produced REAL distinct poses "
+                            + "(not idle clones) in past animated games. Reuse "
+                            + "or adapt them for matching from_image frames:\n"
+                            + _lines
+                            + "\n</proven-pose-prompts>"
+                        )
+                        self._trace({
+                            "kind": "pose_recipes_injected",
+                            "count": len(_recipes),
+                            "poses": [r.get("pose") for r in _recipes],
+                        })
+            except Exception as e:
+                self._trace({"kind": "pose_recipes_error", "err": str(e)})
+
             self._messages = [
                 {"role": "system", "content": sys_prompt},
                 {"role": "user", "content": plan_msg},
@@ -10619,6 +11500,8 @@ class GameAgent:
 
             # ---- PHASE A: planning ------------------------------------------
             yield self._record(AgentEvent("phase", "planning"))
+            self._plan_retry_done = False
+            self._probe_quality_retry_done = False
             # Phase 1B — when the diffuser pipeline lives on a GPU that
             # is NOT shared with any LLM slot, pre-warm it during
             # architect streaming so the cold-load (~30-60 s) is hidden
@@ -10665,6 +11548,183 @@ class GameAgent:
                 self._criteria = crit
                 self._trace({"kind": "criteria", "text": crit[:600]})
             probes = self._extract_probes(plan_reply)
+            # Planning-turn retry on an UNUSABLE plan. A degenerate token-
+            # repetition tail (e.g. "cooldown reset cooldown reset ..." ×100,
+            # or "st.x = st.x + st.x;" ×100) makes the model emit EOS mid-
+            # structured-output — below the RepetitionDetector threshold — so
+            # the plan parses with no <criteria> and/or no <probes>. Proceeding
+            # would burn the whole session on an empty plan. Re-stream ONCE with
+            # a terse corrective reprompt (mirrors the visual-critic reparse
+            # retry). Trace-evidenced 2026-05-31: street-fighter + bomberman
+            # both hit this and both recovered on a fresh attempt. This RECOVERS
+            # empty output — it only fires when the plan parsed empty, so it
+            # never truncates a legitimate long plan (per the no-early-cutoff rule).
+            if (not self._criteria or not probes) and not getattr(
+                self, "_plan_retry_done", False
+            ):
+                self._plan_retry_done = True
+                self._trace({
+                    "kind": "plan_incomplete_retry",
+                    "had_criteria": bool(self._criteria),
+                    "had_probes": bool(probes),
+                    "reply_chars": len(plan_reply or ""),
+                })
+                yield self._record(AgentEvent(
+                    "info",
+                    "planning reply was incomplete (likely a repetition "
+                    "cut-off) — retrying the plan once.",
+                ))
+                self._messages.append({
+                    "role": "user",
+                    "content": (
+                        "Your previous reply was cut off before a complete "
+                        "plan (missing <criteria> and/or <probes>). Re-emit the "
+                        "FULL <plan>, <criteria>, <probes>"
+                        + (", <assets>" if self._animation_expected() else "")
+                        + " now, concisely. Do NOT repeat any word or phrase "
+                        "more than a few times — write each item exactly once."
+                    ),
+                })
+                _retry_role = self._planning_role()
+                yield self._record(AgentEvent(
+                    "activity", "streaming",
+                    {"label": "re-streaming incomplete plan",
+                     "role": _retry_role},
+                ))
+                retry_reply = None
+                try:
+                    retry_reply = await self._stream(
+                        self._token_cb_wrapper, role=_retry_role)
+                except Exception:
+                    retry_reply = None
+                yield self._record(AgentEvent("activity", "idle"))
+                _nc = self._extract_criteria(retry_reply) if retry_reply else None
+                _np = self._extract_probes(retry_reply) if retry_reply else None
+                if retry_reply and (_nc or _np):
+                    self._messages.append({
+                        "role": "assistant", "content": retry_reply,
+                        "model_role": _retry_role,
+                        "model_name": self.get_backend(_retry_role).info.model,
+                    })
+                    self._extract_and_queue_lookups(retry_reply)
+                    self._capture_todos(retry_reply)
+                    self._dump_conversation()
+                    yield self._record(AgentEvent("plan", retry_reply))
+                    plan_reply = retry_reply
+                    if _nc:
+                        self._criteria = _nc
+                        self._trace({"kind": "criteria",
+                                     "text": _nc[:600], "retry": True})
+                    if _np:
+                        probes = _np
+                    self._trace({"kind": "plan_retry_recovered",
+                                 "criteria": bool(_nc), "probes": len(_np or [])})
+
+            # Probe-quality retry: the plan parsed fine (criteria + probes
+            # present) but EVERY probe is structural-only — no input→delta,
+            # no time-based check, no canvas-pixel read. A game that renders
+            # a static HUD passes them all, so the harness `ok=True` signal
+            # would be wrong (CLAUDE.md "harness signal must be right"). The
+            # passive nudge alone (injected into the first-build message)
+            # did NOT move the model: the 2026-05-31 prompt-library sweep
+            # showed 24/26 prompts still emitting 0 dynamic probes
+            # (probe_quality_ratio 0.0). So ESCALATE to a corrective
+            # re-prompt here, mirroring the empty-plan retry above. Bounded
+            # to once; fires only when probes EXIST and ALL are structural,
+            # so a plan that already has one dynamic probe is never
+            # re-streamed (no long-plan regression). The retry is adopted
+            # ONLY if it actually adds a dynamic probe — otherwise the
+            # original probes are kept and the passive nudge below still
+            # fires as a backstop.
+            if (
+                probes
+                and not getattr(self, "_probe_quality_retry_done", False)
+                and self._classify_probes_dynamic(probes)["ratio"] == 0.0
+            ):
+                self._probe_quality_retry_done = True
+                self._trace({
+                    "kind": "probe_quality_retry",
+                    "probe_count": len(probes),
+                    "names": [p.get("name") for p in probes],
+                })
+                yield self._record(AgentEvent(
+                    "info",
+                    "every Phase-A probe is structural-only (a game that "
+                    "renders but never PLAYS would pass them all) — "
+                    "re-prompting the plan once for an input→delta probe.",
+                ))
+                self._messages.append({
+                    "role": "user",
+                    "content": (
+                        "Your <probes> only check structural PRESENCE "
+                        "(elements exist, state is an object, arrays are "
+                        "non-empty). A game that draws a static screen but "
+                        "never responds to input would pass every one of "
+                        "them — so they cannot verify the game actually "
+                        "PLAYS. Re-emit the FULL <probes>...</probes> block "
+                        "now, keeping your structural probes AND adding at "
+                        "least one DYNAMIC probe that simulates an input "
+                        "and asserts a state delta. Copy this shape, "
+                        "swapping in your real control key and state path:\n"
+                        "  {\"name\":\"input_moves_player\",\"expr\":\""
+                        "(async()=>{if(!window.state||!state.player)return "
+                        "false;const x0=state.player.x;window.dispatchEvent("
+                        "new KeyboardEvent('keydown',{code:'ArrowRight',"
+                        "bubbles:true}));await new Promise(r=>setTimeout(r,"
+                        "250));window.dispatchEvent(new KeyboardEvent("
+                        "'keyup',{code:'ArrowRight',bubbles:true}));return "
+                        "state.player.x!==x0;})()\"}\n"
+                        "The exposed state global it reads (window.state, "
+                        "or whatever you expose) MUST exist for the probe "
+                        "to work. Do NOT repeat any word or phrase more "
+                        "than a few times."
+                    ),
+                })
+                _pq_role = self._planning_role()
+                yield self._record(AgentEvent(
+                    "activity", "streaming",
+                    {"label": "re-streaming plan for dynamic probes",
+                     "role": _pq_role},
+                ))
+                pq_reply = None
+                try:
+                    pq_reply = await self._stream(
+                        self._token_cb_wrapper, role=_pq_role)
+                except Exception:
+                    pq_reply = None
+                yield self._record(AgentEvent("activity", "idle"))
+                _np = self._extract_probes(pq_reply) if pq_reply else None
+                _nc = self._extract_criteria(pq_reply) if pq_reply else None
+                # Adopt ONLY if the retry produced probes that now include a
+                # dynamic check — never regress to a worse/empty/still-
+                # structural set.
+                if _np and self._classify_probes_dynamic(_np)["ratio"] > 0.0:
+                    self._messages.append({
+                        "role": "assistant", "content": pq_reply,
+                        "model_role": _pq_role,
+                        "model_name": self.get_backend(_pq_role).info.model,
+                    })
+                    self._extract_and_queue_lookups(pq_reply)
+                    self._capture_todos(pq_reply)
+                    self._dump_conversation()
+                    yield self._record(AgentEvent("plan", pq_reply))
+                    plan_reply = pq_reply
+                    probes = _np
+                    if _nc:
+                        self._criteria = _nc
+                        self._trace({"kind": "criteria", "text": _nc[:600],
+                                     "retry": "probe_quality"})
+                    self._trace({
+                        "kind": "probe_quality_retry_recovered",
+                        "ratio": self._classify_probes_dynamic(probes)["ratio"],
+                        "probes": len(probes),
+                    })
+                else:
+                    self._trace({
+                        "kind": "probe_quality_retry_no_improvement",
+                        "got_probes": len(_np or []),
+                    })
+
             if probes:
                 self._probes = probes
                 # 2.1: log full probe text alongside the count so brittle
@@ -10802,6 +11862,33 @@ class GameAgent:
                 self._capture_todos(plan_reply)
                 self._dump_conversation()
                 yield self._record(AgentEvent("plan", plan_reply))
+
+            # Consolidated plan-outcome trace — one event a reviewer (or the
+            # prompt-eval harness) can read to see WHAT planning produced
+            # (criteria size, probe names, coverage gaps, probe quality)
+            # without scanning the whole token stream. Added 2026-05-31 from
+            # the prompt-library eval: a harness that stopped at the `plan`
+            # event lost the criteria/probes traces that fire just after it.
+            self._trace({
+                "kind": "plan_summary",
+                "criteria_chars": len(self._criteria or ""),
+                "probe_count": len(self._probes or []),
+                "probe_names": [p.get("name") for p in (self._probes or [])][:20],
+                "coverage_gaps": getattr(self, "_planning_coverage_gaps", []),
+                "probe_quality_ratio": (
+                    getattr(self, "_probe_quality", {}) or {}
+                ).get("ratio"),
+            })
+            if plan_only:
+                # Dry-run: stop cleanly after Phase A. No coder-warm, no
+                # asset/sound generation (no diffuser), no build loop.
+                self._dump_conversation()
+                yield self._record(AgentEvent(
+                    "info",
+                    "plan-only mode: Phase A complete — stopping before "
+                    "asset generation and build.",
+                ))
+                return
 
             # Phase 0.4 — pre-warm the coder slot's KV cache while asset
             # / sound generation runs on GPU 0. The architect just ran on
@@ -11024,73 +12111,15 @@ class GameAgent:
                 self._active_opening_book_recipes = opening_hits
                 pb_kwargs = {"playbook_block": pb_block} if pb_block else {}
 
-                # Optional architect step — produce an English design
-                # before code. Only fires on detected complex goals AND
-                # when the feature is on. The architect note becomes
-                # part of the first-build user turn so the editor model
-                # has a concrete plan to execute.
-                architect_note = ""
-                if (
-                    self._use_architect_split
-                    and self._is_complex_goal(goal)
-                ):
-                    yield self._record(AgentEvent(
-                        "phase", "architect",
-                        {"goal_chars": len(goal)},
-                    ))
-                    self._messages.append({
-                        "role": "user",
-                        "content": (
-                            "Before code, do an ARCHITECT pass — describe the "
-                            "implementation in English. No code, no <html_file>, "
-                            "no <patch>. Use this format:\n\n"
-                            "<architect>\n"
-                            "Data: <key globals / state shape>\n"
-                            "Loop: <update / draw responsibilities>\n"
-                            "Layers: <draw order, e.g. bg → entities → fx → hud>\n"
-                            "Risks: <2-3 places this typically goes wrong>\n"
-                            "</architect>\n\n"
-                            "Keep it short — 1-2 sentences per line. The next "
-                            "turn will hand this to the editor model along with "
-                            "the seed code."
-                        ),
-                    })
-                    yield self._record(AgentEvent(
-                        "activity", "streaming",
-                        {"label": "architect note", "role": "architect"},
-                    ))
-                    try:
-                        arch_reply = await self._stream(self._token_cb_wrapper, role="architect")
-                    except Exception as e:
-                        self._set_role_activity("architect", "idle")
-                        yield self._record(AgentEvent("activity", "idle"))
-                        yield self._record(AgentEvent(
-                            "info", f"architect call failed, continuing single-shot: {e}",
-                        ))
-                        # Pop the architect user message so we don't leave
-                        # the conversation in a half-state.
-                        if self._messages and self._messages[-1].get("role") == "user":
-                            self._messages.pop()
-                    else:
-                        yield self._record(AgentEvent("activity", "idle"))
-                        self._messages.append({
-                            "role": "assistant",
-                            "content": arch_reply,
-                            "model_role": "architect",
-                            "model_name": self.get_backend("architect").info.model
-                        })
-                        m = re.search(r"<architect>\s*(.*?)\s*</architect>",
-                                      arch_reply, re.DOTALL | re.IGNORECASE)
-                        if m:
-                            architect_note = m.group(1).strip()
-                            self._trace({
-                                "kind": "architect_note",
-                                "len": len(architect_note),
-                            })
-                            yield self._record(AgentEvent(
-                                "info",
-                                f"architect: {architect_note[:160]}",
-                            ))
+                # Design happens in ONE pass: the planning turn (above, on
+                # the architect role) already emits the full decomposition —
+                # mechanics, controls, risky bits, criteria, probes, media,
+                # and a `Build order` line. The separate `<architect>` prose
+                # turn that used to run here was removed (2026-05-30): it
+                # restated the plan (Risks duplicated, Data/Layers already in
+                # the seed scaffold) and was a second boundary-free prose
+                # generation that ran away on the local model. The architect
+                # ROLE and the exit-decision turn are unchanged.
 
                 # Fix B (model-agnostic): pass the current session's
                 # asset/sound directory basenames so first_build_instruction
@@ -11120,13 +12149,6 @@ class GameAgent:
                         f"{opening_block}\n\n"
                         "Use the opening-book recipes above as verified "
                         "implementation and test guidance.\n\n"
-                        + build_msg
-                    )
-                if architect_note:
-                    build_msg = (
-                        "ARCHITECT NOTE (your own plan from the previous turn — "
-                        "follow it):\n"
-                        f"<architect>\n{architect_note}\n</architect>\n\n"
                         + build_msg
                     )
                 asset_block = render_asset_paths_block(
@@ -11325,7 +12347,9 @@ class GameAgent:
                         reply_prefill = ""
                         prefill_force = False
                         if self._use_prefill and self._fix_mode:
-                            reply_prefill = "<diagnose>\n"
+                            # No trailing newline — Anthropic 400s on final
+                            # assistant whitespace; backend also rstrip()s.
+                            reply_prefill = "<diagnose>"
                         elif (not self._current_file) and self._force_first_build_prefill:
                             # First-build rescue after a no-code turn.
                             reply_prefill = "<html_file>\n<!DOCTYPE html>\n"
@@ -11362,10 +12386,47 @@ class GameAgent:
                         "name",
                         None,
                     )
+                    # P0b (MK trace 20260528): some Anthropic 400s are
+                    # payload-shape errors that retrying the SAME payload
+                    # can never fix. The trace burned two identical
+                    # requests on "does not support assistant message
+                    # prefill" before falling back. Detect those and
+                    # skip the retry — go straight to local fallback.
+                    err_str_lower = str(e).lower()
+                    is_anthropic_shape_400 = (
+                        backend_name == "anthropic"
+                        and any(
+                            phrase in err_str_lower
+                            for phrase in _ANTHROPIC_NON_RETRYABLE_400_PHRASES
+                        )
+                    )
+                    if is_anthropic_shape_400:
+                        self._trace({
+                            "kind": "anthropic_payload_shape_error",
+                            "iteration": iteration,
+                            "matched": next(
+                                (
+                                    p for p in _ANTHROPIC_NON_RETRYABLE_400_PHRASES
+                                    if p in err_str_lower
+                                ),
+                                "",
+                            ),
+                            "err": str(e)[:300],
+                        })
+                        yield self._record(AgentEvent(
+                            "info",
+                            "[yellow]anthropic payload-shape 400[/yellow] — "
+                            "skipping same-payload retry (would 400 again); "
+                            "falling back to local backend if available.",
+                        ))
+                        # Do NOT consume the cloud_retry_attempted budget —
+                        # leave it for an actual transient outage on a
+                        # later iteration.
                     is_cloud_crash = (
                         backend_name in ("anthropic", "openai")
                         and "cause:" in str(e).lower()
                         and not cloud_retry_attempted
+                        and not is_anthropic_shape_400
                     )
                     if is_cloud_crash:
                         cloud_retry_attempted = True
@@ -11379,7 +12440,7 @@ class GameAgent:
                             "info",
                             f"[dim]{backend_name} returned a transient "
                             "error; retrying same backend once before "
-                            "falling back to local Ollama.[/dim]",
+                            "falling back to a local backend.[/dim]",
                         ))
                         continue
                     # Phase 5c: drop the `continuation`-only guard. Trace 2
@@ -12499,6 +13560,10 @@ class GameAgent:
                 if (snap_path and self._use_double_screenshot)
                 else None
             )
+            shot_action_path = (
+                snap_path.with_name(snap_path.stem + "_action.png")
+                if snap_path else None
+            )
             yield self._record(AgentEvent(
                 "activity", "browser",
                 {"label": f"loading iter {iteration} in Chromium"},
@@ -12507,6 +13572,7 @@ class GameAgent:
                 report = await self.browser.load_and_test(
                     self.out_path, screenshot_path=shot_path,
                     screenshot_before_path=shot_before_path,
+                    screenshot_action_path=shot_action_path,
                     probes=self._probes or None,
                     opening_book_recipes=getattr(self, "_active_opening_book_recipes", []),
                     # todo #2: pass criteria so the harness can flag
@@ -12545,6 +13611,7 @@ class GameAgent:
                 })
             self._handle_probe_eval_errors(report, iteration)
             self._apply_scoped_check_to_report(report)
+            self._apply_dead_animation_check_to_report(report)
             # Advance the warnings-persistence counter ONCE per iter,
             # before any format_report_for_model rendering. Compaction
             # is then applied uniformly to the test event text and to
@@ -12577,6 +13644,7 @@ class GameAgent:
                     fail_reasons.append("frozen_canvas")
                 entity_check = report.get("entity_render_check") or {}
                 missing_entities = (entity_check.get("missing") or []) if isinstance(entity_check, dict) else []
+                _static_action = report.get("static_action")
                 summary_payload = {
                     "kind": "iter_summary",
                     "iteration": iteration,
@@ -12588,7 +13656,23 @@ class GameAgent:
                     "console_errors_count": len(console_errors),
                     "frozen_canvas": bool(report.get("frozen_canvas")),
                     "entity_missing_count": len(missing_entities),
+                    # Verification observability (so a future trace answers
+                    # "did the critic even see an action?" with one grep):
+                    "action_frame_captured": bool(report.get("screenshot_action")),
+                    "action_key": report.get("action_key"),
+                    "static_action": _static_action,
                     "fail_reason": ",".join(fail_reasons) or "ok",
+                    # Higher signal-to-noise debugging (2026-05-31): record WHY
+                    # it blocked (the actual soft-warning texts, not just a
+                    # count), the non-blocking warnings, the frozen-canvas
+                    # false-positive classifier, and any queued feedback that a
+                    # non-ok iter will defer — so "stuck + user request starved"
+                    # is visible from this one event.
+                    "soft_warnings": [str(w)[:160] for w in soft_warnings[:6]],
+                    "warnings": [str(w)[:140] for w in (report.get("warnings") or [])[:4]],
+                    "frozen_canvas_input_responsive": report.get("frozen_canvas_input_responsive"),
+                    "pending_feedback": [fb[:120] for fb in (self._pending_feedback or [])[:4]],
+                    "pending_feedback_count": len(self._pending_feedback or []),
                 }
                 self._trace(summary_payload)
                 # Phase 3 surprise rules — fire on signals worth
@@ -12771,6 +13855,19 @@ class GameAgent:
                 except Exception:
                     before_bytes = None
 
+            # Action frame: the harness captured this at the moment a held key
+            # produced its largest canvas change (game mid-ACTION, not at
+            # rest). Handed to the visual critic as a 3rd image so it can judge
+            # whether a deliberate action animation actually renders.
+            action_bytes: bytes | None = None
+            if shot_path is not None and report.get("screenshot_action"):
+                try:
+                    action_bytes = Path(
+                        str(report["screenshot_action"])
+                    ).read_bytes()
+                except Exception:
+                    action_bytes = None
+
             # Compute the screenshot delta BEFORE the vision judge runs
             # — the judge rotates `_prev_judge_png` to the current frame
             # at the end of its call, so we need to read against the
@@ -12934,6 +14031,7 @@ class GameAgent:
                             self._critic_task = asyncio.create_task(
                                 self._spawn_visual_critic(
                                     after_bytes, before_bytes, iteration, vc_role,
+                                    action_bytes=action_bytes,
                                 )
                             )
                         except Exception as exc:
@@ -12954,6 +14052,7 @@ class GameAgent:
                             critique = await self.run_visual_critic(
                                 after_bytes,
                                 before_bytes,
+                                action_png=action_bytes,
                             )
                             yield self._record(self._activity_idle_event(vc_role))
                             if critique:

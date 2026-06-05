@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pull newest code from GitHub (Agent_learning_overlay). Run from anywhere.
+# Pull newest code from GitHub (jmrothberg/Agent_learning). Run from anywhere.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"

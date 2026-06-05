@@ -74,7 +74,7 @@ def test_parse_basic():
     assert len(out) == 2
     assert out[0]["name"] == "ship"
     assert out[0]["prompt"] == "pixel ship facing right"
-    assert out[0]["size"] == (512, 512)  # default (bumped 2026-05-23 from 128)
+    assert out[0]["size"] == (512, 512)  # default 512 for a plain prompt (no hi-res cue)
     assert out[1]["size"] == (64, 64)
 
 
@@ -529,31 +529,31 @@ class Img2ImgStubGenerator:
         return f.name
 
 
-def test_generate_assets_chains_img2img(tmp_path):
-    """End-to-end: a 2-frame walk-cycle spec triggers img2img on frame 2
-    with frame 1 as init, producing two distinct files in session_dir."""
+def test_generate_assets_pose_frame_uses_txt2img_merged(tmp_path):
+    """A from_image pose frame is rendered as TXT2IMG with the parent's
+    character prompt merged with the pose clause — NOT img2img. img2img at
+    guidance_scale=0 can't change a pose (proven 2026-05-30, animation_ab/);
+    txt2img + shared description + fixed seed gives the same character in the
+    new pose."""
     specs = [
-        {"name": "walk1", "prompt": "alien legs together", "size": (64, 64)},
-        {"name": "walk2", "prompt": "alien legs apart", "size": (64, 64),
-         "from_image": "walk1", "strength": 0.45},
+        {"name": "idle", "prompt": "alien standing", "size": (64, 64)},
+        {"name": "punch", "prompt": "alien arm extended punching", "size": (64, 64),
+         "from_image": "idle", "strength": 0.55},
     ]
     txt2img = StubGenerator()
     i2i = Img2ImgStubGenerator()
-    session_dir = tmp_path / "session"
     out = generate_assets(
-        specs, session_dir,
+        specs, tmp_path / "session",
         cache_dir=tmp_path / "cache",
         image_generator=txt2img,
         img2img_generator=i2i,
     )
-    assert set(out.keys()) == {"walk1", "walk2"}
-    assert len(txt2img.calls) == 1, "frame 1 must use txt2img"
-    assert len(i2i.calls) == 1, "frame 2 must use img2img"
-    # Frame 2's init image was the freshly-generated frame 1 (assert by
-    # checking the path it received exists and is non-empty PNG).
-    init_used = i2i.calls[0][1]
-    assert Path(init_used).exists()
-    assert Path(init_used).stat().st_size > 100
+    assert set(out.keys()) == {"idle", "punch"}
+    assert len(i2i.calls) == 0, "pose frames must NOT use img2img"
+    assert len(txt2img.calls) == 2, "both frames render via txt2img"
+    # the punch frame's prompt merges the parent's character desc + pose clause
+    punch_prompt = txt2img.calls[1]
+    assert "alien standing" in punch_prompt and "arm extended punching" in punch_prompt
 
 
 def test_generate_assets_falls_back_to_txt2img_when_img2img_missing(tmp_path):
@@ -574,3 +574,25 @@ def test_generate_assets_falls_back_to_txt2img_when_img2img_missing(tmp_path):
     assert set(out.keys()) == {"walk1", "walk2"}
     # Both frames went through txt2img — chain unavailable.
     assert len(txt2img.calls) == 2
+
+
+def test_render_block_emits_robust_sprite_resolver(tmp_path):
+    """The injected loader must provide a sprite(key) resolver that tolerates
+    key-naming drift (the #1 cause of 'generated art but game shows boxes':
+    code builds 'left_idle' but asset is 'left_fighter_idle') and a LOUD
+    MISSING marker on a true miss — never a clean fillRect block that hides
+    the bug. Added 2026-06-03 after a two-kickers run rendered solid blocks
+    because spriteKey != generated asset name."""
+    from assets import render_asset_paths_block
+    html = tmp_path / "game.html"
+    html.write_text("<html></html>")
+    ad = tmp_path / "game_assets"
+    ad.mkdir()
+    p = ad / "left_fighter_idle.png"
+    p.write_bytes(b"\x89PNG fake")
+    block = render_asset_paths_block({"left_fighter_idle": p}, html)
+    assert "function sprite(key)" in block          # robust accessor
+    assert "MISSING" in block                        # loud marker, not a tidy block
+    assert "naturalWidth" in block                   # guards against undecoded
+    # normalized/token matching so 'left_idle' resolves to 'left_fighter_idle'
+    assert "norm" in block and "includes" in block

@@ -23,6 +23,7 @@ games/traces/
 memory/*
 !memory/playbook.jsonl
 !memory/visual_playtests.jsonl
+!memory/prompt_library.jsonl
 # Precomputed architect opening library — hand-curated mechanism outlines
 # retrieved by retrieve_implementation_outline (k=1, no prompt-bloat risk).
 # Distinct from games/game-memory/ which is per-machine learned memory.
@@ -31,11 +32,15 @@ memory/*
 !memory/playtests.jsonl
 !memory/asset_audits.jsonl
 !memory/animation_audits.jsonl
+# Default system-test battery — committed project input, useful on all machines
+# (moved out of gitignored games/ on 2026-06-02). Read by system_tests.DEFAULT_BATTERY.
+!memory/system_battery.jsonl
 !memory/skeletons/
 !memory/skeletons/*
 games/test_*.html
 games/tune/
 games/system-tests/run_*/
+games/eval-traces/
 # Asset-pipeline artifacts (PNGs are 50-200KB each; cache grows over time)
 games/_asset_cache/
 games/_smoke/

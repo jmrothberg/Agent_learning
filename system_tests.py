@@ -39,8 +39,19 @@ def _timeouts_for_model(model: str) -> tuple[float, float, int]:
 
 
 REPO_ROOT = Path(__file__).resolve().parent
+# Run OUTPUT (per-run artifacts) lives under games/ — that dir is for
+# generated local games and is gitignored. Correct home for outputs.
 SYSTEM_TESTS_ROOT = REPO_ROOT / "games" / "system-tests"
-DEFAULT_BATTERY = SYSTEM_TESTS_ROOT / "battery.jsonl"
+# The default battery is curated project INPUT useful on every machine, so it
+# is committed under memory/ alongside the other opening-library data — NOT
+# under games/ (which is gitignored user output). Moved 2026-06-02 after a
+# fresh checkout had no battery and `system_tests.py run` errored.
+# A user-local override at games/system-tests/battery.jsonl still wins if present.
+DEFAULT_BATTERY = REPO_ROOT / "memory" / "system_battery.jsonl"
+_LEGACY_BATTERY = SYSTEM_TESTS_ROOT / "battery.jsonl"
+if not DEFAULT_BATTERY.exists() and _LEGACY_BATTERY.exists():
+    # Back-compat: honor an existing local battery in the old location.
+    DEFAULT_BATTERY = _LEGACY_BATTERY
 DEFAULT_MODEL = os.environ.get("SYSTEM_TEST_MODEL", "qwen3.6:27b")
 
 SUITE_TESTS = {
