@@ -44,6 +44,7 @@ games/eval-traces/
 # Asset-pipeline artifacts (PNGs are 50-200KB each; cache grows over time)
 games/_asset_cache/
 games/_smoke/
+games/_draw/
 games/*_assets/
 !games/mechanics-standard-chess-on-an_20260522_163629_assets/
 !games/mechanics-standard-chess-on-an_20260522_163629_assets/**

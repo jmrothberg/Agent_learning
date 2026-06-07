@@ -25,7 +25,8 @@ seed** for consistency — *not* img2img (see [Animation](#animation--consistenc
 - [What this is](#what-this-is) · [Quick start](#quick-start) · [Architecture](#architecture)
 - [The verification harness](#the-verification-harness-the-core-lever) · [Assets & animation](#animation--consistency-is-the-hard-constraint)
 - [Memory / opening library](#memory--the-opening-library) · [TUI & CLI](#tui--cli-reference)
-- [System tests](#system-tests--memory-hygiene) · [Standing rules](#standing-rules) · [Troubleshooting](#troubleshooting)
+- [Standalone asset tools](#standalone-asset-tools) · [System tests](#system-tests--memory-hygiene)
+- [Standing rules](#standing-rules) · [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -209,6 +210,32 @@ the CLI). Goal is the positional arg.
 **Model topologies:** 1 model = all roles multiplex one loaded LLM (the `/allroles` default on a
 single machine). On a multi-GPU box, slots 2/3 can host a dedicated architect/critic; the diffuser
 pins to GPU 0 so the LLM slots stay free (`gpu_status.pick_diffuser_cuda_index`).
+
+---
+
+## Standalone asset tools
+
+Two small terminal utilities outside the agent loop — same Z-Image-Turbo pipeline and asset
+cache, no LLM required.
+
+**Draw sprites interactively** — walks you through style, single vs animation mode, and each
+prompt; writes PNGs to `games/_draw/<project>_<timestamp>_assets/` (chroma-keyed RGBA, same as
+the agent). Animation mode chains pose frames off a base idle frame (txt2img merge, not img2img).
+
+```bash
+.venv/bin/python scripts/draw_game_art.py
+```
+
+**Preview a folder** — drag a `*_assets/` or `*_sounds/` folder onto the terminal (or pass the
+path). Audio folders play each clip in order; image folders open in Preview.
+
+```bash
+.venv/bin/python scripts/play_folder.py                    # then drag folder + Enter
+.venv/bin/python scripts/play_folder.py path/to/my_assets  # or pass path directly
+```
+
+Requires the same GPU setup as the agent: `./scripts/install_diffuser.sh` for drawing; preview
+works with macOS `afplay` / Preview only.
 
 ---
 
