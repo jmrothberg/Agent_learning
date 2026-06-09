@@ -1,0 +1,16 @@
+# Gemma 4 12B IT — official ggml-org Q8_0 VLM (vision + audio capable).
+# Weights live on the external data drive; re-import after moving files:
+#   ollama create gemma4:12b-q8 -f scripts/ollama_models/gemma-4-12b-it-q8_0-vlm.Modelfile
+FROM /run/media/jonathan/data/GGUF_Models/gemma-4-12B-it-Q8_0.gguf
+FROM /run/media/jonathan/data/GGUF_Models/mmproj-gemma-4-12B-it-Q8_0.gguf
+TEMPLATE "{{ if .System }}<bos><|turn>system
+{{ .System }}<turn|>
+{{ end }}{{ if .Prompt }}<|turn>user
+{{ .Prompt }}<turn|>
+{{ end }}<|turn>model
+{{ .Response }}<turn|>
+"
+PARAMETER stop <bos>
+PARAMETER stop <|turn>
+PARAMETER stop <turn|>
+PARAMETER stop <|turn>user

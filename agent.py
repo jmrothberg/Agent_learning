@@ -3371,6 +3371,20 @@ class GameAgent:
         self._step_continue = True
         self._trace({"kind": "step_continue_signal"})
 
+    def _step_pause_should_wait(self) -> bool:
+        """True while the between-iter step-mode pause should keep sleeping.
+
+        Ctrl+D / 'done' set _user_force_done without queuing feedback; the
+        wait loop must wake so the top-of-iter ship check can exit.
+        """
+        if self._user_force_done:
+            return False
+        if self._step_continue:
+            return False
+        if self.has_pending_user_input() and not self._feedback_deferred_last_turn:
+            return False
+        return True
+
     def set_research_enabled(self, on: bool) -> None:
         """Toggle Wikipedia research lookup before planning. OFF by
         default per /wiki slash command in chat.py — empirical test
@@ -12268,17 +12282,12 @@ class GameAgent:
                     "Enter to continue, or type feedback",
                     {"just_finished_iter": iteration - 1},
                 ))
-                # Only bypass the pause if we have pending input AND that input was NOT deferred.
-                # If it was deferred, we must still pause so the user can see if the blocker was fixed.
-                def should_wait():
-                    if self._step_continue:
-                        return False
-                    if self.has_pending_user_input() and not self._feedback_deferred_last_turn:
-                        return False
-                    return True
-
-                while should_wait():
+                while self._step_pause_should_wait():
                     await asyncio.sleep(0.1)
+                # Ship requested during the pause (Ctrl+D / 'done') — re-enter
+                # the iter loop so the top-of-loop force_done check exits.
+                if self._user_force_done:
+                    continue
                 if self.has_pending_user_input() and not self._feedback_deferred_last_turn:
                     if self._messages and self._messages[-1].get("role") == "user":
                         base = self._messages.pop()["content"]

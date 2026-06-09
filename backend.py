@@ -131,8 +131,8 @@ _VLM_NAME_SUBSTRINGS: tuple[str, ...] = (
     "minicpm-v", "minicpm-llama3-v",
     # Mistral / Pixtral
     "pixtral",
-    # Google Gemma 3 (multimodal) — gemma3 family
-    "gemma3", "gemma-3",
+    # Google Gemma 3/4 (multimodal) — gemma3 + unified encoder-free gemma4
+    "gemma3", "gemma-3", "gemma4", "gemma-4",
     # PaLI / SigLIP-based
     "pali", "paligemma",
     # CogVLM family

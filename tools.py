@@ -2427,8 +2427,6 @@ class LiveBrowser:
                     action_frame_paths[str(keycode)] = str(fp)
                 except Exception:
                     pass
-        if action_frame_paths:
-            report["action_frames"] = action_frame_paths
         # Pop the raw per-key fake-action signal now; the gating decision is made
         # later (after referenced_assets is computed) — stash it on a local.
         _fake_actions = input_test.pop("fake_actions", None) \
@@ -2521,6 +2519,8 @@ class LiveBrowser:
         report["screenshot"] = screenshot_saved
         report["screenshot_before"] = screenshot_before_saved
         report["screenshot_action"] = screenshot_action_saved
+        if action_frame_paths:
+            report["action_frames"] = action_frame_paths
         report["action_key"] = (
             input_test.get("action_key") if isinstance(input_test, dict) else None
         )

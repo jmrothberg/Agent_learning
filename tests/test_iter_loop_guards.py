@@ -54,6 +54,15 @@ def test_set_step_mode_on_does_not_arm_auto_disabled(tmp_path):
     assert agent._step_auto_disabled is False
 
 
+def test_step_pause_wakes_on_force_done(tmp_path):
+    """Ctrl+D / 'done' during step-mode must not deadlock the wait loop."""
+    agent = _make_agent(tmp_path)
+    agent.set_step_mode(True)
+    assert agent._step_pause_should_wait() is True
+    agent.request_done()
+    assert agent._step_pause_should_wait() is False
+
+
 def test_repeat_sig_streak_starts_zero(tmp_path):
     """Sanity: fresh agent has no repeat streak yet."""
     agent = _make_agent(tmp_path)

@@ -66,6 +66,12 @@ def test_gemma3_multimodal():
     assert classify_model_modality("gemma-3-27b") == "vlm"
 
 
+def test_gemma4_multimodal():
+    """Gemma 4 12B unified — vision via mmproj; tag is gemma4:* in Ollama."""
+    assert classify_model_modality("gemma4:12b-q8") == "vlm"
+    assert classify_model_modality("gemma-4-12b-it") == "vlm"
+
+
 def test_phi_multimodal():
     assert classify_model_modality("phi-3-vision") == "vlm"
     assert classify_model_modality("phi-4-multimodal") == "vlm"
