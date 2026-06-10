@@ -2427,6 +2427,12 @@ class LiveBrowser:
                     action_frame_paths[str(keycode)] = str(fp)
                 except Exception:
                     pass
+        # NOTE: `action_frame_paths` is attached to the report AFTER
+        # `_build_report` runs (below) — `report` does not exist yet here.
+        # Assigning it at this point raised UnboundLocalError and crashed the
+        # whole harness — and only when action keys actually produced frames,
+        # i.e. exactly on good games (Qwen dojo-fight trace 20260610_151443
+        # iters 1-2 never got a test report because of this).
         # Pop the raw per-key fake-action signal now; the gating decision is made
         # later (after referenced_assets is computed) — stash it on a local.
         _fake_actions = input_test.pop("fake_actions", None) \
@@ -2519,6 +2525,8 @@ class LiveBrowser:
         report["screenshot"] = screenshot_saved
         report["screenshot_before"] = screenshot_before_saved
         report["screenshot_action"] = screenshot_action_saved
+        # Moved here from the per-action-frame save block above: `report`
+        # only exists from this point on (UnboundLocalError fix, 2026-06-10).
         if action_frame_paths:
             report["action_frames"] = action_frame_paths
         report["action_key"] = (

@@ -285,6 +285,10 @@ def test_rewrite_exemption_consumed_after_one_attempt(tmp_path):
     a = _make_agent(tmp_path)
     a._current_file = _real_baseline_html()
     a._snapshot_n = 1
+    # 2026-06-10 failing-baseline salvage: rewrites are only banned on a
+    # KNOWN-WORKING baseline. Pin that case here — this test is about the
+    # one-shot exemption being consumed, not about the salvage rule.
+    a._previous_report_ok = True
     a._allow_one_rewrite = True
     # Build a minimal `<html_file>` reply.
     new_html = (
@@ -311,6 +315,9 @@ def test_rewrite_rejected_when_no_feedback_drain(tmp_path):
     a = _make_agent(tmp_path)
     a._current_file = _real_baseline_html()
     a._snapshot_n = 1
+    # 2026-06-10 failing-baseline salvage: the ban now only applies to a
+    # KNOWN-WORKING baseline (previous report ok). Set it explicitly.
+    a._previous_report_ok = True
     new_html = (
         "<!DOCTYPE html><html><body><canvas id='c' width='800' height='600'>"
         "</canvas><script>" + ("// other\n" * 200) +

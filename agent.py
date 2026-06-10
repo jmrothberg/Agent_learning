@@ -49,6 +49,7 @@ import hashlib
 import json
 import os
 import re
+import traceback
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -1088,6 +1089,12 @@ def _resolve_fuzzy_asset_stems(
     return out
 
 
+# Prefix for feedback items written by the HARNESS (not the user). The
+# media-request classifiers must never treat these as user asks — see
+# `_feedback_is_art_change`. The model still sees the full text.
+_HARNESS_ADVISORY_SENTINEL = "[HARNESS ADVISORY — informational, not a request]"
+
+
 def _has_audio_context(text_lower: str) -> bool:
     """True when feedback language is explicitly about audio."""
     if any(re.search(rf"\b{re.escape(n)}\b", text_lower) for n in _SOUND_NOUNS):
@@ -1114,7 +1121,17 @@ def _feedback_is_art_change(text: str, asset_names: list[str]) -> bool:
     counts. Without this, a session with N-frame entity names (every
     asset is `<entity>_<state>`) would skip art-change classification
     even when the user clearly referenced an entity.
+
+    Harness-authored advisories (sentinel-prefixed) are NEVER art
+    requests: 2026-06-10 dojo-fight traces show the ASSET SANITY
+    WARNING (which itself says "do NOT regenerate") being classified
+    as a user art request here, arming 3 turns of "ASSET GENERATION
+    REQUIRED — The user asked you to GENERATE NEW ART" that
+    contradicted both the advisory and the recovery prompt in the
+    same message.
     """
+    if text.lstrip().startswith(_HARNESS_ADVISORY_SENTINEL):
+        return False
     lo = text.lower()
     if _name_in_text(lo, asset_names):
         return True
@@ -1449,6 +1466,94 @@ class AgentEvent:
     kind: str           # phase | token | plan | code | test | question | done | error | info | diagnose | patch | best_of_n | memory | activity | assets | streak
     text: str = ""
     data: dict = field(default_factory=dict)
+
+
+def render_run_summary(records: list[dict], artifact_id: str = "") -> str:
+    """Render a compact per-run markdown summary from parsed jsonl records.
+
+    Pure function (testable without a session). Added 2026-06-10: answering
+    "what happened in this run" previously required grepping a multi-hundred-
+    KB log; the data was already in the `iter_summary` / `code_snapshot` /
+    `no_usable_code` / `harness_crash` trace records — this just renders it
+    as one table per run.
+    """
+    goal = ""
+    model = ""
+    iters: dict[int, dict] = {}
+    no_code_turns: list[str] = []
+    harness_crashes = 0
+    restart_lines: list[str] = []
+    outcome: dict | None = None
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        kind = rec.get("kind")
+        if not goal and rec.get("goal"):
+            goal = str(rec.get("goal"))
+        if not model and rec.get("model_name"):
+            model = str(rec.get("model_name"))
+        if kind == "code_snapshot":
+            it = int(rec.get("iteration") or 0)
+            row = iters.setdefault(it, {})
+            row["materialize"] = str(rec.get("materialize") or "")[:60]
+            row["bytes"] = rec.get("size")
+        elif kind == "iter_summary":
+            it = int(rec.get("iteration") or 0)
+            row = iters.setdefault(it, {})
+            row["ok"] = rec.get("ok")
+            row["probes"] = (
+                f"{rec.get('probes_passed')}/{rec.get('probes_total')}"
+            )
+            sw = rec.get("soft_warnings") or []
+            row["blocker"] = (
+                str(sw[0])[:70] if sw else str(rec.get("fail_reason") or "")[:70]
+            )
+        elif kind == "no_usable_code":
+            reason_bits = [
+                key for key in ("plan_only", "probes_only", "media_only",
+                                "identical_repeat")
+                if rec.get(key)
+            ]
+            no_code_turns.append(",".join(reason_bits) or "rejected/unparsed")
+        elif kind == "harness_crash":
+            harness_crashes += 1
+        elif kind == "event" and rec.get("event") == "restart":
+            restart_lines.append(str(rec.get("text_preview") or "")[:90])
+        elif kind == "session_outcome":
+            outcome = rec
+    lines: list[str] = [f"# Run summary — {artifact_id}".rstrip(" —")]
+    if goal:
+        lines.append(f"Goal: {goal[:200]}")
+    if model:
+        lines.append(f"Model: {model}")
+    lines.append("")
+    if iters:
+        lines.append("| iter | materialize | bytes | ok | probes | blocker |")
+        lines.append("|------|-------------|-------|----|--------|---------|")
+        for it in sorted(iters):
+            row = iters[it]
+            lines.append(
+                f"| {it} | {row.get('materialize', '')} "
+                f"| {row.get('bytes', '')} | {row.get('ok', '')} "
+                f"| {row.get('probes', '')} | {row.get('blocker', '')} |"
+            )
+        lines.append("")
+    if no_code_turns:
+        lines.append(
+            f"No-usable-code turns: {len(no_code_turns)} "
+            f"({'; '.join(no_code_turns[:8])})"
+        )
+    if harness_crashes:
+        lines.append(f"Harness crashes: {harness_crashes}")
+    for rl in restart_lines:
+        lines.append(f"Restart: {rl}")
+    if outcome is not None:
+        lines.append(
+            f"Outcome: ok={outcome.get('ok')} "
+            f"iterations={outcome.get('iterations')} "
+            f"best_exists={outcome.get('best_path_exists')}"
+        )
+    return "\n".join(lines) + "\n"
 
 
 # Default context window. This value is ALSO the denominator for the
@@ -2508,6 +2613,32 @@ class GameAgent:
         )
 
     @staticmethod
+    def _prompt_orders_full_rewrite(prompt_text: str) -> bool:
+        """True when a harness-authored prompt ORDERS a full <html_file>.
+
+        2026-06-10 (both dojo-fight traces): several recovery prompts
+        instruct the model to emit a complete <html_file>, but the
+        baseline-exists gate in `_materialize` then rejected the compliant
+        reply — the harness contradicting itself. Every caller that sends
+        a prompt matching this predicate must arm `_allow_one_rewrite` so
+        the requested rewrite is actually accepted.
+
+        Matches ORDERS only, not conditionals: the generic fallback
+        ("If this is the first build, send a complete <html_file>.") and
+        the identical-reply escalation ("Do NOT re-emit <html_file>")
+        must NOT match.
+        """
+        low = prompt_text.lower()
+        return (
+            "emit one complete <html_file>" in low
+            # format-stuck escalation: "Stop trying to send <patch> this
+            # turn. Send a complete <html_file>..."
+            or "stop trying to send <patch>" in low
+            # stream-loop recovery offers "emit a smaller `<html_file>`"
+            or "emit a smaller `<html_file>`" in low
+        )
+
+    @staticmethod
     def _no_usable_code_fallback(
         *,
         plan_only: bool,
@@ -2651,6 +2782,27 @@ class GameAgent:
                 "emit a <question> asking the user to narrow scope "
                 "instead of shipping concatenated drafts.\n"
                 "Do NOT include <plan>, <criteria>, or <probes>."
+            )
+            return fallback, False
+        # Baseline-exists rejection (2026-06-10 dojo-fight traces): the
+        # old flow fell through to the generic "I could not find a <patch>
+        # or <html_file> block in your reply" — factually FALSE (the reply
+        # contained a full <html_file>; the gate rejected it) — so the
+        # model dropped its in-flight fix instead of re-sending it as
+        # patches. Tell it the truth and ask for the SAME changes as
+        # <patch> blocks.
+        if "baseline file already exists" in reject_low:
+            fallback = (
+                "Your <html_file> WAS received, but it was REJECTED: a "
+                "working baseline file already exists on disk, and full "
+                "rewrites of a working game are banned (regression risk). "
+                "Your changes were NOT applied and NOT saved.\n\n"
+                "Recovery for THIS turn: re-send the SAME fixes you just "
+                "wrote, but as one or more <patch> SEARCH/REPLACE blocks "
+                "against the CURRENT file on disk (shown in an earlier "
+                "message). Keep each SEARCH block small (5-10 lines) and "
+                "copy it EXACTLY from the current file. Do NOT re-emit "
+                "<html_file>."
             )
             return fallback, False
         if consecutive_plan_only >= 2:
@@ -2952,7 +3104,9 @@ class GameAgent:
             )
             text = result.text or ""
         except Exception as e:
-            self._trace({"kind": "format_doctor_error", "err": str(e)[:200]})
+            # traceback included (2026-06-10): str(e) alone hid a harness
+            # bug for days — see _trace_exception docstring.
+            self._trace_exception("format_doctor_error", e)
             return None
         self._trace({
             "kind": "format_doctor_stream_done",
@@ -3971,6 +4125,21 @@ class GameAgent:
             "data": ev.data,
         })
         return ev
+
+    def _trace_exception(self, kind: str, e: Exception, **extra) -> None:
+        """Trace an exception WITH a capped traceback.
+
+        Added 2026-06-10: the dojo-fight trace 20260610_151443 recorded the
+        harness UnboundLocalError only as the one-line str(e) — no stack —
+        which is why a hard tools.py bug survived undetected. str(e) alone
+        is not enough to debug harness/agent-loop failures from a trace.
+        """
+        self._trace({
+            "kind": kind,
+            "err": str(e)[:300],
+            "traceback": traceback.format_exc()[-4000:],
+            **extra,
+        })
 
     def _save_snapshot(self, html: str) -> Path | None:
         try:
@@ -8748,13 +8917,10 @@ class GameAgent:
                     cancel_event=cancel,
                 )
             except Exception as e:
-                self._trace({
-                    "kind": "best_of_n_candidate_error",
-                    "candidate": idx,
-                    "slot": label,
-                    "temperature": temp,
-                    "err": str(e)[:200],
-                })
+                self._trace_exception(
+                    "best_of_n_candidate_error", e,
+                    candidate=idx, slot=label, temperature=temp,
+                )
                 return _Candidate(
                     text="", score=-100.0,
                     extra={"slot": label, "err": str(e)[:200]},
@@ -8922,7 +9088,7 @@ class GameAgent:
                         "blocks": blocks,
                     })
                 except Exception as e:
-                    self._trace({"kind": "patch_outcome_error", "err": str(e)})
+                    self._trace_exception("patch_outcome_error", e)
             if res.applied == 0:
                 # Surface the FIRST per-patch reason in the materialize
                 # message so the user log shows WHY (the model already
@@ -8999,6 +9165,21 @@ class GameAgent:
             if feedback_exempt:
                 self._allow_one_rewrite = False
                 self._trace({"kind": "rewrite_exemption_consumed"})
+            # Failing-baseline salvage (2026-06-10, both dojo-fight traces):
+            # when the on-disk baseline is itself FAILING the harness
+            # (previous report not ok), a structurally-clean inbound rewrite
+            # is more valuable than the rejection — local models pushed into
+            # rewrite mode do not switch back to <patch> on command
+            # (DeepSeek AND Qwen each burned iters 4-6 on this exact
+            # rejection). The inbound HTML already passed the duplicate-decl
+            # micro-probes above, and still faces the bloat / skeleton
+            # checks below. Rewrites on a WORKING baseline
+            # (_previous_report_ok is True) stay banned — that is the
+            # regression-amplification case the gate exists for.
+            failing_baseline_salvage = (
+                not dry_run
+                and self._previous_report_ok is not True
+            )
             if (
                 not dry_run
                 and self._current_file
@@ -9006,6 +9187,7 @@ class GameAgent:
                 and not allow_rewrite
                 and not baseline_degenerate
                 and not feedback_exempt
+                and not failing_baseline_salvage
             ):
                 return None, (
                     "<html_file> rejected: a baseline file already exists. "
@@ -9013,6 +9195,21 @@ class GameAgent:
                     "AGENT_ALLOW_FULL_REWRITE=1 — only when patches truly "
                     "cannot express the structural change.)"
                 )
+            if (
+                failing_baseline_salvage
+                and self._current_file
+                and self._snapshot_n >= 1
+                and not allow_rewrite
+                and not baseline_degenerate
+                and not feedback_exempt
+            ):
+                # The gate above would have rejected this rewrite before the
+                # salvage rule; record that the salvage is what let it through.
+                self._trace({
+                    "kind": "rewrite_accepted_failing_baseline",
+                    "previous_report_ok": self._previous_report_ok,
+                    "html_bytes": len(html),
+                })
             # Materialize-time bloat detector: even when the streaming
             # repetition detector lets a reply through, scan the final
             # HTML for duplicated blocks (typical: a maze 2D literal
@@ -10815,6 +11012,10 @@ class GameAgent:
                         ],
                     })
                     warn_lines = [
+                        # Sentinel keeps this advisory OUT of the user-art-
+                        # request classifier (it is not a request to make art;
+                        # it explicitly says regen is a dead end).
+                        _HARNESS_ADVISORY_SENTINEL,
                         "ASSET SANITY WARNING — these generated sprites came "
                         "out nearly identical to the `from_image` parent they "
                         "were derived from, so the requested pose change "
@@ -13284,6 +13485,18 @@ class GameAgent:
                         # on the next turn's reply even if the model
                         # ignores the escalation.
                         self._last_no_usable_code_fingerprint = None
+                    # If this fallback ORDERS a full rewrite (duplicate-decl
+                    # coaching, plan-only-with-file, format-stuck escalation,
+                    # loop recovery), arm the one-shot exemption so the
+                    # baseline-exists gate accepts the compliant reply.
+                    # Qwen trace 151443 iters 4-6: the model obeyed the
+                    # duplicate-decl coaching and got rejected three times.
+                    if self._prompt_orders_full_rewrite(fallback):
+                        self._allow_one_rewrite = True
+                        self._trace({
+                            "kind": "rewrite_exemption_armed_by_prompt",
+                            "source": "no_usable_code_fallback",
+                        })
                     self._messages.append({
                         "role": "user",
                         "content": self._flush_user_injections(fallback),
@@ -13577,26 +13790,56 @@ class GameAgent:
                 "activity", "browser",
                 {"label": f"loading iter {iteration} in Chromium"},
             ))
-            try:
-                report = await self.browser.load_and_test(
-                    self.out_path, screenshot_path=shot_path,
-                    screenshot_before_path=shot_before_path,
-                    screenshot_action_path=shot_action_path,
-                    probes=self._probes or None,
-                    opening_book_recipes=getattr(self, "_active_opening_book_recipes", []),
-                    # todo #2: pass criteria so the harness can flag
-                    # coverage gaps as a soft_warning (forces the model
-                    # to add probes that actually test what it promised).
-                    criteria=self._criteria or None,
-                )
-            except Exception as e:
+            # Harness-crash handling (2026-06-10, dojo-fight trace 151443):
+            # retry ONCE before charging the model an iteration — crashes can
+            # be data-shape-dependent (the closing verification on the same
+            # session ran fine), and a single retry often succeeds. If both
+            # attempts crash, tell the model the truth: the harness failed,
+            # the GAME WAS NOT TESTED, and it must NOT change the game in
+            # response. The old message ("simplify the page, try again")
+            # blamed the game for a Python bug — Qwen obeyed and spent
+            # 2 iterations shrinking a working build.
+            report = None
+            harness_crash: Exception | None = None
+            for _test_attempt in (1, 2):
+                try:
+                    report = await self.browser.load_and_test(
+                        self.out_path, screenshot_path=shot_path,
+                        screenshot_before_path=shot_before_path,
+                        screenshot_action_path=shot_action_path,
+                        probes=self._probes or None,
+                        opening_book_recipes=getattr(self, "_active_opening_book_recipes", []),
+                        # todo #2: pass criteria so the harness can flag
+                        # coverage gaps as a soft_warning (forces the model
+                        # to add probes that actually test what it promised).
+                        criteria=self._criteria or None,
+                    )
+                    harness_crash = None
+                    break
+                except Exception as e:
+                    harness_crash = e
+                    self._trace_exception(
+                        "harness_crash", e,
+                        iteration=iteration, test_attempt=_test_attempt,
+                    )
+            if harness_crash is not None or report is None:
                 yield self._record(AgentEvent("activity", "idle"))
-                yield self._record(AgentEvent("info", f"browser harness crashed: {e}"))
+                yield self._record(AgentEvent(
+                    "info",
+                    f"browser harness crashed (after retry): {harness_crash}",
+                ))
                 self._messages.append({
                     "role": "user",
                     "content": self._flush_user_injections(
-                        f"The browser test harness itself crashed: {e}\n"
-                        "Please simplify the page and try again."
+                        "HARNESS FAILURE (not a game bug): the browser test "
+                        f"harness itself crashed with an internal error: "
+                        f"{harness_crash}\n"
+                        "Your game was NOT tested this iteration — there is "
+                        "NO test signal, good or bad. Do NOT change the game "
+                        "in response to this message, and do NOT simplify or "
+                        "rewrite working code. Continue with your open "
+                        "<todos> items if any remain, or reply <done/> if "
+                        "you believe the build is complete."
                     ),
                 })
                 continue
@@ -13793,11 +14036,9 @@ class GameAgent:
                         "err": str(e)[:200],
                     })
             except Exception as e:
-                self._trace({
-                    "kind": "iter_summary_error",
-                    "iteration": iteration,
-                    "err": str(e)[:200],
-                })
+                self._trace_exception(
+                    "iter_summary_error", e, iteration=iteration,
+                )
 
             # Auto-arm step-mode on the FIRST failing iter. Rationale
             # (donkey-kong trace 20260513_122154): iter 2 burned 7 min
@@ -14829,7 +15070,7 @@ class GameAgent:
                 else:
                     attempts.append((score, k, canonical_best))
             except Exception as e:
-                self._trace({"kind": "restart_snapshot_failed", "err": str(e)})
+                self._trace_exception("restart_snapshot_failed", e)
                 attempts.append((score, k, canonical_best))
             # Restart-signature-repeat escalation. Compute the dominant
             # failure shape of THIS attempt and compare to the previous
@@ -14906,7 +15147,7 @@ class GameAgent:
                     encoding="utf-8",
                 )
         except Exception as e:
-            self._trace({"kind": "restart_install_failed", "err": str(e)})
+            self._trace_exception("restart_install_failed", e)
         yield self._record(AgentEvent(
             "restart",
             f"restart winner: attempt {best_idx+1} score={best_score:.0f}",
@@ -15225,6 +15466,12 @@ class GameAgent:
             and hasattr(self._p, "scope_reduction_instruction")
         ):
             self._dead_first_build_pending = False
+            # The scope-reduction prompt ORDERS a complete <html_file>;
+            # arm the one-shot exemption so the baseline-exists gate in
+            # `_materialize` accepts the compliant rewrite. DeepSeek trace
+            # 140129 attempt 2: the model obeyed this exact prompt and its
+            # rewrite (containing the PLAYER_X fix) was rejected.
+            self._allow_one_rewrite = True
             self._trace({
                 "kind": "dead_first_build_recovery_prompt_used",
                 # `_build_fix_prompt` runs after the iter's test report
@@ -15236,6 +15483,7 @@ class GameAgent:
                 "recoveries_this_attempt": (
                     self._dead_first_build_recoveries
                 ),
+                "rewrite_exemption_armed": True,
             })
             return self._p.scope_reduction_instruction(report_text)
 
@@ -15412,19 +15660,32 @@ class GameAgent:
             f"{self._last_materialized_iter}) was never tested — running "
             "one closing verification.",
         ))
-        try:
-            report = await self.browser.load_and_test(
-                self.out_path,
-                screenshot_path=None,
-                screenshot_before_path=None,
-                probes=self._probes or None,
-                opening_book_recipes=getattr(self, "_active_opening_book_recipes", []),
-                criteria=self._criteria or None,
-            )
-        except Exception as e:
-            yield self._record(AgentEvent(
-                "info", f"[final-test] browser harness crashed: {e}",
-            ))
+        # Same retry-once + traceback capture as the iteration-loop test
+        # (harness crashes are data-shape-dependent; see harness_crash trace).
+        report = None
+        for _test_attempt in (1, 2):
+            try:
+                report = await self.browser.load_and_test(
+                    self.out_path,
+                    screenshot_path=None,
+                    screenshot_before_path=None,
+                    probes=self._probes or None,
+                    opening_book_recipes=getattr(self, "_active_opening_book_recipes", []),
+                    criteria=self._criteria or None,
+                )
+                break
+            except Exception as e:
+                self._trace_exception(
+                    "harness_crash", e,
+                    context="final_test", test_attempt=_test_attempt,
+                )
+                if _test_attempt == 2:
+                    yield self._record(AgentEvent(
+                        "info",
+                        f"[final-test] browser harness crashed (after retry): {e}",
+                    ))
+                    return
+        if report is None:
             return
         report_text = format_report_for_model(report)
         self._last_report_summary = report_text
@@ -15458,6 +15719,36 @@ class GameAgent:
             })
         except Exception as e:
             self._trace({"kind": "outcome_record_failed", "err": str(e)})
+        # Per-run summary.md (2026-06-10): render the iter table from the
+        # jsonl trace so a failed run is diagnosable in one screen instead
+        # of grepping the full log. Best-effort; never blocks the outcome.
+        self._write_run_summary()
+
+    def _write_run_summary(self) -> None:
+        try:
+            if not self.trace_path.exists():
+                return
+            records: list[dict] = []
+            with self.trace_path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        records.append(json.loads(line))
+                    except Exception:
+                        continue
+            text = render_run_summary(records, artifact_id=self._artifact_id)
+            summary_path = self.trace_path.with_name(
+                self.trace_path.stem + ".summary.md"
+            )
+            summary_path.write_text(text, encoding="utf-8")
+            self._trace({
+                "kind": "run_summary_written",
+                "path": str(summary_path),
+            })
+        except Exception as e:
+            self._trace_exception("run_summary_failed", e)
 
     @staticmethod
     def _chunk_for_display(text: str, chunk: int = 120) -> list[str]:

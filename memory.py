@@ -4794,6 +4794,21 @@ class Playbook:
             # for users who opt back in via /playbook on.
             if sim < 0.02:
                 continue
+            # Code-stage floor (2026-06-10 dojo-fight trace): fix turns
+            # injected `fps-camera-and-movement-vectors` into a 2D-fighter
+            # session at 0.0319 — pure token noise, 1.8KB of misleading
+            # content per fix prompt, and the bullet earned harmful+1 yet
+            # kept re-injecting within the session. Code-stage is the
+            # narrow "validated patterns only" stage, so it gets a higher
+            # floor than plan-stage (which stays broad by design).
+            # 0.035 calibrated against BOTH trace sets: the fight-trace
+            # noise hit scored 0.0319, while genuine code-stage hits
+            # against the real playbook (doom goal + arrows feedback,
+            # pinned by test_doom_trace_fixes fix_b) score 0.0373-0.0517.
+            # Do not raise toward 0.05+ without re-measuring — long goals
+            # dilute Jaccard, so genuine hits sit lower than you'd guess.
+            if stage == "code" and sim < 0.035:
+                continue
 
             # Quality multiplier: bounded ±10% of relevance.
             quality = 1.0 + 0.10 * _tanh(b.score() / 5.0)

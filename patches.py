@@ -384,6 +384,37 @@ def repair_reply(reply: str) -> str:
         flags=re.MULTILINE,
     )
 
+    # 2c. End-of-stream truncation: the reply ENDS inside an open <patch>
+    # that has '<<<<<<< SEARCH' and exactly one '=======' divider plus some
+    # replace-body content, but the stream cut off before the
+    # '>>>>>>> REPLACE' terminator. Append the terminator so step 3 can
+    # auto-close the block. End-of-reply ONLY — a malformed block in the
+    # middle of a reply is left alone (it is a format error, not a
+    # truncation). Motivating trace: dojo-fight 20260610_140129 attempt 1
+    # iter 7 — the model's only <patch> of the session was dropped for a
+    # missing terminator and the iteration was wasted.
+    last_open = reply.rfind("<patch>")
+    if last_open >= 0:
+        tail = reply[last_open:]
+        if (
+            "</patch>" not in tail
+            and ">>>>>>> REPLACE" not in tail
+            and "<<<<<<< SEARCH" in tail
+            and "\n=======" in tail
+        ):
+            divider_idx = tail.find("\n=======")
+            # Exactly one divider, and a non-empty replace body after it —
+            # an empty tail means the stream died AT the divider and we
+            # cannot know the intended replacement; don't synthesize a
+            # deletion patch.
+            after_divider = tail[divider_idx + len("\n======="):]
+            only_one_divider = "\n=======" not in after_divider
+            # Safety: if the model abandoned the patch and started another
+            # tag, this is not a truncation — leave it for the format path.
+            abandoned = "<html_file>" in after_divider or "<patch>" in after_divider
+            if only_one_divider and after_divider.strip() and not abandoned:
+                reply = reply.rstrip("\n") + "\n>>>>>>> REPLACE\n"
+
     # 3. Auto-close <patch> blocks that end with the REPLACE marker but are missing </patch>
     # We do this by finding '<patch>' (case-insensitive) where there's no matching '</patch>' ahead
     # before another '<patch>', and we see '>>>>>>> REPLACE'.
