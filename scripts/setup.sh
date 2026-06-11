@@ -4,7 +4,9 @@
 #
 #   ./scripts/setup.sh                   # DEFAULT: core + Chromium + mlx-lm (arm64 Mac)
 #                                        #         + FULL GPU stack (torch/diffusers/sprites/audio)
+#                                        #         + video cutscenes (Wan2.2 — mlx-gen on Mac)
 #   ./scripts/setup.sh --no-gpu          # rare: skip torch/diffusers (no Z-Image / Stable Audio)
+#   ./scripts/setup.sh --no-video        # skip the video-generation stack (<videos> disabled)
 #   ./scripts/setup.sh --recreate-venv   # nuke .venv and start over (use this
 #                                        #   if the venv was created in a
 #                                        #   different directory and the
@@ -30,8 +32,13 @@
 #      Omit with `--no-gpu`. Then prompts for Z-Image-Turbo weights (or downloads
 #      from HuggingFace when you press Enter with no local copy) and writes
 #      DIFFUSION_MODELS_DIR into `.env` for chat.py / coder.py.
-#   7. Run the pytest suite end-to-end as a sanity check (~190 tests, < 20 s).
-#   8. Print MLX / Ollama next-steps + HF download recovery (only if 403/401).
+#   7. Video cutscenes (<videos> tag, Wan2.2-TI2V-5B) — on macOS arm64 creates
+#      the dedicated `.venv-video/` and pip-installs mlx-gen (weights ~17 GB
+#      lazy-download to the HF cache on first clip). On Ubuntu/Linux the
+#      diffusers stack from step 6 already covers Wan (~25 GB lazy-download on
+#      first <videos>). Omit with `--no-video` (auto-off under `--no-gpu`).
+#   8. Run the pytest suite end-to-end as a sanity check (~190 tests, < 20 s).
+#   9. Print MLX / Ollama next-steps + HF download recovery (only if 403/401).
 #
 # Idempotent: re-running on a healthy install is a no-op (~5 seconds).
 # Cross-platform: tested on macOS (Apple Silicon + MPS) and Ubuntu Linux
@@ -47,6 +54,7 @@ ROOT="$(pwd)"
 # --- arg parsing -----------------------------------------------------------
 
 WITH_GPU="auto"
+WITH_VIDEO="auto"
 SKIP_PLAYWRIGHT=0
 SKIP_TESTS=0
 RECREATE_VENV=0
@@ -62,6 +70,7 @@ for arg in "$@"; do
     case "$arg" in
         --no-gpu)             WITH_GPU="off" ;;
         --gpu|--with-gpu)     WITH_GPU="on"  ;;
+        --no-video)           WITH_VIDEO="off" ;;
         --skip-playwright)    SKIP_PLAYWRIGHT=1 ;;
         --skip-tests)         SKIP_TESTS=1 ;;
         --recreate-venv)      RECREATE_VENV=1 ;;
@@ -79,7 +88,7 @@ fi
 
 # --- helpers ---------------------------------------------------------------
 
-# Pretty step header. `step "1/8" "Description"` prints a numbered banner
+# Pretty step header. `step "1/9" "Description"` prints a numbered banner
 # so the user can follow which phase is in flight.
 step() {
     printf '\n\033[1;36m[%s] %s\033[0m\n' "$1" "$2"
@@ -277,6 +286,17 @@ if [ "$WITH_GPU" = "auto" ]; then
     esac
 fi
 
+# Video cutscene stack (<videos> tag, Wan2.2). Follows the GPU switch:
+# auto-on when the GPU stack is on, forced off under --no-gpu (the Linux
+# backend rides on torch/diffusers from step 6; the Mac backend is
+# pointless without the rest of the media stack anyway).
+if [ "$WITH_VIDEO" = "auto" ]; then
+    WITH_VIDEO="$WITH_GPU"
+fi
+if [ "$WITH_GPU" = "off" ]; then
+    WITH_VIDEO="off"
+fi
+
 MLX_TOOLS=0
 if [ "$PLATFORM" = "macos" ] && [ "$(uname -m)" = "arm64" ] && [ "$MLX_TOOLS_SKIP" -eq 0 ]; then
     MLX_TOOLS=1
@@ -286,13 +306,14 @@ echo "Agent_learning setup"
 echo "  repo:       $ROOT"
 echo "  platform:   $PLATFORM ($OS)"
 echo "  GPU stack:  $WITH_GPU"
+echo "  video gen:  $WITH_VIDEO"
 echo "  mlx-lm:     $([ $MLX_TOOLS -eq 1 ] && echo on || echo off)"
 echo "  playwright: $([ $SKIP_PLAYWRIGHT -eq 0 ] && echo on || echo skipped)"
 echo "  tests:      $([ $SKIP_TESTS -eq 0 ] && echo on || echo skipped)"
 
 # --- 1. python check -------------------------------------------------------
 
-step "1/8" "Python 3.10+ check"
+step "1/9" "Python 3.10+ check"
 
 if ! command -v python3 >/dev/null 2>&1; then
     if [ "$PLATFORM" = "linux" ]; then
@@ -312,7 +333,7 @@ ok "python3 $PY_VER at $(command -v python3)"
 
 # --- 2. venv ---------------------------------------------------------------
 
-step "2/8" "Virtual environment (.venv/)"
+step "2/9" "Virtual environment (.venv/)"
 
 VENV_PY=".venv/bin/python"
 VENV_PIP=".venv/bin/pip"
@@ -361,14 +382,14 @@ ok "pip upgraded"
 
 # --- 3. core deps ----------------------------------------------------------
 
-step "3/8" "Core Python deps (requirements.txt)"
+step "3/9" "Core Python deps (requirements.txt)"
 
 "$VENV_PIP" install -r requirements.txt
 ok "core deps installed"
 
 # --- 4. mlx-lm (Apple Silicon arm64) ---------------------------------------
 
-step "4/8" "MLX server package (requirements-mlx.txt)"
+step "4/9" "MLX server package (requirements-mlx.txt)"
 
 if [ $MLX_TOOLS -eq 1 ]; then
     "$VENV_PIP" install -r requirements-mlx.txt
@@ -377,7 +398,7 @@ fi
 
 # --- 5. playwright ---------------------------------------------------------
 
-step "5/8" "Playwright Chromium"
+step "5/9" "Playwright Chromium"
 
 if [ $SKIP_PLAYWRIGHT -eq 1 ]; then
     warn "skipped (--skip-playwright). Run when ready: env -u PLAYWRIGHT_BROWSERS_PATH $VENV_PY -m playwright install chromium"
@@ -401,7 +422,7 @@ fi
 
 # --- 6. optional GPU stack -------------------------------------------------
 
-step "6/8" "GPU stack — torch + diffusers + sprites + audio (skip with --no-gpu)"
+step "6/9" "GPU stack — torch + diffusers + sprites + audio (skip with --no-gpu)"
 
 if [ "$WITH_GPU" = "off" ]; then
     warn "skipped (--no-gpu). No Z-Image / Stable Audio — sprite + sound generation unavailable."
@@ -426,9 +447,37 @@ else
     configure_diffusion_weights
 fi
 
-# --- 7. tests --------------------------------------------------------------
+# --- 7. video cutscenes (Wan2.2) -------------------------------------------
 
-step "7/8" "Test suite (pytest)"
+step "7/9" "Video cutscenes — Wan2.2-TI2V-5B (skip with --no-video)"
+
+if [ "$WITH_VIDEO" = "off" ]; then
+    warn "skipped (--no-video / --no-gpu). The <videos> tag will be a silent no-op."
+elif [ "$PLATFORM" = "macos" ] && [ "$(uname -m)" = "arm64" ]; then
+    # mlx-gen lives in its OWN venv: it pins its own mlx version, which
+    # must never fight the agent's mlx-lm pin in the main .venv.
+    VIDEO_VENV="$ROOT/.venv-video"
+    if [ ! -x "$VIDEO_VENV/bin/pip" ]; then
+        python3 -m venv "$VIDEO_VENV"
+        ok "created dedicated video venv at .venv-video/"
+    fi
+    "$VIDEO_VENV/bin/pip" install -q -U pip mlx-gen
+    if [ -x "$VIDEO_VENV/bin/mlxgen" ]; then
+        ok "mlx-gen installed — model AbstractFramework/wan2.2-ti2v-5b-diffusers-8bit (~17 GB) lazy-downloads on first clip"
+    else
+        warn "mlx-gen install did not produce .venv-video/bin/mlxgen — <videos> will be a no-op until fixed"
+    fi
+elif [ "$PLATFORM" = "linux" ]; then
+    # Nothing extra to install: the diffusers stack from step 6 covers
+    # Wan2.2 (WanPipeline). Weights lazy-download on first use.
+    ok "Linux uses the step-6 diffusers stack — Wan-AI/Wan2.2-TI2V-5B-Diffusers (~25 GB) lazy-downloads to the HF cache on first <videos>"
+else
+    warn "no supported video backend on this platform — <videos> will be a silent no-op."
+fi
+
+# --- 8. tests --------------------------------------------------------------
+
+step "8/9" "Test suite (pytest)"
 
 if [ $SKIP_TESTS -eq 1 ]; then
     warn "skipped (--skip-tests)"
@@ -437,9 +486,9 @@ else
     ok "all tests passed"
 fi
 
-# --- 8. next steps ---------------------------------------------------------
+# --- 9. next steps ---------------------------------------------------------
 
-step "8/8" "Next steps"
+step "9/9" "Next steps"
 
 cat <<EOF
 
@@ -482,6 +531,18 @@ if [ "$WITH_GPU" = "on" ]; then
        • https://huggingface.co/stabilityai/stable-audio-open-1.0 — agree if prompted
        • .venv/bin/python -m huggingface_hub.commands.huggingface_cli login
          (or export HF_TOKEN=hf_…)
+
+EOF
+fi
+
+if [ "$WITH_VIDEO" = "on" ]; then
+    cat <<'EOF'
+   VIDEO CUTSCENES — Wan2.2-TI2V-5B (<videos> tag, ~3 min per 4s clip):
+     Weights lazy-download to the HF cache on the first clip.
+     Try it standalone (T2V; add --image <png> for image-to-video):
+       .venv/bin/python scripts/generate_video.py \
+           --prompt "a knight runs across a collapsing drawbridge, cinematic" \
+           --out /tmp/test_clip.mp4
 
 EOF
 fi

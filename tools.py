@@ -1362,6 +1362,43 @@ def _canvas_default_size_warning(
     )
 
 
+# JS-source-in-body gate (FPS trace 20260611_213744 iters 5-6): a patch broke
+# a script boundary and 2,517 chars of JavaScript rendered as visible page
+# text. The report showed the raw body sample but never NAMED the failure,
+# so the model stayed stuck on generic blank-canvas heuristics. Each pattern
+# is a distinct JS-source signature; ≥2 distinct kinds = source code, not
+# HUD strings ("Health: Ammo:") or story prose.
+_JS_IN_BODY_SIGNATURES: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bfunction\s+\w+\s*\("),
+    re.compile(r"\b(?:const|let|var)\s+\w+\s*="),
+    re.compile(r"=>\s*\{"),
+    re.compile(r"\bfor\s*\(\s*(?:let|var|const)\b"),
+    re.compile(r"\bif\s*\([^)]+\)\s*\{"),
+)
+_JS_IN_BODY_MIN_CHARS = 200
+
+
+def _js_source_in_body_warning(body_text: str) -> str | None:
+    """Return a gating JS-SOURCE-IN-BODY warning when the page's visible
+    body text is JavaScript source — a broken <script> boundary. None for
+    short bodies and normal HUD/story text (needs >=2 distinct JS-source
+    signature kinds over a meaningful length)."""
+    text = body_text or ""
+    if len(text) <= _JS_IN_BODY_MIN_CHARS:
+        return None
+    kinds = sum(1 for pat in _JS_IN_BODY_SIGNATURES if pat.search(text))
+    if kinds < 2:
+        return None
+    return (
+        f"JS-SOURCE-IN-BODY: ~{len(text)} chars of JavaScript render as "
+        "visible page text — a script boundary is broken. Usual causes: a "
+        "literal `</script>` inside a JS string (split it as "
+        "`'</scr'+'ipt>'`), or a patch inserted code outside the <script> "
+        "tag. Find the break point and restore the boundary; do not "
+        "restyle the text."
+    )
+
+
 def _bracket_imbalance(js: str) -> dict[str, int]:
     """Return |open - close| count per bracket type after stripping strings
     and comments. Zero = balanced.
@@ -2866,6 +2903,13 @@ class LiveBrowser:
         _cds = _canvas_default_size_warning(canvas_info, _src_html)
         if _cds:
             report["soft_warnings"].append(_cds)
+        # JS-SOURCE-IN-BODY gate (trace 20260611_213744): visible body text
+        # is JavaScript source → a script boundary broke. Gating — name the
+        # cause instead of leaving the model to guess from blank-canvas
+        # heuristics. Uses the FULL body text, not the truncated sample.
+        _jsb = _js_source_in_body_warning(body_text)
+        if _jsb:
+            report["soft_warnings"].append(_jsb)
         # Animation-liveness gate: a responsive action that renders a single
         # held pose (not animated) is a hard "must fix" — appended as a
         # soft_warning so the final ok-recompute flips report["ok"]=False and

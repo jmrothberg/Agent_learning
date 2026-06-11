@@ -10,6 +10,8 @@ __pycache__/
 .venv/
 venv/
 env/
+# Dedicated video-generation venv (mlx-gen pins its own mlx; setup.sh step 7)
+.venv-video/
 
 # Generated game artifacts (huge + per-session, no point versioning).
 # Sessions now write games/<goal-slug>_<ts>.html (+ .best.html sibling),
@@ -53,6 +55,11 @@ games/*_assets/
 # Sound-pipeline artifacts (OGGs are 5-50KB each; cache grows over time)
 games/_sound_cache/
 games/*_sounds/
+# Video-pipeline artifacts (MP4s are ~1MB each; Wan2.2 cutscene clips)
+games/_video_cache/
+games/*_videos/
+# Playwright verification screenshots (e.g. dragons-lair-deluxe_shots/)
+games/*_shots/
 !games/mechanics-standard-chess-on-an_20260522_163629_sounds/
 !games/mechanics-standard-chess-on-an_20260522_163629_sounds/**
 !games/game-of-mortal-kombat-fighing_20260524_101226_sounds/

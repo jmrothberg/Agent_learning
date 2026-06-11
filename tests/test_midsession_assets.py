@@ -105,7 +105,7 @@ def test_midsession_assets_inject_feedback(tmp_path: Path) -> None:
     # The next user turn should see a feedback block referencing the
     # new asset path so the model can load it via new Image().
     assert any(
-        "Mid-session asset/sound additions" in fb
+        "Mid-session asset/sound/video additions" in fb
         and "bullet" in fb
         for fb in a._pending_feedback
     )
@@ -256,7 +256,7 @@ def test_midsession_new_name_still_emits_loader_block(tmp_path: Path) -> None:
     assert a._pending_feedback, "expected a queued feedback line"
     fb = a._pending_feedback[0]
     # New name → full loader block injected.
-    assert "Mid-session asset/sound additions" in fb
+    assert "Mid-session asset/sound/video additions" in fb
     assert "explosion" in fb
 
 

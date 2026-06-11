@@ -72,6 +72,14 @@ from sounds import (
     render_sound_paths_block,
     try_load_audio_generator,
 )
+# Video cutscenes (<videos> tag) — sibling of assets/sounds. Wan2.2 runs
+# in a subprocess (scripts/generate_video.py), so this import is cheap.
+from videos import (
+    generate_videos,
+    parse_videos_block,
+    render_video_paths_block,
+    try_load_video_generator,
+)
 from backend import Backend, BackendInfo, detect_backend, make_backend
 from memory import (
     CANVAS_SKELETON_V2,
@@ -1568,7 +1576,7 @@ def _subsystem_hint(signature: str) -> dict | None:
 
 @dataclass
 class AgentEvent:
-    kind: str           # phase | token | plan | code | test | question | done | error | info | diagnose | patch | best_of_n | memory | activity | assets | streak
+    kind: str           # phase | token | plan | code | test | question | done | error | info | diagnose | patch | best_of_n | memory | activity | assets | sounds | videos | streak
     text: str = ""
     data: dict = field(default_factory=dict)
 
@@ -2473,6 +2481,11 @@ class GameAgent:
         # injected loader pattern.
         self._session_sounds: dict[str, Path] = {}
         self._session_looping: set[str] = set()
+        # Video cutscenes (<videos> block). The generator is a cheap
+        # subprocess wrapper (no in-process model load) — Wan2.2 weights
+        # live in the scripts/generate_video.py child process per batch.
+        self._video_generator: Any = None
+        self._session_videos: dict[str, Path] = {}
         self.restart_n: int = max(1, int(restart_n))
         self.restart_score_threshold: float = float(restart_score_threshold)
         # restart-N attempt index (0-based). Attempt 0 keeps the default
@@ -2732,6 +2745,39 @@ class GameAgent:
         length_bucket = str(len(reply or "") // 100)
         head = head + b"|len:" + length_bucket.encode("ascii")
         return _hashlib.sha1(head).hexdigest()[:12]
+
+    _REJECTED_REPLY_STUB_HEAD = 400
+
+    @staticmethod
+    def _stub_rejected_reply(reply: str, rejection_kind: str) -> str | None:
+        """Return a stubbed replacement for a format-rejected reply, or None.
+
+        DeepSeek-V4-Flash FPS trace 20260611_213744: three rejected
+        replies (~86 KB, crashed/looped streams with unclosed
+        <html_file>) stayed verbatim in `_messages`, ballooning the
+        prompt 9K → 47K tokens before the compaction ceiling fired.
+        Unclosed <html_file> bodies don't match the per-turn elision
+        regex (no closing tag), so structured pruning can't shrink them
+        either. The full text is already preserved in the trace
+        (`assistant_reply`) and the .log mirror — history only needs a
+        recognizable head plus an explicit "this was rejected" marker.
+
+        Returns None when the reply is short enough that stubbing
+        wouldn't save anything meaningful.
+        """
+        text = reply or ""
+        head_n = GameAgent._REJECTED_REPLY_STUB_HEAD
+        # Stub only when there is real bulk to elide (head + marker
+        # would otherwise be longer than the original).
+        if len(text) <= head_n + 200:
+            return None
+        elided = len(text) - head_n
+        return (
+            text[:head_n]
+            + f"\n[harness: remaining {elided} chars elided — this reply "
+            f"was rejected ({rejection_kind}) and nothing in it was "
+            "usable; do not repeat this output]"
+        )
 
     @staticmethod
     def _should_skip_format_doctor(
@@ -11334,8 +11380,8 @@ class GameAgent:
     async def _maybe_generate_assets_and_sounds(
         self, reply: str, *, trigger: str,
     ) -> AsyncIterator[AgentEvent]:
-        """Parse <assets>/<sounds> in a model reply and run the diffuser /
-        audio pipeline if either block is present.
+        """Parse <assets>/<sounds>/<videos> in a model reply and run the
+        diffuser / audio / video pipeline for each block present.
 
         Called from two sites:
         - Phase A plan reply (initial generation).
@@ -11369,6 +11415,7 @@ class GameAgent:
             reply, max_assets=session_cap,
         )
         sound_specs = parse_sounds_block(reply)
+        video_specs = parse_videos_block(reply)
         # The model emitted an <assets> block → any outstanding "generate new
         # art" request is now honored; stop re-asserting it (see the
         # ASSET GENERATION REQUIRED directive in _flush_user_injections).
@@ -11502,7 +11549,7 @@ class GameAgent:
                     "info",
                     "scoped media lock: dropped new names; only existing keys are allowed this turn.",
                 ))
-        if not asset_specs and not sound_specs:
+        if not asset_specs and not sound_specs and not video_specs:
             return
 
         # Asset overflow: model asked for more than _MAX_ASSETS_PER_TURN.
@@ -11545,6 +11592,7 @@ class GameAgent:
         # we synthesize at the end reflects only the *new* additions.
         new_asset_paths: dict[str, Path] = {}
         new_sound_paths: dict[str, Path] = {}
+        new_video_paths: dict[str, Path] = {}
         new_looping: set[str] = set()
         pre_asset_hashes: dict[str, str | None] = {}
         pre_sound_hashes: dict[str, str | None] = {}
@@ -11919,12 +11967,123 @@ class GameAgent:
                                 f"  - {name}: {err_line}"
                             ))
 
+        # Video cutscenes — generated AFTER assets so an `image` field can
+        # seed image-to-video from a key-art sprite produced THIS turn.
+        # Each clip costs minutes of GPU; surface per-clip progress.
+        if video_specs:
+            yield self._record(AgentEvent(
+                "info",
+                f"{trigger}: requested {len(video_specs)} cutscene "
+                "video(s); Wan2.2 runs per-clip in a subprocess "
+                "(~2-5 min per clip)…",
+                {
+                    "trigger": trigger,
+                    "videos_requested": [s["name"] for s in video_specs],
+                },
+            ))
+            yield self._record(AgentEvent(
+                "activity", "generating_videos",
+                {
+                    "label": "generating cutscene videos",
+                    "requested": len(video_specs),
+                    "produced": 0,
+                },
+            ))
+            if self._video_generator is None:
+                self._video_generator = try_load_video_generator()
+            if self._video_generator is None:
+                yield self._record(AgentEvent("activity", "idle"))
+                yield self._record(AgentEvent(
+                    "info",
+                    "video backend not reachable (macOS: .venv-video/"
+                    "mlx-gen missing; Linux: torch/diffusers missing) — "
+                    "proceeding without cutscenes."
+                ))
+            else:
+                session_videos_dir = (
+                    self.out_path.parent / f"{self._session_id}_videos"
+                )
+                try:
+                    produced = await asyncio.to_thread(
+                        generate_videos,
+                        video_specs,
+                        session_videos_dir,
+                        video_generator=self._video_generator,
+                        asset_paths=self._session_assets,
+                    )
+                except Exception as e:
+                    yield self._record(AgentEvent("activity", "idle"))
+                    yield self._record(AgentEvent(
+                        "info",
+                        f"video generation crashed: {e!r} — proceeding without."
+                    ))
+                    produced = {}
+                new_video_paths = dict(produced)
+                self._session_videos.update(produced)
+                per_video = getattr(
+                    self._video_generator, "last_stats", None,
+                ) or []
+                self._trace({
+                    "kind": "videos_generated",
+                    "trigger": trigger,
+                    "requested": len(video_specs),
+                    "produced": len(produced),
+                    "names": list(produced.keys()),
+                    "session_dir": str(session_videos_dir),
+                    "per_video": per_video,
+                })
+                yield self._record(AgentEvent(
+                    "videos",
+                    f"{len(produced)}/{len(video_specs)} generated",
+                    {
+                        "trigger": trigger,
+                        "requested": len(video_specs),
+                        "produced": len(produced),
+                        "session_dir": str(session_videos_dir),
+                        "paths": {n: str(p) for n, p in produced.items()},
+                        "per_video": per_video,
+                    },
+                ))
+                yield self._record(AgentEvent("activity", "idle"))
+                if produced:
+                    yield self._record(AgentEvent(
+                        "info",
+                        f"generated {len(produced)}/"
+                        f"{len(video_specs)} cutscene videos at "
+                        f"{session_videos_dir}",
+                        {"videos": {n: str(p) for n, p in produced.items()}},
+                    ))
+                    for s in per_video:
+                        if isinstance(s, dict) and not s.get("error"):
+                            secs = float(s.get("gen_seconds") or 0.0)
+                            tag = " (cached)" if s.get("cache_hit") else (
+                                " (i2v)" if s.get("i2v") else ""
+                            )
+                            yield self._record(AgentEvent(
+                                "info",
+                                f"  video {s.get('name','?')}: "
+                                f"{secs:.0f}s{tag}",
+                            ))
+                if len(produced) < len(video_specs):
+                    failed = [
+                        s for s in per_video
+                        if isinstance(s, dict) and s.get("error")
+                    ]
+                    for s in failed:
+                        yield self._record(AgentEvent(
+                            "info",
+                            f"  - video {s.get('name','?')}: "
+                            f"{str(s.get('error',''))[:400]}"
+                        ))
+
         # Mid-session only: synthesize a feedback line that re-emits the
         # asset/sound paths block, so the model's next user turn sees
         # the new files via the existing _flush_user_injections channel.
         # Phase A doesn't need this — the first-build assembler already
         # renders these blocks inline.
-        if trigger == "mid_session" and (new_asset_paths or new_sound_paths):
+        if trigger == "mid_session" and (
+            new_asset_paths or new_sound_paths or new_video_paths
+        ):
             # Mark the iter as having done real preparatory work, so a
             # follow-up "no usable code" outcome doesn't get charged
             # against max_iters. See _media_regenerated_this_iter init.
@@ -12023,7 +12182,7 @@ class GameAgent:
                 )
                 msg_parts.append("\n".join(lines))
 
-            if new_assets or new_sounds:
+            if new_assets or new_sounds or new_video_paths:
                 # New names → emit the full loader block so the model
                 # knows how to wire them in via a <patch>.
                 blocks: list[str] = []
@@ -12039,12 +12198,18 @@ class GameAgent:
                         new_sounds, self.out_path,
                         looping_names=new_looping_subset,
                     ))
+                if new_video_paths:
+                    # Videos are always treated as new — the loader block
+                    # carries the full <video>-overlay wiring pattern.
+                    blocks.append(render_video_paths_block(
+                        new_video_paths, self.out_path,
+                    ))
                 blocks = [b for b in blocks if b]
                 if blocks:
                     msg_parts.append(
-                        "Mid-session asset/sound additions — load these in "
-                        "your next patch and use them where appropriate. "
-                        "The files exist on disk now:\n\n"
+                        "Mid-session asset/sound/video additions — load "
+                        "these in your next patch and use them where "
+                        "appropriate. The files exist on disk now:\n\n"
                         + "\n\n".join(blocks)
                     )
 
@@ -12054,6 +12219,7 @@ class GameAgent:
                     "kind": "midsession_asset_injection_queued",
                     "asset_names": list(new_asset_paths.keys()),
                     "sound_names": list(new_sound_paths.keys()),
+                    "video_names": list(new_video_paths.keys()),
                     "already_in_html_assets": sorted(already_assets.keys()),
                     "already_in_html_sounds": sorted(already_sounds.keys()),
                     "new_assets": sorted(new_assets.keys()),
@@ -12991,13 +13157,19 @@ class GameAgent:
                     self._session_sounds, self.out_path,
                     looping_names=self._session_looping,
                 )
+                video_block = render_video_paths_block(
+                    self._session_videos, self.out_path,
+                )
                 seed_media_contract = self._render_seed_media_contract(
                     seed_html,
                     asset_names=list(self._session_assets.keys()),
                     sound_names=list(self._session_sounds.keys()),
                 )
                 prelude = "\n\n".join(
-                    b for b in (seed_media_contract, asset_block, sound_block) if b
+                    b for b in (
+                        seed_media_contract, asset_block, sound_block,
+                        video_block,
+                    ) if b
                 )
                 if prelude:
                     build_msg = prelude + "\n\n" + build_msg
@@ -13144,7 +13316,12 @@ class GameAgent:
                     self._session_sounds, self.out_path,
                     looping_names=self._session_looping,
                 )
-                prelude = "\n\n".join(b for b in (asset_block, sound_block) if b)
+                video_block = render_video_paths_block(
+                    self._session_videos, self.out_path,
+                )
+                prelude = "\n\n".join(
+                    b for b in (asset_block, sound_block, video_block) if b
+                )
                 if prelude:
                     build_msg = prelude + "\n\n" + build_msg
                 local_nudge = self._local_first_build_nudge()
@@ -14281,6 +14458,30 @@ class GameAgent:
                         "has_existing_file": bool(self._current_file),
                         "identical_repeat": identical_repeat,
                     })
+                    # Rejected-reply stub (trace 20260611_213744): a
+                    # format-rejected reply with NOTHING usable (no plan/
+                    # probes/media either) is pure prompt poison — replace
+                    # the just-appended assistant message with a short head
+                    # + elision marker. Full text stays in the trace/.log.
+                    # Fingerprinting above already ran on the full reply.
+                    if (
+                        format_rejection is not None
+                        and not (plan_only or probes_only or media_only)
+                        and self._messages
+                        and self._messages[-1].get("role") == "assistant"
+                        and self._messages[-1].get("content") == reply
+                    ):
+                        stub = GameAgent._stub_rejected_reply(
+                            reply, format_rejection.kind
+                        )
+                        if stub is not None:
+                            self._messages[-1]["content"] = stub
+                            self._trace({
+                                "kind": "rejected_reply_stubbed",
+                                "iteration": iteration,
+                                "rejection_kind": format_rejection.kind,
+                                "chars_elided": len(reply) - len(stub),
+                            })
                     fallback, reset_streak = (
                         GameAgent._no_usable_code_fallback(
                             plan_only=plan_only,

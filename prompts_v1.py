@@ -159,6 +159,42 @@ SOUNDS_FORMAT = FormatSpec(
     ],
 )
 
+VIDEOS_FORMAT = FormatSpec(
+    name="<videos>",
+    snippet=(
+        "<videos>[{name,prompt,image?,seconds?}, ...]</videos>  Request "
+        "generated MP4 cutscene clips (Wan2.2, local). Phase A or "
+        "mid-session. EXPENSIVE — minutes of GPU per clip; cutscenes "
+        "only, never gameplay."
+    ),
+    guidelines=[
+        "EMIT <videos> ONLY for cinematic cutscene moments — intro, "
+        "death/game-over, victory, boss reveal, level transition. "
+        "2-4 clips per session MAX: each ~4s clip costs minutes of GPU "
+        "(vs seconds for a sprite). Gameplay itself ALWAYS stays on the "
+        "canvas — a video is a skippable overlay moment, never the game.",
+        "STRONGLY PREFER image-to-video: set `\"image\": "
+        "\"<asset_name>\"` naming a key-art entry from your <assets> "
+        "block (declare a 768px establishing-shot asset like "
+        "`key_intro` first, then animate it). The clip then matches "
+        "your in-game art style exactly. Without `image` the clip is "
+        "text-to-video and may drift off-style. The prompt should "
+        "describe MOTION (\"the dragon slowly rears its head, embers "
+        "drift, camera pulls back\"), not re-describe the still.",
+        "Optional `seconds` 2-8 (default 4). Clips are silent — pair "
+        "them with a <sounds> music/sfx cue if the moment needs audio.",
+        "WIRING: play clips via ONE absolutely-positioned muted <video> "
+        "overlay covering the canvas (the harness returns the exact "
+        "loader pattern with the file paths). Any key must skip; every "
+        "failure path (missing file, autoplay block) must continue the "
+        "game — a cutscene must NEVER be able to stall the game.",
+        "When the harness returns no video paths in the first-build "
+        "prompt, the video backend was not reachable on this machine; "
+        "only THEN ship without cutscenes (or use a static key-art "
+        "pan as the fallback).",
+    ],
+)
+
 ASSETS_FORMAT = FormatSpec(
     name="<assets>",
     snippet=(
@@ -408,6 +444,7 @@ ALL_FORMATS: list[FormatSpec] = [
     PROBES_FORMAT,
     ASSETS_FORMAT,
     SOUNDS_FORMAT,
+    VIDEOS_FORMAT,
     HTML_FORMAT,
     PATCH_FORMAT,
     DIAGNOSE_FORMAT,
@@ -532,7 +569,7 @@ def build_system_prompt(
             # Drop sprite + sound generation pipelines and the on-demand
             # playbook lookup mechanism. The model writes a self-contained
             # game instead of orchestrating an asset pipeline.
-            _SMALL_DROP = {"<assets>", "<sounds>", "<lookup_bullet>", "<todos>"}
+            _SMALL_DROP = {"<assets>", "<sounds>", "<videos>", "<lookup_bullet>", "<todos>"}
             fmts = [f for f in ALL_FORMATS if f.name not in _SMALL_DROP]
         else:
             fmts = ALL_FORMATS
@@ -765,6 +802,44 @@ def _detect_audio_intent(goal: str) -> list[str]:
         if w in _AUDIO_KEYWORDS and w not in seen:
             seen.add(w)
             out.append(w)
+    return out
+
+
+# Modality keywords that signal the goal wants generated VIDEO cutscenes.
+# Genre-free per the project rule — these describe output modality
+# (cutscene, cinematic clip), not subject matter. When any appears in
+# the goal, plan_instruction() escalates the <videos> directive to
+# REQUIRED so smaller models don't politely skip the (expensive but
+# explicitly requested) video pipeline.
+_VIDEO_KEYWORDS = frozenset({
+    "cutscene", "cutscenes", "cinematic", "cinematics",
+    "video", "videos", "movie", "movies", "clip", "clips",
+    "trailer", "filmic",
+})
+
+
+def _detect_video_intent(goal: str) -> list[str]:
+    """Return a list of video-modality keywords found in `goal`. Empty
+    list means no intent detected; non-empty triggers a stronger
+    <videos> directive in the planning prompt. Also matches the
+    two-word form "cut scene" by joining adjacent words, mirroring
+    `_detect_3d_intent`'s join trick.
+    """
+    if not goal:
+        return []
+    import re
+    words = [w.lower() for w in re.findall(r"[a-zA-Z]+", goal)]
+    seen: set[str] = set()
+    out: list[str] = []
+    for w in words:
+        if w in _VIDEO_KEYWORDS and w not in seen:
+            seen.add(w)
+            out.append(w)
+    for i in range(len(words) - 1):
+        j = words[i] + words[i + 1]   # "cut scene" -> "cutscene"
+        if j in _VIDEO_KEYWORDS and j not in seen:
+            seen.add(j)
+            out.append(j)
     return out
 
 
@@ -1033,10 +1108,12 @@ def plan_instruction(
         art_keywords = ()
         threed_keywords = _detect_3d_intent(goal)
         audio_keywords = ()
+        video_keywords = ()
     else:
         art_keywords = _detect_art_intent(goal)
         threed_keywords = _detect_3d_intent(goal)
         audio_keywords = _detect_audio_intent(goal)
+        video_keywords = _detect_video_intent(goal)
     art_nudge = ""
     if art_keywords:
         kws = ", ".join(repr(k) for k in art_keywords)
@@ -1099,6 +1176,22 @@ def plan_instruction(
             "notice. ULTRA IMPORTANT: do not omit <sounds>; do not "
             "assume the audio diffuser is unavailable (the harness will "
             "tell you if it is).\n"
+        )
+
+    # `video_keywords` is also set up top so from_seed suppression sticks.
+    video_nudge = ""
+    if video_keywords:
+        kws = ", ".join(repr(k) for k in video_keywords)
+        video_nudge = (
+            "\n\nVIDEO INTENT DETECTED — your goal mentions "
+            f"{kws}. The user EXPLICITLY wants video cutscenes. You MUST "
+            "emit a <videos> block this turn (2-4 clips: intro / death / "
+            "victory / reveal). Declare a key-art entry in <assets> for "
+            "each clip and reference it via the `image` field so the "
+            "clips match the game's art style (image-to-video). Skipping "
+            "<videos> IS A FAILURE for this goal. Do not assume the "
+            "video backend is unavailable (the harness will tell you if "
+            "it is).\n"
         )
 
     # Phase 4: scope-pacing nudge for art-heavy + logic-heavy goals.
@@ -1316,6 +1409,7 @@ def plan_instruction(
 
     body = (
         PLAN_INSTRUCTION + art_nudge + threed_nudge + audio_nudge
+        + video_nudge
         + scope_nudge + multi_frame_nudge + minimal_nudge + seed_nudge
     )
 

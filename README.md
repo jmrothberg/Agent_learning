@@ -15,9 +15,11 @@ match cascade, every iteration loaded in real Chromium, every sprite alpha-keyed
 flagged, every session feeds a hand-curated playbook the agent reads back next launch.
 
 Asset pipeline (self-contained, no runtime network once weights cache): **Z-Image-Turbo** for
-sprites (txt2img, 768×768 → downscaled, chroma-keyed to RGBA) and **Stable Audio Open** for sounds
-(OGG, 0.2–12 s). Pose/animation frames are **txt2img with one shared character description + fixed
-seed** for consistency — *not* img2img (see [Animation](#animation--consistency-is-the-hard-constraint)).
+sprites (txt2img, 768×768 → downscaled, chroma-keyed to RGBA), **Stable Audio Open** for sounds
+(OGG, 0.2–12 s), and **Wan2.2-TI2V-5B** for video cutscenes (MP4, 2–8 s — see
+[Video cutscenes](#video-cutscenes--wan22-ti2v-5b-local)). Pose/animation frames are **txt2img with
+one shared character description + fixed seed** for consistency — *not* img2img (see
+[Animation](#animation--consistency-is-the-hard-constraint)).
 
 ---
 
@@ -25,7 +27,7 @@ seed** for consistency — *not* img2img (see [Animation](#animation--consistenc
 - [What this is](#what-this-is) · [Quick start](#quick-start) · [Architecture](#architecture)
 - [The verification harness](#the-verification-harness-the-core-lever) · [Assets & animation](#animation--consistency-is-the-hard-constraint)
 - [Memory / opening library](#memory--the-opening-library) · [TUI & CLI](#tui--cli-reference)
-- [Standalone asset tools](#standalone-asset-tools) · [System tests](#system-tests--memory-hygiene)
+- [Standalone asset tools](#standalone-asset-tools) · [Video cutscenes](#video-cutscenes--wan22-ti2v-5b-local) · [System tests](#system-tests--memory-hygiene)
 - [Standing rules](#standing-rules) · [Troubleshooting](#troubleshooting)
 
 ---
@@ -41,7 +43,7 @@ feedback**, running entirely locally. Two drivers:
 
 The loop (`GameAgent.run` in `agent.py`) is async and yields a stream of `AgentEvent`s; the drivers
 only consume the stream. Three phases: **A — plan** (model emits `<plan>`/`<criteria>`/`<probes>` +
-optional `<assets>`/`<sounds>`); **B — build/iterate** (patch or full-file → micro-probes →
+optional `<assets>`/`<sounds>`/`<videos>`); **B — build/iterate** (patch or full-file → micro-probes →
 Chromium load → score against the model's own probes + harness gates); **C — self-critique** (one
 turn after `<done/>`).
 
@@ -82,6 +84,7 @@ Files that carry the weight:
 | `tools.py` | **The verifier.** `LiveBrowser.load_and_test` (Chromium), `_input_smoke_test` (presses keys, captures per-action frames, runs the gates), micro-probes. Highest-leverage file. |
 | `agent.py` | Async `GameAgent.run` loop, prompt assembly, compaction, memory retrieval, `run_visual_critic`, fix-prompt building. |
 | `assets.py` / `sounds.py` | In-process Z-Image-Turbo / Stable Audio (lazy GPU load). `render_asset_paths_block` injects the `sprite()` loader. |
+| `videos.py` | `<videos>` cutscene clips via Wan2.2-TI2V-5B in a **subprocess** (`scripts/generate_video.py` — mlx-gen on Mac, diffusers on Linux). `render_video_paths_block` injects the `<video>`-overlay loader. |
 | `backend.py` | MLX (in-process `mlx_lm`/`mlx_vlm`) + Ollama backends; sampler; VLM image path. |
 | `prompts_v1.py` | Data-driven system prompt (`build_system_prompt` walks a `FormatSpec` list — don't hand-edit the rendered blob). Modality detectors (`_detect_art_intent`/`_detect_3d_intent`). |
 | `memory.py` | `GameMemory` (skeleton retrieval), `Playbook` (Jaccard bullet retrieval), opening-book outlines/recipes. |
@@ -236,6 +239,63 @@ path). Audio folders play each clip in order; image folders open in Preview.
 
 Requires the same GPU setup as the agent: `./scripts/install_diffuser.sh` for drawing; preview
 works with macOS `afplay` / Preview only.
+
+---
+
+## Video cutscenes — Wan2.2-TI2V-5B (local)
+
+The agent can generate short MP4 cutscene clips (intro / death / victory / boss reveal) the same
+way it generates sprites and sounds: the model emits a `<videos>` block at plan time (or
+mid-session) and the harness injects the resulting file paths plus a proven `<video>`-overlay
+loader pattern into the next build prompt. Gameplay always stays on the canvas — clips are
+skippable overlay moments with a mandatory continue-on-failure path, so a missing or blocked video
+can never stall the game.
+
+```text
+<videos>
+[
+  {"name": "intro",   "prompt": "slow push-in toward the castle at dusk, bats circling", "image": "key_intro", "seconds": 4},
+  {"name": "victory", "prompt": "the knight raises the sword, confetti falls, camera orbits", "seconds": 4}
+]
+</videos>
+```
+
+The optional `"image"` field names a key-art **asset from the same session** — the clip is then
+**image-to-video**, so cutscenes stay style-consistent with the in-game sprites (the recommended
+flow: declare a 768px establishing-shot asset, then animate it). Without `image` it's
+text-to-video. `seconds` clamps to 2–8 (default 4). Clips are silent — pair with `<sounds>`.
+
+**Per-platform backends** (both behind `scripts/generate_video.py`; the agent shells out, so no
+video deps ever load into the agent process):
+
+| Platform | Backend | Model | Install |
+|---|---|---|---|
+| macOS (Apple Silicon) | `mlx-gen` CLI in the dedicated `.venv-video/` | `AbstractFramework/wan2.2-ti2v-5b-diffusers-8bit` (~17 GB, lazy) | `./scripts/setup.sh` (step 7) |
+| Ubuntu / Linux (CUDA) | diffusers `WanPipeline` in the main `.venv` | `Wan-AI/Wan2.2-TI2V-5B-Diffusers` (~25 GB, lazy) | covered by `./scripts/install_diffuser.sh` |
+
+Standalone CLI (no LLM needed) — text-to-video and image-to-video:
+
+```bash
+# T2V
+.venv/bin/python scripts/generate_video.py \
+    --prompt "a knight runs across a collapsing drawbridge, cinematic" \
+    --out games/mygame_videos/intro.mp4
+
+# I2V — animate a Z-Image still so the clip matches the game art
+.venv/bin/python scripts/generate_video.py \
+    --prompt "the dragon slowly wakes and rears its head, embers drift" \
+    --image games/mygame_assets/key_dragon_wake.png \
+    --out games/mygame_videos/dragon_reveal.mp4
+```
+
+Defaults: 832×480, 49 frames written at 12 fps (~4 s of slow cinematic motion). Width/height must
+be multiples of 32; frames must be 4k+1. Measured cost: **~3 min per 4 s clip on an M3 Ultra**, so
+the prompt guidelines cap sessions at 2–4 clips. Generated clips cache under `games/_video_cache/`
+(re-runs are free). Env vars: `VIDEO_MODEL` (override model id/path for either backend),
+`VIDEO_VENV` (mlxgen venv location, default `.venv-video/`), `DIFFUSER_CUDA_DEVICE` (pin the CUDA
+index on Linux, same var the sprite/sound diffusers honor). If no backend is installed the whole
+feature is a silent no-op — the model is told to ship without cutscenes. Skip the install with
+`./scripts/setup.sh --no-video`.
 
 ---
 

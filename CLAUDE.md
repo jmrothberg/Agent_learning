@@ -38,6 +38,10 @@ TORCH_CUDA=121 ./scripts/install_diffuser.sh    # older NVIDIA only
 # Verify the diffuser pipeline end-to-end (~2 minutes first run)
 .venv/bin/python scripts/_smoke_doom.py
 
+# Generate a video cutscene clip standalone (Wan2.2 — agent uses the same wrapper for <videos>)
+.venv/bin/python scripts/generate_video.py --prompt "knight charges, cinematic" --out /tmp/clip.mp4
+# add --image <png> for image-to-video (animate session key art). ~3 min per 4s clip on M3 Ultra.
+
 # Run the TUI (recommended)
 .venv/bin/python chat.py
 # In the TUI: /help (commands) · /help topics · /help feedback-flows (static detail, tui_help.py)
@@ -143,6 +147,8 @@ Drivers (`chat.py`, `coder.py`) construct `GameAgent`, wire a token callback, an
 1. `parse_assets_block(plan_reply)` extracts the JSON list (tolerant of fenced ```json wrappers AND of streams that truncated before `</assets>` — the truncated-list repair recovers complete entries).
 2. `generate_assets`: for each spec, hash-cache → if miss, generate at native 768×768 → resize Lanczos → `_chroma_key_to_rgba` (sample 8 corner+edge points; if ≥6/8 agree on a dominant color, alpha-mask within tolerance) → save RGBA PNG. Per-asset stats stashed on `image_generator.last_stats`.
 3. `render_asset_paths_block` builds the GENERATED ASSETS injection block for the first-build user message, with the literal `const ASSETS = {}; await img.decode(); ctx.drawImage(...)` loader pattern inline.
+
+Siblings: `sounds.py` (Stable Audio Open, in-process, OGG ≤12 s) and `videos.py` (Wan2.2-TI2V-5B cutscene MP4s via the `<videos>` tag — runs `scripts/generate_video.py` as a SUBPROCESS: mlx-gen in `.venv-video/` on macOS, diffusers WanPipeline on Linux/CUDA; `image` field seeds image-to-video from a session asset so cutscenes match sprite style; ~3 min per 4 s clip, capped 4/turn; silent no-op when no backend).
 
 ### Prompt assembly (data-driven, not a string blob)
 
