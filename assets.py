@@ -1159,6 +1159,129 @@ def _derived_frame_delta(new_path: Path | str, parent_path: Path | str) -> float
     return total / (len(pa) * 255.0)
 
 
+# Fix-round item 7 — sprite-orientation pinning. Game code universally
+# assumes RIGHT-facing native sprites (flip with ctx.scale(-1,1) when
+# facing < 0), but Z-Image renders whatever orientation the prompt implies
+# and model-authored specs rarely state one. A left-facing kick PNG makes
+# the attack render visually backward with perfectly correct facing STATE
+# — invisible to every JS probe (trace 20260610_185238, wrong-direction
+# kick). When a character/pose spec's prompt has no orientation phrase, we
+# append one so the right-facing assumption is true by construction.
+_ORIENTATION_PHRASE_RE = re.compile(
+    r"facing\s+(?:left|right|up|down|forward|away|the\s+(?:camera|viewer))"
+    r"|(?:left|right|front|rear|back)[-\s]facing"
+    r"|\bprofile\b|\b(?:front|side|rear|back)\s+view\b"
+    r"|\btop[-\s]?down\b|\boverhead\b|\bbird'?s[-\s]?eye\b|\baerial\b"
+    r"|\bisometric\b|\bthree[-\s]quarter\b"
+    r"|\bfrom\s+(?:above|behind|below|the\s+(?:side|front|back))\b",
+    re.IGNORECASE,
+)
+# Mechanism-level (no genre/title words): does the spec describe a FIGURE
+# and/or a POSE? Pose tokens usually live in the asset NAME (player_kick,
+# cpu_idle); figure tokens in the prompt ("pixel-art ninja character ...").
+_POSE_TOKEN_RE = re.compile(
+    r"\b(?:idle|walk(?:ing)?|run(?:ning)?|jump(?:ing)?|kick(?:ing)?|"
+    r"punch(?:ing)?|attack(?:ing)?|block(?:ing)?|duck(?:ing)?|"
+    r"crouch(?:ing)?|hit|hurt|death|die|dying|stance|pose|stand(?:ing)?)\b",
+    re.IGNORECASE,
+)
+_FIGURE_TOKEN_RE = re.compile(
+    r"\b(?:character|person|figure|fighter|warrior|hero|heroine|enemy|"
+    r"boss|creature|monster|animal|humanoid|robot|knight|ninja|soldier|"
+    r"wizard|player|man|woman|boy|girl)\b",
+    re.IGNORECASE,
+)
+
+_ORIENTATION_SUFFIX = ", side view, facing right"
+
+
+def pin_sprite_orientation(name: str, prompt: str) -> tuple[str, bool]:
+    """Return (prompt', pinned). Appends a canonical right-facing
+    orientation to character/pose sprite prompts that don't state one.
+    Pure function; prompts that already carry ANY orientation phrase, and
+    specs that don't look like a figure/pose (backgrounds, tilesets,
+    projectiles named without pose words), pass through unchanged."""
+    p = prompt or ""
+    if _ORIENTATION_PHRASE_RE.search(p):
+        return p, False
+    # Asset names are snake_case (player_kick, cpu_duck) — split separators
+    # so \b-anchored pose tokens match the segments.
+    name_words = re.sub(r"[_\-.]+", " ", name or "")
+    looks_posed = bool(
+        _POSE_TOKEN_RE.search(name_words)
+        or _POSE_TOKEN_RE.search(p)
+        or _FIGURE_TOKEN_RE.search(p)
+    )
+    if not looks_posed:
+        return p, False
+    return p.rstrip().rstrip(",") + _ORIENTATION_SUFFIX, True
+
+
+# Fix round 5b (fight trace 20260611_145321): pin_sprite_orientation fired on
+# all 18 eligible sprites yet player_kick came back with the leg extended
+# LEFT — prompt pins are advisory to a diffusion model. The remedy is a
+# pixel-level, deterministic mirror flip after a VLM orientation audit.
+# Only DIRECTIONAL poses qualify: a strike/throw points somewhere; idle /
+# hit / death / block / duck have no well-defined direction and flipping
+# them has no payoff.
+_DIRECTIONAL_POSE_RE = re.compile(
+    r"\b(?:kick(?:ing)?|punch(?:ing)?|attack(?:ing)?|strik(?:e|ing)|"
+    r"slash(?:ing)?|stab(?:bing)?|jab(?:bing)?|throw(?:ing)?|"
+    r"shoot(?:ing)?|lung(?:e|ing)|fireball)\b",
+    re.IGNORECASE,
+)
+
+
+def select_orientation_audit_targets(
+    asset_stats: list, asset_paths: dict,
+) -> list[tuple[str, "Path"]]:
+    """Pick (name, path) pairs eligible for the post-generation orientation
+    audit: orientation was prompt-pinned AND the asset name carries a
+    directional pose token. Pure function — no I/O."""
+    targets: list[tuple[str, Path]] = []
+    for stat in asset_stats or []:
+        if not isinstance(stat, dict) or not stat.get("orientation_pinned"):
+            continue
+        name = str(stat.get("name") or "")
+        name_words = re.sub(r"[_\-.]+", " ", name)
+        if not _DIRECTIONAL_POSE_RE.search(name_words):
+            continue
+        path = (asset_paths or {}).get(name)
+        if path:
+            targets.append((name, Path(path)))
+    return targets
+
+
+def parse_orientation_verdicts(reply: str, n: int) -> dict[int, str]:
+    """Parse a VLM orientation reply into {1-based index: 'left'|'right'}.
+    Accepts `1: LEFT`, `2 - right`, `3) Left` line shapes; ignores anything
+    else. Indices outside 1..n are dropped. Pure function."""
+    verdicts: dict[int, str] = {}
+    for m in re.finditer(
+        r"^\s*(\d+)\s*[:\-).]\s*.*?\b(left|right)\b",
+        reply or "", re.IGNORECASE | re.MULTILINE,
+    ):
+        idx = int(m.group(1))
+        if 1 <= idx <= n and idx not in verdicts:
+            verdicts[idx] = m.group(2).lower()
+    return verdicts
+
+
+def flip_sprite_horizontal(path: "Path | str") -> bool:
+    """Mirror a PNG left-right in place (lossless transpose — NEVER a
+    regeneration, so character consistency is preserved). Returns True on
+    success, False on any failure (missing file, no PIL, decode error)."""
+    try:
+        from PIL import Image
+        p = Path(path)
+        with Image.open(p) as img:
+            flipped = img.transpose(Image.FLIP_LEFT_RIGHT)
+            flipped.save(p)
+        return True
+    except Exception:
+        return False
+
+
 def generate_assets(
     specs: list[dict],
     session_dir: Path | str,
@@ -1263,6 +1386,13 @@ def generate_assets(
         size = spec["size"]
         from_image = spec.get("from_image")
         strength = spec.get("strength")
+        # Fix-round item 7: pin character/pose sprites to the canonical
+        # right-facing orientation when the prompt doesn't state one, so
+        # in-game flip logic (ctx.scale(-1,1) when facing<0) matches the
+        # art. Pinned BEFORE the cache key so the cache stays consistent
+        # with what was actually sent to the diffuser. Recorded on the
+        # per-asset stat (surfaced via image_generator.last_stats traces).
+        prompt, _orientation_pinned = pin_sprite_orientation(spec["name"], prompt)
         # B2: include parent file's mtime in the cache key for img2img so
         # regenerating a parent invalidates downstream frames.
         if from_image and from_image in out:
@@ -1294,6 +1424,8 @@ def generate_assets(
             "from_image": from_image,
             "strength": strength,
         }
+        if _orientation_pinned:
+            stat["orientation_pinned"] = True
         if cache_path.exists():
             _link_or_copy(cache_path, target_path)
             out[name] = target_path.resolve()

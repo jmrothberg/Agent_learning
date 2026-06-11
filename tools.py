@@ -82,6 +82,40 @@ _MOVEMENT_KEYS = frozenset({
     "KeyW", "KeyA", "KeyS", "KeyD",
 })
 
+# Restart/menu keys declared in criteria — pressed during smoke tests but
+# must not be held during combat inducement (resets the match before the
+# control-recovery re-test) or count as sprite-driven actions.
+_RESTART_KEYS = frozenset({"KeyR", "Enter"})
+
+
+def control_not_recovered_verdict(
+    *,
+    has_position_state: bool,
+    moved_early: bool,
+    recheck_moved: bool,
+    retry_moved: bool | None,
+) -> bool:
+    """Pure decision for the control-recovery re-test (fix-round item 1).
+
+    True only when a movement key moved the player's position EARLY in the
+    run, the post-gameplay re-dispatch no longer moves it, AND a single
+    retry (after a grace wait, so legitimate brief hit-stun expires) is
+    still frozen. Catches the permanent stun-lock family: a hit/stun state
+    whose expiry timer sits BELOW an early-return guard, locking the
+    entity forever (trace build-a-single-screen-2d-fight_20260610_185238).
+
+    - no position state (menu/board games)  -> False (not applicable)
+    - never moved early                     -> False (PLAYER-STUCK's job)
+    - recheck moved                         -> False (controls recovered)
+    - recheck frozen, retry moved           -> False (transient hit-stun)
+    - recheck frozen, retry frozen          -> True
+    """
+    if not has_position_state or not moved_early:
+        return False
+    if recheck_moved:
+        return False
+    return retry_moved is False
+
 
 _PROBE_EVAL_ERROR_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("syntax_error", re.compile(r"\bSyntaxError\b|missing \) after argument list", re.I)),
@@ -409,6 +443,23 @@ def _criteria_coverage_gaps(criteria_text: str, probes: list[dict]) -> list[str]
         if len(overlap) < threshold:
             uncovered.append(line[:140])
     return uncovered
+
+
+# Fix round (fight trace 20260611_145321): a "60fps under stress" criterion
+# became a synthetic coverage_gap probe that no honest probe can satisfy in
+# a short load test — it blocked ok=True forever and distracted the model.
+# Sustained-performance criteria stay advisory (criteria_uncovered) only.
+_PERF_CRITERION_RE = re.compile(
+    r"\b(fps|frame\s?rates?|frames\s+per\s+second|stress(?:\s|-)?test\w*|"
+    r"stress|slow(?:s|ing)?\s?down|slowdowns?|lag\w*|jank\w*|performance)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_unverifiable_perf_criterion(line: str) -> bool:
+    """True for criteria about sustained performance / frame rate — a short
+    harness load cannot honestly verify them, so they must never gate."""
+    return bool(_PERF_CRITERION_RE.search(line or ""))
 
 
 def _truncate(s: str, n: int) -> str:
@@ -894,6 +945,74 @@ _ENTITY_RENDERED_JS = """
 """
 
 
+# Flatten the game's exposed state into a {dotted-path: number}
+# map of numeric leaves, depth-capped and fanout-capped so giant
+# entity arrays don't explode the snapshot. Returns null when
+# nothing is exposed — callers then fall back to canvas hash only.
+#
+# NAME-MATCHING BUG FIX (2026-05-16): for the entire history of
+# this code, the snapshot looked at `window.gameState` while the
+# system prompt and all won-skeletons expose `window.state`. The
+# net effect was that the gameplay verification path was BLIND
+# to the actual state of agent-generated games and silently
+# fell back to canvas-hash (which is degenerate for any auto-
+# animating game). This is the single biggest reason "input
+# smoke test passed" did not correlate with "controls work."
+# Now we walk a small ordered list of plausible globals and
+# take the first that's an object. `state` is the documented
+# convention; the others are back-compat.
+#
+# Hoisted from `_input_smoke_test` to module level 2026-06-10 so the
+# state-timeline sampler in `load_and_test` (capability-round item 4)
+# reuses the exact same flattening.
+_GAMESTATE_SNAPSHOT_JS = """
+() => {
+    const candidates = ['state', 'gameState', 'game', 'GAME', 'world'];
+    let gs = null;
+    for (const name of candidates) {
+        const v = window[name];
+        if (v != null && typeof v === 'object') { gs = v; break; }
+    }
+    if (gs == null) return null;
+    const out = {};
+    const visit = (obj, path, depth) => {
+        if (depth > 4 || obj == null) return;
+        if (typeof obj === 'number' && isFinite(obj)) { out[path] = obj; return; }
+        if (typeof obj === 'boolean') { out[path] = obj ? 1 : 0; return; }
+        // Short string leaves (state names like player.action='hit') are
+        // captured as categorical values so the state timeline can flag an
+        // entity stuck in the same non-default state across all samples
+        // (fix-round item 1, the permanent stun-lock signal).
+        if (typeof obj === 'string') {
+            if (obj.length > 0 && obj.length <= 16) out[path] = obj;
+            return;
+        }
+        if (typeof obj !== 'object') return;
+        const ks = Array.isArray(obj)
+            ? obj.slice(0, 32).map((_, i) => String(i))
+            : Object.keys(obj).slice(0, 64);
+        for (const k of ks) {
+            try { visit(obj[k], path ? path + '.' + k : k, depth + 1); }
+            catch (e) { /* getters etc */ }
+        }
+    };
+    visit(gs, '', 0);
+    // Also surface array lengths so "bullets fired" registers as a delta.
+    const lenVisit = (obj, path, depth) => {
+        if (depth > 4 || obj == null || typeof obj !== 'object') return;
+        if (Array.isArray(obj)) { out[(path || '_root') + '.length'] = obj.length; return; }
+        const ks = Object.keys(obj).slice(0, 64);
+        for (const k of ks) {
+            try { lenVisit(obj[k], path ? path + '.' + k : k, depth + 1); }
+            catch (e) {}
+        }
+    };
+    lenVisit(gs, '', 0);
+    return out;
+}
+"""
+
+
 _CANVAS_PROBE_JS = """
 () => {
     const c = document.querySelector('canvas');
@@ -1198,6 +1317,47 @@ def _strip_js_noise(js: str) -> str:
     return js
 
 
+# Fix round (fight trace 20260611_145321): a rewrite dropped the seed
+# skeleton's canvas sizing → 300x150 browser default → game drawn mostly
+# off-canvas (black screen). The harness recorded width/height but never
+# flagged it. These helpers make that failure a named, gating warning.
+_CANVAS_TAG_RE = re.compile(r"<canvas\b[^>]*>", re.IGNORECASE)
+_CANVAS_JS_SIZE_RE = re.compile(
+    r"\.width\s*=|setAttribute\(\s*['\"]width['\"]", re.IGNORECASE
+)
+
+
+def _canvas_default_size_warning(
+    canvas_info: dict | None, html: str | None
+) -> str | None:
+    """Return a gating CANVAS-DEFAULT-SIZE warning when the live canvas is
+    exactly the untouched 300x150 browser default AND the source confirms
+    no sizing was ever attempted (no width= attribute, no .width assignment).
+    Genre-free: a real game canvas is never the untouched default."""
+    if not isinstance(canvas_info, dict):
+        return None
+    try:
+        w = int(canvas_info.get("width") or 0)
+        h = int(canvas_info.get("height") or 0)
+    except (TypeError, ValueError):
+        return None
+    if (w, h) != (300, 150):
+        return None
+    src = html or ""
+    tags = _CANVAS_TAG_RE.findall(src)
+    if tags and any("width" in t.lower() for t in tags):
+        return None  # markup sizes it — 300x150 must be deliberate
+    if _CANVAS_JS_SIZE_RE.search(src):
+        return None  # script sizes it (e.g. a fit()/DPR resize)
+    return (
+        "CANVAS-DEFAULT-SIZE: your <canvas> has no width/height — it is "
+        "the 300x150 browser default, so most of the game is drawn "
+        "off-canvas. Fix: add width/height attributes (e.g. <canvas "
+        'width="800" height="500">) or set canvas.width/height in JS '
+        "before first draw."
+    )
+
+
 def _bracket_imbalance(js: str) -> dict[str, int]:
     """Return |open - close| count per bracket type after stripping strings
     and comments. Zero = balanced.
@@ -1374,6 +1534,21 @@ def run_micro_probes(
             "handlers — the file has no game logic. Add a <script> with "
             "the game implementation."
         )
+
+    # --- unsized <canvas> (fix round) -----------------------------------
+    # A <canvas> with no width attribute and no .width assignment anywhere
+    # in script renders at the 300x150 browser default — the black-screen
+    # failure from fight trace 20260611_145321. Warning only: the live
+    # CANVAS-DEFAULT-SIZE check in load_and_test is authoritative.
+    canvas_tags = _CANVAS_TAG_RE.findall(html)
+    if canvas_tags and not any("width" in t.lower() for t in canvas_tags):
+        if not _CANVAS_JS_SIZE_RE.search(html):
+            warnings.append(
+                "<canvas> has no width/height attribute and the script never "
+                "assigns canvas.width — it will render at the 300x150 browser "
+                'default. Size it (e.g. <canvas width="800" height="500"> or '
+                "canvas.width=… in JS) before drawing."
+            )
 
     # --- bracket balance per inline script -----------------------------
     # Per pi-mono's prescriptive-error pattern: tell the model EXACTLY
@@ -1996,6 +2171,117 @@ def extract_crash_source_slices(
     return out
 
 
+def summarize_state_timeline(
+    samples: list,
+    *,
+    window_seconds: float | None = None,
+    max_lines: int = 4,
+) -> str:
+    """Dynamics digest over flattened game-state samples (item 4).
+
+    Pure function. Classifies every numeric leaf present in all samples as
+    constant / monotonic / changing, and flags two suspicious patterns:
+    a frame/time counter that never increases (stalled loop) and an
+    entity position frozen while a sibling's moves. Capped at `max_lines`
+    rendered lines; returns "" when fewer than 3 samples exposed state.
+    """
+    dict_samples = [s for s in samples if isinstance(s, dict)]
+    if len(dict_samples) < 3:
+        return ""
+    eps = 1e-3
+    keys = set(dict_samples[0])
+    for s in dict_samples[1:]:
+        keys &= set(s)
+    series: dict[str, list[float]] = {}
+    constant: list[str] = []
+    monotonic: list[str] = []
+    changing: list[str] = []
+    for k in sorted(keys):
+        vals = [s[k] for s in dict_samples]
+        if not all(isinstance(v, (int, float)) for v in vals):
+            continue
+        series[k] = [float(v) for v in vals]
+        deltas = [series[k][i + 1] - series[k][i] for i in range(len(vals) - 1)]
+        if all(abs(d) <= eps for d in deltas):
+            constant.append(k)
+        elif all(d >= -eps for d in deltas) or all(d <= eps for d in deltas):
+            monotonic.append(k)
+        else:
+            changing.append(k)
+    if not series:
+        return ""
+    span = f" over {window_seconds:.1f}s" if window_seconds else ""
+    lines = [
+        f"State timeline ({len(dict_samples)} samples{span}, "
+        f"{len(series)} numeric leaves): {len(constant)} constant, "
+        f"{len(monotonic)} monotonic, {len(changing)} changing"
+    ]
+    moving = monotonic + changing
+    if moving:
+        ex = ", ".join(
+            f"{k} ({series[k][0]:.6g}\u2192{series[k][-1]:.6g})"
+            for k in moving[:3]
+        )
+        lines.append(f"moving: {ex}")
+    # Suspicious 1: a frame/time-ish counter that never increases.
+    stalled = [
+        k for k in constant
+        if k.split(".")[-1].lower()
+        in ("frame", "frames", "tick", "ticks", "time", "t", "elapsed")
+    ]
+    if stalled:
+        lines.append(
+            f"SUSPICIOUS: {stalled[0]} not increasing across samples — "
+            "the update loop may be stalled"
+        )
+    # Suspicious 3 (fix-round item 1): a state-machine string leaf (action/
+    # state/mode/...) stuck on the same non-default value across every
+    # sample — names the permanent stun-lock directly ("player.action stuck
+    # at 'hit' for all 6 samples"). Leaf-name + default filters keep this
+    # mechanism-level and quiet (names/colors/titles never match).
+    if len(lines) < max_lines:
+        _STATEISH_LEAVES = {
+            "action", "state", "mode", "phase", "status",
+            "anim", "animation", "pose",
+        }
+        _DEFAULTISH_VALUES = {
+            "idle", "", "none", "default", "normal",
+            "playing", "play", "running", "run",
+        }
+        for k in sorted(keys):
+            leaf = k.rpartition(".")[2].lower()
+            if leaf not in _STATEISH_LEAVES:
+                continue
+            vals = [s[k] for s in dict_samples]
+            if not all(isinstance(v, str) for v in vals):
+                continue
+            if len(set(vals)) == 1 and vals[0].lower() not in _DEFAULTISH_VALUES:
+                lines.append(
+                    f"SUSPICIOUS: {k} stuck at '{vals[0]}' for all "
+                    f"{len(dict_samples)} samples — does that state ever expire?"
+                )
+                break
+    # Suspicious 2: one entity's position moves while a sibling's never does.
+    if len(lines) < max_lines:
+        moving_set = set(moving)
+        by_leaf: dict[str, list[tuple[str, str]]] = {}
+        for k in series:
+            head, dot, leaf = k.rpartition(".")
+            if dot and leaf in ("x", "y"):
+                by_leaf.setdefault(leaf, []).append((head, k))
+        for leaf, entries in sorted(by_leaf.items()):
+            movers = [h for h, kk in entries if kk in moving_set]
+            frozen_ents = [h for h, kk in entries if kk not in moving_set]
+            if movers and frozen_ents:
+                lines.append(
+                    f"SUSPICIOUS: {frozen_ents[0]}.{leaf} constant across all "
+                    f"samples while {movers[0]}.{leaf} changes — is "
+                    f"{frozen_ents[0]} ever updated?"
+                )
+                break
+    return "\n".join(lines[:max_lines])
+
+
 def format_report_for_model(report: dict[str, Any]) -> str:
     """Turn the report dict into the SHORT plain-text block we feed to the model.
 
@@ -2008,9 +2294,15 @@ def format_report_for_model(report: dict[str, Any]) -> str:
     if report["canvas"] is not None:
         c = report["canvas"]
         blank_str = "unknown" if c.get("blank") is None else str(c["blank"])
+        # Flag the untouched browser default inline so the model sees the
+        # real size every iteration (fix round, fight trace 20260611_145321).
+        default_tag = (
+            " (300x150 is the BROWSER DEFAULT — canvas was never sized!)"
+            if (c.get("width"), c.get("height")) == (300, 150) else ""
+        )
         lines.append(
-            f"Canvas: {c['width']}x{c['height']}, RAF ran: {c['raf_ran']}, "
-            f"blank: {blank_str}"
+            f"Canvas: {c['width']}x{c['height']}{default_tag}, "
+            f"RAF ran: {c['raf_ran']}, blank: {blank_str}"
         )
     else:
         lines.append("Canvas: none")
@@ -2041,6 +2333,10 @@ def format_report_for_model(report: dict[str, Any]) -> str:
         lines.append("Frozen canvas: YES (same pixels at t=half and t=full)")
     elif fz is False:
         lines.append("Frozen canvas: no (pixels changed during run)")
+    # Item 4: runtime dynamics digest (what actually happened over time).
+    tl = report.get("state_timeline")
+    if tl:
+        lines.append(tl)
     lines.append(f"Body text length: {report['body_chars']} chars")
     if report["body_sample"]:
         lines.append(f"Body sample: {report['body_sample']!r}")
@@ -2196,6 +2492,11 @@ class LiveBrowser:
         self._browser = None
         self._context = None
         self._page = None
+        # Fix-round item 2: cross-iteration persistence for the UNDRAWN
+        # sprite-audit gate. First occurrence gates (forces one fix turn);
+        # a persisting occurrence with green probes + no errors demotes to
+        # the non-gating warnings channel. Reset when the finding clears.
+        self._undrawn_seen_before = False
 
     async def start(self) -> None:
         """Launch the browser. Call once before load_and_test."""
@@ -2366,7 +2667,16 @@ class LiveBrowser:
         # the two hashes is what drives the FROZEN heuristic (it catches
         # slowly-moving content the 9-pixel probe misses).
         half = max(self._run_seconds / 2.0, 0.5)
-        await asyncio.sleep(half)
+        # Capability-round item 4 — state timeline. Sample the flattened
+        # game state ~6x across the observation window (3 per half, total
+        # sleep unchanged) so the fix prompt can reason from dynamics
+        # ("cpu.x never changed") instead of booleans. Reuses the
+        # _GAMESTATE_SNAPSHOT_JS flattening from the input smoke test.
+        state_samples: list = []
+        seg = half / 3.0
+        for _ in range(3):
+            await asyncio.sleep(seg)
+            state_samples.append(await self._safe_eval(_GAMESTATE_SNAPSHOT_JS))
         canvas_first = await self._safe_eval(_CANVAS_PROBE_JS)
         hash_first = await self._safe_eval(_CANVAS_HASH_JS)
         # Optional "before-input" screenshot — captures the t=startup
@@ -2380,7 +2690,9 @@ class LiveBrowser:
                 screenshot_before_saved = str(bp)
             except Exception:
                 screenshot_before_saved = None
-        await asyncio.sleep(half)
+        for _ in range(3):
+            await asyncio.sleep(seg)
+            state_samples.append(await self._safe_eval(_GAMESTATE_SNAPSHOT_JS))
         canvas_info = await self._safe_eval(_CANVAS_PROBE_JS)
         hash_last = await self._safe_eval(_CANVAS_HASH_JS)
 
@@ -2525,6 +2837,14 @@ class LiveBrowser:
         report["screenshot"] = screenshot_saved
         report["screenshot_before"] = screenshot_before_saved
         report["screenshot_action"] = screenshot_action_saved
+        # Item 4: dynamics digest over the ~6 observation-window samples.
+        # Empty string when the game exposed no state global.
+        try:
+            report["state_timeline"] = summarize_state_timeline(
+                state_samples, window_seconds=2 * half,
+            )
+        except Exception:
+            report["state_timeline"] = ""
         # Moved here from the per-action-frame save block above: `report`
         # only exists from this point on (UnboundLocalError fix, 2026-06-10).
         if action_frame_paths:
@@ -2532,6 +2852,16 @@ class LiveBrowser:
         report["action_key"] = (
             input_test.get("action_key") if isinstance(input_test, dict) else None
         )
+        # CANVAS-DEFAULT-SIZE gate (fix round): live canvas is the untouched
+        # 300x150 browser default and the source never sizes it. Gating —
+        # the game is being drawn mostly off-canvas.
+        try:
+            _src_html = Path(path).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            _src_html = ""
+        _cds = _canvas_default_size_warning(canvas_info, _src_html)
+        if _cds:
+            report["soft_warnings"].append(_cds)
         # Animation-liveness gate: a responsive action that renders a single
         # held pose (not animated) is a hard "must fix" — appended as a
         # soft_warning so the final ok-recompute flips report["ok"]=False and
@@ -2562,6 +2892,25 @@ class LiveBrowser:
                 "— pixel vs tile, or off-by-one). Spawn the player on a known "
                 "corridor cell and make at least one direction actually change "
                 "its position."
+            )
+        # Control-recovery gate (fix-round item 1): a movement key moved the
+        # player at the start of the run but no longer does after gameplay
+        # (one retry included). The permanent stun-lock family — gating,
+        # because the player has lost control of the game.
+        _cnr = input_test.get("control_not_recovered") if isinstance(input_test, dict) else None
+        if isinstance(_cnr, dict) and _cnr.get("key"):
+            report["control_not_recovered"] = _cnr
+            report["soft_warnings"].append(
+                f"CONTROL-NOT-RECOVERED: {_cnr['key']} moved the player at the "
+                f"start of the run ({', '.join(_cnr.get('leaves', []))}), but "
+                "after gameplay (taking hits) it no longer changes any "
+                "position field — even after a grace wait and retry. The "
+                "usual cause is a hit/stun/knockdown state that never "
+                "expires: its timer is skipped by an early-return guard "
+                "(e.g. `if (action === 'hit') return;` placed ABOVE the "
+                "timer countdown), so the entity is locked forever. Make the "
+                "stun timer decrement BEFORE any early return, and return to "
+                "a controllable state when it hits 0."
             )
         report["frozen_canvas"] = frozen
         report["input_test"] = input_test
@@ -2720,7 +3069,7 @@ class LiveBrowser:
                 preview = ", ".join(undrawn[:8])
                 if len(undrawn) > 8:
                     preview += f", … (+{len(undrawn) - 8} more)"
-                report["soft_warnings"].append(
+                _undrawn_text = (
                     f"ASSETS_LOADED_BUT_UNDRAWN [{preview}]: "
                     f"{len(undrawn)}/{len(referenced_assets)} asset PNG(s) "
                     "loaded but never drawn this run. The usual cause is a "
@@ -2736,6 +3085,34 @@ class LiveBrowser:
                     "entity that has a sprite. The undrawn assets above are: "
                     f"{preview}."
                 )
+                # Fix-round item 2: state-conditional pose sprites
+                # (player_death, cpu_duck, …) structurally CANNOT all draw in
+                # a 3s window + smoke test, so a persisting UNDRAWN finding on
+                # a behaviorally-green build is cosmetic, not a blocker —
+                # trace 20260610_185238 sat at 8/8 probes for 6 iters while
+                # this gate kept ok=False. First occurrence still gates (real
+                # key-mismatch bugs deserve one forced fix turn); a repeat
+                # with all probes passing and zero errors goes to the
+                # non-gating warnings channel (behavioral probes gate;
+                # cosmetics inform).
+                _probes_green = bool(report.get("probes")) and all(
+                    p.get("ok") for p in report.get("probes") or []
+                )
+                _no_errors = not report.get("errors") and not report.get("page_errors")
+                if self._undrawn_seen_before and _probes_green and _no_errors:
+                    report.setdefault("warnings", []).append(
+                        "ADVISORY (non-blocking) — " + _undrawn_text
+                        + " This finding has persisted while all behavioral "
+                        "probes pass; state-conditional pose sprites may "
+                        "simply not have triggered during the test window."
+                    )
+                else:
+                    report["soft_warnings"].append(_undrawn_text)
+                self._undrawn_seen_before = True
+            else:
+                # Finding absent this run — break the persistence streak so a
+                # future regression gates again.
+                self._undrawn_seen_before = False
         # ---- fake-action: code-drawn limb pretending to be a sprite --------
         # Only when the game actually uses sprites. A key that visibly changed
         # the canvas but added NO new sprite source while code-draw
@@ -2743,9 +3120,24 @@ class LiveBrowser:
         # with ctx.lineTo over the idle sprite instead of swapping to the kick
         # sprite). Gating soft_warning so the model must drive actions by sprite.
         if isinstance(_fake_actions, dict) and referenced_assets:
+            # Fix-round item 2: only flag keys the game DECLARED as actions
+            # in <criteria>. The smoke test also presses default movement /
+            # WASD keys; in trace 20260610_185238 this gate blamed KeyA/KeyS
+            # — default presses, not the game's controls (arrows + J/K/L/R)
+            # — and could never be cleared. Declared action keys are the
+            # ones whose animation must be sprite-driven.
+            # Declared action keys only — movement arrows/WASD are pressed by
+            # the smoke-test defaults and must not gate (trace KeyA/KeyS;
+            # criteria may also name ArrowLeft/ArrowRight as move, not attack).
+            _declared_action_keys = (
+                set(_parse_action_keys(criteria or ""))
+                - _MOVEMENT_KEYS
+                - _RESTART_KEYS
+            )
             faked = [
                 kc for kc, info in _fake_actions.items()
                 if isinstance(info, dict)
+                and kc in _declared_action_keys
                 and not info.get("new_sprite_src")
                 and int(info.get("code_draw_delta", 0)) > 0
             ]
@@ -2781,14 +3173,19 @@ class LiveBrowser:
             ]
             if over_sprite:
                 preview = ", ".join(over_sprite[:6])
-                report["soft_warnings"].append(
-                    f"CODE_DRAWN_OVER_SPRITE [{preview}]: the action DID draw its "
+                # Fix-round item 2: NEVER gates. The sprite WAS drawn — the
+                # extra code-draw is a motion line / flash, exactly the juice
+                # the polish rubric requests. Advisory on the non-gating
+                # warnings channel; the model can tune it, shipping is not
+                # blocked (trace 20260610_185238 held ok=False on this).
+                report.setdefault("warnings", []).append(
+                    f"CODE_DRAWN_OVER_SPRITE (advisory — does not block "
+                    f"shipping) [{preview}]: the action DID draw its "
                     "sprite, but ALSO code-drew shapes (ctx.stroke / lineTo / arc "
                     "— a motion line, reach-bar, flash, or limb) on top of the "
-                    "character. The generated action sprite already conveys the "
-                    "move; do not bolt a code-drawn object onto it. Remove the "
-                    "stroke/arc effect and let the *_kick / *_punch sprite show "
-                    "the action (orient it toward the opponent if needed)."
+                    "character. If it reads as a stray object rather than an "
+                    "effect, remove the stroke/arc overlay and let the *_kick / "
+                    "*_punch sprite carry the action."
                 )
         # Procedural-regression detector. Independent of (but coordinated
         # with) ASSETS_LOADED_BUT_UNDRAWN above. The drawImage shim says
@@ -3073,6 +3470,11 @@ class LiveBrowser:
             # new <probes> block whose entries reference the gap → agent
             # replaces self._probes with the new set).
             for gap in coverage_gaps:
+                # Fix round: sustained-performance criteria are advisory
+                # only — no honest probe can verify "60fps under stress"
+                # in a short load, so a synthetic probe would block forever.
+                if _is_unverifiable_perf_criterion(gap):
+                    continue
                 slug = _slugify_criterion(gap)
                 # [HARNESS NOTE] fence (2026-05-24) — without this, the
                 # 27B-class coder mistakes synthetic coverage_gap probe
@@ -3393,11 +3795,17 @@ class LiveBrowser:
                 })
             elif rtype == "asset_stats":
                 has_assets = "_assets/" in html_text or "ASSET_LIST" in html_text or "const ASSETS" in html_text
-                ok = (not has_assets) or ("new Image" in html_text and "decode" in html_text)
+                # Fix round: `img.onload` is just as valid a load path as
+                # `img.decode()` — requiring decode() flagged correct
+                # onload-based loaders (fight trace 20260611_145321).
+                ok = (not has_assets) or (
+                    "new Image" in html_text
+                    and ("decode" in html_text or "onload" in html_text)
+                )
                 check.update({
                     "ok": ok,
                     "hard": has_assets,
-                    "err": "" if ok else "asset loader does not clearly decode generated images",
+                    "err": "" if ok else "asset loader does not clearly decode generated images (no decode() or onload handler)",
                 })
             elif rtype in {"before_mid_after", "event_window"}:
                 # Honest signal, not a RAF-in-source rubber-stamp: a responsive
@@ -3505,61 +3913,10 @@ class LiveBrowser:
         except Exception:
             pass
 
-        # Flatten the game's exposed state into a {dotted-path: number}
-        # map of numeric leaves, depth-capped and fanout-capped so giant
-        # entity arrays don't explode the snapshot. Returns null when
-        # nothing is exposed — input-test then falls back to canvas hash
-        # only.
-        #
-        # NAME-MATCHING BUG FIX (2026-05-16): for the entire history of
-        # this code, the snapshot looked at `window.gameState` while the
-        # system prompt and all won-skeletons expose `window.state`. The
-        # net effect was that the gameplay verification path was BLIND
-        # to the actual state of agent-generated games and silently
-        # fell back to canvas-hash (which is degenerate for any auto-
-        # animating game). This is the single biggest reason "input
-        # smoke test passed" did not correlate with "controls work."
-        # Now we walk a small ordered list of plausible globals and
-        # take the first that's an object. `state` is the documented
-        # convention; the others are back-compat.
-        _GAMESTATE_SNAPSHOT_JS = """
-        () => {
-            const candidates = ['state', 'gameState', 'game', 'GAME', 'world'];
-            let gs = null;
-            for (const name of candidates) {
-                const v = window[name];
-                if (v != null && typeof v === 'object') { gs = v; break; }
-            }
-            if (gs == null) return null;
-            const out = {};
-            const visit = (obj, path, depth) => {
-                if (depth > 4 || obj == null) return;
-                if (typeof obj === 'number' && isFinite(obj)) { out[path] = obj; return; }
-                if (typeof obj === 'boolean') { out[path] = obj ? 1 : 0; return; }
-                if (typeof obj !== 'object') return;
-                const ks = Array.isArray(obj)
-                    ? obj.slice(0, 32).map((_, i) => String(i))
-                    : Object.keys(obj).slice(0, 64);
-                for (const k of ks) {
-                    try { visit(obj[k], path ? path + '.' + k : k, depth + 1); }
-                    catch (e) { /* getters etc */ }
-                }
-            };
-            visit(gs, '', 0);
-            // Also surface array lengths so "bullets fired" registers as a delta.
-            const lenVisit = (obj, path, depth) => {
-                if (depth > 4 || obj == null || typeof obj !== 'object') return;
-                if (Array.isArray(obj)) { out[(path || '_root') + '.length'] = obj.length; return; }
-                const ks = Object.keys(obj).slice(0, 64);
-                for (const k of ks) {
-                    try { lenVisit(obj[k], path ? path + '.' + k : k, depth + 1); }
-                    catch (e) {}
-                }
-            };
-            lenVisit(gs, '', 0);
-            return out;
-        }
-        """
+        # The state-flattening snapshot JS lives at module level
+        # (`_GAMESTATE_SNAPSHOT_JS`) since 2026-06-10 — it is shared with
+        # the state-timeline sampler in `load_and_test` (capability-round
+        # item 4). Same flattening, same depth/fanout caps.
 
         def _gs_changed_leaves(before: Any, after: Any) -> set[str]:
             """Set of leaf paths whose value differs (epsilon for floats)
@@ -3634,6 +3991,13 @@ class LiveBrowser:
         # (real movement) or only a direction/flag (input registered, no move)?
         movement_position_changed = False
         movement_registered_without_move = False
+        # Control-recovery re-test (fix-round item 1): remember the first
+        # movement key that moved a POSITION leaf and which leaves it moved,
+        # so we can re-dispatch it AFTER the full key sweep (during which the
+        # game's own combat lands hits / enters stun states) and verify the
+        # player can still move.
+        recovery_key: str | None = None
+        recovery_leaves: list[str] = []
 
         # Draw-call state snapshot — distinct drawImage SOURCES seen so far,
         # plus code-draw counts (fillRect + stroke/line). Used to tell a REAL
@@ -3745,8 +4109,23 @@ class LiveBrowser:
             # any POSITION leaf change (player actually moved) or only a
             # direction/flag leaf (input registered but entity stuck)?
             if k in _MOVEMENT_KEYS and input_only_leaves:
-                if any(_is_position_leaf(leaf) for leaf in input_only_leaves):
+                pos_leaves = [
+                    leaf for leaf in input_only_leaves
+                    if _is_position_leaf(leaf)
+                ]
+                if pos_leaves:
                     movement_position_changed = True
+                    # Prefer lateral (player.x) movers for the recovery
+                    # re-test — vertical keys (jump) still move y while
+                    # a hit-stun lock freezes x; ArrowUp would false-pass.
+                    x_leaves = sorted(l for l in pos_leaves if l.endswith(".x"))
+                    candidate = x_leaves or sorted(pos_leaves)
+                    cur_has_x = any(
+                        l.endswith(".x") for l in recovery_leaves
+                    )
+                    if recovery_key is None or (x_leaves and not cur_has_x):
+                        recovery_key = k
+                        recovery_leaves = candidate[:5]
                 elif any(not _is_position_leaf(leaf) for leaf in input_only_leaves):
                     movement_registered_without_move = True
 
@@ -3800,6 +4179,97 @@ class LiveBrowser:
                 and ambient_canvas_changed
             ):
                 static_action = {"key": best_action_key, "delta": round(_m, 4)}
+
+        # ---- control-recovery re-test (fix-round item 1) -------------------
+        # The key sweep above reliably makes the game's combat land hits /
+        # enter stun states. Re-dispatch the first movement key that moved a
+        # position leaf EARLY in this run and check the SAME leaves move
+        # again. One retry after a grace wait so legitimate brief hit-stun
+        # never false-positives. Catches the permanent stun-lock: an expiry
+        # timer placed below an `if (action === 'hit') return;` guard.
+        control_not_recovered: dict[str, Any] | None = None
+        if recovery_key is not None and recovery_leaves and has_position_state:
+
+            async def _induce_combat_before_recovery() -> None:
+                """Give declared attack keys + held movement time to land hits.
+
+                The recovery re-test only catches stun-lock AFTER gameplay —
+                a single quick key sweep often never triggers a projectile
+                hit (regression fixture build-a-single-screen-2d-fight_20260610).
+                Walk toward engagement on a lateral key that already moved
+                player.x (if any), tap declared attack keys, then wait for
+                projectiles / melee to resolve. Genre-free."""
+                action_keys = [
+                    k for k in _parse_action_keys(criteria or "")
+                    if k not in _MOVEMENT_KEYS and k not in _RESTART_KEYS
+                ][:4]
+                if not action_keys:
+                    return
+                # Prefer a lateral movement key that already moved player.x —
+                # closing distance is what makes ranged/melee hits land.
+                engage_key = recovery_key
+                for k in ("ArrowRight", "ArrowLeft", "KeyD", "KeyA"):
+                    ev = responsive_evidence.get(k) or []
+                    if any(_is_position_leaf(leaf) and leaf.endswith(".x") for leaf in ev):
+                        engage_key = k
+                        break
+                try:
+                    await self._page.keyboard.down(engage_key)
+                    # ~2.5s walk + attack taps while closing on the opponent.
+                    for _ in range(6):
+                        ak = action_keys[_ % len(action_keys)]
+                        await self._page.keyboard.down(ak)
+                        await asyncio.sleep(0.12)
+                        try:
+                            await self._page.keyboard.up(ak)
+                        except Exception:
+                            pass
+                        await asyncio.sleep(0.3)
+                    await asyncio.sleep(1.0)  # projectiles travel + hit-stun lands
+                finally:
+                    try:
+                        await self._page.keyboard.up(engage_key)
+                    except Exception:
+                        pass
+                    for ak in action_keys:
+                        try:
+                            await self._page.keyboard.up(ak)
+                        except Exception:
+                            pass
+
+            async def _recovery_leaves_move_again() -> bool:
+                b_gs = await self._safe_eval(_GAMESTATE_SNAPSHOT_JS)
+                try:
+                    await self._page.keyboard.down(recovery_key)
+                    await asyncio.sleep(0.4)
+                finally:
+                    try:
+                        await self._page.keyboard.up(recovery_key)
+                    except Exception:
+                        pass
+                a_gs = await self._safe_eval(_GAMESTATE_SNAPSHOT_JS)
+                moved = _gs_changed_leaves(b_gs, a_gs)
+                return any(leaf in moved for leaf in recovery_leaves)
+
+            try:
+                await _induce_combat_before_recovery()
+                recheck_moved = await _recovery_leaves_move_again()
+                retry_moved: bool | None = None
+                if not recheck_moved:
+                    await asyncio.sleep(0.5)  # let a legit hit-stun timer expire
+                    retry_moved = await _recovery_leaves_move_again()
+                if control_not_recovered_verdict(
+                    has_position_state=has_position_state,
+                    moved_early=True,
+                    recheck_moved=recheck_moved,
+                    retry_moved=retry_moved,
+                ):
+                    control_not_recovered = {
+                        "key": recovery_key,
+                        "leaves": recovery_leaves,
+                    }
+            except Exception:
+                pass  # browser hiccup — never block the report on the re-test
 
         # Concise summary line for the report. Two shapes:
         #   PASS — "ArrowRight→[player.x, player.facing], Space→[bullets.length]"
@@ -3861,6 +4331,11 @@ class LiveBrowser:
                 and not movement_position_changed
                 and has_position_state
             ),
+            # Control-recovery verdict (fix-round item 1): {key, leaves} when a
+            # previously-responsive movement key no longer moves the player's
+            # position after gameplay (retry included). None when recovered or
+            # not applicable.
+            "control_not_recovered": control_not_recovered,
         }
 
     async def show_status(self, title: str, message: str = "") -> None:

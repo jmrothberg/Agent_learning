@@ -1586,6 +1586,13 @@ def first_build_instruction(
         "ULTRA IMPORTANT: emit the COMPLETE file, no elisions, no "
         "'rest of code unchanged' placeholders. Then add a <notes> tag "
         "with one sentence of summary.\n\n"
+        # Fix round (fight trace 20260611_145321): a rewrite dropped the
+        # seed's canvas sizing → 300x150 browser default → black screen.
+        "KEEP the seed's canvas sizing: the width/height attributes and "
+        "any fit()/DPR-resize wiring must survive your rewrite (or be "
+        "replaced with equivalent explicit sizing, e.g. <canvas "
+        'width="800" height="500">). A <canvas> with no size renders at '
+        "the useless 300x150 browser default.\n\n"
         "SEED CODE:\n"
         "```html\n"
         f"{seed_html}\n"
@@ -1912,6 +1919,61 @@ def post_clean_instruction(report_text: str) -> str:
         "confident it will not regress. A targeted <patch> is best; for "
         "structural improvements only, a complete <html_file> is acceptable "
         "(auto-revert will roll back any version that regresses)."
+    )
+
+
+def polish_instruction(
+    report_text: str,
+    *,
+    current_file: str = "",
+    critic_note: str = "",
+    component_block: str = "",
+    turn: int = 1,
+    cap: int = 2,
+) -> str:
+    """Capability-round item 2: post-green polish turn.
+
+    Sent instead of post_clean_instruction when probes pass, iteration
+    budget remains, and the per-session polish cap is unmet. Asks for ONE
+    concrete game-feel improvement via small <patch>es — never a
+    restructure. Genre-free juice rubric; auto-revert guards regressions.
+    """
+    crit = ""
+    if critic_note:
+        crit = (
+            "VISUAL CRITIC's latest finding (address it if it fits this "
+            f"turn's ONE improvement): {critic_note}\n\n"
+        )
+    comp = f"{component_block}\n\n" if component_block else ""
+    file_block = ""
+    if current_file:
+        file_block = (
+            "CURRENT FILE ON DISK (this is the SOURCE OF TRUTH — your "
+            "<patch> SEARCH must match THIS exact text, "
+            "character-for-character):\n"
+            "```html\n"
+            f"{current_file}\n"
+            "```\n\n"
+        )
+    return (
+        f"{report_text}\n\n"
+        f"All probes pass — the game WORKS. This is polish turn {turn}/{cap}: "
+        "spend it on GAME FEEL, not features.\n\n"
+        "Do NOT restructure. Pick exactly ONE concrete feel improvement and "
+        "implement it with small <patch>es. Choose from this rubric (skip "
+        "anything already present):\n"
+        "- hit feedback on impactful events (flash, screen shake, hit-pause)\n"
+        "- motion easing instead of linear snaps (UI, pickups, transitions)\n"
+        "- particles on the most important event (death, score, impact)\n"
+        "- audio cues on player actions (WebAudio beeps are fine — no files needed)\n"
+        "- a title screen and/or game-over screen with a restart path\n"
+        "- score presentation (pop on change, floating points, high score)\n\n"
+        f"{crit}"
+        f"{comp}"
+        f"{file_block}"
+        "If the game already feels complete and polished, send <done/> "
+        "instead — shipping is always acceptable. Auto-revert protects the "
+        "working build, but keep the change small and additive."
     )
 
 

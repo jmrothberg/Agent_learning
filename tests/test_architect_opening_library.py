@@ -220,7 +220,9 @@ def test_outline_content_mentions_state_or_probes_or_recommendation():
     """Each outline should give the architect actionable guidance —
     state shape, probe templates, or a recommendation. A vague outline
     that doesn't name concrete fields is dead weight. We accept ANY of
-    several actionable markers."""
+    several actionable markers in `content`, OR a deep `recipe` with
+    state + probes (the 2026-06-11 deep-book format renders those at
+    plan stage, so the guidance reaches the architect either way)."""
     actionable_markers = (
         "state.", "state[", "window.state", "window.gameState",
         "probe", "Probe",
@@ -229,7 +231,9 @@ def test_outline_content_mentions_state_or_probes_or_recommendation():
     )
     for o in _load_outlines():
         c = o["content"]
-        assert any(m in c for m in actionable_markers), (
-            f"{o['id']} content has no actionable markers — "
-            f"add a state.X reference, a probe, or a concrete recommendation."
+        recipe = o.get("recipe") or {}
+        deep_actionable = bool(recipe.get("state")) and bool(recipe.get("probes"))
+        assert deep_actionable or any(m in c for m in actionable_markers), (
+            f"{o['id']} has no actionable markers in content and no deep "
+            f"recipe (state+probes) — add one or the other."
         )

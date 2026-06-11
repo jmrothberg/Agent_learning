@@ -234,6 +234,12 @@ VERIFIED_FINDINGS_FILENAME = "verified_findings.jsonl"
 # infrastructure as playtests.jsonl. Designed alongside the
 # vlm-critic-memory-driven-checklist plan.
 VISUAL_PLAYTESTS_FILENAME = "visual_playtests.jsonl"
+# 2026-06-10: component skill library — tested, mechanics-level JS snippets
+# (game loop, input buffer, particles, hit-pause, ...) the coder can paste
+# and adapt. Code body lives in recipe["code"]; `content` stays the one-line
+# description used for Jaccard matching. Hand-edited data file like
+# visual_playtests.jsonl. See plan local-model_game_agent_capability_round.
+COMPONENTS_FILENAME = "components.jsonl"
 
 DEFAULT_SKELETON = """<!DOCTYPE html>
 <html lang="en"><head>
@@ -3105,7 +3111,39 @@ def _opening_book_seed_items() -> dict[str, list[OpeningBookItem]]:
         # means the matcher returns None for every goal and the critic
         # uses its legacy open-ended prompt — safe degradation).
         VISUAL_PLAYTESTS_FILENAME: [],
+        # Component skill library is a hand-edited data file
+        # (memory/components.jsonl) like visual_playtests — not seeded here.
+        COMPONENTS_FILENAME: [],
     }
+
+
+def _render_outline_recipe(recipe: dict) -> str:
+    """Deep 'book line' render for ONE matched outline (plan stage only).
+
+    Terse imperative lines, no code fences — the same shape playbook
+    bullets use, so local models read it as reference data rather than
+    new instructions. Returns "" for legacy entries with empty recipes.
+    """
+    if not isinstance(recipe, dict) or not recipe:
+        return ""
+    lines: list[str] = []
+    state = str(recipe.get("state") or "").strip()
+    if state:
+        lines.append(f"state: {state}")
+    order = [str(s).strip() for s in (recipe.get("order") or []) if str(s).strip()]
+    if order:
+        lines.append("order: " + " -> ".join(order))
+    traps = [str(s).strip() for s in (recipe.get("traps") or []) if str(s).strip()]
+    if traps:
+        lines.append("traps:")
+        lines.extend(f"- {t}" for t in traps)
+    tuning = [str(s).strip() for s in (recipe.get("tuning") or []) if str(s).strip()]
+    if tuning:
+        lines.append("tuning: " + "; ".join(tuning))
+    probes = [str(s).strip() for s in (recipe.get("probes") or []) if str(s).strip()]
+    if probes:
+        lines.append("probes: " + "; ".join(probes))
+    return "\n".join(lines)
 
 
 def render_opening_book_block(
@@ -3115,15 +3153,27 @@ def render_opening_book_block(
     animation_audits: list[OpeningBookHit],
     *,
     char_budget: int = 2600,
+    deep: bool = False,
 ) -> str:
-    """Compact trusted/lower-confidence recipes for prompts."""
+    """Compact trusted/lower-confidence recipes for prompts.
+
+    `deep=True` (plan stage) additionally renders the matched outline's
+    structured recipe fields (state/order/traps/tuning/probes). Code-stage
+    callers keep the default shallow render so iterate-loop prompts never
+    grow with book depth.
+    """
     sections: list[str] = []
     if outline:
         item = outline.item
-        sections.append(
+        outline_text = (
             f"OUTLINE [{item.id}] tier={item.source_tier} score={outline.score:.3f}\n"
             f"{item.content}"
         )
+        if deep:
+            recipe_text = _render_outline_recipe(getattr(item, "recipe", None))
+            if recipe_text:
+                outline_text += "\n" + recipe_text
+        sections.append(outline_text)
 
     def _line(label: str, hits: list[OpeningBookHit]) -> str:
         rows = []
@@ -3155,6 +3205,48 @@ def render_opening_book_block(
         "as compact implementation/test guidance.\n\n"
         f"{body}\n"
         "</opening_book>"
+    )
+
+
+def render_components_block(
+    hits: list[OpeningBookHit],
+    *,
+    char_budget: int = 2200,
+) -> str:
+    """Render component-library hits as a <components> block with fenced JS.
+
+    Tested, mechanics-level snippets the model should paste and ADAPT (not
+    treat as a library import). Whole entries are dropped — never truncated
+    mid-code — when the budget is exceeded, so emitted JS is always complete.
+    """
+    if not hits:
+        return ""
+    sections: list[str] = []
+    used = 0
+    for h in hits:
+        item = h.item
+        code = str((item.recipe or {}).get("code") or "").strip()
+        if not code:
+            continue
+        section = (
+            f"COMPONENT [{item.id}]: {item.content}\n"
+            f"```js\n{code}\n```"
+        )
+        # Drop whole entries past the budget (always keep at least one).
+        if sections and used + len(section) > char_budget:
+            break
+        sections.append(section)
+        used += len(section)
+    if not sections:
+        return ""
+    body = "\n\n".join(sections)
+    return (
+        "<components>\n"
+        "Tested, working snippets relevant to this goal. Adapt, don't "
+        "import — paste the pattern into your code and rename/modify to fit "
+        "your structures. They are reference implementations, not a library.\n\n"
+        f"{body}\n"
+        "</components>"
     )
 
 
@@ -3193,6 +3285,7 @@ class GameMemory:
             IMPLEMENTATION_OUTLINES_FILENAME: self.base_root / IMPLEMENTATION_OUTLINES_FILENAME,
             VERIFIED_FINDINGS_FILENAME: self.base_root / VERIFIED_FINDINGS_FILENAME,
             VISUAL_PLAYTESTS_FILENAME: self.base_root / VISUAL_PLAYTESTS_FILENAME,
+            COMPONENTS_FILENAME: self.base_root / COMPONENTS_FILENAME,
         }
         self.live_opening_book_paths = {
             PLAYTESTS_FILENAME: self.live_root / PLAYTESTS_FILENAME,
@@ -3201,6 +3294,7 @@ class GameMemory:
             IMPLEMENTATION_OUTLINES_FILENAME: self.live_root / IMPLEMENTATION_OUTLINES_FILENAME,
             VERIFIED_FINDINGS_FILENAME: self.live_root / VERIFIED_FINDINGS_FILENAME,
             VISUAL_PLAYTESTS_FILENAME: self.live_root / VISUAL_PLAYTESTS_FILENAME,
+            COMPONENTS_FILENAME: self.live_root / COMPONENTS_FILENAME,
         }
 
         # Compatibility properties for legacy accesses
@@ -3377,6 +3471,18 @@ class GameMemory:
     ) -> list[OpeningBookHit]:
         return self._retrieve_opening_book(
             PLAYTESTS_FILENAME, goal=goal, modality=modality, k=k, cls=PlaytestRecipe,
+        )
+
+    def load_components(self) -> list[OpeningBookItem]:
+        """Component skill library: tested mechanics-level JS snippets."""
+        return self._load_opening_book(COMPONENTS_FILENAME)
+
+    def retrieve_components(
+        self, goal: str, modality: str | list[str] | None = None, k: int = 3
+    ) -> list[OpeningBookHit]:
+        """Top-k components by goal/modality similarity (opening-book scoring)."""
+        return self._retrieve_opening_book(
+            COMPONENTS_FILENAME, goal=goal, modality=modality, k=k,
         )
 
     def load_asset_audits(self) -> list[OpeningBookItem]:

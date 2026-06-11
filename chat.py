@@ -3096,6 +3096,8 @@ class CodingBoxApp(App):
                 await self.action_ship_it()
             elif cmd in ("revert", "rewind"):
                 self._cmd_revert(arg)
+            elif cmd in ("unqueue", "dequeue", "clearqueue"):
+                self._cmd_unqueue(arg)
             elif cmd == "quit":
                 await self.action_quit_app()
             elif cmd in ("log", "paths", "files"):
@@ -3229,6 +3231,8 @@ class CodingBoxApp(App):
             "  [b]/ship[/b]                      ship current build [dim](= Ctrl+D, or type 'done' / 'looks good')[/dim]",
             "  [b]/revert [N][/b]               roll the game file back to the last clean iter [dim](or iter N specifically; aliases /rewind)[/dim]",
             "                                  [dim]use this when the model breaks something — one keystroke beats typing 'undo that'[/dim]",
+            "  [b]/unqueue[/b]                   drop your last typed feedback only (accidental queue) [dim](/dequeue)[/dim]",
+            "                                  [dim]older queued lines stay; /unqueue all or /unqueue N for more[/dim]",
             "  [b]/retry[/b]                     re-run after a bad model (keeps game file + trace)",
             "  [b]/reset[/b]                     wipe ALL staged state → defaults (seed, model, iters, ctx)",
             "  [b]/open[/b]                      open the current game in your default browser",
@@ -4415,6 +4419,67 @@ class CodingBoxApp(App):
             "The on-disk file is now the working version. Type new "
             "feedback to continue."
         )
+
+    def _cmd_unqueue(self, arg: str) -> None:
+        """/unqueue — drop your last typed feedback before it is applied.
+
+        Bare ``/unqueue`` removes ONLY the most recently typed feedback
+        line (the accidental keystroke). Older queued feedback and any
+        pending model-question answer are left alone. See also
+        ``/unqueue all``, ``/unqueue answer``, ``/unqueue N``.
+        """
+        if self.agent is None:
+            self._log_info("no session yet — nothing queued to remove")
+            return
+        which = arg.strip()
+        try:
+            result = self.agent.unqueue_pending_input(which)
+        except Exception as e:
+            self._log_error(f"/unqueue failed: {e}")
+            return
+        if not result.get("ok"):
+            self._log_info(result.get("error", "nothing to unqueue"))
+            return
+        removed = result.get("removed") or []
+        if not removed:
+            self._log_info("queue already empty")
+            return
+        for item in removed:
+            kind = item.get("kind", "feedback")
+            preview = item.get("preview", "")
+            label = "answer" if kind == "answer" else "feedback"
+            self._log(
+                f"[bold yellow]unqueued[/bold yellow] {label}: "
+                f"[dim]{_esc(preview)}[/dim]"
+            )
+        remain_fb = int(result.get("remaining_feedback") or 0)
+        remain_ans = bool(result.get("remaining_answer"))
+        which = str(result.get("which") or "")
+        if which == "last_feedback" and remain_fb:
+            self._log_info(
+                f"{remain_fb} older feedback item{'s' if remain_fb != 1 else ''} "
+                "still queued for next user-turn"
+            )
+        elif which == "last_feedback" and remain_ans:
+            self._log_info(
+                "queued model-question answer left unchanged "
+                "(use /unqueue answer to drop it)"
+            )
+        elif which == "last_feedback":
+            self._log_info("no feedback queued for next user-turn")
+        else:
+            bits: list[str] = []
+            if remain_fb:
+                bits.append(
+                    f"{remain_fb} feedback item{'s' if remain_fb != 1 else ''}"
+                )
+            if remain_ans:
+                bits.append("1 answer")
+            if bits:
+                self._log_info(f"still queued: {' + '.join(bits)}")
+            else:
+                self._log_info("queue empty — nothing pending for next user-turn")
+        self._update_status()
 
     def _cmd_attach_ref_image(self, arg: str) -> None:
         """/ref <path> — attach a reference image to the NEXT user turn.

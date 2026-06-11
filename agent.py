@@ -57,10 +57,13 @@ from typing import Any, AsyncIterator
 
 from assets import (
     _DERIVED_FRAME_MIN_DELTA,
+    flip_sprite_horizontal,
     generate_assets,
     parse_assets_block,
     parse_assets_block_with_meta,
+    parse_orientation_verdicts,
     render_asset_paths_block,
+    select_orientation_audit_targets,
     try_load_image_generator,
 )
 from sounds import (
@@ -84,6 +87,7 @@ from memory import (
     ANIMATION_AUDITS_FILENAME,
     SkeletonHit,
     lookup_bullet,
+    render_components_block,
     render_opening_book_block,
     render_playbook_block,
     signature_for_report,
@@ -422,6 +426,64 @@ def _baseline_structurally_broken(html: str) -> str | None:
     return errors[0][:240]
 
 
+def _patch_set_bracket_break(base: str, patched: str, patches) -> str | None:
+    """Pre-commit patch validation (fix round, fight trace 20260611_145321):
+    if applying `patches` turned a bracket-balanced baseline into an
+    imbalanced file, return a rejection message naming the offending
+    patch block(s); else None.
+
+    The trace's iter-2 patch applied "2/2 OK" but chopped a function body
+    mid-block (+2 `{`), leaving a broken file on disk that burned a full
+    structural-recovery rewrite + two ~7-minute best-of-N generations.
+    Rejecting at apply time keeps the working baseline on disk and turns
+    the failure into a cheap one-patch retry.
+    """
+    from tools import _SCRIPT_BLOCK_RE, _bracket_imbalance
+
+    def _total_imbalance(html: str) -> dict[str, int]:
+        totals = {"{}": 0, "()": 0, "[]": 0}
+        for m in _SCRIPT_BLOCK_RE.finditer(html or ""):
+            attrs, body = m.group(1) or "", m.group(2) or ""
+            if "src=" in attrs:
+                continue
+            for kind, v in _bracket_imbalance(body).items():
+                totals[kind] += v
+        return totals
+
+    base_imb = _total_imbalance(base)
+    if any(base_imb.values()):
+        return None  # baseline already imbalanced — not the patch's fault
+    patched_imb = _total_imbalance(patched)
+    broken_kinds = [k for k, v in patched_imb.items() if v]
+    if not broken_kinds:
+        return None
+    # Attribute: per-block bracket delta = imbalance(REPLACE) - imbalance(SEARCH).
+    culprits: list[str] = []
+    for idx, p in enumerate(patches):
+        search_imb = _bracket_imbalance(getattr(p, "search", "") or "")
+        replace_imb = _bracket_imbalance(getattr(p, "replace", "") or "")
+        deltas = []
+        for kind in broken_kinds:
+            d = replace_imb[kind] - search_imb[kind]
+            if d:
+                deltas.append(f"{kind} {d:+d}")
+        if deltas:
+            head = ((getattr(p, "search", "") or "").splitlines() or [""])[0]
+            culprits.append(
+                f"block {idx + 1} (SEARCH starts `{head[:80]}`) changes {', '.join(deltas)}"
+            )
+    detail = "; ".join(culprits) if culprits else (
+        "net imbalance "
+        + ", ".join(f"{k} {patched_imb[k]:+d}" for k in broken_kinds)
+    )
+    return (
+        "patch set rejected: applying it would break bracket balance "
+        f"({detail}). The REPLACE text must close every brace it opens — "
+        "include the full surrounding lines so SEARCH and REPLACE have "
+        "matching bracket counts."
+    )
+
+
 def _truncation_reason(html: str) -> str | None:
     """Return a short human description if `html` looks structurally
     truncated (an open tag with no close), else None.
@@ -654,10 +716,53 @@ _COMPACT_PRESSURE = 0.70
 # (pressure defaults 0.0) so a pathological run can't grow unbounded.
 _COMPACT_MESSAGE_CAP = 60
 
+# Fix-round item 3 — absolute prompt-token ceiling for structured compaction.
+# The pressure gate above is relative to num_ctx (0.70 of 100K = 70K), but the
+# 20260610_185238 trace showed MLX streams stalling silently (0 visible tokens
+# for 180-212s) already at 61-69K prompt tokens — the session died before
+# pressure ever fired. Compact when the last coder prompt reaches this many
+# tokens regardless of pressure. Env-overridable for big-prompt-tolerant
+# backends (set 0 to disable the ceiling entirely).
+_COMPACT_TOKEN_CEILING = int(
+    os.environ.get("AGENT_COMPACT_TOKEN_CEILING", "45000") or "45000"
+)
+
+# Capability-round item 2 — polish phase. After probes pass, up to this many
+# turns per session are spent on game feel (juice rubric in
+# prompts_v1.polish_instruction) instead of immediately pushing <done/>.
+# A polish turn that regresses the green build auto-reverts and ends the
+# polish phase. Polish never blocks shipping.
+_POLISH_TURN_CAP = 2
+
+# Capability-round item 5 — best-of-2 repair on stuck blockers. When the
+# session runs with best_of_n == 1 and two consecutive reports failed
+# (_stuck_streak >= 2), that turn samples 2 candidates (backend default
+# temps 0.2 / 0.6) and ships the better-scoring one. Capped per session to
+# bound cost on slow local backends.
+_STUCK_BON_ESCALATION_CAP = 2
+
 # Only elide genuinely large inline HTML blobs during message compaction.
 # Small examples (e.g. `<html_file>...</html_file>` in instructions) must
 # remain verbatim or we mutate the semantics of prior user guidance.
 _SUMMARIZE_MIN_HTML_BYTES = 1024
+
+# Capability-round item 3 — context discipline. Each test-report user turn
+# is wrapped in these harness sentinels (with a 3-line digest embedded in
+# the BEGIN marker). `_prune_messages` collapses superseded wrapped reports
+# older than the keep window down to the digest; the newest report always
+# stays verbatim. User feedback appended by `_flush_user_injections` sits
+# OUTSIDE the wrapper and survives collapse untouched.
+_REPORT_BLOCK_BEGIN = "<!-- HARNESS-REPORT-BLOCK digest:"
+_REPORT_BLOCK_END = "<!-- /HARNESS-REPORT-BLOCK -->"
+_REPORT_BLOCK_RE = re.compile(
+    r"<!-- HARNESS-REPORT-BLOCK digest:\n(.*?)\n-->\n(.*?)<!-- /HARNESS-REPORT-BLOCK -->",
+    re.DOTALL,
+)
+
+# Stale <probes> re-emissions in pruned assistant turns are ~1.5KB each and
+# superseded the moment self._probes updates. Bodies above this size are
+# collapsed by _summarize_content; small examples stay verbatim.
+_SUMMARIZE_MIN_PROBES_BYTES = 300
 
 
 # Centipede trace 20260512_180020: user typed
@@ -2022,6 +2127,30 @@ class GameAgent:
         self._p = self._load_prompt_module(prompt_version)
         self._last_diagnose: str | None = None
         self._stuck_streak: int = 0
+        # Capability-round item 2 — polish-phase state. `_polish_turns_used`
+        # counts polish prompts sent this session (cap _POLISH_TURN_CAP);
+        # `_polish_pending` marks "the turn now streaming is a polish turn"
+        # so a regression on its report ends the polish phase;
+        # `_last_critic_note` keeps the visual critic's latest finding for
+        # the polish prompt.
+        self._polish_turns_used: int = 0
+        self._polish_pending: bool = False
+        self._last_critic_note: str | None = None
+        # Fix-round item 6 — critic action-frame fairness state.
+        # `_no_action_frame_advisory_sent`: the one-per-attempt deterministic
+        # advisory replacing repeated unanswerable action-frame failures.
+        # `_current_critic_payload_fp` / `_suppressed_critic_payload_fp`:
+        # payload-fingerprint dedupe so an identical critic payload whose
+        # critique was already suppressed skips the VLM call entirely.
+        self._no_action_frame_advisory_sent: bool = False
+        self._current_critic_payload_fp: str | None = None
+        self._suppressed_critic_payload_fp: str | None = None
+        # Capability-round item 5 — count of stuck best-of-2 escalations
+        # used this session (cap _STUCK_BON_ESCALATION_CAP).
+        self._stuck_bon_escalations: int = 0
+        # Iterations left after the current one (set each loop pass); the
+        # polish branch only fires when another iter exists to test it.
+        self._iters_remaining: int = 0
         # DK trace 20260513_185815 burned 7 consecutive turns on the same
         # broken format (model emitted <patch> inside a markdown fence,
         # harness rejected with generic "no <patch> or <html_file>" and
@@ -2095,6 +2224,10 @@ class GameAgent:
         # falls back to the message-count safety cap only.
         self._last_prompt_tokens: int = 0
         self._last_prompt_pressure: float = 0.0
+        # Fix-round item 3: one-shot flag set by the silent-stall handler so
+        # the NEXT _prune_messages forces a structured compaction instead of
+        # rebuilding the same prompt that just produced 0 tokens for 180s+.
+        self._force_compact_after_stall: bool = False
         # Dead-first-build detector. Wolfenstein 2026-05-24 trace iter 2
         # loaded a file but RAF never fired AND the input smoke test
         # registered zero state/canvas delta — the file is structurally
@@ -2486,8 +2619,17 @@ class GameAgent:
         """
         prefix = "VISUAL CRITIC (looked at the screenshot of your last iteration): "
         full = prefix + cleaned
+        # Polish phase (item 2): remember the latest finding regardless of
+        # dedup so polish_instruction can surface it.
+        self._last_critic_note = cleaned
         fp = self._critic_note_fingerprint(cleaned)
         if fp in self._recent_critic_note_fingerprints:
+            # Fix-round item 6: remember the payload that produced this
+            # suppressed critique so run_visual_critic can skip an
+            # identical VLM call next iter (payload-fingerprint dedupe).
+            self._suppressed_critic_payload_fp = getattr(
+                self, "_current_critic_payload_fp", None,
+            )
             self._trace({
                 "kind": "coaching_suppressed_repeated",
                 "iteration": iteration,
@@ -3347,9 +3489,14 @@ class GameAgent:
             animation_audits = self._memory.retrieve_animation_audits(
                 goal, mod_toks, k=2 if stage == "plan" else 1,
             )
+            # Plan stage deep-renders the ONE matched outline's recipe
+            # (state/order/traps/tuning/probes) under a 3600-char cap —
+            # ~+600 tokens in the smallest prompt of the session. Code
+            # stage stays shallow at 1400 so iterate prompts never grow.
             block = render_opening_book_block(
                 outline, playtests, asset_audits, animation_audits,
-                char_budget=2600 if stage == "plan" else 1400,
+                char_budget=3600 if stage == "plan" else 1400,
+                deep=(stage == "plan"),
             )
 
             def _row(kind: str, hit: OpeningBookHit) -> dict:
@@ -3378,6 +3525,75 @@ class GameAgent:
         except Exception as e:
             self._trace({"kind": "opening_book_error", "stage": stage, "err": str(e)})
             return "", []
+
+    def _retrieve_components_block(
+        self,
+        query: str,
+        *,
+        stage: str = "plan",
+        k: int = 3,
+    ) -> str:
+        """Retrieve component-library snippets as a <components> block.
+
+        Capability-round item 1: tested, mechanics-level JS the model
+        pastes and ADAPTS (memory/components.jsonl). `query` is the goal
+        at first build; at fix turns it is the blocker text so a snippet
+        is only injected when it matches the actual failure. Returns ""
+        when nothing matches (safe degradation).
+        """
+        try:
+            mod_toks: list[str] = []
+            try:
+                from memory import (
+                    _detect_3d_intent, _detect_board_intent, _detect_dom_intent,
+                )
+                mod_toks = (
+                    _detect_3d_intent(query)
+                    + _detect_board_intent(query)
+                    + _detect_dom_intent(query)
+                )
+            except Exception:
+                mod_toks = []
+            hits = self._memory.retrieve_components(query, mod_toks, k=k)
+            block = render_components_block(
+                hits, char_budget=2200 if stage == "plan" else 1400,
+            )
+            if hits:
+                self._trace({
+                    "kind": "components_injected",
+                    "stage": stage,
+                    "ids": [h.item.id for h in hits],
+                    "scores": [round(h.score, 4) for h in hits],
+                    "chars": len(block or ""),
+                    "rendered": bool(block),
+                })
+            return block or ""
+        except Exception as e:
+            self._trace({"kind": "components_error", "stage": stage, "err": str(e)})
+            return ""
+
+    @staticmethod
+    def _report_blocker_query(report: dict) -> str:
+        """Compact text describing the report's blockers, used as the
+        retrieval query for fix-turn component injection. Empty when the
+        report has no concrete blockers (then no component is injected)."""
+        parts: list[str] = []
+        try:
+            for p in (report.get("probes") or []):
+                if not p.get("ok"):
+                    parts.append(str(p.get("name") or ""))
+            for key in ("page_errors", "console_errors", "errors"):
+                vals = report.get(key) or []
+                if vals:
+                    parts.append(str(vals[0])[:160])
+            if report.get("frozen_canvas"):
+                parts.append("frozen canvas animation loop stalled")
+            it = report.get("input_test") or {}
+            if it.get("ran") and not it.get("any_change"):
+                parts.append("input keyboard keys not moving player")
+        except Exception:
+            return ""
+        return " ".join(x for x in parts if x).strip()
 
     def _extract_and_queue_lookups(self, reply: str) -> None:
         """Find <lookup_bullet>id</lookup_bullet> tags in an assistant reply,
@@ -3470,6 +3686,142 @@ class GameAgent:
         self._pending_answer = text.strip()
         self._feedback_deferred_last_turn = False
         self._trace({"kind": "answer_queued", "text": self._pending_answer})
+
+    def unqueue_pending_input(self, which: str = "") -> dict[str, Any]:
+        """Drop queued user input before the next user-turn boundary.
+
+        Used by the TUI ``/unqueue`` command when the user typed feedback
+        by accident while the agent was still streaming.
+
+        Bare ``/unqueue`` (default) removes ONLY the most recently typed
+        **feedback** line — the last thing appended while watching the
+        stream. It never touches a queued model-question answer and never
+        removes older feedback you queued earlier.
+
+        Explicit forms (power-user):
+          - ``all`` — clear every queued feedback item and any pending
+            answer.
+          - ``answer`` — clear only the pending answer to a model
+            ``<question>``.
+          - ``N`` (1-based) — remove feedback item *N* (same numbering as
+            the status panel ``Queued`` list).
+
+        Returns ``{"ok": True, ...}`` or ``{"ok": False, "error": ...}``.
+        Does not touch conversation history or the on-disk game file.
+        """
+        key = (which or "").strip().lower()
+        removed: list[dict[str, str]] = []
+
+        def _preview(text: str) -> str:
+            t = (text or "").strip()
+            return t[:80] + ("…" if len(t) > 80 else "")
+
+        if key in ("all", "clear", "reset"):
+            for fb in self._pending_feedback:
+                removed.append({"kind": "feedback", "preview": _preview(fb)})
+            if self._pending_answer is not None:
+                removed.append({
+                    "kind": "answer",
+                    "preview": _preview(self._pending_answer),
+                })
+            count = len(self._pending_feedback) + (
+                1 if self._pending_answer is not None else 0
+            )
+            self._pending_feedback = []
+            self._pending_answer = None
+            if count:
+                self._trace({
+                    "kind": "feedback_unqueued",
+                    "which": "all",
+                    "count": count,
+                })
+            return {
+                "ok": True,
+                "which": "all",
+                "removed": removed,
+                "remaining_feedback": 0,
+                "remaining_answer": False,
+            }
+
+        if key in ("answer", "ans"):
+            if self._pending_answer is None:
+                return {"ok": False, "error": "no queued answer to remove"}
+            preview = _preview(self._pending_answer)
+            self._pending_answer = None
+            self._trace({
+                "kind": "feedback_unqueued",
+                "which": "answer",
+                "preview": preview,
+            })
+            return {
+                "ok": True,
+                "which": "answer",
+                "removed": [{"kind": "answer", "preview": preview}],
+                "remaining_feedback": len(self._pending_feedback),
+                "remaining_answer": False,
+            }
+
+        # Default (bare /unqueue): drop ONLY the last typed feedback line.
+        if key in ("", "last", "feedback", "fb"):
+            if not self._pending_feedback:
+                return {
+                    "ok": False,
+                    "error": (
+                        "no queued feedback to remove — only typed feedback "
+                        "can be unqueued with bare /unqueue "
+                        "(use /unqueue answer for a queued model-question reply)"
+                    ),
+                }
+            text = self._pending_feedback.pop()
+            preview = _preview(text)
+            self._trace({
+                "kind": "feedback_unqueued",
+                "which": "last_feedback",
+                "preview": preview,
+                "remaining": len(self._pending_feedback),
+            })
+            return {
+                "ok": True,
+                "which": "last_feedback",
+                "removed": [{"kind": "feedback", "preview": preview}],
+                "remaining_feedback": len(self._pending_feedback),
+                "remaining_answer": self._pending_answer is not None,
+            }
+
+        try:
+            idx = int(key)
+        except ValueError:
+            return {
+                "ok": False,
+                "error": (
+                    f"unknown /unqueue target {which!r} — bare /unqueue "
+                    "drops your last typed feedback; also: all, answer, "
+                    "or a 1-based item number"
+                ),
+            }
+        if idx < 1 or idx > len(self._pending_feedback):
+            return {
+                "ok": False,
+                "error": (
+                    f"no queued feedback item #{idx} "
+                    f"(have {len(self._pending_feedback)})"
+                ),
+            }
+        text = self._pending_feedback.pop(idx - 1)
+        preview = _preview(text)
+        self._trace({
+            "kind": "feedback_unqueued",
+            "which": str(idx),
+            "preview": preview,
+            "remaining": len(self._pending_feedback),
+        })
+        return {
+            "ok": True,
+            "which": str(idx),
+            "removed": [{"kind": "feedback", "preview": preview}],
+            "remaining_feedback": len(self._pending_feedback),
+            "remaining_answer": self._pending_answer is not None,
+        }
 
     def has_pending_user_input(self) -> bool:
         return bool(self._pending_feedback) or self._pending_answer is not None
@@ -4297,6 +4649,9 @@ class GameAgent:
         # Recovery-flag flags from the round-1/2 Wolfenstein fix bundle —
         # any pending recovery prompt is stale because the file changed.
         self._dead_first_build_pending = False
+        # Polish phase (item 2): an in-flight polish turn is stale after a
+        # manual revert; the turn counter is NOT reset (per-session cap).
+        self._polish_pending = False
         self._context_pressure_pending = False
         self._context_pressure_streak = 0
         # Format-stuck streak and stream-status flags reset too — the
@@ -4404,6 +4759,11 @@ class GameAgent:
     _SUMMARIZE_FENCE_RE = re.compile(
         r"```(?:html|HTML)?\n(.*?)\n```", re.DOTALL
     )
+    # Capability-round item 3: stale probe re-emissions in pruned
+    # assistant turns.
+    _SUMMARIZE_PROBES_RE = re.compile(
+        r"<probes>\s*(.*?)\s*</probes>", re.DOTALL | re.IGNORECASE
+    )
 
     def _summarize_content(self, c: str) -> str:
         """Replace embedded HTML blobs with size markers — keep tags + notes.
@@ -4441,8 +4801,19 @@ class GameAgent:
             )
 
         def fence_repl(m):
-            n = len(m.group(1))
+            body = m.group(1)
+            n = len(body)
             if n < _SUMMARIZE_MIN_HTML_BYTES:
+                return m.group(0)
+            # Fix-round item 4: content sniff. The regex's optional `html`
+            # tag means it also matches ```js / ``` fences — and worse, a
+            # CLOSING fence followed by the NEXT opening fence, eliding the
+            # PROSE between them and falsely asserting it was HTML written
+            # to disk (trace 20260610_185238 turn [08] had the marker
+            # spliced mid-sentence between two ```js reasoning fences).
+            # Only elide when the body actually looks like an HTML document.
+            body_head = body.lstrip()[:32].lower()
+            if not (body_head.startswith("<!doctype") or body_head.startswith("<html")):
                 return m.group(0)
             return (
                 f"<!-- HARNESS-OMITTED-PRIOR-FENCE: {n} bytes of "
@@ -4451,9 +4822,64 @@ class GameAgent:
                 f"CURRENT FILE ON DISK block below. -->"
             )
 
+        def probes_repl(m):
+            body = m.group(1)
+            if len(body) < _SUMMARIZE_MIN_PROBES_BYTES:
+                return m.group(0)
+            # Rough def count: each probe object carries a "name" key.
+            n_defs = body.count('"name"')
+            return (
+                f"<!-- HARNESS-OMITTED-PRIOR-PROBES: {n_defs} probe defs "
+                f"from this earlier turn are superseded — the current "
+                f"probe set lives in session state and runs every iter. "
+                f"Do NOT re-emit this marker. -->"
+            )
+
         c = self._SUMMARIZE_HTML_RE.sub(html_repl, c)
         c = self._SUMMARIZE_FENCE_RE.sub(fence_repl, c)
+        c = self._SUMMARIZE_PROBES_RE.sub(probes_repl, c)
         return c
+
+    @staticmethod
+    def _report_digest_lines(report: dict) -> str:
+        """3-line digest of a test report for collapsed history turns:
+        ok flag, probes passing x/y, first blocker. Pure function."""
+        probes = report.get("probes") or []
+        passing = sum(1 for p in probes if p.get("ok"))
+        blocker = ""
+        for p in probes:
+            if not p.get("ok"):
+                blocker = f"probe '{p.get('name') or '?'}' failed"
+                break
+        if not blocker:
+            for key in ("page_errors", "console_errors", "errors"):
+                vals = report.get(key) or []
+                if vals:
+                    blocker = str(vals[0])
+                    break
+        # Sanitize so the digest can't close its wrapping HTML comment.
+        blocker = blocker.replace("-->", "->").replace("\n", " ")[:120]
+        return (
+            f"ok={bool(report.get('ok'))}\n"
+            f"probes passing: {passing}/{len(probes)}\n"
+            f"first blocker: {blocker or '(none recorded)'}"
+        )
+
+    def _wrap_report_block(self, text: str, report: dict) -> str:
+        """Wrap a test-report user turn in collapse sentinels (item 3).
+
+        The digest is embedded in the BEGIN marker at append time so
+        collapse needs no access to the original report later.
+        """
+        try:
+            digest = self._report_digest_lines(report or {})
+        except Exception:
+            digest = "ok=unknown\nprobes passing: ?/?\nfirst blocker: (digest failed)"
+        return (
+            f"{_REPORT_BLOCK_BEGIN}\n{digest}\n-->\n"
+            f"{text}\n"
+            f"{_REPORT_BLOCK_END}"
+        )
 
     def _build_structured_summary(self) -> str:
         """Pi-mono-style structured compaction summary.
@@ -4650,11 +5076,22 @@ class GameAgent:
         # it — so a big-context local model keeps full history (playbook +
         # every prior user ask) until the window is genuinely under pressure.
         pressure = float(getattr(self, "_last_prompt_pressure", 0.0) or 0.0)
+        last_tokens = int(getattr(self, "_last_prompt_tokens", 0) or 0)
         compact_reason = None
         if pressure >= _COMPACT_PRESSURE:
             compact_reason = "token_pressure"
+        elif _COMPACT_TOKEN_CEILING > 0 and last_tokens >= _COMPACT_TOKEN_CEILING:
+            # Fix-round item 3: absolute ceiling — local backends stall
+            # silently well before the relative pressure gate fires.
+            compact_reason = "token_ceiling"
+        elif getattr(self, "_force_compact_after_stall", False):
+            # Fix-round item 3: a silent 0-token stall just aborted — do NOT
+            # rebuild the same giant prompt for the retry; compact first.
+            compact_reason = "silent_stall_recovery"
         elif n > _COMPACT_MESSAGE_CAP:
             compact_reason = "count_cap"
+        # One-shot flag: consumed whether or not it was the deciding reason.
+        self._force_compact_after_stall = False
 
         if compact_reason is not None:
             cutoff = n - _PRUNE_KEEP_RECENT_TURNS
@@ -4689,17 +5126,52 @@ class GameAgent:
         # Default elision path: keep message shape, strip embedded HTML
         # bodies. Cheap, lossy on iteration history, but safe.
         cutoff = n - _PRUNE_KEEP_RECENT_TURNS
+        # Capability-round item 3: the NEWEST wrapped test report always
+        # stays verbatim, even if it has fallen below the keep window.
+        newest_report_idx = -1
+        for i, m in enumerate(self._messages):
+            if (
+                m.get("role") == "user"
+                and _REPORT_BLOCK_BEGIN in (m.get("content") or "")
+            ):
+                newest_report_idx = i
+        collapsed_reports = 0
         for i in range(1, cutoff):
             msg = self._messages[i]
             # Do NOT rewrite user/system turns here. Mutating prior user
             # instructions (especially format examples) creates false context
             # and can derail one-shot generations.
+            # EXCEPTION (item 3): turns wrapped in HARNESS-REPORT-BLOCK
+            # sentinels are harness-authored test reports, not user
+            # instructions. Superseded ones collapse to their 3-line
+            # digest; feedback appended outside the wrapper survives.
+            if msg.get("role") == "user":
+                c = msg.get("content", "") or ""
+                if _REPORT_BLOCK_BEGIN in c and i != newest_report_idx:
+                    def _collapse(m_):
+                        return (
+                            "[superseded test report — collapsed by "
+                            "harness; the newest report below is the "
+                            "current truth]\n"
+                            + m_.group(1).strip()
+                        )
+                    new_c = _REPORT_BLOCK_RE.sub(_collapse, c)
+                    if new_c != c:
+                        msg["content"] = new_c
+                        collapsed_reports += 1
+                continue
             if msg.get("role") != "assistant":
                 continue
             c = msg.get("content", "") or ""
             new_c = self._summarize_content(c)
             if new_c != c:
                 msg["content"] = new_c
+        if collapsed_reports:
+            self._trace({
+                "kind": "report_turns_collapsed",
+                "count": collapsed_reports,
+                "newest_kept_idx": newest_report_idx,
+            })
 
     # -- user-injection plumbing -------------------------------------------
 
@@ -6542,6 +7014,53 @@ class GameAgent:
         clone.recipe = base
         return clone
 
+    @staticmethod
+    def _action_frame_question_indices(checklist: list) -> list[int]:
+        """0-based indices of checklist questions that can ONLY be judged
+        against a captured mid-action frame (fix-round item 6).
+
+        Sniff is textual and mechanism-level: the question references the
+        ACTION frame / mid-input image. When no action frame was captured,
+        these questions are unanswerable — the anti-rubber-stamp NOTE then
+        forces a deterministic FAIL that names a harness capture gap, not a
+        game bug (trace 20260610_185238 failed Q5 identically 6 times).
+        Pure function."""
+        out: list[int] = []
+        for i, q in enumerate(checklist or []):
+            ql = str(q).lower()
+            if "action frame" in ql or "mid-input" in ql or "mid-action" in ql:
+                out.append(i)
+        return out
+
+    def _strip_action_frame_questions(self, recipe):
+        """Return (recipe', skipped_questions). When no action frame exists,
+        drop action-frame-dependent questions from a CLONE of the recipe so
+        prompt + parser + formatter all see the reduced list; per-question
+        fix_hints are renumbered to match. The VLM cannot answer YES to a
+        question it never sees, so the 2026-05-29 anti-rubber-stamp
+        guarantee is preserved — without converting a harness capture gap
+        into a repeated fake game-bug. Returns the original recipe untouched
+        when nothing needs stripping."""
+        checklist = list(recipe.recipe.get("checklist") or [])
+        idxs = set(self._action_frame_question_indices(checklist))
+        if not idxs:
+            return recipe, []
+        skipped = [checklist[i] for i in sorted(idxs)]
+        kept = [(i, q) for i, q in enumerate(checklist) if i not in idxs]
+        clone = copy.copy(recipe)
+        base = dict(recipe.recipe or {})
+        base["checklist"] = [q for _, q in kept]
+        per_q = base.get("fix_hints")
+        if isinstance(per_q, dict) and per_q:
+            remapped: dict[str, str] = {}
+            for new_i, (old_i, _q) in enumerate(kept, start=1):
+                h = per_q.get(str(old_i + 1)) or per_q.get(old_i + 1)
+                if h:
+                    remapped[str(new_i)] = h
+            base["fix_hints"] = remapped
+        clone.recipe = base
+        return clone, skipped
+
     def _build_visual_playtest_prompt(
         self, recipe, before_png: bytes | None, action_png: bytes | None = None,
     ) -> str:
@@ -6805,6 +7324,88 @@ class GameAgent:
                 return head + "\n" + body + "\n\nMinimal fix shape: " + fix_hint
         return head + "\n" + body
 
+    async def _audit_sprite_orientation(
+        self,
+        produced: dict[str, Any],
+        per_asset: list[dict],
+    ) -> list[str]:
+        """Fix round 5b — post-generation orientation audit. For directional
+        pose sprites whose prompt was orientation-pinned (kick/punch/strike/
+        throw…), ask the local critic VLM which way the action points and
+        mirror-flip any LEFT answers in place. NEVER regenerates a frame
+        (lossless transpose preserves the character). Advisory only: any
+        failure (no VLM, bad parse) skips silently and returns []."""
+        targets = select_orientation_audit_targets(per_asset, produced)
+        if not targets:
+            return []
+        backend = self.get_backend("critic")
+        if backend is None:
+            return []
+        try:
+            if not await backend.is_vlm():
+                return []
+        except Exception:
+            return []
+        images: list[bytes] = []
+        names: list[str] = []
+        paths: list[Any] = []
+        for name, path in targets:
+            try:
+                images.append(Path(path).read_bytes())
+            except OSError:
+                continue
+            names.append(name)
+            paths.append(path)
+        if not images:
+            return []
+        listing = "\n".join(
+            f"{i + 1}. {n}" for i, n in enumerate(names)
+        )
+        prompt = (
+            "You are auditing game sprites. Each numbered image below shows "
+            "a character performing an action (the order matches this "
+            "list):\n"
+            f"{listing}\n\n"
+            "For EACH image, answer which horizontal direction the main "
+            "action (extended leg/arm, strike, throw) points. Reply with "
+            "ONE line per image, format strictly:\n"
+            "<number>: LEFT or <number>: RIGHT\n"
+            "No other text."
+        )
+        messages = [{"role": "user", "content": prompt, "images": images}]
+        try:
+            result = await backend.stream_chat(
+                messages,
+                options={"temperature": 0.0, "num_ctx": 4096},
+                keep_alive=self._keep_alive_for_backend(backend),
+                stall_seconds=120.0,
+                overall_seconds=300.0,
+                max_retries=1,
+            )
+            reply = (result.text or "").strip()
+        except Exception as e:
+            self._trace_exception("orientation_audit_vlm_error", e)
+            return []
+        verdicts = parse_orientation_verdicts(reply, len(names))
+        flipped: list[str] = []
+        for idx, direction in verdicts.items():
+            if direction != "left":
+                continue
+            name = names[idx - 1]
+            if flip_sprite_horizontal(paths[idx - 1]):
+                flipped.append(name)
+                for stat in per_asset:
+                    if isinstance(stat, dict) and stat.get("name") == name:
+                        stat["orientation_flipped"] = True
+        self._trace({
+            "kind": "orientation_flip_audit",
+            "targets": names,
+            "verdicts": {names[i - 1]: d for i, d in verdicts.items()},
+            "flipped": flipped,
+            "reply_preview": reply[:200],
+        })
+        return flipped
+
     async def run_visual_critic(
         self,
         current_png: bytes,
@@ -6872,6 +7473,34 @@ class GameAgent:
         # goal-driven "is it actually walking/kicking?" question to a clone of
         # the recipe so the prompt + parser + formatter all see it.
         recipe = self._augment_recipe_for_animation(recipe)
+        # Fix-round item 6: with NO action frame captured, action-frame
+        # questions are unanswerable — strip them from the payload (skip,
+        # don't fail) and surface the capture gap ONCE per attempt as a
+        # deterministic advisory pointing at the real cause.
+        if recipe is not None and action_png is None and self._animation_expected():
+            recipe, _skipped_qs = self._strip_action_frame_questions(recipe)
+            if _skipped_qs:
+                self._trace({
+                    "kind": "visual_playtest_action_questions_skipped",
+                    "recipe_id": recipe.id,
+                    "reason": "no_action_frame_captured",
+                    "skipped": [q[:120] for q in _skipped_qs],
+                })
+                if not self._no_action_frame_advisory_sent:
+                    self._no_action_frame_advisory_sent = True
+                    self._pending_coaching.append(
+                        "HARNESS ADVISORY: no peak-action frame was captured "
+                        "— pressing the action keys produced no visible "
+                        "canvas change. Either the action does not render, "
+                        "or the player cannot act (if the report shows "
+                        "CONTROL-NOT-RECOVERED, fix that first). The visual "
+                        "critic's action-pose checks were SKIPPED this turn, "
+                        "not failed."
+                    )
+            # Degenerate recipe (every question was action-dependent):
+            # fall back to the generic open-ended critic path.
+            if not (recipe.recipe.get("checklist") or []):
+                recipe = None
         try:
             using_recipe = recipe is not None
             if using_recipe:
@@ -6983,6 +7612,33 @@ class GameAgent:
             messages = [
                 {"role": "user", "content": prompt, "images": images}
             ]
+            # Fix-round item 6: cheap dedupe. If this exact payload (recipe +
+            # prompt + image bytes) produced a critique that was suppressed
+            # as a repeat last time, the VLM verdict cannot differ — skip the
+            # call (~12s each on MLX; 5 of 6 calls in trace 20260610_185238
+            # were spent re-deriving an already-suppressed note).
+            import hashlib as _hashlib
+            _fp = _hashlib.sha1()
+            _fp.update((recipe.id if recipe else "generic").encode("utf-8", "ignore"))
+            _fp.update(prompt.encode("utf-8", "ignore"))
+            for _b in images:
+                if isinstance(_b, (bytes, bytearray)):
+                    _fp.update(_hashlib.sha1(bytes(_b)).digest())
+            _payload_fp = _fp.hexdigest()[:16]
+            self._current_critic_payload_fp = _payload_fp
+            if _payload_fp == getattr(self, "_suppressed_critic_payload_fp", None):
+                self._trace({
+                    "kind": "visual_critic_skipped_duplicate",
+                    "recipe_id": recipe.id if recipe else None,
+                    "payload_fp": _payload_fp,
+                    "reason": (
+                        "identical payload to the last critique that was "
+                        "suppressed as a repeat — calling the VLM again "
+                        "cannot produce a different verdict."
+                    ),
+                })
+                self._set_role_activity("critic", "idle")
+                return None
             self._trace({
                 "kind": "visual_critic_start",
                 "model": backend.info.model,
@@ -8476,6 +9132,10 @@ class GameAgent:
         # through the existing "no usable code" path below since the
         # reply text is empty.
         if getattr(result, "silent", False):
+            # Fix-round item 3: force a structured compaction before the
+            # retry — resending the same giant prompt that just stalled
+            # (61-69K tokens in trace 20260610_185238) stalls again.
+            self._force_compact_after_stall = True
             self._trace({
                 "kind": "stream_silent_aborted",
                 "duration_s": round(result.duration_s, 2),
@@ -8789,6 +9449,44 @@ class GameAgent:
             out.append((bk, label))
         return out
 
+    @staticmethod
+    def _should_escalate_stuck_bon(
+        stuck_streak: int,
+        best_of_n: int,
+        escalations_used: int,
+        cap: int = _STUCK_BON_ESCALATION_CAP,
+        last_report: dict | None = None,
+    ) -> bool:
+        """Pure trigger predicate for item 5 (stuck best-of-2 repair).
+
+        Fires only for best-of-1 sessions: a session-wide best_of_n > 1
+        already samples every turn, so escalation would be redundant.
+
+        Fix-round item 5: when the last report shows ALL probes passing and
+        zero errors/page_errors, the blocker is a deterministic audit
+        verdict (sprite-audit soft_warnings) — resampling cannot change it,
+        so don't spend an escalation (~25 min of sequential MLX sampling in
+        trace 20260610_185238 went to exactly this). Escalation stays
+        reserved for failing probes / runtime errors, which fresh samples
+        CAN fix.
+        """
+        if not (
+            stuck_streak >= 2
+            and best_of_n == 1
+            and escalations_used < cap
+        ):
+            return False
+        if isinstance(last_report, dict):
+            probes = last_report.get("probes") or []
+            probes_green = bool(probes) and all(p.get("ok") for p in probes)
+            no_errors = (
+                not last_report.get("errors")
+                and not last_report.get("page_errors")
+            )
+            if probes_green and no_errors:
+                return False
+        return True
+
     async def _generate_and_score_candidates(
         self,
         n: int,
@@ -8820,7 +9518,12 @@ class GameAgent:
             extra["materialize_msg"] = applied_msg
             if not html:
                 return -10.0, extra
-            tmp_path = self.snapshots_dir / f"cand_{self._snapshot_n+1:02d}_{abs(hash(text))%10000:04d}.html"
+            # Fix round: candidates MUST be tested from the same directory as
+            # the real game file (out_path.parent) so relative asset/sound
+            # paths like ./<session>_assets/x.png resolve. Testing from
+            # snapshots_dir made every PNG 404 → sprite fallbacks drew blocks
+            # and scoring was biased against asset-using candidates.
+            tmp_path = self.out_path.parent / f".cand_{self._snapshot_n+1:02d}_{abs(hash(text))%10000:04d}.html"
             try:
                 tmp_path.parent.mkdir(parents=True, exist_ok=True)
                 tmp_path.write_text(html, encoding="utf-8")
@@ -8840,6 +9543,13 @@ class GameAgent:
                 # Scorer crashed — treat as worse than "applied but
                 # broken" but better than "didn't apply".
                 return 10.0, extra
+            finally:
+                # Candidate files are scoring scratch — never leave them
+                # beside the real game in games/.
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
         # Phase 2A — parallel fan-out across independent slots.
         slots = self._available_sampler_slots()
@@ -9113,6 +9823,24 @@ class GameAgent:
                 # Partial-apply: still write what landed, but the caller
                 # gets a non-empty failed list to retry on.
                 pass
+            # Pre-commit bracket validation: never commit a patched file
+            # that turned a balanced baseline into a syntax-broken one.
+            failed_idxs2 = {i for (i, _p, _r) in res.failed}
+            applied_patches = [
+                p for i, p in enumerate(patches) if i not in failed_idxs2
+            ]
+            bracket_reject = _patch_set_bracket_break(
+                base, res.text, applied_patches,
+            )
+            if bracket_reject:
+                if not dry_run:
+                    self._trace({
+                        "kind": "patch_bracket_reject",
+                        "applied": res.applied,
+                        "total": len(patches),
+                        "reason": bracket_reject[:400],
+                    })
+                return None, bracket_reject
             return res.text, f"applied {res.applied}/{len(patches)} patches"
 
         html = self._extract_html(reply)
@@ -10888,6 +11616,25 @@ class GameAgent:
                     if isinstance(s, dict) and s.get("from_image")
                     and isinstance(s.get("parent_delta"), (int, float))
                 }
+                # Fix round 5b: VLM orientation audit + mirror flip for
+                # directional pose sprites the diffuser drew facing left
+                # (prompt pins are advisory — the kick frame in trace
+                # 20260611_145321 disobeyed). Runs BEFORE the trace so
+                # per_asset carries orientation_flipped flags.
+                if produced:
+                    try:
+                        _flipped = await self._audit_sprite_orientation(
+                            produced, per_asset,
+                        )
+                        if _flipped:
+                            yield self._record(AgentEvent(
+                                "info",
+                                f"orientation audit: mirrored "
+                                f"{len(_flipped)} sprite(s) to face right: "
+                                f"{', '.join(_flipped)}",
+                            ))
+                    except Exception as _oa_e:
+                        self._trace_exception("orientation_audit_error", _oa_e)
                 self._trace({
                     "kind": "assets_generated",
                     "trigger": trigger,
@@ -12366,6 +13113,15 @@ class GameAgent:
                         "implementation and test guidance.\n\n"
                         + build_msg
                     )
+                # Capability-round item 1: component skill library —
+                # tested mechanics snippets injected beside the opening
+                # book so the first build adapts working code instead of
+                # synthesizing the same machinery from prose.
+                components_block = self._retrieve_components_block(
+                    goal, stage="plan", k=3,
+                )
+                if components_block:
+                    build_msg = f"{components_block}\n\n" + build_msg
                 asset_block = render_asset_paths_block(
                     self._session_assets, self.out_path,
                 )
@@ -12410,6 +13166,10 @@ class GameAgent:
         for iteration in range(start_iter, hard_max + 1):
             if iteration > end_iter + self._iter_budget_bonus:
                 break
+            # Polish phase (item 2): how many iters remain AFTER this one.
+            # The polish branch in _build_fix_prompt only fires when >= 1
+            # so a polish patch always gets a test pass before shipping.
+            self._iters_remaining = (end_iter + self._iter_budget_bonus) - iteration
             # Dead-first-build attempt-abort. After 2 dead first builds
             # in this attempt, the detector flips this flag so the
             # iteration loop exits cleanly and the restart loop can
@@ -12519,6 +13279,36 @@ class GameAgent:
             # session start; on the 4-GPU box this means GPUs 2 and 3
             # are hot during the first build instead of sitting idle.
             use_bon = self.best_of_n > 1
+            bon_n = self.best_of_n
+            # Capability-round item 5: stuck best-of-2 repair. Being stuck
+            # is precisely when sampling pays — a stream costs minutes, a
+            # browser score costs seconds. One-turn escalation to n=2
+            # (backend default temps 0.2 / 0.6), capped per session.
+            if not use_bon and self._should_escalate_stuck_bon(
+                self._stuck_streak, self.best_of_n, self._stuck_bon_escalations,
+                last_report=self._last_test_report,
+            ):
+                use_bon = True
+                bon_n = 2
+                self._stuck_bon_escalations += 1
+                self._trace({
+                    "kind": "stuck_bon_escalation",
+                    "iteration": iteration,
+                    "stuck_streak": self._stuck_streak,
+                    "escalations_used": self._stuck_bon_escalations,
+                    "cap": _STUCK_BON_ESCALATION_CAP,
+                })
+                yield self._record(AgentEvent(
+                    "best_of_n",
+                    f"stuck {self._stuck_streak} iters — escalating to "
+                    f"best-of-2 for this turn "
+                    f"({self._stuck_bon_escalations}/{_STUCK_BON_ESCALATION_CAP} "
+                    "escalations used)",
+                    {
+                        "stuck_streak": self._stuck_streak,
+                        "escalations_used": self._stuck_bon_escalations,
+                    },
+                ))
             fallback_attempted = False
             # Phase 5d: one transparent retry of the SAME backend on a
             # crashed cloud result before swapping to local Ollama.
@@ -12531,10 +13321,10 @@ class GameAgent:
                     if use_bon:
                         yield self._record(AgentEvent(
                             "best_of_n",
-                            f"sampling {self.best_of_n} candidates",
-                            {"n": self.best_of_n},
+                            f"sampling {bon_n} candidates",
+                            {"n": bon_n},
                         ))
-                        winner, all_cands = await self._generate_and_score_candidates(self.best_of_n)
+                        winner, all_cands = await self._generate_and_score_candidates(bon_n)
                         # Replay the winner visually for the user — feel as if
                         # the model just wrote it now, even though it generated
                         # silently.
@@ -13365,7 +14155,26 @@ class GameAgent:
                     ))
                 # If the reply had patches but they failed to apply, give the
                 # model the specific failures + current file so it can retry.
-                if patches_in_reply and self._current_file:
+                if (
+                    patches_in_reply
+                    and self._current_file
+                    and materialize_msg.startswith("patch set rejected")
+                ):
+                    # Pre-commit bracket rejection: the patches MATCHED but
+                    # would have broken brace balance, so patch_retry_
+                    # instruction (built from match failures) has nothing
+                    # to say. Send the targeted bracket message instead.
+                    self._messages.append({
+                        "role": "user",
+                        "content": self._flush_user_injections(
+                            materialize_msg
+                            + "\nThe file on disk is UNCHANGED (still the last "
+                            "working version). Re-emit ONLY the corrected "
+                            "<patch> block(s); count the braces in SEARCH vs "
+                            "REPLACE before answering."
+                        ),
+                    })
+                elif patches_in_reply and self._current_file:
                     # Snapshot prior-turn failures BEFORE this turn's
                     # re-apply so the [REPEATED FAILURE] marker reflects
                     # cross-turn repeats, not within-turn duplicates.
@@ -13767,6 +14576,9 @@ class GameAgent:
                 next_user = self._build_fix_prompt(
                     report=fake_report, regressed=False, partial_failed=partial_failed,
                 )
+                # Item 3: wrap so a superseded pre-flight report collapses
+                # to its digest once it ages out of the keep window.
+                next_user = self._wrap_report_block(next_user, fake_report)
                 self._fix_mode = True
                 self._messages.append({
                     "role": "user",
@@ -14384,6 +15196,19 @@ class GameAgent:
             prev = self._previous_report or {}
             prev_ok = self._previous_report_ok is True
             current_ok = bool(report.get("ok"))
+            # Polish phase (item 2): consume the "this report answers a
+            # polish turn" flag. A polish turn that regressed the green
+            # build ends the polish phase for the session — the revert
+            # paths below restore the file; we just stop polishing.
+            was_polish_turn = bool(self._polish_pending)
+            self._polish_pending = False
+            if was_polish_turn and not current_ok:
+                self._trace({
+                    "kind": "polish_regression_revert",
+                    "iteration": iteration,
+                    "polish_turns_used_before_stop": self._polish_turns_used,
+                })
+                self._polish_turns_used = _POLISH_TURN_CAP
             if (
                 prev_ok
                 and not current_ok
@@ -14443,9 +15268,19 @@ class GameAgent:
                                 "bonus_cap": revert_bonus_cap,
                             },
                         ))
-                        self._messages.append({
-                            "role": "user",
-                            "content": self._flush_user_injections(
+                        # Polish phase (item 2): a regressing polish turn
+                        # ends polish — re-offer <done/> instead of asking
+                        # for another change.
+                        if was_polish_turn:
+                            revert_msg = (
+                                "REGRESSION DETECTED: your polish change degraded "
+                                f"the working build ({problems_str}). The harness "
+                                "has auto-reverted the file on disk to the previous "
+                                "working version. The polish phase is over — send "
+                                "<done/> to ship the working version as-is."
+                            )
+                        else:
+                            revert_msg = (
                                 "REGRESSION DETECTED: your last change degraded the "
                                 f"working build ({problems_str}). The harness has "
                                 "auto-reverted the file on disk to the previous "
@@ -14454,7 +15289,10 @@ class GameAgent:
                                 "breaking what already worked. If you cannot make a "
                                 "small change without regressing, send <done/> to "
                                 "ship the working version as-is."
-                            ),
+                            )
+                        self._messages.append({
+                            "role": "user",
+                            "content": self._flush_user_injections(revert_msg),
                         })
                         self._fix_mode = True
                         # Skip streak/playbook/save_best below so revert state
@@ -14753,6 +15591,9 @@ class GameAgent:
             next_user = self._build_fix_prompt(
                 report=report, regressed=regressed, partial_failed=partial_failed,
             )
+            # Item 3 (context discipline): wrap the report turn in collapse
+            # sentinels so it shrinks to a 3-line digest once superseded.
+            next_user = self._wrap_report_block(next_user, report)
             # Adaptive temperature: failed → low (precision). Clean+keep-going
             # path goes through post_clean which says "prefer done".
             self._fix_mode = not report["ok"]
@@ -15246,6 +16087,15 @@ class GameAgent:
         self._dead_first_build_recoveries = 0
         self._dead_first_build_pending = False
         self._dead_first_build_abort_attempt = False
+        # Polish phase (item 2): an in-flight polish flag is stale across
+        # restart attempts. `_polish_turns_used` / `_stuck_bon_escalations`
+        # are deliberately NOT reset — their caps are per SESSION.
+        self._polish_pending = False
+        # Fix-round item 6: a fresh attempt gets one new no-action-frame
+        # advisory and a clean critic payload-dedupe slate.
+        self._no_action_frame_advisory_sent = False
+        self._current_critic_payload_fp = None
+        self._suppressed_critic_payload_fp = None
         self._identical_reply_loops_this_attempt = 0
         self._format_rejections_iter1_this_attempt = 0
         # NOTE: _prev_attempt_signature and _force_minimal_first_build
@@ -15370,6 +16220,45 @@ class GameAgent:
             self._scoped_change_active = False
 
         if report["ok"]:
+            # Capability-round item 2: polish phase. Probes are green,
+            # iteration budget remains, and the per-session polish cap is
+            # unmet — spend a turn on game feel instead of pushing <done/>.
+            # Skipped when user feedback is pending (their wish wins) or
+            # the user already asked to ship. Never blocks shipping: the
+            # prompt itself re-offers <done/>.
+            if (
+                self._polish_turns_used < _POLISH_TURN_CAP
+                and self._iters_remaining >= 1
+                and not self.has_pending_user_input()
+                and not self._user_force_done
+                and hasattr(self._p, "polish_instruction")
+            ):
+                self._polish_turns_used += 1
+                self._polish_pending = True
+                # 1 juice component (item 1 synergy): query goal + feel
+                # terms so the snippet fits the game's modality.
+                juice_block = self._retrieve_components_block(
+                    f"{self._goal} juice feel polish particles screen shake "
+                    "easing tween audio hit feedback",
+                    stage="code", k=1,
+                )
+                cf = self._current_file or ""
+                self._trace({
+                    "kind": "polish_turn_started",
+                    "turn": self._polish_turns_used,
+                    "cap": _POLISH_TURN_CAP,
+                    "iters_remaining": self._iters_remaining,
+                    "has_critic_note": bool(self._last_critic_note),
+                    "has_component": bool(juice_block),
+                })
+                return self._p.polish_instruction(
+                    report_text,
+                    current_file=cf if (cf and len(cf) <= 60_000) else "",
+                    critic_note=self._last_critic_note or "",
+                    component_block=juice_block,
+                    turn=self._polish_turns_used,
+                    cap=_POLISH_TURN_CAP,
+                )
             # Truth-source inject for post-clean follow-up turns.
             # Evidence: fighing-game trace 20260519_153115 iter 3→4 — the
             # post_clean instruction does NOT inline the current file, so
@@ -15565,6 +16454,22 @@ class GameAgent:
                 "do not add unrelated scope.\n\n"
                 + fix
             )
+        # Capability-round item 1: fix-turn component injection. Query is
+        # the BLOCKER text (failed probes / errors), not the goal, so a
+        # snippet only appears when it matches the actual failure. k=1.
+        blocker_query = self._report_blocker_query(report)
+        if blocker_query:
+            components_block = self._retrieve_components_block(
+                blocker_query, stage="code", k=1,
+            )
+            if components_block:
+                fix = (
+                    f"{components_block}\n\n"
+                    "The component above matches this failure — adapt it "
+                    "to your existing code via <patch>; do not bolt it on "
+                    "as-is.\n\n"
+                    + fix
+                )
         repeat_fastpath = self._repeat_error_fastpath_block(report)
         if partial_failed:
             fix += "\n\n" + self._partial_patch_recovery_block(partial_failed)

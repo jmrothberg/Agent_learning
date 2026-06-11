@@ -30,8 +30,16 @@ import tools  # noqa: E402
 
 
 def _smoke_test_src() -> str:
-    """The full source of the _input_smoke_test method, for grepping."""
-    return inspect.getsource(tools.LiveBrowser._input_smoke_test)
+    """The full source of the _input_smoke_test method, for grepping.
+
+    2026-06-10: _GAMESTATE_SNAPSHOT_JS was hoisted to module level so the
+    state-timeline sampler (capability-round item 4) shares the exact same
+    flattening. The smoke test still evaluates that constant, so include
+    it here — the candidate-ordering assertions below now grep the
+    module-level JS plus the method body."""
+    return tools._GAMESTATE_SNAPSHOT_JS + inspect.getsource(
+        tools.LiveBrowser._input_smoke_test
+    )
 
 
 def test_snapshot_walks_window_state_first():
