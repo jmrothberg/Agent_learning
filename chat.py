@@ -1001,6 +1001,15 @@ class CodingBoxApp(App):
         # ticks so it doesn't flash and disappear on the next 1Hz refresh.
         # Replaced on each new test, cleared on session reset.
         self._last_test_block: str = ""
+        # Feedback ledger (2026-06-11 FPS trace): a session-scoped record of
+        # every user feedback item with status queued → applying → applied.
+        # The old "Queued (N)" panel section only shows items still sitting
+        # in agent._pending_feedback — most feedback is consumed within
+        # milliseconds (idle boundary / extension restart), so the user
+        # never saw any acknowledgment. The ledger persists for the whole
+        # session and is rendered as a "Feedback:" section in the status
+        # panel. Entries: {text, status, iter, ok}.
+        self._feedback_ledger: list[dict] = []
         self._last_gpu_summary_plain: str = ""
         # Trace JSONL path for the current session. Surfaced in status.
         self._trace_path: Path | None = None
@@ -1466,6 +1475,16 @@ class CodingBoxApp(App):
                         "sounds": str(self._sounds_dir) if self._sounds_dir else None,
                     },
                     "gpu_summary": getattr(self, "_last_gpu_summary_plain", None) or None,
+                    # Queue observability (2026-06-11 FPS trace): the trace
+                    # couldn't answer "was my feedback queued/visible?" —
+                    # record the pending count + last ledger status.
+                    "pending_feedback": len(
+                        getattr(agent, "_pending_feedback", []) or []
+                    ),
+                    "ledger_tail": (
+                        self._feedback_ledger[-1]["status"]
+                        if self._feedback_ledger else None
+                    ),
                 })
             except Exception:
                 pass
@@ -1939,6 +1958,27 @@ class CodingBoxApp(App):
                 out += f"\n[b]Queued ({len(queue_lines)}):[/b]\n"
                 out += "\n".join(queue_lines) + "\n"
                 out += "[dim]Applied at the next user-turn boundary.[/dim]\n"
+        # Feedback ledger — persistent receipt of every feedback item this
+        # session. Most items are consumed within milliseconds, so the
+        # transient "Queued (N)" section alone left the user wondering
+        # whether their prompts were received at all (2026-06-11 FPS trace).
+        if self._feedback_ledger:
+            out += f"\n[b]Feedback ({len(self._feedback_ledger)}):[/b]\n"
+            for entry in self._feedback_ledger[-4:]:
+                txt = str(entry.get("text") or "")
+                preview = txt[:60] + ("…" if len(txt) > 60 else "")
+                status = entry.get("status")
+                if status == "applied":
+                    it = entry.get("iter") or "?"
+                    if entry.get("ok"):
+                        badge = f"[green]✓ applied (iter {it})[/green]"
+                    else:
+                        badge = f"[yellow]△ applied (iter {it}, checks failing)[/yellow]"
+                elif status == "applying":
+                    badge = "[blue]→ applying[/blue]"
+                else:
+                    badge = "[yellow]⏳ queued[/yellow]"
+                out += f"  {badge} [dim]{_esc(preview)}[/dim]\n"
         return out
 
     def _update_mode_bar(self) -> None:
@@ -3044,6 +3084,12 @@ class CodingBoxApp(App):
                 await self._extend_session(text)
                 return
             self.agent.add_user_feedback(text)
+            # Feedback ledger: record receipt. Status flips to "applying"
+            # when the agent drains it (reconciled in _handle_event) and
+            # to "applied" on the next test event.
+            self._feedback_ledger.append(
+                {"text": text, "status": "queued", "iter": None, "ok": None}
+            )
             pending = len(self.agent._pending_feedback)
             self._log(
                 f"[dim cyan]  ✓ queued (pending: {pending}). "
@@ -6172,6 +6218,9 @@ class CodingBoxApp(App):
         self._streak_clean = 0
         self._streak_stuck = 0
         self._last_test_block = ""
+        # Fresh session = fresh feedback ledger. Extensions skip this
+        # method (they reuse the session), so the ledger survives them.
+        self._feedback_ledger = []
 
     def _tick_status(self) -> None:
         """Periodic refresh of the status panel — only repaints when
@@ -6215,7 +6264,17 @@ class CodingBoxApp(App):
         self._session_done = False
         self._phase_label = "extending"
         self.sub_title = "agent is working (extension)"
+        # Feedback ledger: extension feedback never enters
+        # agent._pending_feedback (it restarts the loop directly), so it
+        # was invisible in the panel — record it as already applying.
+        self._feedback_ledger.append(
+            {"text": feedback, "status": "applying", "iter": None, "ok": None}
+        )
         self._update_status()
+        self._log(
+            "[dim cyan]  ✓ received — applying as extension of the "
+            "finished session.[/dim cyan]"
+        )
         self._log_info(
             f"[yellow]extending session[/yellow] with feedback: {_esc(feedback[:160])}"
         )
@@ -6411,10 +6470,33 @@ class CodingBoxApp(App):
             f"[b]{_esc(base_cmd)}[/b]"
         )
 
+    def _reconcile_feedback_ledger(self) -> None:
+        """Flip ledger entries queued → applying once the agent drains them.
+
+        The agent's `_flush_user_injections` consumes `_pending_feedback`
+        between events (no callback), so we reconcile by set-difference:
+        a "queued" ledger entry whose text is no longer pending has been
+        injected into the current turn.
+        """
+        agent = getattr(self, "agent", None)
+        if agent is None or not self._feedback_ledger:
+            return
+        pending = set(getattr(agent, "_pending_feedback", []) or [])
+        for entry in self._feedback_ledger:
+            if entry.get("status") == "queued" and entry.get("text") not in pending:
+                entry["status"] = "applying"
+                entry["iter"] = self._iteration_label
+
     def _handle_event(self, ev: AgentEvent) -> None:
         """Pattern-match on event kind and update the UI."""
         # Always flush any half-streamed line before logging a new event header.
         self._flush_stream()
+        # Feedback ledger: detect drained items before rendering so the
+        # status panel shows "applying" the moment injection happens.
+        try:
+            self._reconcile_feedback_ledger()
+        except Exception:
+            pass
         # Refresh the status panel on EVERY event so the queued-feedback
         # list disappears the moment the agent drains it (the agent's
         # internal flush happens between events, not via a callback).
@@ -6447,6 +6529,13 @@ class CodingBoxApp(App):
         elif ev.kind == "test":
             # ev.text is the human-readable report, ev.data is the dict.
             ok = ev.data.get("ok", False)
+            # Feedback ledger: any item injected into the turn that just
+            # tested flips applying → applied (record iter + harness ok).
+            for _entry in self._feedback_ledger:
+                if _entry.get("status") == "applying":
+                    _entry["status"] = "applied"
+                    _entry["iter"] = self._iteration_label
+                    _entry["ok"] = ok
             tag = "[green]TEST OK[/green]" if ok else "[red]TEST FAILED[/red]"
             n_err = len(ev.data.get("errors", []))
             n_iss = len(ev.data.get("soft_warnings", []))

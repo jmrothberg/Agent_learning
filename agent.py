@@ -4422,12 +4422,27 @@ class GameAgent:
             sig_keys = (
                 "activity", "phase", "iteration", "total_iters",
                 "streak_clean", "streak_stuck", "backend", "model",
+                # Queue observability (2026-06-11): a feedback item being
+                # queued/drained must produce a snapshot row even when the
+                # activity label hasn't changed yet.
+                "pending_feedback", "ledger_tail",
             )
             sig = tuple(snapshot.get(k) for k in sig_keys)
             if sig == getattr(self, "_last_status_sig", None):
                 return
             self._last_status_sig = sig
-            self._trace({"kind": "status_snapshot", **snapshot})
+            # Trace-conciseness (2026-06-11): `goal` and `files` are static
+            # within a session yet were repeated on every row (~300 bytes ×
+            # 100 rows). Carry-forward semantics: write them only when they
+            # change; readers take the last seen value.
+            row = dict(snapshot)
+            static = {k: row.get(k) for k in ("goal", "files")}
+            if static == getattr(self, "_last_status_static", None):
+                for k in ("goal", "files"):
+                    row.pop(k, None)
+            else:
+                self._last_status_static = static
+            self._trace({"kind": "status_snapshot", **row})
         except Exception:
             pass
 

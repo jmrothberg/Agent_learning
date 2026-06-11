@@ -61,6 +61,10 @@ _POSITION_LEAF_NAMES = {
     "x", "y", "tx", "ty", "gx", "gy", "gridx", "gridy", "col", "row",
     "px", "py", "posx", "posy", "cx", "cy", "tilex", "tiley",
     "worldx", "worldy", "left", "top", "row", "column",
+    # 3D games move on the x/z ground plane (FPS trace 20260611_163325:
+    # playerPos.z wasn't recognized as position, so a healthy first-person
+    # game tripped both PLAYER-STUCK and CONTROL-NOT-RECOVERED).
+    "z", "tz", "gz", "pz", "posz", "cz", "tilez", "worldz",
 }
 
 
@@ -4249,7 +4253,16 @@ class LiveBrowser:
                         pass
                 a_gs = await self._safe_eval(_GAMESTATE_SNAPSHOT_JS)
                 moved = _gs_changed_leaves(b_gs, a_gs)
-                return any(leaf in moved for leaf in recovery_leaves)
+                if any(leaf in moved for leaf in recovery_leaves):
+                    return True
+                # FPS yaw fix (trace build-a-first-person-3d-shoote_20260611_
+                # 163325 iter 6): in first-person games W moves RELATIVE TO
+                # FACING — after the key sweep rotated the view, W changes
+                # playerPos.z instead of the originally-recorded playerPos.x,
+                # and the original-leaf-only check reported "frozen" on a
+                # healthy game. Accept ANY position-leaf change as recovery;
+                # the true stun-lock family still trips (nothing moves).
+                return any(_is_position_leaf(leaf) for leaf in moved)
 
             try:
                 await _induce_combat_before_recovery()
