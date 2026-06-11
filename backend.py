@@ -153,7 +153,7 @@ _VLM_NAME_SUBSTRINGS: tuple[str, ...] = (
     # / o-series models accept images via API. Match generously: any
     # gpt-4o*, gpt-5*, claude-*, claude-opus*, claude-sonnet* matches.
     "gpt-4o", "gpt-4.1", "gpt-5", "o1-", "o3-", "o4-",
-    "claude-3", "claude-4", "claude-opus", "claude-sonnet",
+    "claude-3", "claude-4", "claude-opus", "claude-sonnet", "claude-fable",
     "claude-haiku-3", "claude-haiku-4",
 )
 
@@ -211,7 +211,11 @@ class OllamaAutopinResult:
 _OPENAI_DEFAULT_MODEL = "gpt-5"
 _ANTHROPIC_DEFAULT_MODEL = "claude-opus-4-8"
 _OPENAI_MODELS: tuple[str, ...] = (_OPENAI_DEFAULT_MODEL,)
-_ANTHROPIC_MODELS: tuple[str, ...] = (_ANTHROPIC_DEFAULT_MODEL,)
+# Curated /list inventory — edit here to expose more Claude variants.
+_ANTHROPIC_MODELS: tuple[str, ...] = (
+    "claude-fable-5",
+    _ANTHROPIC_DEFAULT_MODEL,
+)
 
 
 class Backend(ABC):

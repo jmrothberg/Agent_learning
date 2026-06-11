@@ -86,9 +86,11 @@ def test_anthropic_inventory_empty_without_key() -> None:
 def test_anthropic_inventory_populated_with_key() -> None:
     with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test"}, clear=False):
         models, default = backend_mod.list_anthropic_inventory()
-        assert len(models) >= 1
+        assert len(models) >= 2
         assert default == backend_mod._ANTHROPIC_DEFAULT_MODEL
         assert default in models
+        assert "claude-fable-5" in models
+        assert "claude-opus-4-8" in models
 
 
 # ---------------------------------------------------------------------------

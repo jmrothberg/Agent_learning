@@ -92,6 +92,7 @@ def test_anthropic_claude_models():
     for name in (
         "claude-3-opus", "claude-3-5-sonnet", "claude-3-haiku",
         "claude-opus-4-1", "claude-opus-4-7", "claude-opus-4-8", "claude-sonnet-4-6",
+        "claude-fable-5",
         "claude-haiku-3-5", "claude-haiku-4-5-20251001",
     ):
         assert classify_model_modality(name) == "vlm", name

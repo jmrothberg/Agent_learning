@@ -3275,7 +3275,7 @@ class GameAgent:
         large_keywords = [
             "70b", "72b", "100b", "110b", "120b", "132b", "141b", "236b", "314b", "405b",
             "gpt-4", "gpt-4o", "o1-", "o3-", "claude-3", "claude-3.5", "claude-4",
-            "opus", "sonnet"
+            "opus", "sonnet", "fable"
         ]
         if any(kw in m for kw in large_keywords):
             return "large"
