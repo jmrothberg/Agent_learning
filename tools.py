@@ -174,6 +174,37 @@ def _normalize_probe_expr(expr: str) -> str:
     return out or "true"
 
 
+# Trace 20260612_171752: probe-ordering fix. A side-effecting probe
+# (restart_resets dispatched KeyR → game reset() zeroed state.frame) ran
+# right before a read-only probe (raf_firing: `frame > 0`), which then read
+# the freshly-reset state and failed for 3 straight iterations — while the
+# report's own state timeline showed the frame counter moving (81→267).
+# These needles identify probes whose evaluation can MUTATE page state (or
+# at least pass wall-clock time): dispatching input events, calling
+# reset/restart/click, or awaiting timers. Read-only probes are run before
+# any of these so they observe undisturbed game state.
+_PROBE_SIDE_EFFECT_NEEDLES = (
+    "dispatchEvent",
+    "KeyboardEvent",
+    "MouseEvent",
+    "PointerEvent",
+    ".reset(",
+    ".restart(",
+    ".click(",
+    "await ",
+)
+
+
+def _probe_has_side_effects(expr: str) -> bool:
+    """True when a model-authored probe expression may mutate page state
+    (dispatches events, calls reset/restart/click) or awaits timers.
+    Conservative: false positives only delay a probe to the second group,
+    they never change its result.
+    """
+    e = expr or ""
+    return any(n in e for n in _PROBE_SIDE_EFFECT_NEEDLES)
+
+
 def _format_probe_failure_warning(p: dict[str, Any]) -> str:
     """Human/model-facing warning for one failed probe."""
     name = p.get("name", "probe")
@@ -2538,6 +2569,12 @@ class LiveBrowser:
         # a persisting occurrence with green probes + no errors demotes to
         # the non-gating warnings channel. Reset when the finding clears.
         self._undrawn_seen_before = False
+        # Trace 20260612_171752: same persistence-downgrade for the
+        # ACTION_DRAWN_NOT_SPRITED gate — it held ok=False from iter 4
+        # through every continuation turn on a 7/7-probes build, blocked
+        # <done/>, and left best_exists=False. Behavioral probes gate;
+        # cosmetics inform.
+        self._action_not_sprited_seen_before = False
 
     async def start(self) -> None:
         """Launch the browser. Call once before load_and_test."""
@@ -2798,10 +2835,32 @@ class LiveBrowser:
         # report so the model sees its own assertions checked.
         probe_results: list[dict[str, Any]] = []
         if probes:
-            for p in probes:
+            # Probe-ordering fix (trace 20260612_171752): run READ-ONLY
+            # probes first so a side-effecting probe (e.g. restart_resets
+            # dispatching KeyR → reset() zeroes state.frame) can't poison a
+            # later read-only probe (raf_firing: `frame > 0`). Relative
+            # order is preserved within each group; the report keeps the
+            # original probe order so the model sees a stable list.
+            indexed = list(enumerate(probes))
+            ordered = (
+                [(i, p) for i, p in indexed
+                 if not _probe_has_side_effects(str(p.get("expr") or ""))]
+                + [(i, p) for i, p in indexed
+                   if _probe_has_side_effects(str(p.get("expr") or ""))]
+            )
+            results_by_idx: dict[int, dict[str, Any]] = {}
+            effectful_run_so_far: list[str] = []
+            for orig_idx, p in ordered:
                 pname = str(p.get("name") or "probe")[:60]
                 pexpr = str(p.get("expr") or "true")[:600]
+                is_effectful = _probe_has_side_effects(pexpr)
                 ok, err, err_kind = await self._run_probe(pexpr)
+                if not ok and not err and not is_effectful:
+                    # Falsy read-only probe (no eval error): retry once
+                    # after a short delay to absorb a startup timing race
+                    # (e.g. probe sampled before the first RAF tick).
+                    await asyncio.sleep(0.3)
+                    ok, err, err_kind = await self._run_probe(pexpr)
                 # 1.2: tainted-canvas / cross-origin / SecurityError on
                 # getImageData are HARNESS-side limitations, not game
                 # bugs — the actual canvas might be perfectly rendered.
@@ -2827,7 +2886,22 @@ class LiveBrowser:
                     )
                     entry.pop("kind", None)
                     entry.pop("error_class", None)
-                probe_results.append(entry)
+                # Ordering hint: a falsy probe that ran AFTER a
+                # side-effecting probe may be reading mutated state — say
+                # so in the failure text so a small model isn't left
+                # guessing at a contradiction with the state timeline.
+                if not entry["ok"] and not err_kind and effectful_run_so_far:
+                    entry["err"] = (
+                        (entry.get("err") or "evaluated falsy")
+                        + " (note: ran after side-effecting probe(s) "
+                        f"[{', '.join(effectful_run_so_far[:3])}] which "
+                        "dispatch events / reset state — their side effects "
+                        "may have mutated the state this probe reads)"
+                    )
+                if is_effectful:
+                    effectful_run_so_far.append(pname)
+                results_by_idx[orig_idx] = entry
+            probe_results = [results_by_idx[i] for i in sorted(results_by_idx)]
 
         title = (await self._page.title()) or ""
         try:
@@ -3191,7 +3265,7 @@ class LiveBrowser:
             ]
             if faked:
                 preview = ", ".join(faked[:6])
-                report["soft_warnings"].append(
+                _faked_text = (
                     f"ACTION_DRAWN_NOT_SPRITED [{preview}]: pressing "
                     f"{'these keys' if len(faked) > 1 else 'this key'} changed "
                     "the canvas by CODE-DRAWING (ctx.fillRect / lineTo / stroke) "
@@ -3202,6 +3276,38 @@ class LiveBrowser:
                     "state.kicking, draw the *_kick sprite); never scribble a "
                     "limb with fillRect/lineTo on top of the character."
                 )
+                # Trace 20260612_171752: persistence downgrade mirroring the
+                # UNDRAWN gate above. First occurrence gates (one forced fix
+                # turn); a REPEAT with all probes passing and zero errors is
+                # cosmetic — it held ok=False from iter 4 through every
+                # continuation turn on a 7/7-probes build, blocked <done/>,
+                # and the model burned its turns on contorted sprite-flash
+                # hacks instead of the user's feedback.
+                _probes_green_fa = bool(report.get("probes")) and all(
+                    p.get("ok") for p in report.get("probes") or []
+                )
+                _no_errors_fa = (
+                    not report.get("errors") and not report.get("page_errors")
+                )
+                if (
+                    self._action_not_sprited_seen_before
+                    and _probes_green_fa
+                    and _no_errors_fa
+                ):
+                    report.setdefault("warnings", []).append(
+                        "ADVISORY (non-blocking) — " + _faked_text
+                        + " This finding has persisted while all behavioral "
+                        "probes pass; the action's visible response may "
+                        "legitimately be code-drawn (particles/flash) in "
+                        "this game."
+                    )
+                else:
+                    report["soft_warnings"].append(_faked_text)
+                self._action_not_sprited_seen_before = True
+            else:
+                # Finding absent this run — break the persistence streak so
+                # a future regression gates again.
+                self._action_not_sprited_seen_before = False
             # ---- code-drawn EFFECT bolted on top of a real sprite action ---
             # The other half of the fake-action problem: the model DOES swap to
             # the kick sprite (new_sprite_src True) but ALSO draws a code shape

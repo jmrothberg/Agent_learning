@@ -434,6 +434,41 @@ def _baseline_structurally_broken(html: str) -> str | None:
     return errors[0][:240]
 
 
+# Trace 20260612_171752: cosmetic sprite-audit findings that may gate ok on
+# their FIRST occurrence but never indicate a behaviorally-broken build.
+# A report whose only gating soft_warnings are from this family — with all
+# probes passing and zero errors — is still worth saving as best.html.
+_COSMETIC_SPRITE_WARNING_PREFIXES = (
+    "ASSETS_LOADED_BUT_UNDRAWN",
+    "ACTION_DRAWN_NOT_SPRITED",
+    "CODE_DRAWN_OVER_SPRITE",
+)
+
+
+def _report_green_except_cosmetic_sprites(report: dict) -> bool:
+    """True when a test report failed `ok` solely on cosmetic sprite-family
+    soft_warnings while all behavioral signals are green: every probe
+    passed, no console/page errors. Such a build is playable and must not
+    be lost (trace 20260612_171752 ended best_exists=False on a 7/7-probes
+    game because ACTION_DRAWN_NOT_SPRITED held ok=False every iter).
+    """
+    if report.get("ok"):
+        return False
+    probes = report.get("probes") or []
+    if not probes or not all(p.get("ok") for p in probes):
+        return False
+    if report.get("errors") or report.get("page_errors") \
+            or report.get("console_errors"):
+        return False
+    softs = report.get("soft_warnings") or []
+    if not softs:
+        return False
+    return all(
+        any(prefix in w for prefix in _COSMETIC_SPRITE_WARNING_PREFIXES)
+        for w in softs
+    )
+
+
 def _patch_set_bracket_break(base: str, patched: str, patches) -> str | None:
     """Pre-commit patch validation (fix round, fight trace 20260611_145321):
     if applying `patches` turned a bracket-balanced baseline into an
@@ -15954,6 +15989,27 @@ class GameAgent:
                 if best is not None:
                     yield self._record(AgentEvent(
                         "info", f"saved working version to {best}"
+                    ))
+            elif _report_green_except_cosmetic_sprites(report):
+                # Trace 20260612_171752: ok stayed False on cosmetic sprite
+                # findings alone (ACTION_DRAWN_NOT_SPRITED) for an entire
+                # session, so a 7/7-probes playable build was never saved —
+                # best_exists=False and continuation turns had no revert
+                # anchor. Behaviorally green (all probes pass, zero errors)
+                # + only cosmetic-sprite soft_warnings → save best.html
+                # anyway; the warnings still reach the model unchanged.
+                best = self._save_best(new_html)
+                if best is not None:
+                    self._trace({
+                        "kind": "best_saved_cosmetic_only",
+                        "soft_warnings": [
+                            w[:80] for w in report.get("soft_warnings") or []
+                        ],
+                    })
+                    yield self._record(AgentEvent(
+                        "info",
+                        f"saved best.html (all probes pass, zero errors; "
+                        f"only cosmetic sprite warnings gate ok) to {best}",
                     ))
                 # If the previous turn had a diagnose, we now know that
                 # diagnosis led to a good fix — record it as a winning
