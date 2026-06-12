@@ -65,6 +65,107 @@ def test_reprompt_fires_repeats_and_caps(tmp_path):
     assert a._unhonored_asset_request is None
 
 
+def test_internal_media_notice_does_not_arm_reprompt(tmp_path):
+    """2026-06-12 (trace 20260612_004616): the agent's own 'Mid-session
+    asset/sound/video additions' notice rode _pending_feedback, classified
+    as a USER art request, and fired 8 spurious ASSET GENERATION REQUIRED
+    banners demanding <assets> for files that already existed. Internally
+    queued texts must never arm the unhonored-asset-request detector."""
+    a = _make_agent(tmp_path)
+    a._session_assets = {"knight_idle": Path("x.png")}
+    a._use_feedback_directives = True
+    notice = (
+        "Mid-session asset/sound/video additions — load these in your "
+        "next patch and use them where appropriate. The files exist on "
+        "disk now:\n\n================ GENERATED ASSETS (sprites) "
+        "================\nZ-Image sprite: knight_dash (knight_dash.png)"
+    )
+    a._queue_internal_feedback(notice)
+    out = a._flush_user_injections("")
+    # The notice itself still reaches the model…
+    assert "Mid-session asset/sound/video additions" in out
+    # …but must NOT be treated as an unhonored user art request.
+    assert "ASSET GENERATION REQUIRED" not in out
+    assert a._unhonored_asset_request is None
+    assert a._asset_reprompt_count == 0
+
+
+def test_genuine_user_art_request_still_arms_reprompt_after_notice(tmp_path):
+    """The internal-text exclusion must not blind the detector to REAL
+    user art requests queued in the same batch."""
+    a = _make_agent(tmp_path)
+    a._session_assets = {"knight_idle": Path("x.png")}
+    a._use_feedback_directives = True
+    a._queue_internal_feedback(
+        "Mid-session asset/sound/video additions — load these in your "
+        "next patch. GENERATED ASSETS (sprites): knight_dash"
+    )
+    a.add_user_feedback("please make a new red dragon sprite")
+    out = a._flush_user_injections("")
+    assert "ASSET GENERATION REQUIRED" in out
+    assert a._unhonored_asset_request == "please make a new red dragon sprite"
+
+
+def test_reprompt_cleared_by_subject_matching_patches(tmp_path):
+    """2026-06-12 (trace 20260612_132314): 'need to improve animation for
+    jump,duck, left and right' was hard-classified as an art request, but
+    the model correctly shipped procedural-animation PATCHES (img2img
+    cannot change pose). The reprompt only cleared on <assets>, so it
+    nagged 3 turns. Patches that touch the request's subject terms must
+    stand it down."""
+    a = _make_agent(tmp_path)
+    a._unhonored_asset_request = (
+        "need to improve animation for jump,duck, left and right"
+    )
+    a._asset_reprompt_count = 2
+    reply = (
+        "<patch>\n"
+        "<<<<<<< SEARCH\n"
+        "function drawKnight(pose) {\n"
+        "=======\n"
+        "function drawKnight(pose) {\n"
+        "  // procedural animation: squash on jump, bob on duck,\n"
+        "  // sway left / right while dashing\n"
+        "  applyPoseAnimation(pose);\n"
+        ">>>>>>> REPLACE\n"
+        "</patch>\n"
+    )
+    a._maybe_clear_asset_reprompt_via_code(reply)
+    assert a._unhonored_asset_request is None
+    assert a._asset_reprompt_count == 0
+
+
+def test_reprompt_kept_when_patches_do_not_touch_subject(tmp_path):
+    """The original here-s-a-tight-test failure mode stays covered: a
+    reply whose patches are unrelated to the art request keeps the
+    reprompt armed."""
+    a = _make_agent(tmp_path)
+    a._unhonored_asset_request = "please make a new red dragon sprite"
+    a._asset_reprompt_count = 1
+    reply = (
+        "<patch>\n"
+        "<<<<<<< SEARCH\n"
+        "score += 10;\n"
+        "=======\n"
+        "score += 25;\n"
+        ">>>>>>> REPLACE\n"
+        "</patch>\n"
+    )
+    a._maybe_clear_asset_reprompt_via_code(reply)
+    assert a._unhonored_asset_request == "please make a new red dragon sprite"
+    assert a._asset_reprompt_count == 1
+
+
+def test_reprompt_kept_when_reply_has_no_patches(tmp_path):
+    a = _make_agent(tmp_path)
+    a._unhonored_asset_request = "make a new red dragon sprite"
+    a._asset_reprompt_count = 1
+    a._maybe_clear_asset_reprompt_via_code(
+        "<notes>I will add the dragon sprite next turn.</notes>"
+    )
+    assert a._unhonored_asset_request == "make a new red dragon sprite"
+
+
 def test_reprompt_clears_when_assets_emitted(tmp_path):
     a = _make_agent(tmp_path)
     a._session_assets = {"fighter_idle": Path("x.png")}

@@ -958,6 +958,15 @@ class CodingBoxApp(App):
         self._stream_started_at: float = 0.0  # monotonic; for tok/s
         self._last_token_at: float = 0.0      # monotonic; for stall age
         self._is_streaming: bool = False
+        # Stream-visibility bookkeeping (2026-06-12, trace 20260612_132314):
+        # a coder stream ran 24+ min at ~12 tok/s with NOTHING printed to
+        # the console for 9+ min (long reasoning, no newline) — the user
+        # couldn't tell a healthy generation from a hang. These drive the
+        # [stream alive] console line and the one-shot runaway mirror.
+        # Display-only; nothing here aborts or truncates a stream.
+        self._last_console_flush_at: float = 0.0   # last stream line printed
+        self._last_stream_alive_note_at: float = 0.0
+        self._runaway_console_warned: bool = False
         # Model 2 / Model 3 sidecar stream stats (same shape as coder Activity).
         self._model2_stream_tokens: int = 0
         self._model2_stream_started_at: float = 0.0
@@ -1330,6 +1339,20 @@ class CodingBoxApp(App):
     # final post-stream "settle" tick).
     _stream_buf: str = ""
 
+    # Mega-line flush threshold (2026-06-12, trace 20260612_132314): the
+    # console only flushed on newline, so one enormous line (a long
+    # reasoning paragraph) stayed invisible for minutes while the stream
+    # was healthy. Past this many buffered chars we flush a partial line.
+    # High enough that normal code lines are unaffected. Display-only.
+    _STREAM_PARTIAL_FLUSH_CHARS = 2000
+    # Mirror of agent.py's _RUNAWAY_TOKEN_FLOOR (15K) — the agent's
+    # runaway_stream_warning is trace-only; the console needs its own.
+    _RUNAWAY_CONSOLE_FLOOR = 15000
+    # [stream alive] line: fires after this much token-flow with no
+    # printable output, repeats at most every _STREAM_ALIVE_REPEAT_S.
+    _STREAM_ALIVE_SILENCE_S = 90.0
+    _STREAM_ALIVE_REPEAT_S = 120.0
+
     def _activity_header(self, role: str) -> str:
         return f"[bold yellow]Activity ({role}):[/bold yellow]"
 
@@ -1367,6 +1390,20 @@ class CodingBoxApp(App):
             self._last_token_at = now
             if self._stream_started_at == 0.0:
                 self._stream_started_at = now
+            # One-shot console mirror of the agent's trace-only
+            # runaway_stream_warning (which never reaches the TUI —
+            # _record without yield is trace-only).
+            if (
+                not self._runaway_console_warned
+                and self._stream_tokens >= self._RUNAWAY_CONSOLE_FLOOR
+            ):
+                self._runaway_console_warned = True
+                self._log_info(
+                    f"[yellow]long stream: {self._stream_tokens:,} completion "
+                    "tokens — typical iter is 1-4K. Not aborting (no-cutoff "
+                    "rule); watch the [stream alive] line below, or /done "
+                    "ships the last clean build.[/yellow]"
+                )
         # Flush at any newline boundary so the user sees lines as they arrive.
         if "\n" in self._stream_buf:
             *complete, self._stream_buf = self._stream_buf.split("\n")
@@ -1375,6 +1412,13 @@ class CodingBoxApp(App):
                     # Raw: model output contains JS bracket indexing that
                     # would otherwise be eaten by Rich's markup parser.
                     self._log_raw(line)
+            self._last_console_flush_at = now
+        elif len(self._stream_buf) >= self._STREAM_PARTIAL_FLUSH_CHARS:
+            # Mega-line flush: one enormous line must not look like a
+            # hang — push what we have as a partial line.
+            self._log_raw(self._stream_buf)
+            self._stream_buf = ""
+            self._last_console_flush_at = now
 
     def _flush_stream(self) -> None:
         """Push any remaining buffered tokens (no trailing newline)."""
@@ -6200,6 +6244,9 @@ class CodingBoxApp(App):
         self._stream_started_at = 0.0
         self._last_token_at = 0.0
         self._is_streaming = False
+        self._last_console_flush_at = 0.0
+        self._last_stream_alive_note_at = 0.0
+        self._runaway_console_warned = False
         self._model2_stream_tokens = 0
         self._model2_stream_started_at = 0.0
         self._model2_last_token_at = 0.0
@@ -6228,9 +6275,50 @@ class CodingBoxApp(App):
         non-idle activity). Idle UI doesn't need re-renders."""
         if self._is_streaming or self._activity_label:
             try:
+                self._maybe_note_stream_alive()
+            except Exception:
+                pass
+            try:
                 self._update_status()
             except Exception:
                 pass
+
+    def _maybe_note_stream_alive(self) -> None:
+        """Print a dim [stream alive] console line when tokens are
+        flowing but nothing printable has appeared for a while.
+
+        Evidence (trace 20260612_132314): a 24-minute reasoning episode
+        produced 18K+ tokens with zero console output for 9+ minutes —
+        indistinguishable from a hang. Display-only, rate-limited;
+        never touches the stream itself.
+        """
+        if not self._is_streaming or self._last_token_at == 0.0:
+            return
+        now = time.monotonic()
+        if now - self._last_token_at > 10.0:
+            # Tokens NOT flowing — that's a stall, which the status
+            # panel's stall-age display already covers.
+            return
+        last_flush = self._last_console_flush_at or self._stream_started_at
+        if not last_flush:
+            return
+        silent_for = now - last_flush
+        if silent_for < self._STREAM_ALIVE_SILENCE_S:
+            return
+        if now - self._last_stream_alive_note_at < self._STREAM_ALIVE_REPEAT_S:
+            return
+        self._last_stream_alive_note_at = now
+        elapsed = (
+            now - self._stream_started_at if self._stream_started_at else 0.0
+        )
+        tps = self._stream_tokens / elapsed if elapsed > 0 else 0.0
+        mins = int(silent_for // 60)
+        silent_label = f"{mins}m" if mins else f"{int(silent_for)}s"
+        self._log_info(
+            f"[dim][stream alive] {self._stream_tokens:,} tokens · "
+            f"{tps:.0f} tok/s · no printable output for {silent_label} — "
+            "model is mid-reasoning; /done ships the last clean build[/dim]"
+        )
 
     async def _extend_session(self, feedback: str) -> None:
         """Continuation: re-run the agent on the existing file with new feedback.
@@ -6708,6 +6796,10 @@ class CodingBoxApp(App):
                         self._stream_tokens = 0
                         self._stream_started_at = now
                         self._last_token_at = 0.0
+                        # Per-stream visibility bookkeeping resets.
+                        self._last_console_flush_at = 0.0
+                        self._last_stream_alive_note_at = 0.0
+                        self._runaway_console_warned = False
                 elif slot == 2:
                     self._model2_is_streaming = False
                 elif slot == 3:

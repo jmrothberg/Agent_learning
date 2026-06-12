@@ -156,4 +156,7 @@ def test_agent_warns_on_near_identical_derived_frame():
     src = inspect.getsource(agent.GameAgent._maybe_generate_assets_and_sounds)
     assert "_DERIVED_FRAME_MIN_DELTA" in src
     assert "ASSET SANITY WARNING" in src
-    assert "self._pending_feedback.append" in src
+    # 2026-06-12: agent-generated warnings ride the INTERNAL feedback
+    # channel so they can't trip user-feedback detectors (the spurious
+    # ASSET GENERATION REQUIRED loop, trace 20260612_004616).
+    assert "self._queue_internal_feedback" in src

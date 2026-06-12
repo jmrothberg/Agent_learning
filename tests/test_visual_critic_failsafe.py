@@ -59,6 +59,26 @@ def test_critic_uses_format_forcing_prefill():
     # re-attached onto the reply before parsing
     assert "_critic_prefill + critique_raw" in src
 
+def test_critic_prefill_latch_disables_after_empty_completion():
+    """2026-06-12: some backends return an EMPTY completion when given an
+    assistant prefill (trace 20260612_004616 wasted one VLM call on 13/13
+    iterations). After one empty prefilled response the agent must latch
+    `_critic_prefill_broken` and skip the prefill for the session, tracing
+    `critic_prefill_disabled` once."""
+    src = inspect.getsource(GameAgent.run_visual_critic)
+    # The latch gates the prefill expression…
+    assert "_critic_prefill_broken" in src
+    i_gate = src.index("_critic_prefill_broken")
+    i_call = src.index("result = await backend.stream_chat")
+    assert i_gate < i_call, "latch must gate the prefill BEFORE the VLM call"
+    # …and an empty completion sets it + fires the trace event.
+    assert "critic_prefill_disabled" in src
+    assert "empty_completion_after_prefill" in src
+    # Initialized False at session start.
+    init_src = inspect.getsource(GameAgent.__init__)
+    assert "_critic_prefill_broken: bool = False" in init_src
+
+
 import agent
 import patches
 from agent import GameAgent

@@ -417,6 +417,24 @@ TODOS_FORMAT = FormatSpec(
     ],
 )
 
+# Minimal <todos> spec for the small model class (2026-06-12). The full
+# TODOS_FORMAT guideline blew the small prompt's 6 KB size budget, which
+# is why <todos> used to be in _SMALL_DROP — but todo-driven execution
+# (the agent naming ONE unchecked item as the turn's CURRENT TASK) helps
+# small models the most, so they must know the tag. One terse guideline.
+TODOS_FORMAT_SMALL = FormatSpec(
+    name="<todos>",
+    snippet=(
+        "<todos>...</todos>           Checklist of remaining work "
+        "(`[ ]` open / `[x]` done)."
+    ),
+    guidelines=[
+        "Keep a short <todos> checklist (one `[ ]`/`[x]` item per line); "
+        "re-emit the FULL updated list each turn. When a CURRENT TASK is "
+        "named, work ONLY on that item, then mark it `[x]`.",
+    ],
+)
+
 LOOKUP_BULLET_FORMAT = FormatSpec(
     name="<lookup_bullet>",
     snippet=(
@@ -569,8 +587,14 @@ def build_system_prompt(
             # Drop sprite + sound generation pipelines and the on-demand
             # playbook lookup mechanism. The model writes a self-contained
             # game instead of orchestrating an asset pipeline.
-            _SMALL_DROP = {"<assets>", "<sounds>", "<videos>", "<lookup_bullet>", "<todos>"}
-            fmts = [f for f in ALL_FORMATS if f.name not in _SMALL_DROP]
+            # <todos> is RE-ENABLED for small (2026-06-12, was in the drop
+            # set for size budget) via the minimal TODOS_FORMAT_SMALL —
+            # todo-driven CURRENT TASK turns help small models the most.
+            _SMALL_DROP = {"<assets>", "<sounds>", "<videos>", "<lookup_bullet>"}
+            fmts = [
+                TODOS_FORMAT_SMALL if f.name == "<todos>" else f
+                for f in ALL_FORMATS if f.name not in _SMALL_DROP
+            ]
         else:
             fmts = ALL_FORMATS
     else:

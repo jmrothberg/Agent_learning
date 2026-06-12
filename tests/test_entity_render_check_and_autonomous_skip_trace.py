@@ -159,6 +159,61 @@ def test_autonomous_skip_traces_when_no_browser():
     assert skips[0]["reason"] == "no_browser"
 
 
+def test_recipe_gate_skip_cached_per_code_hash():
+    """2026-06-12 (trace 20260612_004616): the same recipes re-failed the
+    same applicability gate with identical diagnostics on every clean
+    iter. The skip decision is now cached per (recipe_id, code hash):
+    second run on UNCHANGED code must produce zero new gate evals and
+    zero new autonomous_recipe_skipped events; changing the code re-opens
+    the gate."""
+    a = _agent_stub()
+
+    class _FalsyGateBrowser:
+        def __init__(self):
+            self.eval_calls = 0
+
+        async def _safe_eval(self, js):
+            self.eval_calls += 1
+            return False  # every gate falsy → every recipe skipped
+
+    a.browser = _FalsyGateBrowser()
+    a._recipe_skip_cache = set()
+    a._current_file = "<html>v1</html>"
+    a._queue_internal_feedback = lambda text: None
+
+    async def _drive():
+        async for _ in a._run_autonomous_playtest(iteration=1, report={"ok": True}):
+            pass
+
+    asyncio.run(_drive())
+    skips_run1 = [
+        t for t in a._trace_events
+        if t.get("kind") == "autonomous_recipe_skipped"
+    ]
+    assert skips_run1, "expected at least one gate-falsy skip on run 1"
+    evals_after_run1 = a.browser.eval_calls
+
+    # Run 2, same code: cache hits — no new evals, no new skip events.
+    asyncio.run(_drive())
+    skips_run2 = [
+        t for t in a._trace_events
+        if t.get("kind") == "autonomous_recipe_skipped"
+    ]
+    assert len(skips_run2) == len(skips_run1)
+    assert a.browser.eval_calls == evals_after_run1
+
+    # Run 3, code changed: gates re-evaluated.
+    a._autonomous_no_findings_streak = 0  # keep the loop enabled
+    a._current_file = "<html>v2</html>"
+    asyncio.run(_drive())
+    skips_run3 = [
+        t for t in a._trace_events
+        if t.get("kind") == "autonomous_recipe_skipped"
+    ]
+    assert len(skips_run3) > len(skips_run1)
+    assert a.browser.eval_calls > evals_after_run1
+
+
 def test_autonomous_skip_includes_iteration_for_correlation():
     a = _agent_stub()
     a._use_autonomous_feedback = False

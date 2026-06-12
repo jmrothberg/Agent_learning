@@ -1916,6 +1916,10 @@ class GameAgent:
         self.seed_file: Path | None = Path(seed_file) if seed_file else None
         self._messages: list[dict] = []
         self._pending_feedback: list[str] = []
+        # Texts queued by the AGENT itself (not the user) via
+        # _queue_internal_feedback. Detectors that must only fire on
+        # genuine user feedback (unhonored-asset-request) skip these.
+        self._internal_feedback_texts: set[str] = set()
         # Animation frames that came back near-identical to their from_image
         # parent (dead animation: the limbs never moved). name -> parent_delta.
         # Populated during asset generation; cleared when the frame is later
@@ -2144,6 +2148,13 @@ class GameAgent:
         self._polish_turns_used: int = 0
         self._polish_pending: bool = False
         self._last_critic_note: str | None = None
+        # Prefill-broken latch (2026-06-12): set True after the visual
+        # critic's "Q1: " assistant prefill yields an empty completion
+        # (some backends don't continue prefills — trace 20260612_004616
+        # wasted one VLM call per iteration, 13/13). Once latched, the
+        # critic skips the prefill for the rest of the session. Not
+        # reset between restart attempts — the backend doesn't change.
+        self._critic_prefill_broken: bool = False
         # Fix-round item 6 — critic action-frame fairness state.
         # `_no_action_frame_advisory_sent`: the one-per-attempt deterministic
         # advisory replacing repeated unanswerable action-frame failures.
@@ -2414,6 +2425,25 @@ class GameAgent:
         # <todos> block; optional — universal probes / criteria still
         # cover acceptance even when the model never uses it.
         self._todos_text: str = ""
+        # Autonomous-recipe skip cache (2026-06-12): (recipe_id, code
+        # hash) pairs whose applicability gate already came back falsy
+        # for the current code. Any patch changes the hash and re-opens
+        # the gate; identical re-evals are skipped silently.
+        self._recipe_skip_cache: set[tuple[str, str]] = set()
+        # Todo-driven execution (frontier-agent pattern, 2026-06-12).
+        # Parsed view of _todos_text: list of (done, text) items. When a
+        # clean iter leaves unchecked items, the post-clean prompt names
+        # the FIRST unchecked one as the CURRENT TASK so each turn has
+        # ONE objective (the biggest reliability lever for 27B-class
+        # local models). Telemetry only on mismatch — never a cutoff.
+        self._todos_items: list[tuple[bool, str]] = []
+        # The todo injected as CURRENT TASK in the most recent prompt
+        # (None when no contract was injected). Consumed at the next
+        # streak update for the todo_drift telemetry check.
+        self._current_todo: str | None = None
+        # Per-task injection counts so a todo the model refuses to
+        # check off doesn't get re-nagged forever (cap 2 per task).
+        self._todo_nag_counts: dict[str, int] = {}
         self._token_cb = None
         self._goal: str = ""
         # Tracks the most recent test-report summary for memory.record_outcome.
@@ -3728,6 +3758,30 @@ class GameAgent:
                 # tests). Refresh is advisory; never block feedback.
                 pass
 
+    def _queue_internal_feedback(self, text: str) -> None:
+        """Queue an AGENT-generated notice into the feedback channel.
+
+        Added 2026-06-12: agent-injected texts (mid-session media loader
+        notices, scoped-media locks, autonomous-playtest findings) ride
+        the same `_pending_feedback` queue as real user feedback, so the
+        unhonored-asset-request detector in `_flush_user_injections`
+        classified them as USER art requests — trace 20260612_004616
+        fired 8 spurious ASSET GENERATION REQUIRED banners demanding
+        <assets> for files that already existed on disk. Texts queued
+        here are remembered in `_internal_feedback_texts` so detectors
+        that must only fire on genuine user feedback can skip them.
+        The model still receives the text unchanged.
+        """
+        text = (text or "").strip()
+        if not text:
+            return
+        # Lazy-init so partially-constructed test stubs (which skip
+        # __init__) don't AttributeError here.
+        if not hasattr(self, "_internal_feedback_texts"):
+            self._internal_feedback_texts = set()
+        self._internal_feedback_texts.add(text)
+        self._pending_feedback.append(text)
+
     def add_user_answer(self, text: str) -> None:
         self._pending_answer = text.strip()
         self._feedback_deferred_last_turn = False
@@ -3871,6 +3925,22 @@ class GameAgent:
 
     def has_pending_user_input(self) -> bool:
         return bool(self._pending_feedback) or self._pending_answer is not None
+
+    def _has_genuine_user_input(self) -> bool:
+        """Like has_pending_user_input, but AGENT-generated feedback
+        (autonomous-playtest findings etc., tracked in
+        `_internal_feedback_texts`) doesn't count.
+
+        Added 2026-06-12 (trace 20260612_132314): at every clean iter an
+        [AUTONOMOUS PLAYTEST] finding was pending, so the todo CURRENT
+        TASK contract — gated on "no pending user input" — never fired
+        all session. Internal findings should share the turn with the
+        contract, not displace it; only REAL user input wins the turn.
+        """
+        if self._pending_answer is not None:
+            return True
+        internal = getattr(self, "_internal_feedback_texts", set())
+        return any(fb not in internal for fb in self._pending_feedback)
 
     def request_done(self) -> None:
         self._user_force_done = True
@@ -5111,6 +5181,70 @@ class GameAgent:
 
         return "\n".join(lines)
 
+    def _maybe_reset_continuation_context(self, prior_clean: bool) -> bool:
+        """Fresh-context continuation (frontier-agent pattern, 2026-06-12).
+
+        Replace the accumulated history with [system prompt, state
+        anchor] before the continuation message is appended. Gated:
+          - prior session ended clean (mid-debugging history is never
+            discarded),
+          - a real system prompt sits at index 0,
+          - enough history to be worth replacing (> 3 messages).
+        Falls back to plain append (returns False) on any anchor-build
+        failure. Only changes what we SEND — never cuts model output.
+        Returns True when the reset was applied.
+        """
+        if not (
+            prior_clean
+            and len(self._messages) > 3
+            and (self._messages[0].get("role") == "system")
+        ):
+            return False
+        try:
+            before_msgs = len(self._messages)
+            before_chars = sum(
+                len(str(m.get("content") or "")) for m in self._messages
+            )
+            summary = self._build_structured_summary()
+            anchor_msg = {
+                "role": "user",
+                "content": (
+                    "================ STATE ANCHOR (fresh-context "
+                    "continuation) ================\n"
+                    "The previous build passed its tests and shipped. "
+                    "Older turns were replaced by the snapshot below — "
+                    "treat it as authoritative for goal, criteria, "
+                    "progress, and critical context. The user's NEW "
+                    "request follows in the next message.\n\n"
+                    f"{summary}\n"
+                    "==========================================================="
+                ),
+            }
+            self._messages = [self._messages[0], anchor_msg]
+            after_chars = sum(
+                len(str(m.get("content") or "")) for m in self._messages
+            )
+            self._trace({
+                "kind": "continuation_context_reset",
+                "before_messages": before_msgs,
+                "after_messages": len(self._messages),
+                "before_chars": before_chars,
+                "after_chars": after_chars,
+                # ~4 chars/token heuristic, telemetry only.
+                "est_tokens_saved": max(
+                    0, (before_chars - after_chars) // 4
+                ),
+            })
+            return True
+        except Exception as e:
+            # Anchor build failed — keep the appended-history behavior;
+            # never block the continuation itself.
+            self._trace({
+                "kind": "continuation_context_reset_failed",
+                "err": str(e)[:180],
+            })
+            return False
+
     def _prune_messages(self) -> None:
         """Compress old turns so context stays bounded.
 
@@ -5138,6 +5272,18 @@ class GameAgent:
         # every prior user ask) until the window is genuinely under pressure.
         pressure = float(getattr(self, "_last_prompt_pressure", 0.0) or 0.0)
         last_tokens = int(getattr(self, "_last_prompt_tokens", 0) or 0)
+        # Forward-looking projection (2026-06-12, trace 20260612_132314):
+        # the reactive gates above look at the PREVIOUS stream's prompt
+        # size, so a single-turn jump slips through — a post-clean turn
+        # (full file inline + playtest feedback + history) ballooned
+        # 33K → 60K in one assembly step and the 27B silently emitted 0
+        # tokens for 184s. _prune_messages runs AFTER the new user turn
+        # is appended, so estimating the message list (~4 chars/token)
+        # projects the prompt we are ABOUT to send. Images aren't
+        # counted — this is a floor estimate, which is the safe side.
+        projected_tokens = sum(
+            len(str(m.get("content") or "")) for m in self._messages
+        ) // 4
         compact_reason = None
         if pressure >= _COMPACT_PRESSURE:
             compact_reason = "token_pressure"
@@ -5145,6 +5291,8 @@ class GameAgent:
             # Fix-round item 3: absolute ceiling — local backends stall
             # silently well before the relative pressure gate fires.
             compact_reason = "token_ceiling"
+        elif _COMPACT_TOKEN_CEILING > 0 and projected_tokens >= _COMPACT_TOKEN_CEILING:
+            compact_reason = "projected_ceiling"
         elif getattr(self, "_force_compact_after_stall", False):
             # Fix-round item 3: a silent 0-token stall just aborted — do NOT
             # rebuild the same giant prompt for the retry; compact first.
@@ -5170,10 +5318,19 @@ class GameAgent:
                 ),
             }
             new_messages = [self._messages[0], anchor_msg] + self._messages[cutoff:]
+            # Post-compaction projection so future trace mining can tell
+            # whether compaction actually got the next prompt under the
+            # ceiling (it may not when the bulk lives in the kept-recent
+            # window, e.g. a fresh full-file inline).
+            projected_after = sum(
+                len(str(m.get("content") or "")) for m in new_messages
+            ) // 4
             self._trace({
                 "kind": "structured_compaction",
                 "reason": compact_reason,
                 "prompt_tokens": getattr(self, "_last_prompt_tokens", 0),
+                "projected_tokens": projected_tokens,
+                "projected_tokens_after": projected_after,
                 "num_ctx": getattr(self, "num_ctx", 0),
                 "pressure": round(pressure, 3),
                 "original_messages": n,
@@ -5848,6 +6005,49 @@ class GameAgent:
             "shared_terms": shared_words,
         }
 
+    def _maybe_clear_asset_reprompt_via_code(self, reply: str) -> None:
+        """Stand down the ASSET GENERATION REQUIRED reprompt when the
+        model substantively addressed the request in CODE.
+
+        Evidence (trace 20260612_132314): "need to improve animation for
+        jump,duck, left and right" hard-classified as an art request, but
+        the model — correctly, since img2img cannot change a pose —
+        shipped procedural-animation patches. The reprompt only cleared
+        on an <assets> block, so it nagged for 3 turns and gave up.
+
+        Heuristic: the reply's applied patch bodies share subject
+        keywords with the request (>= 2 terms, or all of them for a
+        one/two-keyword request). Replies that neither emit <assets> nor
+        touch the requested subject keep the reprompt — the original
+        here-s-a-tight-test failure mode stays covered.
+        """
+        req = getattr(self, "_unhonored_asset_request", None)
+        if not req:
+            return
+        try:
+            patch_list = extract_patches(reply or "")
+        except Exception:
+            patch_list = []
+        if not patch_list:
+            return
+        req_kw = self._feedback_keywords(req)
+        if not req_kw:
+            return
+        patch_text = "\n".join(
+            f"{p.search or ''}\n{p.replace or ''}" for p in patch_list
+        )
+        patch_kw = self._feedback_keywords(patch_text)
+        overlap = req_kw & patch_kw
+        if len(overlap) >= min(2, len(req_kw)):
+            self._unhonored_asset_request = None
+            self._asset_reprompt_count = 0
+            self._trace({
+                "kind": "asset_request_honored_via_code",
+                "request": req[:200],
+                "matched_terms": sorted(overlap)[:8],
+                "patch_count": len(patch_list),
+            })
+
     @staticmethod
     def _is_post_clean_instruction(base_message: str) -> bool:
         """True when `base_message` is the clean-report post-clean prompt.
@@ -5935,9 +6135,16 @@ class GameAgent:
         # __init__) don't AttributeError here.
         _unhonored = getattr(self, "_unhonored_asset_request", None)
         _reprompts = getattr(self, "_asset_reprompt_count", 0)
+        # Skip AGENT-generated notices (mid-session media loaders etc.) —
+        # only genuine USER feedback can arm the unhonored-asset-request
+        # detector. Trace 20260612_004616: the agent's own "Mid-session
+        # asset/sound/video additions" notice classified as an art change
+        # and fired 8 spurious ASSET GENERATION REQUIRED banners.
+        _internal_texts = getattr(self, "_internal_feedback_texts", set())
         _art_reqs = [
             fb for fb in self._pending_feedback
-            if _feedback_is_art_change(fb, asset_names)
+            if fb not in _internal_texts
+            and _feedback_is_art_change(fb, asset_names)
         ]
         if _art_reqs:
             _unhonored = _art_reqs[-1]
@@ -7750,7 +7957,25 @@ class GameAgent:
             # assistant-prefill path appends this to the prompt; we prepend it
             # back onto the reply before parsing. Recipe path only (the path
             # that expects the Qn: format). Genre/model-agnostic.
-            _critic_prefill = "Q1: " if (using_recipe and recipe is not None) else None
+            #
+            # Prefill-broken latch (2026-06-12): on some backends the
+            # assistant prefill yields an EMPTY completion — trace
+            # 20260612_004616 burned a wasted VLM call on 13/13 iterations
+            # (raw_preview "Q1: ", parse_rate 0.0) before the terse retry
+            # succeeded every time. After one empty prefilled response we
+            # latch _critic_prefill_broken and skip the prefill for the
+            # rest of the session, saving one VLM round-trip per iter
+            # (30-60s/iter on local VLMs). The prefill stays ON for
+            # backends where it works (qwen thinking-VLMs need it).
+            _critic_prefill = (
+                "Q1: "
+                if (
+                    using_recipe
+                    and recipe is not None
+                    and not getattr(self, "_critic_prefill_broken", False)
+                )
+                else None
+            )
             _critic_messages = messages
             if _critic_prefill:
                 _critic_messages = messages + [
@@ -7766,6 +7991,17 @@ class GameAgent:
                 max_retries=1,
             )
             critique_raw = (result.text or "").strip()
+            if _critic_prefill and len(critique_raw) < 3:
+                # Empty/near-empty completion after a prefill: this
+                # backend doesn't continue assistant prefills. Latch off
+                # for the session; the reparse below still recovers THIS
+                # call's critique.
+                self._critic_prefill_broken = True
+                self._trace({
+                    "kind": "critic_prefill_disabled",
+                    "raw_len": len(critique_raw),
+                    "reason": "empty_completion_after_prefill",
+                })
             # Re-attach the format-forcing prefix so the parser sees the full
             # "Q1: <answer>" first line (the model only generated what FOLLOWS
             # "Q1: "). Guard against the model having echoed it anyway.
@@ -8478,14 +8714,33 @@ class GameAgent:
         )
 
         findings: list[dict] = []
+        # Skip-decision cache (2026-06-12): the same recipes re-fail the
+        # same applicability gate with identical diagnostics on every
+        # clean iter when the code hasn't changed (trace 20260612_004616
+        # logged 3 recipes x many iters of identical gate noise). Key on
+        # (recipe_id, code hash) so any patch invalidates the cache; a
+        # cached skip costs zero browser evals and zero trace events.
+        import hashlib as _hashlib
+        # getattr defaults so partially-constructed test stubs (which
+        # skip __init__) don't AttributeError here.
+        _code_hash = _hashlib.sha256(
+            (getattr(self, "_current_file", "") or "")
+            .encode("utf-8", errors="replace")
+        ).hexdigest()[:16]
+        if not hasattr(self, "_recipe_skip_cache"):
+            self._recipe_skip_cache = set()
         for rec in behavior_recipes:
             r = rec.recipe
+            _rec_id = getattr(rec, "id", "")
+            if (_rec_id, _code_hash) in self._recipe_skip_cache:
+                continue
             applies_js = r.get("applies_when") or "true"
             try:
                 applies = await self.browser._safe_eval(applies_js)
             except Exception:
                 applies = False
             if not applies:
+                self._recipe_skip_cache.add((_rec_id, _code_hash))
                 # Run the diagnostic probes so the trace shows WHICH
                 # condition was missing on this game's state shape.
                 try:
@@ -8494,7 +8749,7 @@ class GameAgent:
                     diag = {"diag_error": str(e)[:120]}
                 self._trace({
                     "kind": "autonomous_recipe_skipped",
-                    "recipe_id": getattr(rec, "id", ""),
+                    "recipe_id": _rec_id,
                     "reason": "applicability_gate_falsy",
                     "diagnostics": diag if isinstance(diag, dict) else {},
                 })
@@ -8549,9 +8804,15 @@ class GameAgent:
             "[AUTONOMOUS PLAYTEST] I ran a short scripted playtest after "
             "iter {iter} passed probes and noticed:\n{body}\n"
             "Treat this as one user observation, not a hard failure — "
-            "address what's actionable; ignore what's already correct."
+            "address what's actionable; ignore what's already correct. "
+            # Brevity nudge (2026-06-12, trace 20260612_132314): this turn
+            # produced an 18K-token deliberation essay on a local 27B.
+            # Prompt-only — the stream is never cut.
+            "Keep your reply brief — a short <diagnose> (1-3 lines) plus "
+            "minimal <patch> blocks; no extended analysis."
         ).format(iter=iteration, body="\n".join(bullets))
-        self._pending_feedback.append(feedback_text)
+        # Agent-generated — must not trip user-feedback detectors.
+        self._queue_internal_feedback(feedback_text)
         yield self._record(AgentEvent(
             "info",
             f"[magenta]autonomous feedback queued[/magenta] "
@@ -11204,6 +11465,32 @@ class GameAgent:
         body = m.group(1).strip()
         return body or None
 
+    @staticmethod
+    def _parse_todo_items(text: str) -> list[tuple[bool, str]]:
+        """Parse a <todos> body into (done, text) items.
+
+        Tolerant of the marker dialects models actually use:
+        `[ ] item`, `- [ ] item`, `* [x] item`, `[X] item`. Lines
+        without a checkbox marker are skipped (headers, blank lines).
+        Added 2026-06-12 for todo-driven execution — the captured
+        text used to be opaque; now the agent can select the next
+        unchecked item as the turn's CURRENT TASK.
+        """
+        items: list[tuple[bool, str]] = []
+        if not text:
+            return items
+        import re as _re
+        pat = _re.compile(r"^\s*[-*]?\s*\[([ xX])\]\s*(.+?)\s*$")
+        for line in text.splitlines():
+            m = pat.match(line)
+            if not m:
+                continue
+            done = m.group(1).lower() == "x"
+            body = m.group(2).strip()
+            if body:
+                items.append((done, body))
+        return items
+
     def _capture_todos(self, reply: str) -> None:
         """If the reply contains a <todos> block, update in-memory
         state and persist to disk. No-op when absent — the model
@@ -11216,6 +11503,8 @@ class GameAgent:
         # anchor (which is already char-budgeted by compaction).
         todos = todos[:6000]
         self._todos_text = todos
+        # Keep the structured view in sync for todo-driven execution.
+        self._todos_items = self._parse_todo_items(todos)
         try:
             path = self.trace_path.parent / f"{self._session_id}.todos.md"
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -11227,6 +11516,55 @@ class GameAgent:
             })
         except Exception as e:
             self._trace({"kind": "todos_write_failed", "err": str(e)})
+
+    @staticmethod
+    def _norm_todo(text: str) -> str:
+        """Whitespace-collapsed lowercase form for fuzzy todo matching
+        (models lightly rephrase items when re-emitting the list)."""
+        return " ".join((text or "").lower().split())
+
+    def _todo_drift_check(self) -> None:
+        """After a clean iter that was given a CURRENT TASK contract,
+        check the model marked the task [x] in its re-emitted <todos>.
+        Mismatch fires a `todo_drift` trace event — telemetry ONLY,
+        never a cutoff or a forced retry. Consumes `_current_todo`.
+        """
+        if not self._current_todo:
+            return
+        want = self._norm_todo(self._current_todo)
+        still_open = any(
+            (not done) and (
+                self._norm_todo(t) == want
+                or want in self._norm_todo(t)
+                or self._norm_todo(t) in want
+            )
+            for done, t in self._todos_items
+        )
+        if still_open:
+            self._trace({
+                "kind": "todo_drift",
+                "todo": self._current_todo[:200],
+                "detail": "clean iter but CURRENT TASK still "
+                          "unchecked in re-emitted <todos>",
+            })
+        self._current_todo = None
+
+    def _select_next_todo(self) -> str | None:
+        """First unchecked todo eligible for a CURRENT TASK contract.
+
+        Returns None when the list is empty, everything is checked, or
+        the first unchecked item has already been nagged twice (the
+        model keeps declining it — stop re-asserting so the prompt
+        doesn't bloat; mirrors the asset-reprompt cap philosophy).
+        """
+        for done, body in getattr(self, "_todos_items", []) or []:
+            if done:
+                continue
+            key = self._norm_todo(body)
+            if self._todo_nag_counts.get(key, 0) >= 2:
+                continue
+            return body
+        return None
 
     @staticmethod
     def _classify_stall(err_text: str) -> dict | None:
@@ -11540,7 +11878,7 @@ class GameAgent:
                     "allowed_assets": sorted(allowed_assets),
                     "allowed_sounds": sorted(allowed_sounds),
                 })
-                self._pending_feedback.append(
+                self._queue_internal_feedback(
                     "SCOPED MEDIA NAME LOCK: new names were ignored "
                     f"[{dropped_line}]. Use existing names only. Assets: "
                     f"{allowed_asset_line}. Sounds: {allowed_sound_line}."
@@ -11851,7 +12189,7 @@ class GameAgent:
                         "never draw the limb in code, and move on to the "
                         "behavior the user actually asked for."
                     )
-                    self._pending_feedback.append("\n".join(warn_lines))
+                    self._queue_internal_feedback("\n".join(warn_lines))
 
         if sound_specs:
             yield self._record(AgentEvent(
@@ -12214,7 +12552,11 @@ class GameAgent:
                     )
 
             if msg_parts:
-                self._pending_feedback.append("\n\n".join(msg_parts))
+                # Agent-generated media notice — queued via the internal
+                # channel so the unhonored-asset-request detector can't
+                # mistake it for a user art request (8 spurious reprompts
+                # in trace 20260612_004616).
+                self._queue_internal_feedback("\n\n".join(msg_parts))
                 self._trace({
                     "kind": "midsession_asset_injection_queued",
                     "asset_names": list(new_asset_paths.keys()),
@@ -12353,6 +12695,20 @@ class GameAgent:
                         "kind": "continuation_baseline_unrecoverable",
                         "reason": broken_reason[:180],
                     })
+            # Fresh-context continuation (frontier-agent pattern,
+            # 2026-06-12). Capture whether the prior session ended clean
+            # BEFORE the line below forces _previous_report_ok=True. When
+            # it did, the accumulated history is debugging residue the new
+            # request doesn't need — trace 20260612_004616 carried ~61K
+            # prompt tokens into its continuation turns despite 7
+            # compactions. SOTA models shrug that off; 27B-class local
+            # models degrade well before it. The reset below replaces the
+            # history with [system, state anchor] before the continuation
+            # message is appended. Only changes what we SEND — never cuts
+            # model output.
+            _prior_clean = bool(self._previous_report_ok) and bool(
+                (self._previous_report or {}).get("ok")
+            )
             # Reset transient state so the loop runs again fresh.
             self._user_force_done = False
             if self._stop_event is not None:
@@ -12365,6 +12721,9 @@ class GameAgent:
             self.add_user_feedback(goal)
             self._continuation_feedback = goal
             self._trace({"kind": "continuation_start", "feedback": goal})
+            # Apply the context reset (see _maybe_reset_continuation_context
+            # for the gates and the fallback behavior).
+            self._maybe_reset_continuation_context(_prior_clean)
             yield self._record(AgentEvent(
                 "info", f"continuing on existing file with new request: {goal[:160]}"
             ))
@@ -14658,6 +15017,12 @@ class GameAgent:
                         "findings": (unassigned + baited),
                     })
 
+            # The reply materialized real code — if an unhonored art
+            # request is outstanding and these patches touch its subject,
+            # stand down the ASSET GENERATION REQUIRED reprompt (the
+            # model chose a code solution; see the method docstring).
+            self._maybe_clear_asset_reprompt_via_code(reply)
+
             # Save + per-iter snapshot
             self.out_path.write_text(new_html, encoding="utf-8")
             self._current_file = new_html
@@ -15525,9 +15890,17 @@ class GameAgent:
             if report["ok"]:
                 self._stuck_streak = 0
                 self._consecutive_clean_iters += 1
+                # Todo-driven execution: telemetry-only drift check on
+                # the CURRENT TASK contract (never a cutoff or retry).
+                self._todo_drift_check()
             else:
                 self._stuck_streak += 1
                 self._consecutive_clean_iters = 0
+                # Failed iter: the contract task wasn't completed because
+                # the build broke — drop it so a later clean iter doesn't
+                # report stale drift. It stays open in _todos_items and
+                # will be re-selected once the build is clean again.
+                self._current_todo = None
             self._trace({
                 "kind": "streak_update",
                 "consecutive_clean_iters": self._consecutive_clean_iters,
@@ -16280,6 +16653,16 @@ class GameAgent:
         self._pending_probe_quarantine_notices = []
         self._recent_feedback_texts = []
         self._user_force_done = False
+        # Todo-driven execution: a fresh attempt gets a fresh checklist
+        # (the model will re-emit <todos> from its new plan/build).
+        self._todos_text = ""
+        self._todos_items = []
+        self._current_todo = None
+        self._todo_nag_counts = {}
+        # Recipe skip cache is code-hash keyed; a fresh attempt rebuilds
+        # the file from scratch, so stale entries can't match anyway —
+        # clear for hygiene.
+        self._recipe_skip_cache = set()
         if self._stop_event is not None:
             self._stop_event.clear()
         self._step_continue = False
@@ -16436,6 +16819,70 @@ class GameAgent:
             self._scoped_change_active = False
 
         if report["ok"]:
+            # Todo-driven execution (2026-06-12): when the model's own
+            # <todos> list still has unchecked items after a clean iter,
+            # name the FIRST unchecked one as the turn's CURRENT TASK —
+            # one objective per turn instead of "everything not yet
+            # done". Frontier-agent pattern; biggest reliability lever
+            # for 27B-class local models. Fires before polish (open work
+            # beats game-feel polish). Skipped when user feedback is
+            # pending (their wish wins) or the user asked to ship. The
+            # contract itself re-offers <done/> so it never blocks
+            # shipping.
+            # Gate on GENUINE user input only (2026-06-12): agent-
+            # generated findings ride the same feedback queue and were
+            # starving this contract at every clean iter. An internal
+            # finding still flows into this turn via
+            # _flush_user_injections — the model gets the finding AND
+            # one scoped task.
+            _todo_task = self._select_next_todo()
+            if (
+                _todo_task is not None
+                and self._iters_remaining >= 1
+                and not self._has_genuine_user_input()
+                and not self._user_force_done
+            ):
+                _key = self._norm_todo(_todo_task)
+                self._todo_nag_counts[_key] = (
+                    self._todo_nag_counts.get(_key, 0) + 1
+                )
+                self._current_todo = _todo_task
+                n_open = sum(
+                    1 for d, _t in self._todos_items if not d
+                )
+                self._trace({
+                    "kind": "todo_contract_injected",
+                    "todo": _todo_task[:200],
+                    "open_count": n_open,
+                    "nag_count": self._todo_nag_counts[_key],
+                })
+                base = self._p.post_clean_instruction(report_text)
+                contract = (
+                    "\n\nCURRENT TASK (from your own <todos> list — "
+                    f"{n_open} item(s) still open):\n"
+                    f"  {_todo_task}\n"
+                    "Work ONLY on this item this turn: emit <patch> "
+                    "blocks scoped to it, then re-emit the FULL <todos> "
+                    "list with it marked [x]. If it is already complete "
+                    "or no longer worth doing, just re-emit <todos> "
+                    "with it marked [x] (or removed) — and if nothing "
+                    "real remains, ship with <done/>."
+                )
+                cf = self._current_file or ""
+                if cf and len(cf) <= 60_000:
+                    # Same truth-source inject as the pending-feedback
+                    # path below: a <patch> is likely this turn.
+                    return (
+                        f"{base}{contract}\n\n"
+                        "CURRENT FILE ON DISK (this is the SOURCE OF "
+                        "TRUTH — if you emit a <patch>, its SEARCH must "
+                        "match THIS exact text, character-for-character; "
+                        "earlier turns' code may be stale):\n"
+                        "```html\n"
+                        f"{cf}\n"
+                        "```\n"
+                    )
+                return f"{base}{contract}"
             # Capability-round item 2: polish phase. Probes are green,
             # iteration budget remains, and the per-session polish cap is
             # unmet — spend a turn on game feel instead of pushing <done/>.

@@ -21,9 +21,13 @@ def test_small_model_prompt_under_six_kilobytes():
     hard-rule (Expose state on window: window.gameState = state; ...).
     Evidence: that rule prevents the single most common probe failure
     across May 20-21 traces (pac/dk/sf/doom/FPS all hit it). The +200
-    chars is justified by the failure mode it eliminates."""
+    chars is justified by the failure mode it eliminates.
+    2026-06-12: bumped 6_300 to 6_600 to admit the minimal
+    TODOS_FORMAT_SMALL spec — todo-driven CURRENT TASK turns require the
+    small class to know the <todos> tag, and one-objective-per-turn is
+    the biggest reliability lever for this class."""
     p = build_system_prompt("snake game", model_class="small")
-    assert len(p) <= 6_300, f"small-model prompt {len(p)} chars exceeds 6.3 KB target"
+    assert len(p) <= 6_600, f"small-model prompt {len(p)} chars exceeds 6.6 KB target"
 
 
 def test_small_model_prompt_drops_optional_tags():

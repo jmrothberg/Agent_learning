@@ -188,6 +188,64 @@ def test_prune_messages_structured_path(tmp_path):
     assert len(a._messages) == 2 + _PRUNE_KEEP_RECENT_TURNS
 
 
+def test_prune_messages_projected_ceiling_triggers_compaction(tmp_path):
+    """2026-06-12 (trace 20260612_132314): a post-clean turn ballooned the
+    prompt 33K → 60K in ONE assembly step (full file inline + playtest
+    feedback + history) and the 27B silently emitted 0 tokens for 184s.
+    The reactive gates look at the PREVIOUS stream's stats, so the jump
+    slipped through. The forward-looking projection over the CURRENT
+    message list (~4 chars/token) must catch it."""
+    a = _make_agent(tmp_path)
+    a._goal = "Make asteroids"
+    # Previous stream looked healthy — reactive gates must NOT fire.
+    a._last_prompt_pressure = 0.3
+    a._last_prompt_tokens = 30_000
+    msgs = [{"role": "system", "content": "sys"}]
+    # 10 x 20K chars = 200K chars ≈ 50K projected tokens > 45K ceiling.
+    for i in range(10):
+        role = "user" if i % 2 == 0 else "assistant"
+        msgs.append({"role": role, "content": "x" * 20_000})
+    a._messages = msgs
+    traced: list[dict] = []
+    a._trace = lambda obj: traced.append(obj)
+
+    a._prune_messages()
+
+    ev = next(
+        (t for t in traced if t.get("kind") == "structured_compaction"), None
+    )
+    assert ev is not None, "projection over ceiling must force compaction"
+    assert ev["reason"] == "projected_ceiling"
+    assert ev["projected_tokens"] >= 45_000
+    # Both before/after projections recorded for future trace tuning.
+    assert "projected_tokens_after" in ev
+    # Compacted shape: system + anchor + last K.
+    assert len(a._messages) == 2 + _PRUNE_KEEP_RECENT_TURNS
+    assert "STATE ANCHOR" in a._messages[1]["content"]
+
+
+def test_prune_messages_small_projection_does_not_compact(tmp_path):
+    """A healthy-size session must NOT be lossily compacted by the new
+    projection gate — only the elision path may run."""
+    a = _make_agent(tmp_path)
+    a._goal = "Pong"
+    a._last_prompt_pressure = 0.2
+    a._last_prompt_tokens = 5_000
+    msgs = [{"role": "system", "content": "sys"}]
+    for i in range(8):
+        role = "user" if i % 2 == 0 else "assistant"
+        msgs.append({"role": role, "content": f"turn-{i} " * 50})
+    a._messages = msgs
+    traced: list[dict] = []
+    a._trace = lambda obj: traced.append(obj)
+
+    a._prune_messages()
+
+    assert not any(
+        t.get("kind") == "structured_compaction" for t in traced
+    )
+
+
 def test_structured_summary_critical_context_always_present(tmp_path):
     """Whatever the state, the 'source of truth' rule must appear so the
     model never loses the patch-against-current-file invariant."""
