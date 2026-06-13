@@ -407,6 +407,10 @@ def test_render_block_uses_relative_paths(tmp_path: Path):
     # reference to a playbook bullet it'd have to look up.
     assert "img.decode()" in block
     assert "drawImage" in block
+    # One failed decode must not prevent RAF/input from starting.
+    assert "requestAnimationFrame(frame);" in block
+    assert "loadAssets();" in block
+    assert "loadAssets().then" not in block
     # And it should be insistent — qwen3.6-class models default to
     # procedural drawing without explicit "MUST" framing.
     assert "MUST USE THEM" in block or "REGRESSION" in block

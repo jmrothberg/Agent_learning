@@ -93,7 +93,7 @@ def test_reconcile_noop_without_agent_or_ledger():
     app._reconcile_feedback_ledger()  # must not raise on empty ledger
 
 
-def test_test_event_flips_applying_to_applied():
+def test_code_then_test_event_flips_to_applied():
     app = _app_with_ledger()
     app.agent = MagicMock()
     app.agent._pending_feedback = []
@@ -108,6 +108,8 @@ def test_test_event_flips_applying_to_applied():
     app._update_status = MagicMock()
     app._log = MagicMock()
     app._maybe_trigger_profile_review = MagicMock()
+    app._handle_event(AgentEvent("code", "games/x.html", {"size": 10}))
+    assert app._feedback_ledger[0]["status"] == "wrote"
     ev = AgentEvent("test", "report text", {
         "ok": True, "errors": [], "soft_warnings": [],
         "probes": [{"name": "p1", "ok": True}],
@@ -120,7 +122,7 @@ def test_test_event_flips_applying_to_applied():
     assert app._feedback_ledger[1]["iter"] == "2/6"
 
 
-def test_test_event_records_failing_checks():
+def test_test_event_records_failing_checks_after_write():
     app = _app_with_ledger()
     app.agent = MagicMock()
     app.agent._pending_feedback = []
@@ -133,6 +135,7 @@ def test_test_event_records_failing_checks():
     app._update_status = MagicMock()
     app._log = MagicMock()
     app._maybe_trigger_profile_review = MagicMock()
+    app._handle_event(AgentEvent("code", "games/x.html", {"size": 10}))
     ev = AgentEvent("test", "report", {
         "ok": False, "errors": [], "soft_warnings": ["W"],
         "probes": [{"name": "p1", "ok": False}],
@@ -181,12 +184,14 @@ def test_render_ledger_status_badges():
     app._feedback_ledger = [
         {"text": "a" * 80, "status": "applied", "iter": "7/6", "ok": True},
         {"text": "b", "status": "applied", "iter": "8/6", "ok": False},
-        {"text": "c", "status": "applying", "iter": None, "ok": None},
+        {"text": "c", "status": "wrote", "iter": "9/6", "ok": None},
+        {"text": "d", "status": "no_usable", "iter": None, "ok": False},
     ]
     out = app._render_iteration_block()
     assert "✓ applied (iter 7/6)" in out
     assert "△ applied (iter 8/6, checks failing)" in out
-    assert "→ applying" in out
+    assert "wrote code (iter 9/6)" in out
+    assert "no usable code" in out
     # Long texts are previewed, not dumped wholesale.
     assert "a" * 80 not in out
     assert "a" * 60 + "…" in out
@@ -215,13 +220,12 @@ def test_render_without_ledger_has_no_section():
 # 2. Extension-path acknowledgment
 # ---------------------------------------------------------------------------
 
-def test_extend_session_appends_applying_entry():
-    # Source-pin: _extend_session records the feedback as already
-    # "applying" (it bypasses agent._pending_feedback) and acknowledges
-    # receipt in the log like the queued path does.
+def test_extend_session_appends_queued_entry():
+    # Source-pin: _extend_session records feedback as queued, not applied,
+    # until a real code event confirms the file was written.
     src = inspect.getsource(CodingBoxApp._extend_session)
     assert "_feedback_ledger.append" in src
-    assert '"applying"' in src
+    assert '"queued"' in src
     assert "received" in src
 
 

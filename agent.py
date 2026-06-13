@@ -2248,6 +2248,10 @@ class GameAgent:
         # Updated by the no_usable_code retry branch in run(); set is
         # bounded by the per-turn failure count, no explicit cap needed.
         self._last_failed_patch_anchors: set[str] = set()
+        # Trace 20260612_225857: repeated bracket-rejected patches against
+        # the same function burned feedback turns. Count bracket rejects so
+        # the next prompt can switch into tiny source-slice surgery mode.
+        self._patch_bracket_reject_streak: int = 0
         # Cross-turn identical-reply detector. Wolfenstein 2026-05-24
         # trace burned 5 consecutive iters where the model emitted
         # bit-identical 7838-token replies and the agent kept sending
@@ -6224,6 +6228,10 @@ class GameAgent:
                 is_sound = _feedback_is_sound_change(fb, sound_names)
                 is_bug = _feedback_is_behavior_bug(fb)
                 is_orient = _feedback_is_orientation_change(fb)
+                visible_issue = bool(re.search(
+                    r"\b(pink|missing|not loading|animation|graphics?|sprite|asset|controls?)\b",
+                    fb.lower(),
+                ))
                 if (is_art or is_sound) and not is_bug and not is_orient:
                     media_to_process_now.append(fb)
                     continue
@@ -6233,11 +6241,21 @@ class GameAgent:
                 # isn't silently dropped, but the user's input is no
                 # longer swallowed for a third turn in a row.
                 prior_defer_count = self._count_recent_deferrals(fb)
-                if prior_defer_count >= 2:
+                if (
+                    prior_defer_count >= 2
+                    or (
+                        visible_issue
+                        and (
+                            getattr(self, "_stuck_streak", 0) >= 2
+                            or getattr(self, "_format_stuck_streak", 0) >= 1
+                        )
+                    )
+                ):
                     force_honor_via_escalation.append(fb)
                     self._trace({
                         "kind": "feedback_deferral_escalated",
                         "prior_defer_count": prior_defer_count,
+                        "visible_issue": visible_issue,
                         "text": fb[:240],
                     })
                 else:
@@ -6264,6 +6282,17 @@ class GameAgent:
             consumed_items.append(f"answer: {self._pending_answer[:120]}")
         for fb in self._pending_feedback:
             consumed_items.append(f"feedback: {fb[:120]}")
+
+        if force_honor_via_escalation:
+            preview = "\n- ".join(fb[:240] for fb in force_honor_via_escalation)
+            parts.append(
+                "================ USER FEEDBACK OVERRIDES STALE BLOCKER ================\n"
+                "The run is stuck on the same blocker/no-usable pattern, and the "
+                "user named a visible issue. For THIS turn, fix the user-visible "
+                "feedback first, then rerun/handle the stale harness blocker.\n"
+                f"\nPriority feedback:\n- {preview}\n"
+                "======================================================================"
+            )
 
         self._feedback_deferred_last_turn = False
         answer_was_consumed = False
@@ -10288,6 +10317,23 @@ class GameAgent:
                 and not baseline_degenerate
                 and not feedback_exempt
             ):
+                current_len = len(self._current_file or "")
+                dropped_media_refs = (
+                    (self._current_file or "").count("_assets/") > html.count("_assets/")
+                    or (self._current_file or "").count("_videos/") > html.count("_videos/")
+                    or (self._current_file or "").count("_sounds/") > html.count("_sounds/")
+                )
+                if current_len and (
+                    len(html) < int(current_len * 0.80) or dropped_media_refs
+                ):
+                    return None, (
+                        "<html_file> rejected: full rewrite on a failing "
+                        "baseline would shrink the existing architecture or "
+                        "drop generated media wiring. Repair the syntax/runtime "
+                        "error with a minimal <patch> instead; keep existing "
+                        "asset/sound/video loaders and scene structure unless "
+                        "the user explicitly asked for a redesign."
+                    )
                 # The gate above would have rejected this rewrite before the
                 # salvage rule; record that the salvage is what let it through.
                 self._trace({
@@ -11356,6 +11402,18 @@ class GameAgent:
                             f"same value regardless of game behavior."
                         ),
                     })
+            if re.search(r"\bstate\.scene\s*>=\s*1\b", expr):
+                findings.append({
+                    "name": name,
+                    "kind": "fragile_initial_scene_index",
+                    "message": (
+                        f"probe `{name}` requires `state.scene >= 1`; "
+                        "most scene arrays are zero-indexed and start at "
+                        "scene 0, so this probe can force a bad state hack. "
+                        "Prefer `typeof state.scene === 'number'` and test "
+                        "progression after dispatching input."
+                    ),
+                })
         return findings
 
     @staticmethod
@@ -14750,6 +14808,31 @@ class GameAgent:
                     # would have broken brace balance, so patch_retry_
                     # instruction (built from match failures) has nothing
                     # to say. Send the targeted bracket message instead.
+                    self._patch_bracket_reject_streak += 1
+                    _slice = ""
+                    try:
+                        first_search = patches_in_reply[0].search or ""
+                        idx = self._current_file.find(first_search)
+                        if idx >= 0:
+                            start = max(0, idx - 500)
+                            end = min(len(self._current_file), idx + len(first_search) + 500)
+                            _slice = self._current_file[start:end]
+                    except Exception:
+                        _slice = ""
+                    surgery = (
+                        "\n\nPATCH SURGERY MODE — this is bracket rejection "
+                        f"#{self._patch_bracket_reject_streak} in a row. "
+                        "Do ONE tiny complete replacement only. Include the "
+                        "entire enclosing function/block with balanced braces "
+                        "in SEARCH and REPLACE. Do NOT emit <probes>, notes, "
+                        "or a full <html_file> in this turn."
+                    )
+                    if _slice:
+                        surgery += (
+                            "\n\nCURRENT SOURCE SLICE AROUND THE FAILED PATCH "
+                            "(patch this exact text):\n"
+                            "```html\n" + _slice[:1800] + "\n```"
+                        )
                     self._messages.append({
                         "role": "user",
                         "content": self._flush_user_injections(
@@ -14758,6 +14841,7 @@ class GameAgent:
                             "working version). Re-emit ONLY the corrected "
                             "<patch> block(s); count the braces in SEARCH vs "
                             "REPLACE before answering."
+                            + surgery
                         ),
                     })
                 elif patches_in_reply and self._current_file:
@@ -14938,6 +15022,7 @@ class GameAgent:
             self._force_first_build_prefill = False
             self._consecutive_plan_only = 0
             self._format_stuck_streak = 0
+            self._patch_bracket_reject_streak = 0
             # Successful materialize means the model emitted a parseable
             # reply — any previous identical-reply loop has been broken.
             self._last_no_usable_code_fingerprint = None
@@ -15058,7 +15143,10 @@ class GameAgent:
             # model chose a code solution; see the method docstring).
             self._maybe_clear_asset_reprompt_via_code(reply)
 
-            # Save + per-iter snapshot
+            # Save + per-iter snapshot. Keep the prior HTML in memory so a
+            # visual/procedural regression can restore the better baseline
+            # even when no clean best.html exists yet.
+            _pre_iter_html = self._current_file
             self.out_path.write_text(new_html, encoding="utf-8")
             self._current_file = new_html
             snap_path = self._save_snapshot(new_html)
@@ -15916,6 +16004,66 @@ class GameAgent:
                         # purposes". _previous_report* stays unchanged.
                         continue
 
+            # Non-clean visual regression guard: the prior iteration may not
+            # have been clean enough for best.html, but it can still be a
+            # better baseline. Trace 20260612_225857 peaked visually before a
+            # later patch reintroduced PROCEDURAL_REGRESSION/pink placeholders.
+            if (
+                not prev_ok
+                and prev
+                and _pre_iter_html
+                and not current_ok
+                and self._iter_budget_bonus < revert_bonus_cap
+            ):
+                prev_probes = prev.get("probes") or []
+                cur_probes = report.get("probes") or []
+                prev_passing = sum(1 for p in prev_probes if p.get("ok"))
+                cur_passing = sum(1 for p in cur_probes if p.get("ok"))
+                visual_terms = (
+                    "PROCEDURAL_REGRESSION_SUSPECTED",
+                    "ASSETS_LOADED_BUT_UNDRAWN",
+                    "MISSING",
+                    "pink",
+                )
+                prev_soft = "\n".join(str(w) for w in prev.get("soft_warnings") or [])
+                cur_soft = "\n".join(str(w) for w in report.get("soft_warnings") or [])
+                added_visual_warning = any(
+                    t in cur_soft and t not in prev_soft for t in visual_terms
+                )
+                if added_visual_warning and cur_passing <= prev_passing:
+                    try:
+                        self.out_path.write_text(_pre_iter_html, encoding="utf-8")
+                    except Exception:
+                        pass
+                    self._current_file = _pre_iter_html
+                    self._iter_budget_bonus += 1
+                    self._trace({
+                        "kind": "visual_regression_snapshot_revert",
+                        "iteration": iteration,
+                        "cur_passing": cur_passing,
+                        "prev_passing": prev_passing,
+                        "bonus_used": self._iter_budget_bonus,
+                    })
+                    yield self._record(AgentEvent(
+                        "info",
+                        "VISUAL REGRESSION: last patch did not improve probes "
+                        "and added procedural/missing-asset warnings. Restored "
+                        "the previous snapshot and granted a bonus iter.",
+                    ))
+                    self._messages.append({
+                        "role": "user",
+                        "content": self._flush_user_injections(
+                            "VISUAL REGRESSION DETECTED: the harness restored "
+                            "the previous, better snapshot. Your last patch did "
+                            "not improve probe count and added procedural/missing "
+                            "asset warnings. Send one minimal <patch> that fixes "
+                            "the user-visible issue without reintroducing large "
+                            "procedural placeholders or pink MISSING boxes."
+                        ),
+                    })
+                    self._fix_mode = True
+                    continue
+
             said_done = bool(_DONE_RE.search(reply))
             regressed = (self._previous_report_ok is True) and (not report["ok"])
 
@@ -16355,6 +16503,30 @@ class GameAgent:
                     "with explicit acknowledgement in <notes> that the "
                     "file does not run.\n"
                 )
+            last_report_facts = ""
+            try:
+                lr = self._previous_report or {}
+                probes = lr.get("probes") or []
+                failed_probe_names = [
+                    str(p.get("name") or "probe")
+                    for p in probes
+                    if isinstance(p, dict) and not p.get("ok")
+                ]
+                facts = [
+                    f"best_path_exists={self.best_path.exists()}",
+                    f"ok={bool(lr.get('ok'))}",
+                    f"failed_probes={failed_probe_names[:6]}",
+                    f"page_errors={(lr.get('page_errors') or [])[:2]}",
+                    f"soft_warnings={(lr.get('soft_warnings') or [])[:3]}",
+                ]
+                last_report_facts = (
+                    "\nFACTUAL LAST REPORT — your <notes> MUST NOT "
+                    "contradict or omit these facts:\n- "
+                    + "\n- ".join(str(f) for f in facts)
+                    + "\nIf best_path_exists=False, say no clean build was saved.\n"
+                )
+            except Exception:
+                last_report_facts = ""
             exit_prompt = (
                 "EXIT DECISION TURN — the iteration cap has been "
                 "reached and the last test was not clean. THIS TURN "
@@ -16373,6 +16545,7 @@ class GameAgent:
                 "answer would unblock you. Be concrete; name the "
                 "specific decision.\n\n"
                 f"{ship_warning}"
+                f"{last_report_facts}"
                 "Do NOT emit <patch>, <html_file>, <plan>, "
                 "<diagnose>, or any other tag this turn. The "
                 "session ends after this reply."

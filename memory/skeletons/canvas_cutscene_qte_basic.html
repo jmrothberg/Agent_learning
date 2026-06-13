@@ -33,6 +33,7 @@
 <div id="hud">
   <span>Scene: <b id="sceneNo">1</b>/<b id="sceneTot">1</b></span>
   <span>Lives: <b id="lives">3</b></span>
+  <span>Score: <b id="score">0</b></span>
 </div>
 <div id="help">React with Arrow keys + Space when prompted · R restart</div>
 <div id="modal"><div class="card">
@@ -52,6 +53,7 @@
   const sceneNoEl = document.getElementById("sceneNo");
   const sceneTotEl = document.getElementById("sceneTot");
   const livesEl = document.getElementById("lives");
+  const scoreEl = document.getElementById("score");
   const modal = document.getElementById("modal");
   const endTitle = document.getElementById("endTitle");
   const endMsg = document.getElementById("endMsg");
@@ -67,28 +69,54 @@
   fit();
   window.addEventListener("resize", fit);
 
-  // ---- Generated stills load here (replace with the GENERATED ASSETS
-  //      loader block — one PNG per scene frame; cycle them for motion).
-  //      Until assets exist, draw() falls back to a labelled placeholder.
+  // ---- Generated media load here ---------------------------------------
+  // Replace this with the GENERATED ASSETS block. Use exact generated names:
+  //   BG_ASSETS: bg_drawbridge, bg_tentacle, ...
+  //   SPRITES: knight_idle, knight_jump, knight_sword, threat sprites, ...
+  // Final scenes should drawImage(bg_scene) first. Procedural rectangles are
+  // temporary missing-asset markers only; do not ship them when assets exist.
   const ASSETS = {};
 
-  // ---- The SCRIPT. Each scene cycles `frames` (asset names) for motion,
-  //      and (optionally) opens a timed QTE window expecting one key.
-  //      Replace frames[] with your generated asset names; tune timing.
+  // ---- The SCRIPT. state.scene is ZERO-indexed; HUD displays scene+1.
+  // Each scene draws a generated full-canvas bg and cycles generated sprite
+  // frames for motion. Key art/video clips may use the same naming pattern.
+  // hazardPath/threatens make the timing READABLE FROM THE PICTURE: each scene's
+  // threat visibly travels from `from` toward the hero's threatened body part so
+  // the player can SEE what/when to react. The prompt word only says WHICH key.
+  // Coords are normalized x=0..1, y=0..1. Window opens at scene start so the
+  // harness still sees input; the threat closes in across the window (reaches the
+  // hero ~hit, i.e. as the window ends).
   const SCENES = [
-    { id: "drawbridge", frames: ["scene1_a", "scene1_b"],
-      qte: { expectKey: "ArrowLeft", prompt: "LEFT!", windowStartMs: 700, durationMs: 1100 } },
-    { id: "tentacle", frames: ["scene2_a", "scene2_b"],
-      qte: { expectKey: "Space", prompt: "SWORD!", windowStartMs: 600, durationMs: 1000 } },
-    { id: "dragon", frames: ["scene3_a", "scene3_b"],
-      qte: { expectKey: "ArrowUp", prompt: "JUMP!", windowStartMs: 600, durationMs: 900 } },
+    { id: "drawbridge", bg: "bg_drawbridge", frames: ["knight_idle", "knight_left"],
+      hazardPath: { from: { x: 0.5, y: 0.02 }, to: { x: 0.5, y: 0.74 }, threatens: "feet" },
+      qte: { expectKey: "ArrowLeft", prompt: "LEFT!", windowStartMs: 0, durationMs: 1400 } },
+    { id: "tentacle", bg: "bg_tentacle", frames: ["knight_idle", "knight_sword"],
+      hazardPath: { from: { x: 0.02, y: 0.55 }, to: { x: 0.44, y: 0.55 }, threatens: "body" },
+      qte: { expectKey: "Space", prompt: "SWORD!", windowStartMs: 0, durationMs: 1200 } },
+    { id: "dragon", bg: "bg_dragon", frames: ["knight_idle", "knight_jump"],
+      hazardPath: { from: { x: 0.92, y: 0.18 }, to: { x: 0.5, y: 0.56 }, threatens: "body" },
+      qte: { expectKey: "ArrowUp", prompt: "JUMP!", windowStartMs: 0, durationMs: 1000 } },
   ];
   const FRAME_MS = 130; // ~7.7 FPS still-frame cadence (Dragon's-Lair-ish)
+
+  // ---- Telegraph helpers: make the timing readable from the moving threat ---
+  // pointOnPath linearly interpolates from->to; anticipation eases it so the
+  // threat winds up then accelerates in. Drive t01 from elapsed time so the
+  // threat sprite (or this fallback marker) visibly closes on the hero.
+  function pointOnPath(path, t01) {
+    return { x: path.from.x + (path.to.x - path.from.x) * t01,
+             y: path.from.y + (path.to.y - path.from.y) * t01 };
+  }
+  function anticipation(t01) {
+    t01 = Math.max(0, Math.min(1, t01));
+    return t01 < 0.5 ? 2 * t01 * t01 : 1 - Math.pow(-2 * t01 + 2, 2) / 2;
+  }
 
   // ---- State (exposed on window for probes) ----------------------------
   const state = {
     scene: 0,
     lives: 3,
+    score: 0,
     over: false,
     won: false,
     sceneEnteredAt: 0,           // performance.now() when current scene began
@@ -113,10 +141,13 @@
       tStart: 0, durationMs: q ? q.durationMs : 0, result: null,
       windowStartMs: q ? q.windowStartMs : 0,
     };
+    state.inputFlash = 0;
+    state.lastInputCode = "";
   }
 
   function reset() {
-    state.over = false; state.won = false; state.lives = 3; state.flash = 0;
+    state.over = false; state.won = false; state.lives = 3; state.score = 0; state.flash = 0;
+    state.inputFlash = 0; state.lastInputCode = "";
     modal.style.display = "none";
     errBox.style.display = "none"; errBox.textContent = "";
     enterScene(0);
@@ -128,6 +159,7 @@
 
   function succeed() {
     state.qte.result = "success";
+    state.score += 100;
     state.flash = 250; state.flashColor = "#3f3";
     const sc = SCENES[state.scene];
     const next = state.scene + 1;
@@ -144,12 +176,24 @@
 
   // ---- Input: a single keydown is the QTE reaction ---------------------
   const REACT_KEYS = ["ArrowLeft","ArrowRight","ArrowUp","ArrowDown","Space"];
+  function qteOpenNow(now) {
+    const q = state.qte;
+    if (!q.active || q.result) return false;
+    const elapsed = now - state.sceneEnteredAt;
+    return elapsed >= q.windowStartMs && elapsed <= q.windowStartMs + q.durationMs;
+  }
   function onKeyDown(e) {
     if (e.code === "KeyR") { reset(); e.preventDefault(); return; }
     if (REACT_KEYS.includes(e.code)) e.preventDefault();
     if (state.over) return;
     const q = state.qte;
-    if (!q.active || !q.windowOpen || q.result) return;  // only react in the open window
+    if (!q.active || q.result) return;
+    // Harness-visible response: compute the time window at keydown time
+    // instead of relying only on the RAF-updated q.windowOpen flag.
+    state.lastInputCode = e.code;
+    state.inputFlash = 150;
+    q.windowOpen = qteOpenNow(performance.now());
+    if (!q.windowOpen) return;
     if (e.code === q.expectKey) succeed();
     else if (REACT_KEYS.includes(e.code)) fail();        // wrong reaction key = miss
   }
@@ -175,6 +219,7 @@
   function update(now) {
     if (state.over) return;
     if (state.flash > 0) state.flash = Math.max(0, state.flash - 16);
+    if (state.inputFlash > 0) state.inputFlash = Math.max(0, state.inputFlash - 16);
     const q = state.qte;
     if (q.active && !q.result) {
       const elapsed = now - state.sceneEnteredAt;
@@ -189,17 +234,44 @@
   function draw(now) {
     ctx.clearRect(0, 0, W, H);
     const sc = SCENES[state.scene];
-    // cycle generated stills for motion; placeholder if assets not loaded yet
+    // Draw generated full-canvas background first; placeholder only while
+    // assets are absent during development.
+    const bg = sc && sc.bg ? ASSETS[sc.bg] : null;
+    if (bg) ctx.drawImage(bg, 0, 0, W, H);
+    else {
+      ctx.fillStyle = "#241a33"; ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = "#6a5a88"; ctx.font = "20px system-ui"; ctx.textAlign = "center";
+      ctx.fillText("MISSING GENERATED BACKGROUND: " + (sc ? sc.bg : "?"), W/2, H*0.55);
+    }
+    // Cycle generated sprite/still frames for motion.
     const frames = (sc && sc.frames) || [];
     const idx = frames.length ? Math.floor((now - state.sceneEnteredAt) / FRAME_MS) % frames.length : 0;
     const img = frames.length ? ASSETS[frames[idx]] : null;
     if (img) {
-      ctx.drawImage(img, 0, 0, W, H);
+      ctx.drawImage(img, W*0.38, H*0.28, W*0.24, H*0.46);
     } else {
-      ctx.fillStyle = "#241a33"; ctx.fillRect(0, 0, W, H);
-      ctx.fillStyle = "#6a5a88"; ctx.font = "20px system-ui"; ctx.textAlign = "center";
-      ctx.fillText("scene " + (state.scene + 1) + " — " + (sc ? sc.id : "?"), W/2, H/2);
-      ctx.fillText("(generated still frames render here)", W/2, H/2 + 28);
+      ctx.fillStyle = "#f0f"; ctx.fillRect(W*0.43, H*0.36, W*0.14, H*0.28);
+      ctx.fillStyle = "#000"; ctx.font = "16px system-ui"; ctx.textAlign = "center";
+      ctx.fillText("MISSING SPRITE", W/2, H*0.52);
+    }
+    // Telegraph: animate the threat along hazardPath so it visibly closes on the
+    // hero by the time the window ends (hit). With a real threat sprite, drawImage
+    // it at this position; the moving marker below is the missing-asset fallback.
+    const q0 = state.qte;
+    if (sc && sc.hazardPath && q0.active && !q0.result) {
+      const span = (q0.windowStartMs || 0) + (q0.durationMs || 0);
+      const t01 = span > 0 ? (now - state.sceneEnteredAt) / span : 1;
+      const p = pointOnPath(sc.hazardPath, anticipation(t01));
+      const threat = ASSETS["threat_" + sc.id] || null;
+      if (threat) {
+        ctx.drawImage(threat, p.x * W - W * 0.07, p.y * H - H * 0.07, W * 0.14, H * 0.14);
+      } else {
+        ctx.save();                              // fallback marker so the approach is still visible
+        ctx.globalAlpha = 0.5 + 0.5 * Math.min(1, t01);
+        ctx.fillStyle = "#ff5a3c";
+        ctx.beginPath(); ctx.arc(p.x * W, p.y * H, 18 + 14 * Math.min(1, t01), 0, Math.PI * 2); ctx.fill();
+        ctx.restore();
+      }
     }
     // QTE prompt — big, centered, high-contrast, only while the window is open
     const q = state.qte;
@@ -214,6 +286,13 @@
     if (state.flash > 0) {
       ctx.save(); ctx.globalAlpha = Math.min(0.5, state.flash / 600);
       ctx.fillStyle = state.flashColor; ctx.fillRect(0, 0, W, H); ctx.restore();
+    }
+    if (state.inputFlash > 0) {
+      ctx.save(); ctx.globalAlpha = Math.min(0.35, state.inputFlash / 300);
+      ctx.fillStyle = "#fff"; ctx.fillRect(0, H - 18, W, 18);
+      ctx.fillStyle = "#000"; ctx.font = "12px system-ui"; ctx.textAlign = "center";
+      ctx.fillText("input: " + state.lastInputCode, W/2, H - 5);
+      ctx.restore();
     }
   }
 
@@ -233,6 +312,7 @@
       sceneNoEl.textContent = Math.min(state.scene + 1, SCENES.length);
       sceneTotEl.textContent = SCENES.length;
       livesEl.textContent = state.lives;
+      scoreEl.textContent = state.score;
     } catch (err) {
       console.error("cutscene crashed:", err);
       errBox.textContent = "crash: " + (err && err.message || err);
@@ -241,6 +321,7 @@
     rafHandle = requestAnimationFrame(frame);
   }
   enterScene(0);
+  window.game = { reset };
   rafHandle = requestAnimationFrame(frame);
 })();
 </script>

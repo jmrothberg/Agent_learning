@@ -3382,12 +3382,43 @@ class LiveBrowser:
                     if isinstance(ev, dict)
                 )
                 median_area = sizes[len(sizes) // 2] if sizes else 0
+                likely_sites: list[str] = []
+                try:
+                    html_for_sites = Path(path).read_text(
+                        encoding="utf-8", errors="ignore",
+                    )
+                    for line in html_for_sites.splitlines():
+                        s = line.strip()
+                        low = s.lower()
+                        if(
+                            ("fillrect" in low and any(
+                                tok in low for tok in (
+                                    "bg", "background", "missing", "fallback",
+                                    "sprite", "entity", "scene",
+                                )
+                            ))
+                            or "missing" in low
+                            or "function drawbg" in low
+                        ):
+                            likely_sites.append(s[:140])
+                        if len(likely_sites) >= 4:
+                            break
+                except Exception:
+                    likely_sites = []
                 report["procedural_regression"] = {
                     "referenced_assets": len(referenced_assets),
                     "big_rect_count": big_rect_count,
                     "draw_image_count": draw_image_count,
                     "median_rect_area_px": median_area,
+                    "likely_source_sites": likely_sites,
                 }
+                site_text = ""
+                if likely_sites:
+                    site_text = (
+                        " Likely source site(s): "
+                        + " | ".join(likely_sites)
+                        + "."
+                    )
                 report["soft_warnings"].append(
                     f"PROCEDURAL_REGRESSION_SUSPECTED: "
                     f"{len(referenced_assets)} sprite asset(s) are "
@@ -3402,6 +3433,7 @@ class LiveBrowser:
                     "ctx.drawImage(ASSETS.<name>, x, y, w, h). UI "
                     "elements (HUD bars, borders) are not counted — "
                     "the 32×32 minimum filters them out."
+                    + site_text
                 )
         # Probe errors are derived from probe_results (entries with
         # ok=False AND non-empty err).

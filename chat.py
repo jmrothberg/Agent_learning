@@ -2018,6 +2018,11 @@ class CodingBoxApp(App):
                         badge = f"[green]✓ applied (iter {it})[/green]"
                     else:
                         badge = f"[yellow]△ applied (iter {it}, checks failing)[/yellow]"
+                elif status == "wrote":
+                    it = entry.get("iter") or "?"
+                    badge = f"[cyan]↦ wrote code (iter {it})[/cyan]"
+                elif status == "no_usable":
+                    badge = "[red]✗ no usable code[/red]"
                 elif status == "applying":
                     badge = "[blue]→ applying[/blue]"
                 else:
@@ -2643,8 +2648,10 @@ class CodingBoxApp(App):
         self._log(f"  jsonl trace:  {jsonl}")
         self._log(f"  conversation: {traces / (stem + '.conversation.md')}")
         self._log(f"  snapshots:    {snaps}")
-        if self._best_path is not None:
+        if self._best_path is not None and self._best_path.exists():
             self._log(f"  best clean:   {self._best_path}")
+        else:
+            self._log("  best clean:   none saved")
         self._log("[dim]Tip: paste the full log above into your AI assistant to debug.[/dim]")
         # The jsonl trace gets `stream_heartbeat` entries every 30s
         # during a long stream — invaluable when the model goes off
@@ -6356,11 +6363,12 @@ class CodingBoxApp(App):
         # agent._pending_feedback (it restarts the loop directly), so it
         # was invisible in the panel — record it as already applying.
         self._feedback_ledger.append(
-            {"text": feedback, "status": "applying", "iter": None, "ok": None}
+            {"text": feedback, "status": "queued", "iter": None, "ok": None,
+             "continuation": True}
         )
         self._update_status()
         self._log(
-            "[dim cyan]  ✓ received — applying as extension of the "
+            "[dim cyan]  ✓ received — queued as extension of the "
             "finished session.[/dim cyan]"
         )
         self._log_info(
@@ -6613,14 +6621,23 @@ class CodingBoxApp(App):
 
         elif ev.kind == "code":
             self._log(f"[green]wrote {text_safe}[/green] ({ev.data.get('size', 0)} bytes)")
+            # Continuation honesty: a user feedback item is not "applied"
+            # merely because the agent started a turn. Mark it as written
+            # only after a real code materialization event; the following
+            # test event will attach the harness result.
+            for _entry in self._feedback_ledger:
+                if _entry.get("status") in {"queued", "applying"}:
+                    _entry["status"] = "wrote"
+                    _entry["iter"] = self._iteration_label
 
         elif ev.kind == "test":
             # ev.text is the human-readable report, ev.data is the dict.
             ok = ev.data.get("ok", False)
-            # Feedback ledger: any item injected into the turn that just
-            # tested flips applying → applied (record iter + harness ok).
+            # Feedback ledger: only a real prior code write flips to
+            # applied. Rejected/no-usable continuation turns can still
+            # produce info events but must not claim the file changed.
             for _entry in self._feedback_ledger:
-                if _entry.get("status") == "applying":
+                if _entry.get("status") == "wrote":
                     _entry["status"] = "applied"
                     _entry["iter"] = self._iteration_label
                     _entry["ok"] = ok
@@ -6700,6 +6717,11 @@ class CodingBoxApp(App):
 
         elif ev.kind == "info":
             self._log_info(text_safe)
+            if (ev.text or "").startswith("no usable code:"):
+                for _entry in self._feedback_ledger:
+                    if _entry.get("status") in {"queued", "applying"}:
+                        _entry["status"] = "no_usable"
+                        _entry["ok"] = False
             # Info events can carry state changes the user needs to see
             # reflected in the bottom bar immediately — e.g. the agent
             # auto-arming step-mode after a first iter failure. Cheap;

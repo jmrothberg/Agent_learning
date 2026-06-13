@@ -584,13 +584,22 @@ def build_system_prompt(
     is_small = (model_class == "small")
     if formats is None:
         if is_small:
-            # Drop sprite + sound generation pipelines and the on-demand
-            # playbook lookup mechanism. The model writes a self-contained
-            # game instead of orchestrating an asset pipeline.
+            # Drop unused media pipelines and the on-demand playbook lookup
+            # mechanism. Trace 20260613_123726 showed the old unconditional
+            # small-model drop removed <assets>/<videos> from the authoritative
+            # output-tags list even when the goal explicitly required generated
+            # media, so the model omitted media tags in Phase A. Keep each
+            # media tag when the actual goal triggers its intent detector.
             # <todos> is RE-ENABLED for small (2026-06-12, was in the drop
             # set for size budget) via the minimal TODOS_FORMAT_SMALL —
             # todo-driven CURRENT TASK turns help small models the most.
-            _SMALL_DROP = {"<assets>", "<sounds>", "<videos>", "<lookup_bullet>"}
+            _SMALL_DROP = {"<lookup_bullet>"}
+            if not _detect_art_intent(goal):
+                _SMALL_DROP.add("<assets>")
+            if not _detect_audio_intent(goal):
+                _SMALL_DROP.add("<sounds>")
+            if not _detect_video_intent(goal):
+                _SMALL_DROP.add("<videos>")
             fmts = [
                 TODOS_FORMAT_SMALL if f.name == "<todos>" else f
                 for f in ALL_FORMATS if f.name not in _SMALL_DROP
@@ -867,6 +876,46 @@ def _detect_video_intent(goal: str) -> list[str]:
     return out
 
 
+# Mechanism keywords that signal a timed-reaction / QTE scene structure.
+# Genre-free: these describe interaction shape, not subject matter. The nudge
+# is deliberately short and conditional so it helps local models wire media +
+# input without bloating unrelated prompts.
+_QTE_KEYWORDS = frozenset({
+    "qte", "quicktime", "quick-time", "quick-time-event",
+    "reaction", "react", "timed", "timing", "prompt",
+    "scripted", "scene", "scenes",
+})
+
+
+def _detect_qte_intent(goal: str) -> list[str]:
+    """Return timed-reaction/QTE mechanism keywords found in `goal`.
+
+    Also matches joined variants like "quick time" -> "quicktime" and
+    "quick time event" -> "quicktimeevent".
+    """
+    if not goal:
+        return []
+    import re
+    words = [w.lower() for w in re.findall(r"[a-zA-Z]+", goal)]
+    seen: set[str] = set()
+    out: list[str] = []
+    for w in words:
+        if w in _QTE_KEYWORDS and w not in seen:
+            seen.add(w)
+            out.append(w)
+    for i in range(len(words) - 1):
+        for j in (words[i] + words[i + 1], words[i] + "-" + words[i + 1]):
+            if j in _QTE_KEYWORDS and j not in seen:
+                seen.add(j)
+                out.append(j)
+    for i in range(len(words) - 2):
+        j = words[i] + words[i + 1] + words[i + 2]
+        if j in {"quicktimeevent"} and j not in seen:
+            seen.add(j)
+            out.append(j)
+    return out
+
+
 def _detect_3d_intent(goal: str) -> list[str]:
     """Return a list of 3D-modality keywords found in `goal`. Empty list
     means the goal is plain 2D / DOM-only and needs no 3D nudge.
@@ -1133,11 +1182,13 @@ def plan_instruction(
         threed_keywords = _detect_3d_intent(goal)
         audio_keywords = ()
         video_keywords = ()
+        qte_keywords = _detect_qte_intent(goal)
     else:
         art_keywords = _detect_art_intent(goal)
         threed_keywords = _detect_3d_intent(goal)
         audio_keywords = _detect_audio_intent(goal)
         video_keywords = _detect_video_intent(goal)
+        qte_keywords = _detect_qte_intent(goal)
     art_nudge = ""
     if art_keywords:
         kws = ", ".join(repr(k) for k in art_keywords)
@@ -1215,7 +1266,32 @@ def plan_instruction(
             "clips match the game's art style (image-to-video). Skipping "
             "<videos> IS A FAILURE for this goal. Do not assume the "
             "video backend is unavailable (the harness will tell you if "
-            "it is).\n"
+            "it is). When the GENERATED VIDEOS block comes back, wire those "
+            "exact MP4 paths into the FIRST <html_file>: muted full-screen "
+            "overlay, any key skips, and both `onended` and `onerror` call "
+            "the same continuation callback. If a video is missing/blocked, "
+            "fall back to its key-art still and continue gameplay — never "
+            "let a cutscene stall the game.\n"
+        )
+
+    qte_nudge = ""
+    if qte_keywords:
+        kws = ", ".join(repr(k) for k in qte_keywords)
+        qte_nudge = (
+            "\n\nTIMED-REACTION / QTE INTENT DETECTED — your goal mentions "
+            f"{kws}. In Phase A, keep the scene script small and explicit: "
+            "`state.scene` is 0-indexed (HUD displays scene+1), expose "
+            "`window.state` and `window.game.reset`, and write probes that "
+            "do NOT require scene>=1 at page load. In the first HTML, "
+            "keydown MUST compute the current QTE window from "
+            "`performance.now() - state.sceneEnteredAt`, set a short "
+            "`inputFlash`/`lastInputCode` immediately so the harness sees "
+            "visible response, then success/fail changes scene/score/lives/"
+            "qte.result. If generated images/videos exist, wire their exact "
+            "paths immediately: drawImage generated backgrounds/sprites, "
+            "and make video overlays any-key skippable with onended/onerror "
+            "continuation. Procedural rectangles are missing-asset fallback "
+            "only, not final scene art.\n"
         )
 
     # Phase 4: scope-pacing nudge for art-heavy + logic-heavy goals.
@@ -1434,6 +1510,7 @@ def plan_instruction(
     body = (
         PLAN_INSTRUCTION + art_nudge + threed_nudge + audio_nudge
         + video_nudge
+        + qte_nudge
         + scope_nudge + multi_frame_nudge + minimal_nudge + seed_nudge
     )
 
