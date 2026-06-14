@@ -245,11 +245,21 @@ class VideoGenerator:
         ]
         if image_path is not None:
             cmd += ["--image", str(image_path)]
+        # Crash-hardening (2026-06-14): write the subprocess output to a
+        # per-clip .gen.log FILE instead of an inherited capture pipe. mlx-gen
+        # streams a large tqdm progress bar to stdout; with a captured pipe, if
+        # the parent chat process goes away mid-clip (e.g. a macOS memory-
+        # pressure jetsam kill — confirmed in JetsamEvent-2026-06-14-125300),
+        # the pipe's read end closes and mlx-gen dies with BrokenPipeError. A
+        # real file is immune to that AND leaves a persistent per-clip log with
+        # the REAL error instead of a misleading broken pipe.
+        log_path = Path(out_path).with_suffix(".gen.log")
         try:
-            proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=_GEN_TIMEOUT_S,
-                cwd=str(_REPO_ROOT),
-            )
+            with open(log_path, "w", encoding="utf-8") as logf:
+                proc = subprocess.run(
+                    cmd, stdout=logf, stderr=subprocess.STDOUT,
+                    timeout=_GEN_TIMEOUT_S, cwd=str(_REPO_ROOT),
+                )
         except subprocess.TimeoutExpired:
             self._last_error = f"video generation timed out after {_GEN_TIMEOUT_S}s"
             return None
@@ -257,9 +267,13 @@ class VideoGenerator:
             self._last_error = f"{type(e).__name__}: {e!s}"
             return None
         if proc.returncode != 0 or not Path(out_path).exists():
-            tail = "\n".join(
-                (proc.stderr or proc.stdout or "").strip().splitlines()[-4:]
-            )
+            try:
+                tail = "\n".join(
+                    log_path.read_text(encoding="utf-8", errors="replace")
+                    .strip().splitlines()[-6:]
+                )
+            except Exception:
+                tail = ""
             self._last_error = (
                 f"generate_video.py rc={proc.returncode}: {tail[:400]}"
             )

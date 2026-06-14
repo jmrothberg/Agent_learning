@@ -1088,6 +1088,11 @@ class CodingBoxApp(App):
         # large when running a frontier-tier model. We do NOT inspect
         # the model name — the user rotates local LLMs constantly.
         self._model_class: str | None = None
+        # Lean system-prompt override. None = auto (the agent renders the
+        # compact `small` schema for LOCAL backends so a local VLM like
+        # qwen3.6:27b isn't buried under a 20KB schema + 6KB project doc).
+        # /leanprompt on|off|auto sets this explicitly.
+        self._lean_prompt: bool | None = None
         # Run-profile contract shown in status/mode bar. Default to
         # local_manual so new sessions start in wait mode: the user can
         # inspect each iter before the next model call. Override with
@@ -1112,7 +1117,7 @@ class CodingBoxApp(App):
         # iter, runs a short scripted playtest, captures multi-window
         # screenshots, evaluates genre-free behavior recipes, and queues
         # user-style feedback into _pending_feedback. Default ON; one
-        # slash command (/feedback off) disables if it ever causes
+        # slash command (/playtest off, alias /feedback off) disables if it ever causes
         # regressions. Existing test reports + visual critic + patch
         # diagnostics are NOT gated by this — only the extra autonomous
         # direction is.
@@ -2644,15 +2649,15 @@ class CodingBoxApp(App):
         jsonl = traces / (stem + ".jsonl")
         self._log("[bold cyan]── log artifacts ──[/bold cyan]")
         self._log(f"  game file:    {self._out_path}")
-        self._log(f"  full log:     {self._log_file_path}")
+        # One-complete-trace (2026-06-14): the .jsonl is the single complete
+        # trace now (.log / .conversation.md / .summary.md siblings retired).
         self._log(f"  jsonl trace:  {jsonl}")
-        self._log(f"  conversation: {traces / (stem + '.conversation.md')}")
         self._log(f"  snapshots:    {snaps}")
         if self._best_path is not None and self._best_path.exists():
             self._log(f"  best clean:   {self._best_path}")
         else:
             self._log("  best clean:   none saved")
-        self._log("[dim]Tip: paste the full log above into your AI assistant to debug.[/dim]")
+        self._log("[dim]Tip: paste the jsonl trace above into your AI assistant to debug.[/dim]")
         # The jsonl trace gets `stream_heartbeat` entries every 30s
         # during a long stream — invaluable when the model goes off
         # the rails (e.g. emits 200 duplicate sprite specs and stalls
@@ -3242,11 +3247,13 @@ class CodingBoxApp(App):
                 self._cmd_toggle_architect(arg)
             elif cmd in ("double-screenshot", "doublescreenshot", "ds"):
                 self._cmd_toggle_double_screenshot(arg)
-            elif cmd in ("vlm-critique", "vlmcritique", "vc"):
+            elif cmd in ("vlm-critique", "vlmcritique", "vc", "judge"):
                 self._cmd_toggle_vlm_critique(arg)
             elif cmd in ("allroles", "all-roles"):
                 self._cmd_toggle_allroles(arg)
-            elif cmd == "feedback":
+            elif cmd in ("leanprompt", "lean-prompt", "lean"):
+                self._cmd_set_leanprompt(arg)
+            elif cmd in ("critique", "playtest", "feedback"):
                 self._cmd_toggle_autonomous_feedback(arg)
             elif cmd in ("rawfeedback", "raw-feedback", "raw"):
                 self._cmd_toggle_raw_feedback(arg)
@@ -3364,12 +3371,14 @@ class CodingBoxApp(App):
             "[bold cyan]── feature toggles ──[/bold cyan]",
             "  [b]/wait [on|off][/b]             step-mode: pause after each iter; Enter or feedback to continue",
             "                                  [dim]/wait on auto-disables /vlm-critique (you're the reviewer); restored on /wait off[/dim]",
-            "  [b]/vlm-critique [on|off][/b]    attach screenshot to Phase C critique · default off",
-            "                                  [dim]needs a VLM as the loaded model; uses slot 1 when no critic slot is staged[/dim]",
-            "                                  [dim]RECOMMENDED: OFF when YOU review each iter — auto critic adds paraphrased noise[/dim]",
-            "  [b]/feedback [on|off][/b]        autonomous self-feedback loop · default ON",
-            "                                  [dim]after each clean iter, runs playtest recipes + queues findings as feedback[/dim]",
-            "                                  [dim]test reports, patch diagnostics, and the critic still run when off[/dim]",
+            "  [b]/vlm-critique [on|off][/b]    review WITH vision: looks at the screen, tells the agent \u00b7 default off",
+            "                                  [dim]alias: /judge · uses a memory checklist when one fits the game[/dim]",
+            "                                  [dim]uses model 2 to look when your main model can't see[/dim]",
+            "                                  [dim]RECOMMENDED: OFF when YOU review each iter \u2014 auto review adds paraphrased noise[/dim]",
+            "  [b]/critique [on|off][/b]        review WITHOUT vision: plays it + reads the report, tells the agent \u00b7 default ON",
+            "                                  [dim]aliases: /playtest /feedback · catches frozen loops / dead controls[/dim]",
+            "                                  [dim]sends problems to the coder so it fixes them next round[/dim]",
+            "                                  [dim]test reports, patch diagnostics, and vlm-critique still run when off[/dim]",
             "  [b]/rawfeedback [on|off][/b]     YOUR typed feedback goes to the model verbatim · default ON",
             "                                  [dim]flip OFF to opt-in to MEDIA-CHANGE / ORIENTATION / SCOPE wrappers on your feedback[/dim]",
             "                                  [dim]machine bug feedback (test reports, console errors, probes) is UNAFFECTED[/dim]",
@@ -4215,21 +4224,8 @@ class CodingBoxApp(App):
         setattr(self, next_model_attr, chosen_name)
         setattr(self, next_role_attr, role)
 
-        # Auto-staff (added 2026-05-21): assigning a sidecar role enables
-        # the matching session feature in one step. Single command sets up
-        # 2- or 3-model topology without three separate toggles.
-        # Evidence: May 21 FPS trace had role=critic set but the user still
-        # had to type /vlm-critique on; this surfaced as "I forgot the
-        # flag" friction. User can still override with the explicit toggle.
-        if slot > 1 and role == "critic" and not self._use_vlm_critique:
-            self._use_vlm_critique = True
-            self._vlm_critique_auto = True
-            if self.agent is not None:
-                self.agent._use_vlm_critique = True
-            self._log_info(
-                f"[dim]auto-enabled[/dim] [b]vlm-critique[/b] "
-                f"[dim](role=critic on model{slot_str}; override: /vlm-critique off)[/dim]"
-            )
+        # Auto-staff architect only — critic screenshot review is explicit
+        # via /vlm-critique (or /allroles), not silently enabled here.
         if slot > 1 and role == "architect" and not self._use_architect_split:
             self._use_architect_split = True
             self._architect_split_auto = True
@@ -5271,9 +5267,9 @@ class CodingBoxApp(App):
             f"  prefill:              {'ON' if self._use_prefill else 'off'}",
             f"  architect-split:      {'ON' if eff_arch_split else 'off'}{' [auto]' if eff_arch_auto and eff_arch_split else ''}",
             f"  double-screenshot:    {'ON' if self._use_double_screenshot else 'off'}",
-            f"  vlm-critique:         {'ON' if eff_vlm_critique else 'off'}{' [auto]' if eff_vlm_auto and eff_vlm_critique else ''}",
+            f"  vlm-critique (vision):{'ON' if eff_vlm_critique else 'off'}{' [auto]' if eff_vlm_auto and eff_vlm_critique else ''}  [dim](looks at the screen; sends problems to the agent)[/dim]",
             f"  /allroles bundle:     {'ON' if self._all_roles_enabled else 'off'}",
-            f"  autonomous /feedback: {'ON' if self._use_autonomous_feedback else 'OFF'}  [dim](multi-shot playtest + recipe checks; /feedback off to disable)[/dim]",
+            f"  critique (no vision): {'ON' if self._use_autonomous_feedback else 'OFF'}  [dim](reviews without looking; sends problems to the agent; /critique off to disable)[/dim]",
             f"  raw user feedback:    {'ON · directives suppressed (default)' if not self._use_feedback_directives else 'off · classifier wrapping ACTIVE'}  [dim](/rawfeedback on|off — bypass MEDIA-CHANGE / ORIENTATION / SCOPE wrappers; machine bug feedback always on)[/dim]",
             f"  iter detail:          {self._iter_decision_verbose}",
             f"  run profile:          {self._format_run_profile()}",
@@ -5648,19 +5644,17 @@ class CodingBoxApp(App):
         self._update_status()
 
     def _cmd_toggle_autonomous_feedback(self, arg: str) -> None:
-        """/feedback [on|off] — toggle the autonomous self-feedback loop.
+        """/critique [on|off] — the review that does NOT look at the screen.
 
-        When ON (default): after each clean iter, the agent runs a short
-        scripted playtest (multi-window screenshot capture + genre-free
-        behavior recipes from the root playbook), and if something looks
-        wrong it generates one paragraph of user-style feedback and
-        queues it into the same input pipeline real user feedback uses.
+        Primary name: /critique. Silent aliases: /playtest, /feedback.
+        When ON (default): after each clean round the agent reviews the game
+        WITHOUT vision — it plays it (scripted browser input from
+        memory/playtests.jsonl) and reads the test report, then queues any
+        problems back to the coder so it fixes them next round.
 
-        When OFF: existing test reports, patch diagnostics, and the
-        visual critic continue running unchanged. Only the extra
-        autonomous direction is suppressed.
-
-        Sticky across /new. Safe to toggle mid-session.
+        For the review that DOES look at the screen, use /vlm-critique.
+        When OFF: harness, your notes, and the vision critique are unchanged.
+        Sticky across /new.
         """
         arg_lc = arg.strip().lower()
         if arg_lc in ("on", "true", "1", "enable"):
@@ -5668,13 +5662,11 @@ class CodingBoxApp(App):
         elif arg_lc in ("off", "false", "0", "disable"):
             new_state = False
         elif arg_lc == "":
-            # Show current state instead of flipping when called bare —
-            # autonomous mode has bigger consequences than a vlm-critique
-            # toggle, so we don't silently flip on bare invocation.
+            # Show current state instead of flipping when called bare.
             cur = "[green]ON[/green]" if self._use_autonomous_feedback else "[yellow]OFF[/yellow]"
             self._log_info(
-                f"autonomous self-feedback is {cur} "
-                "(usage: /feedback on  ·  /feedback off)"
+                f"critique (no vision) is {cur} "
+                "(usage: /critique on  ·  /critique off)"
             )
             return
         else:
@@ -5684,8 +5676,9 @@ class CodingBoxApp(App):
             self.agent._use_autonomous_feedback = new_state
         status = "[green]ON[/green]" if new_state else "[yellow]OFF[/yellow]"
         self._log_info(
-            f"autonomous self-feedback set to {status} "
-            "(standard error reporting unaffected)"
+            f"critique (no vision) set to {status} "
+            "(reviews without looking at the screen; sends problems to the agent — "
+            "use /vlm-critique to also look)"
         )
         self._update_status()
 
@@ -5713,7 +5706,7 @@ class CodingBoxApp(App):
             input smoke test). This is the load-bearing bug signal.
           - Patch failure diagnostics.
           - Playbook retrieval (/playbook off to disable separately).
-          - Autonomous self-playtest after clean iters (/feedback
+          - Autonomous behavior playtest after clean iters (/playtest
             off to disable separately).
           - Visual critic on screenshots (/vlm-critique off to
             disable separately).
@@ -5753,7 +5746,19 @@ class CodingBoxApp(App):
         self._update_status()
 
     def _cmd_toggle_vlm_critique(self, arg: str) -> None:
-        """/vlm-critique [on|off] — toggle attaching screenshot to Phase C self-critique turns."""
+        """/vlm-critique [on|off] — the review that LOOKS at the screen.
+
+        When ON, after each round a vision model looks at the screenshot,
+        uses a memory checklist when one fits the game, and sends any problems
+        back to the coder so it fixes them next round. Which model looks:
+          • model 2 staged as critic (model2/3 --role critic) — the fallback
+            when your main model can't see
+          • else the main model, if it is a VLM
+          • else skip (a blind model never pretends to see)
+
+        Default OFF. Alias: /judge. Sticky across /new.
+        For the review that does NOT look at the screen, use /critique.
+        """
         arg_lc = arg.strip().lower()
         if arg_lc in ("on", "true", "1", "enable"):
             new_state = True
@@ -5777,8 +5782,37 @@ class CodingBoxApp(App):
         if self.agent is not None:
             self.agent._use_vlm_critique = new_state
             self.agent._vlm_critique_auto = False
+            self.agent._all_roles_enabled = self._all_roles_enabled
         status = "[green]ON[/green]" if new_state else "[yellow]OFF[/yellow]"
-        self._log_info(f"VLM critique screenshot attachment set to {status}")
+        self._log_info(
+            f"vlm-critique (vision) set to {status} "
+            "(looks at the screen, uses a memory checklist when one fits, sends problems "
+            "to the agent; uses model 2 if the main model can't see)"
+        )
+        self._update_status()
+
+    def _cmd_set_leanprompt(self, arg: str) -> None:
+        """/leanprompt on|off|auto — control the compact system-prompt schema.
+
+        auto (default): the agent renders the lean `small` schema for LOCAL
+        backends (MLX/Ollama) so a local VLM spends attention on the game,
+        not a ~20KB schema; `large`/cloud keep the full schema. `on` forces
+        lean; `off` forces the full schema for the current tier.
+        """
+        a = arg.strip().lower()
+        if a in ("on", "true", "1", "enable"):
+            self._lean_prompt = True
+        elif a in ("off", "false", "0", "disable"):
+            self._lean_prompt = False
+        elif a in ("", "auto", "default"):
+            self._lean_prompt = None
+        else:
+            self._log_info("usage: /leanprompt on|off|auto")
+            return
+        if self.agent is not None:
+            self.agent.set_lean_prompt(self._lean_prompt)
+        label = {True: "ON (forced)", False: "OFF (forced)", None: "auto (on for local)"}[self._lean_prompt]
+        self._log_info(f"/leanprompt {label} — takes effect on the next /new session")
         self._update_status()
 
     def _cmd_toggle_allroles(self, arg: str) -> None:
@@ -5807,6 +5841,7 @@ class CodingBoxApp(App):
             self.agent._use_vlm_critique = new_state
             self.agent._architect_split_auto = False
             self.agent._vlm_critique_auto = False
+            self.agent._all_roles_enabled = new_state
         if new_state:
             self._log_info(
                 "[green]/allroles ON[/green] — coder + critic + architect "
@@ -6182,6 +6217,11 @@ class CodingBoxApp(App):
         # Default on the agent is True; the App's runtime toggle wins.
         self.agent._use_autonomous_feedback = self._use_autonomous_feedback
         self.agent._use_feedback_directives = self._use_feedback_directives
+        self.agent._all_roles_enabled = self._all_roles_enabled
+        # Lean system-prompt override (None = agent auto-decides: on for
+        # local backends). Only set when the user explicitly toggled it.
+        if self._lean_prompt is not None:
+            self.agent.set_lean_prompt(self._lean_prompt)
         # Apply run-profile step policy on session start.
         if self._run_profile == "local_manual":
             self.agent.set_step_mode(True)
@@ -6416,8 +6456,12 @@ class CodingBoxApp(App):
         await self._start_session(goal)
 
     def _open_log_mirror(self, basename: str) -> None:
-        """Open or rotate the plain-text .log mirror for the new session."""
-        # Close prior handle if rotating.
+        """Record the per-session artifact stem. The on-disk .log mirror is
+        retired (2026-06-14): the .jsonl is the single complete trace, and the
+        in-memory ``_log_mirror_lines`` buffer still backs the copy-log feature.
+        We still set ``_log_file_path`` because it is the stem anchor other UI
+        code uses to derive the jsonl / snapshots paths."""
+        # Close any prior handle if rotating (older sessions may have opened one).
         if self._log_file_handle is not None:
             try:
                 self._log_file_handle.close()
@@ -6428,10 +6472,12 @@ class CodingBoxApp(App):
             log_dir = GAMES_DIR / "traces"
             log_dir.mkdir(parents=True, exist_ok=True)
             self._log_file_path = log_dir / f"{basename}.log"
-            self._log_file_handle = self._log_file_path.open("w", encoding="utf-8")
-            self._log_info(f"Mirroring log to: {self._log_file_path}")
+            # NOTE: intentionally NOT opening the file for writing — the disk
+            # .log mirror duplicated the .jsonl. _log_file_handle stays None, so
+            # the per-line writers (which no-op when None) skip disk writes and
+            # _log_text_for_copy falls back to the in-memory mirror.
         except Exception as e:
-            self._log_info(f"[dim]could not open log mirror: {e}[/dim]")
+            self._log_info(f"[dim]could not resolve log dir: {e}[/dim]")
 
     async def _consume_events(self, goal: str, *, continuation: bool = False) -> None:
         """Drain the AgentEvent stream and update widgets accordingly."""

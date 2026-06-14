@@ -1,14 +1,8 @@
 """Tests for auto-staff behavior added 2026-05-21.
 
-When the user assigns a sidecar role (/model2 N --role critic OR
---role architect), the matching session feature auto-enables in one
-step instead of requiring a second /vlm-critique / /architect toggle.
-Same auto-enable also fires when a local VLM is discovered on any role
-slot via _detect_vlm.
-
-Evidence: May 21 FPS trace had role=critic set but the user still had
-to type /vlm-critique on -- a forgettable extra step. Auto-staff
-removes the friction without changing the explicit-toggle escape hatch.
+When the user assigns --role architect on a sidecar slot, architect-split
+auto-enables in one step. Critic screenshot review is NOT auto-enabled —
+use /vlm-critique on explicitly (or /allroles).
 """
 
 from __future__ import annotations
@@ -60,11 +54,6 @@ def _app_stub() -> CodingBoxApp:
     return app
 
 
-# ---------------------------------------------------------------------------
-# /model2 --role critic auto-enables vlm-critique
-# ---------------------------------------------------------------------------
-
-
 def test_model2_role_only_inherits_staged_model1() -> None:
     """README_forMac: /model2 --role critic must inherit model 1 when no N."""
     app = _app_stub()
@@ -112,24 +101,33 @@ def test_model3_shorthand_architect_inherits_model1() -> None:
     assert app._next_role3 == "architect"
 
 
-def test_model2_role_critic_auto_enables_vlm_critique() -> None:
+def test_model2_role_critic_does_not_auto_enable_vlm_critique() -> None:
     app = _app_stub()
     assert app._use_vlm_critique is False
     assert app._vlm_critique_auto is False
 
     app._cmd_set_model2("2 --role critic")
 
-    assert app._use_vlm_critique is True, (
-        "auto-staff must flip _use_vlm_critique when sidecar role=critic"
+    assert app._use_vlm_critique is False, (
+        "staging critic must not flip /vlm-critique — user opts in explicitly"
     )
-    assert app._vlm_critique_auto is True, "must mark as auto-flipped"
+    assert app._vlm_critique_auto is False
 
 
-def test_model3_role_critic_auto_enables_vlm_critique() -> None:
+def test_model3_role_critic_does_not_auto_enable_vlm_critique() -> None:
     app = _app_stub()
     app._cmd_set_model3("2 --role critic")
+    assert app._use_vlm_critique is False
+    assert app._vlm_critique_auto is False
+
+
+def test_model2_role_critic_then_explicit_vlm_critique_on() -> None:
+    app = _app_stub()
+    app._cmd_set_model2("1 --role critic")
+    assert app._use_vlm_critique is False
+    app._cmd_toggle_vlm_critique("on")
     assert app._use_vlm_critique is True
-    assert app._vlm_critique_auto is True
+    assert app._vlm_critique_auto is False
 
 
 def test_model2_role_architect_auto_enables_architect_split() -> None:
@@ -143,40 +141,15 @@ def test_model2_role_architect_auto_enables_architect_split() -> None:
     assert app._architect_split_auto is True
 
 
-def test_model2_explicit_no_role_when_smart_default_unavailable() -> None:
-    """When the model can't be classified (stub model name) and no
-    --role flag, role resolution returns None — auto-staff should NOT
-    fire because there's no role to staff. The smart-default path is
-    backend-dependent and not pinned by this test (avoid fragile
-    couplings to backend_mod.classify_model_modality)."""
-    app = _app_stub()
-    # Use a model name that won't be classified as VLM:
-    # text-modality smart-default is 'architect', so this DOES auto-staff.
-    # Test the inverse: explicit --role critic followed by switching to a
-    # different model with --role critic must keep auto flag True.
-    app._cmd_set_model2("1 --role critic")
-    assert app._use_vlm_critique is True
-    assert app._vlm_critique_auto is True
-
-
-# ---------------------------------------------------------------------------
-# Explicit toggle clears auto-flag (user override sticks)
-# ---------------------------------------------------------------------------
-
-
 def test_explicit_vlm_critique_off_clears_auto_flag() -> None:
     app = _app_stub()
-    app._cmd_set_model2("2 --role critic")
+    app._cmd_toggle_vlm_critique("on")
     assert app._use_vlm_critique is True
-    assert app._vlm_critique_auto is True
 
     app._cmd_toggle_vlm_critique("off")
 
     assert app._use_vlm_critique is False
-    assert app._vlm_critique_auto is False, (
-        "explicit /vlm-critique off must clear the auto flag so the user "
-        "override sticks even if auto-detection fires again"
-    )
+    assert app._vlm_critique_auto is False
 
 
 def test_explicit_architect_off_clears_auto_flag() -> None:
@@ -191,17 +164,7 @@ def test_explicit_architect_off_clears_auto_flag() -> None:
     assert app._architect_split_auto is False
 
 
-# ---------------------------------------------------------------------------
-# Already-on does not re-auto-flag
-# ---------------------------------------------------------------------------
-
-
-def test_already_on_does_not_overwrite_auto_flag() -> None:
-    """If the user typed /vlm-critique on explicitly BEFORE staging a
-    critic sidecar, the auto-flag should stay False (it's a user choice,
-    not an auto choice). The current implementation only flips
-    _vlm_critique_auto when transitioning from off->on, so this is
-    self-consistent."""
+def test_already_on_vlm_critique_unchanged_when_staging_critic() -> None:
     app = _app_stub()
     app._cmd_toggle_vlm_critique("on")
     assert app._use_vlm_critique is True
@@ -210,7 +173,4 @@ def test_already_on_does_not_overwrite_auto_flag() -> None:
     app._cmd_set_model2("2 --role critic")
 
     assert app._use_vlm_critique is True
-    assert app._vlm_critique_auto is False, (
-        "if vlm-critique was already on (user choice), auto-staff must "
-        "not overwrite the auto flag"
-    )
+    assert app._vlm_critique_auto is False

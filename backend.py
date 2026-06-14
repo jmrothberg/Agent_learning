@@ -32,6 +32,7 @@ For MLX, "which model" comes from:
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import re
@@ -1306,6 +1307,44 @@ class MLXBackend(Backend):
 # -----------------------------------------------------------------------------
 
 
+def _openai_messages_with_images(messages: list[dict]) -> list[dict]:
+    """Return messages with any attached PNG `images` folded into Chat
+    Completions multimodal `content` parts.
+
+    `run_visual_critic` passes screenshots as `{"role":"user",
+    "content":prompt,"images":[png_bytes,...]}`. The Chat Completions API
+    ignores the top-level `images` key, so without this conversion the
+    vision model never sees the screenshot. Messages without images are
+    passed through unchanged (the `images` key, if present and empty, is
+    stripped so the API never sees an unknown field).
+    """
+    if not any(isinstance(m, dict) and m.get("images") for m in messages):
+        return messages
+    out: list[dict] = []
+    for m in messages:
+        if not isinstance(m, dict):
+            out.append(m)
+            continue
+        imgs = m.get("images")
+        if imgs and isinstance(imgs, (list, tuple)):
+            parts: list[dict[str, Any]] = []
+            text = m.get("content") or ""
+            if text:
+                parts.append({"type": "text", "text": text})
+            for b in imgs:
+                if isinstance(b, (bytes, bytearray)):
+                    b64 = base64.b64encode(bytes(b)).decode("ascii")
+                    parts.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{b64}"},
+                    })
+            out.append({"role": m.get("role", "user"), "content": parts})
+        else:
+            # Drop a possibly-empty `images` key so the API sees a clean msg.
+            out.append({k: v for k, v in m.items() if k != "images"})
+    return out
+
+
 class OpenAIBackend(Backend):
     """OpenAI Chat Completions backend. Streaming, async."""
 
@@ -1341,9 +1380,15 @@ class OpenAIBackend(Backend):
         cancel_event: asyncio.Event | None = None,
     ) -> StreamResult:
         opts = dict(options or {})
+        # Convert any attached PNG bytes (run_visual_critic passes
+        # `images=[png,...]` on a message) into Chat Completions multimodal
+        # content parts. The raw `images` key is not understood by the API
+        # and was silently ignored, leaving the vision model blind (same
+        # class of bug as the Anthropic path — trace 20260613_213711).
+        norm_messages = _openai_messages_with_images(messages)
         params: dict[str, Any] = {
             "model": self.info.model,
-            "messages": messages,
+            "messages": norm_messages,
             "stream": True,
             # include_usage gives us prompt/completion token counts in
             # the final chunk so the right-hand status panel can show
@@ -1491,15 +1536,41 @@ def _anthropic_prepare_messages(
     return a 400 'does not support assistant message prefill'.
     """
     system_parts: list[str] = []
-    msgs: list[dict[str, str]] = []
+    msgs: list[dict[str, Any]] = []
     for m in messages:
         role = m.get("role")
         content = m.get("content", "")
         if role == "system":
             if content:
                 system_parts.append(content)
-        else:
-            msgs.append({"role": role, "content": content})
+            continue
+        # Convert any attached PNG bytes (run_visual_critic passes
+        # `images=[png,...]` on the message) into Anthropic vision content
+        # blocks. Without this the `images` key was silently dropped and the
+        # critic model received text only — it then truthfully replied "no
+        # screenshot was provided" and the blind verdict was parsed as real
+        # failures (trace 20260613_213711, Opus 4.8). Image blocks first,
+        # then the text prompt, matching vision_judge._png_block's shape.
+        imgs = m.get("images")
+        if imgs and isinstance(imgs, (list, tuple)):
+            blocks: list[dict[str, Any]] = []
+            for b in imgs:
+                if isinstance(b, (bytes, bytearray)):
+                    blocks.append({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": base64.standard_b64encode(bytes(b)).decode("ascii"),
+                        },
+                    })
+            if blocks:
+                new_content: list[dict[str, Any]] = list(blocks)
+                if content:
+                    new_content.append({"type": "text", "text": content})
+                msgs.append({"role": role, "content": new_content})
+                continue
+        msgs.append({"role": role, "content": content})
     system_text = "\n\n".join(system_parts).strip() or None
 
     # Safety-net fold: trailing assistant tag opener -> user format hint.
@@ -1510,6 +1581,10 @@ def _anthropic_prepare_messages(
         len(msgs) >= 2
         and msgs[-1].get("role") == "assistant"
         and msgs[-2].get("role") == "user"
+        # Only fold when the user content is plain text — a user message
+        # carrying vision content blocks (list) is never a tag-opener case.
+        and isinstance(msgs[-2].get("content"), str)
+        and isinstance(msgs[-1].get("content"), str)
     ):
         tail = str(msgs[-1].get("content") or "").rstrip()
         looks_like_opener = (

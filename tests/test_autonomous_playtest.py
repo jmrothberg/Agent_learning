@@ -1,7 +1,7 @@
 """Phase 1.5 — autonomous self-feedback loop.
 
 Covers four things, all general (no genre logic):
-  1. /feedback dispatcher: on / off / bare state-print
+  1. /playtest dispatcher (alias /feedback): on / off / bare state-print
   2. The 3 seed recipes' applicability gates + check_kind evaluators
   3. Budget governor: hard cap + no-findings auto-stop
   4. End-to-end loop: when a finding fires, feedback lands in
@@ -22,7 +22,7 @@ from chat import CodingBoxApp  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# /feedback dispatcher
+# /playtest dispatcher (alias /feedback)
 # ---------------------------------------------------------------------------
 
 
@@ -55,7 +55,7 @@ def test_feedback_on_re_enables_loop():
 
 def test_feedback_bare_does_not_flip_state():
     # Autonomous mode has bigger consequences than a vlm-critique toggle —
-    # bare /feedback should print state, not toggle. Different from
+    # bare /critique should print state, not toggle. Different from
     # /vlm-critique by design.
     app = _bare_app()
     app._use_autonomous_feedback = True
@@ -75,6 +75,19 @@ def test_feedback_off_propagates_to_active_agent():
     app.agent = agent_stub
     app._cmd_toggle_autonomous_feedback("off")
     assert agent_stub._use_autonomous_feedback is False
+
+
+def test_critique_and_aliases_dispatch_to_no_vision_reviewer():
+    """/critique is the primary name; /playtest and /feedback are silent
+    aliases. All three must route to the no-vision reviewer toggle."""
+    import asyncio
+
+    for name in ("critique", "playtest", "feedback"):
+        app = _bare_app()
+        app._log = lambda *a, **k: None  # type: ignore[assignment]
+        app._use_autonomous_feedback = True
+        asyncio.run(app._handle_slash(f"/{name} off"))
+        assert app._use_autonomous_feedback is False, name
 
 
 # ---------------------------------------------------------------------------

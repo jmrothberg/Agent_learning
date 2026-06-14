@@ -48,7 +48,7 @@ idle). Load the built game, press keys, read the player's position, screenshot i
 | `memory/playbook.jsonl` | code rules-of-thumb, retrieved by Jaccard on the goal each turn |
 | `memory/visual_playtests.jsonl` | mechanism-keyed yes/no VLM checklists + `auto_probes` |
 | `memory/skeletons/` | first-build HTML templates per mechanism |
-| `memory/playtests.jsonl` | autonomous behavioral playtest recipes (seeded in `memory.py`) |
+| `memory/playtests.jsonl` | autonomous behavioral playtest recipes (seeded in `memory.py`), used by the `/critique` (no-vision) review |
 
 Retrieval gotcha: a bullet needs tag overlap with goal text to clear the **~0.02 Jaccard floor**,
 or it never reaches the prompt. If a relevant bullet doesn't fire, broaden its tags (tags weigh 2×).

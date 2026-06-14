@@ -39,7 +39,8 @@ Advisory (surfaced as `warnings`, NEVER gate): **dead / near-identical sprite fr
 Do not regenerate to "fix" them and do not defer the user's gameplay feedback behind them.
 
 ## The visual critic (the human-eyes check for bugs probes can't see)
-The critic is the only thing that catches "fighters facing the wrong way / punch renders backward."
+This is the mechanism behind the `/vlm-critique` review (the "with vision" one; `/critique` is the
+no-vision review). The critic is the only thing that catches "fighters facing the wrong way / punch renders backward."
 It was effectively useless until 2026-06-03 — three real bugs, all fixed:
 1. qwen3.6 (a real VLM) **sees** the screenshot but answers in reasoning prose, never emitting
    `Qn: yes/no` → parse_rate 0 → dropped. **Fix:** prefill the critic's assistant turn with

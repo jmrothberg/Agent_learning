@@ -307,6 +307,7 @@ def _critic_agent(tmp_path: Path, backend) -> GameAgent:
     a = _make_agent(tmp_path)
     a._backend = backend
     a._use_vlm_critique = True
+    a._all_roles_enabled = True  # single-slot critic path via coder
     a._goal = ""
     a._criteria = ""
     return a

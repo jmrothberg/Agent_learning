@@ -142,7 +142,8 @@ Per-action frames are saved to the trace (`iter_NN_action_<Key>.png`) so each ac
 debuggable. **Advisory (never gates):** dead / near-identical sprite frames are *cosmetic*.
 
 ### The visual critic
-The critic is the human-eyes check for "facing the wrong way / punch renders backward." qwen3.6 is a
+This is the mechanism behind the **`/vlm-critique`** review (the "with vision" one). It is the
+human-eyes check for "facing the wrong way / punch renders backward." qwen3.6 is a
 real VLM and sees screenshots, but three fixes were needed to make it useful:
 - It answers in reasoning prose, never `Qn: yes/no` → parse_rate 0 → dropped. **Fix:** prefill the
   critic's assistant turn with `"Q1: "` to force the format (parser tolerates a doubled ordinal).
@@ -175,6 +176,49 @@ admitted sprites/sounds compound across sessions like the playbook does.
 
 ---
 
+## Two reviews: `/critique` and `/vlm-critique`
+
+Everything collapses into **two reviews**. Both look for problems and **hand them back to the
+coding agent so it fixes them next round**. The only difference is whether it uses eyes.
+
+| Command | Looks at the screen? | Default | What it does |
+|---|---|---|---|
+| **`/critique`** | No | ON | Plays the game (scripted input from `memory/playtests.jsonl`) + reads the report, sends problems to the agent |
+| **`/vlm-critique`** | Yes | OFF | A vision model looks at the screenshot, uses a memory checklist when one fits, sends problems to the agent |
+| *(harness — always on)* | — | on | Chromium load, probes, console errors |
+| `/check` | Yes | — | Look at the screen once, on demand |
+| your typed notes | — | — | Type any time (`/rawfeedback` controls wrappers) |
+
+The word **"feedback" is retired** as a name — `/playtest` and `/feedback` still work as silent
+aliases of `/critique`, and `/judge` / `/vc` as aliases of `/vlm-critique`.
+
+**`/critique` (no vision)** runs browser automation recipes (keydown timelines, state deltas,
+"did pixels change?" hashes). Catches frozen loops, dead controls, wrong facing→movement math.
+It **cannot** judge sprites, layout, or art.
+
+**`/vlm-critique` (vision)** is the one that answers "does my game look good?" Which model does the
+looking (first match wins):
+1. **model 2** staged as critic (`/model2 … --role critic`) — the fallback when your main model can't see;
+2. else the **main model**, if it is a VLM;
+3. else skip (a blind model never pretends to see).
+
+It also pulls a mechanism checklist from `memory/visual_playtests.jsonl` when one matches, and skips
+when memory headroom is tight (a vision model + a very large coder can exhaust RAM).
+
+For a full "is it good?" answer, run **both**.
+
+**Typical setup (Mac + large coder LLM):**
+
+```text
+/model2 2 --role critic    # optional: a small VLM does the looking so the huge coder isn't fed screenshots
+/vlm-critique on           # vision review (off by default)
+/critique on               # no-vision review (on by default; complements vision, doesn't replace it)
+```
+
+Manual spot-check while iterating: `/check`, or type notes at a `/wait` pause.
+
+---
+
 ## Memory — the opening library
 
 The Python engine stays general; `memory/` is a hand-curated "opening book" (chess-style) that
@@ -184,6 +228,7 @@ shape, not subject.
 | File | Holds |
 |---|---|
 | `memory/playbook.jsonl` | code rules-of-thumb, retrieved by weighted-Jaccard on the goal (tags weigh 2×; ~0.02 floor) |
+| `memory/playtests.jsonl` | behavior recipes for `/critique` (scripted input, state, pixel hash — no VLM) |
 | `memory/visual_playtests.jsonl` | mechanism-keyed yes/no VLM checklists + `auto_probes` + per-question `fix_hints` |
 | `memory/implementation_outlines.jsonl` | architect mechanism outlines (retrieved k=1) |
 | `memory/skeletons/` | first-build HTML templates per mechanism (`.html` + `.json` sidecar) |
@@ -201,7 +246,8 @@ checked model-free by `eval/eval_prompts_plan.py --coverage`.
 ## TUI & CLI reference
 
 **Key TUI slash commands** (`/help` lists all): `/allroles` (architect-split + visual critic on one
-loaded LLM) · `/feedback [on|off]` (autonomous self-feedback, default on) · `/wait [on|off]`
+loaded LLM) · `/critique [on|off]` (no-vision review, default on; aliases `/playtest`, `/feedback`) ·
+`/vlm-critique [on|off]` (vision review, default off; alias `/judge`) · `/wait [on|off]`
 (step-mode pause per iter) · `/games [N]` (load a curated prompt) · `/ctx N` (context window) ·
 `/ref <path>` (attach a reference image for a VLM turn) · `/check [with <model>]` (explicit cloud or
 local VLM screenshot judge — never auto-called) · `/goodgame` (copy the trio into tracked `goodgame/`).

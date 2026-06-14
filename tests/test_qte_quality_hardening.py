@@ -57,19 +57,29 @@ def test_dragons_lair_director_prompt_is_local_model_safe():
     assert "<assets>" in prompt and "<sounds>" in prompt and "<videos>" in prompt
     assert rec["expect"]["visual_recipe"] == "canvas-cutscene-qte"
     assert rec["expect"]["outline"] == "outline-cutscene-qte"
+    # Concise rewrite (2026-06-13): the field-by-field ROOMS spec and the
+    # exhaustive asset-name list were moved out to the outline/skeleton, but
+    # the hard requirements (media up front, ROOMS-driven, harness-visible
+    # input, skippable video overlays, RAF-immediate) stay in the goal.
     for term in (
         "ROOMS array",
-        "Coordinates are normalized x=0..1, y=0..1",
         "requestAnimationFrame(frame) immediately",
         "onended/onerror always continues",
-        "bg_axe",
-        "hero_idle",
-        "key_intro",
+        "pipeline runs up front",
+        "0-index state.scene",
     ):
         assert term in prompt
-    # The prompt keeps videos up front but caps them to a local-model-safe set.
-    assert "generated videos for intro, one generic funny fail, and victory" in prompt
+    # Media asset families are referenced by prefix, not an exhaustive list.
+    assert "bg_*" in prompt and "hero_*" in prompt and "key_*" in prompt
+    # Videos stay up front but as a small local-model-safe set.
+    assert "cutscene videos for intro, a funny fail, and victory" in prompt
     assert "18 video" not in prompt
+    # The bloated field-by-field spec is gone (now in the skeleton/outline).
+    # NOTE (2026-06-14): no raw len() ceiling here — an arbitrary char cap
+    # artificially blocked the deliberate CHARACTER CONSISTENCY block. Bloat is
+    # guarded SEMANTICALLY instead: the field-by-field hazardPath spec must be
+    # absent and asset families must be referenced by prefix (checked above).
+    assert "hazardPath:{from:{x,y}" not in prompt
 
 
 def test_timed_media_components_retrieve_without_dragon_words():

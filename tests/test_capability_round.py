@@ -108,6 +108,42 @@ def test_every_component_snippet_passes_micro_probes():
         assert mp["ok"], f"{rec['id']}: {mp['errors']}"
 
 
+def test_new_high_value_components_present_and_have_code():
+    """The bounded set added for weak-VLM support must exist, parse, and
+    carry non-empty code (they target what local models reliably get
+    wrong: HiDPI, seeded generation, input, storage, touch, pathfinding,
+    image-load race, audio unlock)."""
+    recs = {
+        json.loads(l)["id"]: json.loads(l)
+        for l in COMPONENTS_PATH.read_text().splitlines() if l.strip()
+    }
+    for cid in (
+        "dpr-canvas-scaling",
+        "seeded-rng-grid-generator",
+        "keyboard-input-ecode",
+        "localstorage-save-load",
+        "mobile-touch-dpad",
+        "bfs-grid-pathfinding",
+        "image-load-decode-gate",
+        "audio-unlock-on-gesture",
+    ):
+        assert cid in recs, f"missing component {cid}"
+        assert recs[cid]["recipe"]["code"].strip(), f"{cid} has empty code"
+        assert recs[cid]["kind"] == "component"
+
+
+def test_seeded_generation_component_retrieves_for_maze_goal():
+    """A maze/procedural goal should surface the seeded-grid generator —
+    the snippet that prevents the big-literal token-repetition loop."""
+    m = _repo_memory()
+    hits = m.retrieve_components(
+        "procedurally generated maze dungeon with random walls each run",
+        k=3,
+    )
+    ids = [h.item.id for h in hits]
+    assert "seeded-rng-grid-generator" in ids, ids
+
+
 def test_components_retrieval_routes_fighting_goal():
     m = _repo_memory()
     hits = m.retrieve_components(
@@ -158,6 +194,21 @@ def test_agent_retrieve_components_block_renders_and_traces(tmp_path):
     row = [t for t in traces if t.get("kind") == "components_injected"][0]
     assert row["stage"] == "plan"
     assert row["ids"]
+
+
+def test_both_first_build_paths_inject_components():
+    """Seed-file build AND skeleton build must both inject a <components>
+    block. The seed path previously skipped it, starving weak models of the
+    copy-paste-correct snippets on continuation/seed builds."""
+    import inspect
+    src = inspect.getsource(GameAgent.run)
+    # Both first-build branches use the same plan-stage component call.
+    assert 'seed_build_instruction(' in src
+    assert 'first_build_instruction(' in src
+    assert src.count('goal, stage="plan", k=3,') >= 2, (
+        "expected a first-build <components> injection on BOTH the seed and "
+        "skeleton paths"
+    )
 
 
 def test_report_blocker_query_builds_from_failures():

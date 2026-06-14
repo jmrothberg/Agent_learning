@@ -70,6 +70,11 @@ class FormatSpec:
     name: str                   # e.g. "<patch>"
     snippet: str                # one-line entry for the <output-tags> list
     guidelines: list[str] = field(default_factory=list)
+    # Optional concise guideline set used ONLY on the lean/`small` system
+    # prompt (local models). When None the full `guidelines` are used.
+    # Lets the heavy media specs (<assets>/<sounds>/<videos>) keep their
+    # essential rules without the multi-KB prose that buries a 27B.
+    guidelines_small: list[str] | None = None
 
 
 # --- format specs ----------------------------------------------------------
@@ -157,6 +162,16 @@ SOUNDS_FORMAT = FormatSpec(
         "prompt, the audio diffuser was not reachable on this machine; "
         "only THEN ship a silent game.",
     ],
+    guidelines_small=[
+        "EMIT <sounds> for audible events (firing, hits, pickups, jumps) "
+        "or looping music. Load each returned OGG via `new Audio(path)` + "
+        "`.play()` (needs a user gesture first). Same `name` mid-session "
+        "re-renders that OGG in place.",
+        "Entry {name, prompt, duration?, loop?}: SFX 0.2-1.5s; looping "
+        "music 8-12s with \"loop\":true. Keep prompts short + audio-"
+        "descriptive. Stock names jump/pickup/hit/win/lose/click/laser/"
+        "explosion are served free.",
+    ],
 )
 
 VIDEOS_FORMAT = FormatSpec(
@@ -192,6 +207,17 @@ VIDEOS_FORMAT = FormatSpec(
         "prompt, the video backend was not reachable on this machine; "
         "only THEN ship without cutscenes (or use a static key-art "
         "pan as the fallback).",
+    ],
+    guidelines_small=[
+        "EMIT <videos> ONLY for cutscene moments (intro, game-over, "
+        "victory) — 2-4 clips MAX, each costs minutes of GPU; gameplay "
+        "always stays on the canvas. PREFER image-to-video: set "
+        "\"image\":\"<key-art asset name>\" so the clip matches your art; "
+        "the prompt describes MOTION, not the still.",
+        "WIRING: ONE absolutely-positioned muted <video> overlay over the "
+        "canvas (loader returned in the first-build prompt). Any key skips; "
+        "every failure path (missing file, autoplay block, onended/onerror) "
+        "MUST continue the game — a cutscene can never stall it.",
     ],
 )
 
@@ -297,6 +323,26 @@ ASSETS_FORMAT = FormatSpec(
         "When the harness returns no asset paths in the first-build "
         "prompt, Z-Image-Turbo was not reachable on this machine; only "
         "THEN fall back to procedural drawing (ctx.fillRect / ctx.arc).",
+    ],
+    guidelines_small=[
+        "EMIT <assets> for any canvas game with visual entities the player "
+        "sees (characters, enemies, projectiles, terrain). Load each "
+        "returned PNG via `new Image()` + `await img.decode()`. Match the "
+        "ART STYLE to the goal (pixel-art only if the goal asks for retro). "
+        "Transparent backgrounds. Same `name` mid-session re-renders in "
+        "place; do NOT replace a sprite with procedural drawing on an "
+        "art-change request.",
+        "ANIMATION: seed every motion frame from the idle base with "
+        "`\"from_image\":\"<entity>_idle\"` + `\"strength\":0.5-0.6` and a "
+        "SHORT prompt naming the moved part ('left leg forward'). Below "
+        "~0.45 strength the frame stays idle. Keep the FIRST <assets> block "
+        "SMALL (idle + one core motion frame per entity, ~8-10 total); add "
+        "more frames in later mid-session turns. A frame that comes back "
+        "near-identical to idle is flagged — raise strength, never draw "
+        "limbs in code.",
+        "SKIP <assets> only for pure-DOM apps (todo lists, calculators). "
+        "If no asset paths return, Z-Image was unreachable — only THEN use "
+        "procedural ctx.fillRect/arc.",
     ],
 )
 
@@ -611,10 +657,15 @@ def build_system_prompt(
 
     output_tags = "\n".join(f"  {f.snippet}" for f in fmts)
 
-    # Per-format guidelines, deduped across formats.
+    # Per-format guidelines, deduped across formats. On the lean/`small`
+    # path, prefer each spec's concise `guidelines_small` when provided so
+    # the heavy media specs don't bury a local model in multi-KB prose.
     all_guidelines: list[str] = []
     for f in fmts:
-        all_guidelines.extend(f.guidelines)
+        if is_small and f.guidelines_small is not None:
+            all_guidelines.extend(f.guidelines_small)
+        else:
+            all_guidelines.extend(f.guidelines)
     guidelines_block = _bulleted(all_guidelines)
 
     hard_rules_block = _bulleted(HARD_RULES)

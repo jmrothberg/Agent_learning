@@ -2169,6 +2169,12 @@ class GameAgent:
         # state-shape assertions are running each iter.
         self._active_visual_playtest_recipe_id: str | None = None
         self._active_visual_playtest_auto_probes: list[str] = []
+        # True when the matched recipe declares `still_frame` (laserdisc /
+        # cutscene cadence). Used to downgrade the FROZEN-AT-IDLE warning to a
+        # neutral advisory so the model is not coached to add an unrequested
+        # breathing/bob motion to a deliberately still-frame game (trace
+        # 20260613_213711, Opus 4.8 iter 5).
+        self._active_visual_playtest_still_frame: bool = False
         self._skeleton_mode = skeleton_mode
         self._prompt_version = prompt_version
         self._p = self._load_prompt_module(prompt_version)
@@ -2402,6 +2408,14 @@ class GameAgent:
             else self._classify_model(model)
         )
         self._trace({"kind": "model_class_resolved", "model": model, "model_class": self._model_class})
+        # Lean system-prompt mode (2026-06-13): render the compact `small`
+        # schema for LOCAL models (MLX/Ollama) even when they classify as
+        # `mid`, so a local VLM like qwen3.6:27b spends its attention on the
+        # game rather than on a ~20KB schema + 6KB project-doc it must read
+        # before writing a line. None = auto (on for local non-large);
+        # override via `/leanprompt on|off`. Retrieval budgets keep using
+        # self._model_class — only the SYSTEM PROMPT tier changes.
+        self._lean_prompt: bool | None = None
         # Most-recent before/after screenshot bytes for the VLM. Filled
         # by the verifier on each iter; consumed by `_stream`.
         self._last_screenshot_before: bytes | None = None
@@ -2425,6 +2439,10 @@ class GameAgent:
         # calls" rule). Set to the sentinel "" to mean "scanned, none
         # found" so we don't rescan every iter.
         self._local_vlm_path: str | None = None
+        # /allroles bundle: when True, vlm-critique runs on the coder slot
+        # instead of the local MLX-VLM vision-judge fallback. Synced from
+        # chat.py after construction (mirrors `_use_autonomous_feedback`).
+        self._all_roles_enabled: bool = False
         # Per-iter screenshot delta against previous iter (mean abs pixel
         # diff, 0..1). Stashed for the loop's regression detector.
         self._last_screenshot_delta: float | None = None
@@ -2513,7 +2531,7 @@ class GameAgent:
         self._session_asset_cap: int | None = None
         # Phase 1.5 — autonomous self-feedback loop. Mirrors the chat.py
         # toggle so the agent can check this flag without depending on
-        # the TUI. Default ON; one slash command (/feedback off) flips it.
+        # the TUI. Default ON; /playtest off (alias /feedback off) flips it.
         # The standard error-reporting paths (test reports, patch
         # diagnostics, visual critic) are NOT gated by this — only the
         # extra autonomous direction.
@@ -2620,13 +2638,16 @@ class GameAgent:
                 return self._backend3
             if getattr(self, "_model2_role", None) == "critic" and getattr(self, "_backend2", None) is not None:
                 return self._backend2
-            # Single-LLM "all roles" path: when the user opted into VLM critique
-            # but no dedicated critic slot exists, run the critic on slot 1.
-            # Gated on the toggle so the default-off path keeps returning None
-            # (which lets _run_vision_judge take over when a local VLM is on disk).
-            if getattr(self, "_use_vlm_critique", False):
+            # Single-LLM /allroles path only: run the critic on slot 1 when
+            # the user explicitly bundled every role onto one LLM. Otherwise
+            # return None so the iter loop uses the local MLX-VLM vision-judge
+            # fallback — avoids feeding screenshots into a huge resident coder.
+            if (
+                getattr(self, "_use_vlm_critique", False)
+                and getattr(self, "_all_roles_enabled", False)
+            ):
                 return self._backend
-            return None  # Fallback to standard non-visual automated testing
+            return None
 
     def _keep_alive_for_backend(self, backend: Backend | None) -> float | str | None:
         if backend is not None and getattr(backend, "info", None) and backend.info.name == "ollama":
@@ -2729,6 +2750,15 @@ class GameAgent:
             return False
         self._pending_coaching.append(full)
         self._recent_critic_note_fingerprints.append(fp)
+        # Loop visibility: the vision critique looked at the screen and is
+        # handing the problem to the coder, which fixes it on the next turn.
+        self._trace({
+            "kind": "vlm_critique_finding_sent_to_coder",
+            "vision": True,
+            "iteration": iteration,
+            "vc_role": vc_role,
+            "preview": cleaned[:200],
+        })
         return True
 
     @staticmethod
@@ -3556,6 +3586,14 @@ class GameAgent:
                     "render_mode": render_mode,
                 })
                 self._active_bullet_ids = list(ids)
+            else:
+                # No hits this turn — clear the active set so a LATER fix
+                # turn that injects nothing cannot penalize an EARLIER
+                # plan-stage batch (stale-attribution bug, trace
+                # 20260613_213711: the QTE bullets were retrieved only at
+                # plan stage but kept getting harmful++ on fix turns that
+                # injected no playbook at all).
+                self._active_bullet_ids = []
             block = render_playbook_block(
                 hits, char_budget=budget, mode=render_mode, full_top_n=full_top_n_val,
             )
@@ -4342,6 +4380,104 @@ class GameAgent:
         """True for local backends (MLX/Ollama)."""
         return self._backend.info.name in {"mlx", "ollama"}
 
+    def _lean_prompt_active(self) -> bool:
+        """Whether to render the compact `small` system-prompt schema.
+
+        Explicit `/leanprompt on|off` wins; otherwise auto-on for local
+        backends (MLX/Ollama) on non-large tiers. SOTA / large / cloud keep
+        the full schema.
+        """
+        if self._lean_prompt is not None:
+            return bool(self._lean_prompt)
+        return self._is_local_backend() and self._model_class != "large"
+
+    def _system_prompt_class(self) -> str:
+        """Effective model_class for SYSTEM PROMPT rendering only.
+
+        In lean mode a `mid` local model renders the `small` schema (67%
+        smaller). Retrieval budgets continue to key off self._model_class,
+        so only the system prompt shrinks.
+        """
+        if self._lean_prompt_active() and self._model_class == "mid":
+            return "small"
+        return self._model_class
+
+    def set_lean_prompt(self, value: bool | None) -> None:
+        """TUI hook for `/leanprompt on|off|auto`. None resets to auto."""
+        self._lean_prompt = value
+
+    # Combined char ceiling for the three first-build memory blocks in lean
+    # mode. opening-book outline (~1.7K) + components (~2.2K) fit; the
+    # lower-priority playbook is dropped when it would push past this. Keeps
+    # a local model from reading 8KB of overlapping "past lessons" before
+    # it writes a line.
+    _LEAN_MEMORY_COMBINED_BUDGET = 4500
+
+    def _apply_lean_memory_budget(
+        self, opening_block: str, components_block: str, playbook_block: str,
+    ) -> tuple[str, str, str]:
+        """In lean mode, cap the COMBINED size of the first-build memory
+        blocks. Priority: opening-book outline > components > playbook —
+        whole blocks are dropped (never mangled) lowest-priority first once
+        the budget is exceeded. No-op outside lean mode."""
+        if not self._lean_prompt_active():
+            return opening_block, components_block, playbook_block
+        budget = self._LEAN_MEMORY_COMBINED_BUDGET
+        used = len(opening_block or "")  # opening (priority 1) always kept
+        blocked = False
+
+        def _fit(block: str) -> str:
+            nonlocal used, blocked
+            if not block:
+                return ""
+            if blocked or used + len(block) > budget:
+                blocked = True
+                return ""
+            used += len(block)
+            return block
+
+        cb = _fit(components_block)
+        pb = _fit(playbook_block)
+        if (cb != components_block) or (pb != playbook_block):
+            self._trace({
+                "kind": "lean_memory_budget_applied",
+                "budget": budget,
+                "kept_opening_chars": len(opening_block or ""),
+                "kept_components_chars": len(cb),
+                "kept_playbook_chars": len(pb),
+                "dropped_components": bool(components_block) and not cb,
+                "dropped_playbook": bool(playbook_block) and not pb,
+            })
+        return opening_block, cb, pb
+
+    _PLAN_ELIDE_RE = re.compile(r"<plan>.*?</plan>", re.DOTALL)
+
+    def _lean_compact_planning_message(self) -> None:
+        """Elide the verbose <plan> prose from the retained Phase-A assistant
+        turn (lean mode, after first build). The plan's <criteria>/<probes>
+        were already extracted into self._criteria / self._probes and survive
+        compaction independently, so the full plan prose re-loading on every
+        coder prefill is pure overhead for a local model. Idempotent."""
+        for msg in self._messages:
+            if msg.get("phase") != "planning":
+                continue
+            content = msg.get("content") or ""
+            if "<plan>" not in content or "[plan prose elided" in content:
+                return
+            new_content = self._PLAN_ELIDE_RE.sub(
+                "<plan>[plan prose elided after first build to save local "
+                "context; criteria/probes retained]</plan>",
+                content,
+                count=1,
+            )
+            if new_content != content:
+                msg["content"] = new_content
+                self._trace({
+                    "kind": "lean_plan_prose_elided",
+                    "saved_chars": len(content) - len(new_content),
+                })
+            return
+
     def _local_first_build_nudge(self) -> str:
         """Small local-only nudge to reduce long repetitive first builds."""
         if not self._is_local_backend():
@@ -4639,12 +4775,32 @@ class GameAgent:
 
     def _record(self, ev: AgentEvent) -> AgentEvent:
         text = ev.text or ""
+        data = ev.data
+        # Trace conciseness (2026-06-13): the `test` event carries the FULL
+        # report dict (~6.6KB) which dominated the jsonl (~35%) and fully
+        # duplicates iter_summary. Store a compact projection in the TRACE
+        # only; the live AgentEvent returned to the TUI is unchanged.
+        if ev.kind == "test" and isinstance(data, dict):
+            probes = data.get("probes") or []
+            data = {
+                "ok": data.get("ok"),
+                "probes_passed": sum(1 for p in probes if p.get("ok")),
+                "probes_total": len(probes),
+                "failing_probes": [
+                    p.get("name") for p in probes if not p.get("ok")
+                ][:8],
+                "soft_warnings": len(data.get("soft_warnings") or []),
+                "page_errors": len(data.get("page_errors") or []),
+                "console_errors": len(data.get("console_errors") or []),
+                "frozen_canvas": data.get("frozen_canvas"),
+                "_slimmed": True,
+            }
         self._trace({
             "kind": "event",
             "event": ev.kind,
             "text_preview": text[:1000],
             "text_len": len(text),
-            "data": ev.data,
+            "data": data,
         })
         return ev
 
@@ -4672,6 +4828,113 @@ class GameAgent:
             return p
         except Exception:
             return None
+
+    def _vision_judge_headroom_ok(self) -> bool:
+        """Return False when stacking a local MLX-VLM on the resident coder
+        LLM would likely trigger macOS memory-pressure kills. Same 20%-of-RAM
+        gate as `_free_memory_before_video`; Ollama daemons are not measured.
+        """
+        try:
+            from backend import MLXBackend
+            llm_path = getattr(MLXBackend, "_loaded_path", None)
+            if not (llm_path and getattr(MLXBackend, "_loaded_model", None) is not None):
+                return True
+            from pathlib import Path as _Path
+            total = 0
+            for f in _Path(llm_path).rglob("*"):
+                try:
+                    if f.is_file():
+                        total += f.stat().st_size
+                except Exception:
+                    pass
+            llm_gb = total / 1e9
+            import os as _os
+            phys_gb = (
+                _os.sysconf("SC_PHYS_PAGES") * _os.sysconf("SC_PAGE_SIZE")
+            ) / 1e9
+            return llm_gb <= 0.20 * phys_gb
+        except Exception:
+            return True
+
+    def _free_memory_before_video(self) -> dict:
+        """Conditionally free the resident in-process MLX LLM + diffuser
+        pipelines BEFORE launching the Wan video subprocess.
+
+        Root cause (confirmed 2026-06-14, JetsamEvent-2026-06-14-125300.ips):
+        with a VERY LARGE in-process MLX LLM resident, loading the ~17 GB Wan
+        model in the video subprocess drove macOS into a memory-pressure
+        (`vm-compressor-space-shortage`) jetsam kill of the chat process
+        (`largeProcess: Python`), which closed the video subprocess's stdout
+        pipe -> BrokenPipeError -> the clip failed. The video subprocess does
+        NOT use the LLM, so freeing it removes the pressure.
+
+        GATED so SMALL/normal LLMs are NOT slowed by a needless reload: only
+        fires when the resident MLX model on disk exceeds ~20% of physical RAM
+        (measured split: working set <=51 GB ~10% of 512 GB; crashing set
+        >=144 GB ~28%, e.g. GLM-5.1 378 GB ~74%). Ollama models live in a
+        separate daemon process and are never touched. Everything freed
+        reloads lazily on the next turn.
+        """
+        info: dict = {"freed": [], "tripped": False, "llm_gb": None}
+        try:
+            from backend import MLXBackend
+            llm_path = getattr(MLXBackend, "_loaded_path", None)
+            if not (llm_path and getattr(MLXBackend, "_loaded_model", None) is not None):
+                return info  # no large in-process MLX LLM resident
+            # On-disk weight size is a good proxy for the resident (wired) size.
+            from pathlib import Path as _Path
+            total = 0
+            for f in _Path(llm_path).rglob("*"):
+                try:
+                    if f.is_file():
+                        total += f.stat().st_size
+                except Exception:
+                    pass
+            llm_gb = total / 1e9
+            info["llm_gb"] = round(llm_gb, 1)
+            import os as _os
+            phys_gb = (
+                _os.sysconf("SC_PHYS_PAGES") * _os.sysconf("SC_PAGE_SIZE")
+            ) / 1e9
+            # Trip only for LLMs large relative to RAM. 0.20 cleanly separates
+            # the working set from the crashing set with a wide margin.
+            if llm_gb <= 0.20 * phys_gb:
+                self._trace({
+                    "kind": "video_memory_relief_skipped",
+                    "llm_gb": info["llm_gb"], "phys_gb": round(phys_gb),
+                })
+                return info
+            info["tripped"] = True
+            # 1) Diffuser pipelines (Z-Image-Turbo + SD-Turbo img2img).
+            try:
+                import assets as _assets
+                info["freed"].extend(_assets.release_preloaded_diffusers())
+            except Exception:
+                pass
+            # 2) Stable-Audio generator held on the agent.
+            try:
+                sg = self._sound_generator
+                if sg is not None and hasattr(sg, "cleanup"):
+                    sg.cleanup()
+                    self._sound_generator = None
+                    info["freed"].append("Stable-Audio")
+            except Exception:
+                pass
+            # 3) The big in-process MLX LLM — the jetsam `largeProcess`. It
+            #    reloads lazily on the next coder turn.
+            try:
+                MLXBackend._drop_after_crash()
+                info["freed"].append("MLX-LLM")
+            except Exception:
+                pass
+            self._trace({
+                "kind": "video_memory_relief",
+                "llm_gb": info["llm_gb"], "phys_gb": round(phys_gb),
+                "freed": info["freed"],
+            })
+        except Exception as e:
+            self._trace({"kind": "video_memory_relief_error", "err": str(e)})
+        return info
 
     # ------------------------------------------------------------------ revert
     #
@@ -4884,6 +5147,14 @@ class GameAgent:
             return None
 
     def _dump_conversation(self) -> None:
+        # One-complete-trace (2026-06-14): the .conversation.md sibling is
+        # retired. Its full content — system prompt, every user turn (with all
+        # injected blocks), every assistant reply — is now captured directly in
+        # the .jsonl (system_prompt_built.system_prompt, stream_start.turn_input,
+        # assistant_reply.reply), so this redundant file is no longer written.
+        # Kept as a no-op (rather than ripping out ~6 call sites) to keep the
+        # change surgical; existing .conversation.md files on disk are untouched.
+        return
         try:
             self.conversation_path.parent.mkdir(parents=True, exist_ok=True)
             lines: list[str] = [
@@ -5682,6 +5953,43 @@ class GameAgent:
         )
         report["warnings"] = warns
         report["dead_anim_frames"] = dict(dead)
+
+    def _apply_still_frame_frozen_downgrade(self, report: dict[str, Any]) -> None:
+        """Neutralize the FROZEN-AT-IDLE warning for still-frame recipes.
+
+        For a laserdisc/cutscene QTE game the matched recipe declares
+        `still_frame: true` ("Motion is intentionally still-frame… do not
+        judge smoothness"). The harness's FROZEN-AT-IDLE warning (already
+        non-gating — input is responsive) nonetheless tells the model to "add
+        a subtle continuous idle animation (breathing/bob)". A strong model
+        obeys and adds unrequested motion to a clean still-frame build (trace
+        20260613_213711, Opus 4.8 iter 5 added a breathing-bob sine wave).
+        When the active recipe is still-frame, replace that warning text with
+        a neutral advisory that the static cadence is expected. Only the
+        idle-by-design warning is touched; a TRUE freeze still goes through
+        the gating soft_warnings channel in tools.py untouched.
+        """
+        if not getattr(self, "_active_visual_playtest_still_frame", False):
+            return
+        warns = report.get("warnings") or []
+        if not warns:
+            return
+        new_warns: list[str] = []
+        replaced = False
+        for w in warns:
+            if isinstance(w, str) and w.startswith("FROZEN-AT-IDLE"):
+                new_warns.append(
+                    "STILL-FRAME CADENCE (advisory — not a problem): the canvas "
+                    "is static between frames, which is INTENDED for this "
+                    "laserdisc/cutscene-style game. Do NOT add a breathing/bob "
+                    "or any continuous idle motion to silence this — still-frame "
+                    "cadence is the desired look. No change needed."
+                )
+                replaced = True
+            else:
+                new_warns.append(w)
+        if replaced:
+            report["warnings"] = new_warns
 
     @staticmethod
     def _probe_shape_key(p: dict[str, Any]) -> str:
@@ -7207,22 +7515,6 @@ class GameAgent:
             self._is_vlm = val
         if val:
             self._trace({"kind": "vlm_detected", "model": backend.info.model, "role": role})
-            # Auto-staff (added 2026-05-21): if a local VLM is on ANY
-            # slot (coder/critic/architect) and vlm-critique is still off,
-            # enable it. Single-model users with a VLM coder were getting
-            # nothing from the proven-useful visual critic loop because
-            # /vlm-critique stayed off by default. User can still override
-            # with /vlm-critique off, and the explicit toggle path remains
-            # the source of truth.
-            if not self._use_vlm_critique:
-                self._use_vlm_critique = True
-                self._vlm_critique_auto = True
-                self._trace({
-                    "kind": "auto_enabled",
-                    "feature": "vlm_critique",
-                    "reason": f"local VLM detected on role={role}",
-                    "model": backend.info.model,
-                })
         return val
 
     def _maybe_inject_visual_playtest_auto_probes(self) -> None:
@@ -7265,6 +7557,12 @@ class GameAgent:
         # which mechanism is guiding this session, even on recipes that
         # don't carry any auto_probes.
         self._active_visual_playtest_recipe_id = recipe.id
+        # Capture the still-frame cadence flag so the report post-processor
+        # can neutralize the FROZEN-AT-IDLE "add a breathing bob" coaching
+        # for laserdisc/cutscene games where static frames are intended.
+        self._active_visual_playtest_still_frame = bool(
+            recipe.recipe.get("still_frame")
+        )
         auto = recipe.recipe.get("auto_probes") or []
         if not auto:
             return
@@ -8524,7 +8822,7 @@ class GameAgent:
     #      and routes it into _pending_feedback so Phase 0.1's partitioner
     #      handles it like a real user message
     # The budget governor (3 cycles/session, 2-no-finding auto-stop) and
-    # the `/feedback off` kill-switch are both checked first; this method
+    # the `/playtest off` kill-switch are both checked first; this method
     # is a no-op when either gate is closed.
 
     _AUTONOMOUS_MAX_CYCLES = 3
@@ -8677,7 +8975,7 @@ class GameAgent:
         """One cycle of the autonomous self-feedback loop.
 
         Caller is the iter loop; we only run when:
-          - /feedback is on (default)
+          - /playtest is on (default)
           - probes passed this iter (report.ok is True)
           - the budget governor allows another cycle
           - no Ctrl+D in flight
@@ -8877,9 +9175,17 @@ class GameAgent:
         ).format(iter=iteration, body="\n".join(bullets))
         # Agent-generated — must not trip user-feedback detectors.
         self._queue_internal_feedback(feedback_text)
+        # Loop visibility: the no-vision critique found problems and is
+        # handing them to the coder, which fixes them on the next turn.
+        self._trace({
+            "kind": "critique_findings_sent_to_coder",
+            "vision": False,
+            "iteration": iteration,
+            "finding_ids": [f.get("recipe_id") for f in findings],
+        })
         yield self._record(AgentEvent(
             "info",
-            f"[magenta]autonomous feedback queued[/magenta] "
+            f"[magenta]critique findings sent to the coder[/magenta] "
             f"({len(findings)} finding(s) from cycle "
             f"{self._autonomous_playtest_cycle})",
         ))
@@ -8896,6 +9202,18 @@ class GameAgent:
         cloud calls). If the judge is unreachable or returns nothing,
         we log a single trace event and continue — never block the run.
         """
+        # Gated on /vlm-critique (same toggle as the structured visual
+        # critic). This path is the local MLX-VLM fallback when no
+        # dedicated critic slot is staged and /allroles is off.
+        if not getattr(self, "_use_vlm_critique", False):
+            return
+        if not self._vision_judge_headroom_ok():
+            self._trace({
+                "kind": "vision_judge_skipped",
+                "iteration": iteration,
+                "reason": "tight_headroom",
+            })
+            return
         try:
             from vision_judge import is_enabled, judge_visual_progress
         except Exception:
@@ -9221,11 +9539,28 @@ class GameAgent:
             self._trace(contract)
         except Exception:
             pass
+        # One-complete-trace (2026-06-14): capture the EXACT outgoing turn the
+        # model is about to answer — the last message in full (the user turn
+        # assembled by _flush_user_injections with all injected playbook /
+        # feedback / coaching / report blocks, or an assistant prefill). This
+        # single chokepoint records every turn's real input across all ~20
+        # append sites, so the .jsonl holds the full conversation that used to
+        # live only in .conversation.md. The system prompt is captured once in
+        # the system_prompt_built event, so it is not repeated here.
+        try:
+            _outgoing = self._messages[-1] if self._messages else {}
+            _turn_input = {
+                "role": _outgoing.get("role"),
+                "content": _outgoing.get("content") or "",
+            }
+        except Exception:
+            _turn_input = None
         self._trace({
             "kind": "stream_start",
             "temperature": temp,
             "fix_mode": self._fix_mode,
             "keep_alive": self._keep_alive_for_backend(active_backend),
+            "turn_input": _turn_input,
         })
 
         # Heartbeat wrapper around the caller's on_token. Every
@@ -11370,6 +11705,40 @@ class GameAgent:
         return findings
 
     @staticmethod
+    def _failure_blames_code(report: dict[str, Any]) -> bool:
+        """True only when a failing iter is attributable to a real CODE
+        defect — so playbook bullets should be penalized (`harmful++`).
+
+        Why this gate exists (trace 20260613_213711, Opus 4.8): a failing
+        iter used to bump `harmful` on every injected bullet whenever the
+        stuck-streak hit 3, regardless of WHY it failed. But the blocker
+        there was a model-authored `<probes>` failure (`state_room0` racing
+        the input smoke test) — nothing to do with the QTE playbook bullets,
+        which were correct. Penalizing them corrupted hand-curated seeds.
+
+        Model-probe-authoring artifacts (the model's own failing `<probes>`
+        and synthetic `coverage_gap__*` probes) surface as soft_warnings
+        prefixed `PROBE FAILED [`. Genuine code defects surface either as
+        page_errors or as soft_warnings WITHOUT that prefix (FROZEN-CANVAS,
+        ENTITY-NOT-RENDERED, HEURISTIC controls-not-wired, OPENING BOOK
+        CHECK FAILED, JS-SOURCE-IN-BODY, …). The harness-synthesized
+        `input_responsive` probe is a real behavioral defect (controls not
+        wired), so a failing one counts as code-attributable even though it
+        carries the PROBE FAILED prefix. Genre-free, model-agnostic.
+        """
+        if report.get("page_errors"):
+            return True
+        soft = report.get("soft_warnings") or []
+        for w in soft:
+            if not str(w).startswith("PROBE FAILED ["):
+                return True
+        # Harness behavioral probe (controls-not-wired) is a real defect.
+        for p in (report.get("probes") or []):
+            if (not p.get("ok")) and p.get("name") == "input_responsive":
+                return True
+        return False
+
+    @staticmethod
     def _lint_probes(probes: list[dict]) -> list[dict]:
         """Return a list of `{name, kind, message}` lint findings for
         probes that pass JSON parse but are structurally tautological.
@@ -11412,6 +11781,35 @@ class GameAgent:
                         "scene 0, so this probe can force a bad state hack. "
                         "Prefer `typeof state.scene === 'number'` and test "
                         "progression after dispatching input."
+                    ),
+                })
+            # Initial-state-equality trap (trace 20260613_213711, Opus 4.8):
+            # a probe asserting `state.<counter> === 0` samples AFTER the
+            # harness input smoke test has already fired keys — in a QTE /
+            # reaction game those keys legitimately advance the counter, so
+            # the probe reads e.g. room 2 and fails. The probe is frozen once
+            # accepted, so the model can only fix it by contorting gameplay
+            # (it added a `started` gate that swallowed real input for 4
+            # iters). Catch it at Phase A — before the probe freezes — unless
+            # the expr resets first so it samples a fresh initial state.
+            counter_eq0 = re.search(
+                r"\bstate\.(room|scene|level|stage)\s*===?\s*0\b", expr
+            )
+            if counter_eq0 and "reset(" not in expr:
+                counter = counter_eq0.group(1)
+                findings.append({
+                    "name": name,
+                    "kind": "fragile_initial_state_equality",
+                    "message": (
+                        f"probe `{name}` asserts `state.{counter} === 0`, "
+                        "but the harness input smoke test fires control keys "
+                        "BEFORE probes run — in a timed/QTE game those keys "
+                        "advance the counter, so this probe fails on a working "
+                        "game and cannot be changed once accepted. Either call "
+                        "`window.game.reset()` at the START of the probe so it "
+                        f"samples a fresh state, or assert `typeof state.{counter} "
+                        "=== 'number'` plus a progression check after dispatching "
+                        "input."
                     ),
                 })
         return findings
@@ -11598,17 +11996,15 @@ class GameAgent:
         self._todos_text = todos
         # Keep the structured view in sync for todo-driven execution.
         self._todos_items = self._parse_todo_items(todos)
-        try:
-            path = self.trace_path.parent / f"{self._session_id}.todos.md"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(todos + "\n", encoding="utf-8")
-            self._trace({
-                "kind": "todos_captured",
-                "len": len(todos),
-                "path": str(path),
-            })
-        except Exception as e:
-            self._trace({"kind": "todos_write_failed", "err": str(e)})
+        # One-complete-trace (2026-06-14): the .todos.md sibling is retired.
+        # The full todos text is now stored inline in the todos_captured trace
+        # event (was len + file path only), so the .jsonl carries it and no
+        # redundant file is written.
+        self._trace({
+            "kind": "todos_captured",
+            "len": len(todos),
+            "todos": todos,
+        })
 
     @staticmethod
     def _norm_todo(text: str) -> str:
@@ -12434,6 +12830,19 @@ class GameAgent:
                 session_videos_dir = (
                     self.out_path.parent / f"{self._session_id}_videos"
                 )
+                # Memory-pressure guard (2026-06-14): a VERY large resident MLX
+                # LLM + the ~17 GB Wan subprocess can trigger a macOS jetsam
+                # kill of the chat process mid-clip (see
+                # _free_memory_before_video). Free the LLM/diffusers FIRST when
+                # the LLM is large relative to RAM. No-op for small/normal LLMs.
+                _mem = await asyncio.to_thread(self._free_memory_before_video)
+                if _mem.get("freed"):
+                    yield self._record(AgentEvent(
+                        "info",
+                        "freed memory before video to avoid an OS memory-"
+                        f"pressure kill: {', '.join(_mem['freed'])} "
+                        f"(LLM ~{_mem.get('llm_gb')} GB — reloads next turn)",
+                    ))
                 try:
                     produced = await asyncio.to_thread(
                         generate_videos,
@@ -12994,15 +13403,58 @@ class GameAgent:
             # module exposes build_system_prompt (v1+), pass model_class
             # so mid-tier models get a trimmed prompt. v0 falls back
             # to the static SYSTEM_PROMPT constant unchanged.
+            lean_active = self._lean_prompt_active()
+            sys_class = self._system_prompt_class()
             if hasattr(self._p, "build_system_prompt"):
                 sys_prompt = self._p.build_system_prompt(
-                    goal, model_class=self._model_class,
+                    goal, model_class=sys_class,
                 )
             else:
                 sys_prompt = self._p.SYSTEM_PROMPT.replace("{goal}", goal)
-            cfg_text, cfg_sources = _read_project_config(Path.cwd())
-            if not cfg_text:
-                cfg_text, cfg_sources = _read_project_config(self.out_path.parent.parent)
+            self._trace({
+                "kind": "system_prompt_built",
+                "model_class": self._model_class,
+                "system_prompt_class": sys_class,
+                "lean": lean_active,
+                "chars": len(sys_prompt),
+                # One-complete-trace (2026-06-14): store the FULL system prompt
+                # text, not just its length, so the .jsonl carries exactly what
+                # the model was told (this content used to live only in the now-
+                # retired .conversation.md). Rebuilt per run/continuation, so
+                # this fires once per build — not per turn.
+                "system_prompt": sys_prompt,
+            })
+            # Runtime-mode observability (2026-06-13): one concise row so a
+            # trace shows whether the user's /allroles + /playtest stack is
+            # actually doing what they think — in particular whether the
+            # per-iter VISUAL CRITIC will run (it needs a VLM-capable model;
+            # on a text-only model /allroles only relabels planning).
+            try:
+                from backend import classify_model_modality as _cmm
+                _model_is_vlm = _cmm(self._backend.info.model) == "vlm"
+            except Exception:
+                _model_is_vlm = False
+            self._trace({
+                "kind": "runtime_modes",
+                "architect_split": bool(getattr(self, "_use_architect_split", False)),
+                "vlm_critique": bool(getattr(self, "_use_vlm_critique", False)),
+                "model_is_vlm": _model_is_vlm,
+                "visual_critic_will_run": bool(
+                    getattr(self, "_use_vlm_critique", False) and _model_is_vlm
+                ),
+                "lean_prompt": lean_active,
+                "autonomous_feedback": bool(getattr(self, "_use_autonomous_feedback", False)),
+                "step_mode": bool(getattr(self, "_step_mode", False)),
+            })
+            # Lean mode (local models): skip the per-turn CLAUDE.md
+            # <project-context> injection. It is ~6KB of developer/ops docs,
+            # not game-codegen guidance, and on every turn it crowds out the
+            # local model's attention. SOTA / non-lean runs keep it.
+            cfg_text, cfg_sources = ("", [])
+            if not lean_active:
+                cfg_text, cfg_sources = _read_project_config(Path.cwd())
+                if not cfg_text:
+                    cfg_text, cfg_sources = _read_project_config(self.out_path.parent.parent)
             if cfg_text:
                 sys_prompt = (
                     sys_prompt
@@ -13132,7 +13584,12 @@ class GameAgent:
                 "role": "assistant",
                 "content": plan_reply,
                 "model_role": planning_role,
-                "model_name": self.get_backend(planning_role).info.model
+                "model_name": self.get_backend(planning_role).info.model,
+                # Tag so lean mode can elide the verbose <plan> prose from
+                # this turn after the first build (criteria/probes already
+                # extracted into self._criteria / self._probes), stopping it
+                # from re-loading on every later coder prefill.
+                "phase": "planning",
             })
             self._extract_and_queue_lookups(plan_reply)
             self._capture_todos(plan_reply)
@@ -13591,6 +14048,20 @@ class GameAgent:
                     goal, stage="plan",
                 )
                 self._active_opening_book_recipes = opening_hits
+                # Component skill library — tested mechanics snippets, same
+                # as the skeleton path. The seed path previously skipped
+                # this, so a seed/continuation build lost the copy-paste-
+                # correct snippets exactly when a weak model needs them.
+                # Retrieved before assembly so the lean budget weighs all three.
+                components_block = self._retrieve_components_block(
+                    goal, stage="plan", k=3,
+                )
+                # Lean mode: cap the COMBINED size of the three memory blocks.
+                opening_block, components_block, pb_block = (
+                    self._apply_lean_memory_budget(
+                        opening_block, components_block, pb_block,
+                    )
+                )
                 pb_kwargs = {"playbook_block": pb_block} if pb_block else {}
                 build_msg = self._p.seed_build_instruction(
                     seed_html, str(self.seed_file), **pb_kwargs,
@@ -13602,6 +14073,8 @@ class GameAgent:
                         "implementation and test guidance.\n\n"
                         + build_msg
                     )
+                if components_block:
+                    build_msg = f"{components_block}\n\n" + build_msg
                 asset_block = render_asset_paths_block(
                     self._session_assets, self.out_path,
                 )
@@ -13710,6 +14183,20 @@ class GameAgent:
                     goal, stage="plan",
                 )
                 self._active_opening_book_recipes = opening_hits
+                # Component skill library — tested mechanics snippets. Retrieved
+                # HERE (before assembly) so the lean combined-memory budget can
+                # weigh all three blocks together.
+                components_block = self._retrieve_components_block(
+                    goal, stage="plan", k=3,
+                )
+                # Lean mode: cap the COMBINED size of the three memory blocks
+                # (opening > components > playbook) so a local model isn't
+                # buried in overlapping past-lessons before the task.
+                opening_block, components_block, pb_block = (
+                    self._apply_lean_memory_budget(
+                        opening_block, components_block, pb_block,
+                    )
+                )
                 pb_kwargs = {"playbook_block": pb_block} if pb_block else {}
 
                 # Design happens in ONE pass: the planning turn (above, on
@@ -13752,13 +14239,7 @@ class GameAgent:
                         "implementation and test guidance.\n\n"
                         + build_msg
                     )
-                # Capability-round item 1: component skill library —
-                # tested mechanics snippets injected beside the opening
-                # book so the first build adapts working code instead of
-                # synthesizing the same machinery from prose.
-                components_block = self._retrieve_components_block(
-                    goal, stage="plan", k=3,
-                )
+                # Component skill library (retrieved + budget-capped above).
                 if components_block:
                     build_msg = f"{components_block}\n\n" + build_msg
                 asset_block = render_asset_paths_block(
@@ -13810,6 +14291,12 @@ class GameAgent:
         for iteration in range(start_iter, hard_max + 1):
             if iteration > end_iter + self._iter_budget_bonus:
                 break
+            # Lean mode: after the first build, elide the verbose <plan>
+            # prose from the retained Phase-A turn so it stops re-loading on
+            # every coder prefill (criteria/probes are already tracked
+            # separately). Idempotent; only fires once.
+            if iteration > start_iter and self._lean_prompt_active():
+                self._lean_compact_planning_message()
             # Polish phase (item 2): how many iters remain AFTER this one.
             # The polish branch in _build_fix_prompt only fires when >= 1
             # so a polish patch always gets a test pass before shipping.
@@ -14127,7 +14614,10 @@ class GameAgent:
                 "kind": "assistant_reply",
                 "iteration": iteration,
                 "len": len(reply),
-                "preview": reply[:600],
+                # One-complete-trace (2026-06-14): store the FULL reply, not a
+                # 600-char preview, so the .jsonl is self-sufficient (this used
+                # to be recoverable only from the now-retired .conversation.md).
+                "reply": reply,
             })
             violation = self._scoped_reply_violation(reply)
             if violation:
@@ -15380,6 +15870,7 @@ class GameAgent:
             self._handle_probe_eval_errors(report, iteration)
             self._apply_scoped_check_to_report(report)
             self._apply_dead_animation_check_to_report(report)
+            self._apply_still_frame_frozen_downgrade(report)
             # Advance the warnings-persistence counter ONCE per iter,
             # before any format_report_for_model rendering. Compaction
             # is then applied uniformly to the test event text and to
@@ -15401,6 +15892,13 @@ class GameAgent:
                 soft_warnings = report.get("soft_warnings") or []
                 page_errors = report.get("page_errors") or []
                 console_errors = report.get("console_errors") or []
+                # fail_reason lists BLOCKING causes only, and only when the
+                # iter actually failed (ok=False). frozen_canvas is NOT added
+                # here: a true freeze already appears as a FROZEN-CANVAS
+                # soft_warning, and an input-responsive "frozen" canvas is
+                # idle-by-design (advisory). Trace 20260613_213711 showed
+                # frozen_canvas listed as a fail_reason on ok=True iters,
+                # which was misleading. Advisories go in their own field.
                 fail_reasons: list[str] = []
                 if page_errors:
                     fail_reasons.append(f"page_errors:{len(page_errors)}")
@@ -15408,8 +15906,14 @@ class GameAgent:
                     fail_reasons.append(f"console_errors:{len(console_errors)}")
                 if soft_warnings:
                     fail_reasons.append(f"soft_warnings:{len(soft_warnings)}")
+                advisories: list[str] = []
                 if report.get("frozen_canvas"):
-                    fail_reasons.append("frozen_canvas")
+                    advisories.append(
+                        "frozen_canvas_idle_by_design"
+                        if report.get("frozen_canvas_input_responsive")
+                        else "frozen_canvas"
+                    )
+                _ok = bool(report.get("ok"))
                 entity_check = report.get("entity_render_check") or {}
                 missing_entities = (entity_check.get("missing") or []) if isinstance(entity_check, dict) else []
                 _static_action = report.get("static_action")
@@ -15422,6 +15926,12 @@ class GameAgent:
                     "soft_warnings_count": len(soft_warnings),
                     "page_errors_count": len(page_errors),
                     "console_errors_count": len(console_errors),
+                    # One-complete-trace (2026-06-14): the actual error STRINGS
+                    # in full (not just counts), so a broken-game run is fully
+                    # debuggable from the .jsonl alone. *_count kept above for
+                    # render_run_summary / /revert back-compat.
+                    "page_errors": list(page_errors),
+                    "console_errors": list(console_errors),
                     "frozen_canvas": bool(report.get("frozen_canvas")),
                     "entity_missing_count": len(missing_entities),
                     # Verification observability (so a future trace answers
@@ -15429,17 +15939,28 @@ class GameAgent:
                     "action_frame_captured": bool(report.get("screenshot_action")),
                     "action_key": report.get("action_key"),
                     "static_action": _static_action,
-                    "fail_reason": ",".join(fail_reasons) or "ok",
+                    # Blocking causes only when ok=False; "ok" otherwise.
+                    "fail_reason": (",".join(fail_reasons) or "blocked") if not _ok else "ok",
+                    "advisories": advisories,
+                    # Prompt-bloat + context signals (2026-06-13) so the
+                    # "agent worse than single-shot" symptom is visible per
+                    # iter without joining stream_done by hand.
+                    "prompt_tokens": int(getattr(self, "_last_prompt_tokens", 0) or 0),
+                    "message_count": len(self._messages),
+                    "lean_prompt": self._lean_prompt_active(),
                     # Higher signal-to-noise debugging (2026-05-31): record WHY
                     # it blocked (the actual soft-warning texts, not just a
                     # count), the non-blocking warnings, the frozen-canvas
                     # false-positive classifier, and any queued feedback that a
                     # non-ok iter will defer — so "stuck + user request starved"
                     # is visible from this one event.
-                    "soft_warnings": [str(w)[:160] for w in soft_warnings[:6]],
-                    "warnings": [str(w)[:140] for w in (report.get("warnings") or [])[:4]],
+                    # One-complete-trace (2026-06-14): full text, no artificial
+                    # caps — record every soft_warning / warning / pending
+                    # feedback item in full so nothing the model saw is lost.
+                    "soft_warnings": [str(w) for w in soft_warnings],
+                    "warnings": [str(w) for w in (report.get("warnings") or [])],
                     "frozen_canvas_input_responsive": report.get("frozen_canvas_input_responsive"),
-                    "pending_feedback": [fb[:120] for fb in (self._pending_feedback or [])[:4]],
+                    "pending_feedback": list(self._pending_feedback or []),
                     "pending_feedback_count": len(self._pending_feedback or []),
                 }
                 self._trace(summary_payload)
@@ -15735,13 +16256,11 @@ class GameAgent:
                             f"[yellow]warning[/yellow] (iter {iteration}): "
                             "input changed buffers but no player coordinates"
                         ))
-            # Visual-progress judge: auto-runs when a local MLX-VLM is
-            # discoverable on disk (honors the "never silent cloud calls"
-            # rule — `_run_vision_judge` skips cleanly when no local VLM
-            # is found, and does NOT fall back to Anthropic). The user
-            # can still invoke a cloud judge explicitly via `/check with
-            # <model>` in chat.py. Disable entirely with VISION_JUDGE=0.
-            if after_bytes is not None:
+            # Per-iter screenshot review — one toggle (/vlm-critique). When ON:
+            # dedicated critic slot → structured visual critic; else local MLX-VLM
+            # vision judge; /allroles routes critique through the coder slot.
+            # Cloud review remains explicit via /check in chat.py.
+            if after_bytes is not None and getattr(self, "_use_vlm_critique", False):
                 critic_backend = self.get_backend("critic")
                 # Fast-path: if the user has already requested ship (Ctrl+D),
                 # skip the post-iter visual critic. The critic is advisory
@@ -15862,7 +16381,7 @@ class GameAgent:
                     "error": str(exc),
                 })
             # Phase 1.5 — autonomous self-feedback. Only fires on clean
-            # iters (probes_ok) and respects the /feedback toggle + the
+            # iters (probes_ok) and respects the /playtest toggle + the
             # budget governor + the Ctrl+D fast-path. Findings flow into
             # _pending_feedback so Phase 0.1's partitioner handles them
             # like real user feedback.
@@ -16109,7 +16628,7 @@ class GameAgent:
                 if report["ok"]:
                     self._playbook.update_counters(ids, helpful_delta=1)
                     delta_label = "helpful+1"
-                elif self._stuck_streak >= 3:
+                elif self._stuck_streak >= 3 and self._failure_blames_code(report):
                     self._playbook.update_counters(ids, harmful_delta=1)
                     delta_label = "harmful+1"
                 if delta_label is not None:
@@ -16424,6 +16943,9 @@ class GameAgent:
                     "kind": "assistant_reply",
                     "iteration": self.max_iters + 1,
                     "len": len(reply),
+                    # One-complete-trace (2026-06-14): full reply text (was
+                    # len-only) so the .jsonl carries the bonus-turn output.
+                    "reply": reply,
                 })
                 violation = self._scoped_reply_violation(reply)
                 if violation:
@@ -17516,10 +18038,11 @@ class GameAgent:
             })
         except Exception as e:
             self._trace({"kind": "outcome_record_failed", "err": str(e)})
-        # Per-run summary.md (2026-06-10): render the iter table from the
-        # jsonl trace so a failed run is diagnosable in one screen instead
-        # of grepping the full log. Best-effort; never blocks the outcome.
-        self._write_run_summary()
+        # One-complete-trace (2026-06-14): the .summary.md sibling is retired —
+        # its iter table is fully derivable from the .jsonl, which is now the
+        # single complete artifact. The render_run_summary() function stays
+        # available (unit-tested, runnable on demand against a .jsonl); we just
+        # no longer auto-write the redundant file each run.
 
     def _write_run_summary(self) -> None:
         try:

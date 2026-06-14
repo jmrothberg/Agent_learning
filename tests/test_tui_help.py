@@ -5,9 +5,11 @@ from __future__ import annotations
 import tui_help
 
 
-def test_normalize_feedback_aliases():
-    assert tui_help.normalize_help_topic("feedback") == "feedback"
-    assert tui_help.normalize_help_topic("autonomous-playtest") == "feedback"
+def test_normalize_critique_aliases():
+    assert tui_help.normalize_help_topic("critique") == "critique"
+    assert tui_help.normalize_help_topic("playtest") == "critique"
+    assert tui_help.normalize_help_topic("feedback") == "critique"
+    assert tui_help.normalize_help_topic("autonomous-playtest") == "critique"
     assert tui_help.normalize_help_topic("VC") == "vlm-critique"
     assert tui_help.normalize_help_topic("vlm_critique") == "vlm-critique"
     assert tui_help.normalize_help_topic("memory") == "playbook"
@@ -30,32 +32,40 @@ def test_all_topics_have_lines():
 def test_topics_page_lists_other_topics():
     lines = tui_help.help_topic_lines("topics") or []
     text = "\n".join(lines)
-    assert "/help feedback" in text
+    assert "/help critique" in text
     assert "/help gpu" in text
     assert "/help getting-started" in text
 
 
-def test_feedback_topic_mentions_vlm_critique_distinction():
-    lines = tui_help.help_topic_lines("feedback") or []
+def test_critique_topic_mentions_vlm_critique_distinction():
+    lines = tui_help.help_topic_lines("critique") or []
     text = "\n".join(lines).lower()
     assert "vlm-critique" in text or "/vlm-critique" in text
-    assert "autonomous" in text or "playtest" in text
-    assert "harness" in text or "probe" in text
+    assert "without" in text and "vision" in text
+    assert "agent" in text or "coder" in text
 
 
-def test_vlm_critique_topic_mentions_feedback_distinction():
+def test_feedback_help_topic_is_alias_pointer():
+    lines = tui_help.help_topic_lines("feedback") or []
+    text = "\n".join(lines).lower()
+    assert "alias" in text
+    assert "critique" in text
+
+
+def test_vlm_critique_topic_mentions_critique_distinction():
     lines = tui_help.help_topic_lines("vlm-critique") or []
     text = "\n".join(lines).lower()
-    assert "/feedback" in text
-    assert "screenshot" in text or "visual" in text
+    assert "/critique" in text
+    assert "screen" in text or "vision" in text
+    assert "model 2" in text
 
 
-def test_feedback_flows_lists_four():
+def test_feedback_flows_explains_two_reviews():
     lines = tui_help.help_topic_lines("feedback-flows") or []
-    text = "\n".join(lines)
-    assert "1." in text or "[b]1." in text
-    assert "playbook" in text.lower()
-    assert "rawfeedback" in text.lower()
+    text = "\n".join(lines).lower()
+    assert "/critique" in text
+    assert "vlm-critique" in text
+    assert "vision" in text
 
 
 def test_help_index_lists_topics_command():
@@ -67,7 +77,7 @@ def test_help_index_lists_topics_command():
 def test_format_unknown_topic_message():
     msgs = tui_help.format_unknown_topic_message("nope")
     assert any("nope" in m for m in msgs)
-    assert any("feedback" in m for m in msgs)
+    assert any("critique" in m for m in msgs)
 
 
 def test_cmd_help_topic_via_app():
@@ -79,8 +89,8 @@ def test_cmd_help_topic_via_app():
     app._log_info = lambda msg: rendered.append(str(msg))  # type: ignore[method-assign]
     app._status_manual_body = None
     app._update_status = lambda: None  # type: ignore[method-assign]
-    app._cmd_help("feedback")
-    assert any("autonomous" in line.lower() for line in rendered)
+    app._cmd_help("critique")
+    assert any("critique" in line.lower() or "without" in line.lower() for line in rendered)
     assert app._status_manual_body is not None
 
 

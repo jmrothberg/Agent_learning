@@ -53,7 +53,12 @@ def test_same_game_basename_gets_distinct_artifact_paths(tmp_path: Path) -> None
     assert a1.best_path == a2.best_path
 
 
-def test_conversation_dump_header_contains_artifact_identity(tmp_path: Path) -> None:
+def test_conversation_dump_is_retired_no_op(tmp_path: Path) -> None:
+    # One-complete-trace (2026-06-14): the .conversation.md sibling is retired.
+    # Its content (system prompt, every user turn, every assistant reply) now
+    # lives in the .jsonl via system_prompt_built.system_prompt,
+    # stream_start.turn_input, and assistant_reply.reply. _dump_conversation()
+    # is a no-op and must NOT write the redundant file.
     a = _make_agent(tmp_path, "mortal.html")
     a._goal = "mortal kombat goal"
     a._messages = [
@@ -62,10 +67,5 @@ def test_conversation_dump_header_contains_artifact_identity(tmp_path: Path) -> 
     ]
     a._dump_conversation()
 
-    text = a.conversation_path.read_text(encoding="utf-8")
-    assert f"_session: {a._session_id}_" in text
-    assert f"_artifact: {a._artifact_id}_" in text
-    assert "_goal: mortal kombat goal_" in text
-    assert f"_trace: {a.trace_path}_" in text
-    assert f"_game: {a.out_path}_" in text
+    assert not a.conversation_path.exists()
 

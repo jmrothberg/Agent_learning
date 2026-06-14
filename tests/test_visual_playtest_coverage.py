@@ -147,6 +147,34 @@ def test_known_assignments() -> None:
         )
 
 
+def test_newly_covered_mechanism_families_route() -> None:
+    """The mechanism families that previously hit the generic fallback (or
+    only a broad neighbour) must now resolve to their dedicated recipe, so
+    the VLM critic gets a precise checklist instead of the open-ended
+    fallback. match-3 intentionally stays on canvas-puzzle-grid (already a
+    strong fit; a competing recipe would risk strong-hook collisions)."""
+    mem = memory_mod.GameMemory(root=str(REPO_MEMORY))
+    expected = {
+        "tower defense place turrets to stop waves of creeps following a path": "canvas-tower-defense",
+        "rhythm music game hit notes in time as they reach the target line": "canvas-rhythm",
+        "idle incremental clicker game click to earn buy upgrades auto income": "canvas-idle-clicker",
+        "bullet hell dodge dense enemy bullet patterns shmup boss": "canvas-bullet-hell",
+        "typing game type the falling words before they reach the bottom": "canvas-word-typing",
+        "pinball flippers launch ball bumpers ramps physics gravity score": "canvas-pinball",
+        "stealth game sneak past guards with vision cones avoid detection": "canvas-stealth",
+        "roguelike procedural dungeon turn-based permadeath loot levels": "canvas-roguelike",
+        "stacking physics tower stack balance dont topple": "canvas-stacking-physics",
+        "match three puzzle swap adjacent gems to clear lines and cascade combos": "canvas-puzzle-grid",
+    }
+    for goal, expected_id in expected.items():
+        r, diag = mem.find_visual_playtest_for(goal=goal)
+        assert r is not None, f"{goal!r} hit fallback"
+        assert r.id == expected_id, (
+            f"{goal!r} matched {r.id!r}, expected {expected_id!r}; "
+            f"top: {diag['top_candidates']}"
+        )
+
+
 def test_library_has_at_least_one_recipe_per_mechanism_family() -> None:
     """Pin that the library covers the major mechanism families
     surfaced by the 25-archetype audit, so future trimming doesn't
@@ -173,6 +201,17 @@ def test_library_has_at_least_one_recipe_per_mechanism_family() -> None:
         "canvas-overworld-rpg",
         "canvas-city-builder",
         "canvas-space-trading",
+        # 2026-06-13 deepening: dedicated recipes for families that
+        # previously hit the generic fallback or only a broad neighbour.
+        "canvas-tower-defense",
+        "canvas-rhythm",
+        "canvas-idle-clicker",
+        "canvas-bullet-hell",
+        "canvas-word-typing",
+        "canvas-pinball",
+        "canvas-stealth",
+        "canvas-roguelike",
+        "canvas-stacking-physics",
         "generic-canvas-game-baseline",
     }
     missing = required - ids
