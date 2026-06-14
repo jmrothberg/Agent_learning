@@ -202,8 +202,10 @@ looking (first match wins):
 2. else the **main model**, if it is a VLM;
 3. else skip (a blind model never pretends to see).
 
-It also pulls a mechanism checklist from `memory/visual_playtests.jsonl` when one matches, and skips
-when memory headroom is tight (a vision model + a very large coder can exhaust RAM).
+There is **one** structured critic path: it pulls a mechanism checklist from
+`memory/visual_playtests.jsonl` when one matches (else an open-ended look). When no separate critic
+is staged, the coder reviews its own screenshot — no second model is loaded. Staging `--role critic`
+only changes **which** model looks, not the path (the old lightweight open-ended judge is retired).
 
 For a full "is it good?" answer, run **both**.
 

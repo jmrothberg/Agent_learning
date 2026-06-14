@@ -30,7 +30,25 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-__all__ = ["VisionVerdict", "judge_visual_progress", "is_enabled"]
+__all__ = [
+    "VisionVerdict", "judge_visual_progress", "is_enabled", "DEFECT_CUES",
+    "run_local_vlm_prompt",
+]
+
+
+# Phrase-level cues that mark a sentence as naming a concrete VISUAL
+# defect (vs pure screenshot narration). Used by `_parse` to recover the
+# model's real finding when it ignores the strict MISSING: format, and
+# imported by agent.py so a defect sentence is never dropped as
+# "non-actionable". Genre-free — describes failure shape, not subject.
+# Motivating trace: dragon's-lair 2026-06-14 — the VLM said "the text
+# 'MISSING hero_idle' ... indicates a missing asset" but the last-line
+# fallback grabbed a useless touch-controls fragment instead.
+DEFECT_CUES: tuple[str, ...] = (
+    "missing", "placeholder", "not visible", "not loaded", "isn't loaded",
+    "blank", "empty", "error", "colored box", "colored rectangle",
+    "magenta", "cut off", "clipped", "overlap", "off-screen", "off screen",
+)
 
 
 # Claude Sonnet 4.6 — current default vision model. Cheap, fast,
@@ -88,6 +106,33 @@ def _judge_prompt(goal: str, has_prev: bool) -> str:
         "thing still visibly missing or wrong, OR 'nothing obvious' "
         "if the game looks like the goal>\n"
     )
+
+
+def _first_defect_sentence(text: str) -> str:
+    """Return the first sentence naming a concrete visual defect, or ''.
+
+    Splits the reply into sentences, strips leading markdown
+    (`*`/`-`/`#`/`**`), and returns the first one whose lowercase
+    contains a `DEFECT_CUES` phrase. Skips the progress-verdict line.
+    """
+    if not text:
+        return ""
+    # Split on newlines AND sentence terminators so a multi-sentence
+    # bullet still yields the single defect sentence.
+    raw_parts = re.split(r"(?<=[.!?])\s+|\n+", text)
+    for part in raw_parts:
+        s = part.strip()
+        # Strip leading list markers and inline bold/heading markers.
+        s = re.sub(r"^\s*(?:[-*#]+|\d+[.)])\s*", "", s)
+        s = s.replace("**", "").strip()
+        if not s:
+            continue
+        low = s.lower()
+        if re.match(r"^\s*progress\s*:", low):
+            continue
+        if any(cue in low for cue in DEFECT_CUES):
+            return s
+    return ""
 
 
 def _parse(raw: str) -> tuple[bool | None, str]:
@@ -159,20 +204,27 @@ def _parse(raw: str) -> tuple[bool | None, str]:
     if m:
         note = m.group(1).strip()
     else:
-        # Fallback: take the last non-empty line. Local VLMs often
-        # bury the actionable hint at the end of free prose.
-        for line in reversed(text.splitlines()):
-            stripped = line.strip()
-            if not stripped:
-                continue
-            # Skip lines that ARE the progress verdict itself.
-            if re.match(r"^\s*(yes|no|unclear|true|false)\b",
-                        stripped, re.IGNORECASE):
-                continue
-            if re.match(r"^\s*PROGRESS\s*:", stripped, re.IGNORECASE):
-                continue
-            note = stripped
-            break
+        # Defect-cue scan: prefer a sentence that names a concrete
+        # visual defect over the trailing line. Local VLMs (esp.
+        # reasoning models) bury the real finding mid-prose and trail
+        # off with UI narration — the last-line fallback then grabs
+        # noise. See DEFECT_CUES + the 2026-06-14 dragon's-lair trace.
+        note = _first_defect_sentence(text)
+        if not note:
+            # Fallback: take the last non-empty line. Local VLMs often
+            # bury the actionable hint at the end of free prose.
+            for line in reversed(text.splitlines()):
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                # Skip lines that ARE the progress verdict itself.
+                if re.match(r"^\s*(yes|no|unclear|true|false)\b",
+                            stripped, re.IGNORECASE):
+                    continue
+                if re.match(r"^\s*PROGRESS\s*:", stripped, re.IGNORECASE):
+                    continue
+                note = stripped
+                break
 
     # Collapse whitespace and drop the literal "nothing obvious"
     # sentinel — the agent loop treats that as "no coaching needed".
@@ -431,6 +483,84 @@ async def _mlx_vlm_judge(
             previous_png=previous_png, model_path=model_path,
         ),
     )
+
+
+def _mlx_vlm_prompt_sync(
+    *, prompt: str, images: list[bytes], model_path: str,
+    max_tokens: int = 512,
+) -> str:
+    """Blocking — run the local MLX VLM with a CALLER-SUPPLIED prompt and
+    one or more PNG images. Returns the raw model text.
+
+    Shares the `_MLX_VLM_CACHE` load path with the progress judge so we
+    never load a second copy of the weights. Used for the structured
+    `/vlm-critique` checklist when no dedicated critic slot exists (the
+    coder is a VLM but multiplexes one model).
+    """
+    import tempfile
+    from pathlib import Path
+    from mlx_vlm import generate as _vlm_generate, load as _vlm_load  # type: ignore
+    from mlx_vlm.prompt_utils import apply_chat_template as _vlm_template  # type: ignore
+    from mlx_vlm.utils import load_config as _vlm_load_config  # type: ignore
+
+    cached = _MLX_VLM_CACHE.get(model_path)
+    if cached is None:
+        model_obj, processor = _vlm_load(model_path)
+        config = _vlm_load_config(model_path)
+        _MLX_VLM_CACHE[model_path] = (model_obj, processor, config)
+    else:
+        model_obj, processor, config = cached
+
+    image_paths: list[str] = []
+    tmp_dir = tempfile.mkdtemp(prefix="vlm_critique_")
+    try:
+        for i, png in enumerate(images or []):
+            p = Path(tmp_dir) / f"img_{i}.png"
+            p.write_bytes(png)
+            image_paths.append(str(p))
+        if not image_paths:
+            return ""
+        templated = _vlm_template(
+            processor, config, prompt, num_images=len(image_paths),
+        )
+        result = _vlm_generate(
+            model_obj, processor, templated,
+            image=image_paths if len(image_paths) > 1 else image_paths[0],
+            max_tokens=max_tokens,
+            temperature=0.0,
+            verbose=False,
+        )
+        return (getattr(result, "text", None) or str(result) or "").strip()
+    finally:
+        try:
+            for p in image_paths:
+                try:
+                    Path(p).unlink()
+                except Exception:
+                    pass
+            Path(tmp_dir).rmdir()
+        except Exception:
+            pass
+
+
+async def run_local_vlm_prompt(
+    *, prompt: str, images: list[bytes], model_path: str,
+    max_tokens: int = 512,
+) -> str | None:
+    """Async wrapper around `_mlx_vlm_prompt_sync`. Returns None when
+    mlx_vlm is unavailable or the call fails (caller treats as no signal).
+    """
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(
+            None,
+            lambda: _mlx_vlm_prompt_sync(
+                prompt=prompt, images=images, model_path=model_path,
+                max_tokens=max_tokens,
+            ),
+        )
+    except Exception:
+        return None
 
 
 def _looks_like_local_mlx(model: str) -> bool:

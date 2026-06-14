@@ -248,3 +248,58 @@ def test_procedural_regression_reports_likely_source_sites():
     assert "Likely source site(s)" in src
     assert "function drawbg" in src.lower()
 
+
+# ----------------------------------------------------------------------
+# Timing verification (QTE timing via memory, 2026-06-14).
+# An input pressed OUTSIDE its window must not score as a hit — the
+# "react at the right moment" guarantee, encoded as data not code.
+# ----------------------------------------------------------------------
+
+
+def test_qte_recipe_has_window_gating_probe():
+    """canvas-cutscene-qte must carry the deterministic out-of-window
+    rejection probe, reading the windowOpen/expectKey/result contract."""
+    visual = _jsonl_record(
+        "memory/visual_playtests.jsonl", "id", "canvas-cutscene-qte"
+    )
+    probes = visual["recipe"].get("auto_probes") or []
+    gate = [p for p in probes if p.get("name") == "auto_qte_input_gated_by_window"]
+    assert gate, "missing auto_qte_input_gated_by_window probe"
+    expr = gate[0]["expr"]
+    for field in ("expectKey", "windowOpen", "result", "sceneEnteredAt"):
+        assert field in expr, f"probe expr missing {field}"
+    # It must dispatch the expected key and only fail on a closed-window hit.
+    assert "KeyboardEvent" in expr
+    assert "succ" in expr
+
+
+def test_qte_gating_probe_is_injected_for_dragons_lair_goal():
+    """The matcher resolves a QTE goal to canvas-cutscene-qte and the
+    gating probe is present so the harness will run it."""
+    mem = GameMemory(root=str(ROOT / "memory"))
+    recipe, _diag = mem.find_visual_playtest_for(
+        goal="dragons lair laserdisc quick-time reaction cutscene duck jump sword"
+    )
+    assert recipe is not None
+    assert recipe.id == "canvas-cutscene-qte"
+    names = [p.get("name") for p in (recipe.recipe.get("auto_probes") or [])]
+    assert "auto_qte_input_gated_by_window" in names
+
+
+def test_qte_playbook_states_verification_contract():
+    qte = _jsonl_record("memory/playbook.jsonl", "id", "qte-timed-input-window")
+    assert "windowOpen" in qte["content"]
+    assert "result" in qte["content"]
+    # Generalized beyond Dragon's Lair to all timed-input mechanics.
+    for tag in ("rhythm", "parry", "timing", "reaction-window"):
+        assert tag in qte["tags"], f"missing tag {tag}"
+
+
+def test_qte_outline_probes_out_of_window_rejection():
+    outline = _jsonl_record(
+        "memory/implementation_outlines.jsonl", "id", "outline-cutscene-qte"
+    )
+    probes = " ".join(outline["recipe"].get("probes") or [])
+    assert "OUT of window" in probes
+    assert "no success" in probes
+

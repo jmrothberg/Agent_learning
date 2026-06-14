@@ -2640,13 +2640,17 @@ class GameAgent:
                 return self._backend3
             if getattr(self, "_model2_role", None) == "critic" and getattr(self, "_backend2", None) is not None:
                 return self._backend2
-            # Single-LLM /allroles path only: run the critic on slot 1 when
-            # the user explicitly bundled every role onto one LLM. Otherwise
-            # return None so the iter loop uses the local MLX-VLM vision-judge
-            # fallback — avoids feeding screenshots into a huge resident coder.
-            if (
-                getattr(self, "_use_vlm_critique", False)
-                and getattr(self, "_all_roles_enabled", False)
+            # Unified single critic (2026-06-14): there is ONE structured
+            # visual-critic path, gated only by /vlm-critique. When no separate
+            # critic model is staged, the CODER itself reviews its own
+            # screenshot — provided it can see (it's a VLM). /allroles also
+            # routes here (coder slot). The old lightweight open-ended
+            # vision-judge fallback is retired. Returns None only when the
+            # coder is text-only AND no critic is staged — then vision is
+            # impossible and the deterministic probes carry verification.
+            if getattr(self, "_use_vlm_critique", False) and (
+                getattr(self, "_all_roles_enabled", False)
+                or getattr(self, "_is_vlm", False)
             ):
                 return self._backend
             return None
@@ -7615,6 +7619,40 @@ class GameAgent:
                 "total_probes": len(self._probes or []),
             })
 
+    def _maybe_inject_asset_miss_probe(self) -> None:
+        """Inject a deterministic probe that fails when the game draws a
+        `MISSING <key>` placeholder for a generated asset.
+
+        The recommended `sprite()` helper records unresolved keys to
+        `window.__assetMisses` (see assets.py). A non-empty map means the
+        code asked for an asset that didn't resolve (key drift / loader
+        not awaited) and drew a loud placeholder instead of the art —
+        exactly the bug the user had to report manually in the
+        dragon's-lair 2026-06-14 trace.
+
+        Gated on `self._session_assets`: only games that generated assets
+        can miss one. Conservative: passes (true) when `__assetMisses` is
+        undefined (helper not used, or nothing drawn yet).
+        """
+        if not getattr(self, "_session_assets", None):
+            return
+        name = "auto_no_missing_asset_placeholders"
+        existing_names = {(p.get("name") or "") for p in (self._probes or [])}
+        if name in existing_names:
+            return
+        expr = (
+            "(()=>{const m=window.__assetMisses;"
+            "return !m||Object.keys(m).length===0;})()"
+        )
+        if self._probes is None:
+            self._probes = []
+        self._probes.append({"name": name, "expr": expr})
+        self._trace({
+            "kind": "asset_miss_probe_injected",
+            "name": name,
+            "total_probes": len(self._probes or []),
+        })
+
     def _animation_expected(self) -> bool:
         """True when the goal/session implies animated character motion.
 
@@ -9234,6 +9272,76 @@ class GameAgent:
             f"{self._autonomous_playtest_cycle})",
         ))
 
+    async def _run_structured_local_vlm_critique(
+        self, current_png: bytes, iteration: int,
+    ) -> bool:
+        """Run the matched visual-playtest checklist through the local VLM.
+
+        Used when `/vlm-critique` is ON but there's no dedicated critic
+        slot (the coder is a VLM that multiplexes one model). Reuses the
+        structured prompt/parse/format pipeline that the out-of-band
+        critic uses, so the model answers concrete yes/no questions
+        (e.g. "is the hero a real sprite, not a placeholder box?")
+        instead of the open-ended progress judge that lost the
+        "MISSING hero_idle" finding in the 2026-06-14 dragon's-lair run.
+
+        Returns True when it handled the critique (queued coaching OR
+        confirmed all-pass), False to let the caller fall through to the
+        open-ended progress judge.
+        """
+        recipe_id = getattr(self, "_active_visual_playtest_recipe_id", None)
+        if not recipe_id:
+            return False
+        try:
+            recipe, _diag = self._memory.find_visual_playtest_for(
+                goal=self._goal or "",
+                plan_text=self._criteria or "",
+                asset_names=list(self._session_assets.keys()),
+            )
+        except Exception:
+            recipe = None
+        if recipe is None or recipe.id != recipe_id:
+            return False
+        try:
+            from vision_judge import run_local_vlm_prompt
+            prompt = self._build_visual_playtest_prompt(
+                recipe, before_png=None, action_png=None,
+            )
+            raw = await run_local_vlm_prompt(
+                prompt=prompt,
+                images=[current_png],
+                model_path=self._local_vlm_path,
+            )
+        except Exception as exc:
+            self._trace({
+                "kind": "structured_critic_via_local_vlm_error",
+                "iteration": iteration,
+                "error": str(exc)[:240],
+            })
+            return False
+        if not raw:
+            return False
+        parsed = self._parse_visual_playtest_response(raw, recipe)
+        critique = self._format_visual_playtest_critique(parsed, recipe)
+        self._trace({
+            "kind": "structured_critic_via_local_vlm",
+            "iteration": iteration,
+            "recipe_id": recipe.id,
+            "parse_rate": parsed.get("parse_rate"),
+            "had_findings": bool(critique),
+        })
+        if critique:
+            queued = self._queue_visual_critic_coaching(
+                critique.strip(), iteration=iteration, vc_role="critic",
+            )
+            if queued:
+                self._record(AgentEvent(
+                    "info",
+                    f"[magenta]vlm-critique[/magenta] (iter {iteration}): "
+                    f"{critique.strip()}",
+                ))
+        return True
+
     async def _run_vision_judge(self, current_png: bytes, iteration: int) -> None:
         """Ask a vision model whether this iter made visible progress
         toward the goal, and queue the verdict for the next user turn.
@@ -9281,6 +9389,20 @@ class GameAgent:
                 self._trace({"kind": "vision_judge_local_vlm", "path": resolved})
         if not self._local_vlm_path:
             return
+        # Structured-checklist path: when a visual recipe matched this
+        # session, run its yes/no checklist through the local VLM instead
+        # of the open-ended progress judge. The checklist asks concrete
+        # questions ("is the character a real sprite, not a placeholder
+        # box?") that the open-ended judge missed in the dragon's-lair
+        # 2026-06-14 trace. Falls through to the progress judge when no
+        # recipe matched or the structured call produced nothing.
+        if getattr(self, "_active_visual_playtest_recipe_id", None):
+            handled = await self._run_structured_local_vlm_critique(
+                current_png, iteration,
+            )
+            self._prev_judge_png = current_png
+            if handled:
+                return
         prev_png = self._prev_judge_png
         verdict = await judge_visual_progress(
             goal=self._goal,
@@ -11017,10 +11139,18 @@ class GameAgent:
             return ""
         # Relevance gate: keep only notes with at least one actionable
         # token. Generic list, not goal-derived. See class docstring
-        # for `_VISION_NOTE_ACTIONABLE_TOKENS`.
+        # for `_VISION_NOTE_ACTIONABLE_TOKENS`. A defect-cue phrase
+        # (e.g. "colored box", "magenta", "clipped") also qualifies — it
+        # names a concrete visual defect even without a change verb, and
+        # is the same cue set the parser uses to recover the finding.
         low_words = {w.lower() for w in words}
         if not (cls._VISION_NOTE_ACTIONABLE_TOKENS & low_words):
-            return ""
+            try:
+                from vision_judge import DEFECT_CUES
+                if not any(cue in low for cue in DEFECT_CUES):
+                    return ""
+            except Exception:
+                return ""
         return text
 
     @staticmethod
@@ -13909,6 +14039,10 @@ class GameAgent:
             # kombat 2026-05-24 had no facing assertion), the injected
             # probe catches it. See VisualPlaytestRecipe.auto_probes.
             self._maybe_inject_visual_playtest_auto_probes()
+            # Deterministic asset-miss probe: fails any iter where the
+            # game draws a MISSING <key> placeholder for a generated asset
+            # (key drift / loader not awaited). No VLM needed.
+            self._maybe_inject_asset_miss_probe()
 
             q = self._extract_question(plan_reply)
             if q is not None:
@@ -16300,10 +16434,12 @@ class GameAgent:
                             f"[yellow]warning[/yellow] (iter {iteration}): "
                             "input changed buffers but no player coordinates"
                         ))
-            # Per-iter screenshot review — one toggle (/vlm-critique). When ON:
-            # dedicated critic slot → structured visual critic; else local MLX-VLM
-            # vision judge; /allroles routes critique through the coder slot.
-            # Cloud review remains explicit via /check in chat.py.
+            # Per-iter screenshot review — one toggle (/vlm-critique), ONE
+            # structured critic path. get_backend('critic') resolves the model:
+            # a staged critic slot (model2/3), else the coder itself when it can
+            # see (VLM), else /allroles coder slot. None → no VLM available, skip
+            # (deterministic probes carry it). Cloud review stays explicit via
+            # /check in chat.py.
             if after_bytes is not None and getattr(self, "_use_vlm_critique", False):
                 critic_backend = self.get_backend("critic")
                 # Fast-path: if the user has already requested ship (Ctrl+D),
@@ -16407,13 +16543,18 @@ class GameAgent:
                                 "error": str(exc),
                             })
                 else:
-                    try:
-                        await self._run_vision_judge(after_bytes, iteration)
-                    except Exception as exc:
+                    # Unified critic (2026-06-14): the open-ended vision judge
+                    # is retired — there is ONE structured visual-critic path.
+                    # A None critic_backend here means either the user forced
+                    # ship (already traced above) or no VLM is available at all
+                    # (text-only coder with no staged critic). In the latter
+                    # case skip vision and let the deterministic probes carry
+                    # verification.
+                    if not self._user_force_done:
                         self._trace({
-                            "kind": "vision_judge_error",
+                            "kind": "visual_critic_skipped",
                             "iteration": iteration,
-                            "error": str(exc),
+                            "reason": "no_vlm_backend_available",
                         })
             try:
                 async for _ob_ev in self._run_opening_book_sidecars(report, iteration):
