@@ -2492,7 +2492,7 @@ class CodingBoxApp(App):
             ap_names = list(
                 getattr(agent, "_active_visual_playtest_auto_probes", []) or []
             )
-            row = f"  visual playtest: [b]{vp_id}[/b]"
+            row = f"  vlm-critique checklist: [b]{vp_id}[/b]"
             if ap_names:
                 row += (
                     f"  [dim]+ {len(ap_names)} auto-probe(s): "

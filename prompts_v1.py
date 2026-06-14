@@ -2187,7 +2187,7 @@ def polish_instruction(
     crit = ""
     if critic_note:
         crit = (
-            "VISUAL CRITIC's latest finding (address it if it fits this "
+            "/vlm-critique finding (address it if it fits this "
             f"turn's ONE improvement): {critic_note}\n\n"
         )
     comp = f"{component_block}\n\n" if component_block else ""

@@ -200,7 +200,7 @@ def test_format_failures_listed_with_remarks() -> None:
     }
     out = GameAgent._format_visual_playtest_critique(parsed, _stub_recipe())
     assert out is not None
-    assert "[VISUAL PLAYTEST — test-recipe]" in out
+    assert "[VLM-CRITIQUE — test-recipe]" in out
     assert "2 of 4 check(s) failed" in out
     assert "Q2" in out
     assert "player clipped at right edge" in out
@@ -234,6 +234,45 @@ def test_format_no_answers_returns_none() -> None:
     parsed = {"answers": {}, "parse_rate": 0.0, "n_questions": 4}
     out = GameAgent._format_visual_playtest_critique(parsed, _stub_recipe())
     assert out is None
+
+
+def test_format_failures_include_playbook_refs() -> None:
+    recipe = memory_mod.VisualPlaytestRecipe(
+        id="facing-recipe",
+        kind="visual_playtest",
+        content="test",
+        tags=[],
+        source_tier="root",
+        verified=True,
+        helpful=0,
+        harmful=0,
+        recipe={
+            "checklist": ["A?", "B?", "C?"],
+            "playbook_refs": {"2": ["directional-sprite-facing"]},
+            "fix_hints": {"2": "flip the sprite toward the opponent"},
+        },
+        trace_ids=[],
+        pass_count=0,
+        false_positive_count=0,
+        last_verified_at="",
+    )
+    parsed = {
+        "answers": {1: ("yes", ""), 2: ("no", "faces away"), 3: ("yes", "")},
+        "parse_rate": 1.0,
+        "n_questions": 3,
+    }
+    out = GameAgent._format_visual_playtest_critique(parsed, recipe)
+    assert out is not None
+    assert "[VLM-CRITIQUE — facing-recipe]" in out
+    assert "Playbook: directional-sprite-facing" in out
+    assert "lookup_bullet" in out
+
+
+def test_queue_visual_critic_coaching_uses_vlm_critique_prefix(tmp_path: Path) -> None:
+    a = _make_agent(tmp_path)
+    assert a._queue_visual_critic_coaching("fighters face away", iteration=1) is True
+    assert a._pending_coaching
+    assert a._pending_coaching[0].startswith("[VLM-CRITIQUE]")
 
 
 # ----------------------------------------------------------------------

@@ -98,7 +98,9 @@ from memory import (
     render_components_block,
     render_opening_book_block,
     render_playbook_block,
+    render_vlm_checklist_section,
     signature_for_report,
+    VLM_CHECKLIST_SKIP_IDS,
 )
 from ollama_io import Candidate, StreamResult
 from patches import FormatRejection, apply_patches, classify_format_failure, extract_patches
@@ -2720,7 +2722,7 @@ class GameAgent:
         Returns True when the note was queued, False when suppressed as
         a repeat of one we already queued in the last 3 critic turns.
         """
-        prefix = "VISUAL CRITIC (looked at the screenshot of your last iteration): "
+        prefix = "[VLM-CRITIQUE] "
         full = prefix + cleaned
         # Polish phase (item 2): remember the latest finding regardless of
         # dedup so polish_instruction can surface it.
@@ -3642,6 +3644,27 @@ class GameAgent:
             animation_audits = self._memory.retrieve_animation_audits(
                 goal, mod_toks, k=2 if stage == "plan" else 1,
             )
+            vlm_checklist: str | None = None
+            if stage == "plan":
+                try:
+                    vp_recipe, vp_diag = self._memory.find_visual_playtest_for(
+                        goal=goal or "",
+                        plan_text=self._criteria or "",
+                        asset_names=list(self._session_assets.keys()),
+                    )
+                except Exception:
+                    vp_recipe, vp_diag = None, {}
+                if (
+                    vp_recipe is not None
+                    and vp_recipe.id not in VLM_CHECKLIST_SKIP_IDS
+                ):
+                    vlm_checklist = render_vlm_checklist_section(vp_recipe)
+                    if vlm_checklist:
+                        self._trace({
+                            "kind": "vlm_checklist_injected",
+                            "recipe_id": vp_recipe.id,
+                            "top_candidates": (vp_diag or {}).get("top_candidates"),
+                        })
             # Plan stage deep-renders the ONE matched outline's recipe
             # (state/order/traps/tuning/probes) under a 3600-char cap —
             # ~+600 tokens in the smallest prompt of the session. Code
@@ -3650,6 +3673,7 @@ class GameAgent:
                 outline, playtests, asset_audits, animation_audits,
                 char_budget=3600 if stage == "plan" else 1400,
                 deep=(stage == "plan"),
+                vlm_checklist=vlm_checklist,
             )
 
             def _row(kind: str, hit: OpeningBookHit) -> dict:
@@ -7924,12 +7948,28 @@ class GameAgent:
         if not failures and not unclears:
             return None  # all-pass; caller treats as "OK"
         head = (
-            f"[VISUAL PLAYTEST — {recipe.id}] "
+            f"[VLM-CRITIQUE — {recipe.id}] "
             f"{len(failures)} of {n_q} check(s) failed"
             + (f" + {len(unclears)} unclear" if unclears else "")
             + ":"
         )
         body = "\n".join(failures + unclears)
+        # Playbook cross-links for failed checklist items.
+        playbook_refs = recipe.recipe.get("playbook_refs") or {}
+        ref_ids: list[str] = []
+        if isinstance(playbook_refs, dict):
+            for idx in failed_idxs:
+                for bid in playbook_refs.get(str(idx)) or playbook_refs.get(idx) or []:
+                    s = str(bid).strip()
+                    if s and s not in ref_ids:
+                        ref_ids.append(s)
+        playbook_tail = ""
+        if ref_ids:
+            playbook_tail = (
+                "\n\nPlaybook: "
+                + ", ".join(ref_ids)
+                + " (use <lookup_bullet>id</lookup_bullet> to fetch bodies)"
+            )
         # Fix-hint. Prefer a PER-QUESTION map (`fix_hints`: {q_index: hint}) so
         # we surface ONLY the advice for checks that actually FAILED. The old
         # behavior dumped the whole blob `fix_hint` on any failure — which made
@@ -7946,13 +7986,17 @@ class GameAgent:
                     if h and h not in hints:
                         hints.append(h)
                 if hints:
-                    return head + "\n" + body + "\n\nMinimal fix shape:\n" + "\n".join(
-                        f"  - (Q{idx}) {h}" for idx, h in zip(failed_idxs, hints)
+                    return (
+                        head + "\n" + body + "\n\nMinimal fix shape:\n"
+                        + "\n".join(
+                            f"  - (Q{idx}) {h}" for idx, h in zip(failed_idxs, hints)
+                        )
+                        + playbook_tail
                     )
             fix_hint = (recipe.recipe.get("fix_hint") or "").strip()
             if fix_hint:
-                return head + "\n" + body + "\n\nMinimal fix shape: " + fix_hint
-        return head + "\n" + body
+                return head + "\n" + body + "\n\nMinimal fix shape: " + fix_hint + playbook_tail
+        return head + "\n" + body + playbook_tail
 
     async def _audit_sprite_orientation(
         self,

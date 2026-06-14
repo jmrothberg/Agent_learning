@@ -96,7 +96,7 @@ def test_visual_playtest_recipe_shows_id() -> None:
         _active_visual_playtest_recipe_id="canvas-two-actors-facing",
     )
     out = app._render_memory_block()
-    assert "visual playtest:" in out
+    assert "vlm-critique checklist:" in out
     assert "canvas-two-actors-facing" in out
 
 
@@ -187,6 +187,6 @@ def test_full_memory_block_layout() -> None:
     assert out.count("Memory in use") == 1
     # Order: skeleton → visual playtest → opening book.
     sk = out.index("skeleton:")
-    vp = out.index("visual playtest:")
+    vp = out.index("vlm-critique checklist:")
     ob = out.index("opening book")
     assert sk < vp < ob

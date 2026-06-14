@@ -248,6 +248,7 @@ _HELP_TOPICS: dict[str, list[str]] = {
     "visual-playtests": [
         "[bold cyan]Visual playtests (memory/visual_playtests.jsonl)[/bold cyan]",
         "",
+        "[b]/vlm-critique[/b] reads these mechanism-keyed checklists each iter (when ON).",
         "Mechanism-keyed [b]visual[/b] checklists for [b]/vlm-critique[/b] and structured critic.",
         "Matcher uses goal + plan + asset names (e.g. maze wording → grid-navigation recipe).",
         "",

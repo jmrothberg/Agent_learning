@@ -3146,6 +3146,36 @@ def _render_outline_recipe(recipe: dict) -> str:
     return "\n".join(lines)
 
 
+# Generic visual recipes — too broad to inject as plan-time checklists.
+VLM_CHECKLIST_SKIP_IDS = frozenset({
+    "canvas-controllable-player",
+    "generic-canvas-game-baseline",
+})
+
+
+def render_vlm_checklist_section(
+    recipe: VisualPlaytestRecipe,
+    *,
+    max_items: int = 5,
+) -> str:
+    """Compact per-mechanism vision checklist for plan-stage opening book.
+
+    Surfaces what `/vlm-critique` will judge so the coder can build
+  correctly on iter 1 even when vision review is still off.
+    """
+    rec = recipe.recipe if isinstance(recipe.recipe, dict) else {}
+    checklist = list(rec.get("checklist") or [])[:max_items]
+    if not checklist:
+        return ""
+    lines = [
+        f"VLM_CHECKLIST [{recipe.id}] (checked when /vlm-critique is on):",
+    ]
+    for i, q in enumerate(checklist, start=1):
+        q_short = q if len(q) <= 120 else q[:117] + "..."
+        lines.append(f"- Q{i}: {q_short}")
+    return "\n".join(lines)
+
+
 def render_opening_book_block(
     outline: OpeningBookHit | None,
     playtests: list[OpeningBookHit],
@@ -3154,6 +3184,7 @@ def render_opening_book_block(
     *,
     char_budget: int = 2600,
     deep: bool = False,
+    vlm_checklist: str | None = None,
 ) -> str:
     """Compact trusted/lower-confidence recipes for prompts.
 
@@ -3192,6 +3223,8 @@ def render_opening_book_block(
     ):
         if hits:
             sections.append(_line(label, hits))
+    if vlm_checklist:
+        sections.append(vlm_checklist)
     if not sections:
         return ""
     body = "\n\n".join(sections)
