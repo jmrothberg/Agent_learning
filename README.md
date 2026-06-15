@@ -65,6 +65,18 @@ MLX_MODEL=~/MLX_Models/Qwen3.6-27B-mxfp8 .venv/bin/python coder.py "snake"   # p
 .venv/bin/python coder.py "snake" --backend ollama                           # force Ollama
 ```
 
+**MLX upgrades — MiniMax-M3 (re-copy after every `pip install -U mlx-lm`):** PyPI `mlx-lm` ships
+`minimax` (M2) but not `minimax_m3`. The pipenetwork MiniMax-M3-MLX weights bundle
+`minimax_m3.py`; after you upgrade mlx-lm (or run `./scripts/install_mlx_v4_fix.sh`, which
+reinstalls mlx-lm), copy it back into the venv or load fails instantly with
+`Model type minimax_m3 not supported`:
+```bash
+cp ~/MLX_Models/MiniMax-M3-MLX-8bit/minimax_m3.py \
+   .venv/lib/python3.12/site-packages/mlx_lm/models/minimax_m3.py
+```
+(Use the model dir you actually downloaded — path or HF id — if not under `~/MLX_Models`.)
+Pick it in the TUI with `/list` then `/load` like any other MLX model.
+
 **Tests** (pure-function, no model/Chromium; ~1 min, 1377 passing):
 ```bash
 .venv/bin/python -m pytest tests/ -q
@@ -385,6 +397,7 @@ caches). `memory/*.jsonl` is hand-curated.
 
 - **Chromium won't launch:** `env -u PLAYWRIGHT_BROWSERS_PATH .venv/bin/python -m playwright install chromium`.
 - **MLX cold-load is slow (~30–60 s first request):** the 27B mxfp8 loads into VRAM in-process; preload with `ollama run --ctx-size N <model>` for the Ollama path.
+- **`Model type minimax_m3 not supported` after an mlx-lm upgrade:** re-copy `minimax_m3.py` from your MiniMax-M3-MLX model dir into `.venv/lib/python3.12/site-packages/mlx_lm/models/` (see **MLX upgrades — MiniMax-M3** above).
 - **"Feedback doesn't stick" / patches fail with SEARCH-not-found:** compaction shredded the file view — check `num_ctx` (default 100K) and the `structured_compaction` trace events.
 - **Game shows colored boxes instead of art:** sprite-key mismatch — the `sprite()` resolver and `ASSETS_LOADED_BUT_UNDRAWN` gate now catch it; re-run.
 - **Model loops/truncates on big builds:** expected for a 27B; the MLX sampler passes `top_p`/`top_k` (vendor coding preset) to avoid the degenerate line-repeat. Judge harness signals from the trace, not always a finished game.
