@@ -6016,6 +6016,66 @@ class GameAgent:
         if replaced:
             report["warnings"] = new_warns
 
+    def _apply_player_stuck_downgrade(self, report: dict[str, Any]) -> None:
+        """Demote PLAYER-STUCK to a non-gating advisory when corroborated.
+
+        The PLAYER-STUCK soft_warning (tools.py) is a STRUCTURAL proxy for "I
+        can see the player isn't moving" — but with `/vlm-critique` off (the
+        default) nothing visual corroborates it, so a genre where the player
+        legitimately does not free-roam (a laserdisc/cutscene QTE: input
+        ADVANCES scenes, it does not walk an entity around) trips it on every
+        iter and can never clear it. That is the unwinnable-loop shape (see
+        `_apply_dead_animation_check_to_report` / CLAUDE.md dead-sprite gate):
+        a correct build stays ok=False forever on one structural warning.
+
+        Trace pin phase-a-requirement-your-plann_20260615_121048: a correct
+        Dragon's-Lair QTE passed 10/10 model probes with 0 errors for 11 iters
+        but PLAYER-STUCK kept ok=False until the model corrupted the build.
+
+        Downgrade (move the warning from gating `soft_warnings` to advisory
+        `warnings`, then recompute ok) ONLY when one genre-free corroboration
+        holds, so a genuine "stuck in a wall" (Pac-Man) still hard-gates:
+          - the matched visual-playtest recipe declares still-frame
+            (`_active_visual_playtest_still_frame`) — a data-layer signal that
+            this game is cutscene/QTE-style with no free movement by design, OR
+          - a model-declared DYNAMIC probe passed this iter (reuse the
+            `_is_dynamic_probe` regex over report["probes"]) — behavioral proof
+            the controls drive intended state change even with no VLM watching.
+        """
+        if not report.get("player_stuck"):
+            return
+        sw = list(report.get("soft_warnings") or [])
+        stuck = [w for w in sw if isinstance(w, str) and w.startswith("PLAYER-STUCK")]
+        if not stuck:
+            return
+        still_frame = bool(getattr(self, "_active_visual_playtest_still_frame", False))
+        dynamic_probe_passed = any(
+            bool(p.get("ok")) and GameAgent._is_dynamic_probe(str(p.get("expr") or ""))
+            for p in (report.get("probes") or [])
+        )
+        if not (still_frame or dynamic_probe_passed):
+            return
+        # Keep every other soft_warning gating; only drop PLAYER-STUCK.
+        report["soft_warnings"] = [w for w in sw if w not in stuck]
+        warns = list(report.get("warnings") or [])
+        warns.append(
+            "PLAYER-STUCK (advisory — does not block shipping): a movement key "
+            "registered input but no POSITION field changed. Corroboration shows "
+            "this is not a stuck player — the controls drive intended state "
+            "changes (a passing dynamic probe and/or a still-frame/QTE game where "
+            "the player advances scenes rather than free-roaming). If you DID "
+            "intend a free-moving player, make at least one direction change its "
+            "x/y position; otherwise no change is needed."
+        )
+        report["warnings"] = warns
+        # ok recompute mirrors tools.py: (no errors) and (no soft_warnings).
+        report["ok"] = not (report.get("errors") or []) and not report["soft_warnings"]
+        self._trace({
+            "kind": "player_stuck_downgraded",
+            "still_frame": still_frame,
+            "dynamic_probe_passed": dynamic_probe_passed,
+        })
+
     @staticmethod
     def _probe_shape_key(p: dict[str, Any]) -> str:
         name = str(p.get("name") or "probe").strip().lower()
@@ -15950,6 +16010,7 @@ class GameAgent:
             self._apply_scoped_check_to_report(report)
             self._apply_dead_animation_check_to_report(report)
             self._apply_still_frame_frozen_downgrade(report)
+            self._apply_player_stuck_downgrade(report)
             # Advance the warnings-persistence counter ONCE per iter,
             # before any format_report_for_model rendering. Compaction
             # is then applied uniformly to the test event text and to

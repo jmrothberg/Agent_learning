@@ -75,7 +75,18 @@ def _is_position_leaf(path: str) -> bool:
     parts = [p for p in str(path or "").split(".") if p]
     if not parts:
         return False
-    return parts[-1].lower() in _POSITION_LEAF_NAMES
+    leaf = parts[-1]
+    if leaf.lower() in _POSITION_LEAF_NAMES:
+        return True
+    # camelCase coordinate compound: a lowercase letter immediately followed by
+    # a trailing single capital X/Y/Z (heroX, playerY, enemyZ) — the entity's
+    # own position field. Genre-free: matches the universal "<entity>X" naming,
+    # not all-lowercase words like `index`/`prefix`/`max` (those end in a
+    # lowercase letter, so they never match). Trace pin: a Dragon's-Lair QTE
+    # nudged state.heroX/heroY on arrows but heroX was not recognized as a
+    # position field, so a real player move read as "no position changed" and
+    # falsely tripped PLAYER-STUCK (phase-a-requirement-your-plann_20260615_121048).
+    return bool(re.search(r"[a-z][XYZ]$", leaf))
 
 
 # Keys that should MOVE a controllable player. If one of these registers input
@@ -4138,8 +4149,21 @@ class LiveBrowser:
         # Does the game even HAVE a spatial entity (position fields)? Only then
         # is "a movement key didn't change any position" meaningful — guards the
         # stuck-player check against menu/quiz games where arrows aren't motion.
+        # Exclude position leaves nested under an array index (e.g.
+        # `rooms.0.from.x`): those are static layout/config CONSTANTS, not a
+        # movable player's position, and they read as position only by name.
+        # Same parts[:-1]-digit convention `_input_evidence_is_plausible` uses
+        # to discount array-indexed leaves. Trace pin: a Dragon's-Lair QTE's
+        # `state.rooms[].from.x/to.y` hazard coords falsely satisfied this,
+        # making the harness think a movable player existed and tripping
+        # PLAYER-STUCK (phase-a-requirement-your-plann_20260615_121048).
+        def _is_movable_position_leaf(leaf: str) -> bool:
+            if not _is_position_leaf(leaf):
+                return False
+            parts = [p for p in str(leaf or "").split(".") if p]
+            return not any(p.isdigit() for p in parts[:-1])
         has_position_state = isinstance(ambient_gs_a, dict) and any(
-            _is_position_leaf(leaf) for leaf in ambient_gs_a
+            _is_movable_position_leaf(leaf) for leaf in ambient_gs_a
         )
 
         # ---- action-frame capture ----------------------------------------

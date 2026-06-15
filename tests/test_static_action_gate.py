@@ -149,6 +149,34 @@ def test_position_leaf_helper():
     assert not tools._is_position_leaf("")
 
 
+def test_position_leaf_recognizes_camelcase_compounds():
+    # camelCase coordinate fields (heroX/playerY/enemyZ) ARE position — trace
+    # phase-a-requirement-your-plann_20260615_121048: state.heroX/heroY moved on
+    # arrows but were not recognized, so a real move read as "no position".
+    assert tools._is_position_leaf("state.heroX")
+    assert tools._is_position_leaf("state.heroY")
+    assert tools._is_position_leaf("player.enemyZ")
+    assert tools._is_position_leaf("nextX")
+    # all-lowercase words that merely end in x/y/z must NOT match (no camelCase
+    # boundary) — guards against `index`/`prefix`/`max` false positives.
+    assert not tools._is_position_leaf("state.index")
+    assert not tools._is_position_leaf("state.prefix")
+    assert not tools._is_position_leaf("state.max")
+    # velocity-style lowercase deltas (dx/dy) are not position fields.
+    assert not tools._is_position_leaf("player.dx")
+
+
+def test_has_position_state_excludes_array_indexed_config():
+    # Static layout constants nested under an array index (rooms.0.from.x) must
+    # NOT make the harness think a movable player exists — trace pin: a QTE's
+    # state.rooms[].from.x falsely satisfied has_position_state and tripped
+    # PLAYER-STUCK. Source-pin the exclusion (the check runs in a browser).
+    src = _smoke_src()
+    assert "_is_movable_position_leaf" in src
+    assert "parts[:-1]" in src
+    assert "isdigit()" in src
+
+
 def test_movement_keys_are_arrows_and_wasd():
     for k in ("ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
               "KeyW", "KeyA", "KeyS", "KeyD"):
@@ -174,3 +202,114 @@ def test_load_and_test_gates_on_stuck_player():
     assert "PLAYER-STUCK" in src
     assert 'input_test.get("input_registered_without_move")' in src
     assert 'report["soft_warnings"].append' in src
+
+
+# ---- PLAYER-STUCK non-gating downgrade -------------------------------------
+# Trace phase-a-requirement-your-plann_20260615_121048: a correct Dragon's-Lair
+# QTE passed 10/10 model probes with 0 errors but PLAYER-STUCK kept ok=False for
+# 11 iters (no VLM to corroborate the structural proxy) until the build was
+# corrupted. _apply_player_stuck_downgrade demotes it to a non-gating advisory
+# when corroborated — but a genuine stuck player (no corroboration) still gates.
+
+from unittest.mock import MagicMock  # noqa: E402
+
+from agent import GameAgent  # noqa: E402
+
+
+def _make_agent(tmp_path) -> GameAgent:
+    out = tmp_path / "game.html"
+    out.write_text("<html></html>")
+    return GameAgent(
+        model="stub:1b",
+        out_path=out,
+        browser=MagicMock(),
+        max_iters=2,
+        memory_root=str(tmp_path / "memory"),
+    )
+
+
+def _stuck_report() -> dict:
+    return {
+        "ok": False,
+        "player_stuck": True,
+        "errors": [],
+        "soft_warnings": ["PLAYER-STUCK: a movement key registered input but ..."],
+        "warnings": [],
+        "probes": [],
+    }
+
+
+# A dynamic probe (dispatch + setTimeout delta) vs a structural one.
+_DYNAMIC_PROBE_EXPR = (
+    "(()=>{const s0=state.scene;window.dispatchEvent(new KeyboardEvent("
+    "'keydown',{code:'ArrowDown'}));return new Promise(r=>setTimeout("
+    "()=>r(state.scene>s0),300));})()"
+)
+_STRUCTURAL_PROBE_EXPR = "!!window.state"
+
+
+def test_player_stuck_stays_gating_without_corroboration(tmp_path):
+    a = _make_agent(tmp_path)
+    a._active_visual_playtest_still_frame = False
+    report = _stuck_report()
+    report["probes"] = [{"name": "state_exposed", "expr": _STRUCTURAL_PROBE_EXPR, "ok": True}]
+    a._apply_player_stuck_downgrade(report)
+    # genuine stuck player (Pac-Man in a wall) — PLAYER-STUCK must still hard-gate.
+    assert any(w.startswith("PLAYER-STUCK") for w in report["soft_warnings"])
+    assert report["ok"] is False
+
+
+def test_player_stuck_downgraded_when_still_frame(tmp_path):
+    a = _make_agent(tmp_path)
+    a._active_visual_playtest_still_frame = True
+    report = _stuck_report()
+    a._apply_player_stuck_downgrade(report)
+    # laserdisc/cutscene QTE: no free movement by design → advisory, not a gate.
+    assert report["soft_warnings"] == []
+    joined = "\n".join(report["warnings"])
+    assert "PLAYER-STUCK" in joined and "does not block shipping" in joined
+    assert report["ok"] is True
+
+
+def test_player_stuck_downgraded_when_dynamic_probe_passes(tmp_path):
+    a = _make_agent(tmp_path)
+    a._active_visual_playtest_still_frame = False
+    report = _stuck_report()
+    report["probes"] = [{"name": "input_advances_scene", "expr": _DYNAMIC_PROBE_EXPR, "ok": True}]
+    a._apply_player_stuck_downgrade(report)
+    # controls provably drive intended state change → advisory, not a gate.
+    assert report["soft_warnings"] == []
+    assert report["ok"] is True
+
+
+def test_player_stuck_not_downgraded_when_dynamic_probe_fails(tmp_path):
+    a = _make_agent(tmp_path)
+    a._active_visual_playtest_still_frame = False
+    report = _stuck_report()
+    # dynamic probe present but FAILED — no corroboration, stays gating.
+    report["probes"] = [{"name": "input_advances_scene", "expr": _DYNAMIC_PROBE_EXPR, "ok": False}]
+    a._apply_player_stuck_downgrade(report)
+    assert any(w.startswith("PLAYER-STUCK") for w in report["soft_warnings"])
+    assert report["ok"] is False
+
+
+def test_player_stuck_downgrade_preserves_other_soft_warnings(tmp_path):
+    a = _make_agent(tmp_path)
+    a._active_visual_playtest_still_frame = True
+    report = _stuck_report()
+    report["soft_warnings"].append("FROZEN-CANVAS: render loop drawing same frame")
+    a._apply_player_stuck_downgrade(report)
+    # only PLAYER-STUCK is dropped; the unrelated gating warning remains.
+    assert not any(w.startswith("PLAYER-STUCK") for w in report["soft_warnings"])
+    assert any(w.startswith("FROZEN-CANVAS") for w in report["soft_warnings"])
+    assert report["ok"] is False
+
+
+def test_player_stuck_downgrade_noop_when_not_flagged(tmp_path):
+    a = _make_agent(tmp_path)
+    a._active_visual_playtest_still_frame = True
+    report = {"ok": True, "errors": [], "soft_warnings": [], "warnings": [], "probes": []}
+    a._apply_player_stuck_downgrade(report)
+    assert report["ok"] is True
+    assert report["soft_warnings"] == []
+    assert report["warnings"] == []
