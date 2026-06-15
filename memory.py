@@ -153,15 +153,57 @@ _SKELETON_SPECIALIZED_STRICT: frozenset[str] = frozenset({
     "canvas_crawler_basic.html", "canvas_cards_basic.html",
     "canvas_rpg_basic.html",
 })
+# Skeleton retrieval sidecars (the goal-token strings used to Jaccard-match a
+# goal to a scaffold) are kept as DATA in memory/skeletons/sidecars.jsonl, not
+# as inline Python — game/genre title tokens (pacman, donkey kong, chess,
+# minecraft, ...) live in memory, not code (project rule "no hardcoded
+# genre/category lists"). The loader resolves the file relative to THIS module
+# so it works regardless of cwd; each *_SIDECAR constant below reads its goal
+# from that file. ensure() still writes a per-skeleton <name>.json from these.
+def _load_skeleton_sidecars() -> dict[str, str]:
+    path = Path(__file__).resolve().parent / "memory" / "skeletons" / "sidecars.jsonl"
+    out: dict[str, str] = {}
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                    name = str(rec.get("name") or "")
+                    goal = str(rec.get("goal") or "")
+                    if name and goal:
+                        out[name] = goal
+                except Exception:
+                    continue
+    except Exception:
+        return out
+    return out
+
+
+_SKELETON_SIDECARS: dict[str, str] = _load_skeleton_sidecars()
+
+
+def _skeleton_sidecar(name: str) -> str | None:
+    """Return the `{"goal": ...}` sidecar JSON string for a skeleton filename,
+    or None if the data file has no entry (skeleton then bootstraps without a
+    sidecar, exactly as a `None` sidecar did before)."""
+    goal = _SKELETON_SIDECARS.get(name)
+    if not goal:
+        return None
+    return json.dumps({"goal": goal}, ensure_ascii=False)
+
+
 CANVAS_SKELETON_V2_NAME = "canvas_basic_v2.html"
 # v2 sidecar: deliberately generic tokens so it wins as the FALLBACK when no
 # modality skeleton matches, NOT so it competes with modality scaffolds. 4/4
 # May 20-21 traces (chess, pac, doom, FPS) fell through to the bare v1 default
 # at score 0.0 — v2 pre-empts the focus-blur / dt-cap / restart-cleanup /
 # DPR / lazy-audio / HUD pointer-events failures those sessions repeatedly hit.
-CANVAS_BASIC_V2_SIDECAR = '{"goal": "canvas 2d generic action arcade default fallback"}'
+CANVAS_BASIC_V2_SIDECAR = _skeleton_sidecar(CANVAS_SKELETON_V2_NAME)
 CANVAS_3D_SKELETON_NAME = "canvas_3d_basic.html"
-CANVAS_3D_SKELETON_SIDECAR = '{"goal": "3D space vector WebGL three.js coordinate projection game first person perspective"}'
+CANVAS_3D_SKELETON_SIDECAR = _skeleton_sidecar(CANVAS_3D_SKELETON_NAME)
 
 CANVAS_GRID_SKELETON_NAME = "canvas_grid_basic.html"
 # Grid sidecar — pac/man/ghost/ghosts added 2026-05-21 after May 20-21
@@ -169,43 +211,43 @@ CANVAS_GRID_SKELETON_NAME = "canvas_grid_basic.html"
 # goal "pac man with ghosts" tokenized to ["pac","man","ghosts"], none of
 # which matched the existing single-token "pacman". Splitting both spellings
 # in the sidecar covers either user phrasing without committing to a genre.
-CANVAS_GRID_SKELETON_SIDECAR = '{"goal": "grid continuous tile corridor snap slide sokoban pacman pac man ghost ghosts maze"}'
+CANVAS_GRID_SKELETON_SIDECAR = _skeleton_sidecar(CANVAS_GRID_SKELETON_NAME)
 
 CANVAS_PLATFORMER_SKELETON_NAME = "canvas_platformer_basic.html"
-CANVAS_PLATFORMER_SKELETON_SIDECAR = '{"goal": "platformer gravity jump climbing ladders oneway donkey kong lode runner"}'
+CANVAS_PLATFORMER_SKELETON_SIDECAR = _skeleton_sidecar(CANVAS_PLATFORMER_SKELETON_NAME)
 
 CANVAS_SCROLLING_SKELETON_NAME = "canvas_scrolling_basic.html"
-CANVAS_SCROLLING_SKELETON_SIDECAR = '{"goal": "scrolling camera viewport parallax offsets scroll horizontal defender scramble side scroller shooter"}'
+CANVAS_SCROLLING_SKELETON_SIDECAR = _skeleton_sidecar(CANVAS_SCROLLING_SKELETON_NAME)
 
 CANVAS_MODE7_SKELETON_NAME = "canvas_mode7_basic.html"
-CANVAS_MODE7_SKELETON_SIDECAR = '{"goal": "mode7 mode 7 perspective ground texture projection 3D rotating kart retro racer fzero f-zero"}'
+CANVAS_MODE7_SKELETON_SIDECAR = _skeleton_sidecar(CANVAS_MODE7_SKELETON_NAME)
 
 CANVAS_CRAWLER_SKELETON_NAME = "canvas_crawler_basic.html"
-CANVAS_CRAWLER_SKELETON_SIDECAR = '{"goal": "crawler dungeon procedural hack and slash gauntlet multi player wall slide screen clamp boundaries split"}'
+CANVAS_CRAWLER_SKELETON_SIDECAR = _skeleton_sidecar(CANVAS_CRAWLER_SKELETON_NAME)
 
 CANVAS_MOBILE_SKELETON_NAME = "canvas_mobile_basic.html"
-CANVAS_MOBILE_SKELETON_SIDECAR = '{"goal": "mobile touch tablet phone ipad iphone virtual joystick d-pad responsive letterbox pointer events"}'
+CANVAS_MOBILE_SKELETON_SIDECAR = _skeleton_sidecar(CANVAS_MOBILE_SKELETON_NAME)
 
 CANVAS_RPG_SKELETON_NAME = "canvas_rpg_basic.html"
-CANVAS_RPG_SKELETON_SIDECAR = '{"goal": "rpg grid tile-based discrete step movement pokemon adventure explorer"}'
+CANVAS_RPG_SKELETON_SIDECAR = _skeleton_sidecar(CANVAS_RPG_SKELETON_NAME)
 
 CANVAS_CARDS_SKELETON_NAME = "canvas_cards_basic.html"
-CANVAS_CARDS_SKELETON_SIDECAR = '{"goal": "cards drag and drop mouse touch board game chess checker solitaire puzzle match snap grid stacking"}'
+CANVAS_CARDS_SKELETON_SIDECAR = _skeleton_sidecar(CANVAS_CARDS_SKELETON_NAME)
 
 CANVAS_PHYSICS_SKELETON_NAME = "canvas_physics_basic.html"
-CANVAS_PHYSICS_SKELETON_SIDECAR = '{"goal": "physics puzzle bubble shooter angry birds projectile trajectory launch gravity reflection collision stick"}'
+CANVAS_PHYSICS_SKELETON_SIDECAR = _skeleton_sidecar(CANVAS_PHYSICS_SKELETON_NAME)
 
 CANVAS_VOXEL_MINECRAFT_SKELETON_NAME = "canvas_voxel_minecraft_basic.html"
-CANVAS_VOXEL_MINECRAFT_SKELETON_SIDECAR = '{"goal": "voxel 3D grid minecraft cube block chunk terrain procedurally mouse look pointer lock build break Three.js"}'
+CANVAS_VOXEL_MINECRAFT_SKELETON_SIDECAR = _skeleton_sidecar(CANVAS_VOXEL_MINECRAFT_SKELETON_NAME)
 
 CANVAS_AR_FLICK_SKELETON_NAME = "canvas_ar_flick_basic.html"
-CANVAS_AR_FLICK_SKELETON_SIDECAR = '{"goal": "flick mobile pointer swipe curveball projectile spin gravity throw capture target poke pokeman go ar camera"}'
+CANVAS_AR_FLICK_SKELETON_SIDECAR = _skeleton_sidecar(CANVAS_AR_FLICK_SKELETON_NAME)
 
 CANVAS_LIT_DUNGEON_SKELETON_NAME = "canvas_lit_dungeon_basic.html"
-CANVAS_LIT_DUNGEON_SIDECAR = '{"goal": "lighting light composite dynamic dungeon visual shadow darkness gradient vision crawler top down"}'
+CANVAS_LIT_DUNGEON_SIDECAR = _skeleton_sidecar(CANVAS_LIT_DUNGEON_SKELETON_NAME)
 
 CANVAS_VFX_PARTICLES_SKELETON_NAME = "canvas_vfx_particles_basic.html"
-CANVAS_VFX_PARTICLES_SIDECAR = '{"goal": "vfx visual effects particles shake screenshake pooling explosion magic juicy float feedback damage impact text"}'
+CANVAS_VFX_PARTICLES_SIDECAR = _skeleton_sidecar(CANVAS_VFX_PARTICLES_SKELETON_NAME)
 
 # Turn-based board scaffold: click-to-select / click-to-move on a grid with
 # alternating players. Added 2026-05-21 after chess-trace evidence — bare
@@ -213,13 +255,13 @@ CANVAS_VFX_PARTICLES_SIDECAR = '{"goal": "vfx visual effects particles shake scr
 # iters re-discovering board indexing + click handling. Genre-free sidecar
 # tokens (turn-based / board / select / move + a few canonical examples).
 CANVAS_BOARD_TURN_SKELETON_NAME = "canvas_board_turn_basic.html"
-CANVAS_BOARD_TURN_SKELETON_SIDECAR = '{"goal": "turn based board click cell select move alternate player hotseat chess checkers go reversi tic tac toe othello"}'
+CANVAS_BOARD_TURN_SKELETON_SIDECAR = _skeleton_sidecar(CANVAS_BOARD_TURN_SKELETON_NAME)
 
 # DOM-only scaffold for UI-style apps where canvas is overkill: calculator,
 # tic-tac-toe, todo lists, simple word games. The existing ui-driven-no-canvas
 # playbook bullet pointed in this direction but provided no starter shape.
 CANVAS_DOM_SKELETON_NAME = "canvas_dom_basic.html"
-CANVAS_DOM_SKELETON_SIDECAR = '{"goal": "dom html buttons table calculator todo word puzzle text form input click no canvas tic tac toe simple"}'
+CANVAS_DOM_SKELETON_SIDECAR = _skeleton_sidecar(CANVAS_DOM_SKELETON_NAME)
 
 # Opening-book memory: root `memory/` stores trusted, precomputed recipes;
 # live `games/game-memory/` stores learned candidates that must earn trust.
@@ -2328,15 +2370,21 @@ def _tokenize(s: str) -> list[str]:
 # to canvas_basic.html at score 0.0 because Jaccard on short goals (1-2
 # non-stopword tokens) cannot clear _SKELETON_MIN_SIM = 0.3.
 _BOARD_KEYWORDS: frozenset[str] = frozenset({
-    "board", "chess", "checkers", "checker", "go", "reversi", "othello",
-    "hotseat", "turn-based", "turnbased",
-    "tic", "tac", "toe", "tic-tac-toe", "tictactoe",
+    # Genre-free SHAPE tokens only — specific board-game TITLES (chess,
+    # checkers, reversi, othello, tic-tac-toe, go) live in the data layer
+    # (memory/visual_playtests.jsonl strong_hooks + the board skeleton
+    # sidecar), which routes them via _recipe_routed_skeleton. Project rule:
+    # no hardcoded genre/category lists in Python.
+    "board", "hotseat", "turn-based", "turnbased",
     "two-player", "twoplayer", "hot-seat",
 })
 
 _DOM_KEYWORDS: frozenset[str] = frozenset({
+    # Generic UI-SHAPE tokens only — specific game titles (e.g. tic-tac-toe)
+    # live in the data layer (visual_playtests.jsonl strong_hooks) and route
+    # via _recipe_routed_skeleton. Project rule: no genre/title lists here.
     "calculator", "todo", "form", "word", "puzzle",
-    "tic-tac-toe", "tictactoe", "button", "buttons", "table", "input",
+    "button", "buttons", "table", "input",
     "spreadsheet", "checklist",
 })
 
@@ -2352,12 +2400,14 @@ _CANVAS_HINT_KEYWORDS: frozenset[str] = frozenset({
 # 3D rendering modality. Mirrors prompts_v1._3D_KEYWORDS to avoid a new
 # cross-module import — keep in sync if either side changes.
 _3D_MODALITY_KEYWORDS: frozenset[str] = frozenset({
+    # Genre-free rendering-MODALITY tokens only — specific 3D game TITLES
+    # (doom, wolfenstein, minecraft) live in the data layer
+    # (memory/visual_playtests.jsonl strong_hooks), which routes them via
+    # _recipe_routed_skeleton. Project rule: no hardcoded genre/title lists.
     "3d", "three", "threejs",
     "first-person", "firstperson", "fps",
     "raycaster", "raycasting", "raycast",
     "voxel", "voxels",
-    "wolfenstein", "doom", "doom-like", "doomlike",
-    "minecraft", "minecraft-like", "minecraftlike",
     "perspective",
 })
 
@@ -2367,16 +2417,17 @@ _3D_MODALITY_KEYWORDS: frozenset[str] = frozenset({
 _MODALITY_MIN_HITS = 2
 
 # Lone-hook tokens that are SO specific they justify a modality match on
-# their own (1 hit is enough). Keeps "chess" / "doom" / "tic-tac-toe" from
-# needing a second keyword to find their scaffold.
-_BOARD_STRONG_HOOKS: frozenset[str] = frozenset({
-    "chess", "checkers", "reversi", "othello", "tictactoe", "tic-tac-toe",
-})
+# their own (1 hit is enough). These are genre-free rendering-modality words
+# (raycaster / voxel / first-person). Game-TITLE lone hooks (chess, doom,
+# tic-tac-toe, ...) intentionally live in the data layer
+# (memory/visual_playtests.jsonl strong_hooks) and route via
+# _recipe_routed_skeleton — not hardcoded here (no genre lists in Python).
+_BOARD_STRONG_HOOKS: frozenset[str] = frozenset()
 _DOM_STRONG_HOOKS: frozenset[str] = frozenset({
-    "calculator", "todo", "tictactoe", "tic-tac-toe",
+    "calculator", "todo",
 })
 _3D_STRONG_HOOKS: frozenset[str] = frozenset({
-    "doom", "wolfenstein", "minecraft", "raycaster", "raycasting",
+    "raycaster", "raycasting",
     "first-person", "firstperson", "voxel",
 })
 
@@ -3752,10 +3803,12 @@ class GameMemory:
 
     def _modality_skeleton(self, goal: str) -> SkeletonHit | None:
         """Return a SkeletonHit if the goal cleanly matches a modality
-        (board / DOM / 3D), else None. Single STRONG-HOOK token (e.g.
-        "chess", "doom", "tictactoe") wins on its own; otherwise we need
-        ≥ _MODALITY_MIN_HITS keyword matches to commit. See class docstring
-        on retrieve_skeleton for the trace evidence motivating this.
+        (board / DOM / 3D), else None. A single genre-free STRONG-HOOK token
+        (e.g. "raycaster", "voxel", "calculator") wins on its own; otherwise
+        we need ≥ _MODALITY_MIN_HITS keyword matches to commit. Game-TITLE
+        goals (chess, doom, ...) are routed instead by the data-driven
+        _recipe_routed_skeleton step in retrieve_skeleton. See the class
+        docstring on retrieve_skeleton for the trace evidence motivating this.
         """
         # 3D is checked first because some 3D goals also mention "board"
         # ("3D chess") but should pick the 3D scaffold, not the board one.
@@ -4042,692 +4095,45 @@ class BulletHit:
 # the model can drop directly into an iteration's reasoning. Tags drive
 # retrieval, so they're chosen to match the words a goal/code is likely
 # to use ("ship", "thrust", "rotation" all on the asteroids bullet).
-SEED_BULLETS: list[Bullet] = [
-    Bullet(
-        id="rotation-thrust-vector",
-        content=(
-            "When applying thrust to a rotatable ship/character, compute "
-            "velocity from its facing angle: vx = Math.cos(angle) * speed, "
-            "vy = Math.sin(angle) * speed. NEVER use plain world-axis dx/dy. "
-            "Canvas y grows downward, so 'forward at angle 0' means +x with "
-            "no y change; rotating CCW by π/2 (-Math.PI/2 from +x) points up."
-        ),
-        tags=["ship", "thrust", "rotation", "asteroids", "angle", "spaceship",
-              "movement", "physics"],
-    ),
-    Bullet(
-        id="asteroid-irregular-polygons",
-        content=(
-            "Asteroids must be irregular polygons, not perfect circles. "
-            "Pre-generate ≥8 vertices at angles 0..2π with per-vertex jitter "
-            "of radius * (0.7..1.3); store the offsets per asteroid and draw "
-            "with ctx.beginPath / lineTo / closePath. Drawing arc(0,0,r,0,2π) "
-            "ships a circle and feels wrong."
-        ),
-        tags=["asteroids", "shape", "polygon", "drawing", "rocks"],
-    ),
-    Bullet(
-        id="raf-must-start",
-        content=(
-            "Animation requires BOTH (a) a frame() function whose final "
-            "statement is requestAnimationFrame(frame), and (b) at least one "
-            "initial requestAnimationFrame(frame) call to kick the loop off. "
-            "Missing either leaves a static canvas — a common silent failure."
-        ),
-        tags=["raf", "animation", "loop", "render"],
-    ),
-    Bullet(
-        id="ecode-not-ekey",
-        content=(
-            "Keyboard input MUST use e.code values like 'ArrowLeft', 'KeyW', "
-            "'Space'. Don't use e.key (varies with keyboard layout) or "
-            "e.keyCode (deprecated, missing on some browsers). Mapping: "
-            "{ArrowUp:'up', ArrowDown:'down', ArrowLeft:'left', "
-            "ArrowRight:'right', KeyW:'up', KeyS:'down', KeyA:'left', "
-            "KeyD:'right', Space:'fire'}."
-        ),
-        tags=["input", "keyboard", "keys", "controls"],
-    ),
-    Bullet(
-        id="preventdefault-game-keys",
-        content=(
-            "Arrow keys and Space scroll the page by default and steal focus. "
-            "Inside keydown, call e.preventDefault() for any code in your "
-            "game key set. Attach the listener to window with "
-            "{passive:false} so preventDefault actually takes effect."
-        ),
-        tags=["input", "keyboard", "preventdefault", "scroll", "controls"],
-    ),
-    Bullet(
-        id="window-listener-not-canvas",
-        content=(
-            "Attach keydown/keyup listeners to window (or document), NOT to "
-            "the <canvas> element. Canvas isn't focused by default and won't "
-            "receive keys. If you really need canvas focus, set tabIndex=0 "
-            "and call .focus() after creation."
-        ),
-        tags=["input", "keyboard", "focus", "canvas"],
-    ),
-    Bullet(
-        id="clear-keys-on-blur",
-        content=(
-            "Add window.addEventListener('blur', () => for (k in keys) "
-            "keys[k]=false) to clear held keys on focus loss; otherwise "
-            "Alt-Tab leaves the player thrusting forever. Same on "
-            "document.addEventListener('visibilitychange', ...) when hidden."
-        ),
-        tags=["input", "keyboard", "focus", "blur", "stuck"],
-    ),
-    Bullet(
-        id="dt-physics-with-cap",
-        content=(
-            "Use delta-time physics: dt = Math.min(0.05, (now - last)/1000); "
-            "last = now. Multiply movement by dt so speed is frame-rate "
-            "independent. Cap dt to ~0.05s before stepping — without the cap, "
-            "tab-switch triggers a 5+ second dt and objects tunnel through "
-            "everything (the 'spiral of death')."
-        ),
-        tags=["physics", "frame-rate", "dt", "delta-time", "loop", "movement"],
-    ),
-    Bullet(
-        id="canvas-dpr-scaling",
-        content=(
-            "On retina/HiDPI displays, the canvas is blurry without DPR "
-            "scaling. Set: const dpr = Math.min(window.devicePixelRatio||1, "
-            "2); cvs.width = cssW * dpr; cvs.height = cssH * dpr; "
-            "cvs.style.width = cssW + 'px'; cvs.style.height = cssH + 'px'; "
-            "ctx.setTransform(dpr,0,0,dpr,0,0). Re-apply on 'resize'."
-        ),
-        tags=["canvas", "dpr", "retina", "scaling", "blurry"],
-    ),
-    Bullet(
-        id="visible-hud-score",
-        content=(
-            "Score and controls must be visible at all times. Either render "
-            "a #hud div with position:fixed (top-left) and update its text "
-            "from the game state, or fillText('Score: '+score, 12, 24) every "
-            "frame inside draw(). A game without a visible score is judged "
-            "broken even if it works."
-        ),
-        tags=["hud", "score", "ui", "instructions", "visible"],
-    ),
-    Bullet(
-        id="game-over-reachable",
-        content=(
-            "There MUST be a way to lose AND a way to restart. Use a state "
-            "machine with state.over flag; show a modal on game over; bind "
-            "Space or a button to reset the state and restart the loop. "
-            "Cancel any pending animation frames on restart."
-        ),
-        tags=["game-state", "game-over", "restart", "modal", "lose"],
-    ),
-    Bullet(
-        id="image-load-race",
-        content=(
-            "drawImage on an Image whose .src was just set paints nothing — "
-            "loading is async. Either: (a) wait for img.decode() / onload "
-            "before starting the loop, or (b) generate sprites procedurally "
-            "via offscreen canvas at boot. Don't drawImage in the same tick "
-            "you assign .src."
-        ),
-        tags=["image", "load", "drawimage", "race", "async", "sprite"],
-    ),
-    Bullet(
-        id="touch-pointer-events",
-        content=(
-            "For mobile/touch, bind pointerdown/pointermove/pointerup OR "
-            "touchstart/touchmove/touchend (with preventDefault) to the same "
-            "action handlers as keys. Use Pointer Events when possible — "
-            "they unify mouse+touch+pen and avoid the touchstart→mousedown "
-            "double-fire."
-        ),
-        tags=["input", "mobile", "touch", "pointer", "controls"],
-    ),
-    Bullet(
-        id="visibility-pause",
-        content=(
-            "On document.visibilitychange when document.hidden, pause the "
-            "loop AND reset 'last' time on resume. Without this, dt explodes "
-            "to seconds when returning to the tab and physics fly off."
-        ),
-        tags=["pause", "visibility", "tab", "focus"],
-    ),
-    Bullet(
-        id="js-modulo-negative",
-        content=(
-            "JavaScript modulo on negative numbers returns a negative result: "
-            "(-1) % 800 === -1, not 799. For wrap-around use "
-            "((x % w) + w) % w."
-        ),
-        tags=["math", "modulo", "wrap", "toroidal"],
-    ),
-    Bullet(
-        id="z-order-layers",
-        content=(
-            "Drawing order matters. Inside draw(): clear → background → "
-            "entities → effects/particles → HUD overlay. Don't draw HUD "
-            "inside the entity loop or it will be obscured by sprites drawn "
-            "later in the same loop."
-        ),
-        tags=["render", "draw", "z-order", "layers", "hud"],
-    ),
-    Bullet(
-        id="frame-trycatch",
-        content=(
-            "Wrap the frame() body in try/catch that logs to console.error. "
-            "One uncaught exception inside requestAnimationFrame silently "
-            "stops the loop with no visible error in the page — the game "
-            "looks frozen with no diagnosis."
-        ),
-        tags=["error-handling", "trycatch", "raf", "loop"],
-    ),
-    Bullet(
-        id="restart-cleanup",
-        content=(
-            "On restart, cancel pending animation frames "
-            "(cancelAnimationFrame) and don't re-add the same event "
-            "listeners — without cleanup, listeners stack and each restart "
-            "doubles input speed. Prefer mutating in-place over re-binding."
-        ),
-        tags=["restart", "cleanup", "listeners", "leak"],
-    ),
-    Bullet(
-        id="snake-grid-tick",
-        content=(
-            "Snake/grid games move in fixed-cell ticks, not free RAF motion. "
-            "Use an accumulator: tickAccum += dt; if (tickAccum >= TICK) { "
-            "step(); tickAccum -= TICK; }. The head must advance EXACTLY one "
-            "cell per step; turning sets the next direction, applied at the "
-            "next step."
-        ),
-        tags=["snake", "grid", "tick", "discrete", "step"],
-    ),
-    Bullet(
-        id="breakout-ball-launch",
-        content=(
-            "Breakout's ball must launch with NON-ZERO dy. A common bug is "
-            "dy=0 on launch — ball travels horizontally forever, paddle "
-            "never sees it. Initial state: dx = ±2, dy = -3 (negative = up). "
-            "On paddle hit, mirror dy and bias dx by hit-position offset."
-        ),
-        tags=["breakout", "ball", "physics", "paddle"],
-    ),
-    Bullet(
-        id="single-html-file-cdn",
-        content=(
-            "Output is a SINGLE .html file containing inline <style> and "
-            "<script>. CDN libraries via <script src='https://...'> are "
-            "allowed (Phaser, three.js, kontra). No bundlers, no node_modules, "
-            "no separate .js or .css files."
-        ),
-        tags=["build", "single-file", "html", "cdn", "structure"],
-    ),
-    Bullet(
-        id="no-localstorage-init",
-        content=(
-            "Don't read/write localStorage on first load without a "
-            "feature-detect — some headless contexts throw "
-            "SecurityError. try { localStorage.getItem('x') } catch (_) {} "
-            "before relying on it."
-        ),
-        tags=["localstorage", "persistence", "init"],
-    ),
-    Bullet(
-        id="hud-pointer-events",
-        content=(
-            "If the HUD is a positioned div over the canvas, set "
-            "pointer-events:none on it so clicks/touches pass through to "
-            "the game. Otherwise the HUD silently swallows input."
-        ),
-        tags=["hud", "ui", "pointer-events", "input"],
-    ),
-    Bullet(
-        id="audio-autoplay-gesture",
-        content=(
-            "Browsers block autoplay until a user gesture. If using "
-            "AudioContext, create it on first keydown/click: "
-            "if (!audio) { audio = new (window.AudioContext||...)(); } "
-            "audio.resume()."
-        ),
-        tags=["audio", "sound", "autoplay", "gesture"],
-    ),
-    Bullet(
-        id="phaser-three-cdn-defer",
-        content=(
-            "When loading Phaser/three.js via CDN, place the <script "
-            "src='...'> in <head> with `defer`, and put your game code in a "
-            "<script> AFTER the body — otherwise the library may not exist "
-            "when your script runs."
-        ),
-        tags=["phaser", "three", "cdn", "load", "library"],
-    ),
-    Bullet(
-        id="ui-driven-no-canvas",
-        content=(
-            "For UI-style requests (todo list, calculator, tic-tac-toe, word "
-            "games) prefer DOM elements over canvas. Use <button>, <input>, "
-            "<ul>, addEventListener('click', ...). Reserve canvas for games "
-            "that genuinely need per-pixel rendering or smooth animation."
-        ),
-        tags=["ui", "dom", "todo", "calculator", "click", "non-canvas"],
-    ),
-    Bullet(
-        id="aabb-collision",
-        content=(
-            "For axis-aligned bounding boxes, collision is: "
-            "a.x < b.x+b.w && a.x+a.w > b.x && a.y < b.y+b.h && a.y+a.h > b.y. "
-            "Always check ALL FOUR conditions; getting one direction wrong "
-            "produces ghost-collisions (objects pass through one side only)."
-        ),
-        tags=["collision", "aabb", "physics", "bbox"],
-    ),
-    Bullet(
-        id="circle-collision",
-        content=(
-            "Circle-circle collision: const dx=a.x-b.x, dy=a.y-b.y, "
-            "rsum=a.r+b.r; if (dx*dx + dy*dy < rsum*rsum) { hit }. "
-            "Use squared distance — avoids sqrt in the hot loop."
-        ),
-        tags=["collision", "circle", "physics"],
-    ),
-    Bullet(
-        id="bullet-pool",
-        content=(
-            "Bullets/projectiles: pre-allocate a pool and reuse via an "
-            "active flag, instead of new Bullet()/array.push every fire. "
-            "Garbage collection in the middle of a frame causes hitches "
-            "visible as stutter."
-        ),
-        tags=["bullets", "pool", "performance", "gc", "shooter"],
-    ),
-    Bullet(
-        id="seed-respect",
-        content=(
-            "When the user provides a seed file, PREFER patches over a full "
-            "rewrite. A wholesale rewrite loses structural choices the user "
-            "may care about (variable names, layout, styling). Patches keep "
-            "their work intact and only change what the goal demands."
-        ),
-        tags=["seed", "patches", "rewrite", "preserve"],
-    ),
-    Bullet(
-        id="place-entities-at-runtime",
-        content=(
-            "For tile-grid levels, PLACE spawn/exit/enemies/pickups by "
-            "SCANNING empty cells in code — never hand-verify coordinates "
-            "in your reply. Snippet: function pickEmpty(map){ while(true){"
-            " const x=1+Math.floor(Math.random()*(W-2)), "
-            "y=1+Math.floor(Math.random()*(H-2)); if(map[y][x]===0) "
-            "return {x:x+0.5,y:y+0.5}; } }. Enumerating 'row 9 col 3 = "
-            "wall!' in <think> burns thousands of tokens and often never "
-            "reaches <html_file>."
-        ),
-        tags=[
-            "maze", "grid", "spawn", "placement", "level", "entity",
-            "tile", "dungeon", "tilemap", "enemy", "pickup",
-            "thinktag-thrash",
-        ],
-    ),
-    Bullet(
-        id="projection-3d-wireframe",
-        content=(
-            "3D wireframe perspective on 2D canvas (Battlezone-style): "
-            "(1) Rotate to camera space: dx=x-px, dz=z-pz; rx=dx*cos(-θ)-"
-            "dz*sin(-θ); rz=dx*sin(-θ)+dz*cos(-θ). "
-            "(2) Project: if(rz<=0.1) return; screenX=cx+(rx/rz)*fov; "
-            "screenY=cy-(y/rz)*fov. "
-            "(3) Sort objects by descending rz (painter's algorithm) so "
-            "closer geometry draws on top; connect with beginPath/moveTo/"
-            "lineTo/stroke."
-        ),
-        tags=["3d", "projection", "wireframe", "battlezone", "perspective", "vector", "camera", "rotation"],
-    ),
-    Bullet(
-        id="platformer-ladders-and-one-way",
-        content=(
-            "For platformers with climbing (e.g. Donkey Kong) and one-way platforms: "
-            "(1) Ladders: Allow climbing only when entity's center is closely aligned horizontally "
-            "with the ladder's x position. Set gravity to zero and allow vertical velocity while "
-            "climbing. (2) One-way platforms: Allow entities to jump up through platforms by checking "
-            "collisions ONLY when velocity vy is positive (falling) AND the entity's feet (bottom) "
-            "are above the platform's top edge before the step. Check: if (vy > 0 && feet <= platformTop "
-            "&& feet + vy >= platformTop) { land_on_platform }."
-        ),
-        tags=["ladder", "climbing", "one-way", "platformer", "gravity", "jump", "donkey-kong"],
-    ),
-    Bullet(
-        id="fighting-states-and-hitboxes",
-        content=(
-            "For fighting/action games (e.g. Street Fighter): (1) State Machine: "
-            "Separate characters into strict states: idle, walking, jumping, crouching, "
-            "attack-startup, attack-active, attack-recovery, hitstun, knockback. Block input "
-            "during attacks, hitstun, and knockback. (2) Combat Collision: Do NOT check plain player "
-            "bounding-box overlaps for attacks. Instead, define 'hurtboxes' (body regions that can "
-            "be hit) and 'hitboxes' (attack regions, e.g. fist/foot). Check overlap of attacker's "
-            "active hitbox with defender's hurtbox ONLY during 'attack-active' animation frames."
-        ),
-        tags=["fighting", "state-machine", "hitbox", "hurtbox", "combat", "collision", "melee", "street-fighter"],
-    ),
-    Bullet(
-        id="isometric-grid-math",
-        content=(
-            "To project a 3D grid onto an isometric screen coordinate system (e.g. Q-bert style): "
-            "For a grid coordinate (row, col, height): screenX = centerX + (col - row) * (tileWidth / 2); "
-            "screenY = centerY + (col + row) * (tileHeight / 2) - height * heightScale. "
-            "To sort rendering order to prevent overlaps (painter's algorithm), draw entities "
-            "by sorting from lowest (row + col) to highest. For isometric jumping, animate "
-            "entity's height with a parabolic curve: height = jumpApex * (4 * t * (1 - t)) where t goes 0..1."
-        ),
-        tags=["isometric", "grid", "q-bert", "math", "projection", "render-order", "isometric-jump"],
-    ),
-    Bullet(
-        id="corner-sliding-alignment",
-        content=(
-            "To implement smooth tile-based corner sliding (e.g. Pac-Man) in continuous movement: "
-            "Allow the player to buffer turns before aligning perfectly with a tile axis. If key is pressed, "
-            "check if coordinate orthogonal to movement is close to a tile boundary (e.g., within a snap tolerance of "
-            "8px). If close, snap coordinate directly to tile center (p.y = Math.floor(p.y/TILE)*TILE) and change "
-            "velocity. This prevents players from sticking to walls when turning corridors."
-        ),
-        tags=["grid", "movement", "corner", "snap", "alignment", "corridor", "pacman", "pac-man"],
-    ),
-    Bullet(
-        id="grid-wave-movement",
-        content=(
-            "For Space Invaders alien wave formations: Store coordinates in a grid matrix or array. "
-            "Move all aliens horizontally together. Keep track of left-most and right-most active bounds. "
-            "When either bound touches screen margins, reverse horizontal direction for all aliens and "
-            "increment their y position downward by one step. To keep tension, increase movement update "
-            "speed proportionally as the number of remaining aliens decreases (e.g., delay = baseDelay * (activeCount / total))."
-        ),
-        tags=["wave", "grid", "formation", "movement", "space-invaders", "aliens", "shooter"],
-    ),
-    Bullet(
-        id="segmented-entity-follow",
-        content=(
-            "To make segment links cleanly follow a leader (e.g. Centipede): Store a history array of the leader's "
-            "coordinates (e.g., up to 200 points). Each follower segment is assigned a specific history index offset "
-            "(e.g., segment i reads index i * segmentSpacing from history). On update, push leader's latest coordinate "
-            "to the front of the history array and trim the tail. This prevents segments from overlapping or separating during turns."
-        ),
-        tags=["follow", "segmented", "centipede", "tail", "history", "movement", "snake"],
-    ),
-    Bullet(
-        id="ball-paddle-angle-bias",
-        content=(
-            "To prevent endless horizontal/vertical bouncing in Breakout: Modify ball bounce angle based on "
-            "where it strikes the paddle. Calculate offset = (ball.x - paddle.x) / paddle.width (valued -0.5 to +0.5). "
-            "Determine bounce direction angle: angle = (offset * maxBiasAngle) - Math.PI/2. Set new ball velocities: "
-            "vx = Math.cos(angle) * speed; vy = Math.sin(angle) * speed (making vy negative/up). This rewards precision hits."
-        ),
-        tags=["breakout", "bounce", "paddle", "physics", "angle", "ball", "collision", "arkanoid"],
-    ),
-    Bullet(
-        id="parallax-coordinate-camera",
-        content=(
-            "For side-scrolling worlds (e.g. Defender): Create a camera object holding a single horizontal "
-            "offset: camera.x = player.x - centerX. When rendering, wrap context drawings inside ctx.save() / "
-            "ctx.translate(-camera.x, -camera.y). Render background details with an offset multiplier (e.g., "
-            "star.x - camera.x * 0.3) to achieve parallax depth. Automatically clear/recycle bullets and "
-            "enemies once they move beyond the viewport boundaries (e.g., x < camera.x - 100)."
-        ),
-        tags=["scrolling", "camera", "parallax", "viewport", "defender", "wrap", "sidescroller"],
-    ),
-    Bullet(
-        id="mode7-ground-projection",
-        content=(
-            "SNES Mode 7 ground projection on 2D canvas (Mario Kart style): "
-            "for each scanline y below horizon, distance = fov / (y + 1); "
-            "scaleX = distance / fov; stepX = sin(θ)*scaleX, stepY = "
-            "-cos(θ)*scaleX. Per pixel along the line: worldX = player.x "
-            "+ cos(θ)*distance + (screenX - cx)*stepX (and matching "
-            "worldY). Sample track texture, clamp bounds, write to "
-            "getImageData buffer."
-        ),
-        tags=["mode7", "mode-7", "projection", "perspective", "racer", "3d", "retro", "mario-kart"],
-    ),
-    Bullet(
-        id="tetris-matrix-rotation",
-        content=(
-            "To rotate 2D piece matrices in Tetris: Transpose and reverse the grid array: "
-            "rotated = matrix[0].map((_, i) => matrix.map(row => row[i]).reverse()). "
-            "To prevent clipping walls on rotation, implement a 'wall-kick' guard: "
-            "If the rotated shape collides with side boundaries or locked cells, try shifting "
-            "its position left or right by 1 or 2 cells. If all shifts still collide, revert rotation. "
-            "When rows are cleared, slice them out and unshift empty rows of width W to the top of the board."
-        ),
-        tags=["matrix", "rotation", "tetris", "blocks", "grid", "wall-kick", "row-clear"],
-    ),
-    Bullet(
-        id="crawler-wall-sliding",
-        content=(
-            "To prevent players from sticking to walls during diagonal movement (e.g. Gauntlet): "
-            "Decompose player movement into separate horizontal and vertical steps. "
-            "Step 1: Apply x movement `p.x += p.vx * dt`, and check collisions. If overlapping a wall boundary, "
-            "snap x position back and zero out `vx`. Step 2: Apply y movement `p.y += p.vy * dt`, and check "
-            "collisions. If overlapping, snap y back. This allows the player to slide smoothly along walls."
-        ),
-        tags=["crawler", "collision", "slide", "wall-sliding", "diagonal", "gauntlet", "movement"],
-    ),
-    Bullet(
-        id="shared-camera-bounds",
-        content=(
-            "For shared shared-screen multiplayer viewports (e.g. Gauntlet): "
-            "Calculate camera center as the average coordinates of all active players: "
-            "centerX = sum(players.x) / count. Clamp camera coordinate boundaries to global "
-            "level bounds. Clamping players: Prevent players from leaving screen edges by checking "
-            "their distance to the clamped camera bounds. If a player coordinates `p.x` leaves "
-            "`centerX - halfScreenWidth`, clamp their coordinates to the screen margin."
-        ),
-        tags=["multiplayer", "camera", "shared-screen", "clamp", "viewport", "gauntlet", "bounds"],
-    ),
-    Bullet(
-        id="mobile-joystick-theta",
-        content=(
-            "To calculate player velocity from virtual joystick touches: "
-            "On pointermove, compute offsets: dx = touchX - joystickStartX, dy = touchY - joystickStartY. "
-            "Find absolute distance and angle: dist = Math.hypot(dx, dy), theta = Math.atan2(dy, dx). "
-            "If distance exceeds max joystick radius, clamp touch visual coordinates to `maxRadius`. "
-            "Calculate player velocities: vx = Math.cos(theta) * speed * Math.min(1, dist/maxRadius), "
-            "and matching vy. This ensures responsive and precise multi-directional mobile steering."
-        ),
-        tags=["mobile", "touch", "joystick", "theta", "angle", "velocity", "trig", "controls"],
-    ),
-    Bullet(
-        id="mobile-letterbox-scaling",
-        content=(
-            "To letterbox a standard canvas for mobile viewports (e.g. iPad/iPhone): "
-            "On resize, fetch window aspect ratio and scale canvas container styles. "
-            "Check: scale = Math.min(window.innerWidth / baseW, window.innerHeight / baseH). "
-            "Set canvas styled width/height: cvs.style.width = (baseW * scale) + 'px'; "
-            "cvs.style.height = (baseH * scale) + 'px'. Center canvas container with flexbox "
-            "or fixed absolute positioning. This prevents screen distortion on rotated devices."
-        ),
-        tags=["mobile", "scaling", "responsive", "letterbox", "aspect-ratio", "resize", "ios"],
-    ),
-    Bullet(
-        id="drag-and-drop-snapping",
-        content=(
-            "For card/board drag-and-drop mechanics (e.g. Solitaire): "
-            "On pointerdown, test bounding box of all items from top-drawn to bottom. "
-            "On match, record active item and calculate dragging offset relative to cursor: "
-            "offsetX = mouseX - item.x. On pointermove, set `item.x = mouseX - offsetX`. "
-            "On pointerup, check overlaps with valid slots using circle-distance or AABB. "
-            "If overlapping, snap item coordinate directly to target coordinates, else lerp back to original slot."
-        ),
-        tags=["drag-and-drop", "mouse", "touch", "snap", "board", "puzzle", "cards", "solitaire"],
-    ),
-    Bullet(
-        id="discrete-tile-stepping",
-        content=(
-            "To implement discrete grid step movement (e.g. Pokemon/Ultima): "
-            "Do NOT move player sprites continuously on arrow holds. Store separate coordinates: "
-            "gridX/gridY (logical grid) and animX/animY (visual coordinates). When a direction key is pressed "
-            "and player is idle: set target cells, block input, and flag player as moving. "
-            "Increment animation offset: t += dt * speed; visually interpolate: animX = animX + (gridX - animX) * t. "
-            "When t >= 1, snap visual coordinates to grid, unblock input, and reset t = 0."
-        ),
-        tags=["grid", "rpg", "discrete", "tile", "step", "interpolation", "lerp", "movement"],
-    ),
-    Bullet(
-        id="gravity-trajectory-bounce",
-        content=(
-            "To bounce projectile circles off wall boundaries (e.g. Bubble Shooter): "
-            "Upon edge collision check, mirror the horizontal velocity: vx = -vx. "
-            "To reflect projectile circles off line segments: find normal vector of segment. "
-            "Velocity reflection formula: R = V - 2 * (V . N) * N. For gravity path forecasting: "
-            "Plot trajectory coordinates inside a simple loop: nextX = x + vx * t; nextY = y + vy * t + 0.5 * gravity * t*t. "
-            "Draw forecasted points on canvas as a guide line."
-        ),
-        tags=["physics", "trajectory", "bounce", "vector", "reflection", "gravity", "launch", "shooter"],
-    ),
-    Bullet(
-        id="pathfinding-bfs-grid",
-        content=(
-            "To implement simple grid pathfinding for enemy chasers (e.g. Pac-Man ghosts, Gauntlet ghosts) avoiding walls: "
-            "Use Breadth-First Search (BFS) to find the shortest path in a 2D tile map. "
-            "Algorithm: Let queue = [[start]]; let visited = set(start). While queue is not empty, pop first path. "
-            "Get last cell in path. If it equals target, return first step of path. "
-            "Otherwise, for each neighboring cell (up, down, left, right), if inside map, not a wall, and not visited: "
-            "visited.add(neighbor) and push path + [neighbor] to queue. Falls back to straight-line direction vector when target is unreached."
-        ),
-        tags=["pathfinding", "bfs", "ghosts", "enemy-ai", "maze", "chase", "grid", "map", "path"],
-    ),
-    Bullet(
-        id="enemy-fsm-states",
-        content=(
-            "To manage complex enemy behaviors in arcade games: Implement a Finite State Machine (FSM) "
-            "with states: 'patrol' (walk between spawn nodes), 'alert' (stop and look around when player is near), "
-            "'chase' (pathfind towards player coordinates), and 'attack' (trigger attack-frames and pause movement). "
-            "Transition triggers: distance to player < alertRadius transitions to 'alert', distance < chaseRadius transitions "
-            "to 'chase', and distance < attackRadius transitions to 'attack'. Use cooldown-ticks or timers to enforce state durations."
-        ),
-        tags=["fsm", "state-machine", "enemy-ai", "combat", "states", "behavior", "ai", "arcade"],
-    ),
-    Bullet(
-        id="pseudo3d-curved-road",
-        content=(
-            "To project an Out Run/retro style curved 3D road onto a 2D canvas: "
-            "Use a scanline camera projection. For each screen line y below horizon (e.g., from top to bottom): "
-            "Calculate normalized depth: z = fov / (y - horizon). Compute horizontal road center shift: "
-            "roadX = baseCenterX + curveAccumulator * (z * z) + Math.sin(z * frequency) * amplitude. "
-            "Project road width: screenW = baseRoadWidth / z. Draw road segment from `roadX - screenW` to "
-            "`roadX + screenW`. Scale obstacles and cars proportionally: scale = spriteSize / z, and draw "
-            "with x offset centered relative to roadX."
-        ),
-        tags=["pseudo-3d", "pseudo3d", "road", "racer", "scanline", "curve", "projection", "outrun", "pole-position"],
-    ),
-    Bullet(
-        id="animation-frame-timing",
-        content=(
-            "To manage smooth sprite animations (running, swinging, hitting) with variable frame rates: "
-            "Track animation state holding: animTimer, currentFrameIndex, and activeSpriteSheet. "
-            "On update, increment: `animTimer += dt`. If `animTimer >= 1 / fps`: reset timer `animTimer -= 1 / fps` "
-            "and advance frame `currentFrameIndex = (currentFrameIndex + 1) % totalFrames`. "
-            "When rendering, draw image using clipping coordinates: `ctx.drawImage(sheet, currentFrameIndex * frameW, 0, "
-            "frameW, frameH, x, y, w, h)`. This keeps visual cycles consistent and speed-independent."
-        ),
-        tags=["animation", "sprite-sheet", "sprites", "frame-rate", "clipping", "timing", "frames", "loop"],
-    ),
-    Bullet(
-        id="input-buffering-queue",
-        content=(
-            "To implement responsive input buffering for fighting or action games (e.g. Street Fighter, platformers): "
-            "Create a buffer queue array to store recent inputs with timestamps: `inputBuffer.push({ key, t: now })`. "
-            "On update, filter out old actions: `inputBuffer = inputBuffer.filter(item => now - item.t < bufferWindowSeconds)` "
-            "(window is typically 0.15 to 0.25 seconds). When a player exits recovery states, hitstun, or lands "
-            "on the ground: check if any valid command key (e.g., 'jump' or 'attack') exists in the active buffer. "
-            "If found, consume it immediately: execute action and clear buffer."
-        ),
-        tags=["input", "buffer", "buffering", "queue", "responsive", "fighting", "action", "combos"],
-    ),
-    Bullet(
-        id="resource-meters-hud",
-        content=(
-            "To render smooth, glowing, or animated health and ammo meters on canvas: "
-            "Draw a background bar: `ctx.fillStyle = '#300'; ctx.fillRect(x, y, maxW, h);`. "
-            "Linearly interpolate visible value to actual value for a smooth animated fill effect: "
-            "`visibleVal += (actualVal - visibleVal) * 0.1` (or `dt * speed`). "
-            "Draw filled bar: `ctx.fillStyle = '#f33'; ctx.fillRect(x, y, (visibleVal / maxVal) * maxW, h);`. "
-            "Add a glossy stroke outline and thin vertical interval lines to make it look clean and highly readable."
-        ),
-        tags=["hud", "health", "ammo", "meter", "ui", "lerp", "canvas-draw", "glossy"],
-    ),
-    # ---- Added 2026-05-21 from May 20-21 trace evidence ------------------
-    # Highest-frequency probe failure across pac/dk/sf/doom/FPS traces was
-    # missing window.gameState / window.game.reset. Promotes the recurring
-    # diagnose hint into a proactive rule.
-    Bullet(
-        id="expose-state-on-window",
-        content=(
-            "Acceptance probes look up state via window.gameState, "
-            "window.state, or window.game.reset() — un-exposed state fails "
-            "probes even when the game works. Always end init with: "
-            "window.gameState = state; window.game = { reset: () => "
-            "resetGame() }. Score, player position, currentPlayer, and any "
-            "reset entry point must be reachable from a probe in ≤3 lines."
-        ),
-        tags=["state", "window", "probe", "gameState", "exposure", "reset",
-              "testing", "acceptance"],
-    ),
-    # Promoted from learned -> seed 2026-05-21 (helpful=1 in live).
-    # Documents the 3s probe warmup window so the model designs init
-    # accordingly instead of paying it in lost iters.
-    Bullet(
-        id="probe-warmup-state-exposure",
-        content=(
-            "Automated acceptance probes typically evaluate window.gameState "
-            "after a ~3-second warmup. Expose the state object synchronously "
-            "before any async asset loading or initialization callbacks. "
-            "Remove or minimize startup delays (ready timers, intro screens, "
-            "loading gates) so gameplay begins immediately and probes can "
-            "verify score increases or entity positions within the evaluation "
-            "window."
-        ),
-        tags=["probe", "testing", "warmup", "state", "async", "ready-timer"],
-    ),
-    # Turn-based board mechanics. Genre-free (no chess/checkers rules) —
-    # just the select-then-move state machine that all of them share.
-    Bullet(
-        id="turn-based-select-move",
-        content=(
-            "Turn-based board UIs use a two-click commit: state.selected = "
-            "null at start; clicking your own piece sets selected and "
-            "computes legalMoves(); clicking a legal target calls "
-            "applyMove() then state.currentPlayer = (currentPlayer === 'W' "
-            "? 'B' : 'W'). Block input during animations or AI thinking. "
-            "Highlight the selected cell + legal targets so the user knows "
-            "what's clickable."
-        ),
-        tags=["turn-based", "board", "select", "move", "alternate", "hotseat",
-              "click", "two-click", "chess", "checkers"],
-    ),
-    Bullet(
-        id="board-grid-indexing",
-        content=(
-            "Store a 2D board as board[r][c] with r=row=y-index, c=col=x-"
-            "index — NEVER mix (x,y) and (r,c) in the same function. "
-            "Render with: for(let r=0;r<SIZE;r++) for(let c=0;c<SIZE;c++) "
-            "{ const piece = board[r][c]; drawAt(c*TILE, r*TILE, piece); }. "
-            "Always (row, col) order in code; (col*TILE, row*TILE) only at "
-            "the draw boundary."
-        ),
-        tags=["board", "grid", "row", "col", "index", "tile", "indexing"],
-    ),
-    Bullet(
-        id="click-cell-from-pointer",
-        content=(
-            "Pointer -> board cell: const rect = cvs.getBoundingClientRect(); "
-            "const mx = e.clientX - rect.left, my = e.clientY - rect.top; "
-            "const c = Math.floor(mx / TILE), r = Math.floor(my / TILE); if "
-            "(r < 0 || r >= SIZE || c < 0 || c >= SIZE) return; — rejects "
-            "clicks outside the board. Use pointerdown (unified mouse + "
-            "touch + pen) and call e.preventDefault() if the page scrolls."
-        ),
-        tags=["pointer", "click", "cell", "board", "getBoundingClientRect",
-              "tile", "input"],
-    ),
-]
+# The seed bullets are loaded from the tracked, hand-curated data file
+# memory/playbook.jsonl (resolved relative to THIS module so it works
+# regardless of cwd). Keeping the bullets as DATA -- not an inline Python
+# list -- is deliberate: game/genre knowledge lives in memory, not in code
+# (project rule "no hardcoded genre/category lists"). On a fresh checkout
+# the file is present (tracked in git); Playbook.ensure() copies it to a
+# fresh playbook path only when one does not already exist.
+def _seed_bullets_path() -> Path:
+    return Path(__file__).resolve().parent / "memory" / PLAYBOOK_FILENAME
+
+
+def _load_seed_bullets() -> list[Bullet]:
+    path = _seed_bullets_path()
+    bullets: list[Bullet] = []
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                    bullets.append(Bullet(
+                        id=str(rec["id"]),
+                        content=str(rec["content"]),
+                        tags=list(rec.get("tags") or []),
+                        helpful=int(rec.get("helpful") or 0),
+                        harmful=int(rec.get("harmful") or 0),
+                        source=str(rec.get("source") or "seed"),
+                        created_at=str(rec.get("created_at") or ""),
+                    ))
+                except Exception:
+                    continue
+    except Exception:
+        return bullets
+    return bullets
+
+
+SEED_BULLETS: list[Bullet] = _load_seed_bullets()
 
 
 class Playbook:

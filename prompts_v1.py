@@ -845,7 +845,6 @@ _3D_KEYWORDS = frozenset({
     "first-person", "firstperson", "fps",
     "raycaster", "raycasting", "raycast",
     "voxel", "voxels",
-    "wolfenstein", "doom-like", "doomlike", "minecraft-like", "minecraftlike",
     "perspective",
 })
 

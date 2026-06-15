@@ -216,11 +216,13 @@ def test_b1_3d_keyword_first_person():
     assert "firstperson" in kws or "first-person" in kws
 
 
-def test_b1_3d_keyword_doom_like():
-    kws = prompts_v1._detect_3d_intent("doom like maze game with monsters")
-    # Either single 'doom' (not in our list — genre-free) won't match,
-    # but 'doomlike' or 'doom-like' joined form should.
-    assert "doomlike" in kws or "doom-like" in kws
+def test_b1_3d_genre_title_does_not_fire():
+    # Genre/title phrases like "doom like" are NOT 3D modality triggers —
+    # no hardcoded genre/title names in Python. Title-level 3D routing is
+    # data-driven (visual_playtests.jsonl strong_hooks).
+    assert prompts_v1._detect_3d_intent("doom like maze game with monsters") == []
+    # A real rendering-modality phrase still fires.
+    assert prompts_v1._detect_3d_intent("first person raycaster game") != []
 
 
 def test_b1_3d_keyword_three_d():
@@ -282,7 +284,10 @@ def test_b2_sprite_procedural_mix_in_system_prompt():
 # ---------------------------------------------------------------------------
 
 
-def test_b3_orientation_block_contains_rotate_pattern(tmp_path):
+def test_b3_orientation_block_removed(tmp_path):
+    # Sprite orientation/facing guidance is no longer injected by the asset
+    # pipeline — it lives in the playbook (directional-art-faces-right). The
+    # pipeline must stay free of art-direction policy.
     import assets
     asset_dir = tmp_path / "x_assets"
     asset_dir.mkdir()
@@ -292,12 +297,8 @@ def test_b3_orientation_block_contains_rotate_pattern(tmp_path):
         {"ship": ship_png},
         tmp_path / "x.html",
     )
-    assert "ORIENTATION" in block
-    assert "ctx.rotate" in block
-    assert "ctx.translate" in block
-    # The pattern shows the right save/restore frame for rotation.
-    assert "ctx.save" in block
-    assert "ctx.restore" in block
+    assert "ORIENTATION" not in block
+    assert "facing right" not in block
 
 
 # ---------------------------------------------------------------------------

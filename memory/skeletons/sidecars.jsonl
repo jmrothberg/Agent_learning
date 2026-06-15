@@ -1,0 +1,17 @@
+{"name": "canvas_basic_v2.html", "goal": "canvas 2d generic action arcade default fallback"}
+{"name": "canvas_3d_basic.html", "goal": "3D space vector WebGL three.js coordinate projection game first person perspective"}
+{"name": "canvas_grid_basic.html", "goal": "grid continuous tile corridor snap slide sokoban pacman pac man ghost ghosts maze"}
+{"name": "canvas_platformer_basic.html", "goal": "platformer gravity jump climbing ladders oneway donkey kong lode runner"}
+{"name": "canvas_scrolling_basic.html", "goal": "scrolling camera viewport parallax offsets scroll horizontal defender scramble side scroller shooter"}
+{"name": "canvas_mode7_basic.html", "goal": "mode7 mode 7 perspective ground texture projection 3D rotating kart retro racer fzero f-zero"}
+{"name": "canvas_crawler_basic.html", "goal": "crawler dungeon procedural hack and slash gauntlet multi player wall slide screen clamp boundaries split"}
+{"name": "canvas_mobile_basic.html", "goal": "mobile touch tablet phone ipad iphone virtual joystick d-pad responsive letterbox pointer events"}
+{"name": "canvas_rpg_basic.html", "goal": "rpg grid tile-based discrete step movement pokemon adventure explorer"}
+{"name": "canvas_cards_basic.html", "goal": "cards drag and drop mouse touch board game chess checker solitaire puzzle match snap grid stacking"}
+{"name": "canvas_physics_basic.html", "goal": "physics puzzle bubble shooter angry birds projectile trajectory launch gravity reflection collision stick"}
+{"name": "canvas_voxel_minecraft_basic.html", "goal": "voxel 3D grid minecraft cube block chunk terrain procedurally mouse look pointer lock build break Three.js"}
+{"name": "canvas_ar_flick_basic.html", "goal": "flick mobile pointer swipe curveball projectile spin gravity throw capture target poke pokeman go ar camera"}
+{"name": "canvas_lit_dungeon_basic.html", "goal": "lighting light composite dynamic dungeon visual shadow darkness gradient vision crawler top down"}
+{"name": "canvas_vfx_particles_basic.html", "goal": "vfx visual effects particles shake screenshake pooling explosion magic juicy float feedback damage impact text"}
+{"name": "canvas_board_turn_basic.html", "goal": "turn based board click cell select move alternate player hotseat chess checkers go reversi tic tac toe othello"}
+{"name": "canvas_dom_basic.html", "goal": "dom html buttons table calculator todo word puzzle text form input click no canvas tic tac toe simple"}

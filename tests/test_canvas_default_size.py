@@ -25,11 +25,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from agent import GameAgent, _patch_set_bracket_break  # noqa: E402
-from assets import (  # noqa: E402
-    flip_sprite_horizontal,
-    parse_orientation_verdicts,
-    select_orientation_audit_targets,
-)
 from tools import (  # noqa: E402
     LiveBrowser,
     _canvas_default_size_warning,
@@ -297,66 +292,18 @@ def test_asset_stats_accepts_onload():
 
 
 # ---------------------------------------------------------------------------
-# 5b. Orientation audit + mirror flip
+# 5b. Sprite orientation is a memory/code convention, not pipeline policy.
+# The pin/audit/flip machinery was removed; assert it is gone so it does not
+# silently creep back (facing lives in the playbook, not the asset pipeline).
 # ---------------------------------------------------------------------------
 
-def _stats(*entries):
-    return [dict(e) for e in entries]
-
-
-def test_audit_targets_directional_pinned_only(tmp_path):
-    paths = {
-        "player_kick": tmp_path / "player_kick.png",
-        "player_idle": tmp_path / "player_idle.png",
-        "cpu_punch": tmp_path / "cpu_punch.png",
-        "background": tmp_path / "background.png",
-    }
-    stats = _stats(
-        {"name": "player_kick", "orientation_pinned": True},
-        {"name": "player_idle", "orientation_pinned": True},   # not directional
-        {"name": "cpu_punch", "orientation_pinned": True},
-        {"name": "background"},                                 # not pinned
-    )
-    targets = select_orientation_audit_targets(stats, paths)
-    names = [n for n, _p in targets]
-    assert names == ["player_kick", "cpu_punch"]
-
-
-def test_audit_targets_skip_missing_path():
-    stats = _stats({"name": "player_kick", "orientation_pinned": True})
-    assert select_orientation_audit_targets(stats, {}) == []
-
-
-def test_parse_orientation_verdicts_variants():
-    reply = "1: LEFT\n2 - right\n3) Left\nblah\n9: left"
-    v = parse_orientation_verdicts(reply, 3)
-    assert v == {1: "left", 2: "right", 3: "left"}
-
-
-def test_parse_orientation_verdicts_garbage():
-    assert parse_orientation_verdicts("I cannot tell.", 2) == {}
-
-
-def test_flip_sprite_horizontal_roundtrip(tmp_path):
-    PIL = pytest.importorskip("PIL")
-    from PIL import Image
-    p = tmp_path / "kick.png"
-    img = Image.new("RGBA", (4, 2), (0, 0, 0, 0))
-    img.putpixel((0, 0), (255, 0, 0, 255))  # red marker on the LEFT edge
-    img.save(p)
-    assert flip_sprite_horizontal(p)
-    with Image.open(p) as flipped:
-        assert flipped.getpixel((3, 0)) == (255, 0, 0, 255)
-        assert flipped.getpixel((0, 0)) == (0, 0, 0, 0)
-
-
-def test_flip_sprite_horizontal_missing_file_is_safe(tmp_path):
-    assert flip_sprite_horizontal(tmp_path / "nope.png") is False
-
-
-def test_orientation_audit_never_regenerates():
-    """Standing rule: a wrong-facing frame is mirrored, never re-rendered."""
-    src = inspect.getsource(GameAgent._audit_sprite_orientation)
-    assert "flip_sprite_horizontal" in src
-    for banned in ("img2img", "generate_assets", "from_image"):
-        assert banned not in src
+def test_orientation_pipeline_machinery_removed():
+    import assets
+    for gone in (
+        "pin_sprite_orientation",
+        "select_orientation_audit_targets",
+        "parse_orientation_verdicts",
+        "flip_sprite_horizontal",
+    ):
+        assert not hasattr(assets, gone), f"assets.{gone} should be removed"
+    assert not hasattr(GameAgent, "_audit_sprite_orientation")

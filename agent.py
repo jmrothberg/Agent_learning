@@ -57,13 +57,10 @@ from typing import Any, AsyncIterator
 
 from assets import (
     _DERIVED_FRAME_MIN_DELTA,
-    flip_sprite_horizontal,
     generate_assets,
     parse_assets_block,
     parse_assets_block_with_meta,
-    parse_orientation_verdicts,
     render_asset_paths_block,
-    select_orientation_audit_targets,
     try_load_image_generator,
 )
 from sounds import (
@@ -8036,88 +8033,6 @@ class GameAgent:
                 return head + "\n" + body + "\n\nMinimal fix shape: " + fix_hint + playbook_tail
         return head + "\n" + body + playbook_tail
 
-    async def _audit_sprite_orientation(
-        self,
-        produced: dict[str, Any],
-        per_asset: list[dict],
-    ) -> list[str]:
-        """Fix round 5b — post-generation orientation audit. For directional
-        pose sprites whose prompt was orientation-pinned (kick/punch/strike/
-        throw…), ask the local critic VLM which way the action points and
-        mirror-flip any LEFT answers in place. NEVER regenerates a frame
-        (lossless transpose preserves the character). Advisory only: any
-        failure (no VLM, bad parse) skips silently and returns []."""
-        targets = select_orientation_audit_targets(per_asset, produced)
-        if not targets:
-            return []
-        backend = self.get_backend("critic")
-        if backend is None:
-            return []
-        try:
-            if not await backend.is_vlm():
-                return []
-        except Exception:
-            return []
-        images: list[bytes] = []
-        names: list[str] = []
-        paths: list[Any] = []
-        for name, path in targets:
-            try:
-                images.append(Path(path).read_bytes())
-            except OSError:
-                continue
-            names.append(name)
-            paths.append(path)
-        if not images:
-            return []
-        listing = "\n".join(
-            f"{i + 1}. {n}" for i, n in enumerate(names)
-        )
-        prompt = (
-            "You are auditing game sprites. Each numbered image below shows "
-            "a character performing an action (the order matches this "
-            "list):\n"
-            f"{listing}\n\n"
-            "For EACH image, answer which horizontal direction the main "
-            "action (extended leg/arm, strike, throw) points. Reply with "
-            "ONE line per image, format strictly:\n"
-            "<number>: LEFT or <number>: RIGHT\n"
-            "No other text."
-        )
-        messages = [{"role": "user", "content": prompt, "images": images}]
-        try:
-            result = await backend.stream_chat(
-                messages,
-                options={"temperature": 0.0, "num_ctx": 4096},
-                keep_alive=self._keep_alive_for_backend(backend),
-                stall_seconds=120.0,
-                overall_seconds=300.0,
-                max_retries=1,
-            )
-            reply = (result.text or "").strip()
-        except Exception as e:
-            self._trace_exception("orientation_audit_vlm_error", e)
-            return []
-        verdicts = parse_orientation_verdicts(reply, len(names))
-        flipped: list[str] = []
-        for idx, direction in verdicts.items():
-            if direction != "left":
-                continue
-            name = names[idx - 1]
-            if flip_sprite_horizontal(paths[idx - 1]):
-                flipped.append(name)
-                for stat in per_asset:
-                    if isinstance(stat, dict) and stat.get("name") == name:
-                        stat["orientation_flipped"] = True
-        self._trace({
-            "kind": "orientation_flip_audit",
-            "targets": names,
-            "verdicts": {names[i - 1]: d for i, d in verdicts.items()},
-            "flipped": flipped,
-            "reply_preview": reply[:200],
-        })
-        return flipped
-
     async def run_visual_critic(
         self,
         current_png: bytes,
@@ -12680,25 +12595,11 @@ class GameAgent:
                     if isinstance(s, dict) and s.get("from_image")
                     and isinstance(s.get("parent_delta"), (int, float))
                 }
-                # Fix round 5b: VLM orientation audit + mirror flip for
-                # directional pose sprites the diffuser drew facing left
-                # (prompt pins are advisory — the kick frame in trace
-                # 20260611_145321 disobeyed). Runs BEFORE the trace so
-                # per_asset carries orientation_flipped flags.
-                if produced:
-                    try:
-                        _flipped = await self._audit_sprite_orientation(
-                            produced, per_asset,
-                        )
-                        if _flipped:
-                            yield self._record(AgentEvent(
-                                "info",
-                                f"orientation audit: mirrored "
-                                f"{len(_flipped)} sprite(s) to face right: "
-                                f"{', '.join(_flipped)}",
-                            ))
-                    except Exception as _oa_e:
-                        self._trace_exception("orientation_audit_error", _oa_e)
+                # Sprite facing/orientation is no longer audited or mirror-
+                # flipped in the pipeline. The convention (author right-facing
+                # art, flip in code) lives in the playbook
+                # (directional-art-faces-right); art-direction policy stays in
+                # memory, not in code.
                 self._trace({
                     "kind": "assets_generated",
                     "trigger": trigger,

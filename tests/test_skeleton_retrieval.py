@@ -21,9 +21,21 @@ from memory import GameMemory  # noqa: E402
 
 
 def _gm(tmp_path: Path) -> GameMemory:
-    """Fresh memory rooted in tmp_path so live/base distinction is clean."""
+    """Fresh memory rooted in tmp_path so live/base distinction is clean.
+
+    Title-level routing (chess/doom/pacman -> skeleton) now flows through the
+    data-driven recipe path (visual_playtests.jsonl strong_hooks -> recipe ->
+    _RECIPE_TO_SKELETON), not hardcoded Python title tokens. So seed the tmp
+    memory with the REAL recipe data, mirroring production. (Title tokens live
+    in data, not code.)
+    """
+    import shutil
+
     gm = GameMemory(root=str(tmp_path / "memory"))
     gm.ensure()
+    src = Path(__file__).parent.parent / "memory" / "visual_playtests.jsonl"
+    if src.exists():
+        shutil.copyfile(src, Path(str(tmp_path / "memory" / "visual_playtests.jsonl")))
     return gm
 
 

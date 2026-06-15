@@ -25,7 +25,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import tools as tools_module  # noqa: E402
 from agent import GameAgent, _COMPACT_TOKEN_CEILING  # noqa: E402
-from assets import pin_sprite_orientation  # noqa: E402
 from tools import (  # noqa: E402
     control_not_recovered_verdict,
     summarize_state_timeline,
@@ -440,56 +439,15 @@ def test_reset_attempt_state_clears_critic_fairness_state(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 7. Sprite orientation pinning
+# 7. Sprite orientation is NOT pinned/rewritten by the pipeline anymore.
+# The facing convention now lives in the playbook (directional-art-faces-right);
+# generate_assets must pass prompts through verbatim and never tag a stat with
+# orientation_pinned. (Art-direction policy belongs in memory, not in code.)
 # ---------------------------------------------------------------------------
 
-def test_pose_sprite_without_orientation_gets_pinned():
-    p, pinned = pin_sprite_orientation(
-        "player_kick", "pixel-art martial artist in a flying kick, transparent background",
-    )
-    assert pinned is True
-    assert p.endswith(", side view, facing right")
-
-
-def test_prompt_with_orientation_unchanged():
-    for prompt in (
-        "pixel-art ninja facing left, transparent background",
-        "left-facing fighter sprite",
-        "top-down view of a character",
-        "warrior in profile, idle stance",
-        "spaceship viewed from above",
-    ):
-        p, pinned = pin_sprite_orientation("player_idle", prompt)
-        assert pinned is False
-        assert p == prompt
-
-
-def test_non_figure_spec_unchanged():
-    p, pinned = pin_sprite_orientation(
-        "dojo_background", "japanese dojo interior, wooden floor, warm lighting",
-    )
-    assert pinned is False
-    assert p == "japanese dojo interior, wooden floor, warm lighting"
-
-
-def test_figure_word_alone_pins():
-    _, pinned = pin_sprite_orientation(
-        "boss", "a big armored warrior, transparent background",
-    )
-    assert pinned is True
-
-
-def test_pose_token_in_name_pins():
-    _, pinned = pin_sprite_orientation(
-        "cpu_duck", "low crouched silhouette, transparent background",
-    )
-    assert pinned is True
-
-
-def test_generate_assets_applies_pinning(tmp_path):
-    """End-to-end through generate_assets with a stub generator: the prompt
-    actually sent to the diffuser carries the pinned orientation and the
-    per-asset stat records it."""
+def test_generate_assets_does_not_pin_orientation(tmp_path):
+    """The pipeline must NOT mutate prompts or tag orientation_pinned —
+    facing is a code/memory convention, not an asset-pipeline policy."""
     from assets import generate_assets
     from PIL import Image
 
@@ -516,12 +474,11 @@ def test_generate_assets_applies_pinning(tmp_path):
         img2img_generator=None,
     )
     assert "player_kick" in out and "dojo_bg" in out
-    kick_prompt = next(p for p in sent_prompts if "kick" in p)
-    bg_prompt = next(p for p in sent_prompts if "dojo interior" in p)
-    assert kick_prompt.endswith(", side view, facing right")
-    assert "facing right" not in bg_prompt
+    # prompts passed through verbatim — nothing appended by the pipeline
+    assert "ninja flying kick, transparent background" in sent_prompts
+    assert all("side view, facing right" not in p for p in sent_prompts)
     stats = {s["name"]: s for s in gen.last_stats}
-    assert stats["player_kick"].get("orientation_pinned") is True
+    assert "orientation_pinned" not in stats["player_kick"]
     assert "orientation_pinned" not in stats["dojo_bg"]
 
 
@@ -531,3 +488,36 @@ def test_playbook_has_directional_art_bullet():
     recs = [json.loads(l) for l in pb.read_text().splitlines() if l.strip()]
     ids = {r["id"] for r in recs}
     assert "directional-art-faces-right" in ids
+
+
+def test_playbook_covers_major_genres_and_concepts():
+    """Memory must know the major game genres + cross-cutting concepts.
+    These bullets fill the gaps the recipes/outlines didn't already cover."""
+    import json
+    pb = Path(__file__).parent.parent / "memory" / "playbook.jsonl"
+    recs = [json.loads(l) for l in pb.read_text().splitlines() if l.strip()]
+    ids = {r["id"] for r in recs}
+    required = {
+        "endless-runner-autoscroll",
+        "box-push-sokoban",
+        "flood-reveal-grid",
+        "gravity-drop-board",
+        "deckbuilder-card-economy",
+        "save-load-persistence",
+        "difficulty-progression-scaling",
+    }
+    missing = required - ids
+    assert not missing, f"playbook missing major-genre/concept bullets: {sorted(missing)}"
+
+
+def test_directional_art_bullet_has_no_pipeline_claim():
+    """The facing convention is model guidance now — it must NOT claim the
+    asset pipeline pins orientation (that machinery was removed)."""
+    import json
+    pb = Path(__file__).parent.parent / "memory" / "playbook.jsonl"
+    bullet = next(
+        json.loads(l) for l in pb.read_text().splitlines()
+        if l.strip() and json.loads(l)["id"] == "directional-art-faces-right"
+    )
+    assert "asset pipeline pins" not in bullet["content"]
+    assert "hero_left" in bullet["content"]  # teaches: don't name by direction
