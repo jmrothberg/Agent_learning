@@ -221,13 +221,35 @@ def _in_unclosed_html_file_block(text: str) -> bool:
     return last_close < last_open
 
 
+# Completion-token ceiling above which the one-shot first-build grace is
+# DENIED. The grace exists so a legitimately long first-build <html_file>
+# (big data tables / level maps) isn't cut mid-output by the repetition
+# detector. But past this many tokens the stream is already far longer than
+# any clean single-file game (observed clean builds finish well under ~12k
+# tokens), so a detector trip here is almost certainly a real repetition loop
+# — the model concatenating multiple drafts. Trace pin: the centipede build
+# 20260615_154952 looped to 22k tokens / 26 minutes on this slow model. This
+# is NOT a blanket cutoff: it only fires when the detector has ALREADY flagged
+# a loop AND we are past the ceiling, so legitimate builds under the ceiling
+# are untouched.
+_LOOP_GRACE_TOKEN_CEILING = 18000
+
+
 def _should_grace_inline_data_bloat(
     *,
     stall_reason: str | None,
     assembled_text: str,
     grace_already_used: bool,
+    completion_tokens: int = 0,
 ) -> bool:
-    """One-shot grace gate for `inline_data_bloat` repetition aborts."""
+    """One-shot grace gate for `inline_data_bloat` repetition aborts.
+
+    `completion_tokens` is the running count of emitted tokens for this
+    stream; past `_LOOP_GRACE_TOKEN_CEILING` the grace is denied so a detected
+    loop aborts immediately instead of getting another full detection window.
+    """
+    if completion_tokens >= _LOOP_GRACE_TOKEN_CEILING:
+        return False
     return (
         not grace_already_used
         and stall_reason == "inline_data_bloat"
@@ -812,6 +834,7 @@ async def stream_chat(
                     stall_reason=repeat.stall_reason,
                     assembled_text="".join(parts),
                     grace_already_used=loop_grace_used,
+                    completion_tokens=n_tokens,
                 ):
                     loop_grace_used = True
                     loop_grace_reason = "inline_data_bloat_unclosed_html_file"

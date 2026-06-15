@@ -103,6 +103,28 @@ def test_inline_data_bloat_grace_gate():
     ) is False
 
 
+def test_inline_data_bloat_grace_denied_past_token_ceiling():
+    """Past the completion-token ceiling the first-build grace is DENIED so a
+    detected loop aborts immediately (trace centipede 20260615_154952: a slow
+    model looped to 22k tokens / 26 min). Below the ceiling, grace still
+    applies, so legitimate long builds are untouched."""
+    partial = "<html_file>\n<html><body>...\n"
+    # Just under the ceiling — grace still granted.
+    assert ollama_io._should_grace_inline_data_bloat(
+        stall_reason="inline_data_bloat",
+        assembled_text=partial,
+        grace_already_used=False,
+        completion_tokens=ollama_io._LOOP_GRACE_TOKEN_CEILING - 1,
+    ) is True
+    # At/over the ceiling — grace denied → caller aborts the runaway loop.
+    assert ollama_io._should_grace_inline_data_bloat(
+        stall_reason="inline_data_bloat",
+        assembled_text=partial,
+        grace_already_used=False,
+        completion_tokens=ollama_io._LOOP_GRACE_TOKEN_CEILING,
+    ) is False
+
+
 # ---------------------------------------------------------------------------
 # RepetitionDetector — the shared class used by BOTH backends. These tests
 # pin its behavior directly so we don't rely on the Ollama or MLX wrappers

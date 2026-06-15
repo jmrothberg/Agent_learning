@@ -1230,6 +1230,7 @@ class MLXBackend(Backend):
                         stall_reason=repeat.stall_reason,
                         assembled_text="".join(parts),
                         grace_already_used=loop_grace_used,
+                        completion_tokens=n_tokens,
                     ):
                         loop_grace_used = True
                         loop_grace_reason = "inline_data_bloat_unclosed_html_file"
