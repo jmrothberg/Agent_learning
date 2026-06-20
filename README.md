@@ -77,6 +77,23 @@ cp ~/MLX_Models/MiniMax-M3-MLX-8bit/minimax_m3.py \
 (Use the model dir you actually downloaded — path or HF id — if not under `~/MLX_Models`.)
 Pick it in the TUI with `/list` then `/load` like any other MLX model.
 
+**MLX upgrades — GLM-5.2 (`glm_moe_dsa` / IndexShare):** PyPI `mlx-lm` 0.31.3 maps
+`glm_moe_dsa` to a bare `deepseek_v32` subclass and builds a DSA indexer on **every**
+layer. GLM-5.2 only has indexer weights on `"full"` layers and reuses the previous
+layer's top-k on `"shared"` layers. Loading without the fix fails instantly with
+`ValueError: Missing 285 parameters: model.layers.*.self_attn.indexer...`.
+```bash
+./scripts/install_mlx_glm52_fix.sh           # install (auto-picks source; see below)
+./scripts/install_mlx_glm52_fix.sh --status  # PR #1410 merge status + installed check
+./scripts/install_mlx_glm52_fix.sh --rollback
+```
+The script checks whether [mlx-lm PR #1410](https://github.com/ml-explore/mlx-lm/pull/1410)
+has merged: if yes it tries PyPI first (then `main` if the release lags), otherwise it
+installs the PR head. After any mlx-lm reinstall, re-copy `minimax_m3.py` if you use
+MiniMax-M3 (see above). Example weights: `pipenetwork/GLM-5.2-MLX-4bit`,
+`mlx-community/GLM-5.2-mxfp4` — needs a very large unified-memory Mac (~370–480 GB
+for 4-bit).
+
 **Tests** (pure-function, no model/Chromium; ~1 min, 1377 passing):
 ```bash
 .venv/bin/python -m pytest tests/ -q
@@ -398,6 +415,7 @@ caches). `memory/*.jsonl` is hand-curated.
 - **Chromium won't launch:** `env -u PLAYWRIGHT_BROWSERS_PATH .venv/bin/python -m playwright install chromium`.
 - **MLX cold-load is slow (~30–60 s first request):** the 27B mxfp8 loads into VRAM in-process; preload with `ollama run --ctx-size N <model>` for the Ollama path.
 - **`Model type minimax_m3 not supported` after an mlx-lm upgrade:** re-copy `minimax_m3.py` from your MiniMax-M3-MLX model dir into `.venv/lib/python3.12/site-packages/mlx_lm/models/` (see **MLX upgrades — MiniMax-M3** above).
+- **`Missing 285 parameters` / `indexer.k_norm.bias` loading GLM-5.2:** PyPI mlx-lm lacks IndexShare — run `./scripts/install_mlx_glm52_fix.sh` (see **MLX upgrades — GLM-5.2** above).
 - **"Feedback doesn't stick" / patches fail with SEARCH-not-found:** compaction shredded the file view — check `num_ctx` (default 100K) and the `structured_compaction` trace events.
 - **Game shows colored boxes instead of art:** sprite-key mismatch — the `sprite()` resolver and `ASSETS_LOADED_BUT_UNDRAWN` gate now catch it; re-run.
 - **Model loops/truncates on big builds:** expected for a 27B; the MLX sampler passes `top_p`/`top_k` (vendor coding preset) to avoid the degenerate line-repeat. Judge harness signals from the trace, not always a finished game.
