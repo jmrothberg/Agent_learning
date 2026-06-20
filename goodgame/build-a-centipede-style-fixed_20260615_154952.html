@@ -1,0 +1,638 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Centipede Shooter</title>
+<style>
+  html, body { margin:0; padding:0; background:#02030a; color:#fff; overflow:hidden; font-family: 'Courier New', monospace; }
+  #wrap { position:fixed; inset:0; display:grid; place-items:center; }
+  canvas { background:#04050f; image-rendering: pixelated; box-shadow: 0 0 40px #0ff3; }
+  #hint { position:fixed; bottom:8px; left:50%; transform:translateX(-50%); color:#9cf; font-size:12px; opacity:0.7; pointer-events:none; }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c" width="800" height="640"></canvas></div>
+<div id="hint">← → ↑ ↓ MOVE &nbsp;·&nbsp; SPACE FIRE &nbsp;·&nbsp; R RESTART</div>
+<script>
+(() => {
+  const cvs = document.getElementById('c');
+  const ctx = cvs.getContext('2d');
+  
+  // DPR scaling
+  function fit() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const rect = cvs.getBoundingClientRect();
+    cvs.width = 800 * dpr;
+    cvs.height = 640 * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+  
+  // Constants
+  const W = 800, H = 640;
+  const HUD_H = 40;
+  const CELL = 32;
+  const COLS = Math.floor(W / CELL); // 25
+  const ROWS = Math.floor((H - HUD_H) / CELL); // 18
+  const PLAYER_ZONE_ROWS = 2; // bottom 2 rows
+  
+  // Asset loader
+  const ASSETS = {};
+  async function loadAssets() {
+    const entries = [
+      ['blaster_idle', './build-a-centipede-style-fixed_20260615_154952_assets/blaster_idle.png'],
+      ['blaster_fire', './build-a-centipede-style-fixed_20260615_154952_assets/blaster_fire.png'],
+      ['centipede_head', './build-a-centipede-style-fixed_20260615_154952_assets/centipede_head.png'],
+      ['centipede_body', './build-a-centipede-style-fixed_20260615_154952_assets/centipede_body.png'],
+      ['mushroom', './build-a-centipede-style-fixed_20260615_154952_assets/mushroom.png'],
+      ['spider', './build-a-centipede-style-fixed_20260615_154952_assets/spider.png'],
+      ['bullet', './build-a-centipede-style-fixed_20260615_154952_assets/bullet.png'],
+      ['explosion', './build-a-centipede-style-fixed_20260615_154952_assets/explosion.png'],
+    ];
+    for (const [name, src] of entries) {
+      const img = new Image();
+      img.src = src;
+      try { await img.decode(); } catch (e) { console.warn('asset failed', name, e); }
+      ASSETS[name] = img;
+    }
+  }
+  
+  // Sprite resolver
+  const _spriteCache = {};
+  function sprite(key) {
+    if (_spriteCache[key] !== undefined) return _spriteCache[key];
+    let img = ASSETS[key];
+    if (!img) {
+      const norm = s => String(s).toLowerCase().replace(/[^a-z0-9]/g, '');
+      const want = norm(key), names = Object.keys(ASSETS);
+      let hit = names.find(n => norm(n) === want)
+             || names.find(n => norm(n).includes(want) || want.includes(norm(n)));
+      if (!hit) {
+        const toks = want.match(/[a-z]+|[0-9]+/g) || []; let best = 0;
+        for (const n of names) { const nn = norm(n); let sc = 0;
+          for (const t of toks) if (t.length >= 3 && nn.includes(t)) sc += t.length;
+          if (sc > best) { best = sc; hit = n; } }
+      }
+      img = hit ? ASSETS[hit] : null;
+    }
+    const ok = (img && img.naturalWidth > 0);
+    if (!ok) { (window.__assetMisses = window.__assetMisses || {})[key] = 1; }
+    _spriteCache[key] = ok ? img : null;
+    return _spriteCache[key];
+  }
+  
+  // Sound loader
+  const SOUNDS = {};
+  function loadSounds() {
+    const entries = [
+      ['laser', './build-a-centipede-style-fixed_20260615_154952_sounds/laser.ogg', false],
+      ['hit', './build-a-centipede-style-fixed_20260615_154952_sounds/hit.ogg', false],
+      ['kill', './build-a-centipede-style-fixed_20260615_154952_sounds/kill.ogg', false],
+      ['explosion', './build-a-centipede-style-fixed_20260615_154952_sounds/explosion.ogg', false],
+      ['music', './build-a-centipede-style-fixed_20260615_154952_sounds/music.ogg', true],
+    ];
+    for (const [name, src, loop] of entries) {
+      const a = new Audio(src);
+      a.loop = loop;
+      SOUNDS[name] = a;
+    }
+  }
+  loadSounds();
+  
+  function play(name) {
+    const base = SOUNDS[name]; if (!base) return;
+    if (base.loop) { base.play().catch(()=>{}); return; }
+    const inst = base.cloneNode(); inst.play().catch(()=>{});
+  }
+  
+  let _audioStarted = false;
+  function _startAudio() {
+    if (_audioStarted) return; _audioStarted = true;
+    if (SOUNDS.music) SOUNDS.music.play().catch(()=>{});
+  }
+  window.addEventListener('keydown', _startAudio, {once:true});
+  window.addEventListener('pointerdown', _startAudio, {once:true});
+  
+  // Input
+  const keys = {};
+  window.addEventListener('keydown', e => {
+    keys[e.code] = true;
+    if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Space'].includes(e.code)) e.preventDefault();
+  });
+  window.addEventListener('keyup', e => { keys[e.code] = false; });
+  
+  // Game state
+  const state = {
+    score: 0,
+    hi: 0,
+    lives: 3,
+    wave: 1,
+    over: false,
+    paused: false,
+    frame: 0,
+    time: 0,
+    player: { x: 12, y: 16, w: 28, h: 28, fireTimer: 0, firing: false, facing: 'up', angle: -Math.PI / 2, direction: 'up', avatar: 'blaster', hero: 'blaster' },
+    bullets: [],
+    segments: [], // array of chains, each chain is array of {col, row}
+    chains: [], // active chains
+    mushrooms: [], // {col, row, hp}
+    particles: [],
+    spider: null,
+    spiderTimer: 0,
+    moveTimer: 0, // centipede step timer
+    flashTimer: 0,
+  };
+  
+  window.state = state;
+  window.gameState = state;
+  window.hero = state.player;
+  
+  function cellToPx(col, row) {
+    return { x: col * CELL + CELL/2, y: HUD_H + row * CELL + CELL/2 };
+  }
+  
+  function pxToCell(x, y) {
+    return { col: Math.floor(x / CELL), row: Math.floor((y - HUD_H) / CELL) };
+  }
+  
+  function getMushroomAt(col, row) {
+    return state.mushrooms.find(m => m.col === col && m.row === row);
+  }
+  
+  function isBlocked(col, row) {
+    if (col < 0 || col >= COLS || row < 0 || row >= ROWS) return true;
+    return !!getMushroomAt(col, row);
+  }
+  
+  function buildCentipede(length) {
+    const startCol = Math.floor(COLS / 2) - Math.floor(length / 2);
+    const chain = [];
+    for (let i = 0; i < length; i++) {
+      chain.push({ col: startCol + i, row: 0, prevCol: startCol + i, prevRow: 0 });
+    }
+    return chain;
+  }
+  
+  function spawnMushrooms(count) {
+    for (let i = 0; i < count; i++) {
+      const col = Math.floor(Math.random() * COLS);
+      const row = Math.floor(Math.random() * (ROWS - PLAYER_ZONE_ROWS - 2));
+      if (!getMushroomAt(col, row)) {
+        state.mushrooms.push({ col, row, hp: 4 });
+      }
+    }
+  }
+  
+  function reset(fullReset = true) {
+    state.score = fullReset ? 0 : state.score;
+    state.lives = 3;
+    state.wave = fullReset ? 1 : state.wave;
+    state.over = false;
+    state.paused = false;
+    state.frame = 0;
+    state.time = 0;
+    state.player.x = Math.floor(COLS / 2);
+    state.player.y = ROWS - 1;
+    state.player.fireTimer = 0;
+    state.player.firing = false;
+    state.bullets = [];
+    state.particles = [];
+    state.spider = null;
+    state.spiderTimer = 0;
+    state.moveTimer = 0;
+    state.flashTimer = 0;
+    state.mushrooms = [];
+    const segCount = 10 + (state.wave - 1) * 2;
+    const segs = buildCentipede(segCount);
+    state.chains = [{ segments: segs, dir: 1 }];
+    state.segments = segs; // for probe compatibility
+    spawnMushrooms(30 + state.wave * 5);
+  }
+  
+  window.game = { reset: () => reset(true) };
+  
+  // Centipede step
+  function stepCentipede() {
+    for (const chain of state.chains) {
+      if (chain.segments.length === 0) continue;
+      const head = chain.segments[0];
+      // Try to move in current direction
+      let nextCol = head.col + chain.dir;
+      let nextRow = head.row;
+      // Check if blocked (wall or mushroom)
+      if (nextCol < 0 || nextCol >= COLS || isBlocked(nextCol, nextRow)) {
+        // Turn down (or up if in player zone)
+        if (head.row >= ROWS - PLAYER_ZONE_ROWS) {
+          // In player zone, go up
+          nextRow = head.row - 1;
+          chain.dir = -chain.dir;
+        } else {
+          nextRow = head.row + 1;
+          chain.dir = -chain.dir;
+        }
+        nextCol = head.col + chain.dir;
+        // If still blocked after turn, just go down
+        if (isBlocked(nextCol, nextRow) || nextCol < 0 || nextCol >= COLS) {
+          nextRow = head.row + 1;
+          nextCol = head.col;
+        }
+      }
+      // Shift segments
+      for (let i = chain.segments.length - 1; i > 0; i--) {
+        chain.segments[i].prevCol = chain.segments[i].col;
+        chain.segments[i].prevRow = chain.segments[i].row;
+        chain.segments[i].col = chain.segments[i-1].prevCol;
+        chain.segments[i].row = chain.segments[i-1].prevRow;
+      }
+      head.prevCol = head.col;
+      head.prevRow = head.row;
+      head.col = nextCol;
+      head.row = nextRow;
+      
+      // Check if head reached player zone
+      if (head.row >= ROWS - PLAYER_ZONE_ROWS) {
+        // Lose a life
+        loseLife();
+        return;
+      }
+    }
+  }
+  
+  function loseLife() {
+    state.lives--;
+    state.flashTimer = 60;
+    play('explosion');
+    state.particles.push({ x: state.player.x * CELL + CELL/2, y: state.player.y * CELL + CELL/2 + HUD_H, life: 30, color: '#ff0' });
+    if (state.lives <= 0) {
+      state.over = true;
+    } else {
+      // Reset centipede to top
+      const segCount = 10 + (state.wave - 1) * 2;
+      const segs = buildCentipede(segCount);
+      state.chains = [{ segments: segs, dir: 1 }];
+      state.segments = segs;
+    }
+  }
+  
+  // Bullet update
+  function updateBullets(dt) {
+    for (let i = state.bullets.length - 1; i >= 0; i--) {
+      const b = state.bullets[i];
+      b.y -= 480 * dt;
+      if (b.y < HUD_H) {
+        state.bullets.splice(i, 1);
+        continue;
+      }
+      // Check mushroom collision
+      const cell = pxToCell(b.x, b.y);
+      const m = getMushroomAt(cell.col, cell.row);
+      if (m) {
+        m.hp--;
+        state.score += 1;
+        if (m.hp <= 0) {
+          state.mushrooms = state.mushrooms.filter(x => x !== m);
+        }
+        state.bullets.splice(i, 1);
+        play('hit');
+        continue;
+      }
+      // Check centipede collision
+      for (let ci = state.chains.length - 1; ci >= 0; ci--) {
+        const chain = state.chains[ci];
+        for (let si = chain.segments.length - 1; si >= 0; si--) {
+          const seg = chain.segments[si];
+          const sp = cellToPx(seg.col, seg.row);
+          if (Math.abs(b.x - sp.x) < CELL/2 && Math.abs(b.y - sp.y) < CELL/2) {
+            // Hit!
+            state.bullets.splice(i, 1);
+            // Add mushroom at this position
+            if (!getMushroomAt(seg.col, seg.row)) {
+              state.mushrooms.push({ col: seg.col, row: seg.row, hp: 4 });
+            }
+            if (si === 0) {
+              // Head shot
+              state.score += 100;
+              play('kill');
+              chain.segments.shift();
+              if (chain.segments.length === 0) {
+                state.chains.splice(ci, 1);
+              }
+            } else {
+              // Body shot - split
+              state.score += 10;
+              play('kill');
+              const tail = chain.segments.splice(si);
+              // tail[0] becomes new head, going opposite direction
+              if (tail.length > 0) {
+                const newChain = { segments: tail, dir: -chain.dir };
+                state.chains.push(newChain);
+              }
+              if (chain.segments.length === 0) {
+                state.chains.splice(ci, 1);
+              }
+            }
+            // Particles
+            state.particles.push({ x: sp.x, y: sp.y, life: 20, color: '#f0f' });
+            // Check wave clear
+            if (state.chains.length === 0) {
+              state.wave++;
+              const segCount = 10 + (state.wave - 1) * 2;
+              const segs = buildCentipede(segCount);
+              state.chains = [{ segments: segs, dir: 1 }];
+              state.segments = segs;
+              spawnMushrooms(20 + state.wave * 3);
+            }
+            break;
+          }
+        }
+      }
+    }
+    // Flatten segments for probe
+    state.segments = state.chains.flatMap(c => c.segments);
+  }
+  
+  // Player update
+  function updatePlayer(dt) {
+    const p = state.player;
+    const speed = 220; // px/sec
+    let dx = 0, dy = 0;
+    if (keys.ArrowLeft) dx -= 1;
+    if (keys.ArrowRight) dx += 1;
+    if (keys.ArrowUp) dy -= 1;
+    if (keys.ArrowDown) dy += 1;
+    if (dx !== 0 && dy !== 0) { dx *= 0.707; dy *= 0.707; }
+    p.x += dx * speed * dt;
+    p.y += dy * speed * dt;
+    if (dx < 0) { p.facing = 'left'; p.angle = Math.PI; p.direction = 'left'; }
+    else if (dx > 0) { p.facing = 'right'; p.angle = 0; p.direction = 'right'; }
+    else if (dy < 0) { p.facing = 'up'; p.angle = -Math.PI / 2; p.direction = 'up'; }
+    else if (dy > 0) { p.facing = 'down'; p.angle = Math.PI / 2; p.direction = 'down'; }
+    if (dx < 0) p.facing = 'left';
+    else if (dx > 0) p.facing = 'right';
+    else if (dy < 0) p.facing = 'up';
+    else if (dy > 0) p.facing = 'down';
+    else p.facing = 'up';
+    // Clamp to player zone (bottom 2 rows, can go up one more)
+    const minY = (ROWS - PLAYER_ZONE_ROWS - 1) * CELL;
+    const maxY = (ROWS - 1) * CELL + (CELL - p.h) / 2;
+    p.y = Math.max(minY, Math.min(maxY, p.y));
+    const minX = 0;
+    const maxX = W - p.w;
+    p.x = Math.max(minX, Math.min(maxX, p.x));
+    
+    // Fire
+    p.fireTimer -= dt;
+    if (keys.Space && p.fireTimer <= 0) {
+      p.firing = true;
+      const bx = p.x + p.w / 2;
+      const by = p.y;
+      state.bullets.push({ x: bx, y: by, vy: -480 });
+      p.fireTimer = 0.18;
+      play('laser');
+    } else {
+      p.firing = false;
+    }
+  }
+  
+  // Spider update
+  function updateSpider(dt) {
+    if (!state.spider) {
+      state.spiderTimer -= dt;
+      if (state.spiderTimer <= 0 && state.frame > 60) {
+        const fromLeft = Math.random() < 0.5;
+        state.spider = {
+          x: fromLeft ? -CELL : W + CELL,
+          y: HUD_H + (ROWS - 1) * CELL + CELL/2,
+          vx: fromLeft ? 80 + Math.random() * 60 : -(80 + Math.random() * 60),
+          vy: 0,
+          targetY: HUD_H + (ROWS - 1 - Math.floor(Math.random() * 2)) * CELL + CELL/2,
+          phase: 0,
+        };
+        state.spiderTimer = 8 + Math.random() * 6;
+      }
+      return;
+    }
+    const s = state.spider;
+    s.phase += dt;
+    s.x += s.vx * dt;
+    // Bounce off walls
+    if (s.x < 0) { s.x = 0; s.vx = Math.abs(s.vx); }
+    if (s.x > W) { s.x = W; s.vx = -Math.abs(s.vx); }
+    // Move toward target Y
+    const dy = s.targetY - s.y;
+    s.y += Math.sign(dy) * Math.min(Math.abs(dy), 60 * dt);
+    // Random target change
+    if (Math.random() < dt * 0.5) {
+      s.targetY = HUD_H + (ROWS - 1 - Math.floor(Math.random() * 2)) * CELL + CELL/2;
+    }
+    // Eat mushrooms
+    const cell = pxToCell(s.x, s.y);
+    if (cell.col >= 0 && cell.col < COLS && cell.row >= 0 && cell.row < ROWS) {
+      const m = getMushroomAt(cell.col, cell.row);
+      if (m && Math.random() < dt * 4) {
+        state.mushrooms = state.mushrooms.filter(x => x !== m);
+        state.score += 5;
+      }
+    }
+    // Check player collision
+    const p = state.player;
+    if (Math.abs(s.x - (p.x + p.w/2)) < CELL && Math.abs(s.y - (p.y + p.h/2)) < CELL) {
+      loseLife();
+      state.spider = null;
+    }
+    // Off screen
+    if (s.x < -CELL * 2 || s.x > W + CELL * 2) {
+      state.spider = null;
+    }
+  }
+  
+  // Particles
+  function updateParticles(dt) {
+    for (let i = state.particles.length - 1; i >= 0; i--) {
+      state.particles[i].life -= dt * 60;
+      if (state.particles[i].life <= 0) state.particles.splice(i, 1);
+    }
+  }
+  
+  // Draw
+  function draw() {
+    // Clear
+    ctx.fillStyle = '#04050f';
+    ctx.fillRect(0, 0, W, H);
+    
+    // HUD background
+    ctx.fillStyle = '#0a0a1a';
+    ctx.fillRect(0, 0, W, HUD_H);
+    ctx.fillStyle = '#1a1a3a';
+    ctx.fillRect(0, HUD_H - 2, W, 2);
+    
+    // Playfield border
+    ctx.strokeStyle = '#2a2a5a';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(1, HUD_H + 1, W - 2, H - HUD_H - 2);
+    
+    // Player zone tint
+    ctx.fillStyle = 'rgba(0, 100, 200, 0.08)';
+    ctx.fillRect(0, HUD_H + (ROWS - PLAYER_ZONE_ROWS) * CELL, W, PLAYER_ZONE_ROWS * CELL);
+    
+    // Mushrooms
+    for (const m of state.mushrooms) {
+      const p = cellToPx(m.col, m.row);
+      const img = sprite('mushroom');
+      if (img) {
+        const a = m.hp / 4;
+        ctx.globalAlpha = 0.5 + a * 0.5;
+        ctx.drawImage(img, p.x - CELL/2, p.y - CELL/2, CELL, CELL);
+        ctx.globalAlpha = 1;
+      } else {
+        ctx.fillStyle = `rgba(200, 50, 50, ${0.5 + (m.hp / 4) * 0.5})`;
+        ctx.fillRect(p.x - 12, p.y - 8, 24, 16);
+      }
+    }
+    
+    // Centipede
+    for (const chain of state.chains) {
+      for (let i = 0; i < chain.segments.length; i++) {
+        const seg = chain.segments[i];
+        const p = cellToPx(seg.col, seg.row);
+        const img = i === 0 ? sprite('centipede_head') : sprite('centipede_body');
+        if (img) {
+          ctx.drawImage(img, p.x - CELL/2, p.y - CELL/2, CELL, CELL);
+        } else {
+          ctx.fillStyle = i === 0 ? '#f0f' : '#a0f';
+          ctx.fillRect(p.x - 12, p.y - 8, 24, 16);
+        }
+      }
+    }
+    
+    // Bullets
+    for (const b of state.bullets) {
+      const img = sprite('bullet');
+      if (img) {
+        ctx.drawImage(img, b.x - 4, b.y - 12, 8, 24);
+      } else {
+        ctx.fillStyle = '#ff0';
+        ctx.fillRect(b.x - 2, b.y - 8, 4, 16);
+      }
+    }
+    
+    // Spider
+    if (state.spider) {
+      const s = state.spider;
+      const img = sprite('spider');
+      if (img) {
+        const flip = s.vx < 0;
+        ctx.save();
+        if (flip) {
+          ctx.translate(s.x, s.y);
+          ctx.scale(-1, 1);
+          ctx.drawImage(img, -CELL/2, -CELL/2, CELL, CELL);
+        } else {
+          ctx.drawImage(img, s.x - CELL/2, s.y - CELL/2, CELL, CELL);
+        }
+        ctx.restore();
+      } else {
+        ctx.fillStyle = '#a0f';
+        ctx.fillRect(s.x - 12, s.y - 8, 24, 16);
+      }
+    }
+    
+    // Player
+    const p = state.player;
+    if (state.flashTimer > 0 && Math.floor(state.flashTimer / 4) % 2 === 0) {
+      // Flash on hit
+    } else {
+      const img = sprite(p.firing ? 'blaster_fire' : 'blaster_idle');
+      if (img) {
+        ctx.drawImage(img, p.x, p.y, p.w, p.h);
+      } else {
+        ctx.fillStyle = '#0ff';
+        ctx.fillRect(p.x, p.y, p.w, p.h);
+      }
+    }
+    
+    // Particles
+    for (const pt of state.particles) {
+      ctx.globalAlpha = Math.max(0, pt.life / 20);
+      ctx.fillStyle = pt.color;
+      ctx.fillRect(pt.x - 2, pt.y - 2, 4, 4);
+    }
+    ctx.globalAlpha = 1;
+    
+    // HUD
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 18px Courier New';
+    ctx.textAlign = 'left';
+    ctx.fillText('SCORE: ' + state.score, 12, 26);
+    ctx.fillText('WAVE: ' + state.wave, W / 2 - 50, 26);
+    ctx.textAlign = 'right';
+    ctx.fillText('LIVES: ' + state.lives, W - 12, 26);
+    
+    // Game over
+    if (state.over) {
+      ctx.fillStyle = 'rgba(0,0,0,0.7)';
+      ctx.fillRect(0, H/2 - 60, W, 120);
+      ctx.fillStyle = '#f44';
+      ctx.font = 'bold 48px Courier New';
+      ctx.textAlign = 'center';
+      ctx.fillText('GAME OVER', W/2, H/2 - 10);
+      ctx.fillStyle = '#fff';
+      ctx.font = '20px Courier New';
+      ctx.fillText('Press R to restart', W/2, H/2 + 30);
+    }
+  }
+  
+  // Game loop
+  let lastTime = performance.now();
+  function frame(now) {
+    try {
+      const dt = Math.min((now - lastTime) / 1000, 0.05);
+      lastTime = now;
+      state.frame++;
+      state.time += dt;
+      
+      if (!state.over) {
+        // Restart
+        if (keys.KeyR && state.frame > 30) {
+          reset(true);
+          keys.KeyR = false;
+        }
+        
+        updatePlayer(dt);
+        
+        // Centipede step (every N ms based on wave)
+        const stepInterval = Math.max(0.08, 0.22 - (state.wave - 1) * 0.015);
+        state.moveTimer += dt;
+        if (state.moveTimer >= stepInterval) {
+          state.moveTimer = 0;
+          stepCentipede();
+        }
+        
+        updateBullets(dt);
+        updateSpider(dt);
+        updateParticles(dt);
+        
+        if (state.flashTimer > 0) state.flashTimer--;
+      } else {
+        if (keys.KeyR) {
+          reset(true);
+          keys.KeyR = false;
+        }
+      }
+      
+      draw();
+    } catch (e) {
+      console.error('frame error', e);
+    }
+    requestAnimationFrame(frame);
+  }
+  
+  // Start
+  reset(true);
+  loadAssets();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

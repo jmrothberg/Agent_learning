@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dojo Fighters</title>
+<style>
+  :root { color-scheme: dark; --bg:#1a0f0a; }
+  html,body { margin:0; height:100%; background:#000; overflow:hidden; font-family:system-ui,sans-serif; }
+  #wrap { position:fixed; inset:0; display:grid; place-items:center; background:#000; }
+  canvas { background:#000; max-width:96vw; max-height:90vh; image-rendering:auto; display:block; }
+  #cut { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; display:none; z-index:10; background:#000; }
+  #hud { position:fixed; top:12px; left:50%; transform:translateX(-50%); display:flex; gap:32px; z-index:5; pointer-events:none; }
+  .hpwrap { display:flex; flex-direction:column; align-items:center; gap:2px; }
+  .hplabel { color:#fff; font-weight:bold; font-size:14px; text-shadow:0 1px 2px #000; }
+  .hpbar { width:280px; height:22px; background:#333; border:2px solid #fff; border-radius:4px; overflow:hidden; box-shadow:0 2px 6px #000a; }
+  .hpfill { height:100%; transition:width 0.2s; }
+  .hpfill.blue { background:linear-gradient(to right,#4af,#28f); }
+  .hpfill.red { background:linear-gradient(to right,#f42,#f28); }
+  #help { position:fixed; bottom:12px; left:50%; transform:translateX(-50%); color:#fff; font-size:13px; opacity:0.75; pointer-events:none; z-index:5; text-shadow:0 1px 2px #000; }
+  #banner { position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); color:#fff; font-size:56px; font-weight:bold; text-shadow:0 0 20px #000, 0 0 40px #000; display:none; z-index:20; text-align:center; pointer-events:none; letter-spacing:2px; }
+  #skipHint { position:fixed; top:50%; left:50%; transform:translate(-50%,calc(-50% + 100px)); color:#fff; font-size:16px; opacity:0.8; display:none; z-index:11; pointer-events:none; text-shadow:0 1px 2px #000; }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c" width="960" height="540"></canvas></div>
+<video id="cut" muted playsinline preload="auto"></video>
+<div id="hud">
+  <div class="hpwrap"><div class="hplabel">BLUE</div><div class="hpbar"><div id="php" class="hpfill blue" style="width:100%"></div></div></div>
+  <div class="hpwrap"><div class="hplabel">RED</div><div class="hpbar"><div id="rhp" class="hpfill red" style="width:100%"></div></div></div>
+</div>
+<div id="banner"></div>
+<div id="skipHint">Press any key to skip</div>
+<div id="help">← → Move · ↑ Jump · ↓ Duck · J Punch · K Kick · L Fireball · R Restart</div>
+<script>
+(() => {
+  "use strict";
+  const cvs = document.getElementById("c");
+  const ctx = cvs.getContext("2d");
+  const W = 960, H = 540;
+  const GROUND = H - 100;
+
+  function fit() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    cvs.width = W * dpr; cvs.height = H * dpr;
+    cvs.style.width = W + "px"; cvs.style.height = H + "px";
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  fit();
+  window.addEventListener("resize", fit);
+
+  // ---- Asset loader ----
+  const ASSETS = {};
+  async function loadAssets() {
+    const entries = [
+      ["dojo_bg","./build-a-single-screen-2d-fight_20260615_181442_assets/dojo_bg.png"],
+      ["blue_idle","./build-a-single-screen-2d-fight_20260615_181442_assets/blue_idle.png"],
+      ["blue_walk","./build-a-single-screen-2d-fight_20260615_181442_assets/blue_walk.png"],
+      ["blue_jump","./build-a-single-screen-2d-fight_20260615_181442_assets/blue_jump.png"],
+      ["blue_duck","./build-a-single-screen-2d-fight_20260615_181442_assets/blue_duck.png"],
+      ["blue_block","./build-a-single-screen-2d-fight_20260615_181442_assets/blue_block.png"],
+      ["blue_punch","./build-a-single-screen-2d-fight_20260615_181442_assets/blue_punch.png"],
+      ["blue_kick","./build-a-single-screen-2d-fight_20260615_181442_assets/blue_kick.png"],
+      ["blue_fireball","./build-a-single-screen-2d-fight_20260615_181442_assets/blue_fireball.png"],
+      ["blue_hit","./build-a-single-screen-2d-fight_20260615_181442_assets/blue_hit.png"],
+      ["blue_death","./build-a-single-screen-2d-fight_20260615_181442_assets/blue_death.png"],
+      ["red_idle","./build-a-single-screen-2d-fight_20260615_181442_assets/red_idle.png"],
+      ["red_walk","./build-a-single-screen-2d-fight_20260615_181442_assets/red_walk.png"],
+      ["red_jump","./build-a-single-screen-2d-fight_20260615_181442_assets/red_jump.png"],
+      ["red_duck","./build-a-single-screen-2d-fight_20260615_181442_assets/red_duck.png"],
+      ["red_block","./build-a-single-screen-2d-fight_20260615_181442_assets/red_block.png"],
+      ["red_punch","./build-a-single-screen-2d-fight_20260615_181442_assets/red_punch.png"],
+      ["red_kick","./build-a-single-screen-2d-fight_20260615_181442_assets/red_kick.png"],
+      ["red_fireball","./build-a-single-screen-2d-fight_20260615_181442_assets/red_fireball.png"],
+      ["red_hit","./build-a-single-screen-2d-fight_20260615_181442_assets/red_hit.png"],
+      ["red_death","./build-a-single-screen-2d-fight_20260615_181442_assets/red_death.png"],
+      ["intro_still","./build-a-single-screen-2d-fight_20260615_181442_assets/intro_still.png"],
+      ["ko_still","./build-a-single-screen-2d-fight_20260615_181442_assets/ko_still.png"],
+    ];
+    for (const [name, src] of entries) {
+      const img = new Image();
+      img.src = src;
+      try { await img.decode(); } catch(e) { console.warn("asset failed", name, e); }
+      ASSETS[name] = img;
+    }
+  }
+
+  // ---- Sound loader ----
+  const SOUNDS = {};
+  function loadSounds() {
+    const entries = [
+      ["punch","./build-a-single-screen-2d-fight_20260615_181442_sounds/punch.ogg",false],
+      ["kick","./build-a-single-screen-2d-fight_20260615_181442_sounds/kick.ogg",false],
+      ["hit","./build-a-single-screen-2d-fight_20260615_181442_sounds/hit.ogg",false],
+      ["fireball","./build-a-single-screen-2d-fight_20260615_181442_sounds/fireball.ogg",false],
+      ["ko","./build-a-single-screen-2d-fight_20260615_181442_sounds/ko.ogg",false],
+      ["music","./build-a-single-screen-2d-fight_20260615_181442_sounds/music.ogg",true],
+    ];
+    for (const [name, src, loop] of entries) {
+      const a = new Audio(src);
+      a.loop = loop;
+      SOUNDS[name] = a;
+    }
+  }
+  loadSounds();
+
+  function play(name) {
+    const base = SOUNDS[name]; if (!base) return;
+    if (base.loop) { base.play().catch(()=>{}); return; }
+    const inst = base.cloneNode();
+    inst.play().catch(()=>{});
+  }
+
+  let _audioStarted = false;
+  function _startAudio() {
+    if (_audioStarted) return; _audioStarted = true;
+    play("music");
+  }
+  window.addEventListener("keydown", _startAudio, {once:true});
+  window.addEventListener("pointerdown", _startAudio, {once:true});
+
+  // ---- Sprite resolver ----
+  const _spriteCache = {};
+  function sprite(key) {
+    // Re-check ASSETS every frame until decoded; only cache positive hits.
+    let img = ASSETS[key];
+    if (img && img.naturalWidth > 0) { _spriteCache[key] = img; return img; }
+    if (_spriteCache[key] !== undefined) return _spriteCache[key];
+    if (!img) {
+      const norm = s => String(s).toLowerCase().replace(/[^a-z0-9]/g,"");
+      const want = norm(key), names = Object.keys(ASSETS);
+      let hit = names.find(n => norm(n) === want)
+             || names.find(n => norm(n).includes(want) || want.includes(norm(n)));
+      if (!hit) {
+        const toks = want.match(/[a-z]+|[0-9]+/g) || []; let best = 0;
+        for (const n of names) { const nn = norm(n); let sc = 0;
+          for (const t of toks) if (t.length >= 3 && nn.includes(t)) sc += t.length;
+          if (sc > best) { best = sc; hit = n; } }
+      }
+      img = hit ? ASSETS[hit] : null;
+    }
+    const ok = (img && img.naturalWidth > 0);
+    if (!ok) { (window.__assetMisses = window.__assetMisses || {})[key] = 1; return null; }
+    _spriteCache[key] = img;
+    return img;
+  }
+
+  // ---- Cutscene ----
+  const CUTS = {
+    intro: "./build-a-single-screen-2d-fight_20260615_181442_videos/intro.mp4",
+    ko: "./build-a-single-screen-2d-fight_20260615_181442_videos/ko.mp4",
+  };
+  const vid = document.getElementById("cut");
+  const skipHint = document.getElementById("skipHint");
+  let cutDone = null;
+  function playCut(name, onDone) {
+    const src = CUTS[name];
+    cutDone = onDone;
+    skipHint.style.display = "block";
+    vid.onended = endCut;
+    vid.onerror = endCut;
+    if (!src) { endCut(); return; }
+    vid.src = src;
+    vid.style.display = "block";
+    vid.play().catch(endCut);
+    setTimeout(() => { if (cutDone) endCut(); }, 8000);
+  }
+  function endCut() {
+    if (!cutDone) return;
+    vid.style.display = "none";
+    vid.pause();
+    skipHint.style.display = "none";
+    const f = cutDone; cutDone = null; f();
+  }
+  window.addEventListener("keydown", () => { if (cutDone) endCut(); });
+  window.addEventListener("pointerdown", () => { if (cutDone) endCut(); });
+
+  // ---- Game state ----
+  const state = {
+    phase: "intro", // intro | fight | ko | over
+    winner: null,
+    player: null,
+    cpu: null,
+    projectiles: [],
+    particles: [],
+    frame: 0,
+    koTimer: 0,
+  };
+
+  function makeFighter(side, color) {
+    return {
+      side, color,
+      x: side === "player" ? 220 : 740,
+      y: GROUND,
+      vx: 0, vy: 0,
+      facing: side === "player" ? 1 : -1,
+      state: "idle",
+      stateTimer: 0,
+      hasHit: false,
+      hasFired: false,
+      hp: 100, maxHp: 100,
+      onGround: true,
+      aiTimer: 0,
+      aiCooldown: 0,
+    };
+  }
+
+  function reset() {
+    state.phase = "fight";
+    state.winner = null;
+    state.player = makeFighter("player", "blue");
+    state.cpu = makeFighter("cpu", "red");
+    state.projectiles = [];
+    state.particles = [];
+    state.frame = 0;
+    state.koTimer = 0;
+    document.getElementById("banner").style.display = "none";
+  }
+  window.game = { reset };
+
+  // ---- Input ----
+  const keys = {};
+  const pressed = {};
+  window.addEventListener("keydown", e => {
+    if (!keys[e.code]) pressed[e.code] = true;
+    keys[e.code] = true;
+    if (e.code === "KeyR") { reset(); e.preventDefault(); return; }
+    if (["ArrowLeft","ArrowRight","ArrowUp","ArrowDown","Space"].includes(e.code)) e.preventDefault();
+  });
+  window.addEventListener("keyup", e => { keys[e.code] = false; });
+
+  function dist(a, b) { return Math.abs(a.x - b.x); }
+
+  function tryAttack(attacker, type) {
+    if (attacker.state === "hit" || attacker.state === "death") return false;
+    if (["punch","kick","fireball"].includes(attacker.state)) return false;
+    attacker.state = type;
+    attacker.stateTimer = 0;
+    attacker.hasHit = false;
+    attacker.hasFired = false;
+    attacker.vx = 0;
+    return true;
+  }
+
+  function spawnFireball(owner) {
+    const dir = owner.facing;
+    state.projectiles.push({
+      x: owner.x + dir * 70,
+      y: owner.y - 110,
+      vx: dir * 420,
+      vy: 0,
+      owner: owner.side,
+      damage: 10,
+      life: 2.5,
+      color: owner.color,
+    });
+    play("fireball");
+  }
+
+  // ---- Hit-pause (game feel) ----
+  let hitPause = 0;
+  function triggerHitPause(seconds) { hitPause = Math.max(hitPause, seconds); }
+  function applyHitPause(dt) {
+    if (hitPause > 0) { hitPause -= dt; return dt * 0.05; }
+    return dt;
+  }
+
+  function applyDamage(target, amount) {
+    if (target.state === "death") return;
+    if (target.state === "block") amount = Math.floor(amount * 0.2);
+    target.hp = Math.max(0, target.hp - amount);
+    if (target.hp <= 0) {
+      target.state = "death";
+      target.stateTimer = 0;
+      target.vx = 0;
+      triggerHitPause(0.18);
+    } else {
+      target.state = "hit";
+      target.stateTimer = 0;
+      target.vx = (target === state.player ? -1 : 1) * 120;
+      triggerHitPause(amount >= 10 ? 0.10 : 0.05);
+    }
+    play("hit");
+  }
+
+  // ---- CPU AI ----
+  function updateCPU(cpu, player, dt) {
+    if (cpu.state === "hit" || cpu.state === "death") return;
+    if (["punch","kick","fireball"].includes(cpu.state)) return;
+    cpu.aiCooldown -= dt;
+    cpu.facing = player.x > cpu.x ? 1 : -1;
+    if (cpu.aiCooldown > 0) return;
+    const d = dist(cpu, player);
+    const r = Math.random();
+    if (d > 320) {
+      if (r < 0.45) { tryAttack(cpu, "fireball"); cpu.aiCooldown = 1.2; }
+      else { cpu.state = "walk"; cpu.vx = cpu.facing * 160; cpu.aiCooldown = 0.25; }
+    } else if (d > 150) {
+      if (r < 0.15 && cpu.onGround) { cpu.state = "jump"; cpu.vy = -600; cpu.onGround = false; cpu.aiCooldown = 0.7; }
+      else if (r < 0.3) { cpu.state = "duck"; cpu.aiCooldown = 0.5; }
+      else { cpu.state = "walk"; cpu.vx = cpu.facing * 180; cpu.aiCooldown = 0.2; }
+    } else {
+      if (r < 0.4) { tryAttack(cpu, r < 0.5 ? "punch" : "kick"); cpu.aiCooldown = 0.7; }
+      else if (r < 0.55) { cpu.state = "block"; cpu.aiCooldown = 0.5; }
+      else { cpu.state = "walk"; cpu.vx = (r < 0.7 ? cpu.facing : -cpu.facing) * 100; cpu.aiCooldown = 0.25; }
+    }
+  }
+
+  // ---- Update ----
+  function updateFighter(f, dt) {
+    if (!f.onGround) {
+      f.vy += 1500 * dt;
+      f.y += f.vy * dt;
+      if (f.y >= GROUND) {
+        f.y = GROUND; f.vy = 0; f.onGround = true;
+        if (f.state === "jump") { f.state = "idle"; f.stateTimer = 0; }
+      }
+    }
+    f.stateTimer += dt;
+    if (f.state === "punch" && f.stateTimer > 0.35) { f.state = "idle"; f.stateTimer = 0; }
+    if (f.state === "kick" && f.stateTimer > 0.45) { f.state = "idle"; f.stateTimer = 0; }
+    if (f.state === "fireball" && f.stateTimer > 0.4) { f.state = "idle"; f.stateTimer = 0; }
+    if (f.state === "hit" && f.stateTimer > 0.35) { f.state = "idle"; f.stateTimer = 0; f.vx = 0; }
+    if (f.state === "block" && f.stateTimer > 0.5) { f.state = "idle"; f.stateTimer = 0; }
+    if (f.state === "duck" && f.stateTimer > 0.5) { f.state = "idle"; f.stateTimer = 0; }
+    if (f.state === "death") { f.vx *= 0.85; }
+    if (f.state === "walk" || f.state === "idle") {
+      f.x += f.vx * dt;
+      f.vx *= 0.7;
+      if (Math.abs(f.vx) < 5 && f.state === "walk") { f.state = "idle"; f.vx = 0; }
+    }
+    f.x = Math.max(70, Math.min(W - 70, f.x));
+  }
+
+  function checkHits() {
+    const p = state.player, c = state.cpu;
+    // Punch
+    if (p.state === "punch" && !p.hasHit && p.stateTimer > 0.08 && p.stateTimer < 0.22) {
+      const hitX = p.x + p.facing * 85;
+      if (Math.abs(hitX - c.x) < 65 && Math.abs(p.y - c.y) < 90) {
+        applyDamage(c, 8); p.hasHit = true; play("punch");
+      }
+    }
+    if (c.state === "punch" && !c.hasHit && c.stateTimer > 0.08 && c.stateTimer < 0.22) {
+      const hitX = c.x + c.facing * 85;
+      if (Math.abs(hitX - p.x) < 65 && Math.abs(c.y - p.y) < 90) {
+        applyDamage(p, 8); c.hasHit = true; play("punch");
+      }
+    }
+    // Kick
+    if (p.state === "kick" && !p.hasHit && p.stateTimer > 0.12 && p.stateTimer < 0.28) {
+      const hitX = p.x + p.facing * 95;
+      if (Math.abs(hitX - c.x) < 75 && Math.abs(p.y - c.y) < 90) {
+        applyDamage(c, 12); p.hasHit = true; play("kick");
+      }
+    }
+    if (c.state === "kick" && !c.hasHit && c.stateTimer > 0.12 && c.stateTimer < 0.28) {
+      const hitX = c.x + c.facing * 95;
+      if (Math.abs(hitX - p.x) < 75 && Math.abs(c.y - p.y) < 90) {
+        applyDamage(p, 12); c.hasHit = true; play("kick");
+      }
+    }
+    // Fireball spawn
+    if (p.state === "fireball" && !p.hasFired && p.stateTimer > 0.18) {
+      spawnFireball(p); p.hasFired = true;
+    }
+    if (c.state === "fireball" && !c.hasFired && c.stateTimer > 0.18) {
+      spawnFireball(c); c.hasFired = true;
+    }
+  }
+
+  function updateProjectiles(dt) {
+    for (let i = state.projectiles.length - 1; i >= 0; i--) {
+      const p = state.projectiles[i];
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.life -= dt;
+      const target = p.owner === "player" ? state.cpu : state.player;
+      if (target.state !== "death" && Math.abs(p.x - target.x) < 55 && Math.abs(p.y - (target.y - 90)) < 70) {
+        applyDamage(target, p.damage);
+        state.projectiles.splice(i, 1);
+        continue;
+      }
+      if (p.life <= 0 || p.x < -60 || p.x > W + 60) {
+        state.projectiles.splice(i, 1);
+      }
+    }
+  }
+
+  function handlePlayerInput() {
+    const p = state.player;
+    if (p.state === "hit" || p.state === "death") { pressed["KeyJ"]=pressed["KeyK"]=pressed["KeyL"]=false; return; }
+    if (["punch","kick","fireball"].includes(p.state)) { pressed["KeyJ"]=pressed["KeyK"]=pressed["KeyL"]=false; return; }
+    // Movement — project through facing so "forward" always means toward the opponent
+    if (keys["ArrowLeft"]) { p.state = "walk"; p.vx = -200 * p.facing; }
+    else if (keys["ArrowRight"]) { p.state = "walk"; p.vx = 200 * p.facing; }
+    else if (p.onGround && p.state === "walk") { p.state = "idle"; p.vx = 0; }
+    if (keys["ArrowUp"] && p.onGround) { p.state = "jump"; p.vy = -650; p.onGround = false; }
+    if (keys["ArrowDown"] && p.onGround) { p.state = "duck"; }
+    else if (p.state === "duck" && !keys["ArrowDown"]) { p.state = "idle"; }
+    // Attacks (edge-triggered)
+    if (pressed["KeyJ"]) { tryAttack(p, "punch"); }
+    if (pressed["KeyK"]) { tryAttack(p, "kick"); }
+    if (pressed["KeyL"]) { tryAttack(p, "fireball"); }
+    // Facing
+    p.facing = state.cpu.x > p.x ? 1 : -1;
+  }
+
+  // ---- Draw ----
+  function drawFighter(f) {
+    let key = f.color + "_" + f.state;
+    let img = sprite(key);
+    if (!img) img = sprite(f.color + "_idle");
+    if (!img) {
+      ctx.fillStyle = f.color === "blue" ? "#44f" : "#f44";
+      ctx.fillRect(f.x - 40, f.y - 160, 80, 160);
+      ctx.fillStyle = "#fff"; ctx.font = "14px monospace"; ctx.textAlign = "center";
+      ctx.fillText("MISSING " + key, f.x, f.y - 140);
+      return;
+    }
+    const dw = 180, dh = 260;
+    const dx = f.x - dw / 2;
+    const dy = f.y - dh + 20;
+    ctx.save();
+    if (f.facing === -1) {
+      ctx.translate(f.x, 0);
+      ctx.scale(-1, 1);
+      ctx.translate(-f.x, 0);
+    }
+    ctx.drawImage(img, dx, dy, dw, dh);
+    ctx.restore();
+  }
+
+  function drawProjectiles() {
+    for (const p of state.projectiles) {
+      ctx.save();
+      const grad = ctx.createRadialGradient(p.x, p.y, 4, p.x, p.y, 28);
+      grad.addColorStop(0, p.color === "blue" ? "#aef" : "#faa");
+      grad.addColorStop(0.4, p.color === "blue" ? "#28f" : "#f42");
+      grad.addColorStop(1, "rgba(255,100,0,0)");
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 28, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#fff";
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 10, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  function drawHUD() {
+    const php = document.getElementById("php");
+    const rhp = document.getElementById("rhp");
+    if (state.player) php.style.width = (state.player.hp / state.player.maxHp * 100) + "%";
+    if (state.cpu) rhp.style.width = (state.cpu.hp / state.cpu.maxHp * 100) + "%";
+  }
+
+  function draw() {
+    const bg = sprite("dojo_bg");
+    if (bg) ctx.drawImage(bg, 0, 0, W, H);
+    else {
+      ctx.fillStyle = "#2a1810"; ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = "#8b4513"; ctx.fillRect(0, GROUND + 80, W, H - GROUND - 80);
+      ctx.fillStyle = "#ffd700"; ctx.globalAlpha = 0.3;
+      ctx.beginPath(); ctx.arc(150, 100, 40, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(810, 100, 40, 0, Math.PI * 2); ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+    if (state.player && state.cpu) {
+      if (state.player.x < state.cpu.x) { drawFighter(state.player); drawFighter(state.cpu); }
+      else { drawFighter(state.cpu); drawFighter(state.player); }
+    }
+    drawProjectiles();
+    drawHUD();
+  }
+
+  // ---- Main loop ----
+  let last = performance.now();
+  function frame(now) {
+    const rawDt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    const dt = applyHitPause(rawDt);
+    try {
+      if (state.phase === "fight") {
+        handlePlayerInput();
+        updateCPU(state.cpu, state.player, dt);
+        updateFighter(state.player, dt);
+        updateFighter(state.cpu, dt);
+        checkHits();
+        updateProjectiles(dt);
+        if (state.player.hp <= 0 && state.phase === "fight") {
+          state.phase = "ko"; state.winner = "cpu"; state.koTimer = 0;
+          play("ko");
+        }
+        if (state.cpu.hp <= 0 && state.phase === "fight") {
+          state.phase = "ko"; state.winner = "player"; state.koTimer = 0;
+          play("ko");
+        }
+      } else if (state.phase === "ko") {
+        state.koTimer += dt;
+        if (state.koTimer > 1.8) {
+          state.phase = "over";
+          const banner = document.getElementById("banner");
+          banner.textContent = state.winner === "player" ? "VICTORY!" : "DEFEAT";
+          banner.style.display = "block";
+          playCut("ko", () => {});
+        }
+      }
+      state.frame++;
+      draw();
+      // Clear edge-triggered pressed keys
+      for (const k in pressed) pressed[k] = false;
+    } catch (err) {
+      console.error("frame error:", err);
+    }
+    requestAnimationFrame(frame);
+  }
+
+  // ---- Boot ----
+  reset();
+  window.state = state;
+
+  loadAssets().then(() => {
+    playCut("intro", () => {
+      state.phase = "fight";
+    });
+  });
+  // Safety: if assets take too long, start fight anyway
+  setTimeout(() => { if (state.phase === "intro") state.phase = "fight"; }, 2000);
+
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
