@@ -1,0 +1,738 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dragon's Lair Deluxe</title>
+<style>
+  :root{--bg:#070510;--fg:#f3e9d2;--gold:#ffd23f;--accent:#c8432f}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);
+    font:16px/1.4 Georgia,'Times New Roman',serif;overflow:hidden;
+    -webkit-tap-highlight-color:transparent;user-select:none}
+  #wrap{position:fixed;inset:0;display:grid;place-items:center}
+  #stage{position:relative}
+  canvas{display:block;background:#000;border-radius:6px;
+    box-shadow:0 10px 50px #000d, 0 0 0 1px #2a2040;
+    max-width:96vw;max-height:94vh;touch-action:none}
+  /* video cutscene overlay sits exactly on top of the canvas */
+  #cut{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;
+    border-radius:6px;background:#000;display:none;z-index:5}
+  #skipHint{position:absolute;right:14px;bottom:10px;z-index:6;display:none;
+    font:13px system-ui,sans-serif;color:#fffa;background:#0007;
+    padding:4px 10px;border-radius:6px;pointer-events:none}
+  #errOverlay{position:fixed;inset:auto 12px 12px 12px;max-height:30%;
+    overflow:auto;background:#400;color:#fdd;padding:8px 12px;
+    font:12px/1.3 monospace;border-radius:6px;display:none;z-index:30}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="stage">
+    <canvas id="c" width="960" height="600"></canvas>
+    <video id="cut" muted playsinline preload="auto"></video>
+    <div id="skipHint">press any key to skip</div>
+  </div>
+</div>
+<div id="errOverlay"></div>
+<script>
+(function(){
+"use strict";
+
+var W=960,H=600;
+var cvs=document.getElementById("c");
+var ctx=cvs.getContext("2d");
+var vid=document.getElementById("cut");
+var skipHint=document.getElementById("skipHint");
+var errBox=document.getElementById("errOverlay");
+
+function fit(){
+  var dpr=Math.min(window.devicePixelRatio||1,2);
+  cvs.width=W*dpr;cvs.height=H*dpr;
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  cvs.style.width="";cvs.style.height="";
+}
+fit();
+window.addEventListener("resize",fit);
+
+/* ============================ Assets ================================= */
+var A="./dragons-lair-deluxe_assets/";
+var ASSET_LIST=[
+  "bg_drawbridge","bg_tentacle_hall","bg_blade_corridor","bg_crumbling_stairs",
+  "bg_bat_cavern","bg_lava_ledge","bg_throne_hall","bg_dragons_lair",
+  "knight_idle","knight_run","knight_jump","knight_duck","knight_dodge_left",
+  "knight_dodge_right","knight_slash","knight_death","knight_victory",
+  "dragon_head","dragon_fire","princess","tentacle","blade_pendulum",
+  "fireball","bat","rock_debris","skeleton_flash","title_emblem",
+  "key_castle","key_dragon_wake","key_rescue","key_death"
+];
+var IMG={};
+function loadAssets(){
+  return Promise.all(ASSET_LIST.map(function(n){
+    return new Promise(function(ok){
+      var im=new Image();
+      im.onload=function(){IMG[n]=im;ok();};
+      im.onerror=function(){IMG[n]=null;ok();};
+      im.src=A+n+".png";
+    });
+  }));
+}
+/* draw image covering a rect (center-crop, keeps aspect) */
+function cover(img,x,y,w,h){
+  if(!img)return false;
+  var s=Math.max(w/img.width,h/img.height);
+  var iw=img.width*s,ih=img.height*s;
+  ctx.drawImage(img,x+(w-iw)/2,y+(h-ih)/2,iw,ih);
+  return true;
+}
+/* draw sprite centered at (x,y) with target height th (keeps aspect) */
+function spr(name,x,y,th,rot,alpha,flip){
+  var img=IMG[name];
+  if(!img)return false;
+  var s=th/img.height,w=img.width*s;
+  ctx.save();
+  ctx.translate(x,y);
+  if(rot)ctx.rotate(rot);
+  if(flip)ctx.scale(-1,1);
+  if(alpha!==undefined)ctx.globalAlpha=alpha;
+  ctx.drawImage(img,-w/2,-th/2,w,th);
+  ctx.restore();
+  return true;
+}
+
+/* ============================ Sounds ================================= */
+var S="./dragons-lair-deluxe_sounds/";
+var SOUND_LIST=["alert_beep","success_chime","death_sound","death_thud",
+  "sword_swing","jump_sound","fire_roar","win_fanfare","game_over","music_tense"];
+var SND={};
+SOUND_LIST.forEach(function(n){
+  var a=new Audio(S+n+".ogg");
+  a.preload="auto";
+  SND[n]=a;
+});
+var audioOn=false;
+function play(n,vol){
+  if(!audioOn||!SND[n])return;
+  try{
+    var i=SND[n].cloneNode();
+    i.volume=vol===undefined?1:vol;
+    i.play().catch(function(){});
+  }catch(e){}
+}
+var music=null;
+function startMusic(){
+  if(!audioOn||music)return;
+  try{
+    music=SND.music_tense.cloneNode();
+    music.loop=true;music.volume=0.25;
+    music.play().catch(function(){});
+  }catch(e){}
+}
+function stopMusic(){if(music){try{music.pause();}catch(e){}music=null;}}
+
+/* ============================ Cutscenes ============================== */
+/* video files are optional — Ken Burns pan over key art when missing */
+var V="./dragons-lair-deluxe_videos/";
+var CUTS={
+  intro:{file:"intro.mp4",art:"key_castle",dur:5000},
+  death:{file:"death.mp4",art:"key_death",dur:2600},
+  dragon:{file:"dragon_reveal.mp4",art:"key_dragon_wake",dur:4500},
+  victory:{file:"victory.mp4",art:"key_rescue",dur:6000}
+};
+var cut={active:false,name:null,onDone:null,kenStart:0,usingVideo:false};
+
+function playCut(name,onDone){
+  var c=CUTS[name];
+  cut.active=true;cut.name=name;cut.onDone=onDone;cut.usingVideo=false;
+  skipHint.style.display="block";
+  vid.onended=null;vid.onerror=null;
+  vid.onerror=function(){startKenBurns();};
+  vid.onended=function(){endCut();};
+  vid.oncanplay=function(){
+    if(!cut.active||cut.usingVideo)return;
+    cut.usingVideo=true;
+    vid.style.display="block";
+    vid.play().catch(function(){startKenBurns();});
+  };
+  vid.src=V+c.file;
+  vid.load();
+  /* if the video can't start quickly, fall back to key-art pan */
+  setTimeout(function(){
+    if(cut.active&&cut.name===name&&!cut.usingVideo)startKenBurns();
+  },900);
+}
+function startKenBurns(){
+  if(!cut.active||cut.usingVideo)return;
+  vid.style.display="none";
+  cut.kenStart=performance.now();
+}
+function endCut(){
+  if(!cut.active)return;
+  cut.active=false;
+  skipHint.style.display="none";
+  vid.style.display="none";
+  try{vid.pause();vid.removeAttribute("src");vid.load();}catch(e){}
+  var f=cut.onDone;cut.onDone=null;
+  if(f)f();
+}
+function drawKenBurns(now){
+  var c=CUTS[cut.name];
+  var t=cut.kenStart?(now-cut.kenStart)/c.dur:0;
+  if(t>=1){endCut();return;}
+  ctx.fillStyle="#000";ctx.fillRect(0,0,W,H);
+  var img=IMG[c.art];
+  if(img){
+    var z=1.05+t*0.12;
+    var s=Math.max(W/img.width,H/img.height)*z;
+    var iw=img.width*s,ih=img.height*s;
+    ctx.drawImage(img,(W-iw)/2+(t-0.5)*40,(H-ih)/2+(t-0.5)*24,iw,ih);
+  }
+  /* letterbox bars for film feel */
+  ctx.fillStyle="#000";
+  ctx.fillRect(0,0,W,46);ctx.fillRect(0,H-46,W,46);
+  ctx.fillStyle="rgba(255,255,255,0.5)";
+  ctx.font="13px system-ui,sans-serif";ctx.textAlign="right";
+  ctx.fillText("press any key to skip",W-16,H-18);
+}
+
+/* ============================ Scenes ================================= */
+/* key codes: ArrowLeft ArrowRight ArrowUp ArrowDown Space */
+var GLYPH={ArrowLeft:"\u2190",ArrowRight:"\u2192",ArrowUp:"\u2191",
+  ArrowDown:"\u2193",Space:"\u2694"};
+var HINT={ArrowLeft:"DODGE LEFT",ArrowRight:"DODGE RIGHT",ArrowUp:"JUMP",
+  ArrowDown:"DUCK",Space:"SWORD"};
+var POSE={ArrowLeft:"knight_dodge_left",ArrowRight:"knight_dodge_right",
+  ArrowUp:"knight_jump",ArrowDown:"knight_duck",Space:"knight_slash"};
+
+var SCENES=[
+  {name:"The Drawbridge",bg:"bg_drawbridge",peril:"planks",
+   steps:[{key:"ArrowUp",cue:[480,488],lead:1500,death:"The rotten planks gave way beneath you."}]},
+  {name:"Hall of Slime",bg:"bg_tentacle_hall",peril:"tentacle",
+   steps:[{key:"Space",cue:[668,330],lead:1600,death:"A tentacle dragged you into the slime pit."}]},
+  {name:"Blade Corridor",bg:"bg_blade_corridor",peril:"blades",
+   steps:[{key:"ArrowDown",cue:[480,190],lead:1600,death:"The first pendulum blade found its mark."},
+          {key:"ArrowUp",cue:[480,470],lead:1100,death:"The low blade swept your legs away."}]},
+  {name:"Crumbling Stairs",bg:"bg_crumbling_stairs",peril:"stairs",
+   steps:[{key:"ArrowRight",cue:[300,290],lead:1500,death:"Falling rubble crushed you on the stairs."},
+          {key:"ArrowUp",cue:[610,440],lead:1050,death:"You fell into the bottomless abyss."}]},
+  {name:"Bat Cavern",bg:"bg_bat_cavern",peril:"bats",
+   steps:[{key:"Space",cue:[360,250],lead:1400,death:"The swarm engulfed you in the dark."},
+          {key:"ArrowDown",cue:[480,185],lead:1000,death:"A second wave of bats struck you down."}]},
+  {name:"The Lava Ledge",bg:"bg_lava_ledge",peril:"lava",
+   steps:[{key:"ArrowLeft",cue:[700,392],lead:1400,death:"A fireball seared you off the ledge."},
+          {key:"ArrowUp",cue:[480,500],lead:1000,death:"The ledge cracked and dropped you into the lava."}]},
+  {name:"Throne Antechamber",bg:"bg_throne_hall",peril:"throne",
+   steps:[{key:"ArrowRight",cue:[260,210],lead:1350,death:"The falling archway buried you."},
+          {key:"Space",cue:[650,340],lead:950,death:"The phantom flame consumed you."}]},
+  {name:"The Dragon's Lair",bg:"bg_dragons_lair",peril:"dragon",
+   steps:[{key:"ArrowLeft",cue:[640,260],lead:1550,death:"The dragon's fire reduced you to ash."},
+          {key:"Space",cue:[700,300],lead:1000,death:"The dragon's jaws snapped shut."}]}
+];
+
+/* ============================ State ================================== */
+var state={
+  phase:"loading",   /* loading|title|play|deathflash|gameover|victory */
+  difficulty:"easy", /* easy (text hints, wider windows) | arcade */
+  scene:0,step:0,
+  lives:5,score:0,streak:0,
+  stepStart:0,windowOpen:false,resolved:false,
+  pose:"knight_idle",poseUntil:0,
+  shake:0,flash:0,flashColor:"#3f3",
+  deathStart:0,deathCause:"",
+  vicStart:0,goStart:0,
+  particles:[],
+  played:{dragonCut:false}
+};
+window.state=state;window.gameState=state;
+
+function windowLen(){
+  var base=Math.max(500,1500-state.scene*110);
+  return state.difficulty==="easy"?base*1.6:base;
+}
+function curStep(){
+  var sc=SCENES[state.scene];
+  return sc?sc.steps[state.step]:null;
+}
+function enterScene(i){
+  state.scene=i;state.step=0;
+  state.pose="knight_idle";state.poseUntil=0;
+  beginStep();
+}
+function beginStep(){
+  state.stepStart=performance.now();
+  state.windowOpen=false;state.resolved=false;
+}
+
+/* ---- outcome handlers ---- */
+function stepSuccess(now){
+  var st=curStep();
+  state.resolved=true;
+  var rt=now-(state.stepStart+st.lead);
+  var bonus=Math.max(0,Math.round((windowLen()-rt)/windowLen()*500));
+  state.streak++;
+  state.score+=250+bonus+state.streak*50;
+  state.pose=POSE[st.key];state.poseUntil=now+550;
+  state.flash=260;state.flashColor="#7f7";
+  burst(st.cue[0],st.cue[1],"#ffd23f",18);
+  play(st.key==="Space"?"sword_swing":st.key==="ArrowUp"?"jump_sound":"success_chime",0.8);
+  var sc=SCENES[state.scene];
+  if(state.step+1<sc.steps.length){
+    setTimeout(function(){
+      if(state.phase!=="play")return;
+      state.step++;beginStep();
+    },620);
+  }else{
+    play("success_chime");
+    state.score+=1000;
+    var next=state.scene+1;
+    setTimeout(function(){
+      if(state.phase!=="play")return;
+      if(next>=SCENES.length){
+        winGame();
+      }else if(next===SCENES.length-1&&!state.played.dragonCut){
+        state.played.dragonCut=true;
+        playCut("dragon",function(){enterScene(next);});
+      }else{
+        enterScene(next);
+      }
+    },700);
+  }
+}
+function stepFail(cause){
+  state.resolved=true;
+  state.streak=0;
+  state.lives--;
+  state.deathCause=cause;
+  state.deathStart=performance.now();
+  state.phase="deathflash";
+  state.pose="knight_death";
+  state.shake=22;
+  play("death_sound");
+  setTimeout(function(){play("death_thud",0.7);},350);
+}
+function afterDeathFlash(){
+  state.phase="cut"; /* guard: update() must not re-trigger while video plays */
+  if(state.lives<=0){
+    playCut("death",function(){
+      state.phase="gameover";state.goStart=performance.now();
+      stopMusic();play("game_over");
+    });
+  }else{
+    playCut("death",function(){
+      state.phase="play";
+      state.pose="knight_idle";
+      beginStep();
+    });
+  }
+}
+function winGame(){
+  state.phase="victory";state.vicStart=performance.now();
+  stopMusic();
+  playCut("victory",function(){
+    play("win_fanfare");
+    state.vicStart=performance.now();
+  });
+}
+function startGame(){
+  state.lives=5;state.score=0;state.streak=0;
+  state.played.dragonCut=false;
+  state.phase="play";
+  startMusic();
+  playCut("intro",function(){enterScene(0);state.stepStart=performance.now();});
+  enterScene(0);
+}
+function toTitle(){
+  state.phase="title";stopMusic();
+}
+window.game={reset:toTitle,start:startGame};
+/* test probe: expected key for the current QTE step */
+window.__expKey=function(){var st=curStep();return st?st.key:null;};
+
+/* ============================ Input ================================== */
+var REACT=["ArrowLeft","ArrowRight","ArrowUp","ArrowDown","Space"];
+window.addEventListener("keydown",function(e){
+  if(REACT.indexOf(e.code)!==-1||e.code==="Enter")e.preventDefault();
+  if(!audioOn){audioOn=true;}
+  if(cut.active){endCut();return;}
+  if(state.phase==="title"){
+    if(e.code==="KeyD"){
+      state.difficulty=state.difficulty==="easy"?"arcade":"easy";
+      return;
+    }
+    if(e.code==="Enter"||e.code==="Space")startGame();
+    return;
+  }
+  if(state.phase==="gameover"||state.phase==="victory"){
+    if(e.code==="Enter"||e.code==="KeyR")toTitle();
+    return;
+  }
+  if(e.code==="KeyR"){toTitle();return;}
+  if(state.phase!=="play")return;
+  var st=curStep();
+  if(!st||state.resolved)return;
+  if(REACT.indexOf(e.code)===-1)return;
+  if(!state.windowOpen)return;          /* early presses are ignored */
+  if(e.code===st.key)stepSuccess(performance.now());
+  else stepFail("Wrong move! "+st.death);
+},{passive:false});
+window.addEventListener("pointerdown",function(){
+  if(!audioOn)audioOn=true;
+  if(cut.active){endCut();return;}
+  if(state.phase==="title")startGame();
+});
+
+/* ============================ Particles ============================== */
+function burst(x,y,color,n){
+  for(var i=0;i<n;i++){
+    state.particles.push({x:x,y:y,vx:(Math.random()-0.5)*7,
+      vy:(Math.random()-0.5)*7-2,life:1,color:color,r:2+Math.random()*3});
+  }
+}
+function stepParticles(dt){
+  var ps=state.particles;
+  for(var i=ps.length-1;i>=0;i--){
+    var p=ps[i];
+    p.x+=p.vx;p.y+=p.vy;p.vy+=0.15;p.life-=dt*1.4;
+    if(p.life<=0)ps.splice(i,1);
+  }
+}
+function drawParticles(){
+  state.particles.forEach(function(p){
+    ctx.globalAlpha=Math.max(0,p.life);
+    ctx.fillStyle=p.color;
+    ctx.beginPath();ctx.arc(p.x,p.y,p.r,0,Math.PI*2);ctx.fill();
+  });
+  ctx.globalAlpha=1;
+}
+
+/* ============================ Update ================================= */
+function update(now,dt){
+  if(state.shake>0)state.shake=Math.max(0,state.shake-dt*40);
+  if(state.flash>0)state.flash=Math.max(0,state.flash-dt*1000);
+  stepParticles(dt);
+  if(state.phase==="play"&&!cut.active){
+    var st=curStep();
+    if(st&&!state.resolved){
+      var el=now-state.stepStart;
+      var open=el>=st.lead&&el<=st.lead+windowLen();
+      if(open&&!state.windowOpen)play("alert_beep",0.7);
+      state.windowOpen=open;
+      if(el>st.lead+windowLen())stepFail(st.death);
+    }
+    if(state.poseUntil&&now>state.poseUntil){
+      state.pose="knight_idle";state.poseUntil=0;
+    }
+  }else if(state.phase==="deathflash"){
+    if(now-state.deathStart>1500){afterDeathFlash();}
+  }
+}
+
+/* ============================ Peril drawing ========================== */
+/* danger animations sync to step timeline: t = ms since step start,
+   tw = st.lead (moment of truth) */
+function perilT(now){
+  var st=curStep();
+  if(!st)return 0;
+  return Math.min(1.6,(now-state.stepStart)/st.lead);
+}
+function drawPeril(sc,now){
+  var t=perilT(now);
+  var st=curStep()||{cue:[W/2,H/2]};
+  if(sc.peril==="planks"){
+    /* planks shake then drop near the gap */
+    for(var i=0;i<3;i++){
+      var sh=t>0.55?Math.sin(now/30+i)*4*t:0;
+      var drop=t>1?(t-1)*420:0;
+      spr("rock_debris",380+i*95+sh,505+drop+i*8,46,Math.sin(now/200+i)*0.2,0.9);
+    }
+  }else if(sc.peril==="tentacle"){
+    var rise=Math.min(1,t)*250;
+    spr("tentacle",st.cue[0]+Math.sin(now/260)*22,H+150-rise,360,
+        Math.sin(now/300)*0.16,0.96);
+  }else if(sc.peril==="blades"){
+    var amp=0.55+Math.min(1,t)*0.65;
+    var a=Math.sin(now/280)*amp;
+    var px=W/2,py=-40,len=state.step===0?330:430;
+    ctx.save();ctx.translate(px,py);ctx.rotate(a);
+    ctx.strokeStyle="rgba(150,150,170,0.8)";ctx.lineWidth=5;
+    ctx.beginPath();ctx.moveTo(0,0);ctx.lineTo(0,len);ctx.stroke();
+    ctx.restore();
+    var bx=px+Math.sin(a)*len,by=py+Math.cos(a)*len;
+    spr("blade_pendulum",bx,by,150,a,0.97);
+  }else if(sc.peril==="stairs"){
+    for(var k=0;k<4;k++){
+      var fall=((now/2.2+k*260)%900);
+      spr("rock_debris",180+k*200+Math.sin(k*7)*40,fall-80,
+          54+k*8,now/400+k,0.85);
+    }
+  }else if(sc.peril==="bats"){
+    for(var b=0;b<6;b++){
+      var bt=(now/900+b*0.35)%2;
+      var bx2=W+80-bt*(W+200);
+      var by2=140+b*55+Math.sin(now/120+b*2)*38;
+      spr("bat",bx2,by2,64+(b%3)*16,0,0.92,b%2===0);
+    }
+  }else if(sc.peril==="lava"){
+    var arc=Math.min(1.15,t);
+    var fx=W*0.85-arc*(W*0.85-st.cue[0]);
+    var fy=H*0.78-Math.sin(arc*Math.PI)*330;
+    spr("fireball",fx,fy,110+arc*40,now/150,0.95);
+    if(Math.random()<0.25)burst(120+Math.random()*(W-240),H*0.86,"#ff8c2a",1);
+  }else if(sc.peril==="throne"){
+    var lt=Math.sin(now/470)>0.93;
+    if(lt){ctx.fillStyle="rgba(220,230,255,0.16)";ctx.fillRect(0,0,W,H);}
+    var dr=Math.min(1.1,t);
+    spr("rock_debris",st.cue[0],-60+dr*(st.cue[1]+90),84,now/350,0.92);
+    if(state.step===1)spr("fireball",650,340+Math.sin(now/180)*16,96,0,0.85);
+  }else if(sc.peril==="dragon"){
+    var bob=Math.sin(now/420)*14;
+    var lunge=Math.min(1,t)*60;
+    /* drawn oversized + pushed toward the frame edge so the sprite's own
+       image border (cropped wing tips) stays off-canvas */
+    if(state.step===0&&t>0.55){
+      spr("dragon_fire",810-lunge*2,255+bob,560,0,0.97,true);
+      if(t>0.6&&Math.random()<0.4)burst(560+Math.random()*120,250+Math.random()*70,"#ff9a2a",1);
+    }else{
+      spr("dragon_head",830-lunge,255+bob,540,0,0.97,true);
+    }
+    spr("princess",150,455+Math.sin(now/600)*5,170);
+  }
+}
+
+/* ============================ Cue drawing ============================ */
+function drawCue(now){
+  var st=curStep();
+  if(!st||state.resolved||state.phase!=="play")return;
+  var el=now-state.stepStart;
+  if(el<st.lead*0.45)return;           /* cue fades in before window */
+  var x=st.cue[0],y=st.cue[1];
+  var wl=windowLen();
+  var inWin=state.windowOpen;
+  var pulse=0.6+Math.sin(now/90)*0.4;
+  var r=34+pulse*12;
+  ctx.save();
+  ctx.globalAlpha=inWin?0.95:0.35+0.3*Math.min(1,(el-st.lead*0.45)/(st.lead*0.55));
+  ctx.strokeStyle="#ffd23f";
+  ctx.lineWidth=inWin?6:3;
+  ctx.shadowColor="#ffd23f";ctx.shadowBlur=inWin?28:10;
+  ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.stroke();
+  /* direction glyph */
+  ctx.fillStyle="#ffd23f";
+  ctx.font="bold 44px system-ui,sans-serif";
+  ctx.textAlign="center";ctx.textBaseline="middle";
+  ctx.fillText(GLYPH[st.key],x,y+2);
+  /* shrinking timer ring while window open */
+  if(inWin){
+    var left=1-Math.min(1,(el-st.lead)/wl);
+    ctx.beginPath();
+    ctx.strokeStyle="#fff";
+    ctx.lineWidth=4;
+    ctx.arc(x,y,r+12,-Math.PI/2,-Math.PI/2+left*Math.PI*2);
+    ctx.stroke();
+  }
+  /* easy-mode text assist */
+  if(state.difficulty==="easy"){
+    ctx.font="bold 26px Georgia,serif";
+    ctx.lineWidth=6;ctx.strokeStyle="#000";
+    ctx.strokeText(HINT[st.key],x,y-r-26);
+    ctx.fillText(HINT[st.key],x,y-r-26);
+  }
+  ctx.restore();
+}
+
+/* ============================ HUD ==================================== */
+function drawHUD(){
+  ctx.save();
+  ctx.fillStyle="rgba(0,0,0,0.45)";
+  ctx.fillRect(0,0,W,40);
+  ctx.font="bold 17px Georgia,serif";
+  ctx.textBaseline="middle";
+  ctx.textAlign="left";
+  ctx.fillStyle="#ffd23f";
+  var hearts="";
+  for(var i=0;i<5;i++)hearts+=i<state.lives?"\u2665 ":"\u2661 ";
+  ctx.fillText(hearts,16,21);
+  ctx.fillStyle="#f3e9d2";
+  ctx.textAlign="center";
+  var sc=SCENES[state.scene];
+  ctx.fillText((state.scene+1)+" / "+SCENES.length+" — "+(sc?sc.name:""),W/2,21);
+  ctx.textAlign="right";
+  ctx.fillText("SCORE "+state.score+(state.streak>1?"  x"+state.streak:""),W-16,21);
+  ctx.restore();
+}
+
+/* ============================ Screens ================================ */
+function drawTitle(now){
+  if(!cover(IMG.key_castle,0,0,W,H)){
+    ctx.fillStyle="#120a1e";ctx.fillRect(0,0,W,H);
+  }
+  ctx.fillStyle="rgba(5,3,12,0.45)";ctx.fillRect(0,0,W,H);
+  spr("title_emblem",W/2,170,200,0,0.95);
+  ctx.save();
+  ctx.textAlign="center";
+  ctx.font="bold 64px Georgia,serif";
+  ctx.lineWidth=10;ctx.strokeStyle="#000";
+  ctx.strokeText("DRAGON'S LAIR",W/2,330);
+  var g=ctx.createLinearGradient(0,300,0,360);
+  g.addColorStop(0,"#ffe9a0");g.addColorStop(1,"#c8860a");
+  ctx.fillStyle=g;
+  ctx.fillText("DRAGON'S LAIR",W/2,330);
+  ctx.font="bold 30px Georgia,serif";
+  ctx.fillStyle="#c8432f";
+  ctx.strokeText("D E L U X E",W/2,372);
+  ctx.fillText("D E L U X E",W/2,372);
+  ctx.font="18px Georgia,serif";
+  ctx.fillStyle="#f3e9d2";
+  ctx.fillText("Rescue the princess. Survive the castle. Slay the dragon.",W/2,430);
+  var blink=Math.sin(now/350)>-0.2;
+  if(blink){
+    ctx.font="bold 24px Georgia,serif";
+    ctx.fillStyle="#ffd23f";
+    ctx.fillText("PRESS ENTER TO BEGIN",W/2,486);
+  }
+  ctx.font="16px Georgia,serif";
+  ctx.fillStyle="#bbb";
+  ctx.fillText("[D] difficulty:  "+(state.difficulty==="easy"?"EASY (hints shown)":"ARCADE (no hints)"),W/2,530);
+  ctx.fillText("React with the glowing gold cue: \u2190 \u2192 \u2191 \u2193  or  SPACE for sword",W/2,560);
+  ctx.restore();
+}
+function drawDeathFlash(now){
+  var t=(now-state.deathStart)/1500;
+  ctx.fillStyle="#000";ctx.fillRect(0,0,W,H);
+  /* the iconic arcade skeleton flash */
+  var on=Math.sin(now/55)>0;
+  if(on&&t<0.8)spr("skeleton_flash",W/2,H/2-10,420,0,0.95);
+  ctx.save();
+  ctx.textAlign="center";
+  ctx.font="italic 22px Georgia,serif";
+  ctx.fillStyle="rgba(243,233,210,"+Math.min(1,t*2)+")";
+  ctx.fillText(state.deathCause,W/2,H-90);
+  ctx.font="bold 18px Georgia,serif";
+  ctx.fillStyle="rgba(255,210,63,"+Math.min(1,t*2)+")";
+  ctx.fillText(state.lives>0?(state.lives+(state.lives===1?" life":" lives")+" remaining"):"",W/2,H-58);
+  ctx.restore();
+}
+function drawGameOver(now){
+  if(!cover(IMG.key_death,0,0,W,H)){ctx.fillStyle="#000";ctx.fillRect(0,0,W,H);}
+  ctx.fillStyle="rgba(0,0,0,0.62)";ctx.fillRect(0,0,W,H);
+  ctx.save();
+  ctx.textAlign="center";
+  ctx.font="bold 66px Georgia,serif";
+  ctx.lineWidth=10;ctx.strokeStyle="#000";
+  ctx.strokeText("GAME OVER",W/2,250);
+  ctx.fillStyle="#c8432f";
+  ctx.fillText("GAME OVER",W/2,250);
+  ctx.font="24px Georgia,serif";
+  ctx.fillStyle="#f3e9d2";
+  ctx.fillText("You fell in "+SCENES[state.scene].name+" — scene "+(state.scene+1)+" of "+SCENES.length,W/2,320);
+  ctx.fillText("Final score: "+state.score,W/2,360);
+  if(Math.sin(now/350)>-0.2){
+    ctx.fillStyle="#ffd23f";
+    ctx.fillText("PRESS ENTER FOR THE TITLE",W/2,440);
+  }
+  ctx.restore();
+}
+function drawVictory(now){
+  if(!cover(IMG.key_rescue,0,0,W,H)){ctx.fillStyle="#241a08";ctx.fillRect(0,0,W,H);}
+  ctx.fillStyle="rgba(10,6,2,0.35)";ctx.fillRect(0,0,W,H);
+  /* celebratory sparkles */
+  if(Math.random()<0.5)burst(Math.random()*W,Math.random()*H*0.6,"#ffe9a0",2);
+  drawParticles();
+  ctx.save();
+  ctx.textAlign="center";
+  ctx.font="bold 60px Georgia,serif";
+  ctx.lineWidth=10;ctx.strokeStyle="#000";
+  ctx.strokeText("THE PRINCESS IS SAVED!",W/2,200);
+  var g=ctx.createLinearGradient(0,170,0,230);
+  g.addColorStop(0,"#ffe9a0");g.addColorStop(1,"#c8860a");
+  ctx.fillStyle=g;
+  ctx.fillText("THE PRINCESS IS SAVED!",W/2,200);
+  ctx.font="26px Georgia,serif";
+  ctx.fillStyle="#f3e9d2";
+  ctx.fillText("All "+SCENES.length+" perils survived — final score "+state.score,W/2,270);
+  if(Math.sin(now/350)>-0.2){
+    ctx.fillStyle="#ffd23f";
+    ctx.fillText("PRESS ENTER FOR THE TITLE",W/2,520);
+  }
+  ctx.restore();
+}
+
+/* ============================ Main draw ============================== */
+function draw(now){
+  ctx.clearRect(0,0,W,H);
+  if(cut.active&&!cut.usingVideo&&cut.kenStart){drawKenBurns(now);return;}
+  if(cut.active)return; /* video element covers the canvas */
+  if(state.phase==="loading"){
+    ctx.fillStyle="#070510";ctx.fillRect(0,0,W,H);
+    ctx.fillStyle="#f3e9d2";ctx.font="22px Georgia,serif";ctx.textAlign="center";
+    ctx.fillText("Loading the castle\u2026",W/2,H/2);
+    return;
+  }
+  if(state.phase==="title"){drawTitle(now);return;}
+  if(state.phase==="gameover"){drawGameOver(now);return;}
+  if(state.phase==="victory"){drawVictory(now);return;}
+  if(state.phase==="deathflash"){drawDeathFlash(now);return;}
+
+  /* ---- play ---- */
+  ctx.save();
+  if(state.shake>0){
+    ctx.translate((Math.random()-0.5)*state.shake,(Math.random()-0.5)*state.shake);
+  }
+  var sc=SCENES[state.scene];
+  if(!cover(IMG[sc.bg],0,0,W,H)){
+    var gr=ctx.createLinearGradient(0,0,0,H);
+    gr.addColorStop(0,"#1a1228");gr.addColorStop(1,"#0e0a16");
+    ctx.fillStyle=gr;ctx.fillRect(0,0,W,H);
+  }
+  drawPeril(sc,now);
+  /* knight: gentle idle bob, pose swap on action */
+  var bob=state.pose==="knight_idle"?Math.sin(now/450)*5:0;
+  var kx=W*0.42,ky=H*0.74+bob;
+  if(state.pose==="knight_jump")ky-=70;
+  if(state.pose==="knight_duck")ky+=34;
+  if(state.pose==="knight_dodge_left")kx-=60;
+  if(state.pose==="knight_dodge_right")kx+=60;
+  spr(state.pose,kx,ky,state.pose==="knight_duck"?190:270);
+  drawParticles();
+  drawCue(now);
+  ctx.restore();
+  if(state.flash>0){
+    ctx.globalAlpha=Math.min(0.4,state.flash/650);
+    ctx.fillStyle=state.flashColor;
+    ctx.fillRect(0,0,W,H);
+    ctx.globalAlpha=1;
+  }
+  /* soft vignette for the filmic look */
+  var vg=ctx.createRadialGradient(W/2,H/2,H*0.42,W/2,H/2,H*0.85);
+  vg.addColorStop(0,"rgba(0,0,0,0)");vg.addColorStop(1,"rgba(0,0,0,0.42)");
+  ctx.fillStyle=vg;ctx.fillRect(0,0,W,H);
+  drawHUD();
+}
+
+/* ============================ Loop =================================== */
+var last=performance.now();
+function frame(now){
+  var dt=Math.min(0.05,(now-last)/1000);
+  last=now;
+  try{
+    update(now,dt);
+    draw(now);
+  }catch(err){
+    console.error("game crashed:",err);
+    errBox.textContent="crash: "+(err&&err.message||err);
+    errBox.style.display="block";
+  }
+  requestAnimationFrame(frame);
+}
+document.addEventListener("visibilitychange",function(){
+  if(!document.hidden)last=performance.now();
+});
+
+loadAssets().then(function(){
+  state.phase="title";
+});
+requestAnimationFrame(frame); /* single RAF loop; loading screen until assets land */
+
+})();
+</script>
+</body>
+</html>

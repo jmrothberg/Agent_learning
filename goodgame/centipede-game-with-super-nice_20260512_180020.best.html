@@ -1,0 +1,1087 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Centipede Arcade</title>
+<style>
+  :root { color-scheme: dark; }
+  html,body { margin:0; height:100%; background:#0b1020; color:#e7ecff;
+    font:16px/1.4 system-ui,sans-serif; overflow:hidden; }
+  #wrap { position:fixed; inset:0; display:grid; place-items:center; }
+  canvas { background:#0a0e1a; border-radius:12px; box-shadow:0 10px 40px #0008;
+    max-width:96vw; max-height:90vh; touch-action:none; }
+  #hud { position:fixed; top:12px; left:12px; background:#000a; padding:8px 14px;
+    border-radius:8px; pointer-events:none; font-size:14px; }
+  #help { position:fixed; bottom:12px; left:50%; transform:translateX(-50%);
+    opacity:.7; font-size:13px; text-align:center; white-space:nowrap; }
+  #modal { position:fixed; inset:0; display:none; place-items:center;
+    background:#000a; backdrop-filter:blur(4px); z-index:10; }
+  #modal .card { background:#1a2348; padding:28px 32px; border-radius:14px;
+    text-align:center; box-shadow:0 20px 60px #000a; }
+  #modal h2 { color:#ff6b6b; margin:0 0 8px; }
+  #modal p { margin:0 0 16px; }
+  button { background:#3b62ff; color:#fff; border:0; padding:10px 22px;
+    border-radius:8px; font-size:15px; cursor:pointer; transition:filter .15s; }
+  button:hover { filter:brightness(1.2); }
+  #lives { color:#ff6b6b; }
+  #level { color:#6bff8b; }
+</style></head>
+<body>
+<div id="wrap"><canvas id="c" width="800" height="600"></canvas></div>
+<div id="hud">Score: <span id="score">0</span> &nbsp;|&nbsp;
+  Lives: <span id="lives">♥♥♥</span> &nbsp;|&nbsp;
+  Level: <span id="level">1</span></div>
+<div id="help">← → or A/D to move &nbsp;|&nbsp; Space / click to fire &nbsp;|&nbsp; P to pause &nbsp;|&nbsp; Enter to restart</div>
+<div id="modal"><div class="card">
+  <h2 id="endTitle">Game Over</h2>
+  <p id="endMsg">Final score: <span id="endScore">0</span></p>
+  <button id="restart">Play again</button>
+</div></div>
+<script>
+(() => {
+  "use strict";
+
+  // ─── CANVAS SETUP ───
+  const cvs = document.getElementById("c");
+  const ctx = cvs.getContext("2d");
+  const W = 800, H = 600;
+  const scoreEl = document.getElementById("score");
+  const livesEl = document.getElementById("lives");
+  const levelEl = document.getElementById("level");
+  const modal = document.getElementById("modal");
+  const endScoreEl = document.getElementById("endScore");
+  const endTitleEl = document.getElementById("endTitle");
+
+  function fit() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    cvs.width = W * dpr; cvs.height = H * dpr;
+    cvs.style.width = W + "px"; cvs.style.height = H + "px";
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  fit();
+  addEventListener("resize", fit);
+
+  // ─── GRID CONFIG ───
+  const GS = 20; // grid cell size
+  const COLS = Math.floor(W / GS);   // 40
+  const ROWS = Math.floor(H / GS);   // 30
+  const PLAYER_ROW = ROWS - 2;       // row 28
+  const PLAY_TOP = 1;                 // centipede spawns from row 1
+
+  // ─── ASSET LOADING ───
+  const ASSETS = {};
+  const ASSET_PATHS = [
+    ['player_ship', './centipede-game-with-super-nice_20260512_180020_assets/player_ship.png'],
+    ['centipede_head', './centipede-game-with-super-nice_20260512_180020_assets/centipede_head.png'],
+    ['centipede_body', './centipede-game-with-super-nice_20260512_180020_assets/centipede_body.png'],
+    ['centipede_tail', './centipede-game-with-super-nice_20260512_180020_assets/centipede_tail.png'],
+    ['mushroom', './centipede-game-with-super-nice_20260512_180020_assets/mushroom.png'],
+    ['mushroom_grown', './centipede-game-with-super-nice_20260512_180020_assets/mushroom_grown.png'],
+    ['spider', './centipede-game-with-super-nice_20260512_180020_assets/spider.png'],
+    ['beetle', './centipede-game-with-super-nice_20260512_180020_assets/beetle.png'],
+  ];
+
+  function loadAssets() {
+    return Promise.all(ASSET_PATHS.map(async ([name, src]) => {
+      const img = new Image();
+      img.src = src;
+      try { await img.decode(); } catch(e) { /* fallback to procedural */ }
+      ASSETS[name] = img;
+    }));
+  }
+
+  // ─── SOUND LOADING ───
+  const SOUNDS = {};
+  const SOUND_PATHS = [
+    ['laser', './centipede-game-with-super-nice_20260512_180020_sounds/laser.ogg', false],
+    ['explosion', './centipede-game-with-super-nice_20260512_180020_sounds/explosion.ogg', false],
+    ['spider_hiss', './centipede-game-with-super-nice_20260512_180020_sounds/spider_hiss.ogg', false],
+    ['life_lost', './centipede-game-with-super-nice_20260512_180020_sounds/life_lost.ogg', false],
+    ['game_over', './centipede-game-with-super-nice_20260512_180020_sounds/game_over.ogg', false],
+    ['powerup', './centipede-game-with-super-nice_20260512_180020_sounds/powerup.ogg', false],
+  ];
+
+  function loadSounds() {
+    SOUND_PATHS.forEach(([name, src, loop]) => {
+      try {
+        const a = new Audio(src);
+        a.loop = loop;
+        SOUNDS[name] = a;
+      } catch(e) { /* audio unavailable */ }
+    });
+  }
+
+  let _audioStarted = false;
+  function startAudio() {
+    if (_audioStarted) return;
+    _audioStarted = true;
+  }
+  window.addEventListener('keydown', startAudio, { once: true });
+  window.addEventListener('pointerdown', startAudio, { once: true });
+
+  function playSound(name) {
+    const base = SOUNDS[name];
+    if (!base) return;
+    const inst = base.cloneNode();
+    inst.volume = 0.5;
+    inst.play().catch(() => {});
+  }
+
+  // ─── INPUT ───
+  const keys = Object.create(null);
+  const pressed = Object.create(null);
+  const KEYMAP = {
+    ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right',
+    KeyW: 'up', KeyS: 'down', KeyA: 'left', KeyD: 'right',
+    Space: 'fire', KeyP: 'pause', Enter: 'restart'
+  };
+
+  addEventListener("keydown", e => {
+    const k = KEYMAP[e.code];
+    if (!k) return;
+    if (!keys[k]) pressed[k] = true;
+    keys[k] = true;
+    if (['up','down','left','right','fire'].includes(k)) e.preventDefault();
+    if (k === 'restart') { e.preventDefault(); reset(); }
+  }, { passive: false });
+  addEventListener("keyup", e => { const k = KEYMAP[e.code]; if (k) keys[k] = false; });
+  cvs.addEventListener("pointerdown", e => {
+    pressed.fire = true;
+    startAudio();
+  });
+
+  // ─── GAME STATE ───
+  const state = {
+    score: 0,
+    lives: 3,
+    level: 1,
+    paused: false,
+    over: false,
+    t: 0,
+    player: { x: W / 2, y: PLAYER_ROW * GS, w: GS, h: GS, fireCooldown: 0, alive: true, respawnTimer: 0 },
+    bullets: [],
+    centipedes: [],
+    mushrooms: [],
+    spiders: [],
+    beetles: [],
+    particles: [],
+    flyingInsects: [],
+    mushroomGrid: null,
+    mushroomGrowthTimer: 0,
+    spiderSpawnTimer: 0,
+    beetleSpawnTimer: 0,
+    centipedeSpawnTimer: 0,
+    lastFireTime: 0,
+    lastSpawnTime: 0,
+    centipedeActive: false,
+    screenShake: 0,
+    starField: [],
+    loading: true,
+  };
+
+  // Expose state for probes
+  window.state = state;
+
+  // ─── STAR FIELD ───
+  function generateStars() {
+    state.starField = [];
+    for (let i = 0; i < 120; i++) {
+      state.starField.push({
+        x: Math.random() * W,
+        y: Math.random() * H,
+        size: Math.random() * 2 + 0.5,
+        alpha: Math.random() * 0.6 + 0.2,
+        twinkleSpeed: Math.random() * 3 + 1,
+        twinkleOffset: Math.random() * Math.PI * 2,
+      });
+    }
+  }
+
+  // ─── MUSHROOM GRID ───
+  function buildMushroomGrid() {
+    const grid = new Array(COLS * ROWS).fill(false);
+    state.mushrooms.forEach(m => {
+      const gx = Math.floor(m.x / GS);
+      const gy = Math.floor(m.y / GS);
+      if (gx >= 0 && gx < COLS && gy >= 0 && gy < ROWS) {
+        grid[gy * COLS + gx] = true;
+      }
+    });
+    state.mushroomGrid = grid;
+  }
+
+  function isMushroomAt(gx, gy) {
+    if (gx < 0 || gx >= COLS || gy < 0 || gy >= ROWS) return false;
+    return state.mushroomGrid && state.mushroomGrid[gy * COLS + gx];
+  }
+
+  // ─── CENTIPEDE ───
+  const CENTIPEDE_LENGTH = 24;
+
+  function spawnCentipede() {
+    const segs = [];
+    const row = PLAY_TOP;
+    const startX = COLS - 1;
+    const length = 12;
+    for (let i = 0; i < length; i++) {
+      segs.push({
+        x: (startX - i) * GS,
+        y: row * GS,
+        gx: startX - i,
+        gy: row,
+        dirX: 1,
+        dirY: 0,
+        sineOffset: i * 0.3,
+        alive: true,
+        type: i === 0 ? 'head' : (i === length - 1 ? 'tail' : 'body'),
+        wobble: 0,
+      });
+    }
+    state.centipedes.push({ segments: segs, dirX: 1 });
+    state.centipedeActive = true;
+    buildMushroomGrid();
+  }
+
+  function updateCentipede(dt) {
+    if (!state.centipedeActive || state.centipedes.length === 0) return;
+
+    state.centipedes.forEach(cip => {
+      if (cip.segments.length === 0) return;
+      if (!cip.moveCounter) cip.moveCounter = 0;
+      cip.moveCounter += dt;
+      const moveInterval = 0.12;
+      if (cip.moveCounter < moveInterval) return;
+      cip.moveCounter = 0;
+
+      // Shift body segments backward (each takes position of predecessor)
+      for (let i = cip.segments.length - 1; i >= 1; i--) {
+        const seg = cip.segments[i];
+        const prev = cip.segments[i - 1];
+        seg.gx = prev.gx;
+        seg.gy = prev.gy;
+        seg.x = seg.gx * GS;
+        seg.y = seg.gy * GS;
+        seg.dirX = prev.dirX;
+        seg.wobble = Math.sin(state.t * 4 + seg.sineOffset) * 2;
+      }
+
+      const head = cip.segments[0];
+      if (!head || !head.alive) return;
+
+      const newGx = head.gx + head.dirX;
+      const newGy = head.gy;
+
+      let blocked = false;
+      if (newGx < 0 || newGx >= COLS) blocked = true;
+      else if (isMushroomAt(newGx, newGy)) blocked = true;
+
+      if (blocked) {
+        const dropGy = head.gy + 1;
+        if (dropGy < ROWS) {
+          head.gy = dropGy;
+          head.dirX = -head.dirX;
+        } else {
+          loseLife();
+          cip.segments = [];
+          return;
+        }
+      } else {
+        head.gx = newGx;
+      }
+
+      head.x = head.gx * GS;
+      head.y = head.gy * GS;
+      head.wobble = Math.sin(state.t * 4 + head.sineOffset) * 2;
+    });
+  }
+
+  function clearCentipede() {
+    state.centipedes = [];
+    state.centipedeActive = false;
+  }
+
+  // ─── MUSHROOMS ───
+  function addMushroom(x, y) {
+    const gx = Math.floor(x / GS);
+    const gy = Math.floor(y / GS);
+    if (gx < 0 || gx >= COLS || gy < 0 || gy >= ROWS) return;
+    if (isMushroomAt(gx, gy)) return;
+    state.mushrooms.push({
+      x: gx * GS, y: gy * GS, age: 0, maxAge: 30 + Math.random() * 20,
+      growing: false, hp: 2
+    });
+    buildMushroomGrid();
+  }
+
+  function growMushrooms(dt) {
+    state.mushroomGrowthTimer += dt;
+    const growthInterval = Math.max(1.5, 5 - state.level * 0.4);
+    if (state.mushroomGrowthTimer >= growthInterval && state.mushrooms.length < 200) {
+      state.mushroomGrowthTimer = 0;
+      // Grow near existing mushrooms or randomly
+      if (state.mushrooms.length > 0) {
+        const parent = state.mushrooms[Math.floor(Math.random() * state.mushrooms.length)];
+        const gx = Math.floor(parent.x / GS);
+        const gy = Math.floor(parent.y / GS);
+        const dirs = [[0,1],[0,-1],[1,0],[-1,0]];
+        const d = dirs[Math.floor(Math.random() * dirs.length)];
+        addMushroom((gx + d[0]) * GS, (gy + d[1]) * GS);
+      } else {
+        addMushroom(
+          Math.floor(Math.random() * (COLS - 4) + 2) * GS,
+          Math.floor(Math.random() * (ROWS - 8) + 4) * GS
+        );
+      }
+    }
+  }
+
+  // ─── SPIDERS ───
+  const MAX_SPIDERS = 4;
+
+  function spawnSpider() {
+    if (state.spiders.length >= MAX_SPIDERS + Math.floor(state.level / 2)) return;
+    const fromLeft = Math.random() > 0.5;
+    const row = Math.floor(Math.random() * (ROWS - 6) + 3);
+    state.spiders.push({
+      x: fromLeft ? -GS : (COLS + 1) * GS,
+      y: row * GS,
+      vx: (fromLeft ? 1 : -1) * (60 + Math.random() * 40),
+      vy: 0,
+      timer: 0,
+      dirTimer: 0,
+      dirChangeTime: 1 + Math.random() * 2,
+      w: GS * 1.2,
+      h: GS * 1.2,
+      facing: fromLeft ? 1 : -1,
+    });
+  }
+
+  function updateSpiders(dt) {
+    state.spiderSpawnTimer += dt;
+    if (state.spiderSpawnTimer > 8 - Math.min(state.level, 5)) {
+      state.spiderSpawnTimer = 0;
+      spawnSpider();
+    }
+
+    state.spiders.forEach(sp => {
+      sp.dirTimer += dt;
+      if (sp.dirTimer >= sp.dirChangeTime) {
+        sp.dirTimer = 0;
+        sp.dirChangeTime = 0.5 + Math.random() * 2;
+        // Change direction randomly
+        const angle = Math.random() * Math.PI * 2;
+        const speed = Math.sqrt(sp.vx * sp.vx + sp.vy * sp.vy);
+        sp.vx = Math.cos(angle) * speed;
+        sp.vy = Math.sin(angle) * speed;
+        sp.facing = sp.vx > 0 ? 1 : -1;
+      }
+      sp.x += sp.vx * dt;
+      sp.y += sp.vy * dt;
+
+      // Spiders lay mushrooms as they move
+      if (!sp.layTimer) sp.layTimer = 0;
+      sp.layTimer += dt;
+      if (sp.layTimer > 2.5) {
+        sp.layTimer = 0;
+        const gx = Math.floor(sp.x / GS);
+        const gy = Math.floor(sp.y / GS);
+        if (gx >= 0 && gx < COLS && gy >= 0 && gy < ROWS && !isMushroomAt(gx, gy)) {
+          state.mushrooms.push({
+            x: gx * GS, y: gy * GS, age: 0, maxAge: 30 + Math.random() * 20,
+            growing: false, hp: 2
+          });
+          buildMushroomGrid();
+        }
+      }
+
+      // Keep in bounds
+      if (sp.y < GS) { sp.y = GS; sp.vy = Math.abs(sp.vy); }
+      if (sp.y > (ROWS - 4) * GS) { sp.y = (ROWS - 4) * GS; sp.vy = -Math.abs(sp.vy); }
+      if (sp.x < -GS * 2) { sp.x = -GS * 2; sp.vx = Math.abs(sp.vx); }
+      if (sp.x > (COLS + 2) * GS) { sp.x = (COLS + 2) * GS; sp.vx = -Math.abs(sp.vx); }
+    });
+  }
+
+  // ─── BEETLES ───
+  const MAX_BEETLES = 2;
+
+  function spawnBeetle() {
+    if (state.beetles.length >= MAX_BEETLES + Math.floor(state.level / 3)) return;
+    const fromLeft = Math.random() > 0.5;
+    const row = Math.floor(Math.random() * (ROWS - 8) + 2);
+    state.beetles.push({
+      x: fromLeft ? -GS * 2 : (COLS + 2) * GS,
+      y: row * GS,
+      vx: (fromLeft ? 1 : -1) * (100 + Math.random() * 60),
+      vy: (Math.random() - 0.5) * 40,
+      timer: 0,
+      w: GS * 1.5,
+      h: GS * 1.2,
+      facing: fromLeft ? 1 : -1,
+      wingPhase: Math.random() * Math.PI * 2,
+    });
+  }
+
+  function updateBeetles(dt) {
+    state.beetleSpawnTimer += dt;
+    if (state.beetleSpawnTimer > 12 - Math.min(state.level, 8)) {
+      state.beetleSpawnTimer = 0;
+      spawnBeetle();
+    }
+
+    state.beetles.forEach(b => {
+      b.timer += dt;
+      b.wingPhase += dt * 15;
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+      // Sine wave vertical movement
+      b.y += Math.sin(b.timer * 3) * 0.5;
+
+      if (b.y < GS) { b.y = GS; b.vy = Math.abs(b.vy); }
+      if (b.y > (ROWS - 4) * GS) { b.y = (ROWS - 4) * GS; b.vy = -Math.abs(b.vy); }
+      if (b.x < -GS * 3) { b.x = -GS * 3; b.vx = Math.abs(b.vx); b.facing = 1; }
+      if (b.x > (COLS + 3) * GS) { b.x = (COLS + 3) * GS; b.vx = -Math.abs(b.vx); b.facing = -1; }
+    });
+  }
+
+  // ─── DRAGONFLIES ───
+  const MAX_DRAGONFLIES = 2;
+
+  function spawnDragonfly() {
+    if (state.flyingInsects.length >= MAX_DRAGONFLIES) return;
+    const fromLeft = Math.random() > 0.5;
+    state.flyingInsects.push({
+      x: fromLeft ? -GS : (COLS + 1) * GS,
+      y: Math.floor(Math.random() * (ROWS - 8) + 2) * GS,
+      vx: (fromLeft ? 1 : -1) * (150 + Math.random() * 80),
+      vy: (Math.random() - 0.5) * 60,
+      timer: 0,
+      w: GS,
+      h: GS * 0.8,
+      facing: fromLeft ? 1 : -1,
+      wingPhase: Math.random() * Math.PI * 2,
+      type: 'dragonfly',
+    });
+  }
+
+  function updateDragonflies(dt) {
+    state.lastSpawnTime += dt;
+    if (state.lastSpawnTime > 15 - Math.min(state.level, 10) && state.level >= 2) {
+      state.lastSpawnTime = 0;
+      spawnDragonfly();
+    }
+
+    state.flyingInsects.forEach(f => {
+      f.timer += dt;
+      f.wingPhase += dt * 20;
+      f.x += f.vx * dt;
+      f.y += f.vy * dt + Math.sin(f.timer * 4) * 0.8;
+
+      if (f.y < GS) { f.y = GS; f.vy = Math.abs(f.vy); }
+      if (f.y > (ROWS - 4) * GS) { f.y = (ROWS - 4) * GS; f.vy = -Math.abs(f.vy); }
+      if (f.x < -GS * 3) { f.x = -GS * 3; f.vx = Math.abs(f.vx); f.facing = 1; }
+      if (f.x > (COLS + 3) * GS) { f.x = (COLS + 3) * GS; f.vx = -Math.abs(f.vx); f.facing = -1; }
+    });
+  }
+
+  // ─── BULLETS ───
+  function fireBullet() {
+    if (state.player.fireCooldown > 0) return;
+    state.player.fireCooldown = 0.18;
+    const p = state.player;
+    state.bullets.push({
+      x: p.x, y: p.y - GS,
+      vy: -500,
+      life: 3,
+    });
+    playSound('laser');
+  }
+
+  function updateBullets(dt) {
+    state.bullets = state.bullets.filter(b => {
+      b.y += b.vy * dt;
+      b.life -= dt;
+      return b.y > -20 && b.life > 0;
+    });
+  }
+
+  // ─── PARTICLES ───
+  function spawnParticles(x, y, count, color, speed) {
+    for (let i = 0; i < count; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const spd = speed * (0.5 + Math.random() * 0.5);
+      state.particles.push({
+        x, y,
+        vx: Math.cos(angle) * spd,
+        vy: Math.sin(angle) * spd,
+        life: 0.3 + Math.random() * 0.5,
+        maxLife: 0.8,
+        color: color,
+        size: 2 + Math.random() * 4,
+      });
+    }
+  }
+
+  function updateParticles(dt) {
+    state.particles = state.particles.filter(p => {
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.vy += 80 * dt; // gravity
+      p.life -= dt;
+      return p.life > 0;
+    });
+  }
+
+  // ─── COLLISIONS ───
+  function checkCollisions() {
+    // Bullets vs centipede segments
+    state.bullets.forEach(b => {
+      state.centipedes.forEach(cip => {
+        cip.segments.forEach((seg, si) => {
+          if (!seg.alive) return;
+          const dx = b.x - (seg.x + GS / 2);
+          const dy = b.y - (seg.y + GS / 2);
+          if (Math.abs(dx) < GS * 0.6 && Math.abs(dy) < GS * 0.6) {
+            seg.alive = false;
+            b.life = 0;
+            const points = seg.type === 'head' ? 100 : (seg.type === 'tail' ? 50 : 25);
+            state.score += points * state.level;
+            addMushroom(seg.x, seg.y);
+            spawnParticles(seg.x + GS/2, seg.y + GS/2, 12,
+              seg.type === 'head' ? '#ff4444' : '#ff8844', 120);
+            playSound('explosion');
+            state.screenShake = 0.1;
+            // Split centipede if hit in the middle
+            if (si > 0 && si < cip.segments.length - 1) {
+              const newSegs = cip.segments.slice(si + 1);
+              if (newSegs.length > 0) {
+                newSegs[0].type = 'head';
+                newSegs[newSegs.length - 1].type = 'tail';
+                state.centipedes.push({ segments: newSegs, dirX: cip.dirX });
+                cip.segments = cip.segments.slice(0, si + 1);
+                cip.segments[cip.segments.length - 1].type = 'tail';
+              }
+            }
+          }
+        });
+      });
+    });
+
+    // Bullets vs spiders
+    state.bullets.forEach(b => {
+      state.spiders.forEach((sp, si) => {
+        const dx = b.x - (sp.x + sp.w / 2);
+        const dy = b.y - (sp.y + sp.h / 2);
+        if (Math.abs(dx) < sp.w * 0.5 && Math.abs(dy) < sp.h * 0.5) {
+          state.score += 75 * state.level;
+          state.spiders.splice(si, 1);
+          b.life = 0;
+          spawnParticles(sp.x + sp.w/2, sp.y + sp.h/2, 15, '#ff2266', 150);
+          playSound('spider_hiss');
+          state.screenShake = 0.15;
+        }
+      });
+    });
+
+    // Bullets vs beetles
+    state.bullets.forEach(b => {
+      state.beetles.forEach((bt, bi) => {
+        const dx = b.x - (bt.x + bt.w / 2);
+        const dy = b.y - (bt.y + bt.h / 2);
+        if (Math.abs(dx) < bt.w * 0.5 && Math.abs(dy) < bt.h * 0.5) {
+          state.score += 50 * state.level;
+          state.beetles.splice(bi, 1);
+          b.life = 0;
+          spawnParticles(bt.x + bt.w/2, bt.y + bt.h/2, 10, '#44ff44', 100);
+          playSound('explosion');
+        }
+      });
+    });
+
+    // Bullets vs dragonflies
+    state.bullets.forEach(b => {
+      state.flyingInsects.forEach((f, fi) => {
+        const dx = b.x - (f.x + f.w / 2);
+        const dy = b.y - (f.y + f.h / 2);
+        if (Math.abs(dx) < f.w * 0.5 && Math.abs(dy) < f.h * 0.5) {
+          state.score += 150 * state.level;
+          state.flyingInsects.splice(fi, 1);
+          b.life = 0;
+          spawnParticles(f.x + f.w/2, f.y + f.h/2, 12, '#44aaff', 130);
+          playSound('explosion');
+        }
+      });
+    });
+
+    // Bullets vs mushrooms (destroy bullet, reduce mushroom HP)
+    state.bullets.forEach(b => {
+      state.mushrooms.forEach((m, mi) => {
+        const dx = b.x - (m.x + GS / 2);
+        const dy = b.y - (m.y + GS / 2);
+        if (Math.abs(dx) < GS * 0.5 && Math.abs(dy) < GS * 0.5) {
+          b.life = 0;
+          m.hp = (m.hp || 2) - 1;
+          spawnParticles(m.x + GS/2, m.y + GS/2, 6, '#cc88ff', 60);
+          if (m.hp <= 0) {
+            state.mushrooms.splice(mi, 1);
+            buildMushroomGrid();
+          }
+        }
+      });
+    });
+
+    // Player vs spiders (lose life)
+    if (state.player.alive) {
+      state.spiders.forEach(sp => {
+        const dx = state.player.x - (sp.x + sp.w / 2);
+        const dy = state.player.y - (sp.y + sp.h / 2);
+        if (Math.abs(dx) < (GS + sp.w) * 0.4 && Math.abs(dy) < (GS + sp.h) * 0.4) {
+          loseLife();
+          spawnParticles(state.player.x, state.player.y, 20, '#ff0000', 200);
+          playSound('life_lost');
+          state.screenShake = 0.3;
+        }
+      });
+
+      // Player vs beetles
+      state.beetles.forEach(bt => {
+        const dx = state.player.x - (bt.x + bt.w / 2);
+        const dy = state.player.y - (bt.y + bt.h / 2);
+        if (Math.abs(dx) < (GS + bt.w) * 0.4 && Math.abs(dy) < (GS + bt.h) * 0.4) {
+          loseLife();
+          spawnParticles(state.player.x, state.player.y, 20, '#ff0000', 200);
+          playSound('life_lost');
+          state.screenShake = 0.3;
+        }
+      });
+    }
+  }
+
+  // ─── LIVES / GAME OVER ───
+  function loseLife() {
+    state.lives--;
+    state.player.alive = false;
+    state.player.respawnTimer = 2;
+    updateLivesDisplay();
+    if (state.lives <= 0) {
+      gameOver();
+    }
+  }
+
+  function updateLivesDisplay() {
+    livesEl.textContent = '♥'.repeat(Math.max(0, state.lives)) + '♡'.repeat(Math.max(0, 3 - state.lives));
+  }
+
+  function gameOver() {
+    state.over = true;
+    endScoreEl.textContent = state.score;
+    endTitleEl.textContent = 'Game Over';
+    modal.style.display = 'grid';
+    playSound('game_over');
+  }
+
+  function checkLevelUp() {
+    if (!state.centipedeActive && state.centipedes.length === 0 &&
+        state.spiders.length === 0 && state.beetles.length === 0 &&
+        state.flyingInsects.length === 0 &&
+        state.bullets.length === 0 && state.player.alive) {
+      // All enemies cleared — next level
+      state.level++;
+      levelEl.textContent = state.level;
+      state.mushrooms = [];
+      state.mushroomGrowthTimer = 0;
+      state.spiderSpawnTimer = 0;
+      state.beetleSpawnTimer = 0;
+      state.centipedeSpawnTimer = 0;
+      state.lastSpawnTime = 0;
+      buildMushroomGrid();
+      spawnCentipede();
+      playSound('powerup');
+    }
+  }
+
+  // ─── RESET ───
+  function reset() {
+    state.score = 0;
+    state.lives = 3;
+    state.level = 1;
+    state.paused = false;
+    state.over = false;
+    state.t = 0;
+    state.player.x = W / 2;
+    state.player.y = PLAYER_ROW * GS;
+    state.player.fireCooldown = 0;
+    state.player.alive = true;
+    state.player.respawnTimer = 0;
+    state.bullets = [];
+    state.centipedes = [];
+    state.centipedeActive = false;
+    state.centipedeSpawnTimer = 0;
+    state.mushrooms = [];
+    state.spiders = [];
+    state.beetles = [];
+    state.flyingInsects = [];
+    state.particles = [];
+    state.mushroomGrowthTimer = 0;
+    state.spiderSpawnTimer = 0;
+    state.beetleSpawnTimer = 0;
+    state.centipedeSpawnTimer = 0;
+    state.lastFireTime = 0;
+    state.lastSpawnTime = 0;
+    state.centipedeActive = false;
+    state.screenShake = 0;
+    state.mushroomGrid = null;
+
+    scoreEl.textContent = '0';
+    levelEl.textContent = '1';
+    updateLivesDisplay();
+    modal.style.display = 'none';
+    generateStars();
+    buildMushroomGrid();
+    spawnCentipede();
+  }
+
+  document.getElementById("restart").onclick = reset;
+
+  // ─── UPDATE ───
+  function update(dt) {
+    if (state.over || state.paused) return;
+    state.t += dt;
+
+    // Player movement (horizontal + vertical within bottom 1/4)
+    const p = state.player;
+    const moveSpeed = 250;
+    const playerTop = H - H / 4;
+    const playerBottom = H - GS;
+    if (p.alive) {
+      if (keys.left) p.x -= moveSpeed * dt;
+      if (keys.right) p.x += moveSpeed * dt;
+      if (keys.up) p.y -= moveSpeed * dt;
+      if (keys.down) p.y += moveSpeed * dt;
+      p.x = Math.max(GS, Math.min(W - GS, p.x));
+      p.y = Math.max(playerTop, Math.min(playerBottom, p.y));
+      if (p.fireCooldown > 0) p.fireCooldown -= dt;
+      if (pressed.fire) fireBullet();
+    } else {
+      p.respawnTimer -= dt;
+      if (p.respawnTimer <= 0 && !state.over) {
+        p.alive = true;
+        p.x = W / 2;
+      }
+    }
+
+    // Pause toggle
+    if (pressed.pause) state.paused = !state.paused;
+
+    // Screen shake decay
+    if (state.screenShake > 0) state.screenShake -= dt * 2;
+
+    // Update all entities
+    updateCentipede(dt);
+    updateBullets(dt);
+    updateSpiders(dt);
+    updateBeetles(dt);
+    updateDragonflies(dt);
+    growMushrooms(dt);
+    updateParticles(dt);
+    checkCollisions();
+
+    // Remove dead centipede segments
+    state.centipedes.forEach(cip => {
+      cip.segments = cip.segments.filter(s => s.alive);
+    });
+    state.centipedes = state.centipedes.filter(c => c.segments.length > 0);
+    if (state.centipedes.length === 0 && state.centipedeActive) {
+      state.centipedeActive = false;
+      state.centipedeSpawnTimer = -2;
+    }
+
+    // Auto-spawn new centipede
+    if (!state.centipedeActive && state.centipedes.length === 0 && !state.over) {
+      state.centipedeSpawnTimer += dt;
+      if (state.centipedeSpawnTimer >= 2) {
+        spawnCentipede();
+      }
+    }
+
+    // Check level up
+    checkLevelUp();
+  }
+
+  // ─── DRAW HELPERS ───
+  function drawSprite(assetName, x, y, w, h, flipX, flipY) {
+    const img = ASSETS[assetName];
+    ctx.save();
+    ctx.translate(x + w / 2, y + h / 2);
+    if (flipX) ctx.scale(-1, 1);
+    if (flipY) ctx.scale(1, -1);
+    if (img && img.complete && img.naturalWidth > 0) {
+      ctx.drawImage(img, -w / 2, -h / 2, w, h);
+    } else {
+      // Fallback procedural drawing
+      ctx.fillStyle = '#88f';
+      ctx.fillRect(-w/2, -h/2, w, h);
+    }
+    ctx.restore();
+  }
+
+  function drawGlowingCircle(x, y, r, color) {
+    const grad = ctx.createRadialGradient(x, y, 0, x, y, r * 2);
+    grad.addColorStop(0, color);
+    grad.addColorStop(1, 'transparent');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(x, y, r * 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // ─── DRAW ───
+  function draw() {
+    ctx.save();
+
+    // Screen shake
+    if (state.screenShake > 0) {
+      const shake = state.screenShake * 8;
+      ctx.translate(
+        (Math.random() - 0.5) * shake,
+        (Math.random() - 0.5) * shake
+      );
+    }
+
+    // Background gradient
+    const bgGrad = ctx.createLinearGradient(0, 0, 0, H);
+    bgGrad.addColorStop(0, '#0a0e1a');
+    bgGrad.addColorStop(0.5, '#0f1528');
+    bgGrad.addColorStop(1, '#141a30');
+    ctx.fillStyle = bgGrad;
+    ctx.fillRect(0, 0, W, H);
+
+    // Subtle grid lines
+    ctx.strokeStyle = 'rgba(40, 60, 100, 0.15)';
+    ctx.lineWidth = 0.5;
+    for (let x = 0; x <= W; x += GS) {
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+    }
+    for (let y = 0; y <= H; y += GS) {
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+    }
+
+    // Star field
+    state.starField.forEach(star => {
+      const twinkle = 0.5 + 0.5 * Math.sin(state.t * star.twinkleSpeed + star.twinkleOffset);
+      ctx.fillStyle = `rgba(200, 220, 255, ${star.alpha * twinkle})`;
+      ctx.beginPath();
+      ctx.arc(star.x, star.y, star.size, 0, Math.PI * 2);
+      ctx.fill();
+    });
+
+    // Player safe zone indicator
+    ctx.fillStyle = 'rgba(0, 100, 200, 0.05)';
+    ctx.fillRect(0, PLAYER_ROW * GS, W, (ROWS - PLAYER_ROW) * GS);
+
+    // ─── MUSHROOMS ───
+    state.mushrooms.forEach(m => {
+      const alpha = 0.6 + 0.4 * (m.age / m.maxAge);
+      ctx.globalAlpha = alpha;
+      const asset = m.age > m.maxAge * 0.5 ? 'mushroom_grown' : 'mushroom';
+      drawSprite(asset, m.x, m.y, GS, GS, false, false);
+      ctx.globalAlpha = 1;
+    });
+
+    // ─── CENTIPEDE ───
+    state.centipedes.forEach(cip => {
+      cip.segments.forEach((seg, i) => {
+        const x = seg.x + seg.wobble * 0.3;
+        const y = seg.y + seg.wobble * 0.3;
+        let assetName;
+        let flipX = seg.dirX < 0;
+        if (i === 0) assetName = 'centipede_head';
+        else if (i === cip.segments.length - 1) assetName = 'centipede_tail';
+        else assetName = 'centipede_body';
+
+        if (i === 0) {
+          drawGlowingCircle(x + GS/2, y + GS/2, GS * 0.8, 'rgba(255, 60, 60, 0.2)');
+        }
+
+        if (assetName === 'centipede_body') {
+          // ─── REMADE CENTIPEDE BODY: round, connected, with animated legs ───
+          const cx = x + GS / 2;
+          const cy = y + GS / 2;
+          ctx.save();
+          ctx.translate(cx, cy);
+          if (flipX) ctx.scale(-1, 1);
+
+          // Round body segment with gradient for 3D look
+          const bodyGrad = ctx.createRadialGradient(-2, -2, 1, 0, 0, GS * 0.42);
+          bodyGrad.addColorStop(0, '#bbdd77');
+          bodyGrad.addColorStop(0.5, '#88cc44');
+          bodyGrad.addColorStop(1, '#559922');
+          ctx.fillStyle = bodyGrad;
+          ctx.beginPath();
+          ctx.arc(0, 0, GS * 0.42, 0, Math.PI * 2);
+          ctx.fill();
+
+          // Highlight for roundness
+          ctx.fillStyle = 'rgba(255,255,255,0.22)';
+          ctx.beginPath();
+          ctx.ellipse(-GS * 0.06, -GS * 0.08, GS * 0.14, GS * 0.09, -0.4, 0, Math.PI * 2);
+          ctx.fill();
+
+          // Animated legs — multiple pairs with wave motion
+          const legWave = state.t * 9 + i * 0.6;
+          const legPairs = 3;
+          ctx.lineWidth = 2.5;
+          ctx.lineCap = 'round';
+          for (let lp = 0; lp < legPairs; lp++) {
+            const t = lp / (legPairs - 1);
+            const lx = -GS * 0.2 + t * GS * 0.4;
+            const wave = Math.sin(legWave + lp * Math.PI * 0.65) * 0.7;
+
+            // Bottom legs
+            ctx.strokeStyle = '#448818';
+            ctx.beginPath();
+            ctx.moveTo(lx, GS * 0.28);
+            const bEndX = lx + Math.sin(wave) * 5;
+            const bEndY = GS * 0.28 + Math.cos(wave) * 6 + 3;
+            ctx.quadraticCurveTo(lx + Math.sin(wave) * 2.5, GS * 0.28 + 4, bEndX, bEndY);
+            ctx.stroke();
+
+            // Top legs (opposite phase)
+            ctx.beginPath();
+            ctx.moveTo(lx, -GS * 0.28);
+            const tEndX = lx + Math.sin(-wave) * 5;
+            const tEndY = -GS * 0.28 - Math.cos(-wave) * 6 - 3;
+            ctx.quadraticCurveTo(lx + Math.sin(-wave) * 2.5, -GS * 0.28 - 4, tEndX, tEndY);
+            ctx.stroke();
+          }
+
+          ctx.restore();
+        } else {
+          drawSprite(assetName, x, y, GS, GS, flipX, false);
+        }
+      });
+    });
+
+    // ─── SPIDERS ───
+    state.spiders.forEach(sp => {
+      // Glow
+      drawGlowingCircle(sp.x + sp.w/2, sp.y + sp.h/2, sp.w * 0.6, 'rgba(255, 30, 80, 0.15)');
+      drawSprite('spider', sp.x, sp.y, sp.w, sp.h, sp.facing < 0, false);
+    });
+
+    // ─── BEETLES ───
+    state.beetles.forEach(bt => {
+      drawGlowingCircle(bt.x + bt.w/2, bt.y + bt.h/2, bt.w * 0.5, 'rgba(50, 200, 50, 0.15)');
+      drawSprite('beetle', bt.x, bt.y, bt.w, bt.h, bt.facing < 0, false);
+    });
+
+    // ─── DRAGONFLIES ───
+    state.flyingInsects.forEach(f => {
+      // Iridescent glow
+      const hue = (state.t * 60 + f.timer * 30) % 360;
+      drawGlowingCircle(f.x + f.w/2, f.y + f.h/2, f.w * 0.6,
+        `hsla(${hue}, 80%, 60%, 0.2)`);
+      // Draw as beetle sprite for now (no dragonfly asset)
+      drawSprite('beetle', f.x, f.y, f.w, f.h, f.facing < 0, false);
+    });
+
+    // ─── BULLETS ───
+    state.bullets.forEach(b => {
+      // Laser trail
+      const trailGrad = ctx.createLinearGradient(b.x, b.y, b.x, b.y + 20);
+      trailGrad.addColorStop(0, '#66ccff');
+      trailGrad.addColorStop(0.5, '#3399ff');
+      trailGrad.addColorStop(1, 'transparent');
+      ctx.fillStyle = trailGrad;
+      ctx.fillRect(b.x - 2, b.y, 4, 20);
+
+      // Bullet glow
+      drawGlowingCircle(b.x, b.y, 8, 'rgba(80, 180, 255, 0.4)');
+
+      // Bullet core
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, 3, 0, Math.PI * 2);
+      ctx.fill();
+    });
+
+    // ─── PLAYER ───
+    if (state.player.alive) {
+      const p = state.player;
+      // Player glow
+      drawGlowingCircle(p.x, p.y, GS * 1.2, 'rgba(50, 120, 255, 0.2)');
+      drawSprite('player_ship', p.x - GS/2, p.y - GS/2, GS, GS, false, false);
+
+      // Cannon barrel glow
+      ctx.fillStyle = 'rgba(100, 200, 255, 0.6)';
+      ctx.beginPath();
+      ctx.arc(p.x, p.y - GS * 0.6, 3, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (state.lives > 0) {
+      // Respawn indicator
+      const p = state.player;
+      ctx.fillStyle = `rgba(255, 100, 100, ${0.3 + 0.3 * Math.sin(state.t * 6)})`;
+      ctx.font = '14px system-ui';
+      ctx.textAlign = 'center';
+      ctx.fillText('RESPAWNING...', p.x, p.y);
+    }
+
+    // ─── PARTICLES ───
+    state.particles.forEach(p => {
+      const alpha = p.life / p.maxLife;
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size * alpha, 0, Math.PI * 2);
+      ctx.fill();
+    });
+    ctx.globalAlpha = 1;
+
+    // ─── PAUSED OVERLAY ───
+    if (state.paused) {
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+      ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 48px system-ui';
+      ctx.textAlign = 'center';
+      ctx.fillText('PAUSED', W / 2, H / 2);
+      ctx.font = '18px system-ui';
+      ctx.fillStyle = '#aaa';
+      ctx.fillText('Press P to resume', W / 2, H / 2 + 40);
+    }
+
+    ctx.restore();
+  }
+
+  // ─── MAIN LOOP ───
+  let lastTime = performance.now();
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - lastTime) / 1000);
+    lastTime = now;
+    try {
+      update(dt);
+      draw();
+      scoreEl.textContent = state.score;
+    } catch (err) {
+      console.error("game crashed:", err);
+      gameOver();
+    }
+    // Clear pressed keys
+    for (const k in pressed) pressed[k] = false;
+    requestAnimationFrame(frame);
+  }
+
+  // ─── INIT ───
+  async function init() {
+    await loadAssets();
+    loadSounds();
+    state.loading = false;
+    generateStars();
+    reset();
+    requestAnimationFrame(frame);
+  }
+
+  init();
+})();
+</script>
+</body></html>
