@@ -1,0 +1,952 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>The Secret of Skull Island</title>
+<style>
+  :root { color-scheme: dark; --bg:#0b1020; --fg:#e7ecff; --panel:#1a2348;
+          --accent:#3b62ff; --gold:#e8c36c; --parch:#f0e0b8; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font:16px/1.4 system-ui,sans-serif; overflow:hidden;
+    -webkit-tap-highlight-color:transparent; user-select:none; }
+  #wrap { position:fixed; inset:0; display:grid; place-items:center; }
+  canvas { background:#10162e; border-radius:12px; box-shadow:0 10px 40px #0008;
+    max-width:96vw; max-height:90vh; touch-action:none; cursor:pointer; }
+  #hud { position:fixed; top:12px; left:12px; background:#0008; padding:8px 12px;
+    border-radius:8px; pointer-events:none; font-variant-numeric:tabular-nums; z-index:10; }
+  #hud span { margin-right:14px; }
+  #help { position:fixed; bottom:155px; left:12px; opacity:.65; font-size:12px;
+    pointer-events:none; z-index:10; max-width:420px; }
+  #modal { position:fixed; inset:0; display:none; place-items:center;
+    background:#000a; backdrop-filter:blur(4px); z-index:50; }
+  #modal .card { background:var(--panel); padding:24px 28px; border-radius:14px;
+    text-align:center; box-shadow:0 20px 60px #000a; min-width:280px; max-width:440px; }
+  #modal h2 { margin:0 0 8px; color:var(--gold); }
+  #pauseTag { position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
+    background:#000c; padding:14px 22px; border-radius:10px; display:none;
+    font-size:24px; pointer-events:none; z-index:20; }
+  #errOverlay { position:fixed; inset:auto 12px 12px 12px; max-height:30%;
+    overflow:auto; background:#400; color:#fdd; padding:8px 12px; font:12px/1.3 monospace;
+    border-radius:6px; display:none; pointer-events:none; z-index:60; }
+  button { background:var(--accent); color:#fff; border:0; padding:10px 18px;
+    border-radius:8px; font-size:15px; cursor:pointer; }
+  button:hover { filter:brightness(1.1); }
+  #cut { position:absolute; inset:0; width:100%; height:100%; object-fit:cover;
+    display:none; z-index:40; }
+  #skipHint { position:absolute; bottom:20px; left:50%; transform:translateX(-50%);
+    color:#fff; background:#0008; padding:6px 14px; border-radius:6px; font-size:14px;
+    display:none; z-index:41; pointer-events:none; }
+  #verbBar { position:fixed; bottom:0; left:0; right:0; height:145px;
+    background:linear-gradient(180deg,#1a2348 0%,#0e1530 100%);
+    border-top:2px solid var(--gold); display:flex; z-index:15; }
+  #verbCol { width:230px; padding:8px 10px; display:grid;
+    grid-template-columns:1fr 1fr; gap:4px; align-content:start;
+    border-right:1px solid #2a3560; }
+  .verbBtn { background:#22305c; color:var(--fg); border:1px solid #2a3560;
+    padding:4px 6px; border-radius:5px; font-size:12px; cursor:pointer;
+    text-align:left; transition:background .1s; }
+  .verbBtn:hover { background:#2e3f72; }
+  .verbBtn.active { background:var(--accent); border-color:var(--gold); color:#fff; }
+  #invCol { flex:1; padding:8px 10px; display:flex; flex-direction:column; }
+  #invLabel { font-size:12px; color:var(--gold); margin-bottom:4px; }
+  #invSlots { display:flex; gap:6px; flex-wrap:wrap; }
+  .invSlot { width:56px; height:56px; background:#0e1530; border:1px solid #2a3560;
+    border-radius:6px; display:flex; align-items:center; justify-content:center;
+    cursor:pointer; position:relative; }
+  .invSlot:hover { border-color:var(--accent); }
+  .invSlot.selected { border-color:var(--gold); box-shadow:0 0 10px var(--gold);
+    background:#1a2850; outline:2px solid var(--gold); outline-offset:1px; }
+  .invSlot img { max-width:48px; max-height:48px; }
+  .invSlot .x { position:absolute; top:1px; right:3px; font-size:10px; color:#f55;
+    cursor:pointer; }
+  #dialogBox { position:fixed; bottom:155px; left:10px; right:10px;
+    max-height:120px; background:rgba(15,20,48,.95); border:2px solid var(--gold);
+    border-radius:8px; padding:10px 14px; font-size:15px; z-index:16;
+    display:none; }
+  #dialogText { color:var(--parch); }
+  #dialogHint { font-size:12px; color:#889; margin-top:6px; }
+  #sceneLabel { position:fixed; top:12px; right:12px; background:#0008;
+    padding:5px 12px; border-radius:6px; font-size:13px; color:var(--gold);
+    z-index:10; pointer-events:none; }
+  #helpBtn, #hintBtn { position:fixed; z-index:25; padding:8px 14px; font-size:13px; }
+  #helpBtn { bottom:155px; right:12px; }
+  #hintBtn { bottom:45px; right:12px; }
+  #helpModal { position:fixed; inset:0; display:none; place-items:center;
+    background:#000a; backdrop-filter:blur(4px); z-index:55; }
+  #helpModal .card { background:var(--panel); padding:24px 28px; border-radius:14px;
+    text-align:left; box-shadow:0 20px 60px #000a; min-width:280px; max-width:440px; }
+  #helpModal h2 { margin:0 0 12px; color:var(--gold); text-align:center; }
+  #helpContent p { margin:0 0 8px; font-size:14px; }
+  #hintText { position:fixed; bottom:88px; right:12px; max-width:340px;
+    background:rgba(15,20,48,.95); border:2px solid var(--gold); padding:10px 14px;
+    border-radius:8px; font-size:13px; display:none; z-index:25; color:var(--parch); }
+</style></head>
+<body>
+<div id="wrap"><canvas id="c" width="960" height="640"></canvas></div>
+<div id="hud">
+  <span>Scene: <b id="sceneNum">1</b></span>
+  <span>Items: <b id="itemCount">0</b></span>
+</div>
+<div id="help">SCUMM-style: pick a verb, click a target · Walk on sand/dock · R to restart</div>
+<div id="pauseTag">PAUSED</div>
+<div id="modal"><div class="card">
+  <h2 id="endTitle">Victory!</h2>
+  <p id="endMsg">You completed your adventure!</p>
+  <button id="restart">Play again</button>
+</div></div>
+<div id="errOverlay"></div>
+<video id="cut" muted playsinline preload="auto"></video>
+<div id="skipHint">Press any key to skip</div>
+<div id="verbBar">
+  <div id="verbCol">
+    <button class="verbBtn active" data-verb="walk">Walk to</button>
+    <button class="verbBtn" data-verb="look">Look at</button>
+    <button class="verbBtn" data-verb="take">Pick up</button>
+    <button class="verbBtn" data-verb="talk">Talk to</button>
+    <button class="verbBtn" data-verb="use">Use</button>
+  </div>
+  <div id="invCol">
+    <div id="invLabel">INVENTORY</div>
+    <div id="invSlots"></div>
+  </div>
+</div>
+<div id="dialogBox">
+  <div id="dialogText"></div>
+  <div id="dialogHint">Click to continue</div>
+</div>
+<div id="sceneLabel"></div>
+<button id="helpBtn">? Help</button>
+<button id="hintBtn">💡 Hint</button>
+<div id="helpModal"><div class="card">
+  <h2>How to Play</h2>
+  <div id="helpContent">
+    <p><b>Goal:</b> Find the treasure of Skull Island!</p>
+    <p><b>Verbs:</b> Walk to, Look at, Pick up, Talk to, Use — select one, then click a target in the scene.</p>
+    <p><b>Inventory:</b> Click an item, then click a hotspot to use it (classic SCUMM-style).</p>
+    <p><b>Tips:</b> Examine everything. Combine items. Talk to locals — they know secrets.</p>
+    <p>Press <b>R</b> to restart at any time.</p>
+  </div>
+  <button id="closeHelp" style="margin-top:16px;">Got it!</button>
+</div></div>
+<div id="hintText"></div>
+<script>
+(() => {
+  "use strict";
+
+  // ---- DOM refs ---------------------------------------------------------
+  const cvs = document.getElementById("c");
+  const ctx = cvs.getContext("2d");
+  const W = 960, H = 640;
+  const sceneNumEl = document.getElementById("sceneNum");
+  const itemCountEl = document.getElementById("itemCount");
+  const modal = document.getElementById("modal");
+  const endTitle = document.getElementById("endTitle");
+  const endMsg = document.getElementById("endMsg");
+  const errBox = document.getElementById("errOverlay");
+  const dialogBox = document.getElementById("dialogBox");
+  const dialogText = document.getElementById("dialogText");
+  const invSlotsEl = document.getElementById("invSlots");
+  const sceneLabel = document.getElementById("sceneLabel");
+  const vid = document.getElementById("cut");
+  const skipHint = document.getElementById("skipHint");
+
+  // ---- DPR scaling ------------------------------------------------------
+  function fit() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    cvs.width = W * dpr; cvs.height = H * dpr;
+    cvs.style.width = W + "px"; cvs.style.height = H + "px";
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  fit();
+  window.addEventListener("resize", fit);
+
+  // ---- Assets -----------------------------------------------------------
+  const ASSETS = {};
+  const ASSET_PATHS = {
+    pirate_idle: './build-a-point-and-click-advent_20260621_150955_assets/pirate_idle.png',
+    pirate_walk1: './build-a-point-and-click-advent_20260621_150955_assets/pirate_walk1.png',
+    pirate_walk2: './build-a-point-and-click-advent_20260621_150955_assets/pirate_walk2.png',
+    beach_bg: './build-a-point-and-click-advent_20260621_150955_assets/beach_bg.png',
+    port_bg: './build-a-point-and-click-advent_20260621_150955_assets/port_bg.png',
+    shovel_item: './build-a-point-and-click-advent_20260621_150955_assets/shovel_item.png',
+    map_item: './build-a-point-and-click-advent_20260621_150955_assets/map_item.png',
+    key_item: './build-a-point-and-click-advent_20260621_150955_assets/key_item.png',
+    island_keyart: './build-a-point-and-click-advent_20260621_150955_assets/island_keyart.png',
+    port_keyart: './build-a-point-and-click-advent_20260621_150955_assets/port_keyart.png',
+  };
+  async function loadAssets() {
+    for (const [name, src] of Object.entries(ASSET_PATHS)) {
+      const img = new Image();
+      img.src = src;
+      ASSETS[name] = img;
+    }
+    await Promise.all(Object.entries(ASSETS).map(([name, img]) =>
+      img.decode().catch(e => console.warn('asset fail', name, e))
+    ));
+  }
+
+  const _spriteCache = {};
+  function sprite(key) {
+    if (_spriteCache[key] !== undefined) return _spriteCache[key];
+    let img = ASSETS[key];
+    if (!img) {
+      const norm = s => String(s).toLowerCase().replace(/[^a-z0-9]/g, '');
+      const want = norm(key), names = Object.keys(ASSETS);
+      let hit = names.find(n => norm(n) === want)
+             || names.find(n => norm(n).includes(want) || want.includes(norm(n)));
+      if (!hit) {
+        const toks = want.match(/[a-z]+|[0-9]+/g) || []; let best = 0;
+        for (const n of names) { const nn = norm(n); let sc = 0;
+          for (const t of toks) if (t.length >= 3 && nn.includes(t)) sc += t.length;
+          if (sc > best) { best = sc; hit = n; } }
+      }
+      img = hit ? ASSETS[hit] : null;
+    }
+    const ok = (img && img.naturalWidth > 0);
+    if (!ok && !img) { (window.__assetMisses = window.__assetMisses || {})[key] = 1; }
+    if (ok) _spriteCache[key] = img;
+    return ok ? img : null;
+  }
+
+  // ---- Sounds -----------------------------------------------------------
+  const SOUNDS = {};
+  const SOUND_PATHS = {
+    click_sfx: './build-a-point-and-click-advent_20260621_150955_sounds/click_sfx.ogg',
+    pickup_sfx: './build-a-point-and-click-advent_20260621_150955_sounds/pickup_sfx.ogg',
+    success_sfx: './build-a-point-and-click-advent_20260621_150955_sounds/success_sfx.ogg',
+    walk_sfx: './build-a-point-and-click-advent_20260621_150955_sounds/walk_sfx.ogg',
+    music: './build-a-point-and-click-advent_20260621_150955_sounds/music.ogg',
+  };
+  const LOOPS = { music: true };
+  function loadSounds() {
+    for (const [name, src] of Object.entries(SOUND_PATHS)) {
+      const a = new Audio(src);
+      a.loop = !!LOOPS[name];
+      SOUNDS[name] = a;
+    }
+  }
+  loadSounds();
+  function play(name) {
+    const base = SOUNDS[name]; if (!base) return;
+    if (base.loop) { base.play().catch(()=>{}); return; }
+    const inst = base.cloneNode(); inst.play().catch(()=>{});
+  }
+  let _audioStarted = false;
+  function _startAudio() {
+    if (_audioStarted) return; _audioStarted = true;
+    if (SOUNDS.music) SOUNDS.music.play().catch(()=>{});
+  }
+  window.addEventListener('keydown', _startAudio, { once: true });
+  window.addEventListener('pointerdown', _startAudio, { once: true });
+
+  // ---- Cutscenes --------------------------------------------------------
+  const CUTS = {
+    intro_cutscene: './build-a-point-and-click-advent_20260621_150955_videos/intro_cutscene.mp4',
+    port_cutscene: './build-a-point-and-click-advent_20260621_150955_videos/port_cutscene.mp4',
+  };
+  let cutDone = null;
+  function playCut(name, onDone) {
+    const src = CUTS[name];
+    if (!src) { onDone(); return; }
+    cutDone = onDone;
+    vid.onended = endCut; vid.onerror = endCut;
+    vid.src = src; vid.style.display = 'block';
+    skipHint.style.display = 'block';
+    vid.play().catch(endCut);
+  }
+  function endCut() {
+    if (!cutDone) return;
+    vid.style.display = 'none'; skipHint.style.display = 'none'; vid.pause();
+    const f = cutDone; cutDone = null; f();
+  }
+  window.addEventListener('keydown', (e) => { if (cutDone) { e.preventDefault(); endCut(); } });
+
+  // ---- Game State -------------------------------------------------------
+  const VERBS = ['walk', 'look', 'take', 'talk', 'use'];
+  const ITEMS = {
+    shovel: { name: 'Shovel', sprite: 'shovel_item' },
+    map: { name: 'Treasure Map', sprite: 'map_item' },
+    key: { name: 'Brass Key', sprite: 'key_item' },
+  };
+
+  // Background art is 512×512; canvas stretches it to 960×640 (non-uniform scale).
+  const BG_SRC = 512;
+  function gx(sx) { return sx * W / BG_SRC; }
+  function gy(sy) { return sy * H / BG_SRC; }
+  function gbox(sx, sy, sw, sh) {
+    return { x: gx(sx), y: gy(sy), w: gx(sw), h: gy(sh) };
+  }
+
+  // Hotspot rects measured on the 512×512 PNGs (verified with _debug_*_hotspots.png)
+  function buildScenes() {
+    const mk = (base, hs) => ({
+      ...base,
+      walkMinX: gx(base.walk.minX), walkMaxX: gx(base.walk.maxX),
+      walkMinY: gy(base.walk.minY), walkMaxY: gy(base.walk.maxY),
+      hotspots: hs.map(h => {
+        const b = gbox(h.sx, h.sy, h.sw, h.sh);
+        const out = { ...h, x: b.x, y: b.y, w: b.w, h: b.h };
+        delete out.sx; delete out.sy; delete out.sw; delete out.sh;
+        if (h.approachSx != null) { out.approachX = gx(h.approachSx); out.approachY = gy(h.approachSy); }
+        delete out.approachSx; delete out.approachSy;
+        if (h.itemDrawSrc) {
+          const d = gbox(h.itemDrawSrc.x, h.itemDrawSrc.y, h.itemDrawSrc.w, h.itemDrawSrc.h);
+          out.itemDraw = { x: d.x, y: d.y, w: d.w, h: d.h };
+          delete out.itemDrawSrc;
+        }
+        if (h.mapDrawSrc) {
+          const d = gbox(h.mapDrawSrc.x, h.mapDrawSrc.y, h.mapDrawSrc.w, h.mapDrawSrc.h);
+          out.mapDraw = { x: d.x, y: d.y, w: d.w, h: d.h };
+          delete out.mapDrawSrc;
+        }
+        return out;
+      }),
+    });
+
+    return [
+      mk(
+        { id: 0, name: "Skull Beach", bg: 'beach_bg', walk: { minX: 48, maxX: 480, minY: 430, maxY: 492 } },
+        [
+          { id: 'sand', sx: 78, sy: 418, sw: 110, sh: 60, label: 'Orange Sand',
+            diggable: true, dug: false, hasMap: false, approachSx: 133, approachSy: 455,
+            mapDrawSrc: { x: 108, y: 432, w: 44, h: 44 } },
+          { id: 'shovel', sx: 125, sy: 432, sw: 53, sh: 40, label: 'Shovel',
+            item: 'shovel', taken: false, approachSx: 152, approachSy: 455,
+            itemDrawSrc: { x: 130, y: 434, w: 44, h: 44 } },
+          { id: 'palm', sx: 155, sy: 250, sw: 90, sh: 170, label: 'Palm Tree',
+            approachSx: 200, approachSy: 455 },
+          { id: 'jungle', sx: 0, sy: 285, sw: 95, sh: 175, label: 'Jungle Path',
+            exitTo: 1, locked: true, approachSx: 48, approachSy: 455 },
+        ]
+      ),
+      mk(
+        { id: 1, name: "Port Brine", bg: 'port_bg', walk: { minX: 36, maxX: 485, minY: 408, maxY: 472 } },
+        [
+          { id: 'barkeeper', sx: 358, sy: 272, sw: 74, sh: 56, label: 'Barkeeper',
+            gaveKey: false, talkable: true, approachSx: 405, approachSy: 450 },
+          { id: 'door', sx: 288, sy: 218, sw: 54, sh: 90, label: 'Back Room Door',
+            locked: true, opened: false, approachSx: 315, approachSy: 450 },
+          { id: 'barrel', sx: 438, sy: 425, sw: 54, sh: 63, label: 'Rum Barrel',
+            approachSx: 465, approachSy: 450 },
+          { id: 'back', sx: 48, sy: 378, sw: 70, sh: 80, label: 'Back to Beach',
+            exitTo: 0, approachSx: 83, approachSy: 450 },
+        ]
+      ),
+    ];
+  }
+  const SCENES = buildScenes();
+
+  const state = {
+    scene: 0,
+    player: { x: gx(320), y: gy(458), tx: gx(320), ty: gy(458), facing: 1, walkFrame: 0, walkTimer: 0, moving: false,
+      pendingExit: null, pendingAction: null },
+    inventory: [],
+    selectedVerb: 'walk',
+    selectedItem: null,
+    dialog: null,
+    over: false,
+    won: false,
+    t: 0,
+    introPlayed: false,
+  };
+
+  // Expose for probes
+  window.gameState = state;
+  window.game = { reset: resetGame };
+
+  function resetGame() {
+    state.scene = 0;
+    state.player.x = gx(320); state.player.tx = gx(320); state.player.ty = gy(458); state.player.y = gy(458);
+    state.player.facing = 1; state.player.walkFrame = 0; state.player.walkTimer = 0; state.player.moving = false;
+    state.player.pendingExit = null; state.player.pendingAction = null;
+    state.inventory = [];
+    state.selectedVerb = 'walk';
+    state.selectedItem = null;
+    state.dialog = null;
+    state.over = false; state.won = false; state.t = 0;
+    state.introPlayed = false;
+    // Reset hotspots
+    for (const sc of SCENES) {
+      for (const h of sc.hotspots) {
+        if (h.taken !== undefined) h.taken = false;
+        if (h.dug !== undefined) h.dug = false;
+        if (h.hasMap !== undefined) h.hasMap = false;
+        if (h.opened !== undefined) h.opened = false;
+        if (h.gaveKey !== undefined) h.gaveKey = false;
+        if (h.id === 'jungle') h.locked = true;
+        if (h.id === 'door') { h.locked = true; h.opened = false; }
+      }
+    }
+    setVerb('walk');
+    renderInventory();
+    modal.style.display = 'none';
+    const hm = document.getElementById('helpModal');
+    if (hm) hm.style.display = 'none';
+    const ht = document.getElementById('hintText');
+    if (ht) ht.style.display = 'none';
+    updateHUD();
+    // Play intro
+    if (!state.introPlayed) {
+      state.introPlayed = true;
+      playCut('intro_cutscene', () => {});
+    }
+  }
+
+  // ---- Verb UI ----------------------------------------------------------
+  function setVerb(v) {
+    state.selectedVerb = v;
+    // Keep inventory selection when switching to Use (SCUMM: item stays highlighted)
+    if (v !== 'use') state.selectedItem = null;
+    document.querySelectorAll('.verbBtn').forEach(b => {
+      b.classList.toggle('active', b.dataset.verb === v);
+    });
+    renderInventory();
+  }
+  document.querySelectorAll('.verbBtn').forEach(b => {
+    b.addEventListener('click', (e) => { e.stopPropagation(); setVerb(b.dataset.verb); play('click_sfx'); });
+  });
+
+  // ---- Inventory UI -----------------------------------------------------
+  function renderInventory() {
+    invSlotsEl.innerHTML = '';
+    for (let i = 0; i < 8; i++) {
+      const slot = document.createElement('div');
+      slot.className = 'invSlot';
+      const item = state.inventory[i];
+      if (item) {
+        const img = sprite(ITEMS[item].sprite);
+        if (img) {
+          const im = document.createElement('img');
+          im.src = img.src;
+          slot.appendChild(im);
+        }
+        if (state.selectedItem === item) slot.classList.add('selected');
+        slot.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (state.selectedItem === item) {
+            state.selectedItem = null;
+          } else {
+            state.selectedItem = item;
+            setVerb('use');
+            play('click_sfx');
+            return;
+          }
+          renderInventory();
+          play('click_sfx');
+        });
+      }
+      invSlotsEl.appendChild(slot);
+    }
+  }
+
+  // ---- Dialog -----------------------------------------------------------
+  function showDialog(text) {
+    state.dialog = { text, shown: true };
+    dialogBox.style.display = 'block';
+    dialogText.textContent = text;
+  }
+  function closeDialog() {
+    state.dialog = null;
+    dialogBox.style.display = 'none';
+  }
+  dialogBox.addEventListener('click', (e) => { e.stopPropagation(); closeDialog(); });
+
+  // ---- Input: canvas click ---------------------------------------------
+  function canvasToGame(clientX, clientY) {
+    const r = cvs.getBoundingClientRect();
+    const sx = W / r.width, sy = H / r.height;
+    return { x: (clientX - r.left) * sx, y: (clientY - r.top) * sy };
+  }
+
+  cvs.addEventListener('click', (e) => {
+    if (state.over || cutDone) return;
+    const { x, y } = canvasToGame(e.clientX, e.clientY);
+    handleClick(x, y);
+  });
+
+  cvs.addEventListener('mousemove', (e) => {
+    if (state.over || cutDone) return;
+    const { x, y } = canvasToGame(e.clientX, e.clientY);
+    const sc = SCENES[state.scene];
+    let hovering = false;
+    if (findHotspotAt(x, y, sc)) hovering = true;
+    cvs.style.cursor = hovering ? 'pointer' : 'default';
+  });
+
+  function findHotspotAt(x, y, sc) {
+    const hits = [];
+    for (const h of sc.hotspots) {
+      if (h.id === 'shovel' && h.taken) continue;
+      if (x >= h.x && x <= h.x + h.w && y >= h.y && y <= h.y + h.h) hits.push(h);
+    }
+    if (!hits.length) return null;
+    if (hits.length === 1) return hits[0];
+    const verb = state.selectedVerb;
+    // Overlapping hotspots: pick the most specific target for this verb
+    if (verb === 'talk') {
+      const npc = hits.find(h => h.talkable);
+      if (npc) return npc;
+    }
+    if (verb === 'take') {
+      const item = hits.find(h => h.item);
+      if (item) return item;
+      const mapSpot = hits.find(h => h.id === 'sand' && h.dug && h.hasMap);
+      if (mapSpot) return mapSpot;
+    }
+    // Default: smallest area wins (e.g. shovel inside sand patch)
+    hits.sort((a, b) => (a.w * a.h) - (b.w * b.h));
+    return hits[0];
+  }
+
+  function clampWalk(x, y, sc) {
+    let tx = x, ty = y;
+    if (sc.walkMinX != null) tx = Math.max(sc.walkMinX, tx);
+    if (sc.walkMaxX != null) tx = Math.min(sc.walkMaxX, tx);
+    if (sc.walkMinY != null) ty = Math.max(sc.walkMinY, ty);
+    if (sc.walkMaxY != null) ty = Math.min(sc.walkMaxY, ty);
+    return { x: tx, y: ty };
+  }
+
+  function handleClick(x, y) {
+    if (state.dialog) { closeDialog(); return; }
+    const sc = SCENES[state.scene];
+    const hit = findHotspotAt(x, y, sc);
+    if (hit) {
+      handleHotspot(hit, x, y);
+      return;
+    }
+    // Walk to clicked ground (any verb — classic SCUMM)
+    state.player.pendingAction = null;
+    state.player.pendingExit = null;
+    const walk = clampWalk(x, y, sc);
+    state.player.tx = walk.x;
+    state.player.ty = walk.y;
+    if (x < state.player.x) state.player.facing = -1;
+    else if (x > state.player.x) state.player.facing = 1;
+    play('click_sfx');
+  }
+
+  function hotspotApproach(h, sc) {
+    if (h.approachX != null) return clampWalk(h.approachX, h.approachY, sc);
+    return clampWalk(h.x + h.w / 2, h.y + h.h, sc);
+  }
+
+  function queueApproachAndAct(h, x, y) {
+    const sc = SCENES[state.scene];
+    const ap = hotspotApproach(h, sc);
+    const dx = ap.x - state.player.x;
+    const dy = ap.y - state.player.y;
+    if (Math.hypot(dx, dy) < 28) {
+      executeHotspotVerb(h, x, y);
+      return;
+    }
+    state.player.tx = ap.x;
+    state.player.ty = ap.y;
+    if (ap.x < state.player.x) state.player.facing = -1;
+    else if (ap.x > state.player.x) state.player.facing = 1;
+    state.player.pendingExit = null;
+    state.player.pendingAction = { h, x, y };
+  }
+
+  function handleHotspot(h, x, y) {
+    const verb = state.selectedVerb;
+    play('click_sfx');
+
+    if (verb === 'walk') {
+      const sc = SCENES[state.scene];
+      state.player.pendingAction = null;
+      const ap = clampWalk(h.x + h.w / 2, h.y + h.h, sc);
+      state.player.tx = ap.x;
+      state.player.ty = ap.y;
+      if (x < state.player.x) state.player.facing = -1;
+      else if (x > state.player.x) state.player.facing = 1;
+      if (h.exitTo !== undefined) state.player.pendingExit = h;
+      return;
+    }
+
+    // SCUMM: walk up to the target, then talk / look / use / pick up
+    queueApproachAndAct(h, x, y);
+  }
+
+  function executeHotspotVerb(h, x, y) {
+    const verb = state.selectedVerb;
+    const item = state.selectedItem;
+    const sc = SCENES[state.scene];
+
+    // Item-on-hotspot combos
+    if (item && verb === 'use') {
+      // shovel on sand
+      if (item === 'shovel' && h.id === 'sand' && !h.dug) {
+        h.dug = true;
+        h.hasMap = true;
+        showDialog("You dig into the sand and uncover a rolled-up chart, half-buried in the hole.");
+        play('success_sfx');
+        renderInventory();
+        updateHUD();
+        return;
+      }
+      // key on door
+      if (item === 'key' && h.id === 'door' && !h.opened) {
+        h.opened = true; h.locked = false;
+        showDialog("The brass key fits perfectly! The tavern door creaks open, revealing a chest of golden doubloons. YOU WIN!");
+        play('success_sfx');
+        state.won = true;
+        state.over = true;
+        endTitle.textContent = "Victory!";
+        endMsg.textContent = "You found the treasure of Skull Island!";
+        setTimeout(() => { modal.style.display = 'grid'; }, 2000);
+        return;
+      }
+      showDialog("Nothing happens when you try to use the " + ITEMS[item].name + " on the " + h.label + ".");
+      return;
+    }
+
+    if (verb === 'look') {
+      if (h.id === 'palm') {
+        showDialog("A tall palm leans over the beach. Carved into the trunk: \"Skull Beach — dig not lest ye find what ye seek. The jungle path leads to Port Brine.\"");
+      } else if (h.id === 'shovel' && !h.taken) {
+        showDialog("A wooden shovel stuck in the sand beside the palm's roots.");
+      } else if (h.id === 'sand' && !h.dug) {
+        showDialog("Warm orange sand and smooth grey stones heaped at the base of the palm. Looks deliberate.");
+      } else if (h.id === 'sand' && h.dug && h.hasMap) {
+        showDialog("A rolled chart lies in the hole. The parchment is still damp with seawater.");
+      } else if (h.id === 'sand' && h.dug) {
+        showDialog("Just a hole in the sand now.");
+      } else if (h.id === 'jungle') {
+        if (h.locked) showDialog("A narrow track leads inland, but thorny vines have grown across it.");
+        else showDialog("The jungle track opens onto a well-worn path.");
+      } else if (h.id === 'barrel') {
+        showDialog("A barrel of cheap rum. The staves are warped and leaking.");
+      } else if (h.id === 'door') {
+        if (h.locked) showDialog("A heavy door at the back of the shop. There's a brass keyhole.");
+        else showDialog("The back room door hangs open, golden light spilling out.");
+      } else if (h.id === 'barkeeper') {
+        showDialog("A sturdy woman with brown hair minds the counter. She eyes you over a mug of grog.");
+      } else if (h.id === 'back') {
+        showDialog("The path back to Skull Beach.");
+      } else {
+        showDialog("It's a " + h.label + ".");
+      }
+      return;
+    }
+    if (verb === 'take') {
+      if (h.id === 'shovel' && !h.taken) {
+        h.taken = true;
+        state.inventory.push('shovel');
+        showDialog("You pick up the wooden shovel. Sturdy enough for digging!");
+        play('pickup_sfx');
+        renderInventory();
+        updateHUD();
+        return;
+      }
+      if (h.id === 'sand' && h.dug && h.hasMap) {
+        h.hasMap = false;
+        state.inventory.push('map');
+        const jungle = SCENES[0].hotspots.find(j => j.id === 'jungle');
+        if (jungle) jungle.locked = false;
+        showDialog("You pick up the chart. The ink shows a trail through the jungle to a port town.");
+        play('pickup_sfx');
+        renderInventory();
+        updateHUD();
+        return;
+      }
+      showDialog("You can't pick up the " + h.label + ".");
+      return;
+    }
+    if (verb === 'talk') {
+      if (h.talkable || h.id === 'barkeeper') {
+        if (!state.inventory.includes('key') && !h.gaveKey) {
+          h.gaveKey = true;
+          state.inventory.push('key');
+          showDialog("\"You look like trouble,\" the barkeeper mutters, sliding a brass key across the counter. \"That opens the back room. The last captain hid something valuable in there.\"");
+          play('pickup_sfx');
+          renderInventory();
+          updateHUD();
+          return;
+        }
+        if (h.gaveKey) {
+          showDialog("\"Quit loitering and find your treasure,\" she says, polishing a mug.");
+        } else {
+          showDialog("She ignores you and wipes down the counter.");
+        }
+        return;
+      }
+      showDialog("It doesn't respond.");
+      return;
+    }
+    if (verb === 'use') {
+      if (h.id === 'door' && h.locked) {
+        showDialog("The door is locked. You need a key.");
+        return;
+      }
+      if (h.id === 'sand' && !h.dug) {
+        showDialog("Digging with your bare hands seems like a bad idea.");
+        return;
+      }
+      if (h.id === 'sand' && h.dug && h.hasMap) {
+        showDialog("The chart is right there in the hole.");
+        return;
+      }
+      if (h.id === 'jungle' && h.locked) {
+        showDialog("The vines don't give an inch.");
+        return;
+      }
+      showDialog("Nothing happens.");
+      return;
+    }
+  }
+
+  // ---- Keyboard: R to restart ------------------------------------------
+  window.addEventListener('keydown', (e) => {
+    if (e.code === 'KeyR') { resetGame(); }
+  });
+
+  // ---- Help / Hint buttons ---------------------------------------------
+  const helpBtn = document.getElementById('helpBtn');
+  const hintBtn = document.getElementById('hintBtn');
+  const helpModal = document.getElementById('helpModal');
+  const hintTextEl = document.getElementById('hintText');
+  const closeHelpBtn = document.getElementById('closeHelp');
+
+  helpBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    helpModal.style.display = 'grid';
+    play('click_sfx');
+  });
+  closeHelpBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    helpModal.style.display = 'none';
+    play('click_sfx');
+  });
+  helpModal.addEventListener('click', (e) => {
+    if (e.target === helpModal) helpModal.style.display = 'none';
+  });
+
+  function getHint() {
+    const s = state;
+    if (s.over) return "The adventure is over. Press R to play again!";
+    if (s.scene === 0) {
+      if (!s.inventory.includes('shovel')) return "There's a shovel in the sand near the big palm tree on the left.";
+      if (!SCENES[0].hotspots.find(h => h.id === 'sand').dug) return "That orange patch of sand and stones at the palm's roots looks worth investigating. Use the shovel on it.";
+      const sand = SCENES[0].hotspots.find(h => h.id === 'sand');
+      if (sand.hasMap) return "Something's sticking out of the sand by the palm tree.";
+      if (!s.inventory.includes('map')) return "You still need what's buried at the palm tree.";
+      return "The jungle path on the far left leads inland.";
+    }
+    if (s.scene === 1) {
+      if (!s.inventory.includes('key')) return "Talk to the woman behind the bar on the right.";
+      return "Use the brass key on the tavern door: select 'Use', click the key in inventory, then click the door.";
+    }
+    return "Explore the area and interact with objects to progress.";
+  }
+
+  let hintTimer = null;
+  hintBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    hintTextEl.textContent = getHint();
+    hintTextEl.style.display = 'block';
+    if (hintTimer) clearTimeout(hintTimer);
+    hintTimer = setTimeout(() => { hintTextEl.style.display = 'none'; }, 6000);
+    play('click_sfx');
+  });
+
+  // ---- Update -----------------------------------------------------------
+  function update(dt) {
+    if (state.over) return;
+    state.t += dt;
+    if (cutDone) return;
+    const p = state.player;
+    const sc = SCENES[state.scene];
+
+    // Movement toward target
+    const dx = p.tx - p.x;
+    const dy = p.ty - p.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist > 2) {
+      const speed = 180;
+      p.x += (dx / dist) * speed * dt;
+      p.y += (dy / dist) * speed * dt;
+      p.moving = true;
+      p.walkTimer += dt;
+      if (p.walkTimer > 0.18) { p.walkTimer = 0; p.walkFrame = (p.walkFrame + 1) % 2; }
+      // Walk SFX occasionally
+      if (Math.random() < dt * 3) play('walk_sfx');
+    } else {
+      p.x = p.tx; p.y = p.ty;
+      p.moving = false;
+      // Pending verb action after walk (Talk to / Look at / etc.)
+      if (p.pendingAction) {
+        const pa = p.pendingAction;
+        p.pendingAction = null;
+        executeHotspotVerb(pa.h, pa.x, pa.y);
+      } else if (p.pendingExit) {
+        const h = p.pendingExit;
+        p.pendingExit = null;
+        if (h.exitTo !== undefined) {
+          if (h.locked) {
+            if (h.id === 'jungle') showDialog("The thorny vines block the path.");
+            else showDialog("The path is blocked. You need to find a way through.");
+          } else {
+            transitionScene(h.exitTo);
+          }
+        }
+      }
+    }
+    updateHUD();
+  }
+
+  function transitionScene(newScene) {
+    state.player.pendingAction = null;
+    state.player.pendingExit = null;
+    if (newScene === 1 && state.scene === 0) {
+      // Play port cutscene
+      playCut('port_cutscene', () => {
+        state.scene = 1;
+        state.player.x = gx(83); state.player.tx = gx(83);
+        state.player.y = gy(450); state.player.ty = gy(450);
+        state.player.facing = 1;
+        updateHUD();
+      });
+    } else {
+      state.scene = newScene;
+      // Place player at appropriate entry
+      if (newScene === 0) { state.player.x = gx(100); state.player.tx = gx(100); state.player.facing = -1; }
+      else { state.player.x = gx(83); state.player.tx = gx(83); state.player.facing = 1; }
+      state.player.y = gy(newScene === 0 ? 458 : 450);
+      state.player.ty = state.player.y;
+      updateHUD();
+    }
+  }
+
+  function updateHUD() {
+    sceneNumEl.textContent = state.scene + 1;
+    itemCountEl.textContent = state.inventory.length;
+    const sc = SCENES[state.scene];
+    sceneLabel.textContent = sc.name;
+  }
+
+  // ---- Draw -------------------------------------------------------------
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    const sc = SCENES[state.scene];
+
+    // Background
+    const bg = sprite(sc.bg);
+    if (bg) {
+      ctx.drawImage(bg, 0, 0, W, H);
+    } else {
+      ctx.fillStyle = sc.id === 0 ? '#2a4a6a' : '#3a3a5a';
+      ctx.fillRect(0, 0, W, H);
+    }
+
+    // Pickup sprites only — no markup over the background art
+    for (const h of sc.hotspots) {
+      if (h.id === 'shovel' && !h.taken) {
+        const si = sprite('shovel_item');
+        const d = h.itemDraw || { x: h.x, y: h.y, w: h.w, h: h.h };
+        if (si) ctx.drawImage(si, d.x, d.y, d.w, d.h);
+      }
+      if (h.id === 'sand' && h.dug && h.hasMap) {
+        const mi = sprite('map_item');
+        const d = h.mapDraw || { x: h.x + 20, y: h.y + 8, w: 50, h: 50 };
+        if (mi) ctx.drawImage(mi, d.x, d.y, d.w, d.h);
+      }
+    }
+
+    // Player character
+    drawPlayer();
+
+    // Debug: show hotspot alignment (remove once verified)
+    drawHotspotDebug(sc);
+
+    // Dialog is DOM-based, no canvas draw needed
+  }
+
+  function drawHotspotDebug(sc) {
+    for (const h of sc.hotspots) {
+      if (h.id === 'shovel' && h.taken) continue;
+      const cx = h.x + h.w / 2;
+      const cy = h.y + h.h / 2;
+      const isNpc = h.id === 'barkeeper';
+      ctx.save();
+      ctx.strokeStyle = isNpc ? '#ff2222' : '#ffaa00';
+      ctx.lineWidth = isNpc ? 2 : 1;
+      ctx.setLineDash(isNpc ? [] : [4, 4]);
+      ctx.strokeRect(h.x, h.y, h.w, h.h);
+      // X at hotspot center
+      const s = isNpc ? 14 : 8;
+      ctx.beginPath();
+      ctx.moveTo(cx - s, cy - s); ctx.lineTo(cx + s, cy + s);
+      ctx.moveTo(cx + s, cy - s); ctx.lineTo(cx - s, cy + s);
+      ctx.stroke();
+      if (isNpc) {
+        ctx.font = 'bold 11px system-ui,sans-serif';
+        ctx.fillStyle = '#ff2222';
+        ctx.textAlign = 'center';
+        ctx.fillText('TALK HERE', cx, h.y - 6);
+      } else {
+        ctx.font = '10px system-ui,sans-serif';
+        ctx.fillStyle = '#ffaa00';
+        ctx.textAlign = 'left';
+        ctx.fillText(h.id, h.x + 2, h.y + 12);
+      }
+      ctx.restore();
+    }
+  }
+
+  function drawPlayer() {
+    const p = state.player;
+    // Walk sprites match the human pirate in the backgrounds; idle monkey sprite differs.
+    let imgKey = 'pirate_walk1';
+    if (p.moving) {
+      imgKey = p.walkFrame === 0 ? 'pirate_walk1' : 'pirate_walk2';
+    }
+    const img = sprite(imgKey);
+    const pw = 82, ph = 116;
+    const footY = 0.975; // measured from pirate_walk sprites
+    const px = p.x - pw / 2;
+    const py = p.y - ph * footY;
+
+    if (img) {
+      ctx.save();
+      if (p.facing < 0) {
+        ctx.translate(px + pw, py);
+        ctx.scale(-1, 1);
+        ctx.drawImage(img, 0, 0, pw, ph);
+      } else {
+        ctx.drawImage(img, px, py, pw, ph);
+      }
+      ctx.restore();
+    } else {
+      // Fallback
+      ctx.fillStyle = '#f0f';
+      ctx.fillRect(px, py, pw, ph);
+      ctx.fillStyle = '#000';
+      ctx.font = '12px monospace';
+      ctx.fillText('MISSING ' + imgKey, px + 2, py + 14);
+    }
+  }
+
+  // ---- Frame loop -------------------------------------------------------
+  let last = performance.now();
+  let rafHandle = 0;
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    try {
+      update(dt);
+      draw();
+    } catch (err) {
+      console.error("game crashed:", err);
+      errBox.textContent = "crash: " + (err && err.message || err);
+      errBox.style.display = "block";
+    }
+    rafHandle = requestAnimationFrame(frame);
+  }
+
+  // ---- Boot -------------------------------------------------------------
+  loadAssets();
+  resetGame();
+  rafHandle = requestAnimationFrame(frame);
+})();
+</script>
+</body></html>
