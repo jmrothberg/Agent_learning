@@ -997,6 +997,12 @@ class CodingBoxApp(App):
         # Helps the user see what the model is currently working on
         # without scrolling the log. Truncated to ~140 chars at set time.
         self._last_diagnose: str | None = None
+        # Sticky one-line note when the LAST stream was aborted by a guard
+        # (repetition / deliberation loop). Without this the reason only
+        # appears as a single scrolled-past log line (minecraft 20260621
+        # trace: a 7-min stream was killed and the status just flipped to
+        # "idle" with no hint why). Cleared once a clean iteration flows.
+        self._last_stall_reason: str | None = None
         # Context-window display. `_ctx_max` is read once at session
         # start from BackendInfo.context_length (Ollama) or the MLX
         # config.json. `_ctx_fill_chars` is recomputed each
@@ -1511,6 +1517,7 @@ class CodingBoxApp(App):
                     "probes_passed": self._probes_passed,
                     "probes_total": self._probes_total,
                     "last_diagnose": self._last_diagnose,
+                    "last_stall_reason": self._last_stall_reason,
                     "ctx_max": self._ctx_max,
                     "ctx_fill_chars": ctx_fill_chars,
                     "backend": getattr(agent, "_backend_label", None)
@@ -1992,6 +1999,8 @@ class CodingBoxApp(App):
             out += f"[b]Skeleton:[/b] [cyan]{_esc(self.agent._active_skeleton)}[/cyan]\n"
         if self._last_diagnose:
             out += f"[b]Last fix:[/b] [dim]{_esc(self._last_diagnose)}[/dim]\n"
+        if self._last_stall_reason:
+            out += f"[b]Last stall:[/b] [yellow]{_esc(self._last_stall_reason)}[/yellow]\n"
         if self.agent is not None:
             pending_fb = list(getattr(self.agent, "_pending_feedback", []) or [])
             pending_ans = getattr(self.agent, "_pending_answer", None)
@@ -3216,7 +3225,7 @@ class CodingBoxApp(App):
             elif cmd == "seed":
                 self._cmd_set_seed(arg)
             elif cmd == "reset":
-                self._cmd_reset()
+                await self._cmd_reset()
             elif cmd == "status":
                 self._cmd_status()
             elif cmd == "wait":
@@ -3239,6 +3248,8 @@ class CodingBoxApp(App):
                 self._cmd_launch_mlx(arg)
             elif cmd == "check":
                 await self._cmd_check(arg)
+            elif cmd == "ask":
+                await self._cmd_ask(arg)
             elif cmd == "ref":
                 self._cmd_attach_ref_image(arg)
             elif cmd == "prefill":
@@ -3330,7 +3341,8 @@ class CodingBoxApp(App):
             # state or clears, where relevant.
             # =====================================================================
             "[bold cyan]── session lifecycle ──[/bold cyan]",
-            "  [b]/new <goal>[/b]                end current session, start fresh (uses staged seed/model)",
+            "  [b]/new[/b]                       reset to a clean slate — type your game idea next",
+            "  [b]/new <goal>[/b]                start a fresh game (uses staged seed/model if any)",
             "  [b]/goodgame[/b]                  copy best.html + *_assets/ + *_sounds/ → goodgame/ [dim](not gitignored)[/dim]",
             "  [b]/ship[/b]                      ship current build [dim](= Ctrl+D, or type 'done' / 'looks good')[/dim]",
             "  [b]/revert [N][/b]               roll the game file back to the last clean iter [dim](or iter N specifically; aliases /rewind)[/dim]",
@@ -3338,7 +3350,7 @@ class CodingBoxApp(App):
             "  [b]/unqueue[/b]                   drop your last typed feedback only (accidental queue) [dim](/dequeue)[/dim]",
             "                                  [dim]older queued lines stay; /unqueue all or /unqueue N for more[/dim]",
             "  [b]/retry[/b]                     re-run after a bad model (keeps game file + trace)",
-            "  [b]/reset[/b]                     wipe ALL staged state → defaults (seed, model, iters, ctx)",
+            "  [b]/reset[/b]                     same as bare [b]/new[/b] — clear staging + wait for a goal",
             "  [b]/open[/b]                      open the current game in your default browser",
             "  [b]/clear[/b]                     clear the agent log pane (no effect on staged state)",
             "  [b]/quit[/b]                      quit the TUI [dim](= Ctrl+Q)[/dim]",
@@ -3400,11 +3412,13 @@ class CodingBoxApp(App):
             "  [b]/check [<N|name>][/b]         visual review on latest screenshot · bare uses active session VLM",
             "                                  [dim]WAIT ON: loads suggested feedback into input for edit/Enter[/dim]",
             "                                  [dim]WAIT OFF: auto-queues guidance into the next coding turn[/dim]",
+            "  [b]/ask <question>[/b]            read-only Q&A about the current game — no code changes",
+            "                                  [dim]e.g. /ask how does digging at skull beach work?[/dim]",
             "  [b]/ref <path>[/b]               attach a reference image (PNG/JPEG/WebP) to the NEXT user turn",
             "                                  [dim]works before /new too; drag a file from Finder into the terminal to fill the path[/dim]",
             "                                  [dim]VLM-only — say 'make the game look like this' on the next line[/dim]",
             "  [b]/help[/b]                     command list [dim](aliases /h /?)[/dim]",
-            "  [b]/help <topic>[/b]             detail: [b]feedback[/b], [b]vlm-critique[/b], [b]rawfeedback[/b]",
+            "  [b]/help <topic>[/b]             detail: [b]feedback[/b], [b]vlm-critique[/b], [b]rawfeedback[/b], [b]ask[/b]",
             "",
             "[bold cyan]── visual playtest recipes (auto-applied) ──[/bold cyan]",
             "  Hand-curated MECHANISM-keyed checklists the VLM critic uses. The matcher",
@@ -4347,14 +4361,14 @@ class CodingBoxApp(App):
         self.run_worker(self._consume_events(goal, continuation=False), exclusive=True)
 
     async def _cmd_new(self, arg: str) -> None:
-        if not arg:
-            self._log_info("usage: /new <game description>")
-            return
         if self.agent is not None and not self._session_done:
             self._log_error(
                 "a session is currently running — press Ctrl+D to ship it "
                 "first, then /new <goal>"
             )
+            return
+        if not arg:
+            await self._fresh_start()
             return
         await self._new_session(arg)
 
@@ -4993,6 +5007,41 @@ class CodingBoxApp(App):
             source="slash_check",
         )
 
+    def _agent_is_streaming(self) -> bool:
+        """True when any model slot is mid-stream."""
+        return bool(
+            self._is_streaming
+            or self._model2_is_streaming
+            or self._model3_is_streaming
+        )
+
+    async def _cmd_ask(self, arg: str) -> None:
+        """/ask <question> — read-only Q&A; does not queue feedback or patch code."""
+        question = (arg or "").strip()
+        if not question:
+            self._log_info(
+                "usage: /ask <question>   "
+                "(e.g. /ask how does digging at skull beach work?)"
+            )
+            return
+        agent = self.agent
+        if agent is None:
+            self._log_error(
+                "/ask needs an active session — start with a goal or /new <goal>"
+            )
+            return
+        if self._agent_is_streaming():
+            self._log_error(
+                "/ask: wait for the current model turn to finish, then retry"
+            )
+            return
+        self._log_info(f"[cyan]/ask[/cyan] {_esc(question)}")
+        try:
+            async for ev in agent.run_ask_turn(question):
+                self._handle_event(ev)
+        except Exception as e:
+            self._log_error(f"/ask failed: {e}")
+
     async def _run_visual_check(
         self,
         *,
@@ -5146,20 +5195,12 @@ class CodingBoxApp(App):
             f"[dim]({size:,} bytes) — type your request, or /new <goal>[/dim]"
         )
 
-    def _cmd_reset(self) -> None:
-        """Wipe ALL staged state in one shot.
-
-        After /reset:
-          - no /seed staged → next /new starts from a memory skeleton
-          - no /model staged → next /new uses /api/ps detection
-          - max-iters back to default (6)
-
-        Does NOT touch the currently-running session (if any), the browser,
-        or anything on disk. To also start a fresh session, follow with
-        /new <goal>.
-        """
+    def _clear_staged_state(self) -> list[str]:
+        """Wipe sticky /new staging back to defaults. Returns a human log summary."""
         had_seed = self._next_seed
         had_model = self._next_model
+        had_model2 = self._next_model2
+        had_model3 = self._next_model3
         had_backend = self._next_backend
         had_iters = self._max_iters
         had_ctx = self._num_ctx
@@ -5170,6 +5211,12 @@ class CodingBoxApp(App):
         self._next_seed = None
         self._next_model = None
         self._next_backend = None
+        self._next_model2 = None
+        self._next_backend2 = None
+        self._next_role2 = None
+        self._next_model3 = None
+        self._next_backend3 = None
+        self._next_role3 = None
         self._staged_ref_image_bytes = None
         self._staged_ref_image_name = None
         self._max_iters = 6
@@ -5196,6 +5243,10 @@ class CodingBoxApp(App):
             bits.append(f"seed={had_seed}")
         if had_model is not None:
             bits.append(f"model={had_model}")
+        if had_model2 is not None:
+            bits.append(f"model2={had_model2}")
+        if had_model3 is not None:
+            bits.append(f"model3={had_model3}")
         if had_backend is not None:
             bits.append(f"backend={had_backend}")
         if had_iters != 6:
@@ -5210,13 +5261,64 @@ class CodingBoxApp(App):
             bits.append(f"ref={had_ref}→cleared")
         if had_allroles:
             bits.append("allroles=on→off")
-        if not bits:
-            self._log_info("nothing to reset (no staged seed/model, iters at default)")
-            return
+        return bits
+
+    async def _fresh_start(self) -> None:
+        """One-shot clean slate: drop the finished session, clear staging, wait for a goal."""
+        bits = self._clear_staged_state()
+        self.agent = None
+        self._session_done = True
+        self._session_seed = None
+        self._goal = ""
+        self._out_path = None
+        self._best_path = None
+        self._trace_path = None
+        self._feedback_ledger = []
+        self._last_test_block = ""
+        self._phase_label = "ready"
+        self._iteration_label = "—"
+        self._awaiting_kind = "goal"
+        if self._log_file_handle is not None:
+            try:
+                self._log_file_handle.close()
+            except Exception:
+                pass
+            self._log_file_handle = None
+            self._log_file_path = None
+        if self.browser is not None:
+            try:
+                await self.browser.show_status(
+                    "Ready for a new game",
+                    "Type your game idea below and press Enter.",
+                )
+            except Exception:
+                pass
+        self.query_one("#log-pane", RichLog).clear()
+        self._log_mirror_lines = []
+        self._status_plain = ""
+        inp = self.query_one("#user-input", Input)
+        inp.placeholder = "describe your game and press Enter"
+        inp.focus()
+        self.sub_title = "ready — type a game goal"
+        self._update_mode_bar()
+        self._update_status()
+        if bits:
+            self._log_info(
+                f"[yellow]cleared staging:[/yellow] {', '.join(bits)}"
+            )
         self._log_info(
-            f"[yellow]reset:[/yellow] cleared {', '.join(bits)}. "
-            "Next /new starts from defaults. [dim](Run /new <goal> to start fresh.)[/dim]"
+            "[bold green]fresh start[/bold green] — type your game idea and press Enter. "
+            "[dim](/games lists curated prompts; /seed only if continuing from old HTML)[/dim]"
         )
+
+    async def _cmd_reset(self) -> None:
+        """Full clean slate — same as bare /new."""
+        if self.agent is not None and not self._session_done:
+            self._log_error(
+                "a session is currently running — press Ctrl+D to ship it first"
+            )
+            return
+        await self._fresh_start()
 
     def _cmd_status(self) -> None:
         # Step-mode shows up here so users can confirm whether the
@@ -6308,6 +6410,7 @@ class CodingBoxApp(App):
         self._probes_passed = None
         self._probes_total = None
         self._last_diagnose = None
+        self._last_stall_reason = None
         self._ctx_max = None
         self._streak_clean = 0
         self._streak_stuck = 0
@@ -6762,7 +6865,23 @@ class CodingBoxApp(App):
                 self._log_info(self._ollama_escape_hint())
 
         elif ev.kind == "info":
-            self._log_info(text_safe)
+            if ev.data.get("ask"):
+                self._log(f"\n[bold cyan]── ask ──[/bold cyan]\n{text_safe}")
+            else:
+                self._log_info(text_safe)
+            # Capture guard aborts (repetition / deliberation) into a
+            # sticky status field so the reason doesn't just scroll past.
+            stall_reason = (ev.data or {}).get("stall_reason")
+            if stall_reason:
+                if stall_reason == "repetition_loop":
+                    kind = (ev.data or {}).get("loop_kind") or "repeat"
+                    label = f"repetition loop ({kind})"
+                else:
+                    label = "deliberation loop (pre-code rambling)"
+                toks = (ev.data or {}).get("tokens")
+                tail = f" after {toks} tok" if toks else ""
+                self._last_stall_reason = f"{label}{tail} — kept partial output"
+                self._update_status()
             if (ev.text or "").startswith("no usable code:"):
                 for _entry in self._feedback_ledger:
                     if _entry.get("status") in {"queued", "applying"}:
@@ -6937,6 +7056,10 @@ class CodingBoxApp(App):
             if self._streak_clean >= 1 and self._last_diagnose:
                 # Clear stale diagnose text once clean iterations are flowing.
                 self._last_diagnose = None
+            if self._streak_clean >= 1 and self._last_stall_reason:
+                # A clean iteration means the stream recovered — drop the
+                # sticky stall note so it doesn't linger as stale.
+                self._last_stall_reason = None
             self._update_status()
 
     def _format_sounds_summary(self, data: dict) -> str:

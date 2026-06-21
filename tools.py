@@ -3232,12 +3232,26 @@ class LiveBrowser:
                     p.get("ok") for p in report.get("probes") or []
                 )
                 _no_errors = not report.get("errors") and not report.get("page_errors")
-                if self._undrawn_seen_before and _probes_green and _no_errors:
+                _entity_missing_count = len(
+                    (report.get("entity_render_check") or {}).get("missing") or []
+                )
+                _opening_hard_green = all(
+                    chk.get("ok") is not False or not chk.get("hard")
+                    for chk in report.get("opening_book_checks") or []
+                )
+                _behavior_green_no_missing = (
+                    _probes_green and _no_errors and _entity_missing_count == 0
+                    and _opening_hard_green
+                )
+                if (
+                    (self._undrawn_seen_before and _probes_green and _no_errors)
+                    or _behavior_green_no_missing
+                ):
                     report.setdefault("warnings", []).append(
                         "ADVISORY (non-blocking) — " + _undrawn_text
-                        + " This finding has persisted while all behavioral "
-                        "probes pass; state-conditional pose sprites may "
-                        "simply not have triggered during the test window."
+                        + " Behavioral probes pass and no entity-render "
+                        "failure is present; state-conditional pose sprites "
+                        "may simply not have triggered during the test window."
                     )
                 else:
                     report["soft_warnings"].append(_undrawn_text)
@@ -4031,6 +4045,43 @@ class LiveBrowser:
                     "ok": bool(has_reset),
                     "hard": False,
                     "err": "" if has_reset else "no obvious restart/reset hook found",
+                })
+            elif rtype == "pointclick_puzzle_chain":
+                result = await self._safe_eval("""
+(() => {
+  const s = window.state || window.gameState || {};
+  const root = (window.SCENES || window.scenes || s.SCENES || s.scenes);
+  const sceneList = Array.isArray(root) ? root :
+    (root && typeof root === 'object' ? Object.values(root) : []);
+  const hotspots = sceneList.flatMap(sc => Array.isArray(sc && sc.hotspots) ? sc.hotspots : []);
+  const textOf = h => [h.id, h.name, h.label, h.verb, h.action, h.type, h.item, h.requiresItem, h.itemRequired, h.useWith, h.needs]
+    .map(v => v == null ? '' : String(v)).join(' ').toLowerCase();
+  const hasInventory = Array.isArray(s.inventory);
+  const hasSelected = ['selectedItem','activeItem','heldItem','selectedInventory','inventorySelection']
+    .some(k => Object.prototype.hasOwnProperty.call(s, k));
+  const hasTake = hotspots.some(h => /\\b(take|get|pick\\s*up|pickup)\\b/.test(textOf(h)));
+  const hasUse = hotspots.some(h => /\\b(use|dig|shovel|unlock|open|combine)\\b/.test(textOf(h)));
+  const hasDialog = !!(s.dialog || s.dialogue || s.message || s.caption || s.statusText);
+  const missing = [];
+  if (!sceneList.length) missing.push('state.scenes/SCENES');
+  if (!hotspots.length) missing.push('scene hotspots[]');
+  if (!hasInventory) missing.push('state.inventory[]');
+  if (!hasSelected) missing.push('selectedItem/active inventory field');
+  if (!(hasTake || hasUse || hasDialog)) missing.push('take/use/dig hotspot or dialog state');
+  return { ok: missing.length === 0, missing };
+})()
+""")
+                ok = bool(isinstance(result, dict) and result.get("ok"))
+                missing = (
+                    ", ".join(result.get("missing") or [])
+                    if isinstance(result, dict) else "runtime state probe failed"
+                )
+                check.update({
+                    "ok": ok,
+                    "hard": True,
+                    "err": "" if ok else (
+                        "point-and-click puzzle chain not exposed: " + missing
+                    ),
                 })
             else:
                 check.update({"ok": True, "skipped": True, "err": "unsupported recipe type"})

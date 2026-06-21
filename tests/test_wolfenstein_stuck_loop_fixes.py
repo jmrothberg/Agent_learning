@@ -662,23 +662,26 @@ def test_deliberation_detector_latches_on_function_declaration():
 
 
 def test_deliberation_detector_still_aborts_on_pure_prose_deliberation():
-    """The detector exists for a reason: a model that produces 6000+
+    """The detector exists for a reason: a model that produces enough
     chars of pure prose / reasoning without ANY tag opener or code
     content must still abort. Drop this assertion and we lose the
-    safety net entirely.
+    safety-net backstop entirely. (Budget raised to 12000 plain after
+    the minecraft 20260621 trace — still bounded, just more room before
+    the backstop fires.)
     """
     from ollama_io import DeliberationDetector
 
     d = DeliberationDetector()
-    # 6100 chars of pure prose with no tag / no code
+    # Pure prose with no tag / no code shape — must eventually backstop.
+    # Loop count comfortably exceeds the 12000-char plain budget.
     prose_chunk = (
         "Let me think about this. First I need to consider the requirements. "
         "Actually, let me approach this differently. The user wants a game "
-        "but I need to plan it carefully before writing any code. "
+        "but I need to plan it carefully before any of that. "
     )
     aborted = False
     total = 0
-    for _ in range(40):
+    for _ in range(80):
         if d.feed(prose_chunk):
             aborted = True
             break

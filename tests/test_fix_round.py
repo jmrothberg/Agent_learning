@@ -178,11 +178,14 @@ def test_undrawn_gates_first_occurrence_then_demotes():
     # Persistence flag drives the channel decision.
     assert "_undrawn_seen_before" in src
     start = src.index("ASSETS_LOADED_BUT_UNDRAWN")
-    window = src[start:start + 3000]
-    # Demotion branch requires green probes AND no errors AND a repeat.
+    window = src[start:start + 4200]
+    # Demotion requires green probes/no errors, plus either a repeat or a
+    # no-missing-entity behaviorally green report.
     assert "_probes_green" in window and "_no_errors" in window
+    assert "_entity_missing_count" in window
+    assert "_opening_hard_green" in window
     assert "ADVISORY (non-blocking)" in window
-    # First occurrence still gates via soft_warnings.
+    # Non-green first occurrence still gates via soft_warnings.
     assert 'report["soft_warnings"].append(_undrawn_text)' in window
 
 

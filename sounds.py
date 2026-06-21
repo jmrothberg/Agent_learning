@@ -328,8 +328,21 @@ class StableAudioGenerator:
             import torch
             del self._pipeline
             self._pipeline = None
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            try:
+                from assets import _torch_empty_device_cache
+                _torch_empty_device_cache()
+            except Exception:
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    if (
+                        hasattr(torch.backends, "mps")
+                        and torch.backends.mps.is_available()
+                    ):
+                        torch.mps.empty_cache()
+                except Exception:
+                    pass
         except Exception:
             self._pipeline = None
 

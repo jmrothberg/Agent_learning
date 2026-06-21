@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from pathlib import Path
 
 import sys
@@ -93,6 +94,20 @@ def test_agent_retrieves_opening_book_block(tmp_path: Path) -> None:
     assert "<opening_book>" in block
     assert hits
     assert len([h for h in hits if h["kind"] == "playtest"]) <= 3
+
+
+def test_plan_turn_injects_opening_book_before_plan_contract() -> None:
+    src = inspect.getsource(GameAgent.run)
+    assert "plan_opening_book_injected" in src
+    assert "Use the opening-book recipes above when choosing your" in src
+    assert "char_budget=1200" in src
+
+
+def test_pointclick_puzzle_chain_recipe_is_executable() -> None:
+    src = inspect.getsource(LiveBrowser._run_opening_book_recipes)
+    assert "pointclick_puzzle_chain" in src
+    assert "selectedItem" in src
+    assert "state.inventory[]" in src
 
 
 def test_opening_book_asset_recipe_execution(tmp_path: Path) -> None:

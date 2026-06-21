@@ -1850,14 +1850,28 @@ def seed_build_instruction(
     seed_path: str,
     *,
     playbook_block: str = "",
+    truncated: bool = False,
 ) -> str:
     """First-build prompt when the user explicitly hands us a starting file.
 
     Differs from `first_build_instruction`: the file is the user's own
     working code (not a memory skeleton), so we strongly prefer
     <patch> blocks over a full rewrite.
+
+    When `truncated` is True the `seed_html` passed in is only an EXCERPT
+    of a large file (the full file is on disk) — the wording changes so the
+    model patches against the on-disk file rather than trusting the excerpt
+    to be complete.
     """
     pb = f"{playbook_block}\n\n" if playbook_block else ""
+    file_label = (
+        "EXISTING FILE (EXCERPT — full file is on disk at the SEED PATH "
+        "above; the middle was elided to save context. Patch against the "
+        "on-disk file; if a patch SEARCH target is not shown below, request "
+        "the region or send a complete <html_file>):\n"
+        if truncated
+        else "EXISTING FILE:\n"
+    )
     return (
         "Plan accepted. The user is starting from an EXISTING game file "
         "they want you to ADAPT (not replace) to match the goal above.\n\n"
@@ -1886,7 +1900,7 @@ def seed_build_instruction(
         "patch — the harness will adopt the new probes for the "
         "iterations that follow.\n\n"
         "Always include a <notes> tag describing what each patch does.\n\n"
-        "EXISTING FILE:\n"
+        f"{file_label}"
         "```html\n"
         f"{seed_html}\n"
         "```\n"
@@ -2395,6 +2409,51 @@ When in doubt, ship. Working > perfect. Reply with EXACTLY ONE of:
   (b) one or more <patch> blocks plus a <notes> tag naming the specific
       crash bug being fixed.
 """
+
+
+# ===========================================================================
+# Read-only /ask turn (TUI slash command)
+# ===========================================================================
+
+_ASK_HTML_EXCERPT_MAX = 10_000
+
+
+def ask_instruction(
+    *,
+    question: str,
+    goal: str = "",
+    criteria: str = "",
+    report_text: str = "",
+    html_excerpt: str = "",
+    asset_names: list[str] | None = None,
+) -> str:
+    """One-turn user message for `/ask` — explain the current game only.
+
+    Not part of ALL_FORMATS; injected ephemerally by GameAgent.run_ask_turn.
+    """
+    assets = ", ".join(asset_names or []) or "(none)"
+    crit_block = criteria.strip() or "(not set)"
+    report_block = report_text.strip() or "(no test report yet)"
+    html_block = (html_excerpt or "(no file)").strip()
+    if len(html_block) > _ASK_HTML_EXCERPT_MAX:
+        html_block = (
+            html_block[:_ASK_HTML_EXCERPT_MAX]
+            + f"\n\n[... truncated {len(html_excerpt) - _ASK_HTML_EXCERPT_MAX} chars ...]"
+        )
+    return (
+        "READ-ONLY ASK TURN — answer the user's question about the CURRENT "
+        "game. Do NOT change code, do NOT emit <patch>, <html_file>, "
+        "<assets>, <sounds>, <videos>, <done/>, or <confirm_done/>. "
+        "Plain prose only. Cite function names or logic from the snippet "
+        "when you can. If the snippet does not contain enough information, "
+        "say what is missing instead of guessing.\n\n"
+        f"GOAL: {goal.strip() or '(not set)'}\n\n"
+        f"ACCEPTANCE CRITERIA (Phase A):\n{crit_block}\n\n"
+        f"LAST TEST REPORT:\n{report_block}\n\n"
+        f"SESSION ASSET NAMES: {assets}\n\n"
+        f"CURRENT best.html EXCERPT:\n{html_block}\n\n"
+        f"USER QUESTION: {question.strip()}"
+    )
 
 
 # ===========================================================================

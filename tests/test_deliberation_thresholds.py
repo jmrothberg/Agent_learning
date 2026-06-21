@@ -24,13 +24,16 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from ollama_io import DeliberationDetector  # noqa: E402
 
 
-def test_default_thresholds_pinned_at_6000_and_12000():
-    """The default thresholds — raised from 4000/8000 to 6000/12000
-    after donkey-kong 20260516_170758 showed premature cutoffs on valid
-    long transitions to code. If you change them, update this test and
-    document the rationale in `DeliberationDetector.__init__`."""
+def test_default_thresholds_pinned_at_12000_and_12000():
+    """The default thresholds — history 4000/8000 → 6000/12000 → 12000/
+    12000. The last bump (minecraft 20260621_182845) raised the plain
+    outside-<think> budget to match the inside-<think> budget so a model
+    that plans a build in plain prose (no <think> wrapper) is given the
+    same room before the deliberation backstop fires. If you change them,
+    update this test and document the rationale in
+    `DeliberationDetector.__init__`."""
     d = DeliberationDetector()
-    assert d._threshold == 6000
+    assert d._threshold == 12000
     assert d._think_threshold == 12000
 
 
@@ -109,6 +112,45 @@ def test_inside_think_higher_budget():
             break
     # Under 8000 chars inside think — must not abort yet.
     assert aborted is False
+
+
+def test_code_discussion_prose_latches_and_never_aborts():
+    """minecraft 20260621_182845: the model planned a build in bullet
+    prose containing real code shapes (`world = {}`, `new Uint8Array(...)`,
+    arrow functions) but no function/const/class keyword. That stream was
+    WORKING and must never be aborted. Each code shape latches the guard;
+    once latched, unbounded further length cannot abort."""
+    for code_shape in [
+        "I'll use a simple object: world = {} keyed by position. ",
+        "Each chunk is new Uint8Array(16 * 16 * 48) for performance. ",
+        "The loader is const f = (n) => n * 2 style, so ",
+    ]:
+        d = DeliberationDetector(threshold_chars=200, think_threshold_chars=200)
+        # A little pre-amble prose, then the code shape — must latch.
+        assert d.feed("Let me think about the architecture. ") is False
+        assert d.feed(code_shape) is False
+        assert d._seen_tag is True, f"should latch on: {code_shape!r}"
+        # Now stream far past the (tiny) threshold — latched, no abort.
+        aborted = False
+        for _ in range(50):
+            if d.feed("x" * 100):
+                aborted = True
+                break
+        assert aborted is False, f"latched stream must not abort: {code_shape!r}"
+
+
+def test_plain_prose_still_backstops_at_threshold():
+    """Pure natural language with ZERO code shape still hits the backstop
+    so a genuinely off-the-rails pure-prose ramble is bounded."""
+    d = DeliberationDetector(threshold_chars=600, think_threshold_chars=600)
+    aborted = False
+    # English prose, no code shapes, no tags.
+    for _ in range(20):
+        if d.feed("the player should be able to walk around the world and "):
+            aborted = True
+            break
+    assert aborted is True
+    assert d.stall_reason == "deliberation_loop"
 
 
 def test_disabled_via_env_var(monkeypatch):

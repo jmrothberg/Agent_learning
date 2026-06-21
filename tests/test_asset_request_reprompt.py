@@ -106,6 +106,56 @@ def test_genuine_user_art_request_still_arms_reprompt_after_notice(tmp_path):
     assert a._unhonored_asset_request == "please make a new red dragon sprite"
 
 
+def test_help_screen_feedback_with_location_asset_stays_code_path(tmp_path):
+    """Trace 20260621_150955: "skull beach" matched beach_bg as a fuzzy
+    asset stem, so a help-screen/game-logic request was misrouted into
+    ASSET GENERATION REQUIRED instead of a code patch request."""
+    a = _make_agent(tmp_path)
+    a._session_assets = {"beach_bg": Path("beach.png")}
+    a._use_feedback_directives = True
+    a._fix_mode = True
+    a._previous_report_ok = False
+    a._pending_feedback = [
+        "Add a help screen. check the logic of the game, "
+        "for example how do you dig at skull beach"
+    ]
+    out = a._flush_user_injections("")
+    assert "ASSET GENERATION REQUIRED" not in out
+    assert "media-only items" not in out
+    assert a._unhonored_asset_request is None
+
+
+def test_ui_feature_patterns_match_help_hint_button_phrasing():
+    """Fix 1 (2026-06-21 seed trace): the narrow `help screen` pattern
+    missed `add a help button` / `hint button` phrasings, so those UI
+    asks were classified as plain code and queued behind a blocker. The
+    widened genre-free patterns must now recognise them."""
+    from agent import _feedback_is_ui_feature
+
+    for phrase in [
+        "add a help button",
+        "add a hint",
+        "please add a help overlay",
+        "add a hint button",
+        "show a hint panel",
+        "we need a help modal",
+        "add help",
+    ]:
+        assert _feedback_is_ui_feature(phrase), (
+            f"should classify as UI feature: {phrase!r}"
+        )
+
+    # Negative controls — these are NOT UI-feature feedback.
+    for phrase in [
+        "the enemy moves too fast",
+        "make the music loop",
+        "the player sprite is the wrong color",
+    ]:
+        assert not _feedback_is_ui_feature(phrase), (
+            f"should NOT classify as UI feature: {phrase!r}"
+        )
+
+
 def test_reprompt_cleared_by_subject_matching_patches(tmp_path):
     """2026-06-12 (trace 20260612_132314): 'need to improve animation for
     jump,duck, left and right' was hard-classified as an art request, but

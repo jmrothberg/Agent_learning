@@ -492,6 +492,20 @@ _JS_OPENER_RE = _re.compile(
     r"|\bclass\s+[A-Za-z_$][A-Za-z0-9_$]*\s*[{<]"
     r"|\b(?:const|let|var)\s+[a-zA-Z_$][a-zA-Z0-9_$]*\s*="
 )
+# Broader "the model is writing real code" signals (minecraft trace
+# 20260621_182845): a model can plan a build in bullet prose that is
+# clearly code — `world = {}`, `new Uint8Array(...)`, arrow functions —
+# without ever using the function/const/class keywords above. The 6000-
+# char fallback then aborted a stream that was WORKING. Per the standing
+# rule (never abort a working stream; only abort genuine off-the-rails
+# repetition), these high-precision JS shapes also latch the detector.
+# Kept tight so ordinary English does not match: arrow `=>`, a `new X(`
+# constructor call, or an assignment to an object/array literal.
+_CODE_DISCUSSION_RE = _re.compile(
+    r"=>"
+    r"|\bnew\s+[A-Za-z_$][A-Za-z0-9_$]*\s*\("
+    r"|[A-Za-z_$][A-Za-z0-9_$]*\s*=\s*[\{\[]"
+)
 
 
 class DeliberationDetector:
@@ -542,12 +556,20 @@ class DeliberationDetector:
 
     def __init__(
         self,
-        # Raised modestly after donkey-kong 20260516_170758 where
-        # the 4000/8000 setting cut off valid long-form transitions
-        # into code too early on qwen3.6 local runs. Keep the guard,
-        # but give one-shot-capable models more room before we call
-        # it deliberation-only.
-        threshold_chars: int = 6000,
+        # History: 4000/8000 → 6000/12000 (donkey-kong 20260516_170758,
+        # premature cutoffs on valid long transitions into code).
+        # 2026-06-21 minecraft trace 20260621_182845: a GLM first build
+        # streamed 6000 chars of genuine planning (chunk sizes, block
+        # IDs, BufferGeometry) WITHOUT a <think> wrapper, so it got the
+        # tight 6000 plain budget and was aborted mid-plan — a working
+        # stream cut off. Per the standing rule "never abort a working
+        # stream; only abort genuine off-the-rails repetition", the plain
+        # (outside-<think>) budget now matches the inside-<think> budget:
+        # a model that plans in prose is given the same room as one that
+        # plans in a reasoning channel. The repetition detector remains
+        # the real-time off-the-rails guard; this is only a far backstop
+        # for a pure-prose stream that never produces a single code shape.
+        threshold_chars: int = 12000,
         *,
         think_threshold_chars: int = 12000,
     ) -> None:
@@ -626,6 +648,7 @@ class DeliberationDetector:
             _TAG_OPENER_RE.search(self._buf)
             or _HTML_OPENER_RE.search(self._buf)
             or _JS_OPENER_RE.search(self._buf)
+            or _CODE_DISCUSSION_RE.search(self._buf)
         ):
             self._seen_tag = True
             return False

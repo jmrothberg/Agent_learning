@@ -452,8 +452,7 @@ class ZImageTurboGenerator:
             self._img2img_pipeline = None
             del self._pipeline
             self._pipeline = None
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            _torch_empty_device_cache()
         except Exception:
             self._pipeline = None
             self._img2img_pipeline = None
@@ -787,8 +786,7 @@ class Img2ImgGenerator:
             import torch
             del self._pipeline
             self._pipeline = None
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            _torch_empty_device_cache()
         except Exception:
             self._pipeline = None
 
@@ -990,6 +988,18 @@ def _construct_generator() -> Any:
         return None
 
 
+def _torch_empty_device_cache() -> None:
+    """Best-effort GPU allocator flush after dropping diffuser pipelines."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+    except Exception:
+        pass
+
+
 def release_preloaded_diffusers() -> list[str]:
     """Release module-level diffuser pipelines and free CUDA cache.
 
@@ -1012,12 +1022,7 @@ def release_preloaded_diffusers() -> list[str]:
             pass
         globals()[attr] = None
         freed.append(label)
-    try:
-        import torch
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-    except Exception:
-        pass
+    _torch_empty_device_cache()
     return freed
 
 

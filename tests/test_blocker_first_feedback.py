@@ -320,6 +320,64 @@ def test_different_feedback_does_not_falsely_escalate() -> None:
     assert "FEEDBACK ESCALATION" not in prompt
 
 
+# Fix 1 (2026-06-21 point-and-click seed trace): UI-feature feedback
+# ("add a help button") is CODE work that, when the failing probes check
+# for exactly that UI, IS the blocker fix — deferring it is circular. It
+# must be processed in the same turn, like media is, not queued behind the
+# report.
+def test_ui_feature_feedback_processed_during_blocker() -> None:
+    for phrase in [
+        "add a help button",
+        "add a hint",
+        "please add a help overlay",
+        "add a hint button to the HUD",
+    ]:
+        a = _agent_stub()
+        a._pending_feedback = [phrase]
+
+        prompt = a._flush_user_injections("FIX THE FAILING HELP-BUTTON PROBE")
+
+        assert "USER FEEDBACK (HIGHEST PRIORITY)" in prompt, (
+            f"UI-feature ask must surface this turn: {phrase!r}"
+        )
+        assert "BLOCKER-FIRST FEEDBACK DEFERRAL" not in prompt, (
+            f"UI-feature ask must not be deferred: {phrase!r}"
+        )
+        assert any(
+            e.get("kind") == "ui_feature_processed_during_blocker"
+            for e in a._trace_events
+        ), f"missing ui_feature trace for {phrase!r}"
+        assert a._pending_feedback == []
+
+
+def test_mixed_ui_feature_and_code_partition_during_blocker() -> None:
+    # "add a help button" (UI feature, process now) + a pure behavior bug
+    # (defer). The UI item surfaces; the code item stays queued.
+    a = _agent_stub()
+    a._pending_feedback = [
+        "add a help button",
+        "the AI is too slow, takes 30 seconds to move",
+    ]
+
+    prompt = a._flush_user_injections("FIX THE BLOCKER")
+
+    assert "USER FEEDBACK (HIGHEST PRIORITY)" in prompt
+    assert "BLOCKER-FIRST FEEDBACK DEFERRAL" in prompt
+    defer_section = prompt.split("BLOCKER-FIRST FEEDBACK DEFERRAL", 1)[1]
+    defer_section = defer_section.split(
+        "=================================================================", 1
+    )[0]
+    assert "AI is too slow" in defer_section
+    assert "help button" not in defer_section.lower()
+    assert a._pending_feedback == [
+        "the AI is too slow, takes 30 seconds to move"
+    ]
+    assert any(
+        e.get("kind") == "ui_feature_processed_during_blocker"
+        for e in a._trace_events
+    )
+
+
 def test_behavior_bug_phrased_with_art_noun_still_defers() -> None:
     # Negative case: a phrase that mentions art nouns/asset names but is
     # clearly a behavior-bug complaint. Must defer, not route through —

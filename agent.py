@@ -693,6 +693,53 @@ def _detect_skeleton_payload(html: str) -> str | None:
 _SKELETON_MAX_BYTES = 4_000        # body cap; 374-byte DK trace fits easily
 _SKELETON_MIN_BODY_BYTES = 800     # post-comment-strip JS volume below this is suspicious
 
+# First-build placeholder rescue threshold. An all-comment/elision stub
+# strips to ~0 chars of code; even a 59-char one-liner toy game strips to
+# well above this. Kept deliberately low (content-based, NOT size-based)
+# so a genuinely tiny real game never trips it.
+_PLACEHOLDER_FIRST_BUILD_MIN_CODE = 24
+
+
+def _is_placeholder_first_build(html: str) -> bool:
+    """True when a FIRST-build `<html_file>` declared a <canvas> game but
+    its inline <script> body/bodies have effectively NO executable code —
+    only comments, whitespace, or `...` elisions.
+
+    Lets the caller route that first build into the EXISTING prefill RETRY
+    rescue (`_force_first_build_prefill`) instead of shipping a dead stub
+    to Chromium. Dragon's-lair trace 20260621_091419 iter 1 emitted a
+    593-byte canvas+comment-only stub that `_detect_skeleton_payload` let
+    through because it lacked the `{ ... }` placeholder marker that detector
+    requires (its condition #4). This is the marker-free, canvas-required
+    sibling — it does NOT change any termination threshold; it only changes
+    how the NEXT first-build attempt starts.
+
+    Conservative by design:
+      - <canvas> required (pure-DOM apps are not our case -> False),
+      - ALL inline <script> bodies are concatenated, so a CDN
+        `<script src=...>` first tag cannot mask a real inline body
+        (protects the working three.js DOOM one-shot),
+      - size ceiling (`_SKELETON_MAX_BYTES`): any sizable file is treated
+        as a real build and never inspected.
+    """
+    if not html:
+        return False
+    if len(html) >= _SKELETON_MAX_BYTES:
+        return False  # sizable -> a real build, never a stub
+    low = html.lower()
+    if "<canvas" not in low:
+        return False  # pure-DOM intent -> exempt (keep DOM-app exemption)
+    bodies = re.findall(
+        r"<script\b[^>]*>(.*?)</script\s*>", html, re.IGNORECASE | re.DOTALL,
+    )
+    body = "\n".join(bodies)
+    # Measure REAL code volume: drop comments, `...` elisions, whitespace.
+    stripped = re.sub(r"//[^\n]*", "", body)
+    stripped = re.sub(r"/\*.*?\*/", "", stripped, flags=re.DOTALL)
+    stripped = re.sub(r"\.\.\.", "", stripped)
+    stripped = re.sub(r"\s+", "", stripped)
+    return len(stripped) < _PLACEHOLDER_FIRST_BUILD_MIN_CODE
+
 
 def _looks_like_placeholder_html_payload(html: str) -> bool:
     """True when extracted `<html_file>` body is a tiny placeholder.
@@ -1242,6 +1289,31 @@ def _resolve_fuzzy_asset_stems(
 _HARNESS_ADVISORY_SENTINEL = "[HARNESS ADVISORY — informational, not a request]"
 
 
+_UI_FEATURE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bhelp\s+screen\b", re.I),
+    re.compile(r"\bhow\s+to\s+play\b", re.I),
+    re.compile(r"\binstructions?\b", re.I),
+    re.compile(r"\btutorial\b", re.I),
+    re.compile(r"\b(?:hud|menu|pause|settings|credits?)\s+(?:screen|overlay|panel|modal)\b", re.I),
+    # Button/overlay phrasings: "add a help button", "hint button",
+    # "help overlay", "hint text/panel". Genre-free UI nouns + verbs —
+    # these are code/DOM features, never generated art (2026-06-21
+    # point-and-click seed trace: "add a help button" missed the
+    # narrower "help screen" pattern and got queued behind a blocker).
+    re.compile(r"\bhelp\s+(?:button|overlay|panel|modal|dialog|box)\b", re.I),
+    re.compile(r"\bhint\s+(?:button|overlay|panel|modal|dialog|box|text|system)\b", re.I),
+    re.compile(r"\badd\s+(?:a\s+|an\s+)?help\b", re.I),
+    re.compile(r"\badd\s+(?:a\s+|an\s+)?hint\b", re.I),
+)
+
+
+def _feedback_is_ui_feature(text: str) -> bool:
+    """True when the user asks for UI/help, not new generated media."""
+    if not text:
+        return False
+    return any(p.search(text) for p in _UI_FEATURE_PATTERNS)
+
+
 def _has_audio_context(text_lower: str) -> bool:
     """True when feedback language is explicitly about audio."""
     if any(re.search(rf"\b{re.escape(n)}\b", text_lower) for n in _SOUND_NOUNS):
@@ -1278,6 +1350,8 @@ def _feedback_is_art_change(text: str, asset_names: list[str]) -> bool:
     same message.
     """
     if text.lstrip().startswith(_HARNESS_ADVISORY_SENTINEL):
+        return False
+    if _feedback_is_ui_feature(text):
         return False
     lo = text.lower()
     if _name_in_text(lo, asset_names):
@@ -3620,8 +3694,17 @@ class GameAgent:
         goal: str,
         *,
         stage: str = "plan",
+        char_budget: int | None = None,
+        deep: bool | None = None,
+        extra_tokens: list[str] | None = None,
     ) -> tuple[str, list[dict]]:
-        """Retrieve compact root/live opening-book recipes with hard caps."""
+        """Retrieve compact root/live opening-book recipes with hard caps.
+
+        `extra_tokens` are appended to the modality tokens used for
+        retrieval — used by the seed path to pass structural tokens pulled
+        from the working file (DOM ids, function names) so the goal alone
+        ("add a button") doesn't mis-rank the outline.
+        """
         try:
             mod_toks: list[str] = []
             try:
@@ -3635,6 +3718,8 @@ class GameAgent:
                 )
             except Exception:
                 mod_toks = []
+            if extra_tokens:
+                mod_toks = mod_toks + list(extra_tokens)
             outline = self._memory.retrieve_implementation_outline(goal, mod_toks)
             playtests = self._memory.retrieve_playtests(
                 goal, mod_toks, k=3 if stage == "plan" else 1,
@@ -3672,8 +3757,8 @@ class GameAgent:
             # stage stays shallow at 1400 so iterate prompts never grow.
             block = render_opening_book_block(
                 outline, playtests, asset_audits, animation_audits,
-                char_budget=3600 if stage == "plan" else 1400,
-                deep=(stage == "plan"),
+                char_budget=char_budget if char_budget is not None else (3600 if stage == "plan" else 1400),
+                deep=deep if deep is not None else (stage == "plan"),
                 vlm_checklist=vlm_checklist,
             )
 
@@ -4187,6 +4272,45 @@ class GameAgent:
         r"""['"]([A-Za-z_][A-Za-z0-9_]*)['"]"""
     )
 
+    # Generic DOM/structural attributes whose values are pure layout noise,
+    # not feature signals — dropped from seed structural tokens.
+    _SEED_TOKEN_STOPWORDS = frozenset({
+        "canvas", "ctx", "context", "div", "span", "body", "html", "head",
+        "script", "style", "container", "wrapper", "main", "root", "app",
+        "game", "gamecontainer", "screen", "overlay", "true", "false",
+    })
+
+    @classmethod
+    def _seed_structural_tokens(cls, html: str, limit: int = 12) -> list[str]:
+        """Pull genre-free structural tokens from a seed file for retrieval.
+
+        Data-driven (tokens come from the file, not a hardcoded vocabulary):
+        DOM `id=`/`class=` values and top-level function names are the
+        strongest signal of the file's actual shape. When the goal is terse
+        ("add a help button") these tokens let plan-time outline retrieval
+        match on what the file IS (hotspots, inventory, scenes, verbs) rather
+        than the goal's single weak DOM word. Returns a small de-duped list.
+        """
+        if not html:
+            return []
+        from collections import Counter
+        counts: Counter[str] = Counter()
+        for m in re.finditer(r'\bid\s*=\s*["\']([A-Za-z_][\w-]*)["\']', html):
+            counts[m.group(1).lower()] += 2  # ids weighted highest
+        for m in re.finditer(r'\bclass\s*=\s*["\']([A-Za-z_][\w\s-]*)["\']', html):
+            for cls_name in m.group(1).split():
+                counts[cls_name.lower()] += 1
+        for m in re.finditer(r'\bfunction\s+([A-Za-z_$][\w$]*)', html):
+            counts[m.group(1).lower()] += 1
+        out: list[str] = []
+        for tok, _n in counts.most_common():
+            if tok in cls._SEED_TOKEN_STOPWORDS or len(tok) < 3:
+                continue
+            out.append(tok)
+            if len(out) >= limit:
+                break
+        return out
+
     @classmethod
     def _scan_html_for_asset_refs(cls, html: str) -> set[str]:
         """Return the set of asset *names* the HTML references.
@@ -4440,11 +4564,18 @@ class GameAgent:
 
     def _apply_lean_memory_budget(
         self, opening_block: str, components_block: str, playbook_block: str,
+        *, protect_components: bool = False,
     ) -> tuple[str, str, str]:
         """In lean mode, cap the COMBINED size of the first-build memory
         blocks. Priority: opening-book outline > components > playbook —
         whole blocks are dropped (never mangled) lowest-priority first once
-        the budget is exceeded. No-op outside lean mode."""
+        the budget is exceeded. No-op outside lean mode.
+
+        `protect_components` (seed continuations) keeps the components block
+        even when opening already filled the budget — on a seed iter 1 the
+        components are the copy-paste-correct snippets (help overlay, media
+        loader) the weak model most needs, so the playbook is trimmed first
+        instead. (2026-06-21 seed trace dropped `help-overlay-modal` here.)"""
         if not self._lean_prompt_active():
             return opening_block, components_block, playbook_block
         budget = self._LEAN_MEMORY_COMBINED_BUDGET
@@ -4461,8 +4592,15 @@ class GameAgent:
             used += len(block)
             return block
 
-        cb = _fit(components_block)
-        pb = _fit(playbook_block)
+        if protect_components and components_block:
+            # Keep components unconditionally (count it against the budget so
+            # playbook still yields), then fit playbook in what remains.
+            cb = components_block
+            used += len(components_block)
+            pb = _fit(playbook_block)
+        else:
+            cb = _fit(components_block)
+            pb = _fit(playbook_block)
         if (cb != components_block) or (pb != playbook_block):
             self._trace({
                 "kind": "lean_memory_budget_applied",
@@ -4854,19 +4992,27 @@ class GameAgent:
         except Exception:
             return None
 
-    def _vision_judge_headroom_ok(self) -> bool:
-        """Return False when stacking a local MLX-VLM on the resident coder
-        LLM would likely trigger macOS memory-pressure kills. Same 20%-of-RAM
-        gate as `_free_memory_before_video`; Ollama daemons are not measured.
+    def _mlx_coder_memory_pressure(self) -> tuple[bool, float | None, float | None]:
+        """True when this session's MLX coder model on disk exceeds ~20% of RAM.
+
+        Uses on-disk weight size as a proxy for wired unified-memory use on
+        Apple Silicon. Does NOT require the MLX model to be loaded right now —
+        the next coder stream will load it, so relief must run after sprite/
+        sound batches even when MLX temporarily dropped weights after planning.
         """
         try:
-            from backend import MLXBackend
-            llm_path = getattr(MLXBackend, "_loaded_path", None)
-            if not (llm_path and getattr(MLXBackend, "_loaded_model", None) is not None):
-                return True
+            if not self._backend or getattr(self._backend.info, "name", None) != "mlx":
+                return False, None, None
             from pathlib import Path as _Path
+            from backend import MLXBackend
+            path = getattr(MLXBackend, "_loaded_path", None) or self._backend.info.model
+            if not path:
+                return False, None, None
+            p = _Path(path)
+            if not p.exists():
+                return False, None, None
             total = 0
-            for f in _Path(llm_path).rglob("*"):
+            for f in p.rglob("*"):
                 try:
                     if f.is_file():
                         total += f.stat().st_size
@@ -4877,9 +5023,46 @@ class GameAgent:
             phys_gb = (
                 _os.sysconf("SC_PHYS_PAGES") * _os.sysconf("SC_PAGE_SIZE")
             ) / 1e9
-            return llm_gb <= 0.20 * phys_gb
+            tripped = llm_gb > 0.20 * phys_gb
+            return tripped, round(llm_gb, 1), round(phys_gb, 1)
         except Exception:
-            return True
+            return False, None, None
+
+    def _release_diffusers_vram(self) -> list[str]:
+        """Drop in-process Z-Image / Stable-Audio pipelines; keep MLX LLM."""
+        freed: list[str] = []
+        try:
+            import assets as _assets
+            freed.extend(_assets.release_preloaded_diffusers())
+        except Exception:
+            pass
+        try:
+            gen = self._asset_generator
+            if gen is not None and hasattr(gen, "cleanup"):
+                gen.cleanup()
+                label = "Z-Image-Turbo (session)"
+                if label not in freed:
+                    freed.append(label)
+        except Exception:
+            pass
+        self._asset_generator = None
+        try:
+            sg = self._sound_generator
+            if sg is not None and hasattr(sg, "cleanup"):
+                sg.cleanup()
+                freed.append("Stable-Audio")
+        except Exception:
+            pass
+        self._sound_generator = None
+        return freed
+
+    def _vision_judge_headroom_ok(self) -> bool:
+        """Return False when stacking a local MLX-VLM on the resident coder
+        LLM would likely trigger macOS memory-pressure kills. Same 20%-of-RAM
+        gate as `_free_memory_before_video`; Ollama daemons are not measured.
+        """
+        tripped, _, _ = self._mlx_coder_memory_pressure()
+        return not tripped
 
     def _free_memory_before_video(self) -> dict:
         """Conditionally free the resident in-process MLX LLM + diffuser
@@ -4902,34 +5085,18 @@ class GameAgent:
         """
         info: dict = {"freed": [], "tripped": False, "llm_gb": None}
         try:
-            from backend import MLXBackend
-            llm_path = getattr(MLXBackend, "_loaded_path", None)
-            if not (llm_path and getattr(MLXBackend, "_loaded_model", None) is not None):
-                return info  # no large in-process MLX LLM resident
-            # On-disk weight size is a good proxy for the resident (wired) size.
-            from pathlib import Path as _Path
-            total = 0
-            for f in _Path(llm_path).rglob("*"):
-                try:
-                    if f.is_file():
-                        total += f.stat().st_size
-                except Exception:
-                    pass
-            llm_gb = total / 1e9
-            info["llm_gb"] = round(llm_gb, 1)
-            import os as _os
-            phys_gb = (
-                _os.sysconf("SC_PHYS_PAGES") * _os.sysconf("SC_PAGE_SIZE")
-            ) / 1e9
-            # Trip only for LLMs large relative to RAM. 0.20 cleanly separates
-            # the working set from the crashing set with a wide margin.
-            if llm_gb <= 0.20 * phys_gb:
-                self._trace({
-                    "kind": "video_memory_relief_skipped",
-                    "llm_gb": info["llm_gb"], "phys_gb": round(phys_gb),
-                })
+            tripped, llm_gb, phys_gb = self._mlx_coder_memory_pressure()
+            if not tripped:
+                if llm_gb is not None:
+                    info["llm_gb"] = llm_gb
+                    self._trace({
+                        "kind": "video_memory_relief_skipped",
+                        "llm_gb": llm_gb,
+                        "phys_gb": phys_gb,
+                    })
                 return info
             info["tripped"] = True
+            info["llm_gb"] = llm_gb
             # 1) Diffuser pipelines (Z-Image-Turbo + SD-Turbo img2img).
             try:
                 import assets as _assets
@@ -4945,16 +5112,19 @@ class GameAgent:
                     info["freed"].append("Stable-Audio")
             except Exception:
                 pass
+            self._asset_generator = None
             # 3) The big in-process MLX LLM — the jetsam `largeProcess`. It
             #    reloads lazily on the next coder turn.
             try:
-                MLXBackend._drop_after_crash()
-                info["freed"].append("MLX-LLM")
+                from backend import MLXBackend
+                if getattr(MLXBackend, "_loaded_model", None) is not None:
+                    MLXBackend._drop_after_crash()
+                    info["freed"].append("MLX-LLM")
             except Exception:
                 pass
             self._trace({
                 "kind": "video_memory_relief",
-                "llm_gb": info["llm_gb"], "phys_gb": round(phys_gb),
+                "llm_gb": info["llm_gb"], "phys_gb": phys_gb,
                 "freed": info["freed"],
             })
         except Exception as e:
@@ -6576,6 +6746,8 @@ class GameAgent:
         _art_reqs = [
             fb for fb in self._pending_feedback
             if fb not in _internal_texts
+            and not _feedback_is_ui_feature(fb)
+            and not _feedback_is_behavior_bug(fb)
             and _feedback_is_art_change(fb, asset_names)
         ]
         if _art_reqs:
@@ -6613,20 +6785,33 @@ class GameAgent:
             self._unhonored_asset_request = None
             self._asset_reprompt_count = 0
         media_to_process_now: list[str] = []
+        ui_to_process_now: list[str] = []
         code_to_defer: list[str] = []
         force_honor_via_escalation: list[str] = []
         if defer_predicate and self._pending_feedback:
             for fb in self._pending_feedback:
                 is_art = _feedback_is_art_change(fb, asset_names)
                 is_sound = _feedback_is_sound_change(fb, sound_names)
+                is_ui_feature = _feedback_is_ui_feature(fb)
                 is_bug = _feedback_is_behavior_bug(fb)
                 is_orient = _feedback_is_orientation_change(fb)
                 visible_issue = bool(re.search(
                     r"\b(pink|missing|not loading|animation|graphics?|sprite|asset|controls?)\b",
                     fb.lower(),
                 ))
-                if (is_art or is_sound) and not is_bug and not is_orient:
+                if (is_art or is_sound) and not is_ui_feature and not is_bug and not is_orient:
                     media_to_process_now.append(fb)
+                    continue
+                # UI-feature requests (help/hint/HUD/menu overlays) are
+                # CODE work that, when the failing probes are checking for
+                # exactly that UI (`help_button_present`, etc.), ARE the
+                # blocker fix — deferring them is circular. Process this
+                # turn instead of queuing behind the report. Genre-free:
+                # keyed on UI-feature phrasing, not game type (2026-06-21
+                # point-and-click seed trace: "add help" deferred behind
+                # the very help-button probe it would satisfy).
+                if is_ui_feature and not is_art and not is_sound:
+                    ui_to_process_now.append(fb)
                     continue
                 # Phase 0.2 — same intent deferred ≥2 times before? Force
                 # it through. The model is told the user has asked N
@@ -6654,10 +6839,14 @@ class GameAgent:
                 else:
                     code_to_defer.append(fb)
             # Rewrite the queue so the downstream "process feedback" block
-            # consumes media items + force-honored items this turn. The
-            # plain code items get re-queued at the end of this method so
-            # they remain pending for the next turn.
-            self._pending_feedback = list(media_to_process_now) + list(force_honor_via_escalation)
+            # consumes media items + UI-feature items + force-honored items
+            # this turn. The plain code items get re-queued at the end of
+            # this method so they remain pending for the next turn.
+            self._pending_feedback = (
+                list(media_to_process_now)
+                + list(ui_to_process_now)
+                + list(force_honor_via_escalation)
+            )
             if media_to_process_now:
                 self._trace({
                     "kind": "media_only_parallel_inject",
@@ -6667,6 +6856,13 @@ class GameAgent:
                     "asset_names": asset_names,
                     "sound_names": sound_names,
                     "preview": "\n- ".join(media_to_process_now)[:400],
+                })
+            if ui_to_process_now:
+                self._trace({
+                    "kind": "ui_feature_processed_during_blocker",
+                    "ui_count": len(ui_to_process_now),
+                    "code_deferred_count": len(code_to_defer),
+                    "preview": "\n- ".join(ui_to_process_now)[:400],
                 })
         defer_block_active = defer_predicate and bool(code_to_defer)
 
@@ -6891,6 +7087,7 @@ class GameAgent:
             # sound names exist when picking which recipe to emit.
             art_change = _feedback_is_art_change(joined, asset_names)
             sound_change = _feedback_is_sound_change(joined, sound_names)
+            ui_feature = _feedback_is_ui_feature(joined)
             existing_media_request = _feedback_requests_existing_media(joined)
             # Phase 0.1 — when the user says BOTH "use the existing X" AND
             # "as a starting point" / "show them walking" / "more frames",
@@ -6955,6 +7152,15 @@ class GameAgent:
             behavior_bug = _feedback_is_behavior_bug(joined)
             behavior_scope = _feedback_mentions_scoped_behavior_change(joined)
             orientation_change = _feedback_is_orientation_change(joined)
+            if ui_feature and (art_change or sound_change):
+                self._trace({
+                    "kind": "media_change_directive_suppressed",
+                    "reason": "ui_feature",
+                    "art_change": art_change,
+                    "sound_change": sound_change,
+                })
+                art_change = False
+                sound_change = False
             # Record routing flags so `_stream` can emit the
             # `turn_contract` trace event. Mode + tag derivation happens
             # after `_configure_scoped_constraints` runs below.
@@ -8092,6 +8298,144 @@ class GameAgent:
             if fix_hint:
                 return head + "\n" + body + "\n\nMinimal fix shape: " + fix_hint + playbook_tail
         return head + "\n" + body + playbook_tail
+
+    # Patterns stripped from /ask replies — read-only turn must never
+    # materialize code even if the model disobeys the prompt contract.
+    _ASK_FORBIDDEN_TAG_RES: tuple = (
+        re.compile(r"<patch>.*?</patch>", re.DOTALL | re.IGNORECASE),
+        re.compile(r"<html_file>.*?</html_file>", re.DOTALL | re.IGNORECASE),
+        re.compile(r"<assets>.*?</assets>", re.DOTALL | re.IGNORECASE),
+        re.compile(r"<sounds>.*?</sounds>", re.DOTALL | re.IGNORECASE),
+        re.compile(r"<videos>.*?</videos>", re.DOTALL | re.IGNORECASE),
+        re.compile(r"<diagnose>.*?</diagnose>", re.DOTALL | re.IGNORECASE),
+        re.compile(r"<done\s*/>", re.IGNORECASE),
+        re.compile(r"<confirm_done\s*/>", re.IGNORECASE),
+    )
+
+    @staticmethod
+    def _sanitize_ask_reply(text: str) -> tuple[str, bool]:
+        out = text or ""
+        stripped = False
+        for pat in GameAgent._ASK_FORBIDDEN_TAG_RES:
+            if pat.search(out):
+                stripped = True
+                out = pat.sub("", out)
+        return out.strip(), stripped
+
+    def _ask_html_excerpt(self, html: str, report: dict | None) -> str:
+        """Bounded best.html slice for /ask grounding."""
+        max_chars = 10_000
+        if not html:
+            return "(no file)"
+        if len(html) <= max_chars:
+            return html
+        report = report or {}
+        if not report.get("ok", True):
+            try:
+                slice_text = self._focused_slice(
+                    html, report, self._criteria or "",
+                )
+                if slice_text and len(slice_text) <= max_chars:
+                    return slice_text
+            except Exception:
+                pass
+        return (
+            html[:max_chars]
+            + f"\n\n[... truncated {len(html) - max_chars} chars ...]"
+        )
+
+    async def run_ask_turn(self, question: str) -> AsyncIterator[AgentEvent]:
+        """One read-only Q&A turn for `/ask` — no harness, no code changes."""
+        question = (question or "").strip()
+        if not question:
+            yield self._record(AgentEvent("error", "empty question"))
+            return
+        if not self.best_path.exists():
+            yield self._record(AgentEvent(
+                "error",
+                "nothing built yet — run at least one iteration, then /ask",
+            ))
+            return
+
+        try:
+            html = self.best_path.read_text(encoding="utf-8")
+        except Exception as e:
+            yield self._record(AgentEvent(
+                "error", f"could not read {self.best_path.name}: {e}",
+            ))
+            return
+
+        report = self._last_test_report or {}
+        report_text = (
+            self._format_report_for_model(report) if report else ""
+        )
+        html_excerpt = self._ask_html_excerpt(html, report)
+        ask_prompt = self._p.ask_instruction(
+            question=question,
+            goal=self._goal or "",
+            criteria=self._criteria or "",
+            report_text=report_text,
+            html_excerpt=html_excerpt,
+            asset_names=sorted(self._session_assets.keys()),
+        )
+
+        snapshot_n = self._snapshot_n
+        saved_messages = list(self._messages)
+        yield self._record(AgentEvent(
+            "activity", "streaming",
+            {"label": "ask reply", "role": "coder"},
+        ))
+        reply = ""
+        try:
+            self._messages = saved_messages + [{
+                "role": "user",
+                "content": ask_prompt,
+                "phase": "ask",
+            }]
+            reply = await self._stream(
+                self._token_cb_wrapper,
+                role="coder",
+                override_temp=0.3,
+            )
+        except Exception as e:
+            self._trace({"kind": "user_ask_error", "err": str(e)[:300]})
+            yield self._record(AgentEvent("error", f"ask turn failed: {e}"))
+            yield self._record(self._activity_idle_event("coder"))
+            return
+        finally:
+            self._messages = saved_messages
+
+        if self._snapshot_n != snapshot_n:
+            self._trace({
+                "kind": "user_ask_snapshot_guard",
+                "before": snapshot_n,
+                "after": self._snapshot_n,
+            })
+
+        if not (reply or "").strip():
+            yield self._record(AgentEvent("error", "model returned nothing"))
+            yield self._record(self._activity_idle_event("coder"))
+            return
+
+        clean_reply, tags_stripped = self._sanitize_ask_reply(reply)
+        if not clean_reply:
+            clean_reply = (
+                "(model reply contained only code tags — omitted on this "
+                "read-only ask turn)"
+            )
+        self._trace({
+            "kind": "user_ask",
+            "question": question[:500],
+            "reply_chars": len(clean_reply),
+            "tags_stripped": tags_stripped,
+            "snapshot_n": self._snapshot_n,
+        })
+        yield self._record(AgentEvent(
+            "info",
+            clean_reply,
+            {"ask": True, "tags_stripped": tags_stripped},
+        ))
+        yield self._record(self._activity_idle_event("coder"))
 
     async def run_visual_critic(
         self,
@@ -10182,7 +10526,17 @@ class GameAgent:
                 "info",
                 f"[yellow]repetition loop detected[/yellow] — model was emitting "
                 f"the same 1-2 short lines on repeat after {result.tokens} tokens "
-                f"({result.duration_s:.0f}s). Aborted stream and kept partial output.{extra}"
+                f"({result.duration_s:.0f}s). Aborted stream and kept partial output.{extra}",
+                # Structured payload so the TUI status panel can show a
+                # sticky "Last stall" line, not just a scrolled-past log
+                # row (asked for after the minecraft 20260621 trace where
+                # the only record of the abort vanished up the log).
+                {
+                    "stall_reason": "repetition_loop",
+                    "loop_kind": loop_kind,
+                    "tokens": result.tokens,
+                    "duration_s": round(result.duration_s, 1),
+                },
             ))
         if result.deliberated:
             # A2: smaller LLMs sometimes ramble pre-tag for thousands of
@@ -10193,7 +10547,12 @@ class GameAgent:
                 "info",
                 f"[yellow]deliberation loop detected[/yellow] — {result.tokens} "
                 f"tokens of pre-tag reasoning with no <patch>/<html_file>. "
-                "Aborted stream; coaching the model to skip the essay."
+                "Aborted stream; coaching the model to skip the essay.",
+                {
+                    "stall_reason": "deliberation_loop",
+                    "tokens": result.tokens,
+                    "duration_s": round(result.duration_s, 1),
+                },
             ))
             self._pending_coaching.append(
                 "Your last reply was pure reasoning prose with no output tag — "
@@ -10703,6 +11062,19 @@ class GameAgent:
                         "reason": bracket_reject[:400],
                     })
                 return None, bracket_reject
+            # Harness honesty: a patch can report "applied" yet leave the
+            # file byte-identical (REPLACE == SEARCH, or only whitespace-
+            # normalized differences). That looks like progress in the log
+            # but nothing changed — the 2026-06-21 seed trace showed
+            # `applied 1/1` with an unchanged SHA. Surface a non-gating
+            # advisory so "applied but nothing changed" is debuggable.
+            if not dry_run and res.applied > 0 and res.text == base:
+                self._trace({
+                    "kind": "patch_noop",
+                    "applied": res.applied,
+                    "total": len(patches),
+                    "note": "patches applied but file content unchanged",
+                })
             return res.text, f"applied {res.applied}/{len(patches)} patches"
 
         html = self._extract_html(reply)
@@ -11161,6 +11533,51 @@ class GameAgent:
     # inject in full on every fix turn. Below this, full-file inject is
     # cheap and removes any risk of the slice missing context.
     _FULL_FILE_INJECT_LIMIT = 12_000
+
+    def _seed_html_for_prompt(
+        self, seed_html: str, report: dict | None = None,
+    ) -> tuple[str, bool]:
+        """Bound the seed file inlined into the first /seed build prompt.
+
+        A large working seed (this 2026-06-21 trace: ~26KB) inlined in full
+        balloons iter-1 context to 15K+ prompt tokens and drives the weak
+        local model into repetition/deliberation loops. Returns
+        (html_for_prompt, truncated). Genre-free, structural:
+
+        - Under _FULL_FILE_INJECT_LIMIT: full file (current behavior).
+        - Otherwise: when a failing report exists, prefer the focused slice;
+          else a head+tail excerpt (DOM/CSS anchors live near the top, boot
+          code near the bottom — the regions UI/additive patches anchor to).
+        The full file stays on disk; the prompt tells the model to patch
+        against the on-disk file, not the excerpt.
+        """
+        if not seed_html or len(seed_html) <= self._FULL_FILE_INJECT_LIMIT:
+            return seed_html, False
+        limit = self._FULL_FILE_INJECT_LIMIT
+        if report and not report.get("ok", True):
+            try:
+                sliced = self._focused_slice(
+                    seed_html, report, self._criteria or "",
+                )
+                if sliced and len(sliced) <= limit:
+                    return sliced, True
+            except Exception:
+                pass
+        # Head + tail with elided middle. Head gets the larger share so the
+        # <head>/<style>/<body>-open structure (where UI anchors live) is
+        # intact; tail keeps the boot/init region.
+        head_budget = int(limit * 0.7)
+        tail_budget = limit - head_budget
+        head = seed_html[:head_budget]
+        tail = seed_html[-tail_budget:]
+        elided = len(seed_html) - head_budget - tail_budget
+        return (
+            head
+            + f"\n\n<!-- ... {elided} chars elided — full file is on disk; "
+              "patch against the on-disk file, do not rewrite ... -->\n\n"
+            + tail,
+            True,
+        )
 
     @staticmethod
     def _identifiers(text: str) -> set[str]:
@@ -13045,11 +13462,38 @@ class GameAgent:
                         if isinstance(s, dict) and s.get("error")
                     ]
                     for s in failed:
-                        yield self._record(AgentEvent(
-                            "info",
-                            f"  - video {s.get('name','?')}: "
-                            f"{str(s.get('error',''))[:400]}"
-                        ))
+                            yield self._record(AgentEvent(
+                                "info",
+                                f"  - video {s.get('name','?')}: "
+                                f"{str(s.get('error',''))[:400]}"
+                            ))
+
+        # Post-media VRAM relief (2026-06-21): after sprite/sound batches,
+        # drop Z-Image / Stable-Audio so the next coder MLX stream is not
+        # competing with diffusers on unified memory. Gated like video relief
+        # — only when the session MLX model is huge relative to RAM (GLM-5.2
+        # @ 391 GB on a 512 GB box trips this every time). Small MLX models
+        # keep pipelines warm for fast mid-session regen. Does NOT drop the
+        # coder LLM — only the drawing/audio stacks.
+        if asset_specs or sound_specs:
+            tripped, llm_gb, phys_gb = self._mlx_coder_memory_pressure()
+            if tripped:
+                freed = await asyncio.to_thread(self._release_diffusers_vram)
+                if freed:
+                    self._trace({
+                        "kind": "diffuser_memory_relief",
+                        "trigger": trigger,
+                        "llm_gb": llm_gb,
+                        "phys_gb": phys_gb,
+                        "freed": freed,
+                    })
+                    yield self._record(AgentEvent(
+                        "info",
+                        "unloaded sprite/sound models to free VRAM for the "
+                        f"coder LLM (~{llm_gb} GB on disk): "
+                        f"{', '.join(freed)} — they reload automatically "
+                        "if you request new art or audio",
+                    ))
 
         # Mid-session only: synthesize a feedback line that re-emits the
         # asset/sound paths block, so the model's next user turn sees
@@ -13527,6 +13971,25 @@ class GameAgent:
                 )
             else:
                 plan_msg = self._p.PLAN_INSTRUCTION
+
+            plan_opening_block, plan_opening_hits = self._retrieve_opening_book_block(
+                goal, stage="plan", char_budget=1200, deep=True,
+            )
+            if plan_opening_block:
+                plan_msg = (
+                    f"{plan_opening_block}\n\n"
+                    "Use the opening-book recipes above when choosing your "
+                    "plan, acceptance criteria, and executable probes. Include "
+                    "the relevant state and puzzle/help checks in the plan "
+                    "contract when they apply.\n\n"
+                    + plan_msg
+                )
+            if plan_opening_hits:
+                self._trace({
+                    "kind": "plan_opening_book_injected",
+                    "hits": plan_opening_hits,
+                    "chars": len(plan_opening_block or ""),
+                })
 
             # Pi-mono-style project-config injection. Reads AGENTS.md /
             # CLAUDE.md from cwd; falls back to the out_path's parent so
@@ -14183,8 +14646,17 @@ class GameAgent:
                 pb_block = self._retrieve_playbook_block(
                     goal, code=seed_html, stage="plan",
                 )
+                # Seed retrieval: bias the outline match with structural
+                # tokens from the working file so a terse goal ("add a
+                # button") doesn't out-rank what the file actually is.
+                seed_struct_tokens = self._seed_structural_tokens(seed_html)
+                if seed_struct_tokens:
+                    self._trace({
+                        "kind": "seed_structural_tokens",
+                        "tokens": seed_struct_tokens,
+                    })
                 opening_block, opening_hits = self._retrieve_opening_book_block(
-                    goal, stage="plan",
+                    goal, stage="plan", extra_tokens=seed_struct_tokens,
                 )
                 self._active_opening_book_recipes = opening_hits
                 # Component skill library — tested mechanics snippets, same
@@ -14196,14 +14668,32 @@ class GameAgent:
                     goal, stage="plan", k=3,
                 )
                 # Lean mode: cap the COMBINED size of the three memory blocks.
+                # protect_components: on a seed continuation the components
+                # are the snippets the weak model copies from — keep them
+                # even if the opening book already filled the budget.
                 opening_block, components_block, pb_block = (
                     self._apply_lean_memory_budget(
                         opening_block, components_block, pb_block,
+                        protect_components=True,
                     )
                 )
                 pb_kwargs = {"playbook_block": pb_block} if pb_block else {}
+                # Cap inlined seed size so a large working file doesn't
+                # balloon iter-1 context into a repetition/deliberation loop
+                # (2026-06-21 point-and-click seed trace). Full file stays on
+                # disk; the prompt tells the model to patch against it.
+                seed_html_for_prompt, seed_truncated = self._seed_html_for_prompt(
+                    seed_html, self._last_test_report,
+                )
+                if seed_truncated:
+                    self._trace({
+                        "kind": "seed_html_excerpted",
+                        "full_bytes": len(seed_html),
+                        "prompt_bytes": len(seed_html_for_prompt),
+                    })
                 build_msg = self._p.seed_build_instruction(
-                    seed_html, str(self.seed_file), **pb_kwargs,
+                    seed_html_for_prompt, str(self.seed_file),
+                    truncated=seed_truncated, **pb_kwargs,
                 )
                 if opening_block:
                     build_msg = (
@@ -15358,6 +15848,32 @@ class GameAgent:
                                     await self._materialize(reply)
                                 )
                                 self._format_stuck_streak = 0
+            # First-build stub rescue (dragon's-lair trace 20260621_091419
+            # iter 1): a placeholder-only first build — a <canvas> game was
+            # intended but the <script> body is just comments/elisions —
+            # is treated as no-usable-code so the EXISTING prefill retry
+            # rescue below arms, instead of shipping the dead stub to
+            # Chromium and recovering via the slower dead-build detour.
+            # Gated to the first build (no baseline) so later patch turns
+            # are untouched; `_is_placeholder_first_build` requires a
+            # <canvas> so pure-DOM apps stay exempt. NOT a termination
+            # change — only steers how the next attempt starts.
+            if (
+                new_html is not None
+                and not self._current_file
+                and _is_placeholder_first_build(new_html)
+            ):
+                self._trace({
+                    "kind": "first_build_stub_rejected",
+                    "iteration": iteration,
+                    "size_bytes": len(new_html),
+                })
+                new_html = None
+                materialize_msg = (
+                    "first build was a placeholder stub (canvas present "
+                    "but <script> body has no real code) — arming the "
+                    "first-build prefill retry rescue"
+                )
             if (
                 new_html is None
                 and self._media_regenerated_this_iter

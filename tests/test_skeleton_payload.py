@@ -26,8 +26,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from agent import (  # noqa: E402
     _detect_skeleton_payload,
+    _is_placeholder_first_build,
     _SKELETON_MAX_BYTES,
     _SKELETON_MIN_BODY_BYTES,
+    _PLACEHOLDER_FIRST_BUILD_MIN_CODE,
 )
 
 
@@ -168,3 +170,97 @@ def test_thresholds_pinned():
     `_detect_skeleton_payload`."""
     assert _SKELETON_MAX_BYTES == 4_000
     assert _SKELETON_MIN_BODY_BYTES == 800
+    assert _PLACEHOLDER_FIRST_BUILD_MIN_CODE == 24
+
+
+# ---------------------------------------------------------------------------
+# `_is_placeholder_first_build` — marker-free, canvas-required sibling.
+# Dragon's-lair trace 20260621_091419 iter 1: a 593-byte canvas+comment-only
+# stub slipped past `_detect_skeleton_payload` (no `{ ... }` marker) and
+# shipped to Chromium. This helper catches that shape so the existing
+# first-build prefill RETRY rescue arms instead.
+# ---------------------------------------------------------------------------
+
+
+# Approximation of the dragon iter-1 stub: a <canvas> game with a
+# <script> body that is ONLY comments — no executable statements.
+_DRAGON_STYLE_STUB = (
+    "<!DOCTYPE html><html><head><title>Dragon's Lair</title></head><body>"
+    "<canvas id='c' width='800' height='600'></canvas>"
+    "<script>\n"
+    "// Dragon's Lair game\n"
+    "// set up the canvas and context\n"
+    "// load the animation frames\n"
+    "// handle input and scene transitions\n"
+    "// main game loop goes here\n"
+    "</script></body></html>"
+)
+
+
+def test_comment_only_canvas_stub_is_placeholder():
+    """The dragon iter-1 shape — canvas present, script body all comments."""
+    assert _is_placeholder_first_build(_DRAGON_STYLE_STUB) is True
+
+
+def test_canvas_with_no_inline_script_is_placeholder():
+    """A <canvas> declared but no inline <script> body at all is a stub."""
+    html = (
+        "<!DOCTYPE html><html><body>"
+        "<canvas id='c'></canvas>"
+        "</body></html>"
+    )
+    assert _is_placeholder_first_build(html) is True
+
+
+def test_real_tiny_canvas_game_is_not_placeholder():
+    """The same 59-char one-liner snake used above — real statements, must
+    NOT be flagged (would otherwise lose a working first build)."""
+    html = (
+        "<!DOCTYPE html><html><body><canvas></canvas><script>"
+        "var s={x:0};function f(){s.x++;requestAnimationFrame(f);}f();"
+        "</script></body></html>"
+    )
+    assert _is_placeholder_first_build(html) is False
+
+
+def test_cdn_first_script_does_not_mask_real_inline_body():
+    """Protects the working three.js DOOM one-shot: a CDN `<script src=...>`
+    first tag has an empty body, but the REAL inline <script> after it
+    must keep the file out of the placeholder bucket. All bodies are
+    concatenated, so the real code wins."""
+    html = (
+        "<!DOCTYPE html><html><head>"
+        "<script src='https://example.com/three.min.js'></script>"
+        "</head><body><canvas></canvas><script>"
+        "const scene=init();function loop(){update();render(scene);"
+        "requestAnimationFrame(loop);}loop();"
+        "</script></body></html>"
+    )
+    assert _is_placeholder_first_build(html) is False
+
+
+def test_dom_only_app_is_not_placeholder():
+    """Pure-DOM app (no <canvas>) is exempt — different intent."""
+    html = (
+        "<!DOCTYPE html><html><body>"
+        "<h1>Calculator</h1><input id='a'><button>+</button>"
+        "<script>// nothing real here either</script>"
+        "</body></html>"
+    )
+    assert _is_placeholder_first_build(html) is False
+
+
+def test_sizable_file_is_never_placeholder():
+    """Any file at/over the size ceiling is treated as a real build and
+    never inspected (belt-and-suspenders for the DOOM 22 KB one-shot)."""
+    big = (
+        "<!DOCTYPE html><html><body><canvas></canvas><script>"
+        + ("// just a comment line\n" * 400)  # >4 KB but all comments
+        + "</script></body></html>"
+    )
+    assert len(big) >= _SKELETON_MAX_BYTES
+    assert _is_placeholder_first_build(big) is False
+
+
+def test_empty_input_is_not_placeholder():
+    assert _is_placeholder_first_build("") is False
