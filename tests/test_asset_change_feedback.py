@@ -112,9 +112,51 @@ def test_existing_media_request_suppresses_regen_intent() -> None:
     assert _feedback_requests_existing_media(
         "use existing p2_idle frames, do not regenerate"
     )
+    assert _feedback_requests_existing_media(
+        "the assets are not being used at idle, they need to be loaded, "
+        "they where created but are not being used"
+    )
+    assert _feedback_requests_existing_media(
+        "load the sprites into the game, they already exist on disk"
+    )
     assert not _feedback_requests_existing_media(
         "redraw the p2 block animation with new art"
     )
+    # Explicit new-art language wins when both signals appear.
+    assert not _feedback_requests_existing_media(
+        "load the new sprites and regenerate the walk frames"
+    )
+
+
+def test_art_change_suppressed_for_existing_media_wiring() -> None:
+    """Chess trace 20260621_193434: 'assets need to be loaded' must not
+    classify as art regen — it is a loader/wiring code fix."""
+    chess_fb = (
+        "the bottom row is being cut off and not shown, the assets are "
+        "not being used at idle, they need to be loaded, they where "
+        "created but are not being used."
+    )
+    assets = ["wp_idle", "wp_walk", "bk_smash"]
+    assert _feedback_requests_existing_media(chess_fb)
+    assert not _feedback_is_art_change(chess_fb, assets)
+
+
+def test_art_change_still_true_for_explicit_new_art() -> None:
+    assert _feedback_is_art_change(
+        "please make a new red dragon sprite", ["knight_idle"]
+    )
+    assert _feedback_is_art_change(
+        "regenerate all the walk frames with new art", ["wp_walk"]
+    )
+
+
+def test_art_change_still_true_for_img2img_chain() -> None:
+    """Existing-media + img2img chain must still route to MEDIA-CHANGE."""
+    fb = (
+        "use existing wp_idle as a starting point but show each piece "
+        "walking to its square"
+    )
+    assert _feedback_is_art_change(fb, ["wp_idle", "wp_walk"])
 
 
 def test_art_change_negative_cases() -> None:

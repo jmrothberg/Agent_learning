@@ -125,6 +125,22 @@ def test_help_screen_feedback_with_location_asset_stays_code_path(tmp_path):
     assert a._unhonored_asset_request is None
 
 
+def test_existing_media_wiring_does_not_arm_asset_reprompt(tmp_path):
+    """Chess trace 20260621_193434: loader feedback must not inject
+    ASSET GENERATION REQUIRED — sprites already exist on disk."""
+    a = _make_agent(tmp_path)
+    a._session_assets = {f"wp_{p}": Path(f"wp_{p}.png") for p in ("idle", "walk", "smash")}
+    a._use_feedback_directives = True
+    a._pending_feedback = [
+        "the assets are not being used at idle, they need to be loaded, "
+        "they where created but are not being used."
+    ]
+    out = a._flush_user_injections("")
+    assert "ASSET GENERATION REQUIRED" not in out
+    assert a._unhonored_asset_request is None
+    assert a._asset_reprompt_count == 0
+
+
 def test_ui_feature_patterns_match_help_hint_button_phrasing():
     """Fix 1 (2026-06-21 seed trace): the narrow `help screen` pattern
     missed `add a help button` / `hint button` phrasings, so those UI

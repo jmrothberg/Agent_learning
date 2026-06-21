@@ -1353,6 +1353,14 @@ def _feedback_is_art_change(text: str, asset_names: list[str]) -> bool:
         return False
     if _feedback_is_ui_feature(text):
         return False
+    # Wire/load existing sprites — code fix, not art regen. img2img chain
+    # and style-rebrand still route through MEDIA-CHANGE when appropriate.
+    if (
+        _feedback_requests_existing_media(text)
+        and not _feedback_requests_img2img_chain(text)
+        and not _feedback_requests_style_rebrand(text)
+    ):
+        return False
     lo = text.lower()
     if _name_in_text(lo, asset_names):
         return True
@@ -1414,14 +1422,85 @@ _EXISTING_MEDIA_ONLY_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\buse\s+(?:the\s+)?(?:existing|original|old|current)\b", re.I),
     re.compile(r"\balready\s+exists?\b", re.I),
     re.compile(r"\buse\s+them\b", re.I),
+    # Wire/load already-generated media — code work, not <assets> regen.
+    # Chess trace 20260621_193434: "assets need to be loaded, they were
+    # created but are not being used" mis-fired ASSET GENERATION REQUIRED.
+    re.compile(r"\bneed(?:s|ed|ing)?\s+to\s+be\s+loaded\b", re.I),
+    re.compile(
+        r"\b(?:not|aren't|isn't|wasn't|weren't)\s+(?:being\s+)?"
+        r"(?:used|loaded|loading|drawn|shown|displayed|visible|wired)\b",
+        re.I,
+    ),
+    re.compile(
+        r"\b(?:were|was|where|are|is)\s+created\b.*\b(?:but|yet|still)\b",
+        re.I | re.DOTALL,
+    ),
+    re.compile(
+        r"\bcreated\b.*\b(?:but|and)\b.*\b(?:not|aren't|isn't)\s+"
+        r"(?:being\s+)?(?:used|loaded|loading)\b",
+        re.I | re.DOTALL,
+    ),
+    re.compile(
+        r"\b(?:load|wire|hook\s+up|integrate|connect)\s+"
+        r"(?:the\s+|these\s+|those\s+)?"
+        r"(?:assets?|sprites?|images?|art|graphics?|pngs?)\b",
+        re.I,
+    ),
+    re.compile(
+        r"\b(?:use|draw|show|display)\s+(?:the\s+)?"
+        r"(?:generated|created)\s+"
+        r"(?:assets?|sprites?|images?|art|graphics?)\b",
+        re.I,
+    ),
+    re.compile(
+        r"\bnot\s+(?:using|showing|drawing|displaying)\s+"
+        r"(?:the\s+)?(?:assets?|sprites?|images?|generated|created)\b",
+        re.I,
+    ),
 )
+
+# When both wiring and explicit new-art language appear, regen wins.
+_EXPLICIT_NEW_ART_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"\b(?:new|another|additional|extra|different)\s+"
+        r"(?:sprite|sprites|asset|assets|image|images|art|graphic|graphics|"
+        r"frame|frames|png|pngs)\b",
+        re.I,
+    ),
+    re.compile(r"\b(?:regenerat|redraw|remake|redo)\w*\b", re.I),
+    re.compile(r"\bmake\s+(?:a\s+|an\s+|me\s+)?new\b", re.I),
+    re.compile(
+        r"\b(?:create|generat)\w*\s+(?:new\s+)?"
+        r"(?:sprite|sprites|asset|assets|image|images|art|graphic|graphics|"
+        r"frame|frames)\b",
+        re.I,
+    ),
+)
+
+
+def _feedback_requests_explicit_new_art(text: str) -> bool:
+    """True when feedback explicitly asks for newly generated media."""
+    if not text:
+        return False
+    # "don't redo / do not regenerate" is a keep-existing signal, not new art.
+    if re.search(
+        r"\b(?:don['’]?t|do\s+not)\s+(?:redo|redraw|regenerat\w*|remake)\b",
+        text,
+        re.I,
+    ):
+        return False
+    return any(p.search(text) for p in _EXPLICIT_NEW_ART_PATTERNS)
 
 
 def _feedback_requests_existing_media(text: str) -> bool:
     """User wants existing media wired/used, not regenerated."""
     if not text:
         return False
-    return any(p.search(text) for p in _EXISTING_MEDIA_ONLY_PATTERNS)
+    if not any(p.search(text) for p in _EXISTING_MEDIA_ONLY_PATTERNS):
+        return False
+    if _feedback_requests_explicit_new_art(text):
+        return False
+    return True
 
 
 # Phase 0.1 — phrases that explicitly request img2img CHAINING (seed from
@@ -6748,6 +6827,7 @@ class GameAgent:
             if fb not in _internal_texts
             and not _feedback_is_ui_feature(fb)
             and not _feedback_is_behavior_bug(fb)
+            and not _feedback_requests_existing_media(fb)
             and _feedback_is_art_change(fb, asset_names)
         ]
         if _art_reqs:
@@ -6799,7 +6879,13 @@ class GameAgent:
                     r"\b(pink|missing|not loading|animation|graphics?|sprite|asset|controls?)\b",
                     fb.lower(),
                 ))
-                if (is_art or is_sound) and not is_ui_feature and not is_bug and not is_orient:
+                if (
+                    (is_art or is_sound)
+                    and not is_ui_feature
+                    and not is_bug
+                    and not is_orient
+                    and not _feedback_requests_existing_media(fb)
+                ):
                     media_to_process_now.append(fb)
                     continue
                 # UI-feature requests (help/hint/HUD/menu overlays) are
