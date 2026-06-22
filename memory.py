@@ -3987,6 +3987,14 @@ class GameMemory:
         # 3D is checked first because some 3D goals also mention "board"
         # ("3D chess") but should pick the 3D scaffold, not the board one.
         threed_hits = _detect_3d_intent(goal)
+        # Voxel/Minecraft goals share the 3D modality bucket but have a dedicated
+        # scaffold with raycast break/place (voxel trace 20260622_133931).
+        if any(h in ("voxel", "voxels") for h in threed_hits):
+            return self._load_modality(
+                CANVAS_VOXEL_MINECRAFT_SKELETON_NAME,
+                CANVAS_VOXEL_MINECRAFT_SKELETON,
+                source_goal_tokens=threed_hits,
+            )
         if any(h in _3D_STRONG_HOOKS for h in threed_hits) or len(threed_hits) >= _MODALITY_MIN_HITS:
             return self._load_modality(CANVAS_3D_SKELETON_NAME, CANVAS_3D_SKELETON,
                                        source_goal_tokens=threed_hits)

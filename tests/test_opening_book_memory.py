@@ -16,7 +16,7 @@ from memory import (  # noqa: E402
     OpeningBookItem,
     render_opening_book_block,
 )
-from tools import LiveBrowser  # noqa: E402
+from tools import LiveBrowser, pointclick_opening_book_applicable  # noqa: E402
 
 
 def test_opening_book_retrieval_caps_and_prefers_root(tmp_path: Path) -> None:
@@ -108,6 +108,79 @@ def test_pointclick_puzzle_chain_recipe_is_executable() -> None:
     assert "pointclick_puzzle_chain" in src
     assert "selectedItem" in src
     assert "state.inventory[]" in src
+    assert "pointclick_opening_book_applicable" in src
+
+
+def test_pointclick_opening_book_not_applicable_for_voxel_goal() -> None:
+    assert pointclick_opening_book_applicable(
+        "first-person voxel sandbox minecraft blocks break place",
+        visual_recipe_id="canvas-3d-first-person",
+    ) is False
+
+
+def test_pointclick_opening_book_applicable_for_p_and_c_goal() -> None:
+    assert pointclick_opening_book_applicable(
+        "monkey island point and click adventure inventory hotspots",
+        visual_recipe_id="canvas-point-and-click",
+    ) is True
+
+
+def test_pointclick_skipped_on_non_p_and_c_goal(tmp_path: Path) -> None:
+    html = tmp_path / "game.html"
+    html.write_text("<script>window.state={player:{x:0}};</script>", encoding="utf-8")
+    browser = LiveBrowser(headless=True)
+
+    checks = asyncio.run(browser._run_opening_book_recipes(
+        html,
+        [{
+            "id": "pointclick-puzzle-chain",
+            "kind": "playtest",
+            "recipe": {"type": "pointclick_puzzle_chain"},
+        }],
+        input_test={"ran": False},
+        canvas_info=None,
+        frozen=None,
+        goal="first-person voxel sandbox with three.js blocks",
+        visual_recipe_id="canvas-3d-first-person",
+    ))
+
+    assert len(checks) == 1
+    assert checks[0]["ok"] is True
+    assert checks[0]["hard"] is False
+    assert checks[0].get("skipped") is True
+
+
+async def _pointclick_hard_fail_when_applicable(tmp_path: Path) -> None:
+    html = tmp_path / "game.html"
+    html.write_text("<script>window.state={};</script>", encoding="utf-8")
+    browser = LiveBrowser(headless=True)
+
+    async def _fake_eval(_js: str):
+        return {"ok": False, "missing": ["state.inventory[]", "scene hotspots[]"]}
+
+    browser._safe_eval = _fake_eval  # type: ignore[method-assign]
+    checks = await browser._run_opening_book_recipes(
+        html,
+        [{
+            "id": "pointclick-puzzle-chain",
+            "kind": "playtest",
+            "recipe": {"type": "pointclick_puzzle_chain"},
+        }],
+        input_test={"ran": False},
+        canvas_info=None,
+        frozen=None,
+        goal="point and click adventure with inventory and hotspots",
+        visual_recipe_id="canvas-point-and-click",
+    )
+
+    assert len(checks) == 1
+    assert checks[0]["ok"] is False
+    assert checks[0]["hard"] is True
+    assert "inventory" in checks[0]["err"]
+
+
+def test_pointclick_hard_fails_when_p_and_c_state_missing(tmp_path: Path) -> None:
+    asyncio.run(_pointclick_hard_fail_when_applicable(tmp_path))
 
 
 def test_opening_book_asset_recipe_execution(tmp_path: Path) -> None:

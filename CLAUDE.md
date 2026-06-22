@@ -1,21 +1,25 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Operational summary for coding agents working in this repo. **Also injected** into the game agent’s
+system prompt (capped at 6 KB) — keep it actionable, not historical.
 
-**Repo:** `jmrothberg/Agent_learning` (`origin`). Single source of truth — commit and push to `main`. User updates with `./scripts/update.sh` or `git pull`.
+**Repo:** `jmrothberg/Agent_learning` (`origin`). Single source of truth — commit and push to `main`.
+User updates: `./scripts/update.sh` or `git pull`.
+
+**Other docs:** deep walkthrough → `README.md` · tests → `TEST.md` · tuning traps →
+`FOR_NEXT_LLM.md` · debug traces → `HARNESS_DEBUG.md`
 
 ---
 
 ## What this project is
 
-A coding agent that drives a **local Ollama model** (qwen3.6:27b/35b is the working default) to write, test, and iteratively fix **single-file HTML5 games** with a real Chromium browser as the verifier. It ships:
+A coding agent driving a **local model** (qwen3.6 27B/35B via MLX in-process or Ollama) to write,
+test, and iteratively fix **single-file HTML5 games** with real Chromium verification, in-process
+Z-Image-Turbo sprites, Stable Audio, optional Wan2.2 cutscenes.
 
-- `chat.py` — Textual TUI (default entry point; visible Chromium beside the terminal)
-- `coder.py` — headless CLI driver for unattended runs / scripting
-- A self-contained Z-Image-Turbo sprite-generation pipeline (no server, in-process)
-- A persistent cross-session **playbook** of HTML/JS rules of thumb (`memory/playbook.jsonl`, hand-curated seed bullets retrieved at runtime by `memory.py`)
-
-The README has a deep walkthrough; this file is the operational summary.
+- `chat.py` — Textual TUI (default; visible Chromium)
+- `coder.py` — headless CLI
+- `memory/playbook.jsonl` — hand-curated rules retrieved at runtime (`memory.py`)
 
 ---
 
@@ -65,10 +69,10 @@ MLX_MODEL=/Users/jonathanrothberg/MLX_Models/Qwen3.6-27B-mxfp8 .venv/bin/python 
 # auto-resolve from the model path: 512 if "flash" is in the name
 # (DeepSeek-V4 Flash crashes mid-generation at >512), else 1024.
 
-# Tests (all pure-function, no model/Chromium calls; full suite ~12s)
+# Tests (pure-function, no model/GPU/browser — see TEST.md)
 .venv/bin/python -m pytest tests/ -q
-.venv/bin/python -m pytest tests/test_patches.py -v        # one file
-.venv/bin/python -m pytest tests/test_patches.py::test_apply_smart_quote_match -v   # one test
+.venv/bin/python -m pytest tests/test_patches.py -v
+.venv/bin/python -m pytest tests/test_patches.py::test_apply_smart_quote_match -v
 
 # System tests (visible browser; smoke fast, pacman slow — prompts unless --yes)
 python system_tests.py run --suite smoke --three-model
@@ -122,10 +126,10 @@ Drivers (`chat.py`, `coder.py`) construct `GameAgent`, wire a token callback, an
 
 ### Verification — multi-layered
 
-`tools.py` runs the harness:
-- **Pre-Chromium micro-probes** (`run_micro_probes`): structural sanity (HTML completeness, `<script>` presence, bracket balance, elision sentinels, API-method allowlist for canvas2d / AudioContext / canvas-elt receivers). Cheap; rejects truncated streams before paying for a 3 s browser load.
-- **Chromium load via Playwright async** (`LiveBrowser.load_and_test`). Captures `console.error` (→ `console_errors`), `pageerror` (→ `page_errors`), canvas state, RAF firing, listener counts, frozen-canvas check, automated input smoke test, screenshot per iter, model-proposed `<probes>` evaluated in the page context. Launches with `--allow-file-access-from-files` + `--disable-web-security` so `drawImage(<file:// PNG>)` doesn't taint the canvas.
-- **Probes gate `ok=True`.** A failed probe (or any `soft_warning`) flips `report["ok"] = False`. Tainted-canvas probe errors are auto-downgraded to passes. `<done/>` requires `_consecutive_clean_iters >= 2`.
+`tools.py`: micro-probes (pre-Chromium) → `LiveBrowser.load_and_test` (Playwright: errors, RAF,
+input smoke test, model `<probes>`, behavioral gates) → optional VLM critic. Failed probes or hard
+soft_warnings flip `ok=False`. `<done/>` needs `_consecutive_clean_iters >= 2`. Gate list and debug
+workflow: **`HARNESS_DEBUG.md`**.
 
 ### Patch engine (the quality lever)
 
@@ -178,18 +182,25 @@ These bind decisions across sessions:
 - **All code self-contained in Agent_learning.** No sys.path-injecting sibling repos (pre-existing `Colossal_Cave/diffusion_manager.py` was vendored into `assets.py` for this reason). External *data* at standard system paths (Ollama models, diffusion weights) is fine.
 - **Visible Chromium, not headless.** The TUI default is `headless=False` so the user can watch the game. CLI keeps `--headless` for unattended runs.
 - **Asteroids is the canonical regression check.** Ship-direction (`vx = cos(angle)*speed`) and round-asteroid (must be irregular polygons, not perfect circles) are the failure pair to verify after any change to retrieval / prompts / patches.
-- **Never regenerate a pose/animation frame to "fix" a dead one — and never let a dead-sprite warning block shipping.** Both regen routes are dead ends, so suggesting either is always wrong: **img2img cannot change a pose** (Z-Image / SD-Turbo run at `guidance_scale=0`, so the frame stays locked to idle at every strength — proven A/B 2026-05-30, `animation_ab/`), and a **fresh txt2img replacement frame will not stay consistent** with the character already placed in the running game — and **consistency is the hard constraint**. (In the dojo-fight trace `…214215`, the txt2img path *still* returned near-idle `block` frames.) A near-identical-sprite finding is **cosmetic**: it is surfaced as an advisory `warning`, must never flip `report["ok"]` to False, and must never defer the user's actual gameplay feedback. Behavioral probes gate shipping; cosmetics inform. See user memory `feedback_sprite_animation_from_image.md`.
+- **Never regenerate a pose frame to “fix” a dead one — and never let a dead-sprite warning block
+  shipping.** img2img cannot change pose; txt2img replacement breaks consistency. Cosmetic findings
+  → advisory `warnings` only; behavioral probes gate shipping.
 - **Iterate autonomously.** Drive build/test/improve loops yourself; research-grounded techniques only.
-- **Do not reintroduce aggressive early cutoffs.** Changes to repetition / deliberation / timeout guards must be trace-backed and must preserve long first-build `<html_file>` completion (no premature guard aborts as the default behavior).
+- **Do not reintroduce aggressive early cutoffs.** Abort/repetition guards must latch on code emission,
+  not token count or length alone. Preserve long first-build `<html_file>` streams unless trace-backed.
 
 ---
 
 ## Things to avoid
 
-- Don't add features without first checking `tools.py` reports `ok=True` honestly. The harness signal must be right before adding more agent-loop machinery — see commit `044edf4` and `games/traces/using-great-graphics-that-you_…` for what happens when it isn't.
+- Don't add features without first checking `tools.py` reports `ok=True` honestly. Fix harness signal
+  before adding loop machinery.
 - Don't bypass `<patch>` once `best.html` exists. Full `<html_file>` rewrites on a working game are a regression-amplification risk.
 - Don't expand the system prompt with always-on rules that only matter sometimes. Use the per-format `FormatSpec.guidelines` (deduped) or a goal-keyword detector (`_detect_*_intent`) to make the rule conditional.
-- Don't tighten repetition/deliberation/timeout abort thresholds without concrete trace evidence and a regression run proving rich first-build streams are not cut mid-output.
-- **Don't tell the model to re-emit / regenerate pose frames, and don't gate `ok` on a dead-sprite warning.** This was a real unwinnable loop (trace `build-a-single-screen-2d-fight_20260531_214215`): a cosmetic img2img dead-sprite warning flipped `ok=False` every iteration, the prescribed "re-emit with `from_image` strength 0.55-0.65" fix is the *proven-broken* img2img path, and while `ok` stayed False the user's gameplay feedback was deferred — so **both qwen3.6-27B and Opus 4.8 corrected the code perfectly yet the harness never accepted the win.** `_apply_dead_animation_check_to_report` now routes the finding to the non-gating `warnings` channel and leaves `ok` alone. Do not reintroduce a regen suggestion (see the rule above) or a hard gate.
-- **Never defer, stage, or "split off" `<videos>` out of the first build to save time/context. Videos MUST be generated up front in the SAME build that needs them.** The game can only be properly tested with the real clips present: the muted-overlay cutscene path, `any-key skip`, and the `onended`/`onerror`/missing-file fallbacks that must "always continue" are only exercised when the MP4s actually exist and load. A build without its videos is an untestable build. Splitting OTHER work across turns is fine; the videos are not separable from the build that plays them. (Flagged after the 2026-06-13 dragons-lair-director trace review proposed deferring the 3 cutscene clips — that idea is wrong; do not suggest it again.)
+- Don't tighten repetition/deliberation/timeout abort thresholds without trace evidence proving
+  first-build streams aren't cut mid-output.
+- **Don't gate `ok` on dead-sprite warnings or suggest regenerating pose frames.** Cosmetic only;
+  `_apply_dead_animation_check_to_report` uses the non-gating `warnings` channel. img2img cannot
+  change pose; txt2img replacement breaks consistency — see standing rules above.
+- **Never defer `<videos>` out of the build that plays them.** Untestable without real MP4s on disk.
 - Don't commit generated artifacts. `.gitignore` excludes routine session outputs under `games/` (`*.html`, `*_assets/`, `*_sounds/`, traces, caches, `game-memory/`). **Exception:** TUI **`/goodgame`** copies the trio into `goodgame/` (tracked, not gitignored — no `git` commands from the agent). Legacy path: commit under `games/` + matching `!` negations (chess sample). `memory/playbook.jsonl` stays hand-curated. Use `scripts/clean_artifacts.sh` to wipe stale session artifacts.

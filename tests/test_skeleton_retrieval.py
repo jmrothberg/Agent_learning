@@ -81,6 +81,14 @@ def test_first_person_compound_picks_3d(tmp_path: Path) -> None:
     assert hit.name == "canvas_3d_basic.html"
 
 
+def test_voxel_picks_voxel_scaffold(tmp_path: Path) -> None:
+    """Voxel/Minecraft goals get the dedicated break/place scaffold, not generic 3D."""
+    hit = _gm(tmp_path).retrieve_skeleton(
+        "first-person voxel sandbox minecraft blocks break place"
+    )
+    assert hit.name == "canvas_voxel_minecraft_basic.html"
+
+
 def test_calculator_picks_dom(tmp_path: Path) -> None:
     """'calculator' is a DOM strong hook; no canvas keyword present so
     DOM scaffold wins."""

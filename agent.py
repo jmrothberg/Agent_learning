@@ -11150,6 +11150,8 @@ class GameAgent:
                     # todo #2: pass criteria so the harness can flag
                     # coverage gaps even on best-of-N candidate scoring.
                     criteria=self._criteria or None,
+                    goal=self._goal or "",
+                    visual_recipe_id=getattr(self, "_active_visual_playtest_recipe_id", None),
                 )
                 extra["report_ok"] = report.get("ok", False)
                 extra["report_summary"] = format_report_for_model(report)[:400]
@@ -16947,6 +16949,8 @@ class GameAgent:
                         # coverage gaps as a soft_warning (forces the model
                         # to add probes that actually test what it promised).
                         criteria=self._criteria or None,
+                        goal=self._goal or "",
+                        visual_recipe_id=getattr(self, "_active_visual_playtest_recipe_id", None),
                     )
                     harness_crash = None
                     break
@@ -19131,6 +19135,8 @@ class GameAgent:
                     probes=self._probes or None,
                     opening_book_recipes=getattr(self, "_active_opening_book_recipes", []),
                     criteria=self._criteria or None,
+                    goal=self._goal or "",
+                    visual_recipe_id=getattr(self, "_active_visual_playtest_recipe_id", None),
                 )
                 break
             except Exception as e:

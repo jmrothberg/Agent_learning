@@ -2037,6 +2037,30 @@ def format_micro_probes_for_model(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def pointclick_opening_book_applicable(
+    goal: str = "",
+    visual_recipe_id: str | None = None,
+) -> bool:
+    """True when the session is a point-and-click adventure, not e.g. voxel/FPS.
+
+    Opening-book playtest `pointclick-puzzle-chain` is hard-only for these goals.
+    Low Jaccard overlap can retrieve it on unrelated goals (voxel trace 20260622).
+    """
+    if visual_recipe_id == "canvas-point-and-click":
+        return True
+    gl = (goal or "").lower()
+    if "point-and-click" in gl or "point and click" in gl or "pointclick" in gl:
+        return True
+    if visual_recipe_id and "point-and-click" in str(visual_recipe_id):
+        return True
+    # Adventure + inventory/hotspot/scene — same shape as open-domain P&C tests.
+    if "adventure" in gl and any(
+        w in gl for w in ("inventory", "hotspot", "hotspots", "scene", "scenes", "monkey")
+    ):
+        return True
+    return False
+
+
 def test_html_file(path: str | Path, run_seconds: float = 3.0) -> dict[str, Any]:
     """Run an HTML file in headless Chromium and return a small report dict.
 
@@ -2725,6 +2749,8 @@ class LiveBrowser:
         screenshot_before_path: str | Path | None = None,
         screenshot_action_path: str | Path | None = None,
         criteria: str | None = None,
+        goal: str | None = None,
+        visual_recipe_id: str | None = None,
     ) -> dict[str, Any]:
         """Navigate to the file, let it run, return the report.
 
@@ -3141,6 +3167,8 @@ class LiveBrowser:
         report["opening_book_checks"] = await self._run_opening_book_recipes(
             path, opening_book_recipes or [], input_test=input_test,
             canvas_info=canvas_info, frozen=frozen,
+            goal=goal or "",
+            visual_recipe_id=visual_recipe_id,
         )
         for chk in report["opening_book_checks"]:
             if chk.get("ok") is False and chk.get("hard"):
@@ -4047,6 +4075,8 @@ class LiveBrowser:
         input_test: dict[str, Any],
         canvas_info: dict[str, Any] | None,
         frozen: bool | None,
+        goal: str = "",
+        visual_recipe_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Execute compact verified-memory recipes against the loaded page.
 
@@ -4134,6 +4164,15 @@ class LiveBrowser:
                     "err": "" if has_reset else "no obvious restart/reset hook found",
                 })
             elif rtype == "pointclick_puzzle_chain":
+                if not pointclick_opening_book_applicable(goal, visual_recipe_id):
+                    check.update({
+                        "ok": True,
+                        "skipped": True,
+                        "hard": False,
+                        "err": "not a point-and-click goal",
+                    })
+                    out.append(check)
+                    continue
                 result = await self._safe_eval("""
 (() => {
   const s = window.state || window.gameState || {};

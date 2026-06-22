@@ -28,7 +28,7 @@ one shared character description + fixed seed** for consistency — *not* img2im
 - [The verification harness](#the-verification-harness-the-core-lever) · [Assets & animation](#animation--consistency-is-the-hard-constraint)
 - [Memory / opening library](#memory--the-opening-library) · [TUI & CLI](#tui--cli-reference)
 - [Standalone asset tools](#standalone-asset-tools) · [Video cutscenes](#video-cutscenes--wan22-ti2v-5b-local) · [System tests](#system-tests--memory-hygiene)
-- [Standing rules](#standing-rules) · [Troubleshooting](#troubleshooting)
+- [Standing rules](#standing-rules) · [Troubleshooting](#troubleshooting) · [Other docs](#other-docs)
 
 ---
 
@@ -94,7 +94,7 @@ MiniMax-M3 (see above). Example weights: `pipenetwork/GLM-5.2-MLX-4bit`,
 `mlx-community/GLM-5.2-mxfp4` — needs a very large unified-memory Mac (~370–480 GB
 for 4-bit).
 
-**Tests** (pure-function, no model/Chromium; ~1 min, 1377 passing):
+**Tests** (pure-function; see `TEST.md`):
 ```bash
 .venv/bin/python -m pytest tests/ -q
 ```
@@ -171,15 +171,10 @@ Per-action frames are saved to the trace (`iter_NN_action_<Key>.png`) so each ac
 debuggable. **Advisory (never gates):** dead / near-identical sprite frames are *cosmetic*.
 
 ### The visual critic
-This is the mechanism behind the **`/vlm-critique`** review (the "with vision" one). It is the
-human-eyes check for "facing the wrong way / punch renders backward." qwen3.6 is a
-real VLM and sees screenshots, but three fixes were needed to make it useful:
-- It answers in reasoning prose, never `Qn: yes/no` → parse_rate 0 → dropped. **Fix:** prefill the
-  critic's assistant turn with `"Q1: "` to force the format (parser tolerates a doubled ordinal).
-- Abstain detection is anchored to "can't see the *image*" — a real finding ("I don't see a
-  projectile") must NOT be treated as blindness.
-- Per-question `fix_hints` surface only failed checks' advice (a blanket hint once made the model
-  flip a correctly-facing sprite → oscillation). The critic skips entirely on a non-VLM backend.
+Mechanism behind **`/vlm-critique`**: a local VLM answers a mechanism-keyed yes/no checklist against
+screenshots (facing, attack pose, etc.). Requires a VLM backend; skips on text-only models. The
+critic prefills `"Q1: "` for parseable output; abstains only on image blindness; per-question
+`fix_hints` for failed checks only. See `FOR_NEXT_LLM.md` for tuning traps.
 
 ---
 
@@ -188,13 +183,11 @@ real VLM and sees screenshots, but three fixes were needed to make it useful:
 A character that kicks/punches must be the **same** character across frames. That's the entire
 reason the asset pipeline exists, and it dictates two hard rules:
 
-- **img2img cannot change a pose** (Z-Image/SD-Turbo run at `guidance_scale=0` → locked to idle at
-  every strength; proven A/B in `animation_ab/`). `from_image` is recolor/restyle only.
-- **A fresh txt2img *replacement* frame breaks consistency** with the character already in the game.
-  So **never regenerate a pose frame to "fix" a dead/wrong one** — both routes are dead ends. A
-  near-identical/dead frame is **cosmetic**: surfaced as an advisory `warning`, it must never flip
-  `ok=False` or defer the user's gameplay feedback. (Trace `…214215` had this combo make both qwen
-  and a SOTA model "fail" while their code was correct. See `feedback_sprite_animation_from_image.md`.)
+- **img2img cannot change a pose** (Z-Image at `guidance_scale=0` → locked to idle). `from_image` is
+  recolor/restyle only.
+- **Fresh txt2img replacement breaks consistency** with art already in the game. **Never regenerate
+  a pose frame to “fix” a dead one.** Near-identical frames are **cosmetic** — advisory only; must
+  not flip `ok=False` or defer user gameplay feedback.
 
 At **plan time**, request all named pose frames as **txt2img with one shared character description +
 fixed seed**. In-session, cycle the frames you have and convey the action with the **sprite**, never
@@ -378,16 +371,28 @@ feature is a silent no-op — the model is told to ship without cutscenes. Skip 
 
 ## System tests & memory hygiene
 
+See **`TEST.md`** for the three-layer testing guide. Quick reference:
+
 ```bash
-python system_tests.py run --suite smoke --three-model      # visible, fast plumbing + move regressions
-python system_tests.py run --suite pacman --yes             # slow full Pac-Man build
-.venv/bin/python eval/eval_prompts_plan.py --coverage       # model-free memory coverage matrix
-.venv/bin/python eval/eval_prompts_plan.py                  # one planning turn per curated prompt
-.venv/bin/python scripts/forget_session.py --list           # memory hygiene
-./scripts/clean_artifacts.sh --yes                          # wipe stale per-session artifacts
+python system_tests.py run --suite smoke --three-model
+python system_tests.py run --suite pacman --yes
+.venv/bin/python eval/eval_prompts_plan.py --coverage
+.venv/bin/python eval/eval_prompts_plan.py
+.venv/bin/python scripts/forget_session.py --list
+./scripts/clean_artifacts.sh --yes
 ```
-The default battery is `memory/system_battery.jsonl` (committed); a local override at
-`games/system-tests/battery.jsonl` wins if present.
+Battery: `memory/system_battery.jsonl` (local override: `games/system-tests/battery.jsonl`).
+
+---
+
+## Other docs
+
+| File | Purpose |
+|------|---------|
+| `CLAUDE.md` | Commands, env vars, architecture summary — **also injected into the game agent** (6 KB cap) |
+| `TEST.md` | How to run and write tests |
+| `FOR_NEXT_LLM.md` | Tuning rules and mistake traps for agent work |
+| `HARNESS_DEBUG.md` | Gate reference and 5-grep trace debug workflow |
 
 ---
 
@@ -402,8 +407,8 @@ The default battery is `memory/system_battery.jsonl` (committed); a local overri
 6. **Asteroids is the canonical regression check** — ship direction (`vx = cos(angle)*speed`) and
    irregular-polygon asteroids must still pass after any retrieval/prompt/patch change.
 7. **Never silently call a cloud model** — cloud needs the user's key + explicit opt-in.
-8. **Don't tighten repetition/timeout aborts without trace evidence** — preserve long first-build
-   `<html_file>` completion.
+8. **Don't tighten repetition/timeout aborts without trace evidence** — latch on code emission, not
+   token count; preserve long first-build `<html_file>` completion.
 
 Don't-commit: routine session outputs under `games/` are gitignored (`*.html`, `*_assets/`, traces,
 caches). `memory/*.jsonl` is hand-curated.
@@ -419,7 +424,7 @@ caches). `memory/*.jsonl` is hand-curated.
 - **"Feedback doesn't stick" / patches fail with SEARCH-not-found:** compaction shredded the file view — check `num_ctx` (default 100K) and the `structured_compaction` trace events.
 - **Game shows colored boxes instead of art:** sprite-key mismatch — the `sprite()` resolver and `ASSETS_LOADED_BUT_UNDRAWN` gate now catch it; re-run.
 - **Model loops/truncates on big builds:** expected for a 27B; the MLX sampler passes `top_p`/`top_k` (vendor coding preset) to avoid the degenerate line-repeat. Judge harness signals from the trace, not always a finished game.
-- **Debugging a bad session:** see `HARNESS_DEBUG.md` (5-grep recipe) and `FOR_NEXT_LLM.md`.
+- **Debugging a bad session:** `HARNESS_DEBUG.md` (5-grep recipe). Tuning traps: `FOR_NEXT_LLM.md`.
 
 ---
 

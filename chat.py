@@ -5196,12 +5196,8 @@ class CodingBoxApp(App):
         )
 
     def _clear_staged_state(self) -> list[str]:
-        """Wipe sticky /new staging back to defaults. Returns a human log summary."""
+        """Wipe game staging for bare /new; model/backend slots stay sticky."""
         had_seed = self._next_seed
-        had_model = self._next_model
-        had_model2 = self._next_model2
-        had_model3 = self._next_model3
-        had_backend = self._next_backend
         had_iters = self._max_iters
         had_ctx = self._num_ctx
         had_restarts = self._restart_n
@@ -5209,14 +5205,6 @@ class CodingBoxApp(App):
         had_ref = self._staged_ref_image_name
         had_allroles = self._all_roles_enabled
         self._next_seed = None
-        self._next_model = None
-        self._next_backend = None
-        self._next_model2 = None
-        self._next_backend2 = None
-        self._next_role2 = None
-        self._next_model3 = None
-        self._next_backend3 = None
-        self._next_role3 = None
         self._staged_ref_image_bytes = None
         self._staged_ref_image_name = None
         self._max_iters = 6
@@ -5241,14 +5229,6 @@ class CodingBoxApp(App):
         bits: list[str] = []
         if had_seed is not None:
             bits.append(f"seed={had_seed}")
-        if had_model is not None:
-            bits.append(f"model={had_model}")
-        if had_model2 is not None:
-            bits.append(f"model2={had_model2}")
-        if had_model3 is not None:
-            bits.append(f"model3={had_model3}")
-        if had_backend is not None:
-            bits.append(f"backend={had_backend}")
         if had_iters != 6:
             bits.append(f"iters={had_iters}→6")
         if had_ctx != default_num_ctx():
@@ -5264,7 +5244,7 @@ class CodingBoxApp(App):
         return bits
 
     async def _fresh_start(self) -> None:
-        """One-shot clean slate: drop the finished session, clear staging, wait for a goal."""
+        """Drop the finished session, clear game staging, wait for the next goal."""
         bits = self._clear_staged_state()
         self.agent = None
         self._session_done = True
@@ -6029,6 +6009,15 @@ class CodingBoxApp(App):
                 source="/model staged (sticky)",
                 endpoint=backend_mod.ollama_endpoint_url(1),
             )
+        elif self._session_model and self._session_backend_info:
+            prev = self._session_backend_info
+            info = backend_mod.BackendInfo(
+                name=prev.name,
+                model=self._session_model,
+                source="previous session (sticky)",
+                endpoint=prev.endpoint,
+                context_length=prev.context_length,
+            )
         else:
             try:
                 info = backend_mod.detect_backend(self._next_backend)
@@ -6045,6 +6034,9 @@ class CodingBoxApp(App):
         self._session_backend_info = info
         model_name = info.model
         self._session_model = model_name
+        # Latch for the next /new — keeps the backend+model unless /load clears it.
+        self._next_backend = info.name
+        self._next_model = info.model
 
         # Resolve staged model2 and model3
         self._session_backend2 = None
