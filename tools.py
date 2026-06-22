@@ -4649,21 +4649,31 @@ class LiveBrowser:
 
             try:
                 await _induce_combat_before_recovery()
-                recheck_moved = await _recovery_leaves_move_again()
-                retry_moved: bool | None = None
-                if not recheck_moved:
-                    await asyncio.sleep(0.5)  # let a legit hit-stun timer expire
-                    retry_moved = await _recovery_leaves_move_again()
-                if control_not_recovered_verdict(
-                    has_position_state=has_position_state,
-                    moved_early=True,
-                    recheck_moved=recheck_moved,
-                    retry_moved=retry_moved,
-                ):
-                    control_not_recovered = {
-                        "key": recovery_key,
-                        "leaves": recovery_leaves,
-                    }
+                # Game-over after combat is expected — movement stops when
+                # lives hit 0 (Star Wars trace: 6/6 probes but CNR soft_warn).
+                _game_over_after_combat = await self._safe_eval(
+                    "(() => {"
+                    "const s = window.state || window.gameState;"
+                    "if (!s) return false;"
+                    "return !!(s.over || s.lives === 0);"
+                    "})()"
+                )
+                if not _game_over_after_combat:
+                    recheck_moved = await _recovery_leaves_move_again()
+                    retry_moved: bool | None = None
+                    if not recheck_moved:
+                        await asyncio.sleep(0.5)  # let a legit hit-stun timer expire
+                        retry_moved = await _recovery_leaves_move_again()
+                    if control_not_recovered_verdict(
+                        has_position_state=has_position_state,
+                        moved_early=True,
+                        recheck_moved=recheck_moved,
+                        retry_moved=retry_moved,
+                    ):
+                        control_not_recovered = {
+                            "key": recovery_key,
+                            "leaves": recovery_leaves,
+                        }
             except Exception:
                 pass  # browser hiccup — never block the report on the re-test
 

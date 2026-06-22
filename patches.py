@@ -960,6 +960,12 @@ class FormatRejection:
 
 # Standalone SEARCH/REPLACE markers (whole-line match required).
 _BARE_SEARCH_RE = re.compile(r"^[ \t]*<{5,}\s*SEARCH\s*$", re.MULTILINE | re.IGNORECASE)
+# Real <patch> block open — line-start tag, optional SEARCH on next line.
+# Ignores prose that quotes "<patch>" (Star Wars iter-2 false positive).
+_PATCH_BLOCK_OPEN_RE = re.compile(
+    r"^\s*<patch>\s*(?:\n\s*<{5,}\s*SEARCH)?",
+    re.MULTILINE | re.IGNORECASE,
+)
 _BARE_REPLACE_RE = re.compile(r"^[ \t]*>{5,}\s*REPLACE\s*$", re.MULTILINE | re.IGNORECASE)
 # A `<html>...</html>` element NOT wrapped in <html_file>. Used to catch
 # the "model emitted bare HTML element with no doctype" variant.
@@ -1096,7 +1102,7 @@ def classify_format_failure(reply: str) -> FormatRejection | None:
         )
 
     # 3. <patch> opened but never closed. Could be a stream stall.
-    if "<patch>" in low and "</patch>" not in low:
+    if _PATCH_BLOCK_OPEN_RE.search(reply) and "</patch>" not in low:
         return FormatRejection(
             kind="unclosed_patch",
             hint="Your <patch> block has no closing </patch>.",

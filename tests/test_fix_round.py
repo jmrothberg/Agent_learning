@@ -124,6 +124,22 @@ def test_load_and_test_gates_control_not_recovered():
     assert "timer" in excerpt.lower()
 
 
+def test_smoke_test_skips_control_recovery_when_game_over():
+    """After combat inducement, game-over (lives=0/over) is not a stun-lock."""
+    src = inspect.getsource(tools_module.LiveBrowser._input_smoke_test)
+    assert "_game_over_after_combat" in src
+    assert "s.over || s.lives === 0" in src
+
+
+def test_patch_first_prefill_on_user_feedback():
+    """First feedback fix turn uses patch prefill, not only after format stuck."""
+    agent_src = (Path(__file__).parent.parent / "agent.py").read_text()
+    idx = agent_src.index("patch_first_prefill")
+    chunk = agent_src[max(0, idx - 900): idx + 400]
+    assert "_last_drained_feedback" in chunk
+    assert '"had_feedback": _has_feedback' in chunk
+
+
 def test_snapshot_js_captures_short_string_leaves():
     js = tools_module._GAMESTATE_SNAPSHOT_JS
     assert "typeof obj === 'string'" in js

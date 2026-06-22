@@ -15570,15 +15570,26 @@ class GameAgent:
                             _wants_assets = bool(
                                 _route and _route.get("allow_assets_block")
                             )
+                            # User-feedback fix turns: commit to <patch>
+                            # immediately (Star Wars trace iter 2 burned 520s
+                            # on a diagnose essay; iter 3 with patch prefill
+                            # applied 6/6 patches in 286s).
+                            _has_feedback = bool(
+                                getattr(self, "_last_drained_feedback", None)
+                            )
                             if (
-                                self._format_stuck_streak >= 1
-                                and self._current_file
+                                self._current_file
                                 and not _wants_assets
+                                and (
+                                    self._format_stuck_streak >= 1
+                                    or _has_feedback
+                                )
                             ):
                                 reply_prefill = "<patch>\n<<<<<<< SEARCH\n"
                                 self._trace({
                                     "kind": "patch_first_prefill",
                                     "format_stuck_streak": self._format_stuck_streak,
+                                    "had_feedback": _has_feedback,
                                     "iteration": iteration,
                                 })
                             else:

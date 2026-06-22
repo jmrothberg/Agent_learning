@@ -181,6 +181,16 @@ def test_classify_unclosed_patch():
     assert rej.kind == "unclosed_patch"
 
 
+def test_classify_unclosed_patch_ignores_quoted_patch_in_prose():
+    """Star Wars iter-2: model quoted '<patch> blocks per reply' in reasoning."""
+    reply = (
+        "<diagnose>collision bug</diagnose>\n\n"
+        'The guidelines say "<patch> blocks per reply are allowed".\n'
+        "Let me plan the fix...\n"
+    )
+    assert classify_format_failure(reply) is None
+
+
 def test_classify_wrong_tag_html_instead_of_html_file():
     reply = (
         "<html>\n"
