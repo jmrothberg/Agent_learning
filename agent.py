@@ -2126,6 +2126,17 @@ class GameAgent:
         self._unhonored_asset_request: str | None = None
         self._asset_reprompt_count: int = 0
         self._feedback_deferred_last_turn: bool = False
+        # LLM Feedback Router (chess-trace fix 2026-06-22): a small LLM
+        # call interprets the pending user feedback batch into a routing
+        # decision (intent + honor-now + allow-assets) that OVERRIDES the
+        # brittle regex classifiers below when present. The regex helpers
+        # (`_feedback_is_art_change` etc.) stay as the offline / parse-fail
+        # fallback (see `_route_user_feedback_llm`). `_feedback_route` is
+        # the most-recent decision dict (or None); `_feedback_route_key`
+        # is the cache key (feedback-hash + asset-count + last_report_ok)
+        # so a re-flush in the same turn reuses it instead of re-calling.
+        self._feedback_route: dict | None = None
+        self._feedback_route_key: str | None = None
         # Most recent feedback batch consumed by _flush_user_injections.
         # Used to restore feedback if a stream fails before any assistant
         # reply lands (extension fallback / backend failure path).
@@ -6598,9 +6609,23 @@ class GameAgent:
         The queue is left intact so the exact feedback is applied after a clean
         report. Only explicit "ignore/ship anyway" style overrides are allowed
         through while a blocker is active.
+
+        Deferral reform (chess-trace fix 2026-06-22): the LLM router decides
+        timing FIRST. When it says `honor_user_now` (and not
+        `defer_behind_blocker`), do NOT defer — the chess trace deferred
+        "no new assets, just show the full screen the bottom row is cut off"
+        behind a stale blocker for three turns because the regex override
+        list didn't match "no new assets" / "cut off". The regex below stays
+        as the fallback when the router didn't run / failed to parse.
         """
         if not (self._pending_feedback and self._has_active_blocker()):
             return False
+        route = getattr(self, "_feedback_route", None)
+        if route is not None:
+            if route.get("defer_behind_blocker"):
+                return True
+            if route.get("honor_user_now", True):
+                return False
         joined = "\n".join(self._pending_feedback)
         return self._BLOCKER_OVERRIDE_RE.search(joined) is None
 
@@ -6756,6 +6781,215 @@ class GameAgent:
             "Treat that version as the baseline."
         )
 
+    # ---- LLM Feedback Router (chess-trace fix 2026-06-22) --------------
+    # Valid `primary_intent` values the router may return. Kept genre-free:
+    # they describe what the user wants DONE (code vs media vs ship), never
+    # a game type. The deterministic mapping in `_flush_user_injections`
+    # turns these into the existing directive paths.
+    _FEEDBACK_ROUTER_INTENTS = (
+        "code_fix",
+        "wire_existing_media",
+        "generate_new_assets",
+        "img2img_chain",
+        "style_rebrand",
+        "ui_feature",
+        "behavior_bug",
+        "ship_override",
+    )
+
+    @staticmethod
+    def _feedback_route_cache_key(
+        feedback_texts: list[str], asset_count: int, last_report_ok: bool | None,
+    ) -> str:
+        """Stable key so a re-flush in the same turn reuses the route.
+
+        Keyed on the joined feedback text + the session asset count + the
+        last report's ok flag — the three inputs that change the routing
+        decision. Same batch ⇒ same key ⇒ one LLM call per turn.
+        """
+        import hashlib as _hashlib
+        joined = "\u0001".join(feedback_texts)
+        raw = f"{joined}|{asset_count}|{last_report_ok}".encode("utf-8", "ignore")
+        return _hashlib.sha1(raw).hexdigest()[:16]
+
+    async def _route_user_feedback_llm(
+        self, feedback_texts: list[str],
+    ) -> dict | None:
+        """Interpret a pending user-feedback batch into a routing decision.
+
+        Returns a dict with keys (`primary_intent`, `honor_user_now`,
+        `allow_assets_block`, `allow_patch`, `defer_behind_blocker`,
+        `user_visible_issue`, `harness_blocker_ack`, `confidence`) or None
+        when the LLM is unavailable / the reply doesn't parse — in which
+        case `_flush_user_injections` falls back to the regex classifiers.
+
+        Design: LLM routes (nuanced intent), hard rules enforce output
+        shape elsewhere. This replaces regex-as-authority for the
+        art/code/media/defer decision so any natural phrasing ("no new
+        assets, just show the full screen", "Bug: row clipped") routes
+        correctly without magic words. See the chess trace
+        a-game-of-chess-player-vs-cpu_20260621_193434.
+        """
+        if not feedback_texts:
+            return None
+        backend = self.get_backend("architect")
+        if backend is None:
+            backend = self._backend
+        if backend is None:
+            return None
+        asset_names = list((self._session_assets or {}).keys())[:20]
+        prev = self._previous_report or {}
+        soft_warnings = [
+            str(w)[:120] for w in (prev.get("soft_warnings") or [])[:3]
+        ]
+        quarantined = list(getattr(self, "_quarantined_probe_names", []) or [])[:5]
+        unhonored = getattr(self, "_unhonored_asset_request", None)
+        joined_feedback = "\n- ".join(feedback_texts)
+        sys_prompt = (
+            "You route a user's feedback on a single-file HTML5 game to the "
+            "right action. The user's words are AUTHORITATIVE — never override "
+            "them. Decide ONLY routing/timing, then reply with ONE JSON object "
+            "and nothing else (no prose, no fences). Schema:\n"
+            "{\n"
+            '  "primary_intent": one of '
+            f"{list(self._FEEDBACK_ROUTER_INTENTS)},\n"
+            '  "honor_user_now": bool,   // address the user THIS turn (true '
+            "unless they explicitly said to wait)\n"
+            '  "allow_assets_block": bool,  // true ONLY if the user wants NEW '
+            "art generated (generate_new_assets / img2img_chain / style_rebrand)\n"
+            '  "allow_patch": bool,\n'
+            '  "defer_behind_blocker": bool,  // almost always false; true only '
+            "if the user said to fix the test/blocker first\n"
+            '  "user_visible_issue": short string or "",\n'
+            '  "harness_blocker_ack": short string or "",\n'
+            '  "confidence": 0..1\n'
+            "}\n"
+            "Rules: 'use/load/wire the existing sprites', 'show the full "
+            "screen', 'bottom row cut off', 'make the board bigger' are "
+            "code_fix or wire_existing_media with allow_assets_block=false. "
+            "'no new assets/images' MUST set allow_assets_block=false. Only an "
+            "explicit request for NEW or restyled art sets allow_assets_block=true."
+        )
+        user_msg = (
+            f"GAME GOAL: {(self._goal or '')[:200]}\n"
+            f"SESSION ASSETS ({len(asset_names)}): {', '.join(asset_names) or 'none'}\n"
+            f"LAST REPORT OK: {prev.get('ok')}\n"
+            f"TOP SOFT WARNINGS: {soft_warnings or 'none'}\n"
+            f"QUARANTINED PROBES: {quarantined or 'none'}\n"
+            f"OUTSTANDING ASSET REQUEST: {(unhonored or 'none')[:160]}\n"
+            "\nUSER FEEDBACK (verbatim):\n"
+            f"- {joined_feedback}\n"
+            "\nReply with the JSON object only."
+        )
+        messages = [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": user_msg},
+        ]
+        # Bounded like the format-doctor: a router that hangs would stall
+        # the feedback turn it is supposed to speed up.
+        router_stall = min(self.stall_seconds, 60.0)
+        router_overall = min(self.overall_seconds, 120.0)
+        self._trace({
+            "kind": "feedback_router_start",
+            "count": len(feedback_texts),
+            "preview": joined_feedback[:200],
+        })
+        try:
+            result = await backend.stream_chat(
+                messages,
+                on_token=None,
+                options={"temperature": 0.1, "num_ctx": self.num_ctx},
+                keep_alive=self._keep_alive_for_backend(backend),
+                stall_seconds=router_stall,
+                overall_seconds=router_overall,
+                max_retries=0,
+                cancel_event=self._ensure_stop_event(),
+            )
+            text = (getattr(result, "text", "") or "").strip()
+        except Exception as e:
+            self._trace_exception("feedback_router_error", e)
+            return None
+        route = self._parse_feedback_route_json(text)
+        if route is None:
+            self._trace({
+                "kind": "feedback_router_parse_failed",
+                "preview": text[:240],
+            })
+            return None
+        self._trace({"kind": "feedback_router_decision", **route})
+        return route
+
+    def _parse_feedback_route_json(self, text: str) -> dict | None:
+        """Extract + validate the router JSON object. Tolerant of fences
+        and surrounding prose; returns None on any malformed reply."""
+        if not text:
+            return None
+        import json as _json
+        candidate = text
+        # Strip code fences if the model wrapped the JSON.
+        fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+        if fence:
+            candidate = fence.group(1)
+        else:
+            brace = re.search(r"\{.*\}", text, re.DOTALL)
+            if brace:
+                candidate = brace.group(0)
+        try:
+            obj = _json.loads(candidate)
+        except Exception:
+            return None
+        if not isinstance(obj, dict):
+            return None
+        intent = str(obj.get("primary_intent", "")).strip()
+        if intent not in self._FEEDBACK_ROUTER_INTENTS:
+            return None
+
+        def _as_bool(v, default):
+            if isinstance(v, bool):
+                return v
+            if isinstance(v, str):
+                return v.strip().lower() in ("true", "1", "yes")
+            return default
+
+        return {
+            "primary_intent": intent,
+            "honor_user_now": _as_bool(obj.get("honor_user_now"), True),
+            "allow_assets_block": _as_bool(obj.get("allow_assets_block"), False),
+            "allow_patch": _as_bool(obj.get("allow_patch"), True),
+            "defer_behind_blocker": _as_bool(obj.get("defer_behind_blocker"), False),
+            "user_visible_issue": str(obj.get("user_visible_issue", ""))[:200],
+            "harness_blocker_ack": str(obj.get("harness_blocker_ack", ""))[:200],
+            "confidence": float(obj.get("confidence", 0.0))
+            if isinstance(obj.get("confidence"), (int, float)) else 0.0,
+        }
+
+    async def _precompute_feedback_route(self) -> None:
+        """Compute (and cache) the router decision for the pending batch.
+
+        Called from the async run loop just before a user-turn message is
+        assembled (the `_flush_user_injections` chokepoints). Cheap on a
+        cache hit. No-op when there is no pending feedback, when raw-feedback
+        mode is off-limits, or when directives have been auto-disabled after
+        repeated overrules (we honor the existing escape hatch).
+        """
+        feedback_texts = [
+            fb for fb in (self._pending_feedback or [])
+            if fb not in getattr(self, "_internal_feedback_texts", set())
+        ]
+        if not feedback_texts:
+            self._feedback_route = None
+            self._feedback_route_key = None
+            return
+        asset_count = len(self._session_assets or {})
+        key = self._feedback_route_cache_key(
+            feedback_texts, asset_count, self._previous_report_ok,
+        )
+        if key == self._feedback_route_key and self._feedback_route is not None:
+            return  # already routed this exact batch this turn
+        route = await self._route_user_feedback_llm(feedback_texts)
+        self._feedback_route = route
+        self._feedback_route_key = key if route is not None else None
+
     def _flush_user_injections(self, base_message: str) -> str:
         """Main router: drain queued user input, inject directives, and
         record the routing decisions consumed by `_stream` to emit one
@@ -6822,14 +7056,48 @@ class GameAgent:
         # asset/sound/video additions" notice classified as an art change
         # and fired 8 spurious ASSET GENERATION REQUIRED banners.
         _internal_texts = getattr(self, "_internal_feedback_texts", set())
-        _art_reqs = [
-            fb for fb in self._pending_feedback
-            if fb not in _internal_texts
-            and not _feedback_is_ui_feature(fb)
-            and not _feedback_is_behavior_bug(fb)
-            and not _feedback_requests_existing_media(fb)
-            and _feedback_is_art_change(fb, asset_names)
-        ]
+        # LLM router (chess-trace fix 2026-06-22): when the router ran, IT
+        # decides whether new art is wanted — `allow_assets_block`. This
+        # demotes the regex `_feedback_is_art_change` to a fallback used
+        # only when the router didn't run / failed to parse. The chess
+        # trace fired "ASSET GENERATION REQUIRED" against "no new assets,
+        # just show the full screen" because the regex saw the asset noun;
+        # the router returns code_fix + allow_assets_block=false there.
+        _route = getattr(self, "_feedback_route", None)
+        if _route is not None:
+            if _route.get("allow_assets_block"):
+                # Router confirms the user wants NEW art — arm the reprompt
+                # with the most recent genuine user feedback item.
+                _user_fb = [
+                    fb for fb in self._pending_feedback
+                    if fb not in _internal_texts
+                ]
+                _art_reqs = _user_fb[-1:] if _user_fb else []
+            else:
+                # Router says NO new art this batch. Clear any stale
+                # outstanding request the user has now contradicted
+                # (chess trace: attempt-3 reprompt still quoted the iter-2
+                # message after the user typed "no new assets").
+                _art_reqs = []
+                if _unhonored is not None:
+                    self._trace({
+                        "kind": "asset_reprompt_cleared_by_router",
+                        "request": str(_unhonored)[:200],
+                        "primary_intent": _route.get("primary_intent"),
+                    })
+                    _unhonored = None
+                    _reprompts = 0
+                    self._unhonored_asset_request = None
+                    self._asset_reprompt_count = 0
+        else:
+            _art_reqs = [
+                fb for fb in self._pending_feedback
+                if fb not in _internal_texts
+                and not _feedback_is_ui_feature(fb)
+                and not _feedback_is_behavior_bug(fb)
+                and not _feedback_requests_existing_media(fb)
+                and _feedback_is_art_change(fb, asset_names)
+            ]
         if _art_reqs:
             _unhonored = _art_reqs[-1]
             _reprompts = 0
@@ -7175,6 +7443,23 @@ class GameAgent:
             sound_change = _feedback_is_sound_change(joined, sound_names)
             ui_feature = _feedback_is_ui_feature(joined)
             existing_media_request = _feedback_requests_existing_media(joined)
+            # LLM router (chess-trace fix 2026-06-22): when the router ran and
+            # said the user does NOT want new art this batch, suppress the
+            # regex-driven MEDIA-CHANGE directive so the model isn't told to
+            # emit <assets> on a pure code/layout turn ("no new assets, just
+            # show the full screen"). Router routes; regex is the fallback.
+            _route = getattr(self, "_feedback_route", None)
+            if _route is not None and not _route.get("allow_assets_block"):
+                if art_change or sound_change:
+                    self._trace({
+                        "kind": "media_change_directive_suppressed",
+                        "reason": "router_no_new_assets",
+                        "primary_intent": _route.get("primary_intent"),
+                        "art_change": art_change,
+                        "sound_change": sound_change,
+                    })
+                art_change = False
+                sound_change = False
             # Phase 0.1 — when the user says BOTH "use the existing X" AND
             # "as a starting point" / "show them walking" / "more frames",
             # they want img2img CHAINING (new frames seeded from existing
@@ -10647,6 +10932,30 @@ class GameAgent:
                 "single line:variable responsible, then ONE <patch>...</patch> "
                 "or <html_file>...</html_file>. No preamble, no exploration."
             )
+        if getattr(result, "diagnose_bloat", False):
+            # Chess-trace fix: the model opened <diagnose> and never closed
+            # it (iter-2: 674 s of unclosed diagnose + probe JSON, no patch).
+            # Coach patch-first: a one-sentence diagnose, then commit to a
+            # <patch> immediately.
+            self._record(AgentEvent(
+                "info",
+                f"[yellow]diagnose-bloat detected[/yellow] — {result.tokens} "
+                "tokens inside an unclosed <diagnose> with no <patch>. "
+                "Aborted stream; coaching the model to close it and patch.",
+                {
+                    "stall_reason": "diagnose_bloat",
+                    "tokens": result.tokens,
+                    "duration_s": round(result.duration_s, 1),
+                },
+            ))
+            self._pending_coaching.append(
+                "Your last reply opened <diagnose> and never closed it — "
+                "aborted by the diagnose-bloat guard. This turn: write ONE "
+                "short sentence inside <diagnose>...</diagnose> (close the "
+                "tag!), then IMMEDIATELY emit ONE <patch>...</patch> against "
+                "the current file. Do not list probes, do not re-plan, do not "
+                "think out loud."
+            )
         if (result.stalled or result.crashed) and not result.text.strip():
             # Backend-aware recovery hint. "num_ctx" is Ollama-specific;
             # MLX has its own knobs (MLX_MAX_TOKENS, Metal wired-memory
@@ -11493,14 +11802,41 @@ class GameAgent:
         persistent harness warnings before formatting. Trace and any
         other consumers of the original `report` see full warnings;
         only the prompt-rendering path uses the compacted view.
+
+        Harness report slimming (chess-trace fix 2026-06-22): on a turn
+        that carries genuine USER feedback, drop the cosmetic ASSET SANITY
+        advisories from the non-gating `warnings` channel so the user's ask
+        isn't buried under harness narration (iter 2 had ~15.6K chars of
+        report text competing with the user's one-line layout request). The
+        advisory is non-gating, so `ok` is unaffected; the trace still keeps
+        the full report.
         """
         if not report:
             return format_report_for_model(report)
-        compacted = self._compact_warnings_for_prompt(
+        warnings = self._compact_warnings_for_prompt(
             report.get("warnings") or []
         )
+        # Genuine user feedback pending? (agent-internal notices excluded.)
+        _internal = getattr(self, "_internal_feedback_texts", set())
+        _user_pending = [
+            fb for fb in (getattr(self, "_pending_feedback", None) or [])
+            if fb not in _internal
+        ]
+        if _user_pending:
+            slimmed = [
+                w for w in warnings
+                if "ASSET SANITY" not in str(w)
+                and not str(w).startswith(_HARNESS_ADVISORY_SENTINEL)
+            ]
+            if len(slimmed) != len(warnings):
+                self._trace({
+                    "kind": "report_slimmed_for_feedback_turn",
+                    "dropped": len(warnings) - len(slimmed),
+                    "kept": len(slimmed),
+                })
+            warnings = slimmed
         rfp = dict(report)
-        rfp["warnings"] = compacted
+        rfp["warnings"] = warnings
         return format_report_for_model(rfp)
 
     # Generic, domain-neutral tokens that indicate the VLM note is
@@ -12901,6 +13237,29 @@ class GameAgent:
         if asset_specs and self._unhonored_asset_request is not None:
             self._unhonored_asset_request = None
             self._asset_reprompt_count = 0
+
+        # Router-vs-model overrule (chess-trace fix 2026-06-22): when the
+        # LLM router judged the user did NOT want new art this batch
+        # (allow_assets_block=false) but the coder emitted an <assets>
+        # block anyway on a mid-session turn, the model overruled the
+        # router. Record it via the SAME counter the scoped classifier
+        # uses — after the threshold this auto-disables directives (raw
+        # feedback) for the session, so a router that keeps mis-reading
+        # the user yields to the model rather than fighting it.
+        _route = getattr(self, "_feedback_route", None)
+        if (
+            asset_specs
+            and trigger != "phase_a"
+            and _route is not None
+            and not _route.get("allow_assets_block")
+        ):
+            self._record_classifier_overrule(
+                expected_mode=(
+                    "router:" + str(_route.get("primary_intent", "no_assets"))
+                ),
+                model_emitted="assets_block",
+                feedback_preview=str(_route.get("user_visible_issue", ""))[:200],
+            )
 
         # P1 (MK trace 20260528): on a seed restart with on-disk media,
         # SKIP phase_a generation entirely. The model can still emit
@@ -15095,6 +15454,10 @@ class GameAgent:
                 # the iter loop so the top-of-loop force_done check exits.
                 if self._user_force_done:
                     continue
+                # LLM router (chess-trace fix): route the feedback the user
+                # typed during the pause BEFORE flushing it, so the deferral
+                # / asset decisions inside _flush_user_injections see it.
+                await self._precompute_feedback_route()
                 if self.has_pending_user_input() and not self._feedback_deferred_last_turn:
                     if self._messages and self._messages[-1].get("role") == "user":
                         base = self._messages.pop()["content"]
@@ -15193,9 +15556,33 @@ class GameAgent:
                         reply_prefill = ""
                         prefill_force = False
                         if self._use_prefill and self._fix_mode:
-                            # No trailing newline — Anthropic 400s on final
-                            # assistant whitespace; backend also rstrip()s.
-                            reply_prefill = "<diagnose>"
+                            # Patch-first recovery (chess-trace iter 4/5 fix):
+                            # after a prior format failure (prose essay /
+                            # unclosed_patch that yielded no usable code), skip
+                            # the <diagnose> essay and prefill straight into a
+                            # <patch> so the model commits to an edit instead
+                            # of rambling. Only when there is a file to patch
+                            # AND the router did not ask for new art (which
+                            # needs an <assets> block, not a patch).
+                            _route = getattr(self, "_feedback_route", None)
+                            _wants_assets = bool(
+                                _route and _route.get("allow_assets_block")
+                            )
+                            if (
+                                self._format_stuck_streak >= 1
+                                and self._current_file
+                                and not _wants_assets
+                            ):
+                                reply_prefill = "<patch>\n<<<<<<< SEARCH\n"
+                                self._trace({
+                                    "kind": "patch_first_prefill",
+                                    "format_stuck_streak": self._format_stuck_streak,
+                                    "iteration": iteration,
+                                })
+                            else:
+                                # No trailing newline — Anthropic 400s on final
+                                # assistant whitespace; backend also rstrip()s.
+                                reply_prefill = "<diagnose>"
                         elif (not self._current_file) and self._force_first_build_prefill:
                             # First-build rescue after a no-code turn.
                             reply_prefill = "<html_file>\n<!DOCTYPE html>\n"
@@ -17645,6 +18032,10 @@ class GameAgent:
                 self._force_question_subsystem = None
 
             # ---- build next user turn ---------------------------------
+            # LLM router (chess-trace fix): route any feedback the user typed
+            # during this iter's stream/test BEFORE the next-turn assembly
+            # consumes it, so deferral / asset decisions see the decision.
+            await self._precompute_feedback_route()
             notice = self._consumed_feedback_summary()
             if notice:
                 yield self._record(AgentEvent("info", notice))

@@ -53,6 +53,7 @@ import ollama
 from ollama_io import (
     Candidate,
     DeliberationDetector,
+    DiagnoseBloatDetector,
     RepetitionDetector,
     StreamResult,
     _should_grace_inline_data_bloat,
@@ -819,6 +820,9 @@ class MLXBackend(Backend):
         # A2: shared deliberation detector for unique-text reasoning loops.
         delib = DeliberationDetector()
         deliberated = False
+        # Diagnose-bloat guard (chess-trace fix): abort an unclosed <diagnose>.
+        diag = DiagnoseBloatDetector()
+        diagnose_bloat = False
         loop_grace_used = False
         loop_grace_reason: str | None = None
 
@@ -1247,6 +1251,11 @@ class MLXBackend(Backend):
                     stall_at = n_tokens
                     worker_cancel.set()
                     break
+                if diag.feed(piece):
+                    diagnose_bloat = True
+                    stall_at = n_tokens
+                    worker_cancel.set()
+                    break
         except asyncio.CancelledError:
             # Caller (agent's task) was cancelled. Stop the worker and
             # re-raise so the agent's run-loop unwinds cleanly.
@@ -1257,7 +1266,7 @@ class MLXBackend(Backend):
             text="".join(parts),
             tokens=n_tokens,
             duration_s=time.monotonic() - started,
-            stalled=stalled or looped or deliberated or silent,
+            stalled=stalled or looped or deliberated or silent or diagnose_bloat,
             stall_at_token=stall_at,
             looped=looped,
             deliberated=deliberated,
@@ -1269,6 +1278,7 @@ class MLXBackend(Backend):
             loop_grace_used=loop_grace_used,
             loop_grace_reason=loop_grace_reason,
             silent=silent,
+            diagnose_bloat=diagnose_bloat,
         )
 
     async def is_vlm(self) -> bool:

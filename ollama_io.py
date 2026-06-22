@@ -663,6 +663,74 @@ class DeliberationDetector:
         return False
 
 
+class DiagnoseBloatDetector:
+    """Abort a fix-turn stream whose `<diagnose>` block never closes.
+
+    `DeliberationDetector` latches the moment ANY output tag appears —
+    including `<diagnose>` — so it CANNOT catch a stream that opens
+    `<diagnose>` then rambles for tens of thousands of chars without ever
+    emitting `</diagnose>` or moving on to `<patch>`/`<html_file>`. That is
+    exactly the chess-trace iter-2 failure (674 s, 6707 tokens, an unclosed
+    `<diagnose>` + probe-JSON loop, no usable patch — see
+    a-game-of-chess-player-vs-cpu_20260621_193434).
+
+    Fix-turn-only and genre-free by construction: it ARMS only after a
+    `<diagnose>` opener is seen (first builds emit `<html_file>`, never
+    `<diagnose>` — so a long legitimate first build is never touched), and
+    it DISARMS the moment `</diagnose>` closes OR a `<patch>`/`<html_file>`
+    opener appears (the model committed to code — honoring the standing
+    rule "latch on code-emission, not length"). Budget is in CHARS for the
+    same backend-agnostic reason as `DeliberationDetector`. Disable with
+    DISABLE_DIAGNOSE_BLOAT_DETECTOR=1.
+    """
+
+    __slots__ = (
+        "_armed", "_disarmed", "_chars_since_open", "_carry",
+        "_budget", "_disabled", "stall_reason",
+    )
+
+    def __init__(self, budget_chars: int = 2400) -> None:
+        import os as _os
+        self._armed = False
+        self._disarmed = False
+        self._chars_since_open = 0
+        # ~12-char carry so a tag split across two streamed pieces
+        # ("<diag" + "nose>") still matches.
+        self._carry = ""
+        self._budget = budget_chars
+        self._disabled = (
+            _os.environ.get("DISABLE_DIAGNOSE_BLOAT_DETECTOR") == "1"
+        )
+        self.stall_reason: str | None = None
+
+    def feed(self, piece: str) -> bool:
+        if self._disabled or self._disarmed:
+            return False
+        window = self._carry + piece
+        if not self._armed:
+            if "<diagnose>" in window:
+                self._armed = True
+                idx = window.rfind("<diagnose>") + len("<diagnose>")
+                self._chars_since_open = max(0, len(window) - idx)
+            self._carry = window[-12:]
+            return False
+        # Armed: disarm on a close OR on committing to code output.
+        if (
+            "</diagnose>" in window
+            or "<patch>" in window
+            or "<html_file>" in window
+        ):
+            self._disarmed = True
+            self._carry = window[-12:]
+            return False
+        self._chars_since_open += len(piece)
+        self._carry = window[-12:]
+        if self._chars_since_open >= self._budget:
+            self.stall_reason = "diagnose_bloat"
+            return True
+        return False
+
+
 @dataclass
 class StreamResult:
     """What stream_chat returns when it completes (or stalls)."""
@@ -734,6 +802,12 @@ class StreamResult:
     # standalone field so the agent can route to a specific recovery
     # ("emit a tag immediately, skip the reasoning preamble").
     silent: bool = False
+    # Diagnose-bloat signal (chess-trace fix 2026-06-22): the model opened
+    # <diagnose> and never closed it within the char budget, nor moved on
+    # to <patch>/<html_file> — the iter-2 unclosed-diagnose runaway. Folded
+    # into `stalled`; standalone field routes the agent to patch-first
+    # coaching instead of a generic retry.
+    diagnose_bloat: bool = False
 
 
 async def stream_chat(
@@ -778,6 +852,9 @@ async def stream_chat(
     # only reasoning paragraphs with no output tag for too long.
     delib = DeliberationDetector()
     deliberated = False
+    # Diagnose-bloat guard (chess-trace fix): abort an unclosed <diagnose>.
+    diag = DiagnoseBloatDetector()
+    diagnose_bloat = False
     loop_grace_used = False
     loop_grace_reason: str | None = None
     # Silent-stream guard. The DeliberationDetector and RepetitionDetector
@@ -874,6 +951,12 @@ async def stream_chat(
                 deliberated = True
                 stall_at = n_tokens
                 break
+
+            # ---- diagnose-bloat detector ----------------------------
+            if diag.feed(piece):
+                diagnose_bloat = True
+                stall_at = n_tokens
+                break
     finally:
         # Best-effort close in both branches. Ollama's AsyncStream exposes
         # .aclose() in newer versions; older versions don't, hence the guard.
@@ -892,7 +975,7 @@ async def stream_chat(
         # for back-compat with callers that only check `.stalled`. Each
         # specific cause is also exposed as its own boolean so the agent
         # can route to a tailored recovery message.
-        stalled=stalled or looped or deliberated or silent,
+        stalled=stalled or looped or deliberated or silent or diagnose_bloat,
         stall_at_token=stall_at,
         looped=looped,
         deliberated=deliberated,
@@ -903,6 +986,7 @@ async def stream_chat(
         loop_grace_used=loop_grace_used,
         loop_grace_reason=loop_grace_reason,
         silent=silent,
+        diagnose_bloat=diagnose_bloat,
     )
 
 

@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Vector Wireframe</title>
+<style>
+  html,body { margin:0; background:#000; overflow:hidden; color:#0f0; font:14px monospace; }
+  #wrap { position:fixed; inset:0; display:grid; place-items:center; }
+  canvas { display:block; background:#000; }
+  #hud { position:fixed; top:8px; left:8px; pointer-events:none; }
+</style></head>
+<body>
+<div id="wrap"><canvas id="c" width="800" height="600"></canvas></div>
+<div id="hud">Score: <span id="score">0</span></div>
+<script>
+(() => {
+  "use strict";
+  const W = 800, H = 600, cx = W / 2, cy = H * 0.55, fov = 420;
+  const cvs = document.getElementById("c");
+  const ctx = cvs.getContext("2d");
+  const state = {
+    player: { x: 0, z: 0, yaw: 0 },
+    score: 0, lives: 3, over: false,
+    bullets: [],
+  };
+  window.state = state;
+  window.game = { reset() { state.player = { x: 0, z: 0, yaw: 0 }; state.score = 0; state.lives = 3; state.over = false; state.bullets = []; } };
+
+  const keys = {};
+  addEventListener("keydown", e => { keys[e.code] = true; if (e.code === "KeyR") window.game.reset(); });
+  addEventListener("keyup", e => { keys[e.code] = false; });
+
+  function project(x, y, z, yaw) {
+    const dx = x - state.player.x, dz = z - state.player.z;
+    const c = Math.cos(-yaw), s = Math.sin(-yaw);
+    const rx = dx * c - dz * s, rz = dx * s + dz * c;
+    if (rz <= 0.1) return null;
+    return { x: cx + (rx / rz) * fov, y: cy - (y / rz) * fov, rz };
+  }
+
+  function strokeSeg(a, b, yaw, color = "#0f0") {
+    const p1 = project(a.x, a.y, a.z, yaw), p2 = project(b.x, b.y, b.z, yaw);
+    if (!p1 || !p2) return;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(p1.x, p1.y);
+    ctx.lineTo(p2.x, p2.y);
+    ctx.stroke();
+  }
+
+  function update(dt) {
+    if (state.over) return;
+    if (keys.ArrowLeft) state.player.yaw -= 1.8 * dt;
+    if (keys.ArrowRight) state.player.yaw += 1.8 * dt;
+    if (keys.ArrowUp) { state.player.x += Math.sin(state.player.yaw) * 60 * dt; state.player.z += Math.cos(state.player.yaw) * 60 * dt; }
+    if (keys.ArrowDown) { state.player.x -= Math.sin(state.player.yaw) * 60 * dt; state.player.z -= Math.cos(state.player.yaw) * 60 * dt; }
+  }
+
+  function draw() {
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, W, H);
+    const yaw = state.player.yaw;
+    // Sample wireframe cube ahead of the camera
+    const s = 40, z0 = 120, x0 = 0, y0 = 0;
+    const corners = [
+      {x:x0-s,y:y0-s,z:z0},{x:x0+s,y:y0-s,z:z0},{x:x0+s,y:y0+s,z:z0},{x:x0-s,y:y0+s,z:z0},
+      {x:x0-s,y:y0-s,z:z0+s*2},{x:x0+s,y:y0-s,z:z0+s*2},{x:x0+s,y:y0+s,z:z0+s*2},{x:x0-s,y:y0+s,z:z0+s*2},
+    ];
+    const edges = [[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]];
+    for (const [i,j] of edges) strokeSeg(corners[i], corners[j], yaw);
+    // Crosshair
+    ctx.strokeStyle = "#0f0";
+    ctx.beginPath();
+    ctx.moveTo(cx - 8, cy); ctx.lineTo(cx + 8, cy);
+    ctx.moveTo(cx, cy - 8); ctx.lineTo(cx, cy + 8);
+    ctx.stroke();
+    document.getElementById("score").textContent = state.score;
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    update(dt);
+    draw();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body></html>

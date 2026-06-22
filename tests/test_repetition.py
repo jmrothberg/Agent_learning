@@ -535,3 +535,62 @@ def test_deliberation_doesnt_drop_below_zero_on_stray_close():
     assert d._think_depth == 0
     d.feed("<think>")
     assert d._think_depth == 1
+
+
+# ---------------------------------------------------------------------------
+# DiagnoseBloatDetector (chess-trace fix 2026-06-22)
+# ---------------------------------------------------------------------------
+
+
+def test_diagnose_bloat_aborts_unclosed_diagnose():
+    """An opened <diagnose> that never closes (the iter-2 674s runaway)
+    aborts once the char budget is exceeded."""
+    d = ollama_io.DiagnoseBloatDetector(budget_chars=200)
+    assert d.feed("<diagnose>") is False
+    fired = False
+    for _ in range(50):
+        if d.feed("rambling analysis without any conclusion or tag "):
+            fired = True
+            break
+    assert fired, "unclosed <diagnose> must abort past the budget"
+    assert d.stall_reason == "diagnose_bloat"
+
+
+def test_diagnose_bloat_disarms_on_close():
+    """A normal short <diagnose>...</diagnose> never fires."""
+    d = ollama_io.DiagnoseBloatDetector(budget_chars=200)
+    d.feed("<diagnose>")
+    assert d.feed("line 42: vx uses sin not cos </diagnose>") is False
+    # Even a long subsequent ramble can't re-arm it.
+    for _ in range(50):
+        assert d.feed("now writing a long patch body " * 3) is False
+
+
+def test_diagnose_bloat_disarms_on_patch_commit():
+    """Opening <patch> after <diagnose> (committing to code) disarms the
+    guard — honors 'latch on code-emission, not length'."""
+    d = ollama_io.DiagnoseBloatDetector(budget_chars=200)
+    d.feed("<diagnose>")
+    assert d.feed("short reason then <patch>\n<<<<<<< SEARCH\n") is False
+    for _ in range(50):
+        assert d.feed("a" * 100) is False
+
+
+def test_diagnose_bloat_never_arms_without_diagnose():
+    """A long first-build <html_file> stream never trips this guard."""
+    d = ollama_io.DiagnoseBloatDetector(budget_chars=200)
+    for _ in range(100):
+        assert d.feed("<!DOCTYPE html><script>const x = 1;</script> " * 2) is False
+
+
+def test_diagnose_bloat_tag_split_across_pieces():
+    """`<diagnose>` split across two streamed pieces still arms."""
+    d = ollama_io.DiagnoseBloatDetector(budget_chars=100)
+    d.feed("<diag")
+    d.feed("nose>")
+    fired = False
+    for _ in range(40):
+        if d.feed("more more more more more "):
+            fired = True
+            break
+    assert fired

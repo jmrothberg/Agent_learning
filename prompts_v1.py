@@ -1062,6 +1062,60 @@ def _detect_art_intent(goal: str) -> list[str]:
     return out
 
 
+# Vector wireframe arcade (Battlezone / Star Wars / Asteroids line-art).
+# Suppresses false art/3D nudges from "line art" and "first-person".
+_WIREFRAME_VECTOR_PHRASES = frozenset({"vector line", "line art"})
+
+
+def _detect_wireframe_vector_intent(goal: str) -> list[str]:
+    """Return wireframe-vector modality keywords found in `goal`."""
+    if not goal:
+        return []
+    import re
+    gl = goal.lower()
+    out: list[str] = []
+    seen: set[str] = set()
+    if "wireframe" in gl:
+        seen.add("wireframe")
+        out.append("wireframe")
+    words = re.findall(r"[a-zA-Z]+", gl)
+    for i in range(len(words) - 1):
+        j = words[i] + " " + words[i + 1]
+        if j in _WIREFRAME_VECTOR_PHRASES and j not in seen:
+            seen.add(j)
+            out.append(j.replace(" ", "-"))
+    if "line art" in gl and "vector" in gl and "vector-line-art" not in seen:
+        out.append("vector-line-art")
+    return out
+
+
+def _perspective_wireframe_nudge_needed(goal: str) -> bool:
+    """Perspective projection nudge for FPS-style wireframe, not top-down."""
+    gl = goal.lower()
+    if "wireframe" in gl:
+        return True
+    for phrase in ("first-person", "first person", "trench", "cockpit", "tank"):
+        if phrase in gl:
+            return True
+    return False
+
+
+def _detect_beat_em_up_intent(goal: str) -> list[str]:
+    """Side-scroll beat-em-up modality (not 1v1 fighters). Genre-free tokens."""
+    gl = goal.lower()
+    out: list[str] = []
+    seen: set[str] = set()
+    for tok in (
+        "beat-em-up", "beatemup", "brawler", "side-scroll", "side-scrolling",
+        "sidescroll", "scrolling", "waves", "floor", "boss",
+    ):
+        if tok in gl.replace("_", "-") or tok.replace("-", " ") in gl:
+            if tok not in seen:
+                seen.add(tok)
+                out.append(tok)
+    return out
+
+
 # Phase 0.8 — single-token keywords that, alone, signal the user wants
 # more than one frame per visual entity (walk cycles, idle bobs, attack
 # sequences, multi-state animations). Combined with `_MULTI_FRAME_PHRASES`
@@ -1229,13 +1283,17 @@ def plan_instruction(
         # media on disk and re-emitting <assets> wastes generator time
         # AND can wipe the user's existing art if a name collides.
         art_keywords = ()
-        threed_keywords = _detect_3d_intent(goal)
+        wireframe_keywords = _detect_wireframe_vector_intent(goal)
+        beat_em_up_keywords = _detect_beat_em_up_intent(goal)
+        threed_keywords = () if wireframe_keywords else _detect_3d_intent(goal)
         audio_keywords = ()
         video_keywords = ()
         qte_keywords = _detect_qte_intent(goal)
     else:
-        art_keywords = _detect_art_intent(goal)
-        threed_keywords = _detect_3d_intent(goal)
+        wireframe_keywords = _detect_wireframe_vector_intent(goal)
+        beat_em_up_keywords = _detect_beat_em_up_intent(goal)
+        art_keywords = () if wireframe_keywords else _detect_art_intent(goal)
+        threed_keywords = () if wireframe_keywords else _detect_3d_intent(goal)
         audio_keywords = _detect_audio_intent(goal)
         video_keywords = _detect_video_intent(goal)
         qte_keywords = _detect_qte_intent(goal)
@@ -1284,7 +1342,38 @@ def plan_instruction(
             "ONLY hand-roll a raycaster if the goal explicitly says "
             "\"raycaster from scratch\" or \"no libraries\". Otherwise "
             "use the library.\n"
+            )
+
+    beat_em_up_nudge = ""
+    if beat_em_up_keywords:
+        kws = ", ".join(repr(k) for k in beat_em_up_keywords)
+        beat_em_up_nudge = (
+            "\n\nBEAT-EM-UP INTENT DETECTED — your goal mentions "
+            f"{kws}. Build a side-scrolling brawler with ONE hero, "
+            "camera-follow, and enemies[] spawning from off-screen — "
+            "NOT a 1v1 two-fighter duel state machine. Walk left/right, "
+            "punch/kick waves, optional floor boss.\n"
         )
+
+    wireframe_nudge = ""
+    if wireframe_keywords:
+        kws = ", ".join(repr(k) for k in wireframe_keywords)
+        if _perspective_wireframe_nudge_needed(goal):
+            wireframe_nudge = (
+                "\n\nWIREFRAME VECTOR INTENT DETECTED — your goal mentions "
+                f"{kws}. Render with 2D canvas beginPath/moveTo/lineTo/stroke "
+                "ONLY — do NOT import three.js/WebGL and do NOT emit <assets>. "
+                "Project world (x,y,z) to screen: rotate to camera yaw, divide "
+                "by rz, sort segments back-to-front (painter's algorithm). "
+                "Glowing vector lines on a black background.\n"
+            )
+        else:
+            wireframe_nudge = (
+                "\n\nVECTOR LINE ART INTENT DETECTED — your goal mentions "
+                f"{kws}. Draw with 2D canvas stroke/line APIs only — do NOT "
+                "emit <assets> or import three.js. Clean glowing vector lines "
+                "on black.\n"
+            )
 
     # `audio_keywords` is also set up top so from_seed suppression sticks.
     audio_nudge = ""
@@ -1558,7 +1647,8 @@ def plan_instruction(
         )
 
     body = (
-        PLAN_INSTRUCTION + art_nudge + threed_nudge + audio_nudge
+        PLAN_INSTRUCTION + art_nudge + threed_nudge + wireframe_nudge
+        + beat_em_up_nudge + audio_nudge
         + video_nudge
         + qte_nudge
         + scope_nudge + multi_frame_nudge + minimal_nudge + seed_nudge

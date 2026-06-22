@@ -384,6 +384,39 @@ def expects_game_controls(*texts: str) -> bool:
     return False
 
 
+# NARROW keyboard-only keyword set (chess-trace fix 2026-06-22). Distinct
+# from `_GAME_CONTROL_KEYWORDS`, which includes pointer-compatible verbs
+# like "move"/"walk" that a CLICK game ("click to move the piece") also
+# uses. These tokens specifically name KEYBOARD input, so their ABSENCE —
+# together with mouse/pointer listeners and no keyboard listeners — is
+# strong evidence the game is click-primary and a synthetic keyboard
+# input_responsive failure is a false positive. Genre-free: input
+# modality, not subject matter.
+_KEYBOARD_ONLY_KEYWORDS = frozenset({
+    "arrow", "arrows",
+    "arrowleft", "arrowright", "arrowup", "arrowdown",
+    "wasd", "key", "keys", "keyboard", "keypress", "keydown",
+    "spacebar", "space", "press", "pressed",
+})
+
+
+def expects_keyboard_controls(*texts: str) -> bool:
+    """True when any supplied text names KEYBOARD input specifically.
+
+    Narrower than `expects_game_controls` — used to decide whether a
+    synthetic keyboard input_responsive failure on a click-primary game
+    (mouse listeners present, no keyboard listeners) should gate `ok`.
+    """
+    pattern = re.compile(r"[a-zA-Z]+")
+    for text in texts:
+        if not text:
+            continue
+        for m in pattern.finditer(text):
+            if m.group(0).lower() in _KEYBOARD_ONLY_KEYWORDS:
+                return True
+    return False
+
+
 # KeyboardEvent.code tokens a game might bind. Matched STRICTLY (so prose
 # "press F" does NOT false-press an unrelated key) — the system prompt and
 # won-skeletons instruct models to write `event.code` tokens in <criteria>.
@@ -659,6 +692,12 @@ def _run_strict_file_runtime_check(path: Path, run_seconds: float = 1.2) -> dict
 _INSTRUMENTATION_JS = """
 window.__rafRan = false;
 window.__listenerCount = { document: 0, window: 0, body: 0, other: 0 };
+// Event-TYPE tally (chess-trace fix 2026-06-22): lets the harness tell a
+// click/pointer-primary game (chess, board games, point-and-click) from a
+// keyboard game, so a synthetic KEYBOARD input_responsive failure can be
+// downgraded to a non-gating warning when the game never wired keyboard
+// input. Genre-free — it keys on the INPUT MODALITY the page registered.
+window.__listenerTypes = { key: 0, mouse: 0, pointer: 0, touch: 0 };
 
 const _origRAF = window.requestAnimationFrame;
 window.requestAnimationFrame = function(cb) {
@@ -673,6 +712,14 @@ EventTarget.prototype.addEventListener = function(type, ...rest) {
         else if (this === window) window.__listenerCount.window++;
         else if (document.body && this === document.body) window.__listenerCount.body++;
         else window.__listenerCount.other++;
+        const _t = (type || '').toLowerCase();
+        if (_t.indexOf('key') === 0) window.__listenerTypes.key++;
+        else if (_t.indexOf('pointer') === 0) window.__listenerTypes.pointer++;
+        else if (_t.indexOf('touch') === 0) window.__listenerTypes.touch++;
+        else if (_t.indexOf('mouse') === 0 || _t === 'click'
+                 || _t === 'dblclick' || _t === 'contextmenu' || _t === 'wheel') {
+            window.__listenerTypes.mouse++;
+        }
     } catch (e) { /* ignore - some targets are exotic */ }
     return _origAdd.call(this, type, ...rest);
 };
@@ -3552,6 +3599,35 @@ class LiveBrowser:
             # input and the input is broken, regardless of whether a
             # restart button happens to exist.
             controls_expected = expects_game_controls(criteria or "")
+            # Click-primary softening (chess-trace fix 2026-06-22): the
+            # harness presses KEYBOARD keys. A chess / board / point-and-
+            # click game wires mouse/pointer handlers and no keyboard
+            # handler, so the keyboard test correctly finds "no change" —
+            # but that is NOT a broken control, it is the wrong modality.
+            # When the page registered mouse/pointer listeners, registered
+            # NO keyboard listeners, and the criteria don't name keyboard
+            # input, downgrade the synthetic probe to a non-gating warning
+            # so the false positive can't pin ok=False for the whole
+            # session (chess trace iters 1-5). Structural + genre-free;
+            # works as a fallback even when the LLM router is unavailable.
+            try:
+                _ltypes = await self._safe_eval(
+                    "window.__listenerTypes || null"
+                )
+            except Exception:
+                _ltypes = None
+            _ltypes = _ltypes if isinstance(_ltypes, dict) else {}
+            _mouse_listeners = (
+                int(_ltypes.get("mouse", 0) or 0)
+                + int(_ltypes.get("pointer", 0) or 0)
+                + int(_ltypes.get("touch", 0) or 0)
+            ) > 0
+            _keyboard_listeners = int(_ltypes.get("key", 0) or 0) > 0
+            click_primary = (
+                _mouse_listeners
+                and not _keyboard_listeners
+                and not expects_keyboard_controls(criteria or "")
+            )
             # Item 3, trace build-a-donkey-kong-clone-in-o_20260514_214747:
             # the model's code had window.addEventListener + e.code +
             # e.preventDefault, and report showed `Input listeners:
@@ -3573,7 +3649,18 @@ class LiveBrowser:
                 listeners_present and raf_ran
                 and canvas_info and canvas_info.get("blank") is False
             )
-            if not has_clickable or controls_expected:
+            if click_primary:
+                # Click/pointer-primary game tested with the keyboard —
+                # non-gating warning, not a soft_warning / synthetic probe.
+                report["warnings"].append(
+                    f"Note: keyboard test pressed {keys_str} with no canvas "
+                    "change, but the page registered mouse/pointer listeners "
+                    "and NO keyboard listeners (and the criteria don't name "
+                    "keyboard input) — treating as click/pointer-primary, not "
+                    "a broken keyboard control."
+                )
+                report["input_modality"] = "click_primary"
+            elif not has_clickable or controls_expected:
                 if handler_present_but_no_visible_change:
                     # Listeners + RAF + non-blank canvas, but keys
                     # don't move pixels: the wiring exists, the bug

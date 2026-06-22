@@ -14,4 +14,5 @@
 {"name": "canvas_lit_dungeon_basic.html", "goal": "lighting light composite dynamic dungeon visual shadow darkness gradient vision crawler top down"}
 {"name": "canvas_vfx_particles_basic.html", "goal": "vfx visual effects particles shake screenshake pooling explosion magic juicy float feedback damage impact text"}
 {"name": "canvas_board_turn_basic.html", "goal": "turn based board click cell select move alternate player hotseat chess checkers go reversi tic tac toe othello"}
+{"name": "canvas_vector_wireframe_basic.html", "goal": "wireframe vector line art perspective projection 2D canvas stroke battlezone star wars trench tank crosshair glowing lines black background"}
 {"name": "canvas_dom_basic.html", "goal": "dom html buttons table calculator todo word puzzle text form input click no canvas tic tac toe simple"}

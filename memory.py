@@ -103,11 +103,69 @@ _RECIPE_TO_SKELETON: dict[str, str] = {
     "canvas-physics-projectile": "canvas_physics_basic",
     "canvas-lit-dungeon": "canvas_lit_dungeon_basic",
     "canvas-mobile-touch": "canvas_mobile_basic",
+    "canvas-vector-wireframe": "canvas_vector_wireframe_basic",
+    "canvas-side-scroll-beat-em-up": "canvas_platformer_basic",
     # NOTE deliberately ABSENT (no dedicated/safe skeleton — fall through to v2):
     # top-down-action, paddle-ball, lane-crossing, puzzle-grid, isometric-tile,
     # overworld-rpg, two-actors-facing, point-and-click, city-builder,
     # space-trading, single-fighter, controllable-player, generic-baseline.
 }
+
+# Visual-playtest id → implementation-outline id. Reuses the already-correct
+# recipe matcher so outline retrieval stays aligned with /vlm-critique routing
+# (added 2026-06-22 — Asteroids/wireframe drift class).
+_RECIPE_TO_OUTLINE: dict[str, str] = {
+    "canvas-controllable-player": "outline-controllable-canvas-game",
+    "canvas-grid-navigation": "outline-grid-navigation",
+    "canvas-two-actors-facing": "outline-two-actors-facing",
+    "canvas-side-scroll-platformer": "outline-side-scroll-platformer",
+    "canvas-side-scroll-beat-em-up": "outline-side-scroll-beat-em-up",
+    "canvas-3d-first-person": "outline-3d-first-person",
+    "canvas-top-down-action": "outline-top-down-action",
+    "canvas-board-game": "outline-turn-based-board",
+    "canvas-puzzle-grid": "outline-puzzle-grid",
+    "canvas-match3": "outline-match3",
+    "canvas-racing-perspective": "outline-racing-perspective",
+    "canvas-vfx-fluid": "outline-vfx-fluid",
+    "canvas-paddle-ball": "outline-paddle-ball",
+    "canvas-lane-crossing": "outline-lane-crossing",
+    "canvas-point-and-click": "outline-point-and-click",
+    "canvas-isometric-tile": "outline-isometric-tile",
+    "canvas-overworld-rpg": "outline-overworld-rpg",
+    "canvas-city-builder": "outline-city-builder",
+    "canvas-space-trading": "outline-space-trading",
+    "canvas-vertical-platformer": "outline-vertical-platformer",
+    "canvas-single-fighter": "outline-asset-backed-animation",
+    "canvas-cutscene-qte": "outline-cutscene-qte",
+    "canvas-card-tabletop": "outline-card-tabletop",
+    "canvas-physics-projectile": "outline-physics-projectile",
+    "canvas-lit-dungeon": "outline-grid-navigation",
+    "canvas-mobile-touch": "outline-controllable-canvas-game",
+    "canvas-tower-defense": "outline-tower-defense",
+    "canvas-rhythm": "outline-rhythm",
+    "canvas-idle-clicker": "outline-idle-clicker",
+    "canvas-bullet-hell": "outline-bullet-hell",
+    "canvas-word-typing": "outline-word-typing",
+    "canvas-pinball": "outline-pinball",
+    "canvas-stealth": "outline-stealth",
+    "canvas-roguelike": "outline-roguelike",
+    "canvas-stacking-physics": "outline-stacking-physics",
+    "canvas-vector-wireframe": "outline-vector-wireframe",
+    "generic-canvas-game-baseline": "outline-controllable-canvas-game",
+}
+
+# Beat-em-up vs 1v1 fighter disambiguation (kung-fu-master trace, 2026-06-22).
+_BEAT_EM_UP_SIGNALS: frozenset[str] = frozenset({
+    "beat-em-up", "beatemup", "brawler", "side-scroll", "sidescroll",
+    "side-scrolling", "scrolling", "wave", "waves", "floor", "boss",
+})
+_DUEL_FIGHTER_SIGNALS: frozenset[str] = frozenset({
+    "1v1", "versus", "duel", "twoplayer", "two-player", "pvp", "opponent",
+    "fireball", "round-end", "round", "ko",
+})
+_STACKING_SIGNALS: frozenset[str] = frozenset({
+    "stacking", "crane", "topple", "jenga", "stacker", "wobble", "teeter",
+})
 
 _SKELETON_MIN_SIM = 0.3
 # Generic skeleton-match tokens (added 2026-05-31). BUNDLED specialized
@@ -2431,6 +2489,41 @@ _3D_STRONG_HOOKS: frozenset[str] = frozenset({
     "first-person", "firstperson", "voxel",
 })
 
+# Modality phrases for 2D-canvas vector wireframe games (Battlezone / Star
+# Wars). When matched, skip the three.js modality skeleton so recipe routing
+# can pick canvas-vector-wireframe instead. Genre-free shape words only.
+_WIREFRAME_VECTOR_PHRASES: frozenset[str] = frozenset({
+    "vector line", "line art",
+})
+
+
+def _detect_wireframe_vector_intent(goal: str) -> list[str]:
+    """Return wireframe-vector modality hits in `goal`. Mirrors prompts_v1."""
+    if not goal:
+        return []
+    import re
+    gl = goal.lower()
+    out: list[str] = []
+    seen: set[str] = set()
+    if "wireframe" in gl and "wireframe" not in seen:
+        seen.add("wireframe")
+        out.append("wireframe")
+    words = re.findall(r"[a-zA-Z]+", gl)
+    for i in range(len(words) - 1):
+        j = words[i] + " " + words[i + 1]
+        if j in _WIREFRAME_VECTOR_PHRASES and j not in seen:
+            seen.add(j)
+            out.append(j.replace(" ", "-"))
+    if "line art" in gl and "vector" in gl and "vector-line-art" not in seen:
+        seen.add("vector-line-art")
+        out.append("vector-line-art")
+    return out
+
+
+def _wireframe_vector_blocks_3d_modality(goal: str) -> bool:
+    """True when goal is a 2D vector wireframe game, not a textured FPS."""
+    return bool(_detect_wireframe_vector_intent(goal))
+
 
 def _modality_tokens(goal: str) -> list[str]:
     """Lowercased word tokens including digits + hyphenated forms.
@@ -2655,7 +2748,51 @@ def find_best_visual_playtest(
         {"id": r.id, "score": round(s, 2), "via": via}
         for (s, _m, r, via) in scored[:3]
     ]
-    return scored[0][2], diag
+    winner = scored[0][2]
+    winner = _disambiguate_beat_em_up_vs_facing(winner, ctx_toks, recipes)
+    winner = _disambiguate_visual_mechanism(winner, ctx_toks, recipes)
+    if winner.id != scored[0][2].id:
+        diag["disambiguated"] = winner.id
+    return winner, diag
+
+
+def _disambiguate_visual_mechanism(
+    recipe: VisualPlaytestRecipe | None,
+    ctx_toks: set[str],
+    recipes: list[VisualPlaytestRecipe],
+) -> VisualPlaytestRecipe | None:
+    """Prefer the more specific mechanism when overlap scores tie."""
+    if recipe is None:
+        return recipe
+    if recipe.id == "canvas-city-builder" and (
+        "isometric" in ctx_toks or "iso" in ctx_toks or "qbert" in ctx_toks
+    ):
+        for r in recipes:
+            if r.id == "canvas-isometric-tile":
+                return r
+    if recipe.id == "canvas-puzzle-grid" and (_STACKING_SIGNALS & ctx_toks):
+        if "crane" in ctx_toks or ("stacking" in ctx_toks and "tower" in ctx_toks):
+            for r in recipes:
+                if r.id == "canvas-stacking-physics":
+                    return r
+    return recipe
+
+
+def _disambiguate_beat_em_up_vs_facing(
+    recipe: VisualPlaytestRecipe | None,
+    ctx_toks: set[str],
+    recipes: list[VisualPlaytestRecipe],
+) -> VisualPlaytestRecipe | None:
+    """Side-scroll beat-em-ups share punch/kick tokens with 1v1 fighters."""
+    if recipe is None or recipe.id != "canvas-two-actors-facing":
+        return recipe
+    has_beat = bool(_BEAT_EM_UP_SIGNALS & ctx_toks)
+    has_duel = bool(_DUEL_FIGHTER_SIGNALS & ctx_toks)
+    if has_beat and not has_duel:
+        for r in recipes:
+            if r.id == "canvas-side-scroll-beat-em-up":
+                return r
+    return recipe
 
 
 def _score_similarity(a_tokens: list[str], b_tokens: list[str]) -> float:
@@ -3622,17 +3759,51 @@ class GameMemory:
             default_min_matches=default_min_matches,
         )
 
+    def _outline_item_by_id(self, outline_id: str) -> OpeningBookHit | None:
+        """Fetch a root opening-book outline by id (recipe-routed lookup)."""
+        for item in self._load_opening_book(
+            IMPLEMENTATION_OUTLINES_FILENAME, cls=ImplementationOutline,
+        ):
+            if item.id == outline_id:
+                return OpeningBookHit(item=item, score=1.0)
+        return None
+
     def retrieve_implementation_outline(
         self, goal: str, modality: str | list[str] | None = None
     ) -> OpeningBookHit | None:
+        # Recipe-routed outline (added 2026-06-22): reuse visual matcher so
+        # outline stays aligned with /vlm-critique checklist selection.
+        try:
+            recipe, _diag = self.find_visual_playtest_for(goal=goal)
+        except Exception:
+            recipe = None
+        if recipe is not None:
+            outline_id = _RECIPE_TO_OUTLINE.get(recipe.id)
+            if outline_id == "outline-vector-wireframe":
+                if "wireframe" not in (goal or "").lower():
+                    outline_id = _RECIPE_TO_OUTLINE.get("canvas-top-down-action")
+            if outline_id:
+                hit = self._outline_item_by_id(outline_id)
+                if hit is not None:
+                    return hit
         hits = self._retrieve_opening_book(
             IMPLEMENTATION_OUTLINES_FILENAME,
             goal=goal,
             modality=modality,
-            k=1,
+            k=8,
             cls=ImplementationOutline,
         )
-        return hits[0] if hits else None
+        if not hits:
+            return None
+        # outline-vector-wireframe only for explicit wireframe goals — top-down
+        # vector games like Asteroids share "vector line art" phrasing but must
+        # keep outline-top-down-action.
+        needs_wireframe = "wireframe" in (goal or "").lower()
+        for hit in hits:
+            if hit.item.id == "outline-vector-wireframe" and not needs_wireframe:
+                continue
+            return hit
+        return hits[0]
 
     def append_live_opening_book_item(self, filename: str, item: OpeningBookItem) -> bool:
         """Append a verified candidate to live memory only."""
@@ -3672,9 +3843,12 @@ class GameMemory:
         goal_toks = _tokenize(goal)
 
         # ---- 1. Modality detector (before Jaccard) -----------------------
-        modality_pick = self._modality_skeleton(goal)
-        if modality_pick is not None:
-            return modality_pick
+        # Wireframe vector goals mention first-person/3d but must NOT inherit
+        # canvas_3d_basic (three.js) — they use 2D canvas stroke projection.
+        if not _wireframe_vector_blocks_3d_modality(goal):
+            modality_pick = self._modality_skeleton(goal)
+            if modality_pick is not None:
+                return modality_pick
 
         # ---- 1b. Recipe-routed skeleton (added 2026-06-02) ---------------
         # Reuse the already-correct visual-playtest matcher to pick a skeleton

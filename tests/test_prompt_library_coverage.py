@@ -19,7 +19,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from memory import GameMemory, Playbook  # noqa: E402
+from memory import GameMemory, Playbook, _RECIPE_TO_OUTLINE  # noqa: E402
 from prompt_library import load_prompt_library  # noqa: E402
 
 _REPO = Path(__file__).parent.parent
@@ -83,6 +83,25 @@ def test_implementation_outline_routes_to_expected(games, mem):
         if got != g["expect"]["outline"]:
             misses.append(f"{g['name']}: expected {g['expect']['outline']}, got {got}")
     assert not misses, "outline routing changed:\n  " + "\n  ".join(misses)
+
+
+def test_visual_outline_map_consistency(games, mem):
+    """Live visual winner must map to the prompt's expected outline."""
+    misses = []
+    for g in games:
+        rec, _ = mem.find_visual_playtest_for(
+            goal=g["prompt"], plan_text="", asset_names=[],
+        )
+        if rec is None:
+            misses.append(f"{g['name']}: no visual recipe")
+            continue
+        mapped = _RECIPE_TO_OUTLINE.get(rec.id)
+        if mapped != g["expect"]["outline"]:
+            misses.append(
+                f"{g['name']}: visual {rec.id} maps to {mapped}, "
+                f"expect outline {g['expect']['outline']}"
+            )
+    assert not misses, "visual↔outline drift:\n  " + "\n  ".join(misses)
 
 
 def test_skeleton_retrieval_engages_for_every_prompt(games, mem):

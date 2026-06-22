@@ -15,7 +15,7 @@ _SHIPPED = _REPO / "memory" / "prompt_library.jsonl"
 
 def test_shipped_library_loads_and_is_numbered_contiguously():
     games = load_prompt_library(_SHIPPED)
-    assert len(games) == 28  # + dragons-lair-director (timed-media QTE), added 2026-06-13
+    assert len(games) == 48  # +18 orphan-recipe showcases, 2026-06-22
     # Numbered 1..N with no gaps, sorted.
     assert [g["n"] for g in games] == list(range(1, len(games) + 1))
 
@@ -27,6 +27,8 @@ def test_showcase_genres_present():
     for genre in ("doom", "minecraft", "outrun", "chess", "zelda", "monkey-island"):
         assert genre in names, f"missing showcase genre: {genre}"
     assert "dragons-lair-director" in names
+    for vector_game in ("battlezone", "star-wars"):
+        assert vector_game in names, f"missing vector wireframe game: {vector_game}"
 
 
 def test_first_three_are_the_named_games():
