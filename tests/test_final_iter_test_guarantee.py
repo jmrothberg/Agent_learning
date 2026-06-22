@@ -70,6 +70,7 @@ def _make_agent_for_test(tmpdir: Path):
     a._last_test_report = None
     a._probes = []
     a._criteria = ""
+    a._goal = ""  # _final_iter_test_if_needed passes goal= to load_and_test
     a._recorded_events: list = []  # consumed by _record but irrelevant here
 
     def _record(ev):
