@@ -84,21 +84,39 @@ def test_unclosed_html_file_block_detection():
     assert ollama_io._in_unclosed_html_file_block(body + "</script></body></html></html_file>") is False
 
 
+def test_unclosed_patch_block_detection():
+    body = "<patch>\n<<<<<<< SEARCH\n  async function loadAssets() {\n"
+    assert ollama_io._in_unclosed_patch_block(body) is True
+    assert ollama_io._in_unclosed_patch_block(body + "=======\n...\n>>>>>>> REPLACE\n</patch>") is False
+
+
 def test_inline_data_bloat_grace_gate():
-    partial = "<html_file>\n<html><body>...\n"
+    partial_html = "<html_file>\n<html><body>...\n"
+    partial_patch = "<patch>\n<<<<<<< SEARCH\nfoo\n"
     assert ollama_io._should_grace_inline_data_bloat(
         stall_reason="inline_data_bloat",
-        assembled_text=partial,
+        assembled_text=partial_html,
         grace_already_used=False,
     ) is True
     assert ollama_io._should_grace_inline_data_bloat(
         stall_reason="inline_data_bloat",
-        assembled_text=partial,
+        assembled_text=partial_patch,
+        grace_already_used=False,
+    ) is True
+    # Grace is not one-shot inside open output blocks — repeat trips still defer.
+    assert ollama_io._should_grace_inline_data_bloat(
+        stall_reason="inline_data_bloat",
+        assembled_text=partial_patch,
         grace_already_used=True,
-    ) is False
+    ) is True
     assert ollama_io._should_grace_inline_data_bloat(
         stall_reason="adjacent_line_spam",
-        assembled_text=partial,
+        assembled_text=partial_html,
+        grace_already_used=False,
+    ) is False
+    assert ollama_io._should_grace_inline_data_bloat(
+        stall_reason="inline_data_bloat",
+        assembled_text="still planning, no tags yet\n",
         grace_already_used=False,
     ) is False
 
@@ -535,6 +553,43 @@ def test_deliberation_doesnt_drop_below_zero_on_stray_close():
     assert d._think_depth == 0
     d.feed("<think>")
     assert d._think_depth == 1
+
+
+def test_code_emission_started_not_set_by_js_prose_only():
+    """Fix-turn deliberation that quotes `function foo()` must NOT arm the
+    repetition detector — holochess GLM 20260623 was killed by
+    inline_data_bloat during pre-<patch> planning prose."""
+    d = ollama_io.DeliberationDetector(threshold_chars=6000)
+    assert d.feed("The bug is in function loadAssets() {\n") is False
+    assert d._seen_tag is True
+    assert d.code_emission_started is False
+    assert d.feed("<patch>\n<<<<<<< SEARCH\n") is False
+    assert d.code_emission_started is True
+
+
+def test_repetition_deferred_until_code_emission_started():
+    """Block-level bloat during JS-quoted deliberation must not abort."""
+    delib = ollama_io.DeliberationDetector(threshold_chars=6000)
+    rep = ollama_io.RepetitionDetector()
+    block = (
+        "function sprite() { if (!img) return null; }\n"
+        "function sprite() { if (!img) return null; }\n"
+    )
+    fired = False
+    for _ in range(20):
+        piece = "Hmm, maybe " + block
+        delib.feed(piece)
+        if delib.code_emission_started and rep.feed(piece):
+            fired = True
+            break
+    assert fired is False
+    delib.feed("<patch>\n")
+    for _ in range(20):
+        if delib.code_emission_started and rep.feed(block):
+            fired = True
+            break
+    assert fired is True
+    assert rep.stall_reason in ("inline_data_bloat", "adjacent_line_spam", "short_line_loop")
 
 
 # ---------------------------------------------------------------------------

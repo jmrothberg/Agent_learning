@@ -259,17 +259,32 @@ def test_scoped_lock_suppresses_unrelated_coaching(tmp_path: Path) -> None:
     assert a._pending_coaching == []
 
 
-def test_scoped_validator_rejects_format_preamble(tmp_path: Path) -> None:
+def test_scoped_validator_tolerates_prose_preamble_with_valid_patch(tmp_path: Path) -> None:
+    """A prose preamble in front of a VALID <patch> must be tolerated —
+    extract_patches() finds the block anywhere in the reply, so the fix is
+    usable and must not be thrown away. Holochess trace 20260623_204052:
+    the whole fix (a valid <diagnose> + 2 <patch> blocks) was discarded over
+    an 880-char prose preamble → "it won't even do a simple FIX". The leading
+    <think>/prose rejection now only fires when NO usable code exists."""
     a = _make_agent(tmp_path)
     a._session_assets = {"player": tmp_path / "player.png"}
     a._pending_feedback.append("only make the player faster, no code changes")
     a._flush_user_injections(base_message="<base>")
 
-    violation = a._scoped_reply_violation(
+    # Prose preamble + one valid patch → accepted (the patch is what matters).
+    assert a._scoped_reply_violation(
         "I will patch now\n<patch>\n<<<<<<< SEARCH\nA\n=======\nB\n>>>>>>> REPLACE\n</patch>"
-    )
-    assert violation is not None
-    assert "SCOPED FORMAT" in violation
+    ) is None
+
+    # A leading <think> block in front of a valid patch is likewise tolerated.
+    assert a._scoped_reply_violation(
+        "<think>reasoning</think>\n<patch>\n<<<<<<< SEARCH\nA\n=======\nB\n>>>>>>> REPLACE\n</patch>"
+    ) is None
+
+    # But a pure-prose reply with NO usable patch/media is still rejected.
+    pure_prose = a._scoped_reply_violation("I think the bug is in loadAssets, let me consider it.")
+    assert pure_prose is not None
+    assert "SCOPED FORMAT" in pure_prose
 
 
 def test_scoped_validator_rejects_full_rewrite_and_multi_patch(tmp_path: Path) -> None:

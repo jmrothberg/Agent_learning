@@ -206,10 +206,11 @@ def _is_repeat_signal_line(s: str) -> bool:
 def _in_unclosed_html_file_block(text: str) -> bool:
     """True when streamed text has opened `<html_file>` but not closed it.
 
-    Used by the one-shot inline-data grace path: long first-build HTML
-    streams can legitimately include large repeated-looking tables/lists
-    before finally closing `</html_file>`. We grant one continuation before
-    aborting so normal long emissions are less likely to be cut mid-output.
+    Used by the inline-data grace path: long first-build HTML streams can
+    legitimately include large repeated-looking tables/lists before finally
+    closing `</html_file>`. While the block is open we defer
+    `inline_data_bloat` aborts so normal long emissions are not cut
+    mid-output.
     """
     if not text:
         return False
@@ -219,6 +220,28 @@ def _in_unclosed_html_file_block(text: str) -> bool:
         return False
     last_close = lower.rfind("</html_file>")
     return last_close < last_open
+
+
+def _in_unclosed_patch_block(text: str) -> bool:
+    """True when streamed text has opened `<patch>` but not closed it.
+
+    Fix turns (holochess GLM 20260623): SEARCH bodies repeat source-file
+    blocks and trip `inline_data_bloat` before `</patch>` lands. Same grace
+    as unclosed `<html_file>` — do not abort mid-emission.
+    """
+    if not text:
+        return False
+    lower = text.lower()
+    last_open = lower.rfind("<patch>")
+    if last_open < 0:
+        return False
+    last_close = lower.rfind("</patch>")
+    return last_close < last_open
+
+
+def _in_unclosed_output_block(text: str) -> bool:
+    """True while an `<html_file>` or `<patch>` block is still open."""
+    return _in_unclosed_html_file_block(text) or _in_unclosed_patch_block(text)
 
 
 # Completion-token ceiling above which the one-shot first-build grace is
@@ -242,19 +265,22 @@ def _should_grace_inline_data_bloat(
     grace_already_used: bool,
     completion_tokens: int = 0,
 ) -> bool:
-    """One-shot grace gate for `inline_data_bloat` repetition aborts.
+    """Defer `inline_data_bloat` abort while a structured output block is open.
 
-    `completion_tokens` is the running count of emitted tokens for this
-    stream; past `_LOOP_GRACE_TOKEN_CEILING` the grace is denied so a detected
-    loop aborts immediately instead of getting another full detection window.
+    Standing rule: repetition guards latch on bad *code* emission, not on
+    pre-tag deliberation or mid-patch SEARCH bodies that legitimately repeat
+    source-file lines. While `<html_file>` or `<patch>` is unclosed, reset
+    the block detector and keep streaming until the tag closes or
+    `_LOOP_GRACE_TOKEN_CEILING` — whichever comes first.
+
+    `grace_already_used` is retained for call-site tracing only; grace is
+    not one-shot inside open output blocks.
     """
+    if stall_reason != "inline_data_bloat":
+        return False
     if completion_tokens >= _LOOP_GRACE_TOKEN_CEILING:
         return False
-    return (
-        not grace_already_used
-        and stall_reason == "inline_data_bloat"
-        and _in_unclosed_html_file_block(assembled_text)
-    )
+    return _in_unclosed_output_block(assembled_text)
 
 
 class RepetitionDetector:
@@ -550,7 +576,8 @@ class DeliberationDetector:
     """
 
     __slots__ = (
-        "_buf", "_total_chars", "_seen_tag", "_threshold", "_think_threshold",
+        "_buf", "_total_chars", "_seen_tag", "_code_emission_started",
+        "_threshold", "_think_threshold",
         "_disabled", "_think_depth", "_carry", "stall_reason",
     )
 
@@ -584,6 +611,12 @@ class DeliberationDetector:
         self._buf = ""
         self._total_chars = 0
         self._seen_tag = False
+        # RepetitionDetector runs only after this flips True — canonical
+        # output tags or real HTML structure, NOT prose that quotes
+        # `function foo()` / `const x = {}` while planning (holochess GLM
+        # 20260623: JS-opener latch let inline_data_bloat kill 8000 tokens
+        # of fix-turn deliberation before </patch>).
+        self._code_emission_started = False
         self._threshold = threshold_chars
         self._think_threshold = max(threshold_chars, think_threshold_chars)
         self._disabled = _os.environ.get("DISABLE_DELIBERATION_DETECTOR") == "1"
@@ -599,12 +632,17 @@ class DeliberationDetector:
         self._carry = ""
         self.stall_reason: str | None = None
 
+    @property
+    def code_emission_started(self) -> bool:
+        """True once the model has opened a structured tag or HTML body."""
+        return self._code_emission_started
+
     def feed(self, piece: str) -> bool:
-        if self._disabled or self._seen_tag:
-            # Even when latched on a real output tag, keep updating
-            # think_depth so a subsequent block this object reuses
-            # stays accurate. But since we early-return, depth-tracking
-            # is moot once latched — skip it.
+        if self._disabled:
+            return False
+        # Hot path: deliberation budget already satisfied AND structured
+        # code emission has begun — no further length/repeat gating needed.
+        if self._seen_tag and self._code_emission_started:
             return False
         # --- update <think> depth incrementally ----------------------
         # Tags may straddle the boundary between two streamed pieces
@@ -644,15 +682,26 @@ class DeliberationDetector:
         # in thinking that latched falsely, then never produced real
         # output. After </think>, the buf may contain post-think content
         # where a fresh opener will latch normally.
-        if self._think_depth == 0 and (
-            _TAG_OPENER_RE.search(self._buf)
-            or _HTML_OPENER_RE.search(self._buf)
-            or _JS_OPENER_RE.search(self._buf)
-            or _CODE_DISCUSSION_RE.search(self._buf)
-        ):
-            self._seen_tag = True
-            return False
+        if self._think_depth == 0:
+            if (
+                _TAG_OPENER_RE.search(self._buf)
+                or _HTML_OPENER_RE.search(self._buf)
+            ):
+                self._code_emission_started = True
+            if (
+                _TAG_OPENER_RE.search(self._buf)
+                or _HTML_OPENER_RE.search(self._buf)
+                or _JS_OPENER_RE.search(self._buf)
+                or _CODE_DISCUSSION_RE.search(self._buf)
+            ):
+                self._seen_tag = True
         # --- abort check --------------------------------------------
+        # Once _seen_tag is set (including JS-opener prose latch), stop
+        # deliberation-length aborts — but keep feeding so
+        # `_code_emission_started` can still flip when `<patch>` arrives
+        # after early `function foo()` mentions in the same stream.
+        if self._seen_tag:
+            return False
         # Compare against cumulative chars, NOT buffer size — the buf
         # is trimmed at 4 KB and would never reach the higher
         # inside-think threshold otherwise.
@@ -932,8 +981,18 @@ async def stream_chat(
                     # A misbehaving UI callback must never kill the stream.
                     pass
 
+            # ---- deliberation detector (A2) -------------------------
+            # Run BEFORE repetition so `code_emission_started` is current
+            # for this piece — repetition must not fire on pre-tag prose.
+            if delib.feed(piece):
+                deliberated = True
+                stall_at = n_tokens
+                break
+
             # ---- repetition detector --------------------------------
-            if repeat.feed(piece):
+            # Only after structured output / HTML body has begun — standing
+            # rule: abort bad repetitive CODE, not fix-turn deliberation.
+            if delib.code_emission_started and repeat.feed(piece):
                 if _should_grace_inline_data_bloat(
                     stall_reason=repeat.stall_reason,
                     assembled_text="".join(parts),
@@ -941,18 +1000,10 @@ async def stream_chat(
                     completion_tokens=n_tokens,
                 ):
                     loop_grace_used = True
-                    loop_grace_reason = "inline_data_bloat_unclosed_html_file"
-                    # Reset the detector so we only abort if the same
-                    # loop shape appears again after this grace.
+                    loop_grace_reason = "inline_data_bloat_unclosed_output_block"
                     repeat = RepetitionDetector()
                     continue
                 looped = True
-                stall_at = n_tokens
-                break
-
-            # ---- deliberation detector (A2) -------------------------
-            if delib.feed(piece):
-                deliberated = True
                 stall_at = n_tokens
                 break
 

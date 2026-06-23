@@ -1242,7 +1242,12 @@ class MLXBackend(Backend):
                 last_activity_at = time.monotonic()
                 if on_token is not None:
                     _safe_call(on_token, piece)
-                if repeat.feed(piece):
+                if delib.feed(piece):
+                    deliberated = True
+                    stall_at = n_tokens
+                    worker_cancel.set()
+                    break
+                if delib.code_emission_started and repeat.feed(piece):
                     if _should_grace_inline_data_bloat(
                         stall_reason=repeat.stall_reason,
                         assembled_text="".join(parts),
@@ -1250,17 +1255,12 @@ class MLXBackend(Backend):
                         completion_tokens=n_tokens,
                     ):
                         loop_grace_used = True
-                        loop_grace_reason = "inline_data_bloat_unclosed_html_file"
-                        # One-shot grace only; if repetition returns after
-                        # reset, we abort as usual.
+                        loop_grace_reason = "inline_data_bloat_unclosed_output_block"
+                        # Reset the detector while the output block is still
+                        # open — SEARCH bodies legitimately repeat source lines.
                         repeat = RepetitionDetector()
                         continue
                     looped = True
-                    stall_at = n_tokens
-                    worker_cancel.set()
-                    break
-                if delib.feed(piece):
-                    deliberated = True
                     stall_at = n_tokens
                     worker_cancel.set()
                     break

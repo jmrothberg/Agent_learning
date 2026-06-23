@@ -3063,7 +3063,7 @@ class GameAgent:
         return (
             last_stream_looped
             and last_stream_loop_kind == "inline_data_bloat"
-            and rejection_kind == "unclosed_html_file"
+            and rejection_kind in ("unclosed_html_file", "unclosed_patch")
         )
 
     @staticmethod
@@ -6100,16 +6100,26 @@ class GameAgent:
         stripped = (reply or "").lstrip()
         if not stripped:
             return "SCOPED FORMAT: empty reply; emit required tag only."
-        if stripped.lower().startswith("<think"):
-            return "SCOPED FORMAT: do not emit <think>; start with required tag."
-        if not stripped.startswith("<"):
-            return "SCOPED FORMAT: no prose preamble; start with required tag."
         low = stripped.lower()
         has_assets = bool(_ASSETS_OPEN_RE.search(low))
         has_sounds = bool(_SOUNDS_OPEN_RE.search(low))
         patches = extract_patches(reply)
         patch_count = len(patches)
         has_html = self._extract_html(reply) is not None
+        # A prose preamble or leading <think> block is COSMETIC, not a scope
+        # violation: extract_patches()/_extract_html() locate blocks ANYWHERE
+        # in the reply, so a valid fix must NOT be discarded just because the
+        # model led with reasoning prose (GLM always does). Holochess trace
+        # 20260623_204052: the model emitted <diagnose> + 2 valid <patch>
+        # blocks behind an 880-char prose preamble and the ENTIRE fix was
+        # thrown away over the leading-character check → "it won't even do a
+        # simple FIX". Only reject for preamble/<think> when there is NO
+        # usable patch/media/html to extract (a genuine non-answer).
+        if not (patch_count or has_assets or has_sounds or has_html):
+            if low.startswith("<think"):
+                return "SCOPED FORMAT: do not emit <think>; start with required tag."
+            if not stripped.startswith("<"):
+                return "SCOPED FORMAT: no prose preamble; start with required tag."
         mode = str(cfg.get("mode") or "single_patch")
         # Be permissive about which tag the model chose. The classifier
         # that picked `media_only` vs `single_patch` reads the user's
