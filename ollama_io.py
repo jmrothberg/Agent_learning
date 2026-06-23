@@ -863,11 +863,11 @@ async def stream_chat(
     # empty `content` strings — observed on qwen3.6:27b 2026-05-23 doom
     # iter 4: 32,777 completion tokens, ZERO non-empty pieces, 1356 s
     # wall-clock — neither detector ever fires. This guard catches that
-    # exact shape: no visible content after a generous wall-clock budget.
-    # Threshold is wall-clock not token-count because Ollama's
-    # mid-stream API doesn't surface the running eval_count; we only see
-    # it on the final done=True frame.
+    # exact shape: no visible content AND no backend activity for the
+    # floor window. Uses last_activity_at (chunk arrival / prefill
+    # progress), not stream start — holochess/GLM 20260623 fix.
     _SILENT_STREAM_SECONDS_FLOOR = 180.0
+    last_activity_at = started
 
     # ollama.AsyncClient.chat returns an async iterator of dicts. We pull
     # .__aiter__() so we can wrap each .__anext__() in asyncio.wait_for.
@@ -907,18 +907,22 @@ async def stream_chat(
             if not piece:
                 # Silent-stream guard — see _SILENT_STREAM_SECONDS_FLOOR
                 # comment block above. Fires only when n_tokens == 0
-                # (no visible content has EVER arrived) AND we've burned
-                # past the wall-clock floor. Once even one content piece
-                # has landed the normal repetition/deliberation detectors
-                # take over.
+                # (no visible content has EVER arrived) AND no backend
+                # activity for the floor window. Measure from
+                # last_activity_at (not stream start) so a long Ollama
+                # prefill on a big prompt is not mistaken for silence —
+                # same holochess/GLM fix as backend.MLXBackend.
                 if (
                     n_tokens == 0
-                    and (time.monotonic() - started) >= _SILENT_STREAM_SECONDS_FLOOR
+                    and (time.monotonic() - last_activity_at) >= _SILENT_STREAM_SECONDS_FLOOR
                 ):
                     silent = True
                     stall_at = 0
                     break
+                # Empty chunk still counts as daemon activity.
+                last_activity_at = time.monotonic()
                 continue
+            last_activity_at = time.monotonic()
             parts.append(piece)
             n_tokens += 1
             if on_token is not None:

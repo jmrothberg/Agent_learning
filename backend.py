@@ -1208,17 +1208,30 @@ class MLXBackend(Backend):
                 if not piece:
                     # Silent-stream guard — mirrors ollama_io.stream_chat.
                     # If the model emits only empty `text` events (e.g. all
-                    # generation goes to a reasoning channel) past the
-                    # wall-clock floor, abort instead of waiting for
-                    # stall_seconds (default 600s) which is too long.
+                    # generation goes to a reasoning channel) with no backend
+                    # activity for the floor window, abort instead of waiting
+                    # for stall_seconds (default 600s) which is too long.
+                    #
+                    # Measure from last_activity_at, NOT stream start.
+                    # Holochess trace 20260623 (GLM-5.2-MLX): 27–34K-token
+                    # feedback prompts prefilled for 5–8 minutes while
+                    # prefill progress kept bumping last_activity_at. The old
+                    # started-based guard fired the instant prefill finished
+                    # (wall clock already >180s) and killed a healthy stream
+                    # as "MLX stall". Same fix pattern as the stall watchdog
+                    # (test_mlx_stall_activity.py).
                     if (
                         n_tokens == 0
-                        and (time.monotonic() - started) >= 180.0
+                        and (time.monotonic() - last_activity_at) >= 180.0
                     ):
                         silent = True
                         stall_at = 0
                         worker_cancel.set()
                         break
+                    # Empty generation events still count as activity —
+                    # a thinking model may stream non-visible tokens for a
+                    # long time without ever landing visible content.
+                    last_activity_at = time.monotonic()
                     continue
                 parts.append(piece)
                 n_tokens += 1

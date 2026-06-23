@@ -97,3 +97,52 @@ def test_stall_check_is_monotonic_safe():
         and n_tokens == 0
     )
     assert stalled is True  # 35s since last activity, > 30s budget
+
+
+# ---------------------------------------------------------------------------
+# Silent-stream guard — activity-aware (holochess trace 20260623)
+#
+# The silent guard aborts when n_tokens==0 and no backend activity for
+# 180s. It must use last_activity_at (prefill chunks, empty gen events),
+# NOT stream start — otherwise a 5–8 minute prefill on a 27K-token GLM
+# prompt false-aborts the instant generation begins.
+# ---------------------------------------------------------------------------
+
+_SILENT_FLOOR = 180.0
+
+
+def _silent_would_fire(*, last_activity_at: float, now: float, n_tokens: int) -> bool:
+    """Inline copy of backend.py + ollama_io.py silent predicate."""
+    return (
+        n_tokens == 0
+        and (now - last_activity_at) >= _SILENT_FLOOR
+    )
+
+
+def test_silent_guard_does_not_fire_during_long_prefill():
+    """Stream has been running 400s but prefill bumped activity 5s ago —
+    must NOT abort (holochess false-positive shape)."""
+    started = 0.0
+    now = 400.0
+    last_activity_at = now - 5.0  # prefill chunk 5s ago
+    assert _silent_would_fire(last_activity_at=last_activity_at, now=now, n_tokens=0) is False
+
+
+def test_silent_guard_does_not_fire_when_started_old_but_activity_recent():
+    """Wall clock since start is irrelevant; only last_activity_at matters."""
+    now = 600.0
+    last_activity_at = now - 30.0
+    assert _silent_would_fire(last_activity_at=last_activity_at, now=now, n_tokens=0) is False
+
+
+def test_silent_guard_fires_after_quiet_window_with_no_visible_tokens():
+    """Genuinely silent: no chunks/tokens for 180s+ after last activity."""
+    now = 300.0
+    last_activity_at = now - 200.0
+    assert _silent_would_fire(last_activity_at=last_activity_at, now=now, n_tokens=0) is True
+
+
+def test_silent_guard_never_fires_once_visible_tokens_landed():
+    now = 1000.0
+    last_activity_at = now - 500.0
+    assert _silent_would_fire(last_activity_at=last_activity_at, now=now, n_tokens=12) is False
