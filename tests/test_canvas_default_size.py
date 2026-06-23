@@ -282,8 +282,15 @@ def test_behavioral_criterion_not_perf():
 
 
 def test_perf_gap_skipped_in_synthesis():
-    src = inspect.getsource(LiveBrowser.load_and_test)
-    assert "_is_unverifiable_perf_criterion" in src
+    # The coverage-gap synthesis (incl. the perf-skip guard) was extracted
+    # from load_and_test into _apply_coverage_gap_gate so the ok-gating is
+    # unit-testable. The perf skip must still live in the synthesis path,
+    # and load_and_test must still call it.
+    from tools import _apply_coverage_gap_gate
+    gate_src = inspect.getsource(_apply_coverage_gap_gate)
+    assert "_is_unverifiable_perf_criterion" in gate_src
+    loader_src = inspect.getsource(LiveBrowser.load_and_test)
+    assert "_apply_coverage_gap_gate" in loader_src
 
 
 def test_asset_stats_accepts_onload():

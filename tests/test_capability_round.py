@@ -17,6 +17,8 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from agent import (  # noqa: E402
@@ -309,6 +311,86 @@ def test_polish_regression_revert_clears_pending_flag(tmp_path):
     if res["ok"]:
         assert a._polish_pending is False
         assert a._polish_turns_used == 1
+
+
+# ---------------------------------------------------------------------------
+# 2b. Step-pause + feedback vs. a queued polish turn (genre-free harness law)
+#
+# Bug (battlezone trace 20260622, GLM-5.2): in step mode the NEXT user turn
+# is queued at the end of the previous iter. After a clean iter that turn is
+# a polish / GAME-FEEL prompt. If the user then types a FIX during the pause,
+# the old code popped the polish message and folded the feedback INTO it,
+# so the model saw "polish turn 1/2 — GAME FEEL" + the fix together. That
+# polish framing bloated the reply (it bundled a juice feature onto the
+# fix), which truncated and got the whole patch set bracket-rejected.
+#
+# Invariant: pending feedback during a step pause must DISCARD a queued
+# polish base and rebuild a clean fix base. A non-polish base is preserved
+# (the working single-fix path — battlezone asks 2 & 3 — must not change).
+# ---------------------------------------------------------------------------
+
+
+def test_step_pause_feedback_replaces_polish_base_not_prepends(tmp_path):
+    a = _make_agent(tmp_path)
+    a._goal = "build a game"
+    a._current_file = "<html><body>game</body></html>"
+    a._iters_remaining = 2
+    a._last_test_report = _clean_report()
+    # The real polish turn step-mode would have queued before the pause
+    # (no feedback pending yet → polish fires).
+    polish = a._build_fix_prompt(
+        report=_clean_report(), regressed=False, partial_failed=[],
+    )
+    assert "polish turn" in polish and "GAME FEEL" in polish  # precondition
+    assert a._polish_pending is True
+    a._messages.append({"role": "user", "content": polish})
+    # User types a generic fix request during the step pause.
+    a._pending_feedback.append("make the player move faster")
+    a._step_pause_flush_feedback()
+    out = a._messages[-1]["content"]
+    assert "USER FEEDBACK" in out
+    assert "polish turn" not in out
+    assert "GAME FEEL" not in out
+    assert a._polish_pending is False
+
+
+def test_step_pause_feedback_without_polish_keeps_base(tmp_path):
+    """Guard: when the queued turn was NOT a polish turn, step-pause folds
+    feedback into the EXISTING base instead of rebuilding it. This is the
+    working single-fix path (battlezone asks 2 & 3) — it must not regress."""
+    a = _make_agent(tmp_path)
+    a._goal = "build a game"
+    a._current_file = "<html><body>game</body></html>"
+    a._iters_remaining = 2
+    a._last_test_report = _failing_report()
+    a._polish_pending = False
+    base = "DIAGNOSE-THEN-FIX base prompt UNIQUE-BASE-MARKER-xyz"
+    a._messages.append({"role": "user", "content": base})
+    a._pending_feedback.append("the controls feel wrong")
+    a._step_pause_flush_feedback()
+    out = a._messages[-1]["content"]
+    assert "USER FEEDBACK" in out
+    # Original base preserved (not rebuilt from the report).
+    assert "UNIQUE-BASE-MARKER-xyz" in out
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Phase 1 not implemented: a behavior_bug/code_fix router intent "
+        "does not yet force fix_mode on a clean-report feedback turn."
+    ),
+)
+def test_behavior_bug_route_forces_fix_mode_on_clean_report(tmp_path):
+    a = _make_agent(tmp_path)
+    a._goal = "build a game"
+    a._iters_remaining = 2
+    a._pending_feedback.append("the enemy walks through walls")
+    a._feedback_route = {"primary_intent": "behavior_bug", "honor_user_now": True}
+    # Phase 1 contract: a behavior_bug feedback turn runs in fix_mode
+    # (precision temperature) even though the prior report was clean.
+    a._route_forces_fix_mode()  # to be added in Phase 1
+    assert a._fix_mode is True
 
 
 # ---------------------------------------------------------------------------

@@ -541,6 +541,94 @@ def _is_unverifiable_perf_criterion(line: str) -> bool:
     return bool(_PERF_CRITERION_RE.search(line or ""))
 
 
+def _apply_coverage_gap_gate(
+    report: dict[str, Any],
+    criteria: str,
+    probes: list[dict],
+    probe_results: list[dict],
+) -> list[dict]:
+    """Synthesize one failing `coverage_gap__<slug>` probe per <criteria>
+    line that no model-authored probe references, AND the matching
+    PROBE FAILED soft_warning so the final ok-recompute gates on it.
+
+    Extracted from `LiveBrowser.load_and_test` (was inline) so the gating
+    invariant is unit-testable without Chromium.
+
+    [COVERAGE-GAP OK FIX 20260622 — battlezone trace, GLM-5.2] The bug this
+    fixes: the synthetic probe was appended to report["probes"] (shown as
+    FAIL) but NO soft_warning was added, so `ok = no errors and no
+    soft_warnings` left ok=True — the report listed a FAIL yet shipped
+    GREEN. Real model-authored failing probes already gate via the loop in
+    load_and_test; synthetic ones now do too, via the same
+    `_format_probe_failure_warning` channel (which `_failure_blames_code`
+    correctly treats as a probe-authoring artifact, NOT a code defect).
+
+    Returns the (possibly extended) probe_results. No-op when there are no
+    gaps — clean games keep ok=True.
+    """
+    coverage_gaps = _criteria_coverage_gaps(criteria or "", probes or [])
+    if not coverage_gaps:
+        return probe_results
+    report["criteria_uncovered"] = coverage_gaps
+    for gap in coverage_gaps:
+        # Sustained-performance criteria are advisory only — no honest probe
+        # can verify "60fps under stress" in a short load, so a synthetic
+        # probe would block ok=True forever.
+        if _is_unverifiable_perf_criterion(gap):
+            continue
+        slug = _slugify_criterion(gap)
+        # [HARNESS NOTE] fence (2026-05-24) — without this, the 27B-class
+        # coder mistakes synthetic coverage_gap probe text for file content
+        # and emits a <patch> trying to DELETE it.
+        synth = {
+            "name": f"coverage_gap__{slug}",
+            "expr": "false  /* synthetic - no model-authored probe for this criterion */",
+            "ok": False,
+            "err": (
+                "[HARNESS NOTE — NOT FILE CONTENT, DO NOT <patch>]\n"
+                f"This is a SYNTHETIC harness probe — it does NOT "
+                f"exist anywhere in your .html file. It was added "
+                f"automatically because your Phase A <criteria> "
+                f"included this line but no model-authored probe "
+                f"in your <probes> block references it:\n\n"
+                f"  criterion: {gap[:200]}\n\n"
+                f"Recovery: in your NEXT reply, do your normal fix "
+                f"work (<patch> or <html_file>) AND include an "
+                f"updated <probes>...</probes> block that adds "
+                f"ONE entry whose name OR expr shares words with "
+                f"the criterion text. The probes block is re-parsed "
+                f"only when accompanied by code — don't emit "
+                f"probes alone. Do NOT emit a <patch> targeting "
+                f"this text; it isn't in any file.\n"
+                "[/HARNESS NOTE]"
+            ),
+            "synthetic": True,
+        }
+        probe_results.append(synth)
+        # [COVERAGE-GAP OK FIX] mirror the model-probe gate: a failing
+        # synthetic probe must add a soft_warning so report["ok"] flips
+        # False. Without this the gap showed as FAIL but still shipped ok.
+        report["soft_warnings"].append(_format_probe_failure_warning(synth))
+    # Refresh the report views that were built earlier in load_and_test.
+    report["probes"] = probe_results
+    report["probe_errors"] = [
+        f"{p.get('name','?')}: {p.get('err','')[:160]}"
+        for p in probe_results
+        if not p.get("ok") and p.get("err")
+    ]
+    report["probe_eval_errors"] = [
+        {
+            "name": p.get("name", "probe"),
+            "expr_preview": (p.get("expr") or "")[:120],
+            "error_class": p.get("error_class") or "eval_error",
+            "err": (p.get("err") or "")[:200],
+        }
+        for p in probe_results
+        if not p.get("ok") and p.get("kind") == "eval_error"
+    ]
+    return probe_results
+
+
 def _truncate(s: str, n: int) -> str:
     """Truncate long strings with a clear marker so the model knows it was cut."""
     if len(s) <= n:
@@ -3783,78 +3871,19 @@ class LiveBrowser:
         # meaningful words do not appear in any probe's name/expr — the
         # model must add a probe that actually tests it. Genre-free:
         # uses simple word overlap, no semantic parsing.
-        coverage_gaps = _criteria_coverage_gaps(criteria or "", probes or [])
-        if coverage_gaps:
-            report["criteria_uncovered"] = coverage_gaps
-            # Synthesize a failing probe per gap so the coverage hole shows
-            # up in the same probe_errors list the model already responds
-            # to. Local LLMs ignore "soft_warnings" but fix failing probes
-            # — proven across the asteroid trace, where the soft-warning
-            # form was visible for 4 iters and never addressed. The
-            # synthetic probes carry name `coverage_gap__<slug>` so the
-            # agent's Phase B re-parse can detect closure (model emits a
-            # new <probes> block whose entries reference the gap → agent
-            # replaces self._probes with the new set).
-            for gap in coverage_gaps:
-                # Fix round: sustained-performance criteria are advisory
-                # only — no honest probe can verify "60fps under stress"
-                # in a short load, so a synthetic probe would block forever.
-                if _is_unverifiable_perf_criterion(gap):
-                    continue
-                slug = _slugify_criterion(gap)
-                # [HARNESS NOTE] fence (2026-05-24) — without this, the
-                # 27B-class coder mistakes synthetic coverage_gap probe
-                # text for file content and emits a <patch> trying to
-                # DELETE it. Doom 2026-05-23 extension 1 trace shows
-                # exactly that: model SEARCH'd for the literal
-                # "FAIL coverage_gap__player_movement... /* synthetic */"
-                # line (which only exists in the harness report, never
-                # in the .html file), patch failed, wasted an iter.
-                # The fence + explicit "DO NOT <patch> this text"
-                # instruction makes the distinction unmistakable.
-                probe_results.append({
-                    "name": f"coverage_gap__{slug}",
-                    "expr": "false  /* synthetic - no model-authored probe for this criterion */",
-                    "ok": False,
-                    "err": (
-                        "[HARNESS NOTE — NOT FILE CONTENT, DO NOT <patch>]\n"
-                        f"This is a SYNTHETIC harness probe — it does NOT "
-                        f"exist anywhere in your .html file. It was added "
-                        f"automatically because your Phase A <criteria> "
-                        f"included this line but no model-authored probe "
-                        f"in your <probes> block references it:\n\n"
-                        f"  criterion: {gap[:200]}\n\n"
-                        f"Recovery: in your NEXT reply, do your normal fix "
-                        f"work (<patch> or <html_file>) AND include an "
-                        f"updated <probes>...</probes> block that adds "
-                        f"ONE entry whose name OR expr shares words with "
-                        f"the criterion text. The probes block is re-parsed "
-                        f"only when accompanied by code — don't emit "
-                        f"probes alone. Do NOT emit a <patch> targeting "
-                        f"this text; it isn't in any file.\n"
-                        "[/HARNESS NOTE]"
-                    ),
-                    "synthetic": True,
-                })
-            # Make sure report["probes"] and report["probe_errors"] reflect
-            # the just-appended synthetic entries — they were built earlier
-            # in this method, so we refresh them here.
-            report["probes"] = probe_results
-            report["probe_errors"] = [
-                f"{p.get('name','?')}: {p.get('err','')[:160]}"
-                for p in probe_results
-                if not p.get("ok") and p.get("err")
-            ]
-            report["probe_eval_errors"] = [
-                {
-                    "name": p.get("name", "probe"),
-                    "expr_preview": (p.get("expr") or "")[:120],
-                    "error_class": p.get("error_class") or "eval_error",
-                    "err": (p.get("err") or "")[:200],
-                }
-                for p in probe_results
-                if not p.get("ok") and p.get("kind") == "eval_error"
-            ]
+        # Synthesize a failing probe per uncovered criterion AND its gating
+        # soft_warning. Extracted to `_apply_coverage_gap_gate` so the gate
+        # is unit-testable without Chromium. The soft_warning append is the
+        # fix (battlezone trace 20260622): synthetic coverage_gap probes
+        # showed as FAIL but never gated ok=True. Local LLMs ignore
+        # "soft_warnings" prose but fix failing probes — the synthetic probe
+        # carries name `coverage_gap__<slug>` so the agent's Phase B
+        # re-parse can detect closure (model emits a new <probes> block
+        # referencing the gap → agent replaces self._probes with the new
+        # set). No-op (and ok preserved) when every criterion is covered.
+        probe_results = _apply_coverage_gap_gate(
+            report, criteria or "", probes or [], probe_results
+        )
         # Outside-agent strict compatibility gate for likely three.js pages:
         # run a short second pass under stock file:// Chromium (no relaxed
         # security flags). Keep diagnostics compact so local small models can

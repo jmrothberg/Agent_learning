@@ -4284,6 +4284,44 @@ class GameAgent:
             return False
         return True
 
+    def _step_pause_flush_feedback(self) -> None:
+        """Fold feedback typed during a step-mode pause into the queued
+        next-user turn.
+
+        In step mode the next user message is ALREADY appended at the end
+        of the previous iter. We pop it and re-flush so the feedback banner
+        leads the report-driven base prompt.
+
+        [STEP-PAUSE POLISH FIX 20260622 — battlezone trace] When the queued
+        base was a polish / GAME-FEEL turn (built last iter because no
+        feedback was pending), reusing it here keeps that polish framing on
+        what is now a FIX turn. The model then bundles a "juice" feature
+        onto the real fix, bloating the reply until it truncates and the
+        whole patch set is bracket-rejected. So if a polish turn is pending,
+        DISCARD it and rebuild a clean fix base from the last report — with
+        feedback now pending, _build_fix_prompt skips polish on its own. A
+        NON-polish base is preserved untouched (the working single-fix path,
+        e.g. battlezone asks 2 & 3, must not change).
+        """
+        if not (self._messages and self._messages[-1].get("role") == "user"):
+            return
+        base = self._messages.pop()["content"]
+        if self._polish_pending and self._last_test_report is not None:
+            self._polish_pending = False
+            base = self._build_fix_prompt(
+                report=self._last_test_report,
+                regressed=False,
+                partial_failed=[],
+            )
+            # Match the end-of-iter queueing path so the rebuilt report
+            # block still collapses once superseded.
+            base = self._wrap_report_block(base, self._last_test_report)
+            self._trace({"kind": "step_pause_polish_discarded"})
+        self._messages.append({
+            "role": "user",
+            "content": self._flush_user_injections(base),
+        })
+
     def set_research_enabled(self, on: bool) -> None:
         """Toggle Wikipedia research lookup before planning. OFF by
         default per /wiki slash command in chat.py — empirical test
@@ -15461,12 +15499,7 @@ class GameAgent:
                 # / asset decisions inside _flush_user_injections see it.
                 await self._precompute_feedback_route()
                 if self.has_pending_user_input() and not self._feedback_deferred_last_turn:
-                    if self._messages and self._messages[-1].get("role") == "user":
-                        base = self._messages.pop()["content"]
-                        self._messages.append({
-                            "role": "user",
-                            "content": self._flush_user_injections(base),
-                        })
+                    self._step_pause_flush_feedback()
                 self._step_continue = False  # consume signal
 
             self._last_iter_run = iteration

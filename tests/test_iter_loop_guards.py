@@ -14,8 +14,17 @@ directly, which is also how the existing test suite handles iter-loop
 internals (e.g. tests/test_focused_slice.py).
 """
 
-from agent import GameAgent
+import inspect
+
+from agent import GameAgent, _patch_set_bracket_break
 from backend import BackendInfo, make_backend
+from patches import Patch, apply_patches, extract_patches
+
+
+def _wrap_script(body: str) -> str:
+    """Minimal genre-free page so the bracket counter (which only scans
+    <script> blocks) has something to count."""
+    return f"<html><body><script>\n{body}\n</script></body></html>"
 
 
 def _make_agent(tmp_path):
@@ -140,3 +149,81 @@ def test_repeat_signature_suppresses_rewrite_exemption(tmp_path):
         "exemption — otherwise the model is rewarded for the same "
         "failing rewrite pattern"
     )
+
+
+# ---------------------------------------------------------------------------
+# Atomic patch-set bracket rule (genre-free harness law).
+#
+# Multi-fix IS supported: a balanced multi-patch set applies and passes the
+# atomic bracket check. But a single block that opens a brace it never
+# closes flips the WHOLE set to rejected — the safety invariant that keeps a
+# truncated patch from corrupting a working baseline (fight trace 20260611).
+# This pair pins both halves so the multi-fix work doesn't loosen the rule.
+# ---------------------------------------------------------------------------
+
+
+def test_balanced_multi_patch_set_applies():
+    base = _wrap_script(
+        "function a(){ return 1; }\n"
+        "function b(){ return 2; }\n"
+    )
+    patches = [
+        Patch(search="function a(){ return 1; }",
+              replace="function a(){ return 11; }"),
+        Patch(search="function b(){ return 2; }",
+              replace="function b(){ return 22; }"),
+    ]
+    res = apply_patches(base, patches)
+    assert res.applied == 2
+    assert res.failed == []
+    # Balanced result → atomic bracket check accepts it.
+    assert _patch_set_bracket_break(base, res.text, patches) is None
+
+
+def test_unbalanced_block_still_rejects_set():
+    base = _wrap_script("function a(){ return 1; }\n")
+    # REPLACE opens an extra { it never closes (the truncated-patch shape).
+    patches = [
+        Patch(search="function a(){ return 1; }",
+              replace="function a(){ if (x) { return 1; }"),
+    ]
+    patched = apply_patches(base, patches).text
+    msg = _patch_set_bracket_break(base, patched, patches)
+    assert msg is not None
+    assert "bracket balance" in msg
+    # Rejection message is genre-free — no game/subject words leak in.
+    low = msg.lower()
+    for word in ("tank", "yaw", "battlezone", "wireframe", "snake", "pacman"):
+        assert word not in low
+
+
+def test_bracket_reject_drives_generic_surgery_turn():
+    """When the atomic bracket check rejects a set, the iter loop queues a
+    generic PATCH SURGERY MODE recovery turn (the automatic version of the
+    one-patch retry that worked manually). Asserted at the source level so
+    no async loop / Chromium is needed — mirrors test_capability_round's
+    inspect.getsource pattern."""
+    src = inspect.getsource(GameAgent.run)
+    assert "PATCH SURGERY MODE" in src
+    assert "patch set rejected" in src
+
+
+def test_small_patch_applies_on_minimal_html():
+    """A surgery-sized 2-line change (a sign flip) applies on arbitrary
+    source via extract_patches + apply_patches — proving recovery-sized
+    patches work on any game, not a specific fixture."""
+    base = _wrap_script("let speed = 0;\nspeed += 1;\n")
+    reply = (
+        "<patch>\n"
+        "<<<<<<< SEARCH\n"
+        "speed += 1;\n"
+        "=======\n"
+        "speed -= 1;\n"
+        ">>>>>>> REPLACE\n"
+        "</patch>\n"
+    )
+    patches = extract_patches(reply)
+    assert len(patches) == 1
+    res = apply_patches(base, patches)
+    assert res.applied == 1
+    assert "speed -= 1;" in res.text

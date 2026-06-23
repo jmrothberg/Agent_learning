@@ -432,3 +432,74 @@ def test_agent_phase_b_reparse_gate_closed_when_no_code(tmp_path):
         "<sounds>[]</sounds>"
     )
     assert _phase_b_reparse_gate(a, reply) is False
+
+
+# ---------------------------------------------------------------------------
+# Harness invariant (genre-free): a failing SYNTHETIC coverage_gap probe
+# must gate report["ok"] == False — same as a failing model-authored probe.
+#
+# Bug (battlezone trace 20260622, GLM-5.2): load_and_test synthesized the
+# coverage_gap probe and listed it as FAIL in report["probes"], but never
+# added the matching PROBE FAILED soft_warning. The final ok-recompute
+# (`ok = no errors and no soft_warnings`) therefore left ok=True — the
+# report showed "6/7, FAIL coverage_gap__x" yet still shipped GREEN.
+#
+# These tests exercise the REAL extracted gate `_apply_coverage_gap_gate`
+# (the same function load_and_test calls), so a regression that drops the
+# soft_warning append turns them RED. No Chromium, no model, no genre.
+# ---------------------------------------------------------------------------
+
+
+def test_synthetic_coverage_gap_probe_fails_report_ok():
+    from tools import _apply_coverage_gap_gate
+    report = _stub_report()
+    # One passing model probe that does NOT cover the second criterion.
+    probes = [{"name": "thing_present", "expr": "!!window.state.thing"}]
+    report["probes"] = list(probes)
+    probe_results = list(probes)
+    criteria = (
+        "Basic: the thing is present at startup.\n"
+        "Behavior: pressing the action key fires a projectile."
+    )
+    probe_results = _apply_coverage_gap_gate(report, criteria, probes, probe_results)
+    # Same ok-recompute formula load_and_test applies after the gate.
+    report["ok"] = (
+        len(report["errors"]) == 0 and len(report["soft_warnings"]) == 0
+    )
+    assert report["ok"] is False
+    assert any(
+        w.startswith("PROBE FAILED [coverage_gap__")
+        for w in report["soft_warnings"]
+    )
+    # The synthetic FAIL is also visible in the probe list.
+    assert any(
+        p["name"].startswith("coverage_gap__") and not p["ok"]
+        for p in probe_results
+    )
+
+
+def test_clean_report_stays_ok_when_no_coverage_gap():
+    """Guard: when every criterion is covered, the gate adds nothing —
+    no synthetic probe, no soft_warning — and ok stays True. The
+    coverage_gap fix must NOT over-gate clean games."""
+    from tools import _apply_coverage_gap_gate
+    report = _stub_report()
+    probes = [{
+        "name": "fires_projectile",
+        "expr": "state.bullets.length > 0 /* action key fires a projectile */",
+    }]
+    report["probes"] = list(probes)
+    probe_results = list(probes)
+    criteria = "Behavior: pressing the action key fires a projectile."
+    before_warnings = len(report["soft_warnings"])
+    before_probes = len(probe_results)
+    probe_results = _apply_coverage_gap_gate(report, criteria, probes, probe_results)
+    report["ok"] = (
+        len(report["errors"]) == 0 and len(report["soft_warnings"]) == 0
+    )
+    assert report["ok"] is True
+    assert len(report["soft_warnings"]) == before_warnings
+    assert len(probe_results) == before_probes
+    assert all(
+        not p["name"].startswith("coverage_gap__") for p in probe_results
+    )
