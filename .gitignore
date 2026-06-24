@@ -34,6 +34,9 @@ memory/*
 !memory/playtests.jsonl
 !memory/asset_audits.jsonl
 !memory/animation_audits.jsonl
+# Hand-curated component skill library (paste-ready JS snippets). Same class
+# of curated opening-library data as visual_playtests.jsonl — must be tracked.
+!memory/components.jsonl
 # Default system-test battery — committed project input, useful on all machines
 # (moved out of gitignored games/ on 2026-06-02). Read by system_tests.DEFAULT_BATTERY.
 !memory/system_battery.jsonl

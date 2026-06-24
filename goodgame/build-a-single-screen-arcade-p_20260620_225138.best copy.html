@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Girder Climb — Arcade Platformer</title>
+<style>
+  html,body { margin:0; background:#0b1020; color:#fff; font-family:'Trebuchet MS',sans-serif; overflow:hidden; }
+  #wrap { position:fixed; inset:0; display:grid; place-items:center; }
+  canvas { background:#10162e; border-radius:8px; box-shadow:0 0 30px #0008; }
+  #hud { position:fixed; top:12px; left:12px; background:#000a; padding:10px 14px; border-radius:8px; font-size:15px; }
+  #hud b { color:#ffd24a; }
+  #help { position:fixed; bottom:12px; left:50%; transform:translateX(-50%); background:#000a; padding:8px 16px; border-radius:8px; font-size:13px; color:#cde; }
+  #msg { position:fixed; top:46%; left:50%; transform:translate(-50%,-50%); font-size:46px; font-weight:bold; color:#ffe; text-shadow:0 0 14px #f80,0 0 4px #000; display:none; pointer-events:none; }
+  #msg small { display:block; font-size:18px; color:#ffd24a; margin-top:8px; }
+</style></head>
+<body>
+<div id="wrap"><canvas id="c" width="800" height="600"></canvas></div>
+<div id="hud">Score: <b id="score">0</b> &nbsp; Lives: <b id="lives">3</b> &nbsp; Level: <b id="level">1</b></div>
+<div id="help">←/→ Run &nbsp; ↑/↓ Climb Ladder &nbsp; Space Jump &nbsp; R Restart</div>
+<div id="msg"></div>
+<script>
+(() => {
+  const cvs = document.getElementById("c");
+  const ctx = cvs.getContext("2d");
+  const LW = 800, LH = 600;
+
+  // HiDPI scaling
+  function fit() {
+    const dpr = window.devicePixelRatio || 1;
+    cvs.width = LW * dpr; cvs.height = LH * dpr;
+    cvs.style.width = LW + "px"; cvs.style.height = LH + "px";
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  fit();
+  window.addEventListener("resize", fit);
+
+  // ---------- Assets ----------
+  const ASSETS = {};
+  async function loadAssets() {
+    const entries = [
+      ['plumber_idle','./build-a-single-screen-arcade-p_20260620_225138_assets/plumber_idle.png'],
+      ['plumber_run1','./build-a-single-screen-arcade-p_20260620_225138_assets/plumber_run1.png'],
+      ['plumber_run2','./build-a-single-screen-arcade-p_20260620_225138_assets/plumber_run2.png'],
+      ['plumber_climb1','./build-a-single-screen-arcade-p_20260620_225138_assets/plumber_climb1.png'],
+      ['plumber_climb2','./build-a-single-screen-arcade-p_20260620_225138_assets/plumber_climb2.png'],
+      ['plumber_jump','./build-a-single-screen-arcade-p_20260620_225138_assets/plumber_jump.png'],
+      ['plumber_hit1','./build-a-single-screen-arcade-p_20260620_225138_assets/plumber_hit1.png'],
+      ['plumber_hit2','./build-a-single-screen-arcade-p_20260620_225138_assets/plumber_hit2.png'],
+      ['ape_idle','./build-a-single-screen-arcade-p_20260620_225138_assets/ape_idle.png'],
+      ['ape_throw','./build-a-single-screen-arcade-p_20260620_225138_assets/ape_throw.png'],
+      ['barrel1','./build-a-single-screen-arcade-p_20260620_225138_assets/barrel1.png'],
+      ['barrel2','./build-a-single-screen-arcade-p_20260620_225138_assets/barrel2.png'],
+      ['princess','./build-a-single-screen-arcade-p_20260620_225138_assets/princess.png'],
+    ];
+    for (const [name, src] of entries) {
+      const img = new Image();
+      img.src = src;
+      try { await img.decode(); } catch (e) { console.warn('asset failed', name, e); }
+      ASSETS[name] = img;
+    }
+  }
+
+  const _spriteCache = {};
+  function sprite(key) {
+    if (_spriteCache[key] !== undefined) return _spriteCache[key];
+    let img = ASSETS[key];
+    if (!img) {
+      const norm = s => String(s).toLowerCase().replace(/[^a-z0-9]/g, '');
+      const want = norm(key), names = Object.keys(ASSETS);
+      let hit = names.find(n => norm(n) === want)
+             || names.find(n => norm(n).includes(want) || want.includes(norm(n)));
+      if (!hit) {
+        const toks = want.match(/[a-z]+|[0-9]+/g) || []; let best = 0;
+        for (const n of names) { const nn = norm(n); let sc = 0;
+          for (const t of toks) if (t.length >= 3 && nn.includes(t)) sc += t.length;
+          if (sc > best) { best = sc; hit = n; } }
+      }
+      img = hit ? ASSETS[hit] : null;
+    }
+    const ok = (img && img.naturalWidth > 0);
+    if (!ok) { (window.__assetMisses = window.__assetMisses || {})[key] = 1; return null; }
+    _spriteCache[key] = img;
+    return img;
+  }
+
+  // ---------- Sounds ----------
+  const SOUNDS = {};
+  function loadSounds() {
+    const entries = [
+      ['jump','./build-a-single-screen-arcade-p_20260620_225138_sounds/jump.ogg',false],
+      ['hit','./build-a-single-screen-arcade-p_20260620_225138_sounds/hit.ogg',false],
+      ['score','./build-a-single-screen-arcade-p_20260620_225138_sounds/score.ogg',false],
+      ['win','./build-a-single-screen-arcade-p_20260620_225138_sounds/win.ogg',false],
+      ['lose','./build-a-single-screen-arcade-p_20260620_225138_sounds/lose.ogg',false],
+    ];
+    for (const [name, src, loop] of entries) {
+      const a = new Audio(src); a.loop = loop; SOUNDS[name] = a;
+    }
+  }
+  function play(name) {
+    const base = SOUNDS[name]; if (!base) return;
+    if (base.loop) { base.play(); return; }
+    try { const inst = base.cloneNode(); inst.play(); } catch(e){}
+  }
+  let _audioStarted = false;
+  function _startAudio() { if (_audioStarted) return; _audioStarted = true; }
+  window.addEventListener('keydown', _startAudio, {once:true});
+  window.addEventListener('pointerdown', _startAudio, {once:true});
+
+  // ---------- Level geometry ----------
+  // Six sloped girders, alternating slope direction (zigzag).
+  const girders = [
+    { xL:30,  xR:770, yL:560, yR:530 }, // 0 bottom, down-left
+    { xL:30,  xR:770, yL:445, yR:475 }, // 1 down-right
+    { xL:30,  xR:770, yL:390, yR:360 }, // 2 down-left
+    { xL:30,  xR:770, yL:275, yR:305 }, // 3 down-right
+    { xL:30,  xR:770, yL:220, yR:190 }, // 4 down-left
+    { xL:30,  xR:770, yL:105, yR:135 }, // 5 top,  down-right
+  ];
+  function girderYAt(g, x) {
+    const t = (x - g.xL) / (g.xR - g.xL);
+    return g.yL + (g.yR - g.yL) * t;
+  }
+  function slopeDir(g) { return g.yR > g.yL ? 1 : -1; }
+
+  // Ladders connecting consecutive girders; yTop/yBot DERIVED from girder surfaces.
+  const ladders = [];
+  function buildLadders() {
+    const defs = [
+      { x:600, lo:0, hi:1, barrel:true },
+      { x:200, lo:1, hi:2, barrel:true },
+      { x:600, lo:2, hi:3, barrel:true },
+      { x:200, lo:3, hi:4, barrel:true },
+      { x:400, lo:4, hi:5, barrel:false },
+    ];
+    for (const d of defs) {
+      ladders.push({
+        x:d.x, lo:d.lo, hi:d.hi, barrel:d.barrel,
+        yBot: girderYAt(girders[d.lo], d.x),
+        yTop: girderYAt(girders[d.hi], d.x),
+      });
+    }
+  }
+  buildLadders();
+
+  function ladderAt(lo, cx) { return ladders.find(l => l.lo === lo && Math.abs(l.x - cx) < 16); }
+  function ladderAtHi(hi, cx) { return ladders.find(l => l.hi === hi && Math.abs(l.x - cx) < 16); }
+
+  // ---------- Constants ----------
+  const GRAVITY = 1300;
+  const RUN_SPEED = 150;
+  const CLIMB_SPEED = 95;
+  const JUMP_IMPULSE = -430;
+  const BARREL_SPEED = 90;
+  const APE_X = 100;
+  const PRINCESS_X = 520;
+
+  // ---------- State ----------
+  let state;
+  function reset() {
+    state = {
+      player: {
+        x: 100, y: 0, vx: 0, vy: 0, w: 28, h: 40,
+        state: 'idle', animTime: 0, facing: 1,
+        grounded: true, gi: 0, onLadder: null,
+        hitTime: 0, hitPhase: 0, invuln: 0, _jumpHeld: false,
+      },
+      barrels: [],
+      spawnTimer: 0,
+      spawnInterval: 2.0,
+      lives: 3,
+      score: 0,
+      frame: 0,
+      gameOver: false,
+      won: false,
+      level: 1,
+      totalSpawned: 0,
+      apeThrowTime: 0,
+      messageTime: 0,
+    };
+    state.player.y = girderYAt(girders[0], state.player.x + state.player.w/2) - state.player.h;
+    window.gameState = state;
+    const msgEl = document.getElementById("msg");
+    msgEl.style.display = "none";
+  }
+  window.game = { reset };
+
+  // ---------- Input ----------
+  const keys = {};
+  window.addEventListener("keydown", e => {
+    keys[e.code] = true;
+    if (["ArrowLeft","ArrowRight","ArrowUp","ArrowDown","Space"].includes(e.code)) e.preventDefault();
+    if (e.code === "KeyR") reset();
+  });
+  window.addEventListener("keyup", e => { keys[e.code] = false; });
+
+  // ---------- Helpers ----------
+  function spawnBarrel() {
+    const g = girders[5];
+    state.barrels.push({
+      id: ++state.totalSpawned,
+      x: APE_X,
+      y: girderYAt(g, APE_X) - 14,
+      vx: slopeDir(g) * BARREL_SPEED,
+      gi: 5, r: 14, spin: 0, scored: false, dead: false,
+      _usedLadder: new Set(),
+    });
+    state.apeThrowTime = 0.35;
+  }
+
+  function respawn() {
+    const p = state.player;
+    p.x = 100; p.gi = 0;
+    p.y = girderYAt(girders[0], 100 + p.w/2) - p.h;
+    p.vx = 0; p.vy = 0;
+    p.state = 'idle'; p.grounded = true; p.onLadder = null;
+    p.hitTime = 0; p.invuln = 1.2; p._jumpHeld = false;
+  }
+
+  function showMessage(t, sub) {
+    const el = document.getElementById("msg");
+    el.innerHTML = t + (sub ? "<small>"+sub+"</small>" : "");
+    el.style.display = "block";
+  }
+
+  // ---------- Update ----------
+  function update(dt) {
+    state.frame++;
+    if (state.gameOver || state.won) return;
+
+    state.spawnTimer += dt;
+    if (state.spawnTimer >= state.spawnInterval) {
+      state.spawnTimer = 0;
+      spawnBarrel();
+    }
+    if (state.apeThrowTime > 0) state.apeThrowTime -= dt;
+
+    updatePlayer(dt);
+    updateBarrels(dt);
+    checkCollisions();
+
+    if (state.messageTime > 0) state.messageTime -= dt;
+  }
+
+  function updatePlayer(dt) {
+    const p = state.player;
+    p.animTime += dt;
+    if (p.invuln > 0) p.invuln -= dt;
+
+    if (p.state === 'hit') {
+      p.hitTime += dt;
+      p.hitPhase = p.hitTime < 0.3 ? 0 : 1;
+      // small fall arc
+      p.vy += GRAVITY * dt * 0.5;
+      p.y += p.vy * dt;
+      p.x += p.vx * dt;
+      if (p.hitTime > 1.0) {
+        if (state.lives <= 0) {
+          state.gameOver = true;
+          showMessage("GAME OVER", "Press R to restart");
+          play('lose');
+        } else {
+          respawn();
+        }
+      }
+      return;
+    }
+
+    let move = 0;
+    if (keys.ArrowLeft) move = -1;
+    if (keys.ArrowRight) move = 1;
+
+    if (p.onLadder) {
+      p.state = 'climb';
+      p.vx = 0;
+      let vy = 0;
+      if (keys.ArrowUp) vy = -CLIMB_SPEED;
+      if (keys.ArrowDown) vy = CLIMB_SPEED;
+      if (vy !== 0) p.animTime += dt; else p.animTime = 0;
+      p.y += vy * dt;
+      const ld = p.onLadder;
+      if (p.y < ld.yTop - p.h) {
+        p.y = ld.yTop - p.h; p.gi = ld.hi; p.onLadder = null; p.grounded = true; p.state = 'idle';
+      }
+      if (p.y > ld.yBot - p.h) {
+        p.y = ld.yBot - p.h; p.gi = ld.lo; p.onLadder = null; p.grounded = true; p.state = 'idle';
+      }
+      if (keys.Space) {
+        p.onLadder = null; p.grounded = false; p.vy = JUMP_IMPULSE * 0.5; p.state = 'jump';
+      }
+      if (move !== 0) p.facing = move;
+      return;
+    }
+
+    if (p.grounded) {
+      // climb up
+      if (keys.ArrowUp) {
+        const ld = ladderAt(p.gi, p.x + p.w/2);
+        if (ld && ld.lo === p.gi) {
+          p.onLadder = ld; p.x = ld.x - p.w/2; p.state = 'climb'; p.grounded = false; return;
+        }
+      }
+      // climb down
+      if (keys.ArrowDown) {
+        const ld = ladderAtHi(p.gi, p.x + p.w/2);
+        if (ld && ld.hi === p.gi) {
+          p.onLadder = ld; p.x = ld.x - p.w/2; p.state = 'climb'; p.grounded = false; return;
+        }
+      }
+      // run
+      if (move !== 0) {
+        p.x += move * RUN_SPEED * dt;
+        p.facing = move;
+        p.state = 'run';
+      } else {
+        p.state = 'idle';
+      }
+      // jump
+      if (keys.Space && !p._jumpHeld) {
+        p.vy = JUMP_IMPULSE;
+        p.grounded = false;
+        p.state = 'jump';
+        p._jumpHeld = true;
+        play('jump');
+      }
+      if (!keys.Space) p._jumpHeld = false;
+      // follow girder surface
+      const g = girders[p.gi];
+      p.y = girderYAt(g, p.x + p.w/2) - p.h;
+      // clamp to girder
+      p.x = Math.max(g.xL + 2, Math.min(g.xR - p.w - 2, p.x));
+    } else {
+      // airborne
+      p.vy += GRAVITY * dt;
+      if (move !== 0) { p.x += move * RUN_SPEED * dt; p.facing = move; }
+      p.x = Math.max(0, Math.min(LW - p.w, p.x));
+      p.y += p.vy * dt;
+      // landing
+      const cx = p.x + p.w/2;
+      let landed = null;
+      for (let i = 0; i < girders.length; i++) {
+        const g = girders[i];
+        if (cx < g.xL || cx > g.xR) continue;
+        const sy = girderYAt(g, cx);
+        if (p.vy > 0 && p.y + p.h >= sy && (p.y + p.h - p.vy * dt) <= sy + 8) {
+          if (!landed || sy > landed.sy) landed = { i, sy };
+        }
+      }
+      if (landed) {
+        p.gi = landed.i; p.y = landed.sy - p.h; p.vy = 0; p.grounded = true; p.state = 'idle';
+      }
+      if (p.y > LH + 40) respawn();
+    }
+
+    // win check
+    if (p.grounded && p.gi === 5 && Math.abs((p.x + p.w/2) - PRINCESS_X) < 26) {
+      state.won = true;
+      state.score += 1000;
+      showMessage("YOU WIN!", "Press R to play again");
+      play('win');
+    }
+  }
+
+  function updateBarrels(dt) {
+    for (const b of state.barrels) {
+      if (b.dead) continue;
+      b.x += b.vx * dt;
+      b.spin += Math.abs(b.vx) * dt * 0.04;
+      const g = girders[b.gi];
+      b.y = girderYAt(g, b.x) - b.r;
+
+      // ladder descent
+      for (const ld of ladders) {
+        if (ld.barrel && ld.hi === b.gi) {
+          if (Math.abs(b.x - ld.x) < 6 && !b._usedLadder.has(ld)) {
+            if (Math.random() < 0.32) {
+              b.gi = ld.lo;
+              b.x = ld.x;
+              b.vx = slopeDir(girders[b.gi]) * BARREL_SPEED;
+              b._usedLadder.add(ld);
+            }
+          }
+        }
+      }
+
+      // edge fall -> next girder below (zigzag)
+      const sd = slopeDir(g);
+      if (sd > 0 && b.x > g.xR + 4) {
+        if (b.gi > 0) { b.gi--; b.x = girders[b.gi].xR; b.vx = slopeDir(girders[b.gi]) * BARREL_SPEED; b._usedLadder = new Set(); }
+        else b.dead = true;
+      } else if (sd < 0 && b.x < g.xL - 4) {
+        if (b.gi > 0) { b.gi--; b.x = girders[b.gi].xL; b.vx = slopeDir(girders[b.gi]) * BARREL_SPEED; b._usedLadder = new Set(); }
+        else b.dead = true;
+      }
+      if (b.x < -40 || b.x > LW + 40) b.dead = true;
+    }
+    state.barrels = state.barrels.filter(b => !b.dead);
+    if (state.barrels.length > 40) state.barrels = state.barrels.slice(-40);
+  }
+
+  function checkCollisions() {
+    const p = state.player;
+    if (p.state === 'hit') return;
+    for (const b of state.barrels) {
+      if (b.dead) continue;
+      const cx = p.x + p.w/2, cy = p.y + p.h/2;
+      const dx = Math.abs(cx - b.x), dy = Math.abs(cy - b.y);
+      const overlapX = dx < (p.w/2 + b.r);
+      const overlapY = dy < (p.h/2 + b.r);
+      if (!overlapX) continue;
+      const feetAbove = (p.y + p.h) < (b.y - b.r + 5);
+      if (feetAbove && p.state === 'jump' && !b.scored) {
+        b.scored = true;
+        state.score += 100;
+        play('score');
+      } else if (overlapY && p.invuln <= 0) {
+        state.lives--;
+        p.state = 'hit'; p.hitTime = 0; p.hitPhase = 0;
+        p.vy = -160; p.vx = (cx < b.x ? -1 : 1) * 80;
+        play('hit');
+        return;
+      }
+    }
+  }
+
+  // ---------- Draw ----------
+  const stars = [];
+  { let s = 1; for (let i = 0; i < 70; i++) { s = (s * 1103515245 + 12345) & 0x7fffffff; stars.push({ x: s % LW, y: (s >> 8) % 420, r: ((s >> 16) % 3) * 0.6 + 0.4 }); } }
+
+  function drawBackground() {
+    const grd = ctx.createLinearGradient(0, 0, 0, LH);
+    grd.addColorStop(0, "#0a0e27"); grd.addColorStop(1, "#1a1f3f");
+    ctx.fillStyle = grd; ctx.fillRect(0, 0, LW, LH);
+    ctx.fillStyle = "rgba(255,255,255,0.8)";
+    for (const s of stars) { ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, 7); ctx.fill(); }
+    ctx.fillStyle = "#ffe9a8"; ctx.beginPath(); ctx.arc(700, 70, 26, 0, 7); ctx.fill();
+    ctx.fillStyle = "rgba(255,233,168,0.3)"; ctx.beginPath(); ctx.arc(700, 70, 34, 0, 7); ctx.fill();
+  }
+
+  function drawGirders() {
+    for (let i = 0; i < girders.length; i++) {
+      const g = girders[i];
+      const t = 14;
+      ctx.fillStyle = "#c8451e";
+      ctx.beginPath();
+      ctx.moveTo(g.xL, g.yL); ctx.lineTo(g.xR, g.yR);
+      ctx.lineTo(g.xR, g.yR + t); ctx.lineTo(g.xL, g.yL + t); ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = "#ff7a4a"; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(g.xL, g.yL); ctx.lineTo(g.xR, g.yR); ctx.stroke();
+      ctx.fillStyle = "#7a2a12";
+      for (let x = g.xL + 20; x < g.xR; x += 38) {
+        const y = girderYAt(g, x) + t / 2;
+        ctx.beginPath(); ctx.arc(x, y, 2.2, 0, 7); ctx.fill();
+      }
+    }
+  }
+
+  function drawLadders() {
+    for (const ld of ladders) {
+      ctx.strokeStyle = "#d9c9a0"; ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(ld.x - 9, ld.yBot); ctx.lineTo(ld.x - 9, ld.yTop);
+      ctx.moveTo(ld.x + 9, ld.yBot); ctx.lineTo(ld.x + 9, ld.yTop);
+      ctx.stroke();
+      ctx.lineWidth = 2;
+      for (let y = ld.yBot - 4; y > ld.yTop; y -= 15) {
+        ctx.beginPath(); ctx.moveTo(ld.x - 9, y); ctx.lineTo(ld.x + 9, y); ctx.stroke();
+      }
+    }
+  }
+
+  function drawApe() {
+    const g = girders[5];
+    const y = girderYAt(g, APE_X);
+    const img = state.apeThrowTime > 0 ? sprite('ape_throw') : sprite('ape_idle');
+    const w = 92, h = 92;
+    if (img) ctx.drawImage(img, APE_X - w/2, y - h + 12, w, h);
+    else missingMarker(APE_X - w/2, y - h + 12, w, h, 'ape');
+  }
+
+  function drawPrincess() {
+    const g = girders[5];
+    const y = girderYAt(g, PRINCESS_X);
+    const img = sprite('princess');
+    const w = 46, h = 56;
+    if (img) ctx.drawImage(img, PRINCESS_X - w/2, y - h, w, h);
+    else missingMarker(PRINCESS_X - w/2, y - h, w, h, 'princess');
+    // glow heart
+    ctx.fillStyle = "rgba(255,120,160,0.5)";
+    ctx.beginPath(); ctx.arc(PRINCESS_X, y - h - 14, 6 + Math.sin(state.frame*0.1)*2, 0, 7); ctx.fill();
+  }
+
+  function drawBarrels() {
+    for (const b of state.barrels) {
+      const img = Math.floor(b.spin) % 2 === 0 ? sprite('barrel1') : sprite('barrel2');
+      const s = b.r * 2;
+      if (img) ctx.drawImage(img, b.x - b.r, b.y - b.r, s, s);
+      else { ctx.fillStyle = "#a06030"; ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, 7); ctx.fill(); ctx.strokeStyle="#5a3010"; ctx.lineWidth=2; ctx.stroke(); }
+    }
+  }
+
+  function playerSprite() {
+    const p = state.player;
+    if (p.state === 'hit') return p.hitPhase === 0 ? sprite('plumber_hit1') : sprite('plumber_hit2');
+    if (p.state === 'jump') return sprite('plumber_jump');
+    if (p.state === 'climb') return Math.floor(p.animTime / 0.22) % 2 === 0 ? sprite('plumber_climb1') : sprite('plumber_climb2');
+    if (p.state === 'run') return Math.floor(p.animTime / 0.11) % 2 === 0 ? sprite('plumber_run1') : sprite('plumber_run2');
+    return sprite('plumber_idle');
+  }
+
+  function drawPlayer() {
+    const p = state.player;
+    const img = playerSprite();
+    const dw = p.w + 10, dh = p.h + 10;
+    const dx = p.x - 5, dy = p.y - 6;
+    ctx.save();
+    if (p.facing < 0) { ctx.translate(dx + dw, 0); ctx.scale(-1, 1); ctx.translate(-dx, 0); }
+    // invuln flicker
+    if (p.invuln > 0 && Math.floor(state.frame / 4) % 2 === 0) ctx.globalAlpha = 0.5;
+    if (img) ctx.drawImage(img, dx, dy, dw, dh);
+    else missingMarker(dx, dy, dw, dh, 'plumber');
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+
+  function missingMarker(x, y, w, h, key) {
+    ctx.fillStyle = "#f0f"; ctx.fillRect(x, y, w, h);
+    ctx.fillStyle = "#000"; ctx.font = "10px monospace";
+    ctx.fillText("MISS " + key, x + 2, y + 12);
+  }
+
+  function updateHUD() {
+    document.getElementById("score").textContent = state.score;
+    document.getElementById("lives").textContent = state.lives;
+    document.getElementById("level").textContent = state.level;
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, LW, LH);
+    drawBackground();
+    drawGirders();
+    drawLadders();
+    drawPrincess();
+    drawApe();
+    drawBarrels();
+    drawPlayer();
+    updateHUD();
+  }
+
+  // ---------- Frame loop ----------
+  let last = performance.now();
+  function frame(now) {
+    let dt = (now - last) / 1000; last = now;
+    if (dt > 0.05) dt = 0.05;
+    try { update(dt); draw(); }
+    catch (e) { console.error(e); }
+    requestAnimationFrame(frame);
+  }
+
+  reset();
+  requestAnimationFrame(frame);
+  loadAssets();
+  loadSounds();
+})();
+</script>
+</body></html>
