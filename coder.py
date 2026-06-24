@@ -143,7 +143,7 @@ async def _run(
     model_class: str = "auto",
     restart_n: int = 1,
     restart_threshold: float = 60.0,
-    playbook_on: bool = False,
+    playbook_on: bool = True,
     playbook_writeback: bool = True,
 ) -> int:
     # Resolve which LLM daemon we'll talk to. --backend overrides the
@@ -191,9 +191,9 @@ async def _run(
         model_class=model_class,
         restart_n=restart_n,
         restart_score_threshold=restart_threshold,
-        # K=0 disables retrieval entirely. Default is OFF — opt in
-        # via --playbook. Writeback stays on so when the user does
-        # enable retrieval, outcomes update the counters.
+        # K=0 disables retrieval entirely. Default is ON (TUI parity) —
+        # opt out via --no-playbook. Writeback stays on so session
+        # outcomes keep updating the bullet counters.
         playbook_top_k=6 if playbook_on else 0,
         playbook_writeback=playbook_writeback,
     )
@@ -289,18 +289,21 @@ def main() -> int:
     p.add_argument(
         "--playbook",
         action="store_true",
-        default=False,
-        help="Enable playbook bullet retrieval. OFF by default — "
-             "across 6 ON/OFF bench pairs on a 27B local model, OFF "
-             "beat ON 5/6 on short-loop runs. Pass --playbook to "
-             "re-enable.",
+        default=True,
+        help="Playbook bullet retrieval. ON by default so CLI/headless "
+             "builds get the same accumulated rules the TUI uses (driver "
+             "parity). Pass --no-playbook to disable.",
     )
     p.add_argument(
         "--no-playbook",
         action="store_false",
         dest="playbook",
-        help="(legacy) Same as omitting --playbook now that off is "
-             "the default. Kept for back-compat with existing scripts.",
+        # Historical note (kept for the next LLM): an early bench on a 27B
+        # local model had OFF beating ON 5/6 on short-loop runs. That was
+        # before the playbook was curated and before plan/first-build/fix
+        # injection was tuned; the TUI has defaulted ON since, so CLI now
+        # matches it. Use --no-playbook for A/B baselines or very tight loops.
+        help="Disable playbook retrieval (A/B baselines or tight loops).",
     )
     p.add_argument(
         "--playbook-writeback",

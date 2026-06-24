@@ -74,6 +74,36 @@ def test_asset_miss_probe_not_duplicated(tmp_path: Path) -> None:
 
 
 # ----------------------------------------------------------------------
+# Tier 1b — missing-asset LOAD gate (C1): a referenced sprite that 404s is a
+# hard broken-art failure, gated even when the model's own probes pass.
+# ----------------------------------------------------------------------
+
+
+def test_asset_load_failed_detects_404_when_art_referenced() -> None:
+    from tools import _asset_load_failed
+    err = (
+        "Failed to load resource: net::ERR_FILE_NOT_FOUND "
+        "file:///tmp/sess_assets/hero_idle.png"
+    )
+    assert _asset_load_failed(True, err) is True
+
+
+def test_asset_load_failed_ignores_when_no_art_referenced() -> None:
+    from tools import _asset_load_failed
+    err = "Failed to load resource: net::ERR_FILE_NOT_FOUND .../sess_assets/x.png"
+    # No generated art referenced in the HTML -> not our gate's concern.
+    assert _asset_load_failed(False, err) is False
+
+
+def test_asset_load_failed_ignores_unrelated_errors() -> None:
+    from tools import _asset_load_failed
+    # A 404 for a non-asset path (e.g. a favicon) must not gate the game.
+    assert _asset_load_failed(True, "Failed to load resource: /favicon.ico 404") is False
+    # No load failure at all.
+    assert _asset_load_failed(True, "some console.log noise about score") is False
+
+
+# ----------------------------------------------------------------------
 # Tier 2 — defect-aware note parser.
 # ----------------------------------------------------------------------
 

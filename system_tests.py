@@ -58,6 +58,13 @@ SUITE_TESTS = {
     "smoke": {"smoke-plumbing", "smoke-move", "smoke-board-select", "smoke-asset-animation"},
     "pacman": {"pacman-hard"},
     "full": {"smoke-plumbing", "smoke-move", "smoke-board-select", "smoke-asset-animation", "pacman-hard"},
+    # Novel-goal smoke: genre-free prompts that name no known genre. Confirms a
+    # genuinely new idea still gets memory (opening_book_trace) and a playable,
+    # error-free, interactive build. Not slow (max_iters 4), so safe for CI.
+    "novel": {
+        "novel-firefly-herd", "novel-radio-tune", "novel-tide-flow", "novel-constellation",
+        "novel-spore-bloom", "novel-pendulum-paint", "novel-echo-ping", "novel-magnet-sort",
+    },
 }
 
 # Slow acceptance benchmarks — prompt before run (smoke suite is fast).

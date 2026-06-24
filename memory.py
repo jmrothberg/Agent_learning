@@ -135,12 +135,12 @@ _RECIPE_TO_OUTLINE: dict[str, str] = {
     "canvas-city-builder": "outline-city-builder",
     "canvas-space-trading": "outline-space-trading",
     "canvas-vertical-platformer": "outline-vertical-platformer",
-    "canvas-single-fighter": "outline-asset-backed-animation",
+    "canvas-single-fighter": "outline-single-fighter",  # dedicated 1-actor showcase outline (was borrowing outline-asset-backed-animation)
     "canvas-cutscene-qte": "outline-cutscene-qte",
     "canvas-card-tabletop": "outline-card-tabletop",
     "canvas-physics-projectile": "outline-physics-projectile",
-    "canvas-lit-dungeon": "outline-grid-navigation",
-    "canvas-mobile-touch": "outline-controllable-canvas-game",
+    "canvas-lit-dungeon": "outline-lit-dungeon",  # dedicated radial-lighting/darkness outline (was borrowing outline-grid-navigation)
+    "canvas-mobile-touch": "outline-mobile-touch",  # dedicated touch-controls outline (was borrowing outline-controllable-canvas-game)
     "canvas-tower-defense": "outline-tower-defense",
     "canvas-rhythm": "outline-rhythm",
     "canvas-idle-clicker": "outline-idle-clicker",
@@ -2455,19 +2455,12 @@ _CANVAS_HINT_KEYWORDS: frozenset[str] = frozenset({
     "webgl",
 })
 
-# 3D rendering modality. Mirrors prompts_v1._3D_KEYWORDS to avoid a new
-# cross-module import — keep in sync if either side changes.
-_3D_MODALITY_KEYWORDS: frozenset[str] = frozenset({
-    # Genre-free rendering-MODALITY tokens only — specific 3D game TITLES
-    # (doom, wolfenstein, minecraft) live in the data layer
-    # (memory/visual_playtests.jsonl strong_hooks), which routes them via
-    # _recipe_routed_skeleton. Project rule: no hardcoded genre/title lists.
-    "3d", "three", "threejs",
-    "first-person", "firstperson", "fps",
-    "raycaster", "raycasting", "raycast",
-    "voxel", "voxels",
-    "perspective",
-})
+# 3D rendering modality. Now imported from the shared modality.py (single
+# source of truth) so memory retrieval and the prompts_v1 planner can never
+# disagree on whether a goal is 3D — the old "keep in sync by hand" comment
+# was the drift hazard this removes. Aliased to the old private name so the
+# rest of this module is unchanged.
+from modality import THREE_D_KEYWORDS as _3D_MODALITY_KEYWORDS
 
 # When ≥ this many modality tokens hit, the modality skeleton wins.
 # Threshold of 2 balances "needs more than coincidence" against the trace
@@ -2581,16 +2574,13 @@ def _detect_dom_intent(goal: str) -> list[str]:
     return out
 
 
-def _detect_3d_intent(goal: str) -> list[str]:
-    """Return 3D-modality keywords. Mirrors the prompts_v1 detector but
-    kept local so memory.py doesn't import the prompt module."""
-    toks = _modality_tokens(goal)
-    seen: set[str] = set()
-    out: list[str] = []
-    for t in toks:
-        if t in _3D_MODALITY_KEYWORDS and t not in seen:
-            seen.add(t); out.append(t)
-    return out
+# 3D-modality detector now comes from the shared modality.py (single source
+# of truth) so it can never disagree with the prompts_v1 planner. Aliased to
+# the old private name `_detect_3d_intent` so all callers in this module and
+# in agent_memory.py keep working unchanged. (The old local copy tokenized via
+# _modality_tokens; the shared one is regex-based and produces identical 3D
+# routing decisions — verified equivalent across the modality battery.)
+from modality import detect_3d_intent as _detect_3d_intent
 
 
 # Stopwords for visual-playtest matching context tokenization. These

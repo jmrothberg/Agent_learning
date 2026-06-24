@@ -840,13 +840,13 @@ _ART_KEYWORDS = frozenset({
 # goal is to nudge the model toward a real 3D library (three.js / babylon
 # / PlayCanvas via CDN) rather than hand-rolling a raycaster in 12 KB,
 # which is what produced the unplayable doom session.
-_3D_KEYWORDS = frozenset({
-    "3d", "three", "threejs",
-    "first-person", "firstperson", "fps",
-    "raycaster", "raycasting", "raycast",
-    "voxel", "voxels",
-    "perspective",
-})
+# 3D modality keyword set + detector now live in the shared modality.py
+# (single source of truth) so the planner and memory retrieval can never
+# disagree on whether a goal is 3D. Aliased to the old private names so the
+# rest of this module — and tests that call prompts_v1._detect_3d_intent —
+# keep working unchanged.
+from modality import THREE_D_KEYWORDS as _3D_KEYWORDS
+from modality import detect_3d_intent as _detect_3d_intent
 
 
 # Modality keywords that signal the goal needs generated AUDIO. Genre-
@@ -966,38 +966,7 @@ def _detect_qte_intent(goal: str) -> list[str]:
     return out
 
 
-def _detect_3d_intent(goal: str) -> list[str]:
-    """Return a list of 3D-modality keywords found in `goal`. Empty list
-    means the goal is plain 2D / DOM-only and needs no 3D nudge.
-    Single-token matches; multi-token phrases like "first person" are
-    detected by joining adjacent words and checking the joined form.
-
-    Tokenizer keeps digits so "3D" is matched as "3d" (not stripped to
-    "d"). Lowercased so the keyword set can stay all-lowercase.
-    """
-    if not goal:
-        return []
-    import re
-    words = [w.lower() for w in re.findall(r"[a-zA-Z0-9]+", goal)]
-    out: list[str] = []
-    seen: set[str] = set()
-    # Single-word match.
-    for w in words:
-        if w in _3D_KEYWORDS and w not in seen:
-            seen.add(w)
-            out.append(w)
-    # Two-word join match for "first person", "doom like", etc.
-    for i in range(len(words) - 1):
-        j = words[i] + words[i + 1]
-        if j in _3D_KEYWORDS and j not in seen:
-            seen.add(j)
-            out.append(j)
-        # And with hyphen variant
-        jh = words[i] + "-" + words[i + 1]
-        if jh in _3D_KEYWORDS and jh not in seen:
-            seen.add(jh)
-            out.append(jh)
-    return out
+# _detect_3d_intent moved to modality.py (imported/aliased above).
 
 
 # Phase 4: heavy-logic keyword set. These describe game-rule depth or

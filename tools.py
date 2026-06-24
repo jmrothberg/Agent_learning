@@ -695,6 +695,27 @@ def _classify_strict_file_failure(
     return "", "", ""
 
 
+def _asset_load_failed(referenced_assets: bool, error_text: str) -> bool:
+    """True when the HTML referenced generated assets AND the run logged a
+    concrete load failure (404 / file-not-found) for an `_assets/` path.
+
+    Genre-free helper for the C1 missing-asset gate: a referenced sprite PNG
+    that the browser could not fetch is a hard broken-art failure (the game
+    falls back to colored squares), distinct from a pose sprite that merely
+    did not trigger during the test window. Returns False when no art was
+    referenced or no asset-path load error appears in the error text.
+    """
+    if not referenced_assets:
+        return False
+    low = (error_text or "").lower()
+    if "_assets/" not in low:
+        return False
+    return any(tok in low for tok in (
+        "404", "failed to load resource", "err_file_not_found",
+        "not allowed to load",
+    ))
+
+
 def _run_strict_file_runtime_check(path: Path, run_seconds: float = 1.2) -> dict[str, Any]:
     """Second-pass outside-agent check: stock Chromium file:// with no relaxed flags."""
     page_errors: list[str] = []
@@ -3423,6 +3444,30 @@ class LiveBrowser:
                 # Finding absent this run — break the persistence streak so a
                 # future regression gates again.
                 self._undrawn_seen_before = False
+            # Missing-asset LOAD gate (C1): a generated _assets PNG the HTML
+            # references but the browser failed to FETCH (404 / file-not-found)
+            # is a hard broken-art failure — the game shows colored-box
+            # placeholders instead of the generated art (holochess 20260623).
+            # Unlike the undrawn check above (a pose sprite may simply not have
+            # triggered), a load failure is unambiguous, so it gates via
+            # soft_warnings regardless of whether the model's own probes pass.
+            if referenced_assets and _asset_load_failed(
+                True,
+                "\n".join(str(e) for e in (
+                    (report.get("page_errors") or [])
+                    + (report.get("errors") or [])
+                    + (report.get("console_errors") or [])
+                )),
+            ):
+                report["missing_asset_load_check"] = {"load_failed": True}
+                report["soft_warnings"].append(
+                    "MISSING_ASSET_LOAD: a generated _assets PNG the game "
+                    "references failed to load (404 / file-not-found), so it is "
+                    "drawing placeholder/colored-square fallbacks instead of the "
+                    "generated art. Load every sprite through the provided "
+                    "sprite()/ASSETS loader using the EXACT names in GENERATED "
+                    "ASSETS and verify each relative path resolves."
+                )
         # ---- fake-action: code-drawn limb pretending to be a sprite --------
         # Only when the game actually uses sprites. A key that visibly changed
         # the canvas but added NO new sprite source while code-draw

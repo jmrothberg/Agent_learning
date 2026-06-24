@@ -100,7 +100,9 @@ def test_plan_turn_injects_opening_book_before_plan_contract() -> None:
     src = inspect.getsource(GameAgent.run)
     assert "plan_opening_book_injected" in src
     assert "Use the opening-book recipes above when choosing your" in src
-    assert "char_budget=1200" in src
+    # B2: plan-turn opening-book budget was raised 1200 -> 3000 so the model
+    # sees the full state contract at the moment it writes its <probes>.
+    assert "char_budget=3000" in src
 
 
 def test_pointclick_puzzle_chain_recipe_is_executable() -> None:

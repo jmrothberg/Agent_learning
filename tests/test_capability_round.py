@@ -380,22 +380,15 @@ def test_step_pause_feedback_without_polish_keeps_base(tmp_path):
     assert "UNIQUE-BASE-MARKER-xyz" in out
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Phase 1 not implemented: a behavior_bug/code_fix router intent "
-        "does not yet force fix_mode on a clean-report feedback turn."
-    ),
-)
 def test_behavior_bug_route_forces_fix_mode_on_clean_report(tmp_path):
     a = _make_agent(tmp_path)
     a._goal = "build a game"
     a._iters_remaining = 2
     a._pending_feedback.append("the enemy walks through walls")
     a._feedback_route = {"primary_intent": "behavior_bug", "honor_user_now": True}
-    # Phase 1 contract: a behavior_bug feedback turn runs in fix_mode
-    # (precision temperature) even though the prior report was clean.
-    a._route_forces_fix_mode()  # to be added in Phase 1
+    # A behavior_bug feedback turn runs in fix_mode (precision temperature)
+    # even though the prior report was clean.
+    a._route_forces_fix_mode()
     assert a._fix_mode is True
 
 

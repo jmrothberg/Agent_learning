@@ -84,7 +84,6 @@ from memory import (
     DEFAULT_SKELETON,
     DEFAULT_SKELETON_NAME,
     GameMemory,
-    OpeningBookHit,
     OpeningBookItem,
     Playbook,
     PLAYTESTS_FILENAME,
@@ -92,12 +91,8 @@ from memory import (
     ANIMATION_AUDITS_FILENAME,
     SkeletonHit,
     lookup_bullet,
-    render_components_block,
-    render_opening_book_block,
     render_playbook_block,
-    render_vlm_checklist_section,
     signature_for_report,
-    VLM_CHECKLIST_SKIP_IDS,
 )
 from ollama_io import Candidate, StreamResult
 from patches import FormatRejection, apply_patches, classify_format_failure, extract_patches
@@ -118,6 +113,9 @@ from tools import (
 # Probe-result handlers (impossible-probe downgrade, eval-error quarantine,
 # all-quarantine ship gate) live in agent_probes.py; GameAgent inherits them.
 from agent_probes import ProbeHandlingMixin
+# First-build/plan-turn memory retrieval (opening-book, components, lean budget,
+# open-domain detection) lives in agent_memory.py; GameAgent inherits it.
+from agent_memory import MemoryRetrievalMixin
 
 
 # Pi-mono pattern: read AGENTS.md / CLAUDE.md from the working tree at
@@ -1948,7 +1946,7 @@ def _parse_ollama_keep_alive_env() -> float | str:
     return int(numeric) if numeric.is_integer() else numeric
 
 
-class GameAgent(ProbeHandlingMixin):
+class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
     """Drives the planning/coding/critique loop. One instance per session."""
 
     def __init__(
@@ -3789,173 +3787,9 @@ class GameAgent(ProbeHandlingMixin):
         except Exception:
             return ""
 
-    def _retrieve_opening_book_block(
-        self,
-        goal: str,
-        *,
-        stage: str = "plan",
-        char_budget: int | None = None,
-        deep: bool | None = None,
-        extra_tokens: list[str] | None = None,
-    ) -> tuple[str, list[dict]]:
-        """Retrieve compact root/live opening-book recipes with hard caps.
-
-        `extra_tokens` are appended to the modality tokens used for
-        retrieval — used by the seed path to pass structural tokens pulled
-        from the working file (DOM ids, function names) so the goal alone
-        ("add a button") doesn't mis-rank the outline.
-        """
-        try:
-            mod_toks: list[str] = []
-            try:
-                from memory import (
-                    _detect_3d_intent, _detect_board_intent, _detect_dom_intent,
-                )
-                mod_toks = (
-                    _detect_3d_intent(goal)
-                    + _detect_board_intent(goal)
-                    + _detect_dom_intent(goal)
-                )
-            except Exception:
-                mod_toks = []
-            if extra_tokens:
-                mod_toks = mod_toks + list(extra_tokens)
-            outline = self._memory.retrieve_implementation_outline(goal, mod_toks)
-            # Universal fallback: a novel/open-domain goal may match NO outline
-            # (Jaccard empty and no recipe route). Rather than plan with no
-            # state/order/traps contract at all, force the genre-free
-            # controllable-canvas-game outline so every build still inherits a
-            # state-on-window / input / dt-cap / draw-order / restart skeleton.
-            outline_fallback = False
-            if outline is None:
-                outline = self._memory._outline_item_by_id(
-                    "outline-controllable-canvas-game"
-                )
-                outline_fallback = outline is not None
-            playtests = self._memory.retrieve_playtests(
-                goal, mod_toks, k=3 if stage == "plan" else 1,
-            )
-            asset_audits = self._memory.retrieve_asset_audits(
-                goal, mod_toks, k=2 if stage == "plan" else 1,
-            )
-            animation_audits = self._memory.retrieve_animation_audits(
-                goal, mod_toks, k=2 if stage == "plan" else 1,
-            )
-            vlm_checklist: str | None = None
-            if stage == "plan":
-                try:
-                    vp_recipe, vp_diag = self._memory.find_visual_playtest_for(
-                        goal=goal or "",
-                        plan_text=self._criteria or "",
-                        asset_names=list(self._session_assets.keys()),
-                    )
-                except Exception:
-                    vp_recipe, vp_diag = None, {}
-                if (
-                    vp_recipe is not None
-                    and vp_recipe.id not in VLM_CHECKLIST_SKIP_IDS
-                ):
-                    vlm_checklist = render_vlm_checklist_section(vp_recipe)
-                    if vlm_checklist:
-                        self._trace({
-                            "kind": "vlm_checklist_injected",
-                            "recipe_id": vp_recipe.id,
-                            "top_candidates": (vp_diag or {}).get("top_candidates"),
-                        })
-            # Plan stage deep-renders the ONE matched outline's recipe
-            # (state/order/traps/tuning/probes) under a 3600-char cap —
-            # ~+600 tokens in the smallest prompt of the session. Code
-            # stage stays shallow at 1400 so iterate prompts never grow.
-            block = render_opening_book_block(
-                outline, playtests, asset_audits, animation_audits,
-                char_budget=char_budget if char_budget is not None else (3600 if stage == "plan" else 1400),
-                deep=deep if deep is not None else (stage == "plan"),
-                vlm_checklist=vlm_checklist,
-            )
-
-            def _row(kind: str, hit: OpeningBookHit) -> dict:
-                return {
-                    "kind": kind,
-                    "id": hit.item.id,
-                    "tier": hit.item.source_tier,
-                    "score": round(hit.score, 4),
-                    "recipe": hit.item.recipe,
-                }
-
-            hits: list[dict] = []
-            if outline:
-                hits.append(_row("outline", outline))
-            hits.extend(_row("playtest", h) for h in playtests)
-            hits.extend(_row("asset_audit", h) for h in asset_audits)
-            hits.extend(_row("animation_audit", h) for h in animation_audits)
-            if hits:
-                self._trace({
-                    "kind": "opening_book_retrieved",
-                    "stage": stage,
-                    "hits": hits,
-                    "modality_tokens": mod_toks,
-                    "outline_fallback": outline_fallback,
-                })
-            return block, hits
-        except Exception as e:
-            self._trace({"kind": "opening_book_error", "stage": stage, "err": str(e)})
-            return "", []
-
-    def _retrieve_components_block(
-        self,
-        query: str,
-        *,
-        stage: str = "plan",
-        k: int = 3,
-        ensure_ids: list[str] | None = None,
-    ) -> str:
-        """Retrieve component-library snippets as a <components> block.
-
-        Capability-round item 1: tested, mechanics-level JS the model
-        pastes and ADAPTS (memory/components.jsonl). `query` is the goal
-        at first build; at fix turns it is the blocker text so a snippet
-        is only injected when it matches the actual failure. Returns ""
-        when nothing matches (safe degradation).
-        """
-        try:
-            mod_toks: list[str] = []
-            try:
-                from memory import (
-                    _detect_3d_intent, _detect_board_intent, _detect_dom_intent,
-                )
-                mod_toks = (
-                    _detect_3d_intent(query)
-                    + _detect_board_intent(query)
-                    + _detect_dom_intent(query)
-                )
-            except Exception:
-                mod_toks = []
-            hits = self._memory.retrieve_components(query, mod_toks, k=k)
-            # Universal-fallback pinning: guarantee the engine-skeleton snippets
-            # (game loop, input) are present for open-domain goals even when
-            # Jaccard retrieval missed them. Pinned hits go FIRST so they
-            # survive the lean budget and the model copies a working loop.
-            if ensure_ids:
-                have = {h.item.id for h in hits}
-                missing = [cid for cid in ensure_ids if cid not in have]
-                if missing:
-                    hits = self._memory.components_by_ids(missing) + hits
-            block = render_components_block(
-                hits, char_budget=2200 if stage == "plan" else 1400,
-            )
-            if hits:
-                self._trace({
-                    "kind": "components_injected",
-                    "stage": stage,
-                    "ids": [h.item.id for h in hits],
-                    "scores": [round(h.score, 4) for h in hits],
-                    "chars": len(block or ""),
-                    "rendered": bool(block),
-                })
-            return block or ""
-        except Exception as e:
-            self._trace({"kind": "components_error", "stage": stage, "err": str(e)})
-            return ""
+    # `_retrieve_opening_book_block` and `_retrieve_components_block` were
+    # moved VERBATIM to agent_memory.MemoryRetrievalMixin (GameAgent inherits
+    # them). See that module for the opening-book / component retrieval logic.
 
     @staticmethod
     def _report_blocker_query(report: dict) -> str:
@@ -4702,72 +4536,9 @@ class GameAgent(ProbeHandlingMixin):
         """TUI hook for `/leanprompt on|off|auto`. None resets to auto."""
         self._lean_prompt = value
 
-    # Combined char ceiling for the three first-build memory blocks in lean
-    # mode. opening-book outline (~1.7K) + components (~2.2K) fit; the
-    # lower-priority playbook is dropped when it would push past this. Keeps
-    # a local model from reading 8KB of overlapping "past lessons" before
-    # it writes a line.
-    _LEAN_MEMORY_COMBINED_BUDGET = 4500
-
-    # Below this retrieved-outline score a fresh goal is treated as
-    # OPEN-DOMAIN (no strong opening-library match). There is no goal->
-    # prompt_library fuzzy matcher and a genre/title list is forbidden, so
-    # the outline score is the genre-free proxy. Open-domain first builds
-    # get one extra component (k=4) and have the game-loop+input snippets
-    # PROTECTED from the lean budget — battlezone 20260622 dropped ALL
-    # components+playbook on its first build and had to invent the loop.
-    _OPEN_DOMAIN_OUTLINE_FLOOR = 0.5
-
-    def _apply_lean_memory_budget(
-        self, opening_block: str, components_block: str, playbook_block: str,
-        *, protect_components: bool = False,
-    ) -> tuple[str, str, str]:
-        """In lean mode, cap the COMBINED size of the first-build memory
-        blocks. Priority: opening-book outline > components > playbook —
-        whole blocks are dropped (never mangled) lowest-priority first once
-        the budget is exceeded. No-op outside lean mode.
-
-        `protect_components` (seed continuations) keeps the components block
-        even when opening already filled the budget — on a seed iter 1 the
-        components are the copy-paste-correct snippets (help overlay, media
-        loader) the weak model most needs, so the playbook is trimmed first
-        instead. (2026-06-21 seed trace dropped `help-overlay-modal` here.)"""
-        if not self._lean_prompt_active():
-            return opening_block, components_block, playbook_block
-        budget = self._LEAN_MEMORY_COMBINED_BUDGET
-        used = len(opening_block or "")  # opening (priority 1) always kept
-        blocked = False
-
-        def _fit(block: str) -> str:
-            nonlocal used, blocked
-            if not block:
-                return ""
-            if blocked or used + len(block) > budget:
-                blocked = True
-                return ""
-            used += len(block)
-            return block
-
-        if protect_components and components_block:
-            # Keep components unconditionally (count it against the budget so
-            # playbook still yields), then fit playbook in what remains.
-            cb = components_block
-            used += len(components_block)
-            pb = _fit(playbook_block)
-        else:
-            cb = _fit(components_block)
-            pb = _fit(playbook_block)
-        if (cb != components_block) or (pb != playbook_block):
-            self._trace({
-                "kind": "lean_memory_budget_applied",
-                "budget": budget,
-                "kept_opening_chars": len(opening_block or ""),
-                "kept_components_chars": len(cb),
-                "kept_playbook_chars": len(pb),
-                "dropped_components": bool(components_block) and not cb,
-                "dropped_playbook": bool(playbook_block) and not pb,
-            })
-        return opening_block, cb, pb
+    # `_LEAN_MEMORY_COMBINED_BUDGET`, `_OPEN_DOMAIN_OUTLINE_FLOOR`,
+    # `_apply_lean_memory_budget`, and `_detect_open_domain_build` were moved
+    # VERBATIM to agent_memory.MemoryRetrievalMixin (GameAgent inherits them).
 
     _PLAN_ELIDE_RE = re.compile(r"<plan>.*?</plan>", re.DOTALL)
 
@@ -6467,6 +6238,28 @@ class GameAgent(ProbeHandlingMixin):
     def _has_active_blocker(self) -> bool:
         """True when the previous tested build failed and the next turn is a fix."""
         return bool(self._fix_mode and self._previous_report_ok is False)
+
+    def _route_forces_fix_mode(self) -> bool:
+        """Force precision fix mode for a feedback turn that reports a real
+        gameplay/code bug, even when the prior harness report was clean.
+
+        The harness cannot catch every gameplay bug (e.g. "the enemy walks
+        through walls" on a build whose probes all passed). When the feedback
+        router classifies the ask as a `behavior_bug` / `code_fix` to honor
+        this turn, run the next turn in `_fix_mode` so it samples at the
+        precision temperature and takes the diagnose-then-fix path instead of
+        treating the message as cosmetic polish. Returns True if it flipped
+        `_fix_mode` on. (Track D — behavior-bug feedback enters fix mode.)
+        """
+        route = getattr(self, "_feedback_route", None)
+        if not isinstance(route, dict):
+            return False
+        intent = str(route.get("primary_intent", "")).strip()
+        if intent in ("behavior_bug", "code_fix") and route.get("honor_user_now", True):
+            if not self._fix_mode:
+                self._fix_mode = True
+                return True
+        return False
 
     def _should_defer_feedback_for_blocker(self) -> bool:
         """Keep fresh feedback from distracting a failing repair turn.
@@ -14231,8 +14024,14 @@ class GameAgent(ProbeHandlingMixin):
             else:
                 plan_msg = self._p.PLAN_INSTRUCTION
 
+            # B1: the plan turn is where the model writes its <criteria>/<probes>;
+            # at 1200 chars the deep outline's state/order/traps contract was
+            # truncated, so probes were authored against fields the game would
+            # not have (the dominant impossible-probe failure). 3000 gives the
+            # full contract here (first-build still gets 3600) so the self-tests
+            # read real state.
             plan_opening_block, plan_opening_hits = self._retrieve_opening_book_block(
-                goal, stage="plan", char_budget=1200, deep=True,
+                goal, stage="plan", char_budget=3000, deep=True,
             )
             if plan_opening_block:
                 plan_msg = (
@@ -14248,6 +14047,19 @@ class GameAgent(ProbeHandlingMixin):
                     "kind": "plan_opening_book_injected",
                     "hits": plan_opening_hits,
                     "chars": len(plan_opening_block or ""),
+                })
+
+            # B2: a THIN playbook at plan time so the model sees the top
+            # loop/input/facing rules BEFORE it commits to an approach instead
+            # of discovering the rule three iterations later. Uses the narrow
+            # code-stage retrieval (top few, full bodies, small budget) so the
+            # smallest prompt of the session stays small.
+            plan_playbook_block = self._retrieve_playbook_block(goal, stage="code")
+            if plan_playbook_block:
+                plan_msg = f"{plan_playbook_block}\n\n" + plan_msg
+                self._trace({
+                    "kind": "plan_playbook_injected",
+                    "chars": len(plan_playbook_block),
                 })
 
             # Pi-mono-style project-config injection. Reads AGENTS.md /
@@ -15057,24 +14869,11 @@ class GameAgent(ProbeHandlingMixin):
                     goal, stage="plan",
                 )
                 self._active_opening_book_recipes = opening_hits
-                # Open-domain detection (genre-free): a fresh goal is "novel"
-                # when it matches NO outline, falls back to the universal
-                # controllable-canvas-game outline, or only weakly matches a
-                # specific one. We can't proxy via prompt_library (no goal->
-                # library matcher; genre/title lists are forbidden), and the
-                # recipe-routed outline score is usually 1.0, so we key on the
-                # outline ID + score together.
-                _outline_rows = [
-                    h for h in opening_hits if h.get("kind") == "outline"
-                ]
-                if not _outline_rows:
-                    open_domain_build = True
-                else:
-                    _o = _outline_rows[0]
-                    open_domain_build = (
-                        _o.get("id") == "outline-controllable-canvas-game"
-                        or _o.get("score", 1.0) < self._OPEN_DOMAIN_OUTLINE_FLOOR
-                    )
+                # Open-domain detection (genre-free) — see
+                # MemoryRetrievalMixin._detect_open_domain_build.
+                open_domain_build, _outline_rows = self._detect_open_domain_build(
+                    opening_hits
+                )
                 # Component skill library — tested mechanics snippets. Retrieved
                 # HERE (before assembly) so the lean combined-memory budget can
                 # weigh all three blocks together. Open-domain builds pull one
@@ -17907,6 +17706,11 @@ class GameAgent(ProbeHandlingMixin):
             # Adaptive temperature: failed → low (precision). Clean+keep-going
             # path goes through post_clean which says "prefer done".
             self._fix_mode = not report["ok"]
+            # Track D: a real gameplay/code bug the harness missed (clean
+            # report) still needs a precision fix turn — let the feedback
+            # router force fix_mode on so the next turn diagnoses-then-fixes
+            # instead of treating the bug report as cosmetic polish.
+            self._route_forces_fix_mode()
             self._messages.append({
                 "role": "user",
                 "content": self._flush_user_injections(next_user),

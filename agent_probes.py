@@ -149,6 +149,107 @@ class ProbeHandlingMixin:
     # still ships on the harness's own input/canvas/error checks, not loops).
     _ALL_PROBES_QUARANTINED_GATE_CAP = 2
 
+    # Name of the single harness-authored self-heal probe (C2). Distinct so it
+    # is easy to recognise, reconcile, and never confuse with a model probe.
+    _OUTLINE_STATE_PROBE_NAME = "auto_outline_state_present"
+
+    @staticmethod
+    def _first_state_field(state_contract: str) -> str | None:
+        """Parse the first FIELD name from an outline `state:` contract.
+
+        Contracts look like 'state={player:{x,y,vx,vy},entities[],score,over}
+        on window' — we want the first property INSIDE the object ('player'),
+        not the variable name ('state'). Falls back to the first identifier in
+        a brace-free contract ('score; lives; over' -> 'score'). Returns None
+        when there is nothing parseable."""
+        import re as _re
+        if not state_contract:
+            return None
+        # Prefer the body of the first {...} object so we read a real field.
+        m = _re.search(r"\{(.*)", state_contract, _re.S)
+        inner = m.group(1) if m else state_contract
+        fm = _re.search(r"[A-Za-z_$][A-Za-z0-9_$]*", inner)
+        return fm.group(0) if fm else None
+
+    def _maybe_inject_outline_state_probe(self, iteration: int) -> str | None:
+        """Self-heal (C2): when ALL model probes were quarantined, author ONE
+        probe from the matched outline's `state:` contract so the build keeps
+        at least one behavioral self-check instead of shipping with zero. The
+        probe reads a field the outline says the game SHOULD expose
+        (`window.state.<field>`). It is advisory (never gates — see
+        `_reconcile_harness_authored_probes`) and is dropped automatically once
+        the model emits its own probe. Returns the probe name, or None when
+        there is no outline state contract to draw from."""
+        if self._probes is None:
+            self._probes = []
+        if any(p.get("name") == self._OUTLINE_STATE_PROBE_NAME for p in self._probes):
+            return None
+        recipes = getattr(self, "_active_opening_book_recipes", None) or []
+        state_str = ""
+        for row in recipes:
+            if isinstance(row, dict) and row.get("kind") == "outline":
+                state_str = str((row.get("recipe") or {}).get("state") or "")
+                break
+        field = self._first_state_field(state_str)
+        if not field:
+            return None
+        expr = (
+            "(()=>{const s=window.state||window.game||window.gameState||{};"
+            f"return ('{field}' in s);}})()"
+        )
+        self._probes.append({
+            "name": self._OUTLINE_STATE_PROBE_NAME,
+            "expr": expr,
+            "harness_authored": True,
+            "advisory": True,
+        })
+        self._trace({
+            "kind": "outline_state_probe_injected",
+            "iteration": iteration,
+            "field": field,
+        })
+        return self._OUTLINE_STATE_PROBE_NAME
+
+    def _reconcile_harness_authored_probes(self, report: dict[str, Any]) -> None:
+        """Keep the C2 self-heal probe advisory and temporary.
+
+        - Once the model supplies its OWN probe again, drop the harness probe
+          from both `self._probes` and the report ("until the model replaces
+          it").
+        - While only the harness probe is present, never let it gate: a falsy
+          result is moved out of the gating `soft_warnings` channel into the
+          advisory `warnings` channel. A passing result is left as-is so the
+          build still has one real green behavioral check.
+        """
+        probes = list(report.get("probes") or [])
+        harness = [p for p in probes if p.get("harness_authored")]
+        if not harness:
+            return
+        names = {str(p.get("name") or "") for p in harness}
+        model_probes = [p for p in probes if not p.get("harness_authored")]
+        if model_probes:
+            # Model authored real probes again — remove the placeholder.
+            self._probes = [
+                p for p in (self._probes or []) if not p.get("harness_authored")
+            ]
+            report["probes"] = model_probes
+            self._remove_probe_warnings(report, names)
+            self._refresh_probe_error_fields(report)
+            return
+        # Only the harness probe is present: never gate on it.
+        failing = [p for p in harness if not p.get("ok")]
+        if failing:
+            self._remove_probe_warnings(report, names)
+            warns = list(report.get("warnings") or [])
+            warns.append(
+                "Harness-authored state-contract probe is failing (advisory): "
+                "the game does not yet expose the field the matched outline "
+                "lists in its state contract. Re-emit <probes> reading the real "
+                "window.state fields your code assigns."
+            )
+            report["warnings"] = warns
+            self._refresh_probe_error_fields(report)
+
     def _handle_probe_eval_errors(self, report: dict[str, Any], iteration: int) -> None:
         """Trace, soften, and quarantine probes that fail at eval time.
 
@@ -157,6 +258,11 @@ class ProbeHandlingMixin:
         name, drop the probe from future iterations so it stops drowning the
         model in stale harness errors.
         """
+        probes = list(report.get("probes") or [])
+        # C2 reconcile: keep any harness-authored self-heal probe advisory, and
+        # drop it the moment the model re-emits its own probe (may mutate
+        # report["probes"], so re-read below).
+        self._reconcile_harness_authored_probes(report)
         probes = list(report.get("probes") or [])
         if not probes:
             return
@@ -303,6 +409,10 @@ class ProbeHandlingMixin:
                     "used": self._all_probes_quarantined_gate_used,
                     "cap": self._ALL_PROBES_QUARANTINED_GATE_CAP,
                 })
+                # C2: author one advisory probe from the matched outline's
+                # state contract so the NEXT iteration has at least one real
+                # behavioral self-check instead of zero.
+                self._maybe_inject_outline_state_probe(iteration)
             else:
                 warns = list(report.get("warnings") or [])
                 warns.append(
