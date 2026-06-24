@@ -6384,6 +6384,78 @@ class GameAgent:
             "dynamic_probe_passed": dynamic_probe_passed,
         })
 
+    def _apply_impossible_probe_downgrade_to_report(self, report: dict[str, Any]) -> None:
+        """Demote STRUCTURALLY-IMPOSSIBLE self-probes to non-gating advisories.
+
+        The model authors its own acceptance probes in Phase A. Sometimes a
+        probe reads state the game's code NEVER produces (a DOM `<img>` in a
+        pure-canvas game, `window.gameState` / `window.game.reset` that were
+        never assigned). Such a probe evaluates FALSY every iteration no matter
+        how good or broken the build is — it carries zero behavioral signal,
+        yet `tools.py` appends a gating `PROBE FAILED` soft_warning for it, so
+        `report["ok"]` can never become True. That is the unwinnable-loop shape
+        (see `_apply_player_stuck_downgrade` / `_apply_dead_animation_check_to_report`):
+        a behaviorally-correct build stays ok=False forever, `_save_best()`
+        never runs, and the loop reads the permanent failure as "stuck" and
+        burns best-of-N retries instead of honoring the user's next feedback.
+
+        Holochess trace 20260623_204052: the model's `all_piece_images_loaded`
+        (queried DOM `<img>` in a canvas game), `loader_has_all_pieces`
+        (`window.gameState||window.state`) and `pieces_render_after_reset`
+        (`window.game.reset`) read state the game never assigns. `probe_lint`
+        ALREADY detected all three every iter (`unassigned_property_read` /
+        `probe_bait_flag` findings in `self._probe_lint_findings`) — but the
+        finding was advisory-only: it nagged the model, it never removed the
+        probe from the gate. This routes those already-detected impossible
+        probes into the non-gating `warnings` channel and recomputes `ok`.
+
+        Genre-free: the trigger is purely "the probe references properties the
+        code never assigns", a signal the harness already computes. Real
+        failures still hard-gate untouched — JS `errors`, `page_errors`,
+        `console_errors`, and any probe that reads REAL game state. Eval-error
+        probes are left to `_handle_probe_eval_errors` (run just before this).
+        """
+        findings = self._probe_lint_findings or []
+        flagged = {
+            str(f.get("name"))
+            for f in findings
+            if f.get("kind") in ("unassigned_property_read", "probe_bait_flag")
+            and f.get("name")
+        }
+        if not flagged:
+            return
+        # Only demote probes that are FAILING FALSY this iter (skip eval_error;
+        # those are quarantined separately) and whose name probe_lint flagged.
+        demote = {
+            str(p.get("name"))
+            for p in (report.get("probes") or [])
+            if not p.get("ok")
+            and p.get("kind") != "eval_error"
+            and str(p.get("name")) in flagged
+        }
+        if not demote:
+            return
+        # Strip the gating `PROBE FAILED [name]` soft_warnings for these probes.
+        GameAgent._remove_probe_warnings(report, demote)
+        names = ", ".join(f"`{n}`" for n in sorted(demote))
+        warns = list(report.get("warnings") or [])
+        warns.append(
+            "IMPOSSIBLE PROBE (advisory — does not block shipping): these "
+            f"self-probes read state the game's code never assigns — {names}. "
+            "They evaluate falsy regardless of game behavior, so they cannot "
+            "test anything real and must NOT gate shipping. If you still want "
+            "the check, rewrite the probe to read state the running game "
+            "actually exposes; otherwise drop it. Real errors and probes that "
+            "read real game state still gate."
+        )
+        report["warnings"] = warns
+        # ok recompute mirrors tools.py: (no errors) and (no soft_warnings).
+        report["ok"] = not (report.get("errors") or []) and not report["soft_warnings"]
+        self._trace({
+            "kind": "impossible_probe_downgraded",
+            "names": sorted(demote),
+        })
+
     @staticmethod
     def _probe_shape_key(p: dict[str, Any]) -> str:
         name = str(p.get("name") or "probe").strip().lower()
@@ -17058,6 +17130,11 @@ class GameAgent:
             self._apply_dead_animation_check_to_report(report)
             self._apply_still_frame_frozen_downgrade(report)
             self._apply_player_stuck_downgrade(report)
+            # Demote structurally-impossible self-probes (probe_lint already
+            # flagged them) so they stop permanently gating ok=false. Runs
+            # after _handle_probe_eval_errors so eval-error probes are routed
+            # to their own quarantine path first.
+            self._apply_impossible_probe_downgrade_to_report(report)
             # Advance the warnings-persistence counter ONCE per iter,
             # before any format_report_for_model rendering. Compaction
             # is then applied uniformly to the test event text and to
