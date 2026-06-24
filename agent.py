@@ -115,6 +115,9 @@ from tools import (
     run_micro_probes,
     score_test_report,
 )
+# Probe-result handlers (impossible-probe downgrade, eval-error quarantine,
+# all-quarantine ship gate) live in agent_probes.py; GameAgent inherits them.
+from agent_probes import ProbeHandlingMixin
 
 
 # Pi-mono pattern: read AGENTS.md / CLAUDE.md from the working tree at
@@ -1945,7 +1948,7 @@ def _parse_ollama_keep_alive_env() -> float | str:
     return int(numeric) if numeric.is_integer() else numeric
 
 
-class GameAgent:
+class GameAgent(ProbeHandlingMixin):
     """Drives the planning/coding/critique loop. One instance per session."""
 
     def __init__(
@@ -2169,6 +2172,14 @@ class GameAgent:
         self._probe_eval_error_shape_streak: dict[str, int] = {}
         self._probe_names_ever_passed: set[str] = set()
         self._pending_probe_quarantine_notices: list[str] = []
+        # When quarantine empties the entire model-authored probe set, the
+        # build would otherwise ship "clean" with ZERO behavioral self-checks
+        # (battlezone 20260622 iter 4: 7/7 probes syntax-quarantined ->
+        # probes_total:0, ok:true). We gate that clean ship for a BOUNDED
+        # number of iters (cap below) so a model that simply cannot author a
+        # parseable probe does not loop forever (mirrors the impossible-probe
+        # downgrade's anti-stuck contract). Counter resets each session.
+        self._all_probes_quarantined_gate_used: int = 0
         # Last few raw feedback strings for repeated-request detection.
         self._recent_feedback_texts: list[str] = []
         # Phase 0.2 — keyword signatures of feedback items that have been
@@ -2237,11 +2248,10 @@ class GameAgent:
         # (coder.py). Off by default; existing autonomous behavior is
         # preserved when the flag stays False.
         self._step_mode: bool = False
-        # Wikipedia research toggle. OFF by default — empirical test
-        # 2026-05-19 returned 0/10 hits on common game goals. /wiki on
-        # in chat.py (or set _research_enabled=True on the agent) opts
-        # in for users who want to test the matcher.
-        self._research_enabled: bool = False
+        # Wikipedia research lookup REMOVED (2026-06-24): empirical 0/10 hit
+        # rate on common game goals; the curated opening library in memory/
+        # (outlines, components, playtests, audits) is the source of grounding
+        # instead. No plan-time network lookup, no <reference> block.
         # Auto-step-mode (DK trace 20260513_122154): when the first
         # iter fails, the harness auto-arms /wait so the user can
         # intervene before the cascade. Fires exactly once per session;
@@ -3811,6 +3821,17 @@ class GameAgent:
             if extra_tokens:
                 mod_toks = mod_toks + list(extra_tokens)
             outline = self._memory.retrieve_implementation_outline(goal, mod_toks)
+            # Universal fallback: a novel/open-domain goal may match NO outline
+            # (Jaccard empty and no recipe route). Rather than plan with no
+            # state/order/traps contract at all, force the genre-free
+            # controllable-canvas-game outline so every build still inherits a
+            # state-on-window / input / dt-cap / draw-order / restart skeleton.
+            outline_fallback = False
+            if outline is None:
+                outline = self._memory._outline_item_by_id(
+                    "outline-controllable-canvas-game"
+                )
+                outline_fallback = outline is not None
             playtests = self._memory.retrieve_playtests(
                 goal, mod_toks, k=3 if stage == "plan" else 1,
             )
@@ -3873,6 +3894,7 @@ class GameAgent:
                     "stage": stage,
                     "hits": hits,
                     "modality_tokens": mod_toks,
+                    "outline_fallback": outline_fallback,
                 })
             return block, hits
         except Exception as e:
@@ -3885,6 +3907,7 @@ class GameAgent:
         *,
         stage: str = "plan",
         k: int = 3,
+        ensure_ids: list[str] | None = None,
     ) -> str:
         """Retrieve component-library snippets as a <components> block.
 
@@ -3908,6 +3931,15 @@ class GameAgent:
             except Exception:
                 mod_toks = []
             hits = self._memory.retrieve_components(query, mod_toks, k=k)
+            # Universal-fallback pinning: guarantee the engine-skeleton snippets
+            # (game loop, input) are present for open-domain goals even when
+            # Jaccard retrieval missed them. Pinned hits go FIRST so they
+            # survive the lean budget and the model copies a working loop.
+            if ensure_ids:
+                have = {h.item.id for h in hits}
+                missing = [cid for cid in ensure_ids if cid not in have]
+                if missing:
+                    hits = self._memory.components_by_ids(missing) + hits
             block = render_components_block(
                 hits, char_budget=2200 if stage == "plan" else 1400,
             )
@@ -4322,19 +4354,6 @@ class GameAgent:
             "content": self._flush_user_injections(base),
         })
 
-    def set_research_enabled(self, on: bool) -> None:
-        """Toggle Wikipedia research lookup before planning. OFF by
-        default per /wiki slash command in chat.py — empirical test
-        2026-05-19 returned 0/10 hits on common game goals so the
-        lookup is pure latency unless the operator opts in to test or
-        improve the matcher.
-        """
-        self._research_enabled = bool(on)
-        self._trace({
-            "kind": "research_enabled_set",
-            "on": self._research_enabled,
-        })
-
     def set_auto_step_on_failure(self, on: bool) -> None:
         """Enable/disable auto step-mode arming on first failed iter."""
         self._auto_step_on_failure = bool(on)
@@ -4689,6 +4708,15 @@ class GameAgent:
     # a local model from reading 8KB of overlapping "past lessons" before
     # it writes a line.
     _LEAN_MEMORY_COMBINED_BUDGET = 4500
+
+    # Below this retrieved-outline score a fresh goal is treated as
+    # OPEN-DOMAIN (no strong opening-library match). There is no goal->
+    # prompt_library fuzzy matcher and a genre/title list is forbidden, so
+    # the outline score is the genre-free proxy. Open-domain first builds
+    # get one extra component (k=4) and have the game-loop+input snippets
+    # PROTECTED from the lean budget — battlezone 20260622 dropped ALL
+    # components+playbook on its first build and had to invent the loop.
+    _OPEN_DOMAIN_OUTLINE_FLOOR = 0.5
 
     def _apply_lean_memory_budget(
         self, opening_block: str, components_block: str, playbook_block: str,
@@ -6384,293 +6412,10 @@ class GameAgent:
             "dynamic_probe_passed": dynamic_probe_passed,
         })
 
-    def _apply_impossible_probe_downgrade_to_report(self, report: dict[str, Any]) -> None:
-        """Demote STRUCTURALLY-IMPOSSIBLE self-probes to non-gating advisories.
-
-        The model authors its own acceptance probes in Phase A. Sometimes a
-        probe reads state the game's code NEVER produces (a DOM `<img>` in a
-        pure-canvas game, `window.gameState` / `window.game.reset` that were
-        never assigned). Such a probe evaluates FALSY every iteration no matter
-        how good or broken the build is — it carries zero behavioral signal,
-        yet `tools.py` appends a gating `PROBE FAILED` soft_warning for it, so
-        `report["ok"]` can never become True. That is the unwinnable-loop shape
-        (see `_apply_player_stuck_downgrade` / `_apply_dead_animation_check_to_report`):
-        a behaviorally-correct build stays ok=False forever, `_save_best()`
-        never runs, and the loop reads the permanent failure as "stuck" and
-        burns best-of-N retries instead of honoring the user's next feedback.
-
-        Holochess trace 20260623_204052: the model's `all_piece_images_loaded`
-        (queried DOM `<img>` in a canvas game), `loader_has_all_pieces`
-        (`window.gameState||window.state`) and `pieces_render_after_reset`
-        (`window.game.reset`) read state the game never assigns. `probe_lint`
-        ALREADY detected all three every iter (`unassigned_property_read` /
-        `probe_bait_flag` findings in `self._probe_lint_findings`) — but the
-        finding was advisory-only: it nagged the model, it never removed the
-        probe from the gate. This routes those already-detected impossible
-        probes into the non-gating `warnings` channel and recomputes `ok`.
-
-        Genre-free: the trigger is purely "the probe references properties the
-        code never assigns", a signal the harness already computes. Real
-        failures still hard-gate untouched — JS `errors`, `page_errors`,
-        `console_errors`, and any probe that reads REAL game state. Eval-error
-        probes are left to `_handle_probe_eval_errors` (run just before this).
-        """
-        findings = self._probe_lint_findings or []
-        flagged = {
-            str(f.get("name"))
-            for f in findings
-            if f.get("kind") in ("unassigned_property_read", "probe_bait_flag")
-            and f.get("name")
-        }
-        if not flagged:
-            return
-        # Only demote probes that are FAILING FALSY this iter (skip eval_error;
-        # those are quarantined separately) and whose name probe_lint flagged.
-        demote = {
-            str(p.get("name"))
-            for p in (report.get("probes") or [])
-            if not p.get("ok")
-            and p.get("kind") != "eval_error"
-            and str(p.get("name")) in flagged
-        }
-        if not demote:
-            return
-        # Strip the gating `PROBE FAILED [name]` soft_warnings for these probes.
-        GameAgent._remove_probe_warnings(report, demote)
-        names = ", ".join(f"`{n}`" for n in sorted(demote))
-        warns = list(report.get("warnings") or [])
-        warns.append(
-            "IMPOSSIBLE PROBE (advisory — does not block shipping): these "
-            f"self-probes read state the game's code never assigns — {names}. "
-            "They evaluate falsy regardless of game behavior, so they cannot "
-            "test anything real and must NOT gate shipping. If you still want "
-            "the check, rewrite the probe to read state the running game "
-            "actually exposes; otherwise drop it. Real errors and probes that "
-            "read real game state still gate."
-        )
-        report["warnings"] = warns
-        # ok recompute mirrors tools.py: (no errors) and (no soft_warnings).
-        report["ok"] = not (report.get("errors") or []) and not report["soft_warnings"]
-        self._trace({
-            "kind": "impossible_probe_downgraded",
-            "names": sorted(demote),
-        })
-
-    @staticmethod
-    def _probe_shape_key(p: dict[str, Any]) -> str:
-        name = str(p.get("name") or "probe").strip().lower()
-        expr = str(p.get("expr") or "").strip().lower()
-        err_class = str(p.get("error_class") or "eval_error").strip().lower()
-        return f"{name}:{err_class}:{expr[:80]}"
-
-    @staticmethod
-    def _refresh_probe_error_fields(report: dict[str, Any]) -> None:
-        probes = list(report.get("probes") or [])
-        report["probe_errors"] = [
-            f"{p.get('name','?')}: {p.get('err','')[:160]}"
-            for p in probes
-            if not p.get("ok") and p.get("err")
-        ]
-        report["probe_eval_errors"] = [
-            {
-                "name": p.get("name", "probe"),
-                "expr_preview": (p.get("expr") or "")[:120],
-                "error_class": p.get("error_class") or "eval_error",
-                "err": (p.get("err") or "")[:200],
-            }
-            for p in probes
-            if not p.get("ok") and p.get("kind") == "eval_error"
-        ]
-
-    @staticmethod
-    def _remove_probe_warnings(report: dict[str, Any], names: set[str]) -> None:
-        if not names:
-            return
-        kept: list[str] = []
-        for w in list(report.get("soft_warnings") or []):
-            drop = False
-            for name in names:
-                if (
-                    f"PROBE FAILED [{name}]" in w
-                    or f"PROBE BROKEN [{name}]" in w
-                ):
-                    drop = True
-                    break
-            if not drop:
-                kept.append(w)
-        report["soft_warnings"] = kept
-
-    def _handle_probe_eval_errors(self, report: dict[str, Any], iteration: int) -> None:
-        """Trace, soften, and quarantine probes that fail at eval time.
-
-        Falsy probes are still game failures. Eval-error probes are broken
-        probe expressions; after two consecutive eval errors for the same
-        name, drop the probe from future iterations so it stops drowning the
-        model in stale harness errors.
-        """
-        probes = list(report.get("probes") or [])
-        if not probes:
-            return
-
-        failing = [p for p in probes if not p.get("ok")]
-        eval_failing = [
-            p for p in failing
-            if p.get("kind") == "eval_error"
-        ]
-
-        for p in probes:
-            name = str(p.get("name") or "probe")
-            if p.get("ok"):
-                self._probe_names_ever_passed.add(name)
-                self._probe_eval_error_streak[name] = 0
-                self._probe_eval_error_shape_streak[self._probe_shape_key(p)] = 0
-                continue
-            if p.get("kind") == "eval_error":
-                shape = self._probe_shape_key(p)
-                self._probe_eval_error_streak[name] = (
-                    self._probe_eval_error_streak.get(name, 0) + 1
-                )
-                self._probe_eval_error_shape_streak[shape] = (
-                    self._probe_eval_error_shape_streak.get(shape, 0) + 1
-                )
-                self._trace({
-                    "kind": "probe_eval_error",
-                    "iteration": iteration,
-                    "name": name,
-                    "expr_preview": (p.get("expr") or "")[:120],
-                    "error_class": p.get("error_class") or "eval_error",
-                    "streak": self._probe_eval_error_streak[name],
-                    "shape_streak": self._probe_eval_error_shape_streak[shape],
-                })
-            else:
-                # A real falsy result breaks the eval-error streak.
-                self._probe_eval_error_streak[name] = 0
-
-        # Two-strike rule for general eval errors, ONE-STRIKE for
-        # SyntaxError. Syntax errors mean the probe expression itself
-        # is malformed JavaScript — re-evaluating it next iter cannot
-        # produce a different result; the only way it would "pass" is
-        # if the model re-emits a corrected probe. Holding the broken
-        # probe in the active set for a second iter just lets the
-        # syntax error mask other harness signals (the 2026-05-23
-        # chess trace's iter 2/3 chased a `new Promise(r=>{...})`
-        # parser error for two iters while the actual
-        # ASSETS_LOADED_BUT_UNDRAWN problem was hidden behind it).
-        # Model-agnostic: any model that emits unparseable JS triggers
-        # the fast-path; legitimate runtime-eval errors still get the
-        # tolerant 2-strike treatment.
-        def _is_syntax_error(p: dict) -> bool:
-            err_class = (p.get("error_class") or "").lower()
-            err_text = (p.get("err") or "").lower()
-            return (
-                "syntaxerror" in err_class
-                or "syntaxerror" in err_text
-                or "unexpected token" in err_text
-                or "unexpected identifier" in err_text
-                or "unterminated" in err_text
-            )
-        quarantine_names: set[str] = set()
-        for p in eval_failing:
-            name = str(p.get("name") or "probe")
-            streak = self._probe_eval_error_streak.get(name, 0)
-            if streak >= 2 or _is_syntax_error(p):
-                quarantine_names.add(name)
-        if quarantine_names:
-            for p in eval_failing:
-                name = str(p.get("name") or "probe")
-                if name not in quarantine_names:
-                    continue
-                is_syntax = _is_syntax_error(p)
-                self._trace({
-                    "kind": "probe_quarantined",
-                    "iteration": iteration,
-                    "name": name,
-                    "expr_preview": (p.get("expr") or "")[:120],
-                    "eval_error_class": p.get("error_class") or "eval_error",
-                    "streak": self._probe_eval_error_streak.get(name, 0),
-                    "fast_path": "syntax_error" if is_syntax else None,
-                })
-                if is_syntax:
-                    notice = (
-                        f"PROBE {name} QUARANTINED IMMEDIATELY: the "
-                        "expression is unparseable JavaScript (syntax "
-                        "error). Re-emit <probes>...</probes> with a "
-                        "corrected expression — re-running malformed "
-                        "JS cannot produce a different result and "
-                        "would mask other harness signals."
-                    )
-                else:
-                    notice = (
-                        f"PROBE {name} QUARANTINED: had eval errors twice; "
-                        "re-emit <probes>...</probes> to replace, or leave it "
-                        "dropped if it was not testing real behavior."
-                    )
-                if notice not in self._pending_probe_quarantine_notices:
-                    self._pending_probe_quarantine_notices.append(notice)
-
-            self._probes = [
-                p for p in self._probes
-                if str(p.get("name") or "probe") not in quarantine_names
-            ]
-            report["probes"] = [
-                p for p in probes
-                if str(p.get("name") or "probe") not in quarantine_names
-            ]
-            self._remove_probe_warnings(report, quarantine_names)
-            warnings = list(report.get("warnings") or [])
-            warnings.append(
-                "Probe quarantine: dropped "
-                f"{len(quarantine_names)} probe(s) after repeated eval-time "
-                "errors; re-emit <probes> to replace if needed."
-            )
-            report["warnings"] = warnings
-            self._refresh_probe_error_fields(report)
-
-        # C1: before a probe is quarantined, avoid blocking on eval-error-only
-        # probes when the rest of the harness says the game is healthy.
-        remaining = list(report.get("probes") or [])
-        remaining_failing = [p for p in remaining if not p.get("ok")]
-        if remaining_failing and all(
-            p.get("kind") == "eval_error" for p in remaining_failing
-        ):
-            input_test = report.get("input_test") or {}
-            canvas = report.get("canvas") or {}
-            healthy_page = not (report.get("page_errors") or report.get("console_errors"))
-            healthy_harness = (
-                input_test.get("ran") is True
-                and input_test.get("any_change") is True
-                and canvas.get("blank") is False
-                and healthy_page
-            )
-            proven_probe_bug = all(
-                (
-                    str(p.get("name") or "probe") in self._probe_names_ever_passed
-                    or self._probe_eval_error_shape_streak.get(self._probe_shape_key(p), 0) >= 2
-                )
-                for p in remaining_failing
-            )
-            if healthy_harness and proven_probe_bug:
-                softened = {str(p.get("name") or "probe") for p in remaining_failing}
-                for p in remaining_failing:
-                    p["ok"] = True
-                    p["downgraded"] = (
-                        "probe eval error softened: input/canvas/page checks "
-                        "were healthy and this probe shape repeatedly failed "
-                        "before evaluating"
-                    )
-                self._remove_probe_warnings(report, softened)
-                warnings = list(report.get("warnings") or [])
-                warnings.append(
-                    "Probe eval errors softened: all remaining probe failures "
-                    "were eval-time errors while input/canvas/page checks were healthy."
-                )
-                report["warnings"] = warnings
-                self._refresh_probe_error_fields(report)
-
-        report["ok"] = (
-            len(report.get("errors") or []) == 0
-            and len(report.get("soft_warnings") or []) == 0
-        )
+    # Probe-result handlers (_apply_impossible_probe_downgrade_to_report,
+    # _probe_shape_key, _refresh_probe_error_fields, _remove_probe_warnings,
+    # _ALL_PROBES_QUARANTINED_GATE_CAP, _handle_probe_eval_errors) were extracted
+    # to agent_probes.py (ProbeHandlingMixin); GameAgent inherits them unchanged.
 
     def _consumed_feedback_summary(self) -> str | None:
         if self._should_defer_feedback_for_blocker():
@@ -14404,66 +14149,13 @@ class GameAgent:
                 "content": self._flush_user_injections(cont_msg),
             })
         else:
-            # Open-domain research: try Wikipedia for the goal before
-            # planning. If we get a hit, prepend the reference to the
-            # planning user-turn so the model's <plan> + <criteria> are
-            # grounded in real mechanics instead of model priors. The
-            # missile-command session in games/traces/ shipped Space
-            # Invaders with the labels swapped — that's the failure
-            # mode this prevents.
-            #
-            # Networked + has its own rate-limit sleeps, so run in a
-            # worker thread to keep the TUI responsive. Total budget
-            # ~3s for a typical hit, ~6s worst case.
+            # Wikipedia research lookup REMOVED (2026-06-24): empirical 0/10
+            # hit rate on common game goals made it pure plan-time latency.
+            # Grounding now comes from the curated opening library in memory/
+            # (outlines / components / playtests / audits), not a network
+            # fetch. reference_block stays empty so plan_instruction renders
+            # no <reference> block (it no-ops on an empty string).
             reference_block = ""
-            # Wikipedia research is OFF by default — empirical test on
-            # 10 representative goals (asteroids, pacman, donkey kong,
-            # space invaders, missile command, street fighter, doom,
-            # snake, 2d roguelike, tetris) returned 0 matches in ~38s
-            # cumulative latency. Filter is too strict: opensearch +
-            # word-overlap rejection drops everything. Until the matcher
-            # is rewritten, the lookup is pure tax with no benefit.
-            # Toggle via the `/wiki on` slash command in chat.py
-            # (mirrors `/wait` style). Trace 20260519_111209
-            # (build-a-complete-playable-2d-r) is the canonical "agent
-            # looked frozen for ~110s with no trace events" case this
-            # guards against — see the visibility events below for the
-            # opt-in path.
-            if self._research_enabled:
-                yield self._record(AgentEvent(
-                    "phase", "research",
-                ))
-                yield self._record(AgentEvent(
-                    "activity", "research",
-                    {"label": "looking up reference"},
-                ))
-                yield self._record(AgentEvent(
-                    "info",
-                    "researching goal on Wikipedia "
-                    "(/wiki on; 8s/request, 6s typical)…",
-                ))
-                try:
-                    import research as _research
-                    reference_block = await asyncio.to_thread(
-                        _research.fetch, goal,
-                    ) or ""
-                except Exception as e:
-                    yield self._record(AgentEvent(
-                        "info", f"research lookup failed: {e!r}"
-                    ))
-                yield self._record(AgentEvent("activity", "idle"))
-                self._trace({
-                    "kind": "research_attempted",
-                    "enabled_via": "/wiki on",
-                    "got_reference": bool(reference_block),
-                    "reference_chars": len(reference_block),
-                })
-            else:
-                self._trace({
-                    "kind": "research_skipped",
-                    "reason": "disabled_by_default",
-                    "hint": "type /wiki on to enable",
-                })
 
             # P1 (MK trace 20260528): rehydrate seed media BEFORE the
             # planning prompt is built so the planner can see existing
@@ -14695,20 +14387,6 @@ class GameAgent:
                 "info",
                 f"Trace: {self.trace_path}  (snapshots: {self.snapshots_dir})",
             ))
-            if reference_block:
-                # Surface the matched title so the user sees what we pulled.
-                first_line = reference_block.splitlines()[1] if "\n" in reference_block else ""
-                yield self._record(AgentEvent(
-                    "info",
-                    f"research: pulled Wikipedia reference ({len(reference_block)} chars) "
-                    f"— {first_line}"
-                ))
-            else:
-                yield self._record(AgentEvent(
-                    "info",
-                    "research: no Wikipedia match for this goal "
-                    "(planning from model priors)"
-                ))
 
             # ---- PHASE A: planning ------------------------------------------
             yield self._record(AgentEvent("phase", "planning"))
@@ -15379,20 +15057,65 @@ class GameAgent:
                     goal, stage="plan",
                 )
                 self._active_opening_book_recipes = opening_hits
+                # Open-domain detection (genre-free): a fresh goal is "novel"
+                # when it matches NO outline, falls back to the universal
+                # controllable-canvas-game outline, or only weakly matches a
+                # specific one. We can't proxy via prompt_library (no goal->
+                # library matcher; genre/title lists are forbidden), and the
+                # recipe-routed outline score is usually 1.0, so we key on the
+                # outline ID + score together.
+                _outline_rows = [
+                    h for h in opening_hits if h.get("kind") == "outline"
+                ]
+                if not _outline_rows:
+                    open_domain_build = True
+                else:
+                    _o = _outline_rows[0]
+                    open_domain_build = (
+                        _o.get("id") == "outline-controllable-canvas-game"
+                        or _o.get("score", 1.0) < self._OPEN_DOMAIN_OUTLINE_FLOOR
+                    )
                 # Component skill library — tested mechanics snippets. Retrieved
                 # HERE (before assembly) so the lean combined-memory budget can
-                # weigh all three blocks together.
+                # weigh all three blocks together. Open-domain builds pull one
+                # extra snippet (k=4) and PIN the engine skeleton (game loop +
+                # buffered input) so a weak model copies a working loop instead
+                # of inventing a broken RAF/input from scratch.
+                _ensure_ids = (
+                    ["fixed-timestep-game-loop", "input-manager-buffered"]
+                    if open_domain_build else None
+                )
                 components_block = self._retrieve_components_block(
-                    goal, stage="plan", k=3,
+                    goal, stage="plan", k=4 if open_domain_build else 3,
+                    ensure_ids=_ensure_ids,
                 )
                 # Lean mode: cap the COMBINED size of the three memory blocks
                 # (opening > components > playbook) so a local model isn't
-                # buried in overlapping past-lessons before the task.
+                # buried in overlapping past-lessons before the task. For
+                # open-domain builds PROTECT the components so the working
+                # game-loop+input snippets survive truncation (the playbook
+                # yields first) instead of the model inventing a broken loop.
                 opening_block, components_block, pb_block = (
                     self._apply_lean_memory_budget(
                         opening_block, components_block, pb_block,
+                        protect_components=open_domain_build,
                     )
                 )
+                if open_domain_build:
+                    self._trace({
+                        "kind": "open_domain_components_boost",
+                        "outline_id": (
+                            _outline_rows[0].get("id") if _outline_rows else None
+                        ),
+                        "outline_score": (
+                            round(_outline_rows[0].get("score", 0.0), 4)
+                            if _outline_rows else None
+                        ),
+                        "floor": self._OPEN_DOMAIN_OUTLINE_FLOOR,
+                        "components_k": 4,
+                        "pinned": ["fixed-timestep-game-loop", "input-manager-buffered"],
+                        "protect_components": True,
+                    })
                 pb_kwargs = {"playbook_block": pb_block} if pb_block else {}
 
                 # Design happens in ONE pass: the planning turn (above, on

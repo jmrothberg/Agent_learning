@@ -3382,6 +3382,7 @@ def render_opening_book_block(
     grow with book depth.
     """
     sections: list[str] = []
+    outline_has_recipe = False
     if outline:
         item = outline.item
         outline_text = (
@@ -3392,6 +3393,7 @@ def render_opening_book_block(
             recipe_text = _render_outline_recipe(getattr(item, "recipe", None))
             if recipe_text:
                 outline_text += "\n" + recipe_text
+                outline_has_recipe = True
         sections.append(outline_text)
 
     def _line(label: str, hits: list[OpeningBookHit]) -> str:
@@ -3413,6 +3415,21 @@ def render_opening_book_block(
             sections.append(_line(label, hits))
     if vlm_checklist:
         sections.append(vlm_checklist)
+    # Probe-authoring contract (once per block, only when a deep outline with a
+    # state contract is present). Weak models routinely author <probes> that
+    # read state the game never assigns (DOM <img>.naturalWidth / window.gameState
+    # in a canvas game) or that are not even parseable JS; those evaluate falsy
+    # or get quarantined every iter and verify nothing (holochess 20260623 /
+    # battlezone 20260622 traces). Tie probe authoring to the outline's `state:`
+    # contract so the model's probes read fields its own code actually sets.
+    if outline_has_recipe:
+        sections.append(
+            "PROBE-AUTHORING: write your <probes> to read the OUTLINE `state:` "
+            "fields above (expose them on window.state); each probe must be "
+            "valid self-contained JS returning a boolean. Do NOT read DOM "
+            "`<img>`.naturalWidth/.complete or window.gameState unless your "
+            "code assigns them — such probes verify nothing and get dropped."
+        )
     if not sections:
         return ""
     body = "\n\n".join(sections)
@@ -3767,6 +3784,23 @@ class GameMemory:
             if item.id == outline_id:
                 return OpeningBookHit(item=item, score=1.0)
         return None
+
+    def components_by_ids(self, ids: list[str]) -> list[OpeningBookHit]:
+        """Fetch specific components by id, preserving the requested order.
+
+        Used by the universal-fallback path to PIN the engine-skeleton
+        snippets (game loop, input) for open-domain goals that Jaccard
+        retrieval might not surface. Score 1.0 so they sort ahead of
+        similarity-ranked hits. Missing ids are silently skipped.
+        """
+        want = [cid for cid in (ids or []) if cid]
+        if not want:
+            return []
+        by_id = {it.id: it for it in self._load_opening_book(COMPONENTS_FILENAME)}
+        return [
+            OpeningBookHit(item=by_id[cid], score=1.0)
+            for cid in want if cid in by_id
+        ]
 
     def retrieve_implementation_outline(
         self, goal: str, modality: str | list[str] | None = None

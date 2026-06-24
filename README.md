@@ -252,12 +252,18 @@ shape, not subject.
 | File | Holds |
 |---|---|
 | `memory/playbook.jsonl` | code rules-of-thumb, retrieved by weighted-Jaccard on the goal (tags weigh 2×; ~0.02 floor) |
-| `memory/playtests.jsonl` | behavior recipes for `/critique` (scripted input, state, pixel hash — no VLM) |
+| `memory/playtests.jsonl` | behavior recipes for `/critique` (scripted input, state, pixel hash — no VLM); incl. genre-free `state_expr` checks (state-exposed, score, timer, pause) |
 | `memory/visual_playtests.jsonl` | mechanism-keyed yes/no VLM checklists + `auto_probes` + per-question `fix_hints` |
-| `memory/implementation_outlines.jsonl` | architect mechanism outlines (retrieved k=1) |
+| `memory/implementation_outlines.jsonl` | architect mechanism outlines (retrieved k=1); deep render carries a probe-authoring contract tied to each outline's `state:` fields |
+| `memory/components.jsonl` | paste-and-adapt JS snippets (game loop, input, camera, pointer-lock, spatial hash, loaders) |
+| `memory/asset_audits.jsonl` | generated-art loader/decode/fallback audits (incl. missing-asset placeholder, chroma-key paths) |
+| `memory/animation_audits.jsonl` | motion audits (midframe, facing-flip, walk-cycle advance, action-frame reset) |
 | `memory/skeletons/` | first-build HTML templates per mechanism (`.html` + `.json` sidecar) |
 | `memory/prompt_library.jsonl` | the curated `/games` prompts |
 | `memory/system_battery.jsonl` | default system-test battery (committed — useful on every machine) |
+
+Grounding is fully offline: the old `/wiki` Wikipedia lookup was **removed** (2026-06-24, 0/10
+empirical hit rate) — the opening library above is the single source of mechanism grounding.
 
 **Skeleton routing** (`retrieve_skeleton`): a modality detector (board/DOM/3D strong-hooks) runs
 first; then the **recipe→skeleton** map reuses the already-accurate visual-recipe matcher; then a

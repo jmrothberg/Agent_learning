@@ -3230,8 +3230,6 @@ class CodingBoxApp(App):
                 self._cmd_status()
             elif cmd == "wait":
                 self._cmd_toggle_wait(arg)
-            elif cmd == "wiki":
-                self._cmd_toggle_wiki(arg)
             elif cmd in ("iter-detail", "iterdetail"):
                 self._cmd_iter_detail(arg)
             elif cmd == "mode":
@@ -5564,44 +5562,6 @@ class CodingBoxApp(App):
         # Surface the new mode in the bottom bar immediately, not only
         # at the next iter-pause event.
         self._update_mode_bar()
-
-    def _cmd_toggle_wiki(self, arg: str) -> None:
-        """/wiki — toggle the Wikipedia research lookup that prepends
-        a <reference> block to the planning turn. Default OFF: empirical
-        test 2026-05-19 returned 0/10 hits on common game goals
-        (asteroids, pacman, donkey kong, space invaders, missile
-        command, street fighter, doom, snake, 2d roguelike, tetris) so
-        the lookup is pure latency unless the operator opts in to test
-        or improve the matcher. /wiki on or /wiki off for explicit
-        set; bare /wiki toggles. Mirrors /wait shape.
-        """
-        if self.agent is None:
-            self._log_info(
-                "no active session — start one and try /wiki again "
-                "(it applies once an agent is running)"
-            )
-            return
-        arg_lc = arg.strip().lower()
-        if arg_lc in ("on", "true", "1"):
-            new_state = True
-        elif arg_lc in ("off", "false", "0"):
-            new_state = False
-        else:
-            new_state = not bool(getattr(self.agent, "_research_enabled", False))
-        self.agent.set_research_enabled(new_state)
-        if new_state:
-            self._log_info(
-                "[yellow]/wiki ON[/yellow] — agent will look up the goal "
-                "on Wikipedia before planning (8s/request; cumulative "
-                "wait visible in trace as `research_attempted`). Empirical "
-                "hit rate is currently ~0/10 on common goals; opt in "
-                "only when testing the matcher."
-            )
-        else:
-            self._log_info(
-                "/wiki off — research lookup skipped before planning."
-            )
-        self._update_status()
 
     def _cmd_audit_playbook(self) -> None:
         """/audit — shell out to scripts/audit_playbook.py and print

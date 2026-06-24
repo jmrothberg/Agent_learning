@@ -204,12 +204,18 @@ def test_both_first_build_paths_inject_components():
     copy-paste-correct snippets on continuation/seed builds."""
     import inspect
     src = inspect.getsource(GameAgent.run)
-    # Both first-build branches use the same plan-stage component call.
+    # Both first-build branches use a plan-stage component call. The seed path
+    # uses a fixed k=3; the skeleton path bumps to k=4 for open-domain goals
+    # (k=4 if open_domain_build else 3), so match on the stable plan-stage
+    # retrieval signature rather than a hardcoded k literal.
     assert 'seed_build_instruction(' in src
     assert 'first_build_instruction(' in src
-    assert src.count('goal, stage="plan", k=3,') >= 2, (
-        "expected a first-build <components> injection on BOTH the seed and "
-        "skeleton paths"
+    assert src.count('goal, stage="plan", k=3,') >= 1, (
+        "expected the seed first-build <components> injection (k=3)"
+    )
+    assert 'goal, stage="plan", k=4 if open_domain_build else 3,' in src, (
+        "expected the skeleton first-build <components> injection with the "
+        "open-domain k-boost"
     )
 
 

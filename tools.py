@@ -4238,6 +4238,35 @@ class LiveBrowser:
                         "point-and-click puzzle chain not exposed: " + missing
                     ),
                 })
+            elif rtype == "state_expr":
+                # Generic ADVISORY runtime check: evaluate a self-contained JS
+                # boolean expression in the page. Never hard-gates (hard=False)
+                # so a genre-free opening-book playtest cannot permanently block
+                # shipping — it only surfaces a finding the model can act on
+                # (e.g. state-exposed-on-window, hud-score-visible). A page eval
+                # error is treated as "skipped" (advisory), not a failure.
+                expr = str(recipe.get("expr") or "").strip()
+                if not expr:
+                    check.update({"ok": True, "skipped": True, "err": "no expr"})
+                else:
+                    res = await self._safe_eval(
+                        "(() => { try { return Boolean(" + expr + "); } "
+                        "catch (e) { return null; } })()"
+                    )
+                    if res is None:
+                        check.update({
+                            "ok": True, "skipped": True,
+                            "err": "state_expr eval error (advisory)",
+                        })
+                    else:
+                        check.update({
+                            "ok": bool(res),
+                            "hard": False,
+                            "err": "" if res else (
+                                str(recipe.get("err") or "")
+                                or f"expected `{expr}` to be truthy"
+                            ),
+                        })
             else:
                 check.update({"ok": True, "skipped": True, "err": "unsupported recipe type"})
             out.append(check)

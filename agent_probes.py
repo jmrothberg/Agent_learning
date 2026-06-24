@@ -1,0 +1,364 @@
+"""Probe-result handlers extracted from agent.py for readability/debuggability.
+
+`ProbeHandlingMixin` holds the methods that post-process a browser test
+`report` dict's model-authored acceptance probes:
+
+  - `_apply_impossible_probe_downgrade_to_report` — demote structurally
+    impossible self-probes (read state the code never assigns) to non-gating
+    advisories so a behaviorally-correct build is not gated forever.
+  - `_probe_shape_key` / `_refresh_probe_error_fields` / `_remove_probe_warnings`
+    — small helpers used by the quarantine pipeline.
+  - `_handle_probe_eval_errors` — trace / soften / quarantine probes that fail
+    at eval time, the all-probes-quarantined ship gate, and the C1
+    healthy-harness softening.
+
+These were moved VERBATIM out of `GameAgent` (no behavior change). `GameAgent`
+inherits this mixin, so every `self.*` attribute reference (all set in
+`GameAgent.__init__`: `self._probe_lint_findings`, `self._probe_eval_error_streak`,
+`self._probe_eval_error_shape_streak`, `self._probe_names_ever_passed`,
+`self._pending_probe_quarantine_notices`, `self._probes`,
+`self._all_probes_quarantined_gate_used`) and helper (`self._trace`) resolves
+unchanged through normal MRO lookup.
+"""
+from __future__ import annotations
+
+from typing import Any
+
+
+class ProbeHandlingMixin:
+    """Probe-result post-processing for GameAgent (see module docstring)."""
+
+    def _apply_impossible_probe_downgrade_to_report(self, report: dict[str, Any]) -> None:
+        """Demote STRUCTURALLY-IMPOSSIBLE self-probes to non-gating advisories.
+
+        The model authors its own acceptance probes in Phase A. Sometimes a
+        probe reads state the game's code NEVER produces (a DOM `<img>` in a
+        pure-canvas game, `window.gameState` / `window.game.reset` that were
+        never assigned). Such a probe evaluates FALSY every iteration no matter
+        how good or broken the build is — it carries zero behavioral signal,
+        yet `tools.py` appends a gating `PROBE FAILED` soft_warning for it, so
+        `report["ok"]` can never become True. That is the unwinnable-loop shape
+        (see `_apply_player_stuck_downgrade` / `_apply_dead_animation_check_to_report`):
+        a behaviorally-correct build stays ok=False forever, `_save_best()`
+        never runs, and the loop reads the permanent failure as "stuck" and
+        burns best-of-N retries instead of honoring the user's next feedback.
+
+        Holochess trace 20260623_204052: the model's `all_piece_images_loaded`
+        (queried DOM `<img>` in a canvas game), `loader_has_all_pieces`
+        (`window.gameState||window.state`) and `pieces_render_after_reset`
+        (`window.game.reset`) read state the game never assigns. `probe_lint`
+        ALREADY detected all three every iter (`unassigned_property_read` /
+        `probe_bait_flag` findings in `self._probe_lint_findings`) — but the
+        finding was advisory-only: it nagged the model, it never removed the
+        probe from the gate. This routes those already-detected impossible
+        probes into the non-gating `warnings` channel and recomputes `ok`.
+
+        Genre-free: the trigger is purely "the probe references properties the
+        code never assigns", a signal the harness already computes. Real
+        failures still hard-gate untouched — JS `errors`, `page_errors`,
+        `console_errors`, and any probe that reads REAL game state. Eval-error
+        probes are left to `_handle_probe_eval_errors` (run just before this).
+        """
+        findings = self._probe_lint_findings or []
+        flagged = {
+            str(f.get("name"))
+            for f in findings
+            if f.get("kind") in ("unassigned_property_read", "probe_bait_flag")
+            and f.get("name")
+        }
+        if not flagged:
+            return
+        # Only demote probes that are FAILING FALSY this iter (skip eval_error;
+        # those are quarantined separately) and whose name probe_lint flagged.
+        demote = {
+            str(p.get("name"))
+            for p in (report.get("probes") or [])
+            if not p.get("ok")
+            and p.get("kind") != "eval_error"
+            and str(p.get("name")) in flagged
+        }
+        if not demote:
+            return
+        # Strip the gating `PROBE FAILED [name]` soft_warnings for these probes.
+        self._remove_probe_warnings(report, demote)
+        names = ", ".join(f"`{n}`" for n in sorted(demote))
+        warns = list(report.get("warnings") or [])
+        warns.append(
+            "IMPOSSIBLE PROBE (advisory — does not block shipping): these "
+            f"self-probes read state the game's code never assigns — {names}. "
+            "They evaluate falsy regardless of game behavior, so they cannot "
+            "test anything real and must NOT gate shipping. If you still want "
+            "the check, rewrite the probe to read state the running game "
+            "actually exposes; otherwise drop it. Real errors and probes that "
+            "read real game state still gate."
+        )
+        report["warnings"] = warns
+        # ok recompute mirrors tools.py: (no errors) and (no soft_warnings).
+        report["ok"] = not (report.get("errors") or []) and not report["soft_warnings"]
+        self._trace({
+            "kind": "impossible_probe_downgraded",
+            "names": sorted(demote),
+        })
+
+    @staticmethod
+    def _probe_shape_key(p: dict[str, Any]) -> str:
+        name = str(p.get("name") or "probe").strip().lower()
+        expr = str(p.get("expr") or "").strip().lower()
+        err_class = str(p.get("error_class") or "eval_error").strip().lower()
+        return f"{name}:{err_class}:{expr[:80]}"
+
+    @staticmethod
+    def _refresh_probe_error_fields(report: dict[str, Any]) -> None:
+        probes = list(report.get("probes") or [])
+        report["probe_errors"] = [
+            f"{p.get('name','?')}: {p.get('err','')[:160]}"
+            for p in probes
+            if not p.get("ok") and p.get("err")
+        ]
+        report["probe_eval_errors"] = [
+            {
+                "name": p.get("name", "probe"),
+                "expr_preview": (p.get("expr") or "")[:120],
+                "error_class": p.get("error_class") or "eval_error",
+                "err": (p.get("err") or "")[:200],
+            }
+            for p in probes
+            if not p.get("ok") and p.get("kind") == "eval_error"
+        ]
+
+    @staticmethod
+    def _remove_probe_warnings(report: dict[str, Any], names: set[str]) -> None:
+        if not names:
+            return
+        kept: list[str] = []
+        for w in list(report.get("soft_warnings") or []):
+            drop = False
+            for name in names:
+                if (
+                    f"PROBE FAILED [{name}]" in w
+                    or f"PROBE BROKEN [{name}]" in w
+                ):
+                    drop = True
+                    break
+            if not drop:
+                kept.append(w)
+        report["soft_warnings"] = kept
+
+    # Max iters the all-probes-quarantined gate blocks a clean ship before it
+    # downgrades to advisory (so a model that cannot emit a parseable probe
+    # still ships on the harness's own input/canvas/error checks, not loops).
+    _ALL_PROBES_QUARANTINED_GATE_CAP = 2
+
+    def _handle_probe_eval_errors(self, report: dict[str, Any], iteration: int) -> None:
+        """Trace, soften, and quarantine probes that fail at eval time.
+
+        Falsy probes are still game failures. Eval-error probes are broken
+        probe expressions; after two consecutive eval errors for the same
+        name, drop the probe from future iterations so it stops drowning the
+        model in stale harness errors.
+        """
+        probes = list(report.get("probes") or [])
+        if not probes:
+            return
+
+        failing = [p for p in probes if not p.get("ok")]
+        eval_failing = [
+            p for p in failing
+            if p.get("kind") == "eval_error"
+        ]
+
+        for p in probes:
+            name = str(p.get("name") or "probe")
+            if p.get("ok"):
+                self._probe_names_ever_passed.add(name)
+                self._probe_eval_error_streak[name] = 0
+                self._probe_eval_error_shape_streak[self._probe_shape_key(p)] = 0
+                continue
+            if p.get("kind") == "eval_error":
+                shape = self._probe_shape_key(p)
+                self._probe_eval_error_streak[name] = (
+                    self._probe_eval_error_streak.get(name, 0) + 1
+                )
+                self._probe_eval_error_shape_streak[shape] = (
+                    self._probe_eval_error_shape_streak.get(shape, 0) + 1
+                )
+                self._trace({
+                    "kind": "probe_eval_error",
+                    "iteration": iteration,
+                    "name": name,
+                    "expr_preview": (p.get("expr") or "")[:120],
+                    "error_class": p.get("error_class") or "eval_error",
+                    "streak": self._probe_eval_error_streak[name],
+                    "shape_streak": self._probe_eval_error_shape_streak[shape],
+                })
+            else:
+                # A real falsy result breaks the eval-error streak.
+                self._probe_eval_error_streak[name] = 0
+
+        # Two-strike rule for general eval errors, ONE-STRIKE for
+        # SyntaxError. Syntax errors mean the probe expression itself
+        # is malformed JavaScript — re-evaluating it next iter cannot
+        # produce a different result; the only way it would "pass" is
+        # if the model re-emits a corrected probe. Holding the broken
+        # probe in the active set for a second iter just lets the
+        # syntax error mask other harness signals (the 2026-05-23
+        # chess trace's iter 2/3 chased a `new Promise(r=>{...})`
+        # parser error for two iters while the actual
+        # ASSETS_LOADED_BUT_UNDRAWN problem was hidden behind it).
+        # Model-agnostic: any model that emits unparseable JS triggers
+        # the fast-path; legitimate runtime-eval errors still get the
+        # tolerant 2-strike treatment.
+        def _is_syntax_error(p: dict) -> bool:
+            err_class = (p.get("error_class") or "").lower()
+            err_text = (p.get("err") or "").lower()
+            return (
+                "syntaxerror" in err_class
+                or "syntaxerror" in err_text
+                or "unexpected token" in err_text
+                or "unexpected identifier" in err_text
+                or "unterminated" in err_text
+            )
+        quarantine_names: set[str] = set()
+        for p in eval_failing:
+            name = str(p.get("name") or "probe")
+            streak = self._probe_eval_error_streak.get(name, 0)
+            if streak >= 2 or _is_syntax_error(p):
+                quarantine_names.add(name)
+        if quarantine_names:
+            for p in eval_failing:
+                name = str(p.get("name") or "probe")
+                if name not in quarantine_names:
+                    continue
+                is_syntax = _is_syntax_error(p)
+                self._trace({
+                    "kind": "probe_quarantined",
+                    "iteration": iteration,
+                    "name": name,
+                    "expr_preview": (p.get("expr") or "")[:120],
+                    "eval_error_class": p.get("error_class") or "eval_error",
+                    "streak": self._probe_eval_error_streak.get(name, 0),
+                    "fast_path": "syntax_error" if is_syntax else None,
+                })
+                if is_syntax:
+                    notice = (
+                        f"PROBE {name} QUARANTINED IMMEDIATELY: the "
+                        "expression is unparseable JavaScript (syntax "
+                        "error). Re-emit <probes>...</probes> with a "
+                        "corrected expression — re-running malformed "
+                        "JS cannot produce a different result and "
+                        "would mask other harness signals."
+                    )
+                else:
+                    notice = (
+                        f"PROBE {name} QUARANTINED: had eval errors twice; "
+                        "re-emit <probes>...</probes> to replace, or leave it "
+                        "dropped if it was not testing real behavior."
+                    )
+                if notice not in self._pending_probe_quarantine_notices:
+                    self._pending_probe_quarantine_notices.append(notice)
+
+            self._probes = [
+                p for p in self._probes
+                if str(p.get("name") or "probe") not in quarantine_names
+            ]
+            report["probes"] = [
+                p for p in probes
+                if str(p.get("name") or "probe") not in quarantine_names
+            ]
+            self._remove_probe_warnings(report, quarantine_names)
+            warnings = list(report.get("warnings") or [])
+            warnings.append(
+                "Probe quarantine: dropped "
+                f"{len(quarantine_names)} probe(s) after repeated eval-time "
+                "errors; re-emit <probes> to replace if needed."
+            )
+            report["warnings"] = warnings
+            self._refresh_probe_error_fields(report)
+
+        # Guard: if quarantine emptied the ENTIRE model-authored probe set this
+        # iter, the build would otherwise ship "clean" with zero behavioral
+        # self-checks (battlezone 20260622 iter 4: 7/7 syntax-quarantined ->
+        # probes_total:0, ok:true). Gate the clean ship and ask for one valid
+        # probe, but only for a bounded number of iters so a model that cannot
+        # author a parseable probe does not loop forever — after the cap we
+        # ship on the harness's own input/canvas/error checks (advisory only).
+        if quarantine_names and not report.get("probes"):
+            if (
+                self._all_probes_quarantined_gate_used
+                < self._ALL_PROBES_QUARANTINED_GATE_CAP
+            ):
+                self._all_probes_quarantined_gate_used += 1
+                sw = list(report.get("soft_warnings") or [])
+                sw.append(
+                    "ALL acceptance probes were quarantined as malformed/broken "
+                    "— the build has zero behavioral self-checks. Re-emit "
+                    "<probes>...</probes> with at least one valid expression "
+                    "that reads real game state (e.g. window.state fields your "
+                    "code actually assigns) before this can ship clean."
+                )
+                report["soft_warnings"] = sw
+                self._trace({
+                    "kind": "all_probes_quarantined_gate",
+                    "iteration": iteration,
+                    "used": self._all_probes_quarantined_gate_used,
+                    "cap": self._ALL_PROBES_QUARANTINED_GATE_CAP,
+                })
+            else:
+                warns = list(report.get("warnings") or [])
+                warns.append(
+                    "All acceptance probes remain quarantined after repeated "
+                    "attempts; shipping on harness behavioral checks "
+                    "(input/canvas/errors). Advisory only — no model probe "
+                    "verified this build."
+                )
+                report["warnings"] = warns
+                self._trace({
+                    "kind": "all_probes_quarantined_advisory",
+                    "iteration": iteration,
+                })
+
+        # C1: before a probe is quarantined, avoid blocking on eval-error-only
+        # probes when the rest of the harness says the game is healthy.
+        remaining = list(report.get("probes") or [])
+        remaining_failing = [p for p in remaining if not p.get("ok")]
+        if remaining_failing and all(
+            p.get("kind") == "eval_error" for p in remaining_failing
+        ):
+            input_test = report.get("input_test") or {}
+            canvas = report.get("canvas") or {}
+            healthy_page = not (report.get("page_errors") or report.get("console_errors"))
+            healthy_harness = (
+                input_test.get("ran") is True
+                and input_test.get("any_change") is True
+                and canvas.get("blank") is False
+                and healthy_page
+            )
+            proven_probe_bug = all(
+                (
+                    str(p.get("name") or "probe") in self._probe_names_ever_passed
+                    or self._probe_eval_error_shape_streak.get(self._probe_shape_key(p), 0) >= 2
+                )
+                for p in remaining_failing
+            )
+            if healthy_harness and proven_probe_bug:
+                softened = {str(p.get("name") or "probe") for p in remaining_failing}
+                for p in remaining_failing:
+                    p["ok"] = True
+                    p["downgraded"] = (
+                        "probe eval error softened: input/canvas/page checks "
+                        "were healthy and this probe shape repeatedly failed "
+                        "before evaluating"
+                    )
+                self._remove_probe_warnings(report, softened)
+                warnings = list(report.get("warnings") or [])
+                warnings.append(
+                    "Probe eval errors softened: all remaining probe failures "
+                    "were eval-time errors while input/canvas/page checks were healthy."
+                )
+                report["warnings"] = warnings
+                self._refresh_probe_error_fields(report)
+
+        report["ok"] = (
+            len(report.get("errors") or []) == 0
+            and len(report.get("soft_warnings") or []) == 0
+        )
