@@ -24,7 +24,7 @@ one shared character description + fixed seed** for consistency — *not* img2im
 ---
 
 ## Contents
-- [What this is](#what-this-is) · [Quick start](#quick-start) · [Architecture](#architecture)
+- [What this is](#what-this-is) · [Quick start](#quick-start) · [Play sample games](#play-sample-games-goodgame) · [Architecture](#architecture)
 - [The verification harness](#the-verification-harness-the-core-lever) · [Assets & animation](#animation--consistency-is-the-hard-constraint)
 - [Memory / opening library](#memory--the-opening-library) · [TUI & CLI](#tui--cli-reference)
 - [Standalone asset tools](#standalone-asset-tools) · [Video cutscenes](#video-cutscenes--wan22-ti2v-5b-local) · [System tests](#system-tests--memory-hygiene)
@@ -101,6 +101,39 @@ for 4-bit).
 
 See `CLAUDE.md` for the full env-var reference (`LLM_BACKEND`, `OLLAMA_MODEL`, `MLX_MODEL`,
 `CODING_BOX_NUM_CTX`, `MLX_TOP_P`/`MLX_TOP_K`, `DIFFUSION_MODELS_DIR`, …).
+
+---
+
+## Play sample games (`goodgame/`)
+
+Curated wins live in **`goodgame/`**. **Play** links open the game in your browser via [jsDelivr](https://www.jsdelivr.com/)
+(serves this repo's `main` branch — no clone, no GPU). Relative `*_assets/` and `*_sounds/` paths load from the
+same CDN origin.
+
+**Launcher:** [https://cdn.jsdelivr.net/gh/jmrothberg/Agent_learning@main/goodgame/index.html](https://cdn.jsdelivr.net/gh/jmrothberg/Agent_learning@main/goodgame/index.html)
+
+| Game | Play |
+|------|------|
+| Open Field Tower Defense | [Play](https://cdn.jsdelivr.net/gh/jmrothberg/Agent_learning@main/goodgame/build-an-open-field-tower-defe_20260625_144848%20copy.html) |
+| Asteroids | [Play](https://cdn.jsdelivr.net/gh/jmrothberg/Agent_learning@main/goodgame/build-the-classic-asteroids-ga_20260612_222054.html) |
+| Centipede Arcade | [Play](https://cdn.jsdelivr.net/gh/jmrothberg/Agent_learning@main/goodgame/centipede-game-with-super-nice_20260512_180020.best.html) |
+| Centipede Shooter | [Play](https://cdn.jsdelivr.net/gh/jmrothberg/Agent_learning@main/goodgame/build-a-centipede-style-fixed_20260615_154952.html) |
+| Girder Climb (platformer) | [Play](https://cdn.jsdelivr.net/gh/jmrothberg/Agent_learning@main/goodgame/build-a-single-screen-arcade-p_20260620_225138.best.html) |
+| Dragon's Lair Deluxe | [Play](https://cdn.jsdelivr.net/gh/jmrothberg/Agent_learning@main/goodgame/dragons-lair-deluxe.html) |
+| Street Fighter | [Play](https://cdn.jsdelivr.net/gh/jmrothberg/Agent_learning@main/goodgame/a-game-of-street-figher-a-two_20260525_151525.html) |
+| Mortal Kombat | [Play](https://cdn.jsdelivr.net/gh/jmrothberg/Agent_learning@main/goodgame/game-of-mortal-kombat-fighing_20260524_101226.html) |
+| Dojo Fighters | [Play](https://cdn.jsdelivr.net/gh/jmrothberg/Agent_learning@main/goodgame/build-a-single-screen-2d-fight_20260615_181442.html) |
+| Space Invaders | [Play](https://cdn.jsdelivr.net/gh/jmrothberg/Agent_learning@main/goodgame/game-of-space-invaders-with-an_20260512_165800.best.html) |
+| Chess | [Play](https://cdn.jsdelivr.net/gh/jmrothberg/Agent_learning@main/goodgame/mechanics-standard-chess-on-an_20260522_163629.html) |
+| The Secret of Skull Island (adventure) | [Play](https://cdn.jsdelivr.net/gh/jmrothberg/Agent_learning@main/goodgame/build-a-point-and-click-advent_20260621_150955.html) |
+
+**Local clone** (optional — same files, `file://` from disk):
+
+```bash
+open "goodgame/build-an-open-field-tower-defe_20260625_144848 copy.html"   # macOS
+```
+
+In the TUI, **`/goodgame`** copies the current session's best build into this folder for tracking.
 
 ---
 
