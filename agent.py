@@ -17374,12 +17374,18 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
             # have been clean enough for best.html, but it can still be a
             # better baseline. Trace 20260612_225857 peaked visually before a
             # later patch reintroduced PROCEDURAL_REGRESSION/pink placeholders.
+            _iter_has_crash = bool(report.get("page_errors")) or any(
+                tok in str(e).lower()
+                for e in (report.get("errors") or [])
+                for tok in ("referenceerror", "typeerror", "syntaxerror")
+            )
             if (
                 not prev_ok
                 and prev
                 and _pre_iter_html
                 and not current_ok
                 and self._iter_budget_bonus < revert_bonus_cap
+                and not _iter_has_crash
             ):
                 prev_probes = prev.get("probes") or []
                 cur_probes = report.get("probes") or []

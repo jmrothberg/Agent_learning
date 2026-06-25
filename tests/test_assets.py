@@ -620,9 +620,11 @@ def test_render_block_sprite_resolver_is_self_healing(tmp_path):
     # MUST NOT emit the negative-cache form that stores null for an image
     # that simply has not decoded yet (naturalWidth still 0 on first frame).
     assert "ok ? img : null" not in block
-    # Cache the resolved image object (null ONLY when no asset name matched).
-    assert "_spriteCache[key] = img || null" in block
+    # Cache hits immediately; cache null only after _assetsReady (Chrome race).
+    assert "_assetsReady" in block
+    assert "_spriteCache[key] = img || null" not in block
+    assert "if (img)" in block and "else if (_assetsReady)" in block
     # Readiness is verified where the sprite is DRAWN, not where it is cached.
     assert "img.complete && img.naturalWidth > 0" in block
     # __assetMisses records a true no-match key, not a still-decoding image.
-    assert "if (!img) { (window.__assetMisses" in block
+    assert "(window.__assetMisses = window.__assetMisses || {})[key] = 1" in block
