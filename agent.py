@@ -4783,6 +4783,20 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
             allowed.append("<html_file>")
         else:
             forbidden.append("<html_file>")
+        # Honor art intent on feedback (GLM-5.2 trace 20260625_124038): when
+        # the LLM feedback router judged the user wants NEW art this batch
+        # (allow_assets_block=true) — or an unhonored art request is still
+        # outstanding — `<assets>` MUST be a usable tag this turn even on a
+        # lean/small prompt that dropped it from the goal-time output-tags
+        # list (the original goal had no art keywords). Surface it as allowed
+        # so the turn contract and the model agree the asset pipeline is open.
+        # Genre-agnostic: keys off the router decision, not any game type.
+        _route = getattr(self, "_feedback_route", None)
+        _wants_art = bool(_route and _route.get("allow_assets_block")) or bool(
+            getattr(self, "_unhonored_asset_request", None)
+        )
+        if _wants_art and "<assets>" not in allowed:
+            allowed.append("<assets>")
         return (allowed, forbidden)
 
     def trace_status(self, snapshot: dict) -> None:
@@ -6384,9 +6398,26 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
         one/two-keyword request). Replies that neither emit <assets> nor
         touch the requested subject keep the reprompt — the original
         here-s-a-tight-test failure mode stays covered.
+
+        GLM-5.2 trace 20260625_124038: the model emitted an <assets> block
+        that FAILED to parse (wrapped in `{"sprites":[...]}`), so Z-Image
+        never ran — yet the patches wired up sprite paths and shared the
+        keywords "sprites"/"enemies", so this method cleared the reprompt
+        and the missing art was masked. Guard against that: when the reply
+        ATTEMPTED an <assets> block, the keyword-overlap clear does NOT
+        apply. Successful generation already clears the reprompt upstream
+        in `_maybe_generate_assets_and_sounds`; if we still hold an
+        outstanding request here AND the reply emitted <assets>, the
+        generation failed and we MUST keep nagging (so the model retries
+        with a valid bare-array block). Only a pure code-only solution
+        (no <assets> attempted) may stand down via keyword overlap.
         """
         req = getattr(self, "_unhonored_asset_request", None)
         if not req:
+            return
+        # If the model attempted an <assets> block this turn, do not clear
+        # via code overlap — see docstring (failed-generation masking fix).
+        if _ASSETS_OPEN_RE.search(reply or ""):
             return
         try:
             patch_list = extract_patches(reply or "")
@@ -12891,6 +12922,29 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
         )
         sound_specs = parse_sounds_block(reply)
         video_specs = parse_videos_block(reply)
+        # Parse-failure coaching (GLM-5.2 trace 20260625_124038): the model
+        # emitted an <assets> tag but it parsed to ZERO specs (wrong JSON
+        # shape, e.g. a `{"sprites":[...]}` wrapper or malformed body). The
+        # old behavior was a SILENT no-op — Z-Image never ran, the model got
+        # no signal, and it shipped code referencing PNGs that never existed.
+        # Emit a trace + queue a one-turn coaching note naming the exact
+        # format so the model retries with a valid bare array. Genre-agnostic.
+        if not asset_specs and _ASSETS_OPEN_RE.search(reply or ""):
+            self._trace({
+                "kind": "assets_parse_failed",
+                "trigger": trigger,
+                "reason": "assets_tag_present_but_zero_specs",
+            })
+            self._queue_internal_feedback(
+                "ASSET FORMAT ERROR: your last <assets> block did not parse "
+                "to any sprites, so NO art was generated. The <assets> body "
+                "MUST be a bare JSON array of objects — "
+                '`<assets>[{"name":"hero","prompt":"..."},'
+                '{"name":"enemy","prompt":"..."}]</assets>`. Do NOT wrap it '
+                'in a key like {"sprites":[...]} or {"assets":[...]}, and do '
+                "NOT use a markdown code fence. Re-emit the <assets> block as "
+                "a bare array this turn so the sprites actually generate."
+            )
         # The model emitted an <assets> block → any outstanding "generate new
         # art" request is now honored; stop re-asserting it (see the
         # ASSET GENERATION REQUIRED directive in _flush_user_injections).

@@ -600,3 +600,29 @@ def test_render_block_emits_robust_sprite_resolver(tmp_path):
     assert "naturalWidth" in block                   # guards against undecoded
     # normalized/token matching so 'left_idle' resolves to 'left_fighter_idle'
     assert "norm" in block and "includes" in block
+
+
+def test_render_block_sprite_resolver_is_self_healing(tmp_path):
+    """The injected sprite() must cache the resolved IMAGE OBJECT, not a
+    readiness verdict, and check naturalWidth AT DRAW TIME — otherwise a
+    matched-but-still-decoding PNG gets cached as a permanent miss and the
+    game shows boxes until the page is reloaded (the holochess 2026-06-24
+    'reload a few times and the art appears' race). Regression guard for the
+    sprite-loader negative-cache fix."""
+    from assets import render_asset_paths_block
+    html = tmp_path / "game.html"
+    html.write_text("<html></html>")
+    ad = tmp_path / "game_assets"
+    ad.mkdir()
+    p = ad / "hero_idle.png"
+    p.write_bytes(b"\x89PNG fake")
+    block = render_asset_paths_block({"hero_idle": p}, html)
+    # MUST NOT emit the negative-cache form that stores null for an image
+    # that simply has not decoded yet (naturalWidth still 0 on first frame).
+    assert "ok ? img : null" not in block
+    # Cache the resolved image object (null ONLY when no asset name matched).
+    assert "_spriteCache[key] = img || null" in block
+    # Readiness is verified where the sprite is DRAWN, not where it is cached.
+    assert "img.complete && img.naturalWidth > 0" in block
+    # __assetMisses records a true no-match key, not a still-decoding image.
+    assert "if (!img) { (window.__assetMisses" in block

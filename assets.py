@@ -287,6 +287,27 @@ def parse_assets_block_with_meta(
     except Exception:
         # Truncated stream / trailing garbage — try repair.
         obj = _try_repair_truncated_json_list(body)
+    # Wrapper tolerance (GLM-5.2 trace 20260625_124038): some models wrap the
+    # spec array in a single-key object — `{"sprites":[...]}`, `{"assets":[...]}`,
+    # `{"images":[...]}` — instead of emitting a bare top-level list. The old
+    # `isinstance(obj, list)` guard silently dropped ALL specs in that case
+    # (16 tower-defense sprites lost; Z-Image never ran). Unwrap a dict whose
+    # only/first list value looks like the spec array so the request is honored.
+    if isinstance(obj, dict):
+        _inner = None
+        for _k in ("sprites", "assets", "images", "items", "list"):
+            _v = obj.get(_k)
+            if isinstance(_v, list):
+                _inner = _v
+                break
+        if _inner is None:
+            # Fall back to the first list value under any key.
+            for _v in obj.values():
+                if isinstance(_v, list):
+                    _inner = _v
+                    break
+        if _inner is not None:
+            obj = _inner
     if not isinstance(obj, list):
         return [], []
     out: list[dict] = []
@@ -1799,19 +1820,27 @@ def render_asset_paths_block(
         "      }",
         "      img = hit ? ASSETS[hit] : null;",
         "    }",
-        "    const ok = (img && img.naturalWidth > 0);",
-        "    // Record misses so the harness can fail a build that draws MISSING",
-        "    // placeholders (harness reads window.__assetMisses).",
-        "    if (!ok) { (window.__assetMisses = window.__assetMisses || {})[key] = 1; }",
-        "    _spriteCache[key] = ok ? img : null;",
+        "    // Cache the resolved IMAGE OBJECT, NOT a readiness verdict. A key that",
+        "    // matches an asset name is cached even while its PNG is still decoding",
+        "    // — the live Image's naturalWidth flips to >0 once decode finishes, so",
+        "    // the next frame draws it (self-healing). Do the naturalWidth check at",
+        "    // DRAW time (step 4), never here: caching `null` for a still-decoding",
+        "    // image makes the miss permanent and is the #1 'reload a few times and",
+        "    // the art appears' bug. Cache null ONLY when the key matches no asset",
+        "    // name at all (a true, permanent miss), and record THAT in",
+        "    // window.__assetMisses so the harness can fail a real key-drift bug.",
+        "    if (!img) { (window.__assetMisses = window.__assetMisses || {})[key] = 1; }",
+        "    _spriteCache[key] = img || null;",
         "    return _spriteCache[key];",
         "  }",
         "",
-        "  // 4. In draw(): use sprite() and, if it EVER misses, draw a LOUD marker",
-        "  //    — NEVER a plain filled rectangle (a tidy box looks intentional and",
-        "  //    hides the bug from you AND the visual critic):",
+        "  // 4. In draw(): fetch via sprite() and check readiness AT DRAW TIME. A",
+        "  //    matched-but-still-decoding image draws the MISSING marker THIS",
+        "  //    frame and the real art the frame after it decodes — NEVER a plain",
+        "  //    filled rectangle (a tidy box looks intentional and hides the bug",
+        "  //    from you AND the visual critic):",
         "  const img = sprite(key);",
-        "  if (img) {",
+        "  if (img && img.complete && img.naturalWidth > 0) {",
         "    ctx.drawImage(img, x, y, w, h);",
         "  } else {",
         "    ctx.fillStyle = '#f0f'; ctx.fillRect(x, y, w, h);",
