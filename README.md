@@ -106,26 +106,29 @@ See `CLAUDE.md` for the full env-var reference (`LLM_BACKEND`, `OLLAMA_MODEL`, `
 
 ## Play sample games (`goodgame/`)
 
-Curated wins live in **`goodgame/`**. **Play** links open the game in your browser via [jsDelivr](https://www.jsdelivr.com/)
-(serves this repo's `main` branch — no clone, no GPU). Relative `*_assets/` and `*_sounds/` paths load from the
-same CDN origin.
+Curated wins live in **`goodgame/`**. **Play** links use **GitHub Pages** (same setup as
+[jmrothberg/Games](https://github.com/jmrothberg/Games)) — click to run in your browser, no clone,
+no GPU. Relative `*_assets/` and `*_sounds/` folders load from the same origin.
 
-**Launcher:** [https://cdn.jsdelivr.net/gh/jmrothberg/Agent_learning@main/goodgame/index.html](https://cdn.jsdelivr.net/gh/jmrothberg/Agent_learning@main/goodgame/index.html)
+**Launcher:** [https://jmrothberg.github.io/Agent_learning/goodgame/](https://jmrothberg.github.io/Agent_learning/goodgame/)
 
 | Game | Play |
 |------|------|
-| Open Field Tower Defense | [Play](https://cdn.jsdelivr.net/gh/jmrothberg/Agent_learning@main/goodgame/build-an-open-field-tower-defe_20260625_144848%20copy.html) |
-| Asteroids | [Play](https://cdn.jsdelivr.net/gh/jmrothberg/Agent_learning@main/goodgame/build-the-classic-asteroids-ga_20260612_222054.html) |
-| Centipede Arcade | [Play](https://cdn.jsdelivr.net/gh/jmrothberg/Agent_learning@main/goodgame/centipede-game-with-super-nice_20260512_180020.best.html) |
-| Centipede Shooter | [Play](https://cdn.jsdelivr.net/gh/jmrothberg/Agent_learning@main/goodgame/build-a-centipede-style-fixed_20260615_154952.html) |
-| Girder Climb (platformer) | [Play](https://cdn.jsdelivr.net/gh/jmrothberg/Agent_learning@main/goodgame/build-a-single-screen-arcade-p_20260620_225138.best.html) |
-| Dragon's Lair Deluxe | [Play](https://cdn.jsdelivr.net/gh/jmrothberg/Agent_learning@main/goodgame/dragons-lair-deluxe.html) |
-| Street Fighter | [Play](https://cdn.jsdelivr.net/gh/jmrothberg/Agent_learning@main/goodgame/a-game-of-street-figher-a-two_20260525_151525.html) |
-| Mortal Kombat | [Play](https://cdn.jsdelivr.net/gh/jmrothberg/Agent_learning@main/goodgame/game-of-mortal-kombat-fighing_20260524_101226.html) |
-| Dojo Fighters | [Play](https://cdn.jsdelivr.net/gh/jmrothberg/Agent_learning@main/goodgame/build-a-single-screen-2d-fight_20260615_181442.html) |
-| Space Invaders | [Play](https://cdn.jsdelivr.net/gh/jmrothberg/Agent_learning@main/goodgame/game-of-space-invaders-with-an_20260512_165800.best.html) |
-| Chess | [Play](https://cdn.jsdelivr.net/gh/jmrothberg/Agent_learning@main/goodgame/mechanics-standard-chess-on-an_20260522_163629.html) |
-| The Secret of Skull Island (adventure) | [Play](https://cdn.jsdelivr.net/gh/jmrothberg/Agent_learning@main/goodgame/build-a-point-and-click-advent_20260621_150955.html) |
+| Open Field Tower Defense | [Play](https://jmrothberg.github.io/Agent_learning/goodgame/build-an-open-field-tower-defe_20260625_144848%20copy.html) |
+| Asteroids | [Play](https://jmrothberg.github.io/Agent_learning/goodgame/build-the-classic-asteroids-ga_20260612_222054.html) |
+| Centipede Arcade | [Play](https://jmrothberg.github.io/Agent_learning/goodgame/centipede-game-with-super-nice_20260512_180020.best.html) |
+| Centipede Shooter | [Play](https://jmrothberg.github.io/Agent_learning/goodgame/build-a-centipede-style-fixed_20260615_154952.html) |
+| Girder Climb (platformer) | [Play](https://jmrothberg.github.io/Agent_learning/goodgame/build-a-single-screen-arcade-p_20260620_225138.best.html) |
+| Dragon's Lair Deluxe | [Play](https://jmrothberg.github.io/Agent_learning/goodgame/dragons-lair-deluxe.html) |
+| Street Fighter | [Play](https://jmrothberg.github.io/Agent_learning/goodgame/a-game-of-street-figher-a-two_20260525_151525.html) |
+| Mortal Kombat | [Play](https://jmrothberg.github.io/Agent_learning/goodgame/game-of-mortal-kombat-fighing_20260524_101226.html) |
+| Dojo Fighters | [Play](https://jmrothberg.github.io/Agent_learning/goodgame/build-a-single-screen-2d-fight_20260615_181442.html) |
+| Space Invaders | [Play](https://jmrothberg.github.io/Agent_learning/goodgame/game-of-space-invaders-with-an_20260512_165800.best.html) |
+| Chess | [Play](https://jmrothberg.github.io/Agent_learning/goodgame/mechanics-standard-chess-on-an_20260522_163629.html) |
+| The Secret of Skull Island (adventure) | [Play](https://jmrothberg.github.io/Agent_learning/goodgame/build-a-point-and-click-advent_20260621_150955.html) |
+
+After pushing a new game to `goodgame/`, wait ~1 minute for Pages to rebuild (or run
+`gh api repos/jmrothberg/Agent_learning/pages/builds --method POST`).
 
 **Local clone** (optional — same files, `file://` from disk):
 
