@@ -3215,6 +3215,8 @@ class CodingBoxApp(App):
                 await self.action_show_log_paths()
             elif cmd == "open":
                 self._cmd_open()
+            elif cmd == "edit":
+                self._cmd_edit()
             elif cmd == "clear":
                 self.query_one("#log-pane", RichLog).clear()
                 self._log_mirror_lines = []
@@ -3350,6 +3352,7 @@ class CodingBoxApp(App):
             "  [b]/retry[/b]                     re-run after a bad model (keeps game file + trace)",
             "  [b]/reset[/b]                     same as bare [b]/new[/b] — clear staging + wait for a goal",
             "  [b]/open[/b]                      open the current game in your default browser",
+            "  [b]/edit[/b]                      open Asset Studio in your default browser",
             "  [b]/clear[/b]                     clear the agent log pane (no effect on staged state)",
             "  [b]/quit[/b]                      quit the TUI [dim](= Ctrl+Q)[/dim]",
             "",
@@ -4443,6 +4446,31 @@ class CodingBoxApp(App):
         try:
             webbrowser.open(url)
             self._log_info(f"opened {url}")
+        except Exception as e:
+            self._log_error(f"could not open browser: {e}")
+
+    def _cmd_edit(self) -> None:
+        """/edit — Asset Studio in the system browser (same as /open)."""
+        import webbrowser
+        from urllib.parse import quote
+
+        try:
+            _scripts = Path(__file__).resolve().parent / "scripts"
+            if str(_scripts) not in sys.path:
+                sys.path.insert(0, str(_scripts))
+            import asset_studio as _asset_studio  # noqa: WPS433
+
+            url = _asset_studio.ensure_server(open_browser=False)
+        except Exception as e:
+            self._log_error(f"could not start Asset Studio server: {e}")
+            return
+
+        if self._assets_dir is not None and self._assets_dir.is_dir():
+            url = f"{url.rstrip('/')}?dir={quote(str(self._assets_dir.resolve()))}"
+
+        try:
+            webbrowser.open(url)
+            self._log_info(f"Asset Studio → {url}")
         except Exception as e:
             self._log_error(f"could not open browser: {e}")
 
@@ -7196,6 +7224,22 @@ def main() -> int:
             # the import itself failed, which we handle silently
             # (the agent will skip assets and the user can read the
             # real reason from the .log on their next session).
+            pass
+    # Asset Studio (browser UI for Z-Image txt2img/img2img) — same GPU
+    # stack, always at http://127.0.0.1:8765/ while chat.py runs.
+    # SKIP_ASSET_STUDIO=1 to opt out. Or double-click
+    # scripts/Asset Studio.command when chat.py isn't running.
+    if os.environ.get("SKIP_ASSET_STUDIO", "").strip() not in ("", "0", "false", "False"):
+        pass
+    else:
+        try:
+            _scripts = Path(__file__).resolve().parent / "scripts"
+            if str(_scripts) not in sys.path:
+                sys.path.insert(0, str(_scripts))
+            import asset_studio as _asset_studio  # noqa: WPS433
+
+            _asset_studio.ensure_server(open_browser=False)
+        except Exception:
             pass
     try:
         CodingBoxApp().run()

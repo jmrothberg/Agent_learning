@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Asset Studio — Z-Image helper</title>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --panel: #1a1d27;
+      --border: #2a3040;
+      --text: #e8ecf4;
+      --muted: #8b95a8;
+      --accent: #6ea8ff;
+      --accent2: #52d1a3;
+      --danger: #ff6b6b;
+      --radius: 10px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+    header {
+      padding: 16px 24px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    header h1 { margin: 0; font-size: 1.15rem; font-weight: 600; }
+    header p { margin: 4px 0 0; color: var(--muted); font-size: 0.85rem; }
+    .pill {
+      font-size: 0.75rem;
+      padding: 4px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      color: var(--muted);
+    }
+    .pill.ok { color: var(--accent2); border-color: #2d5a45; }
+    .pill.bad { color: var(--danger); border-color: #5a2d2d; }
+    main {
+      display: grid;
+      grid-template-columns: 1fr 360px;
+      gap: 16px;
+      padding: 16px 24px 24px;
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+    @media (max-width: 960px) {
+      main { grid-template-columns: 1fr; }
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px;
+    }
+    .panel h2 {
+      margin: 0 0 12px;
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+    }
+    label {
+      display: block;
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+    input[type="text"], input[type="number"], textarea, select {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 10px 12px;
+      font: inherit;
+    }
+    input[readonly] { color: var(--muted); cursor: default; }
+    textarea { min-height: 88px; resize: vertical; }
+    .row { display: flex; gap: 8px; align-items: center; }
+    .row input { flex: 1; }
+    button {
+      background: var(--accent);
+      color: #081018;
+      border: none;
+      border-radius: 8px;
+      padding: 10px 14px;
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button.secondary {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    button.ghost { background: #243049; color: var(--text); }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    button.danger { background: var(--danger); color: #fff; }
+    .drop {
+      border: 2px dashed var(--border);
+      border-radius: var(--radius);
+      min-height: 320px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      overflow: hidden;
+      background:
+        linear-gradient(45deg, #141820 25%, transparent 25%),
+        linear-gradient(-45deg, #141820 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, #141820 75%),
+        linear-gradient(-45deg, transparent 75%, #141820 75%);
+      background-size: 20px 20px;
+      background-position: 0 0, 0 10px, 10px -10px, -10px 0;
+      background-color: #10141c;
+    }
+    .drop.drag { border-color: var(--accent); }
+    .drop img {
+      max-width: 100%;
+      max-height: 480px;
+      object-fit: contain;
+      image-rendering: pixelated;
+    }
+    .drop .hint {
+      text-align: center;
+      color: var(--muted);
+      padding: 24px;
+      pointer-events: none;
+    }
+    .tabs { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
+    .tabs button { flex: 1; min-width: 90px; }
+    .tabs button.active { outline: 2px solid var(--accent); }
+    .field { margin-bottom: 12px; }
+    .range-row { display: flex; gap: 10px; align-items: center; }
+    .range-row input[type="range"] { flex: 1; }
+    .log {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.75rem;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px;
+      max-height: 140px;
+      overflow: auto;
+      color: var(--muted);
+      white-space: pre-wrap;
+    }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+    .actions button { flex: 1; min-width: 120px; }
+    .check { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+    .check input { width: auto; }
+    .size-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Asset Studio</h1>
+      <p>Drag a PNG, describe it, generate with Z-Image-Turbo, save to your <code>*_assets/</code> folder.</p>
+    </div>
+    <div id="backendStatus" class="pill">Checking diffuser…</div>
+  </header>
+
+  <main>
+    <section class="panel">
+      <h2>Preview</h2>
+      <div id="drop" class="drop">
+        <div class="hint" id="dropHint">Drop a PNG here<br><small>or use Open from disk</small></div>
+        <img id="preview" alt="" hidden>
+      </div>
+      <div class="actions" style="margin-top:12px">
+        <button type="button" class="secondary" id="btnOpen">Open from disk</button>
+        <button type="button" class="secondary" id="btnClear">Clear preview</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Save as</h2>
+      <div class="field">
+        <label for="saveFolder">Folder</label>
+        <input id="saveFolder" type="text" readonly placeholder="Opens automatically when you open a PNG">
+      </div>
+      <div class="field">
+        <label for="fileName">Filename</label>
+        <input id="fileName" type="text" placeholder="tower_idle.png">
+      </div>
+
+      <h2 style="margin-top:18px">Mode</h2>
+      <div class="tabs" id="modeTabs">
+        <button type="button" class="ghost active" data-mode="new">New (text)</button>
+        <button type="button" class="ghost" data-mode="modify">Modify (img2img)</button>
+        <button type="button" class="ghost" data-mode="save">Save only</button>
+      </div>
+
+      <div class="field">
+        <label for="preset">Preset</label>
+        <select id="preset">
+          <option value="sprite">Sprite — 512px, chroma-key alpha</option>
+          <option value="background">Background — 768px, keep background</option>
+          <option value="custom">Custom size</option>
+        </select>
+      </div>
+      <div class="field" id="customSizeRow" hidden>
+        <label>Custom size (px)</label>
+        <div class="size-row">
+          <input id="sizeW" type="number" min="16" max="2048" value="512">
+          <input id="sizeH" type="number" min="16" max="2048" value="512">
+        </div>
+      </div>
+      <div class="check">
+        <input type="checkbox" id="chromaKey" checked>
+        <label for="chromaKey" style="margin:0">Chroma-key to transparent (sprites)</label>
+      </div>
+
+      <div class="field" id="promptField">
+        <label for="prompt">Prompt</label>
+        <textarea id="prompt" placeholder="pixel-art tower defense sniper turret, side view, transparent background"></textarea>
+      </div>
+      <div class="field" id="strengthField" hidden>
+        <label>Img2img strength <span id="strengthVal">0.55</span></label>
+        <div class="range-row">
+          <input id="strength" type="range" min="0.15" max="0.95" step="0.05" value="0.55">
+        </div>
+      </div>
+
+      <div class="actions">
+        <button type="button" id="btnGenerate">Generate</button>
+        <button type="button" class="secondary" id="btnSave">Save PNG</button>
+      </div>
+
+      <h2 style="margin-top:18px">Log</h2>
+      <div id="log" class="log"></div>
+    </section>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    // Served from the studio server, or fixed localhost when opened as file://
+    const API = (location.protocol === "http:" || location.protocol === "https:")
+      ? location.origin
+      : "http://127.0.0.1:8765";
+    const state = {
+      mode: "new",
+      imageB64: null,
+      sourcePath: null,
+      saveDir: "",
+      busy: false,
+    };
+
+    function setSaveDir(dir) {
+      state.saveDir = (dir || "").trim();
+      $("saveFolder").value = state.saveDir;
+    }
+
+    function log(msg) {
+      const el = $("log");
+      const ts = new Date().toLocaleTimeString();
+      el.textContent = `[${ts}] ${msg}\n` + el.textContent;
+    }
+
+    function setBusy(on) {
+      state.busy = on;
+      $("btnGenerate").disabled = on;
+      $("btnSave").disabled = on;
+    }
+
+    function showPreview(dataUrl) {
+      const img = $("preview");
+      const hint = $("dropHint");
+      img.src = dataUrl;
+      img.hidden = false;
+      hint.hidden = true;
+    }
+
+    function clearPreview() {
+      state.imageB64 = null;
+      state.sourcePath = null;
+      setSaveDir("");
+      $("preview").hidden = true;
+      $("preview").removeAttribute("src");
+      $("dropHint").hidden = false;
+    }
+
+    function b64FromDataUrl(dataUrl) {
+      const i = dataUrl.indexOf(",");
+      return i >= 0 ? dataUrl.slice(i + 1) : dataUrl;
+    }
+
+    function dataUrlFromB64(b64) {
+      return `data:image/png;base64,${b64}`;
+    }
+
+    function applyPresetUI() {
+      const preset = $("preset").value;
+      $("customSizeRow").hidden = preset !== "custom";
+      if (preset === "sprite") {
+        $("chromaKey").checked = true;
+      } else if (preset === "background") {
+        $("chromaKey").checked = false;
+      }
+    }
+
+    function presetPayload() {
+      const preset = $("preset").value;
+      if (preset === "sprite") return { size: [512, 512], chroma_key: $("chromaKey").checked };
+      if (preset === "background") return { size: [768, 768], chroma_key: $("chromaKey").checked };
+      return {
+        size: [Number($("sizeW").value) || 512, Number($("sizeH").value) || 512],
+        chroma_key: $("chromaKey").checked,
+      };
+    }
+
+    function setMode(mode) {
+      state.mode = mode;
+      document.querySelectorAll("#modeTabs button").forEach((b) => {
+        b.classList.toggle("active", b.dataset.mode === mode);
+      });
+      $("promptField").hidden = mode === "save";
+      $("strengthField").hidden = mode !== "modify";
+      $("btnGenerate").hidden = mode === "save";
+      $("btnGenerate").textContent = mode === "modify" ? "Modify with prompt" : "Generate";
+    }
+
+    async function api(path, body) {
+      const res = await fetch(`${API}${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body || {}),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || res.statusText);
+      return data;
+    }
+
+    async function refreshStatus() {
+      try {
+        const res = await fetch(`${API}/api/status`);
+        const data = await res.json();
+        const el = $("backendStatus");
+        if (data.device) {
+          el.textContent = `Z-Image ready (${data.device})`;
+          el.className = "pill ok";
+        } else if (data.loaded) {
+          el.textContent = "Z-Image loaded";
+          el.className = "pill ok";
+        } else if (data.error) {
+          el.textContent = data.error.slice(0, 80);
+          el.className = "pill bad";
+        } else {
+          el.textContent = "Z-Image idle — loads on first generate";
+          el.className = "pill";
+        }
+        return true;
+      } catch (e) {
+        $("backendStatus").textContent = "Double-click Asset Studio.command";
+        $("backendStatus").className = "pill bad";
+        return false;
+      }
+    }
+
+    async function boot() {
+      if (location.protocol === "file:") {
+        const up = await refreshStatus();
+        if (up) {
+          location.replace(`${API}/`);
+          return;
+        }
+        log("Open scripts/Asset Studio.command in Finder (starts Z-Image + this UI).");
+        $("btnGenerate").disabled = true;
+        $("btnSave").disabled = true;
+        return;
+      }
+      const dirParam = new URLSearchParams(location.search).get("dir");
+      if (dirParam) {
+        setSaveDir(dirParam);
+        log(`Save folder: ${dirParam}`);
+      }
+      applyPresetUI();
+      setMode("new");
+      refreshStatus();
+      setInterval(refreshStatus, 15000);
+    }
+
+    function loadFile(file) {
+      if (!file || !file.type.startsWith("image/")) {
+        log("Dropped file is not an image.");
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        showPreview(reader.result);
+        state.imageB64 = b64FromDataUrl(reader.result);
+        state.sourcePath = null;
+        if (!$("fileName").value.trim()) {
+          $("fileName").value = file.name.replace(/\.[^.]+$/, "") + ".png";
+        }
+        log(`Loaded ${file.name} — use Open from disk to save back to its folder.`);
+        if (state.mode === "new") setMode("modify");
+      };
+      reader.readAsDataURL(file);
+    }
+
+    $("drop").addEventListener("dragover", (e) => {
+      e.preventDefault();
+      $("drop").classList.add("drag");
+    });
+    $("drop").addEventListener("dragleave", () => $("drop").classList.remove("drag"));
+    $("drop").addEventListener("drop", (e) => {
+      e.preventDefault();
+      $("drop").classList.remove("drag");
+      const file = e.dataTransfer.files && e.dataTransfer.files[0];
+      loadFile(file);
+    });
+
+    $("btnClear").addEventListener("click", () => {
+      clearPreview();
+      log("Preview cleared.");
+    });
+
+    $("btnOpen").addEventListener("click", async () => {
+      try {
+        setBusy(true);
+        const data = await api("/api/pick-file", {});
+        if (!data.path) { log("Open cancelled."); return; }
+        state.sourcePath = data.path;
+        state.imageB64 = data.image_b64;
+        showPreview(dataUrlFromB64(data.image_b64));
+        if (data.parent_dir) setSaveDir(data.parent_dir);
+        $("fileName").value = data.filename || "asset.png";
+        log(`Opened ${data.path} — saves go to same folder.`);
+        if (state.mode === "new") setMode("modify");
+      } catch (e) {
+        log(`Open failed: ${e.message}`);
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    $("preset").addEventListener("change", applyPresetUI);
+    $("strength").addEventListener("input", () => {
+      $("strengthVal").textContent = Number($("strength").value).toFixed(2);
+    });
+
+    document.querySelectorAll("#modeTabs button").forEach((btn) => {
+      btn.addEventListener("click", () => setMode(btn.dataset.mode));
+    });
+
+    $("btnGenerate").addEventListener("click", async () => {
+      const prompt = $("prompt").value.trim();
+      if (!prompt) { log("Enter a prompt first."); return; }
+      if (state.mode === "modify" && !state.imageB64) {
+        log("Modify mode needs a source image — use Open from disk.");
+        return;
+      }
+      const { size, chroma_key } = presetPayload();
+      try {
+        setBusy(true);
+        log(state.mode === "modify" ? "Running img2img…" : "Running txt2img… (first run loads model ~30–60s)");
+        const data = await api("/api/generate", {
+          mode: state.mode === "modify" ? "img2img" : "txt2img",
+          prompt,
+          strength: Number($("strength").value),
+          size,
+          chroma_key,
+          init_image_b64: state.mode === "modify" ? state.imageB64 : null,
+        });
+        state.imageB64 = data.image_b64;
+        showPreview(dataUrlFromB64(data.image_b64));
+        log(`Done in ${data.elapsed_s}s${data.note ? " — " + data.note : ""}`);
+        refreshStatus();
+      } catch (e) {
+        log(`Generate failed: ${e.message}`);
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    $("btnSave").addEventListener("click", async () => {
+      let dir = state.saveDir.trim();
+      let name = $("fileName").value.trim();
+      if (!name) { log("Set a filename first."); return; }
+      if (!name.toLowerCase().endsWith(".png")) name += ".png";
+      if (!state.imageB64) { log("Nothing to save — generate or load an image first."); return; }
+      try {
+        setBusy(true);
+        if (!dir) {
+          log("No folder yet — pick your *_assets/ folder once…");
+          const picked = await api("/api/pick-folder", {});
+          if (!picked.path) { log("Save cancelled."); return; }
+          setSaveDir(picked.path);
+          dir = state.saveDir;
+        }
+        const data = await api("/api/save", {
+          dir,
+          filename: name,
+          image_b64: state.imageB64,
+        });
+        state.sourcePath = data.path;
+        log(`Saved → ${data.path}`);
+      } catch (e) {
+        log(`Save failed: ${e.message}`);
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    applyPresetUI();
+    setMode("new");
+    boot();
+  </script>
+</body>
+</html>

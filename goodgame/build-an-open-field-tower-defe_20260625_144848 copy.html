@@ -84,6 +84,7 @@
 
   // ---- Asset loading ----
   const ASSETS = {};
+  let _assetsReady = false;
   async function loadAssets() {
     const entries = [
       ['tower_gun_idle','./build-an-open-field-tower-defe_20260625_144848_assets/tower_gun_idle.png'],
@@ -106,6 +107,7 @@
       try { await img.decode(); } catch(e) { console.warn('asset fail', name); }
       ASSETS[name] = img;
     }
+    _assetsReady = true;
   }
 
   // ---- Sound loading ----
@@ -141,7 +143,11 @@
   // ---- Sprite resolver ----
   const _spriteCache = {};
   function sprite(key) {
-    if (_spriteCache[key] !== undefined) return _spriteCache[key];
+    if (_spriteCache[key] !== undefined) {
+      // Chrome often draws before loadAssets() finishes; don't keep a permanent null.
+      if (_spriteCache[key] === null && !_assetsReady) delete _spriteCache[key];
+      else return _spriteCache[key];
+    }
     let img = ASSETS[key];
     if (!img) {
       const norm = s => String(s).toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -151,9 +157,13 @@
         for (const n of names) { const nn=norm(n); let sc=0; for (const t of toks) if (t.length>=3 && nn.includes(t)) sc+=t.length; if (sc>best) { best=sc; hit=n; } } }
       img = hit ? ASSETS[hit] : null;
     }
-    if (!img) (window.__assetMisses = window.__assetMisses || {})[key] = 1;
-    _spriteCache[key] = img || null;
-    return _spriteCache[key];
+    if (img) {
+      _spriteCache[key] = img;
+    } else if (_assetsReady) {
+      (window.__assetMisses = window.__assetMisses || {})[key] = 1;
+      _spriteCache[key] = null;
+    }
+    return img || null;
   }
   function drawSprite(key, x, y, w, h, angle) {
     const img = sprite(key);

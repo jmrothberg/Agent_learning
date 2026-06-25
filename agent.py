@@ -1010,6 +1010,28 @@ _SCOPED_SIZE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\b(?:larger|smaller|bigger)\b", re.I),
     re.compile(r"\b(?:scale|size)\b", re.I),
 )
+# Layout/position tweak vocabulary: "move/shift/nudge ... down/up/left/
+# right/by", "reposition", explicit "N px / N pixels". Genre-free: this
+# describes a LAYOUT-modality edit (where a UI element sits), not subject
+# matter. Used ONLY to arm a one-patch scope lock on a SEED first build so
+# a weak model can't be pushed into a full-file rewrite of a large seed for
+# a trivial reposition (2026-06-25 trace 161300_697573: "move the weapons
+# selection buttons down 50 pixels" forced a 28-min rewrite loop).
+_SCOPED_POSITION_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\b(?:reposition|relocate|realign|nudge)\b", re.I),
+    re.compile(
+        r"\b(?:move|shift|slide|push|drop|raise|lower|offset)\b.*?"
+        r"\b(?:up|down|left|right|over|by|to\s+the)\b",
+        re.I,
+    ),
+    re.compile(r"\b\d+(?:\.\d+)?\s*(?:px|pixels?)\b", re.I),
+)
+# Recolor tweak vocabulary (companion to the position/size/orientation
+# tweak detectors). Tight on purpose — only explicit recolor phrasing.
+_SCOPED_RECOLOR_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\b(?:recolou?r)\b", re.I),
+    re.compile(r"\bchange\b.{0,20}\bcolou?r\b", re.I),
+)
 
 def _feedback_locks_code(text: str) -> bool:
     """User explicitly forbade code changes for this turn.
@@ -1643,6 +1665,34 @@ def _feedback_mentions_scoped_behavior_change(text: str) -> bool:
     if _feedback_is_behavior_bug(text):
         return True
     return any(p.search(text) for p in _SCOPED_BEHAVIOR_PATTERNS)
+
+
+def _goal_is_small_scope_edit(text: str) -> bool:
+    """True when a seed-edit goal is a localized tweak — reposition,
+    resize, rotate/flip, or recolor of existing elements — rather than a
+    structural rebuild.
+
+    Used ONLY to arm a single-patch scope lock on a SEED first build (the
+    full file is injected for patching by `_seed_html_for_prompt`), so a
+    weak local model can't fall back to a doomed full-file `<html_file>`
+    rewrite of a large seed (2026-06-25 trace 161300_697573).
+
+    Genre-free: every pattern describes a layout/rendering-modality edit
+    (position, scale, orientation, color), never subject matter. Reuses the
+    existing size + orientation detectors so the vocabulary stays in one
+    place.
+    """
+    if not text:
+        return False
+    if _feedback_requests_size_change(text):
+        return True
+    if _feedback_is_orientation_change(text):
+        return True
+    if any(p.search(text) for p in _SCOPED_POSITION_PATTERNS):
+        return True
+    if any(p.search(text) for p in _SCOPED_RECOLOR_PATTERNS):
+        return True
+    return False
 
 
 def _scoped_probe_keywords(text: str, limit: int = 3) -> list[str]:
@@ -4698,9 +4748,29 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
         """
         if not goal:
             return build_msg
-        if not (_feedback_is_strict_scope(goal) or _feedback_locks_code(goal)):
+        # Seed-only widening (2026-06-25 trace 161300_697573): a SEED edit
+        # whose goal is a localized tweak (move/resize/rotate/recolor) but
+        # carries no explicit "only/just/nothing else" phrase still must be
+        # scoped — otherwise a weak model rewrites the whole large seed and
+        # loops. Gated on `self.seed_file` so fresh-from-scratch first builds
+        # (which have no file to patch) are completely unchanged. Safe because
+        # `_seed_html_for_prompt` now injects the full seed so the patch
+        # target is visible, and the lock auto-clears after iter 1.
+        small_scope_seed = bool(
+            self.seed_file is not None
+            and self._current_file
+            and _goal_is_small_scope_edit(goal)
+        )
+        if not (
+            _feedback_is_strict_scope(goal)
+            or _feedback_locks_code(goal)
+            or small_scope_seed
+        ):
             return build_msg
-        locks_code = _feedback_locks_code(goal)
+        # `locks_code=True` is what arms the single_patch lock in
+        # `_configure_scoped_constraints`; a small-scope seed edit qualifies
+        # even without explicit code-lock language.
+        locks_code = _feedback_locks_code(goal) or small_scope_seed
         asset_names = list(self._session_assets.keys()) if self._session_assets else []
         sound_names = list(self._session_sounds.keys()) if self._session_sounds else []
         art_change = bool(asset_names) and _feedback_is_art_change(goal, asset_names)
@@ -4716,6 +4786,7 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
             "locks_code": locks_code,
             "art_change": art_change,
             "sound_change": sound_change,
+            "small_scope_seed": small_scope_seed,
             "scoped_mode": (self._scoped_constraints or {}).get("mode"),
         })
         # Prepend a compact SCOPED-CHANGE notice so the model sees the
@@ -11647,6 +11718,18 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
     # cheap and removes any risk of the slice missing context.
     _FULL_FILE_INJECT_LIMIT = 12_000
 
+    # Seed-build injection budget (separate from the fix-turn limit above).
+    # The first seed turn is the ONLY chance the model gets to see the file
+    # it must patch; truncating it (2026-06-25 trace 161300_697573: a 34KB
+    # seed cut to 12KB) elides the patch target's SEARCH anchor, so
+    # seed_build_instruction's "if the target isn't shown, send a full
+    # <html_file>" fallback fires and a small model loops for ~28 min on a
+    # 711-line rewrite. A 34KB seed adds only ~9-10K prompt tokens (iter-1
+    # prompt was ~14K; ctx default is 100K), so inject typical single-file
+    # games in FULL and keep the head+tail excerpt ONLY for the rare
+    # genuinely-oversized seed.
+    _SEED_FULL_FILE_INJECT_LIMIT = 60_000
+
     def _seed_html_for_prompt(
         self, seed_html: str, report: dict | None = None,
     ) -> tuple[str, bool]:
@@ -11657,16 +11740,18 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
         local model into repetition/deliberation loops. Returns
         (html_for_prompt, truncated). Genre-free, structural:
 
-        - Under _FULL_FILE_INJECT_LIMIT: full file (current behavior).
+        - Under _SEED_FULL_FILE_INJECT_LIMIT: full file (so EVERY patch
+          target stays visible — the primary fix for the 2026-06-25 forced-
+          rewrite loop; see the constant's comment above).
         - Otherwise: when a failing report exists, prefer the focused slice;
           else a head+tail excerpt (DOM/CSS anchors live near the top, boot
           code near the bottom — the regions UI/additive patches anchor to).
         The full file stays on disk; the prompt tells the model to patch
         against the on-disk file, not the excerpt.
         """
-        if not seed_html or len(seed_html) <= self._FULL_FILE_INJECT_LIMIT:
+        if not seed_html or len(seed_html) <= self._SEED_FULL_FILE_INJECT_LIMIT:
             return seed_html, False
-        limit = self._FULL_FILE_INJECT_LIMIT
+        limit = self._SEED_FULL_FILE_INJECT_LIMIT
         if report and not report.get("ok", True):
             try:
                 sliced = self._focused_slice(

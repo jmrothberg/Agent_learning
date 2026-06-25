@@ -349,6 +349,20 @@ path). Audio folders play each clip in order; image folders open in Preview.
 .venv/bin/python scripts/play_folder.py path/to/my_assets  # or pass path directly
 ```
 
+**Asset Studio (browser UI)** — drag a PNG, describe a change (or start from text only), generate
+with the same Z-Image-Turbo pipeline, and save into any `*_assets/` folder with the filename you
+pick. Modes: new sprite/background (txt2img), modify existing (img2img), or save/rename only.
+
+**Double-click** `scripts/Asset Studio.command` in Finder (starts Z-Image + opens the browser —
+you never type a python command). While `chat.py` is running, the same UI is already at
+http://127.0.0.1:8765/ — bookmark it.
+
+```bash
+open "scripts/Asset Studio.command"   # same as double-click in Finder
+# manual fallback only:
+.venv/bin/python scripts/asset_studio.py
+```
+
 Requires the same GPU setup as the agent: `./scripts/install_diffuser.sh` for drawing; preview
 works with macOS `afplay` / Preview only.
 

@@ -38,19 +38,36 @@ def test_small_seed_html_passed_in_full() -> None:
     assert truncated is False
 
 
-def test_large_seed_html_is_excerpted_and_bounded() -> None:
+def test_mid_size_seed_html_passed_in_full() -> None:
+    # 2026-06-25 trace 161300_697573 fix: a typical single-file game seed
+    # (here ~30KB — over the 12K fix-turn limit but UNDER the 60K seed
+    # limit) must be injected in FULL so EVERY patch SEARCH target is
+    # visible. Truncating it elided the target and forced a doomed full
+    # <html_file> rewrite that looped.
     a = _stub()
-    # Comfortably over _FULL_FILE_INJECT_LIMIT (12_000).
     head = "<head><style>#helpBtn{}</style></head>\n"
-    middle = "\n".join(f"function logic{i}() {{ return {i}; }}" for i in range(2000))
+    middle = "\n".join(f"function logic{i}() {{ return {i}; }}" for i in range(700))
     tail = "\n<script>boot();</script></html>"
     html = head + middle + tail
-    assert len(html) > GameAgent._FULL_FILE_INJECT_LIMIT
+    assert GameAgent._FULL_FILE_INJECT_LIMIT < len(html) < GameAgent._SEED_FULL_FILE_INJECT_LIMIT
+    out, truncated = a._seed_html_for_prompt(html, None)
+    assert out == html
+    assert truncated is False
+
+
+def test_large_seed_html_is_excerpted_and_bounded() -> None:
+    a = _stub()
+    # Comfortably over the seed budget (_SEED_FULL_FILE_INJECT_LIMIT).
+    head = "<head><style>#helpBtn{}</style></head>\n"
+    middle = "\n".join(f"function logic{i}() {{ return {i}; }}" for i in range(3000))
+    tail = "\n<script>boot();</script></html>"
+    html = head + middle + tail
+    assert len(html) > GameAgent._SEED_FULL_FILE_INJECT_LIMIT
 
     out, truncated = a._seed_html_for_prompt(html, None)
     assert truncated is True
-    # Excerpt + the elision marker stays comfortably under 2x the limit.
-    assert len(out) < GameAgent._FULL_FILE_INJECT_LIMIT + 500
+    # Excerpt + the elision marker stays comfortably under the seed limit + slack.
+    assert len(out) < GameAgent._SEED_FULL_FILE_INJECT_LIMIT + 500
     # Head structure (UI anchors) is preserved.
     assert "#helpBtn" in out
     # Boot/init tail is preserved.

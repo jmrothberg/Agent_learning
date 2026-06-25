@@ -4847,6 +4847,20 @@ class LiveBrowser:
             "control_not_recovered": control_not_recovered,
         }
 
+    async def open_url(self, url: str) -> None:
+        """Navigate the visible Chromium window to an arbitrary URL."""
+        if self._page is None:
+            return
+        try:
+            await self._page.goto(
+                url,
+                wait_until="domcontentloaded",
+                timeout=30_000,
+            )
+        except Exception:
+            # Best-effort; never let navigation crash the TUI.
+            pass
+
     async def show_status(self, title: str, message: str = "") -> None:
         """Replace whatever the browser is currently displaying with a small
         status page. Used between sessions so a failed new session can't
