@@ -57,51 +57,74 @@
   const TILE = 40, COLS = 20, ROWS = 13, OFFX = 0, OFFY = 60, SIDEBAR_X = 800;
   const ENTRANCE = { col: 0, row: 6 };
   const EXIT = { col: 19, row: 6 };
-  const MAX_WAVES = 15;
+  const MAX_WAVES = 45;
 
   // ---- Tower types ----
   const TOWER_TYPES = {
     gun: { name:'Rapid Gun', cost:50, upgrades:[75,120],
       levels:[{range:100,damage:8,fireRate:3,projSpeed:400},{range:120,damage:12,fireRate:4,projSpeed:450},{range:140,damage:16,fireRate:5,projSpeed:500}],
-      projSprite:'proj_bullet', idleSprite:'tower_gun_idle', fireSprite:'tower_gun_fire', color:'#4488ff' },
-    cannon: { name:'Splash Cannon', cost:100, upgrades:[120,180],
+      anim:'turret', baseSprite:'tower_gun_base', headPrefix:'tower_gun_head', idleSprite:'tower_gun_idle',
+      projSprite:'proj_bullet', color:'#4488ff' },
+    cannon: { name:'Missile Tower', cost:100, upgrades:[120,180],
       levels:[{range:90,damage:25,fireRate:0.8,projSpeed:250,splash:45},{range:100,damage:35,fireRate:1.0,projSpeed:270,splash:55},{range:110,damage:50,fireRate:1.2,projSpeed:300,splash:65}],
-      projSprite:'proj_shell', idleSprite:'tower_cannon_idle', fireSprite:'tower_cannon_idle', color:'#44aa44' },
-    frost: { name:'Frost Tower', cost:80, upgrades:[100,150],
+      anim:'turret', baseSprite:'tower_cannon_base', headPrefix:'tower_cannon_head', idleSprite:'tower_cannon_idle',
+      projSprite:'proj_shell', color:'#44aa44' },
+    frost: { name:'Goo Tower', cost:80, upgrades:[100,150],
       levels:[{range:100,damage:5,fireRate:1.5,projSpeed:300,slow:0.5,slowDur:2},{range:110,damage:8,fireRate:1.8,projSpeed:320,slow:0.6,slowDur:2.5},{range:120,damage:12,fireRate:2.0,projSpeed:340,slow:0.7,slowDur:3}],
-      projSprite:'proj_frost', idleSprite:'tower_frost_idle', fireSprite:'tower_frost_fire', color:'#44ccff' },
-    sniper: { name:'Sniper', cost:150, upgrades:[200,300],
+      anim:'turret', baseSprite:'tower_goo_base', headPrefix:'tower_goo_head', idleSprite:'tower_goo_idle',
+      projSprite:'proj_goo', color:'#44cc44' },
+    sniper: { name:'Mortar', cost:150, upgrades:[200,300],
       levels:[{range:250,damage:60,fireRate:0.5,projSpeed:800},{range:300,damage:90,fireRate:0.6,projSpeed:900},{range:350,damage:130,fireRate:0.7,projSpeed:1000}],
-      projSprite:'proj_sniper', idleSprite:'tower_sniper_idle', fireSprite:'tower_sniper_fire', color:'#aa44ff', hitscan:true },
+      anim:'turret', baseSprite:'tower_sniper_base', headPrefix:'tower_sniper_head', idleSprite:'tower_sniper_idle',
+      projSprite:'proj_sniper', color:'#aa44ff', hitscan:true },
+    tesla: { name:'Tesla Tower', cost:120, upgrades:[180,250],
+      levels:[{range:110,damage:35,fireRate:1.2,projSpeed:500},{range:130,damage:55,fireRate:1.4,projSpeed:550},{range:150,damage:80,fireRate:1.6,projSpeed:600}],
+      anim:'vertical_beam', beamType:'lightning', baseSprite:'tower_tesla_vertical', idleSprite:'tower_tesla_vertical', color:'#66aaff' },
+    flame: { name:'Flame Tower', cost:90, upgrades:[130,190],
+      levels:[{range:75,damage:18,fireRate:2.5,projSpeed:280,splash:35},{range:85,damage:26,fireRate:3,projSpeed:300,splash:42},{range:95,damage:36,fireRate:3.5,projSpeed:320,splash:50}],
+      anim:'vertical_beam', beamType:'flame', baseSprite:'tower_flame_vertical', idleSprite:'tower_flame_vertical', color:'#ff6600' },
   };
 
   // ---- Enemy types ----
   const ENEMY_TYPES = {
-    grunt: { hp:50, speed:60, reward:8, sprite:'enemy_grunt' },
-    runner: { hp:30, speed:110, reward:6, sprite:'enemy_runner' },
+    grunt: { hp:50, speed:60, reward:8, sprite:'enemy_soldier' },
+    runner: { hp:30, speed:110, reward:6, sprite:'enemy_bike' },
     tank: { hp:200, speed:35, reward:20, sprite:'enemy_tank' },
+    jeep: { hp:90, speed:75, reward:12, sprite:'enemy_jeep' },
+    helicopter: { hp:70, speed:95, reward:14, sprite:'enemy_helicopter' },
+    blimp: { hp:350, speed:28, reward:35, sprite:'enemy_blimp' },
   };
 
   // ---- Asset loading ----
   const ASSETS = {};
   let _assetsReady = false;
+  const ASSET_DIR = './build-an-open-field-tower-defe_20260625_144848_assets/';
   async function loadAssets() {
-    const entries = [
-      ['tower_gun_idle','./build-an-open-field-tower-defe_20260625_144848_assets/tower_gun_idle.png'],
-      ['tower_gun_fire','./build-an-open-field-tower-defe_20260625_144848_assets/tower_gun_fire.png'],
-      ['tower_cannon_idle','./build-an-open-field-tower-defe_20260625_144848_assets/tower_cannon_idle.png'],
-      ['tower_frost_idle','./build-an-open-field-tower-defe_20260625_144848_assets/tower_frost_idle.png'],
-      ['tower_frost_fire','./build-an-open-field-tower-defe_20260625_144848_assets/tower_frost_fire.png'],
-      ['tower_sniper_idle','./build-an-open-field-tower-defe_20260625_144848_assets/tower_sniper_idle.png'],
-      ['tower_sniper_fire','./build-an-open-field-tower-defe_20260625_144848_assets/tower_sniper_fire.png'],
-      ['enemy_grunt','./build-an-open-field-tower-defe_20260625_144848_assets/enemy_grunt.png'],
-      ['enemy_runner','./build-an-open-field-tower-defe_20260625_144848_assets/enemy_runner.png'],
-      ['enemy_tank','./build-an-open-field-tower-defe_20260625_144848_assets/enemy_tank.png'],
-      ['proj_bullet','./build-an-open-field-tower-defe_20260625_144848_assets/proj_bullet.png'],
-      ['proj_shell','./build-an-open-field-tower-defe_20260625_144848_assets/proj_shell.png'],
-      ['proj_frost','./build-an-open-field-tower-defe_20260625_144848_assets/proj_frost.png'],
-      ['proj_sniper','./build-an-open-field-tower-defe_20260625_144848_assets/proj_sniper.png'],
-    ];
+    const entries = [];
+    for (const t of ['gun','cannon','goo','sniper']) {
+      entries.push(['tower_' + t + '_base', ASSET_DIR + 'tower_' + t + '_base.png']);
+      for (let i = 0; i <= 4; i++) entries.push(['tower_' + t + '_head_' + i, ASSET_DIR + 'tower_' + t + '_head_' + i + '.png']);
+    }
+    entries.push(
+      ['tower_gun_idle', ASSET_DIR + 'tower_gun_idle.png'],
+      ['tower_gun_fire', ASSET_DIR + 'tower_gun_fire.png'],
+      ['tower_tesla_vertical', ASSET_DIR + 'tower_tesla_vertical.png'],
+      ['tower_flame_vertical', ASSET_DIR + 'tower_flame_vertical.png'],
+      ['tower_cannon_idle', ASSET_DIR + 'tower_cannon_idle.png'],
+      ['tower_goo_idle', ASSET_DIR + 'tower_goo_idle.png'],
+      ['tower_sniper_idle', ASSET_DIR + 'tower_sniper_idle.png'],
+      ['tower_sniper_fire', ASSET_DIR + 'tower_sniper_fire.png'],
+      ['enemy_soldier', ASSET_DIR + 'enemy_soldier.png'],
+      ['enemy_bike', ASSET_DIR + 'enemy_bike.png'],
+      ['enemy_tank', ASSET_DIR + 'enemy_tank.png'],
+      ['enemy_jeep', ASSET_DIR + 'enemy_jeep.png'],
+      ['enemy_helicopter', ASSET_DIR + 'enemy_helicopter.png'],
+      ['enemy_blimp', ASSET_DIR + 'enemy_blimp.png'],
+      ['proj_bullet', ASSET_DIR + 'proj_bullet.png'],
+      ['proj_shell', ASSET_DIR + 'proj_shell.png'],
+      ['proj_goo', ASSET_DIR + 'proj_goo.png'],
+      ['proj_sniper', ASSET_DIR + 'proj_sniper.png'],
+    );
     for (const [name, src] of entries) {
       const img = new Image(); img.src = src;
       try { await img.decode(); } catch(e) { console.warn('asset fail', name); }
@@ -175,6 +198,106 @@
       ctx.fillStyle = '#000'; ctx.font = '9px monospace'; ctx.fillText('?' + key, x + 2, y + 10);
     }
   }
+  function drawSpriteFlip(key, x, y, w, h, flipH) {
+    const img = sprite(key);
+    if (img && img.complete && img.naturalWidth > 0) {
+      ctx.save(); ctx.translate(x + w/2, y + h/2);
+      if (flipH) ctx.scale(-1, 1);
+      ctx.drawImage(img, -w/2, -h/2, w, h); ctx.restore();
+    } else drawSprite(key, x, y, w, h);
+  }
+
+  // 8 compass buckets → one of 5 pre-drawn head angles (mirrored for W/SW/NW)
+  const HEAD_AIM_MAP = [
+    { idx:0, flip:false }, { idx:1, flip:false }, { idx:2, flip:false },
+    { idx:1, flip:true }, { idx:0, flip:true }, { idx:3, flip:true },
+    { idx:4, flip:false }, { idx:3, flip:false },
+  ];
+  function aimBucket(angle) {
+    const a = ((angle % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+    return Math.round(a / (Math.PI / 4)) % 8;
+  }
+  function lerpAngle(from, to, t) {
+    let d = to - from;
+    while (d > Math.PI) d -= Math.PI * 2;
+    while (d < -Math.PI) d += Math.PI * 2;
+    return from + d * t;
+  }
+  function barrelTip(cx, cy, angle, len) {
+    return { x: cx + Math.cos(angle) * len, y: cy + Math.sin(angle) * len };
+  }
+  function drawMuzzleFlash(cx, cy, angle, intensity, color) {
+    const tip = barrelTip(cx, cy, angle, 18);
+    const mid = barrelTip(cx, cy, angle, 11);
+    const pulse = Math.sin(intensity * 45) * 0.5 + 0.5;
+    ctx.save(); ctx.globalAlpha = Math.min(1, intensity * 1.2);
+    ctx.fillStyle = color;
+    ctx.beginPath(); ctx.arc(tip.x, tip.y, 4 + pulse * 7, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(mid.x, mid.y); ctx.lineTo(tip.x, tip.y); ctx.stroke();
+    ctx.restore();
+  }
+  function drawLightningBolt(x1, y1, x2, y2, alpha, color, seed) {
+    const n = 14, pts = [{ x:x1, y:y1 }];
+    for (let i = 1; i < n; i++) {
+      const t = i / n, bx = x1 + (x2 - x1) * t, by = y1 + (y2 - y1) * t;
+      const ang = Math.atan2(y2 - y1, x2 - x1) + Math.PI / 2;
+      const w = 20 * (1 - t * 0.35);
+      const j = Math.sin(seed * 0.71 + i * 1.73) * w + Math.cos(seed * 1.17 + i * 2.31) * w * 0.45;
+      pts.push({ x: bx + Math.cos(ang) * j, y: by + Math.sin(ang) * j });
+    }
+    pts.push({ x:x2, y:y2 });
+    ctx.save(); ctx.globalAlpha = alpha; ctx.shadowColor = color; ctx.shadowBlur = 14;
+    ctx.strokeStyle = color; ctx.lineWidth = 5; ctx.lineJoin = 'round';
+    ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+    ctx.stroke();
+    ctx.strokeStyle = '#e8f4ff'; ctx.lineWidth = 2; ctx.shadowBlur = 6; ctx.stroke();
+    ctx.restore();
+  }
+  function drawFlameStream(x1, y1, x2, y2, alpha, seed) {
+    const dx = x2 - x1, dy = y2 - y1, steps = 14;
+    const colors = ['#ffee66', '#ff8800', '#ff2200'];
+    for (let layer = 0; layer < 3; layer++) {
+      ctx.save(); ctx.globalAlpha = alpha * (0.55 - layer * 0.14);
+      for (let i = 1; i <= steps; i++) {
+        const t = i / steps, px = x1 + dx * t, py = y1 + dy * t;
+        const w = 10 + (1 - t) * 26 + layer * 5;
+        const ang = Math.atan2(dy, dx) + Math.PI / 2;
+        const wob = Math.sin(seed * 0.53 + i * 0.95 + layer * 1.7) * w * 0.42;
+        ctx.fillStyle = colors[layer];
+        ctx.beginPath(); ctx.arc(px + Math.cos(ang) * wob, py + Math.sin(ang) * wob, w * 0.38, 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.restore();
+    }
+  }
+  function drawTurretTower(tw, x, y, cfg) {
+    const cx = tw.x, cy = tw.y;
+    const bucket = aimBucket(tw.displayAngle);
+    const aim = HEAD_AIM_MAP[bucket];
+    const headKey = cfg.headPrefix + '_' + aim.idx;
+    const recoil = tw.muzzleFlash > 0 ? tw.muzzleFlash * 4 : 0;
+    const hx = x + 2 - Math.cos(tw.displayAngle) * recoil;
+    const hy = y + 2 - Math.sin(tw.displayAngle) * recoil;
+    drawSprite(cfg.baseSprite, x + 4, y + 16, TILE - 8, TILE - 18);
+    drawSpriteFlip(headKey, hx, hy, TILE - 4, TILE - 4, aim.flip);
+    if (tw.muzzleFlash > 0) drawMuzzleFlash(cx, cy - 2, tw.displayAngle, tw.muzzleFlash / 0.14, cfg.color);
+  }
+  function drawVerticalBeamTower(tw, x, y, cfg) {
+    const bw = TILE - 6, bh = TILE + 8;
+    drawSprite(cfg.baseSprite, x + (TILE - bw) / 2, y - 6, bw, bh);
+    if (tw.beamTimer > 0 && tw.beamTarget && !tw.beamTarget.dead && !tw.beamTarget.leaked) {
+      const alpha = Math.min(1, tw.beamTimer / (tw.beamDuration || 0.25));
+      const topX = tw.x, topY = tw.y - 22;
+      const tx = tw.beamTarget.x, ty = tw.beamTarget.y;
+      if (cfg.beamType === 'lightning') drawLightningBolt(topX, topY, tx, ty, alpha, cfg.color, tw.beamSeed);
+      else if (cfg.beamType === 'flame') drawFlameStream(topX, topY, tx, ty, alpha, tw.beamSeed);
+    }
+  }
+  function drawTowerGraphic(tw, x, y, cfg) {
+    if (cfg.anim === 'vertical_beam') drawVerticalBeamTower(tw, x, y, cfg);
+    else drawTurretTower(tw, x, y, cfg);
+  }
 
   // ---- BFS pathfinding ----
   function bfsPath(grid, start, end) {
@@ -224,14 +347,20 @@
   // ---- Wave building ----
   function buildWave(n) {
     const result = [];
-    const grunts = 5 + Math.floor(n * 1.5);
-    const runners = n >= 2 ? Math.floor(n * 1.2) : 0;
-    const tanks = n >= 4 ? Math.floor(n * 0.6) : 0;
-    const maxLen = Math.max(grunts, runners, tanks);
+    const soldiers = Math.min(4 + Math.floor(n * 0.7), 22);
+    const bikes = n >= 2 ? Math.min(Math.floor(n * 0.55), 14) : 0;
+    const jeeps = n >= 5 ? Math.min(Math.floor(n * 0.35), 10) : 0;
+    const tanks = n >= 8 ? Math.min(Math.floor(n * 0.3), 9) : 0;
+    const helicopters = n >= 12 ? Math.min(Math.floor(n * 0.25), 7) : 0;
+    const blimps = n >= 20 ? Math.min(Math.floor(n * 0.12), 4) : 0;
+    const maxLen = Math.max(soldiers, bikes, jeeps, tanks, helicopters, blimps);
     for (let i = 0; i < maxLen; i++) {
+      if (i < blimps) result.push('blimp');
       if (i < tanks) result.push('tank');
-      if (i < grunts) result.push('grunt');
-      if (i < runners) result.push('runner');
+      if (i < helicopters) result.push('helicopter');
+      if (i < jeeps) result.push('jeep');
+      if (i < soldiers) result.push('grunt');
+      if (i < bikes) result.push('runner');
     }
     return result;
   }
@@ -254,7 +383,8 @@
     state.towers.push({
       type, col, row, level: 1,
       x: col * TILE + TILE/2 + OFFX, y: row * TILE + TILE/2 + OFFY,
-      lastFire: 0, angle: 0, muzzleFlash: 0,
+      lastFire: 0, angle: 0, displayAngle: 0, muzzleFlash: 0,
+      beamTimer: 0, beamDuration: 0, beamTarget: null, beamSeed: 0,
       range: cfg.levels[0].range, damage: cfg.levels[0].damage,
       fireRate: cfg.levels[0].fireRate, projSpeed: cfg.levels[0].projSpeed,
       splash: cfg.levels[0].splash || 0, slow: cfg.levels[0].slow || 0, slowDur: cfg.levels[0].slowDur || 0,
@@ -330,6 +460,26 @@
   // ---- Combat ----
   function fireProjectile(tw, target) {
     const cfg = TOWER_TYPES[tw.type];
+    if (cfg.beamType === 'lightning') {
+      tw.beamTimer = 0.28; tw.beamDuration = 0.28; tw.beamTarget = target; tw.beamSeed = state.frame + state.t * 120;
+      applyDamage(target, tw.damage); target.hitFlash = 0.15;
+      if (target.hp <= 0) killEnemy(target);
+      state.particles.push({ x:target.x, y:target.y, type:'hit', color:cfg.color, life:0.25, maxLife:0.25, dead:false, vx:0, vy:0 });
+      playSound('hit'); return;
+    }
+    if (cfg.beamType === 'flame') {
+      tw.beamTimer = 0.22; tw.beamDuration = 0.22; tw.beamTarget = target; tw.beamSeed = state.frame + state.t * 90;
+      for (const e of state.enemies) {
+        if (e.dead || e.leaked) continue;
+        const d = Math.hypot(e.x - target.x, e.y - target.y);
+        if (d <= tw.splash) {
+          applyDamage(e, tw.damage * (1 - (d / tw.splash) * 0.45));
+          if (e.hp <= 0) killEnemy(e);
+        }
+      }
+      state.particles.push({ x:target.x, y:target.y, type:'explosion', life:0.35, maxLife:0.35, radius:tw.splash * 0.7, dead:false, vx:0, vy:0 });
+      playSound('explosion'); return;
+    }
     if (cfg.hitscan) {
       state.projectiles.push({ x:tw.x, y:tw.y, target, damage:tw.damage, type:tw.type, dead:false, hitscan:true, life:0.15 });
       state.particles.push({ x:tw.x, y:tw.y, tx:target.x, ty:target.y, type:'beam', color:cfg.color, life:0.15, maxLife:0.15, dead:false, vx:0, vy:0 });
@@ -421,6 +571,8 @@
     // Update towers
     for (const tw of state.towers) {
       if (tw.muzzleFlash > 0) tw.muzzleFlash -= dt;
+      if (tw.beamTimer > 0) tw.beamTimer -= dt;
+      tw.displayAngle = lerpAngle(tw.displayAngle, tw.angle, Math.min(1, dt * 14));
       let bestTarget = null, bestProgress = -1;
       for (const e of state.enemies) {
         if (e.dead || e.leaked) continue;
@@ -432,7 +584,9 @@
       if (bestTarget) {
         tw.angle = Math.atan2(bestTarget.y - tw.y, bestTarget.x - tw.x);
         if (state.t - tw.lastFire >= 1 / tw.fireRate) {
-          tw.lastFire = state.t; tw.muzzleFlash = 0.12; fireProjectile(tw, bestTarget);
+          tw.lastFire = state.t;
+          tw.muzzleFlash = tw.type === 'sniper' ? 0.22 : 0.14;
+          fireProjectile(tw, bestTarget);
         }
       }
     }
@@ -504,22 +658,15 @@
         ctx.strokeStyle = 'rgba(255,255,255,0.4)'; ctx.fillStyle = 'rgba(255,255,255,0.06)';
         ctx.beginPath(); ctx.arc(tw.x, tw.y, tw.range, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
       }
-      const useFire = tw.muzzleFlash > 0 && cfg.fireSprite !== cfg.idleSprite;
-      const aim = tw.angle + Math.PI;
-      drawSprite(useFire ? cfg.fireSprite : cfg.idleSprite, x + 2, y + 2, TILE - 4, TILE - 4, aim);
+      drawTowerGraphic(tw, x, y, cfg);
       ctx.fillStyle = '#ff0';
       for (let i = 0; i < tw.level; i++) { ctx.beginPath(); ctx.arc(x + 6 + i * 7, y + 6, 2.5, 0, Math.PI * 2); ctx.fill(); }
-      if (tw.muzzleFlash > 0) {
-        const fx = tw.x + Math.cos(aim) * 18, fy = tw.y + Math.sin(aim) * 18;
-        ctx.fillStyle = 'rgba(255,220,100,' + (tw.muzzleFlash / 0.12) + ')';
-        ctx.beginPath(); ctx.arc(fx, fy, 7, 0, Math.PI * 2); ctx.fill();
-      }
     }
   }
   function drawEnemies() {
     for (const e of state.enemies) {
       if (e.dead) continue;
-      const size = e.type === 'tank' ? 34 : e.type === 'runner' ? 26 : 30;
+      const size = e.type === 'blimp' ? 40 : e.type === 'tank' ? 34 : e.type === 'jeep' ? 32 : e.type === 'helicopter' ? 30 : e.type === 'runner' ? 26 : 30;
       if (e.slowUntil > state.t) { ctx.fillStyle = 'rgba(100,200,255,0.3)'; ctx.beginPath(); ctx.arc(e.x, e.y, size/2 + 4, 0, Math.PI * 2); ctx.fill(); }
       drawSprite(ENEMY_TYPES[e.type].sprite, e.x - size/2, e.y - size/2, size, size);
       if (e.hitFlash > 0) { ctx.fillStyle = 'rgba(255,255,255,' + (e.hitFlash / 0.1 * 0.5) + ')'; ctx.fillRect(e.x - size/2, e.y - size/2, size, size); }
@@ -555,20 +702,20 @@
   }
 
   // ---- Sidebar ----
-  const TOWER_BUTTONS = [{type:'gun',y:80},{type:'cannon',y:160},{type:'frost',y:250},{type:'sniper',y:330}];
-  const START_BTN = {y:405,h:50}, UPGRADE_BTN = {y:470,h:50}, SELL_BTN = {y:530,h:50};
+  const TOWER_BUTTONS = [{type:'gun',y:65},{type:'cannon',y:118},{type:'frost',y:171},{type:'sniper',y:224},{type:'tesla',y:277},{type:'flame',y:330}];
+  const START_BTN = {y:385,h:42}, UPGRADE_BTN = {y:460,h:42}, SELL_BTN = {y:505,h:42};
 
   function drawSidebar() {
     ctx.fillStyle = '#1a2348'; ctx.fillRect(SIDEBAR_X, 0, W - SIDEBAR_X, H);
     for (const btn of TOWER_BUTTONS) {
-      const cfg = TOWER_TYPES[btn.type], x = SIDEBAR_X + 10, y = btn.y, w = 180, h = 70;
+      const cfg = TOWER_TYPES[btn.type], x = SIDEBAR_X + 10, y = btn.y, w = 180, h = 48;
       const sel = state.selectedType === btn.type;
       const hov = state.mouseX >= x && state.mouseX <= x + w && state.mouseY >= y && state.mouseY <= y + h;
       ctx.fillStyle = sel ? '#3b62ff' : hov ? '#2a3868' : '#222d58'; ctx.fillRect(x, y, w, h);
       ctx.strokeStyle = sel ? '#fff' : '#3b62ff'; ctx.lineWidth = 2; ctx.strokeRect(x, y, w, h);
-      drawSprite(cfg.idleSprite, x + 5, y + 5, 40, 40);
-      ctx.fillStyle = '#e7ecff'; ctx.font = 'bold 13px system-ui'; ctx.fillText(cfg.name, x + 50, y + 25);
-      ctx.fillStyle = '#ff0'; ctx.font = '12px system-ui'; ctx.fillText('$' + cfg.cost, x + 50, y + 45);
+      drawSprite(cfg.idleSprite, x + 5, y + 4, 36, 36);
+      ctx.fillStyle = '#e7ecff'; ctx.font = 'bold 12px system-ui'; ctx.fillText(cfg.name, x + 46, y + 22);
+      ctx.fillStyle = '#ff0'; ctx.font = '11px system-ui'; ctx.fillText('$' + cfg.cost, x + 46, y + 38);
       if (state.money < cfg.cost) { ctx.fillStyle = 'rgba(255,0,0,0.25)'; ctx.fillRect(x, y, w, h); }
     }
     // Start wave
@@ -597,12 +744,12 @@
       ctx.strokeStyle = '#f44'; ctx.lineWidth = 2; ctx.strokeRect(sx, sy, sw, sh);
       ctx.fillStyle = '#fff'; ctx.font = 'bold 13px system-ui'; ctx.textAlign = 'center';
       ctx.fillText('Sell $' + sellRefund, sx + sw/2, sy + sh/2 + 5); ctx.textAlign = 'left';
-      const iy = SELL_BTN.y + SELL_BTN.h + 12;
-      ctx.fillStyle = '#aac'; ctx.font = '11px system-ui';
+      const iy = SELL_BTN.y + SELL_BTN.h + 8;
+      ctx.fillStyle = '#aac'; ctx.font = '10px system-ui';
       ctx.fillText('Lvl ' + tw.level + ' ' + cfg.name, SIDEBAR_X + 10, iy);
-      ctx.fillText('DMG: ' + Math.round(tw.damage), SIDEBAR_X + 10, iy + 16);
-      ctx.fillText('RNG: ' + Math.round(tw.range), SIDEBAR_X + 10, iy + 32);
-      ctx.fillText('RoF: ' + tw.fireRate.toFixed(1), SIDEBAR_X + 10, iy + 48);
+      ctx.fillText('DMG: ' + Math.round(tw.damage), SIDEBAR_X + 10, iy + 14);
+      ctx.fillText('RNG: ' + Math.round(tw.range), SIDEBAR_X + 10, iy + 28);
+      ctx.fillText('RoF: ' + tw.fireRate.toFixed(1), SIDEBAR_X + 10, iy + 42);
     }
   }
 
@@ -622,7 +769,7 @@
       const ok = canPlace(state.hoverCol, state.hoverRow) && state.money >= TOWER_TYPES[state.selectedType].cost;
       ctx.fillStyle = ok ? 'rgba(0,255,0,0.2)' : 'rgba(255,0,0,0.2)'; ctx.fillRect(x, y, TILE, TILE);
       ctx.strokeStyle = ok ? '#0f0' : '#f00'; ctx.lineWidth = 2; ctx.strokeRect(x, y, TILE, TILE);
-      if (ok) { drawSprite(TOWER_TYPES[state.selectedType].idleSprite, x + 2, y + 2, TILE - 4, TILE - 4);
+      if (ok) { drawTowerGraphic({ type:state.selectedType, x:x+TILE/2, y:y+TILE/2, displayAngle:0, beamTimer:0, beamTarget:null, muzzleFlash:0 }, x, y, TOWER_TYPES[state.selectedType]);
         ctx.strokeStyle = 'rgba(255,255,255,0.15)'; ctx.beginPath(); ctx.arc(x + TILE/2, y + TILE/2, TOWER_TYPES[state.selectedType].levels[0].range, 0, Math.PI * 2); ctx.stroke(); }
     }
   }
@@ -642,7 +789,7 @@
     if (x >= SIDEBAR_X) {
       for (const btn of TOWER_BUTTONS) {
         const bx = SIDEBAR_X + 10, by = btn.y;
-        if (x >= bx && x <= bx + 180 && y >= by && y <= by + 70) { state.selectedType = btn.type; state.selectedTower = null; return; }
+        if (x >= bx && x <= bx + 180 && y >= by && y <= by + 48) { state.selectedType = btn.type; state.selectedTower = null; return; }
       }
       { const bx = SIDEBAR_X + 10, by = START_BTN.y;
         if (x >= bx && x <= bx + 180 && y >= by && y <= by + START_BTN.h) { startWave(); return; } }

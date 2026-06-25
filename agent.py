@@ -1033,6 +1033,14 @@ _SCOPED_RECOLOR_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bchange\b.{0,20}\bcolou?r\b", re.I),
 )
 
+# Patch budget for a small-scope SEED edit. An initial seed goal often
+# bundles several edits ("move the buttons + add upgrade/sell + rotate the
+# guns" = 8 patches in trace 194238_248190), so the single-tweak max of 1
+# would reject the whole reply. Generous on purpose — the scope lock's only
+# job on a seed edit is to forbid the doomed full <html_file> rewrite;
+# per-patch validation + auto-revert remain the real quality gates.
+_SEED_EDIT_MAX_PATCHES = 16
+
 def _feedback_locks_code(text: str) -> bool:
     """User explicitly forbade code changes for this turn.
 
@@ -4775,11 +4783,27 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
         sound_names = list(self._session_sounds.keys()) if self._session_sounds else []
         art_change = bool(asset_names) and _feedback_is_art_change(goal, asset_names)
         sound_change = bool(sound_names) and _feedback_is_sound_change(goal, sound_names)
+        # Seed multi-part code tweak (2026-06-25 trace 194238_248190): a
+        # move/rotate/resize/recolor goal is a CODE patch even when it names a
+        # sprite ("rotate the guns" matched seed gun assets → media_only →
+        # every code patch rejected). Force code mode so <patch> stays allowed,
+        # zero out the false art/sound signal, and raise the patch budget so a
+        # multi-part goal ("move buttons + add upgrade/sell + rotate guns")
+        # isn't rejected by the single-tweak max of 1.
+        seed_edit_kwargs: dict[str, Any] = {}
+        if small_scope_seed:
+            art_change = False
+            sound_change = False
+            seed_edit_kwargs = {
+                "max_patch_count": _SEED_EDIT_MAX_PATCHES,
+                "force_code_mode": True,
+            }
         self._configure_scoped_constraints(
             joined_feedback=goal,
             locks_code=locks_code,
             art_change=art_change,
             sound_change=sound_change,
+            **seed_edit_kwargs,
         )
         self._trace({
             "kind": "initial_goal_scoping_applied",
@@ -4793,15 +4817,22 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
         # narrowed contract right at iter 1. Full SCOPED-CHANGE block
         # also fires automatically on any subsequent feedback turn.
         scoped_mode = (self._scoped_constraints or {}).get("mode") or "single_patch"
-        mode_label = (
-            "MEDIA-ONLY (existing names only)"
-            if scoped_mode == "media_only"
-            else "ONE-SMALL-PATCH (no rewrite, max one patch block)"
-        )
+        scoped_max_patch = int((self._scoped_constraints or {}).get("max_patch_count") or 1)
+        if scoped_mode == "media_only":
+            mode_label = "MEDIA-ONLY (existing names only)"
+        elif scoped_max_patch > 1:
+            # Multi-part seed edit: patches allowed (one per change), but NO
+            # full <html_file> rewrite of the working seed.
+            mode_label = (
+                "PATCH-ONLY (no full <html_file> rewrite; emit one small "
+                f"<patch> per change, up to {scoped_max_patch})"
+            )
+        else:
+            mode_label = "ONE-SMALL-PATCH (no rewrite, max one patch block)"
         scoped_notice = (
             "================ INITIAL-GOAL SCOPE LOCK ================\n"
-            "Your goal above carries strict-scope language. Treat this\n"
-            "entire session as scoped:\n"
+            "Your goal above is a scoped edit of the EXISTING file. Treat\n"
+            "this entire session as scoped:\n"
             f"  - Turn mode: {mode_label}\n"
             "  - Address ONLY what the goal explicitly names.\n"
             "  - Do NOT touch unrelated functions, variables, or files.\n"
@@ -5934,8 +5965,23 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
         locks_code: bool,
         art_change: bool,
         sound_change: bool,
+        max_patch_count: int = 1,
+        force_code_mode: bool = False,
     ) -> None:
-        """Persist deterministic scoped routing for the next model reply."""
+        """Persist deterministic scoped routing for the next model reply.
+
+        max_patch_count: how many <patch> blocks the turn may emit (default
+        1 for mid-session tweaks). A multi-part INITIAL seed-edit goal
+        ("move the buttons + add upgrade/sell + rotate the guns") needs
+        several patches, so the seed path raises this.
+
+        force_code_mode: when True, never route to media_only — a
+        move/resize/rotate/recolor seed tweak is a CODE patch even when it
+        names a sprite, so <patch> must stay allowed (2026-06-25 trace
+        194238_248190: a goal naming "guns"/"weapon" matched seed asset
+        names → media_only → 8 valid code patches were all rejected and
+        nothing was saved).
+        """
         if not locks_code:
             self._clear_scoped_constraints()
             return
@@ -5943,8 +5989,14 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
         size_scope = _feedback_requests_size_change(joined_feedback)
         # Preserve working baselines on strict scoped tweaks: default to one
         # small patch unless this is an explicit style-only media request.
-        media_only = bool(art_change or sound_change) and not behavior_scope and not size_scope
+        media_only = (
+            bool(art_change or sound_change)
+            and not behavior_scope
+            and not size_scope
+            and not force_code_mode
+        )
         mode = "media_only" if media_only else "single_patch"
+        max_patch_count = max(1, int(max_patch_count))
         probe_keywords = (
             _scoped_probe_keywords(joined_feedback)
             if mode == "single_patch" and behavior_scope
@@ -5952,7 +6004,7 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
         )
         self._scoped_constraints = {
             "mode": mode,
-            "max_patch_count": 1,
+            "max_patch_count": max_patch_count,
             "allowed_asset_names": sorted(self._session_assets.keys()),
             "allowed_sound_names": sorted(self._session_sounds.keys()),
             "media_name_lock": mode == "media_only",
@@ -5965,7 +6017,7 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
         self._trace({
             "kind": "scoped_constraints_set",
             "mode": mode,
-            "max_patch_count": 1,
+            "max_patch_count": max_patch_count,
             "require_scope_probe": bool(probe_keywords),
             "probe_keywords": probe_keywords,
             "media_name_lock": mode == "media_only",
@@ -5974,6 +6026,7 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
             "sound_change": bool(sound_change),
             "behavior_scope": behavior_scope,
             "size_scope": size_scope,
+            "force_code_mode": bool(force_code_mode),
         })
 
     def _scoped_reply_violation(self, reply: str) -> str | None:
