@@ -2214,6 +2214,10 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
         #   - existing-name lock for media-only turns
         #   - optional scoped-check probe requirement (behavior asks)
         self._scoped_constraints: dict[str, Any] | None = None
+        # Fix B (seed-edit escape hatch): count consecutive scoped violations
+        # so a seed-edit lock can stop thrashing and apply usable code after
+        # 2 strikes. Reset on lock clear and after any successful materialize.
+        self._scoped_violation_streak: int = 0
         # Routing decisions saved by _flush_user_injections so _stream
         # can emit a single turn_contract trace event with allowed/
         # forbidden tags and classifier flags. None until first turn.
@@ -4797,6 +4801,11 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
             seed_edit_kwargs = {
                 "max_patch_count": _SEED_EDIT_MAX_PATCHES,
                 "force_code_mode": True,
+                # Fix A: never reject seed-edit work on patch count — a
+                # multi-part goal can exceed any fixed cap. Fix B: mark the
+                # lock so the violation handlers can escape after thrash.
+                "allow_multi_patch": True,
+                "is_seed_edit": True,
             }
         self._configure_scoped_constraints(
             joined_feedback=goal,
@@ -5944,6 +5953,7 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
     def _clear_scoped_constraints(self) -> None:
         self._scoped_constraints = None
         self._pending_scoped_check_keywords = []
+        self._scoped_violation_streak = 0  # Fix B: reset thrash counter
 
     def _previous_iter_clean_for_scope_guard(self) -> bool:
         prev = self._previous_report or {}
@@ -5967,6 +5977,8 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
         sound_change: bool,
         max_patch_count: int = 1,
         force_code_mode: bool = False,
+        allow_multi_patch: bool = False,
+        is_seed_edit: bool = False,
     ) -> None:
         """Persist deterministic scoped routing for the next model reply.
 
@@ -5981,6 +5993,15 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
         194238_248190: a goal naming "guns"/"weapon" matched seed asset
         names → media_only → 8 valid code patches were all rejected and
         nothing was saved).
+
+        allow_multi_patch: when True, NEVER reject a reply on patch count —
+        a seed-edit multi-part goal can need more patches than any fixed cap,
+        so the count gate in _scoped_reply_violation is skipped (supersedes
+        the brittle max_patch number). Mid-session tweaks leave this False.
+
+        is_seed_edit: marks the lock as an INITIAL seed-edit lock so the
+        violation handlers can apply a forward-progress escape hatch (Fix B)
+        without touching mid-session feedback behavior.
         """
         if not locks_code:
             self._clear_scoped_constraints()
@@ -6005,6 +6026,8 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
         self._scoped_constraints = {
             "mode": mode,
             "max_patch_count": max_patch_count,
+            "allow_multi_patch": bool(allow_multi_patch),
+            "is_seed_edit": bool(is_seed_edit),
             "allowed_asset_names": sorted(self._session_assets.keys()),
             "allowed_sound_names": sorted(self._session_sounds.keys()),
             "media_name_lock": mode == "media_only",
@@ -6018,6 +6041,8 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
             "kind": "scoped_constraints_set",
             "mode": mode,
             "max_patch_count": max_patch_count,
+            "allow_multi_patch": bool(allow_multi_patch),
+            "is_seed_edit": bool(is_seed_edit),
             "require_scope_probe": bool(probe_keywords),
             "probe_keywords": probe_keywords,
             "media_name_lock": mode == "media_only",
@@ -6078,7 +6103,10 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
         if not (patch_count or has_assets or has_sounds):
             return "SCOPED: emit one <patch>, or <assets>/<sounds> with existing names."
         max_patch = int(cfg.get("max_patch_count") or 1)
-        if patch_count > max_patch:
+        # Fix A: a seed-edit lock (allow_multi_patch) never rejects on count —
+        # a multi-part goal can need more patches than any fixed cap, and
+        # auto-revert remains the safety net. Mid-session locks keep the cap.
+        if not cfg.get("allow_multi_patch") and patch_count > max_patch:
             # Wording matches the historical "SCOPED PATCH: send exactly
             # one <patch>" message so existing tests keep working.
             return f"SCOPED: send exactly one <patch> (got {patch_count})."
@@ -10372,14 +10400,21 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
         # local models; give them a larger overall wall-clock cap while
         # keeping normal patch turns at the configured default.
         effective_overall_seconds = self.overall_seconds
-        if self._current_file is None:
+        # Fix C: a seed iter-1 build is a "rich first turn" too (full seed in
+        # the prompt + a multi-part edit goal) but it sets _current_file to the
+        # seed HTML, so the no-baseline branch above misses it (trace
+        # 194238 iter 1 ran 1750s vs the 1800s default — a near miss; a larger
+        # edit gets cut mid-stream → no_usable_code). Give it the same headroom.
+        seed_first_build = self.seed_file is not None and self._snapshot_n == 0
+        no_baseline = self._current_file is None
+        if no_baseline or seed_first_build:
             effective_overall_seconds = max(self.overall_seconds, 2400.0)
         if effective_overall_seconds != self.overall_seconds:
             self._trace({
                 "kind": "stream_timeout_override",
                 "base_overall_seconds": self.overall_seconds,
                 "effective_overall_seconds": effective_overall_seconds,
-                "reason": "no_baseline_file",
+                "reason": "no_baseline_file" if no_baseline else "seed_first_build",
             })
 
         result = None
@@ -15565,22 +15600,54 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
             })
             violation = self._scoped_reply_violation(reply)
             if violation:
-                self._trace({
-                    "kind": "scoped_reply_rejected",
-                    "iteration": iteration,
-                    "violation": violation,
-                })
-                yield self._record(AgentEvent(
-                    "info",
-                    f"scoped guard: {violation}",
-                ))
-                self._messages.append({
-                    "role": "user",
-                    "content": self._flush_user_injections(
-                        self._scoped_retry_instruction(violation)
-                    ),
-                })
-                continue
+                # Fix B (seed-edit escape hatch): a seed-edit lock must always
+                # make forward progress. Count consecutive violations; after 2
+                # strikes, if the reply carries ANY usable code (patches or a
+                # full <html_file> — the full seed is visible so a rewrite is a
+                # real attempt), clear the lock and fall through to materialize
+                # instead of burning every iter to nothing. Auto-revert remains
+                # the safety net. Mid-session locks (no is_seed_edit) unchanged.
+                cfg = self._scoped_constraints or {}
+                self._scoped_violation_streak += 1
+                has_usable_code = bool(extract_patches(reply)) or (
+                    self._extract_html(reply) is not None
+                )
+                if (
+                    cfg.get("is_seed_edit")
+                    and self._scoped_violation_streak >= 2
+                    and has_usable_code
+                ):
+                    self._trace({
+                        "kind": "scoped_escape_hatch_used",
+                        "iteration": iteration,
+                        "violation": violation,
+                        "streak": self._scoped_violation_streak,
+                    })
+                    yield self._record(AgentEvent(
+                        "info",
+                        "scoped guard: seed-edit escape hatch — applying "
+                        "usable code after repeated scope violations.",
+                    ))
+                    self._clear_scoped_constraints()
+                    # Fall through (no continue): the usable code is
+                    # materialized by the normal path below.
+                else:
+                    self._trace({
+                        "kind": "scoped_reply_rejected",
+                        "iteration": iteration,
+                        "violation": violation,
+                    })
+                    yield self._record(AgentEvent(
+                        "info",
+                        f"scoped guard: {violation}",
+                    ))
+                    self._messages.append({
+                        "role": "user",
+                        "content": self._flush_user_injections(
+                            self._scoped_retry_instruction(violation)
+                        ),
+                    })
+                    continue
 
             # ---- mid-session asset / sound generation ------------------
             # If the model emitted a fresh <assets> or <sounds> block in
@@ -16609,6 +16676,7 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
             _pre_iter_html = self._current_file
             self.out_path.write_text(new_html, encoding="utf-8")
             self._current_file = new_html
+            self._scoped_violation_streak = 0  # Fix B: progress made, reset thrash counter
             snap_path = self._save_snapshot(new_html)
             shot_path = snap_path.with_suffix(".png") if snap_path else None
             # 2.3: per-iter HTML sha256 so test events can be correlated
@@ -17948,6 +18016,30 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
                     "reply": reply,
                 })
                 violation = self._scoped_reply_violation(reply)
+                # Fix B (seed-edit escape hatch), bonus turn: same forward-
+                # progress guarantee as the main loop — after 2 consecutive
+                # violations with usable code on a seed-edit lock, clear the
+                # lock and apply instead of rejecting again. Mid-session
+                # locks (no is_seed_edit) keep today's reject-and-retry.
+                if violation:
+                    cfg = self._scoped_constraints or {}
+                    self._scoped_violation_streak += 1
+                    has_usable_code = bool(extract_patches(reply)) or (
+                        self._extract_html(reply) is not None
+                    )
+                    if (
+                        cfg.get("is_seed_edit")
+                        and self._scoped_violation_streak >= 2
+                        and has_usable_code
+                    ):
+                        self._trace({
+                            "kind": "scoped_escape_hatch_used",
+                            "iteration": self.max_iters + 1,
+                            "violation": violation,
+                            "streak": self._scoped_violation_streak,
+                        })
+                        self._clear_scoped_constraints()
+                        violation = None  # fall through to materialize below
                 if violation:
                     yield self._record(AgentEvent(
                         "info",
@@ -17972,6 +18064,7 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
                     if new_html is not None:
                         self.out_path.write_text(new_html, encoding="utf-8")
                         self._current_file = new_html
+                        self._scoped_violation_streak = 0  # Fix B: progress, reset
                         self._save_snapshot(new_html)
                         yield self._record(AgentEvent(
                             "code", str(self.out_path),
