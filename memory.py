@@ -3609,10 +3609,13 @@ def render_opening_book_block(
         body = body[:char_budget].rstrip() + "\n[opening book truncated by budget]"
     return (
         "<opening_book>\n"
-        "Root `memory/` entries are trusted opening-book recipes. Live "
-        "`games/game-memory/` entries are lower-confidence and should only be "
-        "used when they directly match the goal. Do not copy traces; use these "
-        "as compact implementation/test guidance.\n\n"
+        "Root `memory/` entries are trusted opening-book recipes (defaults "
+        "and reference patterns). Adapt them to the user's goal — scene "
+        "count, style, and mechanics follow what the user asked for when "
+        "they specify them. Live `games/game-memory/` entries are "
+        "lower-confidence and should only be used when they directly match "
+        "the goal. Do not copy traces; use these as compact "
+        "implementation/test guidance.\n\n"
         f"{body}\n"
         "</opening_book>"
     )
@@ -4935,9 +4938,11 @@ def render_playbook_block(
     if not work:
         return ""
     head = header or (
-        "RELEVANT PLAYBOOK ENTRIES — these are accumulated lessons from past "
-        "runs, ordered by relevance to your goal. Apply when applicable; "
-        "ignore the ones that don't fit."
+        "RELEVANT PLAYBOOK ENTRIES — accumulated lessons from past runs, "
+        "ordered by relevance. These are reference patterns: apply the "
+        "mechanism lessons when they fit, but the user's goal and latest "
+        "feedback override template specifics (scene count, style, roster). "
+        "Ignore entries that don't fit."
     )
     lines = ["<playbook>", head, ""]
 

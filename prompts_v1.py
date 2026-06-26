@@ -1427,12 +1427,15 @@ def plan_instruction(
     if force_minimal_first_build:
         minimal_nudge = load_plan_nudge("minimal-first-build")
 
+    goal_wins_nudge = load_plan_nudge("goal-wins-over-templates")
+
     body = (
         PLAN_INSTRUCTION + art_nudge + threed_nudge + wireframe_nudge
         + beat_em_up_nudge + audio_nudge
         + video_nudge
         + qte_nudge
         + scope_nudge + multi_frame_nudge + minimal_nudge + seed_nudge
+        + goal_wins_nudge
     )
 
     if not reference_block:

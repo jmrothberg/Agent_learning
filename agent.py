@@ -14933,9 +14933,11 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
                 plan_msg = (
                     f"{plan_opening_block}\n\n"
                     "Use the opening-book recipes above when choosing your "
-                    "plan, acceptance criteria, and executable probes. Include "
-                    "the relevant state and puzzle/help checks in the plan "
-                    "contract when they apply.\n\n"
+                    "plan, acceptance criteria, and executable probes — adapt "
+                    "them to the user's goal when it specifies different "
+                    "counts, style, or mechanics. Include the relevant state "
+                    "and puzzle/help checks in the plan contract when they "
+                    "apply.\n\n"
                     + plan_msg
                 )
             if plan_opening_hits:

@@ -39,47 +39,54 @@ def _jsonl_record(path: str, key: str, value: str) -> dict:
 def test_dragons_lair_prompt_requires_generated_media_wiring():
     rec = _jsonl_record("memory/prompt_library.jsonl", "name", "dragons-lair")
     prompt = rec["prompt"]
-    for term in (
-        "full-screen generated background PNG",
-        "drawImage(bg_scene",
-        "0-index state.scene",
-        "muted full-screen overlays",
-        "onended/onerror",
-    ):
-        assert term in prompt
-    assert "Do NOT treat 'painted background' as canvas painting" in prompt
-
-
-def test_dragons_lair_director_prompt_is_local_model_safe():
-    rec = _jsonl_record("memory/prompt_library.jsonl", "name", "dragons-lair-director")
-    prompt = rec["prompt"]
-    assert "PHASE A REQUIREMENT" in prompt
-    assert "<assets>" in prompt and "<sounds>" in prompt and "<videos>" in prompt
     assert rec["expect"]["visual_recipe"] == "canvas-cutscene-qte"
     assert rec["expect"]["outline"] == "outline-cutscene-qte"
-    # Concise rewrite (2026-06-13): the field-by-field ROOMS spec and the
-    # exhaustive asset-name list were moved out to the outline/skeleton, but
-    # the hard requirements (media up front, ROOMS-driven, harness-visible
-    # input, skippable video overlays, RAF-immediate) stay in the goal.
+    # Visual-first; 8-scene arcade list is a default template, goal can override count/style.
+    assert "VISUAL RULE" in prompt
+    assert "USER GOAL WINS" in prompt
+    assert "DEFAULT 8-SCENE TEMPLATE" in prompt
+    assert "10 scenes" in prompt  # explicit flexibility example for the model
+    assert "cartoon" in prompt.lower()
+    assert "bg_drawbridge" in prompt and "bg_dragons_lair" in prompt
     for term in (
-        "ROOMS array",
-        "requestAnimationFrame(frame) immediately",
-        "onended/onerror always continues",
-        "pipeline runs up front",
+        "drawImage(bg",
         "0-index state.scene",
+        "onended/onerror",
+        "requestAnimationFrame(frame) immediately",
+        "pipeline runs up front",
+        "<assets>",
+        "<sounds>",
+        "<videos>",
+        "SCENES array",
+        "bg_*",
+        "knight_*",
+        "key_*",
     ):
-        assert term in prompt
-    # Media asset families are referenced by prefix, not an exhaustive list.
-    assert "bg_*" in prompt and "hero_*" in prompt and "key_*" in prompt
-    # Videos stay up front but as a small local-model-safe set.
-    assert "cutscene videos for intro, a funny fail, and victory" in prompt
+        assert term in prompt, f"missing {term!r}"
+    assert ("cutscene videos" in prompt or "I2V videos" in prompt) and "intro" in prompt and "victory" in prompt
     assert "18 video" not in prompt
-    # The bloated field-by-field spec is gone (now in the skeleton/outline).
-    # NOTE (2026-06-14): no raw len() ceiling here — an arbitrary char cap
-    # artificially blocked the deliberate CHARACTER CONSISTENCY block. Bloat is
-    # guarded SEMANTICALLY instead: the field-by-field hazardPath spec must be
-    # absent and asset families must be referenced by prefix (checked above).
     assert "hazardPath:{from:{x,y}" not in prompt
+
+
+def test_dragons_lair_outline_lists_eight_canonical_scenes():
+    outline = _jsonl_record(
+        "memory/implementation_outlines.jsonl", "id", "outline-cutscene-qte"
+    )
+    scenes = outline["recipe"]["dragons_lair_scenes"]
+    assert len(scenes) == 8  # reference template when goal is silent
+    assert scenes[0]["bg"] == "bg_drawbridge"
+    assert scenes[-1]["bg"] == "bg_dragons_lair"
+    assert sum(len(s["steps"]) for s in scenes) == 14  # 2 single-beat + 6 dual-beat scenes
+    note = outline["recipe"].get("dragons_lair_scenes_note", "")
+    assert "user goal" in note.lower() or "follow the user goal" in note.lower()
+
+
+def test_dragons_lair_eight_scenes_playbook_exists():
+    rec = _jsonl_record("memory/playbook.jsonl", "id", "dragons-lair-eight-scenes")
+    assert "default template" in rec["content"].lower()
+    assert "cartoon" in rec["content"].lower()
+    assert "flexible" in rec["tags"] or "override" in rec["tags"]
+    assert rec["harmful"] == 0
 
 
 def test_timed_media_components_retrieve_without_dragon_words():
@@ -157,9 +164,11 @@ def test_qte_outline_and_visual_recipe_reject_procedural_backdrops():
     )
     assert visual["verified"] is True
     checks = " ".join(visual["recipe"]["checklist"])
+    flex = (visual.get("content") or "").lower()
     assert "procedural rectangles" in checks
     assert "pink/MISSING" in checks
     assert "auto_cutscene_restart_zero_index" in json.dumps(visual["recipe"])
+    assert "default 8-scene template" in flex or "user's scene count" in flex
 
 
 def test_qte_skeleton_uses_harness_visible_zero_index_contract():
@@ -184,6 +193,16 @@ def test_qte_plan_instruction_includes_mechanism_nudge():
     assert "inputFlash" in out
     assert "scene>=1" in out
     assert "onended/onerror" in out
+    assert "MEMORY vs YOUR GOAL" in out
+
+
+def test_user_goal_wins_playbook_retrieves_on_generic_goals():
+    from memory import Playbook
+    pb = Playbook(base_root=str(ROOT / "memory"))
+    goal = "build a game with 10 cartoon levels and custom characters"
+    hits = pb.retrieve(goal, stage="plan", k=12)
+    ids = {h.bullet.id for h in hits}
+    assert "user-goal-wins-over-templates" in ids
 
 
 def test_generated_assets_block_starts_raf_immediately(tmp_path):
