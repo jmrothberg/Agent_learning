@@ -121,6 +121,43 @@ def test_inline_data_bloat_grace_gate():
     ) is False
 
 
+def test_inline_data_bloat_graced_inside_markdown_patch():
+    """Phase 0E-1 (Fieldrunners trace 20260626_102307 iter 5): the model
+    emitted FOUR correct patches as markdown `SEARCH:/REPLACE:` blocks inside
+    ``` fences (not <patch> tags). The repeated config-table rows tripped
+    inline_data_bloat and KILLED a working stream. Markdown patch context now
+    earns the same grace as an unclosed <patch>."""
+    # Inside an open ``` fence.
+    open_fence = "Patch 1:\nSEARCH:\n```js\nconst ENEMY_STATS = {\n  soldier: {hp:30},\n"
+    assert ollama_io._in_unclosed_markdown_patch_block(open_fence) is True
+    assert ollama_io._should_grace_inline_data_bloat(
+        stall_reason="inline_data_bloat",
+        assembled_text=open_fence,
+        grace_already_used=False,
+    ) is True
+    # Active SEARCH:/REPLACE: markers (balanced fences but mid-patch).
+    md_patch = (
+        "Patch 2: Add enemies\nSEARCH:\n```\nold\n```\nREPLACE:\n```\nnew\n```\n"
+    )
+    assert ollama_io._in_unclosed_markdown_patch_block(md_patch) is True
+    assert ollama_io._should_grace_inline_data_bloat(
+        stall_reason="inline_data_bloat",
+        assembled_text=md_patch,
+        grace_already_used=False,
+    ) is True
+    # Plain prose with no fence and no patch markers — NOT graced (genuine loop).
+    assert ollama_io._in_unclosed_markdown_patch_block(
+        "still planning, no tags yet\n"
+    ) is False
+    # Even markdown patches abort past the runaway ceiling.
+    assert ollama_io._should_grace_inline_data_bloat(
+        stall_reason="inline_data_bloat",
+        assembled_text=md_patch,
+        grace_already_used=False,
+        completion_tokens=ollama_io._LOOP_GRACE_TOKEN_CEILING,
+    ) is False
+
+
 def test_inline_data_bloat_grace_denied_past_token_ceiling():
     """Past the completion-token ceiling the first-build grace is DENIED so a
     detected loop aborts immediately (trace centipede 20260615_154952: a slow

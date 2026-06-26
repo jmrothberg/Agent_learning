@@ -465,6 +465,39 @@ def _parse_action_keys(*texts: str) -> list[str]:
     return seen
 
 
+# Phase 0 (Fieldrunners trace 20260626_102307): control verbs/nouns that mark
+# a declared key as NON-COMBAT (UI / flow / build), so it must not feed the
+# ACTION_DRAWN_NOT_SPRITED gate. Criteria like "Space starts a wave" named a
+# menu/flow key, and the gate falsely diagnosed a "faked kick" on it. Genre-
+# free: these describe control intent (start/pause/build), not subject matter.
+_NON_COMBAT_KEY_CONTEXT_RE = re.compile(
+    r"\b(?:start|starts|starting|begin|begins|spawn|spawns|launch|launches|"
+    r"pause|pauses|resume|resumes|menu|restart|restarts|reset|resets|"
+    r"select|selects|build|builds|place|places|placing|sell|sells|"
+    r"deploy|deploys|upgrade|upgrades|toggle|toggles|confirm|cancel|"
+    r"next\s+wave|wave|round|skip|skips|continue)\b",
+    re.I,
+)
+
+
+def _non_combat_action_keys(criteria: str) -> set[str]:
+    """Key codes whose nearby phrase in the criteria describes a non-combat
+    control (start wave / pause / menu / build / place / sell). These must be
+    excluded from the ACTION_DRAWN_NOT_SPRITED gate — pressing them is not an
+    attack/ability that needs a sprite frame.
+
+    Window-based: a key code counts as non-combat when a control verb/noun
+    appears within ~32 chars after it (or ~16 before). Genre-free."""
+    if not criteria:
+        return set()
+    out: set[str] = set()
+    for m in _KEY_CODE_RE.finditer(criteria):
+        window = criteria[max(0, m.start() - 16): m.end() + 32]
+        if _NON_COMBAT_KEY_CONTEXT_RE.search(window):
+            out.add(m.group(0))
+    return out
+
+
 def _slugify_criterion(text: str) -> str:
     """Compact identifier-safe slug for a criterion line, used as the
     suffix of a synthetic coverage-gap probe name. Keeps the slug short
@@ -3488,6 +3521,9 @@ class LiveBrowser:
                 set(_parse_action_keys(criteria or ""))
                 - _MOVEMENT_KEYS
                 - _RESTART_KEYS
+                # Phase 0: drop keys the criteria describes as start-wave / pause
+                # / menu / build / sell etc. — they are not faked attacks.
+                - _non_combat_action_keys(criteria or "")
             )
             faked = [
                 kc for kc, info in _fake_actions.items()

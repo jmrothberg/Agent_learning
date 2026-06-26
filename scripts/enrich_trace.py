@@ -231,6 +231,24 @@ def _print_summary(summary: dict) -> None:
     print()
 
 
+def _print_timeline(trace: Path) -> None:
+    """Phase 4 (4D.3): one-screen per-iter digest for the reviewing LLM.
+
+    Reuses `agent.render_run_summary` (the single source of truth for the iter
+    table) so the timeline can't drift from what the harness records. Each row
+    carries the fix-layer bucket (`class`: harness_bug / memory_gap /
+    local_llm_limit) so "where does this fix go?" is answerable at a glance.
+    """
+    try:
+        sys.path.insert(0, str(REPO_ROOT))
+        from agent import render_run_summary
+    except Exception as e:  # pragma: no cover - import guard
+        print(f"(timeline unavailable: {e})")
+        return
+    records = _load_events(trace)
+    print(render_run_summary(records, artifact_id=trace.stem))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
@@ -242,9 +260,23 @@ def main() -> int:
         default=None,
         help="Output path (default: sibling .enriched.jsonl).",
     )
+    ap.add_argument(
+        "--timeline",
+        action="store_true",
+        help=(
+            "Print the one-screen per-iter digest (iter/ok/probes/patch/router/"
+            "tok-s/failure_class/blocker) and exit — no enrichment written."
+        ),
+    )
     args = ap.parse_args()
 
     trace, snapshots_dir = _resolve_paths(args.target)
+
+    # Timeline is a read-only digest: print and exit without writing files.
+    if args.timeline:
+        _print_timeline(trace)
+        return 0
+
     enriched, summary = enrich(trace, snapshots_dir)
 
     out_path = Path(args.out) if args.out else trace.with_suffix(".enriched.jsonl")

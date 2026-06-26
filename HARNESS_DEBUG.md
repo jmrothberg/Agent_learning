@@ -36,12 +36,39 @@ Per-action frames save to the trace as `iter_NN_action_<Key>.png`.
 Mechanism-keyed yes/no checklist vs screenshots — catches facing/pose bugs probes miss. Requires a
 VLM backend; skips on text-only models. See **`FOR_NEXT_LLM.md`** for prefill/abstain/fix_hint traps.
 
-## Debug in ~5 greps
+## Debug: start with the timeline
 
-Trace: `games/traces/<slug>__run_*.jsonl`
+The `.jsonl` is an **LLM-only artifact** (humans never read it) — it carries only
+milestone + diagnostic events. Live-monitoring chatter (`stream_heartbeat`,
+`stream_progress`) is NOT persisted; its signal (tokens / tok·s / duration /
+prefill) is folded onto `iter_summary`.
 
-1. **`iter_summary`** — `ok`, `fail_reason`, repeating soft_warnings. Same failure every iter →
-   missing playbook/recipe; changing failures → model quality.
+**One command for the whole session** (reuses `render_run_summary`):
+
+```bash
+.venv/bin/python scripts/enrich_trace.py <session-id> --timeline
+```
+
+One row per iter: `ok · probes · patch N/M · router intent · tok/s · failure_class · blocker`
+(`test_skipped:no_browser` when Chromium was intentionally absent — seed-edit eval).
+
+### `failure_class` — which layer to fix (on `iter_summary` AND `no_usable_code`)
+
+| Class | Means | Fix where |
+|-------|-------|-----------|
+| **harness_bug** | harness contradicted a correct model/router turn (coaching suppressed, art request cleared, false-positive gate) | agent/harness **code** |
+| **memory_gap** | clean materialize but an avoidable mistake canned guidance should pre-empt (undrawn art on art intent, missed build-order) | add expert guidance to **`memory/`** (not the local model) |
+| **local_llm_limit** | model-side stall, no harness contradiction (deliberation / repetition / silent / wrong envelope) | **local model** limit — mitigate via prompt/format forcing |
+| **none** | nothing actionable to triage | — |
+
+Precedence: `harness_bug` > `memory_gap` > `local_llm_limit`. The canonical
+Fieldrunners iters 4–5 emit `no_usable_code` (not `iter_summary`) — `failure_class`
+lives on both so those failures are one-grep visible.
+
+### Then ~5 follow-up greps
+
+1. **`iter_summary` / `no_usable_code`** — `failure_class` + `failure_reason` first; then
+   `fail_reason`, repeating soft_warnings.
 2. **`structured_compaction`** — early fire + high `pressure` → wrong `num_ctx` or denominator.
 3. **`playbook_injected` / `opening_book_retrieved`** — did memory actually reach the model?
 4. **`visual_critic_*`** — parsed vs abstained/unparseable; `image_count` for action frames.

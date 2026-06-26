@@ -1,0 +1,7 @@
+{"name": "fieldrunners_td", "goal": "Build an open-field Fieldrunners-style tower defense where you place turrets to stop waves of enemies", "expect": {"beat_em_up": false}, "note": "TD shape tokens (tower/place/waves) must suppress the brawler nudge"}
+{"name": "grid_td_leak", "goal": "place turrets on a grid to stop waves before they leak past the path", "expect": {"beat_em_up": false}}
+{"name": "genuine_brawler", "goal": "a side-scrolling beat-em-up brawler: clear waves of thugs on each floor then fight the boss", "expect": {"beat_em_up": true}, "note": "no TD shape tokens -> nudge still fires"}
+{"name": "waves_only_no_td", "goal": "survive endless waves of attackers in an arena", "expect": {"beat_em_up": true}, "note": "waves alone (no TD shape) still triggers"}
+{"name": "space_starts_wave", "goal": "tower defense; Space starts the next wave, KeyP pauses", "criteria": "Space starts a wave; KeyP pauses the game", "expect": {"beat_em_up": false, "non_combat_keys": ["Space", "KeyP"]}, "note": "flow keys must be excluded from ACTION_DRAWN gate"}
+{"name": "build_sell_keys", "goal": "tower defense build menu", "criteria": "Digit1 places a turret, KeyS sells the selected tower", "expect": {"non_combat_keys": ["Digit1", "KeyS"]}}
+{"name": "real_attack_keys", "goal": "1v1 fighter", "criteria": "KeyF throws a punch; KeyK performs a special attack", "expect": {"non_combat_keys": []}, "note": "genuine attack keys stay in the gate set"}

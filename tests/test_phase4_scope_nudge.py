@@ -15,12 +15,43 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import memory as memory_module  # noqa: E402
 from agent import GameAgent  # noqa: E402
 from prompts_v1 import (  # noqa: E402
     _detect_art_intent,
     _detect_heavy_logic_intent,
     plan_instruction,
 )
+
+
+def test_plan_nudge_prose_comes_from_data_loader(monkeypatch):
+    """Phase 4 (4A): plan-turn nudge PROSE lives in memory/plan_nudges.jsonl;
+    prompts_v1 reads it through memory.load_plan_nudge. Proven by stubbing the
+    loader: a sentinel body for "art" must appear verbatim in plan_instruction
+    output (the kws placeholder filled), confirming the data file is the source
+    of truth, not a hardcoded string."""
+    # Clear any cache so the monkeypatch takes effect for this loader.
+    monkeypatch.setattr(memory_module, "_PLAN_NUDGES_CACHE", None, raising=False)
+    real = memory_module.load_plan_nudge
+
+    def fake(nudge_id: str) -> str:
+        if nudge_id == "art":
+            return "\n\nSENTINEL-ART {kws} BODY\n"
+        return real(nudge_id)
+
+    monkeypatch.setattr(memory_module, "load_plan_nudge", fake)
+    out = plan_instruction(goal="make a sprite-based pixel-art shooter")
+    assert "SENTINEL-ART" in out
+    # The {kws} slot was interpolated by prompts_v1, not left literal.
+    assert "{kws}" not in out
+
+
+def test_plan_nudges_file_has_expected_ids():
+    """All migrated nudge ids resolve to non-empty bodies (no silent drop)."""
+    for nid in ("art", "3d", "beat-em-up", "audio", "video", "qte",
+                "wireframe-perspective", "wireframe-flat", "scope-pacing",
+                "scope-pacing-multiframe", "multi-frame", "minimal-first-build"):
+        assert memory_module.load_plan_nudge(nid).strip(), nid
 
 
 def test_heavy_logic_keywords_match_logic_terms_not_genres() -> None:

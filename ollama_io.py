@@ -239,9 +239,42 @@ def _in_unclosed_patch_block(text: str) -> bool:
     return last_close < last_open
 
 
+# Markdown patch scaffolding markers. Local models sometimes emit edits as
+# `SEARCH:` / `REPLACE:` blocks inside ``` fences instead of <patch> tags
+# (Fieldrunners trace 20260626_102307 iter 5: FOUR correct patches written
+# in markdown form). The near-duplicate config-table rows / repeated
+# SEARCH-REPLACE scaffolding then trip `inline_data_bloat` even though the
+# model is producing GOOD code — a false-positive abort on a working stream.
+_MD_SEARCH_REPLACE_RE = _re.compile(r"(?:^|\n)\s*(?:SEARCH|REPLACE)\s*:", _re.IGNORECASE)
+
+
+def _in_unclosed_markdown_patch_block(text: str) -> bool:
+    """True when the stream appears to be mid-emission of markdown-formatted
+    patches (open ``` fence, or active SEARCH:/REPLACE: markers).
+
+    This grants the SAME `inline_data_bloat` grace as an unclosed <patch>
+    so a model that writes correct edits in the wrong (markdown) envelope is
+    not killed mid-output. Still bounded by `_LOOP_GRACE_TOKEN_CEILING`, so a
+    genuine runaway loop without any patch markers is unaffected and a
+    markdown-patch stream that truly runs away still aborts past the ceiling.
+    """
+    if not text:
+        return False
+    # Odd number of ``` fences => currently inside an open code fence.
+    if text.count("```") % 2 == 1:
+        return True
+    # Active SEARCH:/REPLACE: patch scaffolding (model is emitting edits).
+    return bool(_MD_SEARCH_REPLACE_RE.search(text))
+
+
 def _in_unclosed_output_block(text: str) -> bool:
-    """True while an `<html_file>` or `<patch>` block is still open."""
-    return _in_unclosed_html_file_block(text) or _in_unclosed_patch_block(text)
+    """True while an `<html_file>`, `<patch>`, or markdown patch block is
+    still open (the streamer should defer `inline_data_bloat` aborts)."""
+    return (
+        _in_unclosed_html_file_block(text)
+        or _in_unclosed_patch_block(text)
+        or _in_unclosed_markdown_patch_block(text)
+    )
 
 
 # Completion-token ceiling above which the one-shot first-build grace is

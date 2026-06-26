@@ -79,7 +79,9 @@ def _run_src() -> str:
 def test_run_wires_stub_after_no_usable_code_trace():
     src = _run_src()
     idx = src.index('"kind": "no_usable_code"')
-    after = src[idx:idx + 2500]
+    # Window widened (Phase 0F): the no_usable_code trace now carries
+    # content-shape + stall fields, so the stub wiring sits a bit further down.
+    after = src[idx:idx + 3600]
     assert "_stub_rejected_reply" in after
     assert '"kind": "rejected_reply_stubbed"' in after
     assert '"chars_elided"' in after

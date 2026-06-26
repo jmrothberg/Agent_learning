@@ -112,6 +112,54 @@ def test_extract_patches_strips_internal_fence():
     assert "<div>new</div>" in out[0].replace
 
 
+def test_normalize_markdown_search_replace_basic():
+    """Fieldrunners iter-5 class: model emits patches as markdown
+    SEARCH:/REPLACE: fenced blocks instead of the <patch> envelope, so the
+    parser saved nothing. repair_reply must rewrite them into real <patch>
+    blocks the extractor can apply."""
+    reply = (
+        "Here are the patches.\n\n"
+        "Patch 1: tweak stats\n\n"
+        "SEARCH:\n"
+        "```js\n"
+        "const HP = 30;\n"
+        "```\n\n"
+        "REPLACE:\n"
+        "```js\n"
+        "const HP = 45;\n"
+        "```\n"
+    )
+    assert "<patch>" not in reply.lower()
+    out = extract_patches(repair_reply(reply))
+    assert len(out) == 1
+    assert out[0].search == "const HP = 30;"
+    assert out[0].replace == "const HP = 45;"
+
+
+def test_normalize_markdown_search_replace_multiple():
+    """Multiple markdown SEARCH/REPLACE pairs in one reply all convert."""
+    reply = (
+        "SEARCH:\n```\nA\n```\nREPLACE:\n```\nB\n```\n\n"
+        "**SEARCH:**\n```python\nC\n```\n**REPLACE:**\n```python\nD\n```\n"
+    )
+    out = extract_patches(repair_reply(reply))
+    assert len(out) == 2
+    assert (out[0].search, out[0].replace) == ("A", "B")
+    assert (out[1].search, out[1].replace) == ("C", "D")
+
+
+def test_normalize_markdown_does_not_touch_real_patch():
+    """If a canonical <patch> is already present, the markdown normalizer is a
+    no-op (idempotent) — never disturb a well-formed patch."""
+    reply = (
+        "<patch>\n<<<<<<< SEARCH\nold\n=======\nnew\n>>>>>>> REPLACE\n</patch>\n"
+    )
+    out = extract_patches(repair_reply(reply))
+    assert len(out) == 1
+    assert out[0].search == "old"
+    assert out[0].replace == "new"
+
+
 def test_repair_reply_normalizes_crlf():
     s = "line1\r\nline2\r\nline3"
     out = repair_reply(s)

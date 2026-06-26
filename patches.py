@@ -99,6 +99,52 @@ def _has_embedded_marker(text: str) -> bool:
     return bool(_EMBEDDED_MARKER_RE.search(text or ""))
 
 
+# Phase 4 (4C): markdown SEARCH:/REPLACE: → <patch> normalization.
+# Fieldrunners trace 20260626_102307 iter 5: instead of the canonical
+# <patch>/<<<<<<< SEARCH/=======/>>>>>>> REPLACE envelope, the model emitted
+# its edits as markdown — `SEARCH:` then a fenced code block, then `REPLACE:`
+# then a fenced code block (one per "Patch N"). The parser found no <patch>,
+# the turn produced ZERO saved code, and an iteration was wasted. This rewrites
+# each well-formed markdown SEARCH/REPLACE pair into a real <patch> so the
+# existing extractor can apply it. Conservative: the label may be wrapped in
+# `**bold**`; the fences may carry a language tag; only WHOLE, closed pairs
+# convert (a truncated final block is left alone).
+_MD_SEARCH_REPLACE_RE = re.compile(
+    # Label tolerates `SEARCH:`, `**SEARCH**:` and `**SEARCH:**` (stars and
+    # colon in either order).
+    r"\*{0,2}SEARCH\*{0,2}[ \t]*:[ \t]*\*{0,2}[ \t]*\n"
+    r"```[^\n]*\n(?P<search>.*?)\n?```"
+    r"\s*?"
+    r"\*{0,2}REPLACE\*{0,2}[ \t]*:[ \t]*\*{0,2}[ \t]*\n"
+    r"```[^\n]*\n(?P<replace>.*?)\n?```",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def normalize_markdown_search_replace(reply: str) -> str:
+    """Convert markdown `SEARCH:`/`REPLACE:` fenced pairs into canonical
+    <patch> blocks. Fires ONLY when the reply has NO real <patch> already but
+    DOES contain at least one markdown pair — so a well-formed patch reply is
+    never disturbed (idempotent). Each converted pair becomes the standard
+    <patch>/<<<<<<< SEARCH/=======/>>>>>>> REPLACE envelope the extractor
+    understands.
+    """
+    if not reply or "<patch>" in reply.lower():
+        return reply
+
+    def _sub(m: "re.Match[str]") -> str:
+        search = m.group("search")
+        replace = m.group("replace")
+        return (
+            "<patch>\n<<<<<<< SEARCH\n"
+            f"{search}\n=======\n{replace}\n"
+            ">>>>>>> REPLACE\n</patch>"
+        )
+
+    new, n = _MD_SEARCH_REPLACE_RE.subn(_sub, reply)
+    return new if n else reply
+
+
 # ---------------------------------------------------------------------------
 # Patch-delta token-repetition detector
 # ---------------------------------------------------------------------------
@@ -358,6 +404,12 @@ def repair_reply(reply: str) -> str:
     if idx >= 0:
         reply = reply[idx + len("</think>"):]
     reply = _strip_outer_fences_around_tags(reply)
+
+    # 0b. Normalize markdown `SEARCH:`/`REPLACE:` fenced pairs → <patch>
+    # (Fieldrunners 20260626_102307 iter 5: patches emitted as markdown, not
+    # the <patch> envelope, so the turn saved nothing). No-op when a real
+    # <patch> is already present.
+    reply = normalize_markdown_search_replace(reply)
 
     # 1. Normalize spaces inside SEARCH / REPLACE / DIVIDER markers
     reply = re.sub(r"^[ \t]*<{7,}[ \t]*SEARCH[ \t]*$", "<<<<<<< SEARCH", reply, flags=re.MULTILINE | re.IGNORECASE)

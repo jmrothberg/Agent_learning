@@ -1,0 +1,3 @@
+{"category": "art_nouns", "kind": "feedback_pattern", "tokens": ["portrait", "portraits", "backdrop", "backdrops", "tileset", "tilesets", "keyart"], "note": "Visual nouns the user references for art-change feedback; unioned with agent._ART_NOUNS. Edit to broaden art-change classification without code."}
+{"category": "media_verbs", "kind": "feedback_pattern", "tokens": ["recolor", "recolour", "reskin", "restyle", "repaint"], "note": "Style-rebrand verbs that pair with an art noun to signal sprite regen; unioned with agent._MEDIA_VERBS."}
+{"category": "sound_nouns", "kind": "feedback_pattern", "tokens": ["jingle", "jingles", "fanfare", "ambience"], "note": "Audio nouns; unioned with agent._SOUND_NOUNS for sound-change classification."}

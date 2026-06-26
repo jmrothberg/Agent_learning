@@ -1,0 +1,6 @@
+{"name": "flip_ship", "goal": "flip the ship sprite to face right", "expect": {"small_scope_edit": true, "orientation_change": true, "size_change": false}, "note": "mirror = one canvas-flip patch, not regen"}
+{"name": "resize_hud", "goal": "make the score text bigger", "expect": {"small_scope_edit": true, "orientation_change": false, "size_change": true}}
+{"name": "reposition", "goal": "move the health bar to the top left corner", "expect": {"small_scope_edit": true, "orientation_change": false, "size_change": false}}
+{"name": "recolor", "goal": "recolor the player sprite to red", "expect": {"small_scope_edit": true, "orientation_change": false, "size_change": false}}
+{"name": "new_art_not_small", "goal": "add a brand new dragon boss sprite", "expect": {"small_scope_edit": false}, "note": "regen request -> not a single-patch local tweak"}
+{"name": "structural_not_small", "goal": "add a second level with a boss fight and a shop", "expect": {"small_scope_edit": false}, "note": "structural rebuild -> full edit, not scope-locked single patch"}

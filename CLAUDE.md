@@ -88,6 +88,18 @@ MLX_MODEL=~/MLX_Models/Qwen3.6-27B-mxfp8 .venv/bin/python eval/eval_prompts_plan
 .venv/bin/python eval/eval_prompts_plan.py --names chess,doom  # by name
 # Layer-0 assertions also run in CI: tests/test_prompt_library_coverage.py
 
+# Seed-EDIT robustness eval (opt-in, local model) — PASS = materialized + bytes changed.
+# Runs real edit turns over eval/fixtures/seed_tower_defense.html (browser=None, so it
+# measures MATERIALIZATION not gameplay). Guards the "feedback produced no saved code"
+# class (Fieldrunners trace 20260626_102307 iters 4-5).
+MLX_MODEL=~/MLX_Models/GLM-5.2-MLX-4bit .venv/bin/python eval/eval_seed_edits.py
+.venv/bin/python eval/eval_seed_edits.py --only 1 --max-iters 2
+.venv/bin/python eval/eval_seed_edits.py --patch-only --max-iters 2   # skip Phase A on canvas seeds
+# Stub regression banks (no model, run in the pytest suite): eval/golden_feedback_flows.jsonl
+# (golden iter 2-3 art->patch / behavior-bug classification), eval/modality_scenarios.jsonl
+# (beat-em-up suppression + non-combat key exclusion), eval/seed_edit_scenarios.jsonl
+# (small-scope / orientation / size edit classification).
+
 # Memory hygiene
 .venv/bin/python scripts/forget_session.py --list
 .venv/bin/python scripts/forget_session.py <session_id>
@@ -119,7 +131,7 @@ MLX_MODEL=~/MLX_Models/Qwen3.6-27B-mxfp8 .venv/bin/python eval/eval_prompts_plan
 `GameAgent.run(goal) -> AsyncIterator[AgentEvent]` in `agent.py` is the heart. Three phases:
 
 1. **Phase A — planning** (1 turn). Model emits `<plan>` + `<criteria>` + `<probes>` + optional `<assets>`. The user-turn prompt is built by `prompts_v1.plan_instruction(goal=...)`, which detects art / 3D modality keywords and injects directives accordingly.
-2. **Phase B — build/iterate** (up to `max_iters`). Each iter: stream model reply → materialize via `patches.extract_patches`/`apply_patches` (preferred) OR full `<html_file>` rewrite → micro-probes (cheap, no browser) → Chromium load → score against the model's own `<probes>`. Failed iters get a diagnose-then-fix prompt; clean iters get a "prefer `<done/>`" prompt.
+2. **Phase B — build/iterate** (up to `max_iters`). Each iter: stream model reply → materialize via `patches.extract_patches`/`apply_patches` (preferred) OR full `<html_file>` rewrite → micro-probes (cheap, no browser) → Chromium load (skipped when `browser=None` — emits `iter_summary` with `test_skipped:no_browser`) → score against the model's own `<probes>`. Failed iters get a diagnose-then-fix prompt; clean iters get a "prefer `<done/>`" prompt. **`patch_only=True`** (requires `seed_file`): skip Phase A planning + phase-A asset gen — used by `eval/eval_seed_edits.py --patch-only`.
 3. **Phase C — self-critique** (1 turn after `<done/>`). Model either `<confirm_done/>` or one more `<patch>`.
 
 Drivers (`chat.py`, `coder.py`) construct `GameAgent`, wire a token callback, and consume the event stream. `chat.py` adds a Textual TUI with mid-stream user feedback queue (drained at every user-turn boundary by `_flush_user_injections`).
@@ -128,12 +140,19 @@ Drivers (`chat.py`, `coder.py`) construct `GameAgent`, wire a token callback, an
 
 `tools.py`: micro-probes (pre-Chromium) → `LiveBrowser.load_and_test` (Playwright: errors, RAF,
 input smoke test, model `<probes>`, behavioral gates) → optional VLM critic. Failed probes or hard
-soft_warnings flip `ok=False`. `<done/>` needs `_consecutive_clean_iters >= 2`. Gate list and debug
-workflow: **`HARNESS_DEBUG.md`**.
+soft_warnings flip `ok=False`. `<done/>` needs `_consecutive_clean_iters >= 2` (skipped-test iters
+do not advance the streak). Gate list and debug workflow: **`HARNESS_DEBUG.md`**.
+
+### Trace (LLM-only `.jsonl`)
+
+High-frequency events (`stream_heartbeat`, `stream_progress`, `image_skipped`) are **not**
+persisted. Stream metrics fold onto `iter_summary`; `failure_class` tags which layer needs the fix
+(harness_bug / memory_gap / local_llm_limit). Timeline: `scripts/enrich_trace.py <session-id> --timeline`.
+Tests: `tests/test_trace_diagnostics.py`.
 
 ### Patch engine (the quality lever)
 
-`patches.py` defines a SEARCH/REPLACE format. The matcher cascades **exact → char-preserving normalized (smart quotes / dashes / unicode spaces) → whitespace-collapse → trimmed**. Cross-patch validation enforces uniqueness (>1 source match → ambiguous error) and non-overlap; surviving patches apply in **reverse source-order** so earlier offsets stay valid. `repair_reply` strips BOM + CRLF + internal `​`​`​`html` fences before parsing.
+`patches.py` defines a SEARCH/REPLACE format. The matcher cascades **exact → char-preserving normalized (smart quotes / dashes / unicode spaces) → whitespace-collapse → trimmed**. Cross-patch validation enforces uniqueness (>1 source match → ambiguous error) and non-overlap; surviving patches apply in **reverse source-order** so earlier offsets stay valid. `repair_reply` strips BOM + CRLF + internal fences, collapses malformed markers, and converts markdown `SEARCH:`/`REPLACE:` fenced pairs to `<patch>` blocks.
 
 ### Memory / Playbook (compounds across sessions)
 
@@ -158,7 +177,7 @@ Siblings: `sounds.py` (Stable Audio Open, in-process, OGG ≤12 s) and `videos.p
 
 `prompts_v1.SYSTEM_PROMPT = build_system_prompt("{goal}")`. The function walks `ALL_FORMATS` (a list of `FormatSpec(name, snippet, guidelines)` per output tag), dedupes guidelines across enabled formats, and renders `<output-tags>` + `<guidelines>` + `<hard-rules>` + `<anti-patterns>`. To swap or disable a tag, edit the `FormatSpec` list — don't hand-edit the rendered prompt.
 
-`plan_instruction(goal=...)` calls `_detect_art_intent(goal)` and `_detect_3d_intent(goal)`; matched modality keywords inject "ART INTENT DETECTED" / "3D INTENT DETECTED" callouts that escalate `<assets>` and three.js usage from "expected" to "required this turn". The keyword sets are intentionally **genre-free** — they describe rendering modality (`sprite`, `pixel`, `first-person`, `voxel`), not subject matter. Don't add genre names (`asteroids`, `doom`) here.
+`plan_instruction(goal=...)` calls `_detect_art_intent(goal)` and `_detect_3d_intent(goal)`; matched modality keywords inject "ART INTENT DETECTED" / "3D INTENT DETECTED" callouts that escalate `<assets>` and three.js usage from "expected" to "required this turn". The keyword sets are intentionally **genre-free** — they describe rendering modality (`sprite`, `pixel`, `first-person`, `voxel`), not subject matter. Don't add genre names (`asteroids`, `doom`) here. The nudge **prose** lives in data (`memory/plan_nudges.jsonl`, loaded via `memory.load_plan_nudge(id)`); `prompts_v1` owns only the detectors + `{kws}`/`{logic_kws}`/`{mf_kws}` slot fill. TD-vs-brawler disambiguation is also data (`memory/visual_playtests.jsonl` `recipe.suppresses_nudges`, loaded via `memory.goal_suppresses_nudge(goal, nudge)`).
 
 ### Project-config injection
 

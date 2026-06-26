@@ -19,6 +19,34 @@ from memory import (  # noqa: E402
 from tools import LiveBrowser, pointclick_opening_book_applicable  # noqa: E402
 
 
+def test_visual_playtest_rows_carry_outline_id() -> None:
+    """Phase 4 (4A): every recipe→outline link is now on the data ROW
+    (recipe.outline_id), consistent with the _RECIPE_TO_OUTLINE fallback."""
+    import memory as memory_module
+    mem = GameMemory(root="memory")
+    rows = mem.load_visual_playtests()
+    for item in rows:
+        rec = item.recipe if isinstance(item.recipe, dict) else {}
+        expected = memory_module._RECIPE_TO_OUTLINE.get(item.id)
+        if expected is None:
+            continue
+        assert rec.get("outline_id") == expected, item.id
+
+
+def test_outline_routing_uses_row_outline_id_not_just_dict(monkeypatch) -> None:
+    """Proves the row's outline_id is the runtime source: with the
+    _RECIPE_TO_OUTLINE fallback emptied, a tower-defense goal STILL routes to
+    outline-tower-defense via the data row."""
+    import memory as memory_module
+    monkeypatch.setattr(memory_module, "_RECIPE_TO_OUTLINE", {})
+    mem = GameMemory(root="memory")
+    hit = mem.retrieve_implementation_outline(
+        "open-field fieldrunners tower defense: place turrets to stop waves"
+    )
+    assert hit is not None
+    assert hit.item.id == "outline-tower-defense"
+
+
 def test_opening_book_retrieval_caps_and_prefers_root(tmp_path: Path) -> None:
     mem = GameMemory(root=tmp_path / "memory")
     mem.ensure()

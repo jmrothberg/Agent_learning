@@ -24,7 +24,8 @@ one shared character description + fixed seed** for consistency — *not* img2im
 ---
 
 ## Contents
-- [What this is](#what-this-is) · [Quick start](#quick-start) · [Play sample games](#play-sample-games-goodgame) · [Architecture](#architecture)
+- [What this is](#what-this-is) · [How this compares](#how-this-compares-to-other-coding-agents) · [Quick start](#quick-start)
+- [Play sample games](#play-sample-games-goodgame) · [Architecture](#architecture)
 - [The verification harness](#the-verification-harness-the-core-lever) · [Assets & animation](#animation--consistency-is-the-hard-constraint)
 - [Memory / opening library](#memory--the-opening-library) · [TUI & CLI](#tui--cli-reference)
 - [Standalone asset tools](#standalone-asset-tools) · [Video cutscenes](#video-cutscenes--wan22-ti2v-5b-local) · [System tests](#system-tests--memory-hygiene)
@@ -46,6 +47,38 @@ only consume the stream. Three phases: **A — plan** (model emits `<plan>`/`<cr
 optional `<assets>`/`<sounds>`/`<videos>`); **B — build/iterate** (patch or full-file → micro-probes →
 Chromium load → score against the model's own probes + harness gates); **C — self-critique** (one
 turn after `<done/>`).
+
+---
+
+## How this compares to other coding agents
+
+Thesis in one line: **a small *validated* model beats a large unvalidated one** — and **tuning
+prompts + harness + memory beats swapping models.** This repo is not a general repo editor; it is a
+**local, game-specialized loop** where Chromium + behavioral gates are the quality lever.
+
+| Pattern | Cursor / Claude Code | Aider / OpenCode | **Coding Box (this repo)** |
+|---|---|---|---|
+| **Primary loop** | chat + tools + subagents | chat + apply_patch / edit | Phase A plan → Phase B patch/rewrite → Phase C self-critique |
+| **Verification** | you run tests / linter | tests if configured | **always-on:** micro-probes → Playwright → model `<probes>` + genre-free gates (`tools.py`) |
+| **Second opinion** | parallel subagents | — | `/critique` (scripted playtests) + `/vlm-critique` (VLM checklist); **serial on one GPU** — no hidden cloud reviewer |
+| **Plan / progress** | plan.md, todo lists | — | Phase A `<criteria>`/`<probes>` + harness-seeded **task ledger** (goal clauses / outline order / optional model `<todos>`) |
+| **Context** | rules, @files, very large ctx | repo + skills | opening book + playbook + lean prompt; **state-anchor compaction** near ~70% of `num_ctx` (default 100K) |
+| **Edits** | search/replace tools | unified diff | `<patch>` SEARCH/REPLACE — 4-tier match cascade; markdown `SEARCH:`/`REPLACE:` pairs repaired in `patches.repair_reply` |
+| **Assets** | none in-loop | none | **in-process** Z-Image-Turbo + Stable Audio; Wan2.2 cutscenes via subprocess |
+| **Memory** | repo files | conversation | hand-curated **`memory/`** opening book (JSONL — one line, no restart) |
+| **Local LLM** | cloud-first | local or cloud | **MLX in-process** (macOS default) or Ollama; cloud only with explicit API key + `/backend` |
+| **Regression** | CI you author | ad hoc | **pytest (~2K tests)** + stub eval banks + opt-in `eval/eval_seed_edits.py` (materialization with `browser=None`) |
+
+**Real advantages vs general agents:** playable-game verification (input smoke test, per-action
+screenshots, sprite gates), and a full on-machine art/audio pipeline tied to the same loop.
+
+**Known gap vs Cursor/Claude Code:** feedback passes through routing/classifiers before the model
+sees it — misclassification can arm the wrong directive (art reprompt vs code patch). The feedback
+router + golden eval banks (`eval/golden_feedback_flows.jsonl`) exist to guard that class.
+
+**Trace/debug (LLM-facing):** persisted `.jsonl` carries milestone events only; use
+`scripts/enrich_trace.py <session-id> --timeline` and `failure_class` on `iter_summary` — see
+**`HARNESS_DEBUG.md`**.
 
 ---
 
@@ -156,11 +189,10 @@ Files that carry the weight:
 | `patches.py` | SEARCH/REPLACE engine: 4-tier match cascade (exact → normalized → whitespace → trimmed), `repair_reply`. |
 
 ### Patch engine
-`<patch>` blocks use a SEARCH/REPLACE format matched **exact → char-preserving-normalized (smart
-quotes/dashes) → whitespace-collapse → trimmed**, with cross-patch uniqueness + non-overlap
-checks; surviving patches apply in reverse source-order. `repair_reply` strips BOM/CRLF/internal
-fences and collapses malformed doubled `=======`/`>>>>>>> REPLACE` markers. Once `best.html`
-exists, prefer patches — full `<html_file>` rewrites on a working game amplify regressions.
+`<patch>` blocks use SEARCH/REPLACE matched **exact → normalized → whitespace → trimmed**;
+`repair_reply` also converts markdown `SEARCH:`/`REPLACE:` pairs to `<patch>` blocks. Once
+`best.html` exists, prefer patches — full `<html_file>` rewrites on a working game amplify regressions.
+Details: **`CLAUDE.md`** · tests: `tests/test_patches.py`.
 
 ### Compaction (two-tier, token-aware)
 Pressure = `prompt_tokens / num_ctx`. ≤5 turns: no-op. ≤14: per-turn `<html_file>` body elision.
@@ -173,44 +205,23 @@ and shred the playbook + the user's instructions.
 
 ## The verification harness (the core lever)
 
-**Most "agent failures" are verifier failures**: the harness said `ok=True` while the game was
-broken, so the fix-loop never engaged. The trap is that probes check **state** (`state==='punch'`,
-a field changed) and pass while the **pixels/behavior** are wrong. So the harness layers structural,
-behavioral, and visual checks — and the highest-value work in this project is **gate fixes**.
+**Most "agent failures" are verifier failures** — the harness said `ok=True` while the game was
+broken, so the fix loop never engaged. Probes often check **state** while **pixels/behavior** are
+wrong; this project layers structural, behavioral, and visual checks on every iter.
 
-**Layers per iteration:**
-1. **Pre-Chromium micro-probes** — HTML completeness, bracket balance, elision sentinels, duplicate
-   top-level declarations, API allowlist. Cheap; rejects truncated streams before a browser load.
-2. **Chromium** (`load_and_test`, Playwright, visible by default) — console/page errors, RAF firing,
-   blank/frozen-canvas, listener counts, the **input smoke test**, the model's `<probes>`,
-   screenshots, an `__audioEvents` shim, and draw-call shims (`__drawImageEvents`, `__fillRectEvents`,
-   `__strokeEvents`).
-3. **Visual critic** (`run_visual_critic`, local VLM) — a mechanism-keyed yes/no checklist judged
-   against the screenshots; catches what probes can't (facing direction, attack pose).
+**Per iteration (when a browser is configured):**
+1. **Micro-probes** (pre-Chromium) — HTML completeness, bracket balance, elision sentinels.
+2. **Chromium** (`LiveBrowser.load_and_test`) — console/page errors, RAF, input smoke test, model
+   `<probes>`, screenshots, behavioral gates (`PLAYER-STUCK`, `ACTION_DRAWN_NOT_SPRITED`, …).
+3. **Optional reviews** — `/critique` (scripted playtests) and `/vlm-critique` (local VLM checklist).
 
-### The gates (all in `tools.py`, genre-free, all flip `ok=False`)
-- **PLAYER-STUCK** — a movement key registers but no *position* leaf changes (spawned in a wall).
-- **ACTION_DRAWN_NOT_SPRITED** — an action key changed the canvas by code-drawing
-  (`fillRect`/`lineTo`/`stroke`) but drew **no new sprite** = a faked action (a kick drawn as lines
-  over idle instead of swapping to the kick sprite).
-- **CODE_DRAWN_OVER_SPRITE** — the action drew its sprite **but also** code-drew stroke/arc shapes on
-  top (a "motion line + flash"/limb). The sprite conveys the move; the overlay is rejected junk.
-- **ASSETS_LOADED_BUT_UNDRAWN** — a sprite loaded but never `drawImage`'d. Usual cause: a sprite-KEY
-  mismatch (`'left_idle'` built vs `'left_fighter_idle'` generated) → silent fillRect block. The
-  injected `sprite(key)` resolver (exact→normalized→token match) self-heals the drift and draws a
-  loud `MISSING` marker on a true miss.
-- **PROCEDURAL_REGRESSION_SUSPECTED** — ≥3 sprites declared but the canvas is mostly big fillRects.
-- **ENTITY-NOT-RENDERED** — entity in `state` with x/y but not drawn.
-- **STATIC-ACTION** — an action renders one held pose while the game animates elsewhere.
+`<done/>` needs a **clean streak** (default 2 consecutive `ok=True` iters). Gate reference,
+`failure_class` triage, and the trace timeline workflow: **`HARNESS_DEBUG.md`**.
 
-Per-action frames are saved to the trace (`iter_NN_action_<Key>.png`) so each action's graphics are
-debuggable. **Advisory (never gates):** dead / near-identical sprite frames are *cosmetic*.
-
-### The visual critic
-Mechanism behind **`/vlm-critique`**: a local VLM answers a mechanism-keyed yes/no checklist against
-screenshots (facing, attack pose, etc.). Requires a VLM backend; skips on text-only models. The
-critic prefills `"Q1: "` for parseable output; abstains only on image blindness; per-question
-`fix_hints` for failed checks only. See `FOR_NEXT_LLM.md` for tuning traps.
+**Eval mode (`browser=None`):** seed-edit regression (`eval/eval_seed_edits.py`) skips Chromium
+entirely — micro-probes still run; each iter emits `iter_summary` with `test_skipped:no_browser`
+(not `harness_crash`). Use `--patch-only` to skip Phase A planning + phase-A asset gen on canvas
+seeds.
 
 ---
 
@@ -288,7 +299,9 @@ shape, not subject.
 | File | Holds |
 |---|---|
 | `memory/playbook.jsonl` | code rules-of-thumb, retrieved by weighted-Jaccard on the goal (tags weigh 2×; ~0.02 floor) |
-| `memory/playtests.jsonl` | behavior recipes for `/critique` (scripted input, state, pixel hash — no VLM); incl. genre-free `state_expr` checks (state-exposed, score, timer, pause) |
+| `memory/plan_nudges.jsonl` | plan-turn modality nudge **prose** (detectors live in `prompts_v1.py`; TD-vs-brawler suppression in `visual_playtests.jsonl`) |
+| `memory/feedback_patterns.jsonl` | extra feedback-classifier phrases (unioned with code lists in `agent.py`) |
+| `memory/playtests.jsonl` | behavior recipes for `/critique` (scripted input, state, pixel hash — no VLM) |
 | `memory/visual_playtests.jsonl` | mechanism-keyed yes/no VLM checklists + `auto_probes` + per-question `fix_hints` |
 | `memory/implementation_outlines.jsonl` | architect mechanism outlines (retrieved k=1); deep render carries a probe-authoring contract tied to each outline's `state:` fields |
 | `memory/components.jsonl` | paste-and-adapt JS snippets (game loop, input, camera, pointer-lock, spatial hash, loaders) |
@@ -430,44 +443,47 @@ feature is a silent no-op — the model is told to ship without cutscenes. Skip 
 See **`TEST.md`** for the three-layer testing guide. Quick reference:
 
 ```bash
+.venv/bin/python -m pytest tests/ -q
 python system_tests.py run --suite smoke --three-model
 python system_tests.py run --suite pacman --yes
 .venv/bin/python eval/eval_prompts_plan.py --coverage
-.venv/bin/python eval/eval_prompts_plan.py
+MLX_MODEL=~/MLX_Models/Qwen3.6-27B-mxfp8 .venv/bin/python eval/eval_seed_edits.py --patch-only --max-iters 2
 .venv/bin/python scripts/forget_session.py --list
 ./scripts/clean_artifacts.sh --yes
 ```
-Battery: `memory/system_battery.jsonl` (local override: `games/system-tests/battery.jsonl`).
+
+Details: **`TEST.md`**. Battery: `memory/system_battery.jsonl`.
 
 ---
 
 ## Other docs
 
-| File | Purpose |
-|------|---------|
-| `CLAUDE.md` | Commands, env vars, architecture summary — **also injected into the game agent** (6 KB cap) |
-| `TEST.md` | How to run and write tests |
-| `FOR_NEXT_LLM.md` | Tuning rules and mistake traps for agent work |
-| `HARNESS_DEBUG.md` | Gate reference and 5-grep trace debug workflow |
+Each file has one job — avoid duplicating long gate/env lists across them.
+
+| File | Audience | Purpose |
+|------|----------|---------|
+| `CLAUDE.md` | **LLM agents + humans** | Commands, env vars, architecture — **also injected into the game agent** (6 KB cap, skipped in lean mode) |
+| `TEST.md` | humans + LLMs | Three-layer test guide (pytest → eval → system tests) |
+| `FOR_NEXT_LLM.md` | LLM tuners | Tuning rules and mistake traps — read before changing harness/prompts |
+| `HARNESS_DEBUG.md` | LLM tuners | Full gate list, `failure_class`, trace timeline workflow |
 
 ---
 
 ## Standing rules
 
-1. **Tune the agent, not the model.** Never "try a bigger model" — fix prompts / retrieval / gates /
-   scoring / memory.
-2. **No hardcoded genre lists.** Detect by rendering/interaction *shape*, never subject matter.
-3. **General fix → code; specific game craft → memory** (retrieval-gated).
-4. **All code self-contained in `Agent_learning/`** — no sibling-repo `sys.path` injection.
-5. **Visible Chromium by default** (TUI `headless=False`; CLI `--headless` for unattended).
-6. **Asteroids is the canonical regression check** — ship direction (`vx = cos(angle)*speed`) and
-   irregular-polygon asteroids must still pass after any retrieval/prompt/patch change.
-7. **Never silently call a cloud model** — cloud needs the user's key + explicit opt-in.
-8. **Don't tighten repetition/timeout aborts without trace evidence** — latch on code emission, not
-   token count; preserve long first-build `<html_file>` completion.
+Full binding rules for coding agents: **`CLAUDE.md`** (also injected into the game agent). Short
+version:
 
-Don't-commit: routine session outputs under `games/` are gitignored (`*.html`, `*_assets/`, traces,
-caches). `memory/*.jsonl` is hand-curated.
+1. **Tune the agent, not the model** — prompts / retrieval / gates / memory, not “try a bigger model.”
+2. **Genre-free in code** — detect rendering *shape*, not subject matter; game craft → `memory/*.jsonl`.
+3. **All code self-contained in `Agent_learning/`** — no sibling-repo imports.
+4. **Visible Chromium by default** (TUI); CLI `--headless` for unattended runs.
+5. **Asteroids regression** after retrieval/prompt/patch changes (ship direction + irregular asteroids).
+6. **Never silent cloud** — API key + explicit opt-in only.
+7. **Cosmetic sprite warnings are advisory** — never block shipping or suggest regenerating pose frames.
+
+Don't commit routine session outputs under `games/` (gitignored). **`/goodgame`** → tracked `goodgame/`.
+`memory/*.jsonl` is hand-curated.
 
 ---
 
@@ -480,9 +496,8 @@ caches). `memory/*.jsonl` is hand-curated.
 - **"Feedback doesn't stick" / patches fail with SEARCH-not-found:** compaction shredded the file view — check `num_ctx` (default 100K) and the `structured_compaction` trace events.
 - **Game shows colored boxes instead of art:** sprite-key mismatch — the `sprite()` resolver and `ASSETS_LOADED_BUT_UNDRAWN` gate now catch it; re-run.
 - **Model loops/truncates on big builds:** expected for a 27B; the MLX sampler passes `top_p`/`top_k` (vendor coding preset) to avoid the degenerate line-repeat. Judge harness signals from the trace, not always a finished game.
-- **Debugging a bad session:** `HARNESS_DEBUG.md` (5-grep recipe). Tuning traps: `FOR_NEXT_LLM.md`.
-
----
+- **Debugging a bad session:** `HARNESS_DEBUG.md` — start with `scripts/enrich_trace.py <id> --timeline`.
+  Tuning traps: `FOR_NEXT_LLM.md`.
 
 ## Dependencies
 Python 3.12, `mlx-lm` / `mlx-vlm` (Apple Silicon) or `ollama`, Playwright Chromium, `diffusers` +

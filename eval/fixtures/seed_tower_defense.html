@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Seed Tower Defense</title>
+<style>
+  body { margin: 0; background: #111; color: #eee; font-family: monospace; }
+  #game { display: block; margin: 0 auto; background: #1d2b1d; }
+  #hud { text-align: center; padding: 6px; }
+</style>
+</head>
+<body>
+<div id="hud">Lives: <span id="lives">20</span> &nbsp; Gold: <span id="gold">100</span> &nbsp; Wave: <span id="wave">0</span></div>
+<canvas id="game" width="640" height="384"></canvas>
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const TILE = 32;
+// A simple straight horizontal path the creeps follow.
+const PATH = [];
+for (let x = 0; x <= 640; x += 8) PATH.push({ x, y: 192 });
+
+const state = {
+  lives: 20,
+  gold: 100,
+  wave: 0,
+  towers: [],
+  creeps: [],
+  waveActive: false,
+};
+window.state = state;
+
+function startWave() {
+  if (state.waveActive) return;
+  state.wave += 1;
+  state.waveActive = true;
+  for (let i = 0; i < 5 + state.wave; i++) {
+    state.creeps.push({ t: -i * 40, hp: 10, speed: 0.6, alive: true });
+  }
+  document.getElementById('wave').textContent = state.wave;
+}
+
+function placeTower(gx, gy) {
+  if (state.gold < 20) return;
+  state.gold -= 20;
+  state.towers.push({ x: gx * TILE + TILE / 2, y: gy * TILE + TILE / 2, range: 80, cd: 0 });
+  document.getElementById('gold').textContent = state.gold;
+}
+
+canvas.addEventListener('click', (e) => {
+  const r = canvas.getBoundingClientRect();
+  const gx = Math.floor((e.clientX - r.left) / TILE);
+  const gy = Math.floor((e.clientY - r.top) / TILE);
+  placeTower(gx, gy);
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.code === 'Space') { e.preventDefault(); startWave(); }
+});
+
+function creepPos(c) {
+  const idx = Math.max(0, Math.min(PATH.length - 1, Math.floor(c.t)));
+  return PATH[idx];
+}
+
+function update() {
+  for (const c of state.creeps) {
+    if (!c.alive) continue;
+    c.t += c.speed;
+    if (c.t >= PATH.length - 1) {
+      c.alive = false;
+      state.lives -= 1;
+      document.getElementById('lives').textContent = state.lives;
+    }
+  }
+  for (const tw of state.towers) {
+    tw.cd = Math.max(0, tw.cd - 1);
+    if (tw.cd === 0) {
+      for (const c of state.creeps) {
+        if (!c.alive) continue;
+        const p = creepPos(c);
+        if (Math.hypot(p.x - tw.x, p.y - tw.y) <= tw.range) {
+          c.hp -= 4;
+          tw.cd = 30;
+          if (c.hp <= 0) { c.alive = false; state.gold += 5; document.getElementById('gold').textContent = state.gold; }
+          break;
+        }
+      }
+    }
+  }
+  if (state.waveActive && state.creeps.every(c => !c.alive)) state.waveActive = false;
+}
+
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  // path
+  ctx.strokeStyle = '#5a4'; ctx.lineWidth = 24;
+  ctx.beginPath(); ctx.moveTo(0, 192); ctx.lineTo(640, 192); ctx.stroke();
+  // towers
+  for (const tw of state.towers) {
+    ctx.fillStyle = '#3cf';
+    ctx.fillRect(tw.x - 10, tw.y - 10, 20, 20);
+  }
+  // creeps
+  for (const c of state.creeps) {
+    if (!c.alive) continue;
+    const p = creepPos(c);
+    ctx.fillStyle = '#e55';
+    ctx.beginPath(); ctx.arc(p.x, p.y, 8, 0, Math.PI * 2); ctx.fill();
+  }
+}
+
+function loop() { update(); draw(); requestAnimationFrame(loop); }
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

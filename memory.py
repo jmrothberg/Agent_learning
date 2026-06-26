@@ -2654,6 +2654,188 @@ def _visual_match_tokens(text: str) -> set[str]:
     return toks
 
 
+# Phase 4 (4A): data-driven modality disambiguation. A visual_playtest recipe
+# may declare `recipe.suppresses_nudges: [{nudge, when_any, unless_any}, ...]`.
+# A goal suppresses `nudge` when ANY `when_any` token is present AND no
+# `unless_any` token is present. This is the SINGLE source of truth for "a
+# tower-defense goal must not get a brawler nudge" (Fieldrunners trace
+# 20260626_102307 plan turn): both prompts_v1._detect_beat_em_up_intent and
+# retrieval call goal_suppresses_nudge() instead of duplicating a token list in
+# Python. The `when_any` tokens are DISCRIMINATIVE (tower/turret/creep/bfs…),
+# NOT the recipe's broad applies_keywords — "waves"/"enemies" alone also occur
+# in brawlers, so matching on those over-suppresses (kung-fu-master). Matching
+# mirrors the original detector exactly: lowercase substring containment on the
+# goal and its underscore->dash form, plus the dash->space form of each token.
+# Editable in the .jsonl without touching code (project rule: guidance in
+# memory/, detectors in code).
+_NUDGE_SUPPRESSOR_PATH = (
+    Path(__file__).resolve().parent / "memory" / VISUAL_PLAYTESTS_FILENAME
+)
+_NUDGE_SUPPRESSORS_CACHE: tuple[dict, ...] | None = None
+
+
+def _load_nudge_suppressors() -> tuple[dict, ...]:
+    """Parse visual_playtests.jsonl rows declaring `recipe.suppresses_nudges`.
+
+    Each returned dict carries {nudge, when_any, unless_any}. Cached after first
+    read (small hand-edited file; loaded once per process). Returns () on any
+    read/parse error — safe degradation (no suppression).
+    """
+    global _NUDGE_SUPPRESSORS_CACHE
+    if _NUDGE_SUPPRESSORS_CACHE is not None:
+        return _NUDGE_SUPPRESSORS_CACHE
+    out: list[dict] = []
+    try:
+        text = _NUDGE_SUPPRESSOR_PATH.read_text(encoding="utf-8")
+    except Exception:
+        _NUDGE_SUPPRESSORS_CACHE = tuple()
+        return _NUDGE_SUPPRESSORS_CACHE
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except Exception:
+            continue
+        rec = row.get("recipe") if isinstance(row, dict) else None
+        if not isinstance(rec, dict):
+            continue
+        specs = rec.get("suppresses_nudges")
+        if not specs:
+            continue
+        for spec in specs:
+            if not isinstance(spec, dict) or not spec.get("nudge"):
+                continue
+            out.append({
+                "nudge": str(spec["nudge"]).lower(),
+                "when_any": tuple(
+                    str(t).lower() for t in (spec.get("when_any") or [])
+                ),
+                "unless_any": tuple(
+                    str(t).lower() for t in (spec.get("unless_any") or [])
+                ),
+            })
+    _NUDGE_SUPPRESSORS_CACHE = tuple(out)
+    return _NUDGE_SUPPRESSORS_CACHE
+
+
+def _goal_contains_any(gl: str, gl_dash: str, tokens) -> bool:
+    """Original detector's substring semantics: a token matches if it appears
+    in the lowercased goal, its underscore->dash form, or its dash->space
+    form."""
+    return any(
+        tok in gl or tok in gl_dash or tok.replace("-", " ") in gl
+        for tok in tokens
+    )
+
+
+def goal_suppresses_nudge(goal: str, nudge: str) -> bool:
+    """True when `goal` matches a recipe spec that suppresses `nudge`: a
+    `when_any` token is present AND no `unless_any` token is present. Genre-free
+    — the tokens describe rendering/mechanic shape, not subject matter.
+    """
+    nudge = (nudge or "").lower()
+    gl = (goal or "").lower()
+    gl_dash = gl.replace("_", "-")
+    for spec in _load_nudge_suppressors():
+        if spec["nudge"] != nudge:
+            continue
+        if not _goal_contains_any(gl, gl_dash, spec["when_any"]):
+            continue
+        if _goal_contains_any(gl, gl_dash, spec["unless_any"]):
+            continue
+        return True
+    return False
+
+
+# Phase 4 (4A): plan-turn nudge PROSE lives in data (memory/plan_nudges.jsonl);
+# prompts_v1 owns only the detectors + slot interpolation. Bodies carry literal
+# {kws}/{logic_kws}/{mf_kws} placeholders the caller fills with str.replace.
+_PLAN_NUDGES_PATH = (
+    Path(__file__).resolve().parent / "memory" / "plan_nudges.jsonl"
+)
+_PLAN_NUDGES_CACHE: dict[str, str] | None = None
+
+
+# Phase 4 (4A): feedback-classification vocabulary EXTENSION layer. The
+# canonical, heavily-commented vocab tuples (_ART_NOUNS / _MEDIA_VERBS /
+# _SOUND_NOUNS) stay in agent.py — each token there carries a trace-provenance
+# comment that is institutional knowledge we must not lose. This data file is an
+# ADDITIVE extension (NOT a copy): the classifier UNIONS these tokens with the
+# code lists, so a reviewer can broaden feedback classification by editing the
+# .jsonl without a code change. Rows: {"category": "art_nouns"|"media_verbs"|
+# "sound_nouns", "tokens": [...]}. Empty/missing file = code-list behavior
+# unchanged (safe degradation).
+_FEEDBACK_PATTERNS_PATH = (
+    Path(__file__).resolve().parent / "memory" / "feedback_patterns.jsonl"
+)
+_FEEDBACK_PATTERNS_CACHE: dict[str, tuple[str, ...]] | None = None
+
+
+def load_feedback_patterns(category: str) -> tuple[str, ...]:
+    """Return EXTENSION tokens for a feedback-classification `category` from
+    memory/feedback_patterns.jsonl (unioned with agent.py's code lists by the
+    classifier). Cached after first read. Returns () on missing/parse error.
+    """
+    global _FEEDBACK_PATTERNS_CACHE
+    if _FEEDBACK_PATTERNS_CACHE is None:
+        cache: dict[str, list[str]] = {}
+        try:
+            text = _FEEDBACK_PATTERNS_PATH.read_text(encoding="utf-8")
+        except Exception:
+            text = ""
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(row, dict):
+                continue
+            cat = str(row.get("category") or "").lower()
+            if not cat:
+                continue
+            toks = row.get("tokens") or []
+            cache.setdefault(cat, []).extend(
+                str(t).lower() for t in toks if str(t).strip()
+            )
+        _FEEDBACK_PATTERNS_CACHE = {k: tuple(v) for k, v in cache.items()}
+    return _FEEDBACK_PATTERNS_CACHE.get(category.lower(), ())
+
+
+def load_plan_nudge(nudge_id: str) -> str:
+    """Return the plan-turn nudge body for `nudge_id` from plan_nudges.jsonl.
+
+    Cached after first read (small hand-edited file). Returns "" when the id is
+    missing or the file can't be read — safe degradation (the detector still
+    ran; the prose is just absent). The single source of truth for nudge prose
+    so it is editable without touching Python (project rule: guidance in
+    memory/, detectors in code).
+    """
+    global _PLAN_NUDGES_CACHE
+    if _PLAN_NUDGES_CACHE is None:
+        cache: dict[str, str] = {}
+        try:
+            text = _PLAN_NUDGES_PATH.read_text(encoding="utf-8")
+        except Exception:
+            text = ""
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(row, dict) and row.get("id"):
+                cache[str(row["id"])] = str(row.get("body", ""))
+        _PLAN_NUDGES_CACHE = cache
+    return _PLAN_NUDGES_CACHE.get(nudge_id, "")
+
+
 def find_best_visual_playtest(
     recipes: list[VisualPlaytestRecipe],
     *,
@@ -3802,7 +3984,14 @@ class GameMemory:
         except Exception:
             recipe = None
         if recipe is not None:
-            outline_id = _RECIPE_TO_OUTLINE.get(recipe.id)
+            # Phase 4 (4A): the recipe->outline link lives on the playtest ROW
+            # (recipe.outline_id) so it is editable in data; _RECIPE_TO_OUTLINE
+            # is the fallback until every row carries the field, then the dict
+            # can be deleted (gradual migration).
+            rec_dict = recipe.recipe if isinstance(recipe.recipe, dict) else {}
+            outline_id = (
+                rec_dict.get("outline_id") or _RECIPE_TO_OUTLINE.get(recipe.id)
+            )
             if outline_id == "outline-vector-wireframe":
                 if "wireframe" not in (goal or "").lower():
                     outline_id = _RECIPE_TO_OUTLINE.get("canvas-top-down-action")

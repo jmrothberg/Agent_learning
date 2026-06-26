@@ -160,6 +160,29 @@ def test_route_no_assets_clears_stale_reprompt(tmp_path):
     assert "ASSET GENERATION REQUIRED" not in out
 
 
+def test_route_retains_reprompt_on_vague_retry(tmp_path):
+    """Phase 0D-6 (Fieldrunners trace 20260626_102307 iter 5): a CONTENT-FREE
+    retry nudge routes as code_fix / allow_assets_block=false, but it does NOT
+    contradict a still-unhonored art request. The standing request must be
+    RETAINED (and re-armed this turn), not silently dropped."""
+    a = _agent(tmp_path)
+    a._session_assets = {"missile_head_n": Path("/tmp/missile_head_n.png")}
+    a._unhonored_asset_request = "give each tower its own unique head sprite"
+    a._asset_reprompt_count = 1
+    a._pending_feedback = ["no usable code was identified by the agent, try again"]
+    a._feedback_route = {
+        "primary_intent": "code_fix",
+        "honor_user_now": True,
+        "allow_assets_block": False,
+        "defer_behind_blocker": False,
+    }
+    out = a._flush_user_injections("REPORT: still failing")
+    # The standing art request survives the vague retry.
+    assert a._unhonored_asset_request == "give each tower its own unique head sprite"
+    # And it is re-surfaced this turn so the <assets> scaffold fires.
+    assert "ASSET GENERATION REQUIRED" in out
+
+
 def test_route_wants_assets_arms_reprompt(tmp_path):
     a = _agent(tmp_path)
     a._session_assets = {"white_pawn_idle": Path("/tmp/white_pawn_idle.png")}

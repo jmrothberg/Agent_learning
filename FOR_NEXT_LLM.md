@@ -61,6 +61,13 @@ bullet never reaches the prompt — broaden tags if a good bullet doesn’t fire
   window on a 100K+ session) triggers lossy compaction every turn — shredding playbook, user
   feedback, and file view (“patches don’t stick”). Default `num_ctx` is **100000**; compact only
   near a genuinely full window (~70% pressure), not on message count alone.
+- **Do NOT add a `warm_prefix` after compaction** (Phase 4B investigation). MLX (`backend.py`
+  `stream_generate`) is called fresh each turn with **no `prompt_cache`** → zero cross-call KV reuse,
+  so a warm just re-prefills on the next real call (dead overhead). On Ollama, compaction rewrites
+  the prefix (state-anchor replaces msgs 1..cutoff) so the cached KV is invalid at the divergence
+  point, and there is no idle window right after compaction to hide prefill in. The existing
+  `warm_prefix` is correctly gated to the **cross-slot** case only (coder slot ≠ architect slot, the
+  multi-GPU Ollama box, where asset/sound gen on another GPU IS the idle window) — keep it there.
 
 **Sampling**
 
@@ -88,4 +95,5 @@ See **`HARNESS_DEBUG.md`** (5-grep recipe on `games/traces/*__run_*.jsonl`).
 ## Read order
 
 `CLAUDE.md` → this file → `tools.py` (`load_and_test`) → trace `.jsonl` for the failure → relevant
-`memory/*.jsonl`. Tests: `.venv/bin/python -m pytest tests/ -q` (pure-function, no GPU/model).
+`memory/*.jsonl`. Agent comparison vs Cursor/Aider: **`README.md#how-this-compares-to-other-coding-agents`**.
+Tests: `.venv/bin/python -m pytest tests/ -q` (pure-function, no GPU/model).

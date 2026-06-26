@@ -1069,16 +1069,37 @@ def _perspective_wireframe_nudge_needed(goal: str) -> bool:
     return False
 
 
+# Phase 0 (Fieldrunners trace 20260626_102307): tower-defense SHAPE tokens.
+# The beat-em-up detector's weak trigger "waves" also appears in tower-defense
+# goals ("waves of enemies"), which wrongly injected a "side-scrolling brawler"
+# nudge onto a TD plan turn. When any of these mechanic-shape tokens are present
+# the goal is a placement/path defense, not a brawler — suppress the nudge.
+# Genre-free: every token names a rendering/mechanic shape (grid, path, turret),
+# not subject matter.
 def _detect_beat_em_up_intent(goal: str) -> list[str]:
-    """Side-scroll beat-em-up modality (not 1v1 fighters). Genre-free tokens."""
+    """Side-scroll beat-em-up modality (not 1v1 fighters). Genre-free tokens.
+
+    Suppressed when the goal matches the tower-defense visual_playtest recipe:
+    "waves" alone is a weak trigger shared with TD ("waves of enemies"), and a
+    TD goal must not receive a brawler nudge (Fieldrunners trace
+    20260626_102307 plan turn). Phase 4 (4A): the TD-vs-brawler disambiguation
+    now lives in DATA (memory/visual_playtests.jsonl `suppresses_nudges`),
+    loaded through the single `memory.goal_suppresses_nudge` so retrieval and
+    this plan-nudge detector can't disagree. Lazy import avoids a circular
+    import (memory imports nothing from prompts_v1, but keep it local for
+    safety)."""
+    from memory import goal_suppresses_nudge
+    if goal_suppresses_nudge(goal, "beat-em-up"):
+        return []
     gl = goal.lower()
+    gl_dash = gl.replace("_", "-")
     out: list[str] = []
     seen: set[str] = set()
     for tok in (
         "beat-em-up", "beatemup", "brawler", "side-scroll", "side-scrolling",
         "sidescroll", "scrolling", "waves", "floor", "boss",
     ):
-        if tok in gl.replace("_", "-") or tok.replace("-", " ") in gl:
+        if tok in gl_dash or tok.replace("-", " ") in gl:
             if tok not in seen:
                 seen.add(tok)
                 out.append(tok)
@@ -1244,6 +1265,11 @@ def plan_instruction(
     fresh generation. `from_seed=True` suppresses those nudges and
     inserts a seed-continuation directive listing available media.
     """
+    # Phase 4 (4A): plan-turn nudge PROSE lives in memory/plan_nudges.jsonl,
+    # loaded via the single memory loader. prompts_v1 keeps only the detectors
+    # (which keywords fired) + the slot interpolation. Lazy import avoids any
+    # import-order coupling.
+    from memory import load_plan_nudge
     # P1: seed continuation flips art / audio "MUST emit" nudges off.
     # Detection is opt-in via the from_seed kwarg so non-seed sessions
     # stay byte-for-byte identical (the existing test suite still passes).
@@ -1269,138 +1295,48 @@ def plan_instruction(
     art_nudge = ""
     if art_keywords:
         kws = ", ".join(repr(k) for k in art_keywords)
-        art_nudge = (
-            "\n\nART INTENT DETECTED — your goal mentions "
-            f"{kws}. The user EXPLICITLY wants generated art. You MUST "
-            "emit an <assets> block this turn with one entry per visual "
-            "entity in the game (every character, enemy, projectile, "
-            "pickup, decoration the player will see). Skipping <assets> "
-            "and falling back to procedural ctx.fillRect drawing IS A "
-            "FAILURE for this goal — the user will notice the difference "
-            "between bare squares and real sprite art. ULTRA IMPORTANT: "
-            "do not omit <assets>; do not say \"I'll draw procedurally\"; "
-            "do not assume the diffuser is unavailable (the harness will "
-            "tell you if it is).\n"
-        )
+        art_nudge = load_plan_nudge("art").replace("{kws}", kws)
 
     # `threed_keywords` is already set at the top of the function so a
     # from_seed continuation still keeps 3D detection but loses art/audio.
     threed_nudge = ""
     if threed_keywords:
         kws = ", ".join(repr(k) for k in threed_keywords)
-        threed_nudge = (
-            "\n\n3D INTENT DETECTED — your goal mentions "
-            f"{kws}. STRONGLY PREFER three.js (or babylon.js / "
-            "PlayCanvas) via CDN over hand-rolling a raycaster or "
-            "writing 3D math from scratch. A few hundred lines of "
-            "`THREE.WebGLRenderer` + `Scene` + sprite-billboard "
-            "`Mesh`es will outperform 1000 lines of raycaster code, "
-            "and the user gets actual 3D fidelity.\n"
-            "\n"
-            "Suggested CDN imports (one is plenty):\n"
-            "  <script src=\"https://cdn.jsdelivr.net/npm/three@0.160/build/three.min.js\"></script>\n"
-            "  <script src=\"https://cdnjs.cloudflare.com/ajax/libs/babylonjs/6.32.0/babylon.min.js\"></script>\n"
-            "\n"
-            "Pair three.js with <assets> using file://-safe texture wiring. "
-            "Do NOT rely on disabled web-security flags. If local PNG texture "
-            "loading fails in a normal browser file:// session, switch to a "
-            "file://-safe path (for example inline/data-URL textures) and keep "
-            "the same art direction. That's how you ship real Doom-shaped "
-            "output instead of a 12 KB raycaster sketch.\n"
-            "\n"
-            "ONLY hand-roll a raycaster if the goal explicitly says "
-            "\"raycaster from scratch\" or \"no libraries\". Otherwise "
-            "use the library.\n"
-            )
+        threed_nudge = load_plan_nudge("3d").replace("{kws}", kws)
 
     beat_em_up_nudge = ""
     if beat_em_up_keywords:
         kws = ", ".join(repr(k) for k in beat_em_up_keywords)
-        beat_em_up_nudge = (
-            "\n\nBEAT-EM-UP INTENT DETECTED — your goal mentions "
-            f"{kws}. Build a side-scrolling brawler with ONE hero, "
-            "camera-follow, and enemies[] spawning from off-screen — "
-            "NOT a 1v1 two-fighter duel state machine. Walk left/right, "
-            "punch/kick waves, optional floor boss.\n"
-        )
+        beat_em_up_nudge = load_plan_nudge("beat-em-up").replace("{kws}", kws)
 
     wireframe_nudge = ""
     if wireframe_keywords:
         kws = ", ".join(repr(k) for k in wireframe_keywords)
         if _perspective_wireframe_nudge_needed(goal):
-            wireframe_nudge = (
-                "\n\nWIREFRAME VECTOR INTENT DETECTED — your goal mentions "
-                f"{kws}. Render with 2D canvas beginPath/moveTo/lineTo/stroke "
-                "ONLY — do NOT import three.js/WebGL and do NOT emit <assets>. "
-                "Project world (x,y,z) to screen: rotate to camera yaw, divide "
-                "by rz, sort segments back-to-front (painter's algorithm). "
-                "Glowing vector lines on a black background.\n"
-            )
+            wireframe_nudge = load_plan_nudge(
+                "wireframe-perspective"
+            ).replace("{kws}", kws)
         else:
-            wireframe_nudge = (
-                "\n\nVECTOR LINE ART INTENT DETECTED — your goal mentions "
-                f"{kws}. Draw with 2D canvas stroke/line APIs only — do NOT "
-                "emit <assets> or import three.js. Clean glowing vector lines "
-                "on black.\n"
-            )
+            wireframe_nudge = load_plan_nudge(
+                "wireframe-flat"
+            ).replace("{kws}", kws)
 
     # `audio_keywords` is also set up top so from_seed suppression sticks.
     audio_nudge = ""
     if audio_keywords:
         kws = ", ".join(repr(k) for k in audio_keywords)
-        audio_nudge = (
-            "\n\nAUDIO INTENT DETECTED — your goal mentions "
-            f"{kws}. The user EXPLICITLY wants generated audio. You MUST "
-            "emit a <sounds> block this turn with one entry per "
-            "discrete audible event the player will hear (firing, hits, "
-            "pickups, explosions, jumps, level-clear) plus optionally a "
-            "looping music track. Skipping <sounds> and shipping a "
-            "silent game IS A FAILURE for this goal — the user will "
-            "notice. ULTRA IMPORTANT: do not omit <sounds>; do not "
-            "assume the audio diffuser is unavailable (the harness will "
-            "tell you if it is).\n"
-        )
+        audio_nudge = load_plan_nudge("audio").replace("{kws}", kws)
 
     # `video_keywords` is also set up top so from_seed suppression sticks.
     video_nudge = ""
     if video_keywords:
         kws = ", ".join(repr(k) for k in video_keywords)
-        video_nudge = (
-            "\n\nVIDEO INTENT DETECTED — your goal mentions "
-            f"{kws}. The user EXPLICITLY wants video cutscenes. You MUST "
-            "emit a <videos> block this turn (2-4 clips: intro / death / "
-            "victory / reveal). Declare a key-art entry in <assets> for "
-            "each clip and reference it via the `image` field so the "
-            "clips match the game's art style (image-to-video). Skipping "
-            "<videos> IS A FAILURE for this goal. Do not assume the "
-            "video backend is unavailable (the harness will tell you if "
-            "it is). When the GENERATED VIDEOS block comes back, wire those "
-            "exact MP4 paths into the FIRST <html_file>: muted full-screen "
-            "overlay, any key skips, and both `onended` and `onerror` call "
-            "the same continuation callback. If a video is missing/blocked, "
-            "fall back to its key-art still and continue gameplay — never "
-            "let a cutscene stall the game.\n"
-        )
+        video_nudge = load_plan_nudge("video").replace("{kws}", kws)
 
     qte_nudge = ""
     if qte_keywords:
         kws = ", ".join(repr(k) for k in qte_keywords)
-        qte_nudge = (
-            "\n\nTIMED-REACTION / QTE INTENT DETECTED — your goal mentions "
-            f"{kws}. In Phase A, keep the scene script small and explicit: "
-            "`state.scene` is 0-indexed (HUD displays scene+1), expose "
-            "`window.state` and `window.game.reset`, and write probes that "
-            "do NOT require scene>=1 at page load. In the first HTML, "
-            "keydown MUST compute the current QTE window from "
-            "`performance.now() - state.sceneEnteredAt`, set a short "
-            "`inputFlash`/`lastInputCode` immediately so the harness sees "
-            "visible response, then success/fail changes scene/score/lives/"
-            "qte.result. If generated images/videos exist, wire their exact "
-            "paths immediately: drawImage generated backgrounds/sprites, "
-            "and make video overlays any-key skippable with onended/onerror "
-            "continuation. Procedural rectangles are missing-asset fallback "
-            "only, not final scene art.\n"
-        )
+        qte_nudge = load_plan_nudge("qte").replace("{kws}", kws)
 
     # Phase 4: scope-pacing nudge for art-heavy + logic-heavy goals.
     # Only fires when BOTH art (or 3D) AND heavy-logic keywords match —
@@ -1423,90 +1359,13 @@ def plan_instruction(
         if multi_frame_keywords:
             mf_kws = ", ".join(repr(k) for k in multi_frame_keywords)
             scope_nudge = (
-                "\n\nSCOPE-PACING NUDGE (multi-frame override) — your "
-                "goal combines visual content (<assets>) with heavy "
-                f"game-rule / AI logic (matched: {logic_kws}) AND "
-                "explicitly asks for multi-frame / animation rosters "
-                f"(matched: {mf_kws}).\n"
-                "Strategy for THIS turn:\n"
-                "  - First, read your own goal text and list the visual "
-                "entity classes (each character/piece/enemy/etc. the "
-                "player will see distinctly) AND the action states the "
-                "user named (e.g. \"walk\", \"smash\", \"die\", "
-                "\"attack\", \"jump\"). The matched keywords above hint "
-                "at this — extend with the exact action verbs from the "
-                "goal text. If the goal said \"walk to new position and "
-                "smash the captured piece\", the state set is at least "
-                "`idle` + `walk` + `smash`.\n"
-                "  - This turn, emit each entity's idle (txt2img) PLUS one "
-                "pose frame for EVERY action state the goal named — not "
-                "just one. If the goal says punch, kick, jump, duck, "
-                "fireball, you emit a frame for each, for each fighter, "
-                "THIS turn. The user enumerated those poses; deferring them "
-                "to a later turn is the listening bug this override exists "
-                "to fix. Seed every pose frame from that entity's idle with "
-                "`\"from_image\": \"<entity>_idle\"` (regenerated as the same "
-                "character in the new pose — strength is ignored for pose "
-                "frames, the shared description + fixed seed keep the "
-                "character, the pose clause moves the limbs). There is no "
-                "8-10 cap when the goal names the states: the roster size is "
-                "idle + (one frame per named action) per entity. Defer ONLY "
-                "the SECOND \"≥2 animations\" smoothing frame of each action "
-                "and any pose the goal did NOT name — those go in later "
-                "mid-session <assets> turns (same name pattern, same idle "
-                "parent).\n"
-                "  - KEEP EACH PROMPT SHORT (≈6-12 words) and name the "
-                "moved part in a few words. It is the long, near-identical "
-                "PROMPTS — not the number of frames — that make a local "
-                "model loop and never finish the turn; many SHORT pose "
-                "prompts are fine and are what the user asked for. A frame "
-                "that comes back near-identical to idle is flagged and "
-                "blocks done. Example (short prompts, idle parent, one frame "
-                "per named action):\n"
-                "      <assets>[\n"
-                "        {\"name\":\"<e1>_idle\", \"prompt\":\"... standing\"},\n"
-                "        {\"name\":\"<e1>_punch\", \"prompt\":\"... right arm extended, fist out\","
-                " \"from_image\":\"<e1>_idle\"},\n"
-                "        {\"name\":\"<e1>_kick\", \"prompt\":\"... right leg raised high, foot out\","
-                " \"from_image\":\"<e1>_idle\"},\n"
-                "        {\"name\":\"<e1>_jump\", \"prompt\":\"... legs tucked, mid-air leap\","
-                " \"from_image\":\"<e1>_idle\"},\n"
-                "        {\"name\":\"<e1>_duck\", \"prompt\":\"... crouched low, knees bent\","
-                " \"from_image\":\"<e1>_idle\"},\n"
-                "        {\"name\":\"<e2>_idle\", \"prompt\":\"... standing\"},\n"
-                "        {\"name\":\"<e2>_punch\", \"prompt\":\"... right arm extended, fist out\","
-                " \"from_image\":\"<e2>_idle\"}\n"
-                "        // ...one frame per named action, for EACH entity\n"
-                "      ]</assets>\n"
-                "  - In the JS loader, key sprites by `entity_state` "
-                "name and advance the active state per entity based on "
-                "game events (selected → walk, captured → smash, "
-                "settled → idle). Plan the FULL game rules + AI in "
-                "<plan>; you'll write them in iter 1.\n"
-                "This guidance is genre-agnostic; it just makes sure "
-                "the user gets the frames they asked for.\n"
+                load_plan_nudge("scope-pacing-multiframe")
+                .replace("{logic_kws}", logic_kws)
+                .replace("{mf_kws}", mf_kws)
             )
         else:
-            scope_nudge = (
-                "\n\nSCOPE-PACING NUDGE — your goal combines visual "
-                "content (<assets>) with heavy game-rule / AI logic "
-                f"(matched: {logic_kws}). When both are present, weak "
-                "local LLMs tend to concatenate two drafts in one "
-                "stream because the file gets too long to keep "
-                "coherent in a single completion.\n"
-                "Strategy for THIS turn:\n"
-                "  - Plan a base roster of <assets>: ONE sprite per "
-                "visual entity (idle pose only). DO NOT add walk-cycle "
-                "frames or death/impact VFX to the roster yet.\n"
-                "  - Plan the FULL game rules + AI in <plan>; you'll "
-                "write them in iter 1.\n"
-                "  - The harness accepts mid-session <assets> blocks — "
-                "you can request walk frames / VFX in a LATER turn "
-                "after iter 1 is verified clean. The asset roster is "
-                "per-turn, not per-session.\n"
-                "This is genre-agnostic guidance, not a rule about your "
-                "specific goal — it just protects the iter-1 stream "
-                "from overload.\n"
+            scope_nudge = load_plan_nudge("scope-pacing").replace(
+                "{logic_kws}", logic_kws
             )
 
     # Phase 0.9 — multi-frame nudge fires INDEPENDENTLY of scope-pacing
@@ -1518,34 +1377,8 @@ def plan_instruction(
     multi_frame_nudge = ""
     if multi_frame_keywords and not scope_nudge:
         mf_kws = ", ".join(repr(k) for k in multi_frame_keywords)
-        multi_frame_nudge = (
-            "\n\nMULTI-FRAME INTENT DETECTED — your goal mentions "
-            f"{mf_kws}. The user wants the entity to ANIMATE: a series of "
-            "frames where the body parts move (walk cycle, attack swing), "
-            "cycled at runtime — not one sprite slid around. Seed EVERY "
-            "motion frame from the entity's IDLE base "
-            "(`from_image: <entity>_idle`, NOT the previous frame) — the "
-            "frame is regenerated as the same character in the new pose "
-            "(the shared description + fixed seed keep the character; the "
-            "pose clause moves the limbs). Name the moved part in a FEW "
-            "WORDS ('left leg forward'). A near-identical frame is flagged "
-            "and BLOCKS done.\n"
-            "THIS turn, emit each entity's idle PLUS one pose frame for "
-            "EVERY action state the goal named — if it says punch, kick, "
-            "jump, duck, fireball, emit a frame for each, for each entity, "
-            "NOW. The user enumerated those poses; deferring them to a "
-            "later turn is the listening bug this directive exists to fix. "
-            "There is no 8-10 entry cap when the goal names the states: the "
-            "roster is idle + (one frame per named action) per entity. "
-            "Defer ONLY the SECOND '≥2 animations' smoothing frame of each "
-            "action and any pose the goal did NOT name to later mid-session "
-            "<assets> turns.\n"
-            "KEEP EACH PROMPT SHORT (≈6-12 words). It is the long, "
-            "near-identical PROMPTS — not the number of frames — that make "
-            "a local model loop and never finish the turn; many SHORT pose "
-            "prompts are fine and are exactly what the user asked for. "
-            "Genre-agnostic: describes rendering shape, not subject "
-            "matter.\n"
+        multi_frame_nudge = load_plan_nudge("multi-frame").replace(
+            "{mf_kws}", mf_kws
         )
 
     # P1 (MK trace 20260528): seed continuation directive.
@@ -1592,28 +1425,7 @@ def plan_instruction(
 
     minimal_nudge = ""
     if force_minimal_first_build:
-        minimal_nudge = (
-            "\n\nRESTART RECOVERY — MINIMAL FIRST BUILD: a previous attempt "
-            "at this goal failed at the first-build stage (dead canvas, "
-            "identical-reply loop, or parse rejection on a too-large file). "
-            "For THIS attempt, scope the FIRST <html_file> deliberately "
-            "smaller:\n"
-            "  - <criteria>: 2-3 acceptance bullets MAXIMUM, covering "
-            "renderer + ONE input + ONE moving entity. Defer enemies, "
-            "pickups, HUD, sounds wiring, animation states, win/lose "
-            "polish to <todos> for later patch turns.\n"
-            "  - <probes>: 3-4 short JS probes against the small core "
-            "(window.gameState exists, raf_ran, player position changes "
-            "on keydown). No probes for features you're not shipping yet.\n"
-            "  - <assets>: emit the SAME asset names you used before — "
-            "the diffuser cache will return them instantly. Add no new "
-            "names this turn. If a previous attempt asked for 24 sprites "
-            "and the file still doesn't run, the issue isn't art.\n"
-            "  - The plan SHOULD list the deferred features in <plan>'s "
-            "'Risky bits' section so iter 1 stays focused.\n"
-            "Genre-agnostic; this nudge fires from observable restart "
-            "history, not the goal text.\n"
-        )
+        minimal_nudge = load_plan_nudge("minimal-first-build")
 
     body = (
         PLAN_INSTRUCTION + art_nudge + threed_nudge + wireframe_nudge
