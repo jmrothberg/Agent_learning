@@ -1,91 +1,135 @@
-# HARNESS_DEBUG.md — debug a bad session
+# HARNESS_DEBUG.md — when a build goes wrong
 
-The harness **detects and coaches**; it does not make the model write better code in one session.
-If quality flat-lines, find the bottleneck (below), not “add another detector.”
+This file is for **you** when a game session looks broken, stuck, or “TEST OK” but plays badly.
 
-Tuning rules and mistake traps: **`FOR_NEXT_LLM.md`**. Commands and env: **`CLAUDE.md`**.
+The browser test **finds problems and tells the model what to fix**. It does not write the game
+for you. If the same bug keeps happening after many tries, the problem is usually one of the buckets
+below — not “we need one more automatic check.”
 
-## Mental model
+More tuning traps: **`FOR_NEXT_LLM.md`**. Commands and env vars: **`CLAUDE.md`**.
 
-Most “agent failures” are **verifier failures** — `ok=True` while broken, so the fix loop never runs.
-Probes check **state**; gates check **behavior and pixels**. When debugging: open the game, drive
-it, read screenshots — never trust “TEST OK” alone.
+---
 
-## Gates (`tools.py` — all genre-free; hard gates flip `ok=False`)
+## Rule #1: play the game yourself
 
-| Gate | What it catches |
-|------|-----------------|
-| **PLAYER-STUCK** | Movement key registers but no position leaf changes (wall spawn, blocked collision) |
-| **ACTION_DRAWN_NOT_SPRITED** | Action changed canvas via code-draw only — no new sprite |
-| **CODE_DRAWN_OVER_SPRITE** | Sprite drawn but stroke/arc “motion lines” on top |
-| **ASSETS_LOADED_BUT_UNDRAWN** | PNG loaded, never `drawImage` / texture bind (key mismatch) |
-| **PROCEDURAL_REGRESSION_SUSPECTED** | Many sprites declared; canvas mostly big fillRects |
-| **ENTITY-NOT-RENDERED** | Entity in `state` with x/y not drawn |
-| **STATIC-ACTION** | Action key holds one pose while game animates elsewhere |
-| **Frozen-canvas** | RAF runs but pixels unchanged (and input didn’t explain it) |
-| **Micro-probes** | Truncated HTML, bracket imbalance, elision sentinels (pre-Chromium) |
-| **Model `<probes>`** | Phase-A acceptance checks evaluated each iter |
-| **Opening-book checks** | Retrieved memory recipes (e.g. P&C chain only when goal is P&C) |
+The agent can report **TEST OK** while the game is still wrong — for example the code says
+`state.player.x` changed but the sprite never moved, or art loaded but never got drawn.
 
-**Advisory only (never gate):** dead / near-identical sprite frames; harness-env pointer-lock noise.
+**Always:** open the `.html`, play it, watch Chromium if the TUI is running, look at screenshots
+under the session folder. Do not trust green test text alone.
 
-Per-action frames save to the trace as `iter_NN_action_<Key>.png`.
+---
 
-## Visual critic (`/vlm-critique`)
+## What the browser checks (plain English)
 
-Mechanism-keyed yes/no checklist vs screenshots — catches facing/pose bugs probes miss. Requires a
-VLM backend; skips on text-only models. See **`FOR_NEXT_LLM.md`** for prefill/abstain/fix_hint traps.
+These live in `tools.py`. When one fires hard, the iteration **fails** and the model gets a fix
+prompt.
 
-## Debug: start with the timeline
+| Name | What it means |
+|------|----------------|
+| **PLAYER-STUCK** | You pressed a move key but the player did not move (often spawned inside a wall). |
+| **ACTION_DRAWN_NOT_SPRITED** | Attack key did something on screen, but by drawing shapes/lines — not by showing the kick/punch sprite. |
+| **CODE_DRAWN_OVER_SPRITE** | The right sprite showed, but the model also drew extra lines/flashes on top (fake “motion”). |
+| **ASSETS_LOADED_BUT_UNDRAWN** | PNG files exist on disk but the game never calls `drawImage` (wrong asset name in code). |
+| **PROCEDURAL_REGRESSION_SUSPECTED** | Game declared lots of sprites but the screen is mostly colored rectangles. |
+| **ENTITY-NOT-RENDERED** | Game state says an enemy/player exists at x/y but nothing was drawn there. |
+| **STATIC-ACTION** | You pressed attack but the character stayed in one frozen pose while other things animated. |
+| **Frozen canvas** | Screen pixels never change between frames (and input did not explain it). |
+| **Micro-probes** | Cheap checks *before* opening the browser: broken/truncated HTML, unbalanced `{` `}`. |
+| **Model probes** | Checks the model wrote at plan time (“does `state.player` exist?”, “did score go up?”). |
 
-The `.jsonl` is an **LLM-only artifact** (humans never read it) — it carries only
-milestone + diagnostic events. Live-monitoring chatter (`stream_heartbeat`,
-`stream_progress`) is NOT persisted; its signal (tokens / tok·s / duration /
-prefill) is folded onto `iter_summary`.
+**Warnings only (do not fail the build):** ugly/dead animation frames that look like copies of idle;
+pointer-lock noise from the test environment.
 
-**One command for the whole session** (reuses `render_run_summary`):
+Action screenshots (one per key tested) save next to the trace as `iter_01_action_ArrowRight.png`,
+etc.
+
+---
+
+## Vision review (`/vlm-critique`)
+
+If enabled and you have a **vision-capable** model loaded, a second pass looks at screenshots and
+answers yes/no questions (“Is the fighter facing left?”, “Is a projectile visible?”). Text-only
+models skip this. Details: **`FOR_NEXT_LLM.md`**.
+
+---
+
+## Reading a session log (the `.jsonl` trace)
+
+Each run writes a trace file under `games/…/traces/`. You normally **do not** read the raw file —
+use the summary script:
 
 ```bash
 .venv/bin/python scripts/enrich_trace.py <session-id> --timeline
 ```
 
-One row per iter: `ok · probes · patch N/M · router intent · tok/s · failure_class · blocker`
-(`test_skipped:no_browser` when Chromium was intentionally absent — seed-edit eval).
+Replace `<session-id>` with the folder name, e.g. `bigger_towers__run_20260626_204410_759021`.
 
-### `failure_class` — which layer to fix (on `iter_summary` AND `no_usable_code`)
+That prints **one line per iteration**, roughly:
 
-| Class | Means | Fix where |
-|-------|-------|-----------|
-| **harness_bug** | harness contradicted a correct model/router turn (coaching suppressed, art request cleared, false-positive gate) | agent/harness **code** |
-| **memory_gap** | clean materialize but an avoidable mistake canned guidance should pre-empt (undrawn art on art intent, missed build-order) | add expert guidance to **`memory/`** (not the local model) |
-| **local_llm_limit** | model-side stall, no harness contradiction (deliberation / repetition / silent / wrong envelope) | **local model** limit — mitigate via prompt/format forcing |
-| **none** | nothing actionable to triage | — |
+- Did the test pass?
+- How many probes passed?
+- Did patches apply? (e.g. `3/3` = three patch blocks, all applied)
+- How fast was the model? (tokens per second)
+- **What kind of failure was it?** (see table below)
+- What blocked shipping?
 
-Precedence: `harness_bug` > `memory_gap` > `local_llm_limit`. The canonical
-Fieldrunners iters 4–5 emit `no_usable_code` (not `iter_summary`) — `failure_class`
-lives on both so those failures are one-grep visible.
+**Seed-edit eval runs** (`eval/eval_seed_edits.py`) turn the browser off on purpose. Those lines
+show `test_skipped:no_browser` — that is expected, not a crash.
 
-### Then ~5 follow-up greps
+---
 
-1. **`iter_summary` / `no_usable_code`** — `failure_class` + `failure_reason` first; then
-   `fail_reason`, repeating soft_warnings.
-2. **`structured_compaction`** — early fire + high `pressure` → wrong `num_ctx` or denominator.
-3. **`playbook_injected` / `opening_book_retrieved`** — did memory actually reach the model?
-4. **`visual_critic_*`** — parsed vs abstained/unparseable; `image_count` for action frames.
-5. **`patch_outcome`** — SEARCH-not-found → stale file view (often compaction).
+## Failure types — where to fix things
 
-Then **open the game and drive it.**
+When something goes wrong, the trace tags a **failure type**. Use it to decide *who* should fix it:
 
-## When dozens of tries show no improvement
+| Tag | Plain meaning | You fix it by… |
+|-----|----------------|----------------|
+| **harness_bug** | The test harness or agent logic was wrong — it blocked or mis-coached a turn that should have been fine. | Changing **Python** (`agent.py`, `tools.py`), not the model prompt. |
+| **memory_gap** | Code saved fine, but the model made a mistake your curated hints should have prevented (e.g. art on disk but never drawn on an art-heavy game). | Adding a line to **`memory/playbook.jsonl`** or related `memory/*.jsonl`. |
+| **local_llm_limit** | The local model stalled, looped, went silent, or emitted garbage — the harness did not contradict it. | Prompt/format tweaks, or accept model limits; not a browser bug. |
+| **none** | Nothing special to classify. | Normal iteration friction. |
 
-1. Base model one-shot ceiling  
-2. Playbook / opening-book coverage (Jaccard misses synonyms)  
-3. Visual critic not running or not gating usefully  
-4. Same model as both implementer and reviewer  
+If the model never saved code that turn, look for **`no_usable_code`** instead of **`iter_summary`**
+— same failure tags appear there.
 
-## Key files
+---
 
-`tools.py` · `agent.py` (`run`, `run_visual_critic`, fix prompts) · `assets.py` (loader block) ·
-`backend.py` (MLX sampler, VLM) · `memory/*.jsonl` · `prompts_v1.py`
+## If you need to dig deeper (5 searches in the trace file)
 
-Tests (no GPU/model): `.venv/bin/python -m pytest tests/ -q`
+After the timeline, open the `.jsonl` and search for:
+
+1. **`iter_summary`** or **`no_usable_code`** — read `failure_class` and any `soft_warnings` text.
+2. **`structured_compaction`** — fired too early? Context window may be too small; patches “don’t
+   stick” because the model lost sight of the file.
+3. **`playbook_injected`** / **`opening_book_retrieved`** — did the memory library actually load?
+4. **`visual_critic`** — did the vision review run and parse answers?
+5. **`patch_outcome`** — patch could not find its SEARCH block (often after compaction ate the
+   file context).
+
+Then **play the game again** and compare to what the log claimed.
+
+---
+
+## When nothing improves after many iterations
+
+1. The **base model** may not be able to one-shot this game — that is a model limit, not always a
+   harness bug.
+2. **Memory** may not match your goal words (playbook did not retrieve the right bullet).
+3. **Vision review** may be off, or the loaded model cannot see images.
+4. The **same model** is both coding and reviewing — on one GPU there is no separate “second
+   opinion” unless you stage a VLM on `/model2`.
+
+---
+
+## Files that matter
+
+| File | Role |
+|------|------|
+| `tools.py` | Browser load, input test, gates |
+| `agent.py` | Main loop, fix prompts, compaction |
+| `assets.py` | Sprite generation and loader injection |
+| `memory/*.jsonl` | Curated hints the model reads each run |
+| `prompts_v1.py` | System prompt templates |
+
+Quick regression (no GPU): `.venv/bin/python -m pytest tests/ -q`
