@@ -7,12 +7,15 @@ and CLI never have to know which daemon they are talking to:
     delegates to the existing watchdog/retry helpers in `ollama_io.py`.
 
   * `MLXBackend`     — loads the MLX model in-process and streams via
-    `mlx_lm.stream_generate` directly. No HTTP, no `mlx_lm.server`,
-    no broken pipes. The model is held in a class-level cache so
-    subsequent requests reuse the loaded weights. Cancellation is
-    plumbed through a `threading.Event` that the worker thread checks
-    between tokens, so Ctrl-D in the TUI actually stops a mid-stream
-    call.
+    `mlx_lm.stream_generate` directly. Default for the TUI (reliable,
+    no HTTP). The model is held in a class-level cache so subsequent
+    requests reuse the loaded weights.
+
+  * `MLXServerBackend` — talks to a running `mlx_lm.server` (or any
+    OpenAI-compatible MLX server) over HTTP. Enabled when `MLX_SERVER_URL`
+    or `MLX_HOST` is set, or when `LLM_BACKEND=mlx-server`. Use this
+    for parallel batch testing: N agent clients → one server with
+    continuous batching, one model copy in VRAM.
 
 `detect_backend()` picks an LLM daemon at session start. The rule:
 
@@ -477,6 +480,12 @@ class OllamaBackend(Backend):
 _MLX_OPTION_KEYS: tuple[str, ...] = (
     "temperature", "top_p", "top_k", "min_p",
     "seed", "max_tokens",
+)
+
+# SSE keepalive / prompt-eval progress inside mlx_lm.server streams.
+_MLX_PROGRESS_RE = re.compile(
+    r"(?:keepalive|Prompt processing progress)[:\s]+(\d+)\s*/\s*(\d+)",
+    re.IGNORECASE,
 )
 
 # DeepSeek-V4 Flash needs an even smaller prefill chunk than Pro
@@ -1314,6 +1323,263 @@ class MLXBackend(Backend):
         return True
 
 
+def _strip_ollama_only_fields(messages: list[dict]) -> list[dict]:
+    """Remove fields Ollama uses that mlx_lm.server doesn't understand."""
+    out: list[dict] = []
+    for m in messages:
+        if not isinstance(m, dict):
+            out.append(m)
+            continue
+        out.append({k: v for k, v in m.items() if k != "images"})
+    return out
+
+
+class MLXServerBackend(Backend):
+    """Talks to `mlx_lm.server` via its OpenAI-compatible HTTP API.
+
+    Use when `MLX_SERVER_URL` / `MLX_HOST` is set or
+    `LLM_BACKEND=mlx-server`. Multiple agent processes can share one
+    server process for continuous batching — one model load in VRAM.
+    """
+
+    def __init__(self, info: BackendInfo) -> None:
+        self.info = info
+
+    async def stream_chat(
+        self,
+        messages: list[dict],
+        *,
+        on_token: Callable[[str], None] | None = None,
+        options: dict[str, Any] | None = None,
+        keep_alive: float | str | None = None,
+        stall_seconds: float = 600.0,
+        overall_seconds: float = 1800.0,
+        max_retries: int = 1,
+        on_stall: Callable[[StreamResult, int], None] | None = None,
+        on_progress: Callable[[str, int, int], None] | None = None,
+        cancel_event: asyncio.Event | None = None,
+    ) -> StreamResult:
+        last: StreamResult | None = None
+        for attempt in range(max_retries + 1):
+            result = await self._stream_once(
+                messages,
+                on_token=on_token,
+                options=options,
+                stall_seconds=stall_seconds,
+                overall_seconds=overall_seconds,
+                on_progress=on_progress,
+                cancel_event=cancel_event,
+            )
+            last = result
+            if result.crashed:
+                return result
+            if not result.stalled:
+                return result
+            if on_stall is not None:
+                try:
+                    on_stall(result, attempt)
+                except Exception:
+                    pass
+            if attempt < max_retries:
+                await asyncio.sleep(2.0)
+        assert last is not None
+        return last
+
+    async def _stream_once(
+        self,
+        messages: list[dict],
+        *,
+        on_token: Callable[[str], None] | None,
+        options: dict[str, Any] | None,
+        stall_seconds: float,
+        overall_seconds: float,
+        on_progress: Callable[[str, int, int], None] | None = None,
+        cancel_event: asyncio.Event | None = None,
+    ) -> StreamResult:
+        import httpx
+
+        opts = dict(options or {})
+        body: dict[str, Any] = {
+            "model": self.info.model,
+            "messages": _strip_ollama_only_fields(messages),
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        for key in _MLX_OPTION_KEYS:
+            if key in opts:
+                body[key] = opts[key]
+        env_cap = (os.environ.get("MLX_MAX_TOKENS") or "").strip()
+        default_max = int(env_cap) if env_cap.isdigit() and int(env_cap) > 0 else 16384
+        body.setdefault("max_tokens", default_max)
+
+        started = time.monotonic()
+        parts: list[str] = []
+        n_tokens = 0
+        stalled = False
+        looped = False
+        crashed = False
+        error_message: str | None = None
+        stall_at: int | None = None
+        prompt_tokens: int | None = None
+        completion_tokens: int | None = None
+        repeat = RepetitionDetector()
+        prompt_eval_done_at: float | None = None
+        _MLX_GENERATION_KICKOFF_SECONDS = 30.0
+        # Activity-aware stall (mirrors in-process MLX): SSE prefill progress
+        # lines reset the per-read wait_for but must NOT extend the quiet
+        # window forever — tune_round1_r2 hung 2h+ on planning with only
+        # stream_start in the trace while progress kept the socket alive.
+        last_activity_at = started
+        _line_poll_s = min(stall_seconds, 30.0)
+
+        try:
+            async with httpx.AsyncClient(
+                base_url=self.info.endpoint, timeout=None,
+            ) as client:
+                async with client.stream(
+                    "POST",
+                    "/v1/chat/completions",
+                    json=body,
+                    headers={"accept": "text/event-stream"},
+                ) as response:
+                    response.raise_for_status()
+                    ait = response.aiter_lines().__aiter__()
+                    while True:
+                        if cancel_event is not None and cancel_event.is_set():
+                            stalled = True
+                            stall_at = n_tokens
+                            break
+                        if time.monotonic() - started > overall_seconds:
+                            stalled = True
+                            stall_at = n_tokens
+                            error_message = (
+                                f"mlx_lm.server exceeded overall timeout "
+                                f"({overall_seconds:.0f}s)"
+                            )
+                            break
+                        try:
+                            line = await asyncio.wait_for(
+                                ait.__anext__(), timeout=_line_poll_s,
+                            )
+                        except StopAsyncIteration:
+                            break
+                        except asyncio.TimeoutError:
+                            # Must run on read timeout — after prefill the SSE
+                            # socket goes quiet until tokens arrive; if generate
+                            # wedged, no lines arrive and the old check below
+                            # this block never ran (tune_round1_r3 hung 2.5m+).
+                            if (
+                                prompt_eval_done_at is not None
+                                and n_tokens == 0
+                                and time.monotonic() - prompt_eval_done_at
+                                > _MLX_GENERATION_KICKOFF_SECONDS
+                            ):
+                                crashed = True
+                                error_message = (
+                                    "mlx_lm.server finished prompt eval but emitted "
+                                    "no tokens (Metal OOM / generate thread crash?)"
+                                )
+                                stall_at = 0
+                                break
+                            if (
+                                time.monotonic() - last_activity_at > stall_seconds
+                                and n_tokens == 0
+                            ):
+                                stalled = True
+                                stall_at = 0
+                                error_message = (
+                                    f"mlx_lm.server quiet for {stall_seconds:.0f}s "
+                                    "before first token"
+                                )
+                                break
+                            continue
+
+                        if not line:
+                            continue
+                        if not line.startswith("data:"):
+                            continue
+                        payload = line[len("data:"):].lstrip()
+                        if not payload:
+                            continue
+                        if payload == "[DONE]":
+                            break
+                        if payload.startswith(":"):
+                            m = _MLX_PROGRESS_RE.search(payload)
+                            if m:
+                                cur, tot = int(m.group(1)), int(m.group(2))
+                                last_activity_at = time.monotonic()
+                                if on_progress is not None:
+                                    try:
+                                        on_progress("prompt_eval", cur, tot)
+                                    except Exception:
+                                        pass
+                                if cur >= tot and prompt_eval_done_at is None:
+                                    prompt_eval_done_at = time.monotonic()
+                            continue
+                        try:
+                            chunk = json.loads(payload)
+                        except json.JSONDecodeError:
+                            continue
+                        usage = chunk.get("usage")
+                        if isinstance(usage, dict):
+                            pt = usage.get("prompt_tokens")
+                            ct = usage.get("completion_tokens")
+                            if isinstance(pt, int):
+                                prompt_tokens = pt
+                            if isinstance(ct, int):
+                                completion_tokens = ct
+                        choices = chunk.get("choices") or []
+                        if not choices:
+                            continue
+                        delta = choices[0].get("delta") or {}
+                        piece = delta.get("content") or ""
+                        if not piece:
+                            continue
+                        parts.append(piece)
+                        n_tokens += 1
+                        last_activity_at = time.monotonic()
+                        if on_token is not None:
+                            try:
+                                on_token(piece)
+                            except Exception:
+                                pass
+                        if repeat.feed(piece):
+                            looped = True
+                            stall_at = n_tokens
+                            break
+        except (httpx.HTTPError, OSError) as e:
+            stalled = True
+            crashed = True
+            error_message = f"{type(e).__name__}: {e}"
+            if stall_at is None:
+                stall_at = n_tokens
+
+        if stalled and not crashed and prompt_eval_done_at is not None and n_tokens == 0:
+            crashed = True
+            if error_message is None:
+                error_message = (
+                    "mlx_lm.server stalled after prompt eval with no output tokens"
+                )
+
+        return StreamResult(
+            text="".join(parts),
+            tokens=n_tokens,
+            duration_s=time.monotonic() - started,
+            stalled=stalled or looped or crashed,
+            stall_at_token=stall_at,
+            looped=looped,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            crashed=crashed,
+            error_message=error_message,
+            loop_kind=repeat.stall_reason if looped else None,
+            loop_line=repeat.loop_line if looped else None,
+        )
+
+    async def is_vlm(self) -> bool:
+        return False
+
+
 # -----------------------------------------------------------------------------
 # Cloud backends — OpenAI and Anthropic.
 #
@@ -1853,11 +2119,27 @@ def detect_backend(prefer: str | None = None) -> BackendInfo:
     if prefer == "mlx":
         info = _try_mlx()
         if info is None:
+            if _mlx_server_mode_requested():
+                raise RuntimeError(
+                    "MLX server mode selected but mlx_lm.server is not reachable.\n"
+                    f"Start it with: mlx_lm.server --model <path> --port 8080\n"
+                    f"Or set MLX_SERVER_URL (currently {_mlx_server_endpoint_url()!r})."
+                )
             raise RuntimeError(
                 "MLX backend selected but no MLX model could be resolved.\n"
                 "Set MLX_MODEL=<path-or-id> to point at a downloaded MLX "
                 "model, or place a model under ~/MLX_Models/ so it's "
                 "auto-discovered."
+            )
+        return info
+
+    if prefer == "mlx-server":
+        info = _try_mlx_server()
+        if info is None:
+            raise RuntimeError(
+                "LLM_BACKEND=mlx-server but mlx_lm.server is not reachable.\n"
+                f"Start it with: mlx_lm.server --model <path> --port 8080\n"
+                f"Endpoint probed: {_mlx_server_endpoint_url()!r}"
             )
         return info
 
@@ -1910,6 +2192,9 @@ def make_backend(info: BackendInfo) -> Backend:
     if info.name == "ollama":
         return OllamaBackend(info)
     if info.name == "mlx":
+        ep = (info.endpoint or "").strip()
+        if ep and ep != _MLX_IN_PROCESS_ENDPOINT:
+            return MLXServerBackend(info)
         return MLXBackend(info)
     if info.name == "openai":
         return OpenAIBackend(info)
@@ -2461,17 +2746,102 @@ def _ollama_full_fallback() -> BackendInfo | None:
 
 
 _MLX_IN_PROCESS_ENDPOINT = "in-process"
+_MLX_PROC_MODEL_RE = re.compile(r"--model[=\s]+(\S+)")
+
+
+def _mlx_server_mode_requested() -> bool:
+    """True when the agent should talk to mlx_lm.server over HTTP."""
+    prefer = (os.environ.get("LLM_BACKEND") or "").strip().lower()
+    if prefer == "mlx-server":
+        return True
+    return bool(
+        (os.environ.get("MLX_SERVER_URL") or os.environ.get("MLX_HOST") or "").strip()
+    )
+
+
+def _mlx_server_endpoint_url() -> str:
+    raw = (
+        os.environ.get("MLX_SERVER_URL")
+        or os.environ.get("MLX_HOST")
+        or ""
+    ).strip().rstrip("/")
+    if not raw:
+        return "http://127.0.0.1:8080"
+    if not raw.startswith("http"):
+        raw = "http://" + raw
+    return raw
 
 
 def _mlx_endpoint() -> str:
-    """Pseudo-endpoint string for the in-process MLX backend.
-
-    Kept as a public function so callers / status displays that show
-    'where is the model running?' have something stable to print.
-    No HTTP is involved; the model lives in this Python process's
-    GPU VRAM.
-    """
+    """Endpoint label for status surfaces."""
+    if _mlx_server_mode_requested():
+        return _mlx_server_endpoint_url()
     return _MLX_IN_PROCESS_ENDPOINT
+
+
+def _mlx_process_model_arg() -> str | None:
+    """Read `--model X` from a running mlx_lm.server process."""
+    try:
+        r = subprocess.run(
+            ["ps", "-axo", "command"],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if r.returncode != 0:
+        return None
+    for line in r.stdout.splitlines():
+        if "mlx_lm.server" not in line and "mlx_lm/server.py" not in line:
+            continue
+        m = _MLX_PROC_MODEL_RE.search(line)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _try_mlx() -> BackendInfo | None:
+    """Resolve MLX backend — server mode when env requests it, else in-process."""
+    if _mlx_server_mode_requested():
+        return _try_mlx_server()
+    return _try_mlx_in_process()
+
+
+def _try_mlx_in_process() -> BackendInfo | None:
+    """Resolve which MLX model to load in-process. None if nothing usable."""
+    env_model = (os.environ.get("MLX_MODEL") or "").strip()
+    if env_model:
+        return BackendInfo(
+            name="mlx", model=env_model,
+            source=f"MLX_MODEL env: {env_model!r}",
+            endpoint=_MLX_IN_PROCESS_ENDPOINT,
+            context_length=_read_mlx_context_length(env_model),
+        )
+
+    local = list_local_mlx_models()
+    chat_local = [p for p in local if _is_chat_capable_tag(p)]
+    if len(chat_local) == 1:
+        path = chat_local[0]
+        return BackendInfo(
+            name="mlx", model=path,
+            source=f"only local MLX chat model: {os.path.basename(path)!r}",
+            endpoint=_MLX_IN_PROCESS_ENDPOINT,
+            context_length=_read_mlx_context_length(path),
+        )
+    if chat_local:
+        path = chat_local[0]
+        return BackendInfo(
+            name="mlx", model=path,
+            source=(
+                f"first of {len(chat_local)} local MLX models: "
+                f"{os.path.basename(path)!r} "
+                "(set MLX_MODEL to override)"
+            ),
+            endpoint=_MLX_IN_PROCESS_ENDPOINT,
+            context_length=_read_mlx_context_length(path),
+        )
+    return None
 
 
 def _read_mlx_context_length(model_path: str) -> int | None:
@@ -2503,45 +2873,57 @@ def _read_mlx_context_length(model_path: str) -> int | None:
     return None
 
 
-def _try_mlx() -> BackendInfo | None:
-    """Resolve which MLX model to load in-process. None if nothing usable.
+def _try_mlx_server() -> BackendInfo | None:
+    """Return BackendInfo when mlx_lm.server is reachable. None otherwise.
 
-    Resolution order:
-      1. MLX_MODEL env var (path or HF id).
-      2. Single locally-downloaded MLX model under MLX_MODELS_DIR /
-         ~/MLX_Models / HF cache (unambiguous).
-      3. First locally-downloaded MLX model (with a warning in source).
+    Model resolution order:
+      1. MLX_MODEL env var.
+      2. `--model` on the running mlx_lm.server process.
+      3. Sole entry in /v1/models, else first entry.
     """
+    endpoint = _mlx_server_endpoint_url()
+    data = _http_get_json(endpoint.rstrip("/") + "/v1/models", timeout=1.0)
+    if data is None:
+        return None
+    available: list[str] = []
+    for m in (data.get("data") or []) if isinstance(data, dict) else []:
+        if isinstance(m, dict) and m.get("id"):
+            available.append(str(m["id"]))
+
     env_model = (os.environ.get("MLX_MODEL") or "").strip()
     if env_model:
         return BackendInfo(
             name="mlx", model=env_model,
-            source=f"MLX_MODEL env: {env_model!r}",
-            endpoint=_MLX_IN_PROCESS_ENDPOINT,
+            source=f"MLX_MODEL env → mlx_lm.server at {endpoint!r}",
+            endpoint=endpoint,
             context_length=_read_mlx_context_length(env_model),
         )
 
-    local = list_local_mlx_models()
-    chat_local = [p for p in local if _is_chat_capable_tag(p)]
-    if len(chat_local) == 1:
-        path = chat_local[0]
+    proc_model = _mlx_process_model_arg()
+    if proc_model:
         return BackendInfo(
-            name="mlx", model=path,
-            source=f"only local MLX chat model: {os.path.basename(path)!r}",
-            endpoint=_MLX_IN_PROCESS_ENDPOINT,
-            context_length=_read_mlx_context_length(path),
+            name="mlx", model=proc_model,
+            source=f"mlx_lm.server --model {proc_model!r}",
+            endpoint=endpoint,
+            context_length=_read_mlx_context_length(proc_model),
         )
-    if chat_local:
-        path = chat_local[0]
+
+    if len(available) == 1:
+        mid = available[0]
         return BackendInfo(
-            name="mlx", model=path,
+            name="mlx", model=mid,
+            source=f"only MLX model in /v1/models: {mid!r}",
+            endpoint=endpoint,
+        )
+    if available:
+        mid = available[0]
+        return BackendInfo(
+            name="mlx", model=mid,
             source=(
-                f"first of {len(chat_local)} local MLX models: "
-                f"{os.path.basename(path)!r} "
-                "(set MLX_MODEL to override)"
+                f"first of {len(available)} in /v1/models: {mid!r} "
+                "(set MLX_MODEL or restart mlx_lm.server with --model)"
             ),
-            endpoint=_MLX_IN_PROCESS_ENDPOINT,
-            context_length=_read_mlx_context_length(path),
+            endpoint=endpoint,
         )
     return None
 
@@ -2680,13 +3062,28 @@ def unload_all_ollama_models(endpoint: str | None = None) -> list[tuple[str, boo
 
 
 def mlx_server_pids() -> list[int]:
-    """Always returns [] now that MLX runs in-process.
-
-    Kept as a no-op shim for chat.py /unload-mlx surfaces; once those
-    surfaces are reworked for the in-process model this function can
-    be deleted.
-    """
-    return []
+    """PIDs of running mlx_lm.server processes — for /unload mlx hints."""
+    try:
+        r = subprocess.run(
+            ["ps", "-axo", "pid,command"],
+            capture_output=True, text=True, timeout=2.0,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    if r.returncode != 0:
+        return []
+    pids: list[int] = []
+    for line in r.stdout.splitlines():
+        if "mlx_lm.server" not in line and "mlx_lm/server.py" not in line:
+            continue
+        parts = line.strip().split(None, 1)
+        if not parts:
+            continue
+        try:
+            pids.append(int(parts[0]))
+        except ValueError:
+            continue
+    return pids
 
 
 def list_ollama_inventory() -> tuple[list[str], set[str]]:
@@ -2710,16 +3107,26 @@ def list_ollama_inventory() -> tuple[list[str], set[str]]:
 
 
 def list_mlx_inventory() -> tuple[list[str], str | None]:
-    """(downloaded_chat_models, active_model_or_None) — for /list display.
+    """(downloaded_chat_models, active_model_or_None) — for /list display."""
+    if _mlx_server_mode_requested():
+        endpoint = _mlx_server_endpoint_url()
+        data = _http_get_json(endpoint.rstrip("/") + "/v1/models", timeout=1.0)
+        if data is None:
+            return [], None
+        all_ids = [
+            m["id"] for m in (data.get("data") or [])
+            if isinstance(m, dict) and m.get("id")
+        ]
+        active = (
+            _mlx_process_model_arg()
+            or (os.environ.get("MLX_MODEL") or "").strip()
+            or None
+        )
+        downloaded = [name for name in all_ids if _is_chat_capable_tag(name)]
+        if active and active not in downloaded and active in all_ids:
+            downloaded.append(active)
+        return downloaded, active
 
-    "Active" = whatever the in-process MLX backend has currently loaded
-    (MLXBackend._loaded_path), or the env-set MLX_MODEL if nothing's
-    loaded yet this session.
-
-    The list is built from a local disk scan of MLX_MODELS_DIR + the
-    platform defaults; the active model is appended even if it would
-    otherwise be filtered.
-    """
     active = MLXBackend._loaded_path or (os.environ.get("MLX_MODEL") or "").strip() or None
     local_paths = list_local_mlx_models()
 
@@ -2861,10 +3268,7 @@ def list_local_mlx_models() -> list[str]:
 
 
 def mlx_endpoint_url() -> str:
-    """Public alias for the MLX endpoint string. Returns "in-process" now
-    that MLX runs in this Python process — kept as a function so callers
-    that render an endpoint label have something stable to display.
-    """
+    """Public alias for the MLX endpoint (in-process label or server URL)."""
     return _mlx_endpoint()
 
 

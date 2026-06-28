@@ -529,3 +529,88 @@ def test_dk_trace_20260514_probes_classify_all_structural():
         f"DK 20260514 probes should classify as all-structural "
         f"but got ratio={result['ratio']}: dynamic={result['dynamic']}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Partial-quarantine gate (serial10 chess game 5) + strong-model regression
+# baseline (serial10 games 2 Asteroids / 7 Mario shipped clean).
+# ---------------------------------------------------------------------------
+
+
+def _clean_recipe_report() -> dict:
+    """A clean, recipe-matched game (mirrors serial10 games 2/7): every probe
+    passes, no eval/syntax errors, healthy page — the strong-model case the
+    partial-quarantine gate must NEVER flip to ok=False."""
+    return {
+        "ok": True,
+        "errors": [],
+        "soft_warnings": [],
+        "page_errors": [],
+        "console_errors": [],
+        "canvas": {"blank": False},
+        "input_test": {"ran": True, "any_change": True},
+        "probes": [
+            {"name": "ship_moves", "expr": "state.ship.x !== 400", "ok": True, "err": ""},
+            {"name": "frame_alive", "expr": "state.frame > 1", "ok": True, "err": ""},
+        ],
+    }
+
+
+def test_clean_recipe_matched_game_stays_ok_no_partial_gate(tmp_path: Path):
+    """Strong-model regression baseline: a recipe-matched game where every
+    probe PASSES (serial10 Asteroids/Mario) must stay ok=True. The
+    partial-quarantine gate only fires on a SYNTAX quarantine, so a clean
+    build can never be over-gated by it."""
+    a = _make_agent(tmp_path)
+    a._active_visual_playtest_recipe_id = "canvas-top-down-action"  # recipe matched
+    report = _clean_recipe_report()
+    a._probes = list(report["probes"])
+    a._handle_probe_eval_errors(report, iteration=2)
+    assert report["ok"] is True
+    assert a._partial_quarantine_gate_used == 0
+    assert not report.get("soft_warnings")
+
+
+def test_partial_quarantine_gate_blocks_clean_ship_on_recipe_match(tmp_path: Path):
+    """serial10 chess game 5: a behavioral probe syntax-quarantined while
+    OTHER probes survive used to ship clean (5/6 + <confirm_done/>). On a
+    recipe-matched game the partial-quarantine gate now holds ok=False so the
+    dead behavioral gate cannot be masked."""
+    a = _make_agent(tmp_path)
+    a._active_visual_playtest_recipe_id = "canvas-board-game"
+    a._probes = list(_syntax_error_report()["probes"])
+    report = _syntax_error_report()
+    a._handle_probe_eval_errors(report, iteration=1)
+    assert report["ok"] is False
+    assert a._partial_quarantine_gate_used == 1
+    assert any(
+        "malformed" in str(sw).lower()
+        for sw in (report.get("soft_warnings") or [])
+    )
+
+
+def test_partial_quarantine_gate_skipped_without_recipe_match(tmp_path: Path):
+    """Conservative scoping: the gate fires ONLY on recipe-matched games. A
+    novel/unmatched game with a syntax-quarantined probe is NOT gated by it
+    (it ships on the harness's own checks), so the gate can never over-gate
+    an out-of-genre build from a strong model."""
+    a = _make_agent(tmp_path)
+    # _active_visual_playtest_recipe_id stays None (no recipe matched)
+    a._probes = list(_syntax_error_report()["probes"])
+    report = _syntax_error_report()
+    a._handle_probe_eval_errors(report, iteration=1)
+    assert a._partial_quarantine_gate_used == 0
+
+
+def test_partial_quarantine_gate_is_bounded_by_cap(tmp_path: Path):
+    """The gate is bounded: after _PARTIAL_QUARANTINE_GATE_CAP iters it stops
+    blocking so a model that cannot author a parseable replacement does not
+    loop forever (mirrors the all-probes-quarantined gate's anti-stuck
+    contract)."""
+    a = _make_agent(tmp_path)
+    a._active_visual_playtest_recipe_id = "canvas-board-game"
+    for it in range(1, a._PARTIAL_QUARANTINE_GATE_CAP + 3):
+        a._probes = list(_syntax_error_report()["probes"])
+        report = _syntax_error_report()
+        a._handle_probe_eval_errors(report, iteration=it)
+    assert a._partial_quarantine_gate_used == a._PARTIAL_QUARANTINE_GATE_CAP

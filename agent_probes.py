@@ -149,6 +149,12 @@ class ProbeHandlingMixin:
     # still ships on the harness's own input/canvas/error checks, not loops).
     _ALL_PROBES_QUARANTINED_GATE_CAP = 2
 
+    # Max iters the PARTIAL-quarantine gate (serial10 chess game 5) blocks a
+    # clean ship when SOME probes survive but a behavioral probe was
+    # syntax-quarantined on a recipe-matched game. Bounded so a model that
+    # cannot author a parseable replacement does not loop forever.
+    _PARTIAL_QUARANTINE_GATE_CAP = 2
+
     # Name of the single harness-authored self-heal probe (C2). Distinct so it
     # is easy to recognise, reconcile, and never confuse with a model probe.
     _OUTLINE_STATE_PROBE_NAME = "auto_outline_state_present"
@@ -425,6 +431,50 @@ class ProbeHandlingMixin:
                 self._trace({
                     "kind": "all_probes_quarantined_advisory",
                     "iteration": iteration,
+                })
+
+        # Partial-quarantine gate (serial10 chess game 5): even when SOME
+        # probes survive, if a model-authored probe was quarantined for a
+        # SYNTAX error on a recipe-matched game, a behavioral self-check was
+        # silently lost. The surviving probes (canvas_present, state_exposed,
+        # …) can report a clean 5/6 pass that enables <done/>/<confirm_done/>
+        # while the move-commit gate is dead. Hold the clean ship for a
+        # BOUNDED number of iters so the model must re-emit a valid
+        # replacement probe. Scoped to recipe-matched games (a known genre
+        # with behavioral expectations) so novel/unmatched games are
+        # untouched; strong models rarely emit syntax errors so this seldom
+        # triggers for them = no penalty.
+        if quarantine_names and report.get("probes"):
+            syntax_quarantined = any(
+                _is_syntax_error(p)
+                for p in eval_failing
+                if str(p.get("name") or "probe") in quarantine_names
+            )
+            recipe_matched = bool(
+                getattr(self, "_active_visual_playtest_recipe_id", None)
+            )
+            if (
+                syntax_quarantined
+                and recipe_matched
+                and self._partial_quarantine_gate_used
+                < self._PARTIAL_QUARANTINE_GATE_CAP
+            ):
+                self._partial_quarantine_gate_used += 1
+                sw = list(report.get("soft_warnings") or [])
+                sw.append(
+                    "A behavioral acceptance probe was quarantined as "
+                    "malformed (syntax error) on a recipe-matched game, so a "
+                    "core mechanic is no longer verified. Re-emit "
+                    "<probes>...</probes> with a corrected expression that "
+                    "reads real window.state fields before this can ship clean."
+                )
+                report["soft_warnings"] = sw
+                self._trace({
+                    "kind": "partial_quarantine_gate",
+                    "iteration": iteration,
+                    "used": self._partial_quarantine_gate_used,
+                    "cap": self._PARTIAL_QUARANTINE_GATE_CAP,
+                    "quarantined": sorted(quarantine_names),
                 })
 
         # C1: before a probe is quarantined, avoid blocking on eval-error-only

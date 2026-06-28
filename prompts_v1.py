@@ -257,15 +257,18 @@ ASSETS_FORMAT = FormatSpec(
         "force everything into one bucket — the typical game has "
         "sprite walls/enemies AND procedural cell-based destructibles.",
         "Prompts should be SHORT and visual, and the ART STYLE should "
-        "MATCH THE GOAL. If the user asks for high-resolution / detailed / "
-        "HD / realistic / cinematic art (or just a polished modern look), "
-        "describe DETAILED high-resolution art — 'high-resolution detailed "
-        "2D game character, crisp shading, clean outline, transparent "
-        "background' — NOT blocky '8-bit' / 'pixel-art' (that looks "
-        "low-res and is usually NOT what a 'best graphics / highest "
-        "resolution' request wants). Use pixel-art / 8-bit ONLY when the "
-        "goal explicitly asks for retro / 8-bit / pixel style. Always use "
-        "transparent backgrounds for game sprites.",
+        "MATCH THE GOAL. Default for canvas sprite games: illustrated 2D "
+        "game art — 'illustrated 2D game sprite, clean outline, cel/flat "
+        "shading, transparent background' — NOT photorealistic photo, NOT "
+        "3D render, NOT stock-photo realism. Only use photorealistic / "
+        "cinematic / 'realistic photo' wording when the goal EXPLICITLY "
+        "asks for realistic / photo / cinematic art. If the user asks for "
+        "high-resolution / detailed / HD / polished modern art (without "
+        "saying photo-real), describe DETAILED high-resolution ILLUSTRATED "
+        "2D sprites — crisp shading, clean outline, transparent background "
+        "— NOT blocky '8-bit' / 'pixel-art' unless the goal explicitly asks "
+        "for retro / 8-bit / pixel style. Always use transparent backgrounds "
+        "for game sprites.",
         "Optional `size` is a string (\"64x64\", \"256x192\") or an int "
         "(square). Default 512 px square — keeps Z-Image's detail and "
         "lets the game downscale at draw time as needed. Override per "
@@ -1293,9 +1296,11 @@ def plan_instruction(
         video_keywords = _detect_video_intent(goal)
         qte_keywords = _detect_qte_intent(goal)
     art_nudge = ""
+    illustrated_sprite_nudge = ""
     if art_keywords:
         kws = ", ".join(repr(k) for k in art_keywords)
         art_nudge = load_plan_nudge("art").replace("{kws}", kws)
+        illustrated_sprite_nudge = load_plan_nudge("illustrated-2d-sprite")
 
     # `threed_keywords` is already set at the top of the function so a
     # from_seed continuation still keeps 3D detection but loses art/audio.
@@ -1430,7 +1435,7 @@ def plan_instruction(
     goal_wins_nudge = load_plan_nudge("goal-wins-over-templates")
 
     body = (
-        PLAN_INSTRUCTION + art_nudge + threed_nudge + wireframe_nudge
+        PLAN_INSTRUCTION + art_nudge + illustrated_sprite_nudge + threed_nudge + wireframe_nudge
         + beat_em_up_nudge + audio_nudge
         + video_nudge
         + qte_nudge

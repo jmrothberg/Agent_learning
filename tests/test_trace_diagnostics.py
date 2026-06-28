@@ -151,6 +151,64 @@ def test_class_memory_gap_only_when_undrawn_and_art():
     assert cls == "none"
 
 
+# --- Exhaustive input matrix (golden trace build-a-dragon-s-lair-laserdis_*) --
+# Proves generality of the `not ok` guard over the whole input space instead of
+# relying on the single real-world trace we have. _classify_failure is a pure
+# function of a handful of flags, so the matrix is small and decisive.
+
+
+def test_class_ok_clean_iter_always_none_matrix():
+    """A CLEAN iter (ok=True) with NO stall and NO harness-bug flag must always
+    be `none`, for every art_intent x undrawn combination. This is the iter-2
+    golden case (ok=True, art_intent=True, undrawn_present=True) plus every
+    other clean art / non-art game (Zelda, chess, tower-defense, novel art)."""
+    for art_intent in (True, False):
+        for undrawn_present in (True, False):
+            cls, reason = _classify(
+                ok=True, materialized=True,
+                art_intent=art_intent, undrawn_present=undrawn_present,
+                stall_reason=None,
+                coaching_suppressed=False, asset_reprompt_cleared=False,
+            )
+            assert cls == "none", (art_intent, undrawn_present, cls)
+            assert reason == ""
+
+
+def test_class_ok_with_stall_is_local_llm_limit():
+    """A clean-result iter that nonetheless stalled mid-stream still surfaces
+    the stall (local_llm_limit) — the `not ok` guard only suppresses the
+    memory_gap mislabel, it does NOT swallow a genuine stall signal."""
+    for art_intent in (True, False):
+        for undrawn_present in (True, False):
+            cls, reason = _classify(
+                ok=True, materialized=True,
+                art_intent=art_intent, undrawn_present=undrawn_present,
+                stall_reason="repetition_loop",
+            )
+            assert cls == "local_llm_limit"
+            assert "repetition_loop" in reason
+
+
+def test_class_failing_art_still_memory_gap():
+    """Failing art iter with undrawn assets keeps memory_gap triage (iter-1
+    golden case) — the guard must not erase failing-iter diagnostics."""
+    cls, reason = _classify(
+        ok=False, materialized=True, art_intent=True, undrawn_present=True,
+    )
+    assert cls == "memory_gap"
+    assert "undrawn" in reason
+
+
+def test_class_harness_bug_precedence_even_when_ok():
+    """A genuine harness contradiction (coaching suppressed on a clean prior
+    iter / standing art request cleared) is worth surfacing regardless of ok —
+    harness_bug precedence must win even on ok=True."""
+    cls, _ = _classify(ok=True, materialized=True, coaching_suppressed=True)
+    assert cls == "harness_bug"
+    cls2, _ = _classify(ok=True, materialized=True, asset_reprompt_cleared=True)
+    assert cls2 == "harness_bug"
+
+
 # ---------------------------------------------------------------------------
 # 3. Digest surfaces failure_class
 # ---------------------------------------------------------------------------

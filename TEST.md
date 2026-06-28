@@ -61,6 +61,29 @@ changed the file?) not gameplay. The agent skips `load_and_test`, emits `browser
 `<patch>`/`<html_file>` landed and the bytes differ from the seed; **FAIL** = no-code or
 byte-identical. Traces under `games/eval_seed_edits/` (gitignored run artifacts).
 
+### Parallel batch testing (one MLX server, N clients)
+
+**Full handoff for agents:** [`eval/PARALLEL_MLX_TESTING.md`](eval/PARALLEL_MLX_TESTING.md)
+
+Start `mlx_lm.server` once, then run N builds against it (continuous batching —
+one model load, not N in-process copies):
+
+```bash
+# Terminal 1
+.venv/bin/mlx_lm.server --model ~/MLX_Models/Qwen3.6-27B-mxfp8 --port 8080
+
+# Terminal 2 — 2 games at a time
+MLX_SERVER_URL=http://127.0.0.1:8080 .venv/bin/python eval/batch_parallel.py \
+  --jobs 2 --goal "snake wraparound" --goal "breakout paddle" --headless
+
+# All 5 seed-edit scenarios, 5-up (patch-only, no browser)
+MLX_SERVER_URL=http://127.0.0.1:8080 .venv/bin/python eval/batch_parallel.py \
+  --seed-edits --jobs 5 --patch-only --max-iters 2
+```
+
+Or set `LLM_BACKEND=mlx-server` / pass `--backend mlx-server` on `coder.py`.
+Default macOS `mlx` stays **in-process** unless `MLX_SERVER_URL` is set.
+
 ## Layer 3 — system tests (full loop, visible browser)
 
 ```bash

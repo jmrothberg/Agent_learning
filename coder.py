@@ -145,6 +145,8 @@ async def _run(
     restart_threshold: float = 60.0,
     playbook_on: bool = True,
     playbook_writeback: bool = True,
+    use_vlm_critique: bool = False,
+    no_auto_step: bool = False,
 ) -> int:
     # Resolve which LLM daemon we'll talk to. --backend overrides the
     # LLM_BACKEND env. If --model was given, build a BackendInfo
@@ -163,7 +165,7 @@ async def _run(
         )
     backend_inst = backend_mod.make_backend(info)
 
-    browser = LiveBrowser(viewport=(800, 600), run_seconds=3.0, headless=headless)
+    browser = LiveBrowser(run_seconds=3.0, headless=headless)
     try:
         await browser.start()
     except Exception as e:
@@ -196,6 +198,7 @@ async def _run(
         # outcomes keep updating the bullet counters.
         playbook_top_k=6 if playbook_on else 0,
         playbook_writeback=playbook_writeback,
+        use_vlm_critique=use_vlm_critique,
     )
 
     # Stream tokens to stdout, one chunk at a time. Newlines flush.
@@ -208,10 +211,15 @@ async def _run(
     # behavior is unchanged unless --step is passed.
     if step:
         agent.set_step_mode(True)
+    # Unattended runs (headless batch, tune_serial_loop) must not auto-arm
+    # step-mode on first test failure — await_user would block on stdin.
+    if headless or no_auto_step:
+        agent.set_auto_step_on_failure(False)
 
     print(
         f"== {PRODUCT_NAME} CLI · {info.name.upper()}={info.model} "
         f"[{info.source}] · headless={headless} · "
+        f"vlm-critique={use_vlm_critique} · "
         f"best-of-N={best_of_n} · step={step}"
     )
     print(f"== Goal: {goal}\n")
@@ -254,6 +262,11 @@ async def _run(
     print(f"\nFinal game saved to: {out_path}", flush=True)
     if open_when_done and out_path.exists():
         webbrowser.open(f"file://{out_path.resolve()}")
+    # Unattended serial/batch (--no-auto-step): skip interpreter shutdown.
+    # torch/MLX/diffusers atexit can SIGSEGV after an otherwise clean run
+    # (tune_serial10 run_03 game 1: exit=-11, best.html OK).
+    if no_auto_step:
+        os._exit(rc)
     return rc
 
 
@@ -264,11 +277,12 @@ def main() -> int:
     p.add_argument("goal", help="What game to build, in plain English.")
     p.add_argument(
         "--backend",
-        choices=["auto", "ollama", "mlx"],
+        choices=["auto", "ollama", "mlx", "mlx-server"],
         default=os.environ.get("LLM_BACKEND")
         or ("mlx" if sys.platform == "darwin" else "auto"),
         help="LLM daemon. Default: LLM_BACKEND env if set, else mlx on macOS "
-             "else auto. 'auto' probes both (MLX wins ties).",
+             "else auto. 'mlx-server' / MLX_SERVER_URL → batched mlx_lm.server; "
+             "'mlx' → in-process (TUI default). 'auto' probes both (MLX wins ties).",
     )
     p.add_argument(
         "--model",
@@ -339,6 +353,18 @@ def main() -> int:
                         "every emitted token reset the timer, so this is a "
                         "quiet-window budget, not a cold-start budget. Same "
                         "value for every model — no bracket table.")
+    p.add_argument(
+        "--vlm-critique",
+        action="store_true",
+        help="Enable structured visual critic (/vlm-critique parity with TUI). "
+             "Requires a VLM-capable backend (in-process --backend mlx with mlx_vlm).",
+    )
+    p.add_argument(
+        "--no-auto-step",
+        action="store_true",
+        help="Do not auto-arm step-mode on first test failure (unattended "
+             "serial/batch runs with visible browser).",
+    )
     p.add_argument("--headless", action="store_true", help="Run Chromium without a visible window.")
     p.add_argument("--open", action="store_true", help="Open final game in your browser.")
     p.add_argument(
@@ -418,6 +444,8 @@ def main() -> int:
         restart_threshold=args.restart_threshold,
         playbook_on=args.playbook,
         playbook_writeback=args.playbook_writeback,
+        use_vlm_critique=args.vlm_critique,
+        no_auto_step=args.no_auto_step,
     ))
 
 

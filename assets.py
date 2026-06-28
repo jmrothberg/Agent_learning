@@ -1291,6 +1291,12 @@ def generate_assets(
         size = spec["size"]
         from_image = spec.get("from_image")
         strength = spec.get("strength")
+        # Append transparent-background suffix for sprite assets (not full-bleed
+        # backgrounds). Z-Image often ignores the phrase without it; chroma-key
+        # below is still the safety net. Matches scripts/draw_game_art.py.
+        gen_prompt = prompt
+        if not _is_full_bleed_asset_name(name):
+            gen_prompt = _ensure_transparent_prompt(gen_prompt)
         # Sprite facing/orientation is NOT pinned or rewritten here — that
         # convention now lives in the playbook (directional-art-faces-right),
         # which teaches the model to author one right-facing pose set and flip
@@ -1394,9 +1400,11 @@ def generate_assets(
                 stat["parent_missing"] = from_image
             stat["pose_txt2img"] = True
             stat["merged_prompt"] = merged[:240]
+            if not _is_full_bleed_asset_name(name):
+                merged = _ensure_transparent_prompt(merged)
             gen_path = _safe_generate(image_generator, merged)
         else:
-            gen_path = _safe_generate(image_generator, prompt)
+            gen_path = _safe_generate(image_generator, gen_prompt)
         if gen_path is None:
             # Pull the real error from the most recently-used generator
             # so the user sees the actual cause — import error, model
@@ -1595,6 +1603,19 @@ def _safe_img2img(
         except Exception:
             pass
         return None
+
+
+def _ensure_transparent_prompt(prompt: str) -> str:
+    """Append transparent-background hint when the model omitted it."""
+    if "transparent" in prompt.lower():
+        return prompt
+    return f"{prompt}, transparent background"
+
+
+def _is_full_bleed_asset_name(name: str) -> bool:
+    """Skip transparency suffix for full-screen background assets."""
+    n = name.lower()
+    return n.startswith("bg_") or n.endswith("_background") or n == "background"
 
 
 # 1.3 — chroma-key pass. Z-Image-Turbo (and most diffusion models)

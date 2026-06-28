@@ -478,6 +478,29 @@ def test_synthetic_coverage_gap_probe_fails_report_ok():
     )
 
 
+def test_synthetic_coverage_gap_advisory_when_all_model_probes_pass():
+    """Round 1 street-fighter trace: model probes passed but Edge criterion
+    had no matching probe — synthetic coverage_gap burned iter 1."""
+    from tools import _apply_coverage_gap_gate
+    report = _stub_report()
+    probes = [{"name": "punch_works", "expr": "state.punching === true"}]
+    probe_results = [{"name": "punch_works", "expr": "...", "ok": True}]
+    report["probes"] = list(probe_results)
+    criteria = (
+        "Basic: punch animation fires.\n"
+        "Edge: hit-stagger recovers after ~300ms."
+    )
+    probe_results = _apply_coverage_gap_gate(report, criteria, probes, probe_results)
+    report["ok"] = (
+        len(report["errors"]) == 0 and len(report["soft_warnings"]) == 0
+    )
+    assert report["ok"] is True
+    assert not any(
+        p["name"].startswith("coverage_gap__") for p in probe_results
+    )
+    assert any("ADVISORY" in w for w in report.get("warnings", []))
+
+
 def test_clean_report_stays_ok_when_no_coverage_gap():
     """Guard: when every criterion is covered, the gate adds nothing —
     no synthetic probe, no soft_warning — and ok stays True. The

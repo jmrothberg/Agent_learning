@@ -17,6 +17,7 @@ doesn't need a 3+ second browser load to confirm.
 
 from __future__ import annotations
 
+import os
 import re
 import time
 from collections import Counter as _Counter
@@ -603,11 +604,26 @@ def _apply_coverage_gap_gate(
     if not coverage_gaps:
         return probe_results
     report["criteria_uncovered"] = coverage_gaps
+    # When every model-authored probe already passes, uncovered criteria
+    # are advisory only — synthetic coverage_gap probes burned a fix iter on
+    # street-fighter Round 1 (8/9 model probes green, Edge criterion gap).
+    model_results = [
+        p for p in probe_results
+        if not p.get("synthetic")
+        and not str(p.get("name") or "").startswith("coverage_gap__")
+    ]
+    all_model_pass = bool(model_results) and all(p.get("ok") for p in model_results)
     for gap in coverage_gaps:
         # Sustained-performance criteria are advisory only — no honest probe
         # can verify "60fps under stress" in a short load, so a synthetic
         # probe would block ok=True forever.
         if _is_unverifiable_perf_criterion(gap):
+            continue
+        if all_model_pass:
+            report.setdefault("warnings", []).append(
+                "ADVISORY (non-blocking) — criteria uncovered by probes: "
+                + gap[:160]
+            )
             continue
         slug = _slugify_criterion(gap)
         # [HARNESS NOTE] fence (2026-05-24) — without this, the 27B-class
@@ -757,7 +773,10 @@ def _run_strict_file_runtime_check(path: Path, run_seconds: float = 1.2) -> dict
     try:
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=True, args=[])
-            context = browser.new_context(viewport={"width": 800, "height": 600})
+            context = browser.new_context(viewport={
+                "width": _DEFAULT_BROWSER_VIEWPORT[0],
+                "height": _DEFAULT_BROWSER_VIEWPORT[1],
+            })
             try:
                 context.add_init_script(_INSTRUMENTATION_JS)
                 page = context.new_page()
@@ -1111,6 +1130,14 @@ _ENTITY_RENDERED_JS = """
 
   // Find candidate entities: top-level state fields whose value is an
   // object with numeric .x AND .y. Skip the state object itself.
+  // ENTITY-FP SUPPRESSION (serial10 game 4): a movement/direction
+  // vector like state.dir = {x:1,y:0} is NOT a drawable entity position.
+  // The heuristic used to read it as a tile/pixel coordinate, find
+  // background there, and emit a false ENTITY-NOT-RENDERED soft_warning
+  // that burned 3 of 4 fix iters. Skip a field when (a) its name reads as
+  // a direction/velocity vector, or (b) BOTH |x|<=1 and |y|<=1 (a unit /
+  // sign vector can never be a real on-canvas entity position).
+  const DIR_NAME_RE = /(^|_)(dir|vel|velocity|heading|facing|delta|accel|acceleration)($|_|[A-Z0-9])/i;
   const candidates = [];
   for (const k in s) {
     if (k.startsWith('_')) continue;
@@ -1119,6 +1146,8 @@ _ENTITY_RENDERED_JS = """
     if (v && typeof v === 'object' && !Array.isArray(v)
         && typeof v.x === 'number' && typeof v.y === 'number'
         && isFinite(v.x) && isFinite(v.y)) {
+      if (DIR_NAME_RE.test(k)) continue;  // direction/velocity vector, not a position
+      if (Math.abs(v.x) <= 1 && Math.abs(v.y) <= 1) continue;  // unit/sign vector, not a position
       candidates.push({name: k, x: v.x, y: v.y});
     }
   }
@@ -2237,7 +2266,10 @@ def test_html_file(path: str | Path, run_seconds: float = 3.0) -> dict[str, Any]
         ]
         browser = pw.chromium.launch(headless=True, args=cors_flags)
         # New context per run so localStorage / cookies don't leak between iterations.
-        context = browser.new_context(viewport={"width": 800, "height": 600})
+        context = browser.new_context(viewport={
+            "width": _DEFAULT_BROWSER_VIEWPORT[0],
+            "height": _DEFAULT_BROWSER_VIEWPORT[1],
+        })
         page = context.new_page()
 
         # --- console capture ---
@@ -2754,6 +2786,30 @@ def format_report_for_model(report: dict[str, Any]) -> str:
 # async-playwright import cost (and so a missing async install doesn't break
 # the headless path).
 
+# Playwright viewport + visible Chromium window size. Old default 800×600 clipped
+# HUD-heavy games (chess with tray + status) in the test browser while the same
+# file:// looked fine in a full browser window. Override: BROWSER_VIEWPORT=WxH
+# (e.g. 1280x800 or 1920x1080).
+_DEFAULT_BROWSER_VIEWPORT: tuple[int, int] = (1280, 800)
+
+
+def _resolve_browser_viewport() -> tuple[int, int]:
+    """Return (width, height) from BROWSER_VIEWPORT env or module default."""
+    raw = (os.environ.get("BROWSER_VIEWPORT") or "").strip()
+    if not raw:
+        return _DEFAULT_BROWSER_VIEWPORT
+    sep = "x" if "x" in raw.lower() else ","
+    parts = raw.lower().split(sep, 1)
+    if len(parts) != 2:
+        return _DEFAULT_BROWSER_VIEWPORT
+    try:
+        w, h = int(parts[0].strip()), int(parts[1].strip())
+        if w >= 320 and h >= 240:
+            return (w, h)
+    except ValueError:
+        pass
+    return _DEFAULT_BROWSER_VIEWPORT
+
 
 class LiveBrowser:
     """Persistent visible Chromium for the TUI. Async, single page, reusable.
@@ -2768,11 +2824,11 @@ class LiveBrowser:
 
     def __init__(
         self,
-        viewport: tuple[int, int] = (800, 600),
+        viewport: tuple[int, int] | None = None,
         run_seconds: float = 3.0,
         headless: bool = False,
     ):
-        self._viewport = viewport
+        self._viewport = viewport if viewport is not None else _resolve_browser_viewport()
         self._run_seconds = run_seconds
         self._headless = headless
         # Buffers reset on every load_and_test call.
@@ -3078,7 +3134,13 @@ class LiveBrowser:
             effectful_run_so_far: list[str] = []
             for orig_idx, p in ordered:
                 pname = str(p.get("name") or "probe")[:60]
-                pexpr = str(p.get("expr") or "true")[:600]
+                # QTE-gate fix (serial10 game 9): recipe auto_probes are
+                # trusted, can legitimately be long (the QTE window-gating
+                # probe is 740 chars). The old [:600] cap sliced valid JS
+                # mid-statement → SyntaxError → quarantine, so the real gate
+                # never ran. Raise the eval cap to 2000 (report copy below is
+                # still bounded at [:200], so report size is unchanged).
+                pexpr = str(p.get("expr") or "true")[:2000]
                 is_effectful = _probe_has_side_effects(pexpr)
                 ok, err, err_kind = await self._run_probe(pexpr)
                 if not ok and not err and not is_effectful:
@@ -4359,8 +4421,15 @@ class LiveBrowser:
         can write either a boolean expression or an IIFE.
         """
         expr = _normalize_probe_expr(expr)
+        # QTE-gate fix (serial10 game 9): some auto_probes are async (the
+        # QTE window-gating probe dispatches a key then awaits a frame to
+        # see if it wrongly registered success). The old sync wrapper did
+        # `Boolean(promise)` → always true, so the async gate silently
+        # no-op'd. Await the expression before coercing: `await (value)`
+        # is a no-op for sync boolean probes, so this is universal and
+        # cannot change any existing sync probe's result.
         wrapped = (
-            "(() => { try { return Boolean(" + expr + "); } "
+            "(async () => { try { return Boolean(await (" + expr + ")); } "
             "catch (e) { return { __probe_err: String(e && e.message || e) }; } })()"
         )
         try:
@@ -4416,6 +4485,13 @@ class LiveBrowser:
         keys = list(dict.fromkeys(default_keys + _parse_action_keys(criteria or "")))[:16]
         if not keys:
             keys = default_keys
+        # Phase 0: criteria-declared non-combat keys (Space to pause, Enter to
+        # start wave, …) must not be pressed during movement smoke — they toggle
+        # flow state and cause false input_responsive failures (Fieldrunners /
+        # snake batch_parallel 20260627).
+        _non_combat = _non_combat_action_keys(criteria or "")
+        if _non_combat:
+            keys = [k for k in keys if k not in _non_combat]
         tried: list[str] = []
         any_change = False
         first_responsive_key: str | None = None
@@ -4423,6 +4499,20 @@ class LiveBrowser:
         try:
             await self._page.bring_to_front()
             await self._page.evaluate("if (document.body) document.body.focus();")
+        except Exception:
+            pass
+
+        # Unpause games that show PAUSED in the HUD before the key sweep — many
+        # grid/arcade builds start paused or use Space as pause; movement keys
+        # do nothing while paused (snake batch_parallel 20260627).
+        try:
+            body_sample = await self._safe_eval(
+                "(()=>{const t=(document.body?.innerText||'').slice(0,240);"
+                "return typeof t==='string'?t:'';})()"
+            )
+            if isinstance(body_sample, str) and re.search(r"\bPAUSED\b", body_sample, re.I):
+                await self._page.keyboard.press("Space")
+                await asyncio.sleep(0.2)
         except Exception:
             pass
 

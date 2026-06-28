@@ -72,6 +72,32 @@ def test_entity_rendered_js_tries_multiple_position_interpretations():
         assert str(n) in _ENTITY_RENDERED_JS
 
 
+def test_entity_rendered_js_skips_direction_and_unit_vectors():
+    """serial10 snake game 4: `state.dir = {x:1,y:0}` is a movement vector,
+    NOT a drawable entity. The old check read it as a tile/pixel coordinate,
+    found background there, and emitted a phantom ENTITY-NOT-RENDERED that
+    burned 3 of 4 fix iters. The check must skip a candidate when (a) its
+    name reads as a direction/velocity vector, or (b) BOTH |x|<=1 and |y|<=1
+    (a unit/sign vector can never be a real on-canvas entity)."""
+    assert "DIR_NAME_RE" in _ENTITY_RENDERED_JS
+    # Name-based skip covers the common movement-vector field names.
+    assert "dir|vel|velocity|heading|facing|delta|accel" in _ENTITY_RENDERED_JS
+    # Magnitude-based skip: a unit/sign vector is not a position.
+    assert "Math.abs(v.x) <= 1 && Math.abs(v.y) <= 1" in _ENTITY_RENDERED_JS
+
+
+def test_entity_rendered_js_still_genre_free_after_dir_skip():
+    """The direction/velocity skip is by ATTRIBUTE shape (vector name /
+    magnitude), not by genre — adding it must not introduce any genre name."""
+    forbidden = [
+        "pacman", "ghost", "mario", "luigi", "snake", "asteroid", "alien",
+    ]
+    for term in forbidden:
+        assert term not in _ENTITY_RENDERED_JS.lower(), (
+            f"_ENTITY_RENDERED_JS must NOT mention genre name {term!r}"
+        )
+
+
 def test_entity_rendered_js_flag_threshold_is_strict():
     """The check flags entities where >80% of the surrounding patch is
     background. Looser thresholds (e.g. 50%) would over-flag entities

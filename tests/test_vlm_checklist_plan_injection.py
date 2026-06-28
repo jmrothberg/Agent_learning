@@ -27,8 +27,8 @@ def test_render_vlm_checklist_section_caps_items() -> None:
     assert section.startswith("VLM_CHECKLIST [canvas-two-actors-facing]")
     assert "/vlm-critique is on" in section
     assert "Q1:" in section
-    assert "Q5:" in section
-    assert "Q6:" not in section
+    assert "Q4:" in section
+    assert "Q5:" not in section
 
 
 def test_fighter_goal_injects_vlm_checklist_at_plan_stage(tmp_path: Path) -> None:
@@ -44,7 +44,7 @@ def test_fighter_goal_injects_vlm_checklist_at_plan_stage(tmp_path: Path) -> Non
         stage="plan",
     )
     assert "VLM_CHECKLIST [canvas-two-actors-facing]" in block
-    assert "facing each other" in block.lower()
+    assert "two distinct characters" in block.lower()
 
 
 def test_code_stage_omits_vlm_checklist(tmp_path: Path) -> None:

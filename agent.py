@@ -2287,6 +2287,13 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
         # parseable probe does not loop forever (mirrors the impossible-probe
         # downgrade's anti-stuck contract). Counter resets each session.
         self._all_probes_quarantined_gate_used: int = 0
+        # Partial-quarantine gate (serial10 chess game 5): when SOME probes
+        # survive but a behavioral probe was syntax-quarantined on a
+        # recipe-matched game, the surviving probes can report a clean pass
+        # that masks the dead gate. Counter (bounded by
+        # _PARTIAL_QUARANTINE_GATE_CAP) blocks the clean ship until a valid
+        # replacement probe is emitted. Per-session (new GameAgent per run).
+        self._partial_quarantine_gate_used: int = 0
         # Last few raw feedback strings for repeated-request detection.
         self._recent_feedback_texts: list[str] = []
         # Phase 0.2 — keyword signatures of feedback items that have been
@@ -6471,9 +6478,16 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
                 "harness_bug",
                 "standing art request cleared by router on vague retry",
             )
-        # 2. MEMORY_GAP — clean materialize but an avoidable mistake that canned
-        #    expert guidance (outline/playbook) should have pre-empted.
-        if materialized and art_intent and undrawn_present:
+        # 2. MEMORY_GAP — a FAILING materialize with an avoidable mistake that
+        #    canned expert guidance (outline/playbook) should have pre-empted.
+        #    Guard on `not ok`: on a CLEAN iter (ok=True) the off-screen scene
+        #    backgrounds of a multi-scene art game are legitimately "loaded but
+        #    undrawn" at headless test time (a non-gating ADVISORY in
+        #    report["warnings"]), so without this guard every clean shipping iter
+        #    of an art game was mislabeled memory_gap and inherited the prior
+        #    iter's reason — golden trace build-a-dragon-s-lair-laserdis_20260626_224306
+        #    iter 2 (ok=True, soft_warnings=[]) is the canonical example.
+        if (not ok) and materialized and art_intent and undrawn_present:
             return (
                 "memory_gap",
                 "assets loaded but undrawn on art-intent build — "
@@ -10272,6 +10286,16 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
             recipe = None
         if recipe is None or recipe.id != recipe_id:
             return False
+        # Resolve in-process mlx_vlm once per session (same path as vision judge).
+        if self._local_vlm_path is None:
+            try:
+                from backend import discover_local_vlm
+                resolved = discover_local_vlm()
+            except Exception:
+                resolved = None
+            self._local_vlm_path = resolved or ""
+        if not self._local_vlm_path:
+            return False
         try:
             from vision_judge import run_local_vlm_prompt
             prompt = self._build_visual_playtest_prompt(
@@ -13936,12 +13960,27 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
         # trace event the user sees, AND coach the model next turn so
         # it knows to split the request or use img2img chaining.
         if dropped_asset_names:
-            self._trace({
+            # Golden trace build-a-dragon-s-lair-laserdis_20260626_224306: the
+            # cap dropped key_fail/key_victory, which were the `image` i2v seeds
+            # for the fail/victory <videos>. The cutscenes then silently fell
+            # back to text-to-video and lost the locked character look. Link the
+            # two facts so the trace + coaching name the real consequence; this
+            # changes NEITHER what is generated NOR the cap — advisory only.
+            _dropped_set = set(dropped_asset_names)
+            affected_video_seeds = [
+                s.get("name")
+                for s in video_specs
+                if isinstance(s, dict) and s.get("image") in _dropped_set
+            ]
+            overflow_event = {
                 "kind": "asset_overflow",
                 "requested": len(asset_specs) + len(dropped_asset_names),
                 "generated_cap": len(asset_specs),
                 "dropped": dropped_asset_names,
-            })
+            }
+            if affected_video_seeds:
+                overflow_event["affected_video_seeds"] = affected_video_seeds
+            self._trace(overflow_event)
             yield self._record(AgentEvent(
                 "info",
                 f"[yellow]asset overflow[/yellow] — you requested "
@@ -13950,7 +13989,7 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
                 f"{', '.join(dropped_asset_names)}. Coaching the model to "
                 "request the rest in a follow-up turn."
             ))
-            self._pending_coaching.append(
+            coaching_msg = (
                 "Your <assets> block requested "
                 f"{len(asset_specs) + len(dropped_asset_names)} sprites but "
                 f"the harness only generates up to {len(asset_specs)} per "
@@ -13963,6 +14002,19 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
                 "single base generation. Do NOT reference dropped names in "
                 "the code until they've been generated."
             )
+            if affected_video_seeds:
+                # One extra line, only when a dropped name is a video i2v seed.
+                coaching_msg += (
+                    " IMPORTANT: dropped key-art "
+                    f"{', '.join(sorted(n for n in _dropped_set if any(s.get('image') == n for s in video_specs if isinstance(s, dict))))}"
+                    " is the image-to-video seed for cutscene(s) "
+                    f"{', '.join(str(n) for n in affected_video_seeds)} — "
+                    "those clips will fall back to text-to-video and DRIFT "
+                    "off your locked character look. Keep video key-art under "
+                    "the asset cap (or request it first) so the cutscenes "
+                    "match the sprites."
+                )
+            self._pending_coaching.append(coaching_msg)
 
         # Mid-session: capture pre-existing assets so the feedback block
         # we synthesize at the end reflects only the *new* additions.
@@ -18334,7 +18386,11 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
                                 action_png=action_bytes,
                             )
                             yield self._record(self._activity_idle_event(vc_role))
-                            if critique:
+                            if not critique:
+                                await self._run_structured_local_vlm_critique(
+                                    after_bytes, iteration,
+                                )
+                            elif critique:
                                 cleaned = critique.strip()
                                 if cleaned and "ok" not in cleaned.lower()[:30]:
                                     queued = self._queue_visual_critic_coaching(
@@ -18357,19 +18413,18 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
                                 "error": str(exc),
                             })
                 else:
-                    # Unified critic (2026-06-14): the open-ended vision judge
-                    # is retired — there is ONE structured visual-critic path.
-                    # A None critic_backend here means either the user forced
-                    # ship (already traced above) or no VLM is available at all
-                    # (text-only coder with no staged critic). In the latter
-                    # case skip vision and let the deterministic probes carry
-                    # verification.
+                    # No staged critic slot — fall back to in-process mlx_vlm
+                    # checklist when discoverable (e.g. mlx-server strips images).
                     if not self._user_force_done:
-                        self._trace({
-                            "kind": "visual_critic_skipped",
-                            "iteration": iteration,
-                            "reason": "no_vlm_backend_available",
-                        })
+                        handled = await self._run_structured_local_vlm_critique(
+                            after_bytes, iteration,
+                        )
+                        if not handled:
+                            self._trace({
+                                "kind": "visual_critic_skipped",
+                                "iteration": iteration,
+                                "reason": "no_vlm_backend_available",
+                            })
             try:
                 async for _ob_ev in self._run_opening_book_sidecars(report, iteration):
                     yield _ob_ev

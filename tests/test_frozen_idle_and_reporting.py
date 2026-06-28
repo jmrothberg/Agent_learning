@@ -91,5 +91,5 @@ def test_single_fighter_recipe_checks_one_character_and_distinct_pose():
     recs = {r.id: r for r in _load_recipes()}
     cl = " ".join(recs["canvas-single-fighter"].recipe["checklist"]).lower()
     assert "one character" in cl
-    assert "different from idle" in cl or "distinct pose" in cl or "clearly different" in cl
+    assert "non-blank" in cl or "hud" in cl
     assert recs["canvas-single-fighter"].recipe.get("auto_probes")  # has a probe

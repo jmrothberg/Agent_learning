@@ -5955,7 +5955,7 @@ class CodingBoxApp(App):
         self._update_status()
 
         if self.browser is None:
-            self.browser = LiveBrowser(viewport=(800, 600), run_seconds=3.0)
+            self.browser = LiveBrowser(run_seconds=3.0)
             try:
                 await self.browser.start()
             except Exception as e:

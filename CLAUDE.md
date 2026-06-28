@@ -94,6 +94,7 @@ MLX_MODEL=~/MLX_Models/Qwen3.6-27B-mxfp8 .venv/bin/python eval/eval_prompts_plan
 # class (Fieldrunners trace 20260626_102307 iters 4-5).
 MLX_MODEL=~/MLX_Models/GLM-5.2-MLX-4bit .venv/bin/python eval/eval_seed_edits.py
 .venv/bin/python eval/eval_seed_edits.py --only 1 --max-iters 2
+# Parallel batch (one mlx_lm.server, N clients): see eval/batch_parallel.py
 .venv/bin/python eval/eval_seed_edits.py --patch-only --max-iters 2   # skip Phase A on canvas seeds
 # Stub regression banks (no model, run in the pytest suite): eval/golden_feedback_flows.jsonl
 # (golden iter 2-3 art->patch / behavior-bug classification), eval/modality_scenarios.jsonl
@@ -112,6 +113,7 @@ MLX_MODEL=~/MLX_Models/GLM-5.2-MLX-4bit .venv/bin/python eval/eval_seed_edits.py
 - `OLLAMA_HOST` — non-default Ollama daemon address
 - `OLLAMA_KEEP_ALIVE` — Ollama model residency between chat turns. Default `-1` keeps the model loaded for the chat process lifetime to prevent 5-minute idle evictions during user-feedback pauses; set e.g. `10m` on tight-VRAM hosts.
 - `MLX_MODEL` — explicit MLX model path or HF id. Loaded in-process via `mlx_lm.load`. If unset, the backend scans `~/MLX_Models/` / `MLX_MODELS_DIR` / HF cache and picks a single discoverable chat model (multi-match → first, with a "set MLX_MODEL to override" hint in `info.source`).
+- `MLX_SERVER_URL` — when set (or `LLM_BACKEND=mlx-server`), talk to a running `mlx_lm.server` over HTTP instead of loading MLX in-process. Use for parallel batch testing: N `coder.py` clients → one server with continuous batching. See `eval/batch_parallel.py` and `TEST.md`.
 - `MLX_MODELS_DIR` — `:`-separated list of additional dirs to scan for downloaded MLX models. Defaults: `~/MLX_Models`, `~/Models_MLX`, `~/.cache/huggingface/hub`, `/opt/mlx_models`.
 - `MLX_PREFILL_STEP_SIZE` — chunk size for prompt eval. Per-model defaults applied automatically: **512** if the model path contains `flash` (DeepSeek-V4 Flash crashes mid-generation at >512 — observed 2026-05-15 DK trace), else **1024**. Env override always wins. Raise to `2048` on small models if you want a few % more throughput.
 - `CODING_BOX_NUM_CTX` — context window (default **100000** — the speed/headroom sweet spot: observed coder prompts stay ~10-45K even deep into feedback sessions, so full history is retained while KV-cache/prefill cost stays low). In the TUI use **`/ctx`** to change it (raise toward 200K for very long sessions, lower on tight-VRAM hosts). Preload Ollama at the chosen size with `ollama run --ctx-size N <model>` to avoid a reload on first request. **Compaction is token-aware:** this value is the denominator for the pressure check — the lossy state-anchor compaction only fires once a coder prompt exceeds ~70% of it (`_COMPACT_PRESSURE`), not at a fixed message count. The old 32K default made that ratio exceed 1.0 within a couple of feedback turns, compacting every turn and shredding the playbook + prior user-feedback.

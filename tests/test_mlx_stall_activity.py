@@ -146,3 +146,43 @@ def test_silent_guard_never_fires_once_visible_tokens_landed():
     now = 1000.0
     last_activity_at = now - 500.0
     assert _silent_would_fire(last_activity_at=last_activity_at, now=now, n_tokens=12) is False
+
+
+# ---------------------------------------------------------------------------
+# MLX server post-prefill generation kickoff (backend.py MLXServerBackend)
+#
+# After SSE prefill progress hits cur>=tot, mlx_lm.server should emit tokens
+# within ~30s. The kickoff check must run on line-read timeout — not only
+# when a line arrives — or a wedged generate thread hangs until stall_seconds.
+# ---------------------------------------------------------------------------
+
+_MLX_GENERATION_KICKOFF_SECONDS = 30.0
+
+
+def _server_post_prefill_would_abort(
+    *,
+    prompt_eval_done_at: float | None,
+    now: float,
+    n_tokens: int,
+) -> bool:
+    return (
+        prompt_eval_done_at is not None
+        and n_tokens == 0
+        and (now - prompt_eval_done_at) > _MLX_GENERATION_KICKOFF_SECONDS
+    )
+
+
+def test_server_generation_kickoff_fires_on_read_timeout_after_prefill():
+    done_at = 100.0
+    now = 135.0  # 35s quiet after prefill
+    assert _server_post_prefill_would_abort(
+        prompt_eval_done_at=done_at, now=now, n_tokens=0,
+    ) is True
+
+
+def test_server_generation_kickoff_waits_grace_window_after_prefill():
+    done_at = 100.0
+    now = 120.0  # 20s — within 30s grace
+    assert _server_post_prefill_would_abort(
+        prompt_eval_done_at=done_at, now=now, n_tokens=0,
+    ) is False

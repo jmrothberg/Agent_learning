@@ -80,7 +80,7 @@ def _fake_local_mlx(paths: list[str]):
 def clear_env(monkeypatch):
     """Strip env vars that would otherwise short-circuit detection."""
     for key in ("OLLAMA_MODEL", "CHAT_OLLAMA_MODEL", "MLX_MODEL", "LLM_BACKEND",
-                "OLLAMA_HOST"):
+                "OLLAMA_HOST", "MLX_SERVER_URL", "MLX_HOST"):
         monkeypatch.delenv(key, raising=False)
 
 
@@ -297,3 +297,107 @@ def test_mlx_local_filters_non_chat(monkeypatch):
 
     info = backend.detect_backend("mlx")
     assert info.model == "/m/Qwen3.6-27B-mxfp8"
+
+
+def test_mlx_server_url_forces_server_backend(monkeypatch):
+    monkeypatch.setenv("MLX_SERVER_URL", "http://127.0.0.1:8080")
+    monkeypatch.setattr(
+        backend, "_http_get_json",
+        _fake_http({
+            "/v1/models": {"data": [{"id": "Qwen3.6-27B-mxfp8"}]},
+        }),
+    )
+
+    info = backend.detect_backend("mlx")
+    assert info.name == "mlx"
+    assert info.endpoint == "http://127.0.0.1:8080"
+    assert info.model == "Qwen3.6-27B-mxfp8"
+    assert "mlx_lm.server" in info.source or "/v1/models" in info.source
+
+
+def test_llm_backend_mlx_server(monkeypatch):
+    monkeypatch.setenv("LLM_BACKEND", "mlx-server")
+    monkeypatch.setattr(
+        backend, "_http_get_json",
+        _fake_http({
+            "/v1/models": {"data": [{"id": "local-model"}]},
+        }),
+    )
+
+    info = backend.detect_backend()
+    assert info.endpoint == "http://127.0.0.1:8080"
+    assert info.model == "local-model"
+
+
+def test_make_backend_routes_http_mlx_to_server():
+    info = backend.BackendInfo(
+        name="mlx",
+        model="foo",
+        source="test",
+        endpoint="http://127.0.0.1:8080",
+    )
+    be = backend.make_backend(info)
+    assert isinstance(be, backend.MLXServerBackend)
+
+
+def test_make_backend_routes_in_process_mlx():
+    info = backend.BackendInfo(
+        name="mlx",
+        model="/m/foo",
+        source="test",
+        endpoint="in-process",
+    )
+    be = backend.make_backend(info)
+    assert isinstance(be, backend.MLXBackend)
+
+
+def test_mlx_server_url_forces_server_backend(monkeypatch):
+    monkeypatch.setenv("MLX_SERVER_URL", "http://127.0.0.1:8080")
+    monkeypatch.setattr(
+        backend, "_http_get_json",
+        _fake_http({
+            "/v1/models": {"data": [{"id": "Qwen3.6-27B-mxfp8"}]},
+        }),
+    )
+
+    info = backend.detect_backend("mlx")
+    assert info.name == "mlx"
+    assert info.endpoint == "http://127.0.0.1:8080"
+    assert info.model == "Qwen3.6-27B-mxfp8"
+    assert "mlx_lm.server" in info.source or "/v1/models" in info.source
+
+
+def test_llm_backend_mlx_server(monkeypatch):
+    monkeypatch.setenv("LLM_BACKEND", "mlx-server")
+    monkeypatch.setattr(
+        backend, "_http_get_json",
+        _fake_http({
+            "/v1/models": {"data": [{"id": "local-model"}]},
+        }),
+    )
+
+    info = backend.detect_backend()
+    assert info.endpoint == "http://127.0.0.1:8080"
+    assert info.model == "local-model"
+
+
+def test_make_backend_routes_http_mlx_to_server():
+    info = backend.BackendInfo(
+        name="mlx",
+        model="foo",
+        source="test",
+        endpoint="http://127.0.0.1:8080",
+    )
+    be = backend.make_backend(info)
+    assert isinstance(be, backend.MLXServerBackend)
+
+
+def test_make_backend_routes_in_process_mlx():
+    info = backend.BackendInfo(
+        name="mlx",
+        model="/m/foo",
+        source="test",
+        endpoint="in-process",
+    )
+    be = backend.make_backend(info)
+    assert isinstance(be, backend.MLXBackend)

@@ -89,7 +89,7 @@ async def _edit_once(backend_inst, goal: str, out_dir: Path, name: str, max_iter
 
 async def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--backend", default="mlx", help="mlx | ollama | auto")
+    ap.add_argument("--backend", default="mlx", help="mlx | mlx-server | ollama | auto")
     ap.add_argument("--model", default=None, help="override model id/path")
     ap.add_argument("--only", type=int, default=None, help="single scenario number (1-based)")
     ap.add_argument("--names", default=None, help="comma list of scenario names")
