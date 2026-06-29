@@ -27,7 +27,8 @@ def test_fix1_short_stream_warning_in_source():
     chess trace's 8-token degenerate reply)."""
     import inspect
     import agent as agent_module
-    src = inspect.getsource(agent_module)
+    from agent import module_inspect_source
+    src = module_inspect_source()
     assert "short_stream_warning" in src
     assert "_SHORT_STREAM_FLOOR" in src
     import re
@@ -49,7 +50,8 @@ def test_fix1_short_stream_only_warns_for_code_emitting_roles():
     deliberate <confirm_done/> reply."""
     import inspect
     import agent as agent_module
-    src = inspect.getsource(agent_module)
+    from agent import module_inspect_source
+    src = module_inspect_source()
     # The role gate is in the emission site.
     assert 'role in ("coder", "architect")' in src
     # Done-marker bypass.
@@ -135,7 +137,8 @@ def test_fix3_recipe_skip_carries_diagnostics_map():
     player.x/y, etc."""
     import inspect
     import agent as agent_module
-    src = inspect.getsource(agent_module)
+    from agent import module_inspect_source
+    src = module_inspect_source()
     # The diagnostic JS exists and tests the expected fields.
     for field in (
         "has_state", "has_gameState", "has_canvas",

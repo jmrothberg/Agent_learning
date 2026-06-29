@@ -175,7 +175,8 @@ def test_phase_0_14_runaway_warning_threshold():
     well before that."""
     import inspect
     import agent as agent_module
-    src = inspect.getsource(agent_module)
+    from agent import module_inspect_source
+    src = module_inspect_source()
     # Verify the floor and the warning kind appear together.
     assert "_RUNAWAY_TOKEN_FLOOR" in src
     assert "runaway_stream_warning" in src
@@ -198,7 +199,8 @@ def test_phase_0_14_warning_fires_once_per_stream():
     30s heartbeat. Regression guard."""
     import inspect
     import agent as agent_module
-    src = inspect.getsource(agent_module)
+    from agent import module_inspect_source
+    src = module_inspect_source()
     assert '"runaway_warned": False' in src, (
         "runaway-warned fire-once flag must be initialized to False"
     )

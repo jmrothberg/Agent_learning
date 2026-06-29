@@ -6,7 +6,7 @@ The browser test **finds problems and tells the model what to fix**. It does not
 for you. If the same bug keeps happening after many tries, the problem is usually one of the buckets
 below — not “we need one more automatic check.”
 
-More tuning traps: **`FOR_NEXT_LLM.md`**. Commands and env vars: **`CLAUDE.md`**.
+More tuning traps: **`FOR_NEXT_LLM.md`**. Commands and env vars: **`CLAUDE.md`**. Batch runs / pytest commands: **`eval/OPERATIONS.md`**. Test map: **`TEST.md`**.
 
 ---
 
@@ -76,6 +76,37 @@ That prints **one line per iteration**, roughly:
 
 **Seed-edit eval runs** (`eval/eval_seed_edits.py`) turn the browser off on purpose. Those lines
 show `test_skipped:no_browser` — that is expected, not a crash.
+
+---
+
+## Best-of-N and session artifacts
+
+Three different “candidate” concepts show up in traces — do not confuse them:
+
+| Name | What it is |
+|------|------------|
+| **`--best-of-n N`** (CLI) | Every fix turn samples N completions and picks the best Chromium score. Default **1** (single sample). |
+| **Stuck best-of-2** | After 2+ failed iters, auto-escalate to 2 samples for one turn (cap 2/session). Default **OFF**. TUI: `/bestof on` · CLI: `--stuck-bon`. |
+| **`top_candidates` in trace** | Memory/visual-playtest recipe matching — unrelated to BoN sampling. |
+
+When BoN runs, candidate HTML is saved **visibly** next to the game (not dotfiles):
+
+```
+games/<session>/
+  game.html
+  game.best.html
+  game_assets/
+  candidates/
+    iter_05/
+      cand_0.html
+      cand_1.html
+```
+
+Open `cand_0.html` in Chrome the same way as the main `.html` — same folder as `_assets/` so paths resolve.
+
+**Trace vs batch monitor:** the agent writes `games/…/traces/*.jsonl` (full session log — use
+`scripts/enrich_trace.py --timeline`). Optional `agent_monitor.json` from
+`eval/tune_overnight_monitor.py` is a batch dashboard only — not required for debugging.
 
 ---
 

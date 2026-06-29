@@ -139,7 +139,7 @@ def test_allroles_help_no_longer_claims_separate_architect_pass():
 def test_claude_md_injection_gated_by_lean_mode():
     """The per-turn CLAUDE.md <project-context> injection must be skipped
     when lean mode is active."""
-    src = inspect.getsource(GameAgent.run)
+    src = GameAgent.run_loop_inspect_source()
     assert "lean_active = self._lean_prompt_active()" in src
     assert "if not lean_active:" in src
     # _read_project_config is only called inside the not-lean branch.

@@ -73,7 +73,7 @@ def test_stub_fires_just_above_threshold():
 # ---------------------------------------------------------------------------
 
 def _run_src() -> str:
-    return inspect.getsource(GameAgent.run)
+    return GameAgent.run_loop_inspect_source()
 
 
 def test_run_wires_stub_after_no_usable_code_trace():

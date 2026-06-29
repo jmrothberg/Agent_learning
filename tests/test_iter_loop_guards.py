@@ -203,7 +203,7 @@ def test_bracket_reject_drives_generic_surgery_turn():
     one-patch retry that worked manually). Asserted at the source level so
     no async loop / Chromium is needed — mirrors test_capability_round's
     inspect.getsource pattern."""
-    src = inspect.getsource(GameAgent.run)
+    src = GameAgent.run_loop_inspect_source()
     assert "PATCH SURGERY MODE" in src
     assert "patch set rejected" in src
 

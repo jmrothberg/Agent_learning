@@ -250,7 +250,7 @@ def test_chat_feedback_ledger_is_write_honest():
 
 
 def test_agent_loop_hardening_hooks_are_wired():
-    src = inspect.getsource(GameAgent)
+    src = GameAgent.class_inspect_source()
     for term in (
         "PATCH SURGERY MODE",
         "USER FEEDBACK OVERRIDES STALE BLOCKER",

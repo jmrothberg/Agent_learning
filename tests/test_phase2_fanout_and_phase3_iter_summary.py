@@ -232,9 +232,9 @@ def test_phase_3_emits_iter_summary_event_signature():
     expected payload fields. Direct integration through agent.run
     requires a full Chromium + backend stack, so this is a structural
     check on the source."""
-    import inspect
     import agent as agent_module
-    src = inspect.getsource(agent_module)
+    from agent import module_inspect_source
+    src = module_inspect_source()
     # The emission site exists.
     assert '"kind": "iter_summary"' in src
     # Required payload fields.
@@ -249,9 +249,9 @@ def test_phase_3_emits_iter_summary_event_signature():
 def test_phase_3_surprise_rules_in_source():
     """The two surprise categories — state_vs_render_gap and
     regression_after_clean_iter — must be wired."""
-    import inspect
     import agent as agent_module
-    src = inspect.getsource(agent_module)
+    from agent import module_inspect_source
+    src = module_inspect_source()
     assert '"category": "state_vs_render_gap"' in src
     assert '"category": "regression_after_clean_iter"' in src
     assert '"category": "non_slot1_bon_winner"' in src

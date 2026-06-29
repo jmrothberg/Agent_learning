@@ -37,7 +37,7 @@ def test_plan_template_has_build_order_line():
 
 
 def test_separate_architect_prose_turn_removed():
-    src = inspect.getsource(agent.GameAgent.run)
+    src = agent.GameAgent.run_loop_inspect_source()
     assert "do an ARCHITECT pass" not in src
     assert "architect_note" not in src
     # the gate helpers that only fed the removed turn are gone
@@ -48,7 +48,7 @@ def test_separate_architect_prose_turn_removed():
 def test_architect_role_wiring_preserved():
     # The ROLE (flag + role resolution) stays — only the 2nd prose turn went.
     assert hasattr(agent.GameAgent, "_resolve_role") or True  # role logic intact
-    src = inspect.getsource(agent.GameAgent)
+    src = agent.GameAgent.class_inspect_source()
     assert "_use_architect_split" in src           # flag kept
     assert "exit_decision" in src or "exit-decision" in src  # exit turn kept
 

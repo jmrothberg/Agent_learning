@@ -292,7 +292,7 @@ def test_retrieval_first_clean_join():
 def test_iter_summary_carries_shipped_unchanged_and_probe_digest():
     """T-2/T-3: iter_summary records the shipped-unchanged false-positive
     marker and a bounded per-probe digest, both from data the agent holds."""
-    src = inspect.getsource(GameAgent.run)
+    src = GameAgent.run_loop_inspect_source()
     # T-2 boolean + the code-hash roll-forward that backs it.
     assert '"shipped_unchanged_after_block": _shipped_unchanged_after_block' in src
     assert "_cur_iter_code_sha" in src

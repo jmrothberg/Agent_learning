@@ -203,7 +203,7 @@ def test_both_first_build_paths_inject_components():
     block. The seed path previously skipped it, starving weak models of the
     copy-paste-correct snippets on continuation/seed builds."""
     import inspect
-    src = inspect.getsource(GameAgent.run)
+    src = GameAgent.run_loop_inspect_source()
     # Both first-build branches use a plan-stage component call. The seed path
     # uses a fixed k=3; the skeleton path bumps to k=4 for open-domain goals
     # (k=4 if open_domain_build else 3), so match on the stable plan-stage

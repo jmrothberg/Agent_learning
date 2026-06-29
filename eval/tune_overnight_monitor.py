@@ -32,6 +32,7 @@ def _trace_signals(trace_path: Path) -> dict:
         "lines": 0,
         "iter_summaries": 0,
         "last_iter_ok": None,
+        "session_ok": None,
         "runaway_warnings": 0,
         "stream_dones": 0,
         "failure_classes": {},
@@ -53,6 +54,8 @@ def _trace_signals(trace_path: Path) -> dict:
         if kind == "iter_summary":
             out["iter_summaries"] += 1
             out["last_iter_ok"] = bool(ev.get("ok"))
+        elif kind == "session_outcome":
+            out["session_ok"] = bool(ev.get("ok"))
         elif kind == "runaway_stream_warning":
             out["runaway_warnings"] += 1
         elif kind == "stream_done":
@@ -92,9 +95,24 @@ def _parse_pass_fail(log_path: Path) -> list[dict]:
         return []
     text = log_path.read_text(encoding="utf-8", errors="replace")
     hits = []
-    for m in re.finditer(r"\[(PASS|FAIL)\]\s+(\S+)", text):
+    tag = r"(?:PASS|FAIL|fresh_pass|artifact_pass|fresh_fail|skipped)"
+    for m in re.finditer(rf"\[({tag})\]\s+(\S+)", text):
         hits.append({"status": m.group(1), "label": m.group(2)})
     return hits
+
+
+def _effective_outcome(raw: dict, sig: dict) -> str:
+    """Prefer checkpoint outcome; infer from trace when missing (old checkpoints)."""
+    outcome = raw.get("outcome")
+    if outcome in ("fresh_pass", "artifact_pass", "fresh_fail", "skipped"):
+        return outcome
+    if sig.get("last_iter_ok") is True:
+        return "fresh_pass"
+    if sig.get("iter_summaries", 0) == 0 and sig.get("session_ok") is False:
+        return "fresh_fail"
+    if raw.get("exit_code") == 0 and sig.get("iter_summaries", 0) > 0:
+        return "fresh_pass"
+    return "fresh_fail"
 
 
 def snapshot(out_dir: Path, jobs_total: int) -> dict:
@@ -104,30 +122,38 @@ def snapshot(out_dir: Path, jobs_total: int) -> dict:
     log_path = out_dir / "overnight.log"
     results_raw = ck.get("results") or []
     game_rows = []
+    pass_fail = []
     for raw in results_raw:
         label = raw.get("label", "")
         trace = _newest_trace(out_dir, label) if label else None
         sig = _trace_signals(trace) if trace else {}
+        outcome = _effective_outcome(raw, sig)
         game_rows.append({
             "label": label,
             "exit_code": raw.get("exit_code"),
+            "outcome": outcome,
             "failure_classes": raw.get("failure_classes") or {},
             "trace": str(trace.relative_to(REPO)) if trace else None,
             "signals": sig,
         })
+        pass_fail.append({"status": outcome, "label": label})
     runaway_games = sum(
         1 for g in game_rows if g.get("signals", {}).get("runaway_warnings", 0) > 0
     )
     no_iter_games = sum(
         1 for g in game_rows if g.get("signals", {}).get("iter_summaries", 0) == 0
     )
+    fresh_pass = sum(1 for g in game_rows if g.get("outcome") == "fresh_pass")
+    fresh_fail = sum(1 for g in game_rows if g.get("outcome") == "fresh_fail")
     return {
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "completed_count": len(completed),
         "jobs_total": jobs_total,
         "completed_labels": completed,
+        "fresh_pass_count": fresh_pass,
+        "fresh_fail_count": fresh_fail,
         "log_tail": _tail_log(log_path),
-        "pass_fail": _parse_pass_fail(log_path),
+        "pass_fail": pass_fail,
         "games": game_rows,
         "patterns": {
             "runaway_games": runaway_games,

@@ -14,7 +14,8 @@ Optional flags:
                         '/Users/jonathanrothberg_1/MLX_Models/Qwen3.6-27B-mxfp8'.)
     --max-iters N       Cap iterations (default 6)
     --out PATH          Where to save the final game (default games/game.html)
-    --best-of-n N       Sample N candidates per fix turn (default 3)
+    --best-of-n N       Sample N candidates per fix turn (default 1)
+    --stuck-bon         Enable automatic stuck best-of-2 escalation (default off)
     --num-ctx N         Ollama context window (default 100000; env CODING_BOX_NUM_CTX)
     --stall-seconds N   Per-stream no-activity watchdog (default 300; fail-open floor)
     --headless          Run Chromium headless (no visible window). Use this
@@ -146,6 +147,7 @@ async def _run(
     playbook_on: bool = True,
     playbook_writeback: bool = True,
     use_vlm_critique: bool = False,
+    stuck_bon_enabled: bool = False,
     no_auto_step: bool = False,
 ) -> int:
     # Resolve which LLM daemon we'll talk to. --backend overrides the
@@ -199,6 +201,7 @@ async def _run(
         playbook_top_k=6 if playbook_on else 0,
         playbook_writeback=playbook_writeback,
         use_vlm_critique=use_vlm_critique,
+        stuck_bon_enabled=stuck_bon_enabled,
     )
 
     # Stream tokens to stdout, one chunk at a time. Newlines flush.
@@ -220,7 +223,7 @@ async def _run(
         f"== {PRODUCT_NAME} CLI · {info.name.upper()}={info.model} "
         f"[{info.source}] · headless={headless} · "
         f"vlm-critique={use_vlm_critique} · "
-        f"best-of-N={best_of_n} · step={step}"
+        f"best-of-N={best_of_n} · stuck-bon={stuck_bon_enabled} · step={step}"
     )
     print(f"== Goal: {goal}\n")
     rc = 0
@@ -259,7 +262,14 @@ async def _run(
         except Exception:
             pass
 
-    print(f"\nFinal game saved to: {out_path}", flush=True)
+    best_path = out_path.with_name(out_path.stem + ".best.html")
+    shipped = best_path.is_file() and best_path.stat().st_size > 500
+    if rc == 0 and not shipped:
+        rc = 1
+    if shipped or out_path.is_file():
+        print(f"\nFinal game saved to: {out_path}", flush=True)
+    else:
+        print(f"\nNo game shipped (missing {best_path.name})", flush=True)
     if open_when_done and out_path.exists():
         webbrowser.open(f"file://{out_path.resolve()}")
     # Unattended serial/batch (--no-auto-step): skip interpreter shutdown.
@@ -340,6 +350,13 @@ def main() -> int:
                         "fan-out oversubscribed the 4-GPU box on first build "
                         "(2026-05-23). Opt in with --best-of-n 2 or 3 when you have "
                         "spare staged slots.")
+    p.add_argument(
+        "--stuck-bon",
+        action="store_true",
+        help="Enable automatic stuck best-of-2 escalation after 2+ failed "
+             "iters (cap 2/session). Default off — same as TUI without "
+             "/bestof on. Separate from --best-of-n.",
+    )
     p.add_argument("--num-ctx", type=int, default=None,
                    help="Ollama context window. Default 100000 (or "
                         "CODING_BOX_NUM_CTX env: supports 100k, 262k, full). "
@@ -445,6 +462,7 @@ def main() -> int:
         playbook_on=args.playbook,
         playbook_writeback=args.playbook_writeback,
         use_vlm_critique=args.vlm_critique,
+        stuck_bon_enabled=args.stuck_bon,
         no_auto_step=args.no_auto_step,
     ))
 

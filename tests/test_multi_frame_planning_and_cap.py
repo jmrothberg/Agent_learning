@@ -309,14 +309,14 @@ def test_user_force_done_logic_short_circuit_flag_exists():
     `if critic_backend is not None and self._user_force_done` line in
     agent.py which we grep-assert below to prevent regression.
     """
-    import inspect
     import agent as agent_module
+    from agent import module_inspect_source
 
     a = GameAgent.__new__(GameAgent)
     a._user_force_done = False
     assert hasattr(a, "_user_force_done")
 
-    src = inspect.getsource(agent_module)
+    src = module_inspect_source()
     assert "critic_skipped_for_force_done" in src, (
         "Phase 0.4b regression: the critic fast-path on Ctrl+D was "
         "removed. The post-iter visual critic must respect "

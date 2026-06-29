@@ -64,13 +64,22 @@ def test_bon_candidates_written_to_out_path_parent():
     sprites failure)."""
     src = inspect.getsource(GameAgent._generate_and_score_candidates)
     assert "self.out_path.parent" in src
+    assert "candidates" in src and "iter_" in src
     assert "self.snapshots_dir / f\"cand_" not in src
+    assert ".cand_" not in src
 
 
-def test_bon_candidate_temp_file_cleaned_up():
+def test_bon_candidates_kept_visible():
+    """BoN candidate HTML stays on disk under candidates/iter_NN/ — no
+    dotfiles, no auto-delete."""
     src = inspect.getsource(GameAgent._generate_and_score_candidates)
-    assert "finally" in src
-    assert "unlink" in src
+    assert "_bon_candidate_path" in src
+    assert "cand_" in src
+    assert ".cand_" not in src
+    assert "unlink" not in src
+    path_src = inspect.getsource(GameAgent._bon_candidate_path)
+    assert "candidates" in path_src
+    assert f'f"cand_{{candidate_index}}.html"' in path_src or "cand_{candidate_index}.html" in path_src
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +266,7 @@ def test_materialize_accepts_balanced_patch(tmp_path):
 def test_bracket_reject_retry_message_is_targeted():
     """The run loop must send the bracket message itself, not the generic
     patch_retry_instruction (whose failed-list would be empty)."""
-    src = inspect.getsource(GameAgent.run)
+    src = GameAgent.run_loop_inspect_source()
     assert 'materialize_msg.startswith("patch set rejected")' in src
 
 

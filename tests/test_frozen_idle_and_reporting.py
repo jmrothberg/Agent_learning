@@ -44,7 +44,7 @@ def test_frozen_canvas_idle_by_design_does_not_hard_block():
 # ---- Reporting: iter_summary carries WHY it blocked + deferred feedback ------
 
 def test_iter_summary_records_soft_warnings_and_deferred_feedback():
-    src = inspect.getsource(agent.GameAgent.run)
+    src = agent.GameAgent.run_loop_inspect_source()
     # the iter_summary payload now includes the actual warning texts, the
     # frozen false-positive classifier, and any queued (deferrable) feedback
     assert '"soft_warnings": [str(w)' in src

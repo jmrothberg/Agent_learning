@@ -33,7 +33,7 @@ alone.
 |------|--------|
 | **Source vs artifacts map** | **`AGENTS.md`** — what to edit vs read for triage (trace paths, logs) |
 | Verifier (highest leverage) | `tools.py` — `load_and_test`, `_input_smoke_test`, gates |
-| Agent loop | `agent.py` — `GameAgent.run`, compaction, memory injection |
+| Agent loop | `agent.py` (orchestrator) + mixins — see **`AGENTS.md` §1b** (`agent_feedback`, `agent_prompts`, `agent_stream`, `agent_gates`, `agent_critic`, `agent_assets`, …) |
 | Assets / audio | `assets.py`, `sounds.py`, `videos.py` |
 | Prompts | `prompts_v1.py` — `FormatSpec` list; don’t hand-edit rendered blob |
 | Memory (one JSONL line, no restart) | `memory/playbook.jsonl`, `visual_playtests.jsonl`, `implementation_outlines.jsonl`, `playtests.jsonl`, `skeletons/` |
@@ -101,7 +101,19 @@ pads stay gitignored under `games/tune_serial10/run_XX/triage.md`.
 
 **run_05 score:** 11/12 PASS (GLM-5.2-MLX-4bit). Sole FAIL: Dragon's Lair — exit=-9 SIGKILL ×3
 (OOM after Holochess 48-sprite session). **run_06:** partial re-run list in
-`eval/tune_serial10_round2_rerun.txt` — run Dragon's Lair first / in isolation.
+`eval/tune_serial10_round2_rerun.txt` (6 games). Ops commands → **`eval/OPERATIONS.md`**.
+
+### run_06 results (GLM-5.2-MLX-4bit, 2026-06-29)
+
+Artifacts: `games/tune_serial10/run_06/` — `overnight.log`, `agent_monitor.json`, `tune_checkpoint.json`, `traces/<label>__run_*.jsonl`.
+
+| # | Game | Outcome | Trace takeaway |
+|---|------|---------|----------------|
+| 01 | Donkey Kong | **fresh_pass** (~51 min) | 1× `memory_gap`; iter 4 clean |
+| 02 | Kung-Fu Master | **fresh_pass** after retries | **Crouch gated movement** — `if (idle\|\|walk)` blocked ArrowRight after input test set `crouch`; **cutscene setTimeout** never reached `startWave(1)` → `ASSETS_LOADED_BUT_UNDRAWN`; stuck BoN doubled wall time when enabled (now default off) |
+| 03–06 | **fresh_fail** (not re-validated) | ~1 s traces, 0 `iter_summary`, `session_outcome ok=false` | Instant `get_backend() missing 'role'` (`@classmethod` orphan on `_stream` — fixed). Old summary wrongly said 6/6 PASS because `coder.py` exited 0; batch now uses trace/`.best.html` verification. Re-run 03–06 only if you need artifacts in this run dir. |
+
+Triage: `.venv/bin/python scripts/enrich_trace.py games/tune_serial10/run_06/traces/02_...620731.jsonl --timeline`
 
 ### Mid-batch harness fixes (applied in repo)
 
@@ -113,15 +125,20 @@ pads stay gitignored under `games/tune_serial10/run_XX/triage.md`.
 | Probes false-fail on `window.state` | Require `window.state = state` in HARD_RULES + first build | `prompts_v1.py` |
 | ENTITY-NOT-RENDERED gates ok when all probes pass (thin crosshair) | Bbox sample + advisory when probes green | `tools.py` |
 | Board games: pointerdown vs mousedown, frozen idle board | Board probe pointerdown+pointerup; turn-based frozen-canvas exemption | `tools.py` |
+| Stuck best-of-2 silently doubled fix time on single MLX | Default **off**; opt in `/bestof on` or `coder.py --stuck-bon`; candidates under `candidates/iter_NN/` | `agent.py`, `chat.py`, `coder.py` |
+| Kung-Fu: movement gated on idle/walk only | Playbook: include crouch/duck in movement branch or reset action before move | `memory/playbook.jsonl` |
+| Video intro: orphan setTimeout, enemies never spawn | Playbook: call `reset()`/`startGame()` — same path as R restart | `memory/playbook.jsonl` |
 
 ### Recurring patterns (watch in new traces)
 
-- **memory_gap: assets loaded but undrawn** — self-recovers but burns iters (Joust 5×). Playbook/outline pre-empt, not new agent machinery.
+- **memory_gap: assets loaded but undrawn** — self-recovers but burns iters (Joust 5×). Often state-gated sprites (enemies not spawned yet) or drawImage not wired — playbook `draw-generated-sprites-not-boxes` + `td-enemies-follow-waypoints` / spawn timers; not new agent machinery.
+- **input_moves_player false-fail** — harness dispatches ArrowRight; if prior keydown left player in crouch/block, movement gated on `idle||walk` fails probe while game feels fine to a human.
 - **ENTITY-NOT-RENDERED soft_warning** — fix only if 2+ games show same pattern (Missile Command iter 2).
 - **OOM at game 12** — verify media/MLX freed at serial game boundaries; run heaviest media game earlier or isolated.
+- **Stuck BoN** — only helps sampling noise on multi-slot parallel backends; on single MLX it is ~2× wall time. Keep default off for tune batches.
 
 ## Read order
 
-`CLAUDE.md` → this file → `tools.py` (`load_and_test`) → trace `.jsonl` for the failure → relevant
-`memory/*.jsonl`. Agent comparison vs Cursor/Aider: **`README.md#how-this-compares-to-other-coding-agents`**.
-Tests: `.venv/bin/python -m pytest tests/ -q` (pure-function, no GPU/model).
+`CLAUDE.md` → this file → **`eval/OPERATIONS.md`** (run batch / pytest) → `TEST.md` (suite map) → `tools.py` (`load_and_test`) → trace `.jsonl` → relevant `memory/*.jsonl`. Agent comparison vs Cursor/Aider: **`README.md#how-this-compares-to-other-coding-agents`**.
+
+Quick test: `.venv/bin/python -m pytest tests/ -q` (pure-function; no GPU/model).

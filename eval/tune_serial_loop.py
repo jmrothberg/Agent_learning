@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Serial VLM tuning loop — one game at a time, visible browser, in-process MLX.
 
+Ops guide (launch batch, triage, artifact paths): eval/OPERATIONS.md
+
 Default: fully unattended — no pause between games, no per-game wall timeout,
 no auto-step on test failure (runs to completion or natural agent exit).
 
@@ -46,6 +48,7 @@ class JobResult:
     failure_classes: dict[str, int] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
     attempts: int = 1
+    outcome: str = "fresh_fail"
 
 
 def _load_goals(args) -> list[tuple[str, str]]:
@@ -147,6 +150,30 @@ def _counts_as_pass(out_path: Path) -> bool:
     return _trace_last_iter_ok(out_path) is True
 
 
+def _classify_outcome(out_path: Path) -> str:
+    """Verdict after a subprocess run (not resume-skip)."""
+    last_ok = _trace_last_iter_ok(out_path)
+    if last_ok is True:
+        return "fresh_pass"
+    best = out_path.with_name(out_path.stem + ".best.html")
+    if best.is_file() and best.stat().st_size > 500:
+        return "artifact_pass"
+    return "fresh_fail"
+
+
+def _outcome_counts(results: list[JobResult]) -> dict[str, int]:
+    keys = ("fresh_pass", "artifact_pass", "fresh_fail", "skipped")
+    counts = {k: 0 for k in keys}
+    for r in results:
+        o = r.outcome if r.outcome in counts else "fresh_fail"
+        counts[o] += 1
+    return counts
+
+
+def _delivered_outcomes() -> frozenset[str]:
+    return frozenset({"fresh_pass", "artifact_pass", "skipped"})
+
+
 def _load_checkpoint(path: Path) -> dict:
     if not path.is_file():
         return {"completed_labels": [], "results": []}
@@ -209,7 +236,7 @@ def _write_summary(
     status: str,
     vlm_critique: bool = True,
 ) -> None:
-    passed = sum(1 for r in results if r.exit_code == 0)
+    counts = _outcome_counts(results)
     summary = {
         "status": status,
         "backend": "mlx-in-process",
@@ -217,7 +244,11 @@ def _write_summary(
         "vlm_critique": vlm_critique,
         "headless": False,
         "jobs": len(results),
-        "passed": passed,
+        "passed": counts["fresh_pass"],
+        "fresh_passed": counts["fresh_pass"],
+        "artifact_passed": counts["artifact_pass"],
+        "fresh_failed": counts["fresh_fail"],
+        "skipped": counts["skipped"],
         "results": [asdict(r) for r in results],
     }
     path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
@@ -372,6 +403,20 @@ async def main_async(args) -> int:
         out_path = out_root / f"{label}.html"
         if args.resume and (label in completed_labels or _is_game_delivered(out_path)):
             print(f"=== skip {i}/{len(jobs)} · {label} (already delivered) ===")
+            if not any(r.label == label for r in results):
+                skip_result = JobResult(
+                    index=i,
+                    label=label,
+                    goal=goal,
+                    cmd=[],
+                    exit_code=0,
+                    duration_s=0.0,
+                    out_path=str(out_path),
+                    outcome="artifact_pass",
+                    notes=["resume skip — artifact on disk"],
+                )
+                results.append(skip_result)
+                print(f"\n[artifact_pass] {label} · skipped (already delivered)")
             if label not in completed_labels:
                 completed_labels.append(label)
                 _save_checkpoint(
@@ -410,22 +455,28 @@ async def main_async(args) -> int:
             if result.exit_code == 0 or _counts_as_pass(out_path):
                 if result.exit_code != 0 and _counts_as_pass(out_path):
                     result.exit_code = 0
-                    result.notes.append("verified artifact on disk after failed exit — counted PASS")
+                    result.notes.append(
+                        "verified artifact on disk after failed exit — artifact_pass"
+                    )
                 break
 
         assert result is not None
+        result.outcome = _classify_outcome(out_path)
+        if any(
+            "verified artifact on disk after failed exit" in n for n in result.notes
+        ) and result.outcome == "fresh_fail" and _counts_as_pass(out_path):
+            result.outcome = "artifact_pass"
         results.append(result)
-        status = "PASS" if result.exit_code == 0 else "FAIL"
         fc_str = ", ".join(f"{k}={v}" for k, v in sorted(result.failure_classes.items()))
         print(
-            f"\n[{status}] {label} · {result.duration_s:.0f}s · exit={result.exit_code}"
+            f"\n[{result.outcome}] {label} · {result.duration_s:.0f}s · exit={result.exit_code}"
             + (f" · attempts={result.attempts}" if result.attempts > 1 else "")
             + (f" · failure_class: {fc_str}" if fc_str else "")
         )
         for note in result.notes:
             print(f"  note: {note}")
 
-        if result.exit_code == 0 or _counts_as_pass(out_path):
+        if result.outcome in _delivered_outcomes():
             if label not in completed_labels:
                 completed_labels.append(label)
 
@@ -446,7 +497,7 @@ async def main_async(args) -> int:
             except EOFError:
                 print("(stdin closed — continuing)", file=sys.stderr)
 
-    passed = sum(1 for r in results if r.exit_code == 0)
+    counts = _outcome_counts(results)
     all_done = len(completed_labels) >= len(jobs)
     _write_summary(
         path=summary_path, model=model, results=results,
@@ -460,8 +511,11 @@ async def main_async(args) -> int:
         jobs_total=len(jobs),
     )
     print(
-        f"\n{len(completed_labels)}/{len(jobs)} delivered · "
-        f"{passed}/{len(results)} passed this session · summary: {summary_path}"
+        f"\n{len(completed_labels)}/{len(jobs)} checkpoint complete · "
+        f"{counts['fresh_pass']}/{len(jobs)} fresh pass · "
+        f"{counts['artifact_pass']} artifact pass · "
+        f"{counts['fresh_fail']} fresh fail · "
+        f"summary: {summary_path}"
     )
     return 0 if all_done else 1
 

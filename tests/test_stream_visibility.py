@@ -228,7 +228,8 @@ def test_info_stall_reason_sets_last_stall_and_banner():
 
 
 def test_run_drains_stream_ui_events_after_stream():
-    src = inspect.getsource(GameAgent)
+    from agent import module_inspect_source
+    src = module_inspect_source()
     assert "for _ev in self._drain_stream_ui_events():" in src
     assert src.count("await self._stream(") == src.count(
         "for _ev in self._drain_stream_ui_events():"

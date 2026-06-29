@@ -340,7 +340,7 @@ def test_silent_stall_flag_forces_compaction_once(tmp_path):
 
 
 def test_silent_abort_handler_sets_stall_flag():
-    src = inspect.getsource(GameAgent)
+    src = GameAgent.class_inspect_source()
     i = src.index('"kind": "stream_silent_aborted"')
     before = src[max(0, i - 600):i]
     assert "_force_compact_after_stall = True" in before
@@ -414,6 +414,33 @@ def test_bon_guard_backward_compatible_without_report():
     assert f(2, 1, 0) is True
     assert f(1, 1, 0) is False
     assert f(2, 2, 0) is False
+
+
+def test_stuck_bon_default_off():
+    """Automatic stuck best-of-2 is opt-in — default False on new agents."""
+    from pathlib import Path
+    from unittest.mock import MagicMock
+
+    out = Path("/tmp/stuck_bon_test_game.html")
+    a = GameAgent(
+        model="stub:1b",
+        out_path=out,
+        browser=MagicMock(),
+        max_iters=4,
+    )
+    assert a._stuck_bon_enabled is False
+    a.set_stuck_bon_enabled(True)
+    assert a._stuck_bon_enabled is True
+
+
+def test_stuck_bon_escalation_gated_on_flag():
+    """Run loop only escalates when _stuck_bon_enabled is True."""
+    src = GameAgent.run_loop_inspect_source()
+    assert "self._stuck_bon_enabled" in src
+    assert "_should_escalate_stuck_bon" in src
+    idx_flag = src.index("self._stuck_bon_enabled")
+    idx_esc = src.index("_should_escalate_stuck_bon")
+    assert idx_flag < idx_esc
 
 
 # ---------------------------------------------------------------------------

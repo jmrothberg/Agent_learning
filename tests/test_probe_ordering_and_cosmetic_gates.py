@@ -219,7 +219,7 @@ def test_no_probes_or_no_softs_disqualify():
 
 
 def test_agent_save_site_wires_cosmetic_fallback():
-    src = inspect.getsource(GameAgent)
+    src = GameAgent.run_loop_inspect_source()
     assert "elif _report_green_except_cosmetic_sprites(report):" in src
     # Degraded save is traced so the run jsonl shows WHY best.html exists
     # despite ok=False.

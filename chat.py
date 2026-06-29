@@ -1119,6 +1119,10 @@ class CodingBoxApp(App):
         # Advanced agent behavior bundles (toggled dynamically via slash commands)
         self._use_prefill: bool = True
         self._use_vlm_critique: bool = False
+        # Stuck best-of-2 escalation — default OFF. When ON, after 2+
+        # failed iters the agent samples two fix attempts and picks the
+        # higher Chromium score (cap 2/session). Opt in via /bestof on.
+        self._stuck_bon_enabled: bool = False
         # Phase 1.5 — autonomous self-feedback loop. After each clean
         # iter, runs a short scripted playtest, captures multi-window
         # screenshots, evaluates genre-free behavior recipes, and queues
@@ -3265,6 +3269,8 @@ class CodingBoxApp(App):
                 self._cmd_toggle_double_screenshot(arg)
             elif cmd in ("vlm-critique", "vlmcritique", "vc", "judge"):
                 self._cmd_toggle_vlm_critique(arg)
+            elif cmd in ("bestof", "best-of-n", "bon", "bestofn"):
+                self._cmd_toggle_bestof(arg)
             elif cmd in ("allroles", "all-roles"):
                 self._cmd_toggle_allroles(arg)
             elif cmd in ("leanprompt", "lean-prompt", "lean"):
@@ -3391,6 +3397,8 @@ class CodingBoxApp(App):
             "                                  [dim]/wait on auto-disables /vlm-critique (you're the reviewer); restored on /wait off[/dim]",
             "  [b]/vlm-critique [on|off][/b]    review WITH vision: looks at the screen, tells the agent \u00b7 default off",
             "                                  [dim]alias: /judge · uses a memory checklist when one fits the game[/dim]",
+            "  [b]/bestof [on|off][/b]          auto sample 2 fixes when stuck 2+ iters \u00b7 default off",
+            "                                  [dim]aliases: /bon /best-of-n · candidates saved under candidates/iter_NN/[/dim]",
             "                                  [dim]uses model 2 to look when your main model can't see[/dim]",
             "                                  [dim]RECOMMENDED: OFF when YOU review each iter \u2014 auto review adds paraphrased noise[/dim]",
             "  [b]/critique [on|off][/b]        review WITHOUT vision: plays it + reads the report, tells the agent \u00b7 default ON",
@@ -5381,6 +5389,7 @@ class CodingBoxApp(App):
             f"  architect-split:      {'ON' if eff_arch_split else 'off'}{' [auto]' if eff_arch_auto and eff_arch_split else ''}",
             f"  double-screenshot:    {'ON' if self._use_double_screenshot else 'off'}",
             f"  vlm-critique (vision):{'ON' if eff_vlm_critique else 'off'}{' [auto]' if eff_vlm_auto and eff_vlm_critique else ''}  [dim](looks at the screen; sends problems to the agent)[/dim]",
+            f"  stuck best-of-2:      {'ON' if self._stuck_bon_enabled else 'off'}  [dim](/bestof on — auto sample 2 fixes when stuck; candidates/iter_NN/)[/dim]",
             f"  /allroles bundle:     {'ON' if self._all_roles_enabled else 'off'}",
             f"  critique (no vision): {'ON' if self._use_autonomous_feedback else 'OFF'}  [dim](reviews without looking; sends problems to the agent; /critique off to disable)[/dim]",
             f"  raw user feedback:    {'ON · directives suppressed (default)' if not self._use_feedback_directives else 'off · classifier wrapping ACTIVE'}  [dim](/rawfeedback on|off — bypass MEDIA-CHANGE / ORIENTATION / SCOPE wrappers; machine bug feedback always on)[/dim]",
@@ -5866,6 +5875,34 @@ class CodingBoxApp(App):
         )
         self._update_status()
 
+    def _cmd_toggle_bestof(self, arg: str) -> None:
+        """/bestof [on|off] — automatic stuck best-of-2 escalation.
+
+        When ON, after 2+ consecutive failed iters the agent samples two
+        fix attempts (temps 0.2 / 0.6), scores each in Chromium, and picks
+        the winner — up to 2 escalations per session. Default OFF (single
+        sample per iter). Candidate HTML is kept visible under
+        candidates/iter_NN/cand_I.html next to the game file.
+        Aliases: /bon, /best-of-n. Sticky across /new.
+        """
+        arg_lc = arg.strip().lower()
+        if arg_lc in ("on", "true", "1", "enable"):
+            new_state = True
+        elif arg_lc in ("off", "false", "0", "disable"):
+            new_state = False
+        else:
+            new_state = not self._stuck_bon_enabled
+        self._stuck_bon_enabled = new_state
+        if self.agent is not None:
+            self.agent.set_stuck_bon_enabled(new_state)
+        status = "[green]ON[/green]" if new_state else "[yellow]OFF[/yellow]"
+        self._log_info(
+            f"stuck best-of-2 set to {status} "
+            "(auto-escalates after 2 failed iters, cap 2/session; "
+            "candidates saved under candidates/iter_NN/)"
+        )
+        self._update_status()
+
     def _cmd_set_leanprompt(self, arg: str) -> None:
         """/leanprompt on|off|auto — control the compact system-prompt schema.
 
@@ -6305,6 +6342,7 @@ class CodingBoxApp(App):
         self.agent._use_autonomous_feedback = self._use_autonomous_feedback
         self.agent._use_feedback_directives = self._use_feedback_directives
         self.agent._all_roles_enabled = self._all_roles_enabled
+        self.agent.set_stuck_bon_enabled(self._stuck_bon_enabled)
         # Lean system-prompt override (None = agent auto-decides: on for
         # local backends). Only set when the user explicitly toggled it.
         if self._lean_prompt is not None:

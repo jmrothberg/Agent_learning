@@ -126,7 +126,7 @@ def test_critic_prompt_refuses_yes_without_action_frame():
 # ---- trace observability (source-pin) --------------------------------------
 
 def test_iter_summary_logs_action_and_static_fields():
-    src = inspect.getsource(agent.GameAgent.run)
+    src = agent.GameAgent.run_loop_inspect_source()
     assert '"action_frame_captured"' in src
     assert '"static_action": _static_action' in src
 

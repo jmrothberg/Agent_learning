@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Overnight watchdog — restarts tune_serial_loop until all goals are delivered.
+# Full ops guide (launch, triage, artifact paths): eval/OPERATIONS.md
 # Survives parent crashes, SIGSEGV atexit, and Cursor terminal aborts.
 #
 # Launch in Terminal.app ONLY (not Cursor). Log: $TUNE_OUT_DIR/overnight.log

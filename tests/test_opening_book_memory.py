@@ -125,7 +125,7 @@ def test_agent_retrieves_opening_book_block(tmp_path: Path) -> None:
 
 
 def test_plan_turn_injects_opening_book_before_plan_contract() -> None:
-    src = inspect.getsource(GameAgent.run)
+    src = GameAgent.run_loop_inspect_source()
     assert "plan_opening_book_injected" in src
     assert "Use the opening-book recipes above when choosing your" in src
     assert "adapt them to the user's goal" in src or "them to the user's goal when it specifies" in src

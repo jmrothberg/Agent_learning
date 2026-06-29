@@ -49,6 +49,7 @@ TORCH_CUDA=121 ./scripts/install_diffuser.sh    # older NVIDIA only
 # Run the TUI (recommended)
 .venv/bin/python chat.py
 # In the TUI: /help (commands) · /help topics · /help feedback-flows · /help critique · /help vlm-critique (static detail, tui_help.py)
+# Stuck best-of-2 (auto sample 2 fixes when stuck 2+ iters): default OFF — /bestof on in TUI, or coder.py --stuck-bon
 
 # One-shot CLI
 .venv/bin/python coder.py "build me a snake game with a wraparound board"
@@ -69,7 +70,7 @@ MLX_MODEL=/Users/jonathanrothberg/MLX_Models/Qwen3.6-27B-mxfp8 .venv/bin/python 
 # auto-resolve from the model path: 512 if "flash" is in the name
 # (DeepSeek-V4 Flash crashes mid-generation at >512), else 1024.
 
-# Tests (pure-function, no model/GPU/browser — see TEST.md)
+# Tests (pure-function, no model/GPU/browser — see TEST.md; batch ops: eval/OPERATIONS.md)
 .venv/bin/python -m pytest tests/ -q
 .venv/bin/python -m pytest tests/test_patches.py -v
 .venv/bin/python -m pytest tests/test_patches.py::test_apply_smart_quote_match -v
@@ -130,7 +131,9 @@ MLX_MODEL=~/MLX_Models/GLM-5.2-MLX-4bit .venv/bin/python eval/eval_seed_edits.py
 
 ### The agent loop is async + event-driven
 
-`GameAgent.run(goal) -> AsyncIterator[AgentEvent]` in `agent.py` is the heart. Three phases:
+`GameAgent.run(goal) -> AsyncIterator[AgentEvent]` in `agent.py` is the heart. Implementation is split across **mixins** (feedback, prompts, stream/materialize, gates, critic, assets, probes, memory) — module map: **`AGENTS.md` §1b**; do not grow inline logic in `run()`.
+
+Three phases:
 
 1. **Phase A — planning** (1 turn). Model emits `<plan>` + `<criteria>` + `<probes>` + optional `<assets>`. The user-turn prompt is built by `prompts_v1.plan_instruction(goal=...)`, which detects art / 3D modality keywords and injects directives accordingly.
 2. **Phase B — build/iterate** (up to `max_iters`). Each iter: stream model reply → materialize via `patches.extract_patches`/`apply_patches` (preferred) OR full `<html_file>` rewrite → micro-probes (cheap, no browser) → Chromium load (skipped when `browser=None` — emits `iter_summary` with `test_skipped:no_browser`) → score against the model's own `<probes>`. Failed iters get a diagnose-then-fix prompt; clean iters get a "prefer `<done/>`" prompt. **`patch_only=True`** (requires `seed_file`): skip Phase A planning + phase-A asset gen — used by `eval/eval_seed_edits.py --patch-only`.

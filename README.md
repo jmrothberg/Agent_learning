@@ -127,7 +127,7 @@ MiniMax-M3 (see above). Example weights: `pipenetwork/GLM-5.2-MLX-4bit`,
 `mlx-community/GLM-5.2-mxfp4` — needs a very large unified-memory Mac (~370–480 GB
 for 4-bit).
 
-**Tests** (pure-function; see `TEST.md`):
+**Tests** (pure-function; see `TEST.md`; **batch / overnight commands:** `eval/OPERATIONS.md`):
 ```bash
 .venv/bin/python -m pytest tests/ -q
 ```
@@ -462,10 +462,13 @@ Each file has one job — avoid duplicating long gate/env lists across them.
 
 | File | Audience | Purpose |
 |------|----------|---------|
+| `AGENTS.md` | maintainers + LLMs | Source vs artifacts, agent mixin map, trace paths |
 | `CLAUDE.md` | **LLM agents + humans** | Commands, env vars, architecture — **also injected into the game agent** (6 KB cap, skipped in lean mode) |
-| `TEST.md` | humans + LLMs | Three-layer test guide (pytest → eval → system tests) |
-| `FOR_NEXT_LLM.md` | LLM tuners | Tuning rules and mistake traps — read before changing harness/prompts |
-| `HARNESS_DEBUG.md` | LLM tuners | Full gate list, `failure_class`, trace timeline workflow |
+| `TEST.md` | humans + LLMs | Three-layer tests, suite map, scripts inventory |
+| **`eval/OPERATIONS.md`** | **humans + LLMs** | **“Run pytest / batch N games / triage run_XX” — natural-language → command** |
+| `FOR_NEXT_LLM.md` | LLM tuners | Tuning traps — read before changing harness/prompts |
+| `HARNESS_DEBUG.md` | LLM tuners | Gate list, `failure_class`, trace timeline workflow |
+| `eval/PARALLEL_MLX_TESTING.md` | batch eval | One MLX server, N parallel clients |
 
 ---
 

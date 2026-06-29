@@ -51,6 +51,18 @@ def test_playbook_draw_generated_sprites_retrieves_for_art_goal():
     assert "draw-generated-sprites-not-boxes" in ids
 
 
+def test_playbook_run06_kung_fu_bullets_retrieve():
+    pb = Playbook()
+    goal = (
+        "Side-scrolling beat-em-up with crouch punch kick video cutscene "
+        "floor intro boss entrance enemies spawn waves"
+    )
+    hits = pb.retrieve(goal, stage="code", k=10)
+    ids = {h.bullet.id for h in hits}
+    assert "harness-movement-not-action-gated" in ids
+    assert "video-intro-must-enter-play" in ids
+
+
 def test_skeletons_show_drawimage_pattern():
     for name in (
         "canvas_board_turn_basic.html",
