@@ -9,19 +9,21 @@
 #   - games/<slug>_<ts>.html  + .best.html siblings
 #   - games/traces/*          (.log + .jsonl + .conversation.md)
 #   - games/snapshots/<slug>_<ts>/   (per-iteration HTML + screenshots)
-#   - memory/skeletons/won_*   (auto-promoted past wins — risky;
+#   - games/game-memory/skeletons/won_*   (auto-promoted past wins — risky;
 #                                     can lock in the wrong game from a
 #                                     mislabeled session)
-#   - memory/goals/*           (per-session outcome cache)
-#   - memory/mistakes.jsonl    (small but stale)
+#   - games/goals/*            (per-session outcome cache)
+#   - games/game-memory/mistakes.jsonl    (small but stale)
 #   - games/tune/*/                  (historical tune-battery run dirs;
 #                                     KEEPS games/tune/battery.jsonl which
 #                                     is the canonical test-definition
 #                                     file, not generated output)
+#   - games/tune_serial10/run_*/     (serial tune batches — HTML + traces)
 #
 # KEEPS (load-bearing — agent depends on these):
-#   - memory/playbook.jsonl              (30 hand-curated seed bullets)
+#   - memory/playbook.jsonl              (hand-curated seed bullets)
 #   - memory/skeletons/canvas_basic.html (bundled default skeleton)
+#   - goodgame/                          (curated wins — NEVER deleted here)
 #   - games/_asset_cache/                      (Z-Image-Turbo PNG cache;
 #                                               cache hits = free)
 #   - games/_smoke/doom.png                    (one-off proof-of-concept;
@@ -53,6 +55,7 @@ n_won=$(find games/game-memory/skeletons -maxdepth 1 -name "won_*" 2>/dev/null |
 n_goals=$(find games/goals -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l)
 n_mistakes=$(count_lines games/game-memory/mistakes.jsonl)
 n_tune_runs=$(find games/tune -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l)
+n_tune_serial=$(find games/tune_serial10 -maxdepth 1 -mindepth 1 -type d -name "run_*" 2>/dev/null | wc -l)
 
 echo "About to delete:"
 echo "  $n_html  per-session game HTML files"
@@ -62,14 +65,16 @@ echo "  $n_won  auto-promoted skeletons (won_*)"
 echo "  $n_goals  per-session goal records"
 echo "  $n_mistakes  lines of mistakes.jsonl"
 echo "  $n_tune_runs  tune-battery run directories"
+echo "  $n_tune_serial  tune_serial10 run directories (run_01, run_02, …)"
 echo
 echo "Keeping:"
 echo "  memory/playbook.jsonl"
 echo "  memory/skeletons/canvas_basic.html"
+echo "  goodgame/                      (curated wins — never touched)"
 echo "  games/tune/battery.jsonl       (canonical test goals)"
 echo "  games/_asset_cache/  (cache speedup; hits are free)"
 echo "  games/_smoke/        (small smoke-test artifacts)"
-echo
+echo "  nohup.out            (delete manually if desired)"
 
 if [ -z "$YES" ]; then
     printf "Proceed? [y/N] "
@@ -127,6 +132,11 @@ rm -f games/game-memory/mistakes.jsonl
 # Tune-battery runs: drop subdirs, keep battery.jsonl test definitions.
 if [ -d games/tune ]; then
     find games/tune -maxdepth 1 -mindepth 1 -type d -exec rm -rf {} +
+fi
+
+# Serial tune batches: drop run_XX dirs (HTML, traces, overnight.log, checkpoints).
+if [ -d games/tune_serial10 ]; then
+    find games/tune_serial10 -maxdepth 1 -mindepth 1 -type d -name "run_*" -exec rm -rf {} +
 fi
 
 echo

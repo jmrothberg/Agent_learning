@@ -17,6 +17,26 @@
   const p = { x: 100, y: 400, vx: 0, vy: 0, w: 20, h: 32, climbing: false, grounded: false, health: 100, visibleHealth: 100 };
   const gravity = 800, speed = 200, jumpForce = -350;
   const keys = {};
+  const ASSETS = {};
+  const PATHS = { player_idle: "./SESSION_assets/player_idle.png" };
+  function sprite(key) { return ASSETS[key] || null; }
+  async function loadAssets() {
+    for (const [k, path] of Object.entries(PATHS)) {
+      const img = new Image(); img.src = path; ASSETS[k] = img;
+      try { await img.decode(); } catch (e) { /* MISSING fallback at draw */ }
+    }
+  }
+  function drawPlayerSprite() {
+    const img = sprite("player_idle");
+    if (img && img.complete && img.naturalWidth > 0) {
+      ctx.drawImage(img, p.x, p.y, p.w, p.h);
+    } else {
+      ctx.fillStyle = "#f0f"; ctx.fillRect(p.x, p.y, p.w, p.h);
+      ctx.fillStyle = "#000"; ctx.font = "10px monospace";
+      ctx.fillText("MISSING:player_idle", p.x, p.y + 12);
+    }
+  }
+  loadAssets();
 
   // Simple input buffer
   const inputBuffer = [];
@@ -72,8 +92,7 @@
 
   function draw() {
     ctx.clearRect(0,0,800,600);
-    ctx.fillStyle = "#00ff88";
-    ctx.fillRect(p.x, p.y, p.w, p.h);
+    drawPlayerSprite();
 
     // Draw HUD Health Bar smoothly
     ctx.fillStyle = "#300";

@@ -7,10 +7,10 @@
 
 The TUI `/games` command lists them by number; `/games <N>` loads prompt #N
 into the input box (press Enter to build). Hand-curated like
-`memory/playbook.jsonl` — edited by humans, not learned. Each prompt is
-written to encode the agent's planning lessons: it names the entity AND every
-action pose the game needs (so the multi-frame planner generates a frame per
-named action up front), plus controls, win/lose, and visual style.
+`memory/playbook.jsonl` — edited by humans, not learned. Each prompt opens
+with a direct game name ("Build a Doom game"), not "-style" references; body
+text encodes planning lessons: entity poses, controls, win/lose, and routing
+keywords for skeleton/recipe selection.
 """
 from __future__ import annotations
 

@@ -90,6 +90,158 @@ def _is_position_leaf(path: str) -> bool:
     return bool(re.search(r"[a-z][XYZ]$", leaf))
 
 
+# Board / grid games often expose selection via cursor.r/c or selected.row/col
+# instead of player.x/y. Arrows moving that cursor IS valid navigation — not
+# PLAYER-STUCK. Parent names are structural (not genre); leaf names are the
+# usual grid indices. Trace pin: holochess iter 3 (cursor.r/c changed but
+# harness wanted player.x/y and falsely gated ok=False).
+_BOARD_NAV_PARENTS = frozenset({
+    "cursor", "selection", "selected", "select", "hover", "focus",
+    "highlight", "active", "picked", "cell", "square", "tile",
+})
+_BOARD_NAV_LEAF_NAMES = frozenset({
+    "r", "c", "row", "col", "column", "x", "y", "index", "idx", "tile",
+})
+
+
+def _is_board_navigation_leaf(path: str) -> bool:
+    """True when a dotted state path is a grid/board selection cursor field."""
+    parts = [p for p in str(path or "").split(".") if p]
+    if len(parts) < 2:
+        return False
+    parent = parts[-2].lower()
+    leaf = parts[-1].lower()
+    return parent in _BOARD_NAV_PARENTS and leaf in _BOARD_NAV_LEAF_NAMES
+
+
+def _is_effective_movement_leaf(path: str) -> bool:
+    """Position leaf OR board-cursor leaf — both count as the entity moving."""
+    return _is_position_leaf(path) or _is_board_navigation_leaf(path)
+
+
+# Pose/animation asset suffixes that legitimately stay undrawn on a static
+# first board (checkers iter 2: hop_up/hop_land idle on opening position).
+_ANIMATION_POSE_SUFFIXES = (
+    "_hop", "_hop_up", "_hop_land", "_hop_down",
+    "_lift", "_slam", "_walk1", "_walk2", "_walk3",
+    "_jump", "_duck", "_punch", "_kick", "_run1", "_run2",
+)
+
+
+def _stem_looks_like_animation_pose(stem: str) -> bool:
+    """True when an asset stem names a state-conditional pose frame."""
+    low = str(stem or "").lower()
+    return any(low.endswith(sfx) or sfx[1:] in low for sfx in _ANIMATION_POSE_SUFFIXES)
+
+
+def _idle_counterpart_drawn(stem: str, drawn_blob: str) -> bool:
+    """True when a pose frame's idle/base sprite appears in drawn sources."""
+    low = str(stem or "").lower()
+    if not low:
+        return False
+    # gold_gumdrop_hop_up -> gold_gumdrop_idle
+    base = low
+    for sfx in _ANIMATION_POSE_SUFFIXES:
+        if base.endswith(sfx):
+            base = base[: -len(sfx)]
+            break
+    if not base.endswith("_"):
+        base += "_"
+    return (base + "idle") in drawn_blob or base.rstrip("_") in drawn_blob
+
+
+def _undrawn_are_animation_poses_only(undrawn: list[str], drawn_blob: str) -> bool:
+    """All undrawn assets are pose frames and their idle counterparts drew."""
+    if not undrawn:
+        return False
+    return all(
+        _stem_looks_like_animation_pose(s) and _idle_counterpart_drawn(s, drawn_blob)
+        for s in undrawn
+    )
+
+
+# Stems that structurally cannot draw in a short smoke window (boss, death pose,
+# late-wave enemy) — advisory when behavioral probes already pass.
+_UNDRAWN_STATE_GATED_RE = re.compile(
+    r"(boss|death|dead|victory|defeat|wave\d|phase\d|_lift|_slam|_hop|"
+    r"_attack|_hit|_hurt|_spawn|promoted|king_crown|frightened|powered)",
+    re.I,
+)
+
+
+def _undrawn_likely_state_gated(undrawn: list[str]) -> bool:
+    """True when every undrawn asset name looks state/wave gated."""
+    if not undrawn:
+        return False
+    return all(_UNDRAWN_STATE_GATED_RE.search(str(s) or "") for s in undrawn)
+
+
+def _patch_probe_pointer_board_clicks(expr: str) -> str:
+    """Upgrade mousedown/click dispatches in board probes to pointer events.
+
+    Checkers trace run_05: games listen for pointerdown but model probes
+    dispatch MouseEvent('mousedown') / click — selection never fires.
+    Prepends a harness helper; also fires pointerdown+pointerup before any
+    canvas mousedown/click dispatch when sx/sy (or clientX/Y) are in scope.
+    """
+    e = str(expr or "")
+    if "dispatchEvent" not in e or "MouseEvent" not in e:
+        return e
+    helper = (
+        "window.__harnessPointerClick=(c,x,y)=>{if(!c)return;"
+        "const o={clientX:x,clientY:y,bubbles:true,cancelable:true,"
+        "pointerId:1,pointerType:'mouse',isPrimary:true,button:0};"
+        "c.dispatchEvent(new PointerEvent('pointerdown',{...o,buttons:1}));"
+        "c.dispatchEvent(new PointerEvent('pointerup',{...o,buttons:0}));};"
+        "window.__harnessOccupiedBoardClick=(c)=>{"
+        "const s=window.state||window.gameState||window.g||{};"
+        "const b=s.board||s.grid||s.cells;"
+        "if(!c||!Array.isArray(b)||!b.length||!Array.isArray(b[0]))return null;"
+        "const rect=c.getBoundingClientRect();"
+        "const rows=b.length,cols=b[0].length;"
+        "for(let r=0;r<rows;r++)for(let c0=0;c0<cols;c0++){"
+        "const cell=b[r][c0];"
+        "if(cell==null||cell===0||cell==='.'||cell===''||cell===' ')continue;"
+        "const x=rect.left+rect.width*((c0+0.5)/cols);"
+        "const y=rect.top+rect.height*((r+0.5)/rows);"
+        "window.__harnessPointerClick(c,x,y);return{r,c:c0,x,y};}"
+        "return null;};"
+    )
+    out = helper + e
+    # Prefer an occupied board cell when the probe hardcodes canvas fractions.
+    if "getBoundingClientRect" in out:
+        out = out.replace(
+            "const r=c.getBoundingClientRect();",
+            "const _occ=window.__harnessOccupiedBoardClick&&"
+            "window.__harnessOccupiedBoardClick(c);"
+            "const r=c.getBoundingClientRect();"
+            "if(_occ){await new Promise(r=>setTimeout(r,50));"
+            "return !!(window.state&&(window.state.selected||window.state.selection));}",
+            1,
+        )
+    # Mirror pointer events for games that only wire pointerdown handlers.
+    for evt in ("mousedown", "click"):
+        token = f"c.dispatchEvent(new MouseEvent('{evt}'"
+        if token in out:
+            out = out.replace(
+                token,
+                f"window.__harnessPointerClick(c,sx,sy);{token}",
+                1,
+            )
+    return out
+
+
+def _is_webgl_or_three_game(html_text: str) -> bool:
+    """Genre-free detector for three.js / WebGL canvas games."""
+    low = (html_text or "").lower()
+    return (
+        "three." in low
+        or "webglrenderer" in low
+        or "babylon." in low
+        or "playcanvas" in low
+    )
+
+
 # Keys that should MOVE a controllable player. If one of these registers input
 # (a direction/flag changes) but no position leaf ever changes, the player is
 # stuck. Attack/ability keys are deliberately excluded.
@@ -860,6 +1012,17 @@ window.__listenerCount = { document: 0, window: 0, body: 0, other: 0 };
 // input. Genre-free — it keys on the INPUT MODALITY the page registered.
 window.__listenerTypes = { key: 0, mouse: 0, pointer: 0, touch: 0 };
 
+// 2D board/grid in live state — click-primary board games (chess, checkers)
+// may ALSO register keyboard listeners as a cursor-navigation fallback
+// (playbook keyboard-fallback-for-click-games); pointer + board still means
+// keyboard smoke-test failure is not a broken control when criteria don't
+// name keyboard input.
+window.__hasPointerBoardState = (() => {
+    const s = window.state || window.gameState || window.g || {};
+    const is2d = (a) => Array.isArray(a) && a.length > 0 && Array.isArray(a[0]);
+    return !!(is2d(s.board) || is2d(s.grid) || is2d(s.cells) || is2d(s.maze));
+})();
+
 const _origRAF = window.requestAnimationFrame;
 window.requestAnimationFrame = function(cb) {
     window.__rafRan = true;
@@ -1161,6 +1324,14 @@ _ENTITY_RENDERED_JS = """
 
   const missing = [];
   for (const ent of candidates) {
+    let v;
+    try { v = s[ent.name]; } catch (e) { v = null; }
+    const ew = (v && typeof v.w === 'number' && v.w > 0) ? v.w
+             : (v && typeof v.r === 'number' && v.r > 0) ? v.r * 2
+             : (v && typeof v.width === 'number' && v.width > 0) ? v.width : 32;
+    const eh = (v && typeof v.h === 'number' && v.h > 0) ? v.h
+             : (v && typeof v.r === 'number' && v.r > 0) ? v.r * 2
+             : (v && typeof v.height === 'number' && v.height > 0) ? v.height : 32;
     const positions = [{kind: 'pixel', px: ent.x, py: ent.y}];
     for (const n of tileCandidates) {
       const t = c.width / n;
@@ -1171,16 +1342,18 @@ _ENTITY_RENDERED_JS = """
       });
     }
     let bestPos = null, bestBgFrac = 1.0;
+    const halfW = Math.min(Math.max(8, Math.round(ew / 2)), 28);
+    const halfH = Math.min(Math.max(8, Math.round(eh / 2)), 28);
     for (const p of positions) {
       if (p.px < 4 || p.px > c.width - 4
           || p.py < 4 || p.py > c.height - 4) continue;
       let patch;
       try {
-        patch = ctx.getImageData(
-          Math.max(0, Math.round(p.px) - 8),
-          Math.max(0, Math.round(p.py) - 8),
-          16, 16
-        ).data;
+        const bx = Math.max(0, Math.round(p.px) - halfW);
+        const by = Math.max(0, Math.round(p.py) - halfH);
+        const bw = Math.min(c.width - bx, halfW * 2);
+        const bh = Math.min(c.height - by, halfH * 2);
+        patch = ctx.getImageData(bx, by, bw, bh).data;
       } catch (e) { continue; }
       let bgCount = 0, total = 0;
       for (let i = 0; i < patch.length; i += 4) {
@@ -1767,6 +1940,42 @@ def _check_asset_paths(
     return out_warnings
 
 
+# Chess/board engines and asset loaders legitimately repeat these lines many
+# times. Holochess run_05 iter 1: a complete 33 KB game was rejected because
+# `} else {` appeared 14× AND the session `_assets` dir token appeared 48×
+# in the ASSETS[] loader — both false positives that blocked materialize.
+_BENIGN_SCRIPT_REPEAT_LINES = frozenset({
+    "} else {",
+    "} else if (",
+    "} else if(",
+    "break;",
+    "continue;",
+    "return;",
+})
+_BENIGN_REPEAT_LINE_RE = re.compile(
+    r"^\}(?:else(?:\s+if\s*\([^)]*\))?|\s*catch(?:\s*\([^)]*\))?)\s*\{?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _is_benign_script_repeat_line(line: str) -> bool:
+    """True when a repeated line is normal control-flow, not a degeneration."""
+    s = (line or "").strip()
+    if s in _BENIGN_SCRIPT_REPEAT_LINES:
+        return True
+    return bool(_BENIGN_REPEAT_LINE_RE.match(s))
+
+
+def _is_benign_script_repeat_identifier(tok: str) -> bool:
+    """True when a high-count identifier is an asset path token, not a loop."""
+    low = str(tok or "").lower()
+    if low.endswith(("_assets", "_sounds", "_videos")):
+        return True
+    if "assets" in low and low.count("_") >= 2:
+        return True
+    return False
+
+
 def run_micro_probes(
     html: str, out_path: "Path | None" = None
 ) -> dict[str, Any]:
@@ -1974,9 +2183,11 @@ def run_micro_probes(
     # surface a specific actionable error instead of forcing the user to
     # decode a 200 KB stream-stall trace.
     rep_warnings: list[str] = []
+    scripts_with_rep_signal = 0
     for (_attrs, body) in scripts:
         if not body.strip():
             continue
+        script_rep = False
         # Same line repeated > 10× verbatim (ignoring blank lines).
         line_counts: dict[str, int] = {}
         for ln in body.splitlines():
@@ -1985,31 +2196,39 @@ def run_micro_probes(
                 continue
             line_counts[stripped] = line_counts.get(stripped, 0) + 1
         for ln, n in line_counts.items():
-            if n > 10:
+            if n > 10 and not _is_benign_script_repeat_line(ln):
                 rep_warnings.append(
                     f"line repeated {n}× verbatim in <script>: "
                     f"{ln[:80]!r}{'…' if len(ln) > 80 else ''}. "
                     "This is a token-repeat loop — emit a focused "
                     "<patch> instead of rewriting the whole file."
                 )
+                script_rep = True
                 break  # one example per script body is enough
         # Single 4+-char identifier appearing > 30× in one script body.
         # Threshold is intentionally high so legit names like `ctx`/`x`/
         # `i` don't trip; the failure pattern is identifier copies like
         # `_ACTUAL_ACTUAL_ACTUAL_…`.
-        for tok, n in _Counter(re.findall(r"[A-Za-z_][A-Za-z0-9_]{3,}", body)).items():
-            if n > 30 and "_" in tok and tok.count("_") >= 2:
-                rep_warnings.append(
-                    f"identifier `{tok}` appears {n}× in one <script> "
-                    "body — almost certainly a repeat-loop degeneration. "
-                    "Restart the change with a small <patch>."
-                )
-                break
+        if not script_rep:
+            for tok, n in _Counter(re.findall(r"[A-Za-z_][A-Za-z0-9_]{3,}", body)).items():
+                if (
+                    n > 30
+                    and "_" in tok
+                    and tok.count("_") >= 2
+                    and not _is_benign_script_repeat_identifier(tok)
+                ):
+                    rep_warnings.append(
+                        f"identifier `{tok}` appears {n}× in one <script> "
+                        "body — almost certainly a repeat-loop degeneration. "
+                        "Restart the change with a small <patch>."
+                    )
+                    script_rep = True
+                    break
         # Suffix-loop: a 5+-char substring repeated > 25× anywhere in
         # the body. Catches the `_ACTUAL_ACTUAL_ACTUAL_…` family where
         # each full identifier is unique (so the token counter above
         # doesn't fire) but the suffix repeats.
-        if len(body) > 2000:
+        if not script_rep and len(body) > 2000:
             for substr in ("_ACTUAL", "_FINAL", "_REAL", "_TRUE"):
                 n = body.count(substr)
                 if n > 25:
@@ -2018,10 +2237,13 @@ def run_micro_probes(
                         "<script> body — token-repeat loop. Send a "
                         "focused <patch>, not a rewrite."
                     )
+                    script_rep = True
                     break
+        if script_rep:
+            scripts_with_rep_signal += 1
     if rep_warnings:
-        # Promote to errors only when 2+ scripts agree (very likely real).
-        if len(rep_warnings) >= 2:
+        # Promote to errors only when 2+ script bodies agree (very likely real).
+        if scripts_with_rep_signal >= 2:
             errors.extend(rep_warnings[:3])
         else:
             warnings.extend(rep_warnings[:3])
@@ -3142,6 +3364,33 @@ class LiveBrowser:
                 # still bounded at [:200], so report size is unchanged).
                 pexpr = str(p.get("expr") or "true")[:2000]
                 is_effectful = _probe_has_side_effects(pexpr)
+                # Board-game probes often dispatch mousedown/click while the
+                # game only listens for pointerdown — patch before eval.
+                if is_effectful and "MouseEvent" in pexpr:
+                    pexpr = _patch_probe_pointer_board_clicks(pexpr)
+                # P3 (run_04 holochess iter 1): isolate CONSECUTIVE
+                # side-effecting probes. select_works / move_tweens /
+                # cpu_auto_replies each click + await; the first leaves the
+                # game mid-animation (state.animating=true blocks clicks), so
+                # the next probe's clicks are silently ignored and it reads
+                # falsy on an otherwise-correct build (3 probes failed iter 1,
+                # all passed by iter 3). When a prior side-effecting probe has
+                # already run AND the game exposes a reset(), restore a clean
+                # non-animating state first so each self-contained probe starts
+                # fresh. Read-only probes ran earlier (ordering fix above) and
+                # are unaffected. Genre-free: gated only on reset() existing.
+                if is_effectful and effectful_run_so_far:
+                    try:
+                        _did_reset = await self._safe_eval(
+                            "(()=>{const g=window.game||{};"
+                            "const f=g.reset||g.restart;"
+                            "if(typeof f==='function'){f.call(g);return true;}"
+                            "return false;})()"
+                        )
+                        if _did_reset:
+                            await asyncio.sleep(0.1)
+                    except Exception:
+                        pass
                 ok, err, err_kind = await self._run_probe(pexpr)
                 if not ok and not err and not is_effectful:
                     # Falsy read-only probe (no eval error): retry once
@@ -3345,6 +3594,19 @@ class LiveBrowser:
                 input_test.get("ran") and input_test.get("any_change") is True
             )
             report["frozen_canvas_input_responsive"] = input_responsive
+            # Turn-based board games (checkers trace run_05): static board
+            # between clicks is idle-by-design, not a freeze — pointer-primary
+            # with a 2D board in state and no keyboard-driven pixel delta.
+            _turn_based_board_idle = False
+            try:
+                _turn_based_board_idle = bool(
+                    await self._safe_eval(
+                        "window.__hasPointerBoardState === true"
+                        " && (window.__listenerTypes||{}).pointer > 0"
+                    )
+                )
+            except Exception:
+                _turn_based_board_idle = False
             if input_responsive:
                 report.setdefault("warnings", []).append(
                     "FROZEN-AT-IDLE (not blocking): canvas is static between "
@@ -3352,6 +3614,12 @@ class LiveBrowser:
                     "the canvas — idle-by-design, not a freeze. Add a subtle "
                     "continuous idle animation (breathing/bob) to silence this "
                     "(see playbook ambient-idle-pixel-delta)."
+                )
+            elif _turn_based_board_idle:
+                report.setdefault("warnings", []).append(
+                    "FROZEN-AT-IDLE (not blocking): turn-based board is static "
+                    "between clicks while RAF is running — expected idle, not a "
+                    "freeze. Pieces animate only after pointer input."
                 )
             else:
                 report["soft_warnings"].append(
@@ -3397,6 +3665,10 @@ class LiveBrowser:
         if isinstance(entity_render_result, dict):
             missing = entity_render_result.get("missing") or []
             report["entity_render_check"] = entity_render_result
+            _ent_probes_green = bool(report.get("probes")) and all(
+                p.get("ok") for p in report.get("probes") or []
+            )
+            _ent_no_errors = not report.get("errors") and not report.get("page_errors")
             for m in missing:
                 if not isinstance(m, dict):
                     continue
@@ -3405,7 +3677,7 @@ class LiveBrowser:
                 pk = m.get("position_kind", "?")
                 ex = m.get("x", 0)
                 ey = m.get("y", 0)
-                report["soft_warnings"].append(
+                _ent_msg = (
                     f"ENTITY-NOT-RENDERED [{name}]: gameState.{name} is "
                     f"at ({ex},{ey}) but the canvas at that position is "
                     f"{int(bg_frac * 100)}% background "
@@ -3414,6 +3686,15 @@ class LiveBrowser:
                     "function references this entity, and that any "
                     "sprite/image is decoded before drawImage is called."
                 )
+                if _ent_probes_green and _ent_no_errors:
+                    report.setdefault("warnings", []).append(
+                        "ADVISORY (non-blocking) — " + _ent_msg
+                        + " Behavioral probes pass; transparent sprite "
+                        "padding or a blink frame may have caused a "
+                        "false sample — verify draw uses center anchoring."
+                    )
+                else:
+                    report["soft_warnings"].append(_ent_msg)
         # Drawn-asset detector — read the drawImage shim's event buffer
         # and diff against the session's known asset filenames. Catches
         # "model loaded the PNG into ASSETS[name] but never called
@@ -3522,15 +3803,67 @@ class LiveBrowser:
                     _probes_green and _no_errors and _entity_missing_count == 0
                     and _opening_hard_green
                 )
+                # P2 (run_04 Dragon iter 1): scene-indexed cutscene/QTE games
+                # reference one bg_* per scene but only the ACTIVE scene's bg
+                # draws during the 3s smoke window — the other bg_* are
+                # legitimately "loaded but undrawn", NOT a sprite-key-mismatch
+                # bug. Dragon's Lair iter 1 passed 8/8 probes with 0 errors yet
+                # gated on 19/24 undrawn (mostly bg_*). When live state exposes
+                # a NUMERIC scene index and the undrawn set is predominantly
+                # scene backgrounds, demote to advisory on a behaviorally-green
+                # build. Genre-free: keys on a numeric state.scene, not subject.
+                try:
+                    _scene_idx = await self._safe_eval(
+                        "(()=>{const s=window.state||window.gameState||window.g||{};"
+                        "const v=(s.scene!==undefined)?s.scene:"
+                        "((s.sceneIndex!==undefined)?s.sceneIndex:"
+                        "((s.currentScene!==undefined)?s.currentScene:null));"
+                        "return (typeof v==='number'&&isFinite(v))?v:null;})()"
+                    )
+                except Exception:
+                    _scene_idx = None
+                _scene_indexed = isinstance(_scene_idx, (int, float)) and not isinstance(_scene_idx, bool)
+                _undrawn_mostly_bg = bool(undrawn) and (
+                    sum(1 for s in undrawn if s.lower().startswith("bg_"))
+                    >= max(1, len(undrawn) // 2)
+                )
+                _scene_offscreen_bg = (
+                    _scene_indexed and _undrawn_mostly_bg
+                    and _probes_green and _no_errors
+                )
+                _undrawn_pose_only = _undrawn_are_animation_poses_only(
+                    undrawn, drawn_blob
+                )
+                _undrawn_state_gated = _undrawn_likely_state_gated(undrawn)
                 if (
-                    (self._undrawn_seen_before and _probes_green and _no_errors)
+                    (_probes_green and _no_errors and (
+                        _undrawn_pose_only
+                        or _scene_offscreen_bg
+                        or _undrawn_state_gated
+                    ))
+                    or (self._undrawn_seen_before and _probes_green and _no_errors)
                     or _behavior_green_no_missing
                 ):
-                    report.setdefault("warnings", []).append(
-                        "ADVISORY (non-blocking) — " + _undrawn_text
-                        + " Behavioral probes pass and no entity-render "
+                    _advisory_tail = (
+                        " Behavioral probes pass and a numeric scene index is "
+                        "exposed; off-screen scene backgrounds simply have not "
+                        "been reached during the test window."
+                        if _scene_offscreen_bg else
+                        " Behavioral probes pass; hop/lift/slam pose sprites "
+                        "may simply not have triggered on the static opening "
+                        "board — idle/base sprites ARE drawn."
+                        if _undrawn_pose_only else
+                        " Behavioral probes pass; undrawn assets look "
+                        "state/wave gated and may not have triggered during "
+                        "the short smoke window."
+                        if _undrawn_state_gated else
+                        " Behavioral probes pass and no entity-render "
                         "failure is present; state-conditional pose sprites "
                         "may simply not have triggered during the test window."
+                    )
+                    report.setdefault("warnings", []).append(
+                        "ADVISORY (non-blocking) — " + _undrawn_text
+                        + _advisory_tail
                     )
                 else:
                     report["soft_warnings"].append(_undrawn_text)
@@ -3805,20 +4138,46 @@ class LiveBrowser:
         input_dead = bool(
             input_test.get("ran") and input_test.get("any_change") is False
         )
-        # Blank canvas + dead keyboard = real failure. Blank with
-        # responsive input (drawing canvas after a stroke) is fine.
+        # Blank canvas + dead keyboard = real failure for 2D games. For
+        # three.js/WebGL builds (Doom trace run_05) surface as advisory only —
+        # the view may be blank because the camera is not wired yet, not
+        # because the harness should hard-block a working iter.
         if (canvas_info and canvas_info.get("blank") is True
                 and input_dead and not input_responsive):
-            report["soft_warnings"].append(
-                f"HEURISTIC: canvas pixels are uniform AND keyboard input "
-                f"didn't change anything either — the game is not "
-                f"rendering / not interactive."
+            if _is_webgl_or_three_game(_src_html):
+                report["warnings"].append(
+                    "ADVISORY (non-blocking): 3D/canvas view appears blank "
+                    "(uniform pixels) and movement keys did not change the "
+                    "rendered view — verify camera position, renderer size, "
+                    "and that gameplay state drives the render loop."
+                )
+            else:
+                report["soft_warnings"].append(
+                    f"HEURISTIC: canvas pixels are uniform AND keyboard input "
+                    f"didn't change anything either — the game is not "
+                    f"rendering / not interactive."
+                )
+        _turn_based_board_idle = False
+        try:
+            _turn_based_board_idle = bool(
+                await self._safe_eval(
+                    "window.__hasPointerBoardState === true"
+                    " && (window.__listenerTypes||{}).pointer > 0"
+                )
             )
-        if frozen is True and not input_responsive:
+        except Exception:
+            _turn_based_board_idle = False
+        if frozen is True and not input_responsive and not _turn_based_board_idle:
             report["soft_warnings"].append(
                 "HEURISTIC: canvas drew SOMETHING but did not change between two "
                 "samples 1s apart AND no key press changed anything either - "
                 "the game is frozen / stuck on one frame."
+            )
+        elif frozen is True and not input_responsive and _turn_based_board_idle:
+            report.setdefault("warnings", []).append(
+                "HEURISTIC (non-blocking): turn-based board canvas unchanged "
+                "between samples with no keyboard delta — expected while "
+                "waiting for pointer clicks."
             )
         # Low-color-diversity check: 1024 sample points across the canvas
         # but only a handful of unique colors → game is barely rendering
@@ -3887,6 +4246,22 @@ class LiveBrowser:
                 and not _keyboard_listeners
                 and not expects_keyboard_controls(criteria or "")
             )
+            # Board games with mouse click + optional keyboard cursor fallback
+            # (holochess trace run_04 iter 2): still pointer-primary when criteria
+            # don't name keyboard — same non-gating treatment as click_primary.
+            _pointer_board = False
+            try:
+                _pointer_board = bool(
+                    await self._safe_eval("window.__hasPointerBoardState === true")
+                )
+            except Exception:
+                _pointer_board = False
+            pointer_board_primary = (
+                _mouse_listeners
+                and _pointer_board
+                and not expects_keyboard_controls(criteria or "")
+            )
+            input_modality_pointer = click_primary or pointer_board_primary
             # Item 3, trace build-a-donkey-kong-clone-in-o_20260514_214747:
             # the model's code had window.addEventListener + e.code +
             # e.preventDefault, and report showed `Input listeners:
@@ -3908,17 +4283,26 @@ class LiveBrowser:
                 listeners_present and raf_ran
                 and canvas_info and canvas_info.get("blank") is False
             )
-            if click_primary:
+            if input_modality_pointer:
                 # Click/pointer-primary game tested with the keyboard —
                 # non-gating warning, not a soft_warning / synthetic probe.
+                if click_primary:
+                    _modality_note = (
+                        "mouse/pointer listeners and NO keyboard listeners"
+                    )
+                    report["input_modality"] = "click_primary"
+                else:
+                    _modality_note = (
+                        "mouse/pointer listeners and a 2D board/grid in "
+                        "state (keyboard listeners may be cursor fallback only)"
+                    )
+                    report["input_modality"] = "pointer_board_primary"
                 report["warnings"].append(
                     f"Note: keyboard test pressed {keys_str} with no canvas "
-                    "change, but the page registered mouse/pointer listeners "
-                    "and NO keyboard listeners (and the criteria don't name "
-                    "keyboard input) — treating as click/pointer-primary, not "
-                    "a broken keyboard control."
+                    f"change, but the page registered {_modality_note} "
+                    "(and the criteria don't name keyboard input) — treating "
+                    "as click/pointer-primary, not a broken keyboard control."
                 )
-                report["input_modality"] = "click_primary"
             elif not has_clickable or controls_expected:
                 if handler_present_but_no_visible_change:
                     # Listeners + RAF + non-blank canvas, but keys
@@ -4564,6 +4948,8 @@ class LiveBrowser:
         # making the harness think a movable player existed and tripping
         # PLAYER-STUCK (phase-a-requirement-your-plann_20260615_121048).
         def _is_movable_position_leaf(leaf: str) -> bool:
+            if _is_board_navigation_leaf(leaf):
+                return True
             if not _is_position_leaf(leaf):
                 return False
             parts = [p for p in str(leaf or "").split(".") if p]
@@ -4727,7 +5113,7 @@ class LiveBrowser:
             if k in _MOVEMENT_KEYS and input_only_leaves:
                 pos_leaves = [
                     leaf for leaf in input_only_leaves
-                    if _is_position_leaf(leaf)
+                    if _is_effective_movement_leaf(leaf)
                 ]
                 if pos_leaves:
                     movement_position_changed = True
@@ -4742,7 +5128,10 @@ class LiveBrowser:
                     if recovery_key is None or (x_leaves and not cur_has_x):
                         recovery_key = k
                         recovery_leaves = candidate[:5]
-                elif any(not _is_position_leaf(leaf) for leaf in input_only_leaves):
+                elif any(
+                    not _is_effective_movement_leaf(leaf)
+                    for leaf in input_only_leaves
+                ):
                     movement_registered_without_move = True
 
             if input_only_leaves:

@@ -686,3 +686,26 @@ def test_diagnose_bloat_tag_split_across_pieces():
             fired = True
             break
     assert fired
+
+
+def test_prose_only_markdown_fence_not_graced():
+    """Donkey Kong trace 20260628: prose loop inside ```html must NOT earn
+    inline_data_bloat grace — only fences with real code after the opener."""
+    prose_fence = (
+        "Let me plan the game carefully.\n```html\n"
+        "Key requirements:\n1. hero moves\n2. barrels roll\n"
+    )
+    assert ollama_io._in_unclosed_markdown_patch_block(prose_fence) is False
+    assert ollama_io._should_grace_inline_data_bloat(
+        stall_reason="inline_data_bloat",
+        assembled_text=prose_fence,
+        grace_already_used=False,
+    ) is False
+    # Real code after opener still graced (no regression).
+    code_fence = "```html\n<script>\nconst state = {};\nfunction loop(){\n"
+    assert ollama_io._in_unclosed_markdown_patch_block(code_fence) is True
+    assert ollama_io._should_grace_inline_data_bloat(
+        stall_reason="inline_data_bloat",
+        assembled_text=code_fence,
+        grace_already_used=False,
+    ) is True

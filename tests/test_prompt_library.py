@@ -77,3 +77,26 @@ def test_malformed_lines_are_skipped(tmp_path: Path):
 
 def test_missing_file_returns_empty(tmp_path: Path):
     assert load_prompt_library(tmp_path / "nope.jsonl") == []
+
+
+def test_prompts_use_direct_openers_no_style_hedging():
+    """Library goals open with a direct game name, not '-style' hedging."""
+    hedging_tokens = ("should", "try to", "strongly prefer")
+    for g in load_prompt_library(_SHIPPED):
+        prompt = g["prompt"]
+        assert prompt.startswith(("Build a ", "Build an ")), (
+            f"#{g['n']} {g['name']}: prompt must start with 'Build a/an'"
+        )
+        first_sentence = prompt.split(".")[0]
+        low_first = first_sentence.lower()
+        assert "-style" not in low_first, (
+            f"#{g['n']} {g['name']}: first sentence contains '-style'"
+        )
+        assert " style " not in low_first, (
+            f"#{g['n']} {g['name']}: first sentence contains ' style '"
+        )
+        head = prompt[:120].lower()
+        for tok in hedging_tokens:
+            assert tok not in head, (
+                f"#{g['n']} {g['name']}: hedging token {tok!r} in first 120 chars"
+            )

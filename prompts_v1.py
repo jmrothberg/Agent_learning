@@ -248,14 +248,15 @@ ASSETS_FORMAT = FormatSpec(
         "request; that loses the sprite path and almost always "
         "regresses. To CHANGE the look, re-render; to ADD a new "
         "visual entity, emit a new name.",
-        "MIX sprites and procedural drawing freely. Sprites are right "
-        "for STATIC visual character (player, enemies, weapons, terrain "
-        "tiles, pickups). Procedural drawing is right for DESTRUCTIBLE "
-        "or STATE-RICH entities where runtime visual state must show "
-        "through (bunkers crumbling brick-by-brick, cracks appearing "
-        "on damage, health bars filling up, particle trails). Don't "
-        "force everything into one bucket — the typical game has "
-        "sprite walls/enemies AND procedural cell-based destructibles.",
+        "DRAW CONTRACT: every entity that HAS a generated PNG MUST be "
+        "drawn via `ctx.drawImage` through `sprite(key)` (or equivalent "
+        "`ASSETS[key]` lookup). Procedural `fillRect`/`arc`/`fillText` "
+        "is allowed ONLY for entities with NO generated PNG — HUD bars, "
+        "particles, grid lines, selection highlights, destructible overlays "
+        "where runtime state must show through (bunkers crumbling brick-by-"
+        "brick, health bars filling up). Drawing a plain colored box or "
+        "circle for an entity that has a sprite is the same failure as "
+        "skipping `<assets>`.",
         "Prompts should be SHORT and visual, and the ART STYLE should "
         "MATCH THE GOAL. Default for canvas sprite games: illustrated 2D "
         "game art — 'illustrated 2D game sprite, clean outline, cel/flat "
@@ -343,6 +344,9 @@ ASSETS_FORMAT = FormatSpec(
         "more frames in later mid-session turns. A frame that comes back "
         "near-identical to idle is flagged — raise strength, never draw "
         "limbs in code.",
+        "DRAW CONTRACT: entities with a generated PNG → drawImage via "
+        "sprite(key); procedural fillRect/arc only for entities with NO "
+        "PNG (HUD, particles, grid). "
         "SKIP <assets> only for pure-DOM apps (todo lists, calculators). "
         "If no asset paths return, Z-Image was unreachable — only THEN use "
         "procedural ctx.fillRect/arc.",
@@ -556,9 +560,11 @@ HARD_RULES: list[str] = [
     # Added 2026-05-21 — most common probe failure across May 20-21 traces
     # (pac, dk, sf, doom, FPS). Tight phrasing so small-model prompt stays
     # under the 6KB target verified by test_prompt_size.
-    "Expose state on window: `window.gameState = state; window.game = "
-    "{ reset }`. Probes call `window.gameState.score`, `window.game.reset()` "
-    "— un-exposed state fails probes even when the game works.",
+    "Expose state on window: `window.state = state` (required — probes "
+    "read `window.state` first); `window.gameState = state` is an accepted "
+    "alias. Also `window.game = { reset }`. Probes call "
+    "`window.state.score`, `window.game.reset()` — un-exposed state fails "
+    "probes even when the game works.",
     # Added 2026-05-25 from OpenAI Codex review. Prevents the `probes_only` /
     # `media_only` `no_usable_code` failure shape. Tag names omitted so the
     # small-class prompt-size + drops-optional-tags asserts still hold.
@@ -1244,6 +1250,8 @@ def plan_instruction(
     from_seed: bool = False,
     seed_asset_names: list[str] | None = None,
     seed_sound_names: list[str] | None = None,
+    model_class: str = "auto",
+    nudge_ids_out: list[str] | None = None,
 ) -> str:
     """Phase A planning prompt, optionally prefixed with a Wikipedia
     reference block fetched by research.fetch().
@@ -1273,6 +1281,11 @@ def plan_instruction(
     # (which keywords fired) + the slot interpolation. Lazy import avoids any
     # import-order coupling.
     from memory import load_plan_nudge
+
+    def _record_nudge(nudge_id: str) -> None:
+        if nudge_ids_out is not None:
+            nudge_ids_out.append(nudge_id)
+
     # P1: seed continuation flips art / audio "MUST emit" nudges off.
     # Detection is opt-in via the from_seed kwarg so non-seed sessions
     # stay byte-for-byte identical (the existing test suite still passes).
@@ -1300,7 +1313,15 @@ def plan_instruction(
     if art_keywords:
         kws = ", ".join(repr(k) for k in art_keywords)
         art_nudge = load_plan_nudge("art").replace("{kws}", kws)
+        _record_nudge("art")
         illustrated_sprite_nudge = load_plan_nudge("illustrated-2d-sprite")
+        illustrated_sprite_nudge += (
+            "\n\nDIRECTIONAL SPRITES — for any character that moves left/right, "
+            "prompt sprites facing screen-RIGHT (canonical). Then a single "
+            "`flip = facing < 0` (or `ctx.scale(-1,1)` when moving left) "
+            "rule is always correct.\n"
+        )
+        _record_nudge("illustrated-2d-sprite")
 
     # `threed_keywords` is already set at the top of the function so a
     # from_seed continuation still keeps 3D detection but loses art/audio.
@@ -1431,11 +1452,19 @@ def plan_instruction(
     minimal_nudge = ""
     if force_minimal_first_build:
         minimal_nudge = load_plan_nudge("minimal-first-build")
+        _record_nudge("minimal-first-build")
 
     goal_wins_nudge = load_plan_nudge("goal-wins-over-templates")
+    _record_nudge("goal-wins-over-templates")
+
+    local_crisp_nudge = ""
+    if model_class == "small":
+        local_crisp_nudge = load_plan_nudge("local-plan-crisp")
+        _record_nudge("local-plan-crisp")
 
     body = (
-        PLAN_INSTRUCTION + art_nudge + illustrated_sprite_nudge + threed_nudge + wireframe_nudge
+        local_crisp_nudge
+        + PLAN_INSTRUCTION + art_nudge + illustrated_sprite_nudge + threed_nudge + wireframe_nudge
         + beat_em_up_nudge + audio_nudge
         + video_nudge
         + qte_nudge
@@ -1462,9 +1491,13 @@ def plan_instruction(
     )
 
 
-PLAN_INSTRUCTION = """Before writing any code, output a short plan, a
-list of acceptance criteria, and a JSON list of EXECUTABLE probes the
-verifier will literally run on your game each iteration.
+PLAN_INSTRUCTION = """CRITICAL FORMAT: output ONLY the structured tags
+below. No prose, bullets, or planning essay outside <plan>, <criteria>,
+<probes>, and optional <assets>/<sounds>/<videos>. Write each tag once.
+
+Before writing any code, output a short plan, a list of acceptance
+criteria, and a JSON list of EXECUTABLE probes the verifier will
+literally run on your game each iteration.
 
 Use this exact format and nothing else:
 
@@ -1582,8 +1615,29 @@ LOW-QUALITY plans (these all fail because nothing is testable):
 If your <plan> reads more like the LOW-QUALITY examples, rewrite before
 sending. Specificity here saves iterations later.
 
-No <html_file> yet. No prose outside tags.
+No <html_file> yet.
 """
+
+
+def measure_plan_reply(reply: str) -> tuple[int, int]:
+    """Return (prose_chars, canonical_chars) for a Phase-A planning reply.
+
+    prose_chars counts text outside structured tags; canonical_chars counts
+    the bodies inside <plan>/<criteria>/<probes>/<assets>/<sounds>/<videos>.
+    """
+    if not reply:
+        return 0, 0
+    tag_re = _re.compile(
+        r"<(plan|criteria|probes|assets|sounds|videos)>(.*?)</\1>",
+        _re.DOTALL | _re.IGNORECASE,
+    )
+    canonical = 0
+    for m in tag_re.finditer(reply):
+        canonical += len(m.group(2))
+    prose = reply
+    for m in tag_re.finditer(reply):
+        prose = prose.replace(m.group(0), "")
+    return len(prose.strip()), canonical
 
 
 # ===========================================================================
@@ -1635,6 +1689,27 @@ def _scrub_seed_paths(
     return _SEED_PATH_RE.sub(_sub, seed_html)
 
 
+def generated_sprite_draw_contract() -> str:
+    """Genre-free draw contract injected when session assets exist."""
+    return (
+        "GENERATED-SPRITE DRAW CONTRACT — PNG paths were returned above. "
+        "Every entity that has a generated sprite MUST be drawn with "
+        "`ctx.drawImage` via `sprite(key)` (or `ASSETS[key]` after "
+        "`img.decode()`). Replace the seed's procedural player/enemy/piece "
+        "draw bodies (`fillRect`, `arc`, Unicode glyphs) with drawImage. "
+        "The seed boilerplate is safe to keep ONLY for canvas sizing, RAF, "
+        "input map, and HUD plumbing — NOT for entity draw. Procedural "
+        "shapes are allowed ONLY as a labeled MISSING fallback while an "
+        "image is still decoding, or for entities with NO generated PNG "
+        "(grid lines, particles, health bars). `loadAssets()` alone is "
+        "insufficient — each entity draw path must call drawImage when the "
+        "sprite is ready.\n"
+        "Expose `window.state = state` (or `window.gameState = state`) "
+        "after init so behavioral probes can read player position, score, "
+        "and game flags."
+    )
+
+
 def first_build_instruction(
     seed_html: str,
     seed_source: str | None = None,
@@ -1642,6 +1717,7 @@ def first_build_instruction(
     playbook_block: str = "",
     current_asset_dir: str | None = None,
     current_sound_dir: str | None = None,
+    has_generated_assets: bool = False,
 ) -> str:
     """First-build prompt. Includes the SEED CODE the model should start from.
 
@@ -1670,13 +1746,24 @@ def first_build_instruction(
     # its structure" against a buggy past session was actively harmful
     # (2026-05-15 user pushback: "if they could mislead, fix that").
     if not seed_source:
-        seed_framing = (
-            "Start from the SEED CODE below — it is the bundled empty "
-            "scaffold (canvas + DPR scaling, RAF loop with delta-time, "
-            "input map, score HUD, pause, game-over modal). It has no "
-            "game logic of its own. Use as much or as little of it as "
-            "fits your goal; the boilerplate is safe to keep."
-        )
+        if has_generated_assets:
+            seed_framing = (
+                "Start from the SEED CODE below — it is the bundled empty "
+                "scaffold (canvas + DPR scaling, RAF loop with delta-time, "
+                "input map, score HUD, pause, game-over modal). It has no "
+                "game logic of its own. KEEP the canvas/RAF/input/HUD "
+                "plumbing, but REPLACE any procedural entity draw bodies "
+                "(fillRect/arc circles) with drawImage via sprite(key) — "
+                "generated PNGs are listed above."
+            )
+        else:
+            seed_framing = (
+                "Start from the SEED CODE below — it is the bundled empty "
+                "scaffold (canvas + DPR scaling, RAF loop with delta-time, "
+                "input map, score HUD, pause, game-over modal). It has no "
+                "game logic of its own. Use as much or as little of it as "
+                "fits your goal; the boilerplate is safe to keep."
+            )
     else:
         seed_framing = (
             "REFERENCE ONLY — the SEED CODE below is from a similar "
@@ -1697,15 +1784,20 @@ def first_build_instruction(
             f"{playbook_block}\n\n"
             "Apply relevant playbook entries on the first attempt.\n\n"
         )
-    return (
-        "Plan accepted. Now write the FIRST version of the game.\n\n"
+    base = (
+        "Plan accepted. The plan, criteria, and probes are fixed — do NOT "
+        "restate requirements or re-plan.\n\n"
         f"{pb}"
         f"{seed_framing}\n\n"
-        "FORMAT-ONLY RULE: this is a code turn. The first non-whitespace "
-        "token in your reply MUST be <html_file>. No prose, no bullets, no "
-        "markdown fence, and no explanation before the opening tag.\n\n"
-        "Do NOT write planning prose this turn. Start with <html_file> as "
-        "the first non-whitespace output.\n\n"
+        "FORMAT CONTRACT: a brief reasoning preamble is fine, but your FIRST "
+        "output tag MUST be `<html_file>` and it must contain the COMPLETE "
+        "game. Emit a RAW `<html_file>` block — do NOT wrap the HTML in a "
+        "markdown ```html fence.\n"
+        "SELF-START: after loading assets, call requestAnimationFrame(loop) "
+        "unconditionally at the end of init so the animation loop actually "
+        "runs.\n"
+        "Expose `window.state = state` (or `window.gameState = state`) after "
+        "init — probes read window.state first.\n\n"
         "Output the COMPLETE file in <html_file>...</html_file> tags. "
         "ULTRA IMPORTANT: emit the COMPLETE file, no elisions, no "
         "'rest of code unchanged' placeholders. Then add a <notes> tag "
@@ -1722,6 +1814,7 @@ def first_build_instruction(
         f"{seed_html}\n"
         "```\n"
     )
+    return base
 
 
 def seed_build_instruction(

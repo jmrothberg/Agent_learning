@@ -50,7 +50,8 @@ def test_plan_nudges_file_has_expected_ids():
     """All migrated nudge ids resolve to non-empty bodies (no silent drop)."""
     for nid in ("art", "3d", "beat-em-up", "audio", "video", "qte",
                 "wireframe-perspective", "wireframe-flat", "scope-pacing",
-                "scope-pacing-multiframe", "multi-frame", "minimal-first-build"):
+                "scope-pacing-multiframe", "multi-frame", "minimal-first-build",
+                "local-plan-crisp"):
         assert memory_module.load_plan_nudge(nid).strip(), nid
 
 

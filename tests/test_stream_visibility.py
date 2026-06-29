@@ -23,7 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from chat import CodingBoxApp  # noqa: E402
-from agent import GameAgent  # noqa: E402
+from agent import GameAgent, AgentEvent  # noqa: E402
 
 
 def _app_stub() -> CodingBoxApp:
@@ -160,3 +160,76 @@ def test_autonomous_feedback_contains_brevity_nudge():
     i_nudge = src.index("Keep your reply brief")
     i_queue = src.index("_queue_internal_feedback(feedback_text)")
     assert i_nudge < i_queue
+
+
+# ---------------------------------------------------------------------------
+# Guard-abort events reach the TUI (donkey-kong 20260628)
+# ---------------------------------------------------------------------------
+
+
+def test_stream_ui_events_queue_and_drain():
+    a = GameAgent.__new__(GameAgent)
+    a._pending_stream_ui_events = []
+    ev = AgentEvent(
+        "info",
+        "Repetition loop detected",
+        {"stall_reason": "repetition_loop", "loop_kind": "inline_data_bloat"},
+    )
+    traced: list[AgentEvent] = []
+    a._record = lambda e: traced.append(e) or e  # type: ignore[method-assign]
+    a._queue_stream_ui_event(ev)
+    assert traced == [ev]
+    assert a._pending_stream_ui_events == [ev]
+    drained = a._drain_stream_ui_events()
+    assert drained == [ev]
+    assert a._pending_stream_ui_events == []
+
+
+def test_repetition_abort_message_matches_loop_kind():
+    from agent import _repetition_loop_abort_message
+
+    msg = _repetition_loop_abort_message(
+        tokens=31051,
+        duration_s=1974.0,
+        loop_kind="inline_data_bloat",
+        loop_line=None,
+    )
+    assert "8-line block" in msg
+    assert "same 1-2 short lines" not in msg
+    assert "reason=inline_data_bloat" in msg
+
+
+def test_info_stall_reason_sets_last_stall_and_banner():
+    app = CodingBoxApp.__new__(CodingBoxApp)
+    app.agent = None
+    app._last_stall_reason = (
+        "repetition loop (inline_data_bloat) after 31051 tok — kept partial output"
+    )
+    app._activity_label = ""
+    app._activity_role = "coder"
+    app._is_streaming = False
+    app._model2_is_streaming = False
+    app._model3_is_streaming = False
+    app._stream_tokens = 0
+    app._stream_started_at = 0.0
+    app._last_token_at = 0.0
+    app._model2_stream_tokens = 0
+    app._model2_stream_started_at = 0.0
+    app._model2_last_token_at = 0.0
+    app._model3_stream_tokens = 0
+    app._model3_stream_started_at = 0.0
+    app._model3_last_token_at = 0.0
+    app._session_model = "stub"
+    app._session_backend2 = None
+    app._session_backend3 = None
+    activity = app._render_activity_line()
+    assert "Last stall" in activity
+    assert "inline_data_bloat" in activity
+
+
+def test_run_drains_stream_ui_events_after_stream():
+    src = inspect.getsource(GameAgent)
+    assert "for _ev in self._drain_stream_ui_events():" in src
+    assert src.count("await self._stream(") == src.count(
+        "for _ev in self._drain_stream_ui_events():"
+    )

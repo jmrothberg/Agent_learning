@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+import inspect
 from unittest.mock import MagicMock
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import prompts_v1  # noqa: E402
 from agent import GameAgent  # noqa: E402
+import tools as tools_module  # noqa: E402
 from tools import (  # noqa: E402
     _classify_probe_eval_error,
     _format_probe_failure_warning,
@@ -526,3 +528,10 @@ def test_clean_report_stays_ok_when_no_coverage_gap():
     assert all(
         not p["name"].startswith("coverage_gap__") for p in probe_results
     )
+
+
+def test_board_probe_mouseevent_gets_pointer_patch_before_eval():
+    """Side-effecting board probes must be patched before _run_probe."""
+    src = inspect.getsource(tools_module.LiveBrowser.load_and_test)
+    assert "_patch_probe_pointer_board_clicks" in src
+    assert 'is_effectful and "MouseEvent" in pexpr' in src

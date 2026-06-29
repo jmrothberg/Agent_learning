@@ -16,10 +16,34 @@ using **one MLX model load** and server-side batching. Repo:
 | VLM critique ON | TUI: `/vlm-critique on` · CLI: `coder.py --vlm-critique` |
 | Visible Chromium | **No `--headless`** — run in Terminal.app |
 | Serial 10-game eval | [`eval/tune_serial_loop.py`](tune_serial_loop.py) + [`eval/tune_serial10_goals.txt`](tune_serial10_goals.txt) |
+| **Round 2 serial (12 games, GLM)** | [`eval/tune_serial10_round2_goals.txt`](tune_serial10_round2_goals.txt) → `games/tune_serial10/run_05` |
 | Unattended default | No pause between games · no job wall timeout · `--no-auto-step` on child (no `/wait` latch) |
 | Crash recovery | `--resume` (default ON) skips delivered games · `--retries 2` per game · `tune_checkpoint.json` |
-| Overnight watchdog | `nohup eval/tune_serial_overnight.sh &` — restarts loop until 10/10 in checkpoint |
+| Overnight watchdog | `nohup eval/tune_serial_overnight.sh &` — restarts loop until checkpoint count equals goal-file lines |
 | After each game | Optional `--pause-between-games` for triage; else auto-advance. Triage `failure_class`: `harness_bug` → code; `memory_gap` → JSONL |
+
+### Round 2 overnight (GLM-5.2-MLX-4bit, text-only — no VLM)
+
+Launch in **Terminal.app only** (not Cursor). Script tees to `run_05/overnight.log` internally — **do not** `>> overnight.log` on nohup (duplicates every line). Prefer **GLM-5.2-MLX-4bit** over mxfp4.
+
+```bash
+cd /Users/jonathanrothberg/Agent_learning
+mkdir -p games/tune_serial10/run_05
+
+caffeinate -dims env \
+  TUNE_OUT_DIR=games/tune_serial10/run_05 \
+  TUNE_GOALS_FILE=eval/tune_serial10_round2_goals.txt \
+  MLX_MODEL="$HOME/MLX_Models/GLM-5.2-MLX-4bit" \
+  nohup bash eval/tune_serial_overnight.sh &
+
+tail -f games/tune_serial10/run_05/overnight.log
+```
+
+Prevent Mac sleep on power adapter: wrap with `caffeinate -dims nohup env TUNE_OUT_DIR=... ...`.
+
+**Autonomous mid-batch (after you launch in Terminal):** poll `eval/tune_overnight_monitor.py --out-dir games/tune_serial10/run_05` → `agent_monitor.json`. Cursor agent may triage traces and apply mid-batch harness fixes when gates pass — **never start the batch from Cursor** (visible Chromium + MLX cold load need Terminal.app).
+
+**Post-batch triage:** read `run_XX/tune_checkpoint.json`, `overnight.log`, traces under `run_XX/traces/`; scratch notes in `run_XX/triage.md` (gitignored). Durable learnings → [`FOR_NEXT_LLM.md`](../FOR_NEXT_LLM.md). **Source vs artifacts map** → [`AGENTS.md`](../AGENTS.md). Optional `run_06` partial re-run via `eval/tune_serial10_round2_rerun.txt`.
 
 ```bash
 cd /Users/jonathanrothberg/Agent_learning

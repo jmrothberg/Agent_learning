@@ -40,7 +40,30 @@
     winner: null,
   };
   window.gameState = state;
+  window.state = state;
   window.game = { reset, currentPlayer: () => state.currentPlayer };
+
+  // ---- Asset loader (model replaces PATHS with generated PNG paths) --
+  const ASSETS = {};
+  const PATHS = { piece_white: "./SESSION_assets/piece_white.png", piece_black: "./SESSION_assets/piece_black.png" };
+  function sprite(key) { return ASSETS[key] || null; }
+  async function loadAssets() {
+    for (const [k, p] of Object.entries(PATHS)) {
+      const img = new Image(); img.src = p; ASSETS[k] = img;
+      try { await img.decode(); } catch (e) { /* MISSING fallback at draw */ }
+    }
+  }
+  function drawPieceSprite(key, cx, cy, size) {
+    const img = sprite(key);
+    if (img && img.complete && img.naturalWidth > 0) {
+      ctx.drawImage(img, cx - size / 2, cy - size / 2, size, size);
+    } else {
+      ctx.fillStyle = "#f0f"; ctx.fillRect(cx - size / 2, cy - size / 2, size, size);
+      ctx.fillStyle = "#000"; ctx.font = "10px monospace";
+      ctx.fillText("MISSING:" + key, cx - size / 2, cy);
+    }
+  }
+  loadAssets();
 
   // ---- Init / reset -----------------------------------------------------
   function reset() {
@@ -138,11 +161,9 @@
       for (let r = 0; r < SIZE; r++) for (let c = 0; c < SIZE; c++) {
         const p = state.board[r][c];
         if (!p) continue;
-        ctx.fillStyle = p.owner === "W" ? "#fafafa" : "#1a1a1a";
-        ctx.beginPath();
-        ctx.arc(c * TILE + TILE / 2, r * TILE + TILE / 2, TILE * 0.35, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.strokeStyle = "#444"; ctx.lineWidth = 2; ctx.stroke();
+        const cx = c * TILE + TILE / 2, cy = r * TILE + TILE / 2;
+        const key = p.owner === "W" ? "piece_white" : "piece_black";
+        drawPieceSprite(key, cx, cy, TILE * 0.7);
       }
     } catch (err) { console.error("draw failed:", err); }
   }

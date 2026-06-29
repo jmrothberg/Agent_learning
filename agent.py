@@ -1842,6 +1842,42 @@ def _subsystem_hint(signature: str) -> dict | None:
     return None
 
 
+def _repetition_loop_abort_message(
+    *,
+    tokens: int,
+    duration_s: float,
+    loop_kind: str | None,
+    loop_line: str | None,
+) -> str:
+    """Human-readable guard-abort text keyed to RepetitionDetector stall_reason."""
+    kind = loop_kind or "unknown"
+    desc_by_kind = {
+        "inline_data_bloat": (
+            "duplicated the same structured 8-line block repeatedly"
+        ),
+        "adjacent_line_spam": "emitted identical consecutive lines",
+        "short_line_loop": "emitted the same 1-2 short lines on repeat",
+        "near_dup_template_loop": (
+            "emitted numbered template variants on repeat"
+        ),
+        "intra_line_repetition": (
+            "degenerated into a boundary-free character repeat"
+        ),
+    }
+    desc = desc_by_kind.get(kind, "entered a token-repetition loop")
+    msg = (
+        f"Repetition loop detected — model {desc} after "
+        f"{tokens} tokens ({duration_s:.0f}s). "
+        "Aborted stream and kept partial output."
+    )
+    if loop_line:
+        preview = loop_line[:80] + ("..." if len(loop_line) > 80 else "")
+        msg += f" reason={kind} sample='{preview}'"
+    else:
+        msg += f" reason={kind}"
+    return msg
+
+
 @dataclass
 class AgentEvent:
     kind: str           # phase | token | plan | code | test | question | done | error | info | diagnose | patch | best_of_n | memory | activity | assets | sounds | videos | streak
@@ -2528,6 +2564,9 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
         # prompt can call out "start with an opening tag, skip the
         # silent reasoning preamble" instead of generic stall coach.
         self._last_stream_silent: bool = False
+        # Guard-abort AgentEvents queued inside _stream() for the TUI.
+        # _stream is not an async generator — run() must drain and yield.
+        self._pending_stream_ui_events: list[AgentEvent] = []
         # Cross-turn patch-SEARCH-failure memory. Stores fingerprints
         # (sha1 of normalized first 80 chars) of every SEARCH block that
         # failed to apply on the most recent retry turn. When the next
@@ -4764,20 +4803,46 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
             return
 
     def _local_first_build_nudge(self) -> str:
-        """Small local-only nudge to reduce long repetitive first builds."""
+        """Local-only first-build contract + optional compact-code hint."""
         if not self._is_local_backend():
             return ""
+        parts = [
+            "LOCAL FIRST-BUILD CONTRACT: Plan is ACCEPTED — do NOT restate "
+            "requirements or re-plan. Brief reasoning OK; first output tag "
+            "must be `<html_file>` (raw tag, no ```html fence). Start the "
+            "loop: call requestAnimationFrame(loop) unconditionally after "
+            "asset load.",
+        ]
         n_assets = len(self._session_assets)
         n_sounds = len(self._session_sounds)
-        if n_assets < 10 and n_sounds < 6:
-            return ""
-        return (
-            "LOCAL MODEL SAFETY NUDGE: Keep first-build code compact to avoid "
-            "token loops. Use short name arrays + loops for media loaders; do "
-            "NOT hand-enumerate long repeated `[name, path]` blocks. Use ONLY "
-            "sound/sprite names present in the GENERATED ASSETS/SOUNDS blocks "
-            "above."
-        )
+        if n_assets >= 10 or n_sounds >= 6:
+            parts.append(
+                "LOCAL MODEL SAFETY NUDGE: Keep first-build code compact to "
+                "avoid token loops. Use short name arrays + loops for media "
+                "loaders; do NOT hand-enumerate long repeated `[name, path]` "
+                "blocks. Use ONLY sound/sprite names present in the GENERATED "
+                "ASSETS/SOUNDS blocks above."
+            )
+        return "\n".join(parts)
+
+    def _should_pre_lean_plan_before_first_build(self) -> bool:
+        """Gate pre-iter-1 plan prose elision: local backend + heavy context."""
+        if not self._is_local_backend():
+            return False
+        if len(self._session_assets) >= 10 or len(self._session_sounds) >= 6:
+            return True
+        for msg in self._messages:
+            if msg.get("phase") != "planning":
+                continue
+            content = msg.get("content") or ""
+            if "[plan prose elided" in content:
+                return False
+            if len(content) > 8000:
+                return True
+            m = self._PLAN_ELIDE_RE.search(content)
+            if m and len(m.group(0)) > 2000:
+                return True
+        return False
 
     def _one_objective_first_build_nudge(self) -> str:
         """Phase 4B (gated experiment): on a slow local backend building a
@@ -5103,6 +5168,9 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
                 # queued/drained must produce a snapshot row even when the
                 # activity label hasn't changed yet.
                 "pending_feedback", "ledger_tail",
+                # Guard-abort sticky note — must re-snapshot when set/cleared
+                # (donkey-kong 20260628: dedupe hid last_stall_reason=null).
+                "last_stall_reason",
             )
             sig = tuple(snapshot.get(k) for k in sig_keys)
             if sig == getattr(self, "_last_status_sig", None):
@@ -5209,6 +5277,22 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
             "data": data,
         })
         return ev
+
+    def _queue_stream_ui_event(self, ev: AgentEvent) -> None:
+        """Trace an event and queue it for TUI yield after _stream() returns.
+
+        Guard-abort notifications fire inside _stream(), which is not an
+        async generator — callers must drain and yield them or the status
+        panel never sees the stall reason (donkey-kong 20260628).
+        """
+        self._record(ev)
+        self._pending_stream_ui_events.append(ev)
+
+    def _drain_stream_ui_events(self) -> list[AgentEvent]:
+        """Return and clear UI events queued during the last _stream()."""
+        out = self._pending_stream_ui_events
+        self._pending_stream_ui_events = []
+        return out
 
     def _trace_exception(self, kind: str, e: Exception, **extra) -> None:
         """Trace an exception WITH a capped traceback.
@@ -5513,6 +5597,9 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
         # continues; only iter-local signals get cleared.
         self._previous_report_ok = None
         self._previous_report = None
+        # T-2: per-iter code-hash trackers for shipped_unchanged_after_block.
+        self._cur_iter_code_sha = None
+        self._prev_iter_code_sha = None
         self._last_test_report = None
         self._last_failed_patch_anchors = set()
         self._pending_coaching = []
@@ -6450,6 +6537,9 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
         asset_reprompt_cleared: bool,
         art_intent: bool,
         undrawn_present: bool,
+        probes_all_passed: bool = False,
+        has_page_errors: bool = False,
+        has_soft_warnings: bool = False,
     ) -> tuple[str, str]:
         """Phase 4 (4D.2): bucket an iter into the layer that needs the fix.
 
@@ -6477,6 +6567,25 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
             return (
                 "harness_bug",
                 "standing art request cleared by router on vague retry",
+            )
+        # 1c (run_04 T-1): "model right, harness wrong." A structural
+        # soft_warning gate flipped ok=False even though EVERY model probe
+        # passed and there were no page errors — the build then typically ships
+        # unchanged. This is the PLAYER-STUCK / keyboard-HEURISTIC / board-input
+        # false-positive class this whole run repairs; before this it was
+        # mislabeled `none` and was invisible to grep + serial-loop triage
+        # counts. The art+undrawn combo is intentionally LEFT to the memory_gap
+        # rule below (first-occurrence undrawn on an art build is a wiring gap,
+        # not a pure harness contradiction).
+        if (
+            (not ok) and materialized and probes_all_passed
+            and not has_page_errors and has_soft_warnings
+            and not (art_intent and undrawn_present)
+        ):
+            return (
+                "harness_bug",
+                "ok=False but all model probes passed with no page errors — "
+                "a structural soft_warning gate over-fired on a correct build",
             )
         # 2. MEMORY_GAP — a FAILING materialize with an avoidable mistake that
         #    canned expert guidance (outline/playbook) should have pre-empted.
@@ -9062,6 +9171,8 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
                 role="coder",
                 override_temp=0.3,
             )
+            for _ev in self._drain_stream_ui_events():
+                yield _ev
         except Exception as e:
             self._trace({"kind": "user_ask_error", "err": str(e)[:300]})
             yield self._record(AgentEvent("error", f"ask turn failed: {e}"))
@@ -10532,6 +10643,7 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
 
         self._last_stream_role = role
         self._set_role_activity(role, f"streaming {role}…")
+        self._pending_stream_ui_events = []
 
         if (
             is_vlm_active
@@ -11210,7 +11322,7 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
                     "Retry the turn. If it persists, check the backend's logs "
                     "and rate limits."
                 )
-            self._record(AgentEvent(
+            self._queue_stream_ui_event(AgentEvent(
                 "error",
                 f"[red]backend crashed mid-generation[/red] after "
                 f"{result.tokens} tok / {result.duration_s:.0f}s.\n"
@@ -11242,15 +11354,14 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
             # the partial text so downstream regexes see a clean tail.
             loop_kind = getattr(result, "loop_kind", None) or "unknown"
             loop_line = (getattr(result, "loop_line", None) or "").strip()
-            extra = f" reason={loop_kind}"
-            if loop_line:
-                preview = loop_line[:80] + ("..." if len(loop_line) > 80 else "")
-                extra += f" sample='{preview}'"
-            self._record(AgentEvent(
+            self._queue_stream_ui_event(AgentEvent(
                 "info",
-                f"[yellow]repetition loop detected[/yellow] — model was emitting "
-                f"the same 1-2 short lines on repeat after {result.tokens} tokens "
-                f"({result.duration_s:.0f}s). Aborted stream and kept partial output.{extra}",
+                _repetition_loop_abort_message(
+                    tokens=result.tokens,
+                    duration_s=result.duration_s,
+                    loop_kind=loop_kind,
+                    loop_line=loop_line or None,
+                ),
                 # Structured payload so the TUI status panel can show a
                 # sticky "Last stall" line, not just a scrolled-past log
                 # row (asked for after the minecraft 20260621 trace where
@@ -11267,10 +11378,10 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
             # tokens without ever emitting <patch> / <html_file>. We
             # aborted; queue a coaching message so the next user turn
             # tells the model to commit to one root cause + one patch.
-            self._record(AgentEvent(
+            self._queue_stream_ui_event(AgentEvent(
                 "info",
-                f"[yellow]deliberation loop detected[/yellow] — {result.tokens} "
-                f"tokens of pre-tag reasoning with no <patch>/<html_file>. "
+                f"Deliberation loop detected — {result.tokens} "
+                "tokens of pre-tag reasoning with no <patch>/<html_file>. "
                 "Aborted stream; coaching the model to skip the essay.",
                 {
                     "stall_reason": "deliberation_loop",
@@ -11316,9 +11427,9 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
             # it (iter-2: 674 s of unclosed diagnose + probe JSON, no patch).
             # Coach patch-first: a one-sentence diagnose, then commit to a
             # <patch> immediately.
-            self._record(AgentEvent(
+            self._queue_stream_ui_event(AgentEvent(
                 "info",
-                f"[yellow]diagnose-bloat detected[/yellow] — {result.tokens} "
+                f"Diagnose-bloat detected — {result.tokens} "
                 "tokens inside an unclosed <diagnose> with no <patch>. "
                 "Aborted stream; coaching the model to close it and patch.",
                 {
@@ -13374,6 +13485,14 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
     # words on list markers / newlines / `then` / `;` / commas.
     _STEP_LIST_MARKER_RE = re.compile(r"^\s*(?:\d+[.)]|[-*•])\s+")
     _STEP_INLINE_SPLIT_RE = re.compile(r"\s*(?:;|,|\bthen\b)\s*", re.IGNORECASE)
+    # P1a (run_04 trace): a SINGLE-LINE goal longer than this many words is
+    # treated as descriptive PROSE, not an imperative list — we do NOT comma-
+    # split it (see _parse_task_steps). 30 words comfortably covers a real
+    # "do X, then Y, and add Z" ask while excluding 200-word game specs.
+    _MAX_INLINE_SPLIT_WORDS = 30
+    # Mid-line enumerated markers ("1) … 2) …", "- … - …") — when present in a
+    # long single line the user really did write a list, so splitting is fine.
+    _INLINE_LIST_MARKER_RE = re.compile(r"(?:^|\s)(?:\d+[.)]|[-*•])\s+\S")
 
     @staticmethod
     def _parse_task_steps(text: str) -> list[str]:
@@ -13385,6 +13504,16 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
         `then`. Fragments under 3 words are dropped, deduped, capped at 8.
         Bare " and " is intentionally NOT a separator (compound nouns like
         "cat and mouse" must not split). Returns [] for a terse single clause.
+
+        P1a (run_04 holochess/Dragon traces): a long DESCRIPTIVE single-line
+        paragraph (a rich game spec, 200 words of commas) must NOT be comma-
+        split — doing so produced 8 sentence-FRAGMENT "todos" (e.g. "but a
+        chess game that teleports pieces…") that the todo contract then nagged
+        one-by-one. Only inline-split a single line when it is SHORT
+        (<= _MAX_INLINE_SPLIT_WORDS words) OR carries explicit enumerated list
+        markers; otherwise return [] so the caller falls back to the outline
+        build ORDER (or seeds no ledger at all). Multi-line goals are unchanged
+        (genuine line-per-step lists).
         """
         if not text or not text.strip():
             return []
@@ -13392,7 +13521,14 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
         if len(raw_lines) > 1:
             candidates = raw_lines
         else:
-            candidates = GameAgent._STEP_INLINE_SPLIT_RE.split(text)
+            line = raw_lines[0] if raw_lines else text.strip()
+            is_prose = (
+                len(line.split()) > GameAgent._MAX_INLINE_SPLIT_WORDS
+                and not GameAgent._INLINE_LIST_MARKER_RE.search(line)
+            )
+            if is_prose:
+                return []
+            candidates = GameAgent._STEP_INLINE_SPLIT_RE.split(line)
         steps: list[str] = []
         seen: set[str] = set()
         for c in candidates:
@@ -14933,12 +15069,16 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
                         "seed_sound_names": sorted(self._session_sounds.keys()),
                     }
                 try:
+                    _plan_nudge_ids: list[str] = []
                     plan_msg = self._p.plan_instruction(
                         reference_block=reference_block,
                         goal=goal,
                         force_minimal_first_build=fmfb,
+                        model_class=self._system_prompt_class(),
+                        nudge_ids_out=_plan_nudge_ids,
                         **from_seed_kwargs,
                     )
+                    self._last_plan_nudge_ids = _plan_nudge_ids
                     if fmfb:
                         self._trace({
                             "kind": "force_minimal_first_build_applied",
@@ -15200,6 +15340,8 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
                             {**stall, "phase": "planning"},
                         ))
                     return
+                for _ev in self._drain_stream_ui_events():
+                    yield _ev
                 yield self._record(AgentEvent("activity", "idle"))
                 self._messages.append({
                     "role": "assistant",
@@ -15270,15 +15412,34 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
                             self._token_cb_wrapper, role=_retry_role)
                     except Exception:
                         retry_reply = None
+                    for _ev in self._drain_stream_ui_events():
+                        yield _ev
                     yield self._record(AgentEvent("activity", "idle"))
                     _nc = self._extract_criteria(retry_reply) if retry_reply else None
                     _np = self._extract_probes(retry_reply) if retry_reply else None
                     if retry_reply and (_nc or _np):
-                        self._messages.append({
-                            "role": "assistant", "content": retry_reply,
-                            "model_role": _retry_role,
-                            "model_name": self.get_backend(_retry_role).info.model,
-                        })
+                        # Replace the failed planning blob instead of stacking
+                        # a second 50k-115k char essay in context (DK trace).
+                        replaced = False
+                        for msg in reversed(self._messages):
+                            if (
+                                msg.get("role") == "assistant"
+                                and msg.get("phase") == "planning"
+                            ):
+                                msg["content"] = retry_reply
+                                msg["model_role"] = _retry_role
+                                msg["model_name"] = (
+                                    self.get_backend(_retry_role).info.model
+                                )
+                                replaced = True
+                                break
+                        if not replaced:
+                            self._messages.append({
+                                "role": "assistant", "content": retry_reply,
+                                "model_role": _retry_role,
+                                "model_name": self.get_backend(_retry_role).info.model,
+                                "phase": "planning",
+                            })
                         self._extract_and_queue_lookups(retry_reply)
                         self._capture_todos(retry_reply)
                         self._dump_conversation()
@@ -15365,6 +15526,8 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
                             self._token_cb_wrapper, role=_pq_role)
                     except Exception:
                         pq_reply = None
+                    for _ev in self._drain_stream_ui_events():
+                        yield _ev
                     yield self._record(AgentEvent("activity", "idle"))
                     _np = self._extract_probes(pq_reply) if pq_reply else None
                     _nc = self._extract_criteria(pq_reply) if pq_reply else None
@@ -15528,6 +15691,8 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
                                 {**stall, "phase": "planning_after_question"},
                             ))
                         return
+                    for _ev in self._drain_stream_ui_events():
+                        yield _ev
                     yield self._record(AgentEvent("activity", "idle"))
                     self._messages.append({
                         "role": "assistant",
@@ -15546,6 +15711,9 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
                 # without scanning the whole token stream. Added 2026-05-31 from
                 # the prompt-library eval: a harness that stopped at the `plan`
                 # event lost the criteria/probes traces that fire just after it.
+                _prose_chars, _canonical_chars = self._p.measure_plan_reply(
+                    plan_reply or ""
+                )
                 self._trace({
                     "kind": "plan_summary",
                     "criteria_chars": len(self._criteria or ""),
@@ -15555,6 +15723,9 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
                     "probe_quality_ratio": (
                         getattr(self, "_probe_quality", {}) or {}
                     ).get("ratio"),
+                    "prose_chars": _prose_chars,
+                    "canonical_chars": _canonical_chars,
+                    "nudge_ids": getattr(self, "_last_plan_nudge_ids", []),
                 })
             else:
                 plan_reply = ""
@@ -15917,6 +16088,7 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
                     skel.html, skel.source_goal,
                     current_asset_dir=cur_asset_dir,
                     current_sound_dir=cur_sound_dir,
+                    has_generated_assets=bool(self._session_assets),
                     **pb_kwargs,
                 )
                 if opening_block:
@@ -15959,6 +16131,13 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
                 # Mirror the seed-file branch: apply scope lock from
                 # the initial goal so iter 1 of a strict goal honors it.
                 build_msg = self._apply_initial_goal_scoping(goal, build_msg)
+                # Run06: draw contract must be the last line the model sees
+                # before writing iter 1 (after asset prelude + nudges).
+                if self._session_assets:
+                    build_msg = (
+                        build_msg + "\n\n"
+                        + self._p.generated_sprite_draw_contract()
+                    )
                 self._messages.append({
                     "role": "user",
                     "content": self._flush_user_injections(build_msg),
@@ -15989,6 +16168,13 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
             # every coder prefill (criteria/probes are already tracked
             # separately). Idempotent; only fires once.
             if iteration > start_iter and self._lean_prompt_active():
+                self._lean_compact_planning_message()
+            # Pre-iter-1: lean verbose plan prose BEFORE the first build on
+            # heavy local sessions so the model does not re-deliberate it.
+            if (
+                iteration == start_iter
+                and self._should_pre_lean_plan_before_first_build()
+            ):
                 self._lean_compact_planning_message()
             # Polish phase (item 2): how many iters remain AFTER this one.
             # The polish branch in _build_fix_prompt only fires when >= 1
@@ -16258,8 +16444,23 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
                                 # No trailing newline — Anthropic 400s on final
                                 # assistant whitespace; backend also rstrip()s.
                                 reply_prefill = "<diagnose>"
-                        elif (not self._current_file) and self._force_first_build_prefill:
-                            # First-build rescue after a no-code turn.
+                        elif (not self._current_file) and (
+                            self._force_first_build_prefill
+                            or self._is_local_backend()
+                        ):
+                            # First-build rescue after a no-code turn, OR a
+                            # PROACTIVE iter-1 prefill for local MLX/Ollama:
+                            # GLM-5.2-MLX rambles 15-18k tokens of pre-<html_file>
+                            # deliberation on rich-spec first builds before any
+                            # code (run_05 DK iter1 47k tok/51min, Doom iter1 37k
+                            # tok/42min — both tripped runaway_stream_warning,
+                            # then shipped clean). Forcing the opening tag is
+                            # constrained decoding, NOT an abort/cutoff: the full
+                            # file still streams to completion; only the rambling
+                            # preamble is skipped. Scoped to local backends so the
+                            # cloud (Anthropic) path is untouched. Once iter 1
+                            # materializes, _current_file is set and this branch
+                            # no longer fires (iters 2+ patch as before).
                             reply_prefill = "<html_file>\n<!DOCTYPE html>\n"
                             prefill_force = True
                         yield self._record(AgentEvent(
@@ -16271,6 +16472,8 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
                             prefill=reply_prefill,
                             prefill_force=prefill_force,
                         )
+                        for _ev in self._drain_stream_ui_events():
+                            yield _ev
                         yield self._record(AgentEvent("activity", "idle"))
                     break
                 except Exception as e:
@@ -17603,6 +17806,10 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
             html_sha = _hashlib.sha256(
                 new_html.encode("utf-8", "replace")
             ).hexdigest()[:16]
+            # T-2: remember THIS iter's code hash so the NEXT iter_summary can
+            # flag shipped_unchanged_after_block (a prior ok=False block that
+            # changed nothing — the definitive false-positive marker).
+            self._cur_iter_code_sha = html_sha
             self._trace({
                 "kind": "code_snapshot",
                 "iteration": iteration,
@@ -17937,11 +18144,47 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
                     ),
                     art_intent=bool(self._session_assets),
                     undrawn_present=_undrawn_present,
+                    # T-1: feed the "model right, harness wrong" signature so a
+                    # green-probes build blocked only by a soft_warning gate is
+                    # tagged harness_bug (was mislabeled `none`).
+                    probes_all_passed=(
+                        probes_total > 0 and probes_passed >= probes_total
+                    ),
+                    has_page_errors=bool(page_errors),
+                    has_soft_warnings=bool(soft_warnings),
                 )
+                # T-2: ground-truth false-positive marker. True when the PRIOR
+                # iter was ok=False yet this iter's code is byte-identical to it
+                # (same sha) — i.e. the block changed nothing, so it was a
+                # harness false positive (Holochess/Dragon shipped unchanged
+                # after a blocked iter). Computed from hashes the agent already
+                # holds; no new event, one boolean on the existing summary.
+                _cur_sha = getattr(self, "_cur_iter_code_sha", None)
+                _shipped_unchanged_after_block = bool(
+                    self._previous_report_ok is False
+                    and _cur_sha is not None
+                    and _cur_sha == getattr(self, "_prev_iter_code_sha", None)
+                )
+                # T-3: compact per-probe digest (name + ok + short expr) for
+                # EVERY probe, passing and failing. Previously iter_summary
+                # carried only probes_passed/total counts and the failing-probe
+                # text lived only in soft_warnings — an LLM reading the trace
+                # could not answer "which probe asserted what?" from the summary
+                # alone (hit on the Dragon failing iter). Bounded so it stays a
+                # digest, not a dump: <=24 probes, expr clipped to 120 chars.
+                _probe_digest = [
+                    {
+                        "name": str(p.get("name") or "")[:60],
+                        "ok": bool(p.get("ok")),
+                        "expr": str(p.get("expr") or "")[:120],
+                    }
+                    for p in (report.get("probes") or [])
+                ][:24]
                 summary_payload = {
                     "kind": "iter_summary",
                     "iteration": iteration,
                     "ok": bool(report.get("ok")),
+                    "shipped_unchanged_after_block": _shipped_unchanged_after_block,
                     # Phase 0F: code landed this iter (reaching iter_summary means
                     # it did) + any stall on the stream that produced it — one
                     # scannable line covering the same fields as no_usable_code.
@@ -17965,6 +18208,8 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
                     "failure_reason": _failure_reason,
                     "probes_passed": probes_passed,
                     "probes_total": probes_total,
+                    # T-3: per-probe name/ok/expr digest (see _probe_digest above).
+                    "probes": _probe_digest,
                     "soft_warnings_count": len(soft_warnings),
                     "page_errors_count": len(page_errors),
                     "console_errors_count": len(console_errors),
@@ -18008,6 +18253,10 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
                 if report.get("test_skipped"):
                     summary_payload["test_skipped"] = report.get("test_skipped")
                 self._trace(summary_payload)
+                # T-2: roll the code-hash forward so the NEXT iter can compare
+                # against THIS iter's shipped bytes (pairs with the existing
+                # _previous_report_ok roll-forward below).
+                self._prev_iter_code_sha = _cur_sha
                 # Phase 3 surprise rules — fire on signals worth
                 # postmortem attention. Surprise events are a separate
                 # kind so they're easy to grep out of the trace.
@@ -19007,6 +19256,8 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
             ))
             try:
                 reply = await self._stream(self._token_cb_wrapper)
+                for _ev in self._drain_stream_ui_events():
+                    yield _ev
                 yield self._record(AgentEvent("activity", "idle"))
                 self._messages.append({"role": "assistant", "content": reply})
                 self._extract_and_queue_lookups(reply)
@@ -19181,6 +19432,8 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
             ))
             try:
                 exit_reply = await self._stream(self._token_cb_wrapper, role=exit_role)
+                for _ev in self._drain_stream_ui_events():
+                    yield _ev
                 yield self._record(AgentEvent("activity", "idle"))
                 self._messages.append({
                     "role": "assistant",
@@ -19684,6 +19937,36 @@ class GameAgent(ProbeHandlingMixin, MemoryRetrievalMixin):
             # finding still flows into this turn via
             # _flush_user_injections — the model gets the finding AND
             # one scoped task.
+            #
+            # P1b (run_04 holochess/Dragon/snake): if the harness SEEDED the
+            # ledger (the model never emitted its own <todos>) and this iter is
+            # honestly clean — all model probes passed AND no page errors — the
+            # working build already satisfies the seeded checklist. Auto-close
+            # it and skip the todo contract instead of nagging the model to
+            # "work ONLY on" a goal fragment for another full turn (each of
+            # those games burned ~1 turn re-marking todos [x] on a 7/7-probe
+            # build). The model's OWN self-declared <todos> are left untouched.
+            if (
+                getattr(self, "_todos_seeded_by_harness", False)
+                and self._todos_items
+                and any(not _d for _d, _ in self._todos_items)
+            ):
+                _all_probes_ok = all(
+                    bool(p.get("ok")) for p in (report.get("probes") or [])
+                )
+                _no_page_errors = not (report.get("page_errors") or [])
+                if _all_probes_ok and _no_page_errors:
+                    self._todos_items = [
+                        (True, _t) for _d, _t in self._todos_items
+                    ]
+                    self._todos_text = "\n".join(
+                        f"- [x] {_t}" for _d, _t in self._todos_items
+                    )
+                    self._trace({
+                        "kind": "task_ledger_auto_closed",
+                        "reason": "clean_iter_all_probes_passed",
+                        "closed": len(self._todos_items),
+                    })
             _todo_task = self._select_next_todo()
             if (
                 _todo_task is not None

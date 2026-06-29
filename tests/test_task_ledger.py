@@ -8,6 +8,7 @@ gets a per-turn checklist from turn 1. Pure-function: no model, no browser.
 
 from __future__ import annotations
 
+import inspect
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -75,6 +76,36 @@ def test_parse_steps_drops_tiny_fragments_and_caps():
     )
     # 'a' / 'b' / 'c' fragments (<3 words) dropped; real clauses kept.
     assert all(len(s.split()) >= 3 for s in steps)
+
+
+def test_parse_steps_long_prose_paragraph_not_comma_split():
+    """P1a (run_04 holochess/Dragon): a long DESCRIPTIVE single-line goal must
+    NOT be comma-shredded into sentence-fragment 'todos'. It returns [] so the
+    caller falls back to outline order / no seed instead of nagging fragments."""
+    prose = (
+        "Build a holochess / Dejarik-style chess game on an 8x8 board, but a "
+        "chess game that teleports pieces feels lifeless, so every move should "
+        "animate smoothly, pieces should glide square-by-square along the path, "
+        "captures should lift and slam the losing piece, the CPU should reply "
+        "with a short think delay, and the whole thing should feel like a living "
+        "hologram with glow, scanlines, and a subtle idle bob on every piece."
+    )
+    assert len(prose.split()) > 30  # genuinely a long descriptive paragraph
+    assert GameAgent._parse_task_steps(prose) == []
+
+
+def test_parse_steps_long_line_with_explicit_markers_still_splits():
+    """A LONG single line that genuinely enumerates with markers (1) ... 2) ...)
+    is a real list and should still split — only marker-free prose is skipped."""
+    long_list = (
+        "Please do all of the following carefully and in order: "
+        "1) implement the full breadth-first pathfinding for every enemy type, "
+        "2) place the turret build menu along the bottom edge of the screen, "
+        "3) draw the animated sprites for towers and creeps with smooth motion"
+    )
+    assert len(long_list.split()) > 30
+    steps = GameAgent._parse_task_steps(long_list)
+    assert len(steps) >= 2
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +240,25 @@ def test_capture_todos_hands_ownership_to_model(tmp_path):
     a._capture_todos("<todos>\n- [ ] model step one\n- [x] model step two\n</todos>")
     assert a._todos_seeded_by_harness is False
     assert len(a._todos_items) == 2
+
+
+def test_harness_seeded_todos_auto_close_on_clean_iter_source():
+    """P1b (run_04): on an honestly-clean iter (report.ok + all model probes
+    passed + no page errors) with a HARNESS-seeded ledger, the contract is
+    skipped and the seeded todos auto-close — no extra 'work on a goal
+    fragment' turn. Source-pinned (the logic is inline in run())."""
+    src = inspect.getsource(GameAgent._build_fix_prompt)
+    i = src.index('"kind": "task_ledger_auto_closed"')
+    block = src[src.rfind("if (", 0, i):i]
+    # Gated on harness-seeded ownership + an open item, before the auto-close.
+    assert "_todos_seeded_by_harness" in block
+    # Predicate computation just above must require green probes + no errors.
+    pre = src[src.rfind("_all_probes_ok = all(", 0, i):i]
+    assert "_no_page_errors" in pre
+    # The contract injection (the nag) is reached AFTER this auto-close so a
+    # fully-closed ledger makes _select_next_todo() return None and skip it.
+    contract_i = src.index('"kind": "todo_contract_injected"', i)
+    assert contract_i > i
 
 
 # ---------------------------------------------------------------------------

@@ -2,22 +2,58 @@
 # Overnight watchdog — restarts tune_serial_loop until all goals are delivered.
 # Survives parent crashes, SIGSEGV atexit, and Cursor terminal aborts.
 #
-# Usage:
+# Launch in Terminal.app ONLY (not Cursor). Log: $TUNE_OUT_DIR/overnight.log
+# (written via tee inside this script — do NOT also redirect nohup stdout to that file).
+#
+# Round 2 / GLM-5.2-MLX-4bit (recommended over mxfp4 for stability):
 #   cd /Users/jonathanrothberg/Agent_learning
-#   MLX_MODEL=~/MLX_Models/Qwen3.6-27B-mxfp8 nohup eval/tune_serial_overnight.sh &
-#   tail -f games/tune_serial10/run_03/overnight.log
-set -u
+#   mkdir -p games/tune_serial10/run_05
+#   caffeinate -dims env \
+#     TUNE_OUT_DIR=games/tune_serial10/run_05 \
+#     TUNE_GOALS_FILE=eval/tune_serial10_round2_goals.txt \
+#     MLX_MODEL="$HOME/MLX_Models/GLM-5.2-MLX-4bit" \
+#     nohup bash eval/tune_serial_overnight.sh &
+#   tail -f games/tune_serial10/run_05/overnight.log
+set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
-OUT_DIR="${TUNE_OUT_DIR:-games/tune_serial10/run_03}"
-GOALS="${TUNE_GOALS_FILE:-eval/tune_serial10_goals.txt}"
-MLX_MODEL="${MLX_MODEL:-$HOME/MLX_Models/Qwen3.6-27B-mxfp8}"
+OUT_DIR="${TUNE_OUT_DIR:-games/tune_serial10/run_05}"
+GOALS="${TUNE_GOALS_FILE:-eval/tune_serial10_round2_goals.txt}"
+MLX_MODEL="${MLX_MODEL:-$HOME/MLX_Models/GLM-5.2-MLX-4bit}"
 JOBS_TOTAL="$(grep -cve '^[[:space:]]*$' -e '^[[:space:]]*#' "$GOALS" || true)"
 LOG="$OUT_DIR/overnight.log"
+PIDFILE="$OUT_DIR/overnight.pid"
 mkdir -p "$OUT_DIR"
 
-echo "=== tune_serial_overnight start $(date -u +%Y-%m-%dT%H:%M:%SZ) ===" | tee -a "$LOG"
+_preflight() {
+  local err=0
+  if [[ ! -x "$REPO_ROOT/.venv/bin/python" ]]; then
+    echo "ERROR: missing .venv — run ./scripts/setup.sh first" >&2
+    err=1
+  fi
+  if [[ ! -f "$GOALS" ]]; then
+    echo "ERROR: goals file not found: $GOALS" >&2
+    err=1
+  fi
+  if [[ "$JOBS_TOTAL" -lt 1 ]]; then
+    echo "ERROR: no goals in $GOALS" >&2
+    err=1
+  fi
+  if [[ ! -e "$MLX_MODEL" ]]; then
+    echo "ERROR: MLX_MODEL path not found: $MLX_MODEL" >&2
+    echo "  Round 2 expects: \$HOME/MLX_Models/GLM-5.2-MLX-4bit" >&2
+    err=1
+  fi
+  if [[ "$err" -ne 0 ]]; then
+    exit 1
+  fi
+}
+
+_preflight
+echo "$$" >"$PIDFILE"
+
+echo "=== tune_serial_overnight start $(date -u +%Y-%m-%dT%H:%M:%SZ) pid=$$ ===" | tee -a "$LOG"
 echo "out_dir=$OUT_DIR goals=$GOALS model=$MLX_MODEL jobs=$JOBS_TOTAL" | tee -a "$LOG"
 
 _run_once() {
@@ -25,9 +61,11 @@ _run_once() {
     LLM_BACKEND=mlx \
     MLX_MODEL="$MLX_MODEL" \
     PYTHONUNBUFFERED=1 \
-    .venv/bin/python eval/tune_serial_loop.py \
+    "$REPO_ROOT/.venv/bin/python" "$REPO_ROOT/eval/tune_serial_loop.py" \
       --goals-file "$GOALS" \
       --out-dir "$OUT_DIR" \
+      --model "$MLX_MODEL" \
+      --no-vlm-critique \
       --resume \
       --retries 2 \
       --retry-delay 30 \
@@ -35,7 +73,7 @@ _run_once() {
 }
 
 _completed_count() {
-  .venv/bin/python - <<PY
+  "$REPO_ROOT/.venv/bin/python" - <<PY
 import json
 from pathlib import Path
 p = Path("$OUT_DIR") / "tune_checkpoint.json"
@@ -48,10 +86,11 @@ PY
 }
 
 # Seed checkpoint for any delivered .best.html not yet recorded.
-.venv/bin/python - <<'PY' "$OUT_DIR"
+"$REPO_ROOT/.venv/bin/python" - <<PY "$OUT_DIR" "$JOBS_TOTAL"
 import json, sys
 from pathlib import Path
 out = Path(sys.argv[1])
+jobs_total = int(sys.argv[2])
 ck_path = out / "tune_checkpoint.json"
 ck = {"completed_labels": [], "results": []}
 if ck_path.is_file():
@@ -67,7 +106,7 @@ for best in sorted(out.glob("*.best.html")):
 if labels != list(ck.get("completed_labels") or []):
     ck["completed_labels"] = labels
     ck["completed_count"] = len(labels)
-    ck["jobs_total"] = 10
+    ck["jobs_total"] = jobs_total
     ck_path.write_text(json.dumps(ck, indent=2))
     print(f"seeded checkpoint: {len(labels)} delivered — {labels}")
 PY
@@ -79,7 +118,7 @@ while true; do
   _run_once || true
   DONE="$(_completed_count)"
   echo "completed $DONE / $JOBS_TOTAL" | tee -a "$LOG"
-  if [ "$DONE" -ge "$JOBS_TOTAL" ]; then
+  if [[ "$DONE" -ge "$JOBS_TOTAL" ]]; then
     echo "=== ALL $JOBS_TOTAL GAMES DELIVERED $(date -u +%Y-%m-%dT%H:%M:%SZ) ===" | tee -a "$LOG"
     exit 0
   fi

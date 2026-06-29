@@ -103,6 +103,21 @@ def test_probe_failure_carries_ordering_hint():
     assert "not err_kind" in guard
 
 
+def test_consecutive_side_effecting_probes_reset_between():
+    """P3 (run_04 holochess iter 1): a side-effecting probe that runs after a
+    prior side-effecting probe resets the game first (when reset() exists) so
+    a leftover mid-animation state can't block the next probe's clicks."""
+    src = inspect.getsource(tools_module.LiveBrowser.load_and_test)
+    i = src.index("if is_effectful and effectful_run_so_far:")
+    block = src[i:i + 500]
+    # Calls game.reset()/restart() and waits a beat before running the probe.
+    assert "g.reset||g.restart" in block
+    assert "asyncio.sleep" in block
+    # The reset happens BEFORE the probe runs this iteration.
+    run_i = src.index("ok, err, err_kind = await self._run_probe(pexpr)", i)
+    assert run_i > i
+
+
 # ---------------------------------------------------------------------------
 # 2. ACTION_DRAWN_NOT_SPRITED persistence downgrade (source-pinned,
 #    mirroring test_undrawn_gates_first_occurrence_then_demotes)

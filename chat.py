@@ -1728,6 +1728,11 @@ class CodingBoxApp(App):
                     f"{summary} [dim](inject at iter boundary — current stream "
                     f"finishes first)[/dim]\n"
                 )
+        if self._last_stall_reason:
+            lines.append(
+                f"[bold yellow]⚠ Last stall:[/bold yellow] "
+                f"[yellow]{_esc(self._last_stall_reason)}[/yellow]\n"
+            )
         return "".join(lines)
 
     def _render_mode_row(self) -> str:
@@ -6845,23 +6850,29 @@ class CodingBoxApp(App):
                 self._log_info(self._ollama_escape_hint())
 
         elif ev.kind == "info":
-            if ev.data.get("ask"):
-                self._log(f"\n[bold cyan]── ask ──[/bold cyan]\n{text_safe}")
-            else:
-                self._log_info(text_safe)
-            # Capture guard aborts (repetition / deliberation) into a
-            # sticky status field so the reason doesn't just scroll past.
             stall_reason = (ev.data or {}).get("stall_reason")
             if stall_reason:
+                # Plain-text body from agent — highlight in log + sticky panel.
+                self._log(
+                    f"[bold yellow]⚠[/bold yellow] [yellow]{_esc(ev.text or '')}[/yellow]"
+                )
                 if stall_reason == "repetition_loop":
                     kind = (ev.data or {}).get("loop_kind") or "repeat"
                     label = f"repetition loop ({kind})"
-                else:
+                elif stall_reason == "deliberation_loop":
                     label = "deliberation loop (pre-code rambling)"
+                elif stall_reason == "diagnose_bloat":
+                    label = "diagnose-bloat (unclosed <diagnose>)"
+                else:
+                    label = f"stream guard ({stall_reason})"
                 toks = (ev.data or {}).get("tokens")
                 tail = f" after {toks} tok" if toks else ""
                 self._last_stall_reason = f"{label}{tail} — kept partial output"
                 self._update_status()
+            elif ev.data.get("ask"):
+                self._log(f"\n[bold cyan]── ask ──[/bold cyan]\n{text_safe}")
+            else:
+                self._log_info(text_safe)
             if (ev.text or "").startswith("no usable code:"):
                 for _entry in self._feedback_ledger:
                     if _entry.get("status") in {"queued", "applying"}:

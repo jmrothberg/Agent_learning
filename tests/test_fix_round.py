@@ -104,6 +104,34 @@ def test_control_recovery_verdict_skips_without_position_state():
     ) is False
 
 
+def test_board_navigation_leaf_recognizes_cursor_rc():
+    """Holochess trace: cursor.r/c must count as movement, not PLAYER-STUCK."""
+    assert tools_module._is_board_navigation_leaf("cursor.r") is True
+    assert tools_module._is_board_navigation_leaf("cursor.c") is True
+    assert tools_module._is_board_navigation_leaf("selected.row") is True
+    assert tools_module._is_effective_movement_leaf("cursor.r") is True
+    # Arcade player coords stay the primary movement signal.
+    assert tools_module._is_board_navigation_leaf("player.x") is False
+    assert tools_module._is_effective_movement_leaf("player.x") is True
+    # Unrelated short leaf names must not false-positive.
+    assert tools_module._is_board_navigation_leaf("timer.r") is False
+
+
+def test_pointer_board_primary_wired_in_load_and_test():
+    """Hybrid board+mouse games skip synthetic input_responsive when criteria
+    don't name keyboard — even if keyboard listeners exist for cursor nav."""
+    src = inspect.getsource(tools_module.LiveBrowser.load_and_test)
+    assert "pointer_board_primary" in src
+    assert "__hasPointerBoardState" in src
+    assert "input_modality_pointer" in src
+
+
+def test_smoke_test_counts_board_cursor_as_position_move():
+    src = inspect.getsource(tools_module.LiveBrowser._input_smoke_test)
+    assert "_is_effective_movement_leaf" in src
+    assert "_is_board_navigation_leaf" in src
+
+
 def test_smoke_test_wires_recovery_retest():
     src = inspect.getsource(tools_module.LiveBrowser._input_smoke_test)
     assert '"control_not_recovered"' in src
@@ -194,7 +222,7 @@ def test_undrawn_gates_first_occurrence_then_demotes():
     # Persistence flag drives the channel decision.
     assert "_undrawn_seen_before" in src
     start = src.index("ASSETS_LOADED_BUT_UNDRAWN")
-    window = src[start:start + 4200]
+    window = src[start:start + 9000]
     # Demotion requires green probes/no errors, plus either a repeat or a
     # no-missing-entity behaviorally green report.
     assert "_probes_green" in window and "_no_errors" in window
@@ -208,6 +236,21 @@ def test_undrawn_gates_first_occurrence_then_demotes():
 def test_undrawn_streak_resets_when_finding_clears():
     src = inspect.getsource(tools_module.LiveBrowser.load_and_test)
     assert "self._undrawn_seen_before = False" in src
+
+
+def test_undrawn_demotes_for_scene_indexed_offscreen_bg():
+    """P2 (run_04 Dragon iter 1): a numeric scene index + undrawn mostly-bg_*
+    on a behaviorally-green build demotes the undrawn finding to advisory."""
+    src = inspect.getsource(tools_module.LiveBrowser.load_and_test)
+    start = src.index("ASSETS_LOADED_BUT_UNDRAWN")
+    window = src[start:start + 4800]
+    # Scene index probed from live state and folded into the demotion gate.
+    assert "_scene_indexed" in window
+    assert "_scene_offscreen_bg" in window
+    assert "_undrawn_mostly_bg" in window
+    assert "sceneIndex" in window
+    # Demotion path must reference the scene-offscreen condition.
+    assert "or _scene_offscreen_bg" in window
 
 
 def test_code_drawn_over_sprite_never_gates():

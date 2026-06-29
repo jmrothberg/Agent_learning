@@ -17,9 +17,6 @@ env/
 # Sessions now write games/<goal-slug>_<ts>.html (+ .best.html sibling),
 # so a single glob covers them all.
 games/*.html
-# Curated showcases only (not every session) — add ! lines when promoting a winner:
-!games/mechanics-standard-chess-on-an_20260522_163629.html
-!games/game-of-mortal-kombat-fighing_20260524_101226.html
 games/snapshots/
 games/traces/
 memory/*
@@ -46,6 +43,11 @@ memory/*
 !memory/skeletons/*
 games/test_*.html
 games/tune/
+# Serial tune batches (nested HTML/traces — depth-1 globs miss these)
+games/tune_serial10/
+games/goals/
+games/**/overnight.log
+games/**/agent_monitor.json
 games/system-tests/run_*/
 games/eval-traces/
 # Asset-pipeline artifacts (PNGs are 50-200KB each; cache grows over time)
@@ -53,10 +55,6 @@ games/_asset_cache/
 games/_smoke/
 games/_draw/
 games/*_assets/
-!games/mechanics-standard-chess-on-an_20260522_163629_assets/
-!games/mechanics-standard-chess-on-an_20260522_163629_assets/**
-!games/game-of-mortal-kombat-fighing_20260524_101226_assets/
-!games/game-of-mortal-kombat-fighing_20260524_101226_assets/**
 # Sound-pipeline artifacts (OGGs are 5-50KB each; cache grows over time)
 games/_sound_cache/
 games/*_sounds/
@@ -65,10 +63,6 @@ games/_video_cache/
 games/*_videos/
 # Playwright verification screenshots (e.g. dragons-lair-deluxe_shots/)
 games/*_shots/
-!games/mechanics-standard-chess-on-an_20260522_163629_sounds/
-!games/mechanics-standard-chess-on-an_20260522_163629_sounds/**
-!games/game-of-mortal-kombat-fighing_20260524_101226_sounds/
-!games/game-of-mortal-kombat-fighing_20260524_101226_sounds/**
 # Per-machine learned memory (won skeletons, live playbook overlay, mistakes).
 # Canonical playbook for git is memory/playbook.jsonl only.
 games/game-memory/
@@ -91,3 +85,6 @@ games/game-memory/
 # Local vLLM vs Ollama bench (machine-specific; never publish)
 scripts/bench_vllm_vs_ollama.py
 games/bench/
+
+# Local overnight launcher noise
+nohup.out

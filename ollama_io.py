@@ -246,6 +246,21 @@ def _in_unclosed_patch_block(text: str) -> bool:
 # SEARCH-REPLACE scaffolding then trip `inline_data_bloat` even though the
 # model is producing GOOD code — a false-positive abort on a working stream.
 _MD_SEARCH_REPLACE_RE = _re.compile(r"(?:^|\n)\s*(?:SEARCH|REPLACE)\s*:", _re.IGNORECASE)
+# Substantive code markers after an open markdown fence — prose-only ```html
+# loops (Donkey Kong trace 20260628) must NOT earn inline_data_bloat grace.
+_MD_FENCE_CODE_SIGNAL_RE = _re.compile(
+    r"(?:<canvas|<script|<!doctype|function\s|const\s|let\s|var\s|=>|class\s)",
+    _re.IGNORECASE,
+)
+
+
+def _markdown_fence_has_code_after_opener(text: str) -> bool:
+    """True when the last open ``` fence is followed by real code content."""
+    if not text or text.count("```") % 2 != 1:
+        return False
+    last = text.rfind("```")
+    after = text[last + 3:]
+    return bool(_MD_FENCE_CODE_SIGNAL_RE.search(after))
 
 
 def _in_unclosed_markdown_patch_block(text: str) -> bool:
@@ -260,9 +275,9 @@ def _in_unclosed_markdown_patch_block(text: str) -> bool:
     """
     if not text:
         return False
-    # Odd number of ``` fences => currently inside an open code fence.
+    # Odd number of ``` fences => open fence, but only grace when code follows.
     if text.count("```") % 2 == 1:
-        return True
+        return _markdown_fence_has_code_after_opener(text)
     # Active SEARCH:/REPLACE: patch scaffolding (model is emitting edits).
     return bool(_MD_SEARCH_REPLACE_RE.search(text))
 

@@ -231,6 +231,68 @@ def _print_summary(summary: dict) -> None:
     print()
 
 
+def _compute_wasted_iters(records: list[dict]) -> tuple[int, list[int]]:
+    """T-4 (offline, zero runtime cost): count `ok=False` iters whose code is
+    byte-identical to the eventually-shipped build — pure harness friction
+    (the block changed nothing). Computed from data the trace already holds:
+    the per-iter `code_snapshot.html_sha256` vs the LAST snapshot's hash. Falls
+    back to the agent-computed `shipped_unchanged_after_block` flag (T-2) for
+    iters that carry it. Returns (count, sorted iter indices)."""
+    sha_by_iter: dict[int, str] = {}
+    last_sha: str | None = None
+    flagged: set[int] = set()
+    ok_by_iter: dict[int, bool] = {}
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        kind = rec.get("kind")
+        if kind == "code_snapshot":
+            it = int(rec.get("iteration") or 0)
+            sha = rec.get("html_sha256")
+            if sha:
+                sha_by_iter[it] = str(sha)
+                last_sha = str(sha)
+        elif kind == "iter_summary":
+            it = int(rec.get("iteration") or 0)
+            ok_by_iter[it] = bool(rec.get("ok"))
+            if rec.get("shipped_unchanged_after_block"):
+                flagged.add(it)
+    wasted: set[int] = set(flagged)
+    if last_sha is not None:
+        for it, ok in ok_by_iter.items():
+            if not ok and sha_by_iter.get(it) == last_sha:
+                wasted.add(it)
+    return len(wasted), sorted(wasted)
+
+
+def _retrieval_first_clean(
+    records: list[dict],
+) -> tuple[int | None, list[str]]:
+    """M-2 (offline join, no new recording, no auto-learner): map the playbook
+    bullet ids RETRIEVED this session to the first `ok=True` iter index. Joining
+    the existing `playbook_retrieved` events to the first-clean iter — aggregated
+    over a batch this yields a "bullet id x first-pass-clean" table that INFORMS
+    hand-curation (counters stay hand-curated per CLAUDE.md). Returns
+    (first_clean_iter or None, ordered-unique retrieved bullet ids)."""
+    first_clean: int | None = None
+    retrieved: list[str] = []
+    seen: set[str] = set()
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        kind = rec.get("kind")
+        if kind == "iter_summary" and rec.get("ok"):
+            it = int(rec.get("iteration") or 0)
+            if first_clean is None or it < first_clean:
+                first_clean = it
+        elif kind == "playbook_retrieved":
+            for bid in (rec.get("ids") or []):
+                if bid not in seen:
+                    seen.add(bid)
+                    retrieved.append(str(bid))
+    return first_clean, retrieved
+
+
 def _print_timeline(trace: Path) -> None:
     """Phase 4 (4D.3): one-screen per-iter digest for the reviewing LLM.
 
@@ -238,6 +300,10 @@ def _print_timeline(trace: Path) -> None:
     table) so the timeline can't drift from what the harness records. Each row
     carries the fix-layer bucket (`class`: harness_bug / memory_gap /
     local_llm_limit) so "where does this fix go?" is answerable at a glance.
+
+    Appends two offline diagnostics computed here (no runtime cost, no new
+    recording): T-4 `wasted_iters` (harness-friction count) and M-2 the
+    retrieved-bullet -> first-clean-iter join.
     """
     try:
         sys.path.insert(0, str(REPO_ROOT))
@@ -247,6 +313,18 @@ def _print_timeline(trace: Path) -> None:
         return
     records = _load_events(trace)
     print(render_run_summary(records, artifact_id=trace.stem))
+    # T-4: harness-friction scalar (ok=False iters identical to shipped build).
+    n_wasted, wasted_iters = _compute_wasted_iters(records)
+    detail = f" (iters {wasted_iters})" if wasted_iters else ""
+    print(f"wasted_iters (ok=False, code == shipped build): {n_wasted}{detail}")
+    # M-2: retrieval -> first-clean-iter join to inform playbook curation.
+    first_clean, retrieved = _retrieval_first_clean(records)
+    print(
+        "playbook retrieval -> first clean iter: "
+        f"first_clean={first_clean if first_clean is not None else 'never'}; "
+        f"retrieved_ids={retrieved if retrieved else '[]'}"
+    )
+    print()
 
 
 def main() -> int:

@@ -44,7 +44,7 @@ class StubGenerator:
 
     def generate(self, prompt: str) -> str | None:
         self.calls.append(prompt)
-        if prompt in self.fail_for:
+        if any(f in prompt for f in self.fail_for):
             return None
         from PIL import Image
         f = tempfile.NamedTemporaryFile(suffix=".png", delete=False)

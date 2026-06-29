@@ -1,0 +1,13 @@
+# Skip bulk binary/generated noise from indexing — NOT traces/logs
+games/**/_assets/
+games/**/_sounds/
+games/**/_videos/
+games/**/_asset_cache/
+games/**/_sound_cache/
+games/**/_video_cache/
+games/**/*.html
+games/**/*.png
+games/**/snapshots/
+nohup.out
+.venv/
+.venv-video/

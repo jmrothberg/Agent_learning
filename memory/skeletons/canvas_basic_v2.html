@@ -129,6 +129,28 @@
   // game-specific globals go here. Replace freely.
   const state = { score: 0, lives: 3, over: false, t: 0,
                   player: { x: W/2, y: H/2, r: 12 } };
+  window.state = state;
+  const ASSETS = {};
+  const PATHS = { player_idle: "./SESSION_assets/player_idle.png" };
+  function sprite(key) { return ASSETS[key] || null; }
+  async function loadAssets() {
+    for (const [k, path] of Object.entries(PATHS)) {
+      const img = new Image(); img.src = path; ASSETS[k] = img;
+      try { await img.decode(); } catch (e) { /* MISSING fallback at draw */ }
+    }
+  }
+  function drawPlayerSprite() {
+    const p = state.player, size = p.r * 2;
+    const img = sprite("player_idle");
+    if (img && img.complete && img.naturalWidth > 0) {
+      ctx.drawImage(img, p.x - p.r, p.y - p.r, size, size);
+    } else {
+      ctx.fillStyle = "#f0f"; ctx.fillRect(p.x - p.r, p.y - p.r, size, size);
+      ctx.fillStyle = "#000"; ctx.font = "10px monospace";
+      ctx.fillText("MISSING:player_idle", p.x - p.r, p.y);
+    }
+  }
+  loadAssets();
   let rafHandle = 0;
   function reset() {
     state.score = 0; state.lives = 3; state.over = false; state.t = 0;
@@ -162,9 +184,7 @@
     // Layer 0 — clear / background
     ctx.clearRect(0, 0, W, H);
     // Layer 1 — entities (drawn first so HUD goes on top)
-    const p = state.player;
-    ctx.fillStyle = "#7ab6ff";
-    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
+    drawPlayerSprite();
     // Layer 2 — effects (particles, etc.) — none in skeleton
     // Layer 3 — HUD overlays (in-canvas; outer DOM HUD is its own layer)
   }
