@@ -9,10 +9,12 @@ Human onboarding → `README.md`. Commands/env → `CLAUDE.md`. Harness traps �
 
 | User intent | Command | Notes |
 |-------------|---------|-------|
+| **Run all 11 games overnight (both batches, auto-chained)** | `bash eval/tune_run07_chain.sh` in Terminal + monitor below in Cursor | **One paste** — Batch B starts automatically when A finishes. No wake-up. |
+| **Run 11 games to improve the agent (run_07)** | Same as chain row above | A=GLM no VLM (6) → B=Qwen VLM on (5), watcher handoff between games. |
 | **Run unit tests** / **pytest** / **after a code change** | `.venv/bin/python -m pytest tests/ -q` | ~2048 tests, no GPU. Full map: `TEST.md`. |
 | **Run one test file** | `.venv/bin/python -m pytest tests/test_patches.py -v` | Swap path. |
 | **Run asteroids regression** | `.venv/bin/python -m pytest tests/test_retrieval.py tests/test_patches.py -q -k asteroids` | Ship thrust + irregular asteroids. |
-| **Run run_06 guards** | `.venv/bin/python -m pytest tests/test_run06_draw_contract.py tests/test_tune_serial_pass.py tests/test_stream_instance_method.py -q` | drawImage contract + honest batch PASS + get_backend fix. |
+| **Run run_06 guards** | `.venv/bin/python -m pytest tests/test_run06_draw_contract.py tests/test_tune_serial_pass.py tests/test_stream_instance_method.py tests/test_grid_maze_chase_probes.py -q` | drawImage contract + honest batch PASS + get_backend fix + grid-maze probes. |
 | **Prompt library coverage (no model)** | `.venv/bin/python eval/eval_prompts_plan.py --coverage` | Instant; CI runs this. |
 | **Plan eval (one model turn per prompt)** | `MLX_MODEL=~/MLX_Models/GLM-5.2-MLX-4bit .venv/bin/python eval/eval_prompts_plan.py` | No browser. |
 | **Seed-edit eval** | `MLX_MODEL=~/MLX_Models/GLM-5.2-MLX-4bit .venv/bin/python eval/eval_seed_edits.py` | Materialization only (`browser=None`). |
@@ -20,17 +22,54 @@ Human onboarding → `README.md`. Commands/env → `CLAUDE.md`. Harness traps �
 | **Interactive TUI** | `.venv/bin/python chat.py` | Visible Chromium; `/bestof off` default. |
 | **System smoke (browser)** | `python system_tests.py run --suite smoke --three-model` | Slow; confirms full loop. |
 | **Timeline a trace** | `.venv/bin/python scripts/enrich_trace.py <path-or-stem> --timeline` | Primary triage; see `HARNESS_DEBUG.md`. |
-| **Batch dashboard refresh** | `.venv/bin/python eval/tune_overnight_monitor.py --out-dir games/tune_serial10/run_06` | Writes `agent_monitor.json`; optional. |
+| **Batch dashboard / watcher (both batches, no pause)** | `.venv/bin/python eval/tune_overnight_monitor.py --run07-chain --interval 30 --sync-loop --auto-release 0` | Status only + instant pass-through if batch was started with `--wait-for-monitor >0`. Default chain has **no pause**. |
 | **Parallel N games (throughput lab)** | See `eval/PARALLEL_MLX_TESTING.md` + `eval/batch_parallel.py` | One `mlx_lm.server`, N clients — **not** in-game BoN. |
 
 ---
 
-## Serial overnight batch (6 games, one MLX, visible browser)
+## run_07 — both batches, one night (A → B auto-chained)
+
+**One Terminal paste runs all 11 games.** Batch B (Qwen + VLM) starts **automatically** when Batch A (GLM, no VLM) finishes — no wake-up, no second Terminal session.
+
+| | Terminal.app (once) | Cursor watcher (once) |
+|---|---------------------|------------------------|
+| Command | `bash eval/tune_run07_chain.sh` | `.venv/bin/python eval/tune_overnight_monitor.py --run07-chain --interval 30 --sync-loop --auto-release 0` |
+| Log / status | `games/tune_serial10/run_07/chain.log` | `games/tune_serial10/run_07/agent_monitor.json` |
+
+```bash
+cd /Users/jonathanrothberg/Agent_learning
+bash eval/tune_run07_chain.sh
+```
+
+Between **games** (both batches): loop waits for watcher — **no Enter**. Cursor agent triages, patches, then:
+
+```bash
+.venv/bin/python eval/tune_inter_game_ready.py \
+  --out-dir games/tune_serial10/run_07_big \
+  --note "what you fixed"
+```
+
+Use `--out-dir` from `active_out_dir` in `agent_monitor.json` (`run_07_big` during Batch A, `run_07_vlm` during Batch B). Monitor `--run07-chain` tracks which is active.
+
+| | Batch A | Batch B |
+|---|---------|---------|
+| Dir | `run_07_big/` | `run_07_vlm/` |
+| Model | GLM-5.2-MLX-4bit | Qwen3.6-27B-mxfp8 |
+| VLM | off (`--no-vlm-critique`) | **on** (default) |
+| Games | 6 | 5 |
+
+**Success criteria:** `fresh_pass` with `iter_summaries > 0` per game — not checkpoint-only complete.
+
+---
+
+## Serial overnight batch (legacy 6-game rerun)
 
 **Goal lists** (pick one):
 
 | File | Purpose |
 |------|---------|
+| `eval/tune_run07_big.txt` | run_07 Batch A (6 games, GLM, no VLM) |
+| `eval/tune_run07_vlm.txt` | run_07 Batch B (5 games, Qwen + VLM, `--max-iters 2`) |
 | `eval/tune_serial10_goals.txt` | Full 12-game battery |
 | `eval/tune_serial10_round2_goals.txt` | Round 2 subset |
 | `eval/tune_serial10_round2_rerun.txt` | run_06 validation (6 games) |

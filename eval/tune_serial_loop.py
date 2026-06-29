@@ -11,7 +11,10 @@ no auto-step on test failure (runs to completion or natural agent exit).
         --goals-file eval/tune_serial10_goals.txt \\
         --out-dir games/tune_serial10/run_01
 
-    # Optional: pause for manual triage between games:
+    # Overnight + Cursor watcher fixes between games (NO Enter in Terminal):
+    .venv/bin/python eval/tune_serial_loop.py ... --wait-for-monitor 1800
+
+    # Manual Enter pause (legacy):
     .venv/bin/python eval/tune_serial_loop.py --pause-between-games
 """
 from __future__ import annotations
@@ -26,6 +29,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from eval.inter_game_sync import wait_for_ready, write_pending  # noqa: E402
 
 import backend as backend_mod  # noqa: E402
 
@@ -491,7 +496,42 @@ async def main_async(args) -> int:
             status="running", vlm_critique=vlm_on,
         )
 
-        if i < len(jobs) and args.pause_between_games:
+        if i < len(jobs) and args.wait_for_monitor > 0:
+            trace_hits = sorted(out_dir.glob(f"traces/{label}__run_*.jsonl"))
+            write_pending(
+                out_dir,
+                {
+                    "label": label,
+                    "goal_index": i,
+                    "jobs_total": len(jobs),
+                    "outcome": result.outcome,
+                    "exit_code": result.exit_code,
+                    "failure_classes": result.failure_classes,
+                    "trace": str(trace_hits[-1].relative_to(REPO_ROOT))
+                    if trace_hits
+                    else None,
+                    "html": str(out_path.relative_to(REPO_ROOT))
+                    if out_path.exists()
+                    else None,
+                },
+            )
+            print(
+                f"\nWaiting for watcher (inter_game_ready.json, timeout "
+                f"{args.wait_for_monitor:.0f}s) — triage + fix in Cursor, then:\n"
+                f"  .venv/bin/python eval/tune_inter_game_ready.py "
+                f"--out-dir {out_dir.relative_to(REPO_ROOT)} --note '…'\n",
+                flush=True,
+            )
+            released = wait_for_ready(
+                out_dir, timeout_s=args.wait_for_monitor, poll_s=5.0,
+            )
+            if not released:
+                print(
+                    f"warning: monitor wait timed out after {args.wait_for_monitor:.0f}s "
+                    f"— continuing to next game without confirmed fix",
+                    file=sys.stderr,
+                )
+        elif i < len(jobs) and args.pause_between_games:
             try:
                 input("\nPause — triage trace, apply general fixes, Enter for next game… ")
             except EOFError:
@@ -585,7 +625,18 @@ def main() -> int:
     ap.add_argument(
         "--pause-between-games",
         action="store_true",
-        help="Wait for Enter between games (default: auto-advance immediately)",
+        help="Wait for Enter between games (use --wait-for-monitor for overnight + agent fixes)",
+    )
+    ap.add_argument(
+        "--wait-for-monitor",
+        type=float,
+        default=0.0,
+        metavar="SECONDS",
+        help=(
+            "After each game, block until eval/tune_inter_game_ready.py writes "
+            "inter_game_ready.json (Cursor watcher triage). 0=off (default). "
+            "Typical overnight: 1800 (30 min cap per game handoff)."
+        ),
     )
     ap.add_argument(
         "--no-vlm-critique",

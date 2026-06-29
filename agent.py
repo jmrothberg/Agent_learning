@@ -9383,6 +9383,22 @@ class GameAgent(
                 "iteration": self._last_materialized_iter,
             })
 
+    @staticmethod
+    def _current_git_sha() -> str:
+        """Short repo SHA for batch/trace correlation (best-effort)."""
+        import subprocess
+        try:
+            out = subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=str(Path(__file__).resolve().parent),
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=2,
+            )
+            return out.strip()
+        except Exception:
+            return ""
+
     def _record_session_outcome(self, ok: bool) -> None:
         try:
             self._memory.record_outcome(
@@ -9394,12 +9410,16 @@ class GameAgent(
                 best_html_path=self.best_path if self.best_path.exists() else None,
                 last_report_summary=self._last_report_summary,
             )
-            self._trace({
+            git_sha = self._current_git_sha()
+            outcome: dict[str, object] = {
                 "kind": "session_outcome",
                 "ok": ok,
                 "iterations": self._last_iter_run,
                 "best_path_exists": self.best_path.exists(),
-            })
+            }
+            if git_sha:
+                outcome["git_sha"] = git_sha
+            self._trace(outcome)
         except Exception as e:
             self._trace({"kind": "outcome_record_failed", "err": str(e)})
         # One-complete-trace (2026-06-14): the .summary.md sibling is retired —

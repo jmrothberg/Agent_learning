@@ -145,8 +145,6 @@ class CriticMixin:
 
 
 
-    @staticmethod
-
     async def _detect_vlm(self, role: str = "coder") -> bool:
 
         backend = self.get_backend(role)

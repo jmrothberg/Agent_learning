@@ -1,4 +1,4 @@
-"""Regression: orphan @classmethod on _stream broke get_backend(role) (run_06)."""
+"""Regression: orphan decorators on stream/VLM paths broke get_backend (run_06/07)."""
 
 from __future__ import annotations
 
@@ -15,4 +15,12 @@ def test_stream_is_instance_method_not_classmethod():
     attr = inspect.getattr_static(GameAgent, "_stream")
     assert not isinstance(attr, classmethod), (
         "_stream must be an instance method; @classmethod makes get_backend(role) fail"
+    )
+
+
+def test_detect_vlm_is_instance_method_not_staticmethod():
+    attr = inspect.getattr_static(GameAgent, "_detect_vlm")
+    assert not isinstance(attr, staticmethod), (
+        "_detect_vlm must be an instance method; @staticmethod makes "
+        "role bind as self → 'str' object has no attribute 'get_backend' (run_07)"
     )
