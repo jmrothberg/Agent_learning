@@ -2317,16 +2317,9 @@ class AssetGenerationMixin:
 
                 )
 
-                # Memory-pressure guard (2026-06-14): a VERY large resident MLX
-
-                # LLM + the ~17 GB Wan subprocess can trigger a macOS jetsam
-
-                # kill of the chat process mid-clip (see
-
-                # _free_memory_before_video). Free the LLM/diffusers FIRST when
-
-                # the LLM is large relative to RAM. No-op for small/normal LLMs.
-
+                # Memory-pressure guard: opt-in only (AGENT_ENABLE_MEMORY_RELIEF=1).
+                # Default off — on-disk GLM size ≠ resident RAM; 512 GB boxes
+                # run GLM + Stable-Audio + Wan subprocess fine without unloading.
                 _mem = await asyncio.to_thread(self._free_memory_before_video)
 
                 if _mem.get("freed"):
@@ -2489,19 +2482,8 @@ class AssetGenerationMixin:
 
 
 
-        # Post-media VRAM relief (2026-06-21): after sprite/sound batches,
-
-        # drop Z-Image / Stable-Audio so the next coder MLX stream is not
-
-        # competing with diffusers on unified memory. Gated like video relief
-
-        # — only when the session MLX model is huge relative to RAM (GLM-5.2
-
-        # @ 391 GB on a 512 GB box trips this every time). Small MLX models
-
-        # keep pipelines warm for fast mid-session regen. Does NOT drop the
-
-        # coder LLM — only the drawing/audio stacks.
+        # Post-media VRAM relief: opt-in AGENT_ENABLE_MEMORY_RELIEF=1 only.
+        # Drops Z-Image / Stable-Audio after sprite/sound batches — never the coder LLM.
 
         if asset_specs or sound_specs:
 

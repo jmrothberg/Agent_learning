@@ -37,6 +37,7 @@ def _fake_huge_model_dir(tmp_path: Path, size_bytes: int) -> tuple[Path, MagicMo
 def test_mlx_coder_memory_pressure_trips_for_huge_model(
     tmp_path: Path, monkeypatch,
 ) -> None:
+    monkeypatch.setenv("AGENT_ENABLE_MEMORY_RELIEF", "1")
     model_dir, fake = _fake_huge_model_dir(tmp_path, int(250 * 1e9))
 
     def _rglob(self: Path, pattern: str):
@@ -62,6 +63,57 @@ def test_mlx_coder_memory_pressure_trips_for_huge_model(
     tripped, llm_gb, _ = agent._mlx_coder_memory_pressure()
     assert tripped is True
     assert llm_gb is not None and llm_gb > 100
+
+
+def test_mlx_coder_memory_pressure_skips_by_default_even_for_huge_on_disk(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """On-disk GLM folder size must not trip relief unless opt-in."""
+    monkeypatch.delenv("AGENT_ENABLE_MEMORY_RELIEF", raising=False)
+    model_dir, fake = _fake_huge_model_dir(tmp_path, int(420 * 1e9))
+
+    def _rglob(self: Path, pattern: str):
+        if self == model_dir:
+            return [fake]
+        return []
+
+    monkeypatch.setattr(Path, "rglob", _rglob)
+    agent = _make_agent(tmp_path)
+    agent._backend = MagicMock()
+    agent._backend.info.name = "mlx"
+    agent._backend.info.model = str(model_dir)
+    tripped, _, _ = agent._mlx_coder_memory_pressure()
+    assert tripped is False
+
+
+def test_free_memory_before_video_never_drops_mlx_llm(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    monkeypatch.setenv("AGENT_ENABLE_MEMORY_RELIEF", "1")
+    model_dir, fake = _fake_huge_model_dir(tmp_path, int(250 * 1e9))
+
+    def _rglob(self: Path, pattern: str):
+        if self == model_dir:
+            return [fake]
+        return []
+
+    monkeypatch.setattr(Path, "rglob", _rglob)
+
+    def _sysconf(name: str) -> int:
+        if name == "SC_PHYS_PAGES":
+            return int(512 * 1e9 / 4096)
+        if name == "SC_PAGE_SIZE":
+            return 4096
+        return 0
+
+    monkeypatch.setattr(os, "sysconf", _sysconf)
+    agent = _make_agent(tmp_path)
+    agent._backend = MagicMock()
+    agent._backend.info.name = "mlx"
+    agent._backend.info.model = str(model_dir)
+    monkeypatch.setattr(MLXBackend, "_loaded_model", object(), raising=False)
+    out = agent._free_memory_before_video()
+    assert "MLX-LLM" not in out.get("freed", [])
 
 
 def test_mlx_coder_memory_pressure_skips_small_model(

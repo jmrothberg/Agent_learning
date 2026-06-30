@@ -60,6 +60,7 @@ MLX upgrades: MiniMax-M3 (`minimax_m3.py` copy after mlx-lm upgrade), GLM-5.2
 - `MLX_MAX_TOKENS` — MLX output cap (default **131072**)
 - `CODING_BOX_NUM_CTX` — context window (default **100000**); compaction fires near ~70% (`_COMPACT_PRESSURE`)
 - `AGENT_COMPACT_TOKEN_CEILING` — absolute token ceiling for compaction (optional override)
+- `AGENT_ENABLE_MEMORY_RELIEF` — set `1` to opt into unloading diffusers before video / after asset batches (default **off**; old on-disk-size gate wrongly unloaded GLM on 512 GB boxes)
 - `AGENT_NO_AUTO_OLLAMA_GPU_FIX` — set `1` to disable auto Ollama VRAM unload on `/new`
 - `ANTHROPIC_MAX_TOKENS` — Anthropic output cap (default 32768)
 - `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` — cloud backends only

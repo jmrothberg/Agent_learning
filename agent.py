@@ -2574,11 +2574,15 @@ class GameAgent(
     def _mlx_coder_memory_pressure(self) -> tuple[bool, float | None, float | None]:
         """True when this session's MLX coder model on disk exceeds ~20% of RAM.
 
-        Uses on-disk weight size as a proxy for wired unified-memory use on
-        Apple Silicon. Does NOT require the MLX model to be loaded right now —
-        the next coder stream will load it, so relief must run after sprite/
-        sound batches even when MLX temporarily dropped weights after planning.
+        **Disabled by default (2026-06-30):** on-disk weight size is not resident
+        RAM — GLM-5.2 4-bit (~420 GB on disk) spuriously tripped the old gate
+        on 512 GB boxes and unloaded MLX + Stable-Audio before video. Opt in on
+        low-RAM machines only: ``AGENT_ENABLE_MEMORY_RELIEF=1``.
         """
+        if os.environ.get("AGENT_ENABLE_MEMORY_RELIEF", "").strip().lower() not in (
+            "1", "true", "yes",
+        ):
+            return False, None, None
         try:
             if not self._backend or getattr(self._backend.info, "name", None) != "mlx":
                 return False, None, None
@@ -2644,23 +2648,14 @@ class GameAgent(
         return not tripped
 
     def _free_memory_before_video(self) -> dict:
-        """Conditionally free the resident in-process MLX LLM + diffuser
-        pipelines BEFORE launching the Wan video subprocess.
+        """Conditionally free diffuser pipelines BEFORE launching the Wan video
+        subprocess. Never drops the in-process MLX LLM — video runs in a
+        separate subprocess and unloading the coder model mid-session is wrong
+        on large-RAM boxes (512 GB + GLM-5.2 4-bit runs fine with everything
+        resident).
 
-        Root cause (confirmed 2026-06-14, JetsamEvent-2026-06-14-125300.ips):
-        with a VERY LARGE in-process MLX LLM resident, loading the ~17 GB Wan
-        model in the video subprocess drove macOS into a memory-pressure
-        (`vm-compressor-space-shortage`) jetsam kill of the chat process
-        (`largeProcess: Python`), which closed the video subprocess's stdout
-        pipe -> BrokenPipeError -> the clip failed. The video subprocess does
-        NOT use the LLM, so freeing it removes the pressure.
-
-        GATED so SMALL/normal LLMs are NOT slowed by a needless reload: only
-        fires when the resident MLX model on disk exceeds ~20% of physical RAM
-        (measured split: working set <=51 GB ~10% of 512 GB; crashing set
-        >=144 GB ~28%, e.g. GLM-5.1 378 GB ~74%). Ollama models live in a
-        separate daemon process and are never touched. Everything freed
-        reloads lazily on the next turn.
+        Opt-in only via ``AGENT_ENABLE_MEMORY_RELIEF=1`` (same gate as
+        ``_mlx_coder_memory_pressure``). Default: no-op.
         """
         info: dict = {"freed": [], "tripped": False, "llm_gb": None}
         try:
@@ -2676,13 +2671,12 @@ class GameAgent(
                 return info
             info["tripped"] = True
             info["llm_gb"] = llm_gb
-            # 1) Diffuser pipelines (Z-Image-Turbo + SD-Turbo img2img).
+            # Diffusers only (Z-Image / Stable-Audio) — NOT the MLX coder LLM.
             try:
                 import assets as _assets
                 info["freed"].extend(_assets.release_preloaded_diffusers())
             except Exception:
                 pass
-            # 2) Stable-Audio generator held on the agent.
             try:
                 sg = self._sound_generator
                 if sg is not None and hasattr(sg, "cleanup"):
@@ -2692,15 +2686,6 @@ class GameAgent(
             except Exception:
                 pass
             self._asset_generator = None
-            # 3) The big in-process MLX LLM — the jetsam `largeProcess`. It
-            #    reloads lazily on the next coder turn.
-            try:
-                from backend import MLXBackend
-                if getattr(MLXBackend, "_loaded_model", None) is not None:
-                    MLXBackend._drop_after_crash()
-                    info["freed"].append("MLX-LLM")
-            except Exception:
-                pass
             self._trace({
                 "kind": "video_memory_relief",
                 "llm_gb": info["llm_gb"], "phys_gb": phys_gb,
