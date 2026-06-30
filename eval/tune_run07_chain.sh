@@ -8,7 +8,7 @@ OUT="$REPO_ROOT/games/tune_serial10/run_07"
 mkdir -p "$OUT"
 LOG="$OUT/chain.log"
 # 0 = no pause between games (batch runs flat-out overnight).
-WAIT="${TUNE_WAIT_FOR_MONITOR:-0}"
+WAIT="${TUNE_WAIT_FOR_MONITOR:-1800}"
 
 echo "=== run_07 chain start $(date -u +%Y-%m-%dT%H:%M:%SZ) wait_for_monitor=${WAIT}s ===" | tee -a "$LOG"
 

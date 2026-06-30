@@ -218,21 +218,17 @@ def _run_run07_chain_monitor(args) -> int:
         big_snap = snapshot((REPO / "games/tune_serial10/run_07_big").resolve(), 6)
         vlm_snap = snapshot((REPO / "games/tune_serial10/run_07_vlm").resolve(), 5)
 
-        # auto_release=0 on --run07-chain: instant pass-through (no sleep wait).
+        # auto_release>0: safety net if Cursor agent stuck (writes ready after SECONDS).
+        # auto_release=0: disabled — agent MUST triage + patch + inter_game_ready.
         if batch_name != "done":
             ig = (big_snap if batch_name == "big" else vlm_snap).get("inter_game") or {}
             age = pending_age_seconds(active_dir)
-            instant = args.auto_release == 0
             timed = args.auto_release > 0 and age >= args.auto_release
-            if ig.get("awaiting_agent_fix") and (instant or timed):
+            if ig.get("awaiting_agent_fix") and timed:
                 write_ready(
                     active_dir,
-                    note=(
-                        "instant pass-through (auto-release=0)"
-                        if instant
-                        else f"auto-release after {args.auto_release:.0f}s wait"
-                    ),
-                    released_by="monitor_instant" if instant else "monitor_timeout",
+                    note=f"auto-release after {args.auto_release:.0f}s wait",
+                    released_by="monitor_timeout",
                 )
                 if batch_name == "big":
                     big_snap = snapshot((REPO / "games/tune_serial10/run_07_big").resolve(), 6)

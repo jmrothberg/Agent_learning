@@ -9,7 +9,7 @@ Human onboarding → `README.md`. Commands/env → `DEV.md`. Harness traps → `
 
 | User intent | Command | Notes |
 |-------------|---------|-------|
-| **Run 10 games overnight (run_08 — tonight)** | See **run_08** section below | 9 fresh library games + Doom (3D nav validation). |
+| **Run 10 games overnight (run_08 — tonight)** | Terminal: `bash eval/tune_run08.sh` · Cursor: watcher below | Blocks between games until watcher fixes + releases — **no Enter**. |
 | **Run all 11 games overnight (both batches, auto-chained)** | `bash eval/tune_run07_chain.sh` in Terminal + monitor below in Cursor | **One paste** — Batch B starts automatically when A finishes. No wake-up. |
 | **Run 11 games to improve the agent (run_07)** | Same as chain row above | A=GLM no VLM (6) → B=Qwen VLM on (5), watcher handoff between games. |
 | **Run unit tests** / **pytest** / **after a code change** | `.venv/bin/python -m pytest tests/ -q` | ~2158 tests, no GPU. Full map: `TEST.md`. |
@@ -24,7 +24,7 @@ Human onboarding → `README.md`. Commands/env → `DEV.md`. Harness traps → `
 | **Interactive TUI** | `.venv/bin/python chat.py` | Visible Chromium; `/bestof off` default. |
 | **System smoke (browser)** | `python system_tests.py run --suite smoke --three-model` | Slow; confirms full loop. |
 | **Timeline a trace** | `.venv/bin/python scripts/enrich_trace.py <path-or-stem> --timeline` | Primary triage; see `HARNESS_DEBUG.md`. |
-| **Batch dashboard / watcher (both batches, no pause)** | `.venv/bin/python eval/tune_overnight_monitor.py --run07-chain --interval 30 --sync-loop --auto-release 0` | Status only + instant pass-through if batch was started with `--wait-for-monitor >0`. Default chain has **no pause**. |
+| **Batch dashboard / watcher (run_07 chain)** | `.venv/bin/python eval/tune_overnight_monitor.py --run07-chain --interval 30 --sync-loop` | Polls `inter_game_pending.json`; agent triages + `tune_inter_game_ready.py` — no stdin. Optional `--auto-release 3600` safety net only. |
 | **Parallel N games (throughput lab)** | See `eval/PARALLEL_MLX_TESTING.md` + `eval/batch_parallel.py` | One `mlx_lm.server`, N clients — **not** in-game BoN. |
 
 ---
@@ -35,7 +35,7 @@ Human onboarding → `README.md`. Commands/env → `DEV.md`. Harness traps → `
 
 | | Terminal.app (once) | Cursor watcher (once) |
 |---|---------------------|------------------------|
-| Command | `bash eval/tune_run07_chain.sh` | `.venv/bin/python eval/tune_overnight_monitor.py --run07-chain --interval 30 --sync-loop --auto-release 0` |
+| Command | `bash eval/tune_run07_chain.sh` | `.venv/bin/python eval/tune_overnight_monitor.py --run07-chain --interval 30 --sync-loop` |
 | Log / status | `games/tune_serial10/run_07/chain.log` | `games/tune_serial10/run_07/agent_monitor.json` |
 
 ```bash
@@ -64,7 +64,7 @@ Use `--out-dir` from `active_out_dir` in `agent_monitor.json` (`run_07_big` duri
 
 ---
 
-## run_08 — tonight (10 games, GLM, no VLM)
+## run_08 — tonight (10 games, GLM, watcher handoff)
 
 Fresh library goals not in run_07, plus **Doom slot 1** to validate the 3D FPS navigation harness fix. Goals: `eval/tune_run08_goals.txt`.
 
@@ -81,27 +81,41 @@ Fresh library goals not in run_07, plus **Doom slot 1** to validate the 3D FPS n
 | 9 | torch-dungeon | lit maze / fog |
 | 10 | bullet-hell-boss | bullet patterns |
 
-**Terminal.app** (not Cursor — visible Chromium + MLX cold load):
+**Two terminals — both required.** Batch blocks after each game until the watcher releases the next game. No Enter, no user prompts.
+
+| | Terminal.app (once) | Cursor watcher (once) |
+|---|---------------------|------------------------|
+| Command | `bash eval/tune_run08.sh` | `.venv/bin/python eval/tune_overnight_monitor.py --out-dir games/tune_serial10/run_08 --jobs-total 10 --interval 30 --sync-loop` |
+| Log / status | `games/tune_serial10/run_08/overnight.log` | `games/tune_serial10/run_08/agent_monitor.json` |
 
 ```bash
 cd /Users/jonathanrothberg/Agent_learning
-mkdir -p games/tune_serial10/run_08
-caffeinate -dims env \
-  TUNE_OUT_DIR=games/tune_serial10/run_08 \
-  TUNE_GOALS_FILE=eval/tune_run08_goals.txt \
-  MLX_MODEL="$HOME/MLX_Models/GLM-5.2-MLX-4bit" \
-  nohup bash eval/tune_serial_overnight.sh &
-tail -f games/tune_serial10/run_08/overnight.log
+bash eval/tune_run08.sh
 ```
-
-**Cursor watcher** (optional — status only; batch runs flat-out with no Enter pause):
 
 ```bash
 .venv/bin/python eval/tune_overnight_monitor.py \
-  --out-dir games/tune_serial10/run_08 --jobs-total 10 --interval 60
+  --out-dir games/tune_serial10/run_08 \
+  --jobs-total 10 \
+  --interval 30 \
+  --sync-loop
 ```
 
-Artifacts: `games/tune_serial10/run_08/` (`overnight.log`, `traces/`, `tune_checkpoint.json`).
+When `agent_monitor.json` shows `awaiting_agent_fix: true` (or the monitor prints `→ WATCHER:`):
+
+1. **Timeline:** `.venv/bin/python scripts/enrich_trace.py <trace-from-pending> --timeline`
+2. **Classify** `failure_class` → patch `tools.py` / `agent_*.py` / `memory/*.jsonl` / `prompts_v1.py` as needed
+3. **Release** (unblocks Terminal — next game starts with fixes loaded):
+
+```bash
+.venv/bin/python eval/tune_inter_game_ready.py \
+  --out-dir games/tune_serial10/run_08 \
+  --note "what you fixed"
+```
+
+Optional safety net if the agent is stuck: add `--auto-release 3600` to the watcher (releases after 1 h without a manual ready — prefer fixing + releasing promptly).
+
+Artifacts: `games/tune_serial10/run_08/` (`overnight.log`, `inter_game_pending.json`, `traces/`, `tune_checkpoint.json`).
 
 ---
 
@@ -131,7 +145,7 @@ caffeinate -dims env \
 tail -f games/tune_serial10/run_06/overnight.log
 ```
 
-**Defaults baked in:** `--best-of-n 1`, stuck best-of-2 **off** (no `--stuck-bon`), `--no-vlm-critique`, `--no-auto-step`, `--resume`, `--retries 2`, `stall_seconds=1200`.
+**Defaults baked in:** `--best-of-n 1`, stuck best-of-2 **off**, `--no-vlm-critique`, `--no-auto-step`, `--resume`, `--retries 2`, `--wait-for-monitor 1800` (blocks until watcher releases via `tune_inter_game_ready.py`).
 
 **Change game count:** edit the goals `.txt` (one goal per non-comment line) or pass `--goal "..."` repeatedly to `eval/tune_serial_loop.py`.
 

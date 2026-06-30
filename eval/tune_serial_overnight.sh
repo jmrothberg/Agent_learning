@@ -8,13 +8,10 @@
 #
 # Round 2 / GLM-5.2-MLX-4bit (recommended over mxfp4 for stability):
 #   cd /Users/jonathanrothberg/Agent_learning
-#   mkdir -p games/tune_serial10/run_08
-#   caffeinate -dims env \
-#     TUNE_OUT_DIR=games/tune_serial10/run_08 \
-#     TUNE_GOALS_FILE=eval/tune_run08_goals.txt \
-#     MLX_MODEL="$HOME/MLX_Models/GLM-5.2-MLX-4bit" \
-#     nohup bash eval/tune_serial_overnight.sh &
+#   bash eval/tune_run08.sh
 #   tail -f games/tune_serial10/run_08/overnight.log
+# Cursor watcher (required — see eval/OPERATIONS.md § run_08):
+#   .venv/bin/python eval/tune_overnight_monitor.py --out-dir games/tune_serial10/run_08 --jobs-total 10 --interval 30 --sync-loop
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -58,6 +55,7 @@ echo "=== tune_serial_overnight start $(date -u +%Y-%m-%dT%H:%M:%SZ) pid=$$ ==="
 echo "out_dir=$OUT_DIR goals=$GOALS model=$MLX_MODEL jobs=$JOBS_TOTAL" | tee -a "$LOG"
 
 _run_once() {
+  WAIT="${TUNE_WAIT_FOR_MONITOR:-1800}"
   env -u PLAYWRIGHT_BROWSERS_PATH \
     LLM_BACKEND=mlx \
     MLX_MODEL="$MLX_MODEL" \
@@ -70,6 +68,7 @@ _run_once() {
       --resume \
       --retries 2 \
       --retry-delay 30 \
+      --wait-for-monitor "$WAIT" \
       2>&1 | tee -a "$LOG"
 }
 
