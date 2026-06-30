@@ -9,7 +9,7 @@ Human onboarding → `README.md`. Commands/env → `DEV.md`. Harness traps → `
 
 | User intent | Command | Notes |
 |-------------|---------|-------|
-| **Run 10 games overnight (run_08 — tonight)** | Terminal: `bash eval/tune_run08.sh` · Cursor: watcher below | Blocks between games until watcher fixes + releases — **no Enter**. |
+| **Run 10 games overnight (run_08 — tonight)** | Terminal: `bash eval/tune_run08.sh` · Cursor: watcher below | Batch runs **flat-out** (no pause). Watcher fixes in parallel. |
 | **Run all 11 games overnight (both batches, auto-chained)** | `bash eval/tune_run07_chain.sh` in Terminal + monitor below in Cursor | **One paste** — Batch B starts automatically when A finishes. No wake-up. |
 | **Run 11 games to improve the agent (run_07)** | Same as chain row above | A=GLM no VLM (6) → B=Qwen VLM on (5), watcher handoff between games. |
 | **Run unit tests** / **pytest** / **after a code change** | `.venv/bin/python -m pytest tests/ -q` | ~2158 tests, no GPU. Full map: `TEST.md`. |
@@ -24,14 +24,14 @@ Human onboarding → `README.md`. Commands/env → `DEV.md`. Harness traps → `
 | **Interactive TUI** | `.venv/bin/python chat.py` | Visible Chromium; `/bestof off` default. |
 | **System smoke (browser)** | `python system_tests.py run --suite smoke --three-model` | Slow; confirms full loop. |
 | **Timeline a trace** | `.venv/bin/python scripts/enrich_trace.py <path-or-stem> --timeline` | Primary triage; see `HARNESS_DEBUG.md`. |
-| **Batch dashboard / watcher (run_07 chain)** | `.venv/bin/python eval/tune_overnight_monitor.py --run07-chain --interval 30 --sync-loop` | Polls `inter_game_pending.json`; agent triages + `tune_inter_game_ready.py` — no stdin. Optional `--auto-release 3600` safety net only. |
+| **Batch dashboard / watcher (run_07 chain)** | `.venv/bin/python eval/tune_overnight_monitor.py --run07-chain --interval 30 --sync-loop` | Polls every **30 seconds** (not minutes). Triage + patch while batch keeps running. |
 | **Parallel N games (throughput lab)** | See `eval/PARALLEL_MLX_TESTING.md` + `eval/batch_parallel.py` | One `mlx_lm.server`, N clients — **not** in-game BoN. |
 
 ---
 
 ## run_07 — both batches, one night (A → B auto-chained)
 
-**One Terminal paste runs all 11 games.** Batch B (Qwen + VLM) starts **automatically** when Batch A (GLM, no VLM) finishes — no wake-up, no second Terminal session.
+**One Terminal paste runs all 11 games back-to-back.** Batch B starts automatically when A finishes. **No pause between games** (`--wait-for-monitor 0` default). Cursor watcher runs in parallel and patches harness/memory while games continue — fixes apply to the next game(s).
 
 | | Terminal.app (once) | Cursor watcher (once) |
 |---|---------------------|------------------------|
@@ -43,7 +43,15 @@ cd /Users/jonathanrothberg/Agent_learning
 bash eval/tune_run07_chain.sh
 ```
 
-Between **games** (both batches): loop waits for watcher — **no Enter**. Cursor agent triages, patches, then:
+Cursor watcher (parallel — triage traces, patch code/memory, **do not stop the batch**):
+
+```bash
+.venv/bin/python eval/tune_overnight_monitor.py --run07-chain --interval 30 --sync-loop
+```
+
+When a game finishes, read `agent_monitor.json` / the newest trace under `traces/`, classify `failure_class`, patch source, commit if needed. **No Enter, no `inter_game_ready` release** — default batch does not block between games.
+
+Optional blocking handoff (only if you explicitly set `TUNE_WAIT_FOR_MONITOR=1800` on the Terminal batch): after fixes, release with:
 
 ```bash
 .venv/bin/python eval/tune_inter_game_ready.py \
@@ -51,7 +59,7 @@ Between **games** (both batches): loop waits for watcher — **no Enter**. Curso
   --note "what you fixed"
 ```
 
-Use `--out-dir` from `active_out_dir` in `agent_monitor.json` (`run_07_big` during Batch A, `run_07_vlm` during Batch B). Monitor `--run07-chain` tracks which is active.
+Use `--out-dir` from `active_out_dir` in `agent_monitor.json` (`run_07_big` during Batch A, `run_07_vlm` during Batch B).
 
 | | Batch A | Batch B |
 |---|---------|---------|
@@ -64,7 +72,7 @@ Use `--out-dir` from `active_out_dir` in `agent_monitor.json` (`run_07_big` duri
 
 ---
 
-## run_08 — tonight (10 games, GLM, watcher handoff)
+## run_08 — tonight (10 games, flat-out + parallel watcher)
 
 Fresh library goals not in run_07, plus **Doom slot 1** to validate the 3D FPS navigation harness fix. Goals: `eval/tune_run08_goals.txt`.
 
@@ -81,7 +89,7 @@ Fresh library goals not in run_07, plus **Doom slot 1** to validate the 3D FPS n
 | 9 | torch-dungeon | lit maze / fog |
 | 10 | bullet-hell-boss | bullet patterns |
 
-**Two terminals — both required.** Batch blocks after each game until the watcher releases the next game. No Enter, no user prompts.
+**Two processes — both required.** Terminal batch runs **game → game with zero wait**. Cursor watcher polls every **30 seconds** (not 30 minutes), triages finished traces, and patches harness/memory/prompts **while the batch keeps going**. No Enter, no blocking, no manual release.
 
 | | Terminal.app (once) | Cursor watcher (once) |
 |---|---------------------|------------------------|
@@ -101,21 +109,14 @@ bash eval/tune_run08.sh
   --sync-loop
 ```
 
-When `agent_monitor.json` shows `awaiting_agent_fix: true` (or the monitor prints `→ WATCHER:`):
+**Watcher loop (continuous, no blocking the batch):**
 
-1. **Timeline:** `.venv/bin/python scripts/enrich_trace.py <trace-from-pending> --timeline`
-2. **Classify** `failure_class` → patch `tools.py` / `agent_*.py` / `memory/*.jsonl` / `prompts_v1.py` as needed
-3. **Release** (unblocks Terminal — next game starts with fixes loaded):
+1. Poll `agent_monitor.json` — when `completed_count` advances, open the newest trace for that label.
+2. **Timeline:** `.venv/bin/python scripts/enrich_trace.py <trace> --timeline`
+3. **Classify** `failure_class` → patch `tools.py` / `agent_*.py` / `memory/*.jsonl` / `prompts_v1.py`
+4. **Keep going** — next game already running or starts immediately; fixes apply to subsequent games.
 
-```bash
-.venv/bin/python eval/tune_inter_game_ready.py \
-  --out-dir games/tune_serial10/run_08 \
-  --note "what you fixed"
-```
-
-Optional safety net if the agent is stuck: add `--auto-release 3600` to the watcher (releases after 1 h without a manual ready — prefer fixing + releasing promptly).
-
-Artifacts: `games/tune_serial10/run_08/` (`overnight.log`, `inter_game_pending.json`, `traces/`, `tune_checkpoint.json`).
+Artifacts: `games/tune_serial10/run_08/` (`overnight.log`, `traces/`, `tune_checkpoint.json`).
 
 ---
 
@@ -145,7 +146,7 @@ caffeinate -dims env \
 tail -f games/tune_serial10/run_06/overnight.log
 ```
 
-**Defaults baked in:** `--best-of-n 1`, stuck best-of-2 **off**, `--no-vlm-critique`, `--no-auto-step`, `--resume`, `--retries 2`, `--wait-for-monitor 1800` (blocks until watcher releases via `tune_inter_game_ready.py`).
+**Defaults baked in:** `--best-of-n 1`, stuck best-of-2 **off**, `--no-vlm-critique`, `--resume`, `--retries 2`, **`--wait-for-monitor 0`** (flat-out — no pause between games).
 
 **Change game count:** edit the goals `.txt` (one goal per non-comment line) or pass `--goal "..."` repeatedly to `eval/tune_serial_loop.py`.
 

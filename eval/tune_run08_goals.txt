@@ -2,8 +2,8 @@
 # Zero overlap with run_07 except Doom slot 1 (3D FPS navigation harness validation).
 # Source: memory/prompt_library.jsonl — one goal per line for tune_serial_loop.
 # Launch: eval/OPERATIONS.md § run_08
-#   Terminal: bash eval/tune_run08.sh
-#   Cursor:   eval/tune_overnight_monitor.py --out-dir games/tune_serial10/run_08 --sync-loop ...
+#   Terminal: bash eval/tune_run08.sh          (flat-out — no pause between games)
+#   Cursor:   tune_overnight_monitor.py ... --interval 30 --sync-loop  (poll every 30s, fix in parallel)
 #
 #   1 → #21 doom
 #   2 → #22 minecraft

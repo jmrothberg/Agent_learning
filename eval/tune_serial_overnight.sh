@@ -55,20 +55,25 @@ echo "=== tune_serial_overnight start $(date -u +%Y-%m-%dT%H:%M:%SZ) pid=$$ ==="
 echo "out_dir=$OUT_DIR goals=$GOALS model=$MLX_MODEL jobs=$JOBS_TOTAL" | tee -a "$LOG"
 
 _run_once() {
-  WAIT="${TUNE_WAIT_FOR_MONITOR:-1800}"
+  WAIT="${TUNE_WAIT_FOR_MONITOR:-0}"
+  LOOP_ARGS=(
+    --goals-file "$GOALS"
+    --out-dir "$OUT_DIR"
+    --model "$MLX_MODEL"
+    --no-vlm-critique
+    --resume
+    --retries 2
+    --retry-delay 30
+  )
+  if [[ "$WAIT" != "0" && "$WAIT" != "0.0" ]]; then
+    LOOP_ARGS+=(--wait-for-monitor "$WAIT")
+  fi
   env -u PLAYWRIGHT_BROWSERS_PATH \
     LLM_BACKEND=mlx \
     MLX_MODEL="$MLX_MODEL" \
     PYTHONUNBUFFERED=1 \
     "$REPO_ROOT/.venv/bin/python" "$REPO_ROOT/eval/tune_serial_loop.py" \
-      --goals-file "$GOALS" \
-      --out-dir "$OUT_DIR" \
-      --model "$MLX_MODEL" \
-      --no-vlm-critique \
-      --resume \
-      --retries 2 \
-      --retry-delay 30 \
-      --wait-for-monitor "$WAIT" \
+      "${LOOP_ARGS[@]}" \
       2>&1 | tee -a "$LOG"
 }
 
