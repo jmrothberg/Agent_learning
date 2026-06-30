@@ -1,7 +1,7 @@
 # eval/OPERATIONS.md — run tests and batches (LLM entry point)
 
 **Start here** when the user asks to run tests, triage a tune batch, or kick off N games.
-Human onboarding → `README.md`. Commands/env → `CLAUDE.md`. Harness traps → `FOR_NEXT_LLM.md`.
+Human onboarding → `README.md`. Commands/env → `DEV.md`. Harness traps → `FOR_NEXT_LLM.md`.
 
 ---
 
@@ -62,9 +62,9 @@ Use `--out-dir` from `active_out_dir` in `agent_monitor.json` (`run_07_big` duri
 
 ---
 
-## Serial overnight batch (legacy 6-game rerun)
+## Serial overnight batch (manual launch)
 
-**Goal lists** (pick one):
+**Primary workflow:** see **run_07 chain** above. For a custom dir/goals file:
 
 | File | Purpose |
 |------|---------|
@@ -72,19 +72,19 @@ Use `--out-dir` from `active_out_dir` in `agent_monitor.json` (`run_07_big` duri
 | `eval/tune_run07_vlm.txt` | run_07 Batch B (5 games, Qwen + VLM, `--max-iters 2`) |
 | `eval/tune_serial10_goals.txt` | Full 12-game battery |
 | `eval/tune_serial10_round2_goals.txt` | Round 2 subset |
-| `eval/tune_serial10_round2_rerun.txt` | run_06 validation (6 games) |
+| `eval/tune_serial10_round2_rerun.txt` | run_06 validation (6 games) → e.g. `run_06` or `run_07` |
 
-**Launch** (Terminal.app, not Cursor — survives IDE restarts):
+**Example launch** (Terminal.app, not Cursor):
 
 ```bash
 cd /Users/jonathanrothberg/Agent_learning
-mkdir -p games/tune_serial10/run_07
+mkdir -p games/tune_serial10/run_06
 caffeinate -dims env \
-  TUNE_OUT_DIR=games/tune_serial10/run_07 \
+  TUNE_OUT_DIR=games/tune_serial10/run_06 \
   TUNE_GOALS_FILE=eval/tune_serial10_round2_rerun.txt \
   MLX_MODEL="$HOME/MLX_Models/GLM-5.2-MLX-4bit" \
   nohup bash eval/tune_serial_overnight.sh &
-tail -f games/tune_serial10/run_07/overnight.log
+tail -f games/tune_serial10/run_06/overnight.log
 ```
 
 **Defaults baked in:** `--best-of-n 1`, stuck best-of-2 **off** (no `--stuck-bon`), `--no-vlm-critique`, `--no-auto-step`, `--resume`, `--retries 2`, `stall_seconds=1200`.
@@ -144,6 +144,17 @@ games/tune_serial10/run_06/
 4. **Check BoN:** if log shows `sampling 2 candidates` / `stuck ... escalating`, stuck BoN was on — default is now off; use `/bestof on` only when you want it.
 5. **Persist learnings:** copy into `FOR_NEXT_LLM.md` + optional `memory/playbook.jsonl` bullet — not into generated `games/*.html`.
 
+### Targeted pytest after edits
+
+| After editing… | Run |
+|----------------|-----|
+| `tools.py` gates | `.venv/bin/python -m pytest tests/test_probe_gate.py tests/test_microprobes.py tests/test_static_action_gate.py -q` |
+| `patches.py` | `.venv/bin/python -m pytest tests/test_patches.py -q` |
+| `agent_feedback.py` | `.venv/bin/python -m pytest tests/test_feedback_router.py tests/test_scoped_feedback.py tests/test_golden_feedback_flows.py -q` |
+| `agent_compaction.py` | `.venv/bin/python -m pytest tests/test_compaction.py tests/test_token_aware_compaction.py -q` |
+| Mixins / loop | `.venv/bin/python -m pytest tests/test_iter_loop_guards.py tests/test_trace_diagnostics.py -q` |
+| Docs only | `.venv/bin/python -m pytest tests/test_doc_links.py tests/test_mixin_map.py -q` |
+
 ---
 
 ## run_06 snapshot (2026-06-29)
@@ -154,7 +165,7 @@ Model: `GLM-5.2-MLX-4bit`. Goals: `eval/tune_serial10_round2_rerun.txt` (6 games
 |------|--------|-------|
 | 01 Donkey Kong | PASS | ~51 min; 1× memory_gap |
 | 02 Kung-Fu Master | PASS (after retries) | Crouch gated movement → `input_moves_player` fail; cutscene setTimeout → enemies undrawn; stuck BoN burned hours when enabled |
-| 03–06 | Multiple trace retries in log | Check newest trace per label |
+| 03–06 | **fresh_fail** | Instant `get_backend` TypeError (~1 s traces, no `.best.html`) — fixed in repo |
 
 Key harness changes already in repo: stuck BoN default off (`/bestof off`), visible `candidates/iter_NN/`, drawImage contract (`test_run06_draw_contract.py`).
 

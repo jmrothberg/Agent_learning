@@ -1454,9 +1454,6 @@ def plan_instruction(
         minimal_nudge = load_plan_nudge("minimal-first-build")
         _record_nudge("minimal-first-build")
 
-    goal_wins_nudge = load_plan_nudge("goal-wins-over-templates")
-    _record_nudge("goal-wins-over-templates")
-
     local_crisp_nudge = ""
     if model_class == "small":
         local_crisp_nudge = load_plan_nudge("local-plan-crisp")
@@ -1469,7 +1466,6 @@ def plan_instruction(
         + video_nudge
         + qte_nudge
         + scope_nudge + multi_frame_nudge + minimal_nudge + seed_nudge
-        + goal_wins_nudge
     )
 
     if not reference_block:

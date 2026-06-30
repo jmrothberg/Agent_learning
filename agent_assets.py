@@ -1005,35 +1005,69 @@ class AssetGenerationMixin:
 
         if not asset_specs and _ASSETS_OPEN_RE.search(reply or ""):
 
-            self._trace({
+            # TD seed trace 20260630_114658: phase_a plan had a malformed
 
-                "kind": "assets_parse_failed",
+            # <assets> tag on a seed continuation. Queueing "NO art was
 
-                "trigger": trigger,
+            # generated / re-emit <assets> this turn" was misleading — the
 
-                "reason": "assets_tag_present_but_zero_specs",
+            # build stream still generated sprites via mid_session minutes
 
-            })
+            # later. Phase A is not the asset turn on seeded runs.
 
-            self._queue_internal_feedback(
+            _seed_phase_a_malformed = (
 
-                "ASSET FORMAT ERROR: your last <assets> block did not parse "
+                trigger == "phase_a"
 
-                "to any sprites, so NO art was generated. The <assets> body "
+                and self.seed_file is not None
 
-                "MUST be a bare JSON array of objects — "
-
-                '`<assets>[{"name":"hero","prompt":"..."},'
-
-                '{"name":"enemy","prompt":"..."}]</assets>`. Do NOT wrap it '
-
-                'in a key like {"sprites":[...]} or {"assets":[...]}, and do '
-
-                "NOT use a markdown code fence. Re-emit the <assets> block as "
-
-                "a bare array this turn so the sprites actually generate."
+                and (self._session_assets or self._session_sounds)
 
             )
+
+            if _seed_phase_a_malformed:
+
+                self._trace({
+
+                    "kind": "assets_parse_failed_seed_ignored",
+
+                    "trigger": trigger,
+
+                    "reason": "seed_phase_a_malformed_assets_tag",
+
+                })
+
+            else:
+
+                self._trace({
+
+                    "kind": "assets_parse_failed",
+
+                    "trigger": trigger,
+
+                    "reason": "assets_tag_present_but_zero_specs",
+
+                })
+
+                self._queue_internal_feedback(
+
+                    "ASSET FORMAT ERROR: your last <assets> block did not parse "
+
+                    "to any sprites, so NO art was generated. The <assets> body "
+
+                    "MUST be a bare JSON array of objects — "
+
+                    '`<assets>[{"name":"hero","prompt":"..."},'
+
+                    '{"name":"enemy","prompt":"..."}]</assets>`. Do NOT wrap it '
+
+                    'in a key like {"sprites":[...]} or {"assets":[...]}, and do '
+
+                    "NOT use a markdown code fence. Re-emit the <assets> block as "
+
+                    "a bare array this turn so the sprites actually generate."
+
+                )
 
         # The model emitted an <assets> block → any outstanding "generate new
 

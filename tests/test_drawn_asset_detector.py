@@ -102,6 +102,36 @@ def test_drawn_asset_check_requires_raf_and_non_blank():
     assert 'canvas_info.get("blank") is False' in src
 
 
+def test_asset_decode_settle_wait_before_undrawn_audit():
+    """Chromium may read __drawImageEvents before async loadAssets() finishes.
+    The harness must poll _assetsReady / ASSETS decode, tick extra RAF frames,
+    and expose asset_decode_settle on the report before the undrawn diff."""
+    src = inspect.getsource(tools_module)
+    assert "_wait_for_session_assets_ready" in src
+    assert 'report["asset_decode_settle"]' in src
+    assert "_ASSET_DECODE_SETTLE_JS" in src
+    assert "window._assetsReady===true" in src
+
+
+def test_drawn_blob_uses_path_boundary_fname_match():
+    """Stem/filename matching must not false-positive on substrings
+    (e.g. idle.png inside blue_idle.png)."""
+    assert tools_module._drawn_blob_contains_asset_fname(
+        "file:///tmp/foo/blue_idle.png?x=1", "blue_idle.png"
+    )
+    assert not tools_module._drawn_blob_contains_asset_fname(
+        "file:///tmp/foo/blue_idle.png", "idle.png"
+    )
+
+
+def test_decode_timing_demotion_when_settle_and_probes_green():
+    """When decode settled and the canvas is advancing with green probes,
+    ASSETS_LOADED_BUT_UNDRAWN demotes to advisory (Chromium timing FP)."""
+    src = inspect.getsource(tools_module)
+    assert "_decode_timing_demote" in src
+    assert "Chromium timing false positive" in src
+
+
 def test_drawn_asset_check_is_genre_free():
     """The detector must not match by genre / game name. It works on
     SHAPE: a path matching `*_assets/*.png` referenced by the HTML,

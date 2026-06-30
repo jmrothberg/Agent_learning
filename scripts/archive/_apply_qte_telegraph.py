@@ -1,3 +1,4 @@
+# ARCHIVED — one-shot migration already applied; see AGENTS.md §1b. Do not re-run.
 """Corrective, idempotent pass: fold the QTE "visual telegraph" concept into
 the EXISTING outline-cutscene-qte recipe fields (the deep-render budget caps
 order<=7, tuning<=3, probes<=3, traps<=140 chars, section<=2600). Adds the

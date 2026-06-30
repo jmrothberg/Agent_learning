@@ -1,7 +1,7 @@
 # FOR_NEXT_LLM.md — tuning this agent
 
 You are fixing a coding agent that drives a **local ~27–35B model** (qwen3.6 via MLX/Ollama) to
-build single-file HTML5 games verified in real Chromium. Read **`CLAUDE.md`** next (commands, env,
+build single-file HTML5 games verified in real Chromium. Read **`DEV.md`** next (commands, env,
 binding rules). Use **`HARNESS_DEBUG.md`** when debugging a bad session trace.
 
 ## The 5 rules
@@ -91,31 +91,19 @@ bullet never reaches the prompt — broaden tags if a good bullet doesn’t fire
 
 ## Debug workflow
 
-See **`HARNESS_DEBUG.md`** (5-grep recipe on `games/traces/*__run_*.jsonl` or batch
-`games/tune_serial10/run_XX/traces/*__run_*.jsonl`).
+See **`HARNESS_DEBUG.md`**. Batch score snapshots → **`eval/OPERATIONS.md`**.
 
-## Serial tune learnings (run_05 → run_06)
+## failure_class → where to edit
 
-Persisted from `games/tune_serial10/run_05/triage.md` before artifact cleanup. Per-run scratch
-pads stay gitignored under `games/tune_serial10/run_XX/triage.md`.
+| `failure_class` | First place to edit |
+|-----------------|---------------------|
+| `harness_bug` | `tools.py` gates · `agent_*.py` loop |
+| `memory_gap` | `memory/playbook.jsonl`, skeletons, outlines |
+| `local_llm_limit` | `prompts_v1.py`, `agent_compaction.py`, `backend.py` |
 
-**run_05 score:** 11/12 PASS (GLM-5.2-MLX-4bit). Sole FAIL: Dragon's Lair — exit=-9 SIGKILL ×3
-(OOM after Holochess 48-sprite session). **run_06:** partial re-run list in
-`eval/tune_serial10_round2_rerun.txt` (6 games). Ops commands → **`eval/OPERATIONS.md`**.
+## Serial tune learnings (durable)
 
-### run_06 results (GLM-5.2-MLX-4bit, 2026-06-29)
-
-Artifacts: `games/tune_serial10/run_06/` — `overnight.log`, `agent_monitor.json`, `tune_checkpoint.json`, `traces/<label>__run_*.jsonl`.
-
-| # | Game | Outcome | Trace takeaway |
-|---|------|---------|----------------|
-| 01 | Donkey Kong | **fresh_pass** (~51 min) | 1× `memory_gap`; iter 4 clean |
-| 02 | Kung-Fu Master | **fresh_pass** after retries | **Crouch gated movement** — `if (idle\|\|walk)` blocked ArrowRight after input test set `crouch`; **cutscene setTimeout** never reached `startWave(1)` → `ASSETS_LOADED_BUT_UNDRAWN`; stuck BoN doubled wall time when enabled (now default off) |
-| 03–06 | **fresh_fail** (not re-validated) | ~1 s traces, 0 `iter_summary`, `session_outcome ok=false` | Instant `get_backend() missing 'role'` (`@classmethod` orphan on `_stream` — fixed). Old summary wrongly said 6/6 PASS because `coder.py` exited 0; batch now uses trace/`.best.html` verification. Re-run 03–06 only if you need artifacts in this run dir. |
-
-Triage: `.venv/bin/python scripts/enrich_trace.py games/tune_serial10/run_06/traces/02_...620731.jsonl --timeline`
-
-### Mid-batch harness fixes (applied in repo)
+Per-run scores live in **`eval/OPERATIONS.md`** (run_06 snapshot). Mid-batch harness fixes already in repo:
 
 | Symptom | Fix | File(s) |
 |---------|-----|---------|
@@ -137,8 +125,26 @@ Triage: `.venv/bin/python scripts/enrich_trace.py games/tune_serial10/run_06/tra
 - **OOM at game 12** — verify media/MLX freed at serial game boundaries; run heaviest media game earlier or isolated.
 - **Stuck BoN** — only helps sampling noise on multi-slot parallel backends; on single MLX it is ~2× wall time. Keep default off for tune batches.
 
+## Feedback channels (user vs harness)
+
+| Source | Queue / path | Prompt wrapper |
+|--------|----------------|----------------|
+| User typed (TUI) | `_pending_feedback` | `USER FEEDBACK (HIGHEST PRIORITY)` |
+| Harness auto | `_queue_internal_feedback` | `HARNESS NOTICE` in raw mode; same queue |
+| Test failures | `_build_fix_prompt` + report | Fix-turn prompt (not feedback queue) |
+| Stall / repeat errors | `_pending_coaching` | `AGENT COACHING` block |
+| `/critique` playtest | `_queue_internal_feedback` | After **clean** iter only |
+| `/vlm-critique` | `_pending_coaching` + `[CRITIC]` | Needs VLM model or local vision judge + toggle ON |
+
+**Triage traps (TD seed trace `20260630_114658`):**
+
+- `assets_parse_failed` at **phase_a** on a seed run ≠ “no art this session.” Build-turn **mid_session** `<assets>` can still generate sprites (`tower_tesla_idle`, `tower_flame_idle` in that trace).
+- `ASSETS_LOADED_BUT_UNDRAWN` = sprites on disk but not drawn — **wiring** issue, not Z-Image failure. Playbook `draw-generated-sprites-not-boxes` is the right lever.
+- **Safari vs Chromium trap:** sprites visible in Safari but `ASSETS_LOADED_BUT_UNDRAWN` in Playwright often means the harness sampled `__drawImageEvents` before async `loadAssets()` finished (placeholder `fillRect` frames first). Check trace `asset_decode_settle.ready`; re-run `scripts/_smoke_asset_decode_settle.py` before chasing model wiring.
+- User feedback naming sprites **already in `_session_assets`** should get wire/draw coaching, not `ASSET GENERATION REQUIRED`.
+
 ## Read order
 
-`CLAUDE.md` → this file → **`eval/OPERATIONS.md`** (run batch / pytest) → `TEST.md` (suite map) → `tools.py` (`load_and_test`) → trace `.jsonl` → relevant `memory/*.jsonl`. Agent comparison vs Cursor/Aider: **`README.md#how-this-compares-to-other-coding-agents`**.
+`DEV.md` → this file → **`eval/OPERATIONS.md`** (run batch / pytest) → `TEST.md` (suite map) → `tools.py` (`load_and_test`) → trace `.jsonl` → relevant `memory/*.jsonl`. Agent comparison vs Cursor/Aider: **`README.md#how-this-compares-to-other-coding-agents`**.
 
 Quick test: `.venv/bin/python -m pytest tests/ -q` (pure-function; no GPU/model).

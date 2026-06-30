@@ -296,6 +296,68 @@ def test_phase_a_runs_when_seed_file_set_but_no_media_on_disk(
     assert "hero" in a._session_assets
 
 
+def test_malformed_phase_a_assets_on_seed_does_not_queue_reemit_feedback(
+    tmp_path: Path,
+) -> None:
+    """TD seed trace 20260630_114658: malformed plan <assets> must not queue
+    'NO art was generated / re-emit <assets>' — mid_session build still
+    generates sprites on the same iter."""
+    seed_basename = "tower_defense_seed"
+    a = _make_seed_agent(tmp_path, seed_basename)
+    _write_pngs(
+        tmp_path / f"{seed_basename}_assets",
+        ["tower_gun_idle.png"],
+    )
+    a._early_rehydrate_seed_media()
+
+    traces: list[dict] = []
+    a._trace = lambda obj: traces.append(obj)
+
+    reply = '<assets>[{"name":"bad"}]</assets>'
+    asyncio.run(_drain(
+        a._maybe_generate_assets_and_sounds(reply, trigger="phase_a"),
+    ))
+
+    assert any(
+        t.get("kind") == "assets_parse_failed_seed_ignored" for t in traces
+    )
+    assert not any(t.get("kind") == "assets_parse_failed" for t in traces)
+    assert not a._pending_feedback
+    assert not any(
+        "ASSET FORMAT ERROR" in fb for fb in a._pending_feedback
+    )
+
+
+def test_malformed_phase_a_assets_fresh_session_still_queues_feedback(
+    tmp_path: Path,
+) -> None:
+    """Control: non-seed phase_a parse failure still coaches the model."""
+    out = tmp_path / "brand_new.html"
+    out.write_text("<html></html>")
+    a = GameAgent(
+        model="stub", out_path=out, browser=MagicMock(),
+        max_iters=1, memory_root=str(tmp_path / "memory"),
+    )
+    sentinel = MagicMock()
+    sentinel.generate.side_effect = AssertionError(
+        "image generator must not be called for parse-failure coaching test"
+    )
+    a._asset_generator = sentinel
+    traces: list[dict] = []
+    a._trace = lambda obj: traces.append(obj)
+
+    reply = '<assets>[{"name":"bad"}]</assets>'
+    asyncio.run(_drain(
+        a._maybe_generate_assets_and_sounds(reply, trigger="phase_a"),
+    ))
+
+    assert any(t.get("kind") == "assets_parse_failed" for t in traces)
+    assert not any(
+        t.get("kind") == "assets_parse_failed_seed_ignored" for t in traces
+    )
+    assert any("ASSET FORMAT ERROR" in fb for fb in a._pending_feedback)
+
+
 # ---------------------------------------------------------------------------
 # Layer 3 — plan_instruction(from_seed=True) suppresses MUST-emit nudges
 # ---------------------------------------------------------------------------

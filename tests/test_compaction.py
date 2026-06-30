@@ -101,6 +101,25 @@ def test_structured_summary_includes_diagnose_and_report(tmp_path):
     assert "TypeError at line 42" in s
 
 
+def test_structured_summary_includes_session_assets(tmp_path):
+    """Compaction summary must list rehydrated asset paths (uses Path)."""
+    a = _make_agent(tmp_path)
+    a._goal = "Tower defense"
+    assets_dir = tmp_path / "game_assets"
+    assets_dir.mkdir()
+    png = assets_dir / "tower_tesla_idle.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n")
+    a._session_assets = {"tower_tesla_idle": png}
+    a._session_sounds = {"shoot": tmp_path / "game_sounds" / "shoot.ogg"}
+    a._session_sounds["shoot"].parent.mkdir(parents=True, exist_ok=True)
+    a._session_sounds["shoot"].write_bytes(b"fake")
+    summary = a._build_structured_summary()
+    assert "## Generated assets" in summary
+    assert "tower_tesla_idle" in summary
+    assert "## Generated sounds" in summary
+    assert "shoot" in summary
+
+
 def test_prune_messages_no_op_when_short(tmp_path):
     """Below the keep-recent threshold, prune is a no-op."""
     a = _make_agent(tmp_path)

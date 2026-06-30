@@ -176,6 +176,23 @@ def _undrawn_likely_state_gated(undrawn: list[str]) -> bool:
     return all(_UNDRAWN_STATE_GATED_RE.search(str(s) or "") for s in undrawn)
 
 
+def _drawn_blob_contains_asset_fname(drawn_blob: str, fname: str) -> bool:
+    """True when drawImage event sources include this exact PNG filename.
+
+    Uses a path-boundary match so short stems like ``idle.png`` do not
+    false-positive against ``blue_idle.png`` substrings.
+    """
+    low = str(drawn_blob or "").lower()
+    fn = str(fname or "").lower()
+    if not fn.endswith(".png"):
+        stem = fn.rsplit(".", 1)[0] if "." in fn else fn
+        fn = f"{stem}.png"
+    return bool(re.search(
+        r"(?:^|[/\\?#])" + re.escape(fn) + r"(?:[?#&]|$)",
+        low,
+    ))
+
+
 def _patch_probe_pointer_board_clicks(expr: str) -> str:
     """Upgrade mousedown/click dispatches in board probes to pointer events.
 
@@ -3159,6 +3176,63 @@ class LiveBrowser:
         self._page_errors.append(text)
         self._errors.append(text)
 
+    _ASSET_DECODE_SETTLE_JS = (
+        "(()=>{"
+        "const html=document.documentElement.innerHTML;"
+        "const hasRefs=/_assets\\/[A-Za-z0-9_\\-]+\\.png/.test(html);"
+        "if(!hasRefs)return{need:false,ready:true};"
+        "if(window._assetsReady===true)return{need:true,ready:true};"
+        "if(window.__assetDecodeSettled===true)return{need:true,ready:true};"
+        "try{"
+        "  if(typeof ASSETS==='object'&&ASSETS){"
+        "    const vals=Object.values(ASSETS);"
+        "    if(vals.length>0&&vals.every(img=>img&&img.naturalWidth>0))"
+        "      return{need:true,ready:true};"
+        "  }"
+        "}catch(e){}"
+        "return{need:true,ready:false};"
+        "})()"
+    )
+
+    async def _wait_for_session_assets_ready(
+        self, *, timeout_ms: int = 8000, raf_ticks: int = 4,
+    ) -> dict[str, Any]:
+        """Poll until async asset loaders finish, then tick extra RAF frames.
+
+        Chromium often samples __drawImageEvents before loadAssets() resolves;
+        this settle window lets real drawImage calls land before the undrawn
+        audit runs. Returns {ready, waited_ms, raf_ticks}.
+        """
+        import asyncio
+        import time
+
+        start = time.monotonic()
+        ready = False
+        need = False
+        while True:
+            try:
+                status = await self._safe_eval(self._ASSET_DECODE_SETTLE_JS)
+            except Exception:
+                status = {"need": False, "ready": True}
+            if not isinstance(status, dict):
+                status = {"need": False, "ready": True}
+            need = bool(status.get("need"))
+            ready = bool(status.get("ready"))
+            if not need or ready:
+                break
+            if int((time.monotonic() - start) * 1000) >= timeout_ms:
+                break
+            await asyncio.sleep(0.05)
+        waited_ms = int((time.monotonic() - start) * 1000)
+        try:
+            await self._safe_eval(
+                f"(async()=>{{for(let i=0;i<{int(raf_ticks)};i++)"
+                "await new Promise(r=>requestAnimationFrame(r));}})()"
+            )
+        except Exception:
+            pass
+        return {"ready": ready, "waited_ms": waited_ms, "raf_ticks": int(raf_ticks)}
+
     async def load_and_test(
         self,
         path: str | Path,
@@ -3171,6 +3245,7 @@ class LiveBrowser:
         criteria: str | None = None,
         goal: str | None = None,
         visual_recipe_id: str | None = None,
+        asset_decode_settle: bool = True,
     ) -> dict[str, Any]:
         """Navigate to the file, let it run, return the report.
 
@@ -3701,6 +3776,15 @@ class LiveBrowser:
         # drawImage on it" — the failure shape from the 2026-05-23 chess
         # trace where the model wrote `await img.decode()` then drew
         # chess pieces with ctx.fillText Unicode glyphs.
+        _decode_settle: dict[str, Any] = {}
+        if asset_decode_settle:
+            try:
+                _decode_settle = await self._wait_for_session_assets_ready()
+            except Exception:
+                _decode_settle = {"ready": False, "waited_ms": 0, "raf_ticks": 0}
+        else:
+            _decode_settle = {"ready": False, "waited_ms": 0, "raf_ticks": 0, "skipped": True}
+        report["asset_decode_settle"] = _decode_settle
         try:
             draw_events = await self._safe_eval(
                 "window.__drawImageEvents || []"
@@ -3739,7 +3823,7 @@ class LiveBrowser:
                 # Drawn-sources match if the path's filename appears in
                 # the recorded src URL (drawImage sees a file:// URL).
                 fname = rel_path.rsplit("/", 1)[-1].lower()
-                if fname not in drawn_blob:
+                if not _drawn_blob_contains_asset_fname(drawn_blob, fname):
                     undrawn.append(stem)
             report["drawn_asset_check"] = {
                 "loaded_referenced_count": len(referenced_assets),
@@ -3835,6 +3919,24 @@ class LiveBrowser:
                     undrawn, drawn_blob
                 )
                 _undrawn_state_gated = _undrawn_likely_state_gated(undrawn)
+                _decode_settled = bool(
+                    (_decode_settle or {}).get("ready") is True
+                    and not (_decode_settle or {}).get("skipped")
+                )
+                _game_advancing = bool(
+                    canvas_info
+                    and canvas_info.get("raf_ran")
+                    and canvas_info.get("blank") is False
+                    and (
+                        frozen is not True
+                        or report.get("frozen_canvas_input_responsive")
+                        or _turn_based_board_idle
+                    )
+                )
+                _decode_timing_demote = (
+                    _decode_settled and _game_advancing
+                    and _probes_green and _no_errors
+                )
                 if (
                     (_probes_green and _no_errors and (
                         _undrawn_pose_only
@@ -3843,6 +3945,7 @@ class LiveBrowser:
                     ))
                     or (self._undrawn_seen_before and _probes_green and _no_errors)
                     or _behavior_green_no_missing
+                    or _decode_timing_demote
                 ):
                     _advisory_tail = (
                         " Behavioral probes pass and a numeric scene index is "
@@ -3857,6 +3960,11 @@ class LiveBrowser:
                         "state/wave gated and may not have triggered during "
                         "the short smoke window."
                         if _undrawn_state_gated else
+                        " Behavioral probes pass; asset decode settled and "
+                        "the canvas is advancing — undrawn stems are likely "
+                        "a Chromium timing false positive (sprites visible in "
+                        "Safari). Re-check after reload if art still missing."
+                        if _decode_timing_demote else
                         " Behavioral probes pass and no entity-render "
                         "failure is present; state-conditional pose sprites "
                         "may simply not have triggered during the test window."

@@ -1,7 +1,7 @@
 """Tests for the model-agnostic session-timeout policy.
 
 The earlier bracket-table approach was the wrong design — it violated
-the project's standing rule (CLAUDE.md: "we do NOT inspect the model
+the project's standing rule (DEV.md: "we do NOT inspect the model
 name") and rotted whenever a new model didn't fit its substring
 table. The replacement is one generous timeout for every model,
 paired with the activity-aware stall watchdog (see

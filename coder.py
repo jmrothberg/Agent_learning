@@ -254,6 +254,10 @@ async def _run(
         rc = 130
     except Exception as e:
         import traceback
+        try:
+            agent._trace_agent_crash(e, source="coder_cli")
+        except Exception:
+            pass
         print(f"\nAgent crashed: {e}\n{traceback.format_exc()}", file=sys.stderr)
         rc = 2
     finally:

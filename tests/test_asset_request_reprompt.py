@@ -141,6 +141,44 @@ def test_existing_media_wiring_does_not_arm_asset_reprompt(tmp_path):
     assert a._asset_reprompt_count == 0
 
 
+def test_named_existing_sprites_do_not_arm_asset_reprompt(tmp_path):
+    """TD seed trace 20260630_114658: user re-asked for tower_tesla_idle /
+    tower_flame_idle after mid_session generation — must coach wiring, not
+    ASSET GENERATION REQUIRED."""
+    a = _make_agent(tmp_path)
+    a._session_assets = {
+        "tower_tesla_idle": Path("tower_tesla_idle.png"),
+        "tower_flame_idle": Path("tower_flame_idle.png"),
+    }
+    a._use_feedback_directives = True
+    a._pending_feedback = [
+        "make sprite graphics for the tower_tesla_idle and tower_flame_idle",
+    ]
+    out = a._flush_user_injections("")
+    assert "ASSET GENERATION REQUIRED" not in out
+    assert "EXISTING SPRITES ON DISK" in out
+    assert "tower_tesla_idle" in out
+    assert "tower_flame_idle" in out
+    assert a._unhonored_asset_request is None
+    assert a._asset_reprompt_count == 0
+
+
+def test_raw_mode_splits_user_and_harness_notice(tmp_path):
+    """Internal harness text must not appear under USER FEEDBACK in raw mode."""
+    a = _make_agent(tmp_path)
+    a._use_feedback_directives = False
+    a.add_user_feedback("move the sell button left")
+    a._queue_internal_feedback("HARNESS TEST NOTICE: not user typed")
+    out = a._flush_user_injections("")
+    assert "USER FEEDBACK (HIGHEST PRIORITY)" in out
+    assert "move the sell button left" in out
+    assert "HARNESS NOTICE" in out
+    assert "HARNESS TEST NOTICE" in out
+    # Internal notice must not sit inside the user wrapper prose.
+    user_block = out.split("HARNESS NOTICE")[0]
+    assert "HARNESS TEST NOTICE" not in user_block
+
+
 def test_ui_feature_patterns_match_help_hint_button_phrasing():
     """Fix 1 (2026-06-21 seed trace): the narrow `help screen` pattern
     missed `add a help button` / `hint button` phrasings, so those UI

@@ -6,7 +6,7 @@ The browser test **finds problems and tells the model what to fix**. It does not
 for you. If the same bug keeps happening after many tries, the problem is usually one of the buckets
 below — not “we need one more automatic check.”
 
-More tuning traps: **`FOR_NEXT_LLM.md`**. Commands and env vars: **`CLAUDE.md`**. Batch runs / pytest commands: **`eval/OPERATIONS.md`**. Test map: **`TEST.md`**.
+More tuning traps: **`FOR_NEXT_LLM.md`**. Commands and env vars: **`DEV.md`**. Trace paths: **`AGENTS.md` §2**. Batch runs / pytest: **`eval/OPERATIONS.md`**. Test map: **`TEST.md`**.
 
 ---
 
@@ -63,7 +63,8 @@ use the summary script:
 .venv/bin/python scripts/enrich_trace.py <session-id> --timeline
 ```
 
-Replace `<session-id>` with the folder name, e.g. `bigger_towers__run_20260626_204410_759021`.
+Replace `<session-id>` with a folder name for TUI traces under `games/traces/`, or pass a **full path**
+for tune batch traces (`games/tune_serial10/run_XX/traces/...jsonl`). See **`AGENTS.md` §2**.
 
 That prints **one line per iteration**, roughly:
 
@@ -73,6 +74,11 @@ That prints **one line per iteration**, roughly:
 - How fast was the model? (tokens per second)
 - **What kind of failure was it?** (see table below)
 - What blocked shipping?
+
+If the session died mid-run (TUI shows “Agent crashed”), the timeline also prints an
+**AGENT CRASH** banner. Grep the raw `.jsonl` for `"kind": "agent_crash"` — that row
+includes `err`, `exc_type`, `iteration`, and a capped `traceback` so an LLM can debug
+without the TUI log.
 
 **Seed-edit eval runs** (`eval/eval_seed_edits.py`) turn the browser off on purpose. Those lines
 show `test_skipped:no_browser` — that is expected, not a crash.
@@ -116,7 +122,7 @@ When something goes wrong, the trace tags a **failure type**. Use it to decide *
 
 | Tag | Plain meaning | You fix it by… |
 |-----|----------------|----------------|
-| **harness_bug** | The test harness or agent logic was wrong — it blocked or mis-coached a turn that should have been fine. | Changing **Python** (`agent.py`, `tools.py`), not the model prompt. |
+| **harness_bug** | The test harness or agent logic was wrong — it blocked or mis-coached a turn that should have been fine. | `tools.py` gates · `agent_*.py` mixins — see **`AGENTS.md` §1b** |
 | **memory_gap** | Code saved fine, but the model made a mistake your curated hints should have prevented (e.g. art on disk but never drawn on an art-heavy game). | Adding a line to **`memory/playbook.jsonl`** or related `memory/*.jsonl`. |
 | **local_llm_limit** | The local model stalled, looped, went silent, or emitted garbage — the harness did not contradict it. | Prompt/format tweaks, or accept model limits; not a browser bug. |
 | **none** | Nothing special to classify. | Normal iteration friction. |
@@ -130,12 +136,14 @@ If the model never saved code that turn, look for **`no_usable_code`** instead o
 
 After the timeline, open the `.jsonl` and search for:
 
-1. **`iter_summary`** or **`no_usable_code`** — read `failure_class` and any `soft_warnings` text.
-2. **`structured_compaction`** — fired too early? Context window may be too small; patches “don’t
+1. **`agent_crash`** — session killed by an uncaught Python error (NameError, etc.); includes
+   `traceback`. Distinct from a browser **`harness_crash`** (Playwright/test layer only).
+2. **`iter_summary`** or **`no_usable_code`** — read `failure_class` and any `soft_warnings` text.
+3. **`structured_compaction`** — fired too early? Context window may be too small; patches “don’t
    stick” because the model lost sight of the file.
-3. **`playbook_injected`** / **`opening_book_retrieved`** — did the memory library actually load?
-4. **`visual_critic`** — did the vision review run and parse answers?
-5. **`patch_outcome`** — patch could not find its SEARCH block (often after compaction ate the
+4. **`playbook_injected`** / **`opening_book_retrieved`** — did the memory library actually load?
+5. **`visual_critic`** — did the vision review run and parse answers?
+6. **`patch_outcome`** — patch could not find its SEARCH block (often after compaction ate the
    file context).
 
 Then **play the game again** and compare to what the log claimed.
@@ -158,7 +166,7 @@ Then **play the game again** and compare to what the log claimed.
 | File | Role |
 |------|------|
 | `tools.py` | Browser load, input test, gates |
-| `agent.py` | Main loop, fix prompts, compaction |
+| `agent.py` + mixins | Loop orchestration — map in **`AGENTS.md` §1b** |
 | `assets.py` | Sprite generation and loader injection |
 | `memory/*.jsonl` | Curated hints the model reads each run |
 | `prompts_v1.py` | System prompt templates |

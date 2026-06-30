@@ -3512,11 +3512,42 @@ VLM_CHECKLIST_SKIP_IDS = frozenset({
     "generic-canvas-game-baseline",
 })
 
+_HUD_CHECKLIST_MARKERS = (
+    "health bar",
+    "life counter",
+    "life counters",
+    "ammo",
+    " hud",
+)
+_FACING_CHECKLIST_Q = "Do both characters appear to face toward each other?"
+
+
+def filter_vlm_checklist_for_goal(checklist: list[str], goal: str) -> list[str]:
+    """Drop HUD checklist items when the goal forbids HUD; add facing Q."""
+    if not checklist:
+        return []
+    low = (goal or "").lower()
+    if "no hud" not in low and "no combat" not in low:
+        return list(checklist)
+    kept = [
+        q for q in checklist
+        if not any(m in q.lower() for m in _HUD_CHECKLIST_MARKERS)
+    ]
+    has_facing = any(
+        "face" in q.lower() and "each other" in q.lower() for q in kept
+    )
+    if not has_facing and any(
+        k in low for k in ("fighter", "versus", "1v1", "two-player", "two player")
+    ):
+        kept.append(_FACING_CHECKLIST_Q)
+    return kept
+
 
 def render_vlm_checklist_section(
     recipe: VisualPlaytestRecipe,
     *,
     max_items: int = 5,
+    goal: str = "",
 ) -> str:
     """Compact per-mechanism vision checklist for plan-stage opening book.
 
@@ -3524,7 +3555,9 @@ def render_vlm_checklist_section(
   correctly on iter 1 even when vision review is still off.
     """
     rec = recipe.recipe if isinstance(recipe.recipe, dict) else {}
-    checklist = list(rec.get("checklist") or [])[:max_items]
+    checklist = filter_vlm_checklist_for_goal(
+        list(rec.get("checklist") or []), goal,
+    )[:max_items]
     if not checklist:
         return ""
     lines = [

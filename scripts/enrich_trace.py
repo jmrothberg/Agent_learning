@@ -27,7 +27,11 @@ Also prints a one-screen summary of what happened in the session:
 VLM detected? Screenshots attached? Judge fired? Parse fails?
 
 Usage:
-    .venv/bin/python scripts/enrich_trace.py <session_id-or-trace-path>
+    # TUI / one-shot — substring under games/traces/:
+    .venv/bin/python scripts/enrich_trace.py <session-id> --timeline
+
+    # Tune batch — full path (or label stem; searches games/**/traces/):
+    .venv/bin/python scripts/enrich_trace.py games/tune_serial10/run_XX/traces/01_....jsonl --timeline
 """
 from __future__ import annotations
 
@@ -63,25 +67,56 @@ def _parse_iso(ts: str) -> datetime | None:
         return None
 
 
-def _resolve_paths(arg: str) -> tuple[Path, Path]:
-    """Accept either a path to a .jsonl trace or a session-id substring.
+def _find_trace_matches(arg: str) -> list[Path]:
+    """Glob trace files matching `arg` under games/**/traces/."""
+    needle = arg.strip()
+    if not needle:
+        return []
+    matches: list[Path] = []
+    seen: set[str] = set()
+    for p in sorted(REPO_ROOT.glob(f"games/**/traces/*{needle}*.jsonl")):
+        key = str(p.resolve())
+        if key not in seen:
+            seen.add(key)
+            matches.append(p)
+    return sorted(matches, key=lambda p: p.stat().st_mtime)
+
+
+def _snapshots_dir_for_trace(trace: Path) -> Path:
+    """Resolve snapshots dir next to the trace's run folder."""
+    session_id = trace.stem
+    # games/traces/foo.jsonl -> games/snapshots/foo
+    if trace.parent.name == "traces" and trace.parent.parent.name == "games":
+        return REPO_ROOT / "games" / "snapshots" / session_id
+    # games/tune_serial10/run_XX/traces/foo.jsonl -> run_XX/snapshots/foo
+    if trace.parent.name == "traces":
+        return trace.parent.parent / "snapshots" / session_id
+    return REPO_ROOT / "games" / "snapshots" / session_id
+
+
+def _resolve_paths(arg: str, snapshots_override: Path | None = None) -> tuple[Path, Path]:
+    """Accept a .jsonl path or a session-id / label substring.
     Returns (trace_path, snapshots_dir)."""
     p = Path(arg)
+    if not p.is_absolute():
+        candidate = REPO_ROOT / p
+        if candidate.is_file() and candidate.suffix == ".jsonl":
+            p = candidate
     if p.is_file() and p.suffix == ".jsonl":
-        trace = p
+        trace = p.resolve()
     else:
-        traces_dir = REPO_ROOT / "games" / "traces"
-        matches = sorted(traces_dir.glob(f"*{arg}*.jsonl"))
+        matches = _find_trace_matches(arg)
         if not matches:
-            raise SystemExit(f"no trace matched {arg!r} in {traces_dir}")
+            raise SystemExit(
+                f"no trace matched {arg!r} under games/traces/ or games/**/traces/"
+            )
         if len(matches) > 1:
             print("multiple matches; using most recent:")
             for m in matches:
-                print(f"  - {m.name}")
-            print(f"using: {matches[-1].name}")
+                print(f"  - {m}")
+            print(f"using: {matches[-1]}")
         trace = matches[-1]
-    session_id = trace.stem
-    snapshots_dir = REPO_ROOT / "games" / "snapshots" / session_id
+    snapshots_dir = snapshots_override or _snapshots_dir_for_trace(trace)
     return trace, snapshots_dir
 
 
@@ -272,7 +307,7 @@ def _retrieval_first_clean(
     bullet ids RETRIEVED this session to the first `ok=True` iter index. Joining
     the existing `playbook_retrieved` events to the first-clean iter — aggregated
     over a batch this yields a "bullet id x first-pass-clean" table that INFORMS
-    hand-curation (counters stay hand-curated per CLAUDE.md). Returns
+    hand-curation (counters stay hand-curated per DEV.md). Returns
     (first_clean_iter or None, ordered-unique retrieved bullet ids)."""
     first_clean: int | None = None
     retrieved: list[str] = []
@@ -346,9 +381,15 @@ def main() -> int:
             "tok-s/failure_class/blocker) and exit — no enrichment written."
         ),
     )
+    ap.add_argument(
+        "--snapshots-dir",
+        default=None,
+        help="Override snapshots directory (default: inferred from trace path).",
+    )
     args = ap.parse_args()
 
-    trace, snapshots_dir = _resolve_paths(args.target)
+    snap_override = Path(args.snapshots_dir).resolve() if args.snapshots_dir else None
+    trace, snapshots_dir = _resolve_paths(args.target, snapshots_override=snap_override)
 
     # Timeline is a read-only digest: print and exit without writing files.
     if args.timeline:

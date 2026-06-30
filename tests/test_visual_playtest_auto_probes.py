@@ -174,6 +174,25 @@ def test_no_auto_probes_on_unsuitable_recipes() -> None:
 # ----------------------------------------------------------------------
 
 
+def test_facing_eval_goal_injects_both_auto_probes(tmp_path: Path) -> None:
+    """Eval GOAL (patch-only fighter seed) must match canvas-two-actors-facing."""
+    goal = (
+        "Two-player 1v1 fighter versus duel. Use ONLY the existing blue_idle and "
+        "red_idle PNGs — no new art, no combat, no HUD. Both fighters must always "
+        "face each other."
+    )
+    a = _make_agent(tmp_path, goal=goal)
+    a._probes = []
+    a._session_assets = {
+        "blue_idle": tmp_path / "blue_idle.png",
+        "red_idle": tmp_path / "red_idle.png",
+    }
+    a._maybe_inject_visual_playtest_auto_probes()
+    names = [p["name"] for p in a._probes]
+    assert "auto_actors_face_each_other" in names
+    assert "auto_actors_face_each_other_strict" in names
+
+
 def test_inject_adds_recipe_auto_probes_to_session(tmp_path: Path) -> None:
     """When a recipe matches, its auto-probes should land in self._probes."""
     a = _make_agent(tmp_path, goal="mortal kombat style two player fighter")

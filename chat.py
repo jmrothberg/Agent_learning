@@ -506,7 +506,7 @@ def resolve_session_timeouts(model: str) -> tuple[float, float]:
     """Return (stall_seconds, overall_seconds) for the session.
 
     Deliberately ignores the model argument. The agent's standing
-    rule (CLAUDE.md) is "we do NOT inspect the model name — a
+    rule (DEV.md) is "we do NOT inspect the model name — a
     model-name table would go stale every release." Earlier
     versions of this function broke that rule with a four-bucket
     bracket table and an MoE-aware config.json parser; both were
@@ -6617,6 +6617,13 @@ class CodingBoxApp(App):
             # markup-stripping mirror handles either way.
             import traceback
             tb = traceback.format_exc()
+            # Mirror to jsonl — the trace must be self-sufficient for LLM triage
+            # (TUI-only crashes were invisible in .jsonl before 2026-06-30).
+            if self.agent is not None:
+                try:
+                    self.agent._trace_agent_crash(e, source="tui_consumer")
+                except Exception:
+                    pass
             self._log_error(f"Agent crashed: {e}")
             self._log(f"[dim red]{_esc(tb)}[/dim red]")
         finally:
@@ -7037,8 +7044,16 @@ class CodingBoxApp(App):
                     pass
             produced = (ev.data or {}).get("produced", 0)
             requested = (ev.data or {}).get("requested", 0)
+            names = [str(n) for n in (ev.data or {}).get("names") or [] if n]
+            names_suffix = ""
+            if names:
+                shown = ", ".join(names[:8])
+                if len(names) > 8:
+                    shown += f" (+{len(names) - 8} more)"
+                names_suffix = f" — {shown}"
             self._log_info(
                 f"[green]assets:[/green] {produced}/{requested} generated"
+                f"{names_suffix}"
                 + (f" at [b]{session_dir}[/b]" if session_dir else "")
             )
             self._update_status()
@@ -7177,7 +7192,13 @@ class CodingBoxApp(App):
         produced = data.get("produced", 0)
         session_dir = data.get("session_dir") or ""
         per_asset = list(data.get("per_asset") or [])
+        names = [str(n) for n in (data.get("names") or []) if n]
         head = f"[b]Assets:[/b] {produced}/{requested} generated"
+        if names:
+            shown = ", ".join(names[:6])
+            if len(names) > 6:
+                shown += f" (+{len(names) - 6} more)"
+            head += f" — {shown}"
         if session_dir:
             head += f" -> [dim]{session_dir}[/dim]"
         rows: list[str] = []

@@ -430,6 +430,40 @@ def _matched_names_in_text(text_lower: str, names: list[str]) -> set[str]:
     return matched
 
 
+def _feedback_referenced_asset_names(text: str, asset_names: list[str]) -> set[str]:
+    """Asset names the user feedback explicitly names (literal + fuzzy stems)."""
+    if not text or not asset_names:
+        return set()
+    lo = text.lower()
+    referenced = set(_matched_names_in_text(lo, asset_names))
+    for _stem, names in (_resolve_fuzzy_asset_stems(text, asset_names) or {}).items():
+        for name in names:
+            referenced.add(re.sub(r"[\s\-]+", "_", (name or "").strip().lower()))
+    return referenced
+
+
+def _feedback_art_request_already_on_disk(text: str, asset_names: list[str]) -> bool:
+    """True when feedback names sprites that already exist this session.
+
+    TD seed trace 20260630_114658: user re-asked for tower_tesla_idle /
+    tower_flame_idle seconds after mid_session generation — reprompting
+    <assets> was wrong; wiring/draw coaching was needed instead.
+    """
+    if not text or not asset_names:
+        return False
+    if _feedback_requests_explicit_new_art(text):
+        return False
+    referenced = _feedback_referenced_asset_names(text, asset_names)
+    if not referenced:
+        return False
+    canon_assets = {
+        re.sub(r"[\s\-]+", "_", (n or "").strip().lower())
+        for n in asset_names
+        if (n or "").strip()
+    }
+    return referenced.issubset(canon_assets)
+
+
 # Tokens that appear as common prefixes/suffixes in asset names and are NOT
 # distinctive on their own — "white" alone shouldn't pull in every white_*
 # sprite in the roster. Used by `_resolve_fuzzy_asset_stems` to skip stems
@@ -1073,6 +1107,23 @@ class FeedbackRoutingMixin:
             self._internal_feedback_texts = set()
         self._internal_feedback_texts.add(text)
         self._pending_feedback.append(text)
+
+
+
+    def _wire_existing_assets_coaching_block(
+        self, text: str, asset_names: list[str],
+    ) -> str:
+        """Coaching when user art feedback names sprites already on disk."""
+        referenced = sorted(_feedback_referenced_asset_names(text, asset_names))
+        names_line = ", ".join(referenced) if referenced else "(named sprites)"
+        return (
+            "================ EXISTING SPRITES ON DISK ================\n"
+            f"The user asked about art for: {names_line}\n"
+            "Those PNGs were already generated this session and exist on disk.\n"
+            "Do NOT re-emit <assets> unless changing the visual prompt.\n"
+            "THIS turn: <patch> the loader/drawImage wiring so the game draws them.\n"
+            "=========================================================="
+        )
 
 
 
@@ -2087,7 +2138,26 @@ class FeedbackRoutingMixin:
                     fb for fb in self._pending_feedback
                     if fb not in _internal_texts
                 ]
-                _art_reqs = _user_fb[-1:] if _user_fb else []
+                if (
+                    _user_fb
+                    and _feedback_art_request_already_on_disk(
+                        _user_fb[-1], asset_names,
+                    )
+                ):
+                    _ref_names = sorted(
+                        _feedback_referenced_asset_names(_user_fb[-1], asset_names)
+                    )
+                    self._trace({
+                        "kind": "asset_request_already_satisfied",
+                        "names": _ref_names,
+                        "feedback_preview": _user_fb[-1][:200],
+                    })
+                    parts.append(self._wire_existing_assets_coaching_block(
+                        _user_fb[-1], asset_names,
+                    ))
+                    _art_reqs = []
+                else:
+                    _art_reqs = _user_fb[-1:] if _user_fb else []
             else:
                 # Router says NO new art this batch. Clear any stale
                 # outstanding request the user has now contradicted
@@ -2158,31 +2228,60 @@ class FeedbackRoutingMixin:
                 and _feedback_is_art_change(fb, asset_names)
             ]
         if _art_reqs:
-            _unhonored = _art_reqs[-1]
-            _reprompts = 0
+            _candidate = _art_reqs[-1]
+            if _feedback_art_request_already_on_disk(_candidate, asset_names):
+                _ref_names = sorted(
+                    _feedback_referenced_asset_names(_candidate, asset_names)
+                )
+                self._trace({
+                    "kind": "asset_request_already_satisfied",
+                    "names": _ref_names,
+                    "feedback_preview": _candidate[:200],
+                })
+                parts.append(self._wire_existing_assets_coaching_block(
+                    _candidate, asset_names,
+                ))
+            else:
+                _unhonored = _candidate
+                _reprompts = 0
         if _unhonored and _reprompts < 3:
-            _reprompts += 1
-            self._unhonored_asset_request = _unhonored
-            self._asset_reprompt_count = _reprompts
-            parts.append(
-                "================ ASSET GENERATION REQUIRED ================\n"
-                "The user asked you to GENERATE NEW ART:\n"
-                f'  "{_unhonored[:300]}"\n'
-                "New art does NOT exist until you emit an <assets> block. THIS "
-                "turn, emit <assets> with a NEW `name` for each new sprite and a "
-                "SHORT prompt for each (for a recolor/variant, reuse the base "
-                "entity's description with the requested change — e.g. a second "
-                "fighter that is the same character in a different color, one "
-                "entry per pose). You MAY also <patch> the code to load and draw "
-                "them. Do NOT reply with only a diagnosis or code — the sprites "
-                "will not appear without an <assets> block.\n"
-                "==========================================================="
-            )
-            self._trace({
-                "kind": "asset_request_reprompt",
-                "attempt": _reprompts,
-                "request": _unhonored[:200],
-            })
+            if _feedback_art_request_already_on_disk(_unhonored, asset_names):
+                _ref_names = sorted(
+                    _feedback_referenced_asset_names(_unhonored, asset_names)
+                )
+                self._trace({
+                    "kind": "asset_request_already_satisfied",
+                    "names": _ref_names,
+                    "feedback_preview": str(_unhonored)[:200],
+                })
+                parts.append(self._wire_existing_assets_coaching_block(
+                    _unhonored, asset_names,
+                ))
+                self._unhonored_asset_request = None
+                self._asset_reprompt_count = 0
+            else:
+                _reprompts += 1
+                self._unhonored_asset_request = _unhonored
+                self._asset_reprompt_count = _reprompts
+                parts.append(
+                    "================ ASSET GENERATION REQUIRED ================\n"
+                    "The user asked you to GENERATE NEW ART:\n"
+                    f'  "{_unhonored[:300]}"\n'
+                    "New art does NOT exist until you emit an <assets> block. THIS "
+                    "turn, emit <assets> with a NEW `name` for each new sprite and a "
+                    "SHORT prompt for each (for a recolor/variant, reuse the base "
+                    "entity's description with the requested change — e.g. a second "
+                    "fighter that is the same character in a different color, one "
+                    "entry per pose). You MAY also <patch> the code to load and draw "
+                    "them. Do NOT reply with only a diagnosis or code — the sprites "
+                    "will not appear without an <assets> block.\n"
+                    "==========================================================="
+                )
+                self._trace({
+                    "kind": "asset_request_reprompt",
+                    "attempt": _reprompts,
+                    "request": _unhonored[:200],
+                })
         elif _unhonored and _reprompts >= 3:
             # Gave it 3 turns; stop nagging so the prompt doesn't bloat.
             self._trace({
@@ -2374,17 +2473,45 @@ class FeedbackRoutingMixin:
             # the user typed and decides for itself whether to <patch>
             # or <assets>. Use when the classifier is misrouting your
             # guidance (Doom trace 2026-05-23 was the motivating case).
+            _internal_texts_raw = getattr(self, "_internal_feedback_texts", set())
+            user_items = [
+                fb for fb in self._pending_feedback if fb not in _internal_texts_raw
+            ]
+            internal_items = [
+                fb for fb in self._pending_feedback if fb in _internal_texts_raw
+            ]
+            if user_items:
+                joined_raw = "\n- ".join(user_items)
+                parts.append(
+                    "================ USER FEEDBACK (HIGHEST PRIORITY) ================\n"
+                    "The user just typed this while watching your game. It OVERRIDES\n"
+                    "any plan or default behavior. Address it explicitly in this turn:\n"
+                    f"\n[USER NOTE]\n- {joined_raw}\n[/USER NOTE]\n"
+                    "=================================================================="
+                )
+                for fb in user_items:
+                    self._trace({
+                        "kind": "feedback_injected",
+                        "text": fb,
+                        "raw_mode": True,
+                        "source": "user",
+                    })
+            if internal_items:
+                joined_internal = "\n- ".join(internal_items)
+                parts.append(
+                    "================ HARNESS NOTICE ================\n"
+                    "Agent-generated coaching (not typed by the user):\n"
+                    f"\n- {joined_internal}\n"
+                    "================================================"
+                )
+                for fb in internal_items:
+                    self._trace({
+                        "kind": "feedback_injected",
+                        "text": fb,
+                        "raw_mode": True,
+                        "source": "internal",
+                    })
             feedback_items = list(self._pending_feedback)
-            joined_raw = "\n- ".join(feedback_items)
-            parts.append(
-                "================ USER FEEDBACK (HIGHEST PRIORITY) ================\n"
-                "The user just typed this while watching your game. It OVERRIDES\n"
-                "any plan or default behavior. Address it explicitly in this turn:\n"
-                f"\n[USER NOTE]\n- {joined_raw}\n[/USER NOTE]\n"
-                "=================================================================="
-            )
-            for fb in feedback_items:
-                self._trace({"kind": "feedback_injected", "text": fb, "raw_mode": True})
             self._trace({
                 "kind": "feedback_directives_suppressed",
                 "reason": "raw_feedback_mode",

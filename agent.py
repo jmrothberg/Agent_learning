@@ -155,10 +155,6 @@ from agent_feedback import (
 
 
 
-# Pi-mono pattern: read AGENTS.md / CLAUDE.md from the working tree at
-# session start and append it as <project-context> in the system prompt.
-# Lets a repo enforce house-style ("always vanilla JS, no React") once
-# instead of re-saying it via feedback every session.
 # Pure helpers — seed media, HTML parsing, compaction constants (agent_helpers.py).
 from agent_helpers import (
     _ANTHROPIC_NON_RETRYABLE_400_PHRASES,
@@ -187,8 +183,6 @@ from agent_helpers import (
     _POLISH_TURN_CAP,
     _PROBES_OPEN_RE,
     _PROBES_RE,
-    _PROJECT_CONFIG_FILES,
-    _PROJECT_CONFIG_MAX_CHARS,
     _PRUNE_KEEP_RECENT_TURNS,
     _QUESTION_RE,
     _REPORT_BLOCK_BEGIN,
@@ -215,7 +209,7 @@ from agent_helpers import (
     _normalize_extracted_html,
     _patch_set_bracket_break,
     _png_dims,
-    _read_project_config,
+    _deprecated_project_config_on_disk,
     _report_green_except_cosmetic_sprites,
     _scan_seed_media,
     _strip_thinking,
@@ -249,6 +243,7 @@ def render_run_summary(records: list[dict], artifact_id: str = "") -> str:
     iters: dict[int, dict] = {}
     no_code_turns: list[str] = []
     harness_crashes = 0
+    agent_crashes: list[dict] = []
     restart_lines: list[str] = []
     outcome: dict | None = None
     for rec in records:
@@ -297,6 +292,8 @@ def render_run_summary(records: list[dict], artifact_id: str = "") -> str:
             )
         elif kind == "harness_crash":
             harness_crashes += 1
+        elif kind == "agent_crash":
+            agent_crashes.append(rec)
         elif kind == "event" and rec.get("event") == "restart":
             restart_lines.append(str(rec.get("text_preview") or "")[:90])
         elif kind == "session_outcome":
@@ -307,6 +304,20 @@ def render_run_summary(records: list[dict], artifact_id: str = "") -> str:
     if model:
         lines.append(f"Model: {model}")
     lines.append("")
+    if agent_crashes:
+        cr = agent_crashes[-1]
+        where = cr.get("source") or "agent_loop"
+        it = cr.get("iteration")
+        it_note = f" iter {it}" if it is not None else ""
+        lines.append(
+            f"**AGENT CRASH** ({where}{it_note}): "
+            f"{cr.get('exc_type', 'Exception')}: {cr.get('err', '')}"
+        )
+        lines.append(
+            "(full traceback on the `agent_crash` row in the .jsonl — "
+            "grep kind agent_crash)"
+        )
+        lines.append("")
     if iters:
         # Phase 4 (4D): the table is an LLM-facing digest — one dense row per
         # iter carrying the fix-layer (`class`) + router/patch/tok-s correlation
@@ -2515,6 +2526,26 @@ class GameAgent(
             **extra,
         })
 
+    def _trace_agent_crash(self, e: Exception, *, source: str = "agent_loop") -> None:
+        """Record a fatal loop/TUI crash in the jsonl so the trace is self-sufficient.
+
+        TUI/CLI consumers also log to the screen, but the .jsonl must carry
+        enough for an LLM to debug without re-running (TD trace 20260630_103853:
+        NameError in compaction was visible in the TUI only).
+        """
+        if getattr(self, "_crash_traced_this_session", False):
+            return
+        self._crash_traced_this_session = True
+        self._trace_exception(
+            "agent_crash",
+            e,
+            source=source,
+            exc_type=type(e).__name__,
+            iteration=getattr(self, "_last_iter_run", None),
+            snapshot_n=getattr(self, "_snapshot_n", None),
+            fix_mode=getattr(self, "_fix_mode", None),
+        )
+
     def _save_snapshot(self, html: str) -> Path | None:
         try:
             self.snapshots_dir.mkdir(parents=True, exist_ok=True)
@@ -4255,21 +4286,28 @@ class GameAgent(
         # ---- seed file OR memory skeleton for the first build ----------
         # ---- PHASE B: build/iterate -------------------------------------
         self._run_session_complete = False
-        async for ev in self._run_phase_a_and_first_build(
-            goal,
-            continuation=continuation,
-            plan_only=plan_only,
-            patch_only=patch_only,
-        ):
-            yield ev
-        if self._run_session_complete:
-            return
-        async for ev in self._run_build_iterate_loop(continuation=continuation):
-            yield ev
-        if self._run_session_complete:
-            return
-        async for ev in self._run_exit_and_finalize():
-            yield ev
+        self._crash_traced_this_session = False
+        try:
+            async for ev in self._run_phase_a_and_first_build(
+                goal,
+                continuation=continuation,
+                plan_only=plan_only,
+                patch_only=patch_only,
+            ):
+                yield ev
+            if self._run_session_complete:
+                return
+            async for ev in self._run_build_iterate_loop(
+                continuation=continuation,
+            ):
+                yield ev
+            if self._run_session_complete:
+                return
+            async for ev in self._run_exit_and_finalize():
+                yield ev
+        except Exception as e:
+            self._trace_agent_crash(e, source="run")
+            raise
 
     async def _run_phase_a_and_first_build(
         self,
@@ -4570,12 +4608,6 @@ class GameAgent(
                     "chars": len(plan_playbook_block),
                 })
 
-            # Pi-mono-style project-config injection. Reads AGENTS.md /
-            # CLAUDE.md from cwd; falls back to the out_path's parent so
-            # `python coder.py` from outside the project tree still picks
-            # them up. Appended INSIDE the system message rather than as
-            # a separate user turn — keeps it ambient instead of
-            # interactive.
             # Stop-Losing-To-OneShot todo #6 — when the active prompt
             # module exposes build_system_prompt (v1+), pass model_class
             # so mid-tier models get a trimmed prompt. v0 falls back
@@ -4623,30 +4655,19 @@ class GameAgent(
                 "autonomous_feedback": bool(getattr(self, "_use_autonomous_feedback", False)),
                 "step_mode": bool(getattr(self, "_step_mode", False)),
             })
-            # Lean mode (local models): skip the per-turn CLAUDE.md
-            # <project-context> injection. It is ~6KB of developer/ops docs,
-            # not game-codegen guidance, and on every turn it crowds out the
-            # local model's attention. SOTA / non-lean runs keep it.
-            cfg_text, cfg_sources = ("", [])
-            if not lean_active:
-                cfg_text, cfg_sources = _read_project_config(Path.cwd())
-                if not cfg_text:
-                    cfg_text, cfg_sources = _read_project_config(self.out_path.parent.parent)
-            if cfg_text:
-                sys_prompt = (
-                    sys_prompt
-                    + "\n\n<project-context>\n"
-                    + "Project-level configuration loaded from the working tree. "
-                    + "Treat its rules as additional hard requirements; they "
-                    + "override anything in <hard-rules> or <iteration-policy> "
-                    + "where they conflict.\n\n"
-                    + cfg_text
-                    + "\n</project-context>"
-                )
+            # Legacy maintainer docs (AGENTS.md / CLAUDE.md) must not be
+            # injected into the game model — trace if still on disk.
+            _dep_cfg = _deprecated_project_config_on_disk(Path.cwd())
+            if not _dep_cfg:
+                _dep_cfg = _deprecated_project_config_on_disk(self.out_path.parent.parent)
+            if _dep_cfg:
                 self._trace({
-                    "kind": "project_config_loaded",
-                    "sources": cfg_sources,
-                    "chars": len(cfg_text),
+                    "kind": "project_config_deprecated_source",
+                    "sources": _dep_cfg,
+                    "hint": (
+                        "maintainer docs belong in AGENTS.md + DEV.md (Cursor only); "
+                        "game model uses prompts_v1 + memory/playbook.jsonl"
+                    ),
                 })
 
             # #5: surface PROVEN pose prompts from past animated sessions.
@@ -4876,7 +4897,7 @@ class GameAgent(
                 # present) but EVERY probe is structural-only — no input→delta,
                 # no time-based check, no canvas-pixel read. A game that renders
                 # a static HUD passes them all, so the harness `ok=True` signal
-                # would be wrong (CLAUDE.md "harness signal must be right"). The
+                # would be wrong (DEV.md "harness signal must be right"). The
                 # passive nudge alone (injected into the first-build message)
                 # did NOT move the model: the 2026-05-31 prompt-library sweep
                 # showed 24/26 prompts still emitting 0 dynamic probes
@@ -5256,6 +5277,10 @@ class GameAgent(
                     "seed_file": str(self.seed_file),
                     "seed_bytes": len(seed_html),
                 }))
+                # Patch-only skips Phase A where auto-probes normally inject
+                # (~5090). Seed edits still match canvas-two-actors-facing etc.
+                # via goal — inject deterministic facing probes before iter 1.
+                self._maybe_inject_visual_playtest_auto_probes()
                 # First build = plan-stage equivalent: model is choosing
                 # the implementation shape, broad context helps.
                 pb_block = self._retrieve_playbook_block(
@@ -6227,6 +6252,8 @@ class GameAgent(
                         f"{len(new_gaps)}",
                     ))
                     self._probes = adopted_probes
+                    # Model <probes> must not drop recipe auto_probes (facing eval).
+                    self._maybe_inject_visual_playtest_auto_probes()
                     continuation_probe_refresh_adopted = continuation_full_rewrite
                     self._planning_coverage_gaps = new_gaps[:6]
 

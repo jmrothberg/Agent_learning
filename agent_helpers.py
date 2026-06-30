@@ -12,10 +12,9 @@ from pathlib import Path
 
 from tools import run_micro_probes
 
-_PROJECT_CONFIG_FILES = ("AGENTS.md", "CLAUDE.md")
-# Cap so a sprawling project README doesn't crowd out the rest of the
-# system prompt. ~6KB ≈ 1500 tokens, still room for the goal + workflow.
-_PROJECT_CONFIG_MAX_CHARS = 6000
+# Maintainer docs used to be injected into the game model (AGENTS.md + CLAUDE.md);
+# traced if still on disk so repos can migrate to AGENTS.md + DEV.md only.
+_DEPRECATED_PROJECT_CONFIG_FILES = ("AGENTS.md", "CLAUDE.md")
 
 
 def _png_dims(png_bytes: bytes) -> tuple[int, int] | None:
@@ -35,40 +34,17 @@ def _png_dims(png_bytes: bytes) -> tuple[int, int] | None:
         return None
 
 
-def _read_project_config(base_dir: Path) -> tuple[str, list[str]]:
-    """Read AGENTS.md / CLAUDE.md (in that order) from `base_dir`.
-
-    Returns (concat_text, source_paths). `concat_text` is empty if no
-    project-config files exist or are readable. Total length is capped
-    at _PROJECT_CONFIG_MAX_CHARS; truncation appends a marker so the
-    model knows it was cut.
-    """
-    parts: list[str] = []
-    sources: list[str] = []
-    used = 0
-    for name in _PROJECT_CONFIG_FILES:
+def _deprecated_project_config_on_disk(base_dir: Path) -> list[str]:
+    """Paths of legacy maintainer files still present (for trace migration hint)."""
+    found: list[str] = []
+    for name in _DEPRECATED_PROJECT_CONFIG_FILES:
         p = base_dir / name
         try:
-            if not p.is_file():
-                continue
-            body = p.read_text(encoding="utf-8", errors="replace")
+            if p.is_file() and p.read_text(encoding="utf-8", errors="replace").strip():
+                found.append(str(p))
         except OSError:
             continue
-        if not body.strip():
-            continue
-        sources.append(str(p))
-        remaining = _PROJECT_CONFIG_MAX_CHARS - used
-        if remaining <= 0:
-            break
-        if len(body) > remaining:
-            body = body[:remaining] + (
-                f"\n\n[... {name} truncated to fit project-context budget ...]"
-            )
-        # Prefix each file with its name so the model can tell them apart
-        # if the project ships both.
-        parts.append(f"## {name}\n\n{body.strip()}")
-        used += len(body) + len(name) + 8
-    return ("\n\n".join(parts), sources)
+    return found
 
 
 # Asset/sound rehydration from a seed file. Lifts every

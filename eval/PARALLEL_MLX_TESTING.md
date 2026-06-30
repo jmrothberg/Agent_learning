@@ -6,21 +6,26 @@ using **one MLX model load** and server-side batching. Repo:
 
 ---
 
-## Primary tuning workflow (serial + VLM + visible browser)
+## Primary tuning workflow
 
-**Use this for agent/memory tuning — not parallel mlx-server batch.**
+**Start here for serial overnight batches:** [`eval/OPERATIONS.md`](OPERATIONS.md) — run_07 chain
+(`bash eval/tune_run07_chain.sh`), pytest commands, triage workflow.
+
+This file is for **parallel mlx-server throughput** only (one `mlx_lm.server`, N clients) — not the
+default agent-tuning path.
+
+---
+
+## Historical: run_05 overnight (superseded by run_07)
+
+<details>
+<summary>Round 2 serial (12 games, GLM) — archived reference</summary>
 
 | Requirement | Command / setting |
 |-------------|-------------------|
 | In-process MLX (VLM works) | `MLX_MODEL=~/MLX_Models/Qwen3.6-27B-mxfp8` + `--backend mlx` — **do not** set `MLX_SERVER_URL` |
-| VLM critique ON | TUI: `/vlm-critique on` · CLI: `coder.py --vlm-critique` |
-| Visible Chromium | **No `--headless`** — run in Terminal.app |
 | Serial 10-game eval | [`eval/tune_serial_loop.py`](tune_serial_loop.py) + [`eval/tune_serial10_goals.txt`](tune_serial10_goals.txt) |
-| **Round 2 serial (12 games, GLM)** | [`eval/tune_serial10_round2_goals.txt`](tune_serial10_round2_goals.txt) → `games/tune_serial10/run_05` |
-| Unattended default | No pause between games · no job wall timeout · `--no-auto-step` on child (no `/wait` latch) |
-| Crash recovery | `--resume` (default ON) skips delivered games · `--retries 2` per game · `tune_checkpoint.json` |
-| Overnight watchdog | `nohup eval/tune_serial_overnight.sh &` — restarts loop until checkpoint count equals goal-file lines |
-| After each game | Optional `--pause-between-games` for triage; else auto-advance. Triage `failure_class`: `harness_bug` → code; `memory_gap` → JSONL |
+| Round 2 (12 games, GLM) | [`eval/tune_serial10_round2_goals.txt`](tune_serial10_round2_goals.txt) → `games/tune_serial10/run_05` |
 
 ### Round 2 overnight (GLM-5.2-MLX-4bit, text-only — no VLM)
 
@@ -60,6 +65,8 @@ MLX_MODEL=~/MLX_Models/Qwen3.6-27B-mxfp8 .venv/bin/python chat.py
 ```
 
 **Why not mlx-server for tuning:** `MLXServerBackend.is_vlm()` is false — images are stripped, structured visual playtests never run (`vlm_critique: false` in batch traces even when the model is VLM-capable).
+
+</details>
 
 ### Round 1 triage (`tune_round1_r4`) — general fixes only
 
@@ -295,5 +302,5 @@ exit codes and generated HTML under `--out-dir`.
 
 - [`eval/tune_serial_loop.py`](tune_serial_loop.py) — serial VLM tuning runner (primary)
 - [`TEST.md`](../TEST.md) — short parallel section in Layer 2b
-- [`CLAUDE.md`](../CLAUDE.md) — `MLX_SERVER_URL` env var
+- [`DEV.md`](../DEV.md) — `MLX_SERVER_URL` env var
 - [`backend.py`](../backend.py) — `MLXServerBackend`, `MLXBackend`, `detect_backend`

@@ -137,6 +137,20 @@ def test_parse_tolerates_format_variations() -> None:
     assert a[4][0] in ("unclear", "no")
 
 
+def test_parse_mxfp8_colon_repeat_format() -> None:
+    """mxfp8 often emits Q1: 1: YES (colon repeat) — trace 155704."""
+    response = (
+        "Q1: 1: YES\n"
+        "Q2: 2: YES\n"
+        "Q3: 3: YES\n"
+        "Q4: 4: YES\n"
+    )
+    parsed = GameAgent._parse_visual_playtest_response(response, _stub_recipe())
+    assert parsed["parse_rate"] == 1.0
+    assert parsed["answers"][1][0] == "yes"
+    assert parsed["answers"][4][0] == "yes"
+
+
 def test_parse_skips_prose_lines() -> None:
     """Lines that don't match the pattern are silently skipped."""
     response = (

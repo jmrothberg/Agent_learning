@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>fighters facing bug seed</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #111; overflow: hidden; }
+  canvas { display: block; margin: 0 auto; background: #111; }
+</style>
+</head>
+<body>
+<canvas id="c" width="800" height="480"></canvas>
+<script>
+(() => {
+  "use strict";
+  const cvs = document.getElementById("c");
+  const ctx = cvs.getContext("2d");
+  const W = 800, H = 480, GROUND = H - 80;
+
+  const ASSET_BASE = "./seed_fighters_facing_bug_assets/";
+  // Art convention: blue_idle.png and red_idle.png are authored facing RIGHT.
+  // Canonical fix: facing = sign(opponent.x - x); draw flip when facing < 0.
+  const entries = [
+    ["blue_idle", "blue_idle.png"],
+    ["red_idle", "red_idle.png"],
+  ];
+
+  const ASSETS = {};
+  let _assetsReady = false;
+  async function loadAssets() {
+    for (const [name, file] of entries) {
+      const img = new Image();
+      img.src = ASSET_BASE + file;
+      try { await img.decode(); } catch (e) { console.warn("asset failed", name, e); }
+      ASSETS[name] = img;
+    }
+    _assetsReady = true;
+    window.__assetDecodeSettled = true;
+  }
+
+  const _spriteCache = {};
+  function sprite(key) {
+    const cached = _spriteCache[key];
+    if (cached) return cached;
+    const img = ASSETS[key];
+    if (img && img.naturalWidth > 0) { _spriteCache[key] = img; return img; }
+    return null;
+  }
+
+  function drawSprite(img, x, y, w, h, flip) {
+    if (!img || img.naturalWidth <= 0) {
+      ctx.fillStyle = "#f0f";
+      ctx.fillRect(x - w / 2, y - h, w, h);
+      return;
+    }
+    ctx.save();
+    if (flip) {
+      ctx.translate(x, y - h / 2);
+      ctx.scale(-1, 1);
+      ctx.drawImage(img, -w / 2, -h / 2, w, h);
+    } else {
+      ctx.drawImage(img, x - w / 2, y - h, w, h);
+    }
+    ctx.restore();
+  }
+
+  const keys = {};
+  window.addEventListener("keydown", (e) => { keys[e.code] = true; });
+  window.addEventListener("keyup", (e) => { keys[e.code] = false; });
+
+  const state = {
+    t: 0,
+    p1: { x: W * 0.25, y: GROUND, facing: 1 },
+    p2: { x: W * 0.75, y: GROUND, facing: 1 },
+  };
+  window.state = state;
+  window.game = { reset() {} };
+
+  function update() {
+    const speed = 4;
+    if (keys.ArrowLeft) state.p1.x -= speed;
+    if (keys.ArrowRight) state.p1.x += speed;
+    state.p1.x = Math.max(60, Math.min(W - 60, state.p1.x));
+    // BUG: facing never updates toward opponent — both stay +1 always.
+    // Fix: state.pN.facing = Math.sign(opponent.x - x); draw flip when facing < 0
+    // (sprites authored facing right).
+  }
+  window.game.update = update;
+
+  function frame() {
+    state.t += 1;
+    update();
+    const bob1 = Math.sin(state.t * 0.09) * 2.5;
+    const bob2 = Math.sin(state.t * 0.09 + 1.1) * 2.5;
+    const p1y = state.p1.y + bob1;
+    const p2y = state.p2.y + bob2;
+    ctx.fillStyle = "#1a1a2e";
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#2d2d44";
+    ctx.fillRect(0, GROUND, W, H - GROUND);
+    drawSprite(sprite("blue_idle"), state.p1.x, p1y, 110, 165, false);
+    drawSprite(sprite("red_idle"), state.p2.x, p2y, 110, 165, false);
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+  loadAssets();
+})();
+</script>
+</body>
+</html>

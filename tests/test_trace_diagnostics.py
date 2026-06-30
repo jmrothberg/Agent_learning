@@ -351,3 +351,17 @@ def test_render_digest_surfaces_failure_class():
     assert "3/3" in text
     # The no-code turn is tagged with its bucket.
     assert "harness_bug" in text
+
+
+def test_render_digest_surfaces_agent_crash():
+    records = [
+        {"kind": "session_start", "goal": "tower defense", "model_name": "stub"},
+        {"kind": "agent_crash", "source": "run", "exc_type": "NameError",
+         "err": "name 'Path' is not defined", "iteration": 2,
+         "traceback": "  File \"agent_compaction.py\", line 240"},
+    ]
+    text = render_run_summary(records, artifact_id="td__run_x")
+    assert "**AGENT CRASH**" in text
+    assert "NameError" in text
+    assert "Path" in text
+    assert "agent_crash" in text

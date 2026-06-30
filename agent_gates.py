@@ -406,7 +406,7 @@ class GateProcessingMixin:
 
         # regeneration routes are dead ends and suggesting either wastes the
 
-        # correction loop (see CLAUDE.md "Things to avoid" + the user memory
+        # correction loop (see DEV.md "Things to avoid" + the user memory
 
         # feedback_sprite_animation_from_image.md):
 
@@ -544,7 +544,7 @@ class GateProcessingMixin:
 
         iter and can never clear it. That is the unwinnable-loop shape (see
 
-        `_apply_dead_animation_check_to_report` / CLAUDE.md dead-sprite gate):
+        `_apply_dead_animation_check_to_report` / DEV.md dead-sprite gate):
 
         a correct build stays ok=False forever on one structural warning.
 

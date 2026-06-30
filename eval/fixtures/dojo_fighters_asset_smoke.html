@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>dojo asset decode smoke</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  canvas { display: block; margin: 0 auto; background: #000; }
+</style>
+</head>
+<body>
+<canvas id="c" width="960" height="540"></canvas>
+<script>
+(() => {
+  "use strict";
+  const cvs = document.getElementById("c");
+  const ctx = cvs.getContext("2d");
+  const W = 960, H = 540, GROUND = H - 100;
+
+  const ASSET_BASE = "./dojo_fighters_asset_smoke_assets/";
+  const MIN_ASSETS = [
+    ["dojo_bg", "dojo_bg.png"],
+    ["blue_idle", "blue_idle.png"],
+    ["red_idle", "red_idle.png"],
+  ];
+  const FULL_ASSETS = [
+    ["dojo_bg", "dojo_bg.png"],
+    ["blue_idle", "blue_idle.png"], ["blue_walk", "blue_walk.png"],
+    ["blue_jump", "blue_jump.png"], ["blue_duck", "blue_duck.png"],
+    ["blue_block", "blue_block.png"], ["blue_punch", "blue_punch.png"],
+    ["blue_kick", "blue_kick.png"], ["blue_fireball", "blue_fireball.png"],
+    ["blue_hit", "blue_hit.png"], ["blue_death", "blue_death.png"],
+    ["red_idle", "red_idle.png"], ["red_walk", "red_walk.png"],
+    ["red_jump", "red_jump.png"], ["red_duck", "red_duck.png"],
+    ["red_block", "red_block.png"], ["red_punch", "red_punch.png"],
+    ["red_kick", "red_kick.png"], ["red_fireball", "red_fireball.png"],
+    ["red_hit", "red_hit.png"], ["red_death", "red_death.png"],
+    ["intro_still", "intro_still.png"], ["ko_still", "ko_still.png"],
+  ];
+  const entries = (window.__SMOKE_FULL_ASSETS ? FULL_ASSETS : MIN_ASSETS);
+
+  const ASSETS = {};
+  let _assetsReady = false;
+  async function loadAssets() {
+    for (const [name, file] of entries) {
+      const img = new Image();
+      img.src = ASSET_BASE + file;
+      try { await img.decode(); } catch (e) { console.warn("asset failed", name, e); }
+      ASSETS[name] = img;
+    }
+    _assetsReady = true;
+    window.__assetDecodeSettled = true;
+  }
+
+  const _spriteCache = {};
+  function sprite(key) {
+    if (_spriteCache[key] !== undefined) {
+      if (_spriteCache[key] === null && !_assetsReady) delete _spriteCache[key];
+      else return _spriteCache[key];
+    }
+    let img = ASSETS[key];
+    if (!img) {
+      const norm = s => String(s).toLowerCase().replace(/[^a-z0-9]/g, "");
+      const want = norm(key), names = Object.keys(ASSETS);
+      let hit = names.find(n => norm(n) === want)
+             || names.find(n => norm(n).includes(want) || want.includes(norm(n)));
+      img = hit ? ASSETS[hit] : null;
+    }
+    if (img && img.naturalWidth > 0) { _spriteCache[key] = img; return img; }
+    if (!img) { _spriteCache[key] = null; return null; }
+    return img;
+  }
+
+  function drawSprite(img, x, y, w, h, flip) {
+    if (!img || img.naturalWidth <= 0) {
+      ctx.fillStyle = "#f0f";
+      ctx.fillRect(x - w / 2, y - h, w, h);
+      return;
+    }
+    ctx.save();
+    if (flip) {
+      ctx.translate(x, y - h / 2);
+      ctx.scale(-1, 1);
+      ctx.drawImage(img, -w / 2, -h / 2, w, h);
+    } else {
+      ctx.drawImage(img, x - w / 2, y - h, w, h);
+    }
+    ctx.restore();
+  }
+
+  const state = {
+    t: 0,
+    p1: { x: W * 0.28, y: GROUND, facing: 1 },
+    p2: { x: W * 0.72, y: GROUND, facing: -1 },
+  };
+  window.state = state;
+  window.game = { reset() {} };
+
+  function frame() {
+    state.t += 1;
+    // Subtle idle bob so the harness frozen-canvas hash changes between samples.
+    const bob1 = Math.sin(state.t * 0.09) * 2.5;
+    const bob2 = Math.sin(state.t * 0.09 + 1.1) * 2.5;
+    const p1y = state.p1.y + bob1;
+    const p2y = state.p2.y + bob2;
+    const bg = sprite("dojo_bg");
+    if (bg && bg.naturalWidth > 0) {
+      ctx.drawImage(bg, 0, 0, W, H);
+    } else {
+      ctx.fillStyle = "#2a1810";
+      ctx.fillRect(0, 0, W, H);
+    }
+    drawSprite(sprite("blue_idle"), state.p1.x, p1y, 120, 180, state.p1.facing < 0);
+    drawSprite(sprite("red_idle"), state.p2.x, p2y, 120, 180, state.p2.facing < 0);
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+  loadAssets();
+})();
+</script>
+</body>
+</html>

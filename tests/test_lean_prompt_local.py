@@ -1,10 +1,9 @@
 """Lean system-prompt routing for LOCAL models (2026-06-13).
 
 A local VLM like qwen3.6:27b classifies as `mid`, which used to render the
-~20KB system prompt + 6KB CLAUDE.md per turn — burying the model and making
-the agent perform worse than a single shot. Lean mode renders the compact
-`small` schema for local backends (and skips the per-turn project-doc), while
-SOTA/large/cloud keep the full prompt.
+~20KB system prompt and bury the model. Lean mode renders the compact `small`
+schema for local backends; maintainer docs are no longer injected. SOTA/large/cloud
+keep the full prompt.
 
 Pure-function tests: no model or Chromium calls.
 """
@@ -135,15 +134,3 @@ def test_allroles_help_no_longer_claims_separate_architect_pass():
     assert "per-iter visual critic" in allroles
     assert "VLM-capable" in allroles
 
-
-def test_claude_md_injection_gated_by_lean_mode():
-    """The per-turn CLAUDE.md <project-context> injection must be skipped
-    when lean mode is active."""
-    src = GameAgent.run_loop_inspect_source()
-    assert "lean_active = self._lean_prompt_active()" in src
-    assert "if not lean_active:" in src
-    # _read_project_config is only called inside the not-lean branch.
-    idx_guard = src.index("if not lean_active:")
-    idx_cfg = src.index("_read_project_config", idx_guard)
-    between = src[idx_guard:idx_cfg]
-    assert between.count("\n") <= 3, "project config read should sit directly under the lean guard"

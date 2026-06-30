@@ -115,7 +115,7 @@ class MemoryRetrievalMixin:
                     vp_recipe is not None
                     and vp_recipe.id not in VLM_CHECKLIST_SKIP_IDS
                 ):
-                    vlm_checklist = render_vlm_checklist_section(vp_recipe)
+                    vlm_checklist = render_vlm_checklist_section(vp_recipe, goal=goal or "")
                     if vlm_checklist:
                         self._trace({
                             "kind": "vlm_checklist_injected",

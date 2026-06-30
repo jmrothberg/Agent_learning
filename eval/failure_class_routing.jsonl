@@ -1,0 +1,4 @@
+{"failure_class": "harness_bug", "symptom": "gate false-positive or wrong ok=True/False", "edit_first": ["tools.py", "agent_gates.py", "agent_feedback.py"], "note": "Verifier or loop wiring — not playbook"}
+{"failure_class": "memory_gap", "symptom": "model saved code but repeated a mistake playbook should prevent", "edit_first": ["memory/playbook.jsonl", "memory/skeletons/", "prompts_v1.py"], "note": "Retrieval or bullet missing — add JSONL line before new loop machinery"}
+{"failure_class": "local_llm_limit", "symptom": "stall, loop, empty stream, deliberation abort", "edit_first": ["prompts_v1.py", "agent_compaction.py", "backend.py", "agent_stream.py"], "note": "Prompt/sampling/compaction — harness did not contradict model"}
+{"failure_class": "none", "symptom": "normal iteration friction", "edit_first": [], "note": "Play the game; may be model limit not harness bug"}

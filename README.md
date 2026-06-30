@@ -132,8 +132,7 @@ for 4-bit).
 .venv/bin/python -m pytest tests/ -q
 ```
 
-See `CLAUDE.md` for the full env-var reference (`LLM_BACKEND`, `OLLAMA_MODEL`, `MLX_MODEL`,
-`CODING_BOX_NUM_CTX`, `MLX_TOP_P`/`MLX_TOP_K`, `DIFFUSION_MODELS_DIR`, …).
+See **`DEV.md`** for env vars (`LLM_BACKEND`, `MLX_MODEL`, `CODING_BOX_NUM_CTX`, …).
 
 ---
 
@@ -180,7 +179,7 @@ Files that carry the weight:
 | File | Role |
 |---|---|
 | `tools.py` | **The verifier.** `LiveBrowser.load_and_test` (Chromium), `_input_smoke_test` (presses keys, captures per-action frames, runs the gates), micro-probes. Highest-leverage file. |
-| `agent.py` | Async `GameAgent.run` loop, prompt assembly, compaction, memory retrieval, `run_visual_critic`, fix-prompt building. |
+| `agent.py` | Orchestrator (`GameAgent.run`); phase methods + mixin map → **`AGENTS.md` §1b** |
 | `assets.py` / `sounds.py` | In-process Z-Image-Turbo / Stable Audio (lazy GPU load). `render_asset_paths_block` injects the `sprite()` loader. |
 | `videos.py` | `<videos>` cutscene clips via Wan2.2-TI2V-5B in a **subprocess** (`scripts/generate_video.py` — mlx-gen on Mac, diffusers on Linux). `render_video_paths_block` injects the `<video>`-overlay loader. |
 | `backend.py` | MLX (in-process `mlx_lm`/`mlx_vlm`) + Ollama backends; sampler; VLM image path. |
@@ -188,18 +187,9 @@ Files that carry the weight:
 | `memory.py` | `GameMemory` (skeleton retrieval), `Playbook` (Jaccard bullet retrieval), opening-book outlines/recipes. |
 | `patches.py` | SEARCH/REPLACE engine: 4-tier match cascade (exact → normalized → whitespace → trimmed), `repair_reply`. |
 
-### Patch engine
-`<patch>` blocks use SEARCH/REPLACE matched **exact → normalized → whitespace → trimmed**;
-`repair_reply` also converts markdown `SEARCH:`/`REPLACE:` pairs to `<patch>` blocks. Once
-`best.html` exists, prefer patches — full `<html_file>` rewrites on a working game amplify regressions.
-Details: **`CLAUDE.md`** · tests: `tests/test_patches.py`.
+### Patch engine & compaction
 
-### Compaction (two-tier, token-aware)
-Pressure = `prompt_tokens / num_ctx`. ≤5 turns: no-op. ≤14: per-turn `<html_file>` body elision.
-\>14 **or** >~70% of `num_ctx`: replace history with one deterministic **state-anchor** message
-(goal / criteria / probes / progress / diagnoses / last report / files / **generated asset paths**).
-Default `num_ctx` is **100000** — a wrong (too-small) denominator makes compaction fire every turn
-and shred the playbook + the user's instructions.
+Prefer `<patch>` once `best.html` exists. Patch cascade and compaction rules: **`DEV.md`** · tests: `tests/test_patches.py`, `tests/test_compaction.py`.
 
 ---
 
@@ -300,7 +290,7 @@ shape, not subject.
 |---|---|
 | `memory/playbook.jsonl` | code rules-of-thumb, retrieved by weighted-Jaccard on the goal (tags weigh 2×; ~0.02 floor) |
 | `memory/plan_nudges.jsonl` | plan-turn modality nudge **prose** (detectors live in `prompts_v1.py`; TD-vs-brawler suppression in `visual_playtests.jsonl`) |
-| `memory/feedback_patterns.jsonl` | extra feedback-classifier phrases (unioned with code lists in `agent.py`) |
+| `memory/feedback_patterns.jsonl` | extra feedback-classifier phrases (unioned in `agent_feedback.py`) |
 | `memory/playtests.jsonl` | behavior recipes for `/critique` (scripted input, state, pixel hash — no VLM) |
 | `memory/visual_playtests.jsonl` | mechanism-keyed yes/no VLM checklists + `auto_probes` + per-question `fix_hints` |
 | `memory/implementation_outlines.jsonl` | architect mechanism outlines (retrieved k=1); deep render carries a probe-authoring contract tied to each outline's `state:` fields |
@@ -331,7 +321,7 @@ loaded LLM) · `/critique [on|off]` (no-vision review, default on; aliases `/pla
 `/ref <path>` (attach a reference image for a VLM turn) · `/check [with <model>]` (explicit cloud or
 local VLM screenshot judge — never auto-called) · `/goodgame` (copy the trio into tracked `goodgame/`).
 
-**`coder.py` flags:** `--backend {auto,ollama,mlx}` · `--model` · `--max-iters` · `--best-of-n` ·
+**`coder.py` flags:** `--backend {auto,ollama,mlx,mlx-server}` · `--model` · `--max-iters` · `--best-of-n` ·
 `--num-ctx` · `--headless` · `--step` · `--restart-n` · `--playbook` (retrieval; off by default on
 the CLI). Goal is the positional arg.
 
@@ -440,19 +430,13 @@ feature is a silent no-op — the model is told to ship without cutscenes. Skip 
 
 ## System tests & memory hygiene
 
-See **`TEST.md`** for the three-layer testing guide. Quick reference:
+See **`TEST.md`** and **`eval/OPERATIONS.md`**. Quick check:
 
 ```bash
 .venv/bin/python -m pytest tests/ -q
-python system_tests.py run --suite smoke --three-model
-python system_tests.py run --suite pacman --yes
-.venv/bin/python eval/eval_prompts_plan.py --coverage
-MLX_MODEL=~/MLX_Models/Qwen3.6-27B-mxfp8 .venv/bin/python eval/eval_seed_edits.py --patch-only --max-iters 2
-.venv/bin/python scripts/forget_session.py --list
-./scripts/clean_artifacts.sh --yes
 ```
 
-Details: **`TEST.md`**. Battery: `memory/system_battery.jsonl`.
+Battery: `memory/system_battery.jsonl`.
 
 ---
 
@@ -463,7 +447,7 @@ Each file has one job — avoid duplicating long gate/env lists across them.
 | File | Audience | Purpose |
 |------|----------|---------|
 | `AGENTS.md` | maintainers + LLMs | Source vs artifacts, agent mixin map, trace paths |
-| `CLAUDE.md` | **LLM agents + humans** | Commands, env vars, architecture — **also injected into the game agent** (6 KB cap, skipped in lean mode) |
+| `DEV.md` | **LLM agents + humans** | Commands, env vars, architecture (maintainer only — not injected into game LLM) |
 | `TEST.md` | humans + LLMs | Three-layer tests, suite map, scripts inventory |
 | **`eval/OPERATIONS.md`** | **humans + LLMs** | **“Run pytest / batch N games / triage run_XX” — natural-language → command** |
 | `FOR_NEXT_LLM.md` | LLM tuners | Tuning traps — read before changing harness/prompts |
@@ -474,19 +458,8 @@ Each file has one job — avoid duplicating long gate/env lists across them.
 
 ## Standing rules
 
-Full binding rules for coding agents: **`CLAUDE.md`** (also injected into the game agent). Short
-version:
-
-1. **Tune the agent, not the model** — prompts / retrieval / gates / memory, not “try a bigger model.”
-2. **Genre-free in code** — detect rendering *shape*, not subject matter; game craft → `memory/*.jsonl`.
-3. **All code self-contained in `Agent_learning/`** — no sibling-repo imports.
-4. **Visible Chromium by default** (TUI); CLI `--headless` for unattended runs.
-5. **Asteroids regression** after retrieval/prompt/patch changes (ship direction + irregular asteroids).
-6. **Never silent cloud** — API key + explicit opt-in only.
-7. **Cosmetic sprite warnings are advisory** — never block shipping or suggest regenerating pose frames.
-
-Don't commit routine session outputs under `games/` (gitignored). **`/goodgame`** → tracked `goodgame/`.
-`memory/*.jsonl` is hand-curated.
+Full list: **`DEV.md`**. Summary: tune the agent not the model; genre-free code; visible Chromium;
+Asteroids regression; cosmetic sprite warnings are advisory; don't commit `games/` output.
 
 ---
 

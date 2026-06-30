@@ -13,6 +13,7 @@ def test_normalize_critique_aliases():
     assert tui_help.normalize_help_topic("VC") == "vlm-critique"
     assert tui_help.normalize_help_topic("vlm_critique") == "vlm-critique"
     assert tui_help.normalize_help_topic("memory") == "playbook"
+    assert tui_help.normalize_help_topic("memory-map") == "memory-map"
     assert tui_help.normalize_help_topic("rewind") == "revert"
     assert tui_help.normalize_help_topic("topics") == "topics"
     assert tui_help.normalize_help_topic("four-gpu") == "gpu"

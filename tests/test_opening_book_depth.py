@@ -209,7 +209,7 @@ def test_new_families_retrieve_on_representative_goals():
 
 def test_canonical_goals_survive_book_growth():
     """Dilution guard: adding 10 entries + tags must not steal the
-    canonical fight / asteroids goals (CLAUDE.md regression pair)."""
+    canonical fight / asteroids goals (DEV.md regression pair)."""
     old_cwd = os.getcwd()
     try:
         os.chdir(PROJECT_ROOT)

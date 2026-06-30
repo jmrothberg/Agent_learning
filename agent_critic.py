@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import os
 import re
 from collections.abc import AsyncIterator
 from typing import Any
@@ -49,7 +50,58 @@ class CriticMixin:
 
         return _hashlib.sha1(head).hexdigest()[:12]
 
+    def _ensure_local_vlm_path(self) -> bool:
+        """Resolve local VLM once per session.
 
+        Honors SMOKE_VLM_MODEL / MLX_VLM_MODEL (same pin as smoke scripts)
+        before discover_local_vlm().
+        """
+        if self._local_vlm_path is not None:
+            return bool(self._local_vlm_path)
+        resolved = None
+        query = os.environ.get("SMOKE_VLM_MODEL") or os.environ.get("MLX_VLM_MODEL")
+        if query:
+            try:
+                from vision_judge import _resolve_local_mlx_vlm
+
+                resolved = _resolve_local_mlx_vlm(query)
+            except Exception:
+                resolved = None
+        if not resolved:
+            try:
+                from backend import discover_local_vlm
+
+                resolved = discover_local_vlm()
+            except Exception:
+                resolved = None
+        self._local_vlm_path = resolved or ""
+        if resolved:
+            self._trace({"kind": "vision_judge_local_vlm", "path": resolved})
+        return bool(self._local_vlm_path)
+
+    _MIN_VLM_SCREENSHOT_BYTES = 12 * 1024
+
+    def _vlm_screenshot_untrusted_reason(self) -> str | None:
+        """Return why the last iter screenshot must not drive VLM coaching.
+
+        Magenta MISSING boxes / pre-decode frames make Q4 'face each other'
+        fail for the wrong reason and poison the coder on the next turn.
+        """
+        report = self._last_test_report or {}
+        decode = report.get("asset_decode_settle") or {}
+        if not decode.get("skipped"):
+            if decode.get("need") is True and decode.get("ready") is not True:
+                return "asset_decode_settle not ready"
+        missing = (report.get("entity_render_check") or {}).get("missing") or []
+        if missing:
+            return f"entity_render_check missing ({len(missing)} entity/ies)"
+        canvas = report.get("canvas") or {}
+        if canvas.get("blank") is True:
+            return "canvas blank"
+        shot = self._last_screenshot_after or b""
+        if shot and len(shot) < self._MIN_VLM_SCREENSHOT_BYTES:
+            return f"screenshot too small ({len(shot)} bytes)"
+        return None
 
     def _queue_visual_critic_coaching(self, cleaned: str, *, iteration: int, vc_role: str = "critic") -> bool:
 
@@ -62,6 +114,17 @@ class CriticMixin:
         a repeat of one we already queued in the last 3 critic turns.
 
         """
+
+        untrusted = self._vlm_screenshot_untrusted_reason()
+        if untrusted:
+            self._trace({
+                "kind": "vlm_critique_skipped_untrusted_screenshot",
+                "iteration": iteration,
+                "vc_role": vc_role,
+                "reason": untrusted,
+                "preview": cleaned[:200],
+            })
+            return False
 
         prefix = "[VLM-CRITIQUE] "
 
@@ -667,7 +730,21 @@ class CriticMixin:
 
         return clone, skipped
 
+    def _adjust_checklist_for_goal(self, recipe):
+        """Clone recipe checklist when goal says no HUD — drop health-bar Qs."""
+        if recipe is None:
+            return recipe
+        from memory import filter_vlm_checklist_for_goal
 
+        checklist = list(recipe.recipe.get("checklist") or [])
+        filtered = filter_vlm_checklist_for_goal(checklist, self._goal or "")
+        if filtered == checklist:
+            return recipe
+        clone = copy.copy(recipe)
+        base = dict(recipe.recipe or {})
+        base["checklist"] = filtered
+        clone.recipe = base
+        return clone
 
     @classmethod
 
@@ -741,7 +818,7 @@ class CriticMixin:
 
             # "<num>." / "<num>)" before the answer word. Added 2026-06-03.
 
-            r"(?:\d+\s*[.)]\s*)?"
+            r"(?:\d+\s*[:.)]\s*)?"
 
             r"(?:(yes|no|unclear|y|n|u)\b|([✅❌✔✖✓✗✘]))"
 
@@ -1374,6 +1451,8 @@ class CriticMixin:
         # the recipe so the prompt + parser + formatter all see it.
 
         recipe = self._augment_recipe_for_animation(recipe)
+
+        recipe = self._adjust_checklist_for_goal(recipe)
 
         # Fix-round item 6: with NO action frame captured, action-frame
 
@@ -2030,6 +2109,19 @@ class CriticMixin:
                             if a == "no"
 
                         ),
+
+                        # Always log raw + per-Q answers so success path is auditable
+                        # (trace 161245: "(all checks passed)" hid Q4:YES on wrong art).
+
+                        "raw_preview": critique_raw[:300],
+
+                        "answers": {
+
+                            str(k): v[0]
+
+                            for k, v in parsed.get("answers", {}).items()
+
+                        },
 
                     })
 
@@ -3353,23 +3445,11 @@ class CriticMixin:
 
             return False
 
+        recipe = self._adjust_checklist_for_goal(recipe)
+
         # Resolve in-process mlx_vlm once per session (same path as vision judge).
 
-        if self._local_vlm_path is None:
-
-            try:
-
-                from backend import discover_local_vlm
-
-                resolved = discover_local_vlm()
-
-            except Exception:
-
-                resolved = None
-
-            self._local_vlm_path = resolved or ""
-
-        if not self._local_vlm_path:
+        if not self._ensure_local_vlm_path():
 
             return False
 
@@ -3523,27 +3603,7 @@ class CriticMixin:
 
         # explicit user-triggered path for that.
 
-        if self._local_vlm_path is None:
-
-            try:
-
-                from backend import discover_local_vlm
-
-                resolved = discover_local_vlm()
-
-            except Exception:
-
-                resolved = None
-
-            # Sentinel "" = scanned, nothing found. Stops us rescanning.
-
-            self._local_vlm_path = resolved or ""
-
-            if resolved:
-
-                self._trace({"kind": "vision_judge_local_vlm", "path": resolved})
-
-        if not self._local_vlm_path:
+        if not self._ensure_local_vlm_path():
 
             return
 

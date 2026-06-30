@@ -31,6 +31,20 @@ def test_render_vlm_checklist_section_caps_items() -> None:
     assert "Q5:" not in section
 
 
+def test_no_hud_goal_filters_health_bar_checklist() -> None:
+    from memory import filter_vlm_checklist_for_goal
+
+    checklist = [
+        "Are two distinct characters visible on screen?",
+        "Are health bars or life counters visible?",
+        "Are both characters fully inside the canvas?",
+    ]
+    goal = "Two-player 1v1 fighter versus — no HUD, no combat"
+    filtered = filter_vlm_checklist_for_goal(checklist, goal)
+    assert not any("health" in q.lower() for q in filtered)
+    assert any("face toward each other" in q.lower() for q in filtered)
+
+
 def test_fighter_goal_injects_vlm_checklist_at_plan_stage(tmp_path: Path) -> None:
     agent = GameAgent(
         model="stub",
