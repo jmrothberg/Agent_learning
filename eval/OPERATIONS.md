@@ -89,12 +89,18 @@ Fresh library goals not in run_07, plus **Doom slot 1** to validate the 3D FPS n
 | 9 | torch-dungeon | lit maze / fog |
 | 10 | bullet-hell-boss | bullet patterns |
 
-**Two processes — both required.** Terminal batch runs **game → game with zero wait**. Cursor watcher polls every **30 seconds** (not 30 minutes), triages finished traces, and patches harness/memory/prompts **while the batch keeps going**. No Enter, no blocking, no manual release.
+**Two processes — both required.** Terminal batch runs **game → game with zero wait** and opens a **visible Chromium window** for each game (no `--headless`). **Run the batch in Terminal.app** — Cursor’s integrated terminal often hides or kills the browser window.
 
 | | Terminal.app (once) | Cursor watcher (once) |
 |---|---------------------|------------------------|
 | Command | `bash eval/tune_run08.sh` | `.venv/bin/python eval/tune_overnight_monitor.py --out-dir games/tune_serial10/run_08 --jobs-total 10 --interval 30 --sync-loop` |
 | Log / status | `games/tune_serial10/run_08/overnight.log` | `games/tune_serial10/run_08/agent_monitor.json` |
+
+**Open batch in Terminal.app from Cursor** (if you didn’t paste there yourself):
+
+```bash
+osascript -e 'tell application "Terminal" to do script "cd /Users/jonathanrothberg/Agent_learning && bash eval/tune_run08.sh"'
+```
 
 ```bash
 cd /Users/jonathanrothberg/Agent_learning

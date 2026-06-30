@@ -18,6 +18,7 @@ LOG="$OUT/overnight.log"
 
 echo "=== run_08 start $(date -u +%Y-%m-%dT%H:%M:%SZ) wait_for_monitor=${WAIT}s ===" | tee -a "$LOG"
 echo "goals=$GOALS model=$MODEL" | tee -a "$LOG"
+echo "visible_chromium=yes (no --headless — Chromium window opens for each game)" | tee -a "$LOG"
 
 ARGS=(--goals-file "$GOALS" --out-dir "$OUT" --model "$MODEL" --no-vlm-critique --resume --retries 2 --retry-delay 30)
 if [[ "$WAIT" != "0" && "$WAIT" != "0.0" ]]; then
