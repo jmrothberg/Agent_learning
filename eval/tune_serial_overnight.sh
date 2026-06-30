@@ -8,19 +8,19 @@
 #
 # Round 2 / GLM-5.2-MLX-4bit (recommended over mxfp4 for stability):
 #   cd /Users/jonathanrothberg/Agent_learning
-#   mkdir -p games/tune_serial10/run_05
+#   mkdir -p games/tune_serial10/run_08
 #   caffeinate -dims env \
-#     TUNE_OUT_DIR=games/tune_serial10/run_05 \
-#     TUNE_GOALS_FILE=eval/tune_serial10_round2_goals.txt \
+#     TUNE_OUT_DIR=games/tune_serial10/run_08 \
+#     TUNE_GOALS_FILE=eval/tune_run08_goals.txt \
 #     MLX_MODEL="$HOME/MLX_Models/GLM-5.2-MLX-4bit" \
 #     nohup bash eval/tune_serial_overnight.sh &
-#   tail -f games/tune_serial10/run_05/overnight.log
+#   tail -f games/tune_serial10/run_08/overnight.log
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
-OUT_DIR="${TUNE_OUT_DIR:-games/tune_serial10/run_05}"
-GOALS="${TUNE_GOALS_FILE:-eval/tune_serial10_round2_goals.txt}"
+OUT_DIR="${TUNE_OUT_DIR:-games/tune_serial10/run_08}"
+GOALS="${TUNE_GOALS_FILE:-eval/tune_run08_goals.txt}"
 MLX_MODEL="${MLX_MODEL:-$HOME/MLX_Models/GLM-5.2-MLX-4bit}"
 JOBS_TOTAL="$(grep -cve '^[[:space:]]*$' -e '^[[:space:]]*#' "$GOALS" || true)"
 LOG="$OUT_DIR/overnight.log"

@@ -9,6 +9,7 @@ Human onboarding → `README.md`. Commands/env → `DEV.md`. Harness traps → `
 
 | User intent | Command | Notes |
 |-------------|---------|-------|
+| **Run 10 games overnight (run_08 — tonight)** | See **run_08** section below | 9 fresh library games + Doom (3D nav validation). |
 | **Run all 11 games overnight (both batches, auto-chained)** | `bash eval/tune_run07_chain.sh` in Terminal + monitor below in Cursor | **One paste** — Batch B starts automatically when A finishes. No wake-up. |
 | **Run 11 games to improve the agent (run_07)** | Same as chain row above | A=GLM no VLM (6) → B=Qwen VLM on (5), watcher handoff between games. |
 | **Run unit tests** / **pytest** / **after a code change** | `.venv/bin/python -m pytest tests/ -q` | ~2158 tests, no GPU. Full map: `TEST.md`. |
@@ -63,12 +64,54 @@ Use `--out-dir` from `active_out_dir` in `agent_monitor.json` (`run_07_big` duri
 
 ---
 
+## run_08 — tonight (10 games, GLM, no VLM)
+
+Fresh library goals not in run_07, plus **Doom slot 1** to validate the 3D FPS navigation harness fix. Goals: `eval/tune_run08_goals.txt`.
+
+| Slot | Library | Modality |
+|------|---------|----------|
+| 1 | doom | 3D FPS (repeat — nav validation) |
+| 2 | minecraft | 3D voxel |
+| 3 | space-invaders | top-down shooter |
+| 4 | dig-dug | grid carve |
+| 5 | bomberman | grid bombs |
+| 6 | outrun | Mode-7 racing + video |
+| 7 | zelda | overworld RPG + video |
+| 8 | monkey-island | point-and-click + video |
+| 9 | torch-dungeon | lit maze / fog |
+| 10 | bullet-hell-boss | bullet patterns |
+
+**Terminal.app** (not Cursor — visible Chromium + MLX cold load):
+
+```bash
+cd /Users/jonathanrothberg/Agent_learning
+mkdir -p games/tune_serial10/run_08
+caffeinate -dims env \
+  TUNE_OUT_DIR=games/tune_serial10/run_08 \
+  TUNE_GOALS_FILE=eval/tune_run08_goals.txt \
+  MLX_MODEL="$HOME/MLX_Models/GLM-5.2-MLX-4bit" \
+  nohup bash eval/tune_serial_overnight.sh &
+tail -f games/tune_serial10/run_08/overnight.log
+```
+
+**Cursor watcher** (optional — status only; batch runs flat-out with no Enter pause):
+
+```bash
+.venv/bin/python eval/tune_overnight_monitor.py \
+  --out-dir games/tune_serial10/run_08 --jobs-total 10 --interval 60
+```
+
+Artifacts: `games/tune_serial10/run_08/` (`overnight.log`, `traces/`, `tune_checkpoint.json`).
+
+---
+
 ## Serial overnight batch (manual launch)
 
 **Primary workflow:** see **run_07 chain** above. For a custom dir/goals file:
 
 | File | Purpose |
 |------|---------|
+| **`eval/tune_run08_goals.txt`** | **run_08 tonight (10 games)** — see § run_08 above |
 | `eval/tune_run07_big.txt` | run_07 Batch A (6 games, GLM, no VLM) |
 | `eval/tune_run07_vlm.txt` | run_07 Batch B (5 games, Qwen + VLM, `--max-iters 2`) |
 | `eval/tune_serial10_goals.txt` | Full 12-game battery |
