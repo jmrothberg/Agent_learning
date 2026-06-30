@@ -22,6 +22,12 @@ def test_stream_instance_method_regression():
     assert not isinstance(inspect.getattr_static(GameAgent, "_stream"), classmethod)
 
 
+def test_wait_for_monitor_handoff_uses_out_root():
+    src = (REPO / "eval" / "tune_serial_loop.py").read_text(encoding="utf-8")
+    assert "out_dir.glob" not in src
+    assert "out_root.glob" in src
+
+
 def test_counts_as_pass_requires_best_or_iter_ok(tmp_path: Path):
     out = tmp_path / "01_game.html"
     out.write_text("x" * 600, encoding="utf-8")

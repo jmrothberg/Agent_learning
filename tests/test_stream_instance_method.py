@@ -24,3 +24,9 @@ def test_detect_vlm_is_instance_method_not_staticmethod():
         "_detect_vlm must be an instance method; @staticmethod makes "
         "role bind as self → 'str' object has no attribute 'get_backend' (run_07)"
     )
+
+
+def test_agent_stream_imports_png_dims():
+    import agent_stream
+
+    assert agent_stream._png_dims is not None

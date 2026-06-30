@@ -50,6 +50,8 @@ from agent_helpers import (
 
     _patch_set_bracket_break,
 
+    _png_dims,
+
     _strip_thinking,
 
     _truncation_reason,

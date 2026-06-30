@@ -497,9 +497,9 @@ async def main_async(args) -> int:
         )
 
         if i < len(jobs) and args.wait_for_monitor > 0:
-            trace_hits = sorted(out_dir.glob(f"traces/{label}__run_*.jsonl"))
+            trace_hits = sorted(out_root.glob(f"traces/{label}__run_*.jsonl"))
             write_pending(
-                out_dir,
+                out_root,
                 {
                     "label": label,
                     "goal_index": i,
@@ -519,11 +519,11 @@ async def main_async(args) -> int:
                 f"\nWaiting for watcher (inter_game_ready.json, timeout "
                 f"{args.wait_for_monitor:.0f}s) — triage + fix in Cursor, then:\n"
                 f"  .venv/bin/python eval/tune_inter_game_ready.py "
-                f"--out-dir {out_dir.relative_to(REPO_ROOT)} --note '…'\n",
+                f"--out-dir {out_root.relative_to(REPO_ROOT)} --note '…'\n",
                 flush=True,
             )
             released = wait_for_ready(
-                out_dir, timeout_s=args.wait_for_monitor, poll_s=5.0,
+                out_root, timeout_s=args.wait_for_monitor, poll_s=5.0,
             )
             if not released:
                 print(
