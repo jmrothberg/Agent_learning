@@ -11,10 +11,16 @@ import json
 import os
 import re
 from collections.abc import AsyncIterator
+from datetime import datetime, timezone
 from typing import Any
 
 from backend import Backend
-from memory import OpeningBookItem
+from memory import (
+    ANIMATION_AUDITS_FILENAME,
+    ASSET_AUDITS_FILENAME,
+    PLAYTESTS_FILENAME,
+    OpeningBookItem,
+)
 from tools import format_report_for_model
 from agent import AgentEvent
 
@@ -307,6 +313,8 @@ class CriticMixin:
                 plan_text=self._criteria or "",
 
                 asset_names=list(self._session_assets.keys()),
+
+                code=getattr(self, "_current_file", "") or "",
 
             )
 
@@ -1430,6 +1438,8 @@ class CriticMixin:
 
                 asset_names=list(self._session_assets.keys()),
 
+                code=getattr(self, "_current_file", "") or "",
+
             )
 
         except Exception as _vp_e:
@@ -2407,7 +2417,7 @@ class CriticMixin:
 
                     false_positive_count=0,
 
-                    last_verified_at=datetime.utcnow().isoformat() + "Z",
+                    last_verified_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
 
                 )
 
@@ -3434,6 +3444,8 @@ class CriticMixin:
                 plan_text=self._criteria or "",
 
                 asset_names=list(self._session_assets.keys()),
+
+                code=getattr(self, "_current_file", "") or "",
 
             )
 

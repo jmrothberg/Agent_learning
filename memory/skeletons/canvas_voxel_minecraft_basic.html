@@ -29,6 +29,12 @@
   let py = 1, vy = 0, isGrounded = true;
   const moveSpeed = 6, gravity = 20, jumpForce = 8;
   const cameraRotation = { x: 0, y: 0 };
+  const state = {
+    score: 0,
+    player: { x: 0, y: 1, z: 5, yaw: 0, pitch: 0 },
+  };
+  window.state = state;
+  window.gameState = state;
   
   // Pointer lock setup
   const wrap = document.getElementById("wrap");
@@ -38,6 +44,8 @@
     cameraRotation.y -= e.movementX * 0.002;
     cameraRotation.x -= e.movementY * 0.002;
     cameraRotation.x = Math.max(-Math.PI/2 + 0.05, Math.min(Math.PI/2 - 0.05, cameraRotation.x));
+    state.player.yaw = cameraRotation.y;
+    state.player.pitch = cameraRotation.x;
   });
 
   addEventListener("keydown", e => { if (e.code in keys) keys[e.code] = 1; });
@@ -123,6 +131,9 @@
     moveVector.y = 0;
     
     camera.position.add(moveVector);
+    state.player.x = camera.position.x;
+    state.player.y = camera.position.y - 1.6;
+    state.player.z = camera.position.z;
 
     // Gravity & Jump
     vy -= gravity * dt;
@@ -136,6 +147,7 @@
   }
 
   init();
+  window.game = { reset() { score = 0; py = 1; vy = 0; isGrounded = true; cameraRotation.x = 0; cameraRotation.y = 0; camera.position.set(0, py + 1.6, 5); state.player = { x: 0, y: 1, z: 5, yaw: 0, pitch: 0 }; } };
   requestAnimationFrame(frame);
 })();
 </script>

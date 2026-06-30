@@ -7,7 +7,7 @@ Three layers, fastest first. **Batch runs and “what command do I run?”** →
 Pure-function, deterministic: stub backend, mock browser, `tmp_path` memory. **Run after every harness/agent change.**
 
 ```bash
-.venv/bin/python -m pytest tests/ -q                  # full suite (~2048 tests, ~1–2 min)
+.venv/bin/python -m pytest tests/ -q                  # full suite (~2158 tests, ~1 min)
 .venv/bin/python -m pytest tests/test_patches.py -v   # one file
 .venv/bin/python -m pytest tests/test_patches.py::test_apply_smart_quote_match -v
 ```
@@ -35,7 +35,7 @@ Do **not** grep `inspect.getsource(agent)` or `inspect.getsource(GameAgent)` for
 | **Agent loop** | `test_iter_loop_guards.py`, `test_stall_recovery.py`, `test_exit_decision_turn.py`, `test_final_iter_test_guarantee.py`, `test_plan_retry.py` | Phase A/B/C, stall recovery, exit honesty, final untested iter |
 | **Compaction / context** | `test_compaction.py`, `test_token_aware_compaction.py`, `test_num_ctx.py` | Token-aware pressure; playbook survives feedback |
 | **Assets / media** | `test_assets.py`, `test_midsession_assets.py`, `test_asset_alignment.py`, `test_seed_phase_a_skip.py`, `test_mid_session_asset_deferral_and_runaway.py` | Alignment scan, rehydrate, style-rebrand deferral |
-| **Memory / prompts** | `test_retrieval.py`, `test_prompt_library*.py`, `test_opening_book_memory.py`, `test_open_domain_routing.py` | Genre-free retrieval; plan nudges data-driven |
+| **Memory / prompts** | `test_retrieval.py`, `test_prompt_library*.py`, `test_opening_book_memory.py`, `test_open_domain_routing.py`, `test_3d_navigation_conventions.py` | Genre-free retrieval; plan nudges data-driven; 3D/wireframe/modality skeletons |
 | **Trace / diagnostics** | `test_trace_diagnostics.py`, `test_patch_outcome_trace.py`, `test_failure_class_routing.py` | `failure_class`, `iter_summary`, ephemeral events |
 | **Backend / streaming** | `test_ollama_io.py`, `test_max_tokens_signal.py`, `test_repetition.py`, `test_deliberation_thresholds.py` | Sampling, repetition latch on code emission |
 
@@ -47,6 +47,7 @@ These pin fixes from specific production traces. Prefer **extending** an existin
 |------|----------------|
 | `test_2026_05_23_fixes.py` | Pac-Man + SOTA chess (short stream, fan-out, endpoint concurrency) |
 | `test_fix_round.py` | Multi-item harness round (compaction, gates, critic dedup) |
+| `test_3d_navigation_conventions.py` | 3D FPS / wireframe / mode7 nav skeletons, playbook suppression, manual-yaw advisory |
 | `test_doom_trace_fixes.py`, `test_doom_general_improvements.py`, `test_doom_feedback_misroute.py` | Doom / FPS traces |
 | `test_wolfenstein_stuck_loop_fixes.py` | Stuck loop / restart signature |
 | `test_qte_quality_hardening.py` | Dragon's Lair QTE wiring |

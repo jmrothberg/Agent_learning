@@ -725,6 +725,17 @@ _EXPLICIT_NEW_ART_PATTERNS: tuple[re.Pattern[str], ...] = (
         r"frame|frames)\b",
         re.I,
     ),
+    # Fieldrunners trace 20260626: "each tower its own unique head sprite"
+    # fuzzy-matched missile_head_n and wrongly skipped <assets> reprompt.
+    re.compile(
+        r"\b(?:each|every)\b.+\b(?:own|unique|distinct|different)\b",
+        re.I,
+    ),
+    re.compile(
+        r"\bunique\s+(?:\w+\s+){0,3}"
+        r"(?:sprite|sprites|head|asset|assets|art|graphic|graphics)\b",
+        re.I,
+    ),
 )
 
 

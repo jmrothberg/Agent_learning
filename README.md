@@ -67,7 +67,7 @@ prompts + harness + memory beats swapping models.** This repo is not a general r
 | **Assets** | none in-loop | none | **in-process** Z-Image-Turbo + Stable Audio; Wan2.2 cutscenes via subprocess |
 | **Memory** | repo files | conversation | hand-curated **`memory/`** opening book (JSONL — one line, no restart) |
 | **Local LLM** | cloud-first | local or cloud | **MLX in-process** (macOS default) or Ollama; cloud only with explicit API key + `/backend` |
-| **Regression** | CI you author | ad hoc | **pytest (~2K tests)** + stub eval banks + opt-in `eval/eval_seed_edits.py` (materialization with `browser=None`) |
+| **Regression** | CI you author | ad hoc | **pytest (~2158 tests)** + stub eval banks + opt-in `eval/eval_seed_edits.py` (materialization with `browser=None`) |
 
 **Real advantages vs general agents:** playable-game verification (input smoke test, per-action
 screenshots, sprite gates), and a full on-machine art/audio pipeline tied to the same loop.
@@ -183,7 +183,8 @@ Files that carry the weight:
 | `assets.py` / `sounds.py` | In-process Z-Image-Turbo / Stable Audio (lazy GPU load). `render_asset_paths_block` injects the `sprite()` loader. |
 | `videos.py` | `<videos>` cutscene clips via Wan2.2-TI2V-5B in a **subprocess** (`scripts/generate_video.py` — mlx-gen on Mac, diffusers on Linux). `render_video_paths_block` injects the `<video>`-overlay loader. |
 | `backend.py` | MLX (in-process `mlx_lm`/`mlx_vlm`) + Ollama backends; sampler; VLM image path. |
-| `prompts_v1.py` | Data-driven system prompt (`build_system_prompt` walks a `FormatSpec` list — don't hand-edit the rendered blob). Modality detectors (`_detect_art_intent`/`_detect_3d_intent`). |
+| `modality.py` | Genre-free rendering-shape detectors (3D, wireframe, FPS nav modality); shared by `prompts_v1.py` and `memory.py`. |
+| `prompts_v1.py` | Data-driven system prompt (`build_system_prompt` walks a `FormatSpec` list — don't hand-edit the rendered blob). |
 | `memory.py` | `GameMemory` (skeleton retrieval), `Playbook` (Jaccard bullet retrieval), opening-book outlines/recipes. |
 | `patches.py` | SEARCH/REPLACE engine: 4-tier match cascade (exact → normalized → whitespace → trimmed), `repair_reply`. |
 

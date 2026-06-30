@@ -88,6 +88,7 @@ bullet never reaches the prompt — broaden tags if a good bullet doesn’t fire
 - Weak models can’t author big mazes inline — give a seeded generator or skeleton to extend.
 - Never call cloud models without explicit user opt-in.
 - `<videos>` for a build must be generated in **that same build** — untestable otherwise.
+- **3D FPS navigation X-axis mismatch** (Doom trace `build-a-doom-game-first-person_20260630_164114`): `fx=+Math.sin(yaw)` with `camera.rotation.y=yaw` walks opposite the gun on world X; Up/Down feels fine because Z matches. Do **not** fix by flipping minimap `lineTo` alone or tweaking only strafe `rz`. Fix: `applyQuaternion(camera.quaternion)` (preferred) or `fx=-Math.sin(yaw)` everywhere (movement, fire, minimap). Playbook: `3d-navigation-modality-invariants`, `fps-camera-and-movement-vectors`. Wireframe Battlezone uses `+cos(z)` — never paste three.js `-cos` into wireframe code.
 
 ## Debug workflow
 
@@ -142,6 +143,7 @@ Per-run scores live in **`eval/OPERATIONS.md`** (run_06 snapshot). Mid-batch har
 - `ASSETS_LOADED_BUT_UNDRAWN` = sprites on disk but not drawn — **wiring** issue, not Z-Image failure. Playbook `draw-generated-sprites-not-boxes` is the right lever.
 - **Safari vs Chromium trap:** sprites visible in Safari but `ASSETS_LOADED_BUT_UNDRAWN` in Playwright often means the harness sampled `__drawImageEvents` before async `loadAssets()` finished (placeholder `fillRect` frames first). Check trace `asset_decode_settle.ready`; re-run `scripts/_smoke_asset_decode_settle.py` before chasing model wiring.
 - User feedback naming sprites **already in `_session_assets`** should get wire/draw coaching, not `ASSET GENERATION REQUIRED`.
+- **Per-entity unique art** ("each tower its own unique head sprite") must stay armed through vague retry nudges — do not fuzzy-match an existing `*_head_*` asset and clear `_unhonored_asset_request`.
 
 ## Read order
 

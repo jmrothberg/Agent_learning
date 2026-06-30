@@ -26,7 +26,7 @@ Legacy `CLAUDE.md` is a redirect stub → `DEV.md`.
 | Area | Paths |
 |------|--------|
 | Agent loop | `agent.py` + mixins (`agent_helpers.py`, `agent_feedback.py`, `agent_prompts.py`, `agent_compaction.py`, `agent_stream.py`, `agent_gates.py`, `agent_critic.py`, `agent_assets.py`, `agent_probes.py`, `agent_memory.py`), `chat.py`, `coder.py`, `patches.py`, `prompts_v1.py`, `memory.py` |
-| Verification | `tools.py`, `vlm_critic.py` |
+| Verification | `tools.py`, `vlm_critic.py`, `modality.py` (genre-free rendering-shape detectors) |
 | Assets / media | `assets.py`, `sounds.py`, `videos.py` |
 | Memory data | `memory/*.jsonl`, `memory/skeletons/` |
 | Eval | `eval/*.py`, `eval/*.jsonl`, `eval/fixtures/`, `eval/*.txt` goal lists |

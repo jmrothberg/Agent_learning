@@ -242,8 +242,10 @@ def test_undrawn_demotes_for_scene_indexed_offscreen_bg():
     """P2 (run_04 Dragon iter 1): a numeric scene index + undrawn mostly-bg_*
     on a behaviorally-green build demotes the undrawn finding to advisory."""
     src = inspect.getsource(tools_module.LiveBrowser.load_and_test)
+    # Single undrawn demotion block — window must span sceneIndex probe through
+    # the _scene_offscreen_bg gate (grew past 4800 chars as demotion paths added).
     start = src.index("ASSETS_LOADED_BUT_UNDRAWN")
-    window = src[start:start + 4800]
+    window = src[start:start + 5600]
     # Scene index probed from live state and folded into the demotion gate.
     assert "_scene_indexed" in window
     assert "_scene_offscreen_bg" in window

@@ -108,6 +108,7 @@ class MemoryRetrievalMixin:
                         goal=goal or "",
                         plan_text=self._criteria or "",
                         asset_names=list(self._session_assets.keys()),
+                        code=getattr(self, "_current_file", "") or "",
                     )
                 except Exception:
                     vp_recipe, vp_diag = None, {}

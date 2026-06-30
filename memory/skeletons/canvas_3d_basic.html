@@ -64,7 +64,7 @@
   dirLight.castShadow = true;
   scene.add(dirLight);
 
-  // Inputs
+  // Inputs — yaw-relative FPS movement (three.js Y-up convention)
   const keys = Object.create(null);
   const KEYMAP = { ArrowUp:"up", ArrowDown:"down", ArrowLeft:"left", ArrowRight:"right",
     KeyW:"up", KeyS:"down", KeyA:"left", KeyD:"right", Space:"act" };
@@ -74,13 +74,37 @@
     if (["up","down","left","right","act"].includes(k)) e.preventDefault();
   }, { passive:false });
   addEventListener("keyup", e => { const k = KEYMAP[e.code]; if (k) keys[k] = false; });
+  addEventListener("blur", () => { for (const k in keys) keys[k] = false; });
 
-  const state = { score:0, over:false };
+  const state = {
+    score: 0, over: false,
+    player: { x: 0, y: 5, z: 15, yaw: 0, pitch: 0 },
+  };
+  window.state = state;
+  window.gameState = state;
+
+  cvs.addEventListener("click", () => cvs.requestPointerLock());
+  addEventListener("mousemove", e => {
+    if (document.pointerLockElement !== cvs) return;
+    state.player.yaw -= e.movementX * 0.002;
+    state.player.pitch -= e.movementY * 0.002;
+    state.player.pitch = Math.max(-Math.PI / 2 + 0.01, Math.min(Math.PI / 2 - 0.01, state.player.pitch));
+  });
+
+  function syncCamera() {
+    const p = state.player;
+    camera.position.set(p.x, p.y, p.z);
+    camera.rotation.order = "YXZ";
+    camera.rotation.y = p.yaw;
+    camera.rotation.x = p.pitch;
+  }
+
   function reset() {
     state.score = 0; state.over = false;
+    state.player.x = 0; state.player.y = 5; state.player.z = 15;
+    state.player.yaw = 0; state.player.pitch = 0;
     modal.style.display = "none";
-    camera.position.set(0, 5, 15);
-    camera.lookAt(0, 0, 0);
+    syncCamera();
   }
   document.getElementById("restart").onclick = reset;
   reset();
@@ -88,10 +112,21 @@
   function update(dt) {
     if (state.over) return;
     const speed = 10;
-    if (keys.left)  camera.position.x -= speed*dt;
-    if (keys.right) camera.position.x += speed*dt;
-    if (keys.up)    camera.position.z -= speed*dt;
-    if (keys.down)  camera.position.z += speed*dt;
+    syncCamera();
+    const move = new THREE.Vector3();
+    if (keys.up) move.z -= 1;
+    if (keys.down) move.z += 1;
+    if (keys.left) move.x -= 1;
+    if (keys.right) move.x += 1;
+    if (move.lengthSq() > 0) {
+      move.normalize().multiplyScalar(speed * dt).applyQuaternion(camera.quaternion);
+      move.y = 0;
+      camera.position.add(move);
+      state.player.x = camera.position.x;
+      state.player.z = camera.position.z;
+      state.player.yaw = camera.rotation.y;
+    }
+    syncCamera();
   }
 
   function draw() {
@@ -118,6 +153,7 @@
     }
     requestAnimationFrame(frame);
   }
+  window.game = { reset };
   requestAnimationFrame(frame);
 })();
 </script>

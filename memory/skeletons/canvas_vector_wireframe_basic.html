@@ -53,6 +53,8 @@
     if (keys.ArrowRight) state.player.yaw += 1.8 * dt;
     if (keys.ArrowUp) { state.player.x += Math.sin(state.player.yaw) * 60 * dt; state.player.z += Math.cos(state.player.yaw) * 60 * dt; }
     if (keys.ArrowDown) { state.player.x -= Math.sin(state.player.yaw) * 60 * dt; state.player.z -= Math.cos(state.player.yaw) * 60 * dt; }
+    if (keys.KeyA) { state.player.x -= Math.cos(state.player.yaw) * 60 * dt; state.player.z += Math.sin(state.player.yaw) * 60 * dt; }
+    if (keys.KeyD) { state.player.x += Math.cos(state.player.yaw) * 60 * dt; state.player.z -= Math.sin(state.player.yaw) * 60 * dt; }
   }
 
   function draw() {

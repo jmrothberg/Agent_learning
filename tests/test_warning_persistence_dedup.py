@@ -23,6 +23,7 @@ from unittest.mock import MagicMock
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from agent import GameAgent  # noqa: E402
+from agent_feedback import _HARNESS_ADVISORY_SENTINEL  # noqa: E402
 
 
 def _make_agent(tmp_path) -> GameAgent:
@@ -218,3 +219,34 @@ def test_compaction_does_not_affect_soft_warnings_or_errors(tmp_path):
     # The fixture's soft_warning string equals `persistent`; assert
     # the FULL string still appears under its own section header.
     assert "x repeats forever" in out
+
+
+def test_format_report_with_pending_feedback_drops_harness_advisory(tmp_path):
+    """Queued user feedback + harness advisory warnings must not NameError.
+
+    Regression: agent_crash when _HARNESS_ADVISORY_SENTINEL was used in
+    _format_report_for_model without being imported (Doom extension run).
+    """
+    a = _make_agent(tmp_path)
+    a._pending_feedback = ["fix the strafe direction"]
+    fake_report = {
+        "ok": False,
+        "errors": [],
+        "warnings": [
+            _HARNESS_ADVISORY_SENTINEL + "\n3D NAVIGATION: movement basis mismatch",
+            "ASSET SANITY: frame near-identical to parent",
+        ],
+        "logs": [],
+        "title": "X",
+        "canvas": {"width": 800, "height": 600, "blank": False, "raf_ran": True},
+        "input_listeners": {"total": 1, "document": 0, "window": 1, "body": 0, "other": 0},
+        "input_test": {"ran": False, "any_change": None, "keys_tried": []},
+        "frozen_canvas": False,
+        "body_chars": 0,
+        "body_sample": "",
+        "probes": [],
+    }
+    out = a._format_report_for_model(fake_report)
+    assert isinstance(out, str)
+    assert "3D NAVIGATION" not in out
+    assert "ASSET SANITY" not in out

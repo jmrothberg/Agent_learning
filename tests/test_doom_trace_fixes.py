@@ -186,6 +186,7 @@ def test_fix_b_feedback_changes_retrieval_to_responsive_bullets(tmp_path):
         "previous-user-fix-is-locked",
         # Bullet whose content carries the exact reversed-arrows fix
         "fps-camera-and-movement-vectors",
+        "fps-minimap-radar-yaw-arrow",
     }
     overlap = responsive_bullets & fb_ids
     assert overlap, (

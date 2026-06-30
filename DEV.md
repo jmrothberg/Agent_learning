@@ -77,7 +77,9 @@ MLX upgrades: MiniMax-M3 (`minimax_m3.py` copy after mlx-lm upgrade), GLM-5.2
 
 Three phases: **A** plan → **B** build/iterate (patch → micro-probes → Chromium) → **C** self-critique.
 
-Drivers: `chat.py`, `coder.py`. Verification: `tools.py`. Patches: `patches.py`. Prompts: `prompts_v1.py`.
+Drivers: `chat.py`, `coder.py`. Verification: `tools.py`. Modality detectors (3D / wireframe / FPS
+nav): `modality.py` — shared by `prompts_v1.py` and `memory.py` (no import cycle). Patches:
+`patches.py`. Prompts: `prompts_v1.py`.
 
 ### Trace (LLM-only `.jsonl`)
 

@@ -30,7 +30,7 @@ prompt.
 | **PLAYER-STUCK** | You pressed a move key but the player did not move (often spawned inside a wall). |
 | **ACTION_DRAWN_NOT_SPRITED** | Attack key did something on screen, but by drawing shapes/lines — not by showing the kick/punch sprite. |
 | **CODE_DRAWN_OVER_SPRITE** | The right sprite showed, but the model also drew extra lines/flashes on top (fake “motion”). |
-| **ASSETS_LOADED_BUT_UNDRAWN** | PNG files exist on disk but the game never calls `drawImage` (wrong asset name in code). |
+| **ASSETS_LOADED_BUT_UNDRAWN** | PNG files exist on disk but the game never calls `drawImage` (wrong asset name in code). **Advisory only** when probes pass and undrawn stems look state-gated, pose-only, scene-indexed off-screen backgrounds, or decode-timing false positives — see `tools.py` demotion paths. |
 | **PROCEDURAL_REGRESSION_SUSPECTED** | Game declared lots of sprites but the screen is mostly colored rectangles. |
 | **ENTITY-NOT-RENDERED** | Game state says an enemy/player exists at x/y but nothing was drawn there. |
 | **STATIC-ACTION** | You pressed attack but the character stayed in one frozen pose while other things animated. |
@@ -167,6 +167,7 @@ Then **play the game again** and compare to what the log claimed.
 |------|------|
 | `tools.py` | Browser load, input test, gates |
 | `agent.py` + mixins | Loop orchestration — map in **`AGENTS.md` §1b** |
+| `modality.py` | Genre-free 3D / wireframe / FPS-nav shape detectors (planner + memory) |
 | `assets.py` | Sprite generation and loader injection |
 | `memory/*.jsonl` | Curated hints the model reads each run |
 | `prompts_v1.py` | System prompt templates |

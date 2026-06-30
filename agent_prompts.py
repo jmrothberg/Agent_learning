@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 
-from agent_feedback import _subsystem_hint
+from agent_feedback import _HARNESS_ADVISORY_SENTINEL, _subsystem_hint
 
 from agent_helpers import (
     _POLISH_TURN_CAP,
@@ -583,6 +583,7 @@ class PromptBuildingMixin:
 
 
 
+    @staticmethod
     def _identifier_occurrence_slice(
         html: str,
         identifiers: list[str] | tuple[str, ...],

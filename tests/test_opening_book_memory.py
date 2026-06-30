@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 import sys
 
@@ -232,3 +233,62 @@ def test_opening_book_asset_recipe_execution(tmp_path: Path) -> None:
 
     assert checks[0]["ok"] is False
     assert checks[0]["hard"] is True
+
+
+def test_opening_book_sidecars_architect_backend_no_name_error(tmp_path: Path) -> None:
+    """Regression: sidecar path used PLAYTESTS_FILENAME without importing it."""
+    from ollama_io import StreamResult
+
+    architect = MagicMock()
+    architect.stream_chat = AsyncMock(
+        return_value=StreamResult(
+            text=(
+                '{"id": "live-sidecar-probe", "content": "generic input delta probe", '
+                '"tags": ["input", "movement"], "recipe": {"type": "input_delta"}}'
+            ),
+            tokens=1,
+            duration_s=0.1,
+            stalled=False,
+        )
+    )
+    coder = MagicMock()
+
+    out = tmp_path / "game.html"
+    out.write_text("<html></html>")
+    agent = GameAgent(
+        backend=coder,
+        backend2=architect,
+        model2_role="architect",
+        out_path=out,
+        browser=MagicMock(),
+        max_iters=2,
+        memory_root=str(Path(__file__).resolve().parent.parent / "memory"),
+    )
+    agent._goal = "first person maze shooter"
+    agent._session_id = "sidecar-test-session"
+    traces: list[dict] = []
+    agent._trace = lambda obj: traces.append(obj)
+
+    async def _run() -> None:
+        report = {
+            "ok": True,
+            "errors": [],
+            "warnings": [],
+            "logs": [],
+            "title": "Test Game",
+            "canvas": {"width": 800, "height": 600, "blank": False, "raf_ran": True},
+            "input_listeners": {"total": 1, "document": 0, "window": 1, "body": 0, "other": 0},
+            "input_test": {"ran": False, "any_change": None, "keys_tried": []},
+            "frozen_canvas": False,
+            "body_chars": 0,
+            "body_sample": "",
+            "probes": [],
+        }
+        async for _ev in agent._run_opening_book_sidecars(report, iteration=1):
+            pass
+
+    asyncio.run(_run())
+
+    proposals = [t for t in traces if t.get("kind") == "opening_book_sidecar_proposal"]
+    assert proposals, f"expected sidecar proposal trace, got {traces!r}"
+    assert proposals[0]["filename"] == PLAYTESTS_FILENAME

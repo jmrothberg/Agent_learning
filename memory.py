@@ -2842,6 +2842,7 @@ def find_best_visual_playtest(
     goal: str = "",
     plan_text: str = "",
     asset_names: list[str] | None = None,
+    code: str = "",
     default_min_matches: int = 2,
 ) -> tuple[VisualPlaytestRecipe | None, dict]:
     """Pick the best-matching visual playtest recipe for the current
@@ -2914,6 +2915,10 @@ def find_best_visual_playtest(
             scored.append((float(score), min_matches, r, "overlap"))
 
     if not scored:
+        winner = _fps_playtest_override_from_code(recipes, code=code)
+        if winner is not None:
+            diag["fps_code_override"] = winner.id
+            return winner, diag
         return None, diag
     scored.sort(key=lambda t: (-t[0], t[2].id))  # highest score, then stable
     diag["top_candidates"] = [
@@ -2923,9 +2928,31 @@ def find_best_visual_playtest(
     winner = scored[0][2]
     winner = _disambiguate_beat_em_up_vs_facing(winner, ctx_toks, recipes)
     winner = _disambiguate_visual_mechanism(winner, ctx_toks, recipes)
+    winner = _disambiguate_fps_vs_grid_navigation(winner, ctx_toks, recipes, code=code)
     if winner.id != scored[0][2].id:
         diag["disambiguated"] = winner.id
     return winner, diag
+
+
+def _fps_playtest_override_from_code(
+    recipes: list[VisualPlaytestRecipe],
+    *,
+    code: str,
+) -> VisualPlaytestRecipe | None:
+    """When the working file is already a three.js FPS build, prefer that recipe."""
+    src = code or ""
+    fps_build = (
+        "THREE.PerspectiveCamera" in src
+        or "player.yaw" in src
+        or "pointerLock" in src
+        or "requestPointerLock" in src
+    )
+    if not fps_build:
+        return None
+    for r in recipes:
+        if r.id == "canvas-3d-first-person":
+            return r
+    return None
 
 
 def _disambiguate_visual_mechanism(
@@ -2964,6 +2991,33 @@ def _disambiguate_beat_em_up_vs_facing(
         for r in recipes:
             if r.id == "canvas-side-scroll-beat-em-up":
                 return r
+    return recipe
+
+
+def _disambiguate_fps_vs_grid_navigation(
+    recipe: VisualPlaytestRecipe | None,
+    ctx_toks: set[str],
+    recipes: list[VisualPlaytestRecipe],
+    *,
+    code: str = "",
+) -> VisualPlaytestRecipe | None:
+    """Continuation goals mentioning maze/map must not hijack an existing FPS build."""
+    if recipe is None:
+        return recipe
+    src = code or ""
+    fps_build = (
+        "THREE.PerspectiveCamera" in src
+        or "player.yaw" in src
+        or "pointerLock" in src
+        or "requestPointerLock" in src
+    )
+    if not fps_build:
+        return recipe
+    if recipe.id not in ("canvas-grid-navigation", "canvas-bullet-hell", "canvas-controllable-player"):
+        return recipe
+    for r in recipes:
+        if r.id == "canvas-3d-first-person":
+            return r
     return recipe
 
 
@@ -3963,6 +4017,7 @@ class GameMemory:
         goal: str = "",
         plan_text: str = "",
         asset_names: list[str] | None = None,
+        code: str = "",
         default_min_matches: int = 2,
     ) -> tuple[VisualPlaytestRecipe | None, dict]:
         """Pick the best-matching visual playtest recipe for the
@@ -3981,6 +4036,7 @@ class GameMemory:
             goal=goal,
             plan_text=plan_text,
             asset_names=asset_names,
+            code=code,
             default_min_matches=default_min_matches,
         )
 

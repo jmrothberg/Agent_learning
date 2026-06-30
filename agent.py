@@ -1569,6 +1569,41 @@ class GameAgent(
     _PLAN_STAGE_CHAR_BUDGET = 4500       # ~1100 tokens, broad context
     _CODE_STAGE_CHAR_BUDGET = 2400       # ~600 tokens, tight context
 
+    @staticmethod
+    def _playbook_suppressed_bullet_ids(
+        *,
+        goal: str = "",
+        active_skeleton: str | None,
+        code: str,
+    ) -> set[str]:
+        """Drop cross-modality navigation bullets that misfire on the active scaffold."""
+        from modality import detect_fps_navigation_modality
+
+        mod = detect_fps_navigation_modality(
+            goal=goal,
+            code=code or "",
+            active_skeleton=active_skeleton,
+        )
+        suppressed: set[str] = set()
+        if mod == "wireframe":
+            suppressed.update({
+                "fps-camera-and-movement-vectors",
+                "fps-minimap-radar-yaw-arrow",
+            })
+        elif mod == "threejs":
+            suppressed.update({
+                "wireframe-fps-movement-vectors",
+                "wireframe-minimap-radar-yaw-arrow",
+            })
+        elif mod == "mode7":
+            suppressed.update({
+                "fps-camera-and-movement-vectors",
+                "wireframe-fps-movement-vectors",
+                "fps-minimap-radar-yaw-arrow",
+                "wireframe-minimap-radar-yaw-arrow",
+            })
+        return suppressed
+
     def _retrieve_playbook_block(
         self,
         goal: str,
@@ -1599,38 +1634,35 @@ class GameAgent(
         if getattr(self._p, "PLAYBOOK_DISABLED", False):
             return ""
         try:
+            # Fix B feedback — resolve early so code-stage k can widen when
+            # user feedback is present (small models otherwise surface k=1
+            # only and miss scope/navigation bullets at rank #2).
+            recent_feedback = (
+                getattr(self, "_last_drained_feedback", None)
+                or getattr(self, "_pending_feedback", None)
+                or []
+            )
+            if not recent_feedback:
+                cont = getattr(self, "_continuation_feedback", None) or ""
+                if cont:
+                    recent_feedback = [cont]
+            feedback_text = " ".join(str(f) for f in recent_feedback[-2:])
             if stage == "plan":
                 k = self._playbook_top_k + self._PLAN_STAGE_TOP_K_BONUS
                 if self._model_class in ("mid", "small"):
                     k = 2
                 budget = self._PLAN_STAGE_CHAR_BUDGET
-                # Stop-Losing-To-OneShot todo #6 — mid-tier models lose
-                # focus when the playbook bloats the planning context;
-                # collapse the plan-stage budget to match code-stage so
-                # the goal stays prominent. The retrieval still fetches
-                # k+bonus bullets (more diversity) — only the rendered
-                # char budget is tightened.
                 if self._model_class in ("mid", "small"):
                     budget = self._CODE_STAGE_CHAR_BUDGET
-                # Plan stage advertises breadth: top-3 full + the rest as
-                # ID-only index. Model emits <lookup_bullet> if it wants
-                # the body of any indexed entry. Pi-mono "skills" pattern.
                 render_mode = "hybrid"
                 full_top_n_val = 1 if self._model_class in ("mid", "small") else 3
             else:
                 k = min(self._playbook_top_k, self._CODE_STAGE_TOP_K)
                 if self._model_class in ("mid", "small"):
-                    k = 1
+                    k = 2 if feedback_text else 1
                 budget = self._CODE_STAGE_CHAR_BUDGET
-                # Code stage already narrowly retrieves; full bodies on all.
                 render_mode = "full"
                 full_top_n_val = 3
-            # Modality-token expansion (added 2026-05-21): when the goal
-            # mentions a known modality (board/DOM/3D/etc), append those
-            # keywords to the playbook query so the modality-tagged
-            # bullets retrieve above the 0.05 Jaccard noise floor. The
-            # detectors are the same ones the skeleton retrieval uses;
-            # importing here keeps the helper public-API stable.
             mod_toks: list[str] = []
             try:
                 from memory import (
@@ -1643,39 +1675,6 @@ class GameAgent(
                 )
             except Exception:
                 mod_toks = []
-            # Fix B (2026-05-25): include the most recent user feedback
-            # in the retrieval query so scope-discipline bullets
-            # (scope-locked-by-user-language, patch-budget-when-scope-
-            # locked, vlm-critic-can-mislead-on-orientation, etc.) fire
-            # when the user types scope-lock language like "JUST do X"
-            # or "do not touch other code". Without this, those bullets
-            # only retrieve when the GOAL itself contains scope vocab —
-            # which it never does, so the bullets sit unused across the
-            # whole session. The doom trace 2026-05-25 made this gap
-            # visible: user typed "JUST change the direction the player
-            # moves with the arrow keys they are REVERSED" four times
-            # in a row, and the scope-locked / patch-budget bullets
-            # never surfaced because retrieval keyed only on the goal.
-            #
-            # Source of feedback text: prefer `_last_drained_feedback`
-            # (the feedback that just landed in this turn's user-turn
-            # message) over `_pending_feedback` (queued for next turn).
-            # On a fix-prompt build the feedback for THIS turn has
-            # already been drained, so `_last_drained_feedback` is the
-            # right scope. Fall back to `_pending_feedback` when the
-            # call site runs before drain.
-            recent_feedback = (
-                getattr(self, "_last_drained_feedback", None)
-                or getattr(self, "_pending_feedback", None)
-                or []
-            )
-            feedback_text = " ".join(str(f) for f in recent_feedback[-2:])
-            # For small/mid model classes the playbook surfaces k=1 hit;
-            # the goal text dominates the query by sheer length, so any
-            # bullet matched only by feedback words gets buried. We
-            # repeat the feedback 3x so its tokens compete on count
-            # with the longer goal. Larger model classes already get
-            # k=3-6 retrievals and don't need the boost as much.
             if feedback_text and self._model_class in ("mid", "small"):
                 feedback_weighted = " ".join([feedback_text] * 3)
             else:
@@ -1685,6 +1684,22 @@ class GameAgent(
                 query, code=code, k=k, stage=stage,
                 modality_tokens=mod_toks,
             )
+            suppressed = self._playbook_suppressed_bullet_ids(
+                goal=goal,
+                active_skeleton=getattr(self, "_active_skeleton", None),
+                code=code or getattr(self, "_current_file", "") or "",
+            )
+            if suppressed and hits:
+                hits = [h for h in hits if h.bullet.id not in suppressed]
+            # Cross-modality suppression can drop the only k=1 hit (small
+            # models) — widen retrieval and take the next in-modality bullets.
+            if suppressed and not hits:
+                wide_k = max(k * 6, 8)
+                hits = self._playbook.retrieve(
+                    query, code=code, k=wide_k, stage=stage,
+                    modality_tokens=mod_toks,
+                )
+                hits = [h for h in hits if h.bullet.id not in suppressed][:k]
             if hits:
                 ids = [h.bullet.id for h in hits]
                 self._trace({
@@ -4926,6 +4941,11 @@ class GameAgent(
                         "renders but never PLAYS would pass them all) — "
                         "re-prompting the plan once for an input→delta probe.",
                     ))
+                    from prompts_v1 import input_moves_player_probe_expr
+                    _dyn_probe = input_moves_player_probe_expr(
+                        goal=self._goal or "",
+                        code=getattr(self, "_current_file", "") or "",
+                    )
                     self._messages.append({
                         "role": "user",
                         "content": (
@@ -4939,14 +4959,7 @@ class GameAgent(
                             "least one DYNAMIC probe that simulates an input "
                             "and asserts a state delta. Copy this shape, "
                             "swapping in your real control key and state path:\n"
-                            "  {\"name\":\"input_moves_player\",\"expr\":\""
-                            "(async()=>{if(!window.state||!state.player)return "
-                            "false;const x0=state.player.x;window.dispatchEvent("
-                            "new KeyboardEvent('keydown',{code:'ArrowRight',"
-                            "bubbles:true}));await new Promise(r=>setTimeout(r,"
-                            "250));window.dispatchEvent(new KeyboardEvent("
-                            "'keyup',{code:'ArrowRight',bubbles:true}));return "
-                            "state.player.x!==x0;})()\"}\n"
+                            f'  {{"name":"input_moves_player","expr":"{_dyn_probe}"}}\n'
                             "The exposed state global it reads (window.state, "
                             "or whatever you expose) MUST exist for the probe "
                             "to work. Do NOT repeat any word or phrase more "

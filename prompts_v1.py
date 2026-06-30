@@ -857,6 +857,55 @@ _ART_KEYWORDS = frozenset({
 from modality import THREE_D_KEYWORDS as _3D_KEYWORDS
 from modality import detect_3d_intent as _detect_3d_intent
 
+# Modality-aware dynamic probe for input_moves_player (3D navigation fix 2026-06-30).
+_INPUT_MOVES_PLAYER_DEFAULT = (
+    "(async()=>{if(!window.state||!state.player)return false;const x0=state.player.x;"
+    "window.dispatchEvent(new KeyboardEvent('keydown',{code:'ArrowRight',bubbles:true}));"
+    "await new Promise(r=>setTimeout(r,250));"
+    "window.dispatchEvent(new KeyboardEvent('keyup',{code:'ArrowRight',bubbles:true}));"
+    "return state.player.x!==x0;})()"
+)
+_INPUT_MOVES_PLAYER_THREEJS_FPS = (
+    "(async()=>{if(!window.state||!state.player)return false;const p=state.player;"
+    "const x0=p.x,z0=p.z,y0=(p.yaw!==undefined?p.yaw:p.angle);"
+    "window.dispatchEvent(new KeyboardEvent('keydown',{code:'ArrowUp',bubbles:true}));"
+    "await new Promise(r=>setTimeout(r,250));"
+    "window.dispatchEvent(new KeyboardEvent('keyup',{code:'ArrowUp',bubbles:true}));"
+    "return p.x!==x0||p.z!==z0||(p.yaw!==undefined&&p.yaw!==y0);})()"
+)
+_INPUT_MOVES_PLAYER_WIREFRAME = (
+    "(async()=>{if(!window.state||!state.player)return false;const p=state.player;"
+    "const y0=(p.yaw!==undefined?p.yaw:p.angle);"
+    "window.dispatchEvent(new KeyboardEvent('keydown',{code:'ArrowLeft',bubbles:true}));"
+    "await new Promise(r=>setTimeout(r,250));"
+    "window.dispatchEvent(new KeyboardEvent('keyup',{code:'ArrowLeft',bubbles:true}));"
+    "const y1=(p.yaw!==undefined?p.yaw:p.angle);"
+    "return typeof y0==='number'&&typeof y1==='number'&&y1!==y0;})()"
+)
+_INPUT_MOVES_PLAYER_MODE7 = (
+    "(async()=>{const s=window.state;if(!s)return false;"
+    "const p=s.player||s;const s0=(p.speed!==undefined?p.speed:p.angle);"
+    "window.dispatchEvent(new KeyboardEvent('keydown',{code:'ArrowUp',bubbles:true}));"
+    "await new Promise(r=>setTimeout(r,250));"
+    "window.dispatchEvent(new KeyboardEvent('keyup',{code:'ArrowUp',bubbles:true}));"
+    "const s1=(p.speed!==undefined?p.speed:p.angle);"
+    "return s1!==s0||p.x!==undefined;})()"
+)
+
+
+def input_moves_player_probe_expr(*, goal: str = "", code: str = "") -> str:
+    """Pick a dynamic movement probe matching the rendering modality."""
+    from modality import detect_fps_navigation_modality
+
+    mod = detect_fps_navigation_modality(goal=goal, code=code)
+    if mod == "wireframe":
+        return _INPUT_MOVES_PLAYER_WIREFRAME
+    if mod == "threejs":
+        return _INPUT_MOVES_PLAYER_THREEJS_FPS
+    if mod == "mode7":
+        return _INPUT_MOVES_PLAYER_MODE7
+    return _INPUT_MOVES_PLAYER_DEFAULT
+
 
 # Modality keywords that signal the goal needs generated AUDIO. Genre-
 # free per the project rule — these all describe rendering shape (sound
@@ -1459,9 +1508,12 @@ def plan_instruction(
         local_crisp_nudge = load_plan_nudge("local-plan-crisp")
         _record_nudge("local-plan-crisp")
 
+    movement_probe = input_moves_player_probe_expr(goal=goal)
+    plan_core = PLAN_INSTRUCTION.replace("{input_moves_player_probe}", movement_probe)
+
     body = (
         local_crisp_nudge
-        + PLAN_INSTRUCTION + art_nudge + illustrated_sprite_nudge + threed_nudge + wireframe_nudge
+        + plan_core + art_nudge + illustrated_sprite_nudge + threed_nudge + wireframe_nudge
         + beat_em_up_nudge + audio_nudge
         + video_nudge
         + qte_nudge
@@ -1537,7 +1589,7 @@ NOT enough: a game that renders a static HUD and never responds to a
 key passes every structural probe. You MUST include at least 1 to 2
 dynamic probes. Copy this template and swap in your real control key
 and state path:
-  - {"name":"input_moves_player", "expr":"(async()=>{if(!window.state||!state.player)return false;const x0=state.player.x;window.dispatchEvent(new KeyboardEvent('keydown',{code:'ArrowRight',bubbles:true}));await new Promise(r=>setTimeout(r,250));window.dispatchEvent(new KeyboardEvent('keyup',{code:'ArrowRight',bubbles:true}));return state.player.x!==x0;})()"}
+  - {"name":"input_moves_player", "expr":"{input_moves_player_probe}"}
   - {"name":"score_changes",      "expr":"(async()=>{const s0=state.score;await new Promise(r=>setTimeout(r,1500));return state.score!==s0||state.frame>30;})()"}
 A dynamic probe records a value, dispatches the input (KeyboardEvent
 keydown/keyup with the e.code your game listens for, or calls an

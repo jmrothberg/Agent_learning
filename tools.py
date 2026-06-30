@@ -259,6 +259,19 @@ def _is_webgl_or_three_game(html_text: str) -> bool:
     )
 
 
+def _threejs_manual_navigation_basis_risk(html_text: str) -> bool:
+    """True when three.js FPS likely uses manual sin/cos that mismatches camera."""
+    if not _is_webgl_or_three_game(html_text):
+        return False
+    if "applyquaternion" in html_text.lower() or "getworlddirection" in html_text.lower():
+        return False
+    has_camera_yaw = "camera.rotation.y" in html_text or "camera.rotation.set" in html_text
+    has_manual_sin = "math.sin(yaw)" in html_text.lower() or "math.sin(state.player.yaw)" in html_text.lower()
+    # Old wrong pattern: fx = +Math.sin(yaw) with three.js camera
+    has_plus_sin = "fx = math.sin" in html_text.lower() or "fx=math.sin" in html_text.lower()
+    return bool(has_camera_yaw and has_manual_sin and has_plus_sin)
+
+
 # Keys that should MOVE a controllable player. If one of these registers input
 # (a direction/flag changes) but no position leaf ever changes, the player is
 # stuck. Attack/ability keys are deliberately excluded.
@@ -4265,6 +4278,13 @@ class LiveBrowser:
                     f"didn't change anything either — the game is not "
                     f"rendering / not interactive."
                 )
+        if _threejs_manual_navigation_basis_risk(_src_html):
+            report.setdefault("warnings", []).append(
+                "3D NAVIGATION (advisory): manual fx=+Math.sin(yaw) movement "
+                "with camera.rotation.y may not match three.js camera forward "
+                "on world X — use applyQuaternion(camera.quaternion) or "
+                "fx=-Math.sin(yaw); see playbook 3d-navigation-modality-invariants."
+            )
         _turn_based_board_idle = False
         try:
             _turn_based_board_idle = bool(

@@ -62,3 +62,68 @@ def detect_3d_intent(goal: str) -> list[str]:
             seen.add(jh)
             out.append(jh)
     return out
+
+
+# Wireframe-vector goal hooks — mirrors memory._detect_wireframe_vector_intent
+# without importing memory (no cycle).
+_WIREFRAME_VECTOR_PHRASES: frozenset[str] = frozenset({
+    "vector line", "line art",
+})
+
+
+def detect_wireframe_navigation_intent(goal: str) -> bool:
+    """True when goal describes 2D canvas wireframe FPS, not three.js WebGL."""
+    if not goal:
+        return False
+    gl = goal.lower()
+    if "wireframe" in gl:
+        return True
+    words = re.findall(r"[a-zA-Z]+", gl)
+    for i in range(len(words) - 1):
+        j = words[i] + " " + words[i + 1]
+        if j in _WIREFRAME_VECTOR_PHRASES:
+            return True
+    if "line art" in gl and "vector" in gl:
+        return True
+    if any(w in gl for w in ("wireframe", "battlezone", "trench")) and "tank" in gl:
+        return True
+    return False
+
+
+def detect_fps_navigation_modality(
+    *,
+    goal: str = "",
+    code: str = "",
+    active_skeleton: str | None = None,
+) -> str:
+    """Classify first-person navigation basis for probes and playbook gating.
+
+    Returns one of: ``threejs``, ``wireframe``, ``mode7``, or ``""``.
+    """
+    src = code or ""
+    gl = (goal or "").lower()
+    skel = (active_skeleton or "").lower()
+
+    if (
+        "strokeSeg" in src
+        or "vector_wireframe" in skel
+        or "wireframe" in skel
+        or detect_wireframe_navigation_intent(goal)
+    ):
+        return "wireframe"
+
+    if "mode7" in skel or "mode7" in src.lower() or "mode-7" in gl or "mode7" in gl:
+        return "mode7"
+
+    if (
+        "canvas_3d" in skel
+        or "voxel" in skel
+        or "THREE." in src
+        or "PerspectiveCamera" in src
+    ):
+        return "threejs"
+
+    if detect_3d_intent(goal) and not detect_wireframe_navigation_intent(goal):
+        return "threejs"
+
+    return ""

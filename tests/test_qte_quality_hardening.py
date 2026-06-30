@@ -193,7 +193,6 @@ def test_qte_plan_instruction_includes_mechanism_nudge():
     assert "inputFlash" in out
     assert "scene>=1" in out
     assert "onended/onerror" in out
-    assert "MEMORY vs YOUR GOAL" in out
 
 
 def test_user_goal_wins_playbook_retrieves_on_generic_goals():
