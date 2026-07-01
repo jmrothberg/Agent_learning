@@ -136,6 +136,22 @@ def test_controllable_player_recipe_has_bounds_probe() -> None:
     assert "auto_player_within_canvas_bounds" in names
 
 
+def test_fps_recipe_has_map_and_enemy_probes() -> None:
+    recipes = _load_seeded_recipes()
+    fps = [r for r in recipes if r.id == "canvas-3d-first-person"][0]
+    names = {ap["name"] for ap in (fps.recipe.get("auto_probes") or [])}
+    assert "auto_fp_map_has_structure" in names
+    assert "auto_fp_enemies_present" in names
+
+
+def test_voxel_recipe_has_hotbar_probe() -> None:
+    recipes = _load_seeded_recipes()
+    voxel = [r for r in recipes if r.id == "canvas-voxel-sandbox"]
+    assert voxel, "canvas-voxel-sandbox missing from visual_playtests.jsonl"
+    names = {ap["name"] for ap in (voxel[0].recipe.get("auto_probes") or [])}
+    assert "auto_voxel_hotbar_has_multiple_types" in names
+
+
 def test_auto_probes_are_conservative_default_true() -> None:
     """Every auto-probe expression must contain at least one
     `return true` so it doesn't fail games that simply don't expose

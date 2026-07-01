@@ -121,6 +121,7 @@ _RECIPE_TO_OUTLINE: dict[str, str] = {
     "canvas-side-scroll-platformer": "outline-side-scroll-platformer",
     "canvas-side-scroll-beat-em-up": "outline-side-scroll-beat-em-up",
     "canvas-3d-first-person": "outline-3d-first-person",
+    "canvas-voxel-sandbox": "outline-voxel-sandbox",
     "canvas-top-down-action": "outline-top-down-action",
     "canvas-board-game": "outline-turn-based-board",
     "canvas-puzzle-grid": "outline-puzzle-grid",
@@ -162,6 +163,16 @@ _BEAT_EM_UP_SIGNALS: frozenset[str] = frozenset({
 _DUEL_FIGHTER_SIGNALS: frozenset[str] = frozenset({
     "1v1", "versus", "duel", "twoplayer", "two-player", "pvp", "opponent",
     "fireball", "round-end", "round", "ko",
+})
+# Voxel sandbox vs FPS shooter disambiguation (minecraft trace run_08).
+_VOXEL_SANDBOX_SIGNALS: frozenset[str] = frozenset({
+    "voxel", "voxels", "minecraft", "sandbox", "block", "blocks",
+    "place", "break", "hotbar", "chunk", "chunks", "terrain",
+    "cube", "cubes", "mine", "mining", "build",
+})
+_FPS_SHOOTER_SIGNALS: frozenset[str] = frozenset({
+    "doom", "wolfenstein", "quake", "shooter", "weapon", "gun",
+    "monster", "monsters", "ammo", "crosshair", "raycaster",
 })
 _STACKING_SIGNALS: frozenset[str] = frozenset({
     "stacking", "crane", "topple", "jenga", "stacker", "wobble", "teeter",
@@ -2929,6 +2940,7 @@ def find_best_visual_playtest(
     winner = _disambiguate_beat_em_up_vs_facing(winner, ctx_toks, recipes)
     winner = _disambiguate_visual_mechanism(winner, ctx_toks, recipes)
     winner = _disambiguate_fps_vs_grid_navigation(winner, ctx_toks, recipes, code=code)
+    winner = _disambiguate_fps_vs_voxel_sandbox(winner, ctx_toks, recipes)
     if winner.id != scored[0][2].id:
         diag["disambiguated"] = winner.id
     return winner, diag
@@ -2991,6 +3003,29 @@ def _disambiguate_beat_em_up_vs_facing(
         for r in recipes:
             if r.id == "canvas-side-scroll-beat-em-up":
                 return r
+    return recipe
+
+
+def _disambiguate_fps_vs_voxel_sandbox(
+    recipe: VisualPlaytestRecipe | None,
+    ctx_toks: set[str],
+    recipes: list[VisualPlaytestRecipe],
+) -> VisualPlaytestRecipe | None:
+    """Place/break voxel goals must not inherit FPS-only auto_probes."""
+    if recipe is None:
+        return recipe
+    has_voxel = bool(_VOXEL_SANDBOX_SIGNALS & ctx_toks)
+    if recipe.id == "canvas-3d-first-person" and has_voxel:
+        for r in recipes:
+            if r.id == "canvas-voxel-sandbox":
+                return r
+    if recipe.id == "canvas-voxel-sandbox" and not has_voxel:
+        has_fps = bool(_FPS_SHOOTER_SIGNALS & ctx_toks)
+        has_place_break = bool({"place", "break", "hotbar", "sandbox"} & ctx_toks)
+        if has_fps and not has_place_break:
+            for r in recipes:
+                if r.id == "canvas-3d-first-person":
+                    return r
     return recipe
 
 
@@ -4104,11 +4139,27 @@ class GameMemory:
         # vector games like Asteroids share "vector line art" phrasing but must
         # keep outline-top-down-action.
         needs_wireframe = "wireframe" in (goal or "").lower()
+        winner: OpeningBookHit | None = None
         for hit in hits:
             if hit.item.id == "outline-vector-wireframe" and not needs_wireframe:
                 continue
-            return hit
-        return hits[0]
+            winner = hit
+            break
+        if winner is None:
+            winner = hits[0]
+        ctx_toks = set(_visual_match_tokens(goal or ""))
+        if winner.item.id == "outline-3d-first-person" and (_VOXEL_SANDBOX_SIGNALS & ctx_toks):
+            voxel_hit = self._outline_item_by_id("outline-voxel-sandbox")
+            if voxel_hit is not None:
+                return voxel_hit
+        if winner.item.id == "outline-voxel-sandbox" and not (_VOXEL_SANDBOX_SIGNALS & ctx_toks):
+            has_fps = bool(_FPS_SHOOTER_SIGNALS & ctx_toks)
+            has_place_break = bool({"place", "break", "hotbar", "sandbox"} & ctx_toks)
+            if has_fps and not has_place_break:
+                fps_hit = self._outline_item_by_id("outline-3d-first-person")
+                if fps_hit is not None:
+                    return fps_hit
+        return winner
 
     def append_live_opening_book_item(self, filename: str, item: OpeningBookItem) -> bool:
         """Append a verified candidate to live memory only."""

@@ -25,9 +25,11 @@ def test_small_model_prompt_under_six_kilobytes():
     2026-06-12: bumped 6_300 to 6_600 to admit the minimal
     TODOS_FORMAT_SMALL spec — todo-driven CURRENT TASK turns require the
     small class to know the <todos> tag, and one-objective-per-turn is
-    the biggest reliability lever for this class."""
+    the biggest reliability lever for this class.
+    2026-07-01: bumped 6_600 to 6_900 for window._assetsReady hard-rule
+    (harness asset-settle contract; run_08 M4/P1)."""
     p = build_system_prompt("snake game", model_class="small")
-    assert len(p) <= 6_600, f"small-model prompt {len(p)} chars exceeds 6.6 KB target"
+    assert len(p) <= 6_900, f"small-model prompt {len(p)} chars exceeds 6.9 KB target"
 
 
 def test_small_model_prompt_drops_optional_tags():

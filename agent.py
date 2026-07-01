@@ -4997,6 +4997,32 @@ class GameAgent(
                             "kind": "probe_quality_retry_no_improvement",
                             "got_probes": len(_np or []),
                         })
+                        # When the corrective re-stream still leaves every probe
+                        # structural-only, inject one harness-authored dynamic
+                        # probe so static-HUD plans cannot ship with ratio 0.0.
+                        _inject_name = "input_moves_player"
+                        _existing_names = {
+                            str(p.get("name") or "") for p in (probes or [])
+                        }
+                        if _inject_name not in _existing_names:
+                            from prompts_v1 import input_moves_player_probe_expr
+                            _dyn_expr = input_moves_player_probe_expr(
+                                goal=self._goal or "",
+                                code=getattr(self, "_current_file", "") or "",
+                            )
+                            probes = list(probes or [])
+                            probes.append({
+                                "name": _inject_name,
+                                "expr": _dyn_expr,
+                                "harness_injected": True,
+                            })
+                            self._trace({
+                                "kind": "probe_quality_harness_inject",
+                                "name": _inject_name,
+                                "ratio_after": (
+                                    self._classify_probes_dynamic(probes)["ratio"]
+                                ),
+                            })
 
                 if probes:
                     self._probes = probes

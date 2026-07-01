@@ -127,12 +127,14 @@ def test_plan_with_dynamic_probe_does_not_retry(tmp_path):
 
 def test_probe_quality_retry_keeps_original_when_no_improvement(tmp_path):
     a = _agent(tmp_path)
-    # Retry STILL all-structural -> not adopted; original probes kept,
-    # flag set so it fires only once.
+    # Retry STILL all-structural -> not adopted; original probes kept plus
+    # one harness-injected input_moves_player dynamic probe.
     events = _drive(a, [_STRUCTURAL_ONLY, _STRUCTURAL_ONLY])
     assert a._probe_quality_retry_done is True
-    assert GameAgent._classify_probes_dynamic(a._probes)["ratio"] == 0.0
-    # Original structural probes retained (3 of them).
-    assert len(a._probes) == 3
+    assert GameAgent._classify_probes_dynamic(a._probes)["ratio"] > 0.0
+    names = [p.get("name") for p in a._probes]
+    assert "input_moves_player" in names
+    # Original structural probes retained (3 of them) + 1 inject = 4.
+    assert len(a._probes) == 4
     # Only the first plan was yielded; the non-improving retry was not.
     assert [e.kind for e in events].count("plan") == 1

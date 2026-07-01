@@ -101,3 +101,106 @@ def test_outline_grid_navigation_probes_are_behavioral() -> None:
 def test_playbook_grid_chase_bullet_exists() -> None:
     pb = Playbook(base_root=str(_REPO))
     assert any(b.id == "grid-chase-vulnerability-timer" for b in pb.load_all())
+
+
+def _probe_expr(name: str) -> str:
+    recipe = _load_grid_recipe()
+    for ap in recipe.recipe.get("auto_probes") or []:
+        if ap.get("name") == name:
+            return ap["expr"]
+    raise AssertionError(f"missing auto_probe {name!r}")
+
+
+def _eval_probe(expr: str, state: dict) -> bool:
+    """Evaluate a harness auto_probe IIFE against a synthetic window.state."""
+    import json
+    import subprocess
+
+    payload = json.dumps(state)
+    js = (
+        "global.window={state:" + payload + "};\n"
+        "const r=" + expr + ";\n"
+        "process.stdout.write(r ? 'true' : 'false');"
+    )
+    out = subprocess.run(
+        ["node", "-e", js],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=5,
+    )
+    return out.stdout.strip() == "true"
+
+
+def test_bomber_shaped_grid_passes_chase_only_probes() -> None:
+    """Paraphrase bomb/destructible grid — enemies[] with dir, no pellet chase."""
+    vuln = _probe_expr("auto_vulnerability_mechanism_exposed")
+    coll = _probe_expr("auto_collectibles_counter")
+    bomber_state = {
+        "maze": [[0, 1], [0, 0]],
+        "enemies": [{"tx": 5, "ty": 3, "dir": "down", "moving": True, "alive": True}],
+        "score": 0,
+        "lives": 3,
+    }
+    assert _eval_probe(vuln, bomber_state) is True
+    assert _eval_probe(coll, bomber_state) is True
+
+
+def test_pacman_shaped_grid_still_asserts_vulnerability() -> None:
+    """Chase/pellet grid with ghosts[] but no scared mode should fail vulnerability probe."""
+    vuln = _probe_expr("auto_vulnerability_mechanism_exposed")
+    coll = _probe_expr("auto_collectibles_counter")
+    chase_state = {
+        "ghosts": [{"tx": 1, "ty": 1, "mode": "walk"}],
+        "dotsLeft": 42,
+    }
+    assert _eval_probe(vuln, chase_state) is False
+    assert _eval_probe(coll, chase_state) is True
+
+
+def test_pacman_shaped_grid_passes_when_vulnerability_exposed() -> None:
+    vuln = _probe_expr("auto_vulnerability_mechanism_exposed")
+    assert _eval_probe(
+        vuln,
+        {"ghosts": [{"mode": "scared"}], "vulnerableTimer": 120, "dotsLeft": 10},
+    ) is True
+
+
+def test_dig_tunnel_grid_passes_solid_tile_probe_when_no_dig_context() -> None:
+    """Pac-Man / bomber grids without dig mechanics must not fail rock probe."""
+    expr = _probe_expr("auto_solid_tile_blocks_move")
+    assert _eval_probe(expr, {"maze": [[0, 1], [0, 0]], "player": {"x": 1, "y": 1}}) is True
+
+
+def test_dig_tunnel_grid_fails_when_can_move_into_rock() -> None:
+    expr = _probe_expr("auto_solid_tile_blocks_move")
+    dig_state = {
+        "digger": {"x": 1, "y": 1},
+        "map": [[0, 2], [0, 0]],
+    }
+    js = (
+        "global.window={state:" + json.dumps(dig_state) + ","
+        "game:{canMoveTo:(x,y)=>true}};\n"
+        "const r=" + expr + ";\n"
+        "process.stdout.write(r ? 'true' : 'false');"
+    )
+    import subprocess
+    out = subprocess.run(["node", "-e", js], capture_output=True, text=True, check=True, timeout=5)
+    assert out.stdout.strip() == "false"
+
+
+def test_dig_tunnel_grid_passes_when_rock_blocks_move() -> None:
+    expr = _probe_expr("auto_solid_tile_blocks_move")
+    dig_state = {
+        "digger": {"x": 1, "y": 1},
+        "map": [[0, 2], [0, 0]],
+    }
+    js = (
+        "global.window={state:" + json.dumps(dig_state) + ","
+        "game:{canMoveTo:(x,y)=>false}};\n"
+        "const r=" + expr + ";\n"
+        "process.stdout.write(r ? 'true' : 'false');"
+    )
+    import subprocess
+    out = subprocess.run(["node", "-e", js], capture_output=True, text=True, check=True, timeout=5)
+    assert out.stdout.strip() == "true"

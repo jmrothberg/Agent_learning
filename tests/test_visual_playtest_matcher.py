@@ -86,6 +86,41 @@ def _fps_recipe() -> VisualPlaytestRecipe:
     )
 
 
+def _voxel_recipe() -> VisualPlaytestRecipe:
+    return _recipe(
+        "canvas-voxel-sandbox",
+        applies_keywords=[
+            "voxel", "voxels", "minecraft", "sandbox", "block", "blocks",
+            "place", "break", "hotbar", "chunk", "terrain", "cube",
+        ],
+        strong_hooks=["minecraft"],
+    )
+
+
+def test_voxel_sandbox_goal_prefers_voxel_over_fps() -> None:
+    """Paraphrase voxel goal must not inherit FPS-only auto_probes."""
+    recipes = [_fps_recipe(), _voxel_recipe()]
+    r, _ = find_best_visual_playtest(
+        recipes,
+        goal=(
+            "first-person voxel sandbox: explore cube blocks, break and "
+            "place with a hotbar, chunked terrain, pointer-lock mouse look"
+        ),
+    )
+    assert r is not None
+    assert r.id == "canvas-voxel-sandbox"
+
+
+def test_doom_goal_stays_fps_not_voxel() -> None:
+    recipes = [_fps_recipe(), _voxel_recipe()]
+    r, _ = find_best_visual_playtest(
+        recipes,
+        goal="doom first-person shooter raycaster maze monsters crosshair weapon",
+    )
+    assert r is not None
+    assert r.id == "canvas-3d-first-person"
+
+
 def _board_recipe() -> VisualPlaytestRecipe:
     return _recipe(
         "canvas-board-game",

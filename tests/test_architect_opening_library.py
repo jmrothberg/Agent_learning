@@ -211,8 +211,8 @@ def test_3d_outline_wins_when_3d_keywords_dominate():
     finally:
         os.chdir(old_cwd)
     assert hit is not None
-    assert hit.item.id == "outline-3d-first-person", (
-        f"got {hit.item.id}, expected outline-3d-first-person"
+    assert hit.item.id == "outline-voxel-sandbox", (
+        f"got {hit.item.id}, expected outline-voxel-sandbox"
     )
 
 

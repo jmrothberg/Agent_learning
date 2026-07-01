@@ -565,6 +565,10 @@ HARD_RULES: list[str] = [
     "alias. Also `window.game = { reset }`. Probes call "
     "`window.state.score`, `window.game.reset()` — un-exposed state fails "
     "probes even when the game works.",
+    # Added 2026-07-01 — harness asset-settle poll (tools.py) waits on
+    # window._assetsReady before sampling drawImage events.
+    "After loadAssets() finishes (every Image decode/onload), set "
+    "`window._assetsReady = true` so the harness knows decoding is done.",
     # Added 2026-05-25 from OpenAI Codex review. Prevents the `probes_only` /
     # `media_only` `no_usable_code` failure shape. Tag names omitted so the
     # small-class prompt-size + drops-optional-tags asserts still hold.
@@ -1291,6 +1295,47 @@ def _detect_multi_frame_intent(goal: str) -> list[str]:
     return matched
 
 
+# Classic franchise goals: nudge asset prompts toward iconic silhouettes
+# (user-editable specific guidance — genre-free mechanism memory stays separate).
+_FRANCHISE_ASSET_HINTS: list[tuple[tuple[str, ...], str]] = [
+    (
+        ("space invaders", "space-invaders", "invaders"),
+        "FRANCHISE ART — Space Invaders: prompt distinct classic arcade "
+        "alien silhouettes (crab, squid, octopus rows) — NOT generic bugs.",
+    ),
+    (
+        ("pac-man", "pacman", "ms pac"),
+        "FRANCHISE ART — Pac-Man: yellow circle hero; pursuers as rounded "
+        "ghost silhouettes with distinct colors.",
+    ),
+    (
+        ("dig dug", "dig-dug"),
+        "FRANCHISE ART — Dig Dug: round digger with pump hose; puffy "
+        "underground monsters that inflate when pumped.",
+    ),
+    (
+        ("minecraft",),
+        "FRANCHISE ART — voxel sandbox: name blocks grass/dirt/stone (or "
+        "similar) in <assets> prompts so hotbar types stay visually distinct.",
+    ),
+    (
+        ("doom", "wolfenstein"),
+        "FRANCHISE ART — FPS: textured wall/floor sprites plus billboard "
+        "monster silhouettes; weapon overlay muzzle points UP in source art.",
+    ),
+]
+
+
+def _franchise_asset_nudge(goal: str) -> str:
+    if not goal:
+        return ""
+    gl = goal.lower()
+    for keys, text in _FRANCHISE_ASSET_HINTS:
+        if any(k in gl for k in keys):
+            return "\n\n" + text + "\n"
+    return ""
+
+
 def plan_instruction(
     *,
     reference_block: str = "",
@@ -1413,6 +1458,8 @@ def plan_instruction(
         kws = ", ".join(repr(k) for k in qte_keywords)
         qte_nudge = load_plan_nudge("qte").replace("{kws}", kws)
 
+    franchise_asset_nudge = _franchise_asset_nudge(goal)
+
     # Phase 4: scope-pacing nudge for art-heavy + logic-heavy goals.
     # Only fires when BOTH art (or 3D) AND heavy-logic keywords match —
     # so a pure-arcade goal (lots of art, simple rules) and a pure-logic
@@ -1513,7 +1560,8 @@ def plan_instruction(
 
     body = (
         local_crisp_nudge
-        + plan_core + art_nudge + illustrated_sprite_nudge + threed_nudge + wireframe_nudge
+        + plan_core + art_nudge + illustrated_sprite_nudge + franchise_asset_nudge
+        + threed_nudge + wireframe_nudge
         + beat_em_up_nudge + audio_nudge
         + video_nudge
         + qte_nudge
@@ -1568,6 +1616,11 @@ Stress: <one assertion that catches stress / leak failure modes (e.g.
          "after firing 50 bullets the frame rate is steady, no listener
          pile-up on restart")>
 </criteria>
+
+CRITERIA-PROBE BINDING: every Basic: line MUST share at least one
+meaningful word with some probe name or expr (the harness uses simple
+word-overlap; unbound Basic criteria are flagged as coverage gaps).
+Edge/Stress lines may stay broader.
 
 <probes>
 [
