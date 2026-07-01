@@ -681,6 +681,52 @@ def _non_combat_action_keys(criteria: str) -> set[str]:
     return out
 
 
+# Flipper/paddle keys rotate canvas segments — not sprite-swap actions.
+_ROTATION_MECHANIC_RE = re.compile(
+    r"\b(?:flipper|flippers|paddle|paddles|bat|batting|rotate|rotating)\b",
+    re.I,
+)
+
+
+def _rotation_mechanic_action_keys(criteria: str) -> set[str]:
+    """Keys declared near flipper/paddle/rotate — code-drawn segments, not sprites."""
+    if not criteria:
+        return set()
+    out: set[str] = set()
+    for m in _KEY_CODE_RE.finditer(criteria):
+        window = criteria[max(0, m.start() - 24): m.end() + 48]
+        if _ROTATION_MECHANIC_RE.search(window):
+            out.add(m.group(0))
+    return out
+
+
+def _criteria_declares_keyboard_player_movement(criteria: str) -> bool:
+    """True when criteria say WASD/arrows move the player/ship (not flippers)."""
+    if not criteria:
+        return False
+    low = criteria.lower()
+    player_words = ("player", "ship", "hero", "character", "walk", "move")
+    for m in _KEY_CODE_RE.finditer(criteria):
+        code = m.group(0)
+        if code not in _MOVEMENT_KEYS:
+            continue
+        window = low[max(0, m.start() - 30): m.end() + 60]
+        if any(w in window for w in player_words):
+            return True
+    return False
+
+
+def _recovery_is_physics_ball_only(
+    recovery_leaves: list[str], criteria: str,
+) -> bool:
+    """Skip CONTROL-NOT-RECOVERED when only state.ball moved (physics body)."""
+    if not recovery_leaves:
+        return False
+    if not all(str(l).startswith("ball.") for l in recovery_leaves):
+        return False
+    return not _criteria_declares_keyboard_player_movement(criteria)
+
+
 def _slugify_criterion(text: str) -> str:
     """Compact identifier-safe slug for a criterion line, used as the
     suffix of a synthetic coverage-gap probe name. Keeps the slug short
@@ -3950,11 +3996,15 @@ class LiveBrowser:
                     _decode_settled and _game_advancing
                     and _probes_green and _no_errors
                 )
+                _sprite_wrapper = (
+                    "sprite(" in html_text and "drawImage" in html_text
+                )
                 if (
                     (_probes_green and _no_errors and (
                         _undrawn_pose_only
                         or _scene_offscreen_bg
                         or _undrawn_state_gated
+                        or _sprite_wrapper
                     ))
                     or (self._undrawn_seen_before and _probes_green and _no_errors)
                     or _behavior_green_no_missing
@@ -3973,6 +4023,9 @@ class LiveBrowser:
                         "state/wave gated and may not have triggered during "
                         "the short smoke window."
                         if _undrawn_state_gated else
+                        " Behavioral probes pass; HTML uses sprite() + "
+                        "drawImage — likely a draw-call instrumentation miss."
+                        if _sprite_wrapper else
                         " Behavioral probes pass; asset decode settled and "
                         "the canvas is advancing — undrawn stems are likely "
                         "a Chromium timing false positive (sprites visible in "
@@ -4040,6 +4093,7 @@ class LiveBrowser:
                 # Phase 0: drop keys the criteria describes as start-wave / pause
                 # / menu / build / sell etc. — they are not faked attacks.
                 - _non_combat_action_keys(criteria or "")
+                - _rotation_mechanic_action_keys(criteria or "")
             )
             faked = [
                 kc for kc, info in _fake_actions.items()
@@ -5321,7 +5375,15 @@ class LiveBrowser:
         # never false-positives. Catches the permanent stun-lock: an expiry
         # timer placed below an `if (action === 'hit') return;` guard.
         control_not_recovered: dict[str, Any] | None = None
-        if recovery_key is not None and recovery_leaves and has_position_state:
+        _skip_cnr = _recovery_is_physics_ball_only(
+            recovery_leaves, criteria or "",
+        )
+        if (
+            recovery_key is not None
+            and recovery_leaves
+            and has_position_state
+            and not _skip_cnr
+        ):
 
             async def _induce_combat_before_recovery() -> None:
                 """Give declared attack keys + held movement time to land hits.

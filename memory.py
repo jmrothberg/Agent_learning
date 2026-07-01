@@ -101,6 +101,7 @@ _RECIPE_TO_SKELETON: dict[str, str] = {
     # recipe (lit-dungeon, mobile). Each maps to its existing dedicated skeleton.
     "canvas-card-tabletop": "canvas_cards_basic",
     "canvas-physics-projectile": "canvas_physics_basic",
+    "canvas-pinball": "canvas_pinball_basic",
     "canvas-lit-dungeon": "canvas_lit_dungeon_basic",
     "canvas-mobile-touch": "canvas_mobile_basic",
     "canvas-vector-wireframe": "canvas_vector_wireframe_basic",
@@ -3593,6 +3594,26 @@ def _render_outline_recipe(recipe: dict) -> str:
     if probes:
         lines.append("probes: " + "; ".join(probes))
     return "\n".join(lines)
+
+
+def render_outline_traps_only(recipe: dict, *, char_budget: int = 400) -> str:
+    """Fix-turn traps/tuning slice — no state/order prose."""
+    if not isinstance(recipe, dict) or not recipe:
+        return ""
+    lines: list[str] = []
+    traps = [str(s).strip() for s in (recipe.get("traps") or []) if str(s).strip()]
+    if traps:
+        lines.append("OUTLINE TRAPS (match your failure — do not add scope):")
+        lines.extend(f"- {t}" for t in traps)
+    tuning = [str(s).strip() for s in (recipe.get("tuning") or []) if str(s).strip()]
+    if tuning:
+        lines.append("tuning: " + "; ".join(tuning))
+    if not lines:
+        return ""
+    body = "\n".join(lines)
+    if len(body) > char_budget:
+        body = body[:char_budget].rstrip() + "\n[traps truncated]"
+    return body
 
 
 # Generic visual recipes — too broad to inject as plan-time checklists.

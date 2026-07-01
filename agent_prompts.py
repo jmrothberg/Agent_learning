@@ -1420,8 +1420,16 @@ class PromptBuildingMixin:
         # gpt-oss skipped it ~100% of the time.)
         # Fix-turn = code stage (narrow): only validated patterns,
         # tighter char budget, no net-harmful bullets.
+        blocker_query = self._report_blocker_query(report)
+        fix_query = (
+            f"{self._goal} {blocker_query}".strip()
+            if blocker_query else self._goal
+        )
         pb_block = self._retrieve_playbook_block(
-            self._goal, code=self._current_file, stage="code",
+            fix_query,
+            code=self._current_file,
+            stage="code",
+            ensure_ids=self._playbook_ensure_ids_for_report(report) or None,
         )
         opening_block, opening_hits = self._retrieve_opening_book_block(
             self._goal, stage="code",
@@ -1438,6 +1446,18 @@ class PromptBuildingMixin:
         # only "what does the report say is wrong?".
         if self._criteria:
             fix_kwargs["criteria_block"] = self._criteria
+        failing_probes = [
+            p for p in (report.get("probes") or []) if not p.get("ok")
+        ]
+        if failing_probes:
+            lines = []
+            for p in failing_probes[:4]:
+                name = str(p.get("name") or "probe")
+                lines.append(
+                    f"- {name}: executable probe returned falsy — fix this "
+                    "behavior before cosmetic warnings."
+                )
+            fix_kwargs["probe_failure_block"] = "\n".join(lines)
         # Build a focused slice when the file is large; falls back to
         # full-file inject for small files (slice would lose context for
         # marginal gain). The slice protects against context-pollution
@@ -1482,10 +1502,16 @@ class PromptBuildingMixin:
                 "do not add unrelated scope.\n\n"
                 + fix
             )
+        traps_block = self._retrieve_outline_traps_block(
+            self._goal,
+            report_text,
+            failure_class=getattr(self, "_last_failure_class", None),
+        )
+        if traps_block:
+            fix = f"{traps_block}\n\n" + fix
         # Capability-round item 1: fix-turn component injection. Query is
         # the BLOCKER text (failed probes / errors), not the goal, so a
         # snippet only appears when it matches the actual failure. k=1.
-        blocker_query = self._report_blocker_query(report)
         if blocker_query:
             components_block = self._retrieve_components_block(
                 blocker_query, stage="code", k=1,

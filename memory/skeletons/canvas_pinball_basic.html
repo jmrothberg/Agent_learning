@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Pinball Table</title>
+<style>
+  html,body { margin:0; background:#0c0d14; overflow:hidden; }
+  #wrap { position:fixed; inset:0; display:grid; place-items:center; }
+  canvas { background:#1a1a2e; }
+</style></head>
+<body>
+<div id="wrap"><canvas id="c" width="800" height="600"></canvas></div>
+<script>
+(() => {
+  const cvs = document.getElementById("c");
+  const ctx = cvs.getContext("2d");
+  const W = 800, H = 600;
+  const state = {
+    ball: { x: 720, y: 520, vx: 0, vy: 0, r: 10, active: false },
+    flippers: [
+      { x: 280, y: 540, angle: 0.4, active: false },
+      { x: 520, y: 540, angle: -0.4, active: false },
+    ],
+    bumpers: [{ x: 400, y: 220, r: 28 }],
+    plunger: { charging: false, power: 0 },
+    score: 0,
+    ballsLeft: 3,
+    launched: false,
+  };
+  window.state = state;
+  window.game = { reset() { location.reload(); } };
+
+  const gravity = 1100;
+  const hitCooldown = {};
+  const keys = {};
+  addEventListener("keydown", e => { keys[e.code] = true; e.preventDefault(); });
+  addEventListener("keyup", e => { keys[e.code] = false; });
+
+  function resolveCircle(ball, body, impulse = 380) {
+    const dx = ball.x - body.x, dy = ball.y - body.y;
+    const dist = Math.hypot(dx, dy) || 0.001;
+    const overlap = ball.r + body.r - dist;
+    if (overlap <= 0) return false;
+    const id = body.id || `${body.x},${body.y}`;
+    if ((hitCooldown[id] || 0) > 0) return false;
+    const nx = dx / dist, ny = dy / dist;
+    ball.x += nx * (overlap + 1);
+    ball.y += ny * (overlap + 1);
+    const dot = ball.vx * nx + ball.vy * ny;
+    if (dot < 0) { ball.vx -= 2 * dot * nx; ball.vy -= 2 * dot * ny; }
+    ball.vx += nx * impulse; ball.vy += ny * impulse;
+    hitCooldown[id] = 4;
+    return true;
+  }
+
+  function update(dt) {
+    if (keys.Space && !state.launched) {
+      state.plunger.charging = true;
+      state.plunger.power = Math.min(1, state.plunger.power + dt * 1.2);
+    } else if (state.plunger.charging) {
+      const p = state.plunger.power;
+      state.ball.vy = -(600 + p * 300);
+      state.ball.vx = -180 - p * 70;
+      state.ball.active = true;
+      state.launched = true;
+      state.plunger.charging = false;
+      state.plunger.power = 0;
+    }
+    const b = state.ball;
+    if (b.active) {
+      const steps = 3;
+      const sdt = dt / steps;
+      for (let i = 0; i < steps; i++) {
+        b.vy += gravity * sdt;
+        b.x += b.vx * sdt;
+        b.y += b.vy * sdt;
+        if (b.x < b.r) { b.x = b.r; b.vx = Math.abs(b.vx) * 0.9; }
+        if (b.x > W - b.r) { b.x = W - b.r; b.vx = -Math.abs(b.vx) * 0.9; }
+        if (b.y < b.r) { b.y = b.r; b.vy = Math.abs(b.vy) * 0.9; }
+        for (const bm of state.bumpers) {
+          if (resolveCircle(b, bm)) state.score += 100;
+        }
+      }
+      const sp = Math.hypot(b.vx, b.vy);
+      if (sp > 1200) { b.vx *= 1200 / sp; b.vy *= 1200 / sp; }
+    }
+    for (const id in hitCooldown) {
+      if (--hitCooldown[id] <= 0) delete hitCooldown[id];
+    }
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = "#16213e";
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#e94560";
+    for (const bm of state.bumpers) {
+      ctx.beginPath();
+      ctx.arc(bm.x, bm.y, bm.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    const b = state.ball;
+    ctx.fillStyle = "#ffd700";
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#fff";
+    ctx.fillText("Score: " + state.score, 16, 24);
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    let dt = (now - last) / 1000; last = now;
+    if (dt > 0.25) dt = 0.25;
+    update(dt);
+    draw();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body></html>

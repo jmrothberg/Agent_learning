@@ -591,6 +591,20 @@ ANTI_PATTERNS: list[str] = [
     "<patch> in Phase B; <confirm_done/> OR <patch> in Phase C.",
     "NEVER use Math.random() seed-dependently in ways that make the game "
     "deterministic across reloads — the test harness assumes some motion.",
+    "NEVER reflect circle collisions while still overlapping — push the "
+    "body out along the normal by overlap+1px BEFORE mirroring velocity; "
+    "use a per-body hit cooldown (3-5 frames) so bumpers cannot re-score "
+    "every frame (infinite ping-pong loop).",
+    "NEVER launch a playfield body with only vertical velocity from a "
+    "shooter/plunger lane — charged release needs horizontal velocity into "
+    "the play area or an angled guide wall, else the body bounces straight "
+    "back and never enters play.",
+    "NEVER integrate fast physics once per frame without substeps or a "
+    "speed cap — thin colliders (flippers, paddles, walls) tunnel at "
+    "high speed; use 2-4 substeps and cap |v| around 1200 px/s.",
+    "NEVER place timed-state early-return ABOVE the timer decrement — "
+    "hit-stun/knockdown locks control forever (see stun-timer-before-"
+    "early-return playbook bullet when CONTROL-NOT-RECOVERED fires).",
 ]
 
 
@@ -845,6 +859,55 @@ _ART_KEYWORDS = frozenset({
     "artwork", "looks", "look", "gorgeous", "beautiful", "pretty",
     "cool", "stunning", "polished",
 })
+
+
+# Visible canvas entities — ball, flipper, ship, etc. Genre-free shape
+# detector: fires canvas-entity-art plan nudge when the goal names entities
+# the player sees but did not use explicit art keywords.
+_CANVAS_ENTITY_KEYWORDS = frozenset({
+    "ball", "balls", "flipper", "flippers", "bumper", "bumpers", "paddle",
+    "paddles", "brick", "bricks", "ship", "ships", "enemy", "enemies",
+    "player", "character", "hero", "table", "creeps", "creep", "turret",
+    "turrets", "projectile", "projectiles", "piece", "pieces", "gem", "gems",
+    "card", "cards", "tower", "towers", "block", "blocks", "sprite",
+})
+
+_PINBALL_KEYWORDS = frozenset({
+    "pinball", "flipper", "flippers", "bumper", "bumpers", "plunger",
+    "drain", "multiball", "tilt", "nudge", "slingshot-pin", "arcade-table",
+})
+
+
+def _detect_canvas_entity_intent(goal: str) -> list[str]:
+    """Return visible-entity keywords when goal describes canvas entities."""
+    if not goal:
+        return []
+    import re
+    words = re.findall(r"[a-zA-Z]+", goal.lower())
+    seen: set[str] = set()
+    out: list[str] = []
+    for w in words:
+        if w in _CANVAS_ENTITY_KEYWORDS and w not in seen:
+            seen.add(w)
+            out.append(w)
+    return out
+
+
+def _detect_pinball_intent(goal: str) -> list[str]:
+    """Return pinball-family keywords for table-physics plan nudge."""
+    if not goal:
+        return []
+    import re
+    words = re.findall(r"[a-zA-Z]+", goal.lower())
+    seen: set[str] = set()
+    out: list[str] = []
+    for w in words:
+        if w in _PINBALL_KEYWORDS and w not in seen:
+            seen.add(w)
+            out.append(w)
+    if "pinball" in seen or len(out) >= 2:
+        return out
+    return []
 
 
 # Modality keywords that signal the goal needs a 3D rendering technique.
@@ -1417,6 +1480,31 @@ def plan_instruction(
         )
         _record_nudge("illustrated-2d-sprite")
 
+    canvas_entity_keywords = ()
+    canvas_entity_nudge = ""
+    if (
+        not from_seed
+        and not wireframe_keywords
+        and not art_keywords
+    ):
+        canvas_entity_keywords = _detect_canvas_entity_intent(goal)
+        if len(canvas_entity_keywords) >= 2:
+            kws = ", ".join(repr(k) for k in canvas_entity_keywords)
+            canvas_entity_nudge = load_plan_nudge(
+                "canvas-entity-art"
+            ).replace("{kws}", kws)
+            _record_nudge("canvas-entity-art")
+
+    pinball_nudge = ""
+    if not from_seed and not wireframe_keywords:
+        pinball_keywords = _detect_pinball_intent(goal)
+        if pinball_keywords:
+            kws = ", ".join(repr(k) for k in pinball_keywords)
+            pinball_nudge = load_plan_nudge("pinball-table").replace(
+                "{kws}", kws
+            )
+            _record_nudge("pinball-table")
+
     # `threed_keywords` is already set at the top of the function so a
     # from_seed continuation still keeps 3D detection but loses art/audio.
     threed_nudge = ""
@@ -1561,6 +1649,7 @@ def plan_instruction(
     body = (
         local_crisp_nudge
         + plan_core + art_nudge + illustrated_sprite_nudge + franchise_asset_nudge
+        + canvas_entity_nudge + pinball_nudge
         + threed_nudge + wireframe_nudge
         + beat_em_up_nudge + audio_nudge
         + video_nudge
@@ -2118,6 +2207,7 @@ def fix_instruction(
     criteria_block: str = "",
     focused_slice: str = "",
     context_pressure: bool = False,
+    probe_failure_block: str = "",
 ) -> str:
     """Combined diagnose + fix turn.
 
@@ -2133,7 +2223,16 @@ def fix_instruction(
     that slice instead of the full file. The patch matcher applies
     against the on-disk file — the model only needs the slice for
     reasoning. Falls back to full file when empty.
+
+    `probe_failure_block` — failing executable probes listed first so
+    gameplay blockers beat cosmetic soft warnings.
     """
+    probe_fail = ""
+    if probe_failure_block:
+        probe_fail = (
+            "PROBE FAILURE — fix these before cosmetic warnings:\n"
+            f"{probe_failure_block}\n\n"
+        )
     hints = ""
     if mistakes_hints:
         hints = (
@@ -2228,6 +2327,7 @@ def fix_instruction(
             "```\n\n"
         )
     return (
+        f"{probe_fail}"
         f"{report_text}\n\n"
         f"{hints}"
         f"{pb}"

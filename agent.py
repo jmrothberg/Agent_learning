@@ -1604,12 +1604,44 @@ class GameAgent(
             })
         return suppressed
 
+    def _playbook_ensure_ids_for_report(self, report: dict) -> list[str]:
+        """Pin playbook bullets linked to the active visual-playtest recipe
+        when one of its auto-probes failed (mechanism-general)."""
+        failing = {
+            str(p.get("name") or "")
+            for p in (report.get("probes") or [])
+            if not p.get("ok")
+        }
+        if not failing or not any(n.startswith("auto_") for n in failing):
+            return []
+        recipe_id = getattr(self, "_active_visual_playtest_recipe_id", None)
+        if not recipe_id:
+            return []
+        try:
+            for item in self._memory.load_visual_playtests():
+                if item.id != recipe_id:
+                    continue
+                refs = (getattr(item, "recipe", None) or {}).get("playbook_refs") or {}
+                if not isinstance(refs, dict):
+                    return []
+                out: list[str] = []
+                for val in refs.values():
+                    for bid in val or []:
+                        s = str(bid).strip()
+                        if s and s not in out:
+                            out.append(s)
+                return out
+        except Exception:
+            return []
+        return []
+
     def _retrieve_playbook_block(
         self,
         goal: str,
         *,
         code: str = "",
         stage: str = "code",
+        ensure_ids: list[str] | None = None,
     ) -> str:
         """Get top-K bullets and render them as a `<playbook>` block.
 
@@ -1700,6 +1732,21 @@ class GameAgent(
                     modality_tokens=mod_toks,
                 )
                 hits = [h for h in hits if h.bullet.id not in suppressed][:k]
+            if ensure_ids:
+                from memory import lookup_bullet, BulletHit
+                by_id = {h.bullet.id: h for h in hits}
+                pinned: list[BulletHit] = []
+                for bid in ensure_ids:
+                    if bid in by_id:
+                        pinned.append(by_id.pop(bid))
+                    else:
+                        b = lookup_bullet(self._playbook, bid)
+                        if b is not None:
+                            pinned.append(BulletHit(b, 1.0))
+                if pinned:
+                    rest = [h for h in hits if h.bullet.id in by_id]
+                    hits = pinned + rest
+                    hits = hits[: max(k, len(pinned))]
             if hits:
                 ids = [h.bullet.id for h in hits]
                 self._trace({
@@ -7759,6 +7806,16 @@ class GameAgent(
                         + list(soft_warnings)
                     )
                 )
+                _launch_pf_fail = any(
+                    not p.get("ok")
+                    and isinstance(p.get("name"), str)
+                    and p["name"].startswith("auto_")
+                    and any(
+                        tok in p["name"]
+                        for tok in ("launch", "playfield", "enter")
+                    )
+                    for p in (report.get("probes") or [])
+                )
                 _failure_class, _failure_reason = self._classify_failure(
                     ok=_ok,
                     materialized=True,
@@ -7779,7 +7836,9 @@ class GameAgent(
                     ),
                     has_page_errors=bool(page_errors),
                     has_soft_warnings=bool(soft_warnings),
+                    launch_playfield_probe_failed=_launch_pf_fail,
                 )
+                self._last_failure_class = _failure_class
                 # T-2: ground-truth false-positive marker. True when the PRIOR
                 # iter was ok=False yet this iter's code is byte-identical to it
                 # (same sha) — i.e. the block changed nothing, so it was a

@@ -133,6 +133,15 @@ def test_class_memory_gap_undrawn_on_art_intent():
     assert "undrawn" in reason
 
 
+def test_class_memory_gap_launch_playfield_over_undrawn():
+    cls, reason = _classify(
+        ok=False, materialized=True, art_intent=True, undrawn_present=True,
+        launch_playfield_probe_failed=True,
+    )
+    assert cls == "memory_gap"
+    assert "launch/playfield" in reason
+
+
 def test_class_harness_bug_green_probes_only_soft_warnings():
     """T-1 (run_04): ok=False but every model probe passed, no page errors,
     only soft_warnings blocked -> harness false positive (PLAYER-STUCK /

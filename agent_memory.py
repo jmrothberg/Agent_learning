@@ -25,6 +25,7 @@ from memory import (
     OpeningBookHit,
     render_components_block,
     render_opening_book_block,
+    render_outline_traps_only,
     render_vlm_checklist_section,
     VLM_CHECKLIST_SKIP_IDS,
 )
@@ -161,6 +162,73 @@ class MemoryRetrievalMixin:
         except Exception as e:
             self._trace({"kind": "opening_book_error", "stage": stage, "err": str(e)})
             return "", []
+
+    _PHYSICS_TRAP_SIGNALS = (
+        "control-not-recovered",
+        "player-stuck",
+        "collision",
+        "bounce",
+        "tunnel",
+        "plunger",
+        "bumper",
+        "flipper",
+        "velocity",
+        "physics",
+        "frozen canvas",
+        "ping-pong",
+        "launch",
+    )
+
+    def _physics_traps_needed(
+        self, report_text: str, failure_class: str | None = None,
+    ) -> bool:
+        if failure_class == "memory_gap":
+            return True
+        low = (report_text or "").lower()
+        return any(sig in low for sig in self._PHYSICS_TRAP_SIGNALS)
+
+    def _retrieve_outline_traps_block(
+        self,
+        goal: str,
+        report_text: str,
+        *,
+        failure_class: str | None = None,
+        char_budget: int = 400,
+    ) -> str:
+        """Inject outline traps/tuning on fix turns when physics/stuck."""
+        if not self._physics_traps_needed(report_text, failure_class):
+            return ""
+        try:
+            mod_toks: list[str] = []
+            try:
+                from memory import (
+                    _detect_3d_intent, _detect_board_intent, _detect_dom_intent,
+                )
+                mod_toks = (
+                    _detect_3d_intent(goal)
+                    + _detect_board_intent(goal)
+                    + _detect_dom_intent(goal)
+                )
+            except Exception:
+                mod_toks = []
+            outline = self._memory.retrieve_implementation_outline(goal, mod_toks)
+            if outline is None:
+                return ""
+            recipe = getattr(outline.item, "recipe", None)
+            block = render_outline_traps_only(
+                recipe if isinstance(recipe, dict) else {},
+                char_budget=char_budget,
+            )
+            if block:
+                self._trace({
+                    "kind": "outline_traps_injected",
+                    "outline_id": outline.item.id,
+                    "chars": len(block),
+                })
+            return block
+        except Exception as e:
+            self._trace({"kind": "outline_traps_error", "err": str(e)})
+            return ""
 
     def _retrieve_components_block(
         self,

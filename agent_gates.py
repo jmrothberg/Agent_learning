@@ -134,6 +134,8 @@ class GateProcessingMixin:
 
         has_soft_warnings: bool = False,
 
+        launch_playfield_probe_failed: bool = False,
+
     ) -> tuple[str, str]:
 
         """Phase 4 (4D.2): bucket an iter into the layer that needs the fix.
@@ -225,6 +227,22 @@ class GateProcessingMixin:
                 "ok=False but all model probes passed with no page errors — "
 
                 "a structural soft_warning gate over-fired on a correct build",
+
+            )
+
+        # 1b. Launch/playfield auto-probe failure beats undrawn-assets triage
+        # (pinball trace 20260701_211752: ball stuck in lane but failure_class
+        # was mislabeled as sprite wiring). Mechanism-general: any auto_* probe
+        # whose name includes launch/playfield/enter.
+        if (not ok) and materialized and launch_playfield_probe_failed:
+
+            return (
+
+                "memory_gap",
+
+                "launch/playfield physics — outline/playbook should pre-empt "
+
+                "lane geometry and exit velocity",
 
             )
 
