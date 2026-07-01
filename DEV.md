@@ -63,6 +63,7 @@ MLX upgrades: MiniMax-M3 (`minimax_m3.py` copy after mlx-lm upgrade), GLM-5.2
 - `AGENT_ENABLE_MEMORY_RELIEF` — set `0` to disable auto-unload of diffusers before video / after asset batches (default **on** when free RAM &lt; `AGENT_MEMORY_RELIEF_MIN_AVAILABLE_GB`, default 64). Skips small MLX models (&lt; `AGENT_MEMORY_RELIEF_SMALL_MODEL_DISK_GB`, default 50 GB on disk).
 - `AGENT_MEMORY_RELIEF_MIN_AVAILABLE_GB` — trip relief when available RAM falls below this (default 64)
 - `AGENT_MEMORY_RELIEF_SMALL_MODEL_DISK_GB` — never unload for coder models smaller than this on disk (default 50)
+- MLX `/model` hot-swap — when upsizing (or loading a large model while diffusers are resident), the harness auto-unloads the previous MLX weights and Z-Image/Stable-Audio before the next generation
 - `AGENT_NO_AUTO_OLLAMA_GPU_FIX` — set `1` to disable auto Ollama VRAM unload on `/new`
 - `ANTHROPIC_MAX_TOKENS` — Anthropic output cap (default 32768)
 - `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` — cloud backends only

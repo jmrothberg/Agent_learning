@@ -2576,11 +2576,19 @@ class GameAgent(
         try:
             if not self._backend or getattr(self._backend.info, "name", None) != "mlx":
                 return None
-            from pathlib import Path as _Path
             from backend import MLXBackend
             path = getattr(MLXBackend, "_loaded_path", None) or self._backend.info.model
-            if not path:
-                return None
+            return self._mlx_model_disk_gb(path)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _mlx_model_disk_gb(path: str | None) -> float | None:
+        """On-disk weight size (GB) for an MLX model directory."""
+        if not path:
+            return None
+        try:
+            from pathlib import Path as _Path
             p = _Path(path)
             if not p.exists():
                 return None
@@ -2594,6 +2602,66 @@ class GameAgent(
             return round(total / 1e9, 1)
         except Exception:
             return None
+
+    def _relieve_vram_for_mlx_model_swap(self, new_model_path: str) -> dict:
+        """Free VRAM before hot-swapping MLX coder models mid-session.
+
+        Pinball trace 20260701_163948: Qwen3.6-27B stayed resident while
+        diffusers were loaded; /model GLM-5.2 only changed the backend pointer
+        and the process OOM-killed on the first GLM load. Unload the previous
+        MLX weights and diffuser pipelines when swapping paths, or when loading
+        a large model while diffusers are still resident.
+        """
+        from backend import MLXBackend
+
+        old_path = MLXBackend._loaded_path or MLXBackend._loaded_vlm_path
+        info: dict = {
+            "old_path": old_path,
+            "new_path": new_model_path,
+            "freed": [],
+            "skipped": False,
+        }
+        if not new_model_path:
+            info["skipped"] = True
+            self._trace({"kind": "mlx_model_swap_relief", **info})
+            return info
+
+        new_disk = self._mlx_model_disk_gb(new_model_path)
+        old_disk = self._mlx_model_disk_gb(old_path) if old_path else None
+        small_disk_gb = float(
+            os.environ.get("AGENT_MEMORY_RELIEF_SMALL_MODEL_DISK_GB", "50")
+        )
+        swapping = old_path is not None and old_path != new_model_path
+        upsizing = (
+            swapping
+            and new_disk is not None
+            and old_disk is not None
+            and new_disk > old_disk
+        )
+        loading_large = new_disk is not None and new_disk >= small_disk_gb
+        diffusers_loaded = (
+            self._asset_generator is not None
+            or self._sound_generator is not None
+        )
+
+        should_relief = swapping or (loading_large and diffusers_loaded)
+        if not should_relief:
+            info["skipped"] = True
+            info["new_disk_gb"] = new_disk
+            info["old_disk_gb"] = old_disk
+            self._trace({"kind": "mlx_model_swap_relief", **info})
+            return info
+
+        info["new_disk_gb"] = new_disk
+        info["old_disk_gb"] = old_disk
+        info["upsizing"] = upsizing
+        info["freed"].extend(self._release_diffusers_vram())
+        if swapping:
+            freed_path = MLXBackend.release_weights(wait_for_metal=True)
+            if freed_path:
+                info["freed"].append(f"MLX-LLM ({Path(freed_path).name})")
+        self._trace({"kind": "mlx_model_swap_relief", **info})
+        return info
 
     @staticmethod
     def _available_system_memory_gb() -> tuple[float | None, float | None]:

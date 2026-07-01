@@ -3864,11 +3864,7 @@ class CodingBoxApp(App):
         if not loaded:
             self._log_info("[dim]no MLX model is currently loaded[/dim]")
             return
-        backend_mod.MLXBackend._loaded_model = None
-        backend_mod.MLXBackend._loaded_tokenizer = None
-        backend_mod.MLXBackend._loaded_path = None
-        import gc
-        gc.collect()
+        backend_mod.MLXBackend.release_weights()
         self._log_info(
             f"[green]✓[/green] released [b]{_esc(loaded)}[/b] from VRAM. "
             "Next /new will reload on first request."
@@ -4072,6 +4068,17 @@ class CodingBoxApp(App):
         except Exception as e:
             self._log_error(f"model swap failed: {e}")
             return False
+        if chosen_backend == "mlx" and self.agent is not None:
+            try:
+                relief = self.agent._relieve_vram_for_mlx_model_swap(chosen_name)
+                freed = relief.get("freed") or []
+                if freed:
+                    self._log_info(
+                        "[dim]freed VRAM for MLX model swap: "
+                        f"{_esc(', '.join(freed))}[/dim]"
+                    )
+            except Exception:
+                pass
         if self.agent is not None:
             self.agent._backend = new_backend
         self._session_backend = new_backend

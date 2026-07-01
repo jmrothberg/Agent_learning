@@ -584,19 +584,26 @@ class MLXBackend(Backend):
         return cls._mlx_thread
 
     @classmethod
-    def _drop_after_crash(cls) -> None:
-        """Free GPU state after the MLX worker raised mid-stream.
+    def _clear_metal_cache(cls) -> None:
+        try:
+            import mlx.core as mx  # type: ignore
+            metal = getattr(mx, "metal", None)
+            if metal is not None and hasattr(metal, "clear_cache"):
+                metal.clear_cache()
+        except Exception:
+            pass
+        import gc as _gc
+        _gc.collect()
 
-        Nulls the cached model/tokenizer references and queues a
-        `mlx.core.metal.clear_cache()` on the MLX thread so the next
-        stream re-enters the load path with a clean Metal context.
-        Without this, a single crash made the rest of the session
-        unusable until the user killed and restarted chat.py (the
-        process-wide Metal allocator was full of dead tensors).
+    @classmethod
+    def release_weights(cls, *, wait_for_metal: bool = False) -> str | None:
+        """Drop cached MLX/VLM weights and clear the Metal allocator.
 
-        Safe to call from any thread — only touches Python refs here
-        and schedules the actual Metal work back onto the MLX thread.
+        Returns the path that was resident (if any). Safe from any thread.
+        When called from the dedicated MLX worker thread, Metal cleanup runs
+        inline (submitting back to the same single-thread executor deadlocks).
         """
+        freed_path = cls._loaded_path or cls._loaded_vlm_path
         cls._loaded_model = None
         cls._loaded_tokenizer = None
         cls._loaded_path = None
@@ -607,21 +614,29 @@ class MLXBackend(Backend):
         import gc
         gc.collect()
 
-        def _clear_on_mlx_thread() -> None:
-            try:
-                import mlx.core as mx  # type: ignore
-                metal = getattr(mx, "metal", None)
-                if metal is not None and hasattr(metal, "clear_cache"):
-                    metal.clear_cache()
-            except Exception:
-                pass
-            import gc as _gc
-            _gc.collect()
+        import threading
+        on_mlx_thread = threading.current_thread().name.startswith("mlx")
+        if on_mlx_thread:
+            cls._clear_metal_cache()
+            return freed_path
 
         try:
-            cls._get_mlx_executor().submit(_clear_on_mlx_thread)
+            fut = cls._get_mlx_executor().submit(cls._clear_metal_cache)
+            if wait_for_metal:
+                fut.result(timeout=30)
         except Exception:
             pass
+        return freed_path
+
+    @classmethod
+    def _drop_after_crash(cls) -> None:
+        """Free GPU state after the MLX worker raised mid-stream.
+
+        Without this, a single crash made the rest of the session
+        unusable until the user killed and restarted chat.py (the
+        process-wide Metal allocator was full of dead tensors).
+        """
+        cls.release_weights()
 
     @classmethod
     def _load_sync(cls, path: str) -> tuple[Any, Any]:
@@ -630,15 +645,9 @@ class MLXBackend(Backend):
         """
         if cls._loaded_path == path and cls._loaded_model is not None:
             return cls._loaded_model, cls._loaded_tokenizer
-        # If a different model was previously loaded, drop the
-        # reference so Python+MLX can reclaim memory before the new
-        # weights arrive.
-        if cls._loaded_model is not None:
-            cls._loaded_model = None
-            cls._loaded_tokenizer = None
-            cls._loaded_path = None
-            import gc
-            gc.collect()
+        # Drop any resident MLX/VLM weights before loading a different path.
+        if cls._loaded_model is not None or cls._loaded_vlm_model is not None:
+            cls.release_weights()
         # Defer the mlx_lm import so Ollama-only users don't pay its
         # ~1-2 s cold-start cost.
         from mlx_lm import load as _mlx_load  # type: ignore
@@ -677,17 +686,8 @@ class MLXBackend(Backend):
                 cls._loaded_vlm_config,
             )
         # Free either slot if it holds a different (or any) model.
-        if cls._loaded_vlm_model is not None:
-            cls._loaded_vlm_model = None
-            cls._loaded_vlm_processor = None
-            cls._loaded_vlm_config = None
-            cls._loaded_vlm_path = None
-        if cls._loaded_model is not None and cls._loaded_path != path:
-            cls._loaded_model = None
-            cls._loaded_tokenizer = None
-            cls._loaded_path = None
-        import gc as _gc
-        _gc.collect()
+        if cls._loaded_vlm_model is not None or cls._loaded_model is not None:
+            cls.release_weights()
         from mlx_vlm import load as _vlm_load  # type: ignore
         from mlx_vlm.utils import load_config as _vlm_load_config  # type: ignore
         model, processor = _vlm_load(path)
