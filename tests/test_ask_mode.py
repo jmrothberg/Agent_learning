@@ -128,6 +128,51 @@ def test_run_ask_turn_requires_best_html(tmp_path: Path) -> None:
     assert agent._pending_feedback == []
 
 
+def test_run_ask_turn_traces_full_reply(tmp_path: Path) -> None:
+    agent = _make_agent(tmp_path)
+    traced: list[dict] = []
+    agent._trace = lambda row: traced.append(row)  # type: ignore[method-assign]
+
+    async def fake_stream(on_token, **kwargs):
+        return "Full answer about digAtSkullBeach()."
+
+    agent._stream = fake_stream  # type: ignore[method-assign]
+    agent.set_token_callback(lambda _p: None)
+
+    asyncio.run(_collect_ask(agent, "how do you dig?"))
+
+    user_ask = next(r for r in traced if r.get("kind") == "user_ask")
+    assert user_ask["reply"] == "Full answer about digAtSkullBeach()."
+    assert "digAtSkullBeach" in user_ask["reply_preview"]
+    assert user_ask.get("phase") == "ask"
+
+
+def test_run_ask_turn_uses_lean_context(tmp_path: Path) -> None:
+    agent = _make_agent(tmp_path)
+    seen_messages: list[list] = []
+    traced: list[dict] = []
+    agent._trace = lambda row: traced.append(row)  # type: ignore[method-assign]
+
+    async def fake_stream(on_token, **kwargs):
+        seen_messages.append(list(agent._messages))
+        return "ok"
+
+    agent._stream = fake_stream  # type: ignore[method-assign]
+    agent.set_token_callback(lambda _p: None)
+
+    asyncio.run(_collect_ask(agent, "why?"))
+
+    assert len(seen_messages) == 1
+    msgs = seen_messages[0]
+    assert len(msgs) == 2
+    assert msgs[0]["role"] == "system"
+    assert msgs[1]["role"] == "user"
+    assert msgs[1].get("phase") == "ask"
+    ctx = next(r for r in traced if r.get("kind") == "user_ask_context")
+    assert ctx["history_chars_dropped"] > 0
+    assert ctx["message_count"] == 2
+
+
 def test_cmd_ask_does_not_queue_feedback() -> None:
     app = CodingBoxApp()
     app._log = MagicMock()  # type: ignore[assignment]
@@ -147,7 +192,8 @@ def test_cmd_ask_does_not_queue_feedback() -> None:
     agent.run_ask_turn = fake_ask
     app.agent = agent
 
-    asyncio.run(app._cmd_ask("how does digging work?"))
+    asyncio.run(app._run_ask_worker("how does digging work?"))
 
     agent.add_user_feedback.assert_not_called()
     assert agent._pending_feedback == []
+    assert app._ask_in_flight is False

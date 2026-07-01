@@ -2571,29 +2571,19 @@ class GameAgent(
         except Exception:
             return None
 
-    def _mlx_coder_memory_pressure(self) -> tuple[bool, float | None, float | None]:
-        """True when this session's MLX coder model on disk exceeds ~20% of RAM.
-
-        **Disabled by default (2026-06-30):** on-disk weight size is not resident
-        RAM — GLM-5.2 4-bit (~420 GB on disk) spuriously tripped the old gate
-        on 512 GB boxes and unloaded MLX + Stable-Audio before video. Opt in on
-        low-RAM machines only: ``AGENT_ENABLE_MEMORY_RELIEF=1``.
-        """
-        if os.environ.get("AGENT_ENABLE_MEMORY_RELIEF", "").strip().lower() not in (
-            "1", "true", "yes",
-        ):
-            return False, None, None
+    def _mlx_model_on_disk_gb(self) -> float | None:
+        """Sum on-disk weight bytes for the active MLX coder model path."""
         try:
             if not self._backend or getattr(self._backend.info, "name", None) != "mlx":
-                return False, None, None
+                return None
             from pathlib import Path as _Path
             from backend import MLXBackend
             path = getattr(MLXBackend, "_loaded_path", None) or self._backend.info.model
             if not path:
-                return False, None, None
+                return None
             p = _Path(path)
             if not p.exists():
-                return False, None, None
+                return None
             total = 0
             for f in p.rglob("*"):
                 try:
@@ -2601,13 +2591,94 @@ class GameAgent(
                         total += f.stat().st_size
                 except Exception:
                     pass
-            llm_gb = total / 1e9
-            import os as _os
+            return round(total / 1e9, 1)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _available_system_memory_gb() -> tuple[float | None, float | None]:
+        """Best-effort (available_gb, phys_gb) for memory-pressure gating."""
+        import os as _os
+        import sys as _sys
+        try:
             phys_gb = (
                 _os.sysconf("SC_PHYS_PAGES") * _os.sysconf("SC_PAGE_SIZE")
             ) / 1e9
-            tripped = llm_gb > 0.20 * phys_gb
-            return tripped, round(llm_gb, 1), round(phys_gb, 1)
+        except Exception:
+            phys_gb = None
+        available_gb: float | None = None
+        try:
+            if _sys.platform == "darwin":
+                import re
+                import subprocess
+                proc = subprocess.run(
+                    ["vm_stat"], capture_output=True, text=True, timeout=2,
+                )
+                text = proc.stdout or ""
+                page_size = 4096
+                m = re.search(r"page size of (\d+)", text)
+                if m:
+                    page_size = int(m.group(1))
+                pages = 0
+                for prefix in (
+                    "Pages free:",
+                    "Pages inactive:",
+                    "Pages speculative:",
+                ):
+                    for line in text.splitlines():
+                        if line.startswith(prefix):
+                            pages += int(line.split(":")[1].strip().rstrip("."))
+                available_gb = pages * page_size / 1e9
+            else:
+                avail_pages = _os.sysconf("SC_AVPHYS_PAGES")
+                page_size = _os.sysconf("SC_PAGE_SIZE")
+                available_gb = avail_pages * page_size / 1e9
+        except Exception:
+            available_gb = None
+        if available_gb is not None:
+            available_gb = round(available_gb, 1)
+        if phys_gb is not None:
+            phys_gb = round(phys_gb, 1)
+        return available_gb, phys_gb
+
+    def _memory_relief_opt_out(self) -> bool:
+        return os.environ.get("AGENT_ENABLE_MEMORY_RELIEF", "").strip().lower() in (
+            "0", "false", "no", "off",
+        )
+
+    def _mlx_coder_memory_pressure(self) -> tuple[bool, float | None, float | None]:
+        """True when diffusers should unload before stacking more GPU work.
+
+        **On by default** when system RAM is tight. Skips entirely for small MLX
+        models (on-disk weights below ``AGENT_MEMORY_RELIEF_SMALL_MODEL_DISK_GB``,
+        default 50). Uses **available** RAM (vm_stat / SC_AVPHYS_PAGES), not
+        on-disk folder size — GLM-5.2's huge shard tree must not trip relief on
+        a 512 GB box that still has hundreds of GB free.
+
+        Opt out: ``AGENT_ENABLE_MEMORY_RELIEF=0``.
+        Tune: ``AGENT_MEMORY_RELIEF_MIN_AVAILABLE_GB`` (default 64).
+        """
+        if self._memory_relief_opt_out():
+            return False, None, None
+        try:
+            if not self._backend or getattr(self._backend.info, "name", None) != "mlx":
+                return False, None, None
+            disk_gb = self._mlx_model_on_disk_gb()
+            small_disk_gb = float(
+                os.environ.get("AGENT_MEMORY_RELIEF_SMALL_MODEL_DISK_GB", "50")
+            )
+            if disk_gb is not None and disk_gb < small_disk_gb:
+                return False, disk_gb, None
+            available_gb, phys_gb = self._available_system_memory_gb()
+            if available_gb is None:
+                return False, disk_gb, phys_gb
+            min_available = float(
+                os.environ.get("AGENT_MEMORY_RELIEF_MIN_AVAILABLE_GB", "64")
+            )
+            tripped = available_gb < min_available
+            # Second value: available_gb when probed, else disk_gb for traces.
+            metric = available_gb if available_gb is not None else disk_gb
+            return tripped, metric, phys_gb
         except Exception:
             return False, None, None
 
@@ -2641,8 +2712,8 @@ class GameAgent(
 
     def _vision_judge_headroom_ok(self) -> bool:
         """Return False when stacking a local MLX-VLM on the resident coder
-        LLM would likely trigger macOS memory-pressure kills. Same 20%-of-RAM
-        gate as `_free_memory_before_video`; Ollama daemons are not measured.
+        LLM would likely trigger macOS memory-pressure kills. Same available-
+        RAM gate as `_free_memory_before_video`; Ollama daemons are not measured.
         """
         tripped, _, _ = self._mlx_coder_memory_pressure()
         return not tripped
@@ -2654,23 +2725,22 @@ class GameAgent(
         on large-RAM boxes (512 GB + GLM-5.2 4-bit runs fine with everything
         resident).
 
-        Opt-in only via ``AGENT_ENABLE_MEMORY_RELIEF=1`` (same gate as
-        ``_mlx_coder_memory_pressure``). Default: no-op.
+        Gated by ``_mlx_coder_memory_pressure`` (on by default when RAM is low).
         """
-        info: dict = {"freed": [], "tripped": False, "llm_gb": None}
+        info: dict = {"freed": [], "tripped": False, "available_gb": None}
         try:
-            tripped, llm_gb, phys_gb = self._mlx_coder_memory_pressure()
+            tripped, metric_gb, phys_gb = self._mlx_coder_memory_pressure()
             if not tripped:
-                if llm_gb is not None:
-                    info["llm_gb"] = llm_gb
+                if metric_gb is not None:
+                    info["available_gb"] = metric_gb
                     self._trace({
                         "kind": "video_memory_relief_skipped",
-                        "llm_gb": llm_gb,
+                        "available_gb": metric_gb,
                         "phys_gb": phys_gb,
                     })
                 return info
             info["tripped"] = True
-            info["llm_gb"] = llm_gb
+            info["available_gb"] = metric_gb
             # Diffusers only (Z-Image / Stable-Audio) — NOT the MLX coder LLM.
             try:
                 import assets as _assets
@@ -2688,7 +2758,7 @@ class GameAgent(
             self._asset_generator = None
             self._trace({
                 "kind": "video_memory_relief",
-                "llm_gb": info["llm_gb"], "phys_gb": phys_gb,
+                "available_gb": info["available_gb"], "phys_gb": phys_gb,
                 "freed": info["freed"],
             })
         except Exception as e:

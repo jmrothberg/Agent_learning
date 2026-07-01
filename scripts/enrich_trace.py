@@ -328,6 +328,25 @@ def _retrieval_first_clean(
     return first_clean, retrieved
 
 
+def _format_ask_turns(records: list[dict]) -> list[str]:
+    """One block per /ask turn for --timeline triage."""
+    lines: list[str] = []
+    for row in records:
+        if row.get("kind") != "user_ask":
+            continue
+        q = (row.get("question") or "").strip()
+        reply = (row.get("reply") or row.get("reply_preview") or "").strip()
+        preview = reply.replace("\n", " ")[:120]
+        chars = row.get("reply_chars") or len(reply)
+        lines.append(f"  Q: {q}")
+        if preview:
+            suffix = "..." if len(reply) > len(preview) else ""
+            lines.append(f"  A ({chars} chars): {preview}{suffix}")
+        else:
+            lines.append(f"  A: (no reply recorded, {chars} chars)")
+    return lines
+
+
 def _print_timeline(trace: Path) -> None:
     """Phase 4 (4D.3): one-screen per-iter digest for the reviewing LLM.
 
@@ -359,6 +378,11 @@ def _print_timeline(trace: Path) -> None:
         f"first_clean={first_clean if first_clean is not None else 'never'}; "
         f"retrieved_ids={retrieved if retrieved else '[]'}"
     )
+    ask_lines = _format_ask_turns(records)
+    if ask_lines:
+        print("ask turns:")
+        for line in ask_lines:
+            print(line)
     print()
 
 

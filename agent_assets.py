@@ -2317,9 +2317,8 @@ class AssetGenerationMixin:
 
                 )
 
-                # Memory-pressure guard: opt-in only (AGENT_ENABLE_MEMORY_RELIEF=1).
-                # Default off — on-disk GLM size ≠ resident RAM; 512 GB boxes
-                # run GLM + Stable-Audio + Wan subprocess fine without unloading.
+                # Memory-pressure guard: on by default when free RAM is low
+                # (see _mlx_coder_memory_pressure). Skips small MLX models.
                 _mem = await asyncio.to_thread(self._free_memory_before_video)
 
                 if _mem.get("freed"):
@@ -2332,7 +2331,7 @@ class AssetGenerationMixin:
 
                         f"pressure kill: {', '.join(_mem['freed'])} "
 
-                        f"(LLM ~{_mem.get('llm_gb')} GB — reloads next turn)",
+                        f"({_mem.get('available_gb')} GB RAM free)",
 
                     ))
 
@@ -2482,12 +2481,11 @@ class AssetGenerationMixin:
 
 
 
-        # Post-media VRAM relief: opt-in AGENT_ENABLE_MEMORY_RELIEF=1 only.
-        # Drops Z-Image / Stable-Audio after sprite/sound batches — never the coder LLM.
+        # Post-media VRAM relief when free RAM is low (default on). Never MLX LLM.
 
         if asset_specs or sound_specs:
 
-            tripped, llm_gb, phys_gb = self._mlx_coder_memory_pressure()
+            tripped, metric_gb, phys_gb = self._mlx_coder_memory_pressure()
 
             if tripped:
 
@@ -2501,7 +2499,7 @@ class AssetGenerationMixin:
 
                         "trigger": trigger,
 
-                        "llm_gb": llm_gb,
+                        "available_gb": metric_gb,
 
                         "phys_gb": phys_gb,
 
@@ -2513,9 +2511,9 @@ class AssetGenerationMixin:
 
                         "info",
 
-                        "unloaded sprite/sound models to free VRAM for the "
+                        "unloaded sprite/sound models to free VRAM "
 
-                        f"coder LLM (~{llm_gb} GB on disk): "
+                        f"({metric_gb} GB RAM free): "
 
                         f"{', '.join(freed)} — they reload automatically "
 

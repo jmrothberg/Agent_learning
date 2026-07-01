@@ -1222,7 +1222,13 @@ class CriticMixin:
 
         try:
 
-            self._messages = saved_messages + [{
+            # Lean context: ask_instruction already embeds goal, report, and
+            # best.html excerpt — replaying the full iter history only bloats
+            # prefill (torch-dungeon 20260701: 78k history + 13k ask prompt).
+            system_msgs = [
+                m for m in saved_messages if m.get("role") == "system"
+            ][:1]
+            ask_messages = list(system_msgs) + [{
 
                 "role": "user",
 
@@ -1231,6 +1237,23 @@ class CriticMixin:
                 "phase": "ask",
 
             }]
+            history_chars_dropped = sum(
+                len(str(m.get("content") or ""))
+                for m in saved_messages
+                if m not in system_msgs
+            )
+            self._trace({
+
+                "kind": "user_ask_context",
+
+                "history_chars_dropped": history_chars_dropped,
+
+                "ask_prompt_chars": len(ask_prompt),
+
+                "message_count": len(ask_messages),
+
+            })
+            self._messages = ask_messages
 
             reply = await self._stream(
 
@@ -1304,11 +1327,17 @@ class CriticMixin:
 
             "question": question[:500],
 
+            "reply": clean_reply,
+
+            "reply_preview": clean_reply[:500],
+
             "reply_chars": len(clean_reply),
 
             "tags_stripped": tags_stripped,
 
             "snapshot_n": self._snapshot_n,
+
+            "phase": "ask",
 
         })
 

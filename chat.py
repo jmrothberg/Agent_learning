@@ -976,6 +976,10 @@ class CodingBoxApp(App):
         self._model3_stream_started_at: float = 0.0
         self._model3_last_token_at: float = 0.0
         self._model3_is_streaming: bool = False
+        # /ask background worker — True while run_ask_turn is in flight.
+        self._ask_in_flight: bool = False
+        # Throttle status repaints driven by token callback (1 Hz).
+        self._last_emit_status_at: float = 0.0
         self._assets_summary: str = ""        # sticky summary of last batch
         # Phase 1C — in-flight totals so the status panel can render
         # live "Sprites: 4/12 · 2.9s avg · ~24s ETA" rows. Set when
@@ -1419,6 +1423,15 @@ class CodingBoxApp(App):
                     "rule); watch the [stream alive] line below, or /done "
                     "ships the last clean build.[/yellow]"
                 )
+        # Keep Activity row tok/s and pre-first-token wait advancing even
+        # when no agent event arrives (e.g. /ask on a long MLX prefill).
+        if self._is_streaming or self._model2_is_streaming or self._model3_is_streaming:
+            if now - self._last_emit_status_at >= 1.0:
+                self._last_emit_status_at = now
+                try:
+                    self._update_status()
+                except Exception:
+                    pass
         # Flush at any newline boundary so the user sees lines as they arrive.
         if "\n" in self._stream_buf:
             *complete, self._stream_buf = self._stream_buf.split("\n")
@@ -1768,6 +1781,11 @@ class CodingBoxApp(App):
                 "[black on green] AUTO [/]  "
                 "[green dim]continuous run — /wait on to pause per-iter[/green dim]"
             )
+        if self._ask_in_flight:
+            mode_badge += (
+                "\n[black on cyan] ASK [/]  "
+                "[cyan]read-only Q&A in progress — watch Activity row[/cyan]"
+            )
         # VLM hint — agent's runtime probe sets self.agent._is_vlm to
         # True/False after the first stream call. None = unknown (not
         # probed yet). When True, the model can read screenshots
@@ -2090,6 +2108,8 @@ class CodingBoxApp(App):
             prefix_badges.append(f"[black on blue] {profile_badge} [/]")
         if getattr(self, "_selection_mode_on", False):
             prefix_badges.append("[black on cyan] SELECT [/]")
+        if self._ask_in_flight:
+            prefix_badges.append("[black on cyan] ASK [/]")
         badge_prefix = " ".join(prefix_badges) + (" " if prefix_badges else "")
         # Mirror the WAIT badge onto the Footer row so the user sees it
         # right next to the keybinding hints, not just on the mode-bar
@@ -2113,6 +2133,11 @@ class CodingBoxApp(App):
             body = (
                 "[bold yellow]WAITING (answer):[/bold yellow] "
                 "type your reply to the model's question"
+            )
+        elif self._ask_in_flight:
+            body = (
+                "[bold cyan]ASK:[/bold cyan] "
+                "read-only Q&A — answer streams to the log when ready"
             )
         elif self._session_done and self._awaiting_kind == "goal":
             body = "[dim]idle — type a new goal or /help[/dim]"
@@ -5069,17 +5094,38 @@ class CodingBoxApp(App):
                 "/ask needs an active session — start with a goal or /new <goal>"
             )
             return
+        if self._ask_in_flight:
+            self._log_error(
+                "/ask: already running — wait for the current answer to finish"
+            )
+            return
         if self._agent_is_streaming():
             self._log_error(
                 "/ask: wait for the current model turn to finish, then retry"
             )
             return
         self._log_info(f"[cyan]/ask[/cyan] {_esc(question)}")
+        self._log_info(
+            "[dim]ask started — watch the Activity row; full Q&A is written "
+            "to the session trace when done[/dim]"
+        )
+        self.run_worker(self._run_ask_worker(question), exclusive=False)
+
+    async def _run_ask_worker(self, question: str) -> None:
+        """Background drain for run_ask_turn — keeps input + status ticks live."""
+        self._ask_in_flight = True
+        self._update_mode_bar()
         try:
+            agent = self.agent
+            if agent is None:
+                return
             async for ev in agent.run_ask_turn(question):
                 self._handle_event(ev)
         except Exception as e:
             self._log_error(f"/ask failed: {e}")
+        finally:
+            self._ask_in_flight = False
+            self._update_mode_bar()
 
     async def _run_visual_check(
         self,
@@ -6427,6 +6473,8 @@ class CodingBoxApp(App):
         self._model3_stream_started_at = 0.0
         self._model3_last_token_at = 0.0
         self._model3_is_streaming = False
+        self._ask_in_flight = False
+        self._last_emit_status_at = 0.0
         self._assets_summary = ""
         self._sounds_summary = ""
         self._sounds_dir = None

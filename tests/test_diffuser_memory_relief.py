@@ -1,4 +1,4 @@
-"""Auto-unload diffusers after sprite/sound batches when MLX coder is huge."""
+"""Auto-unload diffusers when free RAM is low; skip small MLX models."""
 
 from __future__ import annotations
 
@@ -6,6 +6,8 @@ import os
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -25,7 +27,7 @@ def _make_agent(tmp_path: Path) -> GameAgent:
     )
 
 
-def _fake_huge_model_dir(tmp_path: Path, size_bytes: int) -> tuple[Path, MagicMock]:
+def _fake_model_dir(tmp_path: Path, size_bytes: int) -> tuple[Path, MagicMock]:
     model_dir = tmp_path / "mlx_model"
     model_dir.mkdir()
     fake = MagicMock()
@@ -34,15 +36,16 @@ def _fake_huge_model_dir(tmp_path: Path, size_bytes: int) -> tuple[Path, MagicMo
     return model_dir, fake
 
 
-def test_mlx_coder_memory_pressure_trips_for_huge_model(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    monkeypatch.setenv("AGENT_ENABLE_MEMORY_RELIEF", "1")
-    model_dir, fake = _fake_huge_model_dir(tmp_path, int(250 * 1e9))
-
+def _wire_mlx_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    model_dir: Path,
+    fake_file: MagicMock,
+) -> GameAgent:
     def _rglob(self: Path, pattern: str):
         if self == model_dir:
-            return [fake]
+            return [fake_file]
         return []
 
     monkeypatch.setattr(Path, "rglob", _rglob)
@@ -51,98 +54,112 @@ def test_mlx_coder_memory_pressure_trips_for_huge_model(
     agent._backend.info.name = "mlx"
     agent._backend.info.model = str(model_dir)
     monkeypatch.setattr(MLXBackend, "_loaded_path", None)
-
-    def _sysconf(name: str) -> int:
-        if name == "SC_PHYS_PAGES":
-            return int(512 * 1e9 / 4096)
-        if name == "SC_PAGE_SIZE":
-            return 4096
-        return 0
-
-    monkeypatch.setattr(os, "sysconf", _sysconf)
-    tripped, llm_gb, _ = agent._mlx_coder_memory_pressure()
-    assert tripped is True
-    assert llm_gb is not None and llm_gb > 100
+    return agent
 
 
-def test_mlx_coder_memory_pressure_skips_by_default_even_for_huge_on_disk(
-    tmp_path: Path, monkeypatch,
+def test_mlx_coder_memory_pressure_trips_below_64gb_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """On-disk GLM folder size must not trip relief unless opt-in."""
-    monkeypatch.delenv("AGENT_ENABLE_MEMORY_RELIEF", raising=False)
-    model_dir, fake = _fake_huge_model_dir(tmp_path, int(420 * 1e9))
+    """Relief trips when free RAM is under the 64 GB default (e.g. DOOM + GLM stack)."""
+    model_dir, fake = _fake_model_dir(tmp_path, int(250 * 1e9))
+    agent = _wire_mlx_agent(tmp_path, monkeypatch, model_dir=model_dir, fake_file=fake)
+    monkeypatch.setattr(
+        GameAgent,
+        "_available_system_memory_gb",
+        staticmethod(lambda: (48.0, 512.0)),
+    )
+    tripped, avail, _ = agent._mlx_coder_memory_pressure()
+    assert tripped is True
+    assert avail == 48.0
 
-    def _rglob(self: Path, pattern: str):
-        if self == model_dir:
-            return [fake]
-        return []
 
-    monkeypatch.setattr(Path, "rglob", _rglob)
-    agent = _make_agent(tmp_path)
-    agent._backend = MagicMock()
-    agent._backend.info.name = "mlx"
-    agent._backend.info.model = str(model_dir)
+def test_mlx_coder_memory_pressure_skips_at_or_above_64gb_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_dir, fake = _fake_model_dir(tmp_path, int(250 * 1e9))
+    agent = _wire_mlx_agent(tmp_path, monkeypatch, model_dir=model_dir, fake_file=fake)
+    monkeypatch.setattr(
+        GameAgent,
+        "_available_system_memory_gb",
+        staticmethod(lambda: (72.0, 512.0)),
+    )
+    tripped, _, _ = agent._mlx_coder_memory_pressure()
+    assert tripped is False
+
+
+def test_mlx_coder_memory_pressure_trips_when_ram_low(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_dir, fake = _fake_model_dir(tmp_path, int(250 * 1e9))
+    agent = _wire_mlx_agent(tmp_path, monkeypatch, model_dir=model_dir, fake_file=fake)
+    monkeypatch.setattr(
+        GameAgent,
+        "_available_system_memory_gb",
+        staticmethod(lambda: (16.0, 512.0)),
+    )
+    tripped, avail, phys = agent._mlx_coder_memory_pressure()
+    assert tripped is True
+    assert avail == 16.0
+    assert phys == 512.0
+
+
+def test_mlx_coder_memory_pressure_skips_when_ram_plenty_even_huge_on_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GLM-sized on-disk tree must not trip relief on a roomy box."""
+    model_dir, fake = _fake_model_dir(tmp_path, int(420 * 1e9))
+    agent = _wire_mlx_agent(tmp_path, monkeypatch, model_dir=model_dir, fake_file=fake)
+    monkeypatch.setattr(
+        GameAgent,
+        "_available_system_memory_gb",
+        staticmethod(lambda: (200.0, 512.0)),
+    )
+    tripped, _, _ = agent._mlx_coder_memory_pressure()
+    assert tripped is False
+
+
+def test_mlx_coder_memory_pressure_skips_small_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_dir, fake = _fake_model_dir(tmp_path, int(30 * 1e9))
+    agent = _wire_mlx_agent(tmp_path, monkeypatch, model_dir=model_dir, fake_file=fake)
+    monkeypatch.setattr(
+        GameAgent,
+        "_available_system_memory_gb",
+        staticmethod(lambda: (8.0, 64.0)),
+    )
+    tripped, _, _ = agent._mlx_coder_memory_pressure()
+    assert tripped is False
+
+
+def test_mlx_coder_memory_pressure_opt_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGENT_ENABLE_MEMORY_RELIEF", "0")
+    model_dir, fake = _fake_model_dir(tmp_path, int(250 * 1e9))
+    agent = _wire_mlx_agent(tmp_path, monkeypatch, model_dir=model_dir, fake_file=fake)
+    monkeypatch.setattr(
+        GameAgent,
+        "_available_system_memory_gb",
+        staticmethod(lambda: (8.0, 64.0)),
+    )
     tripped, _, _ = agent._mlx_coder_memory_pressure()
     assert tripped is False
 
 
 def test_free_memory_before_video_never_drops_mlx_llm(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("AGENT_ENABLE_MEMORY_RELIEF", "1")
-    model_dir, fake = _fake_huge_model_dir(tmp_path, int(250 * 1e9))
-
-    def _rglob(self: Path, pattern: str):
-        if self == model_dir:
-            return [fake]
-        return []
-
-    monkeypatch.setattr(Path, "rglob", _rglob)
-
-    def _sysconf(name: str) -> int:
-        if name == "SC_PHYS_PAGES":
-            return int(512 * 1e9 / 4096)
-        if name == "SC_PAGE_SIZE":
-            return 4096
-        return 0
-
-    monkeypatch.setattr(os, "sysconf", _sysconf)
-    agent = _make_agent(tmp_path)
-    agent._backend = MagicMock()
-    agent._backend.info.name = "mlx"
-    agent._backend.info.model = str(model_dir)
+    model_dir, fake = _fake_model_dir(tmp_path, int(250 * 1e9))
+    agent = _wire_mlx_agent(tmp_path, monkeypatch, model_dir=model_dir, fake_file=fake)
+    monkeypatch.setattr(
+        GameAgent,
+        "_available_system_memory_gb",
+        staticmethod(lambda: (16.0, 512.0)),
+    )
     monkeypatch.setattr(MLXBackend, "_loaded_model", object(), raising=False)
     out = agent._free_memory_before_video()
     assert "MLX-LLM" not in out.get("freed", [])
-
-
-def test_mlx_coder_memory_pressure_skips_small_model(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    model_dir, fake = _fake_huge_model_dir(tmp_path, int(30 * 1e9))
-
-    def _rglob(self: Path, pattern: str):
-        if self == model_dir:
-            return [fake]
-        return []
-
-    monkeypatch.setattr(Path, "rglob", _rglob)
-    agent = _make_agent(tmp_path)
-    agent._backend = MagicMock()
-    agent._backend.info.name = "mlx"
-    agent._backend.info.model = str(model_dir)
-    monkeypatch.setattr(MLXBackend, "_loaded_path", None)
-
-    def _sysconf(name: str) -> int:
-        if name == "SC_PHYS_PAGES":
-            return int(512 * 1e9 / 4096)
-        if name == "SC_PAGE_SIZE":
-            return 4096
-        return 0
-
-    monkeypatch.setattr(os, "sysconf", _sysconf)
-    tripped, _, _ = agent._mlx_coder_memory_pressure()
-    assert tripped is False
 
 
 def test_release_diffusers_vram_clears_session_generators(tmp_path: Path) -> None:
