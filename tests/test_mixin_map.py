@@ -17,6 +17,7 @@ _EXPECTED = {
     "_build_fix_prompt": "agent_prompts",
     "_build_structured_summary": "agent_prompts",
     "_apply_undrawn_art_intent_gate": "agent_gates",
+    "_apply_dropped_assets_pending_gate": "agent_gates",
     "_apply_scoped_check_to_report": "agent_feedback",
     "_parse_feedback_route_json": "agent_feedback",
     "_route_user_feedback_llm": "agent_feedback",

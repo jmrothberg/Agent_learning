@@ -1795,25 +1795,26 @@ def render_asset_paths_block(
         "  // 1. Build an asset-loader (do this ONCE at startup):",
         "  const ASSETS = {};",
         "  let _assetsReady = false;",
-        "  async function loadAssets() {",
-        "    const entries = [",
+        "  const PATHS = {",
     ]
     for name, path in asset_paths.items():
         try:
             rel = Path(path).resolve().relative_to(html_dir)
         except ValueError:
             rel = path
-        lines.append(f"      ['{name}', './{rel}'],")
+        lines.append(f"    '{name}': './{rel}',")
     lines += [
-        "    ];",
-        "    for (const [name, src] of entries) {",
+        "  };",
+        "  async function loadAssets() {",
+        "    for (const [name, src] of Object.entries(PATHS)) {",
         "      const img = new Image();",
         "      img.src = src;",
-        "      try { await img.decode(); } catch (e) { console.warn('asset failed', name, e); }",
         "      ASSETS[name] = img;",
+        "      try { await img.decode(); } catch (e) { console.warn('asset failed', name, e); }",
         "    }",
         "    _assetsReady = true;",
         "  }",
+        "  // COPY the exact PATHS keys above — do NOT invent alternate key names.",
         "  // 2. Start RAF IMMEDIATELY; load assets in the background:",
         "  //    Never gate requestAnimationFrame behind every image decode.",
         "  //    If one PNG fails, the game must still render fallbacks and respond.",
@@ -1867,12 +1868,22 @@ def render_asset_paths_block(
         "    }",
         "    return img || null;",
         "  }",
+        "  function drawEntity(key, x, y, w, h) {",
+        "    const img = sprite(key);",
+        "    if (img && img.complete && img.naturalWidth > 0) {",
+        "      ctx.drawImage(img, x - w / 2, y - h / 2, w, h);",
+        "    } else {",
+        "      ctx.fillStyle = '#f0f'; ctx.fillRect(x - w / 2, y - h / 2, w, h);",
+        "      ctx.fillStyle = '#000'; ctx.font = '12px monospace';",
+        "      ctx.fillText('MISSING ' + key, x - w / 2 + 2, y - h / 2 + 14);",
+        "    }",
+        "  }",
         "",
-        "  // 4. In draw(): fetch via sprite() and check readiness AT DRAW TIME. A",
-        "  //    matched-but-still-decoding image draws the MISSING marker THIS",
-        "  //    frame and the real art the frame after it decodes — NEVER a plain",
-        "  //    filled rectangle (a tidy box looks intentional and hides the bug",
-        "  //    from you AND the visual critic):",
+        "  // 4. In draw(): call drawEntity(PATHS_KEY, ...) for EVERY entity.",
+        "  //    Use the exact PATHS key strings — never invent aliases.",
+        "  drawEntity('example_key', cx, cy, 64, 64);",
+        "",
+        "  // 5. Readiness check at DRAW time (same as drawEntity):",
         "  const img = sprite(key);",
         "  if (img && img.complete && img.naturalWidth > 0) {",
         "    ctx.drawImage(img, x, y, w, h);",
@@ -1881,6 +1892,13 @@ def render_asset_paths_block(
         "    ctx.fillStyle = '#000'; ctx.font = '12px monospace';",
         "    ctx.fillText('MISSING ' + key, x + 2, y + 14);",
         "  }",
+        "",
+        "MANDATORY ITER-1 WIRING — every PATHS key MUST appear in draw() via",
+        "drawEntity() or ctx.drawImage(sprite('KEY'), ...) on this turn:",
+    ]
+    names_checklist = ", ".join(asset_paths.keys())
+    lines.append(f"  {names_checklist}")
+    lines += [
         "",
         "Available assets — name → relative path:",
     ]

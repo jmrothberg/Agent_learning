@@ -39,7 +39,7 @@ _SYNTHETIC = [
     ("outrun mode7 perspective road race car", "canvas-racing-perspective"),
     ("zelda overworld tile map npc dialogue hearts", "canvas-overworld-rpg"),
     ("monkey island point and click inventory hotspot dialog", "canvas-point-and-click"),
-    ("qbert isometric pyramid hop cubes recolor", "canvas-isometric-tile"),
+    ("qbert isometric pyramid hop cubes recolor", "canvas-pyramid-hopper"),
     ("dragons lair qte timed reaction cutscene prompt window", "canvas-cutscene-qte"),
     ("place towers along a path to stop creeps waves", "canvas-tower-defense"),
     ("rhythm game notes scroll hit line lanes timing combo", "canvas-rhythm"),

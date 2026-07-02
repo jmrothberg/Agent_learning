@@ -1425,11 +1425,23 @@ class PromptBuildingMixin:
             f"{self._goal} {blocker_query}".strip()
             if blocker_query else self._goal
         )
+        ensure_ids = self._playbook_ensure_ids_for_report(report) or None
+        if ensure_ids is None and self._session_assets and any(
+            isinstance(w, str) and "ASSETS_LOADED_BUT_UNDRAWN" in w
+            for w in (report.get("soft_warnings") or [])
+        ):
+            ensure_ids = ["draw-generated-sprites-not-boxes"]
+        elif ensure_ids and self._session_assets and any(
+            isinstance(w, str) and "ASSETS_LOADED_BUT_UNDRAWN" in w
+            for w in (report.get("soft_warnings") or [])
+        ):
+            if "draw-generated-sprites-not-boxes" not in ensure_ids:
+                ensure_ids = list(ensure_ids) + ["draw-generated-sprites-not-boxes"]
         pb_block = self._retrieve_playbook_block(
             fix_query,
             code=self._current_file,
             stage="code",
-            ensure_ids=self._playbook_ensure_ids_for_report(report) or None,
+            ensure_ids=ensure_ids or None,
         )
         opening_block, opening_hits = self._retrieve_opening_book_block(
             self._goal, stage="code",

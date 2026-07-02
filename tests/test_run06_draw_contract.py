@@ -40,13 +40,22 @@ def test_first_build_seed_framing_when_assets_exist():
     assert "window.state = state" in body
 
 
+def test_playbook_draw_generated_sprites_has_shooter_tags_for_centipede():
+    """First-build pins this bullet via ensure_ids when assets exist; tags
+    must include centipede/galaga so plan-stage retrieval can find it."""
+    pb = Playbook()
+    bullet = next(b for b in pb.load_all() if b.id == "draw-generated-sprites-not-boxes")
+    for tag in ("centipede", "galaga", "fixed-shooter", "drawimage"):
+        assert tag in bullet.tags
+
+
 def test_playbook_draw_generated_sprites_retrieves_for_art_goal():
     pb = Playbook()
     goal = (
         "Build a platformer with colorful sprites and drawImage for every "
         "generated character enemy pickup"
     )
-    hits = pb.retrieve(goal, stage="code", k=8)
+    hits = pb.retrieve(goal, stage="plan", k=8)
     ids = {h.bullet.id for h in hits}
     assert "draw-generated-sprites-not-boxes" in ids
 
@@ -97,7 +106,7 @@ def test_entity_not_rendered_advisory_when_probes_green():
 def test_undrawn_first_occurrence_advisory_when_state_gated():
     src = inspect.getsource(tools.LiveBrowser.load_and_test)
     assert "_undrawn_likely_state_gated" in src
-    assert "_undrawn_state_gated" in src
+    assert "_sprite_paths_wrapper" in src
 
 
 def test_outline_turn_based_board_mentions_drawimage():

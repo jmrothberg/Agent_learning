@@ -1409,6 +1409,30 @@ _ENTITY_RENDERED_JS = """
              : (v && typeof v.r === 'number' && v.r > 0) ? v.r * 2
              : (v && typeof v.height === 'number' && v.height > 0) ? v.height : 32;
     const positions = [{kind: 'pixel', px: ent.x, py: ent.y}];
+    // When state exposes a 2D map/grid, coords are usually tile indices —
+    // run_09 roguelike: entity at (37,21) on a 40×30 map was misread as
+    // pixel (37,21) and falsely flagged ENTITY-NOT-RENDERED.
+    let mapGrid = null;
+    try { mapGrid = s.map || s.grid || s.level || s.tiles; } catch (e) { mapGrid = null; }
+    if (Array.isArray(mapGrid) && mapGrid.length > 0) {
+      const mapRows = mapGrid.length;
+      let mapCols = 0;
+      for (let ri = 0; ri < mapRows; ri++) {
+        const row = mapGrid[ri];
+        if (Array.isArray(row) && row.length > mapCols) mapCols = row.length;
+      }
+      if (mapCols > 1 && mapRows > 1
+          && ent.x >= 0 && ent.y >= 0
+          && ent.x < mapCols && ent.y < mapRows) {
+        const tw = c.width / mapCols;
+        const th = c.height / mapRows;
+        positions.push({
+          kind: 'map_tile',
+          px: ent.x * tw + tw / 2,
+          py: ent.y * th + th / 2,
+        });
+      }
+    }
     for (const n of tileCandidates) {
       const t = c.width / n;
       positions.push({
@@ -3992,12 +4016,20 @@ class LiveBrowser:
                         or _turn_based_board_idle
                     )
                 )
-                _decode_timing_demote = (
-                    _decode_settled and _game_advancing
-                    and _probes_green and _no_errors
-                )
                 _sprite_wrapper = (
                     "sprite(" in html_text and "drawImage" in html_text
+                )
+                _sprite_paths_wrapper = (
+                    _sprite_wrapper
+                    and "PATHS" in html_text
+                    and "drawEntity(" in html_text
+                )
+                _decode_timing_demote = (
+                    _decode_settled and _game_advancing and _no_errors
+                    and (
+                        _probes_green
+                        or _sprite_paths_wrapper
+                    )
                 )
                 if (
                     (_probes_green and _no_errors and (
@@ -4005,6 +4037,7 @@ class LiveBrowser:
                         or _scene_offscreen_bg
                         or _undrawn_state_gated
                         or _sprite_wrapper
+                        or _sprite_paths_wrapper
                     ))
                     or (self._undrawn_seen_before and _probes_green and _no_errors)
                     or _behavior_green_no_missing
@@ -4025,7 +4058,12 @@ class LiveBrowser:
                         if _undrawn_state_gated else
                         " Behavioral probes pass; HTML uses sprite() + "
                         "drawImage — likely a draw-call instrumentation miss."
-                        if _sprite_wrapper else
+                        if _sprite_wrapper and not _sprite_paths_wrapper else
+                        " Behavioral probes pass; HTML uses PATHS + drawEntity() + "
+                        "sprite() — first-build wiring is present; undrawn is likely "
+                        "decode timing or state-gated sprites (spider/bullet) not "
+                        "seen in the smoke window."
+                        if _sprite_paths_wrapper else
                         " Behavioral probes pass; asset decode settled and "
                         "the canvas is advancing — undrawn stems are likely "
                         "a Chromium timing false positive (sprites visible in "

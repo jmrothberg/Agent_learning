@@ -1235,6 +1235,9 @@ class GameAgent(
         # Resolved asset paths from Phase A (name → absolute path); used
         # by the first-build prompt assembler.
         self._session_assets: dict[str, Path] = {}
+        # Asset names dropped by the per-turn cap (asset_overflow) that still
+        # need mid-session generation — re-warned every iter until on disk.
+        self._pending_dropped_assets: list[str] = []
         # Phase 0.10 — per-session cap on assets generated per <assets>
         # block. Default `None` means "use module default" (24). Raised
         # at session start when the goal explicitly asks for multi-frame
@@ -2834,27 +2837,17 @@ class GameAgent(
         return not tripped
 
     def _free_memory_before_video(self) -> dict:
-        """Conditionally free diffuser pipelines BEFORE launching the Wan video
-        subprocess. Never drops the in-process MLX LLM — video runs in a
-        separate subprocess and unloading the coder model mid-session is wrong
-        on large-RAM boxes (512 GB + GLM-5.2 4-bit runs fine with everything
-        resident).
+        """Free diffuser pipelines BEFORE launching the Wan video subprocess.
 
-        Gated by ``_mlx_coder_memory_pressure`` (on by default when RAM is low).
+        Always releases Z-Image / Stable-Audio resident pipelines — assets and
+        sounds are already on disk by Phase A video time, and keeping diffusers
+        loaded alongside the MLX coder LLM + Wan subprocess triggered macOS
+        jetsam (vm-compressor-space-shortage) on run_09 games 5–7 even when
+        free-RAM looked plentiful. Never drops the in-process MLX LLM.
         """
-        info: dict = {"freed": [], "tripped": False, "available_gb": None}
+        info: dict = {"freed": [], "forced": True, "available_gb": None}
         try:
-            tripped, metric_gb, phys_gb = self._mlx_coder_memory_pressure()
-            if not tripped:
-                if metric_gb is not None:
-                    info["available_gb"] = metric_gb
-                    self._trace({
-                        "kind": "video_memory_relief_skipped",
-                        "available_gb": metric_gb,
-                        "phys_gb": phys_gb,
-                    })
-                return info
-            info["tripped"] = True
+            _, metric_gb, phys_gb = self._mlx_coder_memory_pressure()
             info["available_gb"] = metric_gb
             # Diffusers only (Z-Image / Stable-Audio) — NOT the MLX coder LLM.
             try:
@@ -2873,8 +2866,10 @@ class GameAgent(
             self._asset_generator = None
             self._trace({
                 "kind": "video_memory_relief",
-                "available_gb": info["available_gb"], "phys_gb": phys_gb,
+                "available_gb": info["available_gb"],
+                "phys_gb": phys_gb,
                 "freed": info["freed"],
+                "forced": True,
             })
         except Exception as e:
             self._trace({"kind": "video_memory_relief_error", "err": str(e)})
@@ -5494,6 +5489,10 @@ class GameAgent(
                 # the implementation shape, broad context helps.
                 pb_block = self._retrieve_playbook_block(
                     goal, code=seed_html, stage="plan",
+                    ensure_ids=(
+                        ["draw-generated-sprites-not-boxes"]
+                        if self._session_assets else None
+                    ),
                 )
                 # Seed retrieval: bias the outline match with structural
                 # tokens from the working file so a terse goal ("add a
@@ -5656,6 +5655,10 @@ class GameAgent(
                 # include code.
                 pb_block = self._retrieve_playbook_block(
                     goal, stage="plan",
+                    ensure_ids=(
+                        ["draw-generated-sprites-not-boxes"]
+                        if self._session_assets else None
+                    ),
                 )
                 opening_block, opening_hits = self._retrieve_opening_book_block(
                     goal, stage="plan",
@@ -7721,6 +7724,7 @@ class GameAgent(
             # Phase 0C: promote undrawn-art advisory back to a blocking
             # soft_warning on iter-1 / art-feedback-pending (golden-iter-2 safe).
             self._apply_undrawn_art_intent_gate(report)
+            self._apply_dropped_assets_pending_gate(report)
             self._apply_still_frame_frozen_downgrade(report)
             self._apply_player_stuck_downgrade(report)
             # Demote structurally-impossible self-probes (probe_lint already

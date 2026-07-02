@@ -66,6 +66,7 @@ def test_entity_rendered_js_tries_multiple_position_interpretations():
     arcade tile sizes (28-wide = Pac-Man, 32, 20, 16, 8) and picks the
     interpretation where the position is most likely rendered."""
     assert "kind: 'pixel'" in _ENTITY_RENDERED_JS
+    assert "map_tile" in _ENTITY_RENDERED_JS
     assert "tile${n}" in _ENTITY_RENDERED_JS
     # Verify several tile candidates exist.
     for n in (28, 32, 20, 16, 8):

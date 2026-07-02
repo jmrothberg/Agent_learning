@@ -133,6 +133,7 @@ _RECIPE_TO_OUTLINE: dict[str, str] = {
     "canvas-lane-crossing": "outline-lane-crossing",
     "canvas-point-and-click": "outline-point-and-click",
     "canvas-isometric-tile": "outline-isometric-tile",
+    "canvas-pyramid-hopper": "outline-pyramid-hopper",
     "canvas-overworld-rpg": "outline-overworld-rpg",
     "canvas-city-builder": "outline-city-builder",
     "canvas-space-trading": "outline-space-trading",
@@ -2977,10 +2978,14 @@ def _disambiguate_visual_mechanism(
     if recipe is None:
         return recipe
     if recipe.id == "canvas-city-builder" and (
-        "isometric" in ctx_toks or "iso" in ctx_toks or "qbert" in ctx_toks
-    ):
+        "isometric" in ctx_toks or "iso" in ctx_toks
+    ) and "qbert" not in ctx_toks:
         for r in recipes:
             if r.id == "canvas-isometric-tile":
+                return r
+    if recipe.id == "canvas-city-builder" and "qbert" in ctx_toks:
+        for r in recipes:
+            if r.id == "canvas-pyramid-hopper":
                 return r
     if recipe.id == "canvas-puzzle-grid" and (_STACKING_SIGNALS & ctx_toks):
         if "crane" in ctx_toks or ("stacking" in ctx_toks and "tower" in ctx_toks):

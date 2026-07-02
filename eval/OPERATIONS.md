@@ -10,6 +10,7 @@ Human onboarding → `README.md`. Commands/env → `DEV.md`. Harness traps → `
 | User intent | Command | Notes |
 |-------------|---------|-------|
 | **Run 10 games overnight (run_08 — tonight)** | Terminal: `bash eval/tune_run08.sh` · Cursor: watcher below | Batch runs **flat-out** (no pause). Watcher fixes in parallel. |
+| **Run 10 games validation (run_10 — run_09 fix retest)** | Terminal: `bash eval/tune_run09.sh` · Cursor: watcher below | `--max-iters 4`, fresh `run_10/` dir. See § run_10. |
 | **Run all 11 games overnight (both batches, auto-chained)** | `bash eval/tune_run07_chain.sh` in Terminal + monitor below in Cursor | **One paste** — Batch B starts automatically when A finishes. No wake-up. |
 | **Run 11 games to improve the agent (run_07)** | Same as chain row above | A=GLM no VLM (6) → B=Qwen VLM on (5), watcher handoff between games. |
 | **Run unit tests** / **pytest** / **after a code change** | `.venv/bin/python -m pytest tests/ -q` | ~2158 tests, no GPU. Full map: `TEST.md`. |
@@ -126,6 +127,51 @@ Artifacts: `games/tune_serial10/run_08/` (`overnight.log`, `traces/`, `tune_chec
 
 ---
 
+## run_10 — validation batch (run_09 fix retest)
+
+Re-runs run_09 failures plus games that exercise each landed fix class (sprite PATHS wiring, video memory relief, asset-overflow gate, pyramid-hopper outline, roguelike art). Goals: `eval/tune_run09_goals.txt`. **`--max-iters 4 --retries 0`**, VLM off.
+
+| Slot | Library | Fix class under test |
+|------|---------|----------------------|
+| 1 | centipede | First-build PATHS / ASSETS_LOADED_BUT_UNDRAWN |
+| 2 | galaga | Sprite wiring control (recovered in run_09) |
+| 3 | pinball | Sprite wiring + local_llm probes-only turn |
+| 4 | qbert | `canvas-pyramid-hopper` / `outline-pyramid-hopper` |
+| 5 | roguelike-dungeon | Art language + map-tile ENTITY-NOT-RENDERED |
+| 6 | tower-defense-openfield | `ASSETS_DROPPED_PENDING` gate |
+| 7 | super-mario | Unconditional video memory relief |
+| 8 | kung-fu-master | Video relief (beat-em-up + cutscene) |
+| 9 | dragons-lair | Video relief (heaviest QTE + multi-video) |
+| 10 | street-fighter | Multi-frame animation stress |
+
+| | Terminal.app (once) | Cursor watcher (once) |
+|---|---------------------|------------------------|
+| Command | `bash eval/tune_run09.sh` | `.venv/bin/python eval/tune_overnight_monitor.py --out-dir games/tune_serial10/run_10 --jobs-total 10 --interval 30 --sync-loop` |
+| Log / status | `games/tune_serial10/run_10/overnight.log` | `games/tune_serial10/run_10/agent_monitor.json` |
+
+**Open batch in Terminal.app from Cursor:**
+
+```bash
+osascript -e 'tell application "Terminal" to do script "cd /Users/jonathanrothberg/Agent_learning && bash eval/tune_run09.sh"'
+```
+
+```bash
+cd /Users/jonathanrothberg/Agent_learning
+bash eval/tune_run09.sh
+```
+
+```bash
+.venv/bin/python eval/tune_overnight_monitor.py \
+  --out-dir games/tune_serial10/run_10 \
+  --jobs-total 10 \
+  --interval 30 \
+  --sync-loop
+```
+
+Artifacts: `games/tune_serial10/run_10/` (`overnight.log`, `traces/`, `tune_checkpoint.json`).
+
+---
+
 ## Serial overnight batch (manual launch)
 
 **Primary workflow:** see **run_07 chain** above. For a custom dir/goals file:
@@ -133,6 +179,7 @@ Artifacts: `games/tune_serial10/run_08/` (`overnight.log`, `traces/`, `tune_chec
 | File | Purpose |
 |------|---------|
 | **`eval/tune_run08_goals.txt`** | **run_08 tonight (10 games)** — see § run_08 above |
+| **`eval/tune_run09_goals.txt`** | **run_10 validation (10 games)** — see § run_10 above |
 | `eval/tune_run07_big.txt` | run_07 Batch A (6 games, GLM, no VLM) |
 | `eval/tune_run07_vlm.txt` | run_07 Batch B (5 games, Qwen + VLM, `--max-iters 2`) |
 | `eval/tune_serial10_goals.txt` | Full 12-game battery |

@@ -414,6 +414,11 @@ def test_render_block_uses_relative_paths(tmp_path: Path):
     # And it should be insistent — qwen3.6-class models default to
     # procedural drawing without explicit "MUST" framing.
     assert "MUST USE THEM" in block or "REGRESSION" in block
+    assert "const PATHS = {" in block
+    assert "ASSETS[name] = img;" in block
+    assert block.index("ASSETS[name] = img;") < block.index("await img.decode();")
+    assert "function drawEntity(" in block
+    assert "MANDATORY ITER-1 WIRING" in block
 
 
 def test_render_block_empty_input_returns_empty():

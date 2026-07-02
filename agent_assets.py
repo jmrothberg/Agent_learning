@@ -1445,6 +1445,13 @@ class AssetGenerationMixin:
 
             self._trace(overflow_event)
 
+            # Persist for iter-to-iter ASSETS_DROPPED_PENDING gate until generated.
+            pending = list(getattr(self, "_pending_dropped_assets", None) or [])
+            for _dn in dropped_asset_names:
+                if _dn not in pending:
+                    pending.append(_dn)
+            self._pending_dropped_assets = pending
+
             yield self._record(AgentEvent(
 
                 "info",
@@ -1670,6 +1677,11 @@ class AssetGenerationMixin:
                 new_asset_paths = dict(produced)
 
                 self._session_assets.update(produced)
+                if produced and getattr(self, "_pending_dropped_assets", None):
+                    self._pending_dropped_assets = [
+                        n for n in self._pending_dropped_assets
+                        if n not in produced
+                    ]
 
                 per_asset = getattr(
 

@@ -160,6 +160,33 @@ def test_free_memory_before_video_never_drops_mlx_llm(
     monkeypatch.setattr(MLXBackend, "_loaded_model", object(), raising=False)
     out = agent._free_memory_before_video()
     assert "MLX-LLM" not in out.get("freed", [])
+    assert out.get("forced") is True
+
+
+def test_free_memory_before_video_always_releases_diffusers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """run_09: jetsam during Wan video even when free RAM looked fine — relief
+    must run unconditionally, not skip when pressure gate is false."""
+    model_dir, fake = _fake_model_dir(tmp_path, int(250 * 1e9))
+    agent = _wire_mlx_agent(tmp_path, monkeypatch, model_dir=model_dir, fake_file=fake)
+    monkeypatch.setattr(
+        GameAgent,
+        "_available_system_memory_gb",
+        staticmethod(lambda: (260.0, 549.0)),
+    )
+    freed_calls: list[str] = []
+
+    def _fake_release():
+        freed_calls.append("diffusers")
+        return ["Z-Image"]
+
+    import assets as assets_mod
+    monkeypatch.setattr(assets_mod, "release_preloaded_diffusers", _fake_release)
+    out = agent._free_memory_before_video()
+    assert freed_calls == ["diffusers"]
+    assert out.get("forced") is True
+    assert "Z-Image" in out.get("freed", [])
 
 
 def test_release_diffusers_vram_clears_session_generators(tmp_path: Path) -> None:

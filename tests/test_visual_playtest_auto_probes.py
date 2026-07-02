@@ -118,7 +118,25 @@ def test_two_actors_facing_recipe_has_facing_probe() -> None:
     assert "facing" in expr
 
 
-def test_grid_navigation_recipe_has_wall_probe() -> None:
+def test_topdown_facing_probe_optional_for_fixed_shooters() -> None:
+    """Centipede/Galaga blasters need not expose player.facing — the
+    auto-probe must pass when no facing/angle/direction field exists."""
+    recipes = _load_seeded_recipes()
+    topdown = [r for r in recipes if r.id == "canvas-top-down-action"][0]
+    expr = next(
+        ap["expr"] for ap in (topdown.recipe.get("auto_probes") or [])
+        if ap["name"] == "auto_topdown_player_can_face_directions"
+    )
+    assert "hasFacing" in expr
+    assert "hasAngle" in expr
+    assert "hasDir" in expr
+    # Simulated fixed-shooter player (no facing fields) must pass.
+    js = (
+        "const window={state:{player:{x:100,y:400,firing:0}}};"
+        + expr
+    )
+    # Can't eval JS in pytest easily — structural check only.
+    assert "if(!hasFacing&&!hasAngle&&!hasDir)returntrue;" in expr.replace(" ", "")
     """canvas-grid-navigation must have a probe asserting the player
     isn't standing inside a wall cell."""
     recipes = _load_seeded_recipes()

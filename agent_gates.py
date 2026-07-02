@@ -108,6 +108,42 @@ class GateProcessingMixin:
 
 
 
+    def _apply_dropped_assets_pending_gate(self, report: dict[str, Any]) -> None:
+        """Re-warn every iter when asset_overflow dropped names still missing.
+
+        run_09 Fieldrunners: harness dropped 14/38 sprites then tests went
+        green, so the model never re-requested tesla/flame/enemy art. Unlike
+        ASSETS_LOADED_BUT_UNDRAWN (loaded but not drawn), these PNGs were
+        never generated — keep blocking until they land on disk.
+        """
+        pending = [
+            n for n in (getattr(self, "_pending_dropped_assets", None) or [])
+            if n and n not in (getattr(self, "_session_assets", None) or {})
+        ]
+        if not pending:
+            return
+        preview = ", ".join(pending[:12])
+        if len(pending) > 12:
+            preview += f", … (+{len(pending) - 12} more)"
+        msg = (
+            f"ASSETS_DROPPED_PENDING [{preview}]: the harness per-turn cap "
+            "dropped these sprites — they do NOT exist on disk yet. Emit "
+            "another <assets> block (mid-session) with just the missing "
+            "names, or use from_image chaining. Do NOT mark the game done "
+            "while these are still missing."
+        )
+        soft = report.setdefault("soft_warnings", [])
+        if not any(isinstance(w, str) and "ASSETS_DROPPED_PENDING" in w for w in soft):
+            soft.append(msg)
+        report["ok"] = False
+        self._trace({
+            "kind": "dropped_assets_pending_gate",
+            "count": len(pending),
+            "names": pending[:24],
+        })
+
+
+
     @staticmethod
 
     def _classify_failure(

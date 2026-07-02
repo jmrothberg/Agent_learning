@@ -242,7 +242,7 @@ def test_dig_dug_and_qbert_route_correctly():
         mem = _memory()
         for name, expected in (
             ("dig-dug", "outline-grid-navigation"),
-            ("qbert", "outline-isometric-tile"),
+            ("qbert", "outline-pyramid-hopper"),
         ):
             hit = mem.retrieve_implementation_outline(prompts[name]["prompt"])
             actual = hit.item.id if hit else None

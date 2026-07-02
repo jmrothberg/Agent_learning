@@ -128,7 +128,7 @@ def test_known_assignments() -> None:
         "point-and-click adventure rooms inventory characters": "canvas-point-and-click",
         "open-world RPG towns overworld NPC dialogue quests": "canvas-overworld-rpg",
         "space trading combat ship pirates upgrades": "canvas-space-trading",
-        "isometric tile puzzle hop change colors": "canvas-isometric-tile",
+        "isometric tile puzzle hop change colors": "canvas-pyramid-hopper",
         "first-person grid-based 3D dungeon party monsters items": "canvas-3d-first-person",
         # Vertical platformers (donkey-kong 2026-05-24 trace). Distinct
         # from canvas-side-scroll-platformer: ladders + cascading
@@ -198,6 +198,7 @@ def test_library_has_at_least_one_recipe_per_mechanism_family() -> None:
         "canvas-lane-crossing",
         "canvas-point-and-click",
         "canvas-isometric-tile",
+        "canvas-pyramid-hopper",
         "canvas-overworld-rpg",
         "canvas-city-builder",
         "canvas-space-trading",
