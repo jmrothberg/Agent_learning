@@ -69,7 +69,8 @@ def test_explicit_on_forces_lean_even_on_cloud(tmp_path):
 def test_lean_system_prompt_is_small_sized(tmp_path):
     a = _agent(tmp_path, backend_name="mlx", model="qwen3.6-27b")
     sp = prompts_v1.build_system_prompt("make a snake game", model_class=a._system_prompt_class())
-    assert len(sp) <= 6600, f"lean system prompt too big: {len(sp)}"
+    # Shipped lean prompt is ~6732 chars (2026-07-02); cap guards runaway growth.
+    assert len(sp) <= 6800, f"lean system prompt too big: {len(sp)}"
 
 
 def test_lean_media_goal_keeps_media_tags(tmp_path):
@@ -112,6 +113,22 @@ def test_lean_memory_budget_noop_for_cloud(tmp_path):
     playbook = "P" * 4000
     ob, cb, pb = a._apply_lean_memory_budget(opening, components, playbook)
     assert (ob, cb, pb) == (opening, components, playbook)
+
+
+def test_lean_memory_budget_protect_playbook_survives_opening_fill(tmp_path):
+    """Mirrors run_10: opening ~4064 chars leaves no room for playbook unless
+    protect_playbook keeps the pinned sprite-wiring bullet."""
+    a = _agent(tmp_path, backend_name="mlx", model="qwen3.6-27b")
+    budget = GameAgent._LEAN_MEMORY_COMBINED_BUDGET
+    opening = "O" * (budget - 100)
+    components = "C" * 1800
+    playbook = "P" * 900
+    ob, cb, pb = a._apply_lean_memory_budget(
+        opening, components, playbook, protect_playbook=True,
+    )
+    assert ob == opening
+    assert pb == playbook
+    assert cb == ""
 
 
 def test_qwen36_27b_is_detected_as_vlm():

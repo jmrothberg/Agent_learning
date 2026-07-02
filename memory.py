@@ -150,6 +150,7 @@ _RECIPE_TO_OUTLINE: dict[str, str] = {
     "canvas-bullet-hell": "outline-bullet-hell",
     "canvas-word-typing": "outline-word-typing",
     "canvas-pinball": "outline-pinball",
+    "canvas-fixed-shooter": "outline-fixed-shooter",
     "canvas-stealth": "outline-stealth",
     "canvas-roguelike": "outline-roguelike",
     "canvas-stacking-physics": "outline-stacking-physics",

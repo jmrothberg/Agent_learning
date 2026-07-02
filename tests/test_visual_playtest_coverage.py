@@ -165,6 +165,10 @@ def test_newly_covered_mechanism_families_route() -> None:
         "roguelike procedural dungeon turn-based permadeath loot levels": "canvas-roguelike",
         "stacking physics tower stack balance dont topple": "canvas-stacking-physics",
         "match three puzzle swap adjacent gems to clear lines and cascade combos": "canvas-puzzle-grid",
+        "Build a Galaga game formation shooter player ship bottom fires upward": "canvas-fixed-shooter",
+        "Build a Centipede game fixed shooter blaster bottom mushrooms segments": "canvas-fixed-shooter",
+        "Build a Space Invaders game fixed shooter cannon bottom grid aliens": "canvas-fixed-shooter",
+        "Build an Asteroids game vector shooter rotates thrusts irregular rocks": "canvas-top-down-action",
     }
     for goal, expected_id in expected.items():
         r, diag = mem.find_visual_playtest_for(goal=goal)
@@ -190,6 +194,7 @@ def test_library_has_at_least_one_recipe_per_mechanism_family() -> None:
         "canvas-vertical-platformer",  # NEW 2026-05-24 (donkey-kong trace)
         "canvas-3d-first-person",
         "canvas-top-down-action",
+        "canvas-fixed-shooter",
         "canvas-board-game",
         "canvas-puzzle-grid",
         "canvas-racing-perspective",

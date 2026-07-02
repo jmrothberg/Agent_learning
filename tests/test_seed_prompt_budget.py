@@ -142,3 +142,32 @@ def test_protect_components_noop_when_no_component() -> None:
         "O" * 100, "", "P" * 100, protect_components=True,
     )
     assert c == ""
+
+
+# ---- run_10: lean budget protects playbook when Phase-A assets exist --------
+
+def test_protect_playbook_keeps_playbook_when_opening_fills_budget() -> None:
+    """run_10 traces: draw-generated-sprites-not-boxes was pinned at plan stage
+    then lean budget dropped the whole playbook before iter 1."""
+    a = _stub()
+    budget = GameAgent._LEAN_MEMORY_COMBINED_BUDGET
+    opening = "O" * (budget - 100)
+    components = "C" * 1500
+    playbook = "P" * 900
+
+    o0, c0, p0 = a._apply_lean_memory_budget(opening, components, playbook)
+    assert p0 == ""
+
+    o1, c1, p1 = a._apply_lean_memory_budget(
+        opening, components, playbook, protect_playbook=True,
+    )
+    assert o1 == opening
+    assert c1 == ""
+    assert p1 == playbook
+
+
+def test_first_build_call_sites_pass_protect_playbook_for_session_assets() -> None:
+    """Retrieval success must not mask prompt-drop — both first-build paths
+    must wire protect_playbook=bool(self._session_assets)."""
+    src = (Path(__file__).parent.parent / "agent.py").read_text(encoding="utf-8")
+    assert src.count("protect_playbook=bool(self._session_assets)") >= 2

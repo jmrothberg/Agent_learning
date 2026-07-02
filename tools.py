@@ -125,6 +125,16 @@ _ANIMATION_POSE_SUFFIXES = (
     "_hop", "_hop_up", "_hop_land", "_hop_down",
     "_lift", "_slam", "_walk1", "_walk2", "_walk3",
     "_jump", "_duck", "_punch", "_kick", "_run1", "_run2",
+    # Undrawn-FP fix (run_10 Q*bert): bounce/flap enemy frames and
+    # directional hop frames (hero_hop_ul/ur/dl/dr) are pose sprites too.
+    "_bounce", "_flap",
+)
+
+# Directional/pose stems like hero_hop_ul or enemy_bounce_2: strip the verb
+# AND its short direction/frame tail to recover the idle base (hero_idle).
+_POSE_VERB_TAIL_RE = re.compile(
+    r"_(hop|jump|walk|run|bounce|flap|duck|punch|kick|lift|slam)"
+    r"(_[a-z0-9]{1,6})?$"
 )
 
 
@@ -145,6 +155,11 @@ def _idle_counterpart_drawn(stem: str, drawn_blob: str) -> bool:
         if base.endswith(sfx):
             base = base[: -len(sfx)]
             break
+    else:
+        # Undrawn-FP fix (run_10 Q*bert): directional pose stems like
+        # hero_hop_ul / enemy_bounce_2 don't end with a listed suffix —
+        # strip verb + short tail so hero_hop_ul -> hero (-> hero_idle).
+        base = _POSE_VERB_TAIL_RE.sub("", base)
     if not base.endswith("_"):
         base += "_"
     return (base + "idle") in drawn_blob or base.rstrip("_") in drawn_blob
@@ -3400,6 +3415,18 @@ class LiveBrowser:
                 {"document": 0, "window": 0, "body": 0, "other": 0, "total": 0}, "",
             )
 
+        # Undrawn-FP fix (run_10 Q*bert): settle async asset decode BEFORE
+        # the observation window + input smoke test, not only right before
+        # the undrawn audit. Otherwise the smoke test's fake-action sampling
+        # and the frozen check run while sprites are still decoding, and
+        # early drawImage calls are missed. The later pre-audit settle call
+        # stays (returns immediately once ready).
+        if asset_decode_settle:
+            try:
+                await self._wait_for_session_assets_ready()
+            except Exception:
+                pass
+
         # Sleep half the budget; sample canvas; sleep rest; sample again.
         # If both samples are byte-identical the game is FROZEN even if
         # requestAnimationFrame fired (it's drawing the same frame).
@@ -3539,14 +3566,30 @@ class LiveBrowser:
                 # are unaffected. Genre-free: gated only on reset() existing.
                 if is_effectful and effectful_run_so_far:
                     try:
+                        # Probe-isolation fix (run_10 Q*bert): cube_recolors
+                        # dispatched its hop AFTER input_moves_player had
+                        # already moved the hero, so the hop landed on an
+                        # already-colored cube and read falsy. When no
+                        # game.reset()/restart() function exists, fall back
+                        # to dispatching KeyR — every harness goal specifies
+                        # "R restart", so this restores a clean opening state
+                        # between consecutive side-effecting probes (no-op on
+                        # games without an R handler).
                         _did_reset = await self._safe_eval(
                             "(()=>{const g=window.game||{};"
                             "const f=g.reset||g.restart;"
-                            "if(typeof f==='function'){f.call(g);return true;}"
-                            "return false;})()"
+                            "if(typeof f==='function'){f.call(g);return 'fn';}"
+                            "const ev=(t)=>document.dispatchEvent("
+                            "new KeyboardEvent(t,{code:'KeyR',key:'r',"
+                            "bubbles:true}));"
+                            "ev('keydown');ev('keyup');return 'keyR';})()"
                         )
                         if _did_reset:
-                            await asyncio.sleep(0.1)
+                            # KeyR restart may re-init assets/state — give it
+                            # a touch longer than a direct reset() call.
+                            await asyncio.sleep(
+                                0.3 if _did_reset == "keyR" else 0.1
+                            )
                     except Exception:
                         pass
                 ok, err, err_kind = await self._run_probe(pexpr)
@@ -4031,6 +4074,20 @@ class LiveBrowser:
                         or _sprite_paths_wrapper
                     )
                 )
+                # Undrawn-FP fix (run_10 Q*bert): the input smoke test itself
+                # SAW a new sprite source drawn in response to a keypress
+                # (fake_actions[key].new_sprite_src). That directly disproves
+                # the "loaded but never drawn / fillRect fallback" story this
+                # gate exists for — the remaining undrawn stems are pose or
+                # state-gated frames. Demote to advisory instead of burning
+                # fix iterations on a game that is provably drawing sprites.
+                _sprite_draw_proven = isinstance(_fake_actions, dict) and any(
+                    isinstance(info, dict) and info.get("new_sprite_src")
+                    for info in _fake_actions.values()
+                )
+                report["drawn_asset_check"]["sprite_draw_proven"] = (
+                    _sprite_draw_proven
+                )
                 if (
                     (_probes_green and _no_errors and (
                         _undrawn_pose_only
@@ -4042,6 +4099,7 @@ class LiveBrowser:
                     or (self._undrawn_seen_before and _probes_green and _no_errors)
                     or _behavior_green_no_missing
                     or _decode_timing_demote
+                    or (_sprite_draw_proven and _no_errors and _game_advancing)
                 ):
                     _advisory_tail = (
                         " Behavioral probes pass and a numeric scene index is "
@@ -4069,6 +4127,11 @@ class LiveBrowser:
                         "a Chromium timing false positive (sprites visible in "
                         "Safari). Re-check after reload if art still missing."
                         if _decode_timing_demote else
+                        " The input smoke test observed a NEW sprite source "
+                        "drawn in response to a keypress — the game provably "
+                        "draws its generated sprites; remaining undrawn stems "
+                        "are pose/state frames not reached in the smoke window."
+                        if _sprite_draw_proven else
                         " Behavioral probes pass and no entity-render "
                         "failure is present; state-conditional pose sprites "
                         "may simply not have triggered during the test window."

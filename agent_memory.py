@@ -297,7 +297,7 @@ class MemoryRetrievalMixin:
 
     def _apply_lean_memory_budget(
         self, opening_block: str, components_block: str, playbook_block: str,
-        *, protect_components: bool = False,
+        *, protect_components: bool = False, protect_playbook: bool = False,
     ) -> tuple[str, str, str]:
         """In lean mode, cap the COMBINED size of the first-build memory
         blocks. Priority: opening-book outline > components > playbook —
@@ -308,7 +308,11 @@ class MemoryRetrievalMixin:
         even when opening already filled the budget — on a seed iter 1 the
         components are the copy-paste-correct snippets (help overlay, media
         loader) the weak model most needs, so the playbook is trimmed first
-        instead. (2026-06-21 seed trace dropped `help-overlay-modal` here.)"""
+        instead. (2026-06-21 seed trace dropped `help-overlay-modal` here.)
+
+        `protect_playbook` (Phase-A assets on disk) keeps the playbook block
+        when ensure_ids pinned draw-generated-sprites-not-boxes — run_10
+        traces retrieved that bullet then lean budget dropped it before iter 1."""
         if not self._lean_prompt_active():
             return opening_block, components_block, playbook_block
         budget = self._LEAN_MEMORY_COMBINED_BUDGET
@@ -330,9 +334,13 @@ class MemoryRetrievalMixin:
             # playbook still yields), then fit playbook in what remains.
             cb = components_block
             used += len(components_block)
-            pb = _fit(playbook_block)
         else:
             cb = _fit(components_block)
+
+        if protect_playbook and playbook_block:
+            pb = playbook_block
+            used += len(playbook_block)
+        else:
             pb = _fit(playbook_block)
         if (cb != components_block) or (pb != playbook_block):
             self._trace({

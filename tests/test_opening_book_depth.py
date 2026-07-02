@@ -45,6 +45,7 @@ NEW_FAMILY_IDS = [
     "outline-bullet-hell",
     "outline-word-typing",
     "outline-stacking-physics",
+    "outline-fixed-shooter",
 ]
 
 # Representative goal -> outline id that MUST win (broadened-book coverage).
@@ -59,6 +60,7 @@ FAMILY_GOALS = [
     ("bullet hell boss fight with spiral patterns", "outline-bullet-hell"),
     ("typing game where you type falling words before they land", "outline-word-typing"),
     ("stacking game where you drop blocks from a swinging crane to build a tower", "outline-stacking-physics"),
+    ("Build a Galaga game formation shooter player at bottom fires upward enemies dive", "outline-fixed-shooter"),
 ]
 
 # Dilution guards: book growth must not steal these canonical goals.

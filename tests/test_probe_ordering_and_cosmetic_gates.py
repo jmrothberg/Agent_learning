@@ -109,13 +109,30 @@ def test_consecutive_side_effecting_probes_reset_between():
     a leftover mid-animation state can't block the next probe's clicks."""
     src = inspect.getsource(tools_module.LiveBrowser.load_and_test)
     i = src.index("if is_effectful and effectful_run_so_far:")
-    block = src[i:i + 500]
+    # Window widened (run_10 fix added an explanatory comment + KeyR fallback).
+    block = src[i:i + 2000]
     # Calls game.reset()/restart() and waits a beat before running the probe.
     assert "g.reset||g.restart" in block
     assert "asyncio.sleep" in block
     # The reset happens BEFORE the probe runs this iteration.
     run_i = src.index("ok, err, err_kind = await self._run_probe(pexpr)", i)
     assert run_i > i
+
+
+def test_probe_isolation_falls_back_to_keyr_restart():
+    """Probe-isolation fix (run_10 Q*bert): when no game.reset()/restart()
+    function exists, the harness dispatches KeyR between consecutive
+    side-effecting probes — every goal specifies "R restart", so this
+    restores a clean opening state (cube_recolors was poisoned by
+    input_moves_player's earlier hop)."""
+    src = inspect.getsource(tools_module.LiveBrowser.load_and_test)
+    i = src.index("if is_effectful and effectful_run_so_far:")
+    block = src[i:i + 2000]
+    assert "code:'KeyR'" in block
+    assert "'keyR'" in block
+    # KeyR restart gets a longer settle than a direct reset() call.
+    assert "0.3 if _did_reset == \"keyR\" else 0.1" in block or \
+        "0.3 if _did_reset == 'keyR' else 0.1" in block
 
 
 # ---------------------------------------------------------------------------

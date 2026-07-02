@@ -2694,7 +2694,11 @@ class CriticMixin:
 
 
 
-    _AUTONOMOUS_MAX_CYCLES = 3
+    # Post-green cap (run_10 Q*bert/Galaga): polish cycles after a green
+    # build cost 15-20 min each at collapsed tok/s and produced churn the
+    # user read as "random changes to a working game". One cycle catches a
+    # real behavioral miss; stop there. (Was 3.)
+    _AUTONOMOUS_MAX_CYCLES = 1
 
     _AUTONOMOUS_FACING_TOLERANCE_DEG = 25.0
 

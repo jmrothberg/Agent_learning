@@ -5523,6 +5523,7 @@ class GameAgent(
                     self._apply_lean_memory_budget(
                         opening_block, components_block, pb_block,
                         protect_components=True,
+                        protect_playbook=bool(self._session_assets),
                     )
                 )
                 pb_kwargs = {"playbook_block": pb_block} if pb_block else {}
@@ -5693,6 +5694,7 @@ class GameAgent(
                     self._apply_lean_memory_budget(
                         opening_block, components_block, pb_block,
                         protect_components=open_domain_build,
+                        protect_playbook=bool(self._session_assets),
                     )
                 )
                 if open_domain_build:
@@ -7939,6 +7941,11 @@ class GameAgent(
                     "frozen_canvas_input_responsive": report.get("frozen_canvas_input_responsive"),
                     "pending_feedback": list(self._pending_feedback or []),
                     "pending_feedback_count": len(self._pending_feedback or []),
+                    # Undrawn-FP observability (run_10): persist the drawn-asset
+                    # audit + decode-settle result so a trace alone answers
+                    # "was ASSETS_LOADED_BUT_UNDRAWN a false positive?".
+                    "drawn_asset_check": report.get("drawn_asset_check"),
+                    "asset_decode_settle": report.get("asset_decode_settle"),
                 }
                 if report.get("test_skipped"):
                     summary_payload["test_skipped"] = report.get("test_skipped")

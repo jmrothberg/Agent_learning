@@ -132,6 +132,66 @@ def test_decode_timing_demotion_when_settle_and_probes_green():
     assert "Chromium timing false positive" in src
 
 
+# ---------------------------------------------------------------------------
+# Undrawn-FP fixes (run_10 Q*bert trace 20260702_204842)
+# ---------------------------------------------------------------------------
+
+def test_directional_hop_and_bounce_stems_are_pose_frames():
+    """hero_hop_ul / enemy_bounce style stems must classify as animation
+    poses, and their idle counterpart must resolve through the directional
+    tail (hero_hop_ul -> hero_idle)."""
+    assert tools_module._stem_looks_like_animation_pose("hero_hop_ul")
+    assert tools_module._stem_looks_like_animation_pose("enemy_bounce")
+    assert tools_module._stem_looks_like_animation_pose("enemy_bounce_2")
+    blob = "file:///tmp/x_assets/hero_idle.png\nfile:///tmp/x_assets/enemy_idle.png"
+    assert tools_module._idle_counterpart_drawn("hero_hop_ul", blob)
+    assert tools_module._idle_counterpart_drawn("enemy_bounce_2", blob)
+    # Base sprite NOT drawn -> no counterpart credit.
+    assert not tools_module._idle_counterpart_drawn("ghost_hop_dr", blob)
+
+
+def test_pose_only_undrawn_set_with_directional_hops():
+    """A Q*bert-shaped undrawn set (all 4 diagonal hop frames + enemy
+    bounce) counts as poses-only when the idle bases drew."""
+    blob = "file:///g_assets/hero_idle.png\nfile:///g_assets/enemy_idle.png"
+    undrawn = ["hero_hop_ul", "hero_hop_ur", "hero_hop_dl", "hero_hop_dr", "enemy_bounce"]
+    assert tools_module._undrawn_are_animation_poses_only(undrawn, blob)
+
+
+def test_sprite_draw_proven_demotes_undrawn_gate():
+    """When the input smoke test recorded a new sprite src on a keypress
+    (fake_actions[key].new_sprite_src), the undrawn finding must demote to
+    advisory instead of gating — the game provably draws sprites."""
+    src = inspect.getsource(tools_module)
+    assert "_sprite_draw_proven" in src
+    assert '"sprite_draw_proven"' in src
+    # The demote condition includes the proven-draw path.
+    assert "_sprite_draw_proven and _no_errors and _game_advancing" in src
+
+
+def test_asset_settle_runs_before_observation_window():
+    """The decode settle must run BEFORE the frozen-canvas observation
+    window / input smoke test, not only right before the undrawn audit —
+    otherwise early drawImage events are missed on slow decodes."""
+    src = inspect.getsource(tools_module.LiveBrowser.load_and_test)
+    settle_idx = src.index("_wait_for_session_assets_ready")
+    window_idx = src.index("Sleep half the budget")
+    assert settle_idx < window_idx, (
+        "asset decode settle must be called before the observation window"
+    )
+
+
+def test_iter_summary_persists_drawn_asset_check():
+    """iter_summary trace events must carry drawn_asset_check and
+    asset_decode_settle so undrawn-FP triage works from the .jsonl alone."""
+    import agent as agent_module
+    src = inspect.getsource(agent_module)
+    anchor = src.index('"kind": "iter_summary"')
+    block = src[anchor:anchor + 6000]
+    assert '"drawn_asset_check"' in block
+    assert '"asset_decode_settle"' in block
+
+
 def test_drawn_asset_check_is_genre_free():
     """The detector must not match by genre / game name. It works on
     SHAPE: a path matching `*_assets/*.png` referenced by the HTML,

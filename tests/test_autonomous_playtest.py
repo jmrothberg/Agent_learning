@@ -311,6 +311,10 @@ def test_autonomous_loop_queues_feedback_when_finding_fires():
 
 def test_autonomous_loop_increments_no_finding_streak_when_clean():
     a = _agent_stub()
+    # This test exercises the no-findings STREAK gate across multiple
+    # cycles; raise the per-session cycle cap (production default is now 1
+    # — post-green polish cap, run_10) so the budget gate doesn't trip first.
+    a._AUTONOMOUS_MAX_CYCLES = 3
     a.browser = _MockBrowser(
         applies_when_returns=False,  # all recipes skip → no findings
         timeline={"samples": [], "errors": []},
