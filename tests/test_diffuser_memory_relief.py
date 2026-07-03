@@ -101,6 +101,23 @@ def test_should_release_diffusers_after_media_on_96gb_phys(
     assert agent._should_release_diffusers_after_media() is True
 
 
+def test_should_release_diffusers_on_96gb_with_small_27b_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Qwen3.6-27B (~30 GB on disk): phys gate must still trip on 96 GB hosts."""
+    model_dir, fake = _fake_model_dir(tmp_path, int(30 * 1e9))
+    agent = _wire_mlx_agent(tmp_path, monkeypatch, model_dir=model_dir, fake_file=fake)
+    monkeypatch.setattr(
+        GameAgent,
+        "_available_system_memory_gb",
+        staticmethod(lambda: (72.0, 96.0)),
+    )
+    tripped, _, phys = agent._mlx_coder_memory_pressure()
+    assert tripped is False
+    assert phys is None
+    assert agent._should_release_diffusers_after_media() is True
+
+
 def test_should_release_diffusers_after_media_skips_512gb_phys(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

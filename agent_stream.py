@@ -685,6 +685,14 @@ class StreamMaterializeMixin:
         self._set_role_activity(role, f"streaming {role}…")
         self._pending_stream_ui_events = []
 
+        _stall_light = bool(getattr(self, "_mlx_stall_light_stream", False))
+        if _stall_light:
+            self._mlx_stall_light_stream = False
+            self._trace({
+                "kind": "mlx_stall_light_stream",
+                "model_role": role,
+            })
+
         if role == "coder":
             freed = self._maybe_release_diffusers_before_coder_stream()
             if freed:
@@ -698,6 +706,7 @@ class StreamMaterializeMixin:
             is_vlm_active
             and self._messages
             and self._messages[-1].get("role") == "user"
+            and not _stall_light
         ):
             # Multi-image attach: prefer the before/after pair when the
             # double-screenshot feature is on and both are present.

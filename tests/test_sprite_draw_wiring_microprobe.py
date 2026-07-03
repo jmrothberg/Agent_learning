@@ -52,3 +52,38 @@ def test_sprite_draw_wiring_passes_when_sprite_called(tmp_path: Path) -> None:
     )
     rep = run_micro_probes(html, out_path=out)
     assert not any("SPRITE_DRAW_WIRING" in e for e in rep.get("errors") or [])
+
+
+def test_paths_key_coverage_flags_missing_paths_keys(tmp_path: Path) -> None:
+    assets = tmp_path / "game_20260703_assets"
+    assets.mkdir()
+    for i in range(6):
+        (assets / f"tower_{i}.png").write_bytes(b"fake")
+    out = tmp_path / "game_20260703.html"
+    out.write_text("x")
+    html = _minimal_html(
+        "const PATHS={tower_basic:'tower_0.png'};"
+        "function drawSprite(k){ctx.drawImage(load(PATHS[k]),0,0);}"
+        "function draw(){drawSprite('tower_flame');drawSprite('enemy_basic');}"
+        "requestAnimationFrame(draw);"
+    )
+    rep = run_micro_probes(html, out_path=out)
+    assert rep["ok"] is False
+    assert any("PATHS_KEY_COVERAGE" in e for e in rep["errors"])
+
+
+def test_paths_key_coverage_passes_when_keys_present(tmp_path: Path) -> None:
+    assets = tmp_path / "game_20260703_assets"
+    assets.mkdir()
+    for i in range(6):
+        (assets / f"tower_{i}.png").write_bytes(b"fake")
+    out = tmp_path / "game_20260703.html"
+    out.write_text("x")
+    html = _minimal_html(
+        "const PATHS={tower_flame:'tower_0.png',enemy_basic:'tower_1.png'};"
+        "function drawSprite(k){ctx.drawImage(load(PATHS[k]),0,0);}"
+        "function draw(){drawSprite('tower_flame');drawSprite('enemy_basic');}"
+        "requestAnimationFrame(draw);"
+    )
+    rep = run_micro_probes(html, out_path=out)
+    assert not any("PATHS_KEY_COVERAGE" in e for e in rep.get("errors") or [])

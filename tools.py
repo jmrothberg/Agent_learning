@@ -2426,6 +2426,11 @@ def run_micro_probes(
             errors.extend(wiring_errors)
             stats["sprite_draw_wiring"] = len(wiring_errors)
 
+        paths_errors = _check_paths_key_coverage(html, out_path)
+        if paths_errors:
+            errors.extend(paths_errors)
+            stats["paths_key_coverage"] = len(paths_errors)
+
     return {
         "ok": not errors,
         "errors": errors,
@@ -2486,6 +2491,74 @@ def _check_sprite_draw_wiring(
             "fail verification."
         ]
     return []
+
+
+def _check_paths_key_coverage(
+    html: str, out_path: "Path | None"
+) -> list[str]:
+    """Block Chromium when drawSprite/sprite keys are missing from PATHS.
+
+    Fieldrunners trace 20260703: PNGs loaded but drawSprite('tower_flame')
+    used keys not declared in const PATHS — pink #f0f MISSING squares.
+    """
+    if out_path is None or not html:
+        return []
+    try:
+        from pathlib import Path
+        out = Path(out_path)
+        base = out.parent
+        session_prefix = (out.stem or "").lower()
+        if not base.is_dir():
+            return []
+    except Exception:
+        return []
+    png_count = 0
+    try:
+        for sub in base.iterdir():
+            if not sub.is_dir():
+                continue
+            name = sub.name.lower()
+            if not name.endswith("_assets"):
+                continue
+            if session_prefix and session_prefix not in name:
+                continue
+            png_count += sum(1 for p in sub.glob("*.png") if p.is_file())
+    except Exception:
+        return []
+    if png_count < 4:
+        return []
+    scripts = _SCRIPT_BLOCK_RE.findall(html)
+    body = "\n".join(b for (_attrs, b) in scripts if b.strip())
+    if not body:
+        return []
+    paths_keys: set[str] = set()
+    for block_m in re.finditer(
+        r"(?:const\s+)?PATHS\s*=\s*\{([^}]*)\}",
+        body,
+        re.DOTALL,
+    ):
+        block = block_m.group(1)
+        for km in re.finditer(r"['\"]?(\w+)['\"]?\s*:", block):
+            paths_keys.add(km.group(1))
+    draw_keys: set[str] = set()
+    for pat in (
+        r"\bsprite\s*\(\s*['\"](\w+)['\"]",
+        r"\bdrawSprite\s*\(\s*['\"](\w+)['\"]",
+        r"\bASSETS\.(\w+)\b",
+        r"\bASSETS\s*\[\s*['\"](\w+)['\"]\s*\]",
+    ):
+        draw_keys.update(re.findall(pat, body))
+    if not draw_keys:
+        return []
+    missing = sorted(k for k in draw_keys if k not in paths_keys)
+    if not missing:
+        return []
+    return [
+        f"PATHS_KEY_COVERAGE: draw code references {', '.join(missing)} "
+        "but const PATHS is missing those keys — runtime shows pink "
+        "#f0f MISSING squares. Add each key to PATHS with the correct "
+        "relative PNG path from GENERATED ASSETS."
+    ]
 
 
 def _check_unused_assets(

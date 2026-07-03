@@ -994,6 +994,11 @@ class GameAgent(
         # the NEXT _prune_messages forces a structured compaction instead of
         # rebuilding the same prompt that just produced 0 tokens for 180s+.
         self._force_compact_after_stall: bool = False
+        # MLX stall retry: omit VLM screenshots and heavy patch prefill on
+        # the one transparent retry after a silent 0-token stall.
+        self._mlx_stall_light_stream: bool = False
+        # Mid-session assets generated but not yet referenced in HTML PATHS.
+        self._new_assets_not_in_html: set[str] = set()
         # Dead-first-build detector. Wolfenstein 2026-05-24 trace iter 2
         # loaded a file but RAF never fired AND the input smoke test
         # registered zero state/canvas delta — the file is structurally
@@ -2826,13 +2831,17 @@ class GameAgent(
                 return False
         except Exception:
             return False
-        tripped, _, phys_gb = self._mlx_coder_memory_pressure()
-        if tripped:
-            return True
+        # Phys-RAM ceiling is independent of the small-model opt-out in
+        # _mlx_coder_memory_pressure (Qwen3.6-27B ~30 GB on disk must still
+        # unload Z-Image on 96 GB hosts).
+        _, phys_gb = self._available_system_memory_gb()
         max_phys = float(
             os.environ.get("AGENT_MEMORY_RELIEF_MAX_PHYS_GB", "128")
         )
         if phys_gb is not None and phys_gb <= max_phys:
+            return True
+        tripped, _, _ = self._mlx_coder_memory_pressure()
+        if tripped:
             return True
         return False
 
@@ -5911,6 +5920,7 @@ class GameAgent(
             # Reset per-iter flags so the media-only-bonus check sees
             # only THIS iter's regen state.
             self._media_regenerated_this_iter = False
+            self._new_assets_not_in_html = set()
             # Phase 4 (4D.1/4D.2): reset per-iter trace-correlation fields so
             # iter_summary reflects only THIS iter (no stale bleed from a prior
             # iter's patch count / coaching / router-state action).
@@ -6129,7 +6139,19 @@ class GameAgent(
                                 _wants_assets
                                 or getattr(self, "_unhonored_asset_request", None)
                             )
-                            if (
+                            _stall_light = getattr(
+                                self, "_mlx_stall_retries_this_iter", 0
+                            ) >= 1
+                            if _stall_light:
+                                # Post-stall retry: lighter prefill than
+                                # patch_first — heavy prefill + VLM image
+                                # just produced 0 tokens for 180s+.
+                                reply_prefill = "<diagnose>"
+                                self._trace({
+                                    "kind": "mlx_stall_light_prefill",
+                                    "iteration": iteration,
+                                })
+                            elif (
                                 self._current_file
                                 and not _wants_assets
                                 and (
@@ -6232,6 +6254,11 @@ class GameAgent(
                         if _mlx_retries < 1:
                             self._mlx_stall_retries_this_iter = _mlx_retries + 1
                             self._force_compact_after_stall = True
+                            self._mlx_stall_light_stream = True
+                            # Compact NOW — _prune_messages already ran at
+                            # iter start; retry must not resend the same
+                            # giant prompt that just stalled.
+                            self._prune_messages()
                             freed = await asyncio.to_thread(
                                 self._release_diffusers_vram
                             )
@@ -7556,6 +7583,9 @@ class GameAgent(
             _pre_iter_html = self._current_file
             self.out_path.write_text(new_html, encoding="utf-8")
             self._current_file = new_html
+            if self._new_assets_not_in_html:
+                refs = self._scan_html_for_asset_refs(new_html)
+                self._new_assets_not_in_html -= refs
             self._scoped_violation_streak = 0  # Fix B: progress made, reset thrash counter
             snap_path = self._save_snapshot(new_html)
             shot_path = snap_path.with_suffix(".png") if snap_path else None
@@ -7702,6 +7732,64 @@ class GameAgent(
                 })
                 self._previous_report_ok = False
                 self._previous_report = fake_report  # todo #3 — full report
+                continue
+
+            # Skip Chromium when mid-session art landed but HTML was not
+            # patched with PATHS/loader entries (Fieldrunners 20260703).
+            _paths_pending = self._new_assets_not_in_html
+            if _paths_pending and self.browser is not None:
+                pending_list = ", ".join(sorted(_paths_pending))
+                self._trace({
+                    "kind": "browser_test_skipped",
+                    "iteration": iteration,
+                    "reason": "paths_pending_after_mid_session_assets",
+                    "pending_assets": sorted(_paths_pending),
+                    "micro_probes_ok": bool(mp.get("ok", True)),
+                })
+                yield self._record(AgentEvent(
+                    "info",
+                    "[dim]browser skipped — mid-session sprites exist on "
+                    "disk but HTML PATHS/loader not updated yet.[/dim]",
+                ))
+                self._stuck_streak += 1
+                fake_report = {
+                    "ok": False,
+                    "errors": [
+                        "MID-SESSION ASSETS NOT WIRED: generated sprites "
+                        f"({pending_list}) exist on disk but this HTML does "
+                        "not reference them. Emit a <patch> adding PATHS/loader "
+                        "entries and wire drawSprite/sprite for these exact "
+                        "keys before browser verification.",
+                    ],
+                    "soft_warnings": [],
+                    "warnings": mp.get("warnings") or [],
+                    "title": "(skipped browser — paths pending)",
+                    "canvas": None,
+                    "input_listeners": {},
+                    "input_test": None,
+                    "frozen_canvas": None,
+                    "body_chars": 0,
+                    "body_sample": "",
+                    "logs": [],
+                    "probes": [],
+                    "test_skipped": "paths_pending_after_mid_session_assets",
+                }
+                mp_text = format_micro_probes_for_model(mp) if not mp.get("ok", True) else (
+                    fake_report["errors"][0]
+                )
+                self._last_report_summary = mp_text
+                yield self._record(AgentEvent("test", mp_text, fake_report))
+                next_user = self._build_fix_prompt(
+                    report=fake_report, regressed=False, partial_failed=partial_failed,
+                )
+                next_user = self._wrap_report_block(next_user, fake_report)
+                self._fix_mode = True
+                self._messages.append({
+                    "role": "user",
+                    "content": self._flush_user_injections(next_user),
+                })
+                self._previous_report_ok = False
+                self._previous_report = fake_report
                 continue
 
             # ---- run the test ------------------------------------------

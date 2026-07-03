@@ -2601,6 +2601,18 @@ class AssetGenerationMixin:
 
             }
 
+            if new_assets:
+
+                pending = getattr(self, "_new_assets_not_in_html", None)
+
+                if pending is None:
+
+                    self._new_assets_not_in_html = set(new_assets.keys())
+
+                else:
+
+                    self._new_assets_not_in_html = pending | set(new_assets.keys())
+
             already_sounds = {
 
                 n: p for n, p in new_sound_paths.items()
