@@ -182,10 +182,9 @@ def test_question_extracted_from_exit_decision_reply():
 
 
 def test_done_and_question_in_same_reply():
-    """If both appear, the agent treats it as a `<done/>` ship
-    (notes captured) AND surfaces the question to the user. Pin
-    that both regexes match — the agent's choice of priority is
-    fine, but the building blocks must work."""
+    """If both appear, <done/> wins — ship path runs and the harness
+    must NOT block waiting for a question answer (run_11 overnight
+    hung 10h when both matched). Both regexes still match for parsing."""
     reply = (
         "<done/>\n"
         "<notes>Shipping with input bug.</notes>\n"
@@ -228,6 +227,68 @@ def test_exit_prompt_offers_both_done_and_question_options():
     # The prompt enumerates the two options as 1. and 2.
     assert "1. <done/>" in agent_py
     assert "2. <question>" in agent_py
+
+
+def test_exit_decision_done_wins_over_question_in_source():
+    """run_11 overnight: exit reply matched both tags → infinite wait.
+    Source must skip question extraction when exit_done_chosen."""
+    agent_py = (
+        Path(__file__).parent.parent / "agent.py"
+    ).read_text(encoding="utf-8")
+    assert "exit_done_chosen" in agent_py
+    assert "if not exit_done_chosen else None" in agent_py
+
+
+def test_exit_decision_question_skips_wait_when_no_auto_step():
+    """Unattended batch (--no-auto-step) must not block on exit question."""
+    agent_py = (
+        Path(__file__).parent.parent / "agent.py"
+    ).read_text(encoding="utf-8")
+    assert "_auto_step_on_failure else 0.0" in agent_py
+
+
+def _exit_question_would_block(
+    *,
+    auto_step_on_failure: bool,
+    exit_done_chosen: bool,
+    question_body: str | None,
+) -> bool:
+    """Mirror agent.py exit-decision wait gate (run_11 Pac-Man hang)."""
+    if exit_done_chosen or question_body is None:
+        return False
+    return auto_step_on_failure
+
+
+def test_run11_pacman_hang_shape_done_and_question_no_block():
+    """run_11 overnight: reply had <done/> AND a spurious <question> body.
+    Old code blocked 10h; done must win and --no-auto-step must not wait."""
+    reply = (
+        "long reasoning mentioning `<question>`…"
+        "<done/><notes>Shipping broken input.</notes>"
+        "<question>Was keymap e.key or e.code?</question>"
+    )
+    assert _DONE_RE.search(reply) is not None
+    q = GameAgent._extract_question(reply)
+    assert q is not None
+    assert not _exit_question_would_block(
+        auto_step_on_failure=False,
+        exit_done_chosen=bool(_DONE_RE.search(reply)),
+        question_body=q,
+    )
+
+
+def test_exit_question_only_blocks_in_interactive_auto_step():
+    """TUI / --step: real exit question may wait; batch must not."""
+    assert _exit_question_would_block(
+        auto_step_on_failure=True,
+        exit_done_chosen=False,
+        question_body="Which control scheme?",
+    )
+    assert not _exit_question_would_block(
+        auto_step_on_failure=False,
+        exit_done_chosen=False,
+        question_body="Which control scheme?",
+    )
 
 
 def test_exit_decision_trace_kinds_named_in_source():

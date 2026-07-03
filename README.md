@@ -25,7 +25,7 @@ one shared character description + fixed seed** for consistency — *not* img2im
 
 ## Contents
 - [What this is](#what-this-is) · [How this compares](#how-this-compares-to-other-coding-agents) · [Quick start](#quick-start)
-- [Play sample games](#play-sample-games-goodgame) · [Architecture](#architecture)
+- [Overnight batches](#overnight-batches-10-games) · [Play sample games](#play-sample-games-goodgame) · [Architecture](#architecture)
 - [The verification harness](#the-verification-harness-the-core-lever) · [Assets & animation](#animation--consistency-is-the-hard-constraint)
 - [Memory / opening library](#memory--the-opening-library) · [TUI & CLI](#tui--cli-reference)
 - [Standalone asset tools](#standalone-asset-tools) · [Video cutscenes](#video-cutscenes--wan22-ti2v-5b-local) · [System tests](#system-tests--memory-hygiene)
@@ -133,6 +133,44 @@ for 4-bit).
 ```
 
 See **`DEV.md`** for env vars (`LLM_BACKEND`, `MLX_MODEL`, `CODING_BOX_NUM_CTX`, …).
+
+---
+
+## Overnight batches (10 games)
+
+**One sentence for another LLM:** run `bash eval/tune_run11.sh` in **Terminal.app**, start the Cursor watcher with `.venv/bin/python eval/tune_overnight_monitor.py --out-dir games/tune_serial10/run_11 --jobs-total 10 --interval 30 --sync-loop`, and edit `eval/tune_run11_goals.txt` to choose which games to test.
+
+Two processes run in parallel — **both required**:
+
+| Where | Command | Purpose |
+|-------|---------|---------|
+| **Terminal.app** | `bash eval/tune_runNN.sh` | Builds games flat-out (visible Chromium, logs to `games/tune_serial10/run_NN/overnight.log`) |
+| **Cursor** | `.venv/bin/python eval/tune_overnight_monitor.py --out-dir games/tune_serial10/run_NN --jobs-total 10 --interval 30 --sync-loop` | Polls every 30s; triage finished traces and patch harness/memory while the batch keeps going |
+
+Open the batch in Terminal from Cursor if needed:
+
+```bash
+osascript -e 'tell application "Terminal" to do script "cd /Users/jonathanrothberg/Agent_learning && bash eval/tune_run11.sh"'
+```
+
+### Pick which games to test
+
+1. **Goals file** — `eval/tune_runNN_goals.txt`  
+   - Lines starting with `#` are comments (slot notes, fix class under test).  
+   - Every other line is **one full game prompt** (single line).  
+   - Copy prompts from `memory/prompt_library.jsonl` or write your own.
+
+2. **Launch script** — copy an existing runner, e.g. `eval/tune_run11.sh` → `eval/tune_run12.sh`, and change:
+   - `OUT=.../games/tune_serial10/run_12`
+   - `GOALS=.../eval/tune_run12_goals.txt`
+
+3. **Output** lands in `games/tune_serial10/run_NN/` (`overnight.log`, `traces/`, `tune_checkpoint.json`, HTML per game).
+
+**Resume vs fresh:** scripts use `--resume` — completed labels in `tune_checkpoint.json` are skipped. Use a **new** `run_NN` directory for a clean 10-game batch.
+
+**Watcher loop:** when `agent_monitor.json` shows `completed_count` advanced, timeline the newest trace (`scripts/enrich_trace.py <trace> --timeline`), classify `failure_class`, patch source — do **not** stop the Terminal batch.
+
+Full command tables and run history: **`eval/OPERATIONS.md`**.
 
 ---
 

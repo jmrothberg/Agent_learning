@@ -9149,7 +9149,8 @@ class GameAgent(
                 })
                 # Capture <notes> for the trace + UI; the actual ship
                 # decision is reflected in the final-iter test below.
-                if _DONE_RE.search(exit_reply):
+                exit_done_chosen = bool(_DONE_RE.search(exit_reply))
+                if exit_done_chosen:
                     notes = self._extract_notes(exit_reply)
                     if notes:
                         yield self._record(AgentEvent(
@@ -9183,17 +9184,27 @@ class GameAgent(
                             "Session will be recorded as failed.",
                         ))
                 # Handle <question>: surface to user, wait for one
-                # answer, then exit. The session ends regardless of
-                # what the user types — this is a "what blocker?"
-                # ask, not a new iter.
-                q = self._extract_question(exit_reply)
+                # answer, then exit. Skip when <done/> already chose ship
+                # (run_11 Pac-Man 20260702: model mentioned both tags in
+                # one reply → waited forever under --no-auto-step).
+                # Unattended batch (--no-auto-step) must never block here.
+                q = (
+                    self._extract_question(exit_reply)
+                    if not exit_done_chosen else None
+                )
                 if q is not None:
                     yield self._record(AgentEvent("question", q))
+                    _exit_q_wait_s = 0.0
+                    _exit_q_max_s = (
+                        120.0 if self._auto_step_on_failure else 0.0
+                    )
                     while (
                         self._pending_answer is None
                         and not self._user_force_done
+                        and _exit_q_wait_s < _exit_q_max_s
                     ):
                         await asyncio.sleep(0.1)
+                        _exit_q_wait_s += 0.1
                     if self._pending_answer is not None:
                         yield self._record(AgentEvent(
                             "info",
