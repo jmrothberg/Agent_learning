@@ -2497,9 +2497,9 @@ class AssetGenerationMixin:
 
         if asset_specs or sound_specs:
 
-            tripped, metric_gb, phys_gb = self._mlx_coder_memory_pressure()
+            if self._should_release_diffusers_after_media():
 
-            if tripped:
+                tripped, metric_gb, phys_gb = self._mlx_coder_memory_pressure()
 
                 freed = await asyncio.to_thread(self._release_diffusers_vram)
 
@@ -2525,7 +2525,9 @@ class AssetGenerationMixin:
 
                         "unloaded sprite/sound models to free VRAM "
 
-                        f"({metric_gb} GB RAM free): "
+                        f"({metric_gb if tripped else phys_gb} GB "
+
+                        f"{'RAM free' if tripped else 'physical RAM'}): "
 
                         f"{', '.join(freed)} — they reload automatically "
 

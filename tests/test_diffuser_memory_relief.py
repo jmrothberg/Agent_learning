@@ -87,6 +87,33 @@ def test_mlx_coder_memory_pressure_skips_at_or_above_64gb_default(
     assert tripped is False
 
 
+def test_should_release_diffusers_after_media_on_96gb_phys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """96 GB Mac: plenty of free pages but still unload after sprite gen."""
+    model_dir, fake = _fake_model_dir(tmp_path, int(250 * 1e9))
+    agent = _wire_mlx_agent(tmp_path, monkeypatch, model_dir=model_dir, fake_file=fake)
+    monkeypatch.setattr(
+        GameAgent,
+        "_available_system_memory_gb",
+        staticmethod(lambda: (72.0, 96.0)),
+    )
+    assert agent._should_release_diffusers_after_media() is True
+
+
+def test_should_release_diffusers_after_media_skips_512gb_phys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_dir, fake = _fake_model_dir(tmp_path, int(250 * 1e9))
+    agent = _wire_mlx_agent(tmp_path, monkeypatch, model_dir=model_dir, fake_file=fake)
+    monkeypatch.setattr(
+        GameAgent,
+        "_available_system_memory_gb",
+        staticmethod(lambda: (200.0, 512.0)),
+    )
+    assert agent._should_release_diffusers_after_media() is False
+
+
 def test_mlx_coder_memory_pressure_trips_when_ram_low(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

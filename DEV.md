@@ -62,6 +62,7 @@ MLX upgrades: MiniMax-M3 (`minimax_m3.py` copy after mlx-lm upgrade), GLM-5.2
 - `AGENT_COMPACT_TOKEN_CEILING` — absolute token ceiling for compaction (optional override)
 - `AGENT_ENABLE_MEMORY_RELIEF` — set `0` to disable auto-unload of diffusers before video / after asset batches (default **on** when free RAM &lt; `AGENT_MEMORY_RELIEF_MIN_AVAILABLE_GB`, default 64). Skips small MLX models (&lt; `AGENT_MEMORY_RELIEF_SMALL_MODEL_DISK_GB`, default 50 GB on disk).
 - `AGENT_MEMORY_RELIEF_MIN_AVAILABLE_GB` — trip relief when available RAM falls below this (default 64)
+- `AGENT_MEMORY_RELIEF_MAX_PHYS_GB` — also trip relief after sprite/sound gen when physical RAM is at or below this (default **128**). Use on 96 GB Macs so Z-Image unloads before the MLX coder runs even if vm_stat still shows plenty of free pages.
 - `AGENT_MEMORY_RELIEF_SMALL_MODEL_DISK_GB` — never unload for coder models smaller than this on disk (default 50)
 - MLX `/model` hot-swap — when upsizing (or loading a large model while diffusers are resident), the harness auto-unloads the previous MLX weights and Z-Image/Stable-Audio before the next generation
 - `AGENT_NO_AUTO_OLLAMA_GPU_FIX` — set `1` to disable auto Ollama VRAM unload on `/new`

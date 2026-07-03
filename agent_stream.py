@@ -685,6 +685,15 @@ class StreamMaterializeMixin:
         self._set_role_activity(role, f"streaming {role}…")
         self._pending_stream_ui_events = []
 
+        if role == "coder":
+            freed = self._maybe_release_diffusers_before_coder_stream()
+            if freed:
+                self._trace({
+                    "kind": "diffuser_release_before_coder_stream",
+                    "freed": freed,
+                    "model_role": role,
+                })
+
         if (
             is_vlm_active
             and self._messages

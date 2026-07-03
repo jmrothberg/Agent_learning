@@ -2421,12 +2421,71 @@ def run_micro_probes(
             warnings.extend(unused_warnings)
             stats["unused_assets"] = len(unused_warnings)
 
+        wiring_errors = _check_sprite_draw_wiring(html, out_path)
+        if wiring_errors:
+            errors.extend(wiring_errors)
+            stats["sprite_draw_wiring"] = len(wiring_errors)
+
     return {
         "ok": not errors,
         "errors": errors,
         "warnings": warnings,
         "stats": stats,
     }
+
+
+def _check_sprite_draw_wiring(
+    html: str, out_path: "Path | None"
+) -> list[str]:
+    """Block Chromium when PNGs exist but entity draws skip sprite()/drawImage.
+
+    Fieldrunners trace 20260703: model defined sprite() helpers but draw
+    loops used fillRect only — runtime had 0 drawImage calls. Catching
+    the static signature (many fillRects, no sprite() calls) saves a
+    browser round-trip and surfaces a precise fix prompt on iter 1.
+    """
+    if out_path is None or not html:
+        return []
+    try:
+        from pathlib import Path
+        out = Path(out_path)
+        base = out.parent
+        session_prefix = (out.stem or "").lower()
+        if not base.is_dir():
+            return []
+    except Exception:
+        return []
+    png_count = 0
+    try:
+        for sub in base.iterdir():
+            if not sub.is_dir():
+                continue
+            name = sub.name.lower()
+            if not name.endswith("_assets"):
+                continue
+            if session_prefix and session_prefix not in name:
+                continue
+            png_count += sum(1 for p in sub.glob("*.png") if p.is_file())
+    except Exception:
+        return []
+    if png_count < 4:
+        return []
+    scripts = _SCRIPT_BLOCK_RE.findall(html)
+    body = "\n".join(b for (_attrs, b) in scripts if b.strip())
+    if not body:
+        return []
+    draw_n = len(re.findall(r"\.drawImage\s*\(", body))
+    fill_n = len(re.findall(r"\.fillRect\s*\(", body))
+    sprite_calls = len(re.findall(r"\bsprite\s*\(", body))
+    if fill_n >= 3 and sprite_calls <= 1 and draw_n <= max(1, fill_n // 4):
+        return [
+            f"SPRITE_DRAW_WIRING: {png_count} generated PNG(s) on disk but "
+            "entity draw code mostly uses fillRect without calling "
+            "sprite(key) or ctx.drawImage. Wire every visible entity to "
+            "the EXACT asset names from GENERATED ASSETS — placeholders "
+            "fail verification."
+        ]
+    return []
 
 
 def _check_unused_assets(

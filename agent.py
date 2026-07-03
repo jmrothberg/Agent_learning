@@ -2266,6 +2266,14 @@ class GameAgent(
                 "blocks. Use ONLY sound/sprite names present in the GENERATED "
                 "ASSETS/SOUNDS blocks above."
             )
+        if n_assets >= 1:
+            parts.append(
+                "SPRITE DRAW (required): PNG paths were generated above — "
+                "every tower/enemy/projectile draw path MUST call "
+                "`sprite(key)` or `ctx.drawImage` with the EXACT asset names. "
+                "Do NOT draw entities with fillRect/arc placeholders when a "
+                "PNG exists; the harness counts undrawn sprites as a failure."
+            )
         return "\n".join(parts)
 
     def _should_pre_lean_plan_before_first_build(self) -> bool:
@@ -2799,6 +2807,45 @@ class GameAgent(
             return tripped, metric, phys_gb
         except Exception:
             return False, None, None
+
+    def _should_release_diffusers_after_media(self) -> bool:
+        """Unload Z-Image before MLX codegen on tight unified-memory hosts.
+
+        Fieldrunners trace 20260703 (96 GB Mac): vm_stat still showed >64 GB
+        free after sprite gen, so the old available-RAM-only gate kept
+        Z-Image resident on MPS while the 27B MLX coder prefilled — silent
+        stall on iter 2. Also trip when physical RAM is at or below
+        AGENT_MEMORY_RELIEF_MAX_PHYS_GB (default 128) so 96 GB-class boxes
+        always drop diffusers after <assets>/<sounds> even if free pages
+        look comfortable.
+        """
+        if self._memory_relief_opt_out():
+            return False
+        try:
+            if not self._backend or getattr(self._backend.info, "name", None) != "mlx":
+                return False
+        except Exception:
+            return False
+        tripped, _, phys_gb = self._mlx_coder_memory_pressure()
+        if tripped:
+            return True
+        max_phys = float(
+            os.environ.get("AGENT_MEMORY_RELIEF_MAX_PHYS_GB", "128")
+        )
+        if phys_gb is not None and phys_gb <= max_phys:
+            return True
+        return False
+
+    def _maybe_release_diffusers_before_coder_stream(self) -> list[str]:
+        """Drop in-process diffusers before a coder stream on MLX when relief trips.
+
+        Same gate as post-<assets> unload — do NOT drop on roomy 512 GB boxes
+        just because generators are still resident; only when memory pressure
+        or the phys-RAM ceiling says to.
+        """
+        if not self._should_release_diffusers_after_media():
+            return []
+        return self._release_diffusers_vram()
 
     def _release_diffusers_vram(self) -> list[str]:
         """Drop in-process Z-Image / Stable-Audio pipelines; keep MLX LLM."""
@@ -6018,6 +6065,7 @@ class GameAgent(
             # overloads usually clear in seconds; retrying once is much
             # cheaper than hot-swapping the whole backend.
             cloud_retry_attempted = False
+            self._mlx_stall_retries_this_iter = 0
             while True:
                 try:
                     if use_bon:
@@ -6174,6 +6222,39 @@ class GameAgent(
                         "name",
                         None,
                     )
+                    # MLX stall recovery — Fieldrunners 20260703: one retry
+                    # after unloading diffusers + compaction instead of
+                    # aborting the whole session on a silent 289s stall.
+                    if stall and backend_name == "mlx":
+                        _mlx_retries = getattr(
+                            self, "_mlx_stall_retries_this_iter", 0
+                        )
+                        if _mlx_retries < 1:
+                            self._mlx_stall_retries_this_iter = _mlx_retries + 1
+                            self._force_compact_after_stall = True
+                            freed = await asyncio.to_thread(
+                                self._release_diffusers_vram
+                            )
+                            self._trace({
+                                "kind": "mlx_stall_recovery",
+                                "iteration": iteration,
+                                "attempt": _mlx_retries + 1,
+                                "freed": freed,
+                            })
+                            if freed:
+                                yield self._record(AgentEvent(
+                                    "info",
+                                    "MLX stall — unloaded "
+                                    f"{', '.join(freed)}; compacting "
+                                    "context and retrying once.",
+                                ))
+                            else:
+                                yield self._record(AgentEvent(
+                                    "info",
+                                    "MLX stall — compacting context "
+                                    "and retrying once.",
+                                ))
+                            continue
                     # P0b (MK trace 20260528): some Anthropic 400s are
                     # payload-shape errors that retrying the SAME payload
                     # can never fix. The trace burned two identical
