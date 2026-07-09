@@ -15,8 +15,8 @@ def test_mlx_stall_recovery_prunes_before_continue():
     idx = agent_src.index('"kind": "mlx_stall_recovery"')
     block = agent_src[max(0, idx - 1200):idx + 1200]
     assert "_force_compact_after_stall = True" in block
-    assert "_mlx_stall_light_stream = True" in block
     assert "self._prune_messages()" in block
+    assert "_mlx_stall_light_stream" not in block
     prune_pos = block.index("self._prune_messages()")
     continue_pos = block.index("\n                            continue", prune_pos)
     assert prune_pos < continue_pos
@@ -29,11 +29,3 @@ def test_mlx_stall_light_prefill_skips_patch_first():
     assert "_stall_light" in block
     assert '"<diagnose>"' in block
     assert "patch_first_prefill" not in block.split("mlx_stall_light_prefill")[0][-200:]
-
-
-def test_agent_stream_omits_vlm_on_stall_light():
-    src = Path(__file__).parent.parent.joinpath("agent_stream.py").read_text()
-    idx = src.index('"kind": "mlx_stall_light_stream"')
-    block = src[max(0, idx - 200):idx + 600]
-    assert "and not _stall_light" in block
-    assert "_mlx_stall_light_stream = False" in block

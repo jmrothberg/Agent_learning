@@ -994,9 +994,6 @@ class GameAgent(
         # the NEXT _prune_messages forces a structured compaction instead of
         # rebuilding the same prompt that just produced 0 tokens for 180s+.
         self._force_compact_after_stall: bool = False
-        # MLX stall retry: omit VLM screenshots and heavy patch prefill on
-        # the one transparent retry after a silent 0-token stall.
-        self._mlx_stall_light_stream: bool = False
         # Mid-session assets generated but not yet referenced in HTML PATHS.
         self._new_assets_not_in_html: set[str] = set()
         # Dead-first-build detector. Wolfenstein 2026-05-24 trace iter 2
@@ -2882,6 +2879,13 @@ class GameAgent(
         except Exception:
             pass
         self._sound_generator = None
+        try:
+            vg = self._video_generator
+            if vg is not None:
+                self._video_generator = None
+                freed.append("VideoGenerator (session)")
+        except Exception:
+            pass
         return freed
 
     def _vision_judge_headroom_ok(self) -> bool:
@@ -6254,7 +6258,6 @@ class GameAgent(
                         if _mlx_retries < 1:
                             self._mlx_stall_retries_this_iter = _mlx_retries + 1
                             self._force_compact_after_stall = True
-                            self._mlx_stall_light_stream = True
                             # Compact NOW — _prune_messages already ran at
                             # iter start; retry must not resend the same
                             # giant prompt that just stalled.

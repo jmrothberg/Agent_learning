@@ -16,6 +16,7 @@ from agent import GameAgent  # noqa: E402
 from memory import render_outline_traps_only  # noqa: E402
 from prompts_v1 import (  # noqa: E402
     _detect_canvas_entity_intent,
+    _detect_open_field_td_intent,
     _detect_pinball_intent,
     plan_instruction,
 )
@@ -104,8 +105,25 @@ def test_detect_pinball_intent() -> None:
     assert _detect_pinball_intent("flipper bumper table") != []
 
 
+def test_detect_open_field_td_intent() -> None:
+    assert _detect_open_field_td_intent("Build a Fieldrunners game") != []
+    assert _detect_open_field_td_intent(
+        "open-field tower defense with BFS pathfinding"
+    ) != []
+    assert _detect_open_field_td_intent("simple pong with paddle") == []
+
+
+def test_open_field_td_nudge_fires() -> None:
+    out = plan_instruction(
+        goal="Build a Fieldrunners open-field tower defense with Tesla and Flame towers"
+    )
+    assert "BEAM TOWERS (Tesla / Flame)" in out
+    assert "NOT rotatable" in out
+    assert "PROCEDURAL attack" in out
+
+
 def test_plan_nudges_include_new_ids() -> None:
-    for nid in ("canvas-entity-art", "pinball-table"):
+    for nid in ("canvas-entity-art", "pinball-table", "open-field-td"):
         assert memory_module.load_plan_nudge(nid).strip(), nid
 
 

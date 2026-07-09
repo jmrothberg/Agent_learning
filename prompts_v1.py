@@ -877,6 +877,35 @@ _PINBALL_KEYWORDS = frozenset({
     "drain", "multiball", "tilt", "nudge", "slingshot-pin", "arcade-table",
 })
 
+# Open-field / Fieldrunners TD — beam vs rotating turret split (20260703).
+_OPEN_FIELD_TD_SHAPE = frozenset({
+    "open", "field", "tower", "towers", "turret", "turrets", "bfs", "maze",
+    "mazing", "tesla", "flame", "creep", "creeps", "wave", "waves",
+})
+
+
+def _detect_open_field_td_intent(goal: str) -> list[str]:
+    """Open-field / Fieldrunners TD — rotating turrets vs fixed beam towers."""
+    if not goal:
+        return []
+    import re
+    gl = goal.lower().replace("_", " ")
+    gl_dash = gl.replace(" ", "-")
+    if "fieldrunners" in gl or "open-field" in gl_dash:
+        return ["fieldrunners"]
+    words = re.findall(r"[a-zA-Z]+", gl)
+    seen: set[str] = set()
+    out: list[str] = []
+    for w in words:
+        if w in _OPEN_FIELD_TD_SHAPE and w not in seen:
+            seen.add(w)
+            out.append(w)
+    if "open" in seen and "field" in seen and seen & {
+        "tower", "towers", "turret", "turrets", "bfs", "maze", "mazing",
+    }:
+        return out
+    return []
+
 
 def _detect_canvas_entity_intent(goal: str) -> list[str]:
     """Return visible-entity keywords when goal describes canvas entities."""
@@ -1505,6 +1534,16 @@ def plan_instruction(
             )
             _record_nudge("pinball-table")
 
+    open_field_td_nudge = ""
+    if not from_seed and not wireframe_keywords:
+        open_field_td_keywords = _detect_open_field_td_intent(goal)
+        if open_field_td_keywords:
+            kws = ", ".join(repr(k) for k in open_field_td_keywords)
+            open_field_td_nudge = load_plan_nudge("open-field-td").replace(
+                "{kws}", kws
+            )
+            _record_nudge("open-field-td")
+
     # `threed_keywords` is already set at the top of the function so a
     # from_seed continuation still keeps 3D detection but loses art/audio.
     threed_nudge = ""
@@ -1649,7 +1688,7 @@ def plan_instruction(
     body = (
         local_crisp_nudge
         + plan_core + art_nudge + illustrated_sprite_nudge + franchise_asset_nudge
-        + canvas_entity_nudge + pinball_nudge
+        + canvas_entity_nudge + pinball_nudge + open_field_td_nudge
         + threed_nudge + wireframe_nudge
         + beat_em_up_nudge + audio_nudge
         + video_nudge
