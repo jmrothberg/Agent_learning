@@ -636,6 +636,8 @@ class Flux2KleinMfluxGenerator:
             "--model", str(self.model_path),
             "--base-model", "flux2-klein-9b",
             "--prompt", str(prompt),
+            # NOTE: mflux rejects --negative-prompt for FLUX.2 klein (exit 2).
+            # Steer away from checkerboard via _ensure_sprite_bg_prompt() instead.
             "--width", "768",
             "--height", "768",
             "--steps", self._steps(),
@@ -1646,12 +1648,12 @@ def generate_assets(
         size = spec["size"]
         from_image = spec.get("from_image")
         strength = spec.get("strength")
-        # Append transparent-background suffix for sprite assets (not full-bleed
-        # backgrounds). Z-Image often ignores the phrase without it; chroma-key
-        # below is still the safety net. Matches scripts/draw_game_art.py.
+        # Append background suffix for sprite assets (not full-bleed backgrounds).
+        # FLUX2 klein: solid white (not "transparent" — it draws checkerboard).
+        # Z-Image: transparent hint + chroma-key safety net below.
         gen_prompt = prompt
         if not _is_full_bleed_asset_name(name):
-            gen_prompt = _ensure_transparent_prompt(gen_prompt)
+            gen_prompt = _ensure_sprite_bg_prompt(gen_prompt, image_generator)
         # Sprite facing/orientation is NOT pinned or rewritten here — that
         # convention now lives in the playbook (directional-art-faces-right),
         # which teaches the model to author one right-facing pose set and flip
@@ -1756,7 +1758,7 @@ def generate_assets(
             stat["pose_txt2img"] = True
             stat["merged_prompt"] = merged[:240]
             if not _is_full_bleed_asset_name(name):
-                merged = _ensure_transparent_prompt(merged)
+                merged = _ensure_sprite_bg_prompt(merged, image_generator)
             gen_path = _safe_generate(image_generator, merged)
         else:
             gen_path = _safe_generate(image_generator, gen_prompt)
@@ -1816,6 +1818,13 @@ def generate_assets(
                     if ck_stats["bg_color"] is not None else None
                 )
                 stat["alpha_pixel_ratio"] = ck_stats["alpha_pixel_ratio"]
+                if ck_stats.get("checkerboard_bg"):
+                    stat["checkerboard_bg"] = ck_stats["checkerboard_bg"]
+                if (
+                    not _is_full_bleed_asset_name(name)
+                    and ck_stats["alpha_pixel_ratio"] < 0.15
+                ):
+                    stat["checkerboard_bg_suspect"] = True
                 keyed.save(cache_path, format="PNG")
             _link_or_copy(cache_path, target_path)
             out[name] = target_path.resolve()
@@ -1967,6 +1976,30 @@ def _ensure_transparent_prompt(prompt: str) -> str:
     return f"{prompt}, transparent background"
 
 
+# FLUX2-klein often renders a fake Photoshop checkerboard when asked for
+# "transparent background". Ask for solid white instead; chroma-key below
+# removes it. (mflux does NOT support --negative-prompt on FLUX.2 klein.)
+_FLUX2_BG_SUFFIX = "solid pure white background, no checkerboard, no grid"
+
+
+def _is_flux2_mflux_generator(generator: Any) -> bool:
+    return type(generator).__name__ == "Flux2KleinMfluxGenerator"
+
+
+def _ensure_sprite_bg_prompt(prompt: str, generator: Any) -> str:
+    """Background wording matched to the active sprite generator."""
+    if not _is_flux2_mflux_generator(generator):
+        return _ensure_transparent_prompt(prompt)
+    p = prompt.strip()
+    if "transparent" in p.lower():
+        # FLUX interprets this as "draw the transparency grid" — strip it.
+        p = re.sub(r",?\s*transparent\s+background\b", "", p, flags=re.I).strip(" ,")
+    low = p.lower()
+    if "solid pure white" in low or "plain white background" in low:
+        return p
+    return f"{p}, {_FLUX2_BG_SUFFIX}" if p else _FLUX2_BG_SUFFIX
+
+
 def _is_full_bleed_asset_name(name: str) -> bool:
     """Skip transparency suffix for full-screen background assets."""
     n = name.lower()
@@ -1981,6 +2014,15 @@ def _is_full_bleed_asset_name(name: str) -> bool:
 # that-you_20260507_103355 for the cascade failure). Right fix is to
 # do the chroma-key once, in PIL, before the PNG ever reaches the
 # game. RGBA output → drawImage just works with full alpha.
+
+def _is_neutral_bg_pixel(r: int, g: int, b: int) -> bool:
+    """True for light gray/white pixels suitable as sprite backdrop."""
+    mx = max(r, g, b)
+    mn = min(r, g, b)
+    if mx < 180:
+        return False
+    return (mx - mn) <= 40
+
 
 def _detect_bg_color(img) -> tuple[int, int, int] | None:
     """Sample the four corners + four edge-midpoints; return the most
@@ -2015,6 +2057,51 @@ def _detect_bg_color(img) -> tuple[int, int, int] | None:
     return best[0]
 
 
+def _detect_checkerboard_bg_colors(img) -> list[tuple[int, int, int]] | None:
+    """When FLUX2 draws a fake transparency grid, return its two neutral tones.
+
+    Samples the full border strip. Requires two distinct neutral clusters
+    covering >= 60% of border pixels — avoids masking multicolor scenes.
+    """
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    w, h = img.size
+    px = img.load()
+    border: list[tuple[int, int, int]] = []
+    for x in range(w):
+        border.append(px[x, 0])
+        border.append(px[x, h - 1])
+    for y in range(h):
+        border.append(px[0, y])
+        border.append(px[w - 1, y])
+    if not border:
+        return None
+
+    tol = 16
+    clusters: list[tuple[tuple[int, int, int], int]] = []
+    for s in border:
+        if not _is_neutral_bg_pixel(s[0], s[1], s[2]):
+            continue
+        matched = False
+        for i, (center, count) in enumerate(clusters):
+            if all(abs(s[j] - center[j]) <= tol for j in range(3)):
+                clusters[i] = (center, count + 1)
+                matched = True
+                break
+        if not matched:
+            clusters.append((s, 1))
+    if len(clusters) < 2:
+        return None
+    clusters.sort(key=lambda item: item[1], reverse=True)
+    c1, n1 = clusters[0]
+    c2, n2 = clusters[1]
+    if (n1 + n2) / len(border) < 0.6:
+        return None
+    if sum(abs(c1[i] - c2[i]) for i in range(3)) < 20:
+        return None
+    return [c1, c2]
+
+
 def _apply_chroma_key_alpha(img, bg: tuple[int, int, int],
                              tolerance: int = 24) -> tuple[Any, float]:
     """Convert pixels within `tolerance` of `bg` to alpha=0.
@@ -2043,27 +2130,65 @@ def _apply_chroma_key_alpha(img, bg: tuple[int, int, int],
     return img, (masked / total if total else 0.0)
 
 
+def _apply_chroma_key_alpha_multi(
+    img,
+    bgs: list[tuple[int, int, int]],
+    tolerance: int = 24,
+) -> tuple[Any, float]:
+    """Key multiple backdrop colors (e.g. FLUX2 checkerboard white + gray)."""
+    if img.mode != "RGBA":
+        img = img.convert("RGBA")
+    px = img.load()
+    w, h = img.size
+    masked = 0
+    total = w * h
+    for y in range(h):
+        for x in range(w):
+            r, g, b, a = px[x, y]
+            if a == 0:
+                continue
+            for bg_r, bg_g, bg_b in bgs:
+                if (
+                    abs(r - bg_r) <= tolerance
+                    and abs(g - bg_g) <= tolerance
+                    and abs(b - bg_b) <= tolerance
+                ):
+                    px[x, y] = (r, g, b, 0)
+                    masked += 1
+                    break
+    return img, (masked / total if total else 0.0)
+
+
 def _chroma_key_to_rgba(pil_img) -> tuple[Any, dict]:
     """Top-level helper: detect background color, apply alpha mask,
     return the RGBA image plus a small stats dict for tracing.
 
     Stats dict shape:
-      {"bg_color": (r,g,b) | None, "alpha_pixel_ratio": float}
+      {"bg_color": (r,g,b) | None, "alpha_pixel_ratio": float,
+       "checkerboard_bg": [(r,g,b), ...] | omitted}
 
-    If no dominant bg color was detected, leaves the image alone (only
-    converts to RGBA so save format is consistent).
+    If no dominant bg color was detected, tries a two-tone checkerboard
+    fallback (FLUX2-klein fake transparency grid). If that also fails,
+    converts to RGBA without masking.
     """
     stats: dict[str, Any] = {"bg_color": None, "alpha_pixel_ratio": 0.0}
     bg = _detect_bg_color(pil_img)
-    if bg is None:
-        # No clear bg — convert mode but skip masking.
-        if pil_img.mode != "RGBA":
-            pil_img = pil_img.convert("RGBA")
-        return pil_img, stats
-    stats["bg_color"] = bg
-    keyed, ratio = _apply_chroma_key_alpha(pil_img, bg)
-    stats["alpha_pixel_ratio"] = round(ratio, 3)
-    return keyed, stats
+    if bg is not None:
+        stats["bg_color"] = bg
+        keyed, ratio = _apply_chroma_key_alpha(pil_img, bg)
+        stats["alpha_pixel_ratio"] = round(ratio, 3)
+        return keyed, stats
+    checker = _detect_checkerboard_bg_colors(pil_img)
+    if checker:
+        stats["bg_color"] = checker[0]
+        stats["checkerboard_bg"] = [list(c) for c in checker]
+        keyed, ratio = _apply_chroma_key_alpha_multi(pil_img, checker)
+        stats["alpha_pixel_ratio"] = round(ratio, 3)
+        return keyed, stats
+    # No clear bg — convert mode but skip masking.
+    if pil_img.mode != "RGBA":
+        pil_img = pil_img.convert("RGBA")
+    return pil_img, stats
 
 
 def _link_or_copy(src: Path, dst: Path) -> None:
