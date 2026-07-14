@@ -414,6 +414,84 @@ def _probe_has_side_effects(expr: str) -> bool:
     return any(n in e for n in _PROBE_SIDE_EFFECT_NEEDLES)
 
 
+# Undrawn-FP / Q*bert: recolor-after-hop probes must run before movement
+# probes that poison board state (cube_recolors after input_moves_player).
+_RECOLOR_PROBE_RE = re.compile(
+    r"recolor|cube_recolor|\.colored|color_change|dots_decrease",
+    re.I,
+)
+
+
+def _effectful_probe_sort_key(probe: dict) -> tuple[int, int]:
+    """Order within the side-effecting probe group: recolor/read checks
+    before movement dispatches so hops do not invalidate recolor probes."""
+    name = str(probe.get("name") or "").lower()
+    expr = str(probe.get("expr") or "")
+    blob = f"{name} {expr}".lower()
+    if _RECOLOR_PROBE_RE.search(blob):
+        return (0, 0)
+    if (
+        "input_moves" in name
+        or "moves_player" in name
+        or ("dispatchevent" in blob and "arrow" in blob)
+    ):
+        return (2, 0)
+    return (1, 0)
+
+
+def _html_referenced_asset_count(html_text: str) -> int:
+    """Count ./_assets/*.png references — used to pick settle RAF depth."""
+    import re as _re
+    return len(_re.findall(
+        r"['\"]\./[A-Za-z0-9_\-]+_assets/[A-Za-z0-9_\-]+\.png['\"]",
+        html_text or "",
+    ))
+
+
+def _asset_settle_raf_ticks(html_text: str) -> int:
+    """More RAF ticks when the page references generated sprite PNGs."""
+    return 8 if _html_referenced_asset_count(html_text) > 0 else 4
+
+
+def _undrawn_all_pose_frames(undrawn: list[str]) -> bool:
+    """True when every undrawn stem names a pose/animation frame."""
+    return bool(undrawn) and all(
+        _stem_looks_like_animation_pose(s) for s in undrawn
+    )
+
+
+def _undrawn_pose_frames_with_draw_proof(
+    undrawn: list[str],
+    drawn_blob: str,
+    *,
+    sprite_draw_proven: bool,
+) -> bool:
+    """Pose-only undrawn set with idle drawn OR input smoke proved sprites."""
+    if not _undrawn_all_pose_frames(undrawn):
+        return False
+    return sprite_draw_proven or _undrawn_are_animation_poses_only(
+        undrawn, drawn_blob
+    )
+
+
+def _undrawn_idle_false_positive_with_draw_proof(
+    undrawn: list[str],
+    *,
+    sprite_draw_proven: bool,
+) -> bool:
+    """hero_idle listed undrawn alongside hop poses — instrumentation FP."""
+    if not undrawn or not sprite_draw_proven:
+        return False
+    non_pose = [s for s in undrawn if not _stem_looks_like_animation_pose(s)]
+    if not non_pose:
+        return False
+    idle_like = [
+        s for s in non_pose
+        if str(s).lower().endswith("_idle") or str(s).lower().endswith("idle")
+    ]
+    return len(non_pose) == len(idle_like) and len(idle_like) <= 2
+
+
 def _format_probe_failure_warning(p: dict[str, Any]) -> str:
     """Human/model-facing warning for one failed probe."""
     name = p.get("name", "probe")
@@ -3553,9 +3631,18 @@ class LiveBrowser:
         # and the frozen check run while sprites are still decoding, and
         # early drawImage calls are missed. The later pre-audit settle call
         # stays (returns immediately once ready).
+        try:
+            _html_for_settle = Path(path).read_text(
+                encoding="utf-8", errors="ignore",
+            )
+        except Exception:
+            _html_for_settle = ""
+        _settle_raf_ticks = _asset_settle_raf_ticks(_html_for_settle)
         if asset_decode_settle:
             try:
-                await self._wait_for_session_assets_ready()
+                await self._wait_for_session_assets_ready(
+                    raf_ticks=_settle_raf_ticks,
+                )
             except Exception:
                 pass
 
@@ -3663,12 +3750,18 @@ class LiveBrowser:
             # order is preserved within each group; the report keeps the
             # original probe order so the model sees a stable list.
             indexed = list(enumerate(probes))
-            ordered = (
-                [(i, p) for i, p in indexed
-                 if not _probe_has_side_effects(str(p.get("expr") or ""))]
-                + [(i, p) for i, p in indexed
-                   if _probe_has_side_effects(str(p.get("expr") or ""))]
+            readonly = [
+                (i, p) for i, p in indexed
+                if not _probe_has_side_effects(str(p.get("expr") or ""))
+            ]
+            effectful = [
+                (i, p) for i, p in indexed
+                if _probe_has_side_effects(str(p.get("expr") or ""))
+            ]
+            effectful.sort(
+                key=lambda ip: (_effectful_probe_sort_key(ip[1]), ip[0]),
             )
+            ordered = readonly + effectful
             results_by_idx: dict[int, dict[str, Any]] = {}
             effectful_run_so_far: list[str] = []
             for orig_idx, p in ordered:
@@ -4037,7 +4130,9 @@ class LiveBrowser:
         _decode_settle: dict[str, Any] = {}
         if asset_decode_settle:
             try:
-                _decode_settle = await self._wait_for_session_assets_ready()
+                _decode_settle = await self._wait_for_session_assets_ready(
+                    raf_ticks=_settle_raf_ticks,
+                )
             except Exception:
                 _decode_settle = {"ready": False, "waited_ms": 0, "raf_ticks": 0}
         else:
@@ -4217,12 +4312,26 @@ class LiveBrowser:
                     isinstance(info, dict) and info.get("new_sprite_src")
                     for info in _fake_actions.values()
                 )
+                _sprite_paths_draw_proven = (
+                    _sprite_paths_wrapper
+                    and _sprite_draw_proven
+                    and _no_errors
+                    and _game_advancing
+                )
+                _undrawn_pose_draw_proof = _undrawn_pose_frames_with_draw_proof(
+                    undrawn, drawn_blob, sprite_draw_proven=_sprite_draw_proven,
+                )
+                _undrawn_idle_fp = _undrawn_idle_false_positive_with_draw_proof(
+                    undrawn, sprite_draw_proven=_sprite_draw_proven,
+                )
                 report["drawn_asset_check"]["sprite_draw_proven"] = (
                     _sprite_draw_proven
                 )
                 if (
                     (_probes_green and _no_errors and (
                         _undrawn_pose_only
+                        or _undrawn_pose_draw_proof
+                        or _undrawn_idle_fp
                         or _scene_offscreen_bg
                         or _undrawn_state_gated
                         or _sprite_wrapper
@@ -4231,7 +4340,7 @@ class LiveBrowser:
                     or (self._undrawn_seen_before and _probes_green and _no_errors)
                     or _behavior_green_no_missing
                     or _decode_timing_demote
-                    or (_sprite_draw_proven and _no_errors and _game_advancing)
+                    or _sprite_paths_draw_proven
                 ):
                     _advisory_tail = (
                         " Behavioral probes pass and a numeric scene index is "
@@ -4242,6 +4351,14 @@ class LiveBrowser:
                         "may simply not have triggered on the static opening "
                         "board — idle/base sprites ARE drawn."
                         if _undrawn_pose_only else
+                        " Behavioral probes pass; undrawn stems are pose/"
+                        "bounce animation frames — input smoke or idle/base "
+                        "sprites confirm real drawImage wiring."
+                        if _undrawn_pose_draw_proof else
+                        " Behavioral probes pass; idle stem(s) in the "
+                        "undrawn list look like a filename-diff false "
+                        "positive while hop/pose frames stay state-gated."
+                        if _undrawn_idle_fp else
                         " Behavioral probes pass; undrawn assets look "
                         "state/wave gated and may not have triggered during "
                         "the short smoke window."
@@ -4259,11 +4376,10 @@ class LiveBrowser:
                         "a Chromium timing false positive (sprites visible in "
                         "Safari). Re-check after reload if art still missing."
                         if _decode_timing_demote else
-                        " The input smoke test observed a NEW sprite source "
-                        "drawn in response to a keypress — the game provably "
-                        "draws its generated sprites; remaining undrawn stems "
-                        "are pose/state frames not reached in the smoke window."
-                        if _sprite_draw_proven else
+                        " Input smoke confirmed a new drawImage sprite source; "
+                        "filename diff is likely instrumentation/timing — "
+                        "verify visually before rewiring."
+                        if _sprite_paths_draw_proven else
                         " Behavioral probes pass and no entity-render "
                         "failure is present; state-conditional pose sprites "
                         "may simply not have triggered during the test window."

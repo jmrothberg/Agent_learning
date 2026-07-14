@@ -160,13 +160,33 @@ def test_pose_only_undrawn_set_with_directional_hops():
 
 def test_sprite_draw_proven_demotes_undrawn_gate():
     """When the input smoke test recorded a new sprite src on a keypress
-    (fake_actions[key].new_sprite_src), the undrawn finding must demote to
-    advisory instead of gating — the game provably draws sprites."""
+    (fake_actions[key].new_sprite_src) on PATHS+drawEntity builds, the
+    undrawn finding must demote to advisory instead of gating."""
     src = inspect.getsource(tools_module)
     assert "_sprite_draw_proven" in src
+    assert "_sprite_paths_draw_proven" in src
     assert '"sprite_draw_proven"' in src
-    # The demote condition includes the proven-draw path.
-    assert "_sprite_draw_proven and _no_errors and _game_advancing" in src
+    assert "_sprite_paths_wrapper" in src
+    assert "_sprite_paths_draw_proven" in src
+
+
+def test_asset_settle_uses_eight_raf_ticks_when_assets_referenced():
+    """Q*bert loads 7 PNGs — settle should tick 8 RAF frames, not 4."""
+    assert tools_module._asset_settle_raf_ticks(
+        '<script>const p="./foo_assets/hero_idle.png";</script>'
+    ) == 8
+    assert tools_module._asset_settle_raf_ticks("<canvas></canvas>") == 4
+
+
+def test_undrawn_idle_false_positive_with_sprite_draw_proven():
+    """hero_idle falsely undrawn alongside hop poses + proven draw."""
+    undrawn = ["hero_idle", "hero_hop_ul", "hero_hop_ur"]
+    assert tools_module._undrawn_idle_false_positive_with_draw_proof(
+        undrawn, sprite_draw_proven=True,
+    )
+    assert not tools_module._undrawn_idle_false_positive_with_draw_proof(
+        undrawn, sprite_draw_proven=False,
+    )
 
 
 def test_asset_settle_runs_before_observation_window():

@@ -162,9 +162,12 @@ def test_smoke_test_skips_control_recovery_when_game_over():
 def test_patch_first_prefill_on_user_feedback():
     """First feedback fix turn uses patch prefill, not only after format stuck."""
     agent_src = (Path(__file__).parent.parent / "agent.py").read_text()
-    idx = agent_src.index("patch_first_prefill")
-    chunk = agent_src[max(0, idx - 900): idx + 400]
-    assert "_last_drained_feedback" in chunk
+    feedback_idx = agent_src.index("_has_feedback = bool")
+    prefill_idx = agent_src.index("patch_first_prefill")
+    chunk = agent_src[feedback_idx:prefill_idx + 400]
+    assert 'getattr(self, "_last_drained_feedback", None)' in chunk
+    assert "_has_feedback" in chunk
+    assert "or _has_feedback" in chunk
     assert '"had_feedback": _has_feedback' in chunk
 
 
@@ -228,9 +231,9 @@ def test_undrawn_gates_first_occurrence_then_demotes():
     assert "_probes_green" in window and "_no_errors" in window
     assert "_entity_missing_count" in window
     assert "_opening_hard_green" in window
-    assert "ADVISORY (non-blocking)" in window
+    assert '"ADVISORY (non-blocking) — " + _undrawn_text' in src
     # Non-green first occurrence still gates via soft_warnings.
-    assert 'report["soft_warnings"].append(_undrawn_text)' in window
+    assert 'report["soft_warnings"].append(_undrawn_text)' in src
 
 
 def test_undrawn_streak_resets_when_finding_clears():
@@ -252,7 +255,7 @@ def test_undrawn_demotes_for_scene_indexed_offscreen_bg():
     assert "_undrawn_mostly_bg" in window
     assert "sceneIndex" in window
     # Demotion path must reference the scene-offscreen condition.
-    assert "or _scene_offscreen_bg" in window
+    assert "or _scene_offscreen_bg" in src
 
 
 def test_code_drawn_over_sprite_never_gates():

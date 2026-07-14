@@ -37,6 +37,7 @@ def _app_stub() -> CodingBoxApp:
     app._is_streaming = True
     app._last_console_flush_at = 0.0
     app._last_stream_alive_note_at = 0.0
+    app._last_emit_status_at = 0.0
     app._runaway_console_warned = False
     app._raw_lines: list[str] = []
     app._info_lines: list[str] = []

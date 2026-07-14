@@ -633,3 +633,118 @@ def test_render_block_sprite_resolver_is_self_healing(tmp_path):
     assert "img.complete && img.naturalWidth > 0" in block
     # __assetMisses records a true no-match key, not a still-decoding image.
     assert "(window.__assetMisses = window.__assetMisses || {})[key] = 1" in block
+
+
+# ---------------------------------------------------------------------------
+# sprite() resolver mirror — same algorithm as injected JS in render block
+# ---------------------------------------------------------------------------
+
+
+def _norm_asset_key(s: str) -> str:
+    return "".join(ch for ch in s.lower() if ch.isalnum())
+
+
+def _entity_tokens(want: str) -> list[str]:
+    import re
+
+    return re.findall(r"[a-z]+\d+|\d+|[a-z]+", want)
+
+
+def _primary_tokens(want: str) -> list[str]:
+    import re
+
+    return re.findall(r"[a-z]+|\d+", want)
+
+
+def _prefix_overlap(want: str, candidate: str) -> int:
+    n = 0
+    for i, ch in enumerate(want):
+        if i >= len(candidate) or candidate[i] != ch:
+            break
+        n += 1
+    return n
+
+
+def _mirror_resolve_sprite_key(key: str, names: list[str]) -> str | None:
+    """Python mirror of the injected sprite() fuzzy resolver (assets.py)."""
+    if key in names:
+        return key
+    want = _norm_asset_key(key)
+    hit: str | None = None
+    for n in names:
+        if _norm_asset_key(n) == want:
+            return n
+    for n in names:
+        nn = _norm_asset_key(n)
+        if nn in want or want in nn:
+            hit = n
+            break
+    if hit:
+        return hit
+    toks = _primary_tokens(want)
+    best = 0
+    ties: list[str] = []
+    for n in names:
+        nn = _norm_asset_key(n)
+        sc = sum(len(t) for t in toks if len(t) >= 3 and t in nn)
+        if sc > best:
+            best = sc
+            ties = [n]
+        elif sc == best and sc > 0:
+            ties.append(n)
+    if len(ties) == 1:
+        return ties[0]
+    if len(ties) > 1:
+        etoks = _entity_tokens(want)
+        tb = -1
+        tb_hit = ties[0]
+        for n in ties:
+            nn = _norm_asset_key(n)
+            sc2 = sum(len(t) for t in etoks if len(t) >= 2 and t in nn)
+            if sc2 > tb:
+                tb = sc2
+                tb_hit = n
+            elif sc2 == tb:
+                pref = _prefix_overlap(want, nn)
+                old_pref = _prefix_overlap(want, _norm_asset_key(tb_hit))
+                if pref > old_pref:
+                    tb_hit = n
+        return tb_hit
+    return None
+
+
+def test_sprite_resolver_key_drift_includes():
+    """Shorter code key contained in longer asset name (includes tier)."""
+    names = ["left_fighter_idle"]
+    assert _mirror_resolve_sprite_key("left_fighter", names) == "left_fighter_idle"
+    assert _mirror_resolve_sprite_key("hero", ["hero_idle"]) == "hero_idle"
+
+
+def test_sprite_resolver_parallel_prefix_tiebreak():
+    names = ["f1_walk", "f2_walk", "f1_idle", "f2_idle"]
+    assert _mirror_resolve_sprite_key("f2_walk", names) == "f2_walk"
+    assert _mirror_resolve_sprite_key("f1_walk", names) == "f1_walk"
+    blue_red = ["blue_special", "red_special", "blue_idle", "red_idle"]
+    assert _mirror_resolve_sprite_key("blue_special", blue_red) == "blue_special"
+    assert _mirror_resolve_sprite_key("red_special", blue_red) == "red_special"
+    p12 = ["p1_special", "p2_special"]
+    assert _mirror_resolve_sprite_key("p2_special", p12) == "p2_special"
+
+
+def test_sprite_resolver_single_entity_unchanged():
+    names = ["hero_idle", "hero_walk"]
+    assert _mirror_resolve_sprite_key("hero_idle", names) == "hero_idle"
+    assert _mirror_resolve_sprite_key("hero_walk", names) == "hero_walk"
+
+
+def test_render_block_flushes_cache_on_assets_ready(tmp_path: Path):
+    html = tmp_path / "game.html"
+    html.write_text("<html></html>")
+    ad = tmp_path / "game_assets"
+    ad.mkdir()
+    p = ad / "ship.png"
+    p.write_bytes(b"\x89PNG fake")
+    block = render_asset_paths_block({"ship": p}, html)
+    flush_idx = block.index("for (const k in _spriteCache) delete _spriteCache[k];")
+    ready_idx = block.index("_assetsReady = true;")
+    assert flush_idx < ready_idx

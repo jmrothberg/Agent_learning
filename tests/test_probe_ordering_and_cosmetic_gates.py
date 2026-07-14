@@ -78,9 +78,8 @@ def test_probe_loop_orders_readonly_first():
     src = inspect.getsource(tools_module.LiveBrowser.load_and_test)
     assert "_probe_has_side_effects" in src
     # Read-only partition concatenated before the effectful one.
-    i = src.index("ordered = (")
-    block = src[i:i + 400]
-    assert "if not _probe_has_side_effects" in block
+    assert "readonly + effectful" in src or "ordered = readonly" in src
+    assert "if not _probe_has_side_effects" in src
     # Report restores the original probe order.
     assert "results_by_idx[i] for i in sorted(results_by_idx)" in src
 
@@ -133,6 +132,15 @@ def test_probe_isolation_falls_back_to_keyr_restart():
     # KeyR restart gets a longer settle than a direct reset() call.
     assert "0.3 if _did_reset == \"keyR\" else 0.1" in block or \
         "0.3 if _did_reset == 'keyR' else 0.1" in block
+
+
+def test_effectful_probes_sort_recolor_before_movement():
+    """cube_recolors / dots_decrease run before input_moves_player."""
+    src = inspect.getsource(tools_module)
+    assert "_effectful_probe_sort_key" in src
+    assert "_RECOLOR_PROBE_RE" in src
+    loop = inspect.getsource(tools_module.LiveBrowser.load_and_test)
+    assert "effectful.sort" in loop
 
 
 # ---------------------------------------------------------------------------

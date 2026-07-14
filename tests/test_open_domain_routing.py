@@ -62,7 +62,14 @@ _SYNTHETIC = [
     ("pong two paddles bounce ball score", "canvas-paddle-ball"),
     ("missile command crosshair cities intercept incoming", "canvas-top-down-action"),
     ("1942 vertical scrolling shoot em up plane formation", "canvas-top-down-action"),
-    ("space invaders grid aliens march shoot bunker", "canvas-top-down-action"),
+    # Fixed-shooter family (2026-07): bottom cannon + marching grid, not free-roam top-down.
+    ("space invaders grid aliens march shoot bunker", "canvas-fixed-shooter"),
+    # run12 showcase families — strong_hooks must keep these off FPS / top-down.
+    ("metal slug run and gun side scroll shoot jump", "canvas-side-scroll-platformer"),
+    ("contra side scrolling run and gun shoot enemies", "canvas-side-scroll-platformer"),
+    ("rampage giant monster climb smash skyscraper", "canvas-vertical-platformer"),
+    ("prince of persia rotoscope jump climb ledge sword", "canvas-side-scroll-platformer"),
+    ("mortal kombat two fighters health bars fatality", "canvas-two-actors-facing"),
 ]
 
 

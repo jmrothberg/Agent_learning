@@ -229,8 +229,9 @@ def test_recipe_gate_skip_cached_per_code_hash():
     assert len(skips_run2) == len(skips_run1)
     assert a.browser.eval_calls == evals_after_run1
 
-    # Run 3, code changed: gates re-evaluated.
+    # Run 3, code changed: gates re-evaluated (reset cycle budget — max is 1/call).
     a._autonomous_no_findings_streak = 0  # keep the loop enabled
+    a._autonomous_playtest_cycle = 0
     a._current_file = "<html>v2</html>"
     asyncio.run(_drive())
     skips_run3 = [
