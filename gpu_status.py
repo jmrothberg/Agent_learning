@@ -840,6 +840,8 @@ def format_gpu_memory(gpu_index: int, snapshot: GpuSnapshot | None) -> str:
 def diffuser_kind(generator: Any) -> str:
     """Short label for which pipeline class is generating."""
     cls = type(generator).__name__
+    if cls == "Flux2KleinMfluxGenerator":
+        return "FLUX2-klein (mflux)"
     if cls == "ZImageTurboGenerator":
         return "Z-Image-Turbo"
     if cls == "Img2ImgGenerator":

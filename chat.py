@@ -2367,13 +2367,17 @@ class CodingBoxApp(App):
         zgen = getattr(agent, "_asset_generator", None) if agent else None
         sgen = getattr(agent, "_sound_generator", None) if agent else None
         z_line = gs.format_diffuser_line("Z-Image-Turbo", None)
+        flux_line = gs.format_diffuser_line("FLUX2-klein (mflux)", None)
         sd_line = gs.format_diffuser_line("SD-Turbo img2img", None)
         if zgen is not None:
             kind = gs.diffuser_kind(zgen)
             if kind == "Z-Image-Turbo":
                 z_line = gs.format_diffuser_line(kind, zgen)
+            elif kind == "FLUX2-klein (mflux)":
+                flux_line = gs.format_diffuser_line(kind, zgen)
             elif kind == "SD-Turbo img2img":
                 sd_line = gs.format_diffuser_line(kind, zgen)
+        rows.append(f"  {flux_line}")
         rows.append(f"  {z_line}")
         rows.append(f"  {sd_line}")
         rows.append(f"  {gs.format_diffuser_line('Stable-Audio', sgen)}")
@@ -7327,16 +7331,16 @@ class CodingBoxApp(App):
 
 
 def main() -> int:
-    # Pre-load the Z-Image-Turbo pipeline NOW, before Textual mounts
-    # and before Playwright/Chromium opens its IPC pipes. The
-    # diffusers from_pretrained path forks a subprocess (via
-    # huggingface_hub / safetensors); doing that fork after Playwright
-    # is up makes _posixsubprocess.fork_exec reject the inherited fd
-    # table with "bad value(s) in fds_to_keep" — which is why the
-    # smoke test (clean process) succeeds and chat.py (Playwright
-    # already running) fails for every asset. SKIP_DIFFUSER_PRELOAD=1
-    # opts out for users who never want art and don't want to wait
-    # ~15-30s on launch.
+    # Pre-load diffuser pipelines NOW, before Textual mounts and before
+    # Playwright/Chromium opens its IPC pipes. diffusers from_pretrained
+    # forks a subprocess (via huggingface_hub / safetensors); doing that
+    # fork after Playwright is up makes _posixsubprocess.fork_exec reject
+    # the inherited fd table with "bad value(s) in fds_to_keep".
+    #
+    # assets.preload(): Z-Image-Turbo when used; always preloads Stable
+    # Audio Open (even when macOS auto-selects FLUX2 klein / mflux for
+    # sprites). SKIP_DIFFUSER_PRELOAD=1 opts out for users who never
+    # want art/audio and don't want ~15-60s on launch.
     if os.environ.get("SKIP_DIFFUSER_PRELOAD", "").strip() not in ("", "0", "false", "False"):
         pass
     else:

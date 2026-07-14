@@ -167,6 +167,17 @@ async def _run(
         )
     backend_inst = backend_mod.make_backend(info)
 
+    # Preload diffusers (Stable Audio; Z-Image when not on FLUX2 klein)
+    # BEFORE Playwright opens IPC pipes — same fds_to_keep trap as chat.py.
+    if os.environ.get("SKIP_DIFFUSER_PRELOAD", "").strip() not in ("", "0", "false", "False"):
+        pass
+    else:
+        try:
+            import assets as _assets
+            _assets.preload()
+        except Exception:
+            pass
+
     browser = LiveBrowser(run_seconds=3.0, headless=headless)
     try:
         await browser.start()

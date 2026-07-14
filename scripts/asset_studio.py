@@ -40,19 +40,19 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 
 _gen_lock = threading.Lock()
-_generator: assets.ZImageTurboGenerator | None = None
+_generator: Any | None = None
 _generator_error: str | None = None
 _server: ThreadingHTTPServer | None = None
 _server_thread: threading.Thread | None = None
 
 
-def _get_generator() -> assets.ZImageTurboGenerator:
+def _get_generator() -> Any:
     global _generator, _generator_error
     if _generator is None:
         _generator = assets.try_load_image_generator()
         if _generator is None:
             _generator_error = (
-                "Could not construct ZImageTurboGenerator — run "
+                "Could not construct a sprite generator — run "
                 "./scripts/install_diffuser.sh"
             )
             _generator = assets.ZImageTurboGenerator()

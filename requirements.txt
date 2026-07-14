@@ -16,12 +16,14 @@
 # RELATED FILES (not merged here on purpose):
 #   requirements-mlx.txt      — mlx_lm.server on Apple Silicon (optional elsewhere)
 #   requirements-diffuser.txt — sprites + Stable Audio (after install_diffuser.sh)
+#     macOS: also mflux + FLUX2-klein CLI when install_diffuser.sh runs on Darwin
 #
 # OUTSIDE PIP (handled by ./scripts/setup.sh):
 #   • Playwright Chromium — env -u PLAYWRIGHT_BROWSERS_PATH … install chromium
 #   • torch + diffusers git + requirements-diffuser.txt — install_diffuser.sh
-#   • Z-Image-Turbo weights — interactive path prompt; Enter downloads if missing
-#     (writes DIFFUSION_MODELS_DIR into .env for chat.py / coder.py)
+#   • Sprite weights — setup.sh prompts for local trees and writes
+#     DIFFUSION_MODELS_DIR into .env. macOS: prefers FLUX2-klein-9B-mlx-8bit
+#     (mflux CLI, fast). Fallback / Linux: Z-Image-Turbo (Enter downloads ~32 GB).
 #   • Ollama app + at least one pulled model  OR  mlx_lm.server (requirements-mlx.txt)
 #   • Display for chat.py visible Chromium (use coder.py --headless if none)
 

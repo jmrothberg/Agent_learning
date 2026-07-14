@@ -27,11 +27,13 @@
 #   5. `env -u PLAYWRIGHT_BROWSERS_PATH playwright install chromium` — browser
 #      cache goes to ~/Library/Caches/ms-playwright (Mac) or ~/.cache/ms-playwright.
 #   6. GPU stack — `./scripts/install_diffuser.sh` installs torch + diffusers git +
-#      transformers AND layers `requirements-diffuser.txt` (soundfile, torchsde)
-#      in one script — Z-Image sprites + Stable Audio Open pip deps together.
-#      Omit with `--no-gpu`. Then prompts for Z-Image-Turbo weights (or downloads
-#      from HuggingFace when you press Enter with no local copy) and writes
-#      DIFFUSION_MODELS_DIR into `.env` for chat.py / coder.py.
+#      transformers AND layers `requirements-diffuser.txt` (soundfile, torchsde,
+#      mflux on macOS) in one script — Z-Image / FLUX2-klein sprites + Stable
+#      Audio Open pip deps together.
+#      Omit with `--no-gpu`. Then prompts for local sprite weights (macOS:
+#      FLUX2-klein-9B-mlx-8bit preferred; Z-Image-Turbo fallback) or downloads
+#      Z-Image from HuggingFace when you press Enter with no local copy) and
+#      writes DIFFUSION_MODELS_DIR into `.env` for chat.py / coder.py.
 #   7. Video cutscenes (<videos> tag, Wan2.2-TI2V-5B) — on macOS arm64 creates
 #      the dedicated `.venv-video/` and pip-installs mlx-gen (weights ~17 GB
 #      lazy-download to the HF cache on first clip). On Ubuntu/Linux the
@@ -137,37 +139,65 @@ path.write_text("\n".join(out) + "\n")
 PY
 }
 
-# Print candidate DIFFUSION_MODELS_DIR roots that already contain Z-Image-Turbo.
-find_zimage_roots() {
-    local bases=()
+# Print candidate DIFFUSION_MODELS_DIR roots (shared search bases).
+_diffusion_search_bases() {
     if [ "$PLATFORM" = "linux" ] && [ -d "/data/Diffusion_Models" ]; then
-        bases+=("/data/Diffusion_Models")
+        printf '%s\n' "/data/Diffusion_Models"
     fi
     if [ "$PLATFORM" = "macos" ]; then
-        bases+=(
-            "$HOME/Diffusion_Models"
-            "$HOME/.Diffusion_Models"
-            "$HOME/Models_Diffusers"
+        printf '%s\n' \
+            "$HOME/Diffusion_Models" \
+            "$HOME/.Diffusion_Models" \
+            "$HOME/Models_Diffusers" \
             "$HOME/.Models_Diffusers"
-        )
     else
-        bases+=(
-            "$HOME/.Models_Diffusers"
-            "$HOME/Models_Diffusers"
-            "$HOME/.Diffusion_Models"
+        printf '%s\n' \
+            "$HOME/.Models_Diffusers" \
+            "$HOME/Models_Diffusers" \
+            "$HOME/.Diffusion_Models" \
             "$HOME/Diffusion_Models"
-        )
     fi
+}
+
+# Return 0 when a diffusion root contains usable sprite weights.
+diffusion_root_has_weights() {
+    local base="${1:-}"
+    base="${base/#\~/$HOME}"
+    base="${base%/}"
+    [ -n "$base" ] || return 1
+    if [ -f "$base/Z-Image-Turbo/model_index.json" ]; then
+        return 0
+    fi
+    if [ -d "$base/FLUX2-klein-9B-mlx-8bit" ]; then
+        return 0
+    fi
+    return 1
+}
+
+# Print candidate DIFFUSION_MODELS_DIR roots that already contain Z-Image-Turbo.
+find_zimage_roots() {
     local base
-    for base in "${bases[@]}"; do
+    while IFS= read -r base; do
+        [ -n "$base" ] || continue
         if [ -f "$base/Z-Image-Turbo/model_index.json" ]; then
             printf '%s\n' "$base"
         fi
-    done
+    done < <(_diffusion_search_bases)
+}
+
+# Print candidate DIFFUSION_MODELS_DIR roots that already contain FLUX2-klein.
+find_flux2_roots() {
+    local base
+    while IFS= read -r base; do
+        [ -n "$base" ] || continue
+        if [ -d "$base/FLUX2-klein-9B-mlx-8bit" ]; then
+            printf '%s\n' "$base"
+        fi
+    done < <(_diffusion_search_bases)
 }
 
 # Resolve a user-entered path to the parent dir for DIFFUSION_MODELS_DIR.
-# Accepts either .../Z-Image-Turbo or its parent (.../Diffusion_Models).
+# Accepts .../Z-Image-Turbo, .../FLUX2-klein-9B-mlx-8bit, or the parent dir.
 resolve_diffusion_models_dir() {
     local raw="${1:-}"
     raw="${raw/#\~/$HOME}"
@@ -183,6 +213,18 @@ resolve_diffusion_models_dir() {
         printf '%s\n' "$raw"
         return 0
     fi
+    if [ -d "$raw/FLUX2-klein-9B-mlx-8bit" ]; then
+        printf '%s\n' "$raw"
+        return 0
+    fi
+    case "$raw" in
+        */FLUX2-klein-9B-mlx-8bit)
+            if [ -d "$raw" ]; then
+                dirname "$raw"
+                return 0
+            fi
+            ;;
+    esac
     return 1
 }
 
@@ -207,35 +249,54 @@ configure_diffusion_weights() {
         return 0
     fi
 
-    local detected_root=""
-    detected_root="$(find_zimage_roots | head -1 || true)"
+    local zimage_root=""
+    local flux2_root=""
+    zimage_root="$(find_zimage_roots | head -1 || true)"
+    flux2_root="$(find_flux2_roots | head -1 || true)"
 
     # Respect an existing .env unless we are interactive and user picks anew.
     if [ -f "$ROOT/.env" ] && grep -q '^DIFFUSION_MODELS_DIR=' "$ROOT/.env" 2>/dev/null; then
         local existing
         existing="$(grep '^DIFFUSION_MODELS_DIR=' "$ROOT/.env" | tail -1 | cut -d= -f2-)"
-        if [ -n "$existing" ] && [ -f "${existing/#\~/$HOME}/Z-Image-Turbo/model_index.json" ]; then
+        if diffusion_root_has_weights "$existing"; then
             ok "DIFFUSION_MODELS_DIR already in .env → ${existing}"
             return 0
         fi
     fi
 
     if [ "$NONINTERACTIVE" -eq 1 ]; then
-        if [ -n "$detected_root" ]; then
-            write_env_var "DIFFUSION_MODELS_DIR" "$detected_root"
-            ok "DIFFUSION_MODELS_DIR=$detected_root (auto-detected → .env)"
+        local auto_root=""
+        # macOS: prefer FLUX2-klein when present (assets.py auto-selects mflux).
+        if [ "$PLATFORM" = "macos" ] && [ -n "$flux2_root" ]; then
+            auto_root="$flux2_root"
+        elif [ -n "$zimage_root" ]; then
+            auto_root="$zimage_root"
+        elif [ -n "$flux2_root" ]; then
+            auto_root="$flux2_root"
+        fi
+        if [ -n "$auto_root" ]; then
+            write_env_var "DIFFUSION_MODELS_DIR" "$auto_root"
+            ok "DIFFUSION_MODELS_DIR=$auto_root (auto-detected → .env)"
         else
-            warn "no local Z-Image-Turbo found (re-run interactively to download)"
+            warn "no local FLUX2-klein or Z-Image-Turbo found (re-run interactively to download)"
         fi
         return 0
     fi
 
     printf '\n'
-    echo "   Z-Image-Turbo sprite weights"
+    echo "   Sprite weights (DIFFUSION_MODELS_DIR parent directory)"
     echo "   Stable Audio Open uses the same root (or HuggingFace on first <sounds>)."
-    if [ -n "$detected_root" ]; then
-        echo "   Local copy found: $detected_root/Z-Image-Turbo"
-        printf '   Path to Z-Image-Turbo directory [Enter = use local copy]: '
+    if [ "$PLATFORM" = "macos" ]; then
+        echo "   macOS: FLUX2-klein-9B-mlx-8bit is preferred when present (fast mflux CLI)."
+    fi
+    if [ -n "$flux2_root" ]; then
+        echo "   Local FLUX2-klein: $flux2_root/FLUX2-klein-9B-mlx-8bit"
+    fi
+    if [ -n "$zimage_root" ]; then
+        echo "   Local Z-Image-Turbo: $zimage_root/Z-Image-Turbo"
+    fi
+    if [ -n "$flux2_root" ] || [ -n "$zimage_root" ]; then
+        printf '   Path to weights directory [Enter = use local copy above]: '
     else
         echo "   No local copy found on this machine."
         printf '   Path to Z-Image-Turbo directory [Enter = download from HuggingFace]: '
@@ -246,8 +307,12 @@ configure_diffusion_weights() {
 
     local models_dir=""
     if [ -z "$zpath" ]; then
-        if [ -n "$detected_root" ]; then
-            models_dir="$detected_root"
+        if [ "$PLATFORM" = "macos" ] && [ -n "$flux2_root" ]; then
+            models_dir="$flux2_root"
+        elif [ -n "$zimage_root" ]; then
+            models_dir="$zimage_root"
+        elif [ -n "$flux2_root" ]; then
+            models_dir="$flux2_root"
         else
             local dl_root="$HOME/Models_Diffusers"
             if [ "$PLATFORM" = "macos" ]; then
@@ -258,7 +323,7 @@ configure_diffusion_weights() {
         fi
     else
         if ! models_dir="$(resolve_diffusion_models_dir "$zpath")"; then
-            warn "not a Z-Image-Turbo tree (need model_index.json) — skipping .env"
+            warn "not a Z-Image-Turbo or FLUX2-klein tree — skipping .env"
             warn "chat.py will download from HuggingFace on first <assets> instead."
             return 0
         fi
@@ -518,10 +583,12 @@ EOF
 
 if [ "$WITH_GPU" = "on" ]; then
     cat <<'EOF'
-   SPRITE WEIGHTS — Z-Image-Turbo:
+   SPRITE WEIGHTS — macOS prefers FLUX2-klein-9B-mlx-8bit (mflux CLI):
      setup.sh writes DIFFUSION_MODELS_DIR to .env when a local tree exists
      (Linux: /data/Diffusion_Models, Mac: ~/Diffusion_Models, etc.).
-     Re-run ./scripts/setup.sh interactively to pick a path or download (~32 GB).
+     macOS: put FLUX2-klein-9B-mlx-8bit under that root; mflux is installed
+     by install_diffuser.sh. Fallback / Linux: Z-Image-Turbo (re-run setup
+     interactively to pick a path or download ~32 GB).
        .venv/bin/python scripts/_smoke_doom.py
 
    GENERATED SOUNDS — Stable Audio Open 1.0 (~9 GB cache typical):

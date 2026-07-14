@@ -1,8 +1,10 @@
 # GPU extras layered AFTER scripts/install_diffuser.sh installs torch + diffusers.
 # That script runs `pip install -r requirements-diffuser.txt` as its final step
-# (soundfile, torchsde for Stable Audio; pins transformers/accelerate/safetensors).
+# (soundfile, torchsde for Stable Audio; mflux on macOS for FLUX2-klein sprites).
 #
-# Optional GPU stack for Z-Image-Turbo (assets.py) + Stable Audio Open (sounds.py).
+# Optional GPU stack for sprite generation + Stable Audio Open (sounds.py).
+#   macOS (Apple Silicon): FLUX2-klein-9B-mlx-8bit via mflux CLI (preferred).
+#   Linux / fallback: Z-Image-Turbo (diffusers) + SD-Turbo img2img chain.
 #
 # IMPORTANT: this file does NOT pin torch / diffusers because the
 # correct flavor depends on your CUDA version. The install script
@@ -15,12 +17,10 @@
 #   .venv/bin/pip install -r requirements-diffuser.txt
 #
 # After install, the FIRST <assets> request in a session will:
-#   1. Re-use Z-Image-Turbo weights under DIFFUSION_MODELS_DIR (setup.sh /
-#      .env), or auto-discovered paths (Linux: /data/Diffusion_Models, Mac:
-#      ~/Diffusion_Models, etc.), else download (~32 GB) from HuggingFace into
-#      ~/.cache/huggingface/hub/.
-#   2. Load the pipeline into GPU VRAM (~30-60s the first time).
-#   3. Generate each requested sprite at 768x768 (~2-4s per image).
+#   macOS: use FLUX2-klein (mflux) when FLUX2-klein-9B-mlx-8bit is under
+#     DIFFUSION_MODELS_DIR (setup.sh / .env) — ~10-15s first sprite, then faster.
+#   Otherwise: Z-Image-Turbo under DIFFUSION_MODELS_DIR or HF cache (~32 GB
+#     download if missing), load into GPU VRAM (~30-60s first time), ~2-4s/sprite.
 #
 # All in-process. No HTTP server, no subprocess.
 
@@ -40,3 +40,9 @@ soundfile>=0.12.0
 torchsde>=0.2.5
 # torch and diffusers — install via scripts/install_diffuser.sh
 # (cu130 nightly + diffusers git HEAD).
+#
+# mflux — FLUX2-klein sprite CLI on macOS (assets.py Flux2KleinMfluxGenerator).
+# install_diffuser.sh pip-installs this on Darwin only; Linux/CUDA hosts keep
+# Z-Image-Turbo + SD-Turbo img2img. Put FLUX2-klein-9B-mlx-8bit under
+# DIFFUSION_MODELS_DIR (setup.sh writes .env when it finds local weights).
+mflux>=0.18.0; sys_platform == 'darwin'

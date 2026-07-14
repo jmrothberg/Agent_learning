@@ -412,22 +412,302 @@ def _resolve_zimage_path() -> str:
       3. The HuggingFace hub fallback ID (Tongyi-MAI/Z-Image-Turbo).
     """
     import os
-    env_dir = (os.environ.get("DIFFUSION_MODELS_DIR") or "").strip()
+    # Allow multiple base dirs (portable across machines):
+    #   DIFFUSION_MODELS_DIR="/path/one:/path/two"
+    raw_env = (os.environ.get("DIFFUSION_MODELS_DIR") or "").strip()
+    env_bases = [p.strip() for p in raw_env.split(":") if p.strip()]
     candidates: list[str] = []
-    if env_dir:
+    for env_dir in env_bases:
         candidates.extend([
             os.path.join(env_dir, "Z-Image-Turbo"),
             os.path.join(env_dir, "Tongyi-MAI_Z-Image-Turbo"),
+            # Common "downloaded diffusers" layout:
+            #   Diffusion_Models/Tongyi-MAI/Z-Image-Turbo
+            os.path.join(env_dir, "Tongyi-MAI", "Z-Image-Turbo"),
         ])
     for base in _MODEL_SEARCH_DIRS:
         candidates.extend([
             os.path.join(base, "Z-Image-Turbo"),
             os.path.join(base, "Tongyi-MAI_Z-Image-Turbo"),
+            # Common "downloaded diffusers" layout:
+            #   Diffusion_Models/Tongyi-MAI/Z-Image-Turbo
+            os.path.join(base, "Tongyi-MAI", "Z-Image-Turbo"),
         ])
     for c in candidates:
         if os.path.isdir(c):
             return c
+    # If the user already has the weights in the HuggingFace hub cache,
+    # prefer a local snapshot directory (no network) over the hub ID.
+    #
+    # IMPORTANT: snapshots can be incomplete (interrupted download / partial
+    # cleanup). Only accept a snapshot that is actually COMPLETE — otherwise
+    # diffusers raises FileNotFoundError mid-load and every asset fails.
+    # We validate the sharded text_encoder against its index (all shards must
+    # exist), because a snapshot can contain shard 3-of-3 but be missing 1,2.
+    try:
+        home = os.path.expanduser("~")
+        hub_root = os.path.join(home, ".cache", "huggingface", "hub")
+        model_root = os.path.join(hub_root, "models--Tongyi-MAI--Z-Image-Turbo", "snapshots")
+        if os.path.isdir(model_root):
+            snaps = [
+                os.path.join(model_root, d)
+                for d in os.listdir(model_root)
+                if os.path.isdir(os.path.join(model_root, d))
+            ]
+            snaps.sort(reverse=True)
+            for snap in snaps:
+                if _zimage_snapshot_is_complete(snap):
+                    return snap
+    except Exception:
+        pass
     return _HF_FALLBACK_MODEL_ID
+
+
+def _zimage_snapshot_is_complete(snapshot_dir: str) -> bool:
+    """True when a HF-cache Z-Image snapshot has all files needed to load.
+
+    Guards against partial downloads. We check the text_encoder because that
+    is where the observed failure occurred (a snapshot with only
+    `model-00003-of-00003.safetensors` present, shards 1-2 missing). When a
+    sharded index is present we require EVERY referenced shard to exist on
+    disk (following symlinks); otherwise we require at least one non-sharded
+    `*.safetensors` weight file.
+    """
+    import os
+    te = os.path.join(snapshot_dir, "text_encoder")
+    if not os.path.isdir(te):
+        return False
+    index_path = os.path.join(te, "model.safetensors.index.json")
+    if os.path.isfile(index_path):
+        try:
+            import json
+            with open(index_path, "r", encoding="utf-8") as fh:
+                idx = json.load(fh)
+            shard_files = set((idx.get("weight_map") or {}).values())
+            if not shard_files:
+                return False
+            for shard in shard_files:
+                # os.path.exists follows symlinks, so a broken HF blob link => False.
+                if not os.path.exists(os.path.join(te, shard)):
+                    return False
+            return True
+        except Exception:
+            return False
+    # No index: accept only if a real (non-broken) safetensors weight exists.
+    try:
+        for fn in os.listdir(te):
+            if fn.endswith(".safetensors") and os.path.exists(os.path.join(te, fn)):
+                return True
+    except OSError:
+        pass
+    return False
+
+
+def _resolve_flux2_path() -> str | None:
+    """Find a locally-downloaded FLUX2 model directory for diffusers.
+
+    Intended for users who store diffusion weights outside the HF hub
+    cache (or in custom trees). Unlike Z-Image-Turbo, we do NOT return
+    a hub ID fallback here — selecting FLUX2 is an explicit opt-in and
+    should never start a surprise 10s-of-GB download.
+    """
+    raw_env = (_os.environ.get("DIFFUSION_MODELS_DIR") or "").strip()
+    env_bases = [p.strip() for p in raw_env.split(":") if p.strip()]
+    candidates: list[str] = []
+    for env_dir in env_bases:
+        candidates.extend([
+            _os.path.join(env_dir, "FLUX2-klein-9B-mlx-8bit"),
+        ])
+    for base in _MODEL_SEARCH_DIRS:
+        candidates.extend([
+            _os.path.join(base, "FLUX2-klein-9B-mlx-8bit"),
+        ])
+    for c in candidates:
+        if _os.path.isdir(c):
+            return c
+    return None
+
+
+def _resolve_mflux_generate_flux2() -> str | None:
+    """Return the mflux FLUX2 generator binary path, or None.
+
+    Cursor/non-interactive shells may not see the same PATH as the user's
+    login shell. Allow an explicit override path via env var.
+    """
+    override = (_os.environ.get("MFLUX_GENERATE_FLUX2") or "").strip()
+    if override:
+        try:
+            if _os.path.isfile(override):
+                return override
+        except Exception:
+            return None
+        return None
+    # Look next to the running interpreter FIRST: when mflux is pip-installed
+    # into the same venv as chat.py, the CLI lands in that venv's bin/ dir,
+    # which is the most reliable location regardless of the ambient PATH.
+    try:
+        venv_bin = _os.path.dirname(sys.executable or "")
+        if venv_bin:
+            cand = _os.path.join(venv_bin, "mflux-generate-flux2")
+            if _os.path.isfile(cand):
+                return cand
+    except Exception:
+        pass
+    try:
+        import shutil
+        hit = shutil.which("mflux-generate-flux2")
+        if hit:
+            return hit
+    except Exception:
+        pass
+    # Common `uv tool install` location (outside PATH for non-login shells):
+    #   ~/.local/share/uv/tools/<tool>/bin/mflux-generate-flux2
+    try:
+        home = _os.path.expanduser("~")
+        uv_tools = _os.path.join(home, ".local", "share", "uv", "tools")
+        if _os.path.isdir(uv_tools):
+            # Keep this shallow and cheap: only scan 2 levels.
+            for tool_dir in _os.listdir(uv_tools):
+                cand = _os.path.join(uv_tools, tool_dir, "bin", "mflux-generate-flux2")
+                if _os.path.isfile(cand):
+                    return cand
+    except Exception:
+        pass
+    return None
+
+
+class Flux2KleinMfluxGenerator:
+    """FLUX2 klein sprite generator via mflux CLI (local, no diffusers).
+
+    The user's `FLUX2-klein-9B-mlx-8bit` weights are in mflux format and do not
+    include a diffusers `model_index.json`, so we generate by invoking the CLI.
+    """
+
+    def __init__(self, *, model_path: str | None = None) -> None:
+        self.model_path = model_path or (_resolve_flux2_path() or "")
+        self._mflux_bin = _resolve_mflux_generate_flux2() or ""
+        self._last_error: str | None = None
+
+    def _ensure_ready(self) -> bool:
+        if not self.model_path:
+            self._last_error = (
+                "FLUX2 klein selected but no local model directory was found. "
+                "Put `FLUX2-klein-9B-mlx-8bit/` under `~/Diffusion_Models` or "
+                "set DIFFUSION_MODELS_DIR to include the parent directory."
+            )
+            return False
+        if not self._mflux_bin:
+            self._last_error = (
+                "FLUX2 klein selected but `mflux-generate-flux2` was not found. "
+                "Put it on PATH, or set MFLUX_GENERATE_FLUX2=/full/path/to/mflux-generate-flux2."
+            )
+            return False
+        return True
+
+    def _fresh_out_path(self) -> str:
+        """Return a unique .png path that does NOT yet exist.
+
+        mflux refuses to overwrite an existing --output file and instead
+        writes a de-duplicated `<name>_1.png`, which would leave us returning
+        an empty placeholder. So we hand it a brand-new path in a temp dir.
+        """
+        import tempfile
+        import uuid
+        d = tempfile.mkdtemp(prefix="flux2klein_")
+        return _os.path.join(d, f"{uuid.uuid4().hex}.png")
+
+    def _steps(self) -> str:
+        """FLUX2 klein is distilled for very few steps. Default 4 (verified
+        ~8.5s incl. load on this Mac); override with MFLUX_STEPS."""
+        raw = (_os.environ.get("MFLUX_STEPS") or "").strip()
+        if raw.isdigit() and int(raw) > 0:
+            return raw
+        return "4"
+
+    def _base_cmd(self, prompt: str, out_path: str) -> list[str]:
+        """Shared CLI args for txt2img and img2img.
+
+        NOTE: klein (distilled) rejects `--guidance` (mflux: "only supported
+        for FLUX.2 base models"), so we do NOT pass it. `--base-model` names
+        the klein family so a local pre-quantized mflux path loads correctly.
+        """
+        return [
+            self._mflux_bin,
+            "--model", str(self.model_path),
+            "--base-model", "flux2-klein-9b",
+            "--prompt", str(prompt),
+            "--width", "768",
+            "--height", "768",
+            "--steps", self._steps(),
+            "--seed", "42",
+            "--output", out_path,
+        ]
+
+    def generate(self, prompt: str) -> str | None:
+        """txt2img via `mflux-generate-flux2`."""
+        self._last_error = None
+        if not self._ensure_ready():
+            return None
+        try:
+            import subprocess
+
+            out_path = self._fresh_out_path()
+            cmd = self._base_cmd(prompt, out_path)
+            proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if proc.returncode != 0:
+                self._last_error = (
+                    f"mflux txt2img failed (exit {proc.returncode}): "
+                    f"{(proc.stderr or proc.stdout or '').strip()[:400]}"
+                )
+                return None
+            return out_path
+        except Exception as e:
+            import traceback as _tb
+            self._last_error = (
+                f"mflux txt2img invoke failed: {type(e).__name__}: {e!s} | "
+                f"trace: {_tb.format_exc().splitlines()[-3:]}"
+            )
+            return None
+
+    def generate_img2img(
+        self,
+        prompt: str,
+        init_image_path: str,
+        *,
+        strength: float = 0.5,
+    ) -> str | None:
+        """Init-image guidance via mflux (img2img).
+
+        mflux 0.18 uses `--image-path` + `--image-strength` (higher strength =
+        result resembles the init image more closely).
+        """
+        self._last_error = None
+        if not self._ensure_ready():
+            return None
+        try:
+            import subprocess
+
+            out_path = self._fresh_out_path()
+            strength = max(0.0, min(1.0, float(strength)))
+            cmd = self._base_cmd(prompt, out_path) + [
+                "--image-path", str(init_image_path),
+                "--image-strength", str(strength),
+            ]
+            proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if proc.returncode != 0:
+                self._last_error = (
+                    f"mflux img2img failed (exit {proc.returncode}): "
+                    f"{(proc.stderr or proc.stdout or '').strip()[:400]}"
+                )
+                return None
+            return out_path
+        except Exception as e:
+            import traceback as _tb
+            self._last_error = (
+                f"mflux img2img invoke failed: {type(e).__name__}: {e!s} | "
+                f"trace: {_tb.format_exc().splitlines()[-3:]}"
+            )
+            return None
 
 
 class ZImageTurboGenerator:
@@ -448,7 +728,17 @@ class ZImageTurboGenerator:
     """
 
     def __init__(self, model_path: str | None = None) -> None:
-        self.model_path = model_path or _resolve_zimage_path()
+        # Default stays Z-Image-Turbo. Opt-in override via env var:
+        #   DIFFUSER_TXT2IMG_BACKBONE=flux2
+        # This only affects the txt2img pipeline; img2img remains SD-Turbo.
+        self._txt2img_backbone = (
+            (_os.environ.get("DIFFUSER_TXT2IMG_BACKBONE") or "").strip().lower()
+        )
+        self._use_mflux = self._txt2img_backbone in ("flux2", "flux")
+        if self._use_mflux:
+            self.model_path = model_path or (_resolve_flux2_path() or "")
+        else:
+            self.model_path = model_path or _resolve_zimage_path()
         self._pipeline: Any = None  # lazy-init in .generate()
         # Img2img pipeline built lazily from _pipeline.components (shared VRAM)
         # in .generate_img2img(); used for from_image animation frames.
@@ -768,15 +1058,38 @@ def _resolve_sd_turbo_path() -> str:
         candidates.extend([
             _os.path.join(env_dir, "sd-turbo"),
             _os.path.join(env_dir, "stabilityai_sd-turbo"),
+            # Common "downloaded diffusers" layout:
+            #   Diffusion_Models/stabilityai/sd-turbo
+            _os.path.join(env_dir, "stabilityai", "sd-turbo"),
         ])
     for base in _MODEL_SEARCH_DIRS:
         candidates.extend([
             _os.path.join(base, "sd-turbo"),
             _os.path.join(base, "stabilityai_sd-turbo"),
+            # Common "downloaded diffusers" layout:
+            #   Diffusion_Models/stabilityai/sd-turbo
+            _os.path.join(base, "stabilityai", "sd-turbo"),
         ])
     for c in candidates:
         if _os.path.isdir(c):
             return c
+    # Same local HF-cache preference as Z-Image-Turbo (no network):
+    #   ~/.cache/huggingface/hub/models--stabilityai--sd-turbo/snapshots/<sha>/
+    try:
+        home = _os.path.expanduser("~")
+        hub_root = _os.path.join(home, ".cache", "huggingface", "hub")
+        model_root = _os.path.join(hub_root, "models--stabilityai--sd-turbo", "snapshots")
+        if _os.path.isdir(model_root):
+            snaps = [
+                _os.path.join(model_root, d)
+                for d in _os.listdir(model_root)
+                if _os.path.isdir(_os.path.join(model_root, d))
+            ]
+            snaps.sort(reverse=True)
+            if snaps:
+                return snaps[0]
+    except Exception:
+        pass
     return _HF_IMG2IMG_FALLBACK_MODEL_ID
 
 
@@ -957,6 +1270,20 @@ class Img2ImgGenerator:
 _PRELOADED: Any = None
 
 
+def _preload_stable_audio() -> None:
+    """Load Stable Audio Open before Playwright opens IPC pipes.
+
+    Same fds_to_keep fork trap as Z-Image-Turbo. When macOS uses FLUX2
+    klein (mflux CLI) we skip the diffusers image preload, but audio
+    still uses diffusers from_pretrained and MUST preload here.
+    """
+    try:
+        import sounds as _sounds
+        _sounds.preload()
+    except Exception:
+        pass
+
+
 def diffuser_cuda_reuse_index() -> int | None:
     """Physical CUDA index of a loaded image pipeline (for co-locating audio)."""
     gen = _PRELOADED
@@ -983,9 +1310,24 @@ def preload() -> Any:
     """
     global _PRELOADED
     if _PRELOADED is not None:
+        _preload_stable_audio()
         return _PRELOADED
+    # If FLUX2 klein (mflux CLI) is active, do NOT preload the diffusers
+    # Z-Image-Turbo pipeline. FLUX2 generation is handled by an external
+    # CLI and doesn't need the Playwright-safe preload — but Stable Audio
+    # still does, so call _preload_stable_audio() on every exit path.
+    backbone = (_os.environ.get("DIFFUSER_TXT2IMG_BACKBONE") or "").strip().lower()
+    if backbone in ("flux2", "flux"):
+        _preload_stable_audio()
+        return None
+    if sys.platform == "darwin":
+        # macOS default: if FLUX2 is available (model + binary), skip preload.
+        if _resolve_flux2_path() and _resolve_mflux_generate_flux2():
+            _preload_stable_audio()
+            return None
     gen = _construct_generator()
     if gen is None:
+        _preload_stable_audio()
         return None
     # Trigger the heavy load NOW so the subprocess fork happens
     # before Playwright/etc opens any FDs. _lazy_init returns False
@@ -994,16 +1336,29 @@ def preload() -> Any:
     # gracefully instead of retrying the broken fork.
     gen._lazy_init()
     _PRELOADED = gen
+    _preload_stable_audio()
     return gen
 
 
 def _construct_generator() -> Any:
     """Internal: just check imports and construct a wrapper. Pulled
     out of try_load_image_generator so preload() can share it."""
-    import importlib.util as _iu
-    if _iu.find_spec("torch") is None or _iu.find_spec("diffusers") is None:
-        return None
     try:
+        # Selection order:
+        # 1) Explicit env override: DIFFUSER_TXT2IMG_BACKBONE=flux2
+        # 2) macOS default: FLUX2 klein when model+binary are present
+        # 3) fallback: Z-Image-Turbo (diffusers)
+        backbone = (_os.environ.get("DIFFUSER_TXT2IMG_BACKBONE") or "").strip().lower()
+        want_flux2 = backbone in ("flux2", "flux")
+        if (want_flux2 or sys.platform == "darwin"):
+            m = _resolve_flux2_path()
+            b = _resolve_mflux_generate_flux2()
+            if m and b and (want_flux2 or sys.platform == "darwin"):
+                return Flux2KleinMfluxGenerator(model_path=m)
+        # diffusers fallback
+        import importlib.util as _iu
+        if _iu.find_spec("torch") is None or _iu.find_spec("diffusers") is None:
+            return None
         return ZImageTurboGenerator()
     except Exception:
         return None
@@ -1051,12 +1406,12 @@ def try_load_image_generator(
     model_id: str = "Z-Image-Turbo",  # kept for API stability; unused
     diffuser_dir: str | None = None,  # kept for API stability; unused
 ) -> Any:
-    """Return the Z-Image-Turbo wrapper. If `preload()` ran earlier,
-    reuses that already-loaded pipeline (this is the path chat.py
-    takes). Otherwise constructs a fresh wrapper that lazy-loads on
-    first .generate() — fine for the smoke test (clean process, no
-    competing fds) but will fail from inside chat.py because Playwright
-    has already opened its IPC pipes.
+    """Return the active sprite generator (FLUX2 klein on macOS when available,
+    else Z-Image-Turbo via diffusers).
+
+    If `preload()` ran earlier, reuses that already-loaded pipeline (this is the
+    path chat.py takes for diffusers). Otherwise constructs a fresh wrapper that
+    lazy-loads on first .generate().
 
     Returns None when torch+diffusers aren't installed.
     """

@@ -14,12 +14,19 @@ every session beats a static prompt.** Every reply is parsed, every patch applie
 match cascade, every iteration loaded in real Chromium, every sprite alpha-keyed, every regression
 flagged, every session feeds a hand-curated playbook the agent reads back next launch.
 
-Asset pipeline (self-contained, no runtime network once weights cache): **Z-Image-Turbo** for
-sprites (txt2img, 768×768 → downscaled, chroma-keyed to RGBA), **Stable Audio Open** for sounds
-(OGG, 0.2–12 s), and **Wan2.2-TI2V-5B** for video cutscenes (MP4, 2–8 s — see
-[Video cutscenes](#video-cutscenes--wan22-ti2v-5b-local)). Pose/animation frames are **txt2img with
-one shared character description + fixed seed** for consistency — *not* img2img (see
-[Animation](#animation--consistency-is-the-hard-constraint)).
+Asset pipeline (self-contained, no runtime network once weights cache):
+
+- **Sprites (macOS Apple Silicon):** **FLUX2-klein-9B** via **mflux** CLI (`mflux-generate-flux2`) —
+  fast txt2img + init-image guidance; auto-selected when `FLUX2-klein-9B-mlx-8bit/` lives under
+  `~/Diffusion_Models` (or `DIFFUSION_MODELS_DIR`). Installed by `./scripts/setup.sh` on Darwin.
+- **Sprites (Linux / fallback):** **Z-Image-Turbo** (diffusers, txt2img 768×768 → downscaled,
+  chroma-keyed to RGBA). SD-Turbo img2img for animation chaining only.
+- **Sounds:** **Stable Audio Open** (OGG, 0.2–12 s) — preloaded at `chat.py` / `coder.py` launch
+  *before* Playwright opens (required for diffusers fork safety).
+- **Video:** **Wan2.2-TI2V-5B** cutscenes (MP4, 2–8 s — see [Video cutscenes](#video-cutscenes--wan22-ti2v-5b-local)).
+
+Pose/animation frames are **txt2img with one shared character description + fixed seed** for
+consistency — *not* img2img pose morphing (see [Animation](#animation--consistency-is-the-hard-constraint)).
 
 ---
 
@@ -64,7 +71,7 @@ prompts + harness + memory beats swapping models.** This repo is not a general r
 | **Plan / progress** | plan.md, todo lists | — | Phase A `<criteria>`/`<probes>` + harness-seeded **task ledger** (goal clauses / outline order / optional model `<todos>`) |
 | **Context** | rules, @files, very large ctx | repo + skills | opening book + playbook + lean prompt; **state-anchor compaction** near ~70% of `num_ctx` (default 100K) |
 | **Edits** | search/replace tools | unified diff | `<patch>` SEARCH/REPLACE — 4-tier match cascade; markdown `SEARCH:`/`REPLACE:` pairs repaired in `patches.repair_reply` |
-| **Assets** | none in-loop | none | **in-process** Z-Image-Turbo + Stable Audio; Wan2.2 cutscenes via subprocess |
+| **Assets** | none in-loop | none | **FLUX2-klein (mflux) on macOS** or Z-Image-Turbo + Stable Audio; Wan2.2 cutscenes via subprocess |
 | **Memory** | repo files | conversation | hand-curated **`memory/`** opening book (JSONL — one line, no restart) |
 | **Local LLM** | cloud-first | local or cloud | **MLX in-process** (macOS default) or Ollama; cloud only with explicit API key + `/backend` |
 | **Regression** | CI you author | ad hoc | **pytest (~2158 tests)** + stub eval banks + opt-in `eval/eval_seed_edits.py` (materialization with `browser=None`) |
@@ -85,12 +92,16 @@ router + golden eval banks (`eval/golden_feedback_flows.jsonl`) exist to guard t
 ## Quick start
 
 ```bash
-./scripts/setup.sh                 # one-time: Python deps, Playwright Chromium, GPU stack
+./scripts/setup.sh                 # one-time: Python deps, Playwright Chromium, GPU stack + mflux (macOS)
 .venv/bin/python scripts/_smoke_doom.py   # verify the asset pipeline end-to-end (~2 min cold)
 
 .venv/bin/python chat.py           # TUI (recommended) — visible Chromium opens beside terminal
 .venv/bin/python coder.py "build me a snake game with a wraparound board"   # one-shot CLI
 ```
+
+**macOS sprite weights:** put `FLUX2-klein-9B-mlx-8bit/` under `~/Diffusion_Models` (setup writes
+`DIFFUSION_MODELS_DIR` to `.env`). Linux/CUDA: use `Z-Image-Turbo/` in the same tree or let setup
+download (~32 GB). `mflux` ships in `.venv` on Darwin via `requirements-diffuser.txt`.
 
 **Backend selection** (macOS defaults to MLX; else `auto`):
 ```bash
@@ -138,7 +149,7 @@ See **`DEV.md`** for env vars (`LLM_BACKEND`, `MLX_MODEL`, `CODING_BOX_NUM_CTX`,
 
 ## Overnight batches (10 games)
 
-**One sentence for another LLM:** run `bash eval/tune_run11.sh` in **Terminal.app**, start the Cursor watcher with `.venv/bin/python eval/tune_overnight_monitor.py --out-dir games/tune_serial10/run_11 --jobs-total 10 --interval 30 --sync-loop`, and edit `eval/tune_run11_goals.txt` to choose which games to test.
+**One sentence for another LLM:** run `bash eval/tune_run12.sh` in **Terminal.app**, start the Cursor watcher with `.venv/bin/python eval/tune_overnight_monitor.py --out-dir games/tune_serial10/run_12 --jobs-total 4 --interval 30 --sync-loop`, and edit `eval/tune_run12_goals.txt` (or copy `eval/tune_run11.sh`) to choose which games to test.
 
 Two processes run in parallel — **both required**:
 
@@ -218,7 +229,7 @@ Files that carry the weight:
 |---|---|
 | `tools.py` | **The verifier.** `LiveBrowser.load_and_test` (Chromium), `_input_smoke_test` (presses keys, captures per-action frames, runs the gates), micro-probes. Highest-leverage file. |
 | `agent.py` | Orchestrator (`GameAgent.run`); phase methods + mixin map → **`AGENTS.md` §1b** |
-| `assets.py` / `sounds.py` | In-process Z-Image-Turbo / Stable Audio (lazy GPU load). `render_asset_paths_block` injects the `sprite()` loader. |
+| `assets.py` / `sounds.py` | Sprites: **FLUX2-klein (mflux CLI)** on macOS when local weights + binary exist, else Z-Image-Turbo (diffusers). Sounds: Stable Audio Open (always preloaded before browser). `render_asset_paths_block` injects the `sprite()` loader. |
 | `videos.py` | `<videos>` cutscene clips via Wan2.2-TI2V-5B in a **subprocess** (`scripts/generate_video.py` — mlx-gen on Mac, diffusers on Linux). `render_video_paths_block` injects the `<video>`-overlay loader. |
 | `backend.py` | MLX (in-process `mlx_lm`/`mlx_vlm`) + Ollama backends; sampler; VLM image path. |
 | `modality.py` | Genre-free rendering-shape detectors (3D, wireframe, FPS nav modality); shared by `prompts_v1.py` and `memory.py`. |
@@ -372,8 +383,8 @@ pins to GPU 0 so the LLM slots stay free (`gpu_status.pick_diffuser_cuda_index`)
 
 ## Standalone asset tools
 
-Two small terminal utilities outside the agent loop — same Z-Image-Turbo pipeline and asset
-cache, no LLM required.
+Two small terminal utilities outside the agent loop — same sprite pipeline as the agent
+(FLUX2-klein on macOS, Z-Image-Turbo elsewhere) and asset cache, no LLM required.
 
 **Draw sprites interactively** — walks you through style, single vs animation mode, and each
 prompt; writes PNGs to `games/_draw/<project>_<timestamp>_assets/` (chroma-keyed RGBA, same as
@@ -392,10 +403,10 @@ path). Audio folders play each clip in order; image folders open in Preview.
 ```
 
 **Asset Studio (browser UI)** — drag a PNG, describe a change (or start from text only), generate
-with the same Z-Image-Turbo pipeline, and save into any `*_assets/` folder with the filename you
-pick. Modes: new sprite/background (txt2img), modify existing (img2img), or save/rename only.
+with the same sprite backend as the agent, and save into any `*_assets/` folder with the filename you
+pick. Modes: new sprite/background (txt2img), modify existing (img2img / init-image on macOS), or save/rename only.
 
-**Double-click** `scripts/Asset Studio.command` in Finder (starts Z-Image + opens the browser —
+**Double-click** `scripts/Asset Studio.command` in Finder (starts the sprite stack + opens the browser —
 you never type a python command). While `chat.py` is running, the same UI is already at
 http://127.0.0.1:8765/ — bookmark it.
 
@@ -504,6 +515,14 @@ Asteroids regression; cosmetic sprite warnings are advisory; don't commit `games
 
 ## Troubleshooting
 
+- **All sounds fail with `bad value(s) in fds_to_keep`:** Stable Audio tried to load *after*
+  Playwright opened. Restart `chat.py` / `coder.py` — `assets.preload()` now always preloads audio
+  at launch (even when macOS uses FLUX2 klein for sprites). Do not set `SKIP_DIFFUSER_PRELOAD=1`
+  if you want `<sounds>`.
+- **Sprites download Z-Image-Turbo on macOS despite local FLUX2:** install mflux in the venv
+  (`./scripts/setup.sh` or `.venv/bin/pip install -r requirements-diffuser.txt`) and ensure
+  `FLUX2-klein-9B-mlx-8bit/` is under `DIFFUSION_MODELS_DIR`. Incomplete HF Z-Image snapshots
+  are skipped automatically.
 - **Chromium won't launch:** `env -u PLAYWRIGHT_BROWSERS_PATH .venv/bin/python -m playwright install chromium`.
 - **MLX cold-load is slow (~30–60 s first request):** the 27B mxfp8 loads into VRAM in-process; preload with `ollama run --ctx-size N <model>` for the Ollama path.
 - **`Model type minimax_m3 not supported` after an mlx-lm upgrade:** re-copy `minimax_m3.py` from your MiniMax-M3-MLX model dir into `.venv/lib/python3.12/site-packages/mlx_lm/models/` (see **MLX upgrades — MiniMax-M3** above).
@@ -516,7 +535,9 @@ Asteroids regression; cosmetic sprite warnings are advisory; don't commit `games
 
 ## Dependencies
 Python 3.12, `mlx-lm` / `mlx-vlm` (Apple Silicon) or `ollama`, Playwright Chromium, `diffusers` +
-`torch` (Z-Image-Turbo, Stable Audio Open). Install via `./scripts/setup.sh`. See `requirements*.txt`.
+`torch` (Z-Image-Turbo + Stable Audio Open on Linux/CUDA), **`mflux`** (macOS FLUX2-klein sprites).
+Install via `./scripts/setup.sh`. See `requirements*.txt` — `requirements-diffuser.txt` layers
+soundfile/torchsde and `mflux>=0.18.0` on Darwin only.
 
 ## License
 See repository.

@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # Install the full diffusion GPU stack into Agent_learning/.venv:
-#   • Z-Image-Turbo sprites (<assets>)  — torch + diffusers git + transformers…
+#   • Sprite generation (<assets>) — macOS: FLUX2-klein via mflux; else
+#     Z-Image-Turbo (torch + diffusers git + transformers…)
 #   • Stable Audio Open (<sounds>)      — layers requirements-diffuser.txt
-#     (soundfile, torchsde, pinned transformers/accelerate/safetensors)
+#     (soundfile, torchsde, mflux on Darwin, pinned transformers/accelerate)
 #
 # Cross-platform: Linux (CUDA) vs macOS (MPS) vs other (CPU — slow).
 # `./scripts/setup.sh` calls this once; you can also run this script alone
 # after creating `.venv`.
 #
-# Model weights: run `./scripts/setup.sh` — prompts for Z-Image-Turbo path
-# (Enter = use local copy or download ~32 GB). Writes DIFFUSION_MODELS_DIR
-# to .env. Stable Audio still downloads on first <sounds> unless cached.
+# Model weights: run `./scripts/setup.sh` — auto-detects FLUX2-klein (macOS)
+# and Z-Image-Turbo, writes DIFFUSION_MODELS_DIR to .env. Stable Audio still
+# downloads on first <sounds> unless cached.
 
 set -euo pipefail
 
@@ -102,7 +103,7 @@ echo "[3/4] Installing transformers / accelerate / safetensors / pillow …"
 $PIP install --upgrade transformers accelerate safetensors pillow
 
 echo
-echo "[4/4] Layering requirements-diffuser.txt (soundfile, torchsde, version pins) …"
+echo "[4/4] Layering requirements-diffuser.txt (soundfile, torchsde, mflux on macOS) …"
 $PIP install -r requirements-diffuser.txt
 
 echo
@@ -148,6 +149,10 @@ if ok_diffusers:
 for mod in ("soundfile", "torchsde"):
     ok = iu.find_spec(mod) is not None
     print(f"  {mod + ':':24} {'✓' if ok else 'MISSING'}")
+import sys
+if sys.platform == "darwin":
+    mflux_cli = __import__("shutil").which("mflux-generate-flux2")
+    print(f"  mflux-generate-flux2:   {'✓ ' + mflux_cli if mflux_cli else 'MISSING (pip install mflux)'}")
 PY
 
 if [ "$SKIP_IMG2IMG" = "0" ]; then
@@ -181,9 +186,14 @@ import assets
 gen = assets.try_load_image_generator()
 print(f"  → {gen!r}")
 if gen is None:
-    print("  Still None — most likely no GPU on this host.")
+    print("  Still None — no local weights and/or no GPU/mflux on this host.")
 else:
-    print("  ✓ ready. Z-Image-Turbo will load on the first <assets> request")
-    print("    (~30-60s once per session, then ~2-4s per sprite on CUDA;")
-    print("     longer on MPS).")
+    kind = type(gen).__name__
+    if kind == "Flux2KleinMfluxGenerator":
+        print("  ✓ FLUX2-klein (mflux) selected — sprites generate via mflux-generate-flux2")
+        print("    (~10-15s first image incl. load, then faster; ~13 GB peak MLX RAM)")
+    else:
+        print("  ✓ ready. Z-Image-Turbo loads on the first <assets> request")
+        print("    (~30-60s once per session, then ~2-4s per sprite on CUDA;")
+        print("     longer on MPS).")
 PY
