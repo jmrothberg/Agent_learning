@@ -2,12 +2,14 @@
 
 Three layers, fastest first. **Batch runs and “what command do I run?”** → **[`eval/OPERATIONS.md`](eval/OPERATIONS.md)** (natural-language → command table, overnight launch, artifact paths). Commands also appear in **`README.md`** and **`DEV.md`** — this file is the **canonical map** of what to run and what each test area guards.
 
+**New harness agent:** read **[`FOR_NEXT_LLM.md` § “New agent — harness improvement”](FOR_NEXT_LLM.md)** first, then use this file to pick which tests to run/extend after each change.
+
 ## Layer 1 — unit suite (`tests/`)
 
-Pure-function, deterministic: stub backend, mock browser, `tmp_path` memory. **Run after every harness/agent change.**
+Pure-function, deterministic: stub backend, mock browser, `tmp_path` memory. **Run after every harness/agent change. The full suite must pass (~2258 tests) before push.**
 
 ```bash
-.venv/bin/python -m pytest tests/ -q                  # full suite (~2158 tests, ~1 min)
+.venv/bin/python -m pytest tests/ -q                  # full suite (~2258 tests, ~1 min)
 .venv/bin/python -m pytest tests/test_patches.py -v   # one file
 .venv/bin/python -m pytest tests/test_patches.py::test_apply_smart_quote_match -v
 ```
@@ -34,7 +36,7 @@ Do **not** grep `inspect.getsource(agent)` or `inspect.getsource(GameAgent)` for
 | **Feedback routing** | `test_feedback_router.py`, `test_blocker_first_feedback.py`, `test_scoped_feedback.py`, `test_golden_feedback_flows.py` | User feedback authoritative; art vs code vs scope locks |
 | **Agent loop** | `test_iter_loop_guards.py`, `test_stall_recovery.py`, `test_exit_decision_turn.py`, `test_final_iter_test_guarantee.py`, `test_plan_retry.py` | Phase A/B/C, stall recovery, exit honesty, final untested iter |
 | **Compaction / context** | `test_compaction.py`, `test_token_aware_compaction.py`, `test_num_ctx.py` | Token-aware pressure; playbook survives feedback |
-| **Assets / media** | `test_assets.py`, `test_midsession_assets.py`, `test_asset_alignment.py`, `test_seed_phase_a_skip.py`, `test_mid_session_asset_deferral_and_runaway.py` | Alignment scan, rehydrate, style-rebrand deferral |
+| **Assets / media** | `test_assets.py`, `test_midsession_assets.py`, `test_asset_alignment.py`, `test_seed_phase_a_skip.py`, `test_mid_session_asset_deferral_and_runaway.py` | Alignment scan, rehydrate, style-rebrand deferral; **injected `sprite()` resolver** tie-break + cache flush (`test_sprite_resolver_*`, `test_render_block_flushes_cache_on_assets_ready`) |
 | **Memory / prompts** | `test_retrieval.py`, `test_prompt_library*.py`, `test_opening_book_memory.py`, `test_open_domain_routing.py`, `test_3d_navigation_conventions.py` | Genre-free retrieval; plan nudges data-driven; 3D/wireframe/modality skeletons |
 | **Trace / diagnostics** | `test_trace_diagnostics.py`, `test_patch_outcome_trace.py`, `test_failure_class_routing.py` | `failure_class`, `iter_summary`, ephemeral events |
 | **Backend / streaming** | `test_ollama_io.py`, `test_max_tokens_signal.py`, `test_repetition.py`, `test_deliberation_thresholds.py` | Sampling, repetition latch on code emission |

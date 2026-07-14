@@ -8,6 +8,8 @@ below — not “we need one more automatic check.”
 
 More tuning traps: **`FOR_NEXT_LLM.md`**. Commands and env vars: **`DEV.md`**. Trace paths: **`AGENTS.md` §2**. Batch runs / pytest: **`eval/OPERATIONS.md`**. Test map: **`TEST.md`**.
 
+**New agent?** Start with **`FOR_NEXT_LLM.md` § “New agent — harness improvement”** before editing code.
+
 ---
 
 ## Rule #1: play the game yourself
@@ -17,6 +19,23 @@ The agent can report **TEST OK** while the game is still wrong — for example t
 
 **Always:** open the `.html`, play it, watch Chromium if the TUI is running, look at screenshots
 under the session folder. Do not trust green test text alone.
+
+### Game looks fine but the trace says `ok=False`
+
+Common on art-heavy builds after user feedback fixed visuals:
+
+| What you see | What the harness still flags | Usually means |
+|--------------|------------------------------|---------------|
+| Sprites correct, fun to play | 1–2 **`soft_warnings`** on last iter | Probe timing (`punch_lands_damage`), partial patch apply, or `input_responsive` in headless test — not “art still wrong” |
+| Sprites correct | `failure_class: memory_gap` + “assets undrawn” | **Stale triage label** — check whether `ASSETS_LOADED_BUT_UNDRAWN` is in `soft_warnings` or demoted to advisory in `report["warnings"]` |
+| Playable in browser | `input_responsive` failed | Keys registered but no pixel delta in 3s smoke — often `_assetsReady` gating or closure-scope `keys` bug in **game code**; fix via memory/prompt, not always harness |
+
+Read **`iter_summary.soft_warnings`** line by line. **`ok`** is false if **any** soft warning exists,
+even when probes are 7/8 and the game looks perfect manually.
+
+**Harness vs memory:** wrong sprite *resolver* for all parallel-prefix games → **`assets.py`**.
+Wrong *wiring in one session* after feedback → often **LLM patch** + playbook (`versus-fighter-sprite-prefix`).
+See **`FOR_NEXT_LLM.md` § harness vs memory**.
 
 ---
 
@@ -168,7 +187,7 @@ Then **play the game again** and compare to what the log claimed.
 | `tools.py` | Browser load, input test, gates |
 | `agent.py` + mixins | Loop orchestration — map in **`AGENTS.md` §1b** |
 | `modality.py` | Genre-free 3D / wireframe / FPS-nav shape detectors (planner + memory) |
-| `assets.py` | Sprite generation and loader injection |
+| `assets.py` | Sprite generation and **injected** `sprite()` / `loadAssets` block (`render_asset_paths_block`) |
 | `memory/*.jsonl` | Curated hints the model reads each run |
 | `prompts_v1.py` | System prompt templates |
 

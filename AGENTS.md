@@ -19,6 +19,22 @@ Map for maintainers and LLMs: **edit source, read artifacts for triage, never co
 
 Legacy `CLAUDE.md` is a redirect stub → `DEV.md`.
 
+### New harness maintainer (fresh Cursor agent)
+
+Improve the **verification loop and agent**, not generated `games/*.html`. Start here:
+
+1. **[`FOR_NEXT_LLM.md`](FOR_NEXT_LLM.md) § “New agent — harness improvement”** — read order, harness vs memory, fix loop, do-not list
+2. **[`HARNESS_DEBUG.md`](HARNESS_DEBUG.md)** — gates, traces, when TEST OK lies
+3. **[`TEST.md`](TEST.md)** — pytest map; extend existing test file for your failure class
+4. Run **`.venv/bin/python -m pytest tests/ -q`** after every change (must stay green)
+
+| Layer | Edit when… |
+|-------|------------|
+| **Harness** | Injected loader (`assets.py`), browser gates (`tools.py`), loop mixins (`agent_*.py`) |
+| **Memory** | Game-type craft the LLM should learn via retrieval (`memory/*.jsonl`, skeletons) |
+
+Trace → fix loop: **§4** below. Batch commands: **`eval/OPERATIONS.md`**.
+
 ---
 
 ## 1. Source tree — safe to edit (commit to git)

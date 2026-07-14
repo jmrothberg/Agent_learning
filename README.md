@@ -74,7 +74,7 @@ prompts + harness + memory beats swapping models.** This repo is not a general r
 | **Assets** | none in-loop | none | **FLUX2-klein (mflux) on macOS** or Z-Image-Turbo + Stable Audio; Wan2.2 cutscenes via subprocess |
 | **Memory** | repo files | conversation | hand-curated **`memory/`** opening book (JSONL — one line, no restart) |
 | **Local LLM** | cloud-first | local or cloud | **MLX in-process** (macOS default) or Ollama; cloud only with explicit API key + `/backend` |
-| **Regression** | CI you author | ad hoc | **pytest (~2158 tests)** + stub eval banks + opt-in `eval/eval_seed_edits.py` (materialization with `browser=None`) |
+| **Regression** | CI you author | ad hoc | **pytest (~2258 tests)** + stub eval banks + opt-in `eval/eval_seed_edits.py` (materialization with `browser=None`) |
 
 **Real advantages vs general agents:** playable-game verification (input smoke test, per-action
 screenshots, sprite gates), and a full on-machine art/audio pipeline tied to the same loop.
@@ -500,8 +500,9 @@ Each file has one job — avoid duplicating long gate/env lists across them.
 | `DEV.md` | **LLM agents + humans** | Commands, env vars, architecture (maintainer only — not injected into game LLM) |
 | `TEST.md` | humans + LLMs | Three-layer tests, suite map, scripts inventory |
 | **`eval/OPERATIONS.md`** | **humans + LLMs** | **“Run pytest / batch N games / triage run_XX” — natural-language → command** |
-| `FOR_NEXT_LLM.md` | LLM tuners | Tuning traps — read before changing harness/prompts |
+| **`FOR_NEXT_LLM.md`** | LLM tuners | **Start here for new agents** — harness vs memory, traps, fix loop |
 | `HARNESS_DEBUG.md` | LLM tuners | Gate list, `failure_class`, trace timeline workflow |
+| `AGENTS.md` | maintainers + LLMs | Source vs artifacts, mixin map, new-maintainer pointer |
 | `eval/PARALLEL_MLX_TESTING.md` | batch eval | One MLX server, N parallel clients |
 
 ---

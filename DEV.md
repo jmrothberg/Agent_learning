@@ -10,6 +10,9 @@ User updates: `./scripts/update.sh` or `git pull`.
 run commands → `eval/OPERATIONS.md` · tuning traps → `FOR_NEXT_LLM.md` · trace debug →
 `HARNESS_DEBUG.md`
 
+**New Cursor agent improving the harness:** read **`FOR_NEXT_LLM.md` § “New agent — harness
+improvement”** first (read order, harness vs memory, canonical fix loop).
+
 ---
 
 ## What this project is

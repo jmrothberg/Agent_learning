@@ -4,6 +4,78 @@ You are fixing a coding agent that drives a **local ~27–35B model** (qwen3.6 v
 build single-file HTML5 games verified in real Chromium. Read **`DEV.md`** next (commands, env,
 binding rules). Use **`HARNESS_DEBUG.md`** when debugging a bad session trace.
 
+---
+
+## New agent — harness improvement (read this first)
+
+You are **not** building games in `games/*.html`. You are improving the **loop that builds and
+verifies** games. A fresh Cursor agent should follow this path before editing code.
+
+### 1. Read order (≈30 min)
+
+| Step | File | Why |
+|------|------|-----|
+| 1 | **`AGENTS.md`** | Source vs artifacts; mixin map; trace paths; **never commit `games/`** |
+| 2 | **This file** (`FOR_NEXT_LLM.md`) | Standing rules + traps |
+| 3 | **`HARNESS_DEBUG.md`** | Gates, `failure_class`, trace timeline |
+| 4 | **`TEST.md`** | What pytest guards; which file to extend per failure class |
+| 5 | **`eval/OPERATIONS.md`** | Commands for batch eval / overnight tune |
+| 6 | **`tools.py`** → `LiveBrowser.load_and_test` | Highest-leverage verifier (browser + gates) |
+| 7 | **`assets.py`** → `render_asset_paths_block` | Injected `sprite()` / loader JS copied into every sprite game |
+
+Optional deep dive: one bad trace via `scripts/enrich_trace.py <id> --timeline`, then open the
+matching `.html` and play it — **do not trust TEST OK alone**.
+
+### 2. Harness vs memory — where to put a fix
+
+| Question | Put the fix in… |
+|----------|------------------|
+| Bug in **injected JS** every sprite game copies (`sprite()`, `loadAssets`, probes)? | **`assets.py`** (or `tools.py` if browser-side only) |
+| Bug in **browser test / gates / ok scoring**? | **`tools.py`** + tests in `tests/test_*gate*.py`, `test_drawn_asset_detector.py`, `test_fix_round.py` |
+| Bug in **agent loop** (compaction, feedback routing, phase order)? | Matching **`agent_*.py`** mixin — see **`AGENTS.md` §1b** |
+| **Genre / game-type** convention (versus fighters, TD waves, chess CPU)? | **`memory/playbook.jsonl`** or `visual_playtests.jsonl` — retrieval-gated, not `if "mortal" in goal` |
+| Model keeps **mis-wiring one game** but harness is correct? | Playbook + optional user feedback; **not** a one-game hardcode in harness |
+
+**Recent example (parallel roster sprites):** `f2_walk` resolving to `f1_walk` was a **harness**
+bug in injected `sprite()` token tie-breaking + load-race cache → fixed in **`assets.py`**. Clearing
+`_spriteCache` on `reset()` and using `prefix + '_' + phase` in `drawFighter` is **memory**
+(`versus-fighter-sprite-prefix` playbook bullet).
+
+### 3. Canonical fix loop (every harness change)
+
+```text
+trace or failing pytest
+  → classify failure_class (harness_bug | memory_gap | local_llm_limit)
+  → smallest edit in the right layer (table above)
+  → targeted pytest (TEST.md) then full suite: .venv/bin/python -m pytest tests/ -q
+  → optional: re-run one eval goal from memory/prompt_library.jsonl
+  → durable trap → add row below or bullet in playbook; ephemeral → triage.md only
+```
+
+**Suite must stay green.** Failing tests are regressions — update tests when behavior intentionally
+changes (see `tests/test_fix_round.py` source-grep guards, `tests/test_assets.py` sprite resolver mirror).
+
+### 4. Do not
+
+- Patch **`games/*.html`** as source (artifacts only).
+- Add **game-title or genre `if` branches** in Python (`tools.py`, `agent.py`).
+- Weaken fuzzy **`sprite()`** matching for one game without a general tie-break / test (`tests/test_assets.py`).
+- Gate **`ok=False`** on cosmetic sprite warnings (dead-frame pose delta, etc.).
+- Create new top-level markdown files — extend **`FOR_NEXT_LLM.md`**, **`HARNESS_DEBUG.md`**, **`TEST.md`**, **`DEV.md`**, **`README.md`**.
+
+### 5. High-leverage files (symptom → first open)
+
+| Symptom | First file(s) |
+|---------|----------------|
+| Art on disk, colored boxes / wrong fighter sprite | `assets.py` (injected resolver), `tools.py` (`ASSETS_LOADED_BUT_UNDRAWN`) |
+| Keys wired but no pixel change / input_responsive | `tools.py` `_input_smoke_test`, game `keys` object — often **memory** + probe |
+| Patch SEARCH not found / feedback ignored | `agent_compaction.py`, `agent_feedback.py`, trace `structured_compaction` |
+| Wrong coaching / asset regen when user wanted wire-only | `agent_feedback.py` routing |
+| Probe false pass (state ok, pixels wrong) | `tools.py` gates, `tests/test_drawn_asset_detector.py` |
+| Plan missing probes / wrong skeleton | `memory.py`, `prompts_v1.py`, `memory/skeletons/` |
+
+---
+
 ## The 5 rules
 
 1. **Tune the agent, not the model.** Fix prompts / retrieval / harness / scoring / memory — never
@@ -55,6 +127,9 @@ bullet never reaches the prompt — broaden tags if a good bullet doesn’t fire
 - Wrong facing → flip in code (`ctx.scale(-1,1)`), don’t regenerate art.
 - Sprite-key drift (`left_idle` vs `left_fighter_idle`) → silent colored boxes. Use the injected
   `sprite()` resolver; gate `ASSETS_LOADED_BUT_UNDRAWN` catches misses.
+- **Parallel roster cross-wiring** (`f1_walk` / `f2_walk`, `blue_*` / `red_*`): harness `sprite()`
+  must not tie-break on action token alone (`walk`) — entity prefix must win. LLM must still clear
+  `_spriteCache` on rematch (playbook `versus-fighter-sprite-prefix`).
 
 **Compaction / context**
 
@@ -117,6 +192,8 @@ Per-run scores live in **`eval/OPERATIONS.md`** (run_06 snapshot). Mid-batch har
 | Stuck best-of-2 silently doubled fix time on single MLX | Default **off**; opt in `/bestof on` or `coder.py --stuck-bon`; candidates under `candidates/iter_NN/` | `agent.py`, `chat.py`, `coder.py` |
 | Kung-Fu: movement gated on idle/walk only | Playbook: include crouch/duck in movement branch or reset action before move | `memory/playbook.jsonl` |
 | Video intro: orphan setTimeout, enemies never spawn | Playbook: call `reset()`/`startGame()` — same path as R restart | `memory/playbook.jsonl` |
+| Parallel roster: `f2_walk` shows `f1` art (MK, Street Fighter, chess colors) | Harness: `sprite()` token tie-break + flush `_spriteCache` on `_assetsReady`; memory: `versus-fighter-sprite-prefix` | `assets.py`, `tests/test_assets.py`, `memory/playbook.jsonl` |
+| Game looks perfect to human but trace shows 2 `soft_warnings` | Often probe timing or partial patch — not always a visual bug; read `iter_summary.soft_warnings` | trace + `HARNESS_DEBUG.md` § “looks fine” |
 
 ### Recurring patterns (watch in new traces)
 
@@ -147,6 +224,10 @@ Per-run scores live in **`eval/OPERATIONS.md`** (run_06 snapshot). Mid-batch har
 
 ## Read order
 
-`DEV.md` → this file → **`eval/OPERATIONS.md`** (run batch / pytest) → `TEST.md` (suite map) → `tools.py` (`load_and_test`) → trace `.jsonl` → relevant `memory/*.jsonl`. Agent comparison vs Cursor/Aider: **`README.md#how-this-compares-to-other-coding-agents`**.
+**New harness agent:** start with **§ “New agent — harness improvement”** at the top of this file,
+then `DEV.md` → **`eval/OPERATIONS.md`** (run batch / pytest) → `TEST.md` (suite map) →
+`tools.py` (`load_and_test`) → trace `.jsonl` → relevant `memory/*.jsonl`. Agent comparison vs
+Cursor/Aider: **`README.md#how-this-compares-to-other-coding-agents`**.
 
-Quick test: `.venv/bin/python -m pytest tests/ -q` (pure-function; no GPU/model).
+Quick test: `.venv/bin/python -m pytest tests/ -q` (pure-function; no GPU/model). **Full suite must
+pass before push** (~2258 tests, ~1 min).
