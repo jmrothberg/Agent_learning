@@ -10,7 +10,8 @@ Map for maintainers and LLMs: **edit source, read artifacts for triage, never co
 |------|:------:|:--------:|---------|
 | `AGENTS.md` | yes | **no** | Router, edit vs artifacts, mixin map |
 | `DEV.md` | yes | **no** | Commands, env vars, architecture |
-| `FOR_NEXT_LLM.md` | yes | no | Durable traps + trace→fix patterns |
+| `HARNESS_TUNING.md` | yes | no | Harness traps, onboarding, trace→fix patterns |
+| `FOR_NEXT_LLM.md` | yes | no | Legacy redirect → `HARNESS_TUNING.md` |
 | `HARNESS_DEBUG.md` | yes | no | Gates, `failure_class`, enrich_trace |
 | `eval/OPERATIONS.md` | yes | no | Natural-language → shell commands |
 | `TEST.md` | yes | no | What each pytest guards |
@@ -23,7 +24,7 @@ Legacy `CLAUDE.md` is a redirect stub → `DEV.md`.
 
 Improve the **verification loop and agent**, not generated `games/*.html`. Start here:
 
-1. **[`FOR_NEXT_LLM.md`](FOR_NEXT_LLM.md) § “New agent — harness improvement”** — read order, harness vs memory, fix loop, do-not list
+1. **[`HARNESS_TUNING.md`](HARNESS_TUNING.md) § “New agent — harness improvement”** — read order, harness vs memory, fix loop, do-not list
 2. **[`HARNESS_DEBUG.md`](HARNESS_DEBUG.md)** — gates, traces, when TEST OK lies
 3. **[`TEST.md`](TEST.md)** — pytest map; extend existing test file for your failure class
 4. Run **`.venv/bin/python -m pytest tests/ -q`** after every change (must stay green)
@@ -113,7 +114,7 @@ Everything under `games/` is **generated at runtime**. Gitignored locally; stays
 
 **Rule:** traces live at `{html_out_dir}/traces/`.
 
-Per-run scratch notes: `games/tune_serial10/run_XX/triage.md` (gitignored). Copy durable learnings into `FOR_NEXT_LLM.md` before wiping runs.
+Per-run scratch notes: `games/tune_serial10/run_XX/triage.md` (gitignored). Copy durable learnings into `HARNESS_TUNING.md` before wiping runs.
 
 ### Triage tools
 
@@ -143,7 +144,7 @@ tail -f games/tune_serial10/run_XX/overnight.log
 |------|------|
 | Commands, env, architecture | `DEV.md` |
 | **Tests, scripts, what each suite guards** | **`TEST.md`** |
-| Tune harness / traps / batch learnings | `FOR_NEXT_LLM.md` |
+| Tune harness / traps / batch learnings | `HARNESS_TUNING.md` |
 | Trace grep workflow | `HARNESS_DEBUG.md` |
 | Serial / overnight eval workflow | **`eval/OPERATIONS.md`** · `eval/PARALLEL_MLX_TESTING.md` |
 | Human onboarding | `README.md` |
@@ -161,7 +162,7 @@ tail -f games/tune_serial10/run_XX/overnight.log
 | `local_llm_limit` | `prompts_v1.py`, `agent_compaction.py`, `backend.py` sampling |
 
 4. **Verify:** targeted pytest from `TEST.md` / `eval/OPERATIONS.md`
-5. **Persist:** durable trap → `FOR_NEXT_LLM.md` + optional playbook bullet; ephemeral notes → `triage.md` then OPERATIONS snapshot
+5. **Persist:** durable trap → `HARNESS_TUNING.md` + optional playbook bullet; ephemeral notes → `triage.md` then OPERATIONS snapshot
 
 **Never** edit `games/*.html` as source — tune harness/memory and re-run.
 

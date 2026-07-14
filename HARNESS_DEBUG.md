@@ -6,9 +6,9 @@ The browser test **finds problems and tells the model what to fix**. It does not
 for you. If the same bug keeps happening after many tries, the problem is usually one of the buckets
 below — not “we need one more automatic check.”
 
-More tuning traps: **`FOR_NEXT_LLM.md`**. Commands and env vars: **`DEV.md`**. Trace paths: **`AGENTS.md` §2**. Batch runs / pytest: **`eval/OPERATIONS.md`**. Test map: **`TEST.md`**.
+More tuning traps: **`HARNESS_TUNING.md`**. Commands and env vars: **`DEV.md`**. Trace paths: **`AGENTS.md` §2**. Batch runs / pytest: **`eval/OPERATIONS.md`**. Test map: **`TEST.md`**.
 
-**New agent?** Start with **`FOR_NEXT_LLM.md` § “New agent — harness improvement”** before editing code.
+**New agent?** Start with **`HARNESS_TUNING.md` § “New agent — harness improvement”** before editing code.
 
 ---
 
@@ -35,7 +35,7 @@ even when probes are 7/8 and the game looks perfect manually.
 
 **Harness vs memory:** wrong sprite *resolver* for all parallel-prefix games → **`assets.py`**.
 Wrong *wiring in one session* after feedback → often **LLM patch** + playbook (`versus-fighter-sprite-prefix`).
-See **`FOR_NEXT_LLM.md` § harness vs memory**.
+See **`HARNESS_TUNING.md` § harness vs memory**.
 
 ---
 
@@ -69,7 +69,7 @@ etc.
 
 If enabled and you have a **vision-capable** model loaded, a second pass looks at screenshots and
 answers yes/no questions (“Is the fighter facing left?”, “Is a projectile visible?”). Text-only
-models skip this. Details: **`FOR_NEXT_LLM.md`**.
+models skip this. Details: **`HARNESS_TUNING.md`**.
 
 ---
 

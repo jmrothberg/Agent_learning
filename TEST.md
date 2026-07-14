@@ -2,7 +2,7 @@
 
 Three layers, fastest first. **Batch runs and “what command do I run?”** → **[`eval/OPERATIONS.md`](eval/OPERATIONS.md)** (natural-language → command table, overnight launch, artifact paths). Commands also appear in **`README.md`** and **`DEV.md`** — this file is the **canonical map** of what to run and what each test area guards.
 
-**New harness agent:** read **[`FOR_NEXT_LLM.md` § “New agent — harness improvement”](FOR_NEXT_LLM.md)** first, then use this file to pick which tests to run/extend after each change.
+**New harness agent:** read **[`HARNESS_TUNING.md` § “New agent — harness improvement”](HARNESS_TUNING.md)** first, then use this file to pick which tests to run/extend after each change.
 
 ## Layer 1 — unit suite (`tests/`)
 

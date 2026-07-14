@@ -496,13 +496,13 @@ Each file has one job — avoid duplicating long gate/env lists across them.
 
 | File | Audience | Purpose |
 |------|----------|---------|
-| `AGENTS.md` | maintainers + LLMs | Source vs artifacts, agent mixin map, trace paths |
+| `AGENTS.md` | maintainers + LLMs | Source vs artifacts, mixin map, trace paths — **new maintainer start** |
 | `DEV.md` | **LLM agents + humans** | Commands, env vars, architecture (maintainer only — not injected into game LLM) |
 | `TEST.md` | humans + LLMs | Three-layer tests, suite map, scripts inventory |
 | **`eval/OPERATIONS.md`** | **humans + LLMs** | **“Run pytest / batch N games / triage run_XX” — natural-language → command** |
-| **`FOR_NEXT_LLM.md`** | LLM tuners | **Start here for new agents** — harness vs memory, traps, fix loop |
-| `HARNESS_DEBUG.md` | LLM tuners | Gate list, `failure_class`, trace timeline workflow |
-| `AGENTS.md` | maintainers + LLMs | Source vs artifacts, mixin map, new-maintainer pointer |
+| **`HARNESS_TUNING.md`** | harness tuners | **Start here for new agents** — harness vs memory, traps, fix loop |
+| `HARNESS_DEBUG.md` | harness tuners | Gate list, `failure_class`, trace timeline workflow |
+| `FOR_NEXT_LLM.md` | — | Legacy redirect → `HARNESS_TUNING.md` |
 | `eval/PARALLEL_MLX_TESTING.md` | batch eval | One MLX server, N parallel clients |
 
 ---
@@ -532,7 +532,7 @@ Asteroids regression; cosmetic sprite warnings are advisory; don't commit `games
 - **Game shows colored boxes instead of art:** sprite-key mismatch — the `sprite()` resolver and `ASSETS_LOADED_BUT_UNDRAWN` gate now catch it; re-run.
 - **Model loops/truncates on big builds:** expected for a 27B; the MLX sampler passes `top_p`/`top_k` (vendor coding preset) to avoid the degenerate line-repeat. Judge harness signals from the trace, not always a finished game.
 - **Debugging a bad session:** `HARNESS_DEBUG.md` — start with `scripts/enrich_trace.py <id> --timeline`.
-  Tuning traps: `FOR_NEXT_LLM.md`.
+  Tuning traps: `HARNESS_TUNING.md`.
 
 ## Dependencies
 Python 3.12, `mlx-lm` / `mlx-vlm` (Apple Silicon) or `ollama`, Playwright Chromium, `diffusers` +

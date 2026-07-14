@@ -13,7 +13,7 @@ _DOC_FILES = [
     _REPO / "DEV.md",
     _REPO / "TEST.md",
     _REPO / "eval" / "OPERATIONS.md",
-    _REPO / "FOR_NEXT_LLM.md",
+    _REPO / "HARNESS_TUNING.md",
     _REPO / "HARNESS_DEBUG.md",
 ]
 

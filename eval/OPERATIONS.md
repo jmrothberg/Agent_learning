@@ -1,7 +1,7 @@
 # eval/OPERATIONS.md — run tests and batches (LLM entry point)
 
 **Start here** when the user asks to run tests, triage a tune batch, or kick off N games.
-Human onboarding → `README.md`. Commands/env → `DEV.md`. Harness traps → `FOR_NEXT_LLM.md`.
+Human onboarding → `README.md`. Commands/env → `DEV.md`. Harness traps → `HARNESS_TUNING.md`.
 
 ---
 
@@ -254,7 +254,7 @@ games/tune_serial10/run_06/
 2. **Read `failure_class`** on failed iters (`harness_bug` → Python; `memory_gap` → playbook; `local_llm_limit` → model/prompt).
 3. **Play the HTML** — green `TEST OK` can still be wrong (`HARNESS_DEBUG.md` rule #1).
 4. **Check BoN:** if log shows `sampling 2 candidates` / `stuck ... escalating`, stuck BoN was on — default is now off; use `/bestof on` only when you want it.
-5. **Persist learnings:** copy into `FOR_NEXT_LLM.md` + optional `memory/playbook.jsonl` bullet — not into generated `games/*.html`.
+5. **Persist learnings:** copy into `HARNESS_TUNING.md` + optional `memory/playbook.jsonl` bullet — not into generated `games/*.html`.
 
 ### Targeted pytest after edits
 
@@ -293,6 +293,6 @@ Corrected run_06 score: **2/6 fresh pass** (01 Donkey Kong, 02 Kung-Fu), **4/6 f
 |-----|------|
 | `TEST.md` | What each pytest file guards |
 | `HARNESS_DEBUG.md` | Gates, BoN glossary, trace grep |
-| `FOR_NEXT_LLM.md` | Tuning traps + batch learnings |
+| `HARNESS_TUNING.md` | Tuning traps + batch learnings |
 | `AGENTS.md` | Source vs artifacts map |
 | `eval/PARALLEL_MLX_TESTING.md` | Multi-game parallel via mlx-server |

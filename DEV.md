@@ -7,10 +7,10 @@ game-building LLM — see `AGENTS.md` §0 (who reads what).
 User updates: `./scripts/update.sh` or `git pull`.
 
 **Other docs:** router → `AGENTS.md` · human onboarding → `README.md` · tests → `TEST.md` ·
-run commands → `eval/OPERATIONS.md` · tuning traps → `FOR_NEXT_LLM.md` · trace debug →
+run commands → `eval/OPERATIONS.md` · tuning traps → `HARNESS_TUNING.md` · trace debug →
 `HARNESS_DEBUG.md`
 
-**New Cursor agent improving the harness:** read **`FOR_NEXT_LLM.md` § “New agent — harness
+**New Cursor agent improving the harness:** read **`HARNESS_TUNING.md` § “New agent — harness
 improvement”** first (read order, harness vs memory, canonical fix loop).
 
 ---

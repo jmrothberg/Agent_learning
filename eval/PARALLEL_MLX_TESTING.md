@@ -48,7 +48,7 @@ Prevent Mac sleep on power adapter: wrap with `caffeinate -dims nohup env TUNE_O
 
 **Autonomous mid-batch (after you launch in Terminal):** poll `eval/tune_overnight_monitor.py --out-dir games/tune_serial10/run_05` → `agent_monitor.json`. Cursor agent may triage traces and apply mid-batch harness fixes when gates pass — **never start the batch from Cursor** (visible Chromium + MLX cold load need Terminal.app).
 
-**Post-batch triage:** read `run_XX/tune_checkpoint.json`, `overnight.log`, traces under `run_XX/traces/`; scratch notes in `run_XX/triage.md` (gitignored). Durable learnings → [`FOR_NEXT_LLM.md`](../FOR_NEXT_LLM.md). **Source vs artifacts map** → [`AGENTS.md`](../AGENTS.md). Optional `run_06` partial re-run via `eval/tune_serial10_round2_rerun.txt`.
+**Post-batch triage:** read `run_XX/tune_checkpoint.json`, `overnight.log`, traces under `run_XX/traces/`; scratch notes in `run_XX/triage.md` (gitignored). Durable learnings → [`HARNESS_TUNING.md`](../HARNESS_TUNING.md). **Source vs artifacts map** → [`AGENTS.md`](../AGENTS.md). Optional `run_06` partial re-run via `eval/tune_serial10_round2_rerun.txt`.
 
 ```bash
 cd /Users/jonathanrothberg/Agent_learning
