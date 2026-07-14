@@ -1690,6 +1690,25 @@ def generate_assets(
             "strength": strength,
         }
         if cache_path.exists():
+            # Re-chroma cached sprites so older white/checkerboard caches
+            # become RGBA transparent (pipeline upgrade must not require
+            # manual cache wipes).
+            if not _is_full_bleed_asset_name(name):
+                try:
+                    from PIL import Image
+                    with Image.open(cache_path) as src_img:
+                        src_img.load()
+                        keyed, ck_stats = _resize_and_chroma_sprite(src_img, size)
+                        stat["bg_color"] = (
+                            list(ck_stats["bg_color"])
+                            if ck_stats["bg_color"] is not None else None
+                        )
+                        stat["alpha_pixel_ratio"] = ck_stats["alpha_pixel_ratio"]
+                        if ck_stats.get("checkerboard_bg"):
+                            stat["checkerboard_bg"] = ck_stats["checkerboard_bg"]
+                        keyed.save(cache_path, format="PNG")
+                except Exception:
+                    pass
             _link_or_copy(cache_path, target_path)
             out[name] = target_path.resolve()
             stat["cache_hit"] = True
@@ -1801,18 +1820,8 @@ def generate_assets(
             with Image.open(gen_path) as src_img:
                 src_img.load()
                 stat["native_size"] = [src_img.width, src_img.height]
-                # Resize first; chroma-key second. Resizing 768→128 is
-                # ~36x cheaper to mask than masking at native res.
-                if size != (src_img.width, src_img.height):
-                    resized = src_img.resize(size, Image.LANCZOS)
-                else:
-                    resized = src_img
-                # 1.3: apply chroma-key to add a transparent background.
-                # Z-Image-Turbo renders with a solid bg even when the
-                # prompt says "transparent background"; this turns it
-                # into actual alpha so the model never has to clean it
-                # up at runtime.
-                keyed, ck_stats = _chroma_key_to_rgba(resized)
+                keyed, ck_stats = _resize_and_chroma_sprite(src_img, size)
+                # 1.3: chroma-key → real RGBA alpha (transparent background).
                 stat["bg_color"] = (
                     list(ck_stats["bg_color"])
                     if ck_stats["bg_color"] is not None else None
@@ -1987,7 +1996,12 @@ def _is_flux2_mflux_generator(generator: Any) -> bool:
 
 
 def _ensure_sprite_bg_prompt(prompt: str, generator: Any) -> str:
-    """Background wording matched to the active sprite generator."""
+    """Background wording matched to the active sprite generator.
+
+    Deliverable is always an RGBA PNG with real alpha (via chroma-key below).
+    FLUX2 cannot paint literal transparency — we ask for solid white, then
+    key it out. Z-Image gets 'transparent background' in the prompt; same key.
+    """
     if not _is_flux2_mflux_generator(generator):
         return _ensure_transparent_prompt(prompt)
     p = prompt.strip()
@@ -2004,6 +2018,16 @@ def _is_full_bleed_asset_name(name: str) -> bool:
     """Skip transparency suffix for full-screen background assets."""
     n = name.lower()
     return n.startswith("bg_") or n.endswith("_background") or n == "background"
+
+
+def _resize_and_chroma_sprite(pil_img, size: tuple[int, int]) -> tuple[Any, dict]:
+    """Resize to target game size, then chroma-key to RGBA transparent PNG."""
+    from PIL import Image as _Image
+    if size != (pil_img.width, pil_img.height):
+        resized = pil_img.resize(size, _Image.LANCZOS)
+    else:
+        resized = pil_img
+    return _chroma_key_to_rgba(resized)
 
 
 # 1.3 — chroma-key pass. Z-Image-Turbo (and most diffusion models)
