@@ -128,3 +128,30 @@ def test_effective_outcome_never_pass_on_session_ok_false():
     raw = {"exit_code": 0}
     sig = {"iter_summaries": 0, "session_ok": False, "last_iter_ok": None}
     assert monitor._effective_outcome(raw, sig) == "fresh_fail"
+
+
+def test_run_vlm10_goal_assembly_produces_ten_goals():
+    """Mirror eval/tune_run_vlm10.sh assembly — batch list must stay stable."""
+    from prompt_library import load_prompt_library
+
+    repo = REPO
+    r12 = [
+        line.strip()
+        for line in (repo / "eval/tune_run12_goals.txt").read_text().splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+    r08 = [
+        line.strip()
+        for line in (repo / "eval/tune_run08_goals.txt").read_text().splitlines()
+        if line.strip() and not line.startswith("#")
+    ][5:8]
+    by_name = {
+        p["name"]: " ".join(p["prompt"].split())
+        for p in load_prompt_library()
+    }
+    extra = [by_name[n] for n in ("fighter-showcase", "1942", "dragons-lair")]
+    goals = r12 + r08 + extra
+    assert len(goals) == 10
+    assert goals[0].startswith("Build a Prince of Persia")
+    assert goals[6].startswith("Build a Monkey Island")
+    assert goals[9].startswith("Build a Dragon's Lair")

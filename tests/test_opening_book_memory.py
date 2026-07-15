@@ -292,3 +292,25 @@ def test_opening_book_sidecars_architect_backend_no_name_error(tmp_path: Path) -
     proposals = [t for t in traces if t.get("kind") == "opening_book_sidecar_proposal"]
     assert proposals, f"expected sidecar proposal trace, got {traces!r}"
     assert proposals[0]["filename"] == PLAYTESTS_FILENAME
+
+
+def test_chess_animation_audit_not_retrieved_for_platformer_goal() -> None:
+    """run_vlm10 PoP: chess audit must not rank in plan-stage top-2 (k=2)."""
+    mem = GameMemory(root="memory")
+    goal = (
+        "Build a Prince of Persia game. Side-view platformer: hero walk/run cycle, "
+        "running-jump, ledge-hang and pull-up across gaps."
+    )
+    hits = mem.retrieve_animation_audits(goal, k=2)
+    ids = {h.item.id for h in hits}
+    assert "chess-path-walk-no-teleport" not in ids
+    assert "walk-cycle-advances" in ids
+
+
+def test_chess_animation_audit_retrieved_for_holochess_goal() -> None:
+    mem = GameMemory(root="memory")
+    hits = mem.retrieve_animation_audits(
+        "Build a holochess board game with animated piece moves", k=2,
+    )
+    ids = {h.item.id for h in hits}
+    assert "chess-path-walk-no-teleport" in ids

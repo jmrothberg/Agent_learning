@@ -118,6 +118,20 @@ def test_recipe_field_caps_for_local_model_prompt_discipline():
         assert 1 <= len(r.get("probes", ["x"])) <= 3, f"{rid}: probes > 3 lines"
 
 
+def test_platformer_outline_jump_probe_avoids_y_delta_race():
+    """run_vlm10 PoP: jump_works y!==y0 races landing — outline must say vy/onGround."""
+    for o in _load_outlines():
+        if o["id"] != "outline-side-scroll-platformer":
+            continue
+        probes = o["recipe"].get("probes") or []
+        jump_line = next((p for p in probes if "Space" in p or "jump" in p.lower()), "")
+        assert jump_line
+        assert "vy" in jump_line or "onGround" in jump_line
+        assert "not y!==y0" in jump_line or "not y!=y0" in jump_line.lower()
+        return
+    raise AssertionError("outline-side-scroll-platformer missing")
+
+
 def test_no_code_fences_in_recipes():
     """The book is prose/structured data — components.jsonl owns code."""
     for o in _load_outlines():
