@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -253,6 +254,8 @@ def test_opening_book_sidecars_architect_backend_no_name_error(tmp_path: Path) -
     )
     coder = MagicMock()
 
+    # Live sidecar writes append to memory_root — must stay isolated from git memory/.
+    mem_root = tmp_path / "memory"
     out = tmp_path / "game.html"
     out.write_text("<html></html>")
     agent = GameAgent(
@@ -262,7 +265,7 @@ def test_opening_book_sidecars_architect_backend_no_name_error(tmp_path: Path) -
         out_path=out,
         browser=MagicMock(),
         max_iters=2,
-        memory_root=str(Path(__file__).resolve().parent.parent / "memory"),
+        memory_root=str(mem_root),
     )
     agent._goal = "first person maze shooter"
     agent._session_id = "sidecar-test-session"
@@ -292,6 +295,30 @@ def test_opening_book_sidecars_architect_backend_no_name_error(tmp_path: Path) -
     proposals = [t for t in traces if t.get("kind") == "opening_book_sidecar_proposal"]
     assert proposals, f"expected sidecar proposal trace, got {traces!r}"
     assert proposals[0]["filename"] == PLAYTESTS_FILENAME
+    assert proposals[0].get("stored") is True
+    live_path = mem_root / PLAYTESTS_FILENAME
+    assert live_path.is_file()
+    live_rows = [json.loads(ln) for ln in live_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    sidecar_rows = [r for r in live_rows if r.get("id") == "live-sidecar-probe"]
+    assert len(sidecar_rows) == 1
+    assert sidecar_rows[0].get("trace_ids") == ["sidecar-test-session"]
+
+
+def test_shipped_playtests_has_no_sidecar_test_pollution() -> None:
+    """Committed playtests.jsonl must not accumulate pytest live-append rows."""
+    path = Path(__file__).resolve().parent.parent / "memory" / PLAYTESTS_FILENAME
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        rec = json.loads(line)
+        assert rec.get("id") != "live-sidecar-probe", (
+            "remove test sidecar rows from memory/playtests.jsonl; "
+            "sidecar tests must use tmp_path / 'memory'"
+        )
+        trace_ids = rec.get("trace_ids") or []
+        assert "sidecar-test-session" not in trace_ids, (
+            "playtests.jsonl polluted by test_opening_book_sidecars_* — use isolated memory_root"
+        )
 
 
 def test_chess_animation_audit_not_retrieved_for_platformer_goal() -> None:
