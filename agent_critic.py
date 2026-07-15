@@ -25,6 +25,164 @@ from tools import format_report_for_model
 from agent import AgentEvent
 
 
+# ---- Point-and-click VLM grounding (bg object locations) -------------------
+# Coarse 3×3 grid + normalized center — robust across VLMs without bbox support.
+
+_POINTCLICK_GRID_CELLS: tuple[str, ...] = (
+    "left-top", "center-top", "right-top",
+    "left-middle", "center-middle", "right-middle",
+    "left-bottom", "center-bottom", "right-bottom",
+)
+
+_POINTCLICK_GRID_INDEX: dict[str, tuple[int, int]] = {
+    cell: (i % 3, i // 3) for i, cell in enumerate(_POINTCLICK_GRID_CELLS)
+}
+
+_GROUNDING_LINE_RE = re.compile(
+    r"^([a-zA-Z0-9_-]+)\s*:\s*"
+    r"(?:NOT\s+PRESENT|"
+    r"([a-z]+(?:-[a-z]+)?)\s*(?:,\s*)?"
+    r"(?:center\s*~?\s*\(\s*([0-9.]+)\s*,\s*([0-9.]+)\s*\))?)",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def parse_pointclick_scene_assets(
+    plan_text: str, asset_names: list[str],
+) -> dict[str, list[str]]:
+    """Map each bg_* asset to hotspot object labels mentioned in the plan."""
+    names = [str(n) for n in asset_names if n]
+    bgs = sorted(n for n in names if n.lower().startswith("bg_"))
+    skip = re.compile(r"player|walk|idle|_bg$|background$", re.I)
+    sprites = [n for n in names if n not in bgs and not skip.search(n)]
+
+    def _label(name: str) -> str:
+        parts = name.split("_", 1)
+        return parts[1] if len(parts) > 1 else name
+
+    plan_low = (plan_text or "").lower()
+    result: dict[str, list[str]] = {}
+    for bg in bgs:
+        scene = bg[3:] if bg.lower().startswith("bg_") else bg
+        scene_low = scene.replace("_", " ")
+        objs: list[str] = []
+        seen: set[str] = set()
+        for sp in sprites:
+            lab = _label(sp)
+            lab_low = lab.lower()
+            if (
+                scene_low in sp.lower()
+                or lab_low in plan_low
+                or f"{lab_low}:" in plan_low
+                or f"id: '{lab_low}'" in plan_low
+                or f'id: "{lab_low}"' in plan_low
+            ):
+                if lab not in seen:
+                    seen.add(lab)
+                    objs.append(lab)
+        if not objs and len(bgs) == 1:
+            for sp in sprites:
+                lab = _label(sp)
+                if lab not in seen:
+                    seen.add(lab)
+                    objs.append(lab)
+        if objs:
+            result[bg] = objs
+    return result
+
+
+def build_pointclick_grounding_prompt(bg_name: str, object_names: list[str]) -> str:
+    """Ask the VLM for coarse object locations inside one background PNG."""
+    objs = "\n".join(f"- {n}" for n in object_names)
+    cells = ", ".join(_POINTCLICK_GRID_CELLS)
+    return (
+        f"You are locating objects in a point-and-click adventure background "
+        f'image for scene "{bg_name}".\n'
+        f"Divide the image into a 3×3 grid with cells: {cells}.\n"
+        "For EACH object below reply exactly ONE line:\n"
+        "  name: <grid-cell>, center ~ (0.xx, 0.yy)\n"
+        "or if the object is not visible in this image:\n"
+        "  name: NOT PRESENT\n"
+        "Use normalized coordinates where (0,0) is top-left and (1,1) is "
+        "bottom-right of the image.\n\n"
+        f"Objects to locate:\n{objs}\n"
+    )
+
+
+def parse_pointclick_grounding_response(raw: str) -> dict[str, dict[str, Any]]:
+    """Parse VLM grounding lines into {object: {cell, nx, ny} | absent}."""
+    out: dict[str, dict[str, Any]] = {}
+    for line in (raw or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "NOT PRESENT" in line.upper():
+            name = line.split(":", 1)[0].strip().lower()
+            if name:
+                out[name] = {"absent": True}
+            continue
+        m = _GROUNDING_LINE_RE.match(line)
+        if not m:
+            continue
+        name = m.group(1).strip().lower()
+        cell = (m.group(2) or "center-middle").lower()
+        if cell not in _POINTCLICK_GRID_INDEX:
+            # tolerate "right middle" → "right-middle"
+            cell = cell.replace(" ", "-")
+        nx = float(m.group(3)) if m.group(3) else None
+        ny = float(m.group(4)) if m.group(4) else None
+        if nx is None or ny is None:
+            gx, gy = _POINTCLICK_GRID_INDEX.get(cell, (1, 1))
+            nx = (gx + 0.5) / 3.0
+            ny = (gy + 0.5) / 3.0
+        out[name] = {"cell": cell, "nx": nx, "ny": ny, "absent": False}
+    return out
+
+
+def format_pointclick_grounding_block(
+    groundings: dict[str, dict[str, dict[str, Any]]],
+) -> str:
+    """Render harness-facing grounding notes for the coder prompt."""
+    if not groundings:
+        return ""
+    lines = [
+        "================ VLM BACKGROUND GROUNDING ================",
+        "The critic VLM looked at each bg_* PNG and reported where "
+        "objects landed. Use these coordinates when placing hotspot "
+        "rects for objects baked into backgrounds; for separate hotspot "
+        "sprites, draw sprite(h.art) at the rect you choose — clicks "
+        "then match by construction.",
+    ]
+    for bg_name, objs in sorted(groundings.items()):
+        lines.append(f"\nScene {bg_name}:")
+        for obj_name, info in sorted(objs.items()):
+            if info.get("absent"):
+                lines.append(f"  - {obj_name}: NOT PRESENT in background")
+                continue
+            cell = info.get("cell", "?")
+            nx = info.get("nx", 0.5)
+            ny = info.get("ny", 0.5)
+            lines.append(
+                f"  - {obj_name}: {cell}, center ~ ({nx:.2f}, {ny:.2f})"
+            )
+    lines.append("========================================================")
+    return "\n".join(lines)
+
+
+def normalized_to_grid_cell(nx: float, ny: float) -> str:
+    """Map normalized (0-1) center to nearest 3×3 grid cell name."""
+    col = 0 if nx < 0.34 else (2 if nx > 0.66 else 1)
+    row = 0 if ny < 0.34 else (2 if ny > 0.66 else 1)
+    return _POINTCLICK_GRID_CELLS[row * 3 + col]
+
+
+def grid_cell_distance(cell_a: str, cell_b: str) -> int:
+    """Chebyshev distance between two grid cell names."""
+    ax, ay = _POINTCLICK_GRID_INDEX.get(cell_a.lower(), (1, 1))
+    bx, by = _POINTCLICK_GRID_INDEX.get(cell_b.lower(), (1, 1))
+    return max(abs(ax - bx), abs(ay - by))
+
+
 class CriticMixin:
 
     """VLM / visual playtest / autonomous critic for GameAgent."""
@@ -3898,5 +4056,224 @@ class CriticMixin:
 
             )
 
+
+
+    def _pointclick_grounding_applicable(self) -> bool:
+        """True when this session is a point-and-click adventure."""
+        try:
+            from prompts_v1 import _detect_point_and_click_intent
+            if _detect_point_and_click_intent(self._goal or ""):
+                return True
+        except Exception:
+            pass
+        recipe_id = getattr(self, "_active_visual_playtest_recipe_id", None)
+        if recipe_id == "canvas-point-and-click":
+            return True
+        try:
+            recipe, _ = self._memory.find_visual_playtest_for(goal=self._goal or "")
+            if recipe and recipe.id == "canvas-point-and-click":
+                return True
+        except Exception:
+            pass
+        return False
+
+    async def _run_pointclick_grounding_vlm(
+        self, png_bytes: bytes, prompt: str,
+    ) -> str:
+        """Send one bg PNG + prompt to critic backend or local MLX VLM."""
+        backend = self.get_backend("critic")
+        if backend is not None:
+            try:
+                if await backend.is_vlm():
+                    messages = [{
+                        "role": "user",
+                        "content": prompt,
+                        "images": [png_bytes],
+                    }]
+                    result = await backend.stream_chat(
+                        messages,
+                        options={"temperature": 0.1, "num_ctx": 4096},
+                        keep_alive=self._keep_alive_for_backend(backend),
+                        stall_seconds=90.0,
+                        overall_seconds=180.0,
+                        max_retries=0,
+                    )
+                    return (result.text or "").strip()
+            except Exception as exc:
+                self._trace({
+                    "kind": "pointclick_grounding_backend_error",
+                    "err": str(exc)[:200],
+                })
+        if self._ensure_local_vlm_path():
+            try:
+                from vision_judge import run_local_vlm_prompt
+                return await run_local_vlm_prompt(
+                    prompt=prompt,
+                    images=[png_bytes],
+                    model_path=self._local_vlm_path,
+                )
+            except Exception as exc:
+                self._trace({
+                    "kind": "pointclick_grounding_local_vlm_error",
+                    "err": str(exc)[:200],
+                })
+        return ""
+
+    async def _maybe_run_pointclick_vlm_grounding(
+        self,
+        produced: dict[str, Any],
+        *,
+        plan_text: str = "",
+    ) -> None:
+        """After bg_* generation, ask VLM where planned objects landed."""
+        if not getattr(self, "_use_vlm_critique", False):
+            return
+        if not self._pointclick_grounding_applicable():
+            return
+        bg_paths = {
+            str(k): v for k, v in produced.items()
+            if str(k).lower().startswith("bg_")
+        }
+        if not bg_paths:
+            return
+        scene_map = parse_pointclick_scene_assets(
+            plan_text, list(produced.keys()),
+        )
+        if not scene_map:
+            # Fall back: ask VLM to locate generic adventure objects.
+            for bg in bg_paths:
+                scene_map[bg] = ["door", "npc", "item"]
+        groundings: dict[str, dict[str, dict[str, Any]]] = {}
+        for bg_name, obj_names in scene_map.items():
+            path = bg_paths.get(bg_name)
+            if path is None:
+                continue
+            try:
+                png_bytes = path.read_bytes()
+            except Exception:
+                continue
+            prompt = build_pointclick_grounding_prompt(bg_name, obj_names)
+            raw = await self._run_pointclick_grounding_vlm(png_bytes, prompt)
+            parsed = parse_pointclick_grounding_response(raw)
+            if parsed:
+                groundings[bg_name] = parsed
+            self._trace({
+                "kind": "pointclick_grounding_bg",
+                "bg": bg_name,
+                "objects": obj_names,
+                "parsed": list(parsed.keys()),
+                "raw_preview": raw[:240],
+            })
+        if not groundings:
+            return
+        if not hasattr(self, "_pointclick_grounding"):
+            self._pointclick_grounding = {}
+        self._pointclick_grounding.update(groundings)
+        block = format_pointclick_grounding_block(groundings)
+        self._pointclick_grounding_block = block
+        coaching = (
+            "[VLM-GROUNDING] Background object locations from generated "
+            "bg_* PNGs:\n" + block
+        )
+        self._pending_coaching.append(coaching)
+        self._trace({
+            "kind": "pointclick_grounding_queued",
+            "scenes": list(groundings.keys()),
+        })
+
+    async def _verify_pointclick_hotspots_vs_grounding(
+        self, *, iteration: int,
+    ) -> None:
+        """Compare declared hotspot centers to VLM-grounded bg locations."""
+        grounding = getattr(self, "_pointclick_grounding", None) or {}
+        if not grounding or self.browser is None:
+            return
+        data = await self.browser._safe_eval(
+            """
+            (() => {
+              const c = document.querySelector('canvas');
+              const w = c ? (c.width || 800) : 800;
+              const h = c ? (c.height || 600) : 600;
+              const s = window.state || window.gameState || {};
+              const scenes = s.scenes || s.SCENES || {};
+              const sid = s.scene ?? s.currentScene ?? s.location;
+              let sc = scenes[sid];
+              if (!sc && typeof sid === 'number' && Array.isArray(scenes)) {
+                sc = scenes[sid];
+              }
+              if (!sc && typeof scenes === 'object') {
+                const keys = Object.keys(scenes);
+                sc = keys.length ? scenes[keys[0]] : null;
+              }
+              const bg = (sc && sc.bg) || '';
+              const hs = ((sc && sc.hotspots) || []).map(hot => ({
+                id: (hot.id || hot.name || '').toLowerCase(),
+                cx: hot.x + (hot.w || 0) / 2,
+                cy: hot.y + (hot.h || 0) / 2,
+                art: hot.art || '',
+              }));
+              return { canvasW: w, canvasH: h, bg, hotspots: hs };
+            })()
+            """
+        )
+        if not isinstance(data, dict):
+            return
+        bg_key = str(data.get("bg") or "")
+        bg_ground = grounding.get(bg_key) or grounding.get(f"bg_{bg_key}")
+        if not bg_ground:
+            for gk in grounding:
+                if gk.endswith(bg_key) or bg_key.endswith(gk.replace("bg_", "")):
+                    bg_ground = grounding[gk]
+                    bg_key = gk
+                    break
+        if not bg_ground:
+            return
+        cw = float(data.get("canvasW") or 800)
+        ch = float(data.get("canvasH") or 600)
+        mismatches: list[str] = []
+        for hot in data.get("hotspots") or []:
+            if not isinstance(hot, dict):
+                continue
+            hid = str(hot.get("id") or "").lower()
+            if not hid:
+                continue
+            # Sprite-composition hotspots with art: draw rect IS the object.
+            if hot.get("art"):
+                continue
+            ginfo = bg_ground.get(hid)
+            if not ginfo or ginfo.get("absent"):
+                continue
+            cx = float(hot.get("cx") or 0)
+            cy = float(hot.get("cy") or 0)
+            declared_cell = normalized_to_grid_cell(cx / cw, cy / ch)
+            grounded_cell = str(ginfo.get("cell") or "")
+            dist = grid_cell_distance(declared_cell, grounded_cell)
+            if dist > 1:
+                gnx = ginfo.get("nx", 0.5)
+                gny = ginfo.get("ny", 0.5)
+                mismatches.append(
+                    f"{hid}: code center ({cx:.0f},{cy:.0f}) is "
+                    f"{declared_cell} but VLM saw it at {grounded_cell} "
+                    f"~({float(gnx):.2f},{float(gny):.2f}) in {bg_key}"
+                )
+        if not mismatches:
+            return
+        note = (
+            "[VLM-GROUNDING] Hotspot rects do not match where objects "
+            "appear in the background PNG. Move each hotspot to the "
+            "grounded location (or draw the object as a separate sprite "
+            "at the hotspot rect):\n- "
+            + "\n- ".join(mismatches[:6])
+        )
+        fp = self._critic_note_fingerprint(note)
+        if fp in getattr(self, "_recent_critic_note_fingerprints", []):
+            return
+        self._pending_coaching.append(note)
+        self._recent_critic_note_fingerprints.append(fp)
+        self._trace({
+            "kind": "pointclick_grounding_hotspot_mismatch",
+            "iteration": iteration,
+            "mismatches": mismatches[:6],
+        })
 
 

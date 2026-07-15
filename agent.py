@@ -720,6 +720,9 @@ class GameAgent(
         # next user-turn to carry a one-shot corrective note. Drained
         # by _flush_user_injections before any base message is appended.
         self._pending_coaching: list[str] = []
+        # Point-and-click VLM grounding: {bg_name: {object: {cell,nx,ny}}}.
+        self._pointclick_grounding: dict[str, dict[str, dict[str, Any]]] = {}
+        self._pointclick_grounding_block: str = ""
         # A5: track consecutive same-signature errors to drive runtime-
         # state probe coaching.
         self._last_mistake_sig: str | None = None
@@ -5838,6 +5841,7 @@ class GameAgent(
                     b for b in (
                         seed_media_contract, asset_block, sound_block,
                         video_block,
+                        getattr(self, "_pointclick_grounding_block", "") or "",
                     ) if b
                 )
                 if prelude:
@@ -6040,7 +6044,10 @@ class GameAgent(
                     self._session_videos, self.out_path,
                 )
                 prelude = "\n\n".join(
-                    b for b in (asset_block, sound_block, video_block) if b
+                    b for b in (
+                        asset_block, sound_block, video_block,
+                        getattr(self, "_pointclick_grounding_block", "") or "",
+                    ) if b
                 )
                 if prelude:
                     build_msg = prelude + "\n\n" + build_msg
@@ -8774,6 +8781,19 @@ class GameAgent(
                                 "iteration": iteration,
                                 "reason": "no_vlm_backend_available",
                             })
+            # Point-and-click: compare declared hotspot rects to VLM
+            # grounding from generated bg PNGs.
+            if getattr(self, "_use_vlm_critique", False):
+                try:
+                    await self._verify_pointclick_hotspots_vs_grounding(
+                        iteration=iteration,
+                    )
+                except Exception as exc:
+                    self._trace({
+                        "kind": "pointclick_grounding_verify_error",
+                        "iteration": iteration,
+                        "error": str(exc)[:200],
+                    })
             try:
                 async for _ob_ev in self._run_opening_book_sidecars(report, iteration):
                     yield _ob_ev

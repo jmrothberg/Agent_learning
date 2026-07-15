@@ -364,6 +364,7 @@ def test_pointclick_visual_recipe_has_alignment_checklist():
     )
     checklist = visual["recipe"].get("checklist") or []
     assert any("debug boxes" in q.lower() for q in checklist)
+    assert any("hotspot debug" in q.lower() for q in checklist)
     probes = visual["recipe"].get("auto_probes") or []
     names = {p.get("name") for p in probes}
     assert "auto_pointclick_hotspot_centers_exposed" in names
@@ -413,4 +414,58 @@ def test_pointclick_state_scenes_playbook_exists():
     rec = _jsonl_record("memory/playbook.jsonl", "id", "pointclick-state-scenes-wiring")
     assert "state.scenes" in rec["content"]
     assert "drawImage" in rec["content"]
+    assert "art" in rec["content"]
+
+
+def test_pointclick_hotspot_playbook_sprite_composition():
+    rec = _jsonl_record(
+        "memory/playbook.jsonl", "id", "pointclick-hotspot-from-source-art",
+    )
+    assert "EMPTY bg_" in rec["content"] or "empty bg_" in rec["content"].lower()
+    assert "sprite(h.art)" in rec["content"]
+    assert "measure rects on the native" not in rec["content"]
+
+
+def test_pointclick_assets_format_rule_in_prompts():
+    blob = " ".join(prompts_v1.ASSETS_FORMAT.guidelines)
+    assert "POINT-AND-CLICK" in blob or "point-and-click" in blob.lower()
+    assert "EMPTY" in blob or "empty" in blob.lower()
+
+
+def test_parse_pointclick_grounding_response():
+    from agent_critic import parse_pointclick_grounding_response
+
+    raw = (
+        "banana: left-bottom, center ~ (0.15, 0.85)\n"
+        "monkey: NOT PRESENT\n"
+        "door: right-middle, center ~ (0.85, 0.45)\n"
+    )
+    parsed = parse_pointclick_grounding_response(raw)
+    assert parsed["banana"]["cell"] == "left-bottom"
+    assert abs(parsed["banana"]["nx"] - 0.15) < 0.01
+    assert parsed["monkey"]["absent"] is True
+    assert parsed["door"]["cell"] == "right-middle"
+
+
+def test_parse_pointclick_scene_assets():
+    from agent_critic import parse_pointclick_scene_assets
+
+    plan = "docks scene with banana and monkey npc; tavern with bartender"
+    assets = [
+        "bg_docks", "bg_tavern", "item_banana", "npc_monkey", "npc_bartender",
+        "player_idle",
+    ]
+    m = parse_pointclick_scene_assets(plan, assets)
+    assert "bg_docks" in m
+    assert "banana" in m["bg_docks"]
+    assert "bg_tavern" in m
+    assert "bartender" in m["bg_tavern"]
+
+
+def test_grid_cell_distance():
+    from agent_critic import grid_cell_distance, normalized_to_grid_cell
+
+    assert grid_cell_distance("left-top", "right-bottom") == 2
+    assert normalized_to_grid_cell(0.1, 0.1) == "left-top"
+    assert normalized_to_grid_cell(0.9, 0.5) == "right-middle"
 

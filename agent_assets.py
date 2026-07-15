@@ -1877,6 +1877,24 @@ class AssetGenerationMixin:
 
                     ))
 
+                # Point-and-click: when VLM critique is on, ground bg_* PNGs
+                # so hotspot rects can match where objects actually landed.
+                if produced and trigger == "phase_a":
+                    try:
+                        await self._maybe_run_pointclick_vlm_grounding(
+                            produced,
+                            plan_text=(
+                                (getattr(self, "_criteria", None) or "")
+                                + "\n"
+                                + (reply or "")
+                            ),
+                        )
+                    except Exception as exc:
+                        self._trace({
+                            "kind": "pointclick_grounding_error",
+                            "err": str(exc)[:200],
+                        })
+
                 # Per-asset success timing: one line each when small,
 
                 # else a summary. Cache hits (gen_seconds≈0) called out.

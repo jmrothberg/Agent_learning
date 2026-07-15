@@ -327,6 +327,14 @@ ASSETS_FORMAT = FormatSpec(
         "When the harness returns no asset paths in the first-build "
         "prompt, Z-Image-Turbo was not reachable on this machine; only "
         "THEN fall back to procedural drawing (ctx.fillRect / ctx.arc).",
+        "POINT-AND-CLICK / HOTSPOT GAMES: bg_* prompts MUST describe an "
+        "EMPTY environment only — walls, floor, sky, distant scenery; "
+        "explicitly EXCLUDE people, NPCs, doors, items, and any object "
+        "the player will click ('empty tavern interior, no people, no bar "
+        "counter in frame'). Every clickable object gets its own transparent "
+        "sprite (npc_*, item_*, prop_*) and a hotspot {art,x,y,w,h}; the "
+        "game draws sprite(h.art) at the hotspot rect so clicks match the "
+        "picture without measuring the PNG.",
     ],
     guidelines_small=[
         "EMIT <assets> for any canvas game with visual entities the player "
