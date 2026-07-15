@@ -48,7 +48,7 @@ def _check_expect(plan_reply: str, expect: dict) -> dict:
     """Return {pass, checks{...}, counts{...}} for one prompt's critical feature."""
     criteria = (GameAgent._extract_criteria(plan_reply) or "")
     probes = GameAgent._extract_probes(plan_reply) or []
-    assets, _dropped = parse_assets_block_with_meta(plan_reply)
+    assets, _dropped, _ = parse_assets_block_with_meta(plan_reply)
     asset_names = [str(a.get("name", "")).lower() for a in assets]
     crit_l = criteria.lower()
 

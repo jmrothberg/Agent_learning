@@ -222,6 +222,26 @@ Per-run scores live in **`eval/OPERATIONS.md`** (run_06 snapshot). Mid-batch har
 - User feedback naming sprites **already in `_session_assets`** should get wire/draw coaching, not `ASSET GENERATION REQUIRED`.
 - **Per-entity unique art** ("each tower its own unique head sprite") must stay armed through vague retry nudges — do not fuzzy-match an existing `*_head_*` asset and clear `_unhonored_asset_request`.
 
+### run_vlm10 batch (Jul 2026) — durable learnings
+
+10-game Qwen 27B + VLM batch: **5 fresh pass**, **2 artifact pass**, **3 fresh fail**
+(PoP, Monkey Island, Dragon's Lair).
+
+| Pattern | Fix (harness/memory) |
+|---------|----------------------|
+| **7/10 iter-1 `ASSETS_LOADED_BUT_UNDRAWN`** | First-build `generated_sprite_draw_contract()` inline + pin `draw-generated-sprites-not-boxes` at plan stage when assets exist |
+| **`ASSETS_DROPPED_PENDING` (Dragon's Lair)** | Persist dropped specs; `_maybe_autogen_pending_dropped_assets()` at iter start; exclude from `_failure_blames_code` writeback |
+| **Malformed Phase-A probes (OutRun)** | `_lint_probe_syntax()` + one-shot plan re-stream before first build |
+| **`HOTSPOT_ALIGNMENT_MISS` (Monkey Island)** | Actionable coords in warning; pin `pointclick-hotspot-from-source-art`; gbox fix_hint on `canvas-point-and-click` |
+| **Post-clean regression (OutRun iter 3–4)** | `_post_clean_shrink_detected` when file shrinks >20% after clean iter; regression prompt leads with revert-to-best |
+| **Chess audit misrouted to PoP** | Narrow `chess-path-walk-no-teleport` tags — drop generic `walk`/`path`/`teleport` (matched platformer goals) |
+| **`auto_*` probe lint noise** | Skip recipe-injected `auto_*` probes in `_probes_referencing_unassigned_props` — model cannot fix alias-tolerant harness probes |
+| **Platformer `jump_works` races landing** | `outline-side-scroll-platformer` probes: assert `vy<0` or `onGround` flip within ~300ms, not `y!==y0` after landing |
+
+**Deferred (noted, not fixed):** QTE `no_action_frame_captured` — harness never captures an action frame during the QTE window for `canvas-cutscene-qte`, so the VLM pose-change question is always skipped; needs dispatch-during-window plumbing in a separate task.
+
+Re-validate failures only: `eval/tune_run_vlm10_failed3.sh` (3 goals, fresh Python process).
+
 ## Read order
 
 **New harness agent:** start with **§ “New agent — harness improvement”** at the top of this file,

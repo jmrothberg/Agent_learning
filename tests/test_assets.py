@@ -141,23 +141,30 @@ def test_parse_with_meta_surfaces_dropped_names():
     reply = '<assets>' + str([
         {"name": f"sprite_{i}", "prompt": f"p{i}"} for i in range(n)
     ]).replace("'", '"') + '</assets>'
-    specs, dropped = parse_assets_block_with_meta(reply)
+    specs, dropped, dropped_specs = parse_assets_block_with_meta(reply)
     assert len(specs) == cap
     assert dropped == [f"sprite_{i}" for i in range(cap, n)]
-    # First cap names are kept, last 5 are dropped.
+    assert len(dropped_specs) == 5
+    assert dropped_specs[0]["name"] == f"sprite_{cap}"
     kept_names = {s["name"] for s in specs}
     assert f"sprite_0" in kept_names
     assert f"sprite_{cap - 1}" in kept_names
     assert f"sprite_{cap}" not in kept_names
 
 
+def test_autogen_pending_dropped_assets_method_exists():
+    from agent_assets import AssetGenerationMixin
+    assert hasattr(AssetGenerationMixin, "_maybe_autogen_pending_dropped_assets")
+
+
 def test_parse_with_meta_no_overflow_returns_empty_dropped():
     """Happy path — request fits under cap, no dropped names."""
     from assets import parse_assets_block_with_meta
     reply = '<assets>[{"name":"a","prompt":"p"},{"name":"b","prompt":"q"}]</assets>'
-    specs, dropped = parse_assets_block_with_meta(reply)
+    specs, dropped, dropped_specs = parse_assets_block_with_meta(reply)
     assert len(specs) == 2
     assert dropped == []
+    assert dropped_specs == []
 
 
 def test_parse_malformed_json_returns_empty():

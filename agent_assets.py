@@ -909,7 +909,86 @@ class AssetGenerationMixin:
 
         return kept, dropped
 
+    async def _maybe_autogen_pending_dropped_assets(
+        self,
+    ) -> AsyncIterator[AgentEvent]:
+        """Generate harness-dropped sprites without waiting for the model.
 
+        run_vlm10 Dragon's Lair: Phase A overflow dropped 4 PNGs; the model
+        never re-emitted <assets> within the 3-iter cap. Autogen here.
+        """
+        specs = list(getattr(self, "_pending_dropped_asset_specs", None) or [])
+        if not specs:
+            return
+        missing = [
+            s for s in specs
+            if str(s.get("name") or "").strip()
+            and str(s["name"]) not in (getattr(self, "_session_assets", None) or {})
+        ]
+        if not missing:
+            self._pending_dropped_asset_specs = []
+            self._pending_dropped_assets = []
+            return
+        cap = getattr(self, "_session_asset_cap", None)
+        batch = missing[: cap if cap else len(missing)]
+        yield self._record(AgentEvent(
+            "info",
+            f"autogen: generating {len(batch)} harness-dropped sprite(s) "
+            f"({', '.join(str(s.get('name') or '') for s in batch[:6])})",
+        ))
+        if self._asset_generator is None:
+            self._asset_generator = await asyncio.to_thread(
+                try_load_image_generator,
+            )
+        if self._asset_generator is None:
+            yield self._record(AgentEvent(
+                "info",
+                "autogen skipped: image generator unavailable",
+            ))
+            return
+        session_assets_dir = self.out_path.parent / f"{self._session_id}_assets"
+        try:
+            produced = await asyncio.to_thread(
+                generate_assets,
+                batch,
+                session_assets_dir,
+                image_generator=self._asset_generator,
+            )
+        except Exception as e:
+            yield self._record(AgentEvent(
+                "info",
+                f"autogen failed: {e!r} — model must re-request assets.",
+            ))
+            return
+        if produced:
+            self._session_assets.update(produced)
+            produced_names = set(produced.keys())
+            self._pending_dropped_assets = [
+                n for n in (getattr(self, "_pending_dropped_assets", None) or [])
+                if n not in produced_names
+            ]
+            self._pending_dropped_asset_specs = [
+                s for s in specs
+                if str(s.get("name") or "") not in produced_names
+            ]
+            self._trace({
+                "kind": "dropped_assets_autogen",
+                "requested": len(batch),
+                "produced": list(produced.keys()),
+            })
+            yield self._record(AgentEvent(
+                "info",
+                f"autogen: generated {len(produced)}/{len(batch)} dropped "
+                f"sprites at {session_assets_dir}",
+            ))
+            block = render_asset_paths_block(produced, self.out_path)
+            if block:
+                self._queue_internal_feedback(
+                    "HARNESS AUTOGEN: sprites dropped by the per-turn cap "
+                    "were generated for you:\n"
+                    f"{block}\n"
+                    "Wire these paths into drawImage/sprite() now."
+                )
 
     async def _maybe_generate_assets_and_sounds(
 
@@ -979,10 +1058,10 @@ class AssetGenerationMixin:
 
         session_cap = getattr(self, "_session_asset_cap", None)
 
-        asset_specs, dropped_asset_names = parse_assets_block_with_meta(
-
-            reply, max_assets=session_cap,
-
+        asset_specs, dropped_asset_names, dropped_asset_specs = (
+            parse_assets_block_with_meta(
+                reply, max_assets=session_cap,
+            )
         )
 
         sound_specs = parse_sounds_block(reply)
@@ -1451,6 +1530,18 @@ class AssetGenerationMixin:
                 if _dn not in pending:
                     pending.append(_dn)
             self._pending_dropped_assets = pending
+            pending_specs = list(
+                getattr(self, "_pending_dropped_asset_specs", None) or []
+            )
+            by_name = {
+                str(s.get("name") or ""): s
+                for s in pending_specs if s.get("name")
+            }
+            for spec in dropped_asset_specs:
+                nm = str(spec.get("name") or "").strip()
+                if nm:
+                    by_name[nm] = spec
+            self._pending_dropped_asset_specs = list(by_name.values())
 
             yield self._record(AgentEvent(
 
@@ -1681,6 +1772,11 @@ class AssetGenerationMixin:
                     self._pending_dropped_assets = [
                         n for n in self._pending_dropped_assets
                         if n not in produced
+                    ]
+                if produced and getattr(self, "_pending_dropped_asset_specs", None):
+                    self._pending_dropped_asset_specs = [
+                        s for s in self._pending_dropped_asset_specs
+                        if str(s.get("name") or "") not in produced
                     ]
 
                 per_asset = getattr(

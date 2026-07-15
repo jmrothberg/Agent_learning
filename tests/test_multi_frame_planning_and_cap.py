@@ -121,21 +121,21 @@ def _assets_reply_with_n_specs(n: int) -> str:
 
 def test_assets_default_cap_24_truncates_larger_rosters():
     reply = _assets_reply_with_n_specs(36)
-    specs, dropped = parse_assets_block_with_meta(reply)
+    specs, dropped, _ = parse_assets_block_with_meta(reply)
     assert len(specs) == 24
     assert len(dropped) == 12
 
 
 def test_assets_explicit_cap_lets_full_roster_land():
     reply = _assets_reply_with_n_specs(36)
-    specs, dropped = parse_assets_block_with_meta(reply, max_assets=72)
+    specs, dropped, _ = parse_assets_block_with_meta(reply, max_assets=72)
     assert len(specs) == 36
     assert dropped == []
 
 
 def test_assets_raised_cap_still_caps_at_its_value():
     reply = _assets_reply_with_n_specs(80)
-    specs, dropped = parse_assets_block_with_meta(reply, max_assets=72)
+    specs, dropped, _ = parse_assets_block_with_meta(reply, max_assets=72)
     assert len(specs) == 72
     assert len(dropped) == 8
 
@@ -145,7 +145,7 @@ def test_assets_cap_min_one_no_zero_truncation():
     # The implementation should clamp to ≥1; if it ever doesn't, this
     # test will alert us.
     reply = _assets_reply_with_n_specs(5)
-    specs, dropped = parse_assets_block_with_meta(reply, max_assets=0)
+    specs, dropped, _ = parse_assets_block_with_meta(reply, max_assets=0)
     assert len(specs) == 1
 
 

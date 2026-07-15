@@ -884,8 +884,9 @@ def _criteria_coverage_gaps(criteria_text: str, probes: list[dict]) -> list[str]
 # a short load test — it blocked ok=True forever and distracted the model.
 # Sustained-performance criteria stay advisory (criteria_uncovered) only.
 _PERF_CRITERION_RE = re.compile(
-    r"\b(fps|frame\s?rates?|frames\s+per\s+second|stress(?:\s|-)?test\w*|"
-    r"stress|slow(?:s|ing)?\s?down|slowdowns?|lag\w*|jank\w*|performance)\b",
+    r"\b(fps|frame\s?rates?|frames\s+per\s+second|frame\s+rate|"
+    r"stress(?:\s|-)?test\w*|stress|slow(?:s|ing)?\s?down|slowdowns?|"
+    r"lag\w*|jank\w*|performance|memory\s+leak)\b",
     re.IGNORECASE,
 )
 
@@ -3883,6 +3884,11 @@ class LiveBrowser:
         except Exception:
             pass
 
+        await self._enable_harness_alignment_debug(
+            visual_recipe_id=visual_recipe_id,
+            goal=goal,
+        )
+
         # ---- screenshot (always taken; saved if path given) ---------------
         screenshot_saved: str | None = None
         if screenshot_path is not None:
@@ -5154,6 +5160,145 @@ class LiveBrowser:
             result["errors"].append(f"gather:{e}")
         return result
 
+    async def _enable_harness_alignment_debug(
+        self,
+        *,
+        visual_recipe_id: str | None,
+        goal: str | None,
+    ) -> None:
+        """Turn on alignment debug overlays before screenshots/VLM critique."""
+        import asyncio
+
+        if self._page is None:
+            return
+        rid = str(visual_recipe_id or "")
+        gl = (goal or "").lower()
+        qteish = any(
+            w in gl
+            for w in ("qte", "dragon", "lair", "quick-time", "cutscene", "peril")
+        )
+        if rid not in ("canvas-point-and-click", "canvas-cutscene-qte") and not (
+            pointclick_opening_book_applicable(goal or "", rid) or qteish
+        ):
+            return
+        try:
+            await self._page.evaluate(
+                """
+                () => {
+                  window.__harnessAlignmentDebug = true;
+                  window.dispatchEvent(new Event('resize'));
+                }
+                """
+            )
+            await asyncio.sleep(0.2)
+        except Exception:
+            pass
+
+    async def _pointclick_hotspot_click_verify(self) -> dict[str, Any]:
+        """Click hotspot center(s) and expect dialog/inventory/scene delta."""
+        import asyncio
+
+        if self._page is None:
+            return {"skipped": True}
+        pre = await self._safe_eval(
+            """
+            (() => {
+              const s = window.state || window.gameState || {};
+              return JSON.stringify({
+                scene: s.scene ?? s.currentScene ?? s.location,
+                invLen: Array.isArray(s.inventory) ? s.inventory.length : -1,
+                dialog: !!(s.dialog && (s.dialog.open || s.dialog.lines || s.dialog.text))
+                  || !!(s.dialogue || s.message || s.caption),
+              });
+            })()
+            """
+        )
+        centers = await self._safe_eval(
+            """
+            (() => {
+              if (typeof window.__harnessHotspotCenters === 'function') {
+                return window.__harnessHotspotCenters();
+              }
+              const s = window.state || window.gameState || {};
+              const root = window.SCENES || window.scenes || s.SCENES || s.scenes;
+              const sceneList = Array.isArray(root) ? root :
+                (root && typeof root === 'object' ? Object.values(root) : []);
+              const idx = s.scene ?? s.currentScene ?? s.location ?? 0;
+              const sc = sceneList[typeof idx === 'number' ? idx : 0] || sceneList[0];
+              const hs = (sc && sc.hotspots) || [];
+              return hs.filter(h => h && typeof h.x === 'number').map(h => ({
+                id: h.id || h.name || '',
+                cx: h.x + (h.w || 0) / 2,
+                cy: h.y + (h.h || 0) / 2,
+              }));
+            })()
+            """
+        )
+        if not isinstance(centers, list) or not centers:
+            return {"skipped": True}
+        target = centers[0]
+        if not isinstance(target, dict):
+            return {"skipped": True}
+        cx = target.get("cx")
+        cy = target.get("cy")
+        if not isinstance(cx, (int, float)) or not isinstance(cy, (int, float)):
+            return {"skipped": True}
+        rect = await self._safe_eval(
+            """
+            (() => {
+              const c = document.querySelector('canvas');
+              if (!c) return null;
+              const r = c.getBoundingClientRect();
+              const sx = r.width / (c.clientWidth || r.width || 1);
+              const sy = r.height / (c.clientHeight || r.height || 1);
+              return { left: r.left, top: r.top, sx, sy };
+            })()
+            """
+        )
+        if not isinstance(rect, dict):
+            return {"ok": False, "hard": False, "err": "HOTSPOT_ALIGNMENT_MISS: no canvas rect"}
+        vx = float(rect["left"]) + float(cx) * float(rect.get("sx") or 1)
+        vy = float(rect["top"]) + float(cy) * float(rect.get("sy") or 1)
+        try:
+            await self._page.mouse.click(vx, vy)
+        except Exception as e:
+            return {
+                "ok": False,
+                "hard": True,
+                "err": f"HOTSPOT_ALIGNMENT_MISS: click failed ({e})",
+            }
+        await asyncio.sleep(0.35)
+        post = await self._safe_eval(
+            """
+            (() => {
+              const s = window.state || window.gameState || {};
+              return JSON.stringify({
+                scene: s.scene ?? s.currentScene ?? s.location,
+                invLen: Array.isArray(s.inventory) ? s.inventory.length : -1,
+                dialog: !!(s.dialog && (s.dialog.open || s.dialog.lines || s.dialog.text))
+                  || !!(s.dialogue || s.message || s.caption),
+              });
+            })()
+            """
+        )
+        if pre != post:
+            return {"ok": True}
+        hid = target.get("id") or "hotspot"
+        has_helper = await self._safe_eval(
+            "typeof window.__harnessHotspotCenters==='function'"
+        )
+        return {
+            "ok": False,
+            "hard": bool(has_helper),
+            "err": (
+                f"HOTSPOT_ALIGNMENT_MISS: hotspot {hid!r} art-center "
+                f"({cx:.0f},{cy:.0f}) → viewport click ({vx:.0f},{vy:.0f}) "
+                f"produced no scene/inventory/dialog change (pre={pre!s}, "
+                f"post={post!s}). Fix: ONE gbox() mapper for drawImage AND "
+                f"hit-test — measure box on source PNG, map art→canvas once."
+            ),
+        }
+
     async def _run_opening_book_recipes(
         self,
         path: Path,
@@ -5296,6 +5441,16 @@ class LiveBrowser:
                         "point-and-click puzzle chain not exposed: " + missing
                     ),
                 })
+                if ok:
+                    click_res = await self._pointclick_hotspot_click_verify()
+                    if isinstance(click_res, dict) and not click_res.get("skipped"):
+                        if not click_res.get("ok"):
+                            check["ok"] = False
+                            if click_res.get("hard"):
+                                check["hard"] = True
+                            check["err"] = str(click_res.get("err") or "HOTSPOT_ALIGNMENT_MISS")
+                        else:
+                            check["hotspot_click_ok"] = True
             elif rtype == "state_expr":
                 # Generic ADVISORY runtime check: evaluate a self-contained JS
                 # boolean expression in the page. Never hard-gates (hard=False)

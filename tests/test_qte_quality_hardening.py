@@ -235,6 +235,28 @@ def test_probe_lint_flags_fragile_scene_ge_one():
     assert any(f["kind"] == "fragile_initial_scene_index" for f in findings)
 
 
+def test_lint_probe_syntax_catches_missing_paren():
+    import shutil
+    if not shutil.which("node"):
+        return
+    bad = [{
+        "name": "acceleration_works",
+        "expr": (
+            "(async()=>{window.dispatchEvent(new KeyboardEvent('keydown',"
+            "{code:'ArrowUp',bubbles:true});return true;})()"
+        ),
+    }]
+    findings = GameAgent._lint_probe_syntax(bad)
+    assert findings
+    assert findings[0]["kind"] == "syntax_error"
+
+
+def test_hotspot_alignment_err_includes_viewport_coords():
+    src = Path(__file__).parent.parent.joinpath("tools.py").read_text()
+    assert "viewport click" in src
+    assert "gbox() mapper" in src
+
+
 def test_chat_feedback_ledger_is_write_honest():
     src = inspect.getsource(chat_module.CodingBoxApp._handle_event)
     assert '"wrote"' in src
@@ -320,4 +342,75 @@ def test_qte_outline_probes_out_of_window_rejection():
     probes = " ".join(outline["recipe"].get("probes") or [])
     assert "OUT of window" in probes
     assert "no success" in probes
+
+
+def test_qte_recipe_has_threat_position_probe():
+    """canvas-cutscene-qte must verify hazard visibly approaches hero."""
+    visual = _jsonl_record(
+        "memory/visual_playtests.jsonl", "id", "canvas-cutscene-qte"
+    )
+    probes = visual["recipe"].get("auto_probes") or []
+    gate = [p for p in probes if p.get("name") == "auto_qte_threat_position_advances"]
+    assert gate, "missing auto_qte_threat_position_advances probe"
+    expr = gate[0]["expr"]
+    assert "__harnessThreatSample" in expr
+    checklist = visual["recipe"].get("checklist") or []
+    assert any("hazard" in q.lower() and "closer" in q.lower() for q in checklist)
+
+
+def test_pointclick_visual_recipe_has_alignment_checklist():
+    visual = _jsonl_record(
+        "memory/visual_playtests.jsonl", "id", "canvas-point-and-click"
+    )
+    checklist = visual["recipe"].get("checklist") or []
+    assert any("debug boxes" in q.lower() for q in checklist)
+    probes = visual["recipe"].get("auto_probes") or []
+    names = {p.get("name") for p in probes}
+    assert "auto_pointclick_hotspot_centers_exposed" in names
+
+
+def test_spatial_alignment_playbooks_exist():
+    for pid in (
+        "spatial-interaction-alignment-general",
+        "pointclick-hotspot-from-source-art",
+        "qte-hazard-body-alignment",
+    ):
+        rec = _jsonl_record("memory/playbook.jsonl", "id", pid)
+        assert "__harnessAlignmentDebug" in rec["content"] or "hazardPath" in rec["content"]
+
+
+def test_qte_skeleton_exposes_harness_threat_sample():
+    skel = (ROOT / "memory/skeletons/canvas_cutscene_qte_basic.html").read_text()
+    assert "__harnessThreatSample" in skel
+    assert "__harnessAlignmentDebug" in skel
+
+
+def test_spatial_alignment_plan_nudge_loads():
+    assert prompts_v1._detect_spatial_alignment_intent(
+        "monkey island point and click adventure with hotspots"
+    )
+    body = prompts_v1.plan_instruction(
+        goal="Build a Dragon's Lair QTE with duck jump sword hazards",
+        model_class="large",
+    )
+    assert "SPATIAL ALIGNMENT" in body or "hazardPath" in body
+
+
+def test_point_and_click_plan_nudge_loads():
+    kws = prompts_v1._detect_point_and_click_intent(
+        "Build a Monkey Island point and click adventure with inventory"
+    )
+    assert kws
+    body = prompts_v1.plan_instruction(
+        goal="Build a Monkey Island point and click adventure with inventory",
+        model_class="large",
+    )
+    assert "POINT-AND-CLICK" in body
+    assert "state.scenes" in body
+
+
+def test_pointclick_state_scenes_playbook_exists():
+    rec = _jsonl_record("memory/playbook.jsonl", "id", "pointclick-state-scenes-wiring")
+    assert "state.scenes" in rec["content"]
+    assert "drawImage" in rec["content"]
 

@@ -320,6 +320,38 @@
     }
     rafHandle = requestAnimationFrame(frame);
   }
+  const hero = { x: 0.5, y: 0.72, scale: 1, facing: 1 };
+  function heroBoxes(h) {
+    const cx = h.x * W, feetY = h.y * H, s = h.scale || 1;
+    return {
+      body: { x: cx - 28 * s, y: feetY - 110 * s, w: 56 * s, h: 90 * s },
+      head: { x: cx - 20 * s, y: feetY - 150 * s, w: 40 * s, h: 38 * s },
+      feet: { x: cx, y: feetY },
+      sword: { x: cx + (h.facing || 1) * 22 * s, y: feetY - 105 * s, w: 70 * s, h: 16 * s },
+    };
+  }
+  function hazardPosAt(sc, t01) {
+    if (!sc || !sc.hazardPath) return null;
+    return pointOnPath(sc.hazardPath, anticipation(Math.max(0, Math.min(1, t01))));
+  }
+  if (window.__harnessAlignmentDebug === undefined) window.__harnessAlignmentDebug = true;
+  window.__harnessThreatSample = () => {
+    const sc = SCENES[state.scene];
+    if (!sc || !sc.hazardPath) return null;
+    const threatens = sc.hazardPath.threatens || "body";
+    const boxes = heroBoxes(hero);
+    const part = boxes[threatens] || boxes.body;
+    const heroNorm = threatens === "feet"
+      ? { x: hero.x, y: hero.y }
+      : { x: (part.x + (part.w || 0) / 2) / W, y: (part.y + (part.h || 0) / 2) / H };
+    return {
+      cue: hazardPosAt(sc, 0),
+      nearHit: hazardPosAt(sc, 0.85),
+      threatens,
+      hero: heroNorm,
+    };
+  };
+
   enterScene(0);
   window.game = { reset };
   rafHandle = requestAnimationFrame(frame);

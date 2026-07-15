@@ -68,3 +68,12 @@ def test_entity_not_rendered_blames_code():
 def test_clean_report_does_not_blame_code():
     report = {"page_errors": [], "soft_warnings": [], "probes": []}
     assert GameAgent._failure_blames_code(report) is False
+
+
+def test_dropped_assets_pending_does_not_blame_code():
+    report = {
+        "soft_warnings": [
+            "ASSETS_DROPPED_PENDING [hazard_dragon_jaw]: harness per-turn cap",
+        ],
+    }
+    assert GameAgent._failure_blames_code(report) is False

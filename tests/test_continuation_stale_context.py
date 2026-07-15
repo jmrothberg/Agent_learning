@@ -31,6 +31,26 @@ window.state = state;
     assert findings[0]["kind"] == "unassigned_property_read"
 
 
+def test_auto_prefixed_probes_skip_unassigned_property_lint():
+    """Harness-injected auto_* probes use alias chains; model cannot fix them."""
+    probes = [
+        {
+            "name": "auto_platformer_has_multiple_platforms",
+            "expr": (
+                "(()=>{const s=window.state;if(!s)return true;"
+                "const plats=s.platforms||s.floors||s.ground;return true;})()"
+            ),
+        }
+    ]
+    html = """<!doctype html><html><body><script>
+const state = { player: { x: 10, y: 20 } };
+window.state = state;
+</script></body></html>"""
+
+    findings = GameAgent._probes_referencing_unassigned_props(probes, html)
+    assert findings == []
+
+
 def test_unused_media_warning_becomes_stale_context_on_rewrite():
     mp = {
         "warnings": [

@@ -248,15 +248,17 @@ def parse_assets_block(reply: str, *, max_assets: int | None = None) -> list[dic
     but can be raised per-session when the user's goal explicitly asks
     for multi-frame rosters (see `prompts_v1._detect_multi_frame_intent`).
     """
-    specs, _dropped = parse_assets_block_with_meta(reply, max_assets=max_assets)
+    specs, _dropped, _dropped_specs = parse_assets_block_with_meta(
+        reply, max_assets=max_assets,
+    )
     return specs
 
 
 def parse_assets_block_with_meta(
     reply: str, *, max_assets: int | None = None,
-) -> tuple[list[dict], list[str]]:
-    """Same as `parse_assets_block` but also returns the names of any
-    asset specs that were parsed-but-dropped due to the per-turn cap.
+) -> tuple[list[dict], list[str], list[dict]]:
+    """Same as `parse_assets_block` but also returns the names (and full
+    specs) of any asset entries parsed-but-dropped due to the per-turn cap.
 
     Why a separate API: the agent needs to tell the model (and the user)
     when a plan asked for more assets than we'll generate, so the model
@@ -275,10 +277,10 @@ def parse_assets_block_with_meta(
     """
     effective_cap = _MAX_ASSETS_PER_TURN if max_assets is None else max(1, int(max_assets))
     if not reply:
-        return [], []
+        return [], [], []
     body = _extract_assets_body(reply)
     if body is None:
-        return [], []
+        return [], [], []
     body = body.strip()
     body = re.sub(r"^```(?:json|JSON)?\s*\n", "", body)
     body = re.sub(r"\n?```$", "", body).strip()
@@ -309,9 +311,10 @@ def parse_assets_block_with_meta(
         if _inner is not None:
             obj = _inner
     if not isinstance(obj, list):
-        return [], []
+        return [], [], []
     out: list[dict] = []
     dropped: list[str] = []
+    dropped_specs: list[dict] = []
     # Dedupe by (normalized prompt, size). Catches the failure mode where
     # the model spams numbered variants of the same template — e.g. 200×
     # `{"name":"minimap_compiler<N>", "prompt":"green computer","size":"16x16"}`.
@@ -355,9 +358,10 @@ def parse_assets_block_with_meta(
             spec["strength"] = max(0.05, min(1.0, strength))
         if len(out) >= effective_cap:
             dropped.append(name)
+            dropped_specs.append(dict(spec))
             continue
         out.append(spec)
-    return out, dropped
+    return out, dropped, dropped_specs
 
 
 def _parse_size(raw: Any) -> tuple[int, int]:

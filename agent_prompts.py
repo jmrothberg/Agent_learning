@@ -1324,7 +1324,16 @@ class PromptBuildingMixin:
 
         if regressed:
             best = self._read_best_or_empty()
-            return self._p.regression_instruction(report_text, best)
+            base = self._p.regression_instruction(report_text, best)
+            if getattr(self, "_post_clean_shrink_detected", False):
+                base = (
+                    "POST-CLEAN REGRESSION: your last patch broke a WORKING "
+                    "build (file shrank >20% — likely accidental truncation). "
+                    "Revert to the last known-good version below, then apply "
+                    "ONE minimal fix.\n\n"
+                    + base
+                )
+            return base
 
         # Fix C (model-agnostic): when the on-disk file is structurally
         # truncated (open <html>/<body>/<script> without matching close),
@@ -1426,17 +1435,6 @@ class PromptBuildingMixin:
             if blocker_query else self._goal
         )
         ensure_ids = self._playbook_ensure_ids_for_report(report) or None
-        if ensure_ids is None and self._session_assets and any(
-            isinstance(w, str) and "ASSETS_LOADED_BUT_UNDRAWN" in w
-            for w in (report.get("soft_warnings") or [])
-        ):
-            ensure_ids = ["draw-generated-sprites-not-boxes"]
-        elif ensure_ids and self._session_assets and any(
-            isinstance(w, str) and "ASSETS_LOADED_BUT_UNDRAWN" in w
-            for w in (report.get("soft_warnings") or [])
-        ):
-            if "draw-generated-sprites-not-boxes" not in ensure_ids:
-                ensure_ids = list(ensure_ids) + ["draw-generated-sprites-not-boxes"]
         pb_block = self._retrieve_playbook_block(
             fix_query,
             code=self._current_file,

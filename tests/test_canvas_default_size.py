@@ -281,6 +281,10 @@ def test_perf_criterion_detected():
     )
     assert _is_unverifiable_perf_criterion("no slowdown with many enemies")
     assert _is_unverifiable_perf_criterion("frame rate stays stable")
+    assert _is_unverifiable_perf_criterion(
+        "Stress: After 30 punch actions and 20 bullet collisions, "
+        "frame rate stays above 45fps with no memory leak"
+    )
 
 
 def test_behavioral_criterion_not_perf():

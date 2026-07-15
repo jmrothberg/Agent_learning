@@ -102,3 +102,79 @@ def test_playbook_ensure_ids_on_auto_probe_failure(tmp_path: Path) -> None:
     ids = agent._playbook_ensure_ids_for_report(report)
     assert "launch-into-playfield" in ids
     assert "circle-collision-pushout-cooldown" in ids
+
+
+def test_playbook_ensure_ids_on_undrawn_warning(tmp_path: Path) -> None:
+    out = tmp_path / "g.html"
+    out.write_text("<html></html>")
+    agent = GameAgent(
+        model="stub",
+        out_path=out,
+        browser=MagicMock(),
+        max_iters=2,
+        memory_root=str(PROJECT_ROOT / "memory"),
+    )
+    report = {
+        "probes": [],
+        "soft_warnings": [
+            "ASSETS_LOADED_BUT_UNDRAWN [hero_walk1, hero_walk2]",
+        ],
+    }
+    ids = agent._playbook_ensure_ids_for_report(report)
+    assert "draw-generated-sprites-not-boxes" in ids
+    assert "animation-frames-consistent-character" in ids
+
+
+def test_playbook_ensure_ids_on_control_not_recovered(tmp_path: Path) -> None:
+    out = tmp_path / "g.html"
+    out.write_text("<html></html>")
+    agent = GameAgent(
+        model="stub",
+        out_path=out,
+        browser=MagicMock(),
+        max_iters=2,
+        memory_root=str(PROJECT_ROOT / "memory"),
+    )
+    report = {
+        "probes": [],
+        "control_not_recovered": {"key": "ArrowRight", "moved_at_start": True},
+    }
+    ids = agent._playbook_ensure_ids_for_report(report)
+    assert "stun-timer-before-early-return" in ids
+
+
+def test_playbook_ensure_ids_on_camera_moves_probe(tmp_path: Path) -> None:
+    out = tmp_path / "g.html"
+    out.write_text("<html></html>")
+    agent = GameAgent(
+        model="stub",
+        out_path=out,
+        browser=MagicMock(),
+        max_iters=2,
+        memory_root=str(PROJECT_ROOT / "memory"),
+    )
+    report = {
+        "probes": [{"name": "camera_moves", "ok": False}],
+    }
+    ids = agent._playbook_ensure_ids_for_report(report)
+    assert "parallax-coordinate-camera" in ids
+
+
+def test_playbook_ensure_ids_on_hotspot_alignment(tmp_path: Path) -> None:
+    out = tmp_path / "g.html"
+    out.write_text("<html></html>")
+    agent = GameAgent(
+        model="stub",
+        out_path=out,
+        browser=MagicMock(),
+        max_iters=2,
+        memory_root=str(PROJECT_ROOT / "memory"),
+    )
+    report = {
+        "probes": [],
+        "soft_warnings": [
+            "OPENING BOOK CHECK FAILED [pointclick-puzzle-chain]: HOTSPOT_ALIGNMENT_MISS",
+        ],
+    }
+    ids = agent._playbook_ensure_ids_for_report(report)
+    assert "pointclick-hotspot-from-source-art" in ids

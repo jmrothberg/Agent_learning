@@ -233,6 +233,16 @@ def test_report_blocker_query_builds_from_failures():
     assert GameAgent._report_blocker_query(_clean_report()) == ""
 
 
+def test_report_blocker_query_includes_undrawn_and_cnr():
+    q = GameAgent._report_blocker_query({
+        "probes": [],
+        "soft_warnings": ["ASSETS_LOADED_BUT_UNDRAWN [hero_idle]"],
+        "control_not_recovered": {"key": "Space", "moved_at_start": True},
+    })
+    assert "ASSETS_LOADED_BUT_UNDRAWN" in q
+    assert "control not recovered" in q
+
+
 # ---------------------------------------------------------------------------
 # 2. Polish phase
 # ---------------------------------------------------------------------------

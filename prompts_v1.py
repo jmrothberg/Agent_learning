@@ -1091,6 +1091,65 @@ _QTE_KEYWORDS = frozenset({
 })
 
 
+_SPATIAL_ALIGNMENT_KEYWORDS = frozenset({
+    "hotspot", "hotspots", "point-and-click", "pointclick", "monkey",
+    "inventory", "qte", "quick-time", "quicktime", "dragons-lair", "dragon",
+    "lair", "duck", "jump", "sword", "hazard", "telegraph", "clickable",
+    "point-and-click", "adventure", "cutscene", "peril",
+})
+
+
+def _detect_spatial_alignment_intent(goal: str) -> list[str]:
+    """Return spatial-alignment keywords (hotspot/QTE hazard sync) in goal."""
+    if not goal:
+        return []
+    import re
+    words = [w.lower() for w in re.findall(r"[a-zA-Z]+", goal)]
+    seen: set[str] = set()
+    out: list[str] = []
+    gl = goal.lower()
+    for phrase in ("point-and-click", "point and click", "monkey island", "dragon's lair", "dragons lair"):
+        if phrase in gl and phrase not in seen:
+            seen.add(phrase)
+            out.append(phrase)
+    for w in words:
+        if w in _SPATIAL_ALIGNMENT_KEYWORDS and w not in seen:
+            seen.add(w)
+            out.append(w)
+    return out
+
+
+_POINT_AND_CLICK_KEYWORDS = frozenset({
+    "point-and-click", "pointclick", "monkey", "inventory", "hotspot",
+    "hotspots", "adventure", "lucasarts", "sierra", "myst", "maniac",
+    "verb", "dialog", "dialogue", "examine", "pickup", "rooms", "scene",
+    "scenes", "npc", "lucas", "kings", "quest",
+})
+
+
+def _detect_point_and_click_intent(goal: str) -> list[str]:
+    """Return point-and-click adventure keywords found in `goal`."""
+    if not goal:
+        return []
+    import re
+    words = [w.lower() for w in re.findall(r"[a-zA-Z]+", goal)]
+    seen: set[str] = set()
+    out: list[str] = []
+    gl = goal.lower()
+    for phrase in (
+        "point-and-click", "point and click", "monkey island",
+        "maniac mansion", "kings quest", "king's quest",
+    ):
+        if phrase in gl and phrase not in seen:
+            seen.add(phrase)
+            out.append(phrase)
+    for w in words:
+        if w in _POINT_AND_CLICK_KEYWORDS and w not in seen:
+            seen.add(w)
+            out.append(w)
+    return out
+
+
 def _detect_qte_intent(goal: str) -> list[str]:
     """Return timed-reaction/QTE mechanism keywords found in `goal`.
 
@@ -1585,6 +1644,24 @@ def plan_instruction(
         kws = ", ".join(repr(k) for k in qte_keywords)
         qte_nudge = load_plan_nudge("qte").replace("{kws}", kws)
 
+    spatial_alignment_nudge = ""
+    spatial_keywords = _detect_spatial_alignment_intent(goal)
+    if spatial_keywords:
+        kws = ", ".join(repr(k) for k in spatial_keywords)
+        spatial_alignment_nudge = load_plan_nudge("spatial-alignment").replace(
+            "{kws}", kws
+        )
+        _record_nudge("spatial-alignment")
+
+    point_and_click_nudge = ""
+    pointclick_keywords = _detect_point_and_click_intent(goal)
+    if pointclick_keywords:
+        kws = ", ".join(repr(k) for k in pointclick_keywords)
+        point_and_click_nudge = load_plan_nudge("point-and-click").replace(
+            "{kws}", kws
+        )
+        _record_nudge("point-and-click")
+
     franchise_asset_nudge = _franchise_asset_nudge(goal)
 
     # Phase 4: scope-pacing nudge for art-heavy + logic-heavy goals.
@@ -1693,6 +1770,8 @@ def plan_instruction(
         + beat_em_up_nudge + audio_nudge
         + video_nudge
         + qte_nudge
+        + spatial_alignment_nudge
+        + point_and_click_nudge
         + scope_nudge + multi_frame_nudge + minimal_nudge + seed_nudge
     )
 
@@ -1785,6 +1864,9 @@ short.
 
 PROBE ROBUSTNESS — test structure and behavior over time, not one
 frame-specific pixel or exact helper names.
+
+PROBE SYNTAX — each `expr` is eval'd in the page: valid JS, balanced
+`()`, `[]`, `{}`; async probes close the IIFE `(async()=>{...})()`.
 
 EXPECTED — emit an <assets> block whenever the game has visual entities
 the player will see (sprites, characters, projectiles, terrain).
@@ -2013,10 +2095,16 @@ def first_build_instruction(
             f"{playbook_block}\n\n"
             "Apply relevant playbook entries on the first attempt.\n\n"
         )
+    asset_contract = ""
+    if has_generated_assets:
+        asset_contract = (
+            generated_sprite_draw_contract() + "\n\n"
+        )
     base = (
         "Plan accepted. The plan, criteria, and probes are fixed — do NOT "
         "restate requirements or re-plan.\n\n"
         f"{pb}"
+        f"{asset_contract}"
         f"{seed_framing}\n\n"
         "FORMAT CONTRACT: a brief reasoning preamble is fine, but your FIRST "
         "output tag MUST be `<html_file>` and it must contain the COMPLETE "
@@ -2584,9 +2672,10 @@ def regression_instruction(report_text: str, last_good: str) -> str:
         "REGRESSION: the previous iteration passed all tests. Your "
         "latest change introduced these problems:\n\n"
         f"{report_text}\n\n"
-        "LAST KNOWN-GOOD VERSION (this passed all tests). Either send "
-        "patches to revert to behavior similar to it, or re-emit it as "
-        "the COMPLETE game in <html_file>...</html_file>:\n\n"
+        "LAST KNOWN-GOOD VERSION (this passed all tests). Your last patch "
+        "broke a WORKING build — revert to behavior similar to the version "
+        "below (or re-emit it as the COMPLETE game in "
+        "<html_file>...</html_file>):\n\n"
         "```html\n"
         f"{last_good}\n"
         "```"

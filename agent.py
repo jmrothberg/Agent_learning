@@ -1240,6 +1240,9 @@ class GameAgent(
         # Asset names dropped by the per-turn cap (asset_overflow) that still
         # need mid-session generation — re-warned every iter until on disk.
         self._pending_dropped_assets: list[str] = []
+        # Full specs for harness-dropped sprites (name/prompt/size) — autogen
+        # at the next iter boundary instead of waiting for the model to re-emit.
+        self._pending_dropped_asset_specs: list[dict] = []
         # Phase 0.10 — per-session cap on assets generated per <assets>
         # block. Default `None` means "use module default" (24). Raised
         # at session start when the goal explicitly asks for multi-frame
@@ -1247,6 +1250,7 @@ class GameAgent(
         # lets a user-requested N entities × M frames roster land in one
         # turn instead of getting silently truncated to 24.
         self._session_asset_cap: int | None = None
+        self._post_clean_shrink_detected: bool = False
         # Phase 1.5 — autonomous self-feedback loop. Mirrors the chat.py
         # toggle so the agent can check this flag without depending on
         # the TUI. Default ON; /playtest off (alias /feedback off) flips it.
@@ -1609,36 +1613,69 @@ class GameAgent(
             })
         return suppressed
 
+    # Failing model probe name -> playbook ids to pin on fix turns (run_vlm10).
+    _REPORT_PROBE_PLAYBOOK_PINS: dict[str, list[str]] = {
+        "camera_moves": ["parallax-coordinate-camera", "beat-em-up-scroll-spawn"],
+    }
+
     def _playbook_ensure_ids_for_report(self, report: dict) -> list[str]:
-        """Pin playbook bullets linked to the active visual-playtest recipe
-        when one of its auto-probes failed (mechanism-general)."""
+        """Pin playbook bullets for harness blockers and visual-playtest refs."""
+        out: list[str] = []
+
+        def _add(*ids: str) -> None:
+            for bid in ids:
+                s = str(bid).strip()
+                if s and s not in out:
+                    out.append(s)
+
         failing = {
             str(p.get("name") or "")
             for p in (report.get("probes") or [])
             if not p.get("ok")
         }
-        if not failing or not any(n.startswith("auto_") for n in failing):
-            return []
-        recipe_id = getattr(self, "_active_visual_playtest_recipe_id", None)
-        if not recipe_id:
-            return []
-        try:
-            for item in self._memory.load_visual_playtests():
-                if item.id != recipe_id:
-                    continue
-                refs = (getattr(item, "recipe", None) or {}).get("playbook_refs") or {}
-                if not isinstance(refs, dict):
-                    return []
-                out: list[str] = []
-                for val in refs.values():
-                    for bid in val or []:
-                        s = str(bid).strip()
-                        if s and s not in out:
-                            out.append(s)
-                return out
-        except Exception:
-            return []
-        return []
+
+        # Harness-warning pins (run_vlm10: undrawn / control-freeze / frozen canvas).
+        soft = [str(w) for w in (report.get("soft_warnings") or [])]
+        warns = [str(w) for w in (report.get("warnings") or [])]
+        all_w = soft + warns
+        if any("ASSETS_LOADED_BUT_UNDRAWN" in w for w in all_w):
+            _add(
+                "draw-generated-sprites-not-boxes",
+                "animation-frames-consistent-character",
+                "sprite-gen-wait-for-load",
+            )
+        if any("HOTSPOT_ALIGNMENT_MISS" in w for w in soft):
+            _add("pointclick-hotspot-from-source-art")
+        cnr = report.get("control_not_recovered")
+        if cnr or any("CONTROL-NOT-RECOVERED" in w for w in soft):
+            _add("stun-timer-before-early-return")
+        if report.get("frozen_canvas") or any("FROZEN-CANVAS" in w for w in soft):
+            _add("raf-must-start", "ambient-idle-pixel-delta", "frame-trycatch")
+
+        for probe_name, bids in self._REPORT_PROBE_PLAYBOOK_PINS.items():
+            if probe_name in failing:
+                _add(*bids)
+
+        # Visual-playtest auto-probe recipe refs (mechanism-general).
+        if failing and any(n.startswith("auto_") for n in failing):
+            recipe_id = getattr(self, "_active_visual_playtest_recipe_id", None)
+            if recipe_id:
+                try:
+                    for item in self._memory.load_visual_playtests():
+                        if item.id != recipe_id:
+                            continue
+                        refs = (
+                            (getattr(item, "recipe", None) or {}).get("playbook_refs")
+                            or {}
+                        )
+                        if isinstance(refs, dict):
+                            for val in refs.values():
+                                _add(*(val or []))
+                        break
+                except Exception:
+                    pass
+
+        return out
 
     def _retrieve_playbook_block(
         self,
@@ -1812,6 +1849,23 @@ class GameAgent(
                     parts.append(str(vals[0])[:160])
             if report.get("frozen_canvas"):
                 parts.append("frozen canvas animation loop stalled")
+            for w in (report.get("soft_warnings") or []):
+                ws = str(w)
+                if any(
+                    tok in ws
+                    for tok in (
+                        "ASSETS_LOADED_BUT_UNDRAWN",
+                        "CONTROL-NOT-RECOVERED",
+                        "FROZEN-CANVAS",
+                        "PROBE FAILED",
+                    )
+                ):
+                    parts.append(ws[:160])
+            cnr = report.get("control_not_recovered")
+            if isinstance(cnr, dict) and cnr.get("key"):
+                parts.append(
+                    f"control not recovered after {cnr.get('key')}"
+                )
             it = report.get("input_test") or {}
             if it.get("ran") and not it.get("any_change"):
                 parts.append("input keyboard keys not moving player")
@@ -3866,6 +3920,15 @@ class GameAgent(
         if report.get("page_errors"):
             return True
         soft = report.get("soft_warnings") or []
+        non_probe = [
+            str(w) for w in soft
+            if not str(w).startswith("PROBE FAILED [")
+        ]
+        # Harness per-turn cap drops — not a code defect; autogen handles it.
+        if non_probe and all(
+            "ASSETS_DROPPED_PENDING" in w for w in non_probe
+        ):
+            return False
         for w in soft:
             if not str(w).startswith("PROBE FAILED ["):
                 return True
@@ -3952,6 +4015,55 @@ class GameAgent(
         return findings
 
     @staticmethod
+    def _lint_probe_syntax(probes: list[dict]) -> list[dict]:
+        """Catch unparseable probe expr at Phase A (run_vlm10 OutRun).
+
+        Model-authored async probes with a missing `)` burn iter 1 before
+        Chromium ever runs — syntax-check here and re-prompt the plan once.
+        """
+        import json
+        import subprocess
+
+        findings: list[dict] = []
+        for p in probes:
+            name = str(p.get("name") or "?")
+            expr = str(p.get("expr") or "").strip()
+            if not expr:
+                continue
+            js = (
+                "try { new Function(" + json.dumps(expr) + "); } "
+                "catch (e) { console.error(String(e.message||e)); "
+                "process.exit(1); }"
+            )
+            try:
+                r = subprocess.run(
+                    ["node", "-e", js],
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                )
+            except FileNotFoundError:
+                return findings
+            except Exception as e:
+                findings.append({
+                    "name": name,
+                    "kind": "syntax_check_error",
+                    "message": f"probe `{name}` syntax check failed: {e}",
+                })
+                continue
+            if r.returncode != 0:
+                err = (r.stderr or r.stdout or "syntax error").strip()[:200]
+                findings.append({
+                    "name": name,
+                    "kind": "syntax_error",
+                    "message": (
+                        f"probe `{name}` has a JavaScript syntax error: "
+                        f"{err}"
+                    ),
+                })
+        return findings
+
+    @staticmethod
     def _probes_referencing_unassigned_props(
         probes: list[dict], html: str,
     ) -> list[dict]:
@@ -4013,6 +4125,11 @@ class GameAgent(
             assigned.add(m.group(1))
         for p in probes:
             name = str(p.get("name", "?"))
+            # Recipe-injected auto_* probes are alias-tolerant by design
+            # (e.g. s.floors||s.ground, return true when absent) — the
+            # model cannot fix them; skip to avoid misleading fix coaching.
+            if name.startswith("auto_"):
+                continue
             expr = str(p.get("expr", ""))
             if not expr:
                 continue
@@ -4989,6 +5106,7 @@ class GameAgent(
                 yield self._record(AgentEvent("phase", "planning"))
                 self._plan_retry_done = False
                 self._probe_quality_retry_done = False
+                self._plan_syntax_retry_done = False
                 # Phase 1B — when the diffuser pipeline lives on a GPU that
                 # is NOT shared with any LLM slot, pre-warm it during
                 # architect streaming so the cold-load (~30-60 s) is hidden
@@ -5344,6 +5462,94 @@ class GameAgent(
                                 "info",
                                 f"[yellow]probe lint[/yellow] {f['message']}",
                             ))
+                    # Syntax lint: malformed probe expr burns iter 1 at test
+                    # time (OutRun trace). Re-stream the plan once before build.
+                    syntax_findings = GameAgent._lint_probe_syntax(probes)
+                    if (
+                        syntax_findings
+                        and probes
+                        and not getattr(self, "_plan_syntax_retry_done", False)
+                    ):
+                        self._plan_syntax_retry_done = True
+                        bad = ", ".join(
+                            f["name"] for f in syntax_findings[:4]
+                        )
+                        self._trace({
+                            "kind": "plan_probe_syntax_retry",
+                            "findings": syntax_findings,
+                        })
+                        yield self._record(AgentEvent(
+                            "info",
+                            f"Phase-A probe(s) have JS syntax errors "
+                            f"({bad}) — re-prompting the plan once.",
+                        ))
+                        detail = "\n".join(
+                            f"- {f['message']}" for f in syntax_findings[:4]
+                        )
+                        self._messages.append({
+                            "role": "user",
+                            "content": (
+                                "Your <probes> block contains JavaScript "
+                                "syntax errors — a malformed probe burns "
+                                "the first build iteration. Fix and re-emit "
+                                "the FULL <probes>...</probes> block now "
+                                "(keep <plan> and <criteria> unchanged):\n"
+                                f"{detail}\n"
+                                "Common trap: missing `)` before `;` inside "
+                                "async KeyboardEvent probes."
+                            ),
+                        })
+                        _syn_role = self._planning_role()
+                        yield self._record(AgentEvent(
+                            "activity", "streaming",
+                            {"label": "re-streaming plan for probe syntax",
+                             "role": _syn_role},
+                        ))
+                        syn_reply = None
+                        try:
+                            syn_reply = await self._stream(
+                                self._token_cb_wrapper, role=_syn_role,
+                            )
+                        except Exception:
+                            syn_reply = None
+                        for _ev in self._drain_stream_ui_events():
+                            yield _ev
+                        yield self._record(AgentEvent("activity", "idle"))
+                        _np = (
+                            self._extract_probes(syn_reply) if syn_reply else None
+                        )
+                        if _np:
+                            _syn2 = GameAgent._lint_probe_syntax(_np)
+                            if not _syn2:
+                                self._messages.append({
+                                    "role": "assistant",
+                                    "content": syn_reply,
+                                    "model_role": _syn_role,
+                                    "model_name": (
+                                        self.get_backend(_syn_role).info.model
+                                    ),
+                                    "phase": "planning",
+                                })
+                                self._extract_and_queue_lookups(syn_reply)
+                                self._capture_todos(syn_reply)
+                                self._dump_conversation()
+                                yield self._record(AgentEvent("plan", syn_reply))
+                                plan_reply = syn_reply
+                                probes = _np
+                                self._probes = _np
+                                self._trace({
+                                    "kind": "plan_probe_syntax_retry_recovered",
+                                    "probes": len(_np),
+                                })
+                            else:
+                                self._trace({
+                                    "kind": "plan_probe_syntax_retry_no_fix",
+                                    "still_bad": [f["name"] for f in _syn2],
+                                })
+                        else:
+                            self._trace({
+                                "kind": "plan_probe_syntax_retry_no_probes",
+                            })
                 # Visual-playtest auto-probes injection. Run AFTER the
                 # model's own <probes> are parsed (or skipped) so the
                 # injected probes ride alongside whatever the model wrote.
@@ -5645,6 +5851,11 @@ class GameAgent(
                 # MK trace 20260517_220025: apply scope lock from the
                 # initial goal so iter 1 of a seed edit doesn't sprawl.
                 build_msg = self._apply_initial_goal_scoping(goal, build_msg)
+                if self._session_assets:
+                    build_msg = (
+                        build_msg + "\n\n"
+                        + self._p.generated_sprite_draw_contract()
+                    )
                 self._messages.append({
                     "role": "user",
                     "content": self._flush_user_injections(build_msg),
@@ -5925,6 +6136,10 @@ class GameAgent(
             # only THIS iter's regen state.
             self._media_regenerated_this_iter = False
             self._new_assets_not_in_html = set()
+            # Harness-owned recovery: generate sprites dropped by the
+            # per-turn cap on the prior turn (Dragon's Lair trace).
+            async for ev in self._maybe_autogen_pending_dropped_assets():
+                yield ev
             # Phase 4 (4D.1/4D.2): reset per-iter trace-correlation fields so
             # iter_summary reflects only THIS iter (no stale bleed from a prior
             # iter's patch count / coaching / router-state action).
@@ -6866,7 +7081,23 @@ class GameAgent(
                 continue
 
             # ---- materialize: patches OR full file --------------------
+            _pre_materialize_bytes = len(self._current_file or "")
             new_html, materialize_msg = await self._materialize(reply)
+            if (
+                new_html is not None
+                and self._previous_report_ok is True
+                and _pre_materialize_bytes
+                and len(new_html) < int(_pre_materialize_bytes * 0.80)
+            ):
+                self._post_clean_shrink_detected = True
+                self._trace({
+                    "kind": "post_clean_shrink_detected",
+                    "iteration": iteration,
+                    "before_bytes": _pre_materialize_bytes,
+                    "after_bytes": len(new_html),
+                })
+            else:
+                self._post_clean_shrink_detected = False
 
             # Format-self-correction (DK trace 20260513_185815): when
             # materialize fails AND the failure looks like a malformed
