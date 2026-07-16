@@ -28,6 +28,14 @@ def test_wait_for_monitor_handoff_uses_out_root():
     assert "out_root.glob" in src
 
 
+def test_serial_loop_rereads_goals_file_each_game():
+    """Mid-batch edits to --goals-file must apply to the next game without
+    restarting the parent (run_15: bloated ASSET MUSTS stayed in memory)."""
+    src = (REPO / "eval" / "tune_serial_loop.py").read_text(encoding="utf-8")
+    assert "Re-read --goals-file each game" in src
+    assert "refreshed = _load_goals(args)" in src
+
+
 def test_counts_as_pass_requires_best_or_iter_ok(tmp_path: Path):
     out = tmp_path / "01_game.html"
     out.write_text("x" * 600, encoding="utf-8")

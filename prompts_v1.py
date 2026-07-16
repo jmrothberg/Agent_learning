@@ -1361,7 +1361,11 @@ _MULTI_FRAME_KEYWORDS = frozenset({
     "walking", "walkcycle",
     "running", "jumping", "falling", "attacking", "shooting", "casting",
     "dying", "death", "dead", "hurt", "damaged",
-    "idle", "bobbing", "bobbed", "swinging", "punching", "kicking",
+    # NOTE: bare "idle" is NOT a single-token keyword — "idle-wait" in
+    # probe coaching (run_15 Dragon's Lair) falsely raised the asset cap.
+    # Idle animation is covered by phrases/regex: idle bob, idle frames,
+    # idle and walk, etc.
+    "bobbing", "bobbed", "swinging", "punching", "kicking",
     "crouching", "ducking", "blocking",
     "animated", "animating",
     # Destruction / impact action states — general, not genre-specific

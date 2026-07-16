@@ -405,6 +405,15 @@ async def main_async(args) -> int:
                 pass
 
     for i, (label, goal) in enumerate(jobs, 1):
+        # Re-read --goals-file each game so mid-batch edits to goal TEXT apply
+        # without restarting the parent loop. Keep the initial `label` for
+        # resume/checkpoint stability (slug is from the goal prefix).
+        try:
+            refreshed = _load_goals(args)
+            if 0 <= (i - 1) < len(refreshed):
+                goal = refreshed[i - 1][1]
+        except Exception:
+            pass
         out_path = out_root / f"{label}.html"
         if args.resume and (label in completed_labels or _is_game_delivered(out_path)):
             print(f"=== skip {i}/{len(jobs)} · {label} (already delivered) ===")

@@ -66,7 +66,25 @@ _NEGATIVE_GOALS = [
     "color picker",
     "asteroids with bullets and rocks",   # single sprite per entity
     "space invaders with one ship and one alien type",
+    # run_15 Dragon's Lair: probe-coaching "idle-wait" must NOT raise the
+    # multi-frame asset cap (bare "idle" token was a false positive).
+    "Dynamic probes must FORCE the event — never idle-wait for score.",
 ]
+
+
+def test_idle_wait_probe_coaching_is_not_multi_frame():
+    assert _detect_multi_frame_intent(
+        "never idle-wait for score/food/collision"
+    ) == []
+
+
+def test_dragons_lair_canonical_goal_not_multi_frame_from_pose_words():
+    """Pose words in the QTE goal are prompt-edit instructions, not a
+    multi-frame roster ask. Cap must stay default unless frames/walk/etc."""
+    from prompt_library import load_prompt_library
+    goal = next(p["prompt"] for p in load_prompt_library() if p["name"] == "dragons-lair")
+    assert "ASSET MUSTS" not in goal
+    assert _detect_multi_frame_intent(goal) == []
 
 
 def test_positive_multi_frame_goals_match():
