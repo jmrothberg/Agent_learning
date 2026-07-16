@@ -104,6 +104,22 @@ PROBES_FORMAT = FormatSpec(
         "Probes that reference globals (state, player, etc.) MUST exist on "
         "window — either expose them (e.g. `window.state = state`) or use "
         "DOM / canvas-pixel checks instead.",
+        # run_13 Elite Trader: probe called simulateClick()/distTo() that the
+        # game never attached to window → falsy forever with no useful err.
+        # Full path only — lean/small uses guidelines_small (size budget).
+        "SELF-CONTAINED: probe exprs may ONLY read `window.state` / "
+        "`window.gameState` / DOM / canvas, or call helpers the game "
+        "explicitly attaches to `window` (e.g. `window.simulateClick`). "
+        "Never call bare helpers like `simulateClick(...)` or `distTo(...)` "
+        "unless your code sets `window.simulateClick = ...`. Prefer "
+        "dispatching KeyboardEvent / PointerEvent / clicking a real DOM "
+        "button inline inside the probe.",
+    ],
+    guidelines_small=[
+        "Probes that reference globals (state, player, etc.) MUST exist on "
+        "window — either expose them (e.g. `window.state = state`) or use "
+        "DOM / canvas-pixel checks instead. No bare helpers "
+        "(`simulateClick`) unless on window.",
     ],
 )
 
@@ -295,7 +311,12 @@ ASSETS_FORMAT = FormatSpec(
         "measures each derived frame against its parent: a frame that "
         "came back near-identical to idle is flagged and BLOCKS <done/> "
         "until the limbs visibly move — raise strength and name the pose "
-        "harder, never draw the limb in code. If the user asks to "
+        "harder, never draw the limb in code. For from_image frames write "
+        "ONLY the pose DELTA with visible asymmetry ('hard left bank, left "
+        "wing tip toward camera, right wing up' / 'left leg forward') — do "
+        "NOT restate the idle orientation ('facing straight up') or the "
+        "merged prompt fights itself and bank/tilt comes back as idle. "
+        "If the user asks to "
         "animate an EXISTING sprite (\"make the king walk\", \"animate "
         "each piece\"), seed from that sprite the same way; the "
         "MEDIA-CHANGE DIRECTIVE block surfaces stem→asset mappings (e.g. "
@@ -1858,17 +1879,23 @@ key passes every structural probe. You MUST include at least 1 to 2
 dynamic probes. Copy this template and swap in your real control key
 and state path:
   - {"name":"input_moves_player", "expr":"{input_moves_player_probe}"}
-  - {"name":"score_changes",      "expr":"(async()=>{const s0=state.score;await new Promise(r=>setTimeout(r,1500));return state.score!==s0||state.frame>30;})()"}
+  - {"name":"score_on_forced_event", "expr":"(async()=>{/* CAUSE the event first — e.g. place food on next cell / enemy on crosshair with hp=1, then key — never idle-wait */ const s0=state.score; /* setup + input here */; await new Promise(r=>setTimeout(r,400)); return state.score>s0;})()"}
 A dynamic probe records a value, dispatches the input (KeyboardEvent
 keydown/keyup with the e.code your game listens for, or calls an
 exposed control like window.game.fire()), `await`s a short timeout so a
-frame advances, then returns whether the value changed.
+frame advances, then returns whether the value changed. Do NOT bare-
+wait for score/food/kill/collision — FORCE the precondition (food cell,
+enemy on crosshair + hp=1, clear serving), then assert.
 
 Probes that reference globals (state, player, etc.) MUST exist on
 window — either expose them (e.g. `window.state = state`) or use DOM /
 canvas-pixel checks instead. Aim for 3 to 5 probes total — mostly
 structural, but at least one input→delta dynamic probe. Keep each expr
 short.
+
+SELF-CONTAINED PROBES — never call bare helpers (`simulateClick`,
+`distTo`) unless attached to `window`. Prefer inline KeyboardEvent /
+PointerEvent / DOM `.click()` inside the expr.
 
 PROBE ROBUSTNESS — test structure and behavior over time, not one
 frame-specific pixel or exact helper names.
@@ -2023,6 +2050,11 @@ def generated_sprite_draw_contract() -> str:
         "(grid lines, particles, health bars). `loadAssets()` alone is "
         "insufficient — each entity draw path must call drawImage when the "
         "sprite is ready.\n"
+        # run_13: 3/10 games burned iter 1 on ASSETS_LOADED_BUT_UNDRAWN.
+        "SELF-CHECK before emitting: every name listed in GENERATED ASSETS "
+        "must appear in a draw call (`sprite('name')` or "
+        "`drawImage(ASSETS.name` / `ASSETS['name']`) in this first build — "
+        "loading without drawing fails the undrawn-art gate.\n"
         "Expose `window.state = state` (or `window.gameState = state`) "
         "after init so behavioral probes can read player position, score, "
         "and game flags."

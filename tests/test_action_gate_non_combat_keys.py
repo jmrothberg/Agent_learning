@@ -37,6 +37,19 @@ def test_build_and_sell_keys_excluded():
     assert "KeyS" in non_combat
 
 
+def test_switch_choose_cycle_keys_excluded():
+    """run_13 SimCity: 'Digit2 switches selectedType' was treated as a
+    combat action → false ACTION_DRAWN_NOT_SPRITED on a tool-palette key."""
+    crit = (
+        "Pressing Digit2 switches selectedType to commercial; "
+        "Digit3 chooses industrial; KeyT cycles the tool palette."
+    )
+    non_combat = _non_combat_action_keys(crit)
+    assert "Digit2" in non_combat
+    assert "Digit3" in non_combat
+    assert "KeyT" in non_combat
+
+
 def test_genuine_attack_key_not_excluded():
     """A real attack key with no flow verb nearby must stay in the gate set."""
     crit = "KeyF throws a punch; KeyK performs a special attack."

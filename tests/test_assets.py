@@ -46,13 +46,18 @@ class StubGenerator:
         self.calls.append(prompt)
         if any(f in prompt for f in self.fail_for):
             return None
-        from PIL import Image
+        from PIL import Image, ImageDraw
         f = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
         f.close()
-        # Distinct color per prompt so we can verify caching collapses
-        # repeated requests but distinct prompts produce distinct files.
+        # White corners so chroma-key keeps the center blob; solid fills were
+        # keyed to empty PNGs and made every from_image frame look identical
+        # (which falsely tripped the run_13 pose-retry path in unit tests).
         seed = sum(ord(c) for c in prompt) % 256
-        Image.new("RGB", (768, 768), (seed, 128, 255 - seed)).save(f.name)
+        img = Image.new("RGB", (768, 768), (255, 255, 255))
+        ImageDraw.Draw(img).rectangle(
+            [192, 192, 576, 576], fill=(seed, 128, 255 - seed)
+        )
+        img.save(f.name)
         return f.name
 
 
@@ -165,6 +170,35 @@ def test_parse_with_meta_no_overflow_returns_empty_dropped():
     assert len(specs) == 2
     assert dropped == []
     assert dropped_specs == []
+
+
+def test_prefer_video_seed_assets_rescues_key_victory():
+    """run_14 Dragon's Lair: FIFO cap dropped key_victory (video i2v seed).
+    Rescue it by evicting a non-seed hazard so cutscenes keep locked look."""
+    from assets import prefer_video_seed_assets
+    kept = (
+        [{"name": f"bg_{i}", "prompt": f"stage {i}"} for i in range(3)]
+        + [{"name": f"hazard_{i}", "prompt": f"threat {i}"} for i in range(5)]
+        + [{"name": "key_intro", "prompt": "intro still"}]
+        + [{"name": "key_fail", "prompt": "fail still"}]
+    )
+    dropped_specs = [{"name": "key_victory", "prompt": "victory still"}]
+    dropped_names = ["key_victory"]
+    videos = [
+        {"name": "intro", "image": "key_intro"},
+        {"name": "fail", "image": "key_fail"},
+        {"name": "victory", "image": "key_victory"},
+    ]
+    new_kept, new_dropped, new_dropped_specs = prefer_video_seed_assets(
+        kept, dropped_names, dropped_specs, videos,
+    )
+    kept_names = {s["name"] for s in new_kept}
+    assert "key_victory" in kept_names
+    assert "key_intro" in kept_names and "key_fail" in kept_names
+    assert all(n.startswith("bg_") for n in kept_names if n.startswith("bg_"))
+    assert "key_victory" not in new_dropped
+    assert any(n.startswith("hazard_") for n in new_dropped)
+    assert len(new_kept) == len(kept)  # cap size unchanged
 
 
 def test_parse_malformed_json_returns_empty():
@@ -567,9 +601,68 @@ def test_generate_assets_pose_frame_uses_txt2img_merged(tmp_path):
     assert set(out.keys()) == {"idle", "punch"}
     assert len(i2i.calls) == 0, "pose frames must NOT use img2img"
     assert len(txt2img.calls) == 2, "both frames render via txt2img"
-    # the punch frame's prompt merges the parent's character desc + pose clause
+    # the punch frame's prompt merges pose clause FIRST then parent character
     punch_prompt = txt2img.calls[1]
     assert "alien standing" in punch_prompt and "arm extended punching" in punch_prompt
+    # Pose-first order (run_13 1942): do not let idle orientation dominate.
+    assert punch_prompt.index("arm extended punching") < punch_prompt.index("alien standing")
+
+
+def test_strip_idle_orientation_locks():
+    from assets import _strip_idle_orientation_locks
+    p = "top-down fighter plane facing straight up, navy blue body"
+    out = _strip_idle_orientation_locks(p)
+    assert "facing straight up" not in out.lower()
+    assert "navy blue body" in out
+    assert "fighter plane" in out
+
+
+def test_generate_assets_pose_retry_when_near_identical(tmp_path):
+    """run_13: near-identical derived frames get one amplified txt2img retry."""
+
+    class NearIdenticalThenDistinct(StubGenerator):
+        def __init__(self) -> None:
+            super().__init__()
+            self._n = 0
+
+        def generate(self, prompt: str) -> str | None:
+            self.calls.append(prompt)
+            self._n += 1
+            from PIL import Image, ImageDraw
+            f = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+            f.close()
+            # White corners survive chroma-key; center blob differs only on retry.
+            img = Image.new("RGB", (128, 128), (255, 255, 255))
+            color = (200, 40, 40) if self._n <= 2 else (40, 40, 200)
+            ImageDraw.Draw(img).rectangle([32, 32, 96, 96], fill=color)
+            img.save(f.name)
+            return f.name
+
+    specs = [
+        {"name": "idle", "prompt": "fighter idle stance", "size": (64, 64)},
+        {
+            "name": "punch",
+            "prompt": "fighter arm extended punch",
+            "size": (64, 64),
+            "from_image": "idle",
+            "strength": 0.55,
+        },
+    ]
+    gen = NearIdenticalThenDistinct()
+    out = generate_assets(
+        specs, tmp_path / "session",
+        cache_dir=tmp_path / "cache",
+        image_generator=gen,
+        img2img_generator=None,
+    )
+    assert set(out.keys()) == {"idle", "punch"}
+    # idle + first pose + amplified retry
+    assert len(gen.calls) == 3
+    assert any("EXTREME visible pose asymmetry" in c for c in gen.calls)
+    stats = getattr(gen, "last_stats", [])
+    punch_stat = next(s for s in stats if s.get("name") == "punch")
+    assert punch_stat.get("pose_retry") is True
+    assert punch_stat.get("parent_delta", 0) >= assets._DERIVED_FRAME_MIN_DELTA
 
 
 def test_generate_assets_falls_back_to_txt2img_when_img2img_missing(tmp_path):

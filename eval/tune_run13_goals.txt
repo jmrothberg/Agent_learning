@@ -1,0 +1,27 @@
+# run_13 — 10 ALL-NEW games (2026-07-15 overnight)
+# GLM-5.2-MLX-4bit, --no-vlm-critique, --max-iters 4 --retries 0.
+# Fresh library goals never used in prior overnight batches (run_07–12).
+#   Terminal: bash eval/tune_run13.sh
+#   Cursor: .venv/bin/python eval/tune_overnight_monitor.py --out-dir games/tune_serial10/run_13 --jobs-total 10 --interval 30 --sync-loop
+#
+#     1 -> 1942
+#     2 -> stealth-infiltration
+#     3 -> simcity-lite
+#     4 -> elite-trader
+#     5 -> match-three
+#     6 -> stacking-tower
+#     7 -> rhythm-tap
+#     8 -> solitaire
+#     9 -> angry-blocks
+#    10 -> fighter-showcase
+
+Build a 1942 game. Vertical-scrolling shoot-'em-up: The player flies a fighter plane upward over a continuously scrolling sea; enemy planes fly in formation patterns from the top and fire back, and the player shoots upward and can perform a brief barrel-roll to dodge bullets. The player plane has a banking animation when moving left/right; enemy planes are sprites with a propeller shimmer. Power-ups upgrade the player's gun. Controls: Arrow keys move, Space fire, Shift roll/dodge, R restart. Survive the wave to advance (denser enemies, an occasional boss bomber); being hit by an enemy or a bullet loses a life. HUD with score and lives. Crisp top-down high-resolution sprites over a scrolling ocean, transparent backgrounds.
+Build a Stealth Infiltration game. The player sneaks through a room with patrolling guards; each guard has a visible vision cone. Entering a cone fills an alert meter; full alert triggers chase. Reach the green goal zone unseen to win; contact with a guard or full alert loses. Walls block line-of-sight. HUD: alert meter, objective marker. Controls: Arrow keys move, R restart. Expose window.state with guards[], alert for probes.
+Build a SimCity game. Click to place residential, commercial, and industrial zones plus roads; each building type costs money and generates income every tick. Show money and population in the HUD. A tool palette selects the active zone type (number keys 1-3). Controls: click place, 1/2/3 select zone, R restart. Tiles render as colored squares with simple icons. Expose window.state with tiles[][], resources, and buildings for probes.
+Build an Elite Trader game. A starmap shows 8-10 star systems connected by lines; click a system within fuel range to jump (consumes fuel). Each system has a market with buy/sell prices for ore, food, and luxuries — prices vary per system. Cargo hold limits purchases; profit by buying low and selling high. Include pirate encounters on some jumps. HUD: credits, fuel, cargo. Controls: click system to travel, buy/sell buttons in market view, R restart. Expose window.state with systems[], ship fuel/cargo/money.
+Build a Match Three game. Click or drag to swap two adjacent gems; if the swap creates 3+ in a row or column they clear, gems above fall down, new gems refill from the top, and cascades chain for combo score. Invalid swaps revert. HUD: score, moves remaining. Controls: click/drag swap, R restart. Expose window.state.board for probes.
+Build a Stacking Tower game. A crane swings a block left-right above the stack; press Space to drop it. Well-aligned blocks stack and raise the tower/score; misaligned blocks topple or fall off and cost a life. Swing speed increases with height. HUD: height/score, lives. Controls: Space drop, R restart. Expose window.state.stack[] for probes.
+Build a Rhythm Tap game. Notes scroll downward toward a fixed hit line; press D/F/J/K (or Arrow keys mapped to lanes) when a note crosses the line. Judge perfect/good/miss by timing window; combo builds score, misses break combo. Simple chart of notes timed to a metronome BPM (no external audio required — visual timing is enough). HUD: score, combo, judgment text flash. Controls: lane keys, R restart. Expose window.state.notes and songTime for probes.
+Build a Solitaire game. Standard layout: stock, waste, four foundations (Ace up by suit), and seven tableau piles with face-down cards underneath. Click/drag to move legal stacks; auto-flip revealed cards. Double-click sends Aces to foundations when legal. Win when all foundations are complete. Render each card with rank and suit visible (not blank rectangles). Controls: mouse drag-and-drop, R reshuffle deal. Expose window.state with piles or tableau for probes.
+Build an Angry Blocks game. A launcher at the left aims a projectile with drag or angle keys; show a faint trajectory preview while aiming. Launch fires a ball under gravity at stacked block targets; knocking blocks scores points. Limited shots per level; clear all blocks to win. Controls: drag or ArrowUp/Down adjust angle, Space launch, R restart. Expose window.state.projectile and state.targets for probes.
+Build a Fighter Showcase game. Single-character animation showcase on one stage — NO opponent, just ONE fighter centered on screen. Generate high-resolution transparent sprite art for idle, walk, jump, crouch, punch (arm fully extended), kick (leg raised), and block — at least 2 frames from idle per action. Controls: ArrowLeft/Right walk, ArrowUp jump, ArrowDown crouch, J punch, K kick, L block, R restart. HUD labels the current move name. Expose window.state.move for probes.

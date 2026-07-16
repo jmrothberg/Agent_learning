@@ -49,6 +49,21 @@ def test_parser_tolerates_prefill_doubled_ordinal():
     assert p2["answers"][1][0] == "yes" and p2["answers"][2][0] == "no"
 
 
+def test_parser_tolerates_emdash_doubled_ordinal():
+    """run_14 Doom: VLM returned `Q1: 1 — yes` (em-dash after doubled ordinal).
+    Old regex only skipped `1.` / `1:` / `1)`, so parse_rate stayed 0 and all
+    playtest findings were dropped after retry."""
+    p = GameAgent._parse_visual_playtest_response(
+        "Q1: 1 — yes\nQ2: 2 — yes\nQ3: 3 — yes\nQ4: 4 — yes\nQ5: 5 — no — gun aims left",
+        _recipe5(),
+    )
+    assert p["parse_rate"] == 1.0
+    assert {k: v[0] for k, v in p["answers"].items()} == {
+        1: "yes", 2: "yes", 3: "yes", 4: "yes", 5: "no"
+    }
+    assert "gun aims left" in p["answers"][5][1]
+
+
 def test_critic_uses_format_forcing_prefill():
     """run_visual_critic must seed an assistant 'Q1: ' prefill on the recipe
     path so the VLM starts inside the answer format instead of reasoning prose,

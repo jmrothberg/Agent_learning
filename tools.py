@@ -68,6 +68,15 @@ _POSITION_LEAF_NAMES = {
     "z", "tz", "gz", "pz", "posz", "cz", "tilez", "worldz",
 }
 
+# run_14 Snake: ArrowUp flipped state.dir.x / state.nextDir.x; leaf name "x"
+# matched as position → CONTROL-NOT-RECOVERED after the snake died mid-sweep
+# (wrong "stun timer" coaching). Direction/velocity parents are NOT position.
+_NON_POSITION_PARENTS = frozenset({
+    "dir", "direction", "nextdir", "facing", "aim", "look", "heading",
+    "vel", "velocity", "speed", "accel", "acceleration",
+    "delta", "offset", "scale", "scroll", "normal", "tangent",
+})
+
 
 def _is_position_leaf(path: str) -> bool:
     """True when the final component of a dotted state path is a position field
@@ -75,6 +84,10 @@ def _is_position_leaf(path: str) -> bool:
     from 'a key registered but the player is stuck'."""
     parts = [p for p in str(path or "").split(".") if p]
     if not parts:
+        return False
+    # Direction/velocity vectors end in .x/.y but are NOT entity position
+    # (run_14 Snake: dir.x / nextDir.x false-tripped CONTROL-NOT-RECOVERED).
+    if any(p.lower() in _NON_POSITION_PARENTS for p in parts[:-1]):
         return False
     leaf = parts[-1]
     if leaf.lower() in _POSITION_LEAF_NAMES:
@@ -414,6 +427,88 @@ def _probe_has_side_effects(expr: str) -> bool:
     return any(n in e for n in _PROBE_SIDE_EFFECT_NEEDLES)
 
 
+# run_13: Elite Trader / Stacking Tower burned all iters on falsy probes with
+# empty `err` — the model never saw WHY (e.g. missing simulateClick, paused
+# crane). Extract state paths + bare helper calls so the harness can sample
+# live values and surface a compact diagnostic.
+_PROBE_STATE_PATH_RE = re.compile(
+    r"\b(?:window\.)?(?:state|gameState|game)(?:\.[A-Za-z_][\w]*)+"
+)
+# Bare calls only — skip method calls (`.find(`) via negative lookbehind.
+_PROBE_HELPER_CALL_RE = re.compile(r"(?<![\.\w])([A-Za-z_][\w]*)\s*\(")
+_PROBE_HELPER_BUILTINS = frozenset({
+    "Boolean", "Number", "String", "Object", "Array", "Math", "JSON",
+    "Date", "Promise", "RegExp", "Error", "Map", "Set", "WeakMap", "WeakSet",
+    "Symbol", "BigInt", "Proxy", "Reflect", "Function", "Image", "Audio",
+    "parseInt", "parseFloat", "isNaN", "isFinite",
+    "setTimeout", "setInterval", "clearTimeout", "clearInterval",
+    "requestAnimationFrame", "cancelAnimationFrame", "queueMicrotask",
+    "fetch", "atob", "btoa", "structuredClone",
+    "encodeURIComponent", "decodeURIComponent", "encodeURI", "decodeURI",
+    "KeyboardEvent", "MouseEvent", "PointerEvent", "TouchEvent",
+    "Event", "CustomEvent", "DOMParser", "URL", "Blob", "File", "FileReader",
+    "FormData", "Headers", "Request", "Response",
+    "document", "window", "console",
+    # Keywords that the call-regex can still match (e.g. `async()`).
+    "async", "await", "if", "for", "while", "switch", "catch", "function",
+    "return", "typeof", "new", "void", "delete", "throw", "with",
+})
+
+
+def _extract_probe_state_paths(expr: str) -> list[str]:
+    """Distinct `state.x.y` / `window.game.foo` paths referenced by a probe."""
+    if not expr:
+        return []
+    seen: list[str] = []
+    for m in _PROBE_STATE_PATH_RE.finditer(expr):
+        path = m.group(0)
+        # Normalize leading window. so sampling is consistent.
+        if path.startswith("window."):
+            path = path[len("window."):]
+        if path not in seen:
+            seen.append(path)
+    return seen[:8]
+
+
+def _extract_probe_helper_idents(expr: str) -> list[str]:
+    """Bare function names the probe calls (custom helpers like simulateClick)."""
+    if not expr:
+        return []
+    seen: list[str] = []
+    for m in _PROBE_HELPER_CALL_RE.finditer(expr):
+        name = m.group(1)
+        if name in _PROBE_HELPER_BUILTINS:
+            continue
+        if name not in seen:
+            seen.append(name)
+    return seen[:6]
+
+
+def _format_falsy_probe_diag(
+    path_values: dict[str, Any] | None = None,
+    undefined_helpers: list[str] | None = None,
+) -> str:
+    """Compact model-facing reason for a falsy probe with no eval error."""
+    bits: list[str] = ["evaluated falsy"]
+    if path_values:
+        parts = []
+        for k, v in list(path_values.items())[:6]:
+            if isinstance(v, float):
+                parts.append(f"{k}={v:.4g}")
+            elif isinstance(v, str):
+                parts.append(f"{k}={v[:40]!r}")
+            else:
+                parts.append(f"{k}={v!r}"[:60])
+        if parts:
+            bits.append("live: " + ", ".join(parts))
+    if undefined_helpers:
+        bits.append(
+            "undefined helpers: " + ", ".join(undefined_helpers[:4])
+            + " (probe must not call helpers unless attached to window)"
+        )
+    return "; ".join(bits)[:280]
+
+
 # Undrawn-FP / Q*bert: recolor-after-hop probes must run before movement
 # probes that poison board state (cube_recolors after input_moves_player).
 _RECOLOR_PROBE_RE = re.compile(
@@ -749,7 +844,8 @@ def _parse_action_keys(*texts: str) -> list[str]:
 _NON_COMBAT_KEY_CONTEXT_RE = re.compile(
     r"\b(?:start|starts|starting|begin|begins|spawn|spawns|launch|launches|"
     r"pause|pauses|resume|resumes|menu|restart|restarts|reset|resets|"
-    r"select|selects|build|builds|place|places|placing|sell|sells|"
+    r"select|selects|switch|switches|switching|choose|chooses|cycle|cycles|"
+    r"build|builds|place|places|placing|sell|sells|"
     r"deploy|deploys|upgrade|upgrades|toggle|toggles|confirm|cancel|"
     r"next\s+wave|wave|round|skip|skips|continue)\b",
     re.I,
@@ -3825,6 +3921,17 @@ class LiveBrowser:
                     # (e.g. probe sampled before the first RAF tick).
                     await asyncio.sleep(0.3)
                     ok, err, err_kind = await self._run_probe(pexpr)
+                # run_13: falsy probes with empty err burned Elite Trader /
+                # Stacking Tower — sample referenced state paths + flag
+                # undefined helpers so the model sees WHY, not just "failed".
+                if not ok and not err and not err_kind:
+                    try:
+                        err = (
+                            await self._diagnose_falsy_probe(pexpr)
+                            or "evaluated falsy"
+                        )
+                    except Exception:
+                        err = "evaluated falsy"
                 # 1.2: tainted-canvas / cross-origin / SecurityError on
                 # getImageData are HARNESS-side limitations, not game
                 # bugs — the actual canvas might be perfectly rendered.
@@ -5512,6 +5619,76 @@ class LiveBrowser:
             err = str(e)[:200]
             return False, err, _classify_probe_eval_error(err)
 
+    async def _diagnose_falsy_probe(self, expr: str) -> str:
+        """Live snapshot of state paths + undefined helpers for a falsy probe.
+
+        run_13: empty `err` on falsy probes left the model guessing for 3+
+        iters (Elite Trader missing simulateClick; Stacking Tower crane
+        paused). Genre-free — only reads paths/idents the probe itself names.
+        """
+        paths = _extract_probe_state_paths(expr)
+        helpers = _extract_probe_helper_idents(expr)
+        path_values: dict[str, Any] = {}
+        undefined: list[str] = []
+        if paths:
+            try:
+                # Resolve each path from window (state.x → window.state.x).
+                snap = await self._page.evaluate(
+                    """(paths) => {
+                      const out = {};
+                      for (const p of paths) {
+                        try {
+                          const parts = String(p).split('.');
+                          let cur = window;
+                          for (const part of parts) {
+                            if (cur == null) { cur = undefined; break; }
+                            cur = cur[part];
+                          }
+                          if (cur === undefined) out[p] = '<undefined>';
+                          else if (cur === null) out[p] = null;
+                          else if (typeof cur === 'number' || typeof cur === 'boolean')
+                            out[p] = cur;
+                          else if (typeof cur === 'string')
+                            out[p] = cur.slice(0, 40);
+                          else if (Array.isArray(cur))
+                            out[p] = 'Array(len=' + cur.length + ')';
+                          else if (typeof cur === 'object')
+                            out[p] = '{…}';
+                          else out[p] = typeof cur;
+                        } catch (e) {
+                          out[p] = '<err>';
+                        }
+                      }
+                      return out;
+                    }""",
+                    paths,
+                )
+                if isinstance(snap, dict):
+                    path_values = snap
+            except Exception:
+                pass
+        if helpers:
+            try:
+                undef = await self._page.evaluate(
+                    """(names) => {
+                      const missing = [];
+                      for (const n of names) {
+                        try {
+                          if (typeof window[n] === 'undefined'
+                              && typeof globalThis[n] === 'undefined')
+                            missing.push(n);
+                        } catch (e) { missing.push(n); }
+                      }
+                      return missing;
+                    }""",
+                    helpers,
+                )
+                if isinstance(undef, list):
+                    undefined = [str(x) for x in undef if x]
+            except Exception:
+                pass
+        return _format_falsy_probe_diag(path_values, undefined)
+
     async def _input_smoke_test(self, criteria: str | None = None) -> dict[str, Any]:
         """Hold each test key for a few frames; report whether the canvas changed.
 
@@ -5835,6 +6012,83 @@ class LiveBrowser:
                 if first_responsive_key is None:
                     first_responsive_key = k
 
+        # run_13: Elite Trader / SimCity are click-primary (starmap / place
+        # tiles). Keyboard-only smoke reported FAIL despite working mouse
+        # handlers because R-restart still registers a key listener. When
+        # pointer/mouse listeners exist, click canvas points and credit any
+        # input-attributable state/canvas change the same way as keys.
+        try:
+            _lt = await self._safe_eval("window.__listenerTypes || null")
+        except Exception:
+            _lt = None
+        _has_pointer = (
+            isinstance(_lt, dict)
+            and (
+                int(_lt.get("pointer") or 0) + int(_lt.get("mouse") or 0)
+            ) > 0
+        )
+        if _has_pointer:
+            try:
+                _csize = await self._safe_eval(
+                    "(()=>{const c=document.querySelector('canvas');"
+                    "if(!c)return null;"
+                    "const r=c.getBoundingClientRect();"
+                    "return {w:r.width||c.width||800,h:r.height||c.height||600,"
+                    "l:r.left||0,t:r.top||0};})()"
+                )
+            except Exception:
+                _csize = None
+            if isinstance(_csize, dict):
+                _cw = float(_csize.get("w") or 800)
+                _ch = float(_csize.get("h") or 600)
+                _cl = float(_csize.get("l") or 0)
+                _ct = float(_csize.get("t") or 0)
+                # Center + four quadrant midpoints (client coords).
+                _click_pts = [
+                    (_cl + _cw * 0.50, _ct + _ch * 0.50),
+                    (_cl + _cw * 0.25, _ct + _ch * 0.25),
+                    (_cl + _cw * 0.75, _ct + _ch * 0.25),
+                    (_cl + _cw * 0.25, _ct + _ch * 0.75),
+                    (_cl + _cw * 0.75, _ct + _ch * 0.75),
+                ]
+                for _i, (_cx, _cy) in enumerate(_click_pts):
+                    _label = f"Click{_i}"
+                    try:
+                        before = await self._safe_eval(_CANVAS_HASH_JS)
+                        before_gs = await self._safe_eval(_GAMESTATE_SNAPSHOT_JS)
+                        await self._page.mouse.click(_cx, _cy)
+                        await asyncio.sleep(0.25)
+                        after_held = await self._safe_eval(_CANVAS_HASH_JS)
+                        after_gs = await self._safe_eval(_GAMESTATE_SNAPSHOT_JS)
+                    except Exception:
+                        continue
+                    tried.append(_label)
+                    input_only_leaves = set()
+                    if has_gamestate:
+                        held_changes = _gs_changed_leaves(before_gs, after_gs)
+                        input_only_leaves = {
+                            leaf for leaf in (held_changes - ambient_gs_changes)
+                            if _input_evidence_is_plausible(leaf)
+                        }
+                    canvas_input_changed = (
+                        after_held is not None
+                        and before is not None
+                        and after_held != before
+                        and not ambient_canvas_changed
+                    )
+                    if input_only_leaves:
+                        responsive_evidence[_label] = sorted(input_only_leaves)[:5]
+                        any_change = True
+                        if first_responsive_key is None:
+                            first_responsive_key = _label
+                        break  # one successful click is enough evidence
+                    if canvas_input_changed:
+                        responsive_evidence[_label] = ["<canvas-pixel-change>"]
+                        any_change = True
+                        if first_responsive_key is None:
+                            first_responsive_key = _label
+                        break
+
         # Select the action frame: among captured candidates, keep only keys
         # that are (a) input-attributable (in responsive_evidence) and (b)
         # TRANSIENT — the canvas largely reverted after release. Pick the
@@ -5936,14 +6190,15 @@ class LiveBrowser:
                         except Exception:
                             pass
 
-            async def _recovery_leaves_move_again() -> bool:
+            async def _recovery_leaves_move_again(key: str | None = None) -> bool:
+                use_key = key or recovery_key
                 b_gs = await self._safe_eval(_GAMESTATE_SNAPSHOT_JS)
                 try:
-                    await self._page.keyboard.down(recovery_key)
+                    await self._page.keyboard.down(use_key)
                     await asyncio.sleep(0.4)
                 finally:
                     try:
-                        await self._page.keyboard.up(recovery_key)
+                        await self._page.keyboard.up(use_key)
                     except Exception:
                         pass
                 a_gs = await self._safe_eval(_GAMESTATE_SNAPSHOT_JS)
@@ -5959,6 +6214,17 @@ class LiveBrowser:
                 # the true stun-lock family still trips (nothing moves).
                 return any(_is_position_leaf(leaf) for leaf in moved)
 
+            # run_14 Pong: ArrowUp moved paddle.y early, then paddle sat at
+            # the top clamp — re-dispatching ArrowUp cannot move further and
+            # falsely tripped CONTROL-NOT-RECOVERED ("stun timer"). Try the
+            # opposite axis key before declaring unrecovered.
+            _CNR_OPPOSITE = {
+                "ArrowUp": "ArrowDown", "ArrowDown": "ArrowUp",
+                "ArrowLeft": "ArrowRight", "ArrowRight": "ArrowLeft",
+                "KeyW": "KeyS", "KeyS": "KeyW",
+                "KeyA": "KeyD", "KeyD": "KeyA",
+            }
+
             try:
                 await _induce_combat_before_recovery()
                 # Game-over after combat is expected — movement stops when
@@ -5967,7 +6233,9 @@ class LiveBrowser:
                     "(() => {"
                     "const s = window.state || window.gameState;"
                     "if (!s) return false;"
-                    "return !!(s.over || s.lives === 0);"
+                    # run_14 Snake uses gameOver (not over/lives) — without
+                    # it, CNR fires after the key sweep kills the snake.
+                    "return !!(s.over || s.gameOver || s.lives === 0);"
                     "})()"
                 )
                 if not _game_over_after_combat:
@@ -5976,6 +6244,16 @@ class LiveBrowser:
                     if not recheck_moved:
                         await asyncio.sleep(0.5)  # let a legit hit-stun timer expire
                         retry_moved = await _recovery_leaves_move_again()
+                    # Axis-clamp fallback: opposite direction still moves → OK.
+                    if (
+                        not recheck_moved
+                        and retry_moved is False
+                        and recovery_key in _CNR_OPPOSITE
+                    ):
+                        opp = _CNR_OPPOSITE[recovery_key]
+                        if await _recovery_leaves_move_again(opp):
+                            recheck_moved = True
+                            retry_moved = True
                     if control_not_recovered_verdict(
                         has_position_state=has_position_state,
                         moved_early=True,

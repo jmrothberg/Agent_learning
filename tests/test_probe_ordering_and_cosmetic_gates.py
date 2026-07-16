@@ -93,6 +93,23 @@ def test_probe_loop_retries_falsy_readonly_once():
     assert "await self._run_probe(pexpr)" in block
 
 
+def test_probe_loop_diagnoses_falsy_empty_err():
+    """run_13: falsy probes with empty err burned Elite Trader / Stacking Tower."""
+    src = inspect.getsource(tools_module.LiveBrowser.load_and_test)
+    assert "_diagnose_falsy_probe" in src
+    assert "undefined helpers" in inspect.getsource(
+        tools_module._format_falsy_probe_diag
+    )
+
+
+def test_input_smoke_has_pointer_click_sweep():
+    """run_13: click-primary games need a click phase, not keyboard-only."""
+    src = inspect.getsource(tools_module.LiveBrowser._input_smoke_test)
+    assert "__listenerTypes" in src
+    assert 'f"Click{_i}"' in src or "Click{_i}" in src
+    assert "mouse.click" in src
+
+
 def test_probe_failure_carries_ordering_hint():
     src = inspect.getsource(tools_module.LiveBrowser.load_and_test)
     i = src.index("ran after side-effecting probe(s)")

@@ -980,11 +980,15 @@ class CriticMixin:
 
             # Tolerate an optional repeated ordinal the model sometimes emits
 
-            # after a "Qn: " prefill (e.g. "Q1: 1. YES") — skip a leading
+            # after a "Qn: " prefill (e.g. "Q1: 1. YES" or "Q1: 1 — yes") —
 
-            # "<num>." / "<num>)" before the answer word. Added 2026-06-03.
+            # skip a leading "<num>." / "<num>)" / "<num> —" before the
 
-            r"(?:\d+\s*[:.)]\s*)?"
+            # answer word. Em-dash form seen in run_14 Doom (parse_rate 0).
+
+            # Added 2026-06-03; em-dash 2026-07-16.
+
+            r"(?:\d+\s*(?:[:.)]|[\-—])\s*)?"
 
             r"(?:(yes|no|unclear|y|n|u)\b|([✅❌✔✖✓✗✘]))"
 

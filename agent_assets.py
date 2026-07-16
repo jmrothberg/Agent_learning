@@ -14,6 +14,7 @@ from assets import (
     generate_assets,
     parse_assets_block,
     parse_assets_block_with_meta,
+    prefer_video_seed_assets,
     render_asset_paths_block,
     try_load_image_generator,
 )
@@ -1068,6 +1069,18 @@ class AssetGenerationMixin:
 
         video_specs = parse_videos_block(reply)
 
+        # run_14 Dragon's Lair: FIFO cap dropped key_victory (i2v seed).
+        # Prefer keeping video image seeds inside the same cap budget.
+        if dropped_asset_names and video_specs:
+            asset_specs, dropped_asset_names, dropped_asset_specs = (
+                prefer_video_seed_assets(
+                    asset_specs,
+                    dropped_asset_names,
+                    dropped_asset_specs,
+                    video_specs,
+                )
+            )
+
         # Parse-failure coaching (GLM-5.2 trace 20260625_124038): the model
 
         # emitted an <assets> tag but it parsed to ZERO specs (wrong JSON
@@ -1482,17 +1495,13 @@ class AssetGenerationMixin:
 
         if dropped_asset_names:
 
-            # Golden trace build-a-dragon-s-lair-laserdis_20260626_224306: the
+            # Golden trace build-a-dragon-s-lair-laserdis_20260626_224306 +
 
-            # cap dropped key_fail/key_victory, which were the `image` i2v seeds
+            # run_14: cap can still drop non-seed sprites after
 
-            # for the fail/victory <videos>. The cutscenes then silently fell
+            # prefer_video_seed_assets rescues i2v seeds. Link any remaining
 
-            # back to text-to-video and lost the locked character look. Link the
-
-            # two facts so the trace + coaching name the real consequence; this
-
-            # changes NEITHER what is generated NOR the cap — advisory only.
+            # affected_video_seeds in the trace + coaching (should be rare).
 
             _dropped_set = set(dropped_asset_names)
 

@@ -4023,15 +4023,33 @@ class GameAgent(
 
         Model-authored async probes with a missing `)` burn iter 1 before
         Chromium ever runs — syntax-check here and re-prompt the plan once.
+
+        run_13: also catch bracket imbalance before the node check (Solitaire /
+        SimCity truncated probes) — works even when node is unavailable.
         """
         import json
         import subprocess
+
+        from tools import _bracket_imbalance
 
         findings: list[dict] = []
         for p in probes:
             name = str(p.get("name") or "?")
             expr = str(p.get("expr") or "").strip()
             if not expr:
+                continue
+            # Fast path: unbalanced (), [], {} — same micro-probe helper.
+            imb = _bracket_imbalance(expr)
+            bad_br = {k: v for k, v in imb.items() if v != 0}
+            if bad_br:
+                findings.append({
+                    "name": name,
+                    "kind": "syntax_error",
+                    "message": (
+                        f"probe `{name}` has unbalanced brackets "
+                        f"{bad_br} — re-emit a complete balanced expr"
+                    ),
+                })
                 continue
             js = (
                 "try { new Function(" + json.dumps(expr) + "); } "

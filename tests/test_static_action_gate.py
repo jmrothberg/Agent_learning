@@ -145,6 +145,10 @@ def test_position_leaf_helper():
     assert tools._is_position_leaf("hero.row")
     assert not tools._is_position_leaf("player.dir")
     assert not tools._is_position_leaf("player.nextDir")
+    # run_14 Snake: dir.x / nextDir.x are direction components, not position.
+    assert not tools._is_position_leaf("state.dir.x")
+    assert not tools._is_position_leaf("state.nextDir.y")
+    assert not tools._is_position_leaf("player.vel.x")
     assert not tools._is_position_leaf("score")
     assert not tools._is_position_leaf("")
 
@@ -195,6 +199,14 @@ def test_smoke_test_distinguishes_move_from_registered():
     # only movement keys, only when the game has position state
     assert "_MOVEMENT_KEYS" in src
     assert "_is_position_leaf" in src
+
+
+def test_cnr_retries_opposite_axis_key():
+    """run_14 Pong: ArrowUp at top clamp must not trip CONTROL-NOT-RECOVERED."""
+    src = _smoke_src()
+    assert "_CNR_OPPOSITE" in src
+    assert '"ArrowUp": "ArrowDown"' in src
+    assert "gameOver" in src  # Snake die() uses gameOver, not only over/lives
 
 
 def test_load_and_test_gates_on_stuck_player():

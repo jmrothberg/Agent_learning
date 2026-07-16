@@ -251,6 +251,22 @@ def test_lint_probe_syntax_catches_missing_paren():
     assert findings[0]["kind"] == "syntax_error"
 
 
+def test_lint_probe_syntax_catches_bracket_imbalance():
+    """run_13: unbalanced () in Phase-A probes burned Solitaire/SimCity
+    iter 1 via quarantine — catch before the node check (no node needed)."""
+    bad = [{
+        "name": "drag_sets_dragging",
+        "expr": (
+            "(async()=>{if(!window.state||!state.piles)return false;"
+            "const L=window.game.layout;con"
+        ),
+    }]
+    findings = GameAgent._lint_probe_syntax(bad)
+    assert findings
+    assert findings[0]["kind"] == "syntax_error"
+    assert "unbalanced" in findings[0]["message"]
+
+
 def test_hotspot_alignment_err_includes_viewport_coords():
     src = Path(__file__).parent.parent.joinpath("tools.py").read_text()
     assert "viewport click" in src

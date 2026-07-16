@@ -18,6 +18,9 @@ from agent import GameAgent  # noqa: E402
 import tools as tools_module  # noqa: E402
 from tools import (  # noqa: E402
     _classify_probe_eval_error,
+    _extract_probe_helper_idents,
+    _extract_probe_state_paths,
+    _format_falsy_probe_diag,
     _format_probe_failure_warning,
     _normalize_probe_expr,
 )
@@ -150,6 +153,33 @@ def test_probe_eval_error_classifier():
     assert _classify_probe_eval_error("SyntaxError: missing ) after argument list") == "syntax_error"
     assert _classify_probe_eval_error("ReferenceError: state is not defined") == "reference_error"
     assert _classify_probe_eval_error("evaluated falsy") is None
+
+
+def test_extract_probe_state_paths_and_helpers():
+    """run_13 Elite Trader probe named state.ship.fuel + bare simulateClick."""
+    expr = (
+        "(async()=>{if(!window.state||state.mode!=='map')return false;"
+        "const f0=state.ship.fuel;simulateClick(target.x,target.y);"
+        "return state.ship.fuel<f0;})()"
+    )
+    paths = _extract_probe_state_paths(expr)
+    assert "state.mode" in paths
+    assert "state.ship.fuel" in paths
+    helpers = _extract_probe_helper_idents(expr)
+    assert "simulateClick" in helpers
+    # Method calls must not be flagged as bare helpers.
+    assert "find" not in helpers
+
+
+def test_format_falsy_probe_diag_surfaces_helpers_and_live():
+    msg = _format_falsy_probe_diag(
+        {"state.mode": "market", "state.crane.x": 400},
+        ["simulateClick"],
+    )
+    assert "evaluated falsy" in msg
+    assert "state.mode" in msg
+    assert "simulateClick" in msg
+    assert "undefined helpers" in msg
 
 
 # ---------------------------------------------------------------------------

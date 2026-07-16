@@ -364,6 +364,90 @@ def parse_assets_block_with_meta(
     return out, dropped, dropped_specs
 
 
+def prefer_video_seed_assets(
+    kept: list[dict],
+    dropped_names: list[str],
+    dropped_specs: list[dict],
+    video_specs: list[dict] | None,
+) -> tuple[list[dict], list[str], list[dict]]:
+    """When the per-turn cap drops an i2v seed still, swap it back into `kept`.
+
+    run_14 Dragon's Lair / golden 20260626: FIFO cap dropped `key_victory`
+    while `<videos>` still pointed at it — cutscene fell back to t2v / 404
+    and lost the locked character look. Coaching alone did not stop the
+    model from referencing the dropped name. Prefer keeping video `image`
+    seeds; evict a non-seed, non-bg, non-key, non-from_image-base sprite.
+    Cap size unchanged.
+    """
+    if not kept or not dropped_specs or not video_specs:
+        return kept, dropped_names, dropped_specs
+    seed_names = {
+        str(s.get("image") or "").strip()
+        for s in video_specs
+        if isinstance(s, dict) and str(s.get("image") or "").strip()
+    }
+    if not seed_names:
+        return kept, dropped_names, dropped_specs
+
+    kept = [dict(s) for s in kept]
+    dropped_specs = [dict(s) for s in dropped_specs]
+    dropped_names = list(dropped_names)
+    kept_names = {str(s.get("name") or "") for s in kept}
+    # Bases referenced by kept from_image frames — do not evict those.
+    from_image_bases = {
+        str(s.get("from_image") or "").strip()
+        for s in kept
+        if str(s.get("from_image") or "").strip()
+    }
+
+    def _eviction_rank(spec: dict) -> int | None:
+        """Lower = safer to drop. None = never evict."""
+        name = str(spec.get("name") or "").strip()
+        if not name or name in seed_names:
+            return None
+        if name in from_image_bases:
+            return None
+        if name.startswith("key_"):
+            return None
+        if name.startswith("bg_"):
+            return None
+        # Prefer evicting derived frames, then ordinary sprites.
+        if spec.get("from_image"):
+            return 0
+        return 1
+
+    for rescue in list(dropped_specs):
+        rname = str(rescue.get("name") or "").strip()
+        if rname not in seed_names or rname in kept_names:
+            continue
+        candidates: list[tuple[int, int, dict]] = []
+        for i, spec in enumerate(kept):
+            rank = _eviction_rank(spec)
+            if rank is None:
+                continue
+            candidates.append((rank, i, spec))
+        if not candidates:
+            break
+        candidates.sort(key=lambda t: (t[0], -t[1]))  # safest, prefer later
+        _rank, idx, victim = candidates[0]
+        victim_name = str(victim.get("name") or "")
+        kept[idx] = rescue
+        kept_names.discard(victim_name)
+        kept_names.add(rname)
+        dropped_specs = [s for s in dropped_specs if str(s.get("name") or "") != rname]
+        dropped_specs.append(victim)
+        dropped_names = [n for n in dropped_names if n != rname]
+        if victim_name:
+            dropped_names.append(victim_name)
+        # Victim may have been a from_image base — refresh set for next rescue.
+        from_image_bases = {
+            str(s.get("from_image") or "").strip()
+            for s in kept
+            if str(s.get("from_image") or "").strip()
+        }
+    return kept, dropped_names, dropped_specs
+
+
 def _parse_size(raw: Any) -> tuple[int, int]:
     """Accept '64', '64x64', '128x96', or int; return (w, h)."""
     if isinstance(raw, int):
@@ -1516,6 +1600,27 @@ _UNSET: Any = object()  # sentinel: "argument not provided"
 # idle. Heuristic warning, never a hard error.
 _DERIVED_FRAME_MIN_DELTA = 0.04
 
+# Idle prompts often lock orientation ("facing straight up"). When merged with
+# a bank/tilt pose that should change orientation, those locks cancel the pose
+# (1942 run_13). Strip only clear orientation locks from the parent string.
+_IDLE_ORIENTATION_LOCK_RE = re.compile(
+    r",?\s*(?:facing\s+(?:straight\s+)?(?:up|forward|front)|"
+    r"viewed\s+from\s+(?:above|front)|"
+    r"front[- ]view|"
+    r"looking\s+(?:straight\s+)?(?:up|forward))\b",
+    re.IGNORECASE,
+)
+
+
+def _strip_idle_orientation_locks(prompt: str) -> str:
+    """Remove idle orientation clamps so pose clauses can change facing/tilt."""
+    if not prompt:
+        return prompt
+    cleaned = _IDLE_ORIENTATION_LOCK_RE.sub("", prompt)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    cleaned = re.sub(r"\s+,", ",", cleaned).strip(" ,")
+    return cleaned or prompt
+
 
 def _derived_frame_delta(new_path: Path | str, parent_path: Path | str) -> float | None:
     """Mean per-pixel RGB delta between a derived frame and its parent.
@@ -1775,7 +1880,18 @@ def generate_assets(
                 or prompt_by_name.get(_safe_filename(from_image))
                 or ""
             )
-            merged = f"{parent_prompt}, {prompt}" if parent_prompt else prompt
+            # Pose clause FIRST. Prepending parent then pose (old order) left
+            # idle orientation locks like "facing straight up" dominating the
+            # prompt — 1942 run_13 bank/roll frames came back ~97% identical
+            # to idle (deltas 0.02–0.04) despite strength 0.55–0.6. Lead with
+            # the NEW pose, keep parent as character/style trailing context.
+            # Also strip idle orientation phrases from the parent so they
+            # cannot cancel bank/tilt/roll wording in the pose clause.
+            if parent_prompt:
+                parent_for_merge = _strip_idle_orientation_locks(parent_prompt)
+                merged = f"{prompt}, {parent_for_merge}" if prompt else parent_for_merge
+            else:
+                merged = prompt
             if from_image not in out and from_image not in prompt_by_name:
                 stat["parent_missing"] = from_image
             stat["pose_txt2img"] = True
@@ -1849,6 +1965,88 @@ def generate_assets(
                 pdelta = _derived_frame_delta(target_path, out[from_image])
                 if pdelta is not None:
                     stat["parent_delta"] = round(pdelta, 4)
+                    # run_13 fighter showcase: 5/8 derived frames stayed
+                    # near-identical to idle after the first txt2img pass.
+                    # One-shot retry with amplified pose wording (pose frames
+                    # are txt2img — img2img locks to idle at any strength).
+                    # Plan "strength bump" is recorded for cache/stats only.
+                    if pdelta < _DERIVED_FRAME_MIN_DELTA:
+                        retry_strength = min(
+                            0.9, float(strength or 0.55) + 0.2
+                        )
+                        amplified = (
+                            "EXTREME visible pose asymmetry, clear "
+                            "silhouette change from idle: " + merged
+                        )
+                        if not _is_full_bleed_asset_name(name):
+                            amplified = _ensure_sprite_bg_prompt(
+                                amplified, image_generator
+                            )
+                        retry_gen = _safe_generate(
+                            image_generator, amplified
+                        )
+                        if retry_gen is not None:
+                            try:
+                                with Image.open(retry_gen) as retry_img:
+                                    retry_img.load()
+                                    retry_keyed, retry_ck = (
+                                        _resize_and_chroma_sprite(
+                                            retry_img, size
+                                        )
+                                    )
+                                    # Write to a side file so we can compare
+                                    # without clobbering until we know better.
+                                    retry_tmp = (
+                                        session_dir
+                                        / f"{name}__pose_retry.png"
+                                    )
+                                    retry_keyed.save(
+                                        retry_tmp, format="PNG"
+                                    )
+                                retry_delta = _derived_frame_delta(
+                                    retry_tmp, out[from_image]
+                                )
+                                if (
+                                    retry_delta is not None
+                                    and retry_delta > pdelta
+                                ):
+                                    # Prefer the on-disk retry PNG (safer than
+                                    # re-saving a PIL image after the with-block).
+                                    _link_or_copy(retry_tmp, cache_path)
+                                    _link_or_copy(cache_path, target_path)
+                                    out[name] = target_path.resolve()
+                                    stat["parent_delta"] = round(
+                                        retry_delta, 4
+                                    )
+                                    stat["pose_retry"] = True
+                                    stat["pose_retry_strength"] = (
+                                        retry_strength
+                                    )
+                                    stat["pose_retry_delta"] = round(
+                                        retry_delta, 4
+                                    )
+                                    pdelta = retry_delta
+                                    # Refresh chroma stats from the kept frame.
+                                    stat["bg_color"] = (
+                                        list(retry_ck["bg_color"])
+                                        if retry_ck["bg_color"] is not None
+                                        else None
+                                    )
+                                    stat["alpha_pixel_ratio"] = (
+                                        retry_ck["alpha_pixel_ratio"]
+                                    )
+                                else:
+                                    stat["pose_retry"] = True
+                                    stat["pose_retry_kept_first"] = True
+                                    if retry_delta is not None:
+                                        stat["pose_retry_delta"] = round(
+                                            retry_delta, 4
+                                        )
+                            except Exception as _retry_err:
+                                stat["pose_retry_error"] = (
+                                    f"{type(_retry_err).__name__}: "
+                                    f"{str(_retry_err)[:80]}"
+                                )
                     # #5: a pose frame that actually MOVED (delta over the
                     # clone floor) is worth remembering — record the exact
                     # prompt so future animation games reuse the proven recipe.

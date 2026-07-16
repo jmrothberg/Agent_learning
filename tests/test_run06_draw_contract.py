@@ -29,6 +29,22 @@ def test_generated_sprite_draw_contract_helper():
     assert "drawImage" in c
     assert "MISSING" in c
     assert "window.state" in c
+    # run_13: undrawn-art self-check before emit
+    assert "SELF-CHECK" in c
+    assert "GENERATED ASSETS" in c
+
+
+def test_probes_format_requires_self_contained_helpers():
+    """run_13 Elite Trader: bare simulateClick() in probes failed forever."""
+    blob = " ".join(prompts_v1.PROBES_FORMAT.guidelines)
+    assert "SELF-CONTAINED" in blob
+    assert "simulateClick" in blob
+
+
+def test_playbook_self_contained_probe_bullet():
+    pb = Playbook()
+    ids = {b.id for b in pb.load_all()}
+    assert "probe-self-contained-no-bare-helpers" in ids
 
 
 def test_first_build_seed_framing_when_assets_exist():

@@ -9,7 +9,10 @@ Human onboarding → `README.md`. Commands/env → `DEV.md`. Harness traps → `
 
 | User intent | Command | Notes |
 |-------------|---------|-------|
-| **Run 10 games overnight (run_08 — tonight)** | Terminal: `bash eval/tune_run08.sh` · Cursor: watcher below | Batch runs **flat-out** (no pause). Watcher fixes in parallel. |
+| **Run 20 GRAPHICS-BEST games overnight (run_15 — tonight)** | Terminal: `bash eval/tune_run15.sh` · Cursor: watcher below | **GLM-5.2-MLX-4bit**, **`--no-vlm-critique`**, flat-out. High-confidence watcher fixes only. |
+| **Run 10 NEW games overnight (run_14)** | Terminal: `bash eval/tune_run14.sh` · Cursor: watcher below | Qwen3.6-27B-mxfp8, VLM critique ON (completed). |
+| **Run 10 NEW games overnight (run_13)** | Terminal: `bash eval/tune_run13.sh` · Cursor: watcher below | GLM-5.2-MLX-4bit, **`--no-vlm-critique`**, flat-out. Watcher fixes in parallel. |
+| **Run 10 games overnight (run_08)** | Terminal: `bash eval/tune_run08.sh` · Cursor: watcher below | Batch runs **flat-out** (no pause). Watcher fixes in parallel. |
 | **Run 10 games validation (run_10 — run_09 fix retest)** | Terminal: `bash eval/tune_run09.sh` · Cursor: watcher below | `--max-iters 4`, fresh `run_10/` dir. See § run_10. |
 | **Run all 11 games overnight (both batches, auto-chained)** | `bash eval/tune_run07_chain.sh` in Terminal + monitor below in Cursor | **One paste** — Batch B starts automatically when A finishes. No wake-up. |
 | **Run 11 games to improve the agent (run_07)** | Same as chain row above | A=GLM no VLM (6) → B=Qwen VLM on (5), watcher handoff between games. |
@@ -73,7 +76,167 @@ Use `--out-dir` from `active_out_dir` in `agent_monitor.json` (`run_07_big` duri
 
 ---
 
-## run_08 — tonight (10 games, flat-out + parallel watcher)
+## run_15 — tonight (20 GRAPHICS-BEST games, GLM-5.2, no VLM critique)
+
+Asset-heavy library goals (fighters, QTE, platformers, FPS, point-click, arcade). Goals: `eval/tune_run15_goals.txt` (canonical `prompt_library.jsonl` — no speculative goal appendices).
+**Model:** `~/MLX_Models/GLM-5.2-MLX-4bit`. **`--no-vlm-critique`**. `--max-iters 4 --retries 0`.
+
+| Slot | Library | Modality |
+|------|---------|----------|
+| 1 | donkey-kong | animated platformer |
+| 2 | frogger | lane crossing |
+| 3 | dragons-lair | visual QTE + video |
+| 4 | super-mario | platformer + video |
+| 5 | prince-of-persia | rotoscope platformer |
+| 6 | doom | FPS / 3D |
+| 7 | zelda | top-down RPG |
+| 8 | street-fighter | versus fighter + video |
+| 9 | mortal-kombat | versus fighter + video |
+| 10 | kung-fu-master | beat-em-up + video |
+| 11 | joust | flap platformer |
+| 12 | rampage | destruction climber |
+| 13 | pac-man | maze chase |
+| 14 | outrun | Mode-7 racer |
+| 15 | monkey-island | point-and-click |
+| 16 | metal-slug | run-and-gun |
+| 17 | fighter-showcase | single-fighter poses |
+| 18 | qbert | isometric hopper |
+| 19 | dig-dug | digger arcade |
+| 20 | bomberman | grid bombs |
+
+**Two processes — both required.** Terminal batch runs **game → game with zero wait** and opens a **visible Chromium window**. Cursor watcher triages finished traces and patches harness/memory/prompts **only when highly confident**.
+
+| | Terminal.app (once) | Cursor watcher (once) |
+|---|---------------------|------------------------|
+| Command | `bash eval/tune_run15.sh` | `.venv/bin/python eval/tune_overnight_monitor.py --out-dir games/tune_serial10/run_15 --jobs-total 20 --interval 30 --sync-loop` |
+| Log / status | `games/tune_serial10/run_15/overnight.log` | `games/tune_serial10/run_15/agent_monitor.json` |
+
+**Open batch in Terminal.app from Cursor:**
+
+```bash
+osascript -e 'tell application "Terminal" to do script "cd /Users/jonathanrothberg/Agent_learning && bash eval/tune_run15.sh"'
+```
+
+```bash
+.venv/bin/python eval/tune_overnight_monitor.py \
+  --out-dir games/tune_serial10/run_15 \
+  --jobs-total 20 \
+  --interval 30 \
+  --sync-loop
+```
+
+**Watcher loop (continuous, no blocking the batch):**
+
+1. Poll `agent_monitor.json` — when `completed_count` advances, open the newest trace for that label.
+2. **Timeline:** `.venv/bin/python scripts/enrich_trace.py <trace> --timeline`
+3. **Classify** `failure_class` → patch only on high-confidence evidence (`tools.py` / `agent_*.py` / `memory/*.jsonl` / `prompts_v1.py`)
+4. **Keep going** — next game already running; fixes apply to subsequent games.
+
+Artifacts: `games/tune_serial10/run_15/` (`overnight.log`, `traces/`, `tune_checkpoint.json`).
+
+---
+
+## run_14 — (10 NEW games, Qwen3.6-27B-mxfp8, VLM critique ON)
+
+All-new library goals never used in run_07–13. Goals: `eval/tune_run14_goals.txt`.
+**Model:** `~/MLX_Models/Qwen3.6-27B-mxfp8`. **VLM critique ON** (default — no `--no-vlm-critique`). `--max-iters 4 --retries 0`.
+
+| Slot | Library | Modality |
+|------|---------|----------|
+| 1 | tetris | falling-block puzzle |
+| 2 | snake | grid arcade |
+| 3 | pong | paddle duel |
+| 4 | doom | FPS raycaster / 3D |
+| 5 | minecraft | voxel sandbox |
+| 6 | dragons-lair | visual QTE |
+| 7 | particle-fireworks | particle VFX |
+| 8 | tower-defense | fixed-path TD |
+| 9 | cookie-clicker | idle clicker |
+| 10 | typing-race | typing |
+
+**Two processes — both required.** Terminal batch runs **game → game with zero wait** and opens a **visible Chromium window**. Cursor watcher triages each finished trace and patches harness/memory/prompts **as evidence arrives** (do not wait until the end).
+
+| | Terminal.app (once) | Cursor watcher (once) |
+|---|---------------------|------------------------|
+| Command | `bash eval/tune_run14.sh` | `.venv/bin/python eval/tune_overnight_monitor.py --out-dir games/tune_serial10/run_14 --jobs-total 10 --interval 30 --sync-loop` |
+| Log / status | `games/tune_serial10/run_14/overnight.log` | `games/tune_serial10/run_14/agent_monitor.json` |
+
+**Open batch in Terminal.app from Cursor:**
+
+```bash
+osascript -e 'tell application "Terminal" to do script "cd /Users/jonathanrothberg/Agent_learning && bash eval/tune_run14.sh"'
+```
+
+```bash
+.venv/bin/python eval/tune_overnight_monitor.py \
+  --out-dir games/tune_serial10/run_14 \
+  --jobs-total 10 \
+  --interval 30 \
+  --sync-loop
+```
+
+**Watcher loop (continuous, no blocking the batch):**
+
+1. Poll `agent_monitor.json` — when `completed_count` advances, open the newest trace for that label.
+2. **Timeline:** `.venv/bin/python scripts/enrich_trace.py <trace> --timeline`
+3. **Classify** `failure_class` → patch `tools.py` / `agent_*.py` / `memory/*.jsonl` / `prompts_v1.py`
+4. **Keep going** — next game already running; fixes apply to subsequent games.
+
+Artifacts: `games/tune_serial10/run_14/` (`overnight.log`, `traces/`, `tune_checkpoint.json`).
+
+---
+
+## run_13 — (10 NEW games, GLM-5.2, no VLM critique)
+
+All-new library goals never used in run_07–12. Goals: `eval/tune_run13_goals.txt`.
+**Model:** `~/MLX_Models/GLM-5.2-MLX-4bit`. **`--no-vlm-critique`**. `--max-iters 4 --retries 0`.
+
+| Slot | Library | Modality |
+|------|---------|----------|
+| 1 | 1942 | vertical shoot-'em-up |
+| 2 | stealth-infiltration | stealth / FOV |
+| 3 | simcity-lite | city builder |
+| 4 | elite-trader | space trading |
+| 5 | match-three | match-3 puzzle |
+| 6 | stacking-tower | physics stack |
+| 7 | rhythm-tap | rhythm |
+| 8 | solitaire | cards |
+| 9 | angry-blocks | physics puzzle |
+| 10 | fighter-showcase | pose / animation showcase |
+
+**Two processes — both required.** Terminal batch runs **game → game with zero wait** and opens a **visible Chromium window**. Cursor watcher triages each finished trace and patches harness/memory/prompts **as evidence arrives** (do not wait until the end).
+
+| | Terminal.app (once) | Cursor watcher (once) |
+|---|---------------------|------------------------|
+| Command | `bash eval/tune_run13.sh` | `.venv/bin/python eval/tune_overnight_monitor.py --out-dir games/tune_serial10/run_13 --jobs-total 10 --interval 30 --sync-loop` |
+| Log / status | `games/tune_serial10/run_13/overnight.log` | `games/tune_serial10/run_13/agent_monitor.json` |
+
+**Open batch in Terminal.app from Cursor:**
+
+```bash
+osascript -e 'tell application "Terminal" to do script "cd /Users/jonathanrothberg/Agent_learning && bash eval/tune_run13.sh"'
+```
+
+```bash
+.venv/bin/python eval/tune_overnight_monitor.py \
+  --out-dir games/tune_serial10/run_13 \
+  --jobs-total 10 \
+  --interval 30 \
+  --sync-loop
+```
+
+**Watcher loop (continuous, no blocking the batch):**
+
+1. Poll `agent_monitor.json` — when `completed_count` advances, open the newest trace for that label.
+2. **Timeline:** `.venv/bin/python scripts/enrich_trace.py <trace> --timeline`
+3. **Classify** `failure_class` → patch `tools.py` / `agent_*.py` / `memory/*.jsonl` / `prompts_v1.py`
+4. **Keep going** — next game already running; fixes apply to subsequent games.
+
+Artifacts: `games/tune_serial10/run_13/` (`overnight.log`, `traces/`, `tune_checkpoint.json`).
+
+---
+
+## run_08 — (10 games, flat-out + parallel watcher)
 
 Fresh library goals not in run_07, plus **Doom slot 1** to validate the 3D FPS navigation harness fix. Goals: `eval/tune_run08_goals.txt`.
 
