@@ -36,6 +36,16 @@ def test_serial_loop_rereads_goals_file_each_game():
     assert "refreshed = _load_goals(args)" in src
 
 
+def test_serial_loop_crash_bonus_retry_on_sigkill():
+    """exit<0 with no HTML gets one free retry even when --retries 0
+    (run_15 Dragon/Prince/Doom jetsam left no code). Soft fails still
+    respect the retries budget."""
+    src = (REPO / "eval" / "tune_serial_loop.py").read_text(encoding="utf-8")
+    assert "crash_bonus_retry" in src
+    assert "crash_bonus_used" in src
+    assert "exit<0 with no delivered HTML" in src
+
+
 def test_counts_as_pass_requires_best_or_iter_ok(tmp_path: Path):
     out = tmp_path / "01_game.html"
     out.write_text("x" * 600, encoding="utf-8")

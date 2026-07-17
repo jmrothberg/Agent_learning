@@ -2250,10 +2250,27 @@ def _is_neutral_bg_pixel(r: int, g: int, b: int) -> bool:
     return (mx - mn) <= 40
 
 
+def _border_rgb_samples(img) -> list[tuple[int, int, int]]:
+    """Full perimeter RGB samples (top/bottom rows + left/right cols)."""
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    w, h = img.size
+    px = img.load()
+    border: list[tuple[int, int, int]] = []
+    for x in range(w):
+        border.append(px[x, 0])
+        border.append(px[x, h - 1])
+    for y in range(h):
+        border.append(px[0, y])
+        border.append(px[w - 1, y])
+    return border
+
+
 def _detect_bg_color(img) -> tuple[int, int, int] | None:
-    """Sample the four corners + four edge-midpoints; return the most
-    common color if it dominates (>= 6 of 8 samples agree within
-    tolerance), else None (don't mask — we'd risk eating real pixels).
+    """Sample corners + edge midpoints; return dominant backdrop color.
+
+    Accept >=6/8 agreement, or >=5/8 when the cluster is near-white/light-gray
+    (figure often eats one edge sample and would otherwise stay opaque).
     """
     if img.mode != "RGB":
         img = img.convert("RGB")
@@ -2277,10 +2294,47 @@ def _detect_bg_color(img) -> tuple[int, int, int] | None:
         )
         if best is None or n > best[1]:
             best = (s, n)
-    if best is None or best[1] < 6:
-        # No clearly-dominant background — leave the image alone.
+    if best is None:
         return None
-    return best[0]
+    if best[1] >= 6:
+        return best[0]
+    if best[1] >= 5 and _is_neutral_bg_pixel(*best[0]):
+        return best[0]
+    return None
+
+
+def _detect_neutral_border_majority_bg(img) -> tuple[int, int, int] | None:
+    """Fallback when 8-point sampling fails but the border is mostly neutral.
+
+    If >=35% of border pixels are near-white/gray and one cluster dominates,
+    use it as bg. Two strong neutral tones → defer to checkerboard detector.
+    """
+    border = _border_rgb_samples(img)
+    if not border:
+        return None
+    neutrals = [c for c in border if _is_neutral_bg_pixel(*c)]
+    if len(neutrals) / len(border) < 0.35:
+        return None
+    tol = 16
+    clusters: list[tuple[tuple[int, int, int], int]] = []
+    for s in neutrals:
+        matched = False
+        for i, (center, count) in enumerate(clusters):
+            if all(abs(s[j] - center[j]) <= tol for j in range(3)):
+                clusters[i] = (center, count + 1)
+                matched = True
+                break
+        if not matched:
+            clusters.append((s, 1))
+    if not clusters:
+        return None
+    clusters.sort(key=lambda item: item[1], reverse=True)
+    center, n = clusters[0]
+    if n / len(neutrals) < 0.5:
+        return None
+    if len(clusters) >= 2 and clusters[1][1] / len(neutrals) >= 0.25:
+        return None
+    return center
 
 
 def _detect_checkerboard_bg_colors(img) -> list[tuple[int, int, int]] | None:
@@ -2289,17 +2343,7 @@ def _detect_checkerboard_bg_colors(img) -> list[tuple[int, int, int]] | None:
     Samples the full border strip. Requires two distinct neutral clusters
     covering >= 60% of border pixels — avoids masking multicolor scenes.
     """
-    if img.mode != "RGB":
-        img = img.convert("RGB")
-    w, h = img.size
-    px = img.load()
-    border: list[tuple[int, int, int]] = []
-    for x in range(w):
-        border.append(px[x, 0])
-        border.append(px[x, h - 1])
-    for y in range(h):
-        border.append(px[0, y])
-        border.append(px[w - 1, y])
+    border = _border_rgb_samples(img)
     if not border:
         return None
 
@@ -2399,6 +2443,8 @@ def _chroma_key_to_rgba(pil_img) -> tuple[Any, dict]:
     """
     stats: dict[str, Any] = {"bg_color": None, "alpha_pixel_ratio": 0.0}
     bg = _detect_bg_color(pil_img)
+    if bg is None:
+        bg = _detect_neutral_border_majority_bg(pil_img)
     if bg is not None:
         stats["bg_color"] = bg
         keyed, ratio = _apply_chroma_key_alpha(pil_img, bg)

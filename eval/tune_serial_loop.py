@@ -447,10 +447,15 @@ async def main_async(args) -> int:
 
         max_attempts = 1 + max(0, args.retries)
         result: JobResult | None = None
-        for attempt in range(1, max_attempts + 1):
+        # Jetsam/SIGKILL (exit<0) with no HTML gets one free retry even when
+        # --retries 0; soft fails still respect the retries budget.
+        crash_bonus_used = 0
+        attempt = 0
+        while True:
+            attempt += 1
             if attempt > 1:
                 print(
-                    f"\n↻ retry {attempt}/{max_attempts} for {label} "
+                    f"\n↻ retry {attempt} for {label} "
                     f"(prior exit={result.exit_code if result else '?'}) — "
                     f"sleep {args.retry_delay:.0f}s\n",
                     flush=True,
@@ -473,6 +478,27 @@ async def main_async(args) -> int:
                         "verified artifact on disk after failed exit — artifact_pass"
                     )
                 break
+            if attempt < max_attempts:
+                continue
+            if (
+                result.exit_code < 0
+                and not _is_game_delivered(out_path)
+                and crash_bonus_used < 1
+            ):
+                crash_bonus_used += 1
+                result.notes.append(
+                    "crash_bonus_retry: exit<0 with no delivered HTML "
+                    "(jetsam/SIGKILL) — one free retry despite --retries budget"
+                )
+                print(
+                    f"\n↻ crash-bonus retry for {label} "
+                    f"(exit={result.exit_code}, no HTML) — "
+                    f"sleep {args.retry_delay:.0f}s\n",
+                    flush=True,
+                )
+                await asyncio.sleep(args.retry_delay)
+                continue
+            break
 
         assert result is not None
         result.outcome = _classify_outcome(out_path)

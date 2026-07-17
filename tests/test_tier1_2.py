@@ -137,6 +137,58 @@ def test_13_chromakey_no_dominant_bg_skips_masking():
     assert stats["alpha_pixel_ratio"] == 0.0
 
 
+def test_13_chromakey_near_white_5_of_8_when_figure_touches_edge():
+    """run_15 Rampage: figure eats left edge samples so only 5/8 agree on
+    white — still chroma-key (opaque idle boxes otherwise)."""
+    from PIL import Image
+    img = Image.new("RGB", (64, 64), (252, 253, 253))
+    # Figure touches left corners + left mid — breaks strict 6/8 consensus.
+    for y in range(64):
+        for x in range(8):
+            img.putpixel((x, y), (180, 100, 70))
+    keyed, stats = assets._chroma_key_to_rgba(img)
+    assert stats["bg_color"] is not None
+    assert stats["alpha_pixel_ratio"] > 0.4
+    # Right edge was backdrop → transparent.
+    assert keyed.getpixel((63, 32))[3] == 0
+    # Figure stays opaque.
+    assert keyed.getpixel((2, 32))[3] == 255
+
+
+def test_13_chromakey_border_majority_when_figure_fills_most_edges():
+    """run_15 Rampage punch: only ~3/8 edge samples white, but border strip
+    is still majority near-white — chroma via border-majority fallback."""
+    from PIL import Image
+    img = Image.new("RGB", (64, 64), (254, 254, 254))
+    # Non-matching edge colors so 8-point consensus fails (like punch1).
+    img.putpixel((0, 0), (255, 253, 253))
+    img.putpixel((63, 0), (161, 153, 139))
+    img.putpixel((0, 63), (4, 4, 3))
+    img.putpixel((63, 63), (36, 34, 28))
+    img.putpixel((32, 0), (254, 255, 254))
+    img.putpixel((32, 63), (253, 255, 253))
+    img.putpixel((0, 32), (165, 178, 155))
+    img.putpixel((63, 32), (112, 101, 88))
+    # Interior figure + most of the canvas fill with opaque body, leaving
+    # a white halo near the top/right that dominates the border strip.
+    for y in range(8, 64):
+        for x in range(0, 56):
+            img.putpixel((x, y), (40, 120, 60))
+    # Keep a white border band on top + right (backdrop).
+    for x in range(64):
+        for y in range(0, 6):
+            img.putpixel((x, y), (254, 254, 254))
+    for y in range(64):
+        for x in range(58, 64):
+            img.putpixel((x, y), (254, 254, 254))
+    keyed, stats = assets._chroma_key_to_rgba(img)
+    assert stats["bg_color"] is not None
+    assert stats.get("checkerboard_bg") is None
+    assert stats["alpha_pixel_ratio"] > 0.15
+    assert keyed.getpixel((60, 2))[3] == 0
+    assert keyed.getpixel((20, 40))[3] == 255
+
+
 # ---------------------------------------------------------------------------
 # 2.1 — probes_parsed trace includes the full text
 # ---------------------------------------------------------------------------

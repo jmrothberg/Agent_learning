@@ -294,3 +294,95 @@ def test_hybrid_mode_index_shows_score_when_nonzero():
     )
     # b3 (helpful=3) is in the summary section; should show score=+3.
     assert "score=+3" in block or "score=+4" in block
+
+
+# ---------------------------------------------------------------------------
+# run_15 playbook reachability — bullets must fire for their target goals
+# ---------------------------------------------------------------------------
+
+_REPO = Path(__file__).resolve().parent.parent
+
+
+def _real_playbook() -> Playbook:
+    return Playbook(base_root=str(_REPO / "memory"))
+
+
+def _plan_ids(goal: str, k: int = 24) -> list[str]:
+    return [h.bullet.id for h in _real_playbook().retrieve(goal, stage="plan", k=k)]
+
+
+def test_run15_pacman_goal_retrieves_chomp_cycle_bullet():
+    """Frozen Pac-Man/ghosts (run_15): chomp-cycle coaching must reach plan."""
+    ids = _plan_ids(
+        "Build a Pac-Man game. Maze game: A yellow chomping hero navigates "
+        "a walled maze eating dots; four colored ghosts chase him."
+    )
+    assert "maze-chase-sprite-chomp-cycle" in ids
+
+
+def test_run15_zelda_goal_retrieves_npc_dialog_bullet():
+    """Zelda dialog_opens fail (run_15): facing-map talk bullet must retrieve."""
+    ids = _plan_ids(
+        "Build a Zelda game. Top-down action-RPG: A hero explores a "
+        "tile-based overworld, talks to NPCs (dialog boxes), fights "
+        "enemies with a sword."
+    )
+    assert "npc-talk-opens-dialogue-state" in ids
+
+
+def test_run15_street_fighter_goal_retrieves_punch_damage_bullet():
+    """Street Fighter punch_deals_damage (run_15): versus punch bullet must fire."""
+    ids = _plan_ids(
+        "Build a Street Fighter game. a blue-gi player versus a red-gi CPU "
+        "fighter. Punch and kick deal damage. Versus fighting."
+    )
+    assert "versus-punch-probe-deals-damage" in ids
+
+
+def test_run15_donkey_kong_goal_retrieves_jump_over_and_locomotion_bullets():
+    """DK jump_over_barrel_scores + STATIC-ACTION (run_15): both bullets fire."""
+    goal = (
+        "Build a Donkey Kong game. Single-screen arcade platformer: plumber "
+        "climbs girders, barrels roll down, jumping over a barrel scores "
+        "points. Animated poses idle, run, climb, jump — at least 2 frames."
+    )
+    ids = _plan_ids(goal)
+    assert "jump-over-hazard-scores" in ids
+    assert "locomotion-held-key-multi-frame" in ids
+    assert "ramp-hazard-roll-then-tumble" in ids
+
+
+def test_run15_fps_goal_retrieves_navigation_minimap_invariant():
+    """Maze FPS: three.js + shared look/move basis + minimap coaching."""
+    ids = _plan_ids(
+        "Build a first-person three.js maze shooter: textured walls, "
+        "mouse-look WASD, billboard monsters, minimap radar yaw."
+    )
+    assert "3d-navigation-modality-invariants" in ids
+
+
+def test_run15_versus_goal_retrieves_symmetric_prefix_roster():
+    """Incomplete P2 pose roster → MISSING boxes; covered by prefix bullet."""
+    ids = _plan_ids(
+        "Build a versus fighting game. Two fighters face each other, "
+        "walk punch kick block projectile poses, sprite prefixes."
+    )
+    assert "versus-fighter-sprite-prefix" in ids
+
+
+def test_run15_racing_goal_retrieves_pseudo3d_road_rivals():
+    """Rival overwrite / undrawn cars: covered by pseudo3d road bullet."""
+    ids = _plan_ids(
+        "Build a pseudo-3D Mode-7 racing road with rival cars, "
+        "player steering accelerate brake roadside scenery."
+    )
+    assert "pseudo3d-curved-road" in ids
+
+
+def test_run15_versus_goal_retrieves_kick_direction_code_flip():
+    """Kick wrong way without VLM: code-flip bullet must retrieve."""
+    ids = _plan_ids(
+        "Build a versus fighting game. punch and kick deal damage, "
+        "fighters face each other, kick toward opponent, sprite flip."
+    )
+    assert "attack-sprite-wrong-direction-flip-in-code" in ids

@@ -36,6 +36,11 @@ matching `.html` and play it — **do not trust TEST OK alone**.
 | **Genre / game-type** convention (versus fighters, TD waves, chess CPU)? | **`memory/playbook.jsonl`** or `visual_playtests.jsonl` — retrieval-gated, not `if "mortal" in goal` |
 | Model keeps **mis-wiring one game** but harness is correct? | Playbook + optional user feedback; **not** a one-game hardcode in harness |
 
+**Prompt / memory style (local LLMs):** library goals and playbook bullets must state **one** best
+practice, not a menu (`raycaster or three.js` → prefer three.js). Prefer extending an existing
+bullet over adding a new ID. Keep bullets short (~250–500 chars); put mechanics in playbook /
+outlines, not long goal appendices.
+
 **Recent example (parallel roster sprites):** `f2_walk` resolving to `f1_walk` was a **harness**
 bug in injected `sprite()` token tie-breaking + load-race cache → fixed in **`assets.py`**. Clearing
 `_spriteCache` on `reset()` and using `prefix + '_' + phase` in `drawFighter` is **memory**
@@ -194,6 +199,13 @@ Per-run scores live in **`eval/OPERATIONS.md`** (run_06 snapshot). Mid-batch har
 | Video intro: orphan setTimeout, enemies never spawn | Playbook: call `reset()`/`startGame()` — same path as R restart | `memory/playbook.jsonl` |
 | Parallel roster: `f2_walk` shows `f1` art (MK, Street Fighter, chess colors) | Harness: `sprite()` token tie-break + flush `_spriteCache` on `_assetsReady`; memory: `versus-fighter-sprite-prefix` | `assets.py`, `tests/test_assets.py`, `memory/playbook.jsonl` |
 | Game looks perfect to human but trace shows 2 `soft_warnings` | Often probe timing or partial patch — not always a visual bug; read `iter_summary.soft_warnings` | trace + `HARNESS_DEBUG.md` § “looks fine” |
+| Cascade hazards roll uphill / skip mid-span tumble | INITIAL vx from slopeDir + ladder gaps (`ramp-hazard-roll-then-tumble`) | `memory/playbook.jsonl`, outline trap |
+| Maze FPS missing overview map | Short goal HUD line + `3d-navigation-modality-invariants` + outline trap | `prompt_library.jsonl` (doom), playbook, outline |
+| Attack limb points away from opponent | Code EXTRA flip — no VLM (`attack-sprite-wrong-direction-flip-in-code`) | `memory/playbook.jsonl` |
+| Versus P2 incomplete pose roster → MISSING boxes | Same pose suffixes both prefixes (`versus-fighter-sprite-prefix`) | `memory/playbook.jsonl` |
+| Sprite opaque when figure touches image edge | Chroma: near-white 5/8 + border-majority fallback | `assets.py`, `tests/test_tier1_2.py` |
+| Pseudo-3D rivals stack / car undrawn | Discrete lanes + z-sort + drawImage (`pseudo3d-curved-road`) | `memory/playbook.jsonl`, racing outline |
+| Maze chase looks frozen | Don’t gate mouth cycle on dir; chasers must move (`maze-chase-sprite-chomp-cycle`) | `memory/playbook.jsonl` |
 
 ### Recurring patterns (watch in new traces)
 
@@ -201,6 +213,7 @@ Per-run scores live in **`eval/OPERATIONS.md`** (run_06 snapshot). Mid-batch har
 - **input_moves_player false-fail** — harness dispatches ArrowRight; if prior keydown left player in crouch/block, movement gated on `idle||walk` fails probe while game feels fine to a human.
 - **ENTITY-NOT-RENDERED soft_warning** — fix only if 2+ games show same pattern (Missile Command iter 2).
 - **OOM at game 12** — verify media/MLX freed at serial game boundaries; run heaviest media game earlier or isolated.
+- **SIGKILL / exit=-9 with no HTML (run_15)** — jetsam during Phase A / Wan left Dragon, Prince, Doom with no `<html_file>`. `tune_serial_loop` grants one **crash-bonus retry** when `exit<0` and nothing delivered, even if `--retries 0` (soft fails still respect retries). Memory: `jump-over-hazard-scores`, `locomotion-held-key-multi-frame`.
 - **Stuck BoN** — only helps sampling noise on multi-slot parallel backends; on single MLX it is ~2× wall time. Keep default off for tune batches.
 
 ## Feedback channels (user vs harness)
