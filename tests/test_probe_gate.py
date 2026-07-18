@@ -171,6 +171,37 @@ def test_extract_probe_state_paths_and_helpers():
     assert "find" not in helpers
 
 
+def test_extract_probe_helpers_skips_local_arrow_decls():
+    """run_14 Dragon's Lair: `const d=(a,b)=>…; return d(near,hero)<d(cue,hero)`
+    must NOT report undefined helper `d` — it is local to the IIFE."""
+    expr = (
+        "(()=>{return (async()=>{"
+        "const d=(a,b)=>Math.hypot((a.x||0)-(b.x||0),(a.y||0)-(b.y||0));"
+        "return d(s.nearHit,s.hero)<d(s.cue,s.hero);})()})()"
+    )
+    helpers = _extract_probe_helper_idents(expr)
+    assert "d" not in helpers
+    assert "simulateClick" not in helpers  # sanity: not a false positive list
+
+
+def test_patch_probe_keyboard_dual_dispatches_document_and_window():
+    """run_14 typing-race: document.dispatchEvent(KeyboardEvent) missed
+    window listeners — harness dual-dispatches both targets."""
+    from tools import _patch_probe_keyboard_dispatch
+
+    expr = (
+        "(async()=>{ const w = state.target[0].toLowerCase(); "
+        "document.dispatchEvent(new KeyboardEvent('keydown',{key:w,bubbles:true})); "
+        "await new Promise(r=>setTimeout(r,200)); "
+        "return state.typed === w; })()"
+    )
+    out = _patch_probe_keyboard_dispatch(expr)
+    assert "__harnessKeyDispatch" in out
+    assert "document.dispatchEvent(new KeyboardEvent" not in out
+    # Idempotent
+    assert _patch_probe_keyboard_dispatch(out) == out
+
+
 def test_format_falsy_probe_diag_surfaces_helpers_and_live():
     msg = _format_falsy_probe_diag(
         {"state.mode": "market", "state.crane.x": 400},

@@ -495,3 +495,19 @@ def test_canvas_truly_hallucinated_method_still_flagged():
     assert r["stats"].get("api_hallucinations", 0) >= 1
     assert any("drawScene" in w and "HTMLCanvasElement" in w
                for w in r["warnings"])
+
+
+def test_extra_close_paren_promoted_to_error_via_node():
+    """run_16 1942: extra `)` was only ±1 WARNING; Chromium then failed and
+    flooded the local model. node confirm must make micro-probes ok=False."""
+    html = _wrap(
+        "const state={bullets:[],player:{x:1,y:1}};\n"
+        "function fire(){\n"
+        "  state.bullets.push({x:1,y:2,vx:0,vy:-1}));\n"  # extra )
+        "}\n"
+        "function loop(){requestAnimationFrame(loop);} loop();\n"
+    )
+    r = run_micro_probes(html)
+    assert r["stats"]["bracket_imbalance"]["()"] == -1
+    assert r["ok"] is False
+    assert any("syntax error" in e.lower() for e in r["errors"])

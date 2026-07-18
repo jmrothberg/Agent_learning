@@ -285,7 +285,7 @@ def test_wasted_iters_counts_blocked_iter_identical_to_shipped():
 
 
 def test_retrieval_first_clean_join():
-    """M-2: retrieved bullet ids map to the first ok=True iter index."""
+    """M-2: legacy traces without retrieved_ids fall back to playbook_retrieved."""
     et = _load_enrich_trace()
     records = [
         {"kind": "playbook_retrieved", "ids": ["b1", "b2"]},
@@ -296,6 +296,26 @@ def test_retrieval_first_clean_join():
     first_clean, retrieved = et._retrieval_first_clean(records)
     assert first_clean == 2
     assert retrieved == ["b1", "b2", "b3"]  # ordered-unique union
+
+
+def test_retrieval_first_clean_prefers_per_iter_retrieved_ids():
+    """Post-clean feedback retrieval must not be credited to first-clean."""
+    et = _load_enrich_trace()
+    records = [
+        {"kind": "iter_summary", "iteration": 1, "ok": True, "retrieved_ids": ["b1"]},
+        {"kind": "playbook_retrieved", "ids": ["b2"], "feedback_in_query": True},
+        {"kind": "iter_summary", "iteration": 2, "ok": False, "retrieved_ids": ["b2"]},
+    ]
+    first_clean, credited = et._retrieval_first_clean(records)
+    assert first_clean == 1
+    assert credited == ["b1"]
+
+
+def test_session_outcome_carries_materialized_and_crash_flags():
+    """Offline credit eligibility needs code_materialized + backend_crashed."""
+    src = GameAgent.class_inspect_source()
+    assert '"code_materialized": code_materialized' in src
+    assert '"backend_crashed": backend_crashed' in src
 
 
 def test_iter_summary_carries_shipped_unchanged_and_probe_digest():
@@ -309,6 +329,20 @@ def test_iter_summary_carries_shipped_unchanged_and_probe_digest():
     # T-3 compact probe digest (name + ok + short expr), bounded.
     assert "_probe_digest = [" in src
     assert '"probes": _probe_digest' in src
+
+
+def test_iter_summary_carries_retrieved_ids():
+    """Scoreboard/credit: active playbook ids fold onto iter_summary."""
+    src = GameAgent.run_loop_inspect_source()
+    assert '"retrieved_ids": list(getattr(self, "_active_bullet_ids"' in src
+
+
+def test_session_outcome_carries_numeric_score():
+    """session_outcome.score uses _score_attempt so offline tools need no join."""
+    src = GameAgent.class_inspect_source()
+    assert '"kind": "session_outcome"' in src
+    assert '"score": session_score' in src
+    assert "session_score = float(self._score_attempt())" in src
 
 
 def test_image_skipped_not_persisted(tmp_path):

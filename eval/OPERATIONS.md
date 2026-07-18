@@ -16,7 +16,7 @@ Human onboarding → `README.md`. Commands/env → `DEV.md`. Harness traps → `
 | **Run 10 games validation (run_10 — run_09 fix retest)** | Terminal: `bash eval/tune_run09.sh` · Cursor: watcher below | `--max-iters 4`, fresh `run_10/` dir. See § run_10. |
 | **Run all 11 games overnight (both batches, auto-chained)** | `bash eval/tune_run07_chain.sh` in Terminal + monitor below in Cursor | **One paste** — Batch B starts automatically when A finishes. No wake-up. |
 | **Run 11 games to improve the agent (run_07)** | Same as chain row above | A=GLM no VLM (6) → B=Qwen VLM on (5), watcher handoff between games. |
-| **Run unit tests** / **pytest** / **after a code change** | `.venv/bin/python -m pytest tests/ -q` | ~2158 tests, no GPU. Full map: `TEST.md`. |
+| **Run unit tests** / **pytest** / **after a code change** | `.venv/bin/python -m pytest tests/ -q` | ~2330 tests, no GPU. Full map: `TEST.md`. |
 | **Run one test file** | `.venv/bin/python -m pytest tests/test_patches.py -v` | Swap path. |
 | **Run asteroids regression** | `.venv/bin/python -m pytest tests/test_retrieval.py tests/test_patches.py -q -k asteroids` | Ship thrust + irregular asteroids. |
 | **Run 3D navigation guards** | `.venv/bin/python -m pytest tests/test_3d_navigation_conventions.py tests/test_doom_trace_fixes.py -q` | Skeletons, playbook, FPS yaw/movement conventions. |
@@ -28,6 +28,9 @@ Human onboarding → `README.md`. Commands/env → `DEV.md`. Harness traps → `
 | **Interactive TUI** | `.venv/bin/python chat.py` | Visible Chromium; `/bestof off` default. |
 | **System smoke (browser)** | `python system_tests.py run --suite smoke --three-model` | Slow; confirms full loop. |
 | **Timeline a trace** | `.venv/bin/python scripts/enrich_trace.py <path-or-stem> --timeline` | Primary triage; see `HARNESS_DEBUG.md`. |
+| **Compare tune runs (scoreboard)** | `.venv/bin/python eval/compare_runs.py run_15 run_16` | Cross-run fresh_pass / wasted_iters / failure_class — measure before/after harness changes. |
+| **Run 10 graphics-heavy games (run_16)** | **completed** — `games/tune_serial10/run_16/` | **5/10 fresh_pass** · GLM-5.2 · `--max-iters 3` · scoreboard below. |
+| **Offline playbook credit (dry-run)** | `.venv/bin/python scripts/credit_bullets.py games/tune_serial10/run_15 --dry-run` | Helpful/harmful deltas from traces; omit `--dry-run` to apply + ledger dedupe. |
 | **Batch dashboard / watcher (run_07 chain)** | `.venv/bin/python eval/tune_overnight_monitor.py --run07-chain --interval 30 --sync-loop` | Polls every **30 seconds** (not minutes). Triage + patch while batch keeps running. |
 | **Parallel N games (throughput lab)** | See `eval/PARALLEL_MLX_TESTING.md` + `eval/batch_parallel.py` | One `mlx_lm.server`, N clients — **not** in-game BoN. |
 
@@ -76,7 +79,49 @@ Use `--out-dir` from `active_out_dir` in `agent_monitor.json` (`run_07_big` duri
 
 ---
 
-## run_15 — tonight (20 GRAPHICS-BEST games, GLM-5.2, no VLM critique)
+## run_16 — (10 graphics-heavy, GLM-5.2, max-iters 3) — completed
+
+Fresh modalities not exhausted by run_15 (shooters, animated board games, open-field TD, roguelike, pinball, bullet hell, lit dungeon). Goals: `eval/tune_run16_goals.txt`.
+**Model:** `~/MLX_Models/GLM-5.2-MLX-4bit`. **`--no-vlm-critique`**. **`--max-iters 3 --retries 0`**.
+
+| # | Outcome | Label |
+|---|---------|-------|
+| 1–2 | fresh_fail (infra / SIGKILL, no iter_summary) | Centipede, Galaga |
+| 3–6, 10 | fresh_pass | 1942, Holochess, Checkers, Fieldrunners, Torch Dungeon |
+| 7–9 | fresh_fail (quality) | Roguelike (stairs/fog + monsters_step), Pinball (playfield entry), Bullet Hell (steady-state `bullets_spawn`) |
+
+### Scoreboard snapshot — run_15 vs run_16 (2026-07-18)
+
+```bash
+.venv/bin/python eval/compare_runs.py run_15 run_16
+```
+
+| run | status | jobs | fresh_pass | artifact_pass | fail | avg wasted_iters | avg first_clean | never_clean | infra_failed | avg tok/s |
+|-----|--------|------|------------|---------------|------|-----------------|-----------------|-------------|--------------|-----------|
+| run_15 | incomplete | 24 | 12 | 2 | 10 | 0.32 | 2.23 | 7 | 5 | 9.01 |
+| run_16 | incomplete | 10 | 5 | 0 | 5 | 0.23 | 2.6 | 3 | 5 | 9.02 |
+
+failure_class (non-ok iters): run_15 `memory_gap=33`, `local_llm_limit=1`; run_16 `memory_gap=12` (plus 2 early SIGKILL with no iters).
+
+**Harness/memory landed mid-batch:** syntax soft_warning cascade suppress; partial-quarantine gate cap 2→1; ENTITY fog skip (`seen`/`explored`); pinball `auto_body` reseat; `outline-bullet-hell` / roguelike / pinball trap updates. Optional re-run Centipede/Galaga later (infra, not quality).
+
+### Post-batch learning (traces + HTML, no new model runs — 2026-07-18)
+
+Applied `scripts/credit_bullets.py` on run_14/15/16 (infra SIGKILL skipped). Fact-based harness FPs from shipped HTML:
+
+| Evidence | Fix |
+|----------|-----|
+| DL `auto_qte_threat_position_advances` → `undefined helpers: d` (local arrow) | Skip local decls in helper diagnose; recipe inlines `Math.hypot` |
+| Typing `document.dispatchEvent(KeyboardEvent)` vs `window` listener | `_patch_probe_keyboard_dispatch` dual-fires both |
+| OutRun intro-only draw of `key_art` with green probes + undrawn cars | Intro/title/menu mode demotes ASSETS_UNDRAWN |
+| Bullet hell `length>b0` after wait with 94 live bullets | Phase-A `fragile_length_growth_probe` lint |
+| DK `jumpOverSet` never `.add` / score | `outline-vertical-platformer` trap + probe |
+
+Repetition abort threshold left at `_BLOCK_MAX_REPEATS=3` — lowering to 2 false-positived healthy semicolon-chained streams.
+
+---
+
+## run_15 — (20 GRAPHICS-BEST games, GLM-5.2, no VLM critique) — completed
 
 Asset-heavy library goals (fighters, QTE, platformers, FPS, point-click, arcade). Goals: `eval/tune_run15_goals.txt` (canonical `prompt_library.jsonl` — no speculative goal appendices).
 **Model:** `~/MLX_Models/GLM-5.2-MLX-4bit`. **`--no-vlm-critique`**. `--max-iters 4 --retries 0`.
@@ -133,6 +178,19 @@ osascript -e 'tell application "Terminal" to do script "cd /Users/jonathanrothbe
 4. **Keep going** — next game already running; fixes apply to subsequent games.
 
 Artifacts: `games/tune_serial10/run_15/` (`overnight.log`, `traces/`, `tune_checkpoint.json`).
+
+### Scoreboard snapshot — run_14 vs run_15 (2026-07-17)
+
+Measured with `eval/compare_runs.py` on real `tune_summary.json` + traces (run_15 still in progress when captured):
+
+| run | status | jobs | fresh_pass | artifact_pass | fail | avg wasted_iters | avg first_clean | never_clean | avg tok/s |
+|-----|--------|------|------------|---------------|------|-----------------|-----------------|-------------|-----------|
+| run_14 | incomplete | 10 | 4 | 0 | 6 | 0.6 | 1.5 | 6 | 4.06 |
+| run_15 | running | 18 | 7 | 2 | 9 | 0.4 | 2.38 | 12 | 9.15 |
+
+failure_class (non-ok iters): run_14 `memory_gap=6`; run_15 `memory_gap=28`, `local_llm_limit=1`.
+
+Re-run after 20/20: `.venv/bin/python eval/compare_runs.py run_14 run_15`.
 
 ---
 

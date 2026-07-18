@@ -32,6 +32,14 @@ _MAX_MSGS = 12          # at most this many console lines forwarded
 _MAX_MSG_LEN = 240      # truncate each line to this many chars
 _MAX_BODY_TEXT = 200    # tiny snippet of body text
 
+# Page/console errors that mean the script never parsed — every RAF/input/
+# probe soft_warning after this is cascading noise for local LLMs.
+_SYNTAX_PAGE_ERROR_RE = re.compile(
+    r"SyntaxError|Unexpected token|missing \) after argument list|"
+    r"Invalid or unexpected token|expected\b.*[\)\}\]]",
+    re.I,
+)
+
 
 def _input_evidence_is_plausible(path: str) -> bool:
     """Return True when a state delta is likely caused by held input.
@@ -219,6 +227,35 @@ def _drawn_blob_contains_asset_fname(drawn_blob: str, fname: str) -> bool:
         r"(?:^|[/\\?#])" + re.escape(fn) + r"(?:[?#&]|$)",
         low,
     ))
+
+
+def _patch_probe_keyboard_dispatch(expr: str) -> str:
+    """Dual-dispatch KeyboardEvents to window AND document.
+
+    run_14 typing-race: model probe used `document.dispatchEvent(new
+    KeyboardEvent(...))` while the game listened on `window` — typed stayed
+    '' for 3 iters with a correct key handler. Genre-free: fire both targets
+    so either listener shape receives the event. Idempotent via helper guard.
+    """
+    e = str(expr or "")
+    if "KeyboardEvent" not in e or "dispatchEvent" not in e:
+        return e
+    if "__harnessKeyDispatch" in e:
+        return e
+    if "document.dispatchEvent" not in e and "window.dispatchEvent" not in e:
+        return e
+    helper = (
+        "window.__harnessKeyDispatch=(ev)=>{"
+        "try{window.dispatchEvent(ev);}catch(_e){}"
+        "try{document.dispatchEvent(ev);}catch(_e){}"
+        "};"
+    )
+    # Replace after building helper so helper's own dispatchEvent calls stay raw.
+    out = e.replace("document.dispatchEvent(", "window.__harnessKeyDispatch(")
+    out = out.replace("window.dispatchEvent(", "window.__harnessKeyDispatch(")
+    if out == e:
+        return e
+    return helper + out
 
 
 def _patch_probe_pointer_board_clicks(expr: str) -> str:
@@ -470,14 +507,39 @@ def _extract_probe_state_paths(expr: str) -> list[str]:
     return seen[:8]
 
 
+# Local decls inside the probe IIFE — run_14 Dragon's Lair auto_qte used
+# `const d=(a,b)=>Math.hypot(...)` then called `d(...)`. Diagnose looked up
+# `window.d`, reported "undefined helpers: d", and burned 4 iters on a
+# recipe bug. Skip names declared in the same expression.
+_PROBE_LOCAL_DECL_RE = re.compile(
+    r"\b(?:const|let|var)\s+([A-Za-z_][\w]*)\s*=|"
+    r"\bfunction\s+([A-Za-z_][\w]*)\s*\("
+)
+
+
+def _probe_locally_declared_idents(expr: str) -> set[str]:
+    """Idents bound by const/let/var/function inside this probe expression."""
+    found: set[str] = set()
+    for m in _PROBE_LOCAL_DECL_RE.finditer(expr or ""):
+        name = m.group(1) or m.group(2)
+        if name:
+            found.add(name)
+    return found
+
+
 def _extract_probe_helper_idents(expr: str) -> list[str]:
-    """Bare function names the probe calls (custom helpers like simulateClick)."""
+    """Bare function names the probe calls (custom helpers like simulateClick).
+
+    Skips builtins and names declared locally in the same expression
+    (arrow/const helpers) — those are not missing window.* APIs.
+    """
     if not expr:
         return []
+    local = _probe_locally_declared_idents(expr)
     seen: list[str] = []
     for m in _PROBE_HELPER_CALL_RE.finditer(expr):
         name = m.group(1)
-        if name in _PROBE_HELPER_BUILTINS:
+        if name in _PROBE_HELPER_BUILTINS or name in local:
             continue
         if name not in seen:
             seen.append(name)
@@ -1590,6 +1652,19 @@ _ENTITY_RENDERED_JS = """
 
   const missing = [];
   for (const ent of candidates) {
+    // Fog-of-war FP (run_16 roguelike): stairs/exits sit in state at tile
+    // coords while draw() skips unseen tiles → 100% background sample and a
+    // blocking soft_warning even though hiding is intentional. If seen /
+    // explored marks this cell false, skip — not an undrawn-sprite bug.
+    try {
+      const fog = s.seen || s.explored;
+      if (Array.isArray(fog) && Number.isInteger(ent.x) && Number.isInteger(ent.y)
+          && ent.y >= 0 && ent.y < fog.length && Array.isArray(fog[ent.y])
+          && ent.x >= 0 && ent.x < fog[ent.y].length
+          && fog[ent.y][ent.x] === false) {
+        continue;
+      }
+    } catch (e) {}
     let v;
     try { v = s[ent.name]; } catch (e) { v = null; }
     const ew = (v && typeof v.w === 'number' && v.w > 0) ? v.w
@@ -2266,6 +2341,39 @@ def _is_benign_script_repeat_identifier(tok: str) -> bool:
     return False
 
 
+def _inline_script_syntax_error(js: str) -> str | None:
+    """Return a short SyntaxError message if `js` does not parse, else None.
+
+    Used by micro-probes when bracket balance is suspicious (±1). Prefer
+    node (same path as probe lint); if node is missing, return None and
+    leave the soft WARNING in place.
+    """
+    import json
+    import subprocess
+
+    if not (js or "").strip():
+        return None
+    # Cap payload so a huge file doesn't stall the preflight.
+    payload = js if len(js) <= 200_000 else js[:200_000]
+    check = (
+        "try { new Function(" + json.dumps(payload) + "); } "
+        "catch (e) { console.error(String(e.message || e)); process.exit(1); }"
+    )
+    try:
+        r = subprocess.run(
+            ["node", "-e", check],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    if r.returncode == 0:
+        return None
+    err = (r.stderr or r.stdout or "SyntaxError").strip().splitlines()
+    return (err[0] if err else "SyntaxError")[:160]
+
+
 def run_micro_probes(
     html: str, out_path: "Path | None" = None
 ) -> dict[str, Any]:
@@ -2365,7 +2473,10 @@ def run_micro_probes(
     for kind, delta in total_imbalance.items():
         # Heuristic strips can over-count by ~1 in pathological corner
         # cases (regex literals look like division, etc). Allow ±1 as
-        # WARNING; ±2 as ERROR.
+        # WARNING unless node confirms a real SyntaxError (1942 run_16:
+        # extra `)` on bullets.push was delta=-1, WARNING-only, then
+        # Chromium failed and flooded the local model with cascading
+        # soft_warnings). ±2 stays a hard ERROR.
         if abs(delta) >= 2:
             sign = "extra opening" if delta > 0 else "extra closing"
             errors.append(
@@ -2381,6 +2492,21 @@ def run_micro_probes(
                 "(could be a regex-literal false-positive — Chromium "
                 "will confirm)."
             )
+
+    # When bracket balance is suspicious (±1), confirm with node — catches
+    # real extra `)` / missing `(` without treating every regex as ERROR.
+    if any(v != 0 for v in total_imbalance.values()):
+        for (_attrs, body) in scripts:
+            if not body.strip():
+                continue
+            syn_err = _inline_script_syntax_error(body)
+            if syn_err:
+                errors.append(
+                    f"inline <script> has a JavaScript syntax error: {syn_err} "
+                    "— fix the parse error before anything else; RAF/input/"
+                    "probe failures are cascading symptoms."
+                )
+                break
 
     # --- duplicate top-level declarations -----------------------------
     # Catches the "concatenated two drafts" failure mode where the model
@@ -3378,9 +3504,27 @@ def format_report_for_model(report: dict[str, Any]) -> str:
     if report.get("soft_warnings"):
         # Heuristic broken-but-no-exception findings. Listed as ISSUES so the
         # model treats them with the same urgency as real errors.
-        lines.append("ISSUES (must fix):")
-        for s in report["soft_warnings"]:
-            lines.append(f"  - {s}")
+        # Local-LLM noise guard (1942 run_16): when the page failed to PARSE,
+        # RAF-never-fired / controls-dead / probe-fail soft_warnings are all
+        # cascading symptoms — dump them and tell the model to fix syntax first.
+        page_for_syntax = list(report.get("page_errors") or []) or list(
+            report.get("errors") or []
+        )
+        syntax_blocker = next(
+            (e for e in page_for_syntax if _SYNTAX_PAGE_ERROR_RE.search(str(e))),
+            None,
+        )
+        if syntax_blocker:
+            lines.append(
+                "ISSUES: suppressed "
+                f"{len(report['soft_warnings'])} cascading soft-warning(s) — "
+                "fix the PAGE/SYNTAX error above first; RAF, input, and probe "
+                "failures are symptoms of the parse error."
+            )
+        else:
+            lines.append("ISSUES (must fix):")
+            for s in report["soft_warnings"]:
+                lines.append(f"  - {s}")
     if report["warnings"]:
         lines.append("Warnings:")
         for w in report["warnings"]:
@@ -3388,11 +3532,28 @@ def format_report_for_model(report: dict[str, Any]) -> str:
     if report.get("probes"):
         n_pass = sum(1 for p in report["probes"] if p.get("ok"))
         n = len(report["probes"])
-        lines.append(f"Acceptance probes: {n_pass}/{n} pass")
-        for p in report["probes"]:
-            tag = "ok " if p.get("ok") else "FAIL"
-            err = f"  ({p['err']})" if p.get("err") else ""
-            lines.append(f"  {tag} {p.get('name','probe')}: {p.get('expr','')[:80]}{err}")
+        page_for_syntax = list(report.get("page_errors") or []) or list(
+            report.get("errors") or []
+        )
+        syntax_blocker = next(
+            (e for e in page_for_syntax if _SYNTAX_PAGE_ERROR_RE.search(str(e))),
+            None,
+        )
+        if syntax_blocker:
+            # Names only — full expr dump competes with the syntax fix.
+            failed = [p.get("name", "probe") for p in report["probes"] if not p.get("ok")]
+            lines.append(
+                f"Acceptance probes: {n_pass}/{n} pass "
+                f"(details omitted until syntax is fixed"
+                + (f"; failing: {', '.join(failed[:6])}" if failed else "")
+                + ")"
+            )
+        else:
+            lines.append(f"Acceptance probes: {n_pass}/{n} pass")
+            for p in report["probes"]:
+                tag = "ok " if p.get("ok") else "FAIL"
+                err = f"  ({p['err']})" if p.get("err") else ""
+                lines.append(f"  {tag} {p.get('name','probe')}: {p.get('expr','')[:80]}{err}")
     if report.get("opening_book_checks"):
         checks = report["opening_book_checks"]
         n_pass = sum(1 for c in checks if c.get("ok"))
@@ -3875,6 +4036,10 @@ class LiveBrowser:
                 # game only listens for pointerdown — patch before eval.
                 if is_effectful and "MouseEvent" in pexpr:
                     pexpr = _patch_probe_pointer_board_clicks(pexpr)
+                # run_14 typing-race: document.dispatchEvent(KeyboardEvent)
+                # while game listens on window — dual-dispatch both targets.
+                if is_effectful and "KeyboardEvent" in pexpr:
+                    pexpr = _patch_probe_keyboard_dispatch(pexpr)
                 # P3 (run_04 holochess iter 1): isolate CONSECUTIVE
                 # side-effecting probes. select_works / move_tweens /
                 # cpu_auto_replies each click + await; the first leaves the
@@ -4385,6 +4550,23 @@ class LiveBrowser:
                     undrawn, drawn_blob
                 )
                 _undrawn_state_gated = _undrawn_likely_state_gated(undrawn)
+                # run_15 OutRun: mode==="intro" only draws key_art; player_car /
+                # road sprites draw after first key → playing. All probes green
+                # but ASSETS_UNDRAWN blocked. Genre-free: string mode/screen/phase.
+                try:
+                    _mode_s = await self._safe_eval(
+                        "(()=>{const s=window.state||window.gameState||window.g||{};"
+                        "const m=s.mode??s.screen??s.phase??s.gameMode??'';"
+                        "return (typeof m==='string')?String(m).toLowerCase():'';})()"
+                    )
+                except Exception:
+                    _mode_s = ""
+                _intro_mode = isinstance(_mode_s, str) and _mode_s in (
+                    "intro", "title", "menu", "start", "attract", "splash",
+                )
+                _intro_play_sprites_undrawn = (
+                    _intro_mode and _probes_green and _no_errors
+                )
                 _decode_settled = bool(
                     (_decode_settle or {}).get("ready") is True
                     and not (_decode_settle or {}).get("skipped")
@@ -4447,6 +4629,7 @@ class LiveBrowser:
                         or _undrawn_idle_fp
                         or _scene_offscreen_bg
                         or _undrawn_state_gated
+                        or _intro_play_sprites_undrawn
                         or _sprite_wrapper
                         or _sprite_paths_wrapper
                     ))
@@ -4460,6 +4643,10 @@ class LiveBrowser:
                         "exposed; off-screen scene backgrounds simply have not "
                         "been reached during the test window."
                         if _scene_offscreen_bg else
+                        " Behavioral probes pass; game is still on an "
+                        "intro/title/menu screen — playfield sprites draw "
+                        "after the first input starts play."
+                        if _intro_play_sprites_undrawn else
                         " Behavioral probes pass; hop/lift/slam pose sprites "
                         "may simply not have triggered on the static opening "
                         "board — idle/base sprites ARE drawn."

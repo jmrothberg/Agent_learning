@@ -87,6 +87,14 @@ def test_entity_rendered_js_skips_direction_and_unit_vectors():
     assert "Math.abs(v.x) <= 1 && Math.abs(v.y) <= 1" in _ENTITY_RENDERED_JS
 
 
+def test_entity_rendered_js_skips_fog_hidden_tiles():
+    """run_16 roguelike: state.stairs at a far tile is intentionally not
+    drawn while seen[y][x]===false; sampling that cell as ENTITY-NOT-RENDERED
+    is a harness false positive. Skip when seen/explored marks the cell false."""
+    assert "s.seen || s.explored" in _ENTITY_RENDERED_JS
+    assert "fog[ent.y][ent.x] === false" in _ENTITY_RENDERED_JS
+
+
 def test_entity_rendered_js_still_genre_free_after_dir_skip():
     """The direction/velocity skip is by ATTRIBUTE shape (vector name /
     magnitude), not by genre — adding it must not introduce any genre name."""

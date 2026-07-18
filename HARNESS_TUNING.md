@@ -182,6 +182,18 @@ See **`HARNESS_DEBUG.md`**. Batch score snapshots → **`eval/OPERATIONS.md`**.
 | `memory_gap` | `memory/playbook.jsonl`, skeletons, outlines |
 | `local_llm_limit` | `prompts_v1.py`, `agent_compaction.py`, `backend.py` |
 
+## Measure before/after (scoreboard)
+
+Before claiming a harness/memory change helped, run:
+
+```bash
+.venv/bin/python eval/compare_runs.py run_15 run_16
+```
+
+Compare `fresh_pass`, `avg wasted_iters`, `avg first_clean`, and `failure_class` histograms on real batch traces — not anecdotes. Snapshot durable scoreboards into `eval/OPERATIONS.md`.
+
+---
+
 ## Serial tune learnings (durable)
 
 Per-run scores live in **`eval/OPERATIONS.md`** (run_06 snapshot). Mid-batch harness fixes already in repo:
@@ -193,6 +205,15 @@ Per-run scores live in **`eval/OPERATIONS.md`** (run_06 snapshot). Mid-batch har
 | Art-intent builds: assets loaded but procedural boxes drawn | drawImage contract last on first build; playbook bullet; skeletons teach drawImage; undrawn advisory | `prompts_v1.py`, `agent.py`, `memory/playbook.jsonl`, skeletons, `tools.py` |
 | Probes false-fail on `window.state` | Require `window.state = state` in HARD_RULES + first build | `prompts_v1.py` |
 | ENTITY-NOT-RENDERED gates ok when all probes pass (thin crosshair) | Bbox sample + advisory when probes green | `tools.py` |
+| ENTITY-NOT-RENDERED on fog-hidden stairs/exits (run_16 roguelike) | Skip sample when `seen`/`explored`[y][x]===false | `tools.py` |
+| SyntaxError → cascade soft_warnings flood fix prompt (run_16 1942) | On page SyntaxError, suppress ISSUES/probe dump noise | `tools.py` |
+| Partial quarantine blocks green probes under max-iters 3 (Holochess) | `_PARTIAL_QUARANTINE_GATE_CAP` 2→1 | `agent_probes.py` |
+| Pinball `auto_body_enters_playfield` after mutating probes (run_16) | Reseat via reset/`R` before Space launch check | `memory/visual_playtests.jsonl` |
+| Bullet-hell `bullets_spawn` length-grows at steady-state (run_16) | Outline + Phase-A lint `fragile_length_growth_probe` | `implementation_outlines.jsonl`, `agent.py` |
+| QTE auto_probe `const d=…` flagged undefined helper (run_14) | Skip locally declared idents; inline Math.hypot in recipe | `tools.py`, `visual_playtests.jsonl` |
+| Typing probe `document.dispatchEvent` vs `window` listener (run_14) | Dual-dispatch KeyboardEvent to window+document | `tools.py` `_patch_probe_keyboard_dispatch` |
+| ASSETS_UNDRAWN on intro/title while probes green (run_15 OutRun) | Demote when `state.mode` is intro/title/menu | `tools.py` |
+| DK jumpOverSet declared never scored (run_15) | Vertical-platformer trap + probe: award score once airborne | `implementation_outlines.jsonl` |
 | Board games: pointerdown vs mousedown, frozen idle board | Board probe pointerdown+pointerup; turn-based frozen-canvas exemption | `tools.py` |
 | Stuck best-of-2 silently doubled fix time on single MLX | Default **off**; opt in `/bestof on` or `coder.py --stuck-bon`; candidates under `candidates/iter_NN/` | `agent.py`, `chat.py`, `coder.py` |
 | Kung-Fu: movement gated on idle/walk only | Playbook: include crouch/duck in movement branch or reset action before move | `memory/playbook.jsonl` |
@@ -211,9 +232,10 @@ Per-run scores live in **`eval/OPERATIONS.md`** (run_06 snapshot). Mid-batch har
 
 - **memory_gap: assets loaded but undrawn** — self-recovers but burns iters (Joust 5×). Often state-gated sprites (enemies not spawned yet) or drawImage not wired — playbook `draw-generated-sprites-not-boxes` + `td-enemies-follow-waypoints` / spawn timers; not new agent machinery.
 - **input_moves_player false-fail** — harness dispatches ArrowRight; if prior keydown left player in crouch/block, movement gated on `idle||walk` fails probe while game feels fine to a human.
-- **ENTITY-NOT-RENDERED soft_warning** — fix only if 2+ games show same pattern (Missile Command iter 2).
+- **ENTITY-NOT-RENDERED soft_warning** — fix only if 2+ games show same pattern; fog-hidden tiles are now skipped (`seen`/`explored`).
 - **OOM at game 12** — verify media/MLX freed at serial game boundaries; run heaviest media game earlier or isolated.
-- **SIGKILL / exit=-9 with no HTML (run_15)** — jetsam during Phase A / Wan left Dragon, Prince, Doom with no `<html_file>`. `tune_serial_loop` grants one **crash-bonus retry** when `exit<0` and nothing delivered, even if `--retries 0` (soft fails still respect retries). Memory: `jump-over-hazard-scores`, `locomotion-held-key-multi-frame`.
+- **SIGKILL / exit=-9 with no HTML (run_15/16)** — jetsam / early restart can leave Centipede/Galaga with no `iter_summary`. Crash-bonus retry exists; optional dedicated re-run for infra-only fails.
+- **Repetition / think thrash (run_16 pinball, torch)** — plunger kinematics or asset-loader loops burn 15–40+ min; outline traps + harness abort help but still waste wall clock under max-iters 3.
 - **Stuck BoN** — only helps sampling noise on multi-slot parallel backends; on single MLX it is ~2× wall time. Keep default off for tune batches.
 
 ## Feedback channels (user vs harness)

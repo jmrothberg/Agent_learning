@@ -492,3 +492,26 @@ def test_a1_no_slice_when_no_stack_frame():
         ["plain log message with no stack frame here"]
     )
     assert slices == []
+
+
+def test_format_suppresses_cascading_issues_on_syntax_page_error():
+    """Local-LLM noise: syntax page error → drop soft_warning flood."""
+    r = _stub_report()
+    r["page_errors"] = ["UNCAUGHT: Unexpected token ')'"]
+    r["errors"] = list(r["page_errors"])
+    r["soft_warnings"] = [
+        "HEURISTIC: <canvas> exists but requestAnimationFrame never fired",
+        "HEURISTIC: pressed ArrowUp — canvas pixels never changed",
+        "PROBE FAILED [player_visible]: state.player undefined",
+    ]
+    r["probes"] = [
+        {"name": "player_visible", "ok": False, "expr": "window.state && state.player"},
+        {"name": "canvas_present", "ok": True, "expr": "!!document.querySelector('canvas')"},
+    ]
+    text = tools.format_report_for_model(r)
+    assert "PAGE ERRORS" in text
+    assert "Unexpected token" in text
+    assert "cascading soft-warning" in text
+    assert "requestAnimationFrame never fired" not in text
+    assert "details omitted until syntax is fixed" in text
+    assert "window.state && state.player" not in text  # full expr suppressed

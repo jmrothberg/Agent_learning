@@ -1071,6 +1071,9 @@ class GameAgent(
         # mid-stream-crash wreckage. The fix is to start the next iter
         # fresh, not to coax the doctor through the same context.
         self._last_stream_crashed: bool = False
+        # Sticky for session_outcome.backend_crashed — offline credit must not
+        # treat infra/backend deaths as playbook-harmful (trace-schema audit).
+        self._session_backend_crashed: bool = False
         # Tracks the most recent iteration where _materialize wrote a
         # file to disk vs the most recent iteration where the verifier
         # ran. If they diverge at end-of-run we run one final test on
@@ -4013,6 +4016,32 @@ class GameAgent(
                         f"samples a fresh state, or assert `typeof state.{counter} "
                         "=== 'number'` plus a progression check after dispatching "
                         "input."
+                    ),
+                })
+            # run_16 bullet-hell: `const b0=state.bullets.length; await 1500ms;
+            # return length>b0` fails at steady-state (94 live bullets, cull =
+            # spawn). Require length>=N or a totalSpawned/fired counter instead.
+            if (
+                "setTimeout" in expr
+                and ".length" in expr
+                and re.search(
+                    r"(?:const|let|var)\s+(\w+)\s*=\s*[^;]*\.length\b",
+                    expr,
+                )
+                and re.search(
+                    r"\.length\s*>\s*\w+|\w+\s*<\s*[^;]*\.length",
+                    expr,
+                )
+            ):
+                findings.append({
+                    "name": name,
+                    "kind": "fragile_length_growth_probe",
+                    "message": (
+                        f"probe `{name}` captures an array `.length`, waits, then "
+                        "requires growth. Culled arrays (bullets/particles) often "
+                        "stay flat at steady-state even when spawning correctly. "
+                        "Prefer `state.bullets.length >= 8` or assert a "
+                        "`totalSpawned`/`fired` counter increases."
                     ),
                 })
         return findings
@@ -8328,6 +8357,9 @@ class GameAgent(
                     "failure_reason": _failure_reason,
                     "probes_passed": probes_passed,
                     "probes_total": probes_total,
+                    # Offline scoreboard / credit: active playbook ids without
+                    # joining a separate playbook_retrieved event.
+                    "retrieved_ids": list(getattr(self, "_active_bullet_ids", []) or []),
                     # T-3: per-probe name/ok/expr digest (see _probe_digest above).
                     "probes": _probe_digest,
                     "soft_warnings_count": len(soft_warnings),
@@ -10122,11 +10154,27 @@ class GameAgent(
                 last_report_summary=self._last_report_summary,
             )
             git_sha = self._current_git_sha()
+            # Numeric session score (same helper as restart selection) so
+            # offline compare_runs / credit tools need no probe re-join.
+            try:
+                session_score = float(self._score_attempt())
+            except Exception:
+                session_score = 100.0 if ok else 0.0
+            # Offline credit / compare_runs: distinguish "never clean" memory
+            # fails from sessions that never produced code (backend crash).
+            code_materialized = int(getattr(self, "_snapshot_n", 0) or 0) > 0
+            backend_crashed = bool(
+                getattr(self, "_session_backend_crashed", False)
+                or getattr(self, "_last_stream_crashed", False)
+            )
             outcome: dict[str, object] = {
                 "kind": "session_outcome",
                 "ok": ok,
                 "iterations": self._last_iter_run,
                 "best_path_exists": self.best_path.exists(),
+                "score": session_score,
+                "code_materialized": code_materialized,
+                "backend_crashed": backend_crashed,
             }
             if git_sha:
                 outcome["git_sha"] = git_sha

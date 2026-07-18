@@ -1120,6 +1120,10 @@ class StreamMaterializeMixin:
         self._last_stream_stalled = bool(result.stalled)
         self._last_stream_deliberated = bool(result.deliberated)
         self._last_stream_crashed = bool(result.crashed)
+        # Sticky session flag for offline credit eligibility (don't mark
+        # playbook bullets harmful when the backend dies before code lands).
+        if result.crashed:
+            self._session_backend_crashed = True
         self._last_stream_silent = bool(getattr(result, "silent", False))
         self._last_stream_loop_kind = (
             getattr(result, "loop_kind", None) if result.looped else None

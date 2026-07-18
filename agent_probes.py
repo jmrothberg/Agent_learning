@@ -153,7 +153,13 @@ class ProbeHandlingMixin:
     # clean ship when SOME probes survive but a behavioral probe was
     # syntax-quarantined on a recipe-matched game. Bounded so a model that
     # cannot author a parseable replacement does not loop forever.
-    _PARTIAL_QUARANTINE_GATE_CAP = 2
+    # Max iters the partial-quarantine gate blocks a clean ship after a
+    # syntax-quarantined probe on a recipe-matched game. Cap=1 (was 2): with
+    # tune batches at max_iters=3, two holds left only one iter for real
+    # gameplay fixes (run_16 Holochess: 6/6 probes green on iter 2 but still
+    # ok=False solely from this gate; local prompt_tokens ~30k). One repair
+    # chance is enough; then ship on surviving probes + harness checks.
+    _PARTIAL_QUARANTINE_GATE_CAP = 1
 
     # Name of the single harness-authored self-heal probe (C2). Distinct so it
     # is easy to recognise, reconcile, and never confuse with a model probe.

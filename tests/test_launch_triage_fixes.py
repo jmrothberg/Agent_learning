@@ -78,6 +78,9 @@ def test_canvas_pinball_auto_probes_async_launch() -> None:
         launch = next(p for p in o["recipe"]["auto_probes"] if p["name"] == "auto_launch_increases_speed")
         assert "launched===true" not in launch["expr"]
         assert "async" in launch["expr"]
+        # run_16: prior probes mutate ball — reseat before playfield entry check
+        body = next(p for p in o["recipe"]["auto_probes"] if p["name"] == "auto_body_enters_playfield")
+        assert "KeyR" in body["expr"] or "reset" in body["expr"]
         return
     pytest.fail("canvas-pinball not found")
 

@@ -156,7 +156,8 @@ def test_smoke_test_skips_control_recovery_when_game_over():
     """After combat inducement, game-over (lives=0/over) is not a stun-lock."""
     src = inspect.getsource(tools_module.LiveBrowser._input_smoke_test)
     assert "_game_over_after_combat" in src
-    assert "s.over || s.lives === 0" in src
+    # run_14 Snake: also treat gameOver (not only over/lives).
+    assert "s.over || s.gameOver || s.lives === 0" in src
 
 
 def test_patch_first_prefill_on_user_feedback():

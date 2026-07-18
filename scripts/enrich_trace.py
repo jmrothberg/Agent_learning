@@ -303,29 +303,55 @@ def _compute_wasted_iters(records: list[dict]) -> tuple[int, list[int]]:
 def _retrieval_first_clean(
     records: list[dict],
 ) -> tuple[int | None, list[str]]:
-    """M-2 (offline join, no new recording, no auto-learner): map the playbook
-    bullet ids RETRIEVED this session to the first `ok=True` iter index. Joining
-    the existing `playbook_retrieved` events to the first-clean iter — aggregated
-    over a batch this yields a "bullet id x first-pass-clean" table that INFORMS
-    hand-curation (counters stay hand-curated per DEV.md). Returns
-    (first_clean_iter or None, ordered-unique retrieved bullet ids)."""
+    """M-2 (offline join): first ok=True iter + bullet ids credited to it.
+
+    Prefer per-iter ``iter_summary.retrieved_ids`` (active set at that iter) so
+    feedback-refreshed retrieval after first-clean is not mis-credited. Fall
+    back to the union of ``playbook_retrieved.ids`` for legacy traces that
+    predate ``retrieved_ids``. Returns (first_clean_iter or None, credited ids).
+    """
     first_clean: int | None = None
-    retrieved: list[str] = []
-    seen: set[str] = set()
+    per_iter_ids: dict[int, list[str]] = {}
+    has_per_iter = False
+    legacy: list[str] = []
+    legacy_seen: set[str] = set()
     for rec in records:
         if not isinstance(rec, dict):
             continue
         kind = rec.get("kind")
-        if kind == "iter_summary" and rec.get("ok"):
+        if kind == "iter_summary":
             it = int(rec.get("iteration") or 0)
-            if first_clean is None or it < first_clean:
+            if rec.get("ok") and (first_clean is None or it < first_clean):
                 first_clean = it
+            if "retrieved_ids" in rec:
+                has_per_iter = True
+                seen: set[str] = set()
+                ordered: list[str] = []
+                for bid in (rec.get("retrieved_ids") or []):
+                    s = str(bid)
+                    if s not in seen:
+                        seen.add(s)
+                        ordered.append(s)
+                per_iter_ids[it] = ordered
         elif kind == "playbook_retrieved":
             for bid in (rec.get("ids") or []):
-                if bid not in seen:
-                    seen.add(bid)
-                    retrieved.append(str(bid))
-    return first_clean, retrieved
+                s = str(bid)
+                if s not in legacy_seen:
+                    legacy_seen.add(s)
+                    legacy.append(s)
+    if has_per_iter:
+        if first_clean is not None:
+            return first_clean, list(per_iter_ids.get(first_clean, []))
+        # Never clean: union of ids from every materialized iter (ordered).
+        seen_u: set[str] = set()
+        out: list[str] = []
+        for it in sorted(per_iter_ids):
+            for bid in per_iter_ids[it]:
+                if bid not in seen_u:
+                    seen_u.add(bid)
+                    out.append(bid)
+        return None, out
+    return first_clean, legacy
 
 
 def _format_ask_turns(records: list[dict]) -> list[str]:

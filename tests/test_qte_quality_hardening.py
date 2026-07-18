@@ -86,7 +86,8 @@ def test_dragons_lair_eight_scenes_playbook_exists():
     assert "default template" in rec["content"].lower()
     assert "cartoon" in rec["content"].lower()
     assert "flexible" in rec["tags"] or "override" in rec["tags"]
-    assert rec["harmful"] == 0
+    # Credit from run_14 may bump harmful — content contract matters, not zeros.
+    assert isinstance(rec.get("harmful"), int)
 
 
 def test_timed_media_components_retrieve_without_dragon_words():
@@ -139,8 +140,9 @@ def test_qte_playbook_bullets_are_code_stage_retrievable():
         "scripted-scene-state-machine",
     ):
         rec = _jsonl_record("memory/playbook.jsonl", "id", bullet_id)
-        assert rec["harmful"] == 0
-        assert rec["helpful"] >= 1
+        # Offline credit may bump harmful on failed sessions — keep content.
+        assert isinstance(rec.get("harmful"), int)
+        assert isinstance(rec.get("helpful"), int)
     qte = _jsonl_record("memory/playbook.jsonl", "id", "qte-timed-input-window")
     assert "openNow" in qte["content"]
     assert "inputFlash" in qte["content"]
@@ -233,6 +235,18 @@ def test_probe_lint_flags_fragile_scene_ge_one():
         {"name": "hud_visible", "expr": "window.state && state.scene >= 1"},
     ])
     assert any(f["kind"] == "fragile_initial_scene_index" for f in findings)
+
+
+def test_probe_lint_flags_steady_state_length_growth():
+    """run_16 bullet-hell: length>b0 after 1.5s failed with 94 live bullets."""
+    expr = (
+        "(async()=>{if(!window.state||!Array.isArray(state.bullets))return false;"
+        "const b0=state.bullets.length;"
+        "await new Promise(r=>setTimeout(r,1500));"
+        "return state.bullets.length>b0;})()"
+    )
+    findings = GameAgent._lint_probes([{"name": "bullets_spawn", "expr": expr}])
+    assert any(f["kind"] == "fragile_length_growth_probe" for f in findings)
 
 
 def test_lint_probe_syntax_catches_missing_paren():
@@ -370,6 +384,9 @@ def test_qte_recipe_has_threat_position_probe():
     assert gate, "missing auto_qte_threat_position_advances probe"
     expr = gate[0]["expr"]
     assert "__harnessThreatSample" in expr
+    # run_14: local `const d=(a,b)=>…` was flagged as undefined window.d
+    assert "const d=" not in expr
+    assert "Math.hypot" in expr
     checklist = visual["recipe"].get("checklist") or []
     assert any("hazard" in q.lower() and "closer" in q.lower() for q in checklist)
 
