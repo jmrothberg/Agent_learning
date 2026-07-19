@@ -46,6 +46,40 @@ def test_serial_loop_crash_bonus_retry_on_sigkill():
     assert "exit<0 with no delivered HTML" in src
 
 
+def test_coder_stdout_ignores_closed_pipe(monkeypatch):
+    """A detached batch reader must not abort before HTML materialization."""
+    import coder
+    from agent import AgentEvent
+
+    class ClosedPipe:
+        writes = 0
+
+        def write(self, _text: str) -> None:
+            self.writes += 1
+            raise BrokenPipeError(32, "Broken pipe")
+
+        def flush(self) -> None:
+            raise AssertionError("write should fail before flush")
+
+    pipe = ClosedPipe()
+    monkeypatch.setattr(coder, "_stdout_broken", False)
+    monkeypatch.setattr(coder.sys, "stdout", pipe)
+
+    coder._print_event(AgentEvent("info", "reply is ready to materialize"))
+    assert coder._stdout_broken is True
+
+    # Once the pipe is known closed, later events do not attempt another write.
+    coder._print_event(AgentEvent("code", "game.html"))
+    assert pipe.writes == 1
+
+    token_pipe = ClosedPipe()
+    monkeypatch.setattr(coder, "_stdout_broken", False)
+    monkeypatch.setattr(coder.sys, "stdout", token_pipe)
+    coder._stdout_write("<html_file>")
+    assert coder._stdout_broken is True
+    assert token_pipe.writes == 1
+
+
 def test_counts_as_pass_requires_best_or_iter_ok(tmp_path: Path):
     out = tmp_path / "01_game.html"
     out.write_text("x" * 600, encoding="utf-8")

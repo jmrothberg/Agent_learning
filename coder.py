@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import errno
 import os
 import re
 import sys
@@ -61,6 +62,7 @@ from tools import LiveBrowser
 # the goal (instead of clobbering games/game.html every run).
 _DEFAULT_OUT = "games/game.html"
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
+_stdout_broken = False
 
 
 def _slugify(text: str, max_len: int = 30) -> str:
@@ -82,19 +84,50 @@ def _resolve_out_path(arg_out: str, goal: str) -> Path:
     return Path("games") / f"{_slugify(goal)}_{ts}.html"
 
 
+def _stdout_print(*args: object, **kwargs: object) -> None:
+    """Print unless the stdout reader has closed its pipe.
+
+    CLI output is observational: a detached batch reader must not abort the
+    agent before an already-generated reply can be materialized to disk.
+    """
+    global _stdout_broken
+    if _stdout_broken:
+        return
+    try:
+        print(*args, **kwargs)
+    except OSError as exc:
+        if exc.errno != errno.EPIPE:
+            raise
+        _stdout_broken = True
+
+
+def _stdout_write(piece: str) -> None:
+    """Write streamed tokens with the same closed-pipe handling as events."""
+    global _stdout_broken
+    if _stdout_broken:
+        return
+    try:
+        sys.stdout.write(piece)
+        sys.stdout.flush()
+    except OSError as exc:
+        if exc.errno != errno.EPIPE:
+            raise
+        _stdout_broken = True
+
+
 def _print_event(ev: AgentEvent) -> None:
     """Single line per event, matched by `tail -f games/traces/*.log`."""
     if ev.kind == "phase":
-        print(f"\n── {ev.text} ──", flush=True)
+        _stdout_print(f"\n── {ev.text} ──", flush=True)
     elif ev.kind == "memory":
-        print(f"  memory: {ev.text}", flush=True)
+        _stdout_print(f"  memory: {ev.text}", flush=True)
     elif ev.kind == "best_of_n":
-        print(f"  best-of-N: {ev.text}", flush=True)
+        _stdout_print(f"  best-of-N: {ev.text}", flush=True)
     elif ev.kind == "diagnose":
-        print(f"  diagnose: {ev.text[:200]}", flush=True)
+        _stdout_print(f"  diagnose: {ev.text[:200]}", flush=True)
     elif ev.kind == "code":
         d = ev.data
-        print(
+        _stdout_print(
             f"  wrote {ev.text} ({d.get('size', 0)} bytes; "
             f"{d.get('materialize', 'n/a')})",
             flush=True,
@@ -104,28 +137,30 @@ def _print_event(ev: AgentEvent) -> None:
         n_err = len(ev.data.get("errors", []))
         n_iss = len(ev.data.get("soft_warnings", []))
         tag = "TEST OK" if ok else "TEST FAILED"
-        print(f"  {tag} ({n_err} error(s), {n_iss} issue(s))", flush=True)
+        _stdout_print(f"  {tag} ({n_err} error(s), {n_iss} issue(s))", flush=True)
         if not ok:
-            print(f"  --- report ---\n{ev.text}\n  --- /report ---", flush=True)
+            _stdout_print(
+                f"  --- report ---\n{ev.text}\n  --- /report ---", flush=True
+            )
     elif ev.kind == "question":
-        print(f"\n? Model asks: {ev.text}", flush=True)
+        _stdout_print(f"\n? Model asks: {ev.text}", flush=True)
     elif ev.kind == "done":
-        print(f"\nDONE — {ev.text}", flush=True)
+        _stdout_print(f"\nDONE — {ev.text}", flush=True)
     elif ev.kind == "error":
-        print(f"\n! ERROR: {ev.text}", flush=True)
+        _stdout_print(f"\n! ERROR: {ev.text}", flush=True)
     elif ev.kind == "info":
-        print(f"  i {ev.text}", flush=True)
+        _stdout_print(f"  i {ev.text}", flush=True)
     elif ev.kind == "restart":
-        print(f"  ↻ {ev.text}", flush=True)
+        _stdout_print(f"  ↻ {ev.text}", flush=True)
     elif ev.kind == "mlx_stall":
-        print(f"\n! STALL: {ev.text}", flush=True)
+        _stdout_print(f"\n! STALL: {ev.text}", flush=True)
     elif ev.kind == "plan":
         # Plan tokens already streamed via on_token; no-op here.
         pass
     elif ev.kind == "await_user":
         # Step-mode pause banner. Actual stdin read happens in the event
         # consumer below so it doesn't block the streaming printer here.
-        print(f"\n⏸  {ev.text}", flush=True)
+        _stdout_print(f"\n⏸  {ev.text}", flush=True)
 
 
 async def _run(
@@ -217,8 +252,7 @@ async def _run(
 
     # Stream tokens to stdout, one chunk at a time. Newlines flush.
     def on_token(piece: str) -> None:
-        sys.stdout.write(piece)
-        sys.stdout.flush()
+        _stdout_write(piece)
     agent.set_token_callback(on_token)
     # Step-mode (Stop-Losing-To-OneShot todo #1): pause after each iter
     # and read stdin before continuing. Off by default — autonomous
@@ -230,13 +264,13 @@ async def _run(
     if headless or no_auto_step:
         agent.set_auto_step_on_failure(False)
 
-    print(
+    _stdout_print(
         f"== {PRODUCT_NAME} CLI · {info.name.upper()}={info.model} "
         f"[{info.source}] · headless={headless} · "
         f"vlm-critique={use_vlm_critique} · "
         f"best-of-N={best_of_n} · stuck-bon={stuck_bon_enabled} · step={step}"
     )
-    print(f"== Goal: {goal}\n")
+    _stdout_print(f"== Goal: {goal}\n")
     rc = 0
     try:
         async for ev in agent.run_with_restarts(goal):
@@ -282,9 +316,11 @@ async def _run(
     if rc == 0 and not shipped:
         rc = 1
     if shipped or out_path.is_file():
-        print(f"\nFinal game saved to: {out_path}", flush=True)
+        _stdout_print(f"\nFinal game saved to: {out_path}", flush=True)
     else:
-        print(f"\nNo game shipped (missing {best_path.name})", flush=True)
+        _stdout_print(
+            f"\nNo game shipped (missing {best_path.name})", flush=True
+        )
     if open_when_done and out_path.exists():
         webbrowser.open(f"file://{out_path.resolve()}")
     # Unattended serial/batch (--no-auto-step): skip interpreter shutdown.

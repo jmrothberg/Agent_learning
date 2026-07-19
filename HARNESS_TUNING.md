@@ -234,7 +234,8 @@ Per-run scores live in **`eval/OPERATIONS.md`** (run_06 snapshot). Mid-batch har
 - **input_moves_player false-fail** — harness dispatches ArrowRight; if prior keydown left player in crouch/block, movement gated on `idle||walk` fails probe while game feels fine to a human.
 - **ENTITY-NOT-RENDERED soft_warning** — fix only if 2+ games show same pattern; fog-hidden tiles are now skipped (`seen`/`explored`).
 - **OOM at game 12** — verify media/MLX freed at serial game boundaries; run heaviest media game earlier or isolated.
-- **SIGKILL / exit=-9 with no HTML (run_15/16)** — jetsam / early restart can leave Centipede/Galaga with no `iter_summary`. Crash-bonus retry exists; optional dedicated re-run for infra-only fails.
+- **BrokenPipe before materialize (run_16 Centipede)** — the full first-build HTML reached `assistant_reply`, but an overnight relaunch closed stdout; printing cosmetic notes raised before `_materialize`, losing the artifact (`rc=2`). `coder.py` stdout is now best-effort so a detached reader cannot abort the agent loop.
+- **SIGKILL / exit=-9 with no HTML (run_15/16)** — separate from BrokenPipe: jetsam / early restart can leave Centipede/Galaga at planning or `stream_start` with no reply or `iter_summary`. Crash-bonus retry exists; optional dedicated re-run for infra-only fails.
 - **Repetition / think thrash (run_16 pinball, torch)** — plunger kinematics or asset-loader loops burn 15–40+ min; outline traps + harness abort help but still waste wall clock under max-iters 3.
 - **Stuck BoN** — only helps sampling noise on multi-slot parallel backends; on single MLX it is ~2× wall time. Keep default off for tune batches.
 
