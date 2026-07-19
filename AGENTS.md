@@ -69,8 +69,8 @@ Do **not** patch random `games/*.html` to fix the agent — change harness/memor
 | [`agent_prompts.py`](agent_prompts.py) | `_build_fix_prompt`, structured summary, seed HTML for prompts |
 | [`agent_compaction.py`](agent_compaction.py) | `_prune_messages`, continuation context reset |
 | [`agent_stream.py`](agent_stream.py) | HTML extract, format doctor, stall/repetition recovery |
-| [`agent_probes.py`](agent_probes.py) | Probe quarantine, impossible-probe downgrade |
-| [`agent_memory.py`](agent_memory.py) | Opening-book / components / lean budget retrieval |
+| [`agent_probes.py`](agent_probes.py) | Probe extract/lint/classify, quarantine, impossible-probe downgrade |
+| [`agent_memory.py`](agent_memory.py) | Playbook / opening-book / components / lean budget retrieval |
 | [`agent_gates.py`](agent_gates.py) | Report post-processing gates (`_apply_*_to_report` except scoped check) |
 | [`agent_critic.py`](agent_critic.py) | VLM / visual playtest / autonomous playtest |
 | [`agent_assets.py`](agent_assets.py) | Mid-session asset/sound generation and alignment |
@@ -95,6 +95,8 @@ Thin `run()` delegates to phase methods. Grep helpers: `GameAgent.run_loop_inspe
 | `_feedback_*` / `_route_*` | `_parse_feedback_route_json`, `_route_user_feedback_llm` | `agent_feedback.py` |
 | `_prune_*` / `_maybe_reset_*` | `_prune_messages`, `_maybe_reset_continuation_context` | `agent_compaction.py` |
 | `_extract_*` / `_run_format_*` | `_extract_html`, `_run_format_doctor` | `agent_stream.py` |
+| probe `_extract_*` / `_lint_*` / `_classify_*` | `_extract_probes`, `_lint_probes`, `_classify_probes_dynamic` | `agent_probes.py` |
+| `_retrieve_*` (memory) / `_playbook_*` | `_retrieve_playbook_block`, `_retrieve_opening_book_block` | `agent_memory.py` |
 | `_run_autonomous_*` / `_queue_visual_*` | visual playtest, VLM critic | `agent_critic.py` |
 | `_maybe_generate_*` | mid-session assets/sounds | `agent_assets.py` |
 

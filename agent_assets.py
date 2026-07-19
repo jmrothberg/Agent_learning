@@ -1836,11 +1836,25 @@ class AssetGenerationMixin:
 
                     "names": list(produced.keys()),
 
+                    "paths": {name: str(path) for name, path in produced.items()},
+
                     "session_dir": str(session_assets_dir),
 
                     "pose_deltas": pose_deltas,
 
-                    "per_asset": per_asset,
+                    "failures": {
+                        str(stat.get("name") or "unknown"): str(stat.get("error"))[:240]
+                        for stat in per_asset
+                        if isinstance(stat, dict) and stat.get("error")
+                    },
+
+                    "per_asset": [
+                        {
+                            key: value for key, value in stat.items()
+                            if key not in {"prompt", "negative_prompt", "spec", "prose"}
+                        }
+                        for stat in per_asset if isinstance(stat, dict)
+                    ],
 
                 })
 
@@ -2288,11 +2302,25 @@ class AssetGenerationMixin:
 
                     "names": list(produced.keys()),
 
+                    "paths": {name: str(path) for name, path in produced.items()},
+
                     "looping": sorted(new_looping),
 
                     "session_dir": str(session_sounds_dir),
 
-                    "per_sound": per_sound,
+                    "failures": {
+                        str(stat.get("name") or "unknown"): str(stat.get("error"))[:240]
+                        for stat in per_sound
+                        if isinstance(stat, dict) and stat.get("error")
+                    },
+
+                    "per_sound": [
+                        {
+                            key: value for key, value in stat.items()
+                            if key not in {"prompt", "negative_prompt", "spec", "prose"}
+                        }
+                        for stat in per_sound if isinstance(stat, dict)
+                    ],
 
                 })
 

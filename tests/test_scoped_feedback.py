@@ -628,10 +628,8 @@ def test_derive_allowed_forbidden_tags_single_patch(tmp_path: Path) -> None:
     assert "<html_file>" in forbidden
 
 
-def test_estimate_prompt_section_chars_keys(tmp_path: Path) -> None:
-    """The helper returns at minimum system and history_total keys; if
-    the most recent user message contains known markers, each marker
-    becomes a `section_*` key with a positive char count."""
+def test_prompt_provenance_fields_on_scoped_feedback(tmp_path: Path) -> None:
+    """The turn-contract fields carry compact totals and section rows."""
     a = _make_agent(tmp_path)
     a._messages = [
         {"role": "system", "content": "SYS"},
@@ -645,11 +643,13 @@ def test_estimate_prompt_section_chars_keys(tmp_path: Path) -> None:
             ),
         },
     ]
-    s = a._estimate_prompt_section_chars()
-    assert s["system"] == 3
-    assert s["history_total"] >= 3
-    assert s.get("section_user_feedback", 0) > 0
-    assert s.get("section_scoped_change", 0) > 0
+    fields = a._prompt_provenance_fields()
+    assert fields["prompt_system_chars"] == 3
+    assert fields["prompt_history_chars"] >= 3
+    assert fields["prompt_last_user_chars"] == len(a._messages[-1]["content"])
+    section_ids = [row["id"] for row in fields["prompt_sections"]]
+    assert section_ids == ["user_feedback", "scoped_change"]
+    assert fields["prompt_other_chars"] == 0
 
 
 def test_post_clean_feedback_contract_compacts_clean_report(tmp_path: Path) -> None:

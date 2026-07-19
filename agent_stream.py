@@ -850,9 +850,9 @@ class StreamMaterializeMixin:
                 "scoped_change_active": bool(self._scoped_change_active),
                 "force_question": self._force_question_subsystem is not None,
                 "snapshot_n": self._snapshot_n,
-                "prompt_sections": self._estimate_prompt_section_chars(),
                 "temperature": temp,
             })
+            contract.update(self._prompt_provenance_fields())
             allowed, forbidden = self._derive_allowed_forbidden_tags()
             contract["allowed_tags"] = allowed
             contract["forbidden_tags"] = forbidden

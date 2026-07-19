@@ -12,6 +12,11 @@ under a second.
 """
 from __future__ import annotations
 
+import json
+
+import pytest
+
+from agent_prompts import PromptBuildingMixin
 from prompts_v1 import build_system_prompt
 
 
@@ -90,3 +95,79 @@ def test_small_model_prompt_includes_markdown_fence_warning():
     assert "RAW HTML" in p or "raw HTML" in p, (
         "markdown-fence warning missing from small-model trimmed prompt"
     )
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "All checks passed. Emit <done/> or make one clean follow-up.",
+        (
+            "REPLY FORMAT FOR THIS TURN\nFix the failing probe.\n\n"
+            "CURRENT FILE ON DISK:\n```html\n<html></html>\n```\n"
+        ),
+        "POST-CLEAN REGRESSION: revert one minimal change.\n\nLast known-good follows.",
+        (
+            "================ USER FEEDBACK (HIGHEST PRIORITY) ================\n"
+            "move only the score\n"
+            "================ SCOPED-CHANGE DIRECTIVE ================\n"
+            "do not touch gameplay\n"
+        ),
+        (
+            "================ TRUNCATION DETECTED ================\n"
+            "Emit one complete replacement file."
+        ),
+    ],
+    ids=["clean", "failed", "regressed", "scoped", "truncation"],
+)
+def test_prompt_section_collection_reconstructs_branch_bytes(prompt: str) -> None:
+    sections = PromptBuildingMixin._collect_prompt_sections(prompt)
+    reconstructed = "".join(section["text"] for section in sections)
+    assert reconstructed.encode("utf-8") == prompt.encode("utf-8")
+
+
+def test_prompt_section_collection_preserves_unmatched_prefix_and_known_blocks() -> None:
+    prompt = (
+        "arbitrary unmatched prefix\n\n"
+        "================ USER FEEDBACK (HIGHEST PRIORITY) ================\n"
+        "make it blue\n\n"
+        "================ SCOPED-CHANGE DIRECTIVE ================\n"
+        "only recolor it\n"
+        "<opening_book>\noutline\n</opening_book>\n"
+        "<components>\ncomponent\n</components>\n"
+        "<playbook>\nlesson\n</playbook>\n"
+        "CURRENT FILE ON DISK:\n<html></html>"
+    )
+    sections = PromptBuildingMixin._collect_prompt_sections(prompt)
+    assert sections[0] == {
+        "id": "core",
+        "source": "other",
+        "text": "arbitrary unmatched prefix\n\n",
+    }
+    assert [section["id"] for section in sections[1:]] == [
+        "user_feedback",
+        "scoped_change",
+        "opening_book",
+        "components",
+        "playbook",
+        "current_file",
+    ]
+    assert "".join(section["text"] for section in sections) == prompt
+
+
+def test_prompt_section_manifest_is_bounded_text_free_and_exactly_accounted() -> None:
+    marker = "================ USER FEEDBACK (HIGHEST PRIORITY) ================"
+    prompt = "".join(f"{marker}\nfeedback {i}\n" for i in range(20))
+    sections = PromptBuildingMixin._collect_prompt_sections(prompt)
+    manifest, other_chars = PromptBuildingMixin._bounded_prompt_section_manifest(
+        sections,
+    )
+    serialized = json.dumps(
+        manifest, ensure_ascii=False, separators=(",", ":"),
+    ).encode("utf-8")
+
+    assert len(manifest) <= 12
+    assert len(serialized) <= 1024
+    assert all(set(row) == {"id", "source", "chars"} for row in manifest)
+    assert all("text" not in row for row in manifest)
+    assert sum(int(row["chars"]) for row in manifest) + other_chars == len(prompt)
+    assert other_chars > 0

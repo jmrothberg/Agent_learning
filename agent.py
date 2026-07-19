@@ -91,7 +91,6 @@ from memory import (
     ANIMATION_AUDITS_FILENAME,
     SkeletonHit,
     lookup_bullet,
-    render_playbook_block,
     signature_for_report,
 )
 from ollama_io import Candidate, StreamResult
@@ -182,7 +181,6 @@ from agent_helpers import (
     _PLAN_OPEN_RE,
     _POLISH_TURN_CAP,
     _PROBES_OPEN_RE,
-    _PROBES_RE,
     _PRUNE_KEEP_RECENT_TURNS,
     _QUESTION_RE,
     _REPORT_BLOCK_BEGIN,
@@ -222,6 +220,229 @@ class AgentEvent:
     kind: str           # phase | token | plan | code | test | question | done | error | info | diagnose | patch | best_of_n | memory | activity | assets | sounds | videos | streak
     text: str = ""
     data: dict = field(default_factory=dict)
+
+
+_TRACE_MAX_BYTES = 2048
+_TRACE_PREVIEW_CHARS = 320
+_TRACE_CANONICAL_KINDS = frozenset({"stream_start", "assistant_reply"})
+_TRACE_IDENTITY_KEYS = (
+    "ts", "kind", "event", "iteration", "failure_class", "ok", "err", "error",
+    "exc_type", "source", "stage", "recovery", "recovery_action", "stall_reason",
+    "last_stall_reason", "html_sha256", "code_sha256", "previous_code_sha256",
+    "ids", "retrieved_ids", "patch_applied", "patch_outcome", "probes_passed",
+    "probes_total", "failing_probes", "probes", "blocker", "fail_reason",
+    "failure_reason", "soft_warnings", "page_errors", "console_errors",
+    "shipped_unchanged_after_block", "materialized", "router_intent",
+    "coaching_action", "task_ledger_done", "stream_tokens", "stream_duration_s",
+    "tok_per_s", "prefill_s", "frozen_canvas", "action_frame_captured",
+    "action_key", "static_action", "prompt_tokens", "message_count", "lean_prompt",
+    "pending_feedback_count", "drawn_asset_check", "asset_decode_settle",
+    "traceback", "edit_first", "model_role", "model_name",
+)
+_TRACE_REQUIRED_KEYS = (
+    "ts", "kind", "event", "iteration", "failure_class",
+    "err", "error", "exc_type",
+)
+
+
+def _trace_json_bytes(obj: dict) -> int:
+    """Serialized UTF-8 size using the exact compact trace encoding."""
+    return len(json.dumps(
+        obj, ensure_ascii=False, default=str, separators=(",", ":"),
+    ).encode("utf-8"))
+
+
+def _trace_preview(text: str, limit: int = _TRACE_PREVIEW_CHARS) -> str:
+    """Deterministic character preview; JSON byte budgeting happens afterward."""
+    return text if len(text) <= limit else text[:limit]
+
+
+def _compact_trace_value(value: Any, *, string_limit: int, list_limit: int, depth: int = 0) -> Any:
+    """Bound nested diagnostic values without modifying their runtime owners."""
+    if isinstance(value, str):
+        return _trace_preview(value, string_limit)
+    if isinstance(value, dict):
+        if depth >= 5:
+            return {"_type": "dict", "_len": len(value)}
+        return {
+            str(key): _compact_trace_value(
+                item, string_limit=string_limit, list_limit=list_limit, depth=depth + 1,
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        compacted = [
+            _compact_trace_value(
+                item, string_limit=string_limit, list_limit=list_limit, depth=depth + 1,
+            )
+            for item in value[:list_limit]
+        ]
+        if len(value) > list_limit:
+            compacted.append({"_omitted": len(value) - list_limit})
+        return compacted
+    return value
+
+
+def _compact_trace_payload(payload: dict) -> dict:
+    """Return a deterministic <=2 KiB noncanonical trace projection.
+
+    The exact model turn and reply rows are canonical conversation artifacts and
+    are deliberately exempt. Everything else is diagnostic data: long nested
+    strings/lists are bounded, and an identity-first fallback keeps routing,
+    failure, hash, probe, patch, and recovery fields visible.
+    """
+    kind = payload.get("kind")
+    if kind in _TRACE_CANONICAL_KINDS:
+        return payload
+
+    original_bytes = _trace_json_bytes(payload)
+    projected = copy.deepcopy(payload)
+
+    # The prompt row is a manifest, not a third copy of canonical prompt prose.
+    if kind == "system_prompt_built" and isinstance(projected.get("system_prompt"), str):
+        prompt = projected.pop("system_prompt")
+        projected["system_prompt_sha256"] = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        projected["system_prompt_chars"] = len(prompt)
+
+    # Generic UI rows may mirror a report/plan/reply. Keep only bounded previews
+    # and lengths in the persisted trace; the in-memory AgentEvent is unchanged.
+    if kind == "event":
+        text = str(projected.get("text_preview") or "")
+        projected["text_preview"] = _trace_preview(text)
+        if isinstance(projected.get("data"), dict):
+            def _event_data_projection(value: Any, depth: int = 0) -> Any:
+                if isinstance(value, dict):
+                    out: dict[str, Any] = {}
+                    for key, item in value.items():
+                        if key in {
+                            "reply", "report", "plan", "content", "prompt",
+                            "negative_prompt", "system_prompt", "spec", "prose",
+                        }:
+                            rendered = item if isinstance(item, str) else json.dumps(
+                                item, ensure_ascii=False, default=str, separators=(",", ":"),
+                            )
+                            out[f"{key}_len"] = len(rendered)
+                            if depth == 0 and key in {"reply", "report", "plan", "content"}:
+                                out[f"{key}_preview"] = _trace_preview(rendered, 160)
+                            continue
+                        out[str(key)] = _event_data_projection(item, depth + 1)
+                    return out
+                if isinstance(value, list):
+                    return [_event_data_projection(item, depth + 1) for item in value]
+                return value
+
+            data = _event_data_projection(projected["data"])
+            projected["data"] = _compact_trace_value(
+                data, string_limit=240, list_limit=12,
+            )
+
+    # Retrieval traces carry attribution, never reconstructible recipe prose.
+    if kind in {
+        "opening_book_retrieved", "plan_opening_book_injected",
+        "playbook_retrieved", "playbook_injected", "components_injected",
+        "outline_traps_injected",
+    }:
+        def _without_recipe(value: Any) -> Any:
+            if isinstance(value, dict):
+                return {
+                    key: _without_recipe(item)
+                    for key, item in value.items()
+                    if key not in {"recipe", "rendered_text", "content", "prompt"}
+                }
+            if isinstance(value, list):
+                return [_without_recipe(item) for item in value]
+            return value
+        projected = _without_recipe(projected)
+
+    # Media generation diagnostics retain outcomes and compact numeric/cache
+    # stats, but not repeated generation prompt prose.
+    if kind in {"assets_generated", "sounds_generated"}:
+        stat_key = "per_asset" if kind == "assets_generated" else "per_sound"
+        compact_stats = []
+        for stat in projected.get(stat_key) or []:
+            if not isinstance(stat, dict):
+                continue
+            compact_stats.append({
+                key: value for key, value in stat.items()
+                if key not in {"prompt", "negative_prompt", "spec", "prose"}
+            })
+        projected[stat_key] = compact_stats
+
+    if _trace_json_bytes(projected) <= _TRACE_MAX_BYTES and projected == payload:
+        return projected
+
+    projected["_trace_compacted"] = True
+    projected["_trace_original_bytes"] = original_bytes
+    projected = _compact_trace_value(projected, string_limit=320, list_limit=16)
+    if _trace_json_bytes(projected) <= _TRACE_MAX_BYTES:
+        return projected
+
+    projected = _compact_trace_value(projected, string_limit=120, list_limit=8)
+    if _trace_json_bytes(projected) <= _TRACE_MAX_BYTES:
+        return projected
+
+    # Deterministic final fallback: preserve diagnostic identity first, then add
+    # remaining compact fields only while the serialized row stays in budget.
+    fallback = {
+        key: _compact_trace_value(projected[key], string_limit=96, list_limit=6)
+        for key in _TRACE_REQUIRED_KEYS
+        if key in projected
+    }
+    fallback["_trace_compacted"] = True
+    fallback["_trace_original_bytes"] = original_bytes
+    for key in _TRACE_IDENTITY_KEYS:
+        if key not in projected or key in fallback:
+            continue
+        candidate = dict(fallback)
+        candidate[key] = _compact_trace_value(
+            projected[key], string_limit=96, list_limit=6,
+        )
+        if _trace_json_bytes(candidate) <= _TRACE_MAX_BYTES:
+            fallback = candidate
+    for key, value in projected.items():
+        if key in fallback:
+            continue
+        candidate = dict(fallback)
+        candidate[key] = _compact_trace_value(value, string_limit=96, list_limit=6)
+        if _trace_json_bytes(candidate) <= _TRACE_MAX_BYTES:
+            fallback = candidate
+    dropped_fields = max(
+        0,
+        len(projected) - len([
+            key for key in fallback
+            if not key.startswith("_trace_")
+        ]),
+    )
+    with_dropped = dict(fallback)
+    with_dropped["_trace_dropped_fields"] = dropped_fields
+    if _trace_json_bytes(with_dropped) <= _TRACE_MAX_BYTES:
+        fallback = with_dropped
+    # Exception identity is retained even for pathological multi-byte inputs.
+    while _trace_json_bytes(fallback) > _TRACE_MAX_BYTES:
+        reduced = False
+        for key in ("traceback", "err", "error", "fail_reason", "blocker", "soft_warnings"):
+            value = fallback.get(key)
+            if isinstance(value, str) and len(value) > 24:
+                fallback[key] = value[:max(24, len(value) // 2)]
+                reduced = True
+                break
+            if isinstance(value, list) and value:
+                fallback[key] = value[:max(1, len(value) // 2)]
+                reduced = True
+                break
+        if not reduced:
+            # Metadata/key names alone can only exceed the limit for adversarial
+            # input; retain the required identities and omit ancillary fields.
+            fallback = {
+                key: fallback[key]
+                for key in ("ts", "kind", "iteration", "failure_class", "err", "error", "exc_type")
+                if key in fallback
+            } | {
+                "_trace_compacted": True,
+                "_trace_original_bytes": original_bytes,
+            }
+            break
+    return fallback
 
 
 from agent_gates import GateProcessingMixin
@@ -1573,271 +1794,9 @@ class GameAgent(
         import importlib
         return importlib.import_module(f"prompts_{version}")
 
-    # OpenCoder #1 — two-stage retrieval (broad-then-narrow). Plan stage
-    # gets a wider, more permissive cut of the playbook (small models
-    # benefit from "see the whole space"); code stage gets a tighter cut
-    # of validated patterns only (no net-harmful bullets, fewer entries,
-    # smaller char budget). Mirrors OpenCoder's two-stage SFT — broad
-    # first, narrow second.
-    _PLAN_STAGE_TOP_K_BONUS = 2          # plan retrieves K + bonus bullets
-    _CODE_STAGE_TOP_K = 3                # narrow cut at code time
-    _PLAN_STAGE_CHAR_BUDGET = 4500       # ~1100 tokens, broad context
-    _CODE_STAGE_CHAR_BUDGET = 2400       # ~600 tokens, tight context
-
-    @staticmethod
-    def _playbook_suppressed_bullet_ids(
-        *,
-        goal: str = "",
-        active_skeleton: str | None,
-        code: str,
-    ) -> set[str]:
-        """Drop cross-modality navigation bullets that misfire on the active scaffold."""
-        from modality import detect_fps_navigation_modality
-
-        mod = detect_fps_navigation_modality(
-            goal=goal,
-            code=code or "",
-            active_skeleton=active_skeleton,
-        )
-        suppressed: set[str] = set()
-        if mod == "wireframe":
-            suppressed.update({
-                "fps-camera-and-movement-vectors",
-                "fps-minimap-radar-yaw-arrow",
-            })
-        elif mod == "threejs":
-            suppressed.update({
-                "wireframe-fps-movement-vectors",
-                "wireframe-minimap-radar-yaw-arrow",
-            })
-        elif mod == "mode7":
-            suppressed.update({
-                "fps-camera-and-movement-vectors",
-                "wireframe-fps-movement-vectors",
-                "fps-minimap-radar-yaw-arrow",
-                "wireframe-minimap-radar-yaw-arrow",
-            })
-        return suppressed
-
-    # Failing model probe name -> playbook ids to pin on fix turns (run_vlm10).
-    _REPORT_PROBE_PLAYBOOK_PINS: dict[str, list[str]] = {
-        "camera_moves": ["parallax-coordinate-camera", "beat-em-up-scroll-spawn"],
-    }
-
-    def _playbook_ensure_ids_for_report(self, report: dict) -> list[str]:
-        """Pin playbook bullets for harness blockers and visual-playtest refs."""
-        out: list[str] = []
-
-        def _add(*ids: str) -> None:
-            for bid in ids:
-                s = str(bid).strip()
-                if s and s not in out:
-                    out.append(s)
-
-        failing = {
-            str(p.get("name") or "")
-            for p in (report.get("probes") or [])
-            if not p.get("ok")
-        }
-
-        # Harness-warning pins (run_vlm10: undrawn / control-freeze / frozen canvas).
-        soft = [str(w) for w in (report.get("soft_warnings") or [])]
-        warns = [str(w) for w in (report.get("warnings") or [])]
-        all_w = soft + warns
-        if any("ASSETS_LOADED_BUT_UNDRAWN" in w for w in all_w):
-            _add(
-                "draw-generated-sprites-not-boxes",
-                "animation-frames-consistent-character",
-                "sprite-gen-wait-for-load",
-            )
-        if any("HOTSPOT_ALIGNMENT_MISS" in w for w in soft):
-            _add("pointclick-hotspot-from-source-art")
-        cnr = report.get("control_not_recovered")
-        if cnr or any("CONTROL-NOT-RECOVERED" in w for w in soft):
-            _add("stun-timer-before-early-return")
-        if report.get("frozen_canvas") or any("FROZEN-CANVAS" in w for w in soft):
-            _add("raf-must-start", "ambient-idle-pixel-delta", "frame-trycatch")
-
-        for probe_name, bids in self._REPORT_PROBE_PLAYBOOK_PINS.items():
-            if probe_name in failing:
-                _add(*bids)
-
-        # Visual-playtest auto-probe recipe refs (mechanism-general).
-        if failing and any(n.startswith("auto_") for n in failing):
-            recipe_id = getattr(self, "_active_visual_playtest_recipe_id", None)
-            if recipe_id:
-                try:
-                    for item in self._memory.load_visual_playtests():
-                        if item.id != recipe_id:
-                            continue
-                        refs = (
-                            (getattr(item, "recipe", None) or {}).get("playbook_refs")
-                            or {}
-                        )
-                        if isinstance(refs, dict):
-                            for val in refs.values():
-                                _add(*(val or []))
-                        break
-                except Exception:
-                    pass
-
-        return out
-
-    def _retrieve_playbook_block(
-        self,
-        goal: str,
-        *,
-        code: str = "",
-        stage: str = "code",
-        ensure_ids: list[str] | None = None,
-    ) -> str:
-        """Get top-K bullets and render them as a `<playbook>` block.
-
-        `stage` selects OpenCoder-style two-stage retrieval:
-          - "plan" (Stage-1, broad): top_k+bonus bullets, all positive
-            relevance hits including net-harmful (exposure to history),
-            larger char budget.
-          - "code" (Stage-2, narrow, default): top-3 only, drops bullets
-            with score ≤ -2 (validated-only patterns), smaller budget.
-
-        After retrieval, `render_playbook_block` runs shingle dedup
-        (OpenCoder #5) and budget capping (OpenCoder #2) before emitting
-        the prompt block.
-
-        Empty string when nothing matches OR when the active prompt module
-        has set PLAYBOOK_DISABLED = True (gives a v0-prompt the option to
-        opt out wholesale). Logs retrieved bullet IDs + stage to the trace
-        for postmortem inspection of which bullets fired.
-        """
-        if self._playbook_top_k <= 0:
-            return ""
-        if getattr(self._p, "PLAYBOOK_DISABLED", False):
-            return ""
-        try:
-            # Fix B feedback — resolve early so code-stage k can widen when
-            # user feedback is present (small models otherwise surface k=1
-            # only and miss scope/navigation bullets at rank #2).
-            recent_feedback = (
-                getattr(self, "_last_drained_feedback", None)
-                or getattr(self, "_pending_feedback", None)
-                or []
-            )
-            if not recent_feedback:
-                cont = getattr(self, "_continuation_feedback", None) or ""
-                if cont:
-                    recent_feedback = [cont]
-            feedback_text = " ".join(str(f) for f in recent_feedback[-2:])
-            if stage == "plan":
-                k = self._playbook_top_k + self._PLAN_STAGE_TOP_K_BONUS
-                if self._model_class in ("mid", "small"):
-                    k = 2
-                budget = self._PLAN_STAGE_CHAR_BUDGET
-                if self._model_class in ("mid", "small"):
-                    budget = self._CODE_STAGE_CHAR_BUDGET
-                render_mode = "hybrid"
-                full_top_n_val = 1 if self._model_class in ("mid", "small") else 3
-            else:
-                k = min(self._playbook_top_k, self._CODE_STAGE_TOP_K)
-                if self._model_class in ("mid", "small"):
-                    k = 2 if feedback_text else 1
-                budget = self._CODE_STAGE_CHAR_BUDGET
-                render_mode = "full"
-                full_top_n_val = 3
-            mod_toks: list[str] = []
-            try:
-                from memory import (
-                    _detect_board_intent, _detect_dom_intent, _detect_3d_intent,
-                )
-                mod_toks = (
-                    _detect_3d_intent(goal)
-                    + _detect_board_intent(goal)
-                    + _detect_dom_intent(goal)
-                )
-            except Exception:
-                mod_toks = []
-            if feedback_text and self._model_class in ("mid", "small"):
-                feedback_weighted = " ".join([feedback_text] * 3)
-            else:
-                feedback_weighted = feedback_text
-            query = goal if not feedback_text else f"{goal} {feedback_weighted}"
-            hits = self._playbook.retrieve(
-                query, code=code, k=k, stage=stage,
-                modality_tokens=mod_toks,
-            )
-            suppressed = self._playbook_suppressed_bullet_ids(
-                goal=goal,
-                active_skeleton=getattr(self, "_active_skeleton", None),
-                code=code or getattr(self, "_current_file", "") or "",
-            )
-            if suppressed and hits:
-                hits = [h for h in hits if h.bullet.id not in suppressed]
-            # Cross-modality suppression can drop the only k=1 hit (small
-            # models) — widen retrieval and take the next in-modality bullets.
-            if suppressed and not hits:
-                wide_k = max(k * 6, 8)
-                hits = self._playbook.retrieve(
-                    query, code=code, k=wide_k, stage=stage,
-                    modality_tokens=mod_toks,
-                )
-                hits = [h for h in hits if h.bullet.id not in suppressed][:k]
-            if ensure_ids:
-                from memory import lookup_bullet, BulletHit
-                by_id = {h.bullet.id: h for h in hits}
-                pinned: list[BulletHit] = []
-                for bid in ensure_ids:
-                    if bid in by_id:
-                        pinned.append(by_id.pop(bid))
-                    else:
-                        b = lookup_bullet(self._playbook, bid)
-                        if b is not None:
-                            pinned.append(BulletHit(b, 1.0))
-                if pinned:
-                    rest = [h for h in hits if h.bullet.id in by_id]
-                    hits = pinned + rest
-                    hits = hits[: max(k, len(pinned))]
-            if hits:
-                ids = [h.bullet.id for h in hits]
-                self._trace({
-                    "kind": "playbook_retrieved",
-                    "stage": stage,
-                    "ids": ids,
-                    "scores": [round(h.score, 4) for h in hits],
-                    "goal_preview": goal[:120],
-                    "feedback_in_query": bool(feedback_text),
-                    "feedback_preview": feedback_text[:200] if feedback_text else "",
-                    "char_budget": budget,
-                    "render_mode": render_mode,
-                })
-                self._active_bullet_ids = list(ids)
-            else:
-                # No hits this turn — clear the active set so a LATER fix
-                # turn that injects nothing cannot penalize an EARLIER
-                # plan-stage batch (stale-attribution bug, trace
-                # 20260613_213711: the QTE bullets were retrieved only at
-                # plan stage but kept getting harmful++ on fix turns that
-                # injected no playbook at all).
-                self._active_bullet_ids = []
-            block = render_playbook_block(
-                hits, char_budget=budget, mode=render_mode, full_top_n=full_top_n_val,
-            )
-            # Injection observability: distinguishes "retrieved but rendered
-            # empty" from "actually placed in the prompt". In the 2026-05-29
-            # fighting trace it was impossible to tell whether the animation
-            # bullets ever reached the model — this makes it one grep.
-            self._trace({
-                "kind": "playbook_injected",
-                "stage": stage,
-                "ids": [h.bullet.id for h in hits] if hits else [],
-                "chars": len(block or ""),
-                "rendered": bool(block),
-            })
-            return block
-        except Exception:
-            return ""
-
-    # `_retrieve_opening_book_block` and `_retrieve_components_block` were
-    # moved VERBATIM to agent_memory.MemoryRetrievalMixin (GameAgent inherits
-    # them). See that module for the opening-book / component retrieval logic.
+    # Playbook / opening-book / component retrieval methods were moved
+    # VERBATIM to agent_memory.MemoryRetrievalMixin (GameAgent inherits them).
+    # See that module for the memory retrieval logic.
 
     @staticmethod
     def _report_blocker_query(report: dict) -> str:
@@ -2440,63 +2399,8 @@ class GameAgent(
                 total += len(content)
         return total
 
-    # Markers used by `_estimate_prompt_section_chars` to attribute
-    # the most recent user message to known sections. Position of the
-    # first occurrence is used as the section start; the section ends
-    # at the next marker (or end-of-string).
-    _PROMPT_SECTION_MARKERS: tuple[tuple[str, str], ...] = (
-        ("user_answer", "================ USER ANSWER (HIGHEST PRIORITY)"),
-        ("user_feedback", "================ USER FEEDBACK (HIGHEST PRIORITY)"),
-        ("scope_arbitration", "================ FEEDBACK SCOPE ARBITRATION"),
-        ("media_directive", "================ MEDIA-CHANGE DIRECTIVE"),
-        ("scoped_change", "================ SCOPED-CHANGE DIRECTIVE"),
-        ("agent_coaching", "================ AGENT COACHING"),
-        ("generated_assets", "================ GENERATED ASSETS"),
-        ("generated_sounds", "================ GENERATED SOUNDS"),
-        ("state_anchor", "# Session state anchor"),
-        ("current_file", "CURRENT FILE ON DISK"),
-        ("seed_file", "EXISTING FILE:"),
-    )
-
-    def _estimate_prompt_section_chars(self) -> dict:
-        """Approximate char counts per section in the most recent user
-        message, plus totals for system prompt and message history.
-        Read by the `turn_contract` trace event. Best-effort: silently
-        returns minimal data if the message list is empty.
-        """
-        out: dict[str, int] = {}
-        # System prompt size (first message, role=system).
-        if self._messages and self._messages[0].get("role") == "system":
-            sys_content = self._messages[0].get("content") or ""
-            out["system"] = len(sys_content) if isinstance(sys_content, str) else 0
-        else:
-            out["system"] = 0
-        # Total message-history chars (matches _estimate_ctx_fill).
-        out["history_total"] = self._estimate_ctx_fill()
-        # Most-recent user message section breakdown.
-        last_user_content = ""
-        for msg in reversed(self._messages):
-            if msg.get("role") == "user":
-                content = msg.get("content")
-                if isinstance(content, str):
-                    last_user_content = content
-                break
-        if not last_user_content:
-            return out
-        out["last_user_chars"] = len(last_user_content)
-        # Find every marker's first-occurrence offset; sort by offset
-        # and slice between consecutive markers. Sections that don't
-        # appear in this message are omitted (cheap, no noise).
-        hits: list[tuple[int, str]] = []
-        for label, marker in self._PROMPT_SECTION_MARKERS:
-            idx = last_user_content.find(marker)
-            if idx >= 0:
-                hits.append((idx, label))
-        hits.sort()
-        for i, (start, label) in enumerate(hits):
-            end = hits[i + 1][0] if i + 1 < len(hits) else len(last_user_content)
-            out[f"section_{label}"] = end - start
-        return out
+    # Exact prompt provenance lives with the prompt builders in
+    # `agent_prompts.py`; it observes `_messages` without changing them.
 
     def trace_status(self, snapshot: dict) -> None:
         """Persist a TUI status-panel snapshot to the trace .jsonl.
@@ -2586,16 +2490,22 @@ class GameAgent(
             if obj.get("kind") in self._EPHEMERAL_TRACE_KINDS:
                 return
             self.trace_path.parent.mkdir(parents=True, exist_ok=True)
+            traced = dict(obj)
             # Add dynamic multi-agent telemetry role & name metadata
-            if "model_role" not in obj and "model_name" not in obj:
+            if "model_role" not in traced and "model_name" not in traced:
                 role = getattr(self, "_last_stream_role", "coder")
                 backend = self.get_backend(role)
                 if backend:
-                    obj["model_role"] = role
-                    obj["model_name"] = backend.info.model
-            payload = {"ts": datetime.utcnow().isoformat() + "Z", **obj}
+                    traced["model_role"] = role
+                    traced["model_name"] = backend.info.model
+            payload = _compact_trace_payload({
+                "ts": datetime.utcnow().isoformat() + "Z",
+                **traced,
+            })
             with self.trace_path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+                f.write(json.dumps(
+                    payload, ensure_ascii=False, default=str, separators=(",", ":"),
+                ) + "\n")
         except Exception:
             pass
 
@@ -2624,7 +2534,7 @@ class GameAgent(
         self._trace({
             "kind": "event",
             "event": ev.kind,
-            "text_preview": text[:1000],
+            "text_preview": text[:_TRACE_PREVIEW_CHARS],
             "text_len": len(text),
             "data": data,
         })
@@ -3210,10 +3120,9 @@ class GameAgent(
 
     def _dump_conversation(self) -> None:
         # One-complete-trace (2026-06-14): the .conversation.md sibling is
-        # retired. Its full content — system prompt, every user turn (with all
-        # injected blocks), every assistant reply — is now captured directly in
-        # the .jsonl (system_prompt_built.system_prompt, stream_start.turn_input,
-        # assistant_reply.reply), so this redundant file is no longer written.
+        # retired. Canonical user turns (with all injected blocks) and assistant
+        # replies are captured directly in the .jsonl; the system prompt has a
+        # compact hash/size manifest. This redundant file is no longer written.
         # Kept as a no-op (rather than ripping out ~6 call sites) to keep the
         # change surgical; existing .conversation.md files on disk are untouched.
         return
@@ -3661,246 +3570,6 @@ class GameAgent(
     # separate `<architect>` prose turn, which was merged into the single
     # planning pass. The architect ROLE and exit-decision turn are unchanged.)
 
-    # Properties whose presence/size is established at init, NOT at
-    # runtime — comparisons against them aren't dynamic even when they
-    # use `>` / `<`. `state.barrels.length > 0` is "we spawned a
-    # barrel", which the game does on iter 1; `c.toDataURL().length >
-    # 200` is "the canvas has rendered SOMETHING", true the moment the
-    # HUD draws. Excluding these closes the DK trace 20260514_104131
-    # false-negative (5/5 'structural-with-floor' probes scored as
-    # 40% dynamic, nudge stayed silent on a game where gameplay never
-    # advanced).
-    _STRUCTURAL_NUMERIC_PROPS = (
-        "length", "size", "width", "height", "bytelength",
-        "innerwidth", "innerheight", "clientwidth", "clientheight",
-        "offsetwidth", "offsetheight",
-    )
-    _CMP_RE = re.compile(r"(\S+?)\s*([<>]=?)\s*(-?\d+)")
-    _CMP_REV_RE = re.compile(r"(-?\d+)\s*([<>]=?)\s*(\S+)")
-    # Probes that explicitly try to capture a time-delta — IIFE or
-    # ternary patterns that store a `t0` / `before` snapshot and
-    # compare later. Genuine dynamic checks; only fire when paired with
-    # an explicit time signal (await/setTimeout/etc.) so an `x !== 0`
-    # at init doesn't false-positive.
-
-    @staticmethod
-    def _is_dynamic_probe(expr: str) -> bool:
-        """True if `expr` verifies behavior over time, not just existence.
-
-        Heuristic (no LLM call — this is a regex problem, not a
-        reasoning problem; weak models can't reliably self-critique
-        their own probe list per TACL 2024 / arXiv 2411.17501).
-
-        Dynamic signals (each is sufficient):
-          - awaits or returns a Promise (`await`, `.then(`, `Promise.`)
-          - references a timer / clock (`setTimeout`, `setInterval`,
-            `requestAnimationFrame`, `performance.now`, `Date.now`)
-          - reads canvas state via getImageData (the resulting pixel
-            array is genuine runtime state, not a `.length` check)
-          - compares against a NON-ZERO numeric threshold AND the LHS
-            isn't a known structural property (.length / .size /
-            .width / .height etc.)
-
-        Structural-only (returns False):
-          - `!!window.state`, `typeof X === 'object'`
-          - `X.length > 0`, `X.length > 200`, `width > 0` (existence
-            with a floor; true at init for any rendered game)
-          - `state.player.x > 0` — at init most games have positive
-            starting coordinates; "non-zero" doesn't mean "moved"
-          - bare delta-marker identifiers (`prev`, `t0`, `lastFire`)
-            — too many false positives like `lastFireTime > 0` which
-            just means "fired at init"
-
-        DK trace 20260514_104131 pin: the five probes (`canvas_exists`,
-        `player_state`, `barrels_active`, `score_visible`,
-        `game_not_blank`) ALL classify as structural under this rule,
-        so the nudge fires.
-        """
-        if not expr:
-            return False
-        e = expr.strip()
-        low = e.lower()
-        # 1. Awaits / promises — only way a probe can actually wait.
-        if "await " in e or ".then(" in e or "promise." in low:
-            return True
-        # 2. Timers / clocks — the probe is taking a time-delta.
-        for tok in (
-            "settimeout", "setinterval", "requestanimationframe",
-            "performance.now", "date.now",
-        ):
-            if tok in low:
-                return True
-        # 3. Canvas pixel read — getImageData returns runtime state.
-        # Exclude `getImageData(...).data.length` (still a presence
-        # check on the returned typed array).
-        if "getimagedata" in low and ".data.length" not in low:
-            return True
-        # 4. Numeric comparison against a non-trivial threshold (|N| >=
-        # 1) where the LHS isn't a structural-presence property.
-        def _is_structural_lhs(lhs: str) -> bool:
-            low_lhs = lhs.lower()
-            for prop in GameAgent._STRUCTURAL_NUMERIC_PROPS:
-                if "." + prop in low_lhs:
-                    return True
-            return False
-
-        for m in GameAgent._CMP_RE.finditer(e):
-            lhs = m.group(1)
-            threshold = int(m.group(3))
-            if threshold == 0:
-                continue
-            if _is_structural_lhs(lhs):
-                continue
-            return True
-        for m in GameAgent._CMP_REV_RE.finditer(e):
-            rhs = m.group(3)
-            threshold = int(m.group(1))
-            if threshold == 0:
-                continue
-            if _is_structural_lhs(rhs):
-                continue
-            return True
-        return False
-
-    @staticmethod
-    def _classify_probes_dynamic(probes: list[dict]) -> dict:
-        """Bulk-classify probes into structural vs dynamic.
-
-        Returns {"dynamic": [names], "structural": [names], "ratio": float}
-        where ratio is dynamic_count / total (0.0 when probes is empty).
-        """
-        if not probes:
-            return {"dynamic": [], "structural": [], "ratio": 0.0}
-        dyn: list[str] = []
-        struct: list[str] = []
-        for p in probes:
-            name = str(p.get("name", "?"))
-            expr = str(p.get("expr", ""))
-            if GameAgent._is_dynamic_probe(expr):
-                dyn.append(name)
-            else:
-                struct.append(name)
-        total = len(dyn) + len(struct)
-        return {
-            "dynamic": dyn,
-            "structural": struct,
-            "ratio": (len(dyn) / total) if total else 0.0,
-        }
-
-    # Pattern 1: probe binds a local `const x0 = …` (or `let`/`var`), then
-    # immediately returns a literal `true`/`false` without ever reading
-    # x0 again. The temp binding is wasted; the probe is tautological.
-    # Donkey-kong trace 20260516_142445 iter 1 `mario_moves`:
-    #   `(()=>{const x0=s.player.x; setTimeout(()=>{}, 100); return true;})()`
-    # Pattern 2: probe asserts `typeof obj.NAME === 'undefined'` (or the
-    # short form `obj.NAME === undefined`) and returns false on that
-    # path, but `obj.NAME` is never assigned anywhere in the game body.
-    # That check is permanently true → probe always returns false →
-    # zero signal. Donkey-kong trace 20260516_124628 iter 1 `barrels_move`:
-    #   `if (typeof b.x0 === 'undefined') return false; …`  (b.x0 is
-    #   never assigned).
-    # The undefined-property check needs the on-disk HTML, so it runs
-    # later — at materialize time, not at probe-parse time. The
-    # tautological-temp check is purely structural and runs immediately.
-    # Match: `const NAME = …;` followed (eventually) by `return <literal>`.
-    # The `.*?` is lazy so we don't span over an outer return that
-    # belongs to a different function body. We accept newlines (DOTALL)
-    # and braces inside (e.g. an inner `setTimeout(()=>{})`) because
-    # the "is the temp dead?" check below uses `expr.count(temp_name)`
-    # to confirm the binding is actually unused.
-    _PROBE_TAUTOLOGY_RE = re.compile(
-        r"(?:const|let|var)\s+(\w+)\s*=\s*[^;]+;"
-        r".*?return\s+(?:true|false|0|1)\s*;",
-        re.IGNORECASE | re.DOTALL,
-    )
-
-    # MK trace 20260517_220025 fix. Iter 2 probe:
-    #   (()=>{try{const s=window.state; if(!s)return false;
-    #          return s.cpuPunchFlipped===true;}catch(e){return false;}})()
-    # was bait — the SAME iter's patch added `cpuPunchFlipped: true`
-    # to state.reset(), so the probe trivially passed without
-    # verifying the actual draw transform. Detect this shape so the
-    # next user-turn fix prompt surfaces the bait. The probe-side
-    # pattern matches any `<ident>.<prop> === true|false` shape (the
-    # probe in the MK trace used `s.X` where `s` was a local alias
-    # for `window.state`). False-positive risk is bounded by the
-    # second-pass check that `<prop>` was also assigned to a literal
-    # boolean by the same iter's patch.
-    _PROBE_BAIT_PROP_RE = re.compile(
-        r"\b\w+\.(\w+)\s*===\s*(?:true|false)\b",
-        re.IGNORECASE,
-    )
-    # Inline constant assignment matchers — both object-literal
-    # (`cpuPunchFlipped: true`) and statement (`state.X = true`,
-    # `window.X = true`) forms. Conservative on purpose: we only
-    # match LITERAL true/false to flag the exact bait shape.
-    _PROBE_BAIT_OBJLIT_RE = re.compile(
-        r"\b(\w+)\s*:\s*(?:true|false)\b",
-        re.IGNORECASE,
-    )
-    _PROBE_BAIT_ASSIGN_RE = re.compile(
-        r"(?:state|window|self|globalThis)\.(\w+)\s*=\s*(?:true|false)\b",
-        re.IGNORECASE,
-    )
-
-    @staticmethod
-    def _probes_baited_by_patches(
-        probes: list[dict], applied_replaces: list[str],
-    ) -> list[dict]:
-        """Detect probes whose only assertion is `state.X === true|false`
-        when the SAME iter's applied patch also writes that exact flag
-        as a literal constant. Returns the same `{name, kind, message}`
-        shape as `_lint_probes`. MK trace 20260517_220025 iter 2 is
-        the case study: a probe checked `state.cpuPunchFlipped===true`
-        while the patch added `cpuPunchFlipped: true` to reset() — the
-        probe passed without actually testing the rendered flip.
-
-        Conservative: requires LITERAL true/false on both sides, and
-        only flags when the same property name appears in BOTH the
-        probe expr and a REPLACE constant assignment. False positives
-        would noisily lint legitimate flag checks; false negatives
-        keep the existing behavior.
-        """
-        if not probes or not applied_replaces:
-            return []
-        # Build the set of property names assigned to a literal
-        # boolean by the applied patches.
-        assigned_to_bool: set[str] = set()
-        for replace_text in applied_replaces:
-            if not isinstance(replace_text, str) or not replace_text:
-                continue
-            for m in GameAgent._PROBE_BAIT_OBJLIT_RE.finditer(replace_text):
-                assigned_to_bool.add(m.group(1))
-            for m in GameAgent._PROBE_BAIT_ASSIGN_RE.finditer(replace_text):
-                assigned_to_bool.add(m.group(1))
-        if not assigned_to_bool:
-            return []
-        findings: list[dict] = []
-        for p in probes:
-            name = str(p.get("name", "?"))
-            expr = str(p.get("expr", ""))
-            if not expr:
-                continue
-            for m in GameAgent._PROBE_BAIT_PROP_RE.finditer(expr):
-                prop = m.group(1)
-                if prop in assigned_to_bool:
-                    findings.append({
-                        "name": name,
-                        "kind": "probe_bait_flag",
-                        "message": (
-                            f"probe `{name}` checks "
-                            f"`{prop} === true|false` but the same "
-                            f"iter's patch sets `{prop}` to a literal "
-                            f"boolean — the probe passes without "
-                            f"verifying the actual behavior. Replace "
-                            f"the flag check with a draw-path / DOM / "
-                            f"canvas-state assertion that fails when "
-                            f"the visual change is missing."
-                        ),
-                    })
-                    break
-        return findings
-
     @staticmethod
     def _failure_blames_code(report: dict[str, Any]) -> bool:
         """True only when a failing iter is attributable to a real CODE
@@ -3943,304 +3612,6 @@ class GameAgent(
             if (not p.get("ok")) and p.get("name") == "input_responsive":
                 return True
         return False
-
-    @staticmethod
-    def _lint_probes(probes: list[dict]) -> list[dict]:
-        """Return a list of `{name, kind, message}` lint findings for
-        probes that pass JSON parse but are structurally tautological.
-
-        Catches the donkey-kong 20260516_142445 `mario_moves` shape —
-        the probe binds a `const x0` then returns `true` without ever
-        comparing against x0. The setTimeout callback is empty, so the
-        probe provides no behavioral signal.
-        """
-        findings: list[dict] = []
-        for p in probes:
-            name = str(p.get("name", "?"))
-            expr = str(p.get("expr", ""))
-            if not expr:
-                continue
-            m = GameAgent._PROBE_TAUTOLOGY_RE.search(expr)
-            if m:
-                temp_name = m.group(1)
-                # Confirm the temp is referenced ONLY in its declaration:
-                # split on the temp name; if there's only one occurrence
-                # left after stripping the decl prefix, the temp is dead.
-                if expr.count(temp_name) <= 1:
-                    findings.append({
-                        "name": name,
-                        "kind": "tautological_constant_return",
-                        "message": (
-                            f"probe `{name}` binds `{temp_name}` but "
-                            f"never reads it again before returning a "
-                            f"constant — the probe always returns the "
-                            f"same value regardless of game behavior."
-                        ),
-                    })
-            if re.search(r"\bstate\.scene\s*>=\s*1\b", expr):
-                findings.append({
-                    "name": name,
-                    "kind": "fragile_initial_scene_index",
-                    "message": (
-                        f"probe `{name}` requires `state.scene >= 1`; "
-                        "most scene arrays are zero-indexed and start at "
-                        "scene 0, so this probe can force a bad state hack. "
-                        "Prefer `typeof state.scene === 'number'` and test "
-                        "progression after dispatching input."
-                    ),
-                })
-            # Initial-state-equality trap (trace 20260613_213711, Opus 4.8):
-            # a probe asserting `state.<counter> === 0` samples AFTER the
-            # harness input smoke test has already fired keys — in a QTE /
-            # reaction game those keys legitimately advance the counter, so
-            # the probe reads e.g. room 2 and fails. The probe is frozen once
-            # accepted, so the model can only fix it by contorting gameplay
-            # (it added a `started` gate that swallowed real input for 4
-            # iters). Catch it at Phase A — before the probe freezes — unless
-            # the expr resets first so it samples a fresh initial state.
-            counter_eq0 = re.search(
-                r"\bstate\.(room|scene|level|stage)\s*===?\s*0\b", expr
-            )
-            if counter_eq0 and "reset(" not in expr:
-                counter = counter_eq0.group(1)
-                findings.append({
-                    "name": name,
-                    "kind": "fragile_initial_state_equality",
-                    "message": (
-                        f"probe `{name}` asserts `state.{counter} === 0`, "
-                        "but the harness input smoke test fires control keys "
-                        "BEFORE probes run — in a timed/QTE game those keys "
-                        "advance the counter, so this probe fails on a working "
-                        "game and cannot be changed once accepted. Either call "
-                        "`window.game.reset()` at the START of the probe so it "
-                        f"samples a fresh state, or assert `typeof state.{counter} "
-                        "=== 'number'` plus a progression check after dispatching "
-                        "input."
-                    ),
-                })
-            # run_16 bullet-hell: `const b0=state.bullets.length; await 1500ms;
-            # return length>b0` fails at steady-state (94 live bullets, cull =
-            # spawn). Require length>=N or a totalSpawned/fired counter instead.
-            if (
-                "setTimeout" in expr
-                and ".length" in expr
-                and re.search(
-                    r"(?:const|let|var)\s+(\w+)\s*=\s*[^;]*\.length\b",
-                    expr,
-                )
-                and re.search(
-                    r"\.length\s*>\s*\w+|\w+\s*<\s*[^;]*\.length",
-                    expr,
-                )
-            ):
-                findings.append({
-                    "name": name,
-                    "kind": "fragile_length_growth_probe",
-                    "message": (
-                        f"probe `{name}` captures an array `.length`, waits, then "
-                        "requires growth. Culled arrays (bullets/particles) often "
-                        "stay flat at steady-state even when spawning correctly. "
-                        "Prefer `state.bullets.length >= 8` or assert a "
-                        "`totalSpawned`/`fired` counter increases."
-                    ),
-                })
-        return findings
-
-    @staticmethod
-    def _lint_probe_syntax(probes: list[dict]) -> list[dict]:
-        """Catch unparseable probe expr at Phase A (run_vlm10 OutRun).
-
-        Model-authored async probes with a missing `)` burn iter 1 before
-        Chromium ever runs — syntax-check here and re-prompt the plan once.
-
-        run_13: also catch bracket imbalance before the node check (Solitaire /
-        SimCity truncated probes) — works even when node is unavailable.
-        """
-        import json
-        import subprocess
-
-        from tools import _bracket_imbalance
-
-        findings: list[dict] = []
-        for p in probes:
-            name = str(p.get("name") or "?")
-            expr = str(p.get("expr") or "").strip()
-            if not expr:
-                continue
-            # Fast path: unbalanced (), [], {} — same micro-probe helper.
-            imb = _bracket_imbalance(expr)
-            bad_br = {k: v for k, v in imb.items() if v != 0}
-            if bad_br:
-                findings.append({
-                    "name": name,
-                    "kind": "syntax_error",
-                    "message": (
-                        f"probe `{name}` has unbalanced brackets "
-                        f"{bad_br} — re-emit a complete balanced expr"
-                    ),
-                })
-                continue
-            js = (
-                "try { new Function(" + json.dumps(expr) + "); } "
-                "catch (e) { console.error(String(e.message||e)); "
-                "process.exit(1); }"
-            )
-            try:
-                r = subprocess.run(
-                    ["node", "-e", js],
-                    capture_output=True,
-                    text=True,
-                    timeout=3,
-                )
-            except FileNotFoundError:
-                return findings
-            except Exception as e:
-                findings.append({
-                    "name": name,
-                    "kind": "syntax_check_error",
-                    "message": f"probe `{name}` syntax check failed: {e}",
-                })
-                continue
-            if r.returncode != 0:
-                err = (r.stderr or r.stdout or "syntax error").strip()[:200]
-                findings.append({
-                    "name": name,
-                    "kind": "syntax_error",
-                    "message": (
-                        f"probe `{name}` has a JavaScript syntax error: "
-                        f"{err}"
-                    ),
-                })
-        return findings
-
-    @staticmethod
-    def _probes_referencing_unassigned_props(
-        probes: list[dict], html: str,
-    ) -> list[dict]:
-        """For each probe, find `obj.PROP` accesses where PROP is never
-        assigned anywhere in `html`. Returns the same `{name, kind,
-        message}` shape as `_lint_probes`.
-
-        Catches the donkey-kong 20260516_124628 `barrels_move` shape:
-        the probe gates on `b.x0` but the game code never sets `b.x0`,
-        so the probe trivially returns false. The check is permissive —
-        only properties that look like real game-state names (≥ 2 chars,
-        not a reserved word, not a built-in property) are checked, to
-        avoid flagging legitimate property reads on DOM / built-in
-        objects.
-        """
-        if not probes or not html:
-            return []
-        # Cheap negation: skip if the HTML body is too small to contain
-        # any real game state. The check below assumes a parseable script.
-        if "<script" not in html.lower():
-            return []
-        findings: list[dict] = []
-        # Properties to never flag: DOM, canvas, common built-ins. If a
-        # probe accesses `c.width` and the HTML never says `c.width = X`,
-        # that's fine — `width` is a DOM property of the canvas element.
-        _IGNORE = {
-            "length", "size", "width", "height", "x", "y", "left", "top",
-            "right", "bottom", "data", "value", "textContent",
-            "innerText", "innerHTML", "style", "className", "id", "name",
-            "parent", "child", "next", "prev", "node", "type", "kind",
-        }
-        # Extract candidate property *accesses* (not method *calls*).
-        # Negative lookahead `(?!\s*\()` skips `obj.method(args)` —
-        # methods aren't assignable state, so flagging them as
-        # "unassigned" produces false positives (e.g. `obj.toString`,
-        # `document.querySelector`). Method-call hallucinations are
-        # caught by the separate API-allowlist micro-probe in tools.py.
-        prop_re = re.compile(
-            r"\b\w+\.([A-Za-z_$][\w$]*)\b(?!\s*\()"
-        )
-        # Build the assignment set ONCE per HTML — assignments look like
-        # `obj.prop =`, `obj.prop +=`, `obj.prop:` (object literal),
-        # `prop:` inside object literals at all depths.
-        # Conservatively, scan for both patterns.
-        assigned: set[str] = set()
-        for m in re.finditer(
-            r"\.([A-Za-z_$][\w$]*)\s*(?:=|\+=|-=|\*=|/=)(?!=)",
-            html,
-        ):
-            assigned.add(m.group(1))
-        # Object-literal entries: `name:` at line start or after `,` /
-        # `{` / `(`. This is a loose match (catches some non-assignments
-        # like ternary labels) which is FINE — false negatives (skipping
-        # a real warning) are cheaper than false positives.
-        for m in re.finditer(
-            r"(?:[,{(\n]\s*|^\s*)([A-Za-z_$][\w$]*)\s*:",
-            html,
-        ):
-            assigned.add(m.group(1))
-        for p in probes:
-            name = str(p.get("name", "?"))
-            # Recipe-injected auto_* probes are alias-tolerant by design
-            # (e.g. s.floors||s.ground, return true when absent) — the
-            # model cannot fix them; skip to avoid misleading fix coaching.
-            if name.startswith("auto_"):
-                continue
-            expr = str(p.get("expr", ""))
-            if not expr:
-                continue
-            missing: set[str] = set()
-            for m in prop_re.finditer(expr):
-                prop = m.group(1)
-                if prop in _IGNORE or prop.startswith("_"):
-                    continue
-                # The probe accesses obj.prop; if `prop` is never
-                # assigned anywhere in the file, flag it.
-                if prop not in assigned:
-                    missing.add(prop)
-            if missing:
-                sample = ", ".join(f"`{p}`" for p in sorted(missing)[:3])
-                findings.append({
-                    "name": name,
-                    "kind": "unassigned_property_read",
-                    "message": (
-                        f"probe `{name}` reads {sample} but the game "
-                        f"code never assigns those properties — the "
-                        f"probe will trivially fail (or short-circuit "
-                        f"return) regardless of game behavior. Prefer "
-                        f"fixing the probe to read real runtime state; "
-                        f"do not add a constant pass-flag assignment "
-                        f"unless it is genuinely updated by gameplay."
-                    ),
-                })
-        return findings
-
-    @staticmethod
-    def _extract_probes(reply: str) -> list[dict]:
-        """Pull a JSON list-of-{name,expr} out of <probes>...</probes>.
-
-        Tolerant: accepts either a JSON list of objects, or a list of
-        plain strings (treated as `expr`, with name auto-assigned). Bad
-        JSON returns []; the agent shouldn't ever crash on a probe parse
-        failure since universal probes still cover the basics.
-        """
-        reply = _strip_thinking(reply)
-        m = _PROBES_RE.search(reply)
-        if not m:
-            return []
-        body = m.group(1).strip()
-        # Strip a fenced ```json``` if present.
-        body = re.sub(r"^```(?:json|JSON)?\s*\n", "", body)
-        body = re.sub(r"\n?```$", "", body).strip()
-        try:
-            obj = json.loads(body)
-        except Exception:
-            return []
-        out: list[dict] = []
-        if isinstance(obj, list):
-            for i, item in enumerate(obj, 1):
-                if isinstance(item, dict) and item.get("expr"):
-                    out.append({
-                        "name": str(item.get("name") or f"probe_{i}")[:60],
-                        "expr": str(item["expr"])[:600],
-                    })
-                elif isinstance(item, str):
-                    out.append({"name": f"probe_{i}", "expr": item[:600]})
-        return out[:8]   # cap so a chatty model can't bloat the verifier
 
     @staticmethod
     def _extract_todos(reply: str) -> str | None:
@@ -4998,8 +4369,20 @@ class GameAgent(
             if plan_opening_hits:
                 self._trace({
                     "kind": "plan_opening_book_injected",
-                    "hits": plan_opening_hits,
-                    "chars": len(plan_opening_block or ""),
+                    "hits": [
+                        {key: value for key, value in hit.items() if key != "recipe"}
+                        for hit in plan_opening_hits
+                    ],
+                    "selected_chars": sum(
+                        len(json.dumps(
+                            hit.get("recipe") or {},
+                            ensure_ascii=False,
+                            default=str,
+                            separators=(",", ":"),
+                        ))
+                        for hit in plan_opening_hits
+                    ),
+                    "rendered_chars": len(plan_opening_block or ""),
                 })
 
             # B2: a THIN playbook at plan time so the model sees the top
@@ -5033,11 +4416,8 @@ class GameAgent(
                 "system_prompt_class": sys_class,
                 "lean": lean_active,
                 "chars": len(sys_prompt),
-                # One-complete-trace (2026-06-14): store the FULL system prompt
-                # text, not just its length, so the .jsonl carries exactly what
-                # the model was told (this content used to live only in the now-
-                # retired .conversation.md). Rebuilt per run/continuation, so
-                # this fires once per build — not per turn.
+                # _trace converts this to a compact hash/size manifest without
+                # changing the runtime prompt sent to the model.
                 "system_prompt": sys_prompt,
             })
             # Runtime-mode observability (2026-06-13): one concise row so a

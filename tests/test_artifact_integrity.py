@@ -55,10 +55,10 @@ def test_same_game_basename_gets_distinct_artifact_paths(tmp_path: Path) -> None
 
 def test_conversation_dump_is_retired_no_op(tmp_path: Path) -> None:
     # One-complete-trace (2026-06-14): the .conversation.md sibling is retired.
-    # Its content (system prompt, every user turn, every assistant reply) now
-    # lives in the .jsonl via system_prompt_built.system_prompt,
-    # stream_start.turn_input, and assistant_reply.reply. _dump_conversation()
-    # is a no-op and must NOT write the redundant file.
+    # Canonical user turns and assistant replies live in the .jsonl via
+    # stream_start.turn_input and assistant_reply.reply; system_prompt_built is
+    # a compact hash/size manifest. _dump_conversation() is a no-op and must NOT
+    # write a redundant sibling file.
     a = _make_agent(tmp_path, "mortal.html")
     a._goal = "mortal kombat goal"
     a._messages = [

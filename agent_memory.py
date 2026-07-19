@@ -1,8 +1,10 @@
-"""Opening-book / component / lean-budget memory retrieval extracted from agent.py.
+"""Playbook / opening-book / component / lean-budget memory retrieval extracted from agent.py.
 
 `MemoryRetrievalMixin` holds the first-build/plan-turn memory assembly helpers
 that `GameAgent` used to carry inline:
 
+  - `_retrieve_playbook_block` — retrieve and render two-stage playbook bullets,
+    including report-driven pinning and cross-modality suppression.
   - `_retrieve_opening_book_block` — retrieve the matched implementation outline
     (+ universal fallback), playtests, asset/animation audits, and the optional
     VLM checklist, rendered into the `<opening-book>` block.
@@ -21,11 +23,16 @@ inherits this mixin, so every `self.*` attribute reference (`self._memory`,
 """
 from __future__ import annotations
 
+import json
+
 from memory import (
+    BulletHit,
     OpeningBookHit,
+    lookup_bullet,
     render_components_block,
     render_opening_book_block,
     render_outline_traps_only,
+    render_playbook_block,
     render_vlm_checklist_section,
     VLM_CHECKLIST_SKIP_IDS,
 )
@@ -33,6 +40,269 @@ from memory import (
 
 class MemoryRetrievalMixin:
     """First-build / plan-turn memory retrieval for GameAgent (see docstring)."""
+
+    # OpenCoder #1 — two-stage retrieval (broad-then-narrow). Plan stage
+    # gets a wider, more permissive cut of the playbook (small models
+    # benefit from "see the whole space"); code stage gets a tighter cut
+    # of validated patterns only (no net-harmful bullets, fewer entries,
+    # smaller char budget). Mirrors OpenCoder's two-stage SFT — broad
+    # first, narrow second.
+    _PLAN_STAGE_TOP_K_BONUS = 2          # plan retrieves K + bonus bullets
+    _CODE_STAGE_TOP_K = 3                # narrow cut at code time
+    _PLAN_STAGE_CHAR_BUDGET = 4500       # ~1100 tokens, broad context
+    _CODE_STAGE_CHAR_BUDGET = 2400       # ~600 tokens, tight context
+
+    @staticmethod
+    def _playbook_suppressed_bullet_ids(
+        *,
+        goal: str = "",
+        active_skeleton: str | None,
+        code: str,
+    ) -> set[str]:
+        """Drop cross-modality navigation bullets that misfire on the active scaffold."""
+        from modality import detect_fps_navigation_modality
+
+        mod = detect_fps_navigation_modality(
+            goal=goal,
+            code=code or "",
+            active_skeleton=active_skeleton,
+        )
+        suppressed: set[str] = set()
+        if mod == "wireframe":
+            suppressed.update({
+                "fps-camera-and-movement-vectors",
+                "fps-minimap-radar-yaw-arrow",
+            })
+        elif mod == "threejs":
+            suppressed.update({
+                "wireframe-fps-movement-vectors",
+                "wireframe-minimap-radar-yaw-arrow",
+            })
+        elif mod == "mode7":
+            suppressed.update({
+                "fps-camera-and-movement-vectors",
+                "wireframe-fps-movement-vectors",
+                "fps-minimap-radar-yaw-arrow",
+                "wireframe-minimap-radar-yaw-arrow",
+            })
+        return suppressed
+
+    # Failing model probe name -> playbook ids to pin on fix turns (run_vlm10).
+    _REPORT_PROBE_PLAYBOOK_PINS: dict[str, list[str]] = {
+        "camera_moves": ["parallax-coordinate-camera", "beat-em-up-scroll-spawn"],
+    }
+
+    def _playbook_ensure_ids_for_report(self, report: dict) -> list[str]:
+        """Pin playbook bullets for harness blockers and visual-playtest refs."""
+        out: list[str] = []
+
+        def _add(*ids: str) -> None:
+            for bid in ids:
+                s = str(bid).strip()
+                if s and s not in out:
+                    out.append(s)
+
+        failing = {
+            str(p.get("name") or "")
+            for p in (report.get("probes") or [])
+            if not p.get("ok")
+        }
+
+        # Harness-warning pins (run_vlm10: undrawn / control-freeze / frozen canvas).
+        soft = [str(w) for w in (report.get("soft_warnings") or [])]
+        warns = [str(w) for w in (report.get("warnings") or [])]
+        all_w = soft + warns
+        if any("ASSETS_LOADED_BUT_UNDRAWN" in w for w in all_w):
+            _add(
+                "draw-generated-sprites-not-boxes",
+                "animation-frames-consistent-character",
+                "sprite-gen-wait-for-load",
+            )
+        if any("HOTSPOT_ALIGNMENT_MISS" in w for w in soft):
+            _add("pointclick-hotspot-from-source-art")
+        cnr = report.get("control_not_recovered")
+        if cnr or any("CONTROL-NOT-RECOVERED" in w for w in soft):
+            _add("stun-timer-before-early-return")
+        if report.get("frozen_canvas") or any("FROZEN-CANVAS" in w for w in soft):
+            _add("raf-must-start", "ambient-idle-pixel-delta", "frame-trycatch")
+
+        for probe_name, bids in self._REPORT_PROBE_PLAYBOOK_PINS.items():
+            if probe_name in failing:
+                _add(*bids)
+
+        # Visual-playtest auto-probe recipe refs (mechanism-general).
+        if failing and any(n.startswith("auto_") for n in failing):
+            recipe_id = getattr(self, "_active_visual_playtest_recipe_id", None)
+            if recipe_id:
+                try:
+                    for item in self._memory.load_visual_playtests():
+                        if item.id != recipe_id:
+                            continue
+                        refs = (
+                            (getattr(item, "recipe", None) or {}).get("playbook_refs")
+                            or {}
+                        )
+                        if isinstance(refs, dict):
+                            for val in refs.values():
+                                _add(*(val or []))
+                        break
+                except Exception:
+                    pass
+
+        return out
+
+    def _retrieve_playbook_block(
+        self,
+        goal: str,
+        *,
+        code: str = "",
+        stage: str = "code",
+        ensure_ids: list[str] | None = None,
+    ) -> str:
+        """Get top-K bullets and render them as a `<playbook>` block.
+
+        `stage` selects OpenCoder-style two-stage retrieval:
+          - "plan" (Stage-1, broad): top_k+bonus bullets, all positive
+            relevance hits including net-harmful (exposure to history),
+            larger char budget.
+          - "code" (Stage-2, narrow, default): top-3 only, drops bullets
+            with score ≤ -2 (validated-only patterns), smaller budget.
+
+        After retrieval, `render_playbook_block` runs shingle dedup
+        (OpenCoder #5) and budget capping (OpenCoder #2) before emitting
+        the prompt block.
+
+        Empty string when nothing matches OR when the active prompt module
+        has set PLAYBOOK_DISABLED = True (gives a v0-prompt the option to
+        opt out wholesale). Logs retrieved bullet IDs + stage to the trace
+        for postmortem inspection of which bullets fired.
+        """
+        if self._playbook_top_k <= 0:
+            return ""
+        if getattr(self._p, "PLAYBOOK_DISABLED", False):
+            return ""
+        try:
+            # Fix B feedback — resolve early so code-stage k can widen when
+            # user feedback is present (small models otherwise surface k=1
+            # only and miss scope/navigation bullets at rank #2).
+            recent_feedback = (
+                getattr(self, "_last_drained_feedback", None)
+                or getattr(self, "_pending_feedback", None)
+                or []
+            )
+            if not recent_feedback:
+                cont = getattr(self, "_continuation_feedback", None) or ""
+                if cont:
+                    recent_feedback = [cont]
+            feedback_text = " ".join(str(f) for f in recent_feedback[-2:])
+            if stage == "plan":
+                k = self._playbook_top_k + self._PLAN_STAGE_TOP_K_BONUS
+                if self._model_class in ("mid", "small"):
+                    k = 2
+                budget = self._PLAN_STAGE_CHAR_BUDGET
+                if self._model_class in ("mid", "small"):
+                    budget = self._CODE_STAGE_CHAR_BUDGET
+                render_mode = "hybrid"
+                full_top_n_val = 1 if self._model_class in ("mid", "small") else 3
+            else:
+                k = min(self._playbook_top_k, self._CODE_STAGE_TOP_K)
+                if self._model_class in ("mid", "small"):
+                    k = 2 if feedback_text else 1
+                budget = self._CODE_STAGE_CHAR_BUDGET
+                render_mode = "full"
+                full_top_n_val = 3
+            mod_toks: list[str] = []
+            try:
+                from memory import (
+                    _detect_board_intent, _detect_dom_intent, _detect_3d_intent,
+                )
+                mod_toks = (
+                    _detect_3d_intent(goal)
+                    + _detect_board_intent(goal)
+                    + _detect_dom_intent(goal)
+                )
+            except Exception:
+                mod_toks = []
+            if feedback_text and self._model_class in ("mid", "small"):
+                feedback_weighted = " ".join([feedback_text] * 3)
+            else:
+                feedback_weighted = feedback_text
+            query = goal if not feedback_text else f"{goal} {feedback_weighted}"
+            hits = self._playbook.retrieve(
+                query, code=code, k=k, stage=stage,
+                modality_tokens=mod_toks,
+            )
+            suppressed = self._playbook_suppressed_bullet_ids(
+                goal=goal,
+                active_skeleton=getattr(self, "_active_skeleton", None),
+                code=code or getattr(self, "_current_file", "") or "",
+            )
+            if suppressed and hits:
+                hits = [h for h in hits if h.bullet.id not in suppressed]
+            # Cross-modality suppression can drop the only k=1 hit (small
+            # models) — widen retrieval and take the next in-modality bullets.
+            if suppressed and not hits:
+                wide_k = max(k * 6, 8)
+                hits = self._playbook.retrieve(
+                    query, code=code, k=wide_k, stage=stage,
+                    modality_tokens=mod_toks,
+                )
+                hits = [h for h in hits if h.bullet.id not in suppressed][:k]
+            if ensure_ids:
+                by_id = {h.bullet.id: h for h in hits}
+                pinned: list[BulletHit] = []
+                for bid in ensure_ids:
+                    if bid in by_id:
+                        pinned.append(by_id.pop(bid))
+                    else:
+                        b = lookup_bullet(self._playbook, bid)
+                        if b is not None:
+                            pinned.append(BulletHit(b, 1.0))
+                if pinned:
+                    rest = [h for h in hits if h.bullet.id in by_id]
+                    hits = pinned + rest
+                    hits = hits[: max(k, len(pinned))]
+            if hits:
+                ids = [h.bullet.id for h in hits]
+                self._active_bullet_ids = list(ids)
+            else:
+                # No hits this turn — clear the active set so a LATER fix
+                # turn that injects nothing cannot penalize an EARLIER
+                # plan-stage batch (stale-attribution bug, trace
+                # 20260613_213711: the QTE bullets were retrieved only at
+                # plan stage but kept getting harmful++ on fix turns that
+                # injected no playbook at all).
+                self._active_bullet_ids = []
+            block = render_playbook_block(
+                hits, char_budget=budget, mode=render_mode, full_top_n=full_top_n_val,
+            )
+            if hits:
+                self._trace({
+                    "kind": "playbook_retrieved",
+                    "stage": stage,
+                    "ids": [h.bullet.id for h in hits],
+                    "scores": [round(h.score, 4) for h in hits],
+                    "sources": [h.bullet.source for h in hits],
+                    "selected_chars": sum(len(h.bullet.content or "") for h in hits),
+                    "rendered_chars": len(block or ""),
+                    "feedback_in_query": bool(feedback_text),
+                    "char_budget": budget,
+                    "render_mode": render_mode,
+                })
+            # Injection observability: distinguishes "retrieved but rendered
+            # empty" from "actually placed in the prompt". In the 2026-05-29
+            # fighting trace it was impossible to tell whether the animation
+            # bullets ever reached the model — this makes it one grep.
+            self._trace({
+                "kind": "playbook_injected",
+                "stage": stage,
+                "ids": [h.bullet.id for h in hits] if hits else [],
+                "chars": len(block or ""),
+                "rendered": bool(block),
+            })
+            return block
+        except Exception:
+            return ""
 
     # Combined char ceiling for the three first-build memory blocks in lean
     # mode. opening-book outline (~1.7K) + components (~2.2K) fit; the
@@ -151,12 +421,28 @@ class MemoryRetrievalMixin:
             hits.extend(_row("asset_audit", h) for h in asset_audits)
             hits.extend(_row("animation_audit", h) for h in animation_audits)
             if hits:
+                # Runtime callers need the full recipe dictionaries for browser
+                # playtests. Persist only this reconstructible attribution copy.
+                trace_hits = [
+                    {key: value for key, value in hit.items() if key != "recipe"}
+                    for hit in hits
+                ]
                 self._trace({
                     "kind": "opening_book_retrieved",
                     "stage": stage,
-                    "hits": hits,
+                    "hits": trace_hits,
                     "modality_tokens": mod_toks,
                     "outline_fallback": outline_fallback,
+                    "selected_chars": sum(
+                        len(json.dumps(
+                            hit.get("recipe") or {},
+                            ensure_ascii=False,
+                            default=str,
+                            separators=(",", ":"),
+                        ))
+                        for hit in hits
+                    ),
+                    "rendered_chars": len(block or ""),
                 })
             return block, hits
         except Exception as e:
@@ -287,7 +573,19 @@ class MemoryRetrievalMixin:
                     "stage": stage,
                     "ids": [h.item.id for h in hits],
                     "scores": [round(h.score, 4) for h in hits],
+                    "tiers": [h.item.source_tier for h in hits],
+                    "selected_chars": sum(
+                        len(h.item.content or "")
+                        + len(json.dumps(
+                            h.item.recipe or {},
+                            ensure_ascii=False,
+                            default=str,
+                            separators=(",", ":"),
+                        ))
+                        for h in hits
+                    ),
                     "chars": len(block or ""),
+                    "rendered_chars": len(block or ""),
                     "rendered": bool(block),
                 })
             return block or ""

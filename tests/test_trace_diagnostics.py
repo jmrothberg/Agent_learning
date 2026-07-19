@@ -16,6 +16,7 @@ Pure-function / no model / no browser.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import sys
@@ -24,7 +25,8 @@ from unittest.mock import MagicMock
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from agent import GameAgent, render_run_summary  # noqa: E402
+from agent import AgentEvent, GameAgent, render_run_summary  # noqa: E402
+from backend import StreamResult  # noqa: E402
 
 
 def _agent(tmp_path: Path) -> GameAgent:
@@ -81,6 +83,128 @@ def test_diagnostic_events_still_persisted(tmp_path):
     for k in ("slow_prefill", "patch_outcome", "feedback_router_decision",
               "coaching_suppressed_clean_pass", "no_usable_code"):
         assert k in kinds
+
+
+def test_oversized_noncanonical_trace_is_at_most_2kb(tmp_path):
+    a = _agent(tmp_path)
+    a._trace({
+        "kind": "arbitrary_diagnostic",
+        "iteration": 7,
+        "failure_class": "harness_bug",
+        "err": "identity-error",
+        "huge": "界🙂\n" * 5000,
+        "nested": [{"report": "R" * 5000} for _ in range(50)],
+    })
+    raw = a.trace_path.read_bytes().splitlines()[-1]
+    row = json.loads(raw)
+    assert len(raw) <= 2048
+    assert row["kind"] == "arbitrary_diagnostic"
+    assert row["iteration"] == 7
+    assert row["failure_class"] == "harness_bug"
+    assert row["err"] == "identity-error"
+    assert row["_trace_compacted"] is True
+    assert row["_trace_original_bytes"] > len(raw)
+
+
+def test_canonical_turn_and_reply_preserve_exact_unicode_multiline(tmp_path):
+    a = _agent(tmp_path)
+    turn = {"role": "user", "content": "第一行🙂\nsecond line\r\n\t끝"}
+    reply = "答え🙂\n```js\nconst café = '☕';\n```\r\n"
+    a._trace({"kind": "stream_start", "turn_input": turn})
+    a._trace({"kind": "assistant_reply", "iteration": 1, "reply": reply})
+    rows = [
+        json.loads(line)
+        for line in a.trace_path.read_text(encoding="utf-8").splitlines()
+        if json.loads(line).get("kind") in {"stream_start", "assistant_reply"}
+    ]
+    assert rows[0]["turn_input"] == turn
+    assert rows[1]["reply"] == reply
+    assert "_trace_compacted" not in rows[0]
+    assert "_trace_compacted" not in rows[1]
+
+
+def test_generic_event_has_bounded_preview_and_no_full_canonical_copy(tmp_path):
+    a = _agent(tmp_path)
+    full = "PLAN🙂\n" * 1000
+    a._record(AgentEvent("plan", full, {
+        "plan": full,
+        "reply": full,
+        "compact_flag": True,
+    }))
+    row = json.loads(a.trace_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert row["kind"] == "event"
+    assert row["text_len"] == len(full)
+    assert len(row["text_preview"]) <= 320
+    assert "plan" not in row["data"] and "reply" not in row["data"]
+    assert row["data"]["plan_len"] == len(full)
+    assert len(row["data"]["plan_preview"]) <= 160
+    assert len(a.trace_path.read_bytes().splitlines()[-1]) <= 2048
+
+
+def test_trace_slimming_reduces_representative_serialized_bytes(tmp_path):
+    full_recipe = {
+        "state": ["player", "waves", "towers"],
+        "probes": ["window.__gameState exists"] * 80,
+        "steps": "render and verify\n" * 300,
+    }
+    before_payload = {
+        "ts": "2026-07-19T00:00:00Z",
+        "kind": "opening_book_retrieved",
+        "stage": "plan",
+        "hits": [{
+            "kind": "outline", "id": "outline-tower-defense",
+            "tier": "root", "score": 0.91, "recipe": full_recipe,
+        }],
+    }
+    before = len(json.dumps(
+        before_payload, ensure_ascii=False, separators=(",", ":"),
+    ).encode("utf-8"))
+    a = _agent(tmp_path)
+    a._trace(before_payload)
+    raw = a.trace_path.read_bytes().splitlines()[-1]
+    after = len(raw)
+    row = json.loads(raw)
+    assert after < before
+    assert after <= 2048
+    assert row["hits"][0]["id"] == "outline-tower-defense"
+    assert "recipe" not in row["hits"][0]
+
+
+def test_system_prompt_trace_is_manifest_under_1kb(tmp_path):
+    a = _agent(tmp_path)
+    prompt = "SYSTEM🙂\n" * 5000
+    a._trace({
+        "kind": "system_prompt_built",
+        "model_class": "small",
+        "chars": len(prompt),
+        "system_prompt": prompt,
+    })
+    raw = a.trace_path.read_bytes().splitlines()[-1]
+    row = json.loads(raw)
+    assert len(raw) <= 1024
+    assert "system_prompt" not in row
+    assert row["system_prompt_chars"] == len(prompt)
+    assert len(row["system_prompt_sha256"]) == 64
+
+
+def test_media_generation_trace_keeps_outcomes_not_prompt_prose(tmp_path):
+    a = _agent(tmp_path)
+    a._trace({
+        "kind": "assets_generated",
+        "requested": 2,
+        "produced": 1,
+        "names": ["hero"],
+        "paths": {"hero": "/tmp/hero.png"},
+        "failures": {"enemy": "generator unavailable"},
+        "per_asset": [
+            {"name": "hero", "prompt": "long repeated art prose", "cache_hit": True},
+        ],
+    })
+    row = json.loads(a.trace_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert row["paths"] == {"hero": "/tmp/hero.png"}
+    assert row["failures"] == {"enemy": "generator unavailable"}
+    assert row["per_asset"] == [{"name": "hero", "cache_hit": True}]
+    assert "long repeated art prose" not in json.dumps(row, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------
@@ -408,3 +532,138 @@ def test_render_digest_surfaces_agent_crash():
     assert "NameError" in text
     assert "Path" in text
     assert "agent_crash" in text
+
+
+def test_one_screen_diagnostics_keep_core_trace_signals():
+    et = _load_enrich_trace()
+    records = [
+        {"kind": "session_start", "goal": "tower defense", "model_name": "stub"},
+        {"kind": "playbook_retrieved", "ids": ["tower-loop", "range-ring"]},
+        {"kind": "iter_summary", "iteration": 1, "ok": False,
+         "probes_passed": 4, "probes_total": 6, "patch_applied": "2/3",
+         "failure_class": "memory_gap", "soft_warnings": ["collision blocker"],
+         "retrieved_ids": ["tower-loop", "range-ring"]},
+        {"kind": "agent_crash", "source": "run", "exc_type": "RuntimeError",
+         "err": "edit crashed", "iteration": 2},
+    ]
+    digest = render_run_summary(records, artifact_id="td__run_x")
+    assert "memory_gap" in digest
+    assert "collision blocker" in digest
+    assert "4/6" in digest
+    assert "2/3" in digest
+    assert "RuntimeError" in digest and "edit crashed" in digest
+    first_clean, retrieved = et._retrieval_first_clean(records)
+    assert first_clean is None
+    assert retrieved == ["tower-loop", "range-ring"]
+    assert "memory_gap ->" in et._format_edit_first(records)
+
+
+def test_failing_iteration_trace_stage_contract(tmp_path):
+    """A failed production loop iteration records stages in causal order."""
+    class FakeBrowser:
+        async def load_and_test(self, path, **kwargs):
+            return {
+                "ok": False,
+                "page_errors": ["scripted browser failure"],
+                "console_errors": [],
+                "errors": [],
+                "soft_warnings": [],
+                "warnings": [],
+                "title": "scripted failure",
+                "canvas": None,
+                "input_listeners": {"keydown": 1},
+                "input_test": None,
+                "frozen_canvas": None,
+                "body_chars": 1,
+                "body_sample": "",
+                "logs": [],
+                "probes": [],
+                "screenshot": None,
+                "screenshot_before": None,
+                "screenshot_action": None,
+            }
+
+    agent = GameAgent(
+        model="stub:1b",
+        out_path=tmp_path / "game.html",
+        browser=FakeBrowser(),
+        max_iters=2,
+        memory_root=str(tmp_path / "memory"),
+        playbook_writeback=False,  # Production-loop test must never credit tracked memory.
+    )
+    agent._goal = "scripted trace-stage contract"
+    agent._criteria = ""
+    agent._probes = []
+    agent._messages = [{"role": "user", "content": "Build the scripted game."}]
+    agent._use_autonomous_feedback = False
+    agent._use_vlm_critique = False
+    agent.set_auto_step_on_failure(False)  # Keep this unattended regression non-blocking.
+
+    first_reply = """<html_file>
+<!DOCTYPE html><html><body><canvas id="game" width="320" height="200"></canvas>
+<script>
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+let x = 10;
+addEventListener("keydown", e => { if (e.key === "ArrowRight") x += 2; });
+function loop() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillRect(x, 20, 20, 20);
+  requestAnimationFrame(loop);
+}
+loop();
+</script></body></html>
+</html_file>"""
+    second_reply = "\n".join([
+        "<patch>",
+        "<" * 7 + " SEARCH",
+        "let x = 10;",
+        "=" * 7,
+        "let x = 12;",
+        ">" * 7 + " REPLACE",
+        "</patch>",
+    ])
+    replies = iter((first_reply, second_reply))
+
+    async def scripted_stream_chat(*args, **kwargs):
+        text = next(replies)
+        return StreamResult(
+            text=text, tokens=1, duration_s=0.01, stalled=False,
+        )
+
+    # Script below production _stream so stream_start remains production-wired.
+    agent._backend.stream_chat = scripted_stream_chat
+
+    async def drive_loop():
+        async for _ in agent._run_build_iterate_loop(continuation=False):
+            pass
+
+    asyncio.run(drive_loop())
+    records = [
+        json.loads(line)
+        for line in agent.trace_path.read_text().splitlines()
+        if line.strip()
+    ]
+
+    # Normalize only contract stages: a traced AgentEvent("test") is persisted
+    # as kind=event/event=test, and the next prompt is embedded in stream_start.
+    normalized = []
+    for record in records:
+        kind = record.get("kind")
+        if kind in {"stream_start", "assistant_reply", "code_snapshot", "iter_summary"}:
+            normalized.append(kind)
+        elif kind == "event" and record.get("event") == "test":
+            normalized.append("test")
+
+    expected = [
+        "stream_start",
+        "assistant_reply",
+        "code_snapshot",
+        "test",
+        "iter_summary",
+        "stream_start",
+    ]
+    assert normalized[:len(expected)] == expected
+    second_stream = [r for r in records if r.get("kind") == "stream_start"][1]
+    assert second_stream["turn_input"]["role"] == "user"
+    assert "scripted browser failure" in second_stream["turn_input"]["content"]

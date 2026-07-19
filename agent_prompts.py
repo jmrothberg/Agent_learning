@@ -8,6 +8,7 @@ focused slices, and report formatting. Moved VERBATIM from
 from __future__ import annotations
 
 
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,133 @@ from tools import format_report_for_model
 class PromptBuildingMixin:
 
     """Prompt building for GameAgent (see module docstring)."""
+
+    # Observation-only boundaries for prompt provenance. These do not
+    # participate in prompt assembly; unmatched bytes are kept as `other`.
+    _PROMPT_SECTION_BOUNDARIES: tuple[tuple[str, str, str], ...] = (
+        ("user_answer", "user", "================ USER ANSWER (HIGHEST PRIORITY)"),
+        ("user_feedback", "user", "================ USER FEEDBACK (HIGHEST PRIORITY)"),
+        ("scope_arbitration", "harness", "================ FEEDBACK SCOPE ARBITRATION"),
+        ("media_directive", "harness", "================ MEDIA-CHANGE DIRECTIVE"),
+        ("scoped_change", "harness", "================ SCOPED-CHANGE DIRECTIVE"),
+        ("agent_coaching", "harness", "================ AGENT COACHING"),
+        ("generated_assets", "generated_media", "================ GENERATED ASSETS"),
+        ("generated_sounds", "generated_media", "================ GENERATED SOUNDS"),
+        ("state_anchor", "history_summary", "# Session state anchor"),
+        ("opening_book", "memory", "<opening_book>"),
+        ("components", "memory", "<components>"),
+        ("playbook", "memory", "<playbook>"),
+        ("outline_traps", "memory", "OUTLINE TRAPS (match your failure — do not add scope):"),
+        ("test_report", "harness_report", _REPORT_BLOCK_BEGIN),
+        ("current_file", "working_file", "CURRENT FILE ON DISK"),
+        ("seed_file", "seed_file", "EXISTING FILE:"),
+    )
+
+    @classmethod
+    def _collect_prompt_sections(cls, prompt_text: str) -> list[dict[str, str]]:
+        """Partition a prompt exactly at stable, observation-only boundaries."""
+        if not prompt_text:
+            return []
+        hits: list[tuple[int, str, str]] = []
+        for section_id, source, marker in cls._PROMPT_SECTION_BOUNDARIES:
+            for match in re.finditer(
+                rf"(?m)^{re.escape(marker)}",
+                prompt_text,
+            ):
+                hits.append((match.start(), section_id, source))
+        hits.sort(key=lambda item: item[0])
+        # File blocks consume the remainder of the prompt. Never inspect
+        # their payload for marker-shaped user HTML or JavaScript text.
+        terminal_starts = [
+            start for start, section_id, _source in hits
+            if section_id in {"current_file", "seed_file"}
+        ]
+        if terminal_starts:
+            terminal_start = min(terminal_starts)
+            hits = [
+                hit for hit in hits
+                if hit[0] <= terminal_start
+            ]
+
+        sections: list[dict[str, str]] = []
+        if not hits:
+            return [{"id": "core", "source": "other", "text": prompt_text}]
+        if hits[0][0] > 0:
+            sections.append({
+                "id": "core",
+                "source": "other",
+                "text": prompt_text[:hits[0][0]],
+            })
+
+        seen: dict[str, int] = {}
+        for i, (start, section_id, source) in enumerate(hits):
+            end = hits[i + 1][0] if i + 1 < len(hits) else len(prompt_text)
+            seen[section_id] = seen.get(section_id, 0) + 1
+            occurrence = seen[section_id]
+            unique_id = section_id if occurrence == 1 else f"{section_id}_{occurrence}"
+            sections.append({
+                "id": unique_id,
+                "source": source,
+                "text": prompt_text[start:end],
+            })
+        return sections
+
+    @staticmethod
+    def _bounded_prompt_section_manifest(
+        sections: list[dict[str, str]],
+        *,
+        max_entries: int = 12,
+        max_serialized_bytes: int = 1024,
+    ) -> tuple[list[dict[str, int | str]], int]:
+        """Strip text and bound the trace manifest; return folded char count."""
+        manifest: list[dict[str, int | str]] = []
+        other_chars = 0
+        folded = False
+        for section in sections:
+            entry: dict[str, int | str] = {
+                "id": section["id"],
+                "source": section["source"],
+                "chars": len(section["text"]),
+            }
+            candidate = manifest + [entry]
+            candidate_bytes = len(json.dumps(
+                candidate, ensure_ascii=False, separators=(",", ":"),
+            ).encode("utf-8"))
+            if (
+                folded
+                or len(candidate) > max_entries
+                or candidate_bytes > max_serialized_bytes
+            ):
+                folded = True
+                other_chars += int(entry["chars"])
+                continue
+            manifest.append(entry)
+        return manifest, other_chars
+
+    def _prompt_provenance_fields(self) -> dict[str, Any]:
+        """Return compact totals and an exact last-user section manifest."""
+        system_chars = 0
+        if self._messages and self._messages[0].get("role") == "system":
+            system_content = self._messages[0].get("content")
+            if isinstance(system_content, str):
+                system_chars = len(system_content)
+
+        last_user = ""
+        for message in reversed(self._messages):
+            if message.get("role") == "user":
+                content = message.get("content")
+                if isinstance(content, str):
+                    last_user = content
+                break
+        sections = self._collect_prompt_sections(last_user)
+        manifest, other_chars = self._bounded_prompt_section_manifest(sections)
+        return {
+            "prompt_system_chars": system_chars,
+            "prompt_history_chars": self._estimate_ctx_fill(),
+            "prompt_last_user_chars": len(last_user),
+            "prompt_sections": manifest,
+            "prompt_other_chars": other_chars,
+        }
 
 
     @staticmethod

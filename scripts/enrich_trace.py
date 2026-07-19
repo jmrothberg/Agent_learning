@@ -45,6 +45,43 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
+def _load_failure_class_routes() -> dict[str, list[str]]:
+    """Load the canonical failure-class → edit-target routing bank."""
+    path = REPO_ROOT / "eval" / "failure_class_routing.jsonl"
+    routes: dict[str, list[str]] = {}
+    try:
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            if not raw.strip():
+                continue
+            row = json.loads(raw)
+            failure_class = str(row.get("failure_class") or "").strip()
+            if failure_class:
+                routes[failure_class] = [
+                    str(p) for p in (row.get("edit_first") or []) if p
+                ]
+    except Exception:
+        return {}
+    return routes
+
+
+def _format_edit_first(records: list[dict]) -> str:
+    """One compact owner-routing line for classes present in a trace."""
+    routes = _load_failure_class_routes()
+    seen: set[str] = set()
+    parts: list[str] = []
+    for row in records:
+        if row.get("kind") not in {"iter_summary", "no_usable_code"}:
+            continue
+        failure_class = str(row.get("failure_class") or "").strip()
+        if not failure_class or failure_class == "none" or failure_class in seen:
+            continue
+        seen.add(failure_class)
+        targets = routes.get(failure_class) or []
+        if targets:
+            parts.append(f"{failure_class} -> {', '.join(targets)}")
+    return "edit_first: " + "; ".join(parts) if parts else ""
+
+
 def _png_dims(path: Path) -> tuple[int, int] | None:
     try:
         with path.open("rb") as fh:
@@ -393,6 +430,9 @@ def _print_timeline(trace: Path) -> None:
         return
     records = _load_events(trace)
     print(render_run_summary(records, artifact_id=trace.stem))
+    edit_first = _format_edit_first(records)
+    if edit_first:
+        print(edit_first)
     # T-4: harness-friction scalar (ok=False iters identical to shipped build).
     n_wasted, wasted_iters = _compute_wasted_iters(records)
     detail = f" (iters {wasted_iters})" if wasted_iters else ""

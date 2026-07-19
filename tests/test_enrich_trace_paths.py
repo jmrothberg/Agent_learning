@@ -60,3 +60,29 @@ def test_resolve_full_path_relative_to_repo(tmp_path: Path, monkeypatch) -> None
     got_trace, snap = et._resolve_paths("games/traces/x.jsonl")
     assert got_trace.resolve() == trace.resolve()
     assert snap.name == "x"
+
+
+def test_failure_class_routes_load_canonical_bank() -> None:
+    et = _load_enrich_trace()
+    routes = et._load_failure_class_routes()
+    assert routes["harness_bug"]
+    assert routes["memory_gap"]
+    assert routes["local_llm_limit"]
+    assert routes["none"] == []
+
+
+def test_format_edit_first_is_compact_and_ignores_unknown() -> None:
+    et = _load_enrich_trace()
+    records = [
+        {"kind": "iter_summary", "failure_class": "memory_gap"},
+        {"kind": "iter_summary", "failure_class": "memory_gap"},
+        {"kind": "no_usable_code", "failure_class": "harness_bug"},
+        {"kind": "iter_summary", "failure_class": "future_unknown_class"},
+        {"kind": "iter_summary", "failure_class": "none"},
+    ]
+    line = et._format_edit_first(records)
+    assert line.startswith("edit_first: ")
+    assert line.count("memory_gap ->") == 1
+    assert line.count("harness_bug ->") == 1
+    assert "future_unknown_class" not in line
+    assert "none ->" not in line

@@ -124,6 +124,21 @@ def test_agent_retrieves_opening_book_block(tmp_path: Path) -> None:
     assert "<opening_book>" in block
     assert hits
     assert len([h for h in hits if h["kind"] == "playtest"]) <= 3
+    # Browser/runtime callers still need executable recipes, but the trace only
+    # stores reconstructible retrieval attribution.
+    assert any(h.get("recipe") for h in hits)
+    rows = [
+        json.loads(line)
+        for line in agent.trace_path.read_text(encoding="utf-8").splitlines()
+    ]
+    retrieved = next(
+        row for row in rows if row.get("kind") == "opening_book_retrieved"
+    )
+    assert retrieved["hits"]
+    assert all("recipe" not in h for h in retrieved["hits"])
+    assert all({"id", "tier", "score"} <= set(h) for h in retrieved["hits"])
+    assert retrieved["selected_chars"] > 0
+    assert retrieved["rendered_chars"] == len(block)
 
 
 def test_plan_turn_injects_opening_book_before_plan_contract() -> None:
