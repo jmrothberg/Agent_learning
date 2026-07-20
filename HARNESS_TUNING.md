@@ -74,14 +74,14 @@ changes (see `tests/test_fix_round.py` source-grep guards, `tests/test_assets.py
 
 **Two processes. Cursor agent starts both. Never ask the human to paste. User must see the watcher in Cursor.**
 
-Canonical recipe + “only change the games” checklist: **`eval/OPERATIONS.md` § HARD RULES**.
+Canonical recipe: **`eval/overnight.sh`** + **`eval/OPERATIONS.md` § HARD RULES**.
 
 | | Batch | Watcher |
 |---|--------|---------|
 | Where visible | **macOS Terminal.app** | **Cursor IDE terminals panel** (`monitor:` lines) |
-| How you start it | `bash eval/launch_overnight_batch.sh eval/tune_runXX.sh` (`all` OS perms) | Cursor Shell, **`block_until_ms=0`** |
+| How you start it | `bash eval/overnight.sh --prompts N,N,… --model <MLX> --vlm yes\|no` (`all` OS perms; script opens Terminal) | Cursor Shell, **`block_until_ms=0`**, command printed by `overnight.sh` |
 | Halting | **Never** (`--wait-for-monitor 0`) | Patch while games continue |
-| Forbidden | Batch in Cursor integrated terminal; asking human to paste | `nohup` / `disown` / invisible background watcher |
+| Forbidden | Batch in Cursor; asking human to paste; new `tune_runXX.sh` for a normal night | `nohup` / `disown` / invisible watcher |
 
 **When a game finishes (or `agent_monitor.json` moves):**
 
@@ -103,7 +103,8 @@ Canonical recipe + “only change the games” checklist: **`eval/OPERATIONS.md`
 - Weaken fuzzy **`sprite()`** matching for one game without a general tie-break / test (`tests/test_assets.py`).
 - Gate **`ok=False`** on cosmetic sprite warnings (dead-frame pose delta, etc.).
 - Create new top-level markdown files — extend **`HARNESS_TUNING.md`**, **`HARNESS_DEBUG.md`**, **`TEST.md`**, **`DEV.md`**, **`README.md`**.
-- **Start overnight `tune_run*.sh` inside Cursor’s integrated terminal** — use `eval/launch_overnight_batch.sh` → Terminal.app.
+- **Start overnight batch inside Cursor’s integrated terminal** — use `eval/overnight.sh` (opens Terminal.app).
+- **Invent a new `tune_runXX.sh` / goals file** for a normal night — use `overnight.sh --prompts … --model … --vlm …`.
 - **Ask the human to paste** the overnight batch command — you launch Terminal yourself.
 - **Hide the watcher** with `nohup`/`disown` — it must appear in the Cursor terminals panel.
 - **Halt the overnight batch** between games to land a harness fix unless the user explicitly requested `TUNE_WAIT_FOR_MONITOR`.

@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# LEGACY helper for old eval/tune_runXX.sh scripts.
+# Preferred overnight entry: bash eval/overnight.sh --prompts N,N --model NAME --vlm yes|no
+#
 # Open overnight batch in REAL Terminal.app (never Cursor's integrated terminal).
 #
 # Usage (Cursor agent runs this — NEVER ask the human to paste):
