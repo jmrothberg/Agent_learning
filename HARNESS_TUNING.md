@@ -36,6 +36,16 @@ matching `.html` and play it — **do not trust TEST OK alone**.
 | **Genre / game-type** convention (versus fighters, TD waves, chess CPU)? | **`memory/playbook.jsonl`** or `visual_playtests.jsonl` — retrieval-gated, not `if "mortal" in goal` |
 | Model keeps **mis-wiring one game** but harness is correct? | Playbook + optional user feedback; **not** a one-game hardcode in harness |
 
+#### Standing rule — game titles vs game *classes* (do not violate)
+
+| Layer | What belongs there |
+|-------|--------------------|
+| **Saved test prompts only** — `memory/prompt_library.jsonl`, `eval/*_goals.txt` | **Game-specific** wording is allowed and expected (e.g. Centipede head/body/tail, named controls, one title’s quirks). |
+| **Memory / retrieval / pins** — `playbook.jsonl`, outlines, nudges, skeletons, `visual_playtests`, `ensure_ids` / first-build pins | Teach **classes of games** (fixed-shooter, pinball, segmented-follower, versus). Pin by recipe id or class phrases (`fixed shooter`, `body segments`, `flipper`) — **never** by a single title (`if "centipede" in goal`, `ensure_ids` for `"galaga"` only). |
+| **Harness Python** — `tools.py`, `agent_*.py`, `assets.py` | Mechanism / structural only — **no** game-title branches. |
+
+**Mistake to never repeat:** stuffing Centipede/Galaga/… title logic into memory pins or harness “to fix one HTML smell.” Put the named-game sentence in the **library/eval prompt**; put the reusable mechanism in a **class** playbook/outline/skeleton bullet that any matching goal retrieves.
+
 **Prompt / memory style (local LLMs):** library goals and playbook bullets must state **one** best
 practice, not a menu (`raycaster or three.js` → prefer three.js). Prefer extending an existing
 bullet over adding a new ID. Keep bullets short (~250–500 chars); put mechanics in playbook /
@@ -64,6 +74,7 @@ changes (see `tests/test_fix_round.py` source-grep guards, `tests/test_assets.py
 
 - Patch **`games/*.html`** as source (artifacts only).
 - Add **game-title or genre `if` branches** in Python (`tools.py`, `agent.py`).
+- Pin playbook / `ensure_ids` / skeletons by a **single game title** — use **classes** (see §2 standing rule). Game-specific lines go only in `prompt_library` / eval goals.
 - Weaken fuzzy **`sprite()`** matching for one game without a general tie-break / test (`tests/test_assets.py`).
 - Gate **`ok=False`** on cosmetic sprite warnings (dead-frame pose delta, etc.).
 - Create new top-level markdown files — extend **`HARNESS_TUNING.md`**, **`HARNESS_DEBUG.md`**, **`TEST.md`**, **`DEV.md`**, **`README.md`**.

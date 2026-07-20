@@ -2546,6 +2546,7 @@ def render_asset_paths_block(
         "",
         "  // 1. Build an asset-loader (do this ONCE at startup):",
         "  const ASSETS = {};",
+        # COMMENT: harness polls window._assetsReady (run_17 roguelike set local-only).
         "  let _assetsReady = false;",
         "  const PATHS = {",
     ]
@@ -2566,6 +2567,7 @@ def render_asset_paths_block(
         "    }",
         "    for (const k in _spriteCache) delete _spriteCache[k];",
         "    _assetsReady = true;",
+        "    window._assetsReady = true;",
         "  }",
         "  // COPY the exact PATHS keys above — do NOT invent alternate key names.",
         "  // 2. Start RAF IMMEDIATELY; load assets in the background:",

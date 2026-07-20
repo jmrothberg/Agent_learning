@@ -50,6 +50,8 @@ Trace → fix loop: **§4** below. Batch commands: **`eval/OPERATIONS.md`**.
 | Tests / scripts | `tests/`, `scripts/`, `system_tests.py` |
 | Curated samples | `goodgame/` (promoted via TUI `/goodgame`) |
 
+**Memory vs test prompts (always):** see **[`HARNESS_TUNING.md`](HARNESS_TUNING.md) §2 “Standing rule — game titles vs game classes”** (canonical). Short form: game-specific wording only in `prompt_library` / eval goals; memory pins and harness teach **classes** (fixed-shooter, pinball, …), never a single title.
+
 Do **not** patch random `games/*.html` to fix the agent — change harness/memory and re-run.
 
 ---

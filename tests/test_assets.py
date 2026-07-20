@@ -848,3 +848,5 @@ def test_render_block_flushes_cache_on_assets_ready(tmp_path: Path):
     flush_idx = block.index("for (const k in _spriteCache) delete _spriteCache[k];")
     ready_idx = block.index("_assetsReady = true;")
     assert flush_idx < ready_idx
+    # run_17: harness polls window._assetsReady — contract must set it.
+    assert "window._assetsReady = true;" in block

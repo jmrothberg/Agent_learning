@@ -362,6 +362,29 @@ def test_diag_match_tokens_sample_present() -> None:
     assert len(diag["match_tokens_sample"]) > 0
 
 
+def test_sprite_scale_appendix_does_not_strong_hook_fixed_shooter() -> None:
+    """run_17: SPRITE SCALE text said 'invaders' and strong-hooked
+    canvas-fixed-shooter onto Roguelike/Pinball. Appendix must be stripped."""
+    from pathlib import Path
+    from memory import GameMemory, find_best_visual_playtest
+
+    root = Path(__file__).resolve().parents[1] / "memory"
+    mem = GameMemory(root=str(root))
+    recipes = mem.load_visual_playtests()
+    scale = (
+        " SPRITE SCALE (required): Main enemies, invaders, gems, blocks, "
+        "and props must be clearly visible."
+    )
+    rogue = (
+        "Build a Roguelike Dungeon game. Procedurally generate rooms "
+        "connected by corridors; fog-of-war reveals tiles near the player."
+    )
+    winner, diag = find_best_visual_playtest(recipes, goal=rogue + scale)
+    assert winner is not None
+    assert winner.id != "canvas-fixed-shooter", diag.get("top_candidates")
+    assert winner.id in ("canvas-roguelike", "canvas-grid-navigation")
+
+
 # ----------------------------------------------------------------------
 # Module wiring: the constants + class exist and are loadable.
 # ----------------------------------------------------------------------

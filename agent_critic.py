@@ -512,6 +512,18 @@ class CriticMixin:
 
         )
 
+        # COMMENT: if a later inject rematches a different recipe, drop the
+        # previous recipe's auto_probes so wrong-genre probes do not accumulate.
+        prev_auto = list(getattr(self, "_active_visual_playtest_auto_probes", []) or [])
+        prev_recipe = getattr(self, "_prev_visual_playtest_recipe_id_for_probes", None)
+        if prev_recipe and prev_recipe != recipe.id and prev_auto and self._probes:
+            drop = set(prev_auto)
+            self._probes = [
+                p for p in self._probes if (p.get("name") or "") not in drop
+            ]
+            self._active_visual_playtest_auto_probes = []
+        self._prev_visual_playtest_recipe_id_for_probes = recipe.id
+
         auto = recipe.recipe.get("auto_probes") or []
 
         if not auto:

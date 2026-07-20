@@ -13,8 +13,11 @@
   const cvs = document.getElementById("c");
   const ctx = cvs.getContext("2d");
   const W = 800, H = 600;
+  // COMMENT: run_17 — launch lane + keep inLane until above SEP_TOP so the
+  // ball enters the table (vx/vy alone failed when inLane cleared too early).
+  const LANE_L = 720, LANE_W = 60, SEP_TOP = 90, SEP_BOT = 560;
   const state = {
-    ball: { x: 720, y: 520, vx: 0, vy: 0, r: 10, active: false },
+    ball: { x: LANE_L + LANE_W / 2, y: SEP_BOT - 14, vx: 0, vy: 0, r: 10, active: false, inLane: true },
     flippers: [
       { x: 280, y: 540, angle: 0.4, active: false },
       { x: 520, y: 540, angle: -0.4, active: false },
@@ -57,10 +60,12 @@
       state.plunger.power = Math.min(1, state.plunger.power + dt * 1.2);
     } else if (state.plunger.charging) {
       const p = state.plunger.power;
+      // REQUIRED launch impulse (table is LEFT of the lane).
       state.ball.vy = -(600 + p * 300);
       state.ball.vx = -180 - p * 70;
       state.ball.active = true;
       state.launched = true;
+      // Keep inLane until above SEP_TOP — do NOT clear here.
       state.plunger.charging = false;
       state.plunger.power = 0;
     }
@@ -72,11 +77,18 @@
         b.vy += gravity * sdt;
         b.x += b.vx * sdt;
         b.y += b.vy * sdt;
-        if (b.x < b.r) { b.x = b.r; b.vx = Math.abs(b.vx) * 0.9; }
-        if (b.x > W - b.r) { b.x = W - b.r; b.vx = -Math.abs(b.vx) * 0.9; }
-        if (b.y < b.r) { b.y = b.r; b.vy = Math.abs(b.vy) * 0.9; }
-        for (const bm of state.bumpers) {
-          if (resolveCircle(b, bm)) state.score += 100;
+        if (b.inLane) {
+          // Constrain x only — never Math.abs(vx) on the playfield-side wall.
+          if (b.x < LANE_L + b.r) b.x = LANE_L + b.r;
+          if (b.x > LANE_L + LANE_W - b.r) b.x = LANE_L + LANE_W - b.r;
+          if (b.y < SEP_TOP - 10 && b.vy < 0) b.inLane = false;
+        } else {
+          if (b.x < b.r) { b.x = b.r; b.vx = Math.abs(b.vx) * 0.9; }
+          if (b.x > W - b.r) { b.x = W - b.r; b.vx = -Math.abs(b.vx) * 0.9; }
+          if (b.y < b.r) { b.y = b.r; b.vy = Math.abs(b.vy) * 0.9; }
+          for (const bm of state.bumpers) {
+            if (resolveCircle(b, bm)) state.score += 100;
+          }
         }
       }
       const sp = Math.hypot(b.vx, b.vy);
@@ -91,6 +103,9 @@
     ctx.clearRect(0, 0, W, H);
     ctx.fillStyle = "#16213e";
     ctx.fillRect(0, 0, W, H);
+    // Launch lane (separator stops at SEP_TOP — gap above).
+    ctx.fillStyle = "#0a0a14";
+    ctx.fillRect(LANE_L, SEP_TOP, LANE_W, SEP_BOT - SEP_TOP);
     ctx.fillStyle = "#e94560";
     for (const bm of state.bumpers) {
       ctx.beginPath();

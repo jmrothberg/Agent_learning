@@ -646,6 +646,12 @@ class GateProcessingMixin:
 
         still_frame = bool(getattr(self, "_active_visual_playtest_still_frame", False))
 
+        # COMMENT: run_17 pinball — arrows change flipper angle, not player x/y;
+        # PLAYER-STUCK burned iters while launch geometry was the real bug.
+        pinball_recipe = (
+            getattr(self, "_active_visual_playtest_recipe_id", None) == "canvas-pinball"
+        )
+
         dynamic_probe_passed = any(
 
             bool(p.get("ok")) and type(self)._is_dynamic_probe(str(p.get("expr") or ""))
@@ -654,7 +660,7 @@ class GateProcessingMixin:
 
         )
 
-        if not (still_frame or dynamic_probe_passed):
+        if not (still_frame or dynamic_probe_passed or pinball_recipe):
 
             return
 

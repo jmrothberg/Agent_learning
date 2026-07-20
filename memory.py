@@ -2623,6 +2623,27 @@ _VISUAL_MATCH_STOPWORDS: frozenset[str] = frozenset({
 })
 
 
+# Eval goal appendices that must NOT feed visual-recipe strong_hooks
+# (run_17: "SPRITE SCALE … invaders …" mis-routed Roguelike/Pinball →
+# canvas-fixed-shooter). Matching markers is case-insensitive.
+_GOAL_APPENDIX_MARKERS = (
+    "SPRITE SCALE (required):",
+    "SPRITE SCALE:",
+)
+
+
+def _strip_goal_appendices_for_match(text: str) -> str:
+    """Drop shared goal appendices before visual-playtest matching."""
+    out = text or ""
+    upper = out.upper()
+    cut = len(out)
+    for marker in _GOAL_APPENDIX_MARKERS:
+        idx = upper.find(marker.upper())
+        if 0 <= idx < cut:
+            cut = idx
+    return out[:cut].rstrip()
+
+
 def _visual_match_tokens(text: str) -> set[str]:
     """Tokenize matching context into a keyword set for visual-playtest
     recipe retrieval.
@@ -2889,8 +2910,12 @@ def find_best_visual_playtest(
         context for postmortem analysis.
     """
     asset_names = asset_names or []
+    # COMMENT: run_17 — shared goal appendices (SPRITE SCALE) contained
+    # the token "invaders", which strong-hook-bypassed canvas-fixed-shooter
+    # for Roguelike/Pinball and injected wrong auto_probes. Strip known
+    # eval appendices before matching so only the real goal/plan decide.
     context = " ".join([
-        goal or "",
+        _strip_goal_appendices_for_match(goal or ""),
         plan_text or "",
         " ".join(asset_names),
     ])

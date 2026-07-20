@@ -56,13 +56,15 @@ echo "out_dir=$OUT_DIR goals=$GOALS model=$MLX_MODEL jobs=$JOBS_TOTAL" | tee -a 
 
 _run_once() {
   WAIT="${TUNE_WAIT_FOR_MONITOR:-0}"
-  LOOP_ARGS=(
+    LOOP_ARGS=(
     --goals-file "$GOALS"
     --out-dir "$OUT_DIR"
     --model "$MLX_MODEL"
     --no-vlm-critique
     --resume
-    --retries 2
+    # Match run_15/16 throughput (run_17 regression: default max-iters=6 + retries=2).
+    --max-iters "${TUNE_MAX_ITERS:-3}"
+    --retries "${TUNE_RETRIES:-0}"
     --retry-delay 30
   )
   if [[ "$WAIT" != "0" && "$WAIT" != "0.0" ]]; then

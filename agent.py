@@ -5185,10 +5185,7 @@ class GameAgent(
                 # the implementation shape, broad context helps.
                 pb_block = self._retrieve_playbook_block(
                     goal, code=seed_html, stage="plan",
-                    ensure_ids=(
-                        ["draw-generated-sprites-not-boxes"]
-                        if self._session_assets else None
-                    ),
+                    ensure_ids=self._first_build_playbook_ensure_ids(goal),
                 )
                 # Seed retrieval: bias the outline match with structural
                 # tokens from the working file so a terse goal ("add a
@@ -5358,10 +5355,7 @@ class GameAgent(
                 # include code.
                 pb_block = self._retrieve_playbook_block(
                     goal, stage="plan",
-                    ensure_ids=(
-                        ["draw-generated-sprites-not-boxes"]
-                        if self._session_assets else None
-                    ),
+                    ensure_ids=self._first_build_playbook_ensure_ids(goal),
                 )
                 opening_block, opening_hits = self._retrieve_opening_book_block(
                     goal, stage="plan",

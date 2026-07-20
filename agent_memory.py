@@ -90,7 +90,57 @@ class MemoryRetrievalMixin:
     # Failing model probe name -> playbook ids to pin on fix turns (run_vlm10).
     _REPORT_PROBE_PLAYBOOK_PINS: dict[str, list[str]] = {
         "camera_moves": ["parallax-coordinate-camera", "beat-em-up-scroll-spawn"],
+        # run_17: playfield / assetsReady probes need sticky bullets on fix turns
+        "auto_body_enters_playfield": ["launch-into-playfield"],
+        "player_sprite_visible_at_startup": ["image-load-race", "draw-generated-sprites-not-boxes"],
     }
+
+    def _first_build_playbook_ensure_ids(self, goal: str) -> list[str] | None:
+        """Pin class-level playbook bullets on first-build (not game titles).
+
+        Policy: game-specific wording belongs in saved test prompts
+        (`prompt_library` / eval goals). Memory pins use mechanism
+        *classes* (visual recipe id + class phrases), never titles like
+        Centipede/Galaga.
+        """
+        out: list[str] = []
+
+        def _add(*ids: str) -> None:
+            for bid in ids:
+                s = str(bid).strip()
+                if s and s not in out:
+                    out.append(s)
+
+        if getattr(self, "_session_assets", None):
+            _add("draw-generated-sprites-not-boxes", "image-load-race")
+
+        recipe = getattr(self, "_active_visual_playtest_recipe_id", None) or ""
+        g = (goal or "").lower()
+
+        # Fixed-shooter / top-down shooter *class* (not named games).
+        fixed_shooter_class = (
+            recipe in ("canvas-fixed-shooter", "canvas-top-down-action")
+            or "fixed shooter" in g
+            or "formation shooter" in g
+            or "vertical-shooter" in g
+            or "vertical shooter" in g
+        )
+        if fixed_shooter_class:
+            _add("top-down-sprite-draw-orientation", "draw-fighters-large")
+
+        # Segmented-follower *class* (history trail) — class words only.
+        if any(k in g for k in ("segmented", "segments", "segment chain", "body segments")):
+            _add("segmented-entity-follow")
+
+        # Pinball / charged-launch *class*.
+        pinball_class = (
+            recipe == "canvas-pinball"
+            or any(k in g for k in ("pinball", "flipper", "plunger", "launch lane"))
+        )
+        if pinball_class:
+            _add("launch-into-playfield")
+
+        return out or None
 
     def _playbook_ensure_ids_for_report(self, report: dict) -> list[str]:
         """Pin playbook bullets for harness blockers and visual-playtest refs."""
@@ -117,6 +167,7 @@ class MemoryRetrievalMixin:
                 "draw-generated-sprites-not-boxes",
                 "animation-frames-consistent-character",
                 "sprite-gen-wait-for-load",
+                "image-load-race",
             )
         if any("HOTSPOT_ALIGNMENT_MISS" in w for w in soft):
             _add("pointclick-hotspot-from-source-art")
