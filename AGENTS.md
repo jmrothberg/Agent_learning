@@ -29,6 +29,8 @@ Improve the **verification loop and agent**, not generated `games/*.html`. Start
 3. **[`TEST.md`](TEST.md)** — pytest map; extend existing test file for your failure class
 4. Run **`.venv/bin/python -m pytest tests/ -q`** after every change (must stay green)
 
+**Overnight batches (mandatory shape):** (1) `bash eval/launch_overnight_batch.sh eval/tune_runXX.sh` → **Terminal.app**; (2) watcher via Cursor Shell with **`block_until_ms=0`** so `monitor:` is visible in the IDE panel; (3) patch harness/memory from traces while games continue. **Never** batch-in-Cursor, **never** ask the human to paste, **never** `nohup` the watcher, **never** halt the batch. User only changing games → edit goals + `tune_runXX.sh` + OPERATIONS row, then that launch checklist. Full rules: **`eval/OPERATIONS.md` § HARD RULES** · **`HARNESS_TUNING.md` §3b**.
+
 | Layer | Edit when… |
 |-------|------------|
 | **Harness** | Injected loader (`assets.py`), browser gates (`tools.py`), loop mixins (`agent_*.py`) |

@@ -5,16 +5,64 @@ Human onboarding → `README.md`. Commands/env → `DEV.md`. Harness traps → `
 
 ---
 
+## HARD RULES — overnight batch (never violate)
+
+**Same shape every night.** The Cursor agent does **all** launch work. The human only picks games / knobs.
+
+| Role | Where it must appear | How the agent starts it | Forbidden |
+|------|----------------------|-------------------------|-----------|
+| **Batch** | **macOS Terminal.app** window (visible Chromium) | `bash eval/launch_overnight_batch.sh eval/tune_runXX.sh` with **full OS permissions** (`all`) | Cursor integrated terminal · asking human to paste · `nohup` of the batch |
+| **Watcher** | **Cursor IDE terminals panel** (user must see `monitor:` lines) | Cursor **Shell** tool, `block_until_ms=0`, foreground command = monitor | `nohup` · `disown` · redirect-only background · skipping the watcher |
+
+### When the user only changes which games to run
+
+Do **only** this, then launch (do not invent extra process shapes):
+
+1. Copy prior `eval/tune_runNN.sh` → `eval/tune_runXX.sh`; set `OUT=…/run_XX`, goals file, `jobs=N`, model/VLM/iters as asked.
+2. Write `eval/tune_runXX_goals.txt` (prompt_library ids / goals).
+3. Add one row under **If the user says…** + a short `## run_XX` section (commands table).
+4. Launch with the recipe below. Patch harness from traces while it runs. **Never halt.**
+
+### Launch recipe (agent checklist — every overnight)
+
+```text
+[ ] 1. Batch — Terminal.app ONLY (full OS perms):
+        bash eval/launch_overnight_batch.sh eval/tune_runXX.sh
+      Confirm overnight.log shows planning/coding, NOT chrome-mac-x64 / Playwright missing.
+[ ] 2. Watcher — Cursor Shell ONLY (block_until_ms=0 so it shows in the IDE panel):
+        .venv/bin/python eval/tune_overnight_monitor.py \
+          --out-dir games/tune_serial10/run_XX \
+          --jobs-total N --interval 30 --sync-loop
+      Confirm the Cursor terminal prints `monitor: 0/N …` within ~30s.
+[ ] 3. Tell the user both are up (Terminal batch + Cursor watcher). Do not ask them to paste anything.
+[ ] 4. Improve while it runs (enrich_trace → failure_class → surgical fix → pytest). Never pause the batch.
+```
+
+Equivalent direct Terminal open (if you cannot use the helper):
+
+```bash
+osascript -e 'tell application "Terminal" to activate' \
+  -e 'tell application "Terminal" to do script "cd /Users/jonathanrothberg/Agent_learning && bash eval/tune_runXX.sh"'
+```
+
+**Burned on run_18 (do not repeat):**
+- Batch inside Cursor → wrong Playwright arch (`chrome-mac-x64`) → instant `fresh_fail` ×11.
+- Asking the human to paste when `osascript` failed once → wrong; retry with `all` perms / `launch_overnight_batch.sh`.
+- Watcher via `nohup` → user cannot see it in Cursor; always use Cursor Shell `block_until_ms=0`.
+
+---
+
 ## If the user says… → run this
 
 | User intent | Command | Notes |
 |-------------|---------|-------|
+| **Run Mr. Do! + 10 graphics/3D overnight (run_18)** | `bash eval/launch_overnight_batch.sh eval/tune_run18.sh` · Cursor Shell watcher | **GLM-5.2-MLX-4bit**, **`--no-vlm-critique`**, `--max-iters 3`. None from run_16/17. |
 | **Run 20 GRAPHICS-BEST games overnight (run_15 — tonight)** | Terminal: `bash eval/tune_run15.sh` · Cursor: watcher below | **GLM-5.2-MLX-4bit**, **`--no-vlm-critique`**, flat-out. High-confidence watcher fixes only. |
 | **Run 10 NEW games overnight (run_14)** | Terminal: `bash eval/tune_run14.sh` · Cursor: watcher below | Qwen3.6-27B-mxfp8, VLM critique ON (completed). |
 | **Run 10 NEW games overnight (run_13)** | Terminal: `bash eval/tune_run13.sh` · Cursor: watcher below | GLM-5.2-MLX-4bit, **`--no-vlm-critique`**, flat-out. Watcher fixes in parallel. |
 | **Run 10 games overnight (run_08)** | Terminal: `bash eval/tune_run08.sh` · Cursor: watcher below | Batch runs **flat-out** (no pause). Watcher fixes in parallel. |
 | **Run 10 games validation (run_10 — run_09 fix retest)** | Terminal: `bash eval/tune_run09.sh` · Cursor: watcher below | `--max-iters 4`, fresh `run_10/` dir. See § run_10. |
-| **Run all 11 games overnight (both batches, auto-chained)** | `bash eval/tune_run07_chain.sh` in Terminal + monitor below in Cursor | **One paste** — Batch B starts automatically when A finishes. No wake-up. |
+| **Run all 11 games overnight (both batches, auto-chained)** | Agent `osascript`s `eval/tune_run07_chain.sh` in Terminal + monitor in Cursor | Batch B starts automatically when A finishes. No wake-up. |
 | **Run 11 games to improve the agent (run_07)** | Same as chain row above | A=GLM no VLM (6) → B=Qwen VLM on (5), watcher handoff between games. |
 | **Run unit tests** / **pytest** / **after a code change** | `.venv/bin/python -m pytest tests/ -q` | ~2330 tests, no GPU. Full map: `TEST.md`. |
 | **Run one test file** | `.venv/bin/python -m pytest tests/test_patches.py -v` | Swap path. |
@@ -38,7 +86,7 @@ Human onboarding → `README.md`. Commands/env → `DEV.md`. Harness traps → `
 
 ## run_07 — both batches, one night (A → B auto-chained)
 
-**One Terminal paste runs all 11 games back-to-back.** Batch B starts automatically when A finishes. **No pause between games** (`--wait-for-monitor 0` default). Cursor watcher runs in parallel and patches harness/memory while games continue — fixes apply to the next game(s).
+**One Terminal.app launch runs all 11 games back-to-back** (`osascript` → `tune_run07_chain.sh`). Batch B starts automatically when A finishes. **No pause between games** (`--wait-for-monitor 0` default). Cursor watcher runs in parallel and patches harness/memory while games continue — fixes apply to the next game(s).
 
 | | Terminal.app (once) | Cursor watcher (once) |
 |---|---------------------|------------------------|
@@ -76,6 +124,43 @@ Use `--out-dir` from `active_out_dir` in `agent_monitor.json` (`run_07_big` duri
 | Games | 6 | 5 |
 
 **Success criteria:** `fresh_pass` with `iter_summaries > 0` per game — not checkpoint-only complete.
+
+---
+
+## run_18 — (Mr. Do! + 10 graphics/3D, GLM-5.2, max-iters 3)
+
+Goals never used in run_16 or run_17: new Mr. Do!, never-run vector 3D (Battlezone, Star Wars), voxel/FPS 3D, particles, and high-sprite arcade last seen in run_14/15. Goals: `eval/tune_run18_goals.txt`.
+**Model:** `~/MLX_Models/GLM-5.2-MLX-4bit`. **`--no-vlm-critique`**. **`--max-iters 3 --retries 0`**.
+
+| # | Library | Why |
+|---|---------|-----|
+| 1 | mr-do | new digger arcade (sprites) |
+| 2 | battlezone | 3D vector tank (never overnight) |
+| 3 | star-wars | 3D vector trench (never overnight) |
+| 4 | minecraft | voxel 3D (last run_14) |
+| 5 | doom | three.js FPS (last run_15, not 16/17) |
+| 6 | asteroids | vector ship/rocks (last run_11) |
+| 7 | missile-command | particle explosions (last run_11) |
+| 8 | particle-fireworks | particle FX showcase (last run_14) |
+| 9 | metal-slug | run-gun sprites (last run_15, not 16/17) |
+| 10 | dig-dug | digger sibling to Mr. Do! (last run_15) |
+| 11 | rampage | climb-smash sprites (last run_15, not 16/17) |
+
+| | Terminal.app (once) | Cursor watcher (once) |
+|---|---------------------|------------------------|
+| Command | `bash eval/launch_overnight_batch.sh eval/tune_run18.sh` | Cursor Shell `block_until_ms=0`: `.venv/bin/python eval/tune_overnight_monitor.py --out-dir games/tune_serial10/run_18 --jobs-total 11 --interval 30 --sync-loop` |
+| Log / status | `games/tune_serial10/run_18/overnight.log` | `games/tune_serial10/run_18/agent_monitor.json` |
+
+```bash
+bash eval/launch_overnight_batch.sh eval/tune_run18.sh
+```
+
+```bash
+# Cursor Shell — must be visible in IDE terminals panel (NOT nohup)
+.venv/bin/python eval/tune_overnight_monitor.py \
+  --out-dir games/tune_serial10/run_18 \
+  --jobs-total 11 --interval 30 --sync-loop
+```
 
 ---
 
@@ -318,7 +403,7 @@ Fresh library goals not in run_07, plus **Doom slot 1** to validate the 3D FPS n
 | Command | `bash eval/tune_run08.sh` | `.venv/bin/python eval/tune_overnight_monitor.py --out-dir games/tune_serial10/run_08 --jobs-total 10 --interval 30 --sync-loop` |
 | Log / status | `games/tune_serial10/run_08/overnight.log` | `games/tune_serial10/run_08/agent_monitor.json` |
 
-**Open batch in Terminal.app from Cursor** (if you didn’t paste there yourself):
+**Open batch in Terminal.app from Cursor** (agent always does this — never ask the human):
 
 ```bash
 osascript -e 'tell application "Terminal" to do script "cd /Users/jonathanrothberg/Agent_learning && bash eval/tune_run08.sh"'

@@ -70,6 +70,31 @@ trace or failing pytest
 **Suite must stay green.** Failing tests are regressions — update tests when behavior intentionally
 changes (see `tests/test_fix_round.py` source-grep guards, `tests/test_assets.py` sprite resolver mirror).
 
+### 3b. Overnight parallel improvement (same every night)
+
+**Two processes. Cursor agent starts both. Never ask the human to paste. User must see the watcher in Cursor.**
+
+Canonical recipe + “only change the games” checklist: **`eval/OPERATIONS.md` § HARD RULES**.
+
+| | Batch | Watcher |
+|---|--------|---------|
+| Where visible | **macOS Terminal.app** | **Cursor IDE terminals panel** (`monitor:` lines) |
+| How you start it | `bash eval/launch_overnight_batch.sh eval/tune_runXX.sh` (`all` OS perms) | Cursor Shell, **`block_until_ms=0`** |
+| Halting | **Never** (`--wait-for-monitor 0`) | Patch while games continue |
+| Forbidden | Batch in Cursor integrated terminal; asking human to paste | `nohup` / `disown` / invisible background watcher |
+
+**When a game finishes (or `agent_monitor.json` moves):**
+
+1. Timeline: `.venv/bin/python scripts/enrich_trace.py games/tune_serial10/run_XX/traces/<label>__run_*.jsonl --timeline`
+2. Optionally open the matching snapshot / shipped HTML under that run dir — **read-only evidence**
+3. Classify `failure_class` on failed `iter_summary` (`HARNESS_DEBUG.md`)
+4. Edit the **right layer** (§2 table) — surgical; no title hardcodes; no `games/*.html` as source
+5. `.venv/bin/python -m pytest tests/ -q` (or targeted file first) — must stay green
+6. Record durable trap in this file’s table; class craft → `memory/playbook.jsonl` / outline / skeleton
+7. **Do not** pause the batch, ask the user to restart, or wait until morning to start fixing
+
+**Burned on run_18:** (1) batch in Cursor → `chrome-mac-x64` Playwright fail ×11; (2) asked human to paste; (3) watcher via `nohup` so Cursor showed nothing. Fix = Terminal launcher + visible Cursor Shell watcher.
+
 ### 4. Do not
 
 - Patch **`games/*.html`** as source (artifacts only).
@@ -78,6 +103,10 @@ changes (see `tests/test_fix_round.py` source-grep guards, `tests/test_assets.py
 - Weaken fuzzy **`sprite()`** matching for one game without a general tie-break / test (`tests/test_assets.py`).
 - Gate **`ok=False`** on cosmetic sprite warnings (dead-frame pose delta, etc.).
 - Create new top-level markdown files — extend **`HARNESS_TUNING.md`**, **`HARNESS_DEBUG.md`**, **`TEST.md`**, **`DEV.md`**, **`README.md`**.
+- **Start overnight `tune_run*.sh` inside Cursor’s integrated terminal** — use `eval/launch_overnight_batch.sh` → Terminal.app.
+- **Ask the human to paste** the overnight batch command — you launch Terminal yourself.
+- **Hide the watcher** with `nohup`/`disown` — it must appear in the Cursor terminals panel.
+- **Halt the overnight batch** between games to land a harness fix unless the user explicitly requested `TUNE_WAIT_FOR_MONITOR`.
 
 ### 5. High-leverage files (symptom → first open)
 
