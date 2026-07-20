@@ -1754,7 +1754,10 @@ def generate_assets(
         t0 = time.time()
         name = _safe_filename(spec["name"])
         prompt = spec["prompt"]
-        size = spec["size"]
+        # Defensive: harness-built specs (seed declared-roster coerce) may
+        # omit size; parse_assets_block always injects it. Never KeyError a
+        # whole batch (trace 20260720_135103: 0/15 sprites, sounds OK).
+        size = spec.get("size") or _parse_size(_default_size_for_prompt(prompt))
         from_image = spec.get("from_image")
         strength = spec.get("strength")
         # Append background suffix for sprite assets (not full-bleed backgrounds).
@@ -2101,6 +2104,26 @@ def generate_assets(
     except Exception:
         pass
     return out
+
+
+def diffuser_display_label(generator: Any | None = None) -> str:
+    """UI/status label for the active sprite generator (instance or env).
+
+    Must match `per_asset.diffuser` / `gpu_status.diffuser_kind` when a
+    generator is loaded; otherwise mirrors DIFFUSER_TXT2IMG_BACKBONE so
+    status text does not hardcode Z-Image while FLUX2 is selected.
+    """
+    if generator is not None:
+        try:
+            import gpu_status as _gs
+            return _gs.diffuser_kind(generator)
+        except Exception:
+            pass
+    import os as _os
+    backbone = (_os.environ.get("DIFFUSER_TXT2IMG_BACKBONE") or "").strip().lower()
+    if backbone in ("flux2", "flux"):
+        return "FLUX2-klein (mflux)"
+    return "Z-Image-Turbo"
 
 
 def _attach_diffuser_stat(stat: dict[str, Any], gen: Any | None) -> None:

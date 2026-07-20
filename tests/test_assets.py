@@ -341,6 +341,19 @@ def test_generate_writes_pngs(tmp_path: Path):
     assert len(gen.calls) == 2
 
 
+def test_generate_sizeless_spec_does_not_crash(tmp_path: Path):
+    """Harness-filled seed-roster specs may omit size — must not KeyError.
+
+    Regression for trace 20260720_135103 (0/15 sprites, sounds OK).
+    """
+    specs = [{"name": "hero_idle_down", "prompt": "game sprite for hero idle down"}]
+    gen = StubGenerator()
+    out = generate_assets(specs, tmp_path / "session", image_generator=gen)
+    assert "hero_idle_down" in out
+    assert out["hero_idle_down"].exists()
+    assert len(gen.calls) == 1
+
+
 def test_generate_caches_by_content(tmp_path: Path):
     """Second call for the same (prompt, size) must NOT re-invoke the
     generator — cache hit."""
@@ -850,3 +863,12 @@ def test_render_block_flushes_cache_on_assets_ready(tmp_path: Path):
     assert flush_idx < ready_idx
     # run_17: harness polls window._assetsReady — contract must set it.
     assert "window._assetsReady = true;" in block
+
+
+def test_diffuser_display_label_follows_backbone(monkeypatch) -> None:
+    """Status text must not hard-lock to Z-Image when FLUX2 is selected."""
+    monkeypatch.setenv("DIFFUSER_TXT2IMG_BACKBONE", "flux2")
+    assert "FLUX2" in assets.diffuser_display_label(None)
+    assert "Z-Image" not in assets.diffuser_display_label(None)
+    monkeypatch.setenv("DIFFUSER_TXT2IMG_BACKBONE", "")
+    assert assets.diffuser_display_label(None) == "Z-Image-Turbo"

@@ -201,6 +201,9 @@ from agent_helpers import (
     _baseline_structurally_broken,
     _detect_block_bloat,
     _detect_skeleton_payload,
+    _declared_seed_media_names,
+    _declared_stems_complete,
+    _missing_declared_stems,
     _is_degenerate_baseline,
     _is_placeholder_first_build,
     _looks_like_placeholder_html_payload,
@@ -2835,7 +2838,11 @@ class GameAgent(
             gen = self._asset_generator
             if gen is not None and hasattr(gen, "cleanup"):
                 gen.cleanup()
-                label = "Z-Image-Turbo (session)"
+                try:
+                    import assets as _assets_lbl
+                    label = f"{_assets_lbl.diffuser_display_label(gen)} (session)"
+                except Exception:
+                    label = "txt2img (session)"
                 if label not in freed:
                     freed.append(label)
         except Exception:
@@ -4290,18 +4297,120 @@ class GameAgent(
                 # loop set it after a same-signature attempt), then
                 # fall back to the simplest reference-only call.
                 fmfb = bool(getattr(self, "_force_minimal_first_build", False))
-                # P1: seed continuation — pass discovered names so
-                # plan_instruction can suppress the MUST-emit <assets>
-                # directive and tell the model to reuse existing media.
+                # Seed media policy (wording-agnostic): declared PATHS are
+                # the roster; disk only answers coverage. Folder may be
+                # missing/empty/partial/orphan-polluted.
                 from_seed_kwargs = {}
+                declared_a = list(
+                    getattr(self, "_seed_declared_asset_names", None) or []
+                )
+                declared_s = list(
+                    getattr(self, "_seed_declared_sound_names", None) or []
+                )
+                assets_complete = _declared_stems_complete(
+                    declared_a, self._session_assets,
+                )
+                sounds_complete = _declared_stems_complete(
+                    declared_s, self._session_sounds,
+                )
+                coverage_complete = assets_complete and sounds_complete
+                art_intent = False
+                replace_intent = False
+                behavior_scope = False
+                try:
+                    art_intent = bool(
+                        getattr(self._p, "_detect_art_intent", None)
+                        and self._p._detect_art_intent(goal)
+                    )
+                except Exception:
+                    art_intent = False
+                try:
+                    replace_intent = bool(
+                        getattr(self._p, "_detect_seed_media_replace_intent", None)
+                        and self._p._detect_seed_media_replace_intent(goal)
+                    )
+                except Exception:
+                    replace_intent = False
+                try:
+                    from agent_feedback import (
+                        _feedback_is_behavior_bug,
+                        _feedback_mentions_scoped_behavior_change,
+                    )
+                    behavior_scope = bool(
+                        _feedback_mentions_scoped_behavior_change(goal or "")
+                        or _feedback_is_behavior_bug(goal or "")
+                    )
+                except Exception:
+                    behavior_scope = False
+                incomplete = bool(
+                    (declared_a or declared_s) and not coverage_complete
+                )
+                # Regen when seed has declared names and user wants media
+                # (art/replace intent) while coverage is incomplete OR they
+                # asked to replace/new — not a keep-code phrase list.
+                seed_media_regen = bool(
+                    self.seed_file is not None
+                    and (declared_a or declared_s)
+                    and (art_intent or replace_intent)
+                    and (incomplete or replace_intent)
+                )
+                # Full declared roster when replace/new cues; else missing only.
+                seed_media_regen_all = bool(
+                    seed_media_regen and replace_intent
+                )
+                self._seed_media_regen = seed_media_regen
+                self._seed_media_regen_all = seed_media_regen_all
+                # Back-compat alias used by coerce / skip / tests.
+                self._assets_only_goal = seed_media_regen
                 if self.seed_file is not None and (
-                    early_seed_assets or early_seed_sounds
+                    early_seed_assets
+                    or early_seed_sounds
+                    or declared_a
+                    or declared_s
                 ):
+                    # Prompt name list: declared first (truth); orphans omitted
+                    # from the "existing" contract when regen is active.
+                    if seed_media_regen:
+                        seed_a = sorted(declared_a)
+                        seed_s = sorted(declared_s)
+                    else:
+                        seed_a = sorted(
+                            set(self._session_assets.keys()) | set(declared_a)
+                        )
+                        seed_s = sorted(
+                            set(self._session_sounds.keys()) | set(declared_s)
+                        )
                     from_seed_kwargs = {
                         "from_seed": True,
-                        "seed_asset_names": sorted(self._session_assets.keys()),
-                        "seed_sound_names": sorted(self._session_sounds.keys()),
+                        "seed_asset_names": seed_a,
+                        "seed_sound_names": seed_s,
+                        "seed_regen_assets": seed_media_regen,
                     }
+                    # Seed + media regen + no behavior fix → don't rewrite HTML.
+                    if seed_media_regen and not behavior_scope:
+                        self._scoped_constraints = {
+                            "mode": "media_only",
+                            "max_patch_count": 0,
+                            "allow_multi_patch": False,
+                            "is_seed_edit": True,
+                            "allowed_asset_names": sorted(declared_a),
+                            "allowed_sound_names": sorted(declared_s),
+                            "media_name_lock": True,
+                            "require_scope_probe": False,
+                            "probe_keywords": [],
+                            "preserve_baseline": True,
+                            "feedback_preview": (goal or "")[:220],
+                        }
+                        self._trace({
+                            "kind": "seed_media_regen_scoped",
+                            "regen_all": seed_media_regen_all,
+                            "incomplete": incomplete,
+                            "allowed_assets": sorted(declared_a)[:48],
+                            "allowed_sounds": sorted(declared_s)[:48],
+                            "missing_assets": _missing_declared_stems(
+                                declared_a, self._session_assets,
+                            )[:48],
+                        })
                 try:
                     _plan_nudge_ids: list[str] = []
                     plan_msg = self._p.plan_instruction(

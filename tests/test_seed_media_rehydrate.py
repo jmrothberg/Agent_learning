@@ -26,6 +26,7 @@ from unittest.mock import MagicMock
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from agent import GameAgent, _scan_seed_media  # noqa: E402
+from agent_helpers import _declared_seed_media_names  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +64,27 @@ def test_scan_ignores_missing_files(tmp_path: Path) -> None:
     a, s, adir, sdir = _scan_seed_media(seed.read_text(), seed)
     assert a == {}
     assert adir is None
+
+
+def test_declared_seed_media_names_even_when_files_missing() -> None:
+    html = (
+        "<html><script>"
+        "const PATHS=["
+        "['hero_idle_down','./game_assets/hero_idle_down.png'],"
+        "['bomb','./game_assets/bomb.png'],"
+        "['soft_block','./game_assets/soft_block.png']"
+        "];"
+        "const SFX={boom:'./game_sounds/boom.ogg'};"
+        "</script></html>"
+    )
+    assets, sounds = _declared_seed_media_names(html)
+    assert assets == ["hero_idle_down", "bomb", "soft_block"]
+    assert sounds == ["boom"]
+    # Scanner still returns empty when files are absent.
+    from pathlib import Path as _P
+    a, s, _, _ = _scan_seed_media(html, _P("/tmp/no_such_seed.html"))
+    assert a == {}
+    assert s == {}
 
 
 def test_scan_picks_up_sounds(tmp_path: Path) -> None:

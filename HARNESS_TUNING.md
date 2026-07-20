@@ -238,6 +238,7 @@ Per-run scores live in **`eval/OPERATIONS.md`** (run_06 snapshot). Mid-batch har
 | Sprite opaque when figure touches image edge | Chroma: near-white 5/8 + border-majority fallback | `assets.py`, `tests/test_tier1_2.py` |
 | Pseudo-3D rivals stack / car undrawn | Discrete lanes + z-sort + drawImage (`pseudo3d-curved-road`) | `memory/playbook.jsonl`, racing outline |
 | Maze chase looks frozen | Don’t gate mouth cycle on dir; chasers must move (`maze-chase-sprite-chomp-cycle`) | `memory/playbook.jsonl` |
+| Seed empty `_assets/` + assets-only goal → Asteroids roster into Bomberman PATHS folder | Declared PATHS = roster; skip only when **every** declared stem is on disk; orphans never count; art/replace intent (not keep-code phrases) forces declared regen + media_only | `agent_helpers.py`, `agent_assets.py`, `agent.py`, `prompts_v1.py` |
 
 ### Recurring patterns (watch in new traces)
 
@@ -268,6 +269,8 @@ Per-run scores live in **`eval/OPERATIONS.md`** (run_06 snapshot). Mid-batch har
 - **Safari vs Chromium trap:** sprites visible in Safari but `ASSETS_LOADED_BUT_UNDRAWN` in Playwright often means the harness sampled `__drawImageEvents` before async `loadAssets()` finished (placeholder `fillRect` frames first). Check trace `asset_decode_settle.ready`; re-run `scripts/_smoke_asset_decode_settle.py` before chasing model wiring.
 - User feedback naming sprites **already in `_session_assets`** should get wire/draw coaching, not `ASSET GENERATION REQUIRED`.
 - **Per-entity unique art** ("each tower its own unique head sprite") must stay armed through vague retry nudges — do not fuzzy-match an existing `*_head_*` asset and clear `_unhonored_asset_request`.
+- **Seed empty disk + assets-only** (Bomberman PATHS, zero PNGs, goal “create assets / keep code identical”): do **not** treat as fresh game. Force declared PATHS stems; status label must match active diffuser (`FLUX2` vs Z-Image).
+- **Seed declared PATHS vs disk leftovers:** coverage = every declared stem present; orphan `ship.png` in the folder does not unlock skip or become `allowed_asset_names`. Art/replace intent is wording-agnostic (`assets`/`sprites`/`generate`/`new`), not a keep-code phrase list.
 
 ### run_vlm10 batch (Jul 2026) — durable learnings
 

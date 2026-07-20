@@ -71,6 +71,62 @@ _SOUND_EXTS: frozenset[str] = frozenset(
 )
 
 
+def _declared_seed_media_names(
+    seed_html: str,
+) -> tuple[list[str], list[str]]:
+    """Return asset/sound stems referenced in seed HTML even if files are missing.
+
+    On-disk existence is for rehydrate/reuse; declared PATHS/sound refs are
+    the truth source for assets-only regen when `<basename>_assets/` is empty.
+    Order follows first HTML occurrence; duplicates dropped.
+    """
+    assets: list[str] = []
+    sounds: list[str] = []
+    seen_a: set[str] = set()
+    seen_s: set[str] = set()
+    for m in _SEED_ASSET_RE.finditer(seed_html or ""):
+        stem = Path(m.group(2)).stem
+        if stem and stem not in seen_a:
+            seen_a.add(stem)
+            assets.append(stem)
+    for m in _SEED_SOUND_RE.finditer(seed_html or ""):
+        stem = Path(m.group(2)).stem
+        if stem and stem not in seen_s:
+            seen_s.add(stem)
+            sounds.append(stem)
+    return assets, sounds
+
+
+def _declared_stems_complete(
+    declared: list[str] | None,
+    present: dict | set | frozenset | None,
+) -> bool:
+    """True when every declared stem exists in `present`. Empty declared → True."""
+    if not declared:
+        return True
+    if present is None:
+        return False
+    keys = (
+        present if isinstance(present, (set, frozenset)) else set(present.keys())
+    )
+    return all(name in keys for name in declared)
+
+
+def _missing_declared_stems(
+    declared: list[str] | None,
+    present: dict | set | frozenset | None,
+) -> list[str]:
+    """Declared stems not present on disk/session (order preserved)."""
+    if not declared:
+        return []
+    if present is None:
+        return list(declared)
+    keys = (
+        present if isinstance(present, (set, frozenset)) else set(present.keys())
+    )
+    return [name for name in declared if name not in keys]
+
+
 def _scan_seed_media(
     seed_html: str, seed_path: Path,
 ) -> tuple[

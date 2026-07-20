@@ -1172,8 +1172,21 @@ class FeedbackRoutingMixin:
         # `_configure_scoped_constraints`; a small-scope seed edit qualifies
         # even without explicit code-lock language.
         locks_code = _feedback_locks_code(goal) or small_scope_seed
-        asset_names = list(self._session_assets.keys()) if self._session_assets else []
-        sound_names = list(self._session_sounds.keys()) if self._session_sounds else []
+        declared_a = list(
+            getattr(self, "_seed_declared_asset_names", None) or []
+        )
+        declared_s = list(
+            getattr(self, "_seed_declared_sound_names", None) or []
+        )
+        # session ∪ declared so empty/orphan disk still sees art nouns + PATHS
+        asset_names = sorted(
+            set(self._session_assets.keys() if self._session_assets else ())
+            | set(declared_a)
+        )
+        sound_names = sorted(
+            set(self._session_sounds.keys() if self._session_sounds else ())
+            | set(declared_s)
+        )
         art_change = bool(asset_names) and _feedback_is_art_change(goal, asset_names)
         sound_change = bool(sound_names) and _feedback_is_sound_change(goal, sound_names)
         # Seed multi-part code tweak (2026-06-25 trace 194238_248190): a
@@ -1385,8 +1398,30 @@ class FeedbackRoutingMixin:
             "max_patch_count": max_patch_count,
             "allow_multi_patch": bool(allow_multi_patch),
             "is_seed_edit": bool(is_seed_edit),
-            "allowed_asset_names": sorted(self._session_assets.keys()),
-            "allowed_sound_names": sorted(self._session_sounds.keys()),
+            "allowed_asset_names": (
+                sorted(getattr(self, "_seed_declared_asset_names", None) or [])
+                if (
+                    mode == "media_only"
+                    and (
+                        getattr(self, "_seed_media_regen", False)
+                        or getattr(self, "_assets_only_goal", False)
+                    )
+                    and getattr(self, "_seed_declared_asset_names", None)
+                )
+                else sorted(self._session_assets.keys())
+            ),
+            "allowed_sound_names": (
+                sorted(getattr(self, "_seed_declared_sound_names", None) or [])
+                if (
+                    mode == "media_only"
+                    and (
+                        getattr(self, "_seed_media_regen", False)
+                        or getattr(self, "_assets_only_goal", False)
+                    )
+                    and getattr(self, "_seed_declared_sound_names", None)
+                )
+                else sorted(self._session_sounds.keys())
+            ),
             "media_name_lock": mode == "media_only",
             "require_scope_probe": bool(probe_keywords),
             "probe_keywords": probe_keywords,

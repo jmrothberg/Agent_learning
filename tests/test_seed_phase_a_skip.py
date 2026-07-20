@@ -420,3 +420,248 @@ def test_plan_instruction_non_seed_unchanged() -> None:
     assert "SEED CONTINUATION" not in out
     # Backward-compat: the existing PLAN_INSTRUCTION body is still there.
     assert "PROBES are real code" in out or "<probes>" in out
+
+
+# ---------------------------------------------------------------------------
+# Assets-only seed regen — declared PATHS, no genre invent
+# ---------------------------------------------------------------------------
+
+def test_plan_instruction_seed_regen_requires_declared_roster() -> None:
+    out = plan_instruction(
+        reference_block="",
+        goal="create all new assets, keep code identical",
+        from_seed=True,
+        seed_asset_names=["hero_idle_down", "bomb", "soft_block"],
+        seed_sound_names=[],
+        seed_regen_assets=True,
+    )
+    assert "SEED ASSETS-ONLY REGEN" in out
+    assert "DO NOT emit <assets>" not in out
+    assert "EXACTLY the asset names" in out
+    assert "hero_idle_down" in out
+    assert "bomb" in out
+    assert "soft_block" in out
+
+
+def test_detect_assets_only_intent() -> None:
+    from prompts_v1 import (
+        _detect_art_intent,
+        _detect_assets_only_intent,
+        _detect_seed_media_replace_intent,
+    )
+    assert _detect_assets_only_intent(
+        "creat all new assets, keep code identical, no changes, "
+        "just create the correct assets in the correct folders"
+    )
+    assert _detect_assets_only_intent(
+        "regenerate all sprites, keep code identical"
+    )
+    assert not _detect_assets_only_intent("build a bomberman game")
+    assert not _detect_assets_only_intent("add a jump mechanic")
+    # Frustrating re-run wording — replace intent must fire without keep-code.
+    g = (
+        "Make new assets for bomberman, do NOT change the code, "
+        "just generate the assets"
+    )
+    assert _detect_art_intent(g)
+    assert _detect_seed_media_replace_intent(g)
+    assert _detect_seed_media_replace_intent("sprites please, generate them")
+    assert not _detect_seed_media_replace_intent("fix the jump collision")
+
+
+def test_declared_stems_complete_ignores_orphans() -> None:
+    from agent_helpers import (
+        _declared_stems_complete,
+        _missing_declared_stems,
+    )
+    declared = ["hero_idle_down", "bomb", "soft_block"]
+    orphans = {"ship": Path("/x/ship.png"), "asteroid": Path("/x/a.png")}
+    assert not _declared_stems_complete(declared, orphans)
+    assert _missing_declared_stems(declared, orphans) == declared
+    present = {
+        "hero_idle_down": Path("/x/h.png"),
+        "bomb": Path("/x/b.png"),
+        "soft_block": Path("/x/s.png"),
+        "ship": Path("/x/ship.png"),
+    }
+    assert _declared_stems_complete(declared, present)
+
+
+def test_coerce_specs_to_declared_seed_roster_drops_invented(tmp_path: Path) -> None:
+    seed = tmp_path / "g.html"
+    seed.write_text("<html></html>")
+    a = GameAgent(
+        model="stub",
+        out_path=seed,
+        browser=MagicMock(),
+        max_iters=1,
+        memory_root=str(tmp_path / "memory"),
+        seed_file=seed,
+    )
+    a._seed_media_regen = True
+    a._seed_media_regen_all = True
+    a._assets_only_goal = True
+    a._seed_declared_asset_names = ["hero_idle_down", "bomb"]
+    a._seed_declared_sound_names = []
+    specs, sounds = a._coerce_specs_to_declared_seed_roster(
+        [
+            {"name": "ship", "prompt": "spaceship"},
+            {"name": "asteroid", "prompt": "rock"},
+            {"name": "bomb", "prompt": "round bomb"},
+        ],
+        [],
+    )
+    assert [s["name"] for s in specs] == ["hero_idle_down", "bomb"]
+    assert specs[1]["prompt"] == "round bomb"
+    assert "hero" in specs[0]["prompt"].lower() or "idle" in specs[0]["prompt"].lower()
+    # Trace 20260720_135103: synthesized specs must carry size or
+    # generate_assets KeyError zeros the whole batch.
+    for s in specs:
+        assert s.get("size"), f"missing size on coerced spec {s.get('name')}"
+        assert isinstance(s["size"], tuple) and len(s["size"]) == 2
+    assert sounds == []
+
+
+def test_phase_a_orphans_do_not_skip_when_declared_incomplete(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Leftover ship/asteroid PNGs must not count as declared coverage."""
+    seed_basename = "grid_bomber_orphans"
+    seed = tmp_path / f"{seed_basename}.html"
+    seed.write_text(
+        "<html><body><script>"
+        f"const PATHS=[['hero_idle_down','./{seed_basename}_assets/hero_idle_down.png'],"
+        f"['bomb','./{seed_basename}_assets/bomb.png']];"
+        "</script></body></html>",
+        encoding="utf-8",
+    )
+    adir = tmp_path / f"{seed_basename}_assets"
+    adir.mkdir()
+    (adir / "ship.png").write_bytes(b"\x89PNG fake")
+    (adir / "asteroid.png").write_bytes(b"\x89PNG fake")
+    a = GameAgent(
+        model="stub",
+        out_path=seed,
+        browser=MagicMock(),
+        max_iters=1,
+        memory_root=str(tmp_path / "memory"),
+        seed_file=seed,
+    )
+    a._early_rehydrate_seed_media()
+    assert set(a._session_assets) == {"ship", "asteroid"}
+    assert set(a._seed_declared_asset_names) == {"hero_idle_down", "bomb"}
+    a._seed_media_regen = True
+    a._seed_media_regen_all = True
+    a._assets_only_goal = True
+
+    captured: list[list[str]] = []
+
+    class _StubGen:
+        def generate(self, prompt: str) -> str:
+            return ""
+
+    def _fake_generate(specs, *args, **kwargs):
+        captured.append([str(s.get("name")) for s in specs])
+        out = {}
+        for s in specs:
+            p = adir / f"{s['name']}.png"
+            p.write_bytes(b"\x89PNG fake")
+            out[s["name"]] = p
+        return out
+
+    monkeypatch.setattr(
+        "agent_assets.try_load_image_generator", lambda: _StubGen(),
+    )
+    monkeypatch.setattr("agent_assets.generate_assets", _fake_generate)
+
+    reply = (
+        "<assets>["
+        '{"name":"ship","prompt":"spaceship"},'
+        '{"name":"asteroid","prompt":"rock"}'
+        "]</assets>"
+    )
+
+    async def _drain():
+        async for _ev in a._maybe_generate_assets_and_sounds(
+            reply, trigger="phase_a",
+        ):
+            pass
+
+    asyncio.run(_drain())
+    assert captured, "must generate despite orphan PNGs on disk"
+    assert set(captured[0]) == {"hero_idle_down", "bomb"}
+    assert "ship" not in captured[0]
+
+
+def test_phase_a_generates_declared_names_when_assets_only(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Empty disk + media replace intent: generator gets declared stems."""
+    seed_basename = "grid_bomber_seed"
+    seed = tmp_path / f"{seed_basename}.html"
+    seed.write_text(
+        "<html><body><script>"
+        f"const PATHS=[['hero_idle_down','./{seed_basename}_assets/hero_idle_down.png'],"
+        f"['bomb','./{seed_basename}_assets/bomb.png'],"
+        f"['soft_block','./{seed_basename}_assets/soft_block.png']];"
+        "</script></body></html>",
+        encoding="utf-8",
+    )
+    (tmp_path / f"{seed_basename}_assets").mkdir()
+    a = GameAgent(
+        model="stub",
+        out_path=seed,
+        browser=MagicMock(),
+        max_iters=1,
+        memory_root=str(tmp_path / "memory"),
+        seed_file=seed,
+    )
+    a._early_rehydrate_seed_media()
+    assert a._session_assets == {}
+    assert set(a._seed_declared_asset_names) == {
+        "hero_idle_down", "bomb", "soft_block",
+    }
+    a._seed_media_regen = True
+    a._seed_media_regen_all = True
+    a._assets_only_goal = True
+
+    captured: list[list[str]] = []
+
+    class _StubGen:
+        def generate(self, prompt: str) -> str:
+            return ""
+
+    def _fake_generate(specs, *args, **kwargs):
+        captured.append([str(s.get("name")) for s in specs])
+        out = {}
+        for s in specs:
+            p = tmp_path / f"{seed_basename}_assets" / f"{s['name']}.png"
+            p.write_bytes(b"\x89PNG fake")
+            out[s["name"]] = p
+        return out
+
+    monkeypatch.setattr(
+        "agent_assets.try_load_image_generator", lambda: _StubGen(),
+    )
+    monkeypatch.setattr("agent_assets.generate_assets", _fake_generate)
+
+    reply = (
+        "<assets>["
+        '{"name":"ship","prompt":"spaceship"},'
+        '{"name":"asteroid","prompt":"rock"},'
+        '{"name":"bullet","prompt":"bullet"}'
+        "]</assets>"
+    )
+
+    async def _drain():
+        events = []
+        async for ev in a._maybe_generate_assets_and_sounds(
+            reply, trigger="phase_a",
+        ):
+            events.append(ev)
+        return events
+
+    asyncio.run(_drain())
+    assert captured, "generate_assets should have been called"
+    assert set(captured[0]) == {"hero_idle_down", "bomb", "soft_block"}
+    assert "ship" not in captured[0]

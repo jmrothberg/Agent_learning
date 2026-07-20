@@ -1071,6 +1071,59 @@ def _detect_audio_intent(goal: str) -> list[str]:
     return out
 
 
+def _detect_seed_media_replace_intent(goal: str) -> bool:
+    """True when goal asks to create/replace/regenerate media (any wording).
+
+    Genre-free media nouns + make/new/regen verbs — NOT a keep-code phrase
+    list. Used with seed declared PATHS coverage; folder may be missing.
+    """
+    if not goal:
+        return False
+    gl = goal.lower()
+    has_media = any(
+        t in gl
+        for t in (
+            "asset", "assets", "sprite", "sprites", "png", "graphics",
+            "art", "image", "images",
+        )
+    )
+    # "creat" catches typo "creat all new assets"; "make new" / "generate"
+    wants = any(
+        t in gl
+        for t in (
+            "creat", "regen", "regenerate", "replace", "generate",
+            "redo", "rebuild", "recreate", "fresh",
+            "new asset", "new assets", "new sprite", "new sprites",
+            "all new", "make new", "make assets", "make sprites",
+        )
+    )
+    return bool(has_media and wants)
+
+
+def _detect_assets_only_intent(goal: str) -> bool:
+    """Legacy helper: media request + explicit keep-code phrasing.
+
+    Prefer seed coverage + `_detect_art_intent` /
+    `_detect_seed_media_replace_intent` for gating. Kept as a soft OR.
+    """
+    if not goal:
+        return False
+    if not _detect_seed_media_replace_intent(goal):
+        return False
+    gl = goal.lower()
+    keep_code = any(
+        p in gl
+        for p in (
+            "keep code", "code identical", "identical", "no changes",
+            "no change", "no code", "dont change", "don't change",
+            "do not change", "not change the code",
+            "only assets", "assets only", "just create", "just the assets",
+            "just generate", "correct folders",
+        )
+    )
+    return bool(keep_code)
+
+
 # Modality keywords that signal the goal wants generated VIDEO cutscenes.
 # Genre-free per the project rule — these describe output modality
 # (cutscene, cinematic clip), not subject matter. When any appears in
@@ -1528,6 +1581,7 @@ def plan_instruction(
     from_seed: bool = False,
     seed_asset_names: list[str] | None = None,
     seed_sound_names: list[str] | None = None,
+    seed_regen_assets: bool = False,
     model_class: str = "auto",
     nudge_ids_out: list[str] | None = None,
 ) -> str:
@@ -1553,6 +1607,10 @@ def plan_instruction(
     FORBIDDEN — the model should reuse existing media, not request
     fresh generation. `from_seed=True` suppresses those nudges and
     inserts a seed-continuation directive listing available media.
+
+    `seed_regen_assets=True` (assets-only goal + declared PATHS): keep
+    from_seed name list but REQUIRE <assets> with EXACTLY those stems —
+    do not invent a new genre roster; do not rewrite code.
     """
     # Phase 4 (4A): plan-turn nudge PROSE lives in memory/plan_nudges.jsonl,
     # loaded via the single memory loader. prompts_v1 keeps only the detectors
@@ -1567,6 +1625,8 @@ def plan_instruction(
     # P1: seed continuation flips art / audio "MUST emit" nudges off.
     # Detection is opt-in via the from_seed kwarg so non-seed sessions
     # stay byte-for-byte identical (the existing test suite still passes).
+    # seed_regen_assets: still suppress free invent nudges; dedicated
+    # seed_nudge below forces the declared roster instead.
     if from_seed:
         # Suppress art / audio MUST-emit nudges; the seed already has
         # media on disk and re-emitting <assets> wastes generator time
@@ -1757,30 +1817,52 @@ def plan_instruction(
             more = f" (+{len(names) - cap} more)" if len(names) > cap else ""
             return ", ".join(shown) + more
 
-        seed_nudge = (
-            "\n\nSEED CONTINUATION — this is an EXISTING game the user "
-            "is asking you to ADAPT. The harness has rehydrated this "
-            "session's media from disk already; new generation in this "
-            "turn would WIPE the user's existing art and is BLOCKED.\n"
-            "\n"
-            "ULTRA IMPORTANT — Phase A constraints for seed runs:\n"
-            "  - DO NOT emit <assets> in this turn. The on-disk roster "
-            "is the truth source.\n"
-            "  - DO NOT emit <sounds> in this turn. Same reason.\n"
-            "  - DO emit <plan>, <criteria>, <probes> focused on the "
-            "code fix the user is requesting.\n"
-            "  - Refer to existing media by their EXACT names; do not "
-            "invent new names — the loader entries already map them.\n"
-            "\n"
-            f"Existing assets on disk: {_fmt_names(seed_a)}\n"
-            f"Existing sounds on disk: {_fmt_names(seed_s)}\n"
-            "\n"
-            "If you genuinely need a brand-new visual entity the seed "
-            "doesn't already have (rare on a seed restart — the user "
-            "usually wants behavior/animation fixes, not new sprites), "
-            "you can request it in a LATER mid-session <assets> turn "
-            "AFTER iter 1 confirms the fix is working. Not now.\n"
-        )
+        if seed_regen_assets:
+            seed_nudge = (
+                "\n\nSEED ASSETS-ONLY REGEN — this is an EXISTING game. "
+                "The user wants NEW media files for the names ALREADY "
+                "declared in the seed HTML. Keep the code identical; "
+                "do not redesign the game or invent a different genre.\n"
+                "\n"
+                "ULTRA IMPORTANT — Phase A constraints:\n"
+                "  - DO emit <assets> this turn with EXACTLY the asset "
+                "names listed below (one entry per name). Do NOT invent "
+                "new entity names (no ship/asteroid/etc. unless listed).\n"
+                "  - Prompts describe each named sprite as used by the "
+                "existing code (generic: sprite for that PATHS key).\n"
+                "  - DO NOT emit a full <html_file> rewrite. Code stays.\n"
+                "  - DO emit <plan>/<criteria>/<probes> about verifying "
+                "the existing game with refreshed art — not a new game.\n"
+                "\n"
+                f"Declared asset names (REQUIRED roster): {_fmt_names(seed_a)}\n"
+                f"Declared sound names: {_fmt_names(seed_s)}\n"
+            )
+            _record_nudge("seed-assets-only-regen")
+        else:
+            seed_nudge = (
+                "\n\nSEED CONTINUATION — this is an EXISTING game the user "
+                "is asking you to ADAPT. The harness has rehydrated this "
+                "session's media from disk already; new generation in this "
+                "turn would WIPE the user's existing art and is BLOCKED.\n"
+                "\n"
+                "ULTRA IMPORTANT — Phase A constraints for seed runs:\n"
+                "  - DO NOT emit <assets> in this turn. The on-disk roster "
+                "is the truth source.\n"
+                "  - DO NOT emit <sounds> in this turn. Same reason.\n"
+                "  - DO emit <plan>, <criteria>, <probes> focused on the "
+                "code fix the user is requesting.\n"
+                "  - Refer to existing media by their EXACT names; do not "
+                "invent new names — the loader entries already map them.\n"
+                "\n"
+                f"Existing assets on disk: {_fmt_names(seed_a)}\n"
+                f"Existing sounds on disk: {_fmt_names(seed_s)}\n"
+                "\n"
+                "If you genuinely need a brand-new visual entity the seed "
+                "doesn't already have (rare on a seed restart — the user "
+                "usually wants behavior/animation fixes, not new sprites), "
+                "you can request it in a LATER mid-session <assets> turn "
+                "AFTER iter 1 confirms the fix is working. Not now.\n"
+            )
 
     minimal_nudge = ""
     if force_minimal_first_build:

@@ -11,6 +11,9 @@ from typing import Any
 
 from assets import (
     _DERIVED_FRAME_MIN_DELTA,
+    _default_size_for_prompt,
+    _parse_size,
+    diffuser_display_label,
     generate_assets,
     parse_assets_block,
     parse_assets_block_with_meta,
@@ -31,7 +34,14 @@ from videos import (
     try_load_video_generator,
 )
 from agent_feedback import _HARNESS_ADVISORY_SENTINEL, _feedback_requests_style_rebrand
-from agent_helpers import _ASSETS_OPEN_RE, _SOUNDS_OPEN_RE, _scan_seed_media
+from agent_helpers import (
+    _ASSETS_OPEN_RE,
+    _SOUNDS_OPEN_RE,
+    _declared_seed_media_names,
+    _declared_stems_complete,
+    _missing_declared_stems,
+    _scan_seed_media,
+)
 from agent import AgentEvent
 
 
@@ -308,6 +318,16 @@ class AssetGenerationMixin:
 
             return 0, 0
 
+        # Declared PATHS/sound stems even when PNGs/OGGs are missing —
+        # assets-only seed regen must not invent a new genre roster.
+        try:
+            declared_a, declared_s = _declared_seed_media_names(seed_html)
+            self._seed_declared_asset_names = list(declared_a)
+            self._seed_declared_sound_names = list(declared_s)
+        except Exception:
+            self._seed_declared_asset_names = []
+            self._seed_declared_sound_names = []
+
         try:
 
             seed_assets, seed_sounds, _, _ = _scan_seed_media(
@@ -345,6 +365,14 @@ class AssetGenerationMixin:
             "assets": len(seed_assets),
 
             "sounds": len(seed_sounds),
+
+            "declared_assets": len(
+                getattr(self, "_seed_declared_asset_names", None) or []
+            ),
+
+            "declared_sounds": len(
+                getattr(self, "_seed_declared_sound_names", None) or []
+            ),
 
             "asset_names": sorted(seed_assets.keys())[:24],
 
@@ -865,6 +893,126 @@ class AssetGenerationMixin:
 
 
     @staticmethod
+    def _prompt_for_declared_asset_stem(name: str) -> str:
+        """Minimal genre-free prompt when the model omitted a declared stem."""
+        readable = (name or "sprite").replace("_", " ").strip() or "sprite"
+        return (
+            f"game sprite for {readable}, transparent background, no text"
+        )
+
+    @staticmethod
+    def _asset_spec_with_size(spec: dict[str, Any]) -> dict[str, Any]:
+        """Ensure a size tuple — generate_assets requires spec['size'].
+
+        Harness-filled declared-roster specs historically lacked size
+        (trace 20260720_135103 KeyError), while parse_assets_block always
+        injects it. Normalize both paths here.
+        """
+        if spec.get("size"):
+            return spec
+        prompt = str(spec.get("prompt") or "")
+        out = dict(spec)
+        out["size"] = _parse_size(_default_size_for_prompt(prompt))
+        return out
+
+    def _coerce_specs_to_declared_seed_roster(
+        self,
+        asset_specs: list[dict[str, Any]],
+        sound_specs: list[dict[str, Any]],
+        *,
+        trigger: str = "",
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Seed media: declared PATHS own names on regen / phase_a invent.
+
+        Mid-session additive names (new boss sprite) must still be allowed.
+        """
+        declared_a = list(
+            getattr(self, "_seed_declared_asset_names", None) or []
+        )
+        declared_s = list(
+            getattr(self, "_seed_declared_sound_names", None) or []
+        )
+        if not self.seed_file or (not declared_a and not declared_s):
+            return asset_specs, sound_specs
+
+        seed_regen = bool(
+            getattr(self, "_seed_media_regen", False)
+            or getattr(self, "_assets_only_goal", False)
+        )
+        by_a = {
+            str(s.get("name") or "").strip(): s
+            for s in (asset_specs or [])
+            if str(s.get("name") or "").strip()
+        }
+        by_s = {
+            str(s.get("name") or "").strip(): s
+            for s in (sound_specs or [])
+            if str(s.get("name") or "").strip()
+        }
+
+        if not seed_regen:
+            # Phase A only: drop invent outside declared. Mid-session may add.
+            if trigger != "phase_a" or (not by_a and not by_s):
+                return asset_specs, sound_specs
+            kept_a = [by_a[n] for n in declared_a if n in by_a]
+            kept_s = [by_s[n] for n in declared_s if n in by_s]
+            dropped = sorted(
+                (set(by_a) - set(declared_a)) | (set(by_s) - set(declared_s))
+            )
+            if dropped:
+                self._trace({
+                    "kind": "seed_media_invented_names_dropped",
+                    "dropped_invented": dropped[:48],
+                })
+            return kept_a, kept_s
+
+        regen_all = bool(getattr(self, "_seed_media_regen_all", True))
+        if regen_all:
+            target_a = list(declared_a)
+            target_s = list(declared_s)
+        else:
+            target_a = _missing_declared_stems(
+                declared_a, self._session_assets,
+            )
+            target_s = _missing_declared_stems(
+                declared_s, self._session_sounds,
+            )
+            if not target_a and not target_s:
+                return asset_specs, sound_specs
+
+        new_assets: list[dict[str, Any]] = []
+        for name in target_a:
+            if name in by_a:
+                new_assets.append(self._asset_spec_with_size(by_a[name]))
+            else:
+                prompt = self._prompt_for_declared_asset_stem(name)
+                new_assets.append(self._asset_spec_with_size({
+                    "name": name,
+                    "prompt": prompt,
+                }))
+        new_sounds: list[dict[str, Any]] = []
+        for name in target_s:
+            if name in by_s:
+                new_sounds.append(by_s[name])
+            else:
+                new_sounds.append({
+                    "name": name,
+                    "prompt": f"short game sound for {name.replace('_', ' ')}",
+                })
+        dropped = sorted(
+            (set(by_a) - set(target_a)) | (set(by_s) - set(target_s))
+        )
+        if dropped or new_assets != asset_specs or new_sounds != sound_specs:
+            self._trace({
+                "kind": "seed_media_roster_forced",
+                "regen_all": regen_all,
+                "target_assets": target_a[:48],
+                "target_sounds": target_s[:48],
+                "dropped_invented": dropped[:48],
+            })
+        return new_assets, new_sounds
+
+    @staticmethod
 
     def _filter_media_specs_to_allowed(
 
@@ -1081,6 +1229,11 @@ class AssetGenerationMixin:
                 )
             )
 
+        # Seed media: force declared PATHS stems when regen / drop phase_a invent.
+        asset_specs, sound_specs = self._coerce_specs_to_declared_seed_roster(
+            asset_specs, sound_specs, trigger=trigger,
+        )
+
         # Parse-failure coaching (GLM-5.2 trace 20260625_124038): the model
 
         # emitted an <assets> tag but it parsed to ZERO specs (wrong JSON
@@ -1221,29 +1374,41 @@ class AssetGenerationMixin:
 
 
 
-        # P1 (MK trace 20260528): on a seed restart with on-disk media,
+        # P1 (MK trace 20260528): on a seed restart with COMPLETE declared
+        # media on disk, SKIP phase_a generation. Orphan leftovers that are
+        # not in declared PATHS do not count as coverage. Seed media regen
+        # (art intent + incomplete/replace) must NOT skip.
 
-        # SKIP phase_a generation entirely. The model can still emit
-
-        # <assets> in its plan, but we won't burn 90+ seconds re-
-
-        # rendering sprites the user already has. Mid-session triggers
-
-        # are unaffected — explicit user requests like "add a new boss
-
-        # sprite" still flow through the generator below.
-
+        declared_a = list(
+            getattr(self, "_seed_declared_asset_names", None) or []
+        )
+        declared_s = list(
+            getattr(self, "_seed_declared_sound_names", None) or []
+        )
+        coverage_complete = (
+            _declared_stems_complete(declared_a, self._session_assets)
+            and _declared_stems_complete(declared_s, self._session_sounds)
+        )
+        seed_regen = bool(
+            getattr(self, "_seed_media_regen", False)
+            or getattr(self, "_assets_only_goal", False)
+        )
+        skip_phase_a = False
         if (
-
             trigger == "phase_a"
-
             and self.seed_file is not None
-
-            and (self._session_assets or self._session_sounds)
-
             and (asset_specs or sound_specs)
-
+            and not seed_regen
         ):
+            if declared_a or declared_s:
+                skip_phase_a = coverage_complete
+            else:
+                # No PATHS declared — legacy: any on-disk session media.
+                skip_phase_a = bool(
+                    self._session_assets or self._session_sounds
+                )
+
+        if skip_phase_a:
 
             self._trace({
 
@@ -1252,6 +1417,8 @@ class AssetGenerationMixin:
                 "have_assets": len(self._session_assets),
 
                 "have_sounds": len(self._session_sounds),
+
+                "coverage_complete": coverage_complete,
 
                 "requested_assets": [
 
@@ -1660,19 +1827,23 @@ class AssetGenerationMixin:
 
         if asset_specs:
 
+            _diffuser_lbl = diffuser_display_label(self._asset_generator)
+
             yield self._record(AgentEvent(
 
                 "info",
 
                 f"{trigger}: requested {len(asset_specs)} asset(s); "
 
-                "loading Z-Image-Turbo (first call only, ~30-60s)…",
+                f"loading {_diffuser_lbl} (first call only, ~30-60s)…",
 
                 {
 
                     "trigger": trigger,
 
                     "assets_requested": [s["name"] for s in asset_specs],
+
+                    "diffuser_label": _diffuser_lbl,
 
                 },
 
@@ -1710,7 +1881,7 @@ class AssetGenerationMixin:
 
                     "info",
 
-                    "Z-Image-Turbo not reachable (no CUDA / no diffusers / "
+                    f"{_diffuser_lbl} not reachable (no CUDA / no diffusers / "
 
                     "Colossal_Cave/diffusion_manager.py missing) — "
 
