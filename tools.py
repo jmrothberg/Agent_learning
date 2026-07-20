@@ -2794,6 +2794,56 @@ def _check_sprite_draw_wiring(
     return []
 
 
+def _collect_paths_table_keys(body: str) -> set[str]:
+    """Keys declared in sprite loader tables — several equivalent shapes.
+
+    Class-general (not title-specific). Local models / goodgames emit any of:
+      - ``PATHS = { bomb: "./x_assets/bomb.png" }`` (harness/skeletons)
+      - ``PATHS`` / ``ASSET_PATHS = [['bomb', './x_assets/bomb.png'], …]``
+      - ``const entries = [['bomb', './…png'], …]`` inside ``loadAssets()``
+    Only matching object ``PATHS={…}`` caused false PATHS_KEY_COVERAGE fails.
+    """
+    keys: set[str] = set()
+    # Object: PATHS / ASSET_PATHS = { key: "…", … }
+    for block_m in re.finditer(
+        r"(?:const\s+|let\s+|var\s+)?(?:ASSET_)?PATHS\s*=\s*\{([^}]*)\}",
+        body,
+        re.DOTALL,
+    ):
+        block = block_m.group(1)
+        for km in re.finditer(r"['\"]?(\w+)['\"]?\s*:", block):
+            keys.add(km.group(1))
+    # Named array tables: PATHS / ASSET_PATHS = [ … ]
+    for block_m in re.finditer(
+        r"(?:const\s+|let\s+|var\s+)?(?:ASSET_)?PATHS\s*=\s*\[",
+        body,
+    ):
+        start = block_m.end()
+        depth = 1
+        i = start
+        while i < len(body) and depth > 0:
+            ch = body[i]
+            if ch == "[":
+                depth += 1
+            elif ch == "]":
+                depth -= 1
+            i += 1
+        block = body[start : i - 1]
+        for km in re.finditer(r"\[\s*['\"](\w+)['\"]\s*,", block):
+            keys.add(km.group(1))
+    # Any ['stem', '…png|…_assets/…'] pair — covers loadAssets `entries = […]`
+    # without requiring the table be named PATHS.
+    for km in re.finditer(
+        r"\[\s*['\"](\w+)['\"]\s*,\s*['\"][^'\"]*"
+        r"(?:_assets/|\.(?:png|jpg|jpeg|webp|gif))"
+        r"[^'\"]*['\"]",
+        body,
+        re.IGNORECASE,
+    ):
+        keys.add(km.group(1))
+    return keys
+
+
 def _check_paths_key_coverage(
     html: str, out_path: "Path | None"
 ) -> list[str]:
@@ -2832,15 +2882,7 @@ def _check_paths_key_coverage(
     body = "\n".join(b for (_attrs, b) in scripts if b.strip())
     if not body:
         return []
-    paths_keys: set[str] = set()
-    for block_m in re.finditer(
-        r"(?:const\s+)?PATHS\s*=\s*\{([^}]*)\}",
-        body,
-        re.DOTALL,
-    ):
-        block = block_m.group(1)
-        for km in re.finditer(r"['\"]?(\w+)['\"]?\s*:", block):
-            paths_keys.add(km.group(1))
+    paths_keys = _collect_paths_table_keys(body)
     draw_keys: set[str] = set()
     for pat in (
         r"\bsprite\s*\(\s*['\"](\w+)['\"]",
