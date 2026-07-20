@@ -215,6 +215,7 @@ from agent_helpers import (
     _scan_seed_media,
     _strip_thinking,
     _truncation_reason,
+    should_reject_post_clean_shrink,
 )
 
 
@@ -6620,12 +6621,47 @@ class GameAgent(
             # ---- materialize: patches OR full file --------------------
             _pre_materialize_bytes = len(self._current_file or "")
             new_html, materialize_msg = await self._materialize(reply)
+            # Post-clean shrink guard (castle courtyard 20260720_193459 /
+            # OutRun). Truncated shrink after a clean iter → REJECT like
+            # first_build_stub (keep baseline, no write); a well-formed
+            # shrink (e.g. user asked to simplify) is still written and
+            # only coached via the detect event — browser probes /
+            # auto-revert judge it, so intentional shrinks can't thrash.
+            _shrink_trunc = (
+                _truncation_reason(new_html) if new_html is not None else None
+            )
             if (
+                new_html is not None
+                and should_reject_post_clean_shrink(
+                    previous_ok=self._previous_report_ok,
+                    before_bytes=_pre_materialize_bytes,
+                    after_bytes=len(new_html),
+                    truncated=_shrink_trunc is not None,
+                )
+            ):
+                self._post_clean_shrink_detected = True
+                self._trace({
+                    "kind": "post_clean_shrink_rollback",
+                    "iteration": iteration,
+                    "before_bytes": _pre_materialize_bytes,
+                    "after_bytes": len(new_html),
+                    "reason": _shrink_trunc,
+                    "action": "rollback",
+                })
+                materialize_msg = (
+                    f"post-clean shrink rejected "
+                    f"({_pre_materialize_bytes}→{len(new_html)}, "
+                    f"{_shrink_trunc}; kept working baseline)"
+                )
+                new_html = None
+            elif (
                 new_html is not None
                 and self._previous_report_ok is True
                 and _pre_materialize_bytes
                 and len(new_html) < int(_pre_materialize_bytes * 0.80)
             ):
+                # Well-formed shrink: write it, but flag for the regression
+                # banner if the browser test comes back worse.
                 self._post_clean_shrink_detected = True
                 self._trace({
                     "kind": "post_clean_shrink_detected",
@@ -7178,6 +7214,24 @@ class GameAgent(
                             ),
                         )
                     )
+                    # Post-clean shrink rollback: castle path never hits
+                    # regressed=True (no browser write). Prepend here so the
+                    # model learns the working file was kept.
+                    if self._post_clean_shrink_detected:
+                        fallback = (
+                            "POST-CLEAN SHRINK REJECTED: materialize would have "
+                            "cut a WORKING build by >20%. On-disk file is "
+                            "unchanged. Do NOT patch a truncated ghost — emit a "
+                            "complete <html_file> rewrite for the requested "
+                            "change (or one small surgical <patch> that does "
+                            "not shrink the file).\n\n"
+                            + fallback
+                        )
+                        self._allow_one_rewrite = True
+                        self._trace({
+                            "kind": "rewrite_exemption_armed_by_prompt",
+                            "source": "post_clean_shrink_rollback",
+                        })
                     if reset_streak:
                         self._consecutive_plan_only = 0
                         # Clear the fingerprint too: the escalation

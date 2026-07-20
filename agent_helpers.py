@@ -477,6 +477,35 @@ def _truncation_reason(html: str) -> str | None:
     return None
 
 
+def should_reject_post_clean_shrink(
+    *,
+    previous_ok: bool | None,
+    before_bytes: int,
+    after_bytes: int,
+    truncated: bool,
+    keep_ratio: float = 0.80,
+) -> bool:
+    """True when materialize after a CLEAN iter would shrink the file
+    below ``keep_ratio`` of the working baseline AND the new HTML is
+    structurally truncated (caller passes ``_truncation_reason(...)``
+    result as ``truncated``).
+
+    Castle courtyard 20260720_193459 / OutRun class: a truncated patch
+    can apply "successfully" yet destroy a green build. The truncation
+    requirement keeps intentional simplification ("remove the second
+    level") writable — a well-formed shrink is written and judged by the
+    browser probes / auto-revert instead, so this guard cannot thrash a
+    legitimate shrink.
+    """
+    if previous_ok is not True:
+        return False
+    if not truncated:
+        return False
+    if before_bytes <= 0 or after_bytes < 0:
+        return False
+    return after_bytes < int(before_bytes * keep_ratio)
+
+
 def _is_degenerate_baseline(html: str) -> bool:
     """True when `html` looks like a placeholder skeleton rather than a
     real game: too small, OR no <canvas>, OR no <script>, OR a <script>
