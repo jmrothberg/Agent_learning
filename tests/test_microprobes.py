@@ -269,6 +269,47 @@ def test_duplicate_const_inside_nested_function_allowed():
     assert "duplicate top-level declaration" not in err_blob, r["errors"]
 
 
+def test_bare_script_sibling_function_locals_allowed():
+    """Castlevania 20260720_175910: bare (non-IIFE) script with
+    `const p` / `const mat` inside sibling functions must NOT be treated
+    as concatenated drafts. Canned IIFE games already sit locals at
+    depth >= 2; bare scripts need outer_depth=0."""
+    html = _wrap(
+        "function buildCastle() {\n"
+        "  const mat = 1;\n"
+        "  const p = 2;\n"
+        "  return mat + p;\n"
+        "}\n"
+        "function animate() {\n"
+        "  const mat = 3;\n"
+        "  const p = 4;\n"
+        "  const sinF = 0;\n"
+        "  return mat + p + sinF;\n"
+        "}\n"
+        "buildCastle(); animate();\n"
+    )
+    r = run_micro_probes(html)
+    err_blob = "\n".join(r.get("errors", [])).lower()
+    assert "duplicate top-level declaration" not in err_blob, r["errors"]
+    assert not (r.get("stats") or {}).get("duplicate_declarations")
+
+
+def test_bare_script_true_top_level_concat_still_detected():
+    """Bare script with two top-level `const state` is still a real
+    concatenated-draft failure — outer_depth=0 must still catch it."""
+    html = _wrap(
+        "const state = { score: 0 };\n"
+        "function tick() { return state.score; }\n"
+        "const state = { score: 1 };\n"
+        "tick();\n"
+    )
+    r = run_micro_probes(html)
+    assert r["ok"] is False
+    err_blob = "\n".join(r["errors"]).lower()
+    assert "duplicate top-level declaration" in err_blob, r["errors"]
+    assert "state" in err_blob, r["errors"]
+
+
 # ---------------------------------------------------------------------------
 # Formatter
 # ---------------------------------------------------------------------------

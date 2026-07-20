@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from agent import AgentEvent, GameAgent  # noqa: E402
 from chat import CodingBoxApp  # noqa: E402
-from prompts_v1 import ask_instruction  # noqa: E402
+from prompts_v1 import ASK_ADVICE_SYSTEM, ask_advice_instruction, ask_instruction  # noqa: E402
 
 
 def _make_agent(tmp_path: Path) -> GameAgent:
@@ -32,8 +32,14 @@ def _make_agent(tmp_path: Path) -> GameAgent:
         {"role": "assistant", "content": "<plan>done</plan>"},
     ]
     agent._snapshot_n = 2
+    # Length must clear run_ask_turn's has_game threshold (>=200 chars)
+    # so game-mode asks stay grounded in best.html, not advice mode.
     agent.best_path.write_text(
-        "<html><script>function digAtSkullBeach(){}</script></html>",
+        "<html><body><canvas id='c'></canvas>"
+        "<script>function digAtSkullBeach(){ /* puzzle helper */ }"
+        "function helpOverlay(){ return 'dig at skull beach'; }"
+        "// padding so excerpt/game detection treats this as a real build"
+        "</script></body></html>",
         encoding="utf-8",
     )
     return agent
@@ -60,6 +66,18 @@ def test_ask_instruction_includes_question_and_context() -> None:
     assert "beach_bg" in body
     assert "READ-ONLY ASK TURN" in body
     assert "do NOT emit <patch>" in body
+
+
+def test_ask_advice_instruction_is_freeform() -> None:
+    body = ask_advice_instruction(
+        question="which 80s game benefits from rich art?",
+        goal="",
+    )
+    assert "ADVISORY ASK TURN" in body
+    assert "which 80s game benefits from rich art?" in body
+    assert "freeform advice" in body
+    assert "do NOT emit <patch>" in body
+    assert "game-design" in ASK_ADVICE_SYSTEM.lower() or "advisor" in ASK_ADVICE_SYSTEM.lower()
 
 
 def test_sanitize_ask_reply_strips_code_tags() -> None:
@@ -118,14 +136,30 @@ def test_run_ask_turn_strips_patch_tags_without_applying(tmp_path: Path) -> None
     assert info.data.get("tags_stripped") is True
 
 
-def test_run_ask_turn_requires_best_html(tmp_path: Path) -> None:
+def test_run_ask_turn_advice_mode_without_best_html(tmp_path: Path) -> None:
+    """No best.html → freeform advice (pre-/new), not an error."""
     agent = _make_agent(tmp_path)
     agent.best_path.unlink()
+    agent._messages = []
+    traced: list[dict] = []
+    agent._trace = lambda row: traced.append(row)  # type: ignore[method-assign]
 
-    events = asyncio.run(_collect_ask(agent, "how does it work?"))
+    async def fake_stream(on_token, **kwargs):
+        return "A side-scroller with parallax art layers."
 
-    assert any(ev.kind == "error" for ev in events)
+    agent._stream = fake_stream  # type: ignore[method-assign]
+    agent.set_token_callback(lambda _p: None)
+
+    events = asyncio.run(
+        _collect_ask(agent, "which genre benefits most from rich art?")
+    )
+
+    assert not any(ev.kind == "error" for ev in events)
+    assert any(ev.kind == "info" and ev.data.get("ask") for ev in events)
     assert agent._pending_feedback == []
+    ctx = next(r for r in traced if r.get("kind") == "user_ask_context")
+    assert ctx["ask_mode"] == "advice"
+    assert ctx["message_count"] == 2
 
 
 def test_run_ask_turn_traces_full_reply(tmp_path: Path) -> None:
@@ -171,6 +205,7 @@ def test_run_ask_turn_uses_lean_context(tmp_path: Path) -> None:
     ctx = next(r for r in traced if r.get("kind") == "user_ask_context")
     assert ctx["history_chars_dropped"] > 0
     assert ctx["message_count"] == 2
+    assert ctx.get("ask_mode") == "game"
 
 
 def test_cmd_ask_does_not_queue_feedback() -> None:
@@ -197,3 +232,40 @@ def test_cmd_ask_does_not_queue_feedback() -> None:
     agent.add_user_feedback.assert_not_called()
     assert agent._pending_feedback == []
     assert app._ask_in_flight is False
+
+
+def test_cmd_ask_works_without_session_agent() -> None:
+    """Pre-game /ask must not require self.agent (advice before /new)."""
+    app = CodingBoxApp()
+    app._log_info = MagicMock()  # type: ignore[assignment]
+    app._log_error = MagicMock()  # type: ignore[assignment]
+    app._is_streaming = False
+    app._model2_is_streaming = False
+    app._model3_is_streaming = False
+    app.agent = None
+    ask_agent = MagicMock()
+    app._ensure_ask_agent = MagicMock(return_value=ask_agent)  # type: ignore[method-assign]
+
+    def _fake_run_worker(coro, exclusive=False):
+        # Production schedules the coroutine; close it so pytest doesn't warn.
+        if hasattr(coro, "close"):
+            coro.close()
+
+    app.run_worker = MagicMock(side_effect=_fake_run_worker)  # type: ignore[method-assign]
+
+    asyncio.run(app._cmd_ask("which genre benefits from rich art?"))
+
+    app._ensure_ask_agent.assert_called()
+    app._log_error.assert_not_called()
+    app.run_worker.assert_called_once()
+    # Must not claim an active session is required.
+    for call in app._log_error.call_args_list:
+        assert "active session" not in str(call)
+
+
+def test_ensure_ask_agent_prefers_session_agent() -> None:
+    app = CodingBoxApp()
+    session = MagicMock()
+    app.agent = session
+    app._ask_only_agent = MagicMock()
+    assert app._ensure_ask_agent() is session

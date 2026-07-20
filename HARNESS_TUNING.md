@@ -175,6 +175,14 @@ bullet never reaches the prompt — broaden tags if a good bullet doesn’t fire
 
 **Other**
 
+- **Duplicate-decl microprobe vs bare scripts** (Castlevania trace
+  `20260720_175910`): materialize rejected a complete `<html_file>` as
+  “concatenated drafts” because `depth <= 1` treated function-local
+  `const mat` / `const p` as top-level. Canned/serial/skeleton games wrap
+  JS in an IIFE, so locals sit at depth ≥ 2 and never hit this FP —
+  winners reuse short names freely inside the IIFE. Fix: count decls only
+  at `_script_outer_decl_depth` (IIFE body = 1, bare = 0). Detect IIFE as
+  whole-script wrap at the start, not “contains IIFE somewhere.”
 - Movement: tile `moveProgress` is 0→1 fraction — don’t divide by tile size twice.
 - Weak models can’t author big mazes inline — give a seeded generator or skeleton to extend.
 - Never call cloud models without explicit user opt-in.

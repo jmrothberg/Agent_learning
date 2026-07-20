@@ -978,6 +978,9 @@ class CodingBoxApp(App):
         self._model3_is_streaming: bool = False
         # /ask background worker — True while run_ask_turn is in flight.
         self._ask_in_flight: bool = False
+        # Lightweight GameAgent for pre-game /ask (no Chromium, no self.agent).
+        # Kept separate so typing a goal still starts a fresh build cleanly.
+        self._ask_only_agent: GameAgent | None = None
         # Throttle status repaints driven by token callback (1 Hz).
         self._last_emit_status_at: float = 0.0
         self._assets_summary: str = ""        # sticky summary of last batch
@@ -3455,8 +3458,8 @@ class CodingBoxApp(App):
             "  [b]/check [<N|name>][/b]         visual review on latest screenshot · bare uses active session VLM",
             "                                  [dim]WAIT ON: loads suggested feedback into input for edit/Enter[/dim]",
             "                                  [dim]WAIT OFF: auto-queues guidance into the next coding turn[/dim]",
-            "  [b]/ask <question>[/b]            read-only Q&A about the current game — no code changes",
-            "                                  [dim]e.g. /ask how does digging at skull beach work?[/dim]",
+            "  [b]/ask <question>[/b]            talk to the model anytime — pre-game advice or current game Q&A",
+            "                                  [dim]e.g. /ask which 80s game benefits most from rich art?[/dim]",
             "  [b]/ref <path>[/b]               attach a reference image (PNG/JPEG/WebP) to the NEXT user turn",
             "                                  [dim]works before /new too; drag a file from Finder into the terminal to fill the path[/dim]",
             "                                  [dim]VLM-only — say 'make the game look like this' on the next line[/dim]",
@@ -5090,19 +5093,121 @@ class CodingBoxApp(App):
             or self._model3_is_streaming
         )
 
+    def _resolve_primary_backend_info(self) -> backend_mod.BackendInfo | None:
+        """Resolve Model-1 BackendInfo from sticky /load staging (no Chromium).
+
+        Same sticky tiers as `_start_session`, extracted so `/ask` can talk
+        to the model before a game session exists.
+        """
+        if self._next_backend in ("ollama", "mlx", "openai", "anthropic") and self._next_model:
+            if self._next_backend == "mlx":
+                endpoint = backend_mod.mlx_endpoint_url()
+            elif self._next_backend == "openai":
+                endpoint = backend_mod.openai_endpoint_url()
+            elif self._next_backend == "anthropic":
+                endpoint = backend_mod.anthropic_endpoint_url()
+            else:
+                endpoint = backend_mod.ollama_endpoint_url(1)
+            return backend_mod.BackendInfo(
+                name=self._next_backend, model=self._next_model,
+                source=f"/load staged: {self._next_backend} (sticky)",
+                endpoint=endpoint,
+            )
+        if self._next_model:
+            return backend_mod.BackendInfo(
+                name="ollama", model=self._next_model,
+                source="/model staged (sticky)",
+                endpoint=backend_mod.ollama_endpoint_url(1),
+            )
+        if self._session_model and self._session_backend_info:
+            prev = self._session_backend_info
+            return backend_mod.BackendInfo(
+                name=prev.name,
+                model=self._session_model,
+                source="previous session (sticky)",
+                endpoint=prev.endpoint,
+                context_length=prev.context_length,
+            )
+        try:
+            return backend_mod.detect_backend(self._next_backend)
+        except RuntimeError as e:
+            self._log_error(str(e))
+            return None
+
+    def _ensure_coder_backend_for_ask(self) -> bool:
+        """Ensure `_session_backend` exists for /ask. Returns False on failure."""
+        if self._session_backend is not None:
+            return True
+        info = self._resolve_primary_backend_info()
+        if info is None:
+            return False
+        try:
+            self._session_backend = backend_mod.make_backend(info)
+        except Exception as e:
+            self._log_error(f"could not initialize backend: {e}")
+            return False
+        self._session_backend_info = info
+        self._session_model = info.model
+        # Latch sticky /load like `_start_session` so a later /new reuses it.
+        self._next_backend = info.name
+        self._next_model = info.model
+        self.title = f"{CHAT_APP_TITLE} — {info.name.upper()} · {info.model}"
+        self._log_info(
+            f"Using [b]{info.name.upper()}[/b] · [b]{_esc(info.model)}[/b] "
+            f"[dim]({_esc(info.source)})[/dim] for /ask"
+        )
+        self._update_status()
+        return True
+
+    def _ensure_ask_agent(self) -> GameAgent | None:
+        """Agent for `/ask`: prefer the live session, else a scratch ask-only agent.
+
+        Ask-only never assigns self.agent, so awaiting_kind 'goal'
+        still means: type a game idea to start building.
+        """
+        if self.agent is not None:
+            return self.agent
+        if self._ask_only_agent is not None:
+            self._ask_only_agent.set_token_callback(self._emit_token)
+            return self._ask_only_agent
+        if not self._ensure_coder_backend_for_ask():
+            return None
+        scratch_dir = GAMES_DIR / "_ask_scratch"
+        scratch_dir.mkdir(parents=True, exist_ok=True)
+        out_path = scratch_dir / "advice.html"
+        # Do not create best.html — run_ask_turn uses advice mode without it.
+        if not out_path.exists():
+            out_path.write_text("", encoding="utf-8")
+        stall_s, overall_s = resolve_session_timeouts(
+            self._session_model or "stub"
+        )
+        agent = GameAgent(
+            backend=self._session_backend,
+            out_path=out_path,
+            browser=None,
+            max_iters=1,
+            stall_seconds=stall_s,
+            overall_seconds=overall_s,
+            num_ctx=self._num_ctx,
+            prompt_version="v1",
+            model=self._session_model,
+            model_class=self._model_class or "auto",
+            playbook_top_k=0,
+            playbook_writeback=False,
+        )
+        agent._goal = self._goal or ""
+        agent.set_token_callback(self._emit_token)
+        self._ask_only_agent = agent
+        return agent
+
     async def _cmd_ask(self, arg: str) -> None:
-        """/ask <question> — read-only Q&A; does not queue feedback or patch code."""
+        """/ask <question> — read-only Q&A anytime; does not patch code."""
         question = (arg or "").strip()
         if not question:
             self._log_info(
                 "usage: /ask <question>   "
-                "(e.g. /ask how does digging at skull beach work?)"
-            )
-            return
-        agent = self.agent
-        if agent is None:
-            self._log_error(
-                "/ask needs an active session — start with a goal or /new <goal>"
+                "(works before or during a game — "
+                "e.g. /ask which genre benefits most from rich art?)"
             )
             return
         if self._ask_in_flight:
@@ -5114,6 +5219,9 @@ class CodingBoxApp(App):
             self._log_error(
                 "/ask: wait for the current model turn to finish, then retry"
             )
+            return
+        # Fail fast (backend / init) before claiming ask started.
+        if self._ensure_ask_agent() is None:
             return
         self._log_info(f"[cyan]/ask[/cyan] {_esc(question)}")
         self._log_info(
@@ -5127,7 +5235,7 @@ class CodingBoxApp(App):
         self._ask_in_flight = True
         self._update_mode_bar()
         try:
-            agent = self.agent
+            agent = self._ensure_ask_agent()
             if agent is None:
                 return
             async for ev in agent.run_ask_turn(question):
@@ -5343,6 +5451,7 @@ class CodingBoxApp(App):
         """Drop the finished session, clear game staging, wait for the next goal."""
         bits = self._clear_staged_state()
         self.agent = None
+        self._ask_only_agent = None
         self._session_done = True
         self._session_seed = None
         self._goal = ""
@@ -6391,6 +6500,8 @@ class CodingBoxApp(App):
             backend3=self._session_backend3,
             model3_role=self._session_role3,
         )
+        # Real session owns the coder slot — drop pre-game ask-only agent.
+        self._ask_only_agent = None
         # Phase 1.5 — autonomous-feedback flag is set on the agent
         # AFTER construction so we don't have to thread it through
         # GameAgent.__init__'s long kwargs list (every existing test
@@ -6611,6 +6722,7 @@ class CodingBoxApp(App):
         # Drop the old agent reference; the worker (if any) has already
         # finished — we checked _session_done in _cmd_new.
         self.agent = None
+        self._ask_only_agent = None
         # Close the previous log mirror.
         if self._log_file_handle is not None:
             try:

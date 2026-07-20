@@ -2119,6 +2119,32 @@ def _strip_js_noise(js: str) -> str:
     return js
 
 
+# Whole-script IIFE openers only (Castlevania 20260720_175910): bare
+# multi-function scripts put function-local `const` at brace depth 1 —
+# the old `depth <= 1` probe treated those as top-level duplicates.
+# Match wrap at the START after noise strip; never "contains IIFE mid-file".
+_IIFE_SCRIPT_HEAD_RE = re.compile(
+    r"^(?:"
+    r"\(\s*(?:async\s+)?function\b"
+    r"|\(\s*(?:async\s*)?\([^)]*\)\s*=>"
+    r")"
+)
+
+
+def _script_outer_decl_depth(stripped_js: str) -> int:
+    """Brace depth of the script's outer executable scope.
+
+    Returns 1 if the whole body is IIFE-wrapped (`(() => { ... })()` /
+    `(function () { ... })()` / async variants); else 0 for bare scripts.
+    Canned/skeleton games use IIFE so function-local consts sit at depth
+    >= 2 and stay ignored; bare scripts only count true top-level (depth 0).
+    """
+    head = stripped_js.lstrip()
+    if _IIFE_SCRIPT_HEAD_RE.match(head):
+        return 1
+    return 0
+
+
 # Fix round (fight trace 20260611_145321): a rewrite dropped the seed
 # skeleton's canvas sizing → 300x150 browser default → game drawn mostly
 # off-canvas (black screen). The harness recorded width/height but never
@@ -2520,6 +2546,11 @@ def run_micro_probes(
     # after a 3-second browser load. This probe catches it pre-Chromium
     # and tells the model EXACTLY which name is duplicated so the next
     # turn can target the right delete.
+    #
+    # Scope depth: count only at `_script_outer_decl_depth` (IIFE body = 1,
+    # bare script top-level = 0). Do NOT use `depth <= 1` on bare scripts —
+    # that false-rejects sibling function-local `const` (Castlevania
+    # 20260720_175910: `mat`/`p`/`s` inside buildCastle vs animate).
     _DECL_RE = re.compile(
         r"^(?P<indent>[ \t]*)(?P<kind>const|let|function)\s+"
         r"(?P<name>[A-Za-z_$][\w$]*)\b"
@@ -2529,11 +2560,8 @@ def run_micro_probes(
         if not body.strip():
             continue
         stripped = _strip_js_noise(body)
+        outer_depth = _script_outer_decl_depth(stripped)
         depth = 0
-        # Names declared at depth ≤ 1. Depth 0 is the bare script body;
-        # depth 1 is "inside the IIFE wrapper that most agent games use"
-        # — `(() => { ... })()`. Nested function bodies live at depth ≥ 2
-        # and are excluded because shadowing there is legal.
         seen: dict[str, int] = {}
         for raw_line in stripped.splitlines():
             line = raw_line.rstrip()
@@ -2542,7 +2570,7 @@ def run_micro_probes(
             # the enclosing scope.
             opens = line.count("{")
             closes = line.count("}")
-            if depth <= 1:
+            if depth == outer_depth:
                 m = _DECL_RE.match(line)
                 if m:
                     name = m.group("name")

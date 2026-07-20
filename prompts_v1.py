@@ -2844,6 +2844,32 @@ When in doubt, ship. Working > perfect. Reply with EXACTLY ONE of:
 
 _ASK_HTML_EXCERPT_MAX = 10_000
 
+# Minimal system prompt when /ask runs with no game session yet.
+ASK_ADVICE_SYSTEM = (
+    "You are a concise game-design and craft advisor for a local coding "
+    "agent that builds single-file HTML5 canvas games. Answer in plain "
+    "prose. Do not emit code fences for full games, and never emit "
+    "harness tags like <html_file>, <patch>, <assets>, <sounds>, "
+    "<videos>, <done/>, or <confirm_done/>. Prefer concrete, actionable "
+    "advice (genre fit, art vs code tradeoffs, what to ask the builder)."
+)
+
+
+def ask_advice_instruction(*, question: str, goal: str = "") -> str:
+    """Pre-game / freeform `/ask` — no HTML required.
+
+    Used when there is no active build yet (advice before /new) or the
+    session has no best.html. Still read-only: no code tags.
+    """
+    return (
+        "ADVISORY ASK TURN — answer the user's question. There may be no "
+        "game built yet. Do NOT change code and do NOT emit <patch>, "
+        "<html_file>, <assets>, <sounds>, <videos>, <done/>, or "
+        "<confirm_done/>. Plain prose only.\n\n"
+        f"OPTIONAL GOAL CONTEXT: {goal.strip() or '(none — freeform advice)'}\n\n"
+        f"USER QUESTION: {question.strip()}"
+    )
+
 
 def ask_instruction(
     *,

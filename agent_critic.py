@@ -1312,7 +1312,12 @@ class CriticMixin:
 
     async def run_ask_turn(self, question: str) -> AsyncIterator[AgentEvent]:
 
-        """One read-only Q&A turn for `/ask` — no harness, no code changes."""
+        """One read-only Q&A turn for `/ask` — no harness, no code changes.
+
+        Two modes (auto):
+          - Game: best.html exists → grounded in goal / report / HTML.
+          - Advice: no build yet → freeform design advice (pre-/new OK).
+        """
 
         question = (question or "").strip()
 
@@ -1322,63 +1327,48 @@ class CriticMixin:
 
             return
 
-        if not self.best_path.exists():
+        has_game = False
+        html = ""
+        if self.best_path.exists():
+            try:
+                html = self.best_path.read_text(encoding="utf-8")
+                # Scratch / empty stubs do not count as a built game.
+                has_game = bool(html) and (
+                    "<canvas" in html.lower() or "<script" in html.lower()
+                ) and len(html) >= 200
+            except Exception as e:
+                yield self._record(AgentEvent(
+                    "error", f"could not read {self.best_path.name}: {e}",
+                ))
+                return
 
-            yield self._record(AgentEvent(
-
-                "error",
-
-                "nothing built yet — run at least one iteration, then /ask",
-
-            ))
-
-            return
-
-
-
-        try:
-
-            html = self.best_path.read_text(encoding="utf-8")
-
-        except Exception as e:
-
-            yield self._record(AgentEvent(
-
-                "error", f"could not read {self.best_path.name}: {e}",
-
-            ))
-
-            return
-
-
-
-        report = self._last_test_report or {}
-
-        report_text = (
-
-            self._format_report_for_model(report) if report else ""
-
-        )
-
-        html_excerpt = self._ask_html_excerpt(html, report)
-
-        ask_prompt = self._p.ask_instruction(
-
-            question=question,
-
-            goal=self._goal or "",
-
-            criteria=self._criteria or "",
-
-            report_text=report_text,
-
-            html_excerpt=html_excerpt,
-
-            asset_names=sorted(self._session_assets.keys()),
-
-        )
-
-
+        if has_game:
+            report = self._last_test_report or {}
+            report_text = (
+                self._format_report_for_model(report) if report else ""
+            )
+            html_excerpt = self._ask_html_excerpt(html, report)
+            ask_prompt = self._p.ask_instruction(
+                question=question,
+                goal=self._goal or "",
+                criteria=self._criteria or "",
+                report_text=report_text,
+                html_excerpt=html_excerpt,
+                asset_names=sorted(self._session_assets.keys()),
+            )
+            ask_mode = "game"
+        else:
+            ask_fn = getattr(self._p, "ask_advice_instruction", None)
+            if callable(ask_fn):
+                ask_prompt = ask_fn(
+                    question=question, goal=self._goal or "",
+                )
+            else:
+                ask_prompt = (
+                    "ADVISORY ASK TURN — plain prose only, no code tags.\n\n"
+                    f"USER QUESTION: {question}"
+                )
+            ask_mode = "advice"
 
         snapshot_n = self._snapshot_n
 
@@ -1402,6 +1392,17 @@ class CriticMixin:
             system_msgs = [
                 m for m in saved_messages if m.get("role") == "system"
             ][:1]
+            if not system_msgs:
+                # Pre-game /ask: no session system prompt yet.
+                try:
+                    from prompts_v1 import ASK_ADVICE_SYSTEM
+                    sys_text = ASK_ADVICE_SYSTEM
+                except Exception:
+                    sys_text = (
+                        "You are a concise game-design advisor. "
+                        "Plain prose only; no harness code tags."
+                    )
+                system_msgs = [{"role": "system", "content": sys_text}]
             ask_messages = list(system_msgs) + [{
 
                 "role": "user",
@@ -1419,6 +1420,8 @@ class CriticMixin:
             self._trace({
 
                 "kind": "user_ask_context",
+
+                "ask_mode": ask_mode,
 
                 "history_chars_dropped": history_chars_dropped,
 
