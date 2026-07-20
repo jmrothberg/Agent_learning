@@ -79,7 +79,7 @@ Canonical recipe: **`eval/overnight.sh`** + **`eval/OPERATIONS.md` § HARD RULES
 | | Batch | Watcher |
 |---|--------|---------|
 | Where visible | **macOS Terminal.app** | **Cursor IDE terminals panel** (`monitor:` lines) |
-| How you start it | `bash eval/overnight.sh --prompts N,N,… --model <MLX> --vlm yes\|no` (`all` OS perms; script opens Terminal) | Cursor Shell, **`block_until_ms=0`**, command printed by `overnight.sh` |
+| How you start it | Double-click `Overnight.command` **or** `bash eval/overnight.sh` / CLI flags (`all` OS perms) | Cursor Shell, **`block_until_ms=0`**, command printed in Terminal |
 | Halting | **Never** (`--wait-for-monitor 0`) | Patch while games continue |
 | Forbidden | Batch in Cursor; asking human to paste; new `tune_runXX.sh` for a normal night | `nohup` / `disown` / invisible watcher |
 

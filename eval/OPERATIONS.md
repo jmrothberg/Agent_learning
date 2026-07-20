@@ -7,52 +7,47 @@ Human onboarding → `README.md`. Commands/env → `DEV.md`. Harness traps → `
 
 ## HARD RULES — overnight batch (never violate)
 
-**One script.** Human (or agent) picks **prompt numbers**, **MLX model**, **VLM yes/no**. Agent launches it; watcher is visible in Cursor.
+**One script / one double-click.** Prefer the Terminal Q&A (no command line). CLI flags still work for agents.
 
 ```bash
-# List library numbers:
-bash eval/overnight.sh --list
+# You (Finder): double-click Overnight.command
+# Or in Terminal.app:  bash eval/overnight.sh
+# Asks: prompt numbers → iterations → VLM yes/no → model → Start?
 
-# Start overnight (agent runs this with full OS perms — opens Terminal.app itself):
+# Agent / CLI:
 bash eval/overnight.sh --prompts 54,28,21 --model GLM-5.2-MLX-4bit --vlm no
-# same shorthand:
-bash eval/overnight.sh 54,28,21 GLM-5.2-MLX-4bit no
+bash eval/overnight.sh --list
 ```
 
-| Role | Where it must appear | How the agent starts it | Forbidden |
-|------|----------------------|-------------------------|-----------|
-| **Batch** | **macOS Terminal.app** (visible Chromium) | `bash eval/overnight.sh --prompts … --model … --vlm yes\|no` with **`all` OS perms** (script opens Terminal) | Cursor integrated terminal · asking human to paste · inventing `tune_runXX.sh` for a normal night |
-| **Watcher** | **Cursor IDE terminals panel** (`monitor:` lines) | Cursor **Shell**, `block_until_ms=0`, command printed by `overnight.sh` | `nohup` · `disown` · skipping the watcher |
+| Role | Where it must appear | How it starts | Forbidden |
+|------|----------------------|---------------|-----------|
+| **Batch** | **macOS Terminal.app** (visible Chromium) | Double-click `Overnight.command` **or** agent runs `overnight.sh` with `all` perms | Cursor integrated terminal · asking human to paste |
+| **Watcher** | **Cursor IDE terminals panel** (`monitor:` lines) | Cursor **Shell**, `block_until_ms=0`, command printed after batch starts | `nohup` · skipping the watcher |
 
-### When the user only changes which games / model / VLM
+### When the user starts an overnight
 
-Do **only** this (no new `tune_runXX.sh`, no hand-written goals file):
+1. They double-click **`Overnight.command`** (or run `bash eval/overnight.sh` in Terminal) and answer the questions.
+2. Agent starts the printed watcher in a Cursor Shell (`block_until_ms=0`).
+3. Patch harness from traces while it runs. **Never halt.**
 
-1. `bash eval/overnight.sh --list` if you need numbers.
-2. `bash eval/overnight.sh --prompts <nums> --model <name> --vlm yes|no` (full OS perms).
-3. Start the printed watcher in a Cursor Shell (`block_until_ms=0`).
-4. Patch harness from traces while it runs. **Never halt.**
-
-Optional knobs: `--run-id run_19` (else auto next `run_N`), `--max-iters 3`, `--retries 0`, `--dry-run`.
+If the agent must launch for them: `bash eval/overnight.sh --interactive` (opens Terminal Q&A) or CLI `--prompts/--model/--vlm`. Optional: `--run-id`, `--max-iters`, `--retries`, `--dry-run`.
 
 ### Launch recipe (agent checklist — every overnight)
 
 ```text
-[ ] 1. Batch (full OS perms) — overnight.sh opens Terminal.app:
-        bash eval/overnight.sh --prompts N,N,... --model GLM-5.2-MLX-4bit --vlm no
+[ ] 1. User: double-click Overnight.command  (or agent: bash eval/overnight.sh --interactive with full OS perms)
       Confirm overnight.log shows planning/coding, NOT chrome-mac-x64 / Playwright missing.
-[ ] 2. Watcher — Cursor Shell ONLY (block_until_ms=0); use the exact line overnight.sh printed:
+[ ] 2. Watcher — Cursor Shell ONLY (block_until_ms=0); use the line printed in Terminal:
         .venv/bin/python eval/tune_overnight_monitor.py --out-dir games/tune_serial10/run_N --jobs-total K --interval 30 --sync-loop
-      Confirm the Cursor terminal prints `monitor: 0/K …` within ~30s.
 [ ] 3. Tell the user both are up. Do not ask them to paste anything.
-[ ] 4. Improve while it runs (enrich_trace → failure_class → surgical fix → pytest). Never pause the batch.
+[ ] 4. Improve while it runs. Never pause the batch.
 ```
 
-Legacy per-run scripts (`eval/tune_runXX.sh`) still work via `eval/launch_overnight_batch.sh` but **new nights use `overnight.sh`**.
+Legacy `eval/tune_runXX.sh` still works but **new nights use `Overnight.command` / `overnight.sh`**.
 
 **Burned on run_18 (do not repeat):**
 - Batch inside Cursor → wrong Playwright arch (`chrome-mac-x64`) → instant `fresh_fail` ×11.
-- Asking the human to paste when `osascript` failed once → wrong; retry `overnight.sh` with `all` perms.
+- Asking the human to paste → wrong; use `Overnight.command` or `overnight.sh --interactive`.
 - Watcher via `nohup` → user cannot see it in Cursor; always use Cursor Shell `block_until_ms=0`.
 
 ---
@@ -61,7 +56,7 @@ Legacy per-run scripts (`eval/tune_runXX.sh`) still work via `eval/launch_overni
 
 | User intent | Command | Notes |
 |-------------|---------|-------|
-| **Overnight (default — any prompts)** | `bash eval/overnight.sh --prompts N,N,… --model GLM-5.2-MLX-4bit --vlm no` · Cursor Shell watcher | **Preferred.** Numbers from `overnight.sh --list`. Auto `run_N`. |
+| **Overnight (default)** | Double-click `Overnight.command` · Cursor Shell watcher | Interactive: prompts → iters → VLM → model. Or CLI `overnight.sh --prompts …`. |
 | **Run Mr. Do! + 10 graphics/3D overnight (run_18)** | legacy `eval/tune_run18.sh` or `overnight.sh --prompts …` | **GLM-5.2-MLX-4bit**, VLM off, `--max-iters 3`. Already launched. |
 | **Run 20 GRAPHICS-BEST games overnight (run_15 — tonight)** | Terminal: `bash eval/tune_run15.sh` · Cursor: watcher below | **GLM-5.2-MLX-4bit**, **`--no-vlm-critique`**, flat-out. High-confidence watcher fixes only. |
 | **Run 10 NEW games overnight (run_14)** | Terminal: `bash eval/tune_run14.sh` · Cursor: watcher below | Qwen3.6-27B-mxfp8, VLM critique ON (completed). |

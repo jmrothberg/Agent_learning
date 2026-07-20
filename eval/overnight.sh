@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 # eval/overnight.sh — ONE overnight entry point.
 #
-# Pick prompt_library numbers, an MLX model, and VLM yes/no. That is all.
+# Interactive (no command line — just run / double-click Overnight.command):
+#   bash eval/overnight.sh
+#   bash eval/overnight.sh --interactive
 #
+# CLI still works for agents:
 #   bash eval/overnight.sh --prompts 54,28,21 --model GLM-5.2-MLX-4bit --vlm no
-#   bash eval/overnight.sh 54,28,21 GLM-5.2-MLX-4bit no          # same (positional)
-#   bash eval/overnight.sh --list                                 # show # → name
+#   bash eval/overnight.sh 54,28,21 GLM-5.2-MLX-4bit no
+#   bash eval/overnight.sh --list
 #
-# From Cursor the agent runs this with full OS perms: it opens Terminal.app for
-# the batch and prints the exact Cursor Shell watcher command (block_until_ms=0).
-# Never ask the human to paste. Never run the batch inside Cursor's integrated
-# terminal. See eval/OPERATIONS.md § HARD RULES.
+# From Cursor with flags: opens Terminal.app for the batch and prints the watcher
+# line. Interactive mode asks questions inside Terminal, then starts.
+# See eval/OPERATIONS.md § HARD RULES.
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -18,23 +20,23 @@ cd "$REPO_ROOT"
 usage() {
   cat <<'EOF'
 Usage:
-  bash eval/overnight.sh --prompts N,N,... --model NAME_OR_PATH --vlm yes|no
-  bash eval/overnight.sh N,N,... NAME_OR_PATH yes|no
+  bash eval/overnight.sh                    # interactive Q&A in Terminal
+  open Overnight.command                    # same (double-click in Finder)
+  bash eval/overnight.sh --prompts N,N,... --model NAME --vlm yes|no
+  bash eval/overnight.sh N,N,... NAME yes|no
   bash eval/overnight.sh --list
 
 Options:
-  --prompts   Comma-separated prompt_library numbers and/or names (required)
-  --model     MLX folder name under ~/MLX_Models/ or an absolute path (required)
-  --vlm       yes|no  (VLM critique; only useful if a VLM is available)
-  --run-id    Optional out dir name (default: next run_N under games/tune_serial10/)
-  --max-iters Default 3
-  --retries   Default 0
-  --list      Print prompt_library numbers and exit
-  --dry-run   Resolve goals + print watcher cmd; do not open Terminal or start batch
-  -h|--help   This help
-
-Agent launch (Cursor, full OS perms) then Cursor Shell watcher:
-  bash eval/overnight.sh --prompts 54,28 --model GLM-5.2-MLX-4bit --vlm no
+  --prompts     Comma-separated prompt_library numbers and/or names
+  --model       MLX folder name under ~/MLX_Models/ or absolute path
+  --vlm         yes|no
+  --run-id      Optional out dir (default: next run_N)
+  --max-iters   Default 3
+  --retries     Default 0
+  --interactive Force the question UI
+  --list        Print prompt library and exit
+  --dry-run     Resolve goals + print watcher; do not start batch
+  -h|--help     This help
 EOF
 }
 
@@ -46,6 +48,12 @@ MAX_ITERS="${TUNE_MAX_ITERS:-3}"
 RETRIES="${TUNE_RETRIES:-0}"
 LIST_ONLY=0
 DRY_RUN=0
+INTERACTIVE=0
+
+# No args → interactive
+if [[ $# -eq 0 ]]; then
+  INTERACTIVE=1
+fi
 
 # Positional shorthand: overnight.sh 54,28 GLM-5.2-MLX-4bit no
 if [[ "${1:-}" != "" && "${1:-}" != -* ]]; then
@@ -65,24 +73,132 @@ while [[ $# -gt 0 ]]; do
     --retries) RETRIES="${2:-}"; shift 2 ;;
     --list) LIST_ONLY=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
+    --interactive|-i) INTERACTIVE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown arg: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
 
-if [[ "$LIST_ONLY" -eq 1 ]]; then
+print_library() {
   "$REPO_ROOT/.venv/bin/python" - <<'PY'
 from prompt_library import load_prompt_library
 for p in load_prompt_library():
     print(f"{p['n']:3d}  {p.get('name','')}  —  {p.get('title','')}")
 PY
+}
+
+if [[ "$LIST_ONLY" -eq 1 ]]; then
+  print_library
   exit 0
 fi
 
-if [[ -z "$PROMPTS" || -z "$MODEL" || -z "$VLM" ]]; then
-  echo "error: need --prompts, --model, and --vlm (yes|no)" >&2
-  usage >&2
-  exit 2
+# If interactive requested but we're not in Terminal.app yet, open Terminal and ask there.
+if [[ "$INTERACTIVE" -eq 1 && "${OVERNIGHT_CHILD:-}" != "1" && "${TERM_PROGRAM:-}" != "Apple_Terminal" ]]; then
+  CHILD_CMD="cd ${REPO_ROOT} && OVERNIGHT_CHILD=1 bash ${REPO_ROOT}/eval/overnight.sh --interactive"
+  osascript -e 'tell application "Terminal" to activate' \
+    -e "tell application \"Terminal\" to do script \"${CHILD_CMD}\""
+  echo "Opened Terminal.app — answer the questions there to start the overnight batch."
+  echo "After it starts, run the watcher in Cursor (the Terminal window will print the exact command)."
+  exit 0
+fi
+
+interactive_ask() {
+  echo ""
+  echo "════════════════════════════════════════════════════════"
+  echo "  Overnight batch — answer the questions, then it starts"
+  echo "════════════════════════════════════════════════════════"
+  echo ""
+  echo "Canned prompts (enter numbers separated by commas):"
+  echo ""
+  print_library
+  echo ""
+  while true; do
+    read -r -p "Prompt numbers (e.g. 54,28,21): " PROMPTS
+    PROMPTS="$(echo "$PROMPTS" | tr -d '[:space:]')"
+    if [[ -n "$PROMPTS" ]]; then break; fi
+    echo "  Need at least one number."
+  done
+
+  echo ""
+  read -r -p "Max iterations per game [${MAX_ITERS}]: " ans
+  if [[ -n "${ans:-}" ]]; then MAX_ITERS="$ans"; fi
+  if ! [[ "$MAX_ITERS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "error: max-iters must be a positive integer" >&2
+    exit 2
+  fi
+
+  echo ""
+  echo "VLM critique checks orientation/art with a vision model (slower; needs a VLM)."
+  while true; do
+    read -r -p "Enable VLM critique? [y/N]: " ans
+    ans="$(echo "${ans:-n}" | tr '[:upper:]' '[:lower:]')"
+    case "$ans" in
+      y|yes) VLM=yes; break ;;
+      n|no|"") VLM=no; break ;;
+      *) echo "  Enter y or n." ;;
+    esac
+  done
+
+  echo ""
+  echo "MLX models in ~/MLX_Models:"
+  local models=()
+  local i=1 default_i=1
+  shopt -s nullglob
+  local d
+  for d in "$HOME"/MLX_Models/*/; do
+    [[ -d "$d" ]] || continue
+    local name
+    name="$(basename "$d")"
+    models+=("$name")
+    echo "  $i) $name"
+    if [[ "$name" == "GLM-5.2-MLX-4bit" ]]; then default_i=$i; fi
+    i=$((i + 1))
+  done
+  shopt -u nullglob
+  if [[ ${#models[@]} -eq 0 ]]; then
+    echo "error: no models found in $HOME/MLX_Models" >&2
+    exit 2
+  fi
+  echo ""
+  while true; do
+    read -r -p "Model number [${default_i}]: " ans
+    ans="${ans:-$default_i}"
+    if [[ "$ans" =~ ^[0-9]+$ ]] && (( ans >= 1 && ans <= ${#models[@]} )); then
+      MODEL="${models[$((ans - 1))]}"
+      break
+    fi
+    echo "  Enter a number 1–${#models[@]}."
+  done
+
+  echo ""
+  echo "── Summary ──"
+  echo "  prompts:    $PROMPTS"
+  echo "  max-iters:  $MAX_ITERS"
+  echo "  vlm:        $VLM"
+  echo "  model:      $MODEL"
+  echo ""
+  read -r -p "Start overnight batch now? [Y/n]: " ans
+  ans="$(echo "${ans:-y}" | tr '[:upper:]' '[:lower:]')"
+  case "$ans" in
+    y|yes|"") ;;
+    *) echo "Cancelled."; exit 0 ;;
+  esac
+}
+
+if [[ "$INTERACTIVE" -eq 1 ]]; then
+  interactive_ask
+elif [[ -z "$PROMPTS" || -z "$MODEL" || -z "$VLM" ]]; then
+  echo "Missing --prompts / --model / --vlm. Starting interactive mode…"
+  echo ""
+  INTERACTIVE=1
+  if [[ "${OVERNIGHT_CHILD:-}" != "1" && "${TERM_PROGRAM:-}" != "Apple_Terminal" ]]; then
+    CHILD_CMD="cd ${REPO_ROOT} && OVERNIGHT_CHILD=1 bash ${REPO_ROOT}/eval/overnight.sh --interactive"
+    osascript -e 'tell application "Terminal" to activate' \
+      -e "tell application \"Terminal\" to do script \"${CHILD_CMD}\""
+    echo "Opened Terminal.app — answer the questions there."
+    exit 0
+  fi
+  interactive_ask
 fi
 
 case "$(echo "$VLM" | tr '[:upper:]' '[:lower:]')" in
@@ -169,12 +285,13 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   echo "goals: ${GOALS}"
   echo "model: ${MODEL_PATH}"
   echo "prompts: ${PROMPTS}"
+  echo "max-iters: ${MAX_ITERS}"
   echo ">>> CURSOR WATCHER: ${WATCH_CMD}"
   exit 0
 fi
 
-# From Cursor / non-Terminal: open real Terminal.app and exit (agent then starts watcher).
-if [[ "${OVERNIGHT_CHILD:-}" != "1" && "${TERM_PROGRAM:-}" != "Apple_Terminal" ]]; then
+# CLI path from Cursor (non-interactive, not already Terminal): open Terminal and exit.
+if [[ "$INTERACTIVE" -eq 0 && "${OVERNIGHT_CHILD:-}" != "1" && "${TERM_PROGRAM:-}" != "Apple_Terminal" ]]; then
   CHILD_CMD="cd ${REPO_ROOT} && OVERNIGHT_CHILD=1 bash ${REPO_ROOT}/eval/overnight.sh --prompts ${PROMPTS} --model ${MODEL_PATH} --vlm ${VLM} --run-id ${RUN_ID} --max-iters ${MAX_ITERS} --retries ${RETRIES}"
   osascript -e 'tell application "Terminal" to activate' \
     -e "tell application \"Terminal\" to do script \"${CHILD_CMD}\""
@@ -193,9 +310,13 @@ echo "prompts=${PROMPTS} jobs=${JOBS} model=${MODEL_PATH} vlm=${VLM}" | tee -a "
 echo "goals=${GOALS}" | tee -a "$LOG"
 echo "visible_chromium=yes (no --headless)" | tee -a "$LOG"
 echo "" | tee -a "$LOG"
-echo ">>> CURSOR WATCHER:" | tee -a "$LOG"
+echo ">>> CURSOR WATCHER (start this in Cursor so harness fixes run in parallel):" | tee -a "$LOG"
 echo ">>> ${WATCH_CMD}" | tee -a "$LOG"
 echo "" | tee -a "$LOG"
+echo ""
+echo "Batch starting. In Cursor, run the watcher:"
+echo "  ${WATCH_CMD}"
+echo ""
 
 ARGS=(--goals-file "$GOALS" --out-dir "$OUT" --model "$MODEL_PATH" --backend mlx --resume --max-iters "$MAX_ITERS" --retries "$RETRIES")
 if [[ "$VLM" == "no" ]]; then

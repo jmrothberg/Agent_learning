@@ -149,39 +149,27 @@ See **`DEV.md`** for env vars (`LLM_BACKEND`, `MLX_MODEL`, `CODING_BOX_NUM_CTX`,
 
 ## Overnight batches (10 games)
 
-**One sentence for another LLM:** run `bash eval/tune_run12.sh` in **Terminal.app**, start the Cursor watcher with `.venv/bin/python eval/tune_overnight_monitor.py --out-dir games/tune_serial10/run_12 --jobs-total 4 --interval 30 --sync-loop`, and edit `eval/tune_run12_goals.txt` (or copy `eval/tune_run11.sh`) to choose which games to test.
+**Easiest (no command line):** double-click **`Overnight.command`** in Finder. Terminal opens and asks:
+1. prompt numbers (from the canned list)
+2. max iterations
+3. VLM critique yes/no
+4. which MLX model
+then starts the batch. Cursor still needs the watcher (Terminal prints the exact command).
+
+**One sentence for another LLM:** user double-clicks `Overnight.command` (or `bash eval/overnight.sh`); agent starts `.venv/bin/python eval/tune_overnight_monitor.py --out-dir games/tune_serial10/run_N --jobs-total K --interval 30 --sync-loop` in a Cursor Shell (`block_until_ms=0`). CLI: `bash eval/overnight.sh --prompts 54,28 --model GLM-5.2-MLX-4bit --vlm no`.
 
 Two processes run in parallel — **both required**:
 
 | Where | Command | Purpose |
 |-------|---------|---------|
-| **Terminal.app** | `bash eval/tune_runNN.sh` | Builds games flat-out (visible Chromium, logs to `games/tune_serial10/run_NN/overnight.log`) |
-| **Cursor** | `.venv/bin/python eval/tune_overnight_monitor.py --out-dir games/tune_serial10/run_NN --jobs-total 10 --interval 30 --sync-loop` | Polls every 30s; triage finished traces and patch harness/memory while the batch keeps going |
+| **Terminal.app** | Double-click `Overnight.command` **or** `bash eval/overnight.sh` | Interactive Q&A then builds games (visible Chromium → `games/tune_serial10/run_N/`) |
+| **Cursor** | Watcher line printed by overnight (e.g. `tune_overnight_monitor.py … --jobs-total K`) | Polls every 30s; triage traces and patch harness/memory while the batch keeps going |
 
-Open the batch in Terminal from Cursor if needed:
-
-```bash
-osascript -e 'tell application "Terminal" to do script "cd /Users/jonathanrothberg/Agent_learning && bash eval/tune_run11.sh"'
-```
-
-### Pick which games to test
-
-1. **Goals file** — `eval/tune_runNN_goals.txt`  
-   - Lines starting with `#` are comments (slot notes, fix class under test).  
-   - Every other line is **one full game prompt** (single line).  
-   - Copy prompts from `memory/prompt_library.jsonl` or write your own.
-
-2. **Launch script** — copy an existing runner, e.g. `eval/tune_run11.sh` → `eval/tune_run12.sh`, and change:
-   - `OUT=.../games/tune_serial10/run_12`
-   - `GOALS=.../eval/tune_run12_goals.txt`
-
-3. **Output** lands in `games/tune_serial10/run_NN/` (`overnight.log`, `traces/`, `tune_checkpoint.json`, HTML per game).
-
-**Resume vs fresh:** scripts use `--resume` — completed labels in `tune_checkpoint.json` are skipped. Use a **new** `run_NN` directory for a clean 10-game batch.
+**Resume vs fresh:** auto next `run_N` each night (`--resume` skips completed labels). Use a new run id for a clean batch.
 
 **Watcher loop:** when `agent_monitor.json` shows `completed_count` advanced, timeline the newest trace (`scripts/enrich_trace.py <trace> --timeline`), classify `failure_class`, patch source — do **not** stop the Terminal batch.
 
-Full command tables and run history: **`eval/OPERATIONS.md`**.
+Full rules and legacy `tune_runNN.sh`: **`eval/OPERATIONS.md`**.
 
 ---
 

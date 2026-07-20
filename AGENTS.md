@@ -29,7 +29,7 @@ Improve the **verification loop and agent**, not generated `games/*.html`. Start
 3. **[`TEST.md`](TEST.md)** — pytest map; extend existing test file for your failure class
 4. Run **`.venv/bin/python -m pytest tests/ -q`** after every change (must stay green)
 
-**Overnight batches (mandatory shape):** one command — `bash eval/overnight.sh --prompts N,N,… --model <MLX> --vlm yes|no` (opens **Terminal.app**); then watcher in Cursor Shell with **`block_until_ms=0`**. **Never** batch-in-Cursor, **never** ask the human to paste, **never** `nohup` the watcher, **never** halt the batch, **never** invent a new `tune_runXX.sh` for a normal night. Full rules: **`eval/OPERATIONS.md` § HARD RULES** · **`HARNESS_TUNING.md` §3b**.
+**Overnight batches:** double-click **`Overnight.command`** (Terminal Q&A: prompts → iters → VLM → model) **or** agent runs `bash eval/overnight.sh …`; then watcher in Cursor Shell with **`block_until_ms=0`**. **Never** batch-in-Cursor, **never** ask the human to paste, **never** `nohup` the watcher, **never** halt the batch. Full rules: **`eval/OPERATIONS.md` § HARD RULES** · **`HARNESS_TUNING.md` §3b**.
 
 | Layer | Edit when… |
 |-------|------------|
