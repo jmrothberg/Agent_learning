@@ -111,11 +111,65 @@ class MemoryRetrievalMixin:
                 if s and s not in out:
                     out.append(s)
 
-        if getattr(self, "_session_assets", None):
-            _add("draw-generated-sprites-not-boxes", "image-load-race")
-
         recipe = getattr(self, "_active_visual_playtest_recipe_id", None) or ""
         g = (goal or "").lower()
+
+        # run_18: 3D/WebGL/voxel classes — do NOT pin drawImage bullets (Doom
+        # green iters retrieved only those while art was THREE.Texture).
+        webgl_or_voxel = (
+            recipe in (
+                "canvas-3d-first-person",
+                "canvas-voxel-sandbox",
+                "canvas-3d-racing",
+            )
+            or "three.js" in g
+            or "webgl" in g
+            or "voxel" in g
+            or "first-person" in g
+            or "first person" in g
+        )
+        # Wireframe / trench vector (2D canvas, not three.js).
+        wireframe_class = (
+            recipe == "canvas-vector-wireframe"
+            or "wireframe" in g
+            or "vector tank" in g
+            or "vector trench" in g
+            or ("trench" in g and "vector" in g)
+        )
+        voxel_class = (
+            recipe == "canvas-voxel-sandbox"
+            or "voxel" in g
+            or ("block" in g and "place" in g and ("break" in g or "mine" in g))
+        )
+        fps_class = (
+            recipe == "canvas-3d-first-person"
+            or ("three.js" in g and ("first-person" in g or "first person" in g or "fps" in g or "maze" in g))
+            or ("pointer-lock" in g or "pointer lock" in g)
+        )
+
+        if getattr(self, "_session_assets", None) and not (
+            webgl_or_voxel or fps_class or voxel_class or wireframe_class
+        ):
+            _add("draw-generated-sprites-not-boxes", "image-load-race")
+
+        if wireframe_class:
+            _add(
+                "projection-3d-wireframe",
+                "wireframe-fps-movement-vectors",
+                "vector-stroke-contrast",
+            )
+            if any(k in g for k in ("trench", "depth", "exhaust", "tie fighter")):
+                _add("trench-depth-vector-spawn")
+
+        if voxel_class:
+            _add("voxel-mesh-simple-or-groups")
+
+        if fps_class:
+            _add(
+                "fps-camera-and-movement-vectors",
+                "3d-navigation-modality-invariants",
+                "fps-minimap-radar-yaw-arrow",
+            )
 
         # Fixed-shooter / top-down shooter *class* (not named games).
         fixed_shooter_class = (
@@ -139,6 +193,10 @@ class MemoryRetrievalMixin:
         )
         if pinball_class:
             _add("launch-into-playfield")
+
+        # Climb-smash / character pose isolation (Rampage-class).
+        if any(k in g for k in ("climb", "skyscraper", "punch/smash", "cling")):
+            _add("character-sprite-isolation")
 
         return out or None
 
@@ -174,8 +232,26 @@ class MemoryRetrievalMixin:
         cnr = report.get("control_not_recovered")
         if cnr or any("CONTROL-NOT-RECOVERED" in w for w in soft):
             _add("stun-timer-before-early-return")
+        # run_18: new soft_warning → class craft pins
+        if any("EMPTY-3D-VIEW" in w for w in soft):
+            _add("voxel-mesh-simple-or-groups")
+        if any("DIM-VECTOR-SCENE" in w for w in soft):
+            _add("vector-stroke-contrast", "projection-3d-wireframe")
+        if any("OBSTACLE-DEPTH-STALL" in w for w in soft):
+            _add("trench-depth-vector-spawn")
+        if any("OPAQUE-SPRITE-SCENERY" in w for w in soft):
+            _add("character-sprite-isolation")
+        # run_18: frozen-canvas must MERGE raf pins with class ensure_ids —
+        # never replace wireframe/FPS/voxel craft (Battlezone trace).
         if report.get("frozen_canvas") or any("FROZEN-CANVAS" in w for w in soft):
             _add("raf-must-start", "ambient-idle-pixel-delta", "frame-trycatch")
+            goal = (
+                getattr(self, "_current_goal", None)
+                or getattr(self, "goal", None)
+                or ""
+            )
+            class_ids = self._first_build_playbook_ensure_ids(str(goal)) or []
+            _add(*class_ids)
 
         for probe_name, bids in self._REPORT_PROBE_PLAYBOOK_PINS.items():
             if probe_name in failing:

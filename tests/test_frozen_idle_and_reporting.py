@@ -127,10 +127,12 @@ def test_probe_pointer_board_click_patch():
 
 
 def test_webgl_blank_view_is_advisory_not_gating():
+    """readPixels blank stays advisory; screenshot EMPTY-3D-VIEW is the blocker."""
     src = inspect.getsource(tools.LiveBrowser.load_and_test)
     assert "_is_webgl_or_three_game" in src
     assert "ADVISORY (non-blocking): 3D/canvas view appears blank" in src
-
+    assert "webgl_empty_screenshot_soft_warning" in src
+    assert "EMPTY-3D-VIEW" in inspect.getsource(tools.webgl_empty_screenshot_soft_warning)
 
 def test_holochess_iter1_not_rejected_for_else_branches():
     """Run_05 holochess: 33 KB complete game must not fail materialize on

@@ -1957,6 +1957,12 @@ def generate_assets(
                     and ck_stats["alpha_pixel_ratio"] < 0.15
                 ):
                     stat["checkerboard_bg_suspect"] = True
+                # run_18: mid-alpha + will be rechecked by tools opaque-edge gate
+                if (
+                    not _is_full_bleed_asset_name(name)
+                    and 0.15 <= float(ck_stats["alpha_pixel_ratio"]) <= 0.85
+                ):
+                    stat["partial_alpha_character_candidate"] = True
                 keyed.save(cache_path, format="PNG")
             _link_or_copy(cache_path, target_path)
             out[name] = target_path.resolve()

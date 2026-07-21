@@ -43,7 +43,7 @@ If the agent must launch for them: `bash eval/overnight.sh --interactive` (opens
 [ ] 4. Improve while it runs. Never pause the batch.
 ```
 
-Legacy `eval/tune_runXX.sh` still works but **new nights use `Overnight.command` / `overnight.sh`**.
+Legacy per-run tune_runNN.sh scripts under eval/ (when present) still work but **new nights use `Overnight.command` / `overnight.sh`**.
 
 **Burned on run_18 (do not repeat):**
 - Batch inside Cursor → wrong Playwright arch (`chrome-mac-x64`) → instant `fresh_fail` ×11.

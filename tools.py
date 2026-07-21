@@ -710,6 +710,246 @@ def screenshot_delta(prev_png: bytes | None, curr_png: bytes | None) -> float | 
     return total / (len(pa) * 255.0)
 
 
+# run_18: screenshot empty/sky + dim-vector gates (NOT WebGL readPixels blank).
+_VIEW_SAMPLE = 64
+_SKY_DOMINANT_FRAC = 0.95
+_DIM_INK_FRAC_MAX = 0.05
+_DIM_INK_LUMA_MAX = 40.0
+
+
+def analyze_viewport_png(png_bytes: bytes | None) -> dict[str, Any] | None:
+    """Sample a Playwright viewport PNG for emptiness / dim-ink heuristics.
+
+    Returns dominant_frac, non_bg_frac, ink_mean_luma, blank — or None.
+    """
+    if not png_bytes:
+        return None
+    try:
+        from io import BytesIO
+
+        from PIL import Image
+    except Exception:
+        return None
+    try:
+        im = Image.open(BytesIO(png_bytes)).convert("RGB")
+        w, h = im.size
+        # Step-sample (not bilinear resize) so thin vector strokes survive.
+        step_x = max(1, w // _VIEW_SAMPLE)
+        step_y = max(1, h // _VIEW_SAMPLE)
+        pixels = [
+            im.getpixel((x, y))
+            for y in range(0, h, step_y)
+            for x in range(0, w, step_x)
+        ]
+    except Exception:
+        return None
+    n = len(pixels)
+    if n <= 0:
+        return None
+    buckets: dict[tuple[int, int, int], int] = {}
+    for r, g, b in pixels:
+        key = (r // 8, g // 8, b // 8)
+        buckets[key] = buckets.get(key, 0) + 1
+    top_n = max(buckets.values()) if buckets else 0
+    dominant_frac = top_n / n
+    bg_key = max(buckets, key=buckets.get) if buckets else (0, 0, 0)
+    ink = [p for p in pixels if (p[0] // 8, p[1] // 8, p[2] // 8) != bg_key]
+    non_bg_frac = len(ink) / n
+    if ink:
+        ink_mean_luma = sum(
+            0.299 * r + 0.587 * g + 0.114 * b for r, g, b in ink
+        ) / len(ink)
+    else:
+        ink_mean_luma = 0.0
+    blank = dominant_frac >= 0.999 or non_bg_frac < 0.001
+    return {
+        "n_pixels": n,
+        "dominant_frac": round(dominant_frac, 4),
+        "non_bg_frac": round(non_bg_frac, 4),
+        "ink_mean_luma": round(ink_mean_luma, 2),
+        "blank": blank,
+    }
+
+
+def webgl_empty_screenshot_soft_warning(
+    html_text: str, analysis: dict[str, Any] | None
+) -> str | None:
+    """Blocking soft_warning when WebGL/three.js screenshot is empty or sky-only."""
+    if not analysis or not _is_webgl_or_three_game(html_text or ""):
+        return None
+    if analysis.get("blank") or float(analysis.get("dominant_frac") or 0) >= _SKY_DOMINANT_FRAC:
+        return (
+            "EMPTY-3D-VIEW: Playwright screenshot is blank or a single dominant "
+            "hue (≥95% of samples) on a WebGL/three.js page — the 3D world is "
+            "not visible (typical: sky-only voxel mesh, missing geometry groups, "
+            "or camera/renderer not drawing). Fix terrain/walls meshing (prefer "
+            "single MeshLambertMaterial + BoxGeometry, or BufferGeometry.addGroup "
+            "per face for multi-material); do not ship a solid sky/clear color."
+        )
+    return None
+
+
+def dim_vector_ink_soft_warning(
+    html_text: str, analysis: dict[str, Any] | None
+) -> str | None:
+    """Blocking soft_warning when 2D canvas ink is sparse and near-black."""
+    if not analysis or _is_webgl_or_three_game(html_text or ""):
+        return None
+    non_bg = float(analysis.get("non_bg_frac") or 0)
+    luma = float(analysis.get("ink_mean_luma") or 0)
+    if non_bg <= _DIM_INK_FRAC_MAX and luma <= _DIM_INK_LUMA_MAX and non_bg > 0:
+        return (
+            "DIM-VECTOR-SCENE: canvas ink is very sparse and near-black "
+            f"(non-bg={non_bg:.1%}, ink_luma={luma:.0f}) — wireframe/vector "
+            "strokes are effectively invisible. Use bright glowing strokes "
+            "(e.g. #0f0 / #0ff on black), not near-black greens like #0a330a."
+        )
+    if analysis.get("blank") or (
+        non_bg < 0.002
+        and float(analysis.get("dominant_frac") or 0) >= 0.99
+        and luma <= _DIM_INK_LUMA_MAX
+    ):
+        return (
+            "DIM-VECTOR-SCENE: 2D canvas screenshot is effectively empty/black — "
+            "draw visible vector geometry with bright strokes on a dark field."
+        )
+    return None
+
+
+def obstacle_depth_stall_soft_warning(sample_a: Any, sample_b: Any) -> str | None:
+    """Warn when obstacles expose z but none move toward the camera."""
+    if not isinstance(sample_a, dict) or not isinstance(sample_b, dict):
+        return None
+    zs0 = [float(z) for z in (sample_a.get("zs") or []) if isinstance(z, (int, float))]
+    zs1 = [float(z) for z in (sample_b.get("zs") or []) if isinstance(z, (int, float))]
+    if len(zs0) < 2 or len(zs1) < 2:
+        return None
+    decreased = False
+    if min(zs1) < min(zs0) - 0.5:
+        decreased = True
+    if (sum(zs1) / len(zs1)) < (sum(zs0) / len(zs0)) - 1.0:
+        decreased = True
+    if decreased:
+        return None
+    dist0, dist1 = sample_a.get("distance"), sample_b.get("distance")
+    dist_advanced = (
+        isinstance(dist0, (int, float))
+        and isinstance(dist1, (int, float))
+        and float(dist1) > float(dist0) + 1.0
+    )
+    if dist_advanced or (min(zs0) > 50 and min(zs1) > 50):
+        return (
+            "OBSTACLE-DEPTH-STALL: state obstacles expose z but none moved "
+            "toward the camera across samples"
+            + (" while state.distance advanced" if dist_advanced else "")
+            + ". Each frame decrease obstacle z (or re-express depth) so "
+            "towers/fighters approach — see playbook trench-depth-vector-spawn."
+        )
+    return None
+
+
+_OBSTACLE_DEPTH_SAMPLE_JS = """(() => {
+  const s = window.state || window.gameState || window.g || {};
+  const lists = [s.obstacles, s.towers, s.hazards, s.trenchObstacles];
+  let arr = null;
+  for (const a of lists) {
+    if (Array.isArray(a) && a.length >= 2) { arr = a; break; }
+  }
+  if (!arr) return null;
+  const zs = [];
+  for (const o of arr) {
+    if (o && typeof o.z === 'number' && isFinite(o.z)) zs.push(o.z);
+  }
+  if (zs.length < 2) return null;
+  const d = (typeof s.distance === 'number' && isFinite(s.distance)) ? s.distance : null;
+  return {zs, distance: d};
+})()"""
+
+
+_CHARACTER_SPRITE_NAME_RE = re.compile(
+    r"(monster|hero|player|fighter|creep|digger|civilian|enemy|commando|"
+    r"character|actor|boss|npc|lizard|ape|plumber)",
+    re.I,
+)
+
+# Role skip for OPAQUE-SPRITE-SCENERY (not a genre special-case).
+# Title/cutscene plates are opaque scene art on purpose. Their stems often
+# also match _CHARACTER_SPRITE_NAME_RE (e.g. keyart_boss → "boss") and would
+# hard soft_warning a probe-green build. Same idea as bg_/sky below.
+# Trace: build-a-doom-game-first-person_20260721_132716 (harness_bug).
+_CUTSCENE_OR_KEYART_NAME_RE = re.compile(
+    r"(^|_)(keyart|title|intro|cutscene)(_|$)",
+    re.I,
+)
+
+
+def opaque_scenery_soft_warning_for_png(
+    name: str, png_path: Path
+) -> str | None:
+    """Warn when a *character* PNG keeps opaque non-white edge scenery.
+
+    Intended for in-world sprites (monster/hero/boss/…) with wall/building
+    baked into opaque edges. Skips background/sky and cutscene/title/keyart
+    plates — those roles are allowed to be opaque scenery. Still warns on
+    real character stems (monster_idle, boss_idle) even if a keyart_* file
+    exists beside them.
+    """
+    if not name or _CHARACTER_SPRITE_NAME_RE.search(name) is None:
+        return None
+    low = name.lower()
+    if low.startswith("bg_") or low.startswith("sky"):
+        return None
+    # Cutscene/title/keyart role skip — see _CUTSCENE_OR_KEYART_NAME_RE.
+    if _CUTSCENE_OR_KEYART_NAME_RE.search(low):
+        return None
+    try:
+        from PIL import Image
+    except Exception:
+        return None
+    try:
+        im = Image.open(png_path).convert("RGBA")
+    except Exception:
+        return None
+    w, h = im.size
+    if w < 8 or h < 8:
+        return None
+    px = im.load()
+    edge: list[tuple[int, int, int, int]] = []
+    for x in range(w):
+        edge.append(px[x, 0])
+        edge.append(px[x, h - 1])
+    for y in range(h):
+        edge.append(px[0, y])
+        edge.append(px[w - 1, y])
+    if not edge:
+        return None
+    opaque_scenery = 0
+    alpha_hi = 0
+    for r, g, b, a in edge:
+        if a < 16:
+            continue
+        alpha_hi += 1
+        luma = 0.299 * r + 0.587 * g + 0.114 * b
+        if a >= 200 and luma < 230:
+            opaque_scenery += 1
+    if alpha_hi < max(8, len(edge) // 20):
+        return None
+    frac = opaque_scenery / max(1, alpha_hi)
+    data = list(im.getdata())
+    alpha_px = sum(1 for *_, a in data if a < 16)
+    alpha_ratio = alpha_px / max(1, len(data))
+    if alpha_ratio < 0.15 or alpha_ratio > 0.92:
+        return None
+    if frac < 0.35:
+        return None
+    return (
+        f"OPAQUE-SPRITE-SCENERY [{name}]: character sprite keeps opaque "
+        f"non-white edges (scenery_frac={frac:.0%}, alpha_ratio={alpha_ratio:.0%}) "
+        "— regenerate with the figure ONLY on a fully transparent empty "
+        "background (no building/wall/window baked into the PNG)."
+    )
+
+
 def _canvas_hash_distance(a: str | None, b: str | None) -> float | None:
     """Fraction of cells that differ between two `_CANVAS_HASH_JS` strings.
 
@@ -4233,14 +4473,26 @@ class LiveBrowser:
 
         # ---- screenshot (always taken; saved if path given) ---------------
         screenshot_saved: str | None = None
+        screenshot_png_bytes: bytes | None = None
         if screenshot_path is not None:
             try:
                 p = Path(screenshot_path)
                 p.parent.mkdir(parents=True, exist_ok=True)
                 await self._page.screenshot(path=str(p), full_page=False)
                 screenshot_saved = str(p)
+                try:
+                    screenshot_png_bytes = p.read_bytes()
+                except OSError:
+                    screenshot_png_bytes = None
             except Exception:
                 screenshot_saved = None
+                screenshot_png_bytes = None
+        else:
+            # Still capture bytes for emptiness gates when caller skipped path.
+            try:
+                screenshot_png_bytes = await self._page.screenshot(full_page=False)
+            except Exception:
+                screenshot_png_bytes = None
 
         # ---- detect frozen canvas: 32x32 hash identical at t=half and t=full
         # The hash covers the whole playfield, so even one pixel of motion
@@ -4288,6 +4540,41 @@ class LiveBrowser:
         _cds = _canvas_default_size_warning(canvas_info, _src_html)
         if _cds:
             report["soft_warnings"].append(_cds)
+        # run_18: Playwright PNG emptiness / dim-vector (not readPixels blank).
+        try:
+            _view = analyze_viewport_png(screenshot_png_bytes)
+            report["viewport_png_analysis"] = _view
+            _empty3d = webgl_empty_screenshot_soft_warning(_src_html, _view)
+            if _empty3d:
+                report["soft_warnings"].append(_empty3d)
+            else:
+                _dimv = dim_vector_ink_soft_warning(_src_html, _view)
+                if _dimv:
+                    report["soft_warnings"].append(_dimv)
+        except Exception:
+            pass
+        # run_18: trench/depth obstacles whose z never approaches the camera.
+        try:
+            _obs_a = await self._safe_eval(_OBSTACLE_DEPTH_SAMPLE_JS)
+            if isinstance(_obs_a, dict):
+                await self._page.wait_for_timeout(450)
+                _obs_b = await self._safe_eval(_OBSTACLE_DEPTH_SAMPLE_JS)
+                _ostall = obstacle_depth_stall_soft_warning(_obs_a, _obs_b)
+                if _ostall:
+                    report["soft_warnings"].append(_ostall)
+        except Exception:
+            pass
+        # run_18: character PNGs with baked-in wall/scenery on opaque edges.
+        try:
+            _asset_dir = Path(path).parent
+            for _png in _asset_dir.glob("*_assets/*.png"):
+                _stem = _png.stem
+                _osc = opaque_scenery_soft_warning_for_png(_stem, _png)
+                if _osc:
+                    report["soft_warnings"].append(_osc)
+                    break  # one coach line is enough per iter
+        except Exception:
+            pass
         # JS-SOURCE-IN-BODY gate (trace 20260611_213744): visible body text
         # is JavaScript source → a script boundary broke. Gating — name the
         # cause instead of leaving the model to guess from blank-canvas
@@ -4543,6 +4830,9 @@ class LiveBrowser:
                 and canvas_info
                 and canvas_info.get("raf_ran")
                 and canvas_info.get("blank") is False
+                # run_18 Doom: drawImage audit false-positives all THREE.Texture
+                # wall/monster PNGs as undrawn while the screenshot shows them.
+                and not _is_webgl_or_three_game(_src_html)
             ):
                 preview = ", ".join(undrawn[:8])
                 if len(undrawn) > 8:
