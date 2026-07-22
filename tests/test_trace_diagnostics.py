@@ -298,6 +298,40 @@ def test_class_harness_fp_yields_to_memory_gap_on_undrawn_art():
     assert "undrawn" in reason
 
 
+def test_class_harness_bug_when_undrawn_demoted_to_advisory_only():
+    """run_19: advisory ASSETS_LOADED must NOT set undrawn_present.
+
+    Centipede/Prince/Rampage had demoted undrawn in `warnings` while OPAQUE
+    or STATIC-ACTION blocked — classifier wrongly said memory_gap.
+    """
+    cls, reason = _classify(
+        ok=False, materialized=True, art_intent=True, undrawn_present=False,
+        probes_all_passed=True, has_page_errors=False, has_soft_warnings=True,
+    )
+    assert cls == "harness_bug"
+    assert "all model probes passed" in reason
+
+
+def test_undrawn_present_counts_soft_warnings_only():
+    """Wiring: undrawn_present must not scan advisory report['warnings']."""
+    import re
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[1].joinpath("agent.py").read_text()
+    m = re.search(
+        r"_undrawn_present\s*=\s*any\(\s*"
+        r"isinstance\(w,\s*str\)\s+and\s+\"ASSETS_LOADED_BUT_UNDRAWN\"\s+in\s+w\s+"
+        r"for w in ([^)]+)\)",
+        src,
+        re.S,
+    )
+    assert m, "undrawn_present assignment not found"
+    iterable = m.group(1).strip()
+    assert iterable == "soft_warnings" or iterable.startswith("soft_warnings")
+    assert "report.get" not in iterable
+    assert 'warnings")' not in iterable and "warnings')" not in iterable
+
+
 def test_class_local_llm_limit_on_stall():
     cls, reason = _classify(materialized=False, stall_reason="repetition_loop")
     assert cls == "local_llm_limit"

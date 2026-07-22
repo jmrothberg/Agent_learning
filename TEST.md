@@ -32,7 +32,7 @@ Do **not** grep `inspect.getsource(agent)` or `inspect.getsource(GameAgent)` for
 | Subsystem | Primary tests | What must stay true |
 |-----------|---------------|---------------------|
 | **Patch engine** | `test_patches.py`, `test_materialize_msg.py`, `test_format_rejection.py` | 4-tier match, non-overlap, repair_reply |
-| **Verifier / gates** | `test_probe_gate.py`, `test_static_action_gate.py`, `test_microprobes.py`, `test_drawn_asset_detector.py`, `test_dead_animation_gate.py`, `test_run18_quality_gates.py` | `ok=False` on real behavioral gaps; cosmetic sprite warnings non-gating; **run_18**: screenshot EMPTY-3D-VIEW / DIM-VECTOR / OBSTACLE-DEPTH-STALL / OPAQUE-SPRITE-SCENERY (character stems only — skip `keyart`/`title`/`intro`/`cutscene` plates); WebGL skips drawImage undrawn nag |
+| **Verifier / gates** | `test_probe_gate.py`, `test_static_action_gate.py`, `test_microprobes.py`, `test_drawn_asset_detector.py`, `test_dead_animation_gate.py`, `test_run18_quality_gates.py` | `ok=False` on real behavioral gaps; cosmetic sprite warnings non-gating; **run_18**: screenshot EMPTY-3D-VIEW / DIM-VECTOR / OBSTACLE-DEPTH-STALL / OPAQUE-SPRITE-SCENERY (character stems only — skip `keyart`/`title`/`intro`/`cutscene` plates; scan **this HTML’s** `{stem}_assets/` only); WebGL skips drawImage undrawn nag; **run_19**: probe keyboard/pointer patches must stay a single expression for `_run_probe` |
 | **Feedback routing** | `test_feedback_router.py`, `test_blocker_first_feedback.py`, `test_scoped_feedback.py`, `test_golden_feedback_flows.py` | User feedback authoritative; art vs code vs scope locks |
 | **Agent loop** | `test_iter_loop_guards.py`, `test_stall_recovery.py`, `test_exit_decision_turn.py`, `test_final_iter_test_guarantee.py`, `test_plan_retry.py` | Phase A/B/C, stall recovery, exit honesty, final untested iter |
 | **Compaction / context** | `test_compaction.py`, `test_token_aware_compaction.py`, `test_num_ctx.py` | Token-aware pressure; playbook survives feedback |
@@ -56,6 +56,9 @@ These pin fixes from specific production traces. Prefer **extending** an existin
 | `test_phase2_fix_coaching.py` | Degenerate baseline rewrite trap |
 | `test_run06_draw_contract.py` | Serial tune run_06 drawImage contract (`memory_gap`) |
 | `test_run18_quality_gates.py` (`test_opaque_scenery_skips_keyart_even_when_boss_in_name`) | Doom `20260721_132716`: `OPAQUE-SPRITE-SCENERY` must not hard-fail `keyart_boss` / title plates (`harness_bug`) |
+| `test_probe_gate.py` (`test_patch_probe_*_single_expr_parses_in_run_probe_wrapper`) | run_19: dual-dispatch helpers must parse inside `_run_probe` wrapper (was SyntaxError → quarantine all effectful probes) |
+| `test_run18_quality_gates.py` (`test_opaque_scenery_scan_ignores_sibling_game_assets`) | run_19 Rampage: OPAQUE must not read sibling games’ `_assets/` in a shared overnight dir |
+| `test_trace_diagnostics.py` (`test_undrawn_present_counts_soft_warnings_only`, `test_class_harness_bug_when_undrawn_demoted_to_advisory_only`) | run_19: advisory undrawn must not force `memory_gap` over green-probe soft gates |
 
 **Stub regression banks** (no model; loaded by pytest): `eval/golden_feedback_flows.jsonl`, `eval/modality_scenarios.jsonl`, `eval/seed_edit_scenarios.jsonl`, `eval/failure_class_routing.jsonl`.
 

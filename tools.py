@@ -229,6 +229,29 @@ def _drawn_blob_contains_asset_fname(drawn_blob: str, fname: str) -> bool:
     ))
 
 
+def _wrap_probe_expr_for_eval(expr: str) -> str:
+    """Exact wrapper used by LiveBrowser._run_probe (keep in sync).
+
+    run_19: probe patches that prepend *statements* break this wrapper
+    (`Boolean(await (stmt; expr))` → SyntaxError → instant quarantine).
+    """
+    return (
+        "(async () => { try { return Boolean(await (" + str(expr or "") + ")); } "
+        "catch (e) { return { __probe_err: String(e && e.message || e) }; } })()"
+    )
+
+
+def _probe_expr_as_async_iife(helper_stmts: str, body_expr: str) -> str:
+    """Wrap helper statements + probe body into ONE expression for _run_probe."""
+    return (
+        "(async()=>{"
+        + helper_stmts
+        + "return await("
+        + body_expr
+        + ");})()"
+    )
+
+
 def _patch_probe_keyboard_dispatch(expr: str) -> str:
     """Dual-dispatch KeyboardEvents to window AND document.
 
@@ -236,6 +259,11 @@ def _patch_probe_keyboard_dispatch(expr: str) -> str:
     KeyboardEvent(...))` while the game listened on `window` — typed stayed
     '' for 3 iters with a correct key handler. Genre-free: fire both targets
     so either listener shape receives the event. Idempotent via helper guard.
+
+    run_19: helper must live inside a single async IIFE expression — prepending
+    `window.__harnessKeyDispatch=...;` as a bare statement made
+    `Boolean(await (helper; expr))` a SyntaxError and quarantined every
+    KeyboardEvent probe across the overnight batch.
     """
     e = str(expr or "")
     if "KeyboardEvent" not in e or "dispatchEvent" not in e:
@@ -255,7 +283,7 @@ def _patch_probe_keyboard_dispatch(expr: str) -> str:
     out = out.replace("window.dispatchEvent(", "window.__harnessKeyDispatch(")
     if out == e:
         return e
-    return helper + out
+    return _probe_expr_as_async_iife(helper, out)
 
 
 def _patch_probe_pointer_board_clicks(expr: str) -> str:
@@ -263,11 +291,16 @@ def _patch_probe_pointer_board_clicks(expr: str) -> str:
 
     Checkers trace run_05: games listen for pointerdown but model probes
     dispatch MouseEvent('mousedown') / click — selection never fires.
-    Prepends a harness helper; also fires pointerdown+pointerup before any
+    Injects a harness helper; also fires pointerdown+pointerup before any
     canvas mousedown/click dispatch when sx/sy (or clientX/Y) are in scope.
+
+    run_19: same single-expression rule as keyboard dual-dispatch — bare
+    helper prepends SyntaxError inside `_run_probe`'s Boolean(await(...)).
     """
     e = str(expr or "")
     if "dispatchEvent" not in e or "MouseEvent" not in e:
+        return e
+    if "__harnessPointerClick" in e:
         return e
     helper = (
         "window.__harnessPointerClick=(c,x,y)=>{if(!c)return;"
@@ -289,7 +322,7 @@ def _patch_probe_pointer_board_clicks(expr: str) -> str:
         "window.__harnessPointerClick(c,x,y);return{r,c:c0,x,y};}"
         "return null;};"
     )
-    out = helper + e
+    out = e
     # Prefer an occupied board cell when the probe hardcodes canvas fractions.
     if "getBoundingClientRect" in out:
         out = out.replace(
@@ -310,7 +343,7 @@ def _patch_probe_pointer_board_clicks(expr: str) -> str:
                 f"window.__harnessPointerClick(c,sx,sy);{token}",
                 1,
             )
-    return out
+    return _probe_expr_as_async_iife(helper, out)
 
 
 def _is_webgl_or_three_game(html_text: str) -> bool:
@@ -864,6 +897,28 @@ _OBSTACLE_DEPTH_SAMPLE_JS = """(() => {
   const d = (typeof s.distance === 'number' && isFinite(s.distance)) ? s.distance : null;
   return {zs, distance: d};
 })()"""
+
+
+def companion_assets_dir_for_html(html_path: Path | str) -> Path:
+    """Directory of PNGs belonging to this HTML only (`{stem}_assets`).
+
+    Serial overnight co-locates many games under one out-dir. Opaque-sprite
+    (and similar) scans must NOT glob sibling `*_assets/` folders.
+    """
+    p = Path(html_path)
+    return p.with_name(f"{p.stem}_assets")
+
+
+def opaque_scenery_soft_warning_for_html_assets(html_path: Path | str) -> str | None:
+    """First OPAQUE-SPRITE soft_warning for this HTML's companion assets only."""
+    asset_dir = companion_assets_dir_for_html(html_path)
+    if not asset_dir.is_dir():
+        return None
+    for png in asset_dir.glob("*.png"):
+        osc = opaque_scenery_soft_warning_for_png(png.stem, png)
+        if osc:
+            return osc
+    return None
 
 
 _CHARACTER_SPRITE_NAME_RE = re.compile(
@@ -4565,14 +4620,13 @@ class LiveBrowser:
         except Exception:
             pass
         # run_18: character PNGs with baked-in wall/scenery on opaque edges.
+        # run_19: scan ONLY this HTML's companion `{stem}_assets/` — parent
+        # `*_assets/*.png` glob contaminated Rampage with Prince's hero_pullup
+        # when all games share one overnight out-dir.
         try:
-            _asset_dir = Path(path).parent
-            for _png in _asset_dir.glob("*_assets/*.png"):
-                _stem = _png.stem
-                _osc = opaque_scenery_soft_warning_for_png(_stem, _png)
-                if _osc:
-                    report["soft_warnings"].append(_osc)
-                    break  # one coach line is enough per iter
+            _osc = opaque_scenery_soft_warning_for_html_assets(path)
+            if _osc:
+                report["soft_warnings"].append(_osc)
         except Exception:
             pass
         # JS-SOURCE-IN-BODY gate (trace 20260611_213744): visible body text
@@ -6152,10 +6206,7 @@ class LiveBrowser:
         # no-op'd. Await the expression before coercing: `await (value)`
         # is a no-op for sync boolean probes, so this is universal and
         # cannot change any existing sync probe's result.
-        wrapped = (
-            "(async () => { try { return Boolean(await (" + expr + ")); } "
-            "catch (e) { return { __probe_err: String(e && e.message || e) }; } })()"
-        )
+        wrapped = _wrap_probe_expr_for_eval(expr)
         try:
             res = await self._page.evaluate(wrapped)
             if isinstance(res, dict) and res.get("__probe_err"):

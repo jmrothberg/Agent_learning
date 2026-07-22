@@ -7799,12 +7799,12 @@ class GameAgent(
                     if _ledger_items else ""
                 )
                 # Phase 4 (4D.2): which LAYER needs the fix (advisory triage).
+                # run_19: only gating soft_warnings count — advisory `warnings`
+                # still listed demoted ASSETS_LOADED_BUT_UNDRAWN and forced
+                # memory_gap even when the real blocker was OPAQUE/STATIC-ACTION.
                 _undrawn_present = any(
                     isinstance(w, str) and "ASSETS_LOADED_BUT_UNDRAWN" in w
-                    for w in (
-                        list(report.get("warnings") or [])
-                        + list(soft_warnings)
-                    )
+                    for w in soft_warnings
                 )
                 _launch_pf_fail = any(
                     not p.get("ok")

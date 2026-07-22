@@ -202,6 +202,63 @@ def test_patch_probe_keyboard_dual_dispatches_document_and_window():
     assert _patch_probe_keyboard_dispatch(out) == out
 
 
+def _assert_probe_wrapper_parses(patched: str) -> None:
+    """run_19: patched expr must parse inside the exact _run_probe wrapper."""
+    import subprocess
+
+    from tools import _wrap_probe_expr_for_eval
+
+    wrapped = _wrap_probe_expr_for_eval(patched)
+    # new Function("return " + wrapped) matches browser/parse check shape.
+    script = (
+        "try { new Function('return ' + " + repr(wrapped) + "); "
+        "console.log('OK'); } catch (e) { console.error(e.message); process.exit(1); }"
+    )
+    r = subprocess.run(
+        ["node", "-e", script],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert r.returncode == 0, (
+        f"patched probe does not parse in _run_probe wrapper: "
+        f"{(r.stderr or r.stdout or '').strip()[:300]}"
+    )
+
+
+def test_patch_probe_keyboard_single_expr_parses_in_run_probe_wrapper():
+    """run_19: bare helper prepend → SyntaxError → every KeyboardEvent probe
+    quarantined. Patched output must be one expression for Boolean(await(...))."""
+    from tools import _patch_probe_keyboard_dispatch
+
+    expr = (
+        "(()=>{ "
+        "document.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true})); "
+        "return true; })()"
+    )
+    out = _patch_probe_keyboard_dispatch(expr)
+    assert out.startswith("(async()=>{")
+    assert "__harnessKeyDispatch" in out
+    _assert_probe_wrapper_parses(out)
+
+
+def test_patch_probe_pointer_single_expr_parses_in_run_probe_wrapper():
+    """run_19: same trap for __harnessPointerClick prepend (SimCity clicks)."""
+    from tools import _patch_probe_pointer_board_clicks
+
+    expr = (
+        "(()=>{ const c=document.querySelector('canvas'); "
+        "const sx=10,sy=10; "
+        "c.dispatchEvent(new MouseEvent('click',{clientX:sx,clientY:sy,bubbles:true})); "
+        "return true; })()"
+    )
+    out = _patch_probe_pointer_board_clicks(expr)
+    assert out.startswith("(async()=>{")
+    assert "__harnessPointerClick" in out
+    assert _patch_probe_pointer_board_clicks(out) == out  # idempotent
+    _assert_probe_wrapper_parses(out)
+
+
 def test_format_falsy_probe_diag_surfaces_helpers_and_live():
     msg = _format_falsy_probe_diag(
         {"state.mode": "market", "state.crane.x": 400},

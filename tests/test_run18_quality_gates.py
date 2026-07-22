@@ -167,6 +167,51 @@ def test_opaque_scenery_skips_keyart_even_when_boss_in_name(tmp_path: Path):
     assert tools.opaque_scenery_soft_warning_for_png("monster_idle", path)
 
 
+def test_opaque_scenery_scan_ignores_sibling_game_assets(tmp_path: Path):
+    """run_19 Rampage: shared out-dir glob hit Prince's hero_pullup.
+
+    Only `{html_stem}_assets/` may arm OPAQUE-SPRITE for that HTML.
+    """
+    # Opaque character PNG living under a *sibling* game's assets.
+    foreign = tmp_path / "07_prince_assets"
+    foreign.mkdir()
+    im = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    px = im.load()
+    for x in range(64):
+        for y in range(64):
+            if x < 4 or x >= 60 or y < 4 or y >= 60:
+                px[x, y] = (120, 120, 115, 255)
+            elif 16 <= x < 48 and 16 <= y < 48:
+                px[x, y] = (40, 180, 40, 255)
+    im.save(foreign / "hero_pullup.png")
+
+    own = tmp_path / "08_rampage_assets"
+    own.mkdir()
+    # Clean isolated monster (transparent edges) — must not warn.
+    clean = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    cpx = clean.load()
+    for x in range(20, 44):
+        for y in range(20, 44):
+            cpx[x, y] = (40, 180, 40, 255)
+    clean.save(own / "monster_idle.png")
+
+    html = tmp_path / "08_rampage.html"
+    html.write_text("<html></html>")
+    assert tools.companion_assets_dir_for_html(html) == own
+    assert tools.opaque_scenery_soft_warning_for_html_assets(html) is None
+    # Foreign sibling still triggers when scanned directly.
+    assert tools.opaque_scenery_soft_warning_for_png(
+        "hero_pullup", foreign / "hero_pullup.png"
+    )
+
+
+def test_opaque_scan_uses_companion_helper_in_load_and_test():
+    src = inspect.getsource(tools.LiveBrowser.load_and_test)
+    assert "opaque_scenery_soft_warning_for_html_assets" in src
+    assert '.glob("*_assets/' not in src
+    assert ".glob('*_assets/" not in src
+
+
 def test_webgl_undrawn_gate_skipped_in_source():
     src = inspect.getsource(tools.LiveBrowser.load_and_test)
     assert "not _is_webgl_or_three_game(_src_html)" in src
