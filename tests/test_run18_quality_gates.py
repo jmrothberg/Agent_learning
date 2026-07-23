@@ -270,6 +270,29 @@ def test_ensure_ids_fixed_shooter_keeps_drawimage(tmp_path: Path):
     assert "draw-generated-sprites-not-boxes" in ids
 
 
+def test_ensure_ids_vertical_ladder_pins_climb_craft(tmp_path: Path):
+    """DK-class goals must pin ladder climb craft, not Rampage pose isolation."""
+    ag = _agent(tmp_path)
+    ag._session_assets = [{"name": "hero"}]
+    ag._active_visual_playtest_recipe_id = "canvas-vertical-platformer"
+    ids = ag._first_build_playbook_ensure_ids(
+        "Build a game where a hero climbs ladders between girders"
+    )
+    assert ids
+    assert "ladder-climb-detect-and-top-exit" in ids
+    assert "character-sprite-isolation" not in ids
+
+
+def test_ensure_ids_bare_climb_does_not_pin_rampage(tmp_path: Path):
+    ag = _agent(tmp_path)
+    ag._session_assets = None
+    ag._active_visual_playtest_recipe_id = None
+    ids = ag._first_build_playbook_ensure_ids(
+        "Build a side-scroll platformer where the hero climbs ropes"
+    )
+    assert not ids or "character-sprite-isolation" not in ids
+
+
 def test_frozen_merge_keeps_class_pins(tmp_path: Path):
     ag = _agent(tmp_path)
     ag._current_goal = "Build a 2D wireframe vector tank game with radar"
@@ -314,6 +337,7 @@ def test_playbook_new_ids_exist():
     assert "vector-stroke-contrast" in ids
     assert "voxel-mesh-simple-or-groups" in ids
     assert "character-sprite-isolation" in ids
+    assert "ladder-climb-detect-and-top-exit" in ids
 
 
 def test_prompt_library_run18_wording():

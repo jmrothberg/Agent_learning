@@ -275,6 +275,7 @@ Per-run scores live in **`eval/OPERATIONS.md`** (run_06 snapshot). Mid-batch har
 | Parallel roster: `f2_walk` shows `f1` art (MK, Street Fighter, chess colors) | Harness: `sprite()` token tie-break + flush `_spriteCache` on `_assetsReady`; memory: `versus-fighter-sprite-prefix` | `assets.py`, `tests/test_assets.py`, `memory/playbook.jsonl` |
 | Game looks perfect to human but trace shows 2 `soft_warnings` | Often probe timing or partial patch — not always a visual bug; read `iter_summary.soft_warnings` | trace + `HARNESS_DEBUG.md` § “looks fine” |
 | Cascade hazards roll uphill / skip mid-span tumble | INITIAL vx from slopeDir + ladder gaps (`ramp-hazard-roll-then-tumble`) | `memory/playbook.jsonl`, outline trap |
+| Ladder mid-climb stuck then thrash-revert (DK 20260722) | Full-span `findLadderAt` + top-exit; pin ladder craft for vertical-platformer; drop bare `"climb"`→Rampage pin | `memory/playbook.jsonl`, `outline-vertical-platformer`, `agent_memory.py` |
 | Maze FPS missing overview map | Short goal HUD line + `3d-navigation-modality-invariants` + outline trap | `prompt_library.jsonl` (doom), playbook, outline |
 | Attack limb points away from opponent | Code EXTRA flip — no VLM (`attack-sprite-wrong-direction-flip-in-code`) | `memory/playbook.jsonl` |
 | Versus P2 incomplete pose roster → MISSING boxes | Same pose suffixes both prefixes (`versus-fighter-sprite-prefix`) | `memory/playbook.jsonl` |

@@ -195,8 +195,32 @@ class MemoryRetrievalMixin:
             _add("launch-into-playfield")
 
         # Climb-smash / character pose isolation (Rampage-class).
-        if any(k in g for k in ("climb", "skyscraper", "punch/smash", "cling")):
+        # Do NOT match bare "climb" — vertical-platformer goals say "climbs ladders"
+        # and that wrongly crowded out ladder craft (DK ladder thrash 20260722).
+        if any(k in g for k in ("skyscraper", "punch/smash", "cling", "rampage")):
             _add("character-sprite-isolation")
+
+        # Vertical platformer / ladders class — pin climb detect+top-exit (swap, not bloat).
+        vertical_ladder_class = (
+            recipe == "canvas-vertical-platformer"
+            or (
+                any(k in g for k in ("ladder", "ladders"))
+                and any(
+                    k in g
+                    for k in (
+                        "girder",
+                        "girders",
+                        "vertical",
+                        "platform",
+                        "platforms",
+                        "floor",
+                        "floors",
+                    )
+                )
+            )
+        )
+        if vertical_ladder_class:
+            _add("ladder-climb-detect-and-top-exit", "ladder-snap-to-platform-y")
 
         return out or None
 
