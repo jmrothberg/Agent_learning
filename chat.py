@@ -1089,6 +1089,11 @@ class CodingBoxApp(App):
         # turn (planning/build) gets the reference image.
         self._staged_ref_image_bytes: bytes | None = None
         self._staged_ref_image_name: str | None = None
+        # /assets stages PNG/JPEG/WebP files (or a folder of them) for the
+        # NEXT /new. Unlike /ref (vision hint), these become real session
+        # sprites copied into <session>_assets/ so the coder wires them —
+        # no VLM required. Sticky until bare /assets or /reset.
+        self._staged_asset_paths: list[Path] = []
         # Stop-Losing-To-OneShot Track A — restart-N. The threshold gate
         # makes 2 essentially free for simple games (they pass iter 1
         # with score > 60 and never trigger a restart) while giving hard
@@ -2018,6 +2023,17 @@ class CodingBoxApp(App):
             else:
                 hint = " [dim](queued for next user turn)[/dim]"
             out += f"[b]Ref image:[/b] [green]queued[/green]{hint}\n"
+        if self._staged_asset_paths:
+            names = ", ".join(p.stem for p in self._staged_asset_paths[:6])
+            more = (
+                f" +{len(self._staged_asset_paths) - 6}"
+                if len(self._staged_asset_paths) > 6
+                else ""
+            )
+            out += (
+                f"[b]Staged /assets:[/b] [cyan]{len(self._staged_asset_paths)}[/cyan] "
+                f"[dim]({names}{more}) → next /new[/dim]\n"
+            )
         # Context window row: hide entirely when neither max nor a
         # running agent is available (avoids a sad-looking "0 / 0" on
         # backends that don't expose context_length).
@@ -3267,6 +3283,8 @@ class CodingBoxApp(App):
                 self._cmd_set_ctx(arg)
             elif cmd == "seed":
                 self._cmd_set_seed(arg)
+            elif cmd in ("assets", "asset"):
+                self._cmd_stage_assets(arg)
             elif cmd == "reset":
                 await self._cmd_reset()
             elif cmd == "status":
@@ -3339,6 +3357,8 @@ class CodingBoxApp(App):
             "  [b]brand-new unrelated game[/b]      [b]/new <goal>[/b]",
             "  [b]start from an existing .html[/b]  [b]/seed <path>[/b]  then type your request (or [b]/new <goal>[/b] for a new game)",
             "                                  [dim]existing sprites/sounds are reused — the planner won't regenerate them[/dim]",
+            "  [b]new game + your PNGs[/b]          [b]/assets <png-or-folder>[/b] then [b]/new <goal>[/b]",
+            "                                  [dim]copies into session _assets/; tell the goal to use those names — see /help assets[/dim]",
             "  [b]paste in input[/b]                [b]Ctrl+V[/b] or terminal Edit→Paste ([b]Cmd+V[/b] on macOS)",
             "",
             "[bold cyan]── redraw ONE asset (no code change) ──[/bold cyan]",
@@ -3415,6 +3435,8 @@ class CodingBoxApp(App):
             "",
             "[bold cyan]── run knobs (all sticky across /new) ──[/bold cyan]",
             "  [b]/seed <path>[/b]               stage a baseline .html · bare = clear",
+            "  [b]/assets <png|folder>[/b]      stage your PNGs for next /new (real sprites, not VLM) · bare = clear",
+            "                                  [dim]alias /asset — see /help assets for /seed vs /ref vs /assets[/dim]",
             "  [b]/iters <N>[/b]                 max iterations per session",
             "  [b]/ctx [N|100k|131k|262k|full][/b]   Ollama context window · default 100k · bare = show current",
             "                                  [dim]raises KV VRAM; Ollama reloads on next request — preload with[/dim]",
@@ -3460,11 +3482,10 @@ class CodingBoxApp(App):
             "                                  [dim]WAIT OFF: auto-queues guidance into the next coding turn[/dim]",
             "  [b]/ask <question>[/b]            talk to the model anytime — pre-game advice or current game Q&A",
             "                                  [dim]e.g. /ask which 80s game benefits most from rich art?[/dim]",
-            "  [b]/ref <path>[/b]               attach a reference image (PNG/JPEG/WebP) to the NEXT user turn",
-            "                                  [dim]works before /new too; drag a file from Finder into the terminal to fill the path[/dim]",
-            "                                  [dim]VLM-only — say 'make the game look like this' on the next line[/dim]",
+            "  [b]/ref <path>[/b]               attach a reference image to the NEXT user turn (VLM glance only)",
+            "                                  [dim]not for copying sprites — use /assets or /seed · /help assets[/dim]",
             "  [b]/help[/b]                     command list [dim](aliases /h /?)[/dim]",
-            "  [b]/help <topic>[/b]             detail: [b]feedback[/b], [b]vlm-critique[/b], [b]rawfeedback[/b], [b]ask[/b]",
+            "  [b]/help <topic>[/b]             detail: [b]assets[/b], [b]feedback[/b], [b]vlm-critique[/b], [b]rawfeedback[/b], [b]ask[/b]",
             "",
             "[bold cyan]── visual playtest recipes (auto-applied) ──[/bold cyan]",
             "  Hand-curated MECHANISM-keyed checklists the VLM critic uses. The matcher",
@@ -5399,6 +5420,99 @@ class CodingBoxApp(App):
             f"[dim]({size:,} bytes) — type your request, or /new <goal>[/dim]"
         )
 
+    _STAGED_ASSET_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
+
+    def _cmd_stage_assets(self, arg: str) -> None:
+        """/assets <png|folder> — stage real sprites for the next /new.
+
+        Unlike /ref (one VLM glance), these files are copied into the
+        session ``*_assets/`` folder and registered in ``_session_assets``
+        so the text coder can wire ``sprite('name')`` — no vision needed.
+        Bare ``/assets`` clears the staged list.
+        """
+        if not arg:
+            if not self._staged_asset_paths:
+                self._log_info(
+                    "no staged assets (usage: /assets <file.png|folder>)"
+                )
+            else:
+                n = len(self._staged_asset_paths)
+                self._log_info(f"cleared {n} staged asset file(s)")
+                self._staged_asset_paths = []
+            return
+        candidate = Path(arg.strip().strip("'\"")).expanduser()
+        if not candidate.exists():
+            self._log_error(f"/assets: path not found: {candidate}")
+            return
+        found: list[Path] = []
+        if candidate.is_file():
+            if candidate.suffix.lower() not in self._STAGED_ASSET_SUFFIXES:
+                self._log_error(
+                    f"/assets: expected PNG/JPEG/WebP, got {candidate.suffix!r}"
+                )
+                return
+            found = [candidate.resolve()]
+        elif candidate.is_dir():
+            for p in sorted(candidate.iterdir()):
+                if p.is_file() and p.suffix.lower() in self._STAGED_ASSET_SUFFIXES:
+                    found.append(p.resolve())
+            if not found:
+                self._log_error(
+                    f"/assets: no PNG/JPEG/WebP files in {candidate}"
+                )
+                return
+        else:
+            self._log_error(f"/assets: not a file or folder: {candidate}")
+            return
+        # Merge by stem (later path wins) so re-running /assets is additive.
+        by_stem = {p.stem: p for p in self._staged_asset_paths}
+        for p in found:
+            by_stem[p.stem] = p
+        self._staged_asset_paths = sorted(by_stem.values(), key=lambda p: p.stem)
+        names = ", ".join(p.stem for p in self._staged_asset_paths[:8])
+        more = (
+            f" (+{len(self._staged_asset_paths) - 8} more)"
+            if len(self._staged_asset_paths) > 8
+            else ""
+        )
+        self._log_info(
+            f"staged [b]{len(self._staged_asset_paths)}[/b] asset(s) for next "
+            f"/new: {names}{more} "
+            f"[dim]— name them in your goal (e.g. player uses hero.png)[/dim]"
+        )
+
+    def _apply_staged_assets_to_session(self, agent, assets_dir: Path) -> None:
+        """Copy staged PNGs into the session assets dir and register them.
+
+        Called once at /new after GameAgent exists. Sticky staging is kept
+        (like /seed) so the same folder can seed multiple games until
+        bare /assets clears it.
+        """
+        if not self._staged_asset_paths:
+            return
+        assets_dir.mkdir(parents=True, exist_ok=True)
+        added: list[str] = []
+        for src in self._staged_asset_paths:
+            if not src.is_file():
+                self._log_error(f"/assets: missing staged file, skipped: {src}")
+                continue
+            dest = assets_dir / src.name
+            try:
+                shutil.copy2(src, dest)
+            except OSError as e:
+                self._log_error(f"/assets: could not copy {src.name}: {e}")
+                continue
+            agent._session_assets[src.stem] = dest
+            added.append(src.stem)
+        if added:
+            self._log_info(
+                f"/assets: copied {len(added)} sprite(s) into "
+                f"[b]{_esc(assets_dir.name)}[/b] "
+                f"({', '.join(added[:8])}"
+                f"{'…' if len(added) > 8 else ''}) — "
+                f"first build will list PATHS; mention those names in your goal"
+            )
+
     def _clear_staged_state(self) -> list[str]:
         """Wipe game staging for bare /new; model/backend slots stay sticky."""
         had_seed = self._next_seed
@@ -5407,10 +5521,12 @@ class CodingBoxApp(App):
         had_restarts = self._restart_n
         had_class = self._model_class
         had_ref = self._staged_ref_image_name
+        had_assets = list(self._staged_asset_paths)
         had_allroles = self._all_roles_enabled
         self._next_seed = None
         self._staged_ref_image_bytes = None
         self._staged_ref_image_name = None
+        self._staged_asset_paths = []
         self._max_iters = 6
         self._num_ctx = default_num_ctx()
         self._ctx_max = self._num_ctx
@@ -5443,6 +5559,8 @@ class CodingBoxApp(App):
             bits.append(f"model-class={had_class}→auto")
         if had_ref:
             bits.append(f"ref={had_ref}→cleared")
+        if had_assets:
+            bits.append(f"assets={len(had_assets)}→cleared")
         if had_allroles:
             bits.append("allroles=on→off")
         return bits
@@ -5566,6 +5684,11 @@ class CodingBoxApp(App):
             f"  seed in use:          {_esc(str(self._session_seed) if self._session_seed else '—')}",
             f"  staged seed:          {_esc(str(self._next_seed) if self._next_seed else '—')}",
             f"  staged /ref image:    {_esc(self._staged_ref_image_name or '—')}",
+            (
+                f"  staged /assets:       {len(self._staged_asset_paths)} file(s)"
+                if self._staged_asset_paths
+                else "  staged /assets:       —"
+            ),
             f"  session done:         {self._session_done}",
             f"  game file:            {self._out_path or '—'}",
             f"  log file:             {self._log_file_path or '—'}",
@@ -6553,6 +6676,9 @@ class CodingBoxApp(App):
         self._trace_path = self.agent.trace_path
         self._assets_dir = self._out_path.parent / f"{basename}_assets"
         self._sounds_dir = self._out_path.parent / f"{basename}_sounds"
+        # /assets staging: copy PNGs into this session's folder BEFORE Phase A
+        # so first-build PATHS + structured summary already list them.
+        self._apply_staged_assets_to_session(self.agent, self._assets_dir)
         # Reset rolling status state for the new session — sticky values
         # from a prior session would mislead the user about THIS one.
         self._reset_status_state()

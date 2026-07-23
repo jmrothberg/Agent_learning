@@ -352,12 +352,54 @@ checked model-free by `eval/eval_prompts_plan.py --coverage`.
 
 ## TUI & CLI reference
 
-**Key TUI slash commands** (`/help` lists all): `/allroles` (architect-split + visual critic on one
+**Key TUI slash commands** (`/help` lists all; `/help assets` for art): `/allroles` (architect-split + visual critic on one
 loaded LLM) · `/critique [on|off]` (no-vision review, default on; aliases `/playtest`, `/feedback`) ·
 `/vlm-critique [on|off]` (vision review, default off; alias `/judge`) · `/wait [on|off]`
 (step-mode pause per iter) · `/games [N]` (load a curated prompt) · `/ctx N` (context window) ·
-`/ref <path>` (attach a reference image for a VLM turn) · `/check [with <model>]` (explicit cloud or
+`/assets <png|folder>` (stage your sprites for next `/new`) · `/seed <game.html>` (continue an existing game) ·
+`/ref <path>` (VLM glance only — not for copying sprites) · `/check [with <model>]` (explicit cloud or
 local VLM screenshot judge — never auto-called) · `/goodgame` (copy the trio into tracked `goodgame/`).
+
+### Use your own art (example: Space Invaders)
+
+You already have PNGs. Do **not** put them in `/ref` (that only shows a picture to a VLM once). Stage them with **`/assets`**, then name the **file stems** in the goal so the coder wires `sprite('…')`.
+
+Suppose your art lives here:
+
+```text
+~/Art/space_invaders/
+  player.png
+  invader_a.png
+  invader_b.png
+  bunker.png
+  bullet.png
+```
+
+In `chat.py`:
+
+```text
+/assets ~/Art/space_invaders
+/new Build Space Invaders. Use my staged sprites by name:
+player is the ship, invader_a and invader_b are the aliens (alternate frames),
+bunker is the shield, bullet is the shot. Do not invent new sprite names for those —
+load them with sprite('player'), sprite('invader_a'), etc.
+```
+
+What happens:
+
+1. `/assets` remembers those PNGs (sticky until bare `/assets` or `/reset`).
+2. `/new` creates `games/<session>_assets/` and **copies** the files in.
+3. First build gets a PATHS block listing `player`, `invader_a`, … — the model should draw those keys, not regenerate them.
+
+One file works the same: `/assets ~/Art/space_invaders/player.png`.
+
+| Want… | Use |
+|-------|-----|
+| Brand-new game + your PNGs | `/assets` then `/new` with stems in the goal |
+| Continue an old HTML that already has `*_assets/` | `/seed games/foo.html` |
+| Mood/palette glance for a vision model | `/ref` (not for copying sprites) |
+
+In-TUI detail: **`/help assets`**.
 
 **`coder.py` flags:** `--backend {auto,ollama,mlx,mlx-server}` · `--model` · `--max-iters` · `--best-of-n` ·
 `--num-ctx` · `--headless` · `--step` · `--restart-n` · `--playbook` (retrieval; off by default on
