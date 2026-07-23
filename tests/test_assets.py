@@ -872,3 +872,55 @@ def test_diffuser_display_label_follows_backbone(monkeypatch) -> None:
     assert "Z-Image" not in assets.diffuser_display_label(None)
     monkeypatch.setenv("DIFFUSER_TXT2IMG_BACKBONE", "")
     assert assets.diffuser_display_label(None) == "Z-Image-Turbo"
+
+
+def test_pretrained_local_kwargs_for_local_dir(tmp_path: Path) -> None:
+    """Local dirs must force local_files_only so hub HEAD is skipped."""
+    from assets import _pretrained_local_kwargs
+
+    local = tmp_path / "Z-Image-Turbo"
+    local.mkdir()
+    assert _pretrained_local_kwargs(str(local)) == {"local_files_only": True}
+    assert _pretrained_local_kwargs("Tongyi-MAI/Z-Image-Turbo") == {}
+
+
+def test_resolve_hf_cache_snapshot_picks_newest(tmp_path: Path, monkeypatch) -> None:
+    """Generic HF-cache scan used by sounds + shared helpers."""
+    from assets import _resolve_hf_cache_snapshot
+
+    fake_home = tmp_path / "home"
+    root = (
+        fake_home
+        / ".cache"
+        / "huggingface"
+        / "hub"
+        / "models--stabilityai--stable-audio-open-1.0"
+        / "snapshots"
+    )
+    old = root / "aaaa"
+    new = root / "bbbb"
+    old.mkdir(parents=True)
+    new.mkdir(parents=True)
+    (old / "model_index.json").write_text("{}", encoding="utf-8")
+    (new / "model_index.json").write_text("{}", encoding="utf-8")
+    # Newer mtime wins.
+    import os
+    os.utime(old, (1_000_000, 1_000_000))
+    os.utime(new, (2_000_000, 2_000_000))
+    monkeypatch.setattr(os.path, "expanduser", lambda *_: str(fake_home))
+    assert _resolve_hf_cache_snapshot("stabilityai/stable-audio-open-1.0") == str(new)
+
+
+def test_construct_generator_skips_hub_zimage_when_flux2_local(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """macOS never constructs Z-Image — even if a local Z-Image dir exists."""
+    zimg = tmp_path / "Z-Image-Turbo"
+    zimg.mkdir()
+    monkeypatch.setattr(assets, "_resolve_zimage_path", lambda: str(zimg))
+    monkeypatch.setattr(assets, "_resolve_flux2_path", lambda: None)
+    monkeypatch.setattr(assets, "_resolve_mflux_generate_flux2", lambda: None)
+    monkeypatch.setattr(assets.sys, "platform", "darwin")
+    monkeypatch.delenv("DIFFUSER_TXT2IMG_BACKBONE", raising=False)
+    assert assets._construct_generator() is None
+

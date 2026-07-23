@@ -217,7 +217,7 @@ Files that carry the weight:
 |---|---|
 | `tools.py` | **The verifier.** `LiveBrowser.load_and_test` (Chromium), `_input_smoke_test` (presses keys, captures per-action frames, runs the gates), micro-probes. Highest-leverage file. |
 | `agent.py` | Orchestrator (`GameAgent.run`); phase methods + mixin map → **`AGENTS.md` §1b** |
-| `assets.py` / `sounds.py` | Sprites: **FLUX2-klein (mflux CLI)** on macOS when local weights + binary exist, else Z-Image-Turbo (diffusers). Sounds: Stable Audio Open (always preloaded before browser). `render_asset_paths_block` injects the `sprite()` loader. |
+| `assets.py` / `sounds.py` | Sprites: **FLUX2-klein (mflux CLI)** on macOS (never Z-Image); **Z-Image-Turbo** (diffusers) on Linux. Sounds: Stable Audio Open (always preloaded before browser). `render_asset_paths_block` injects the `sprite()` loader. |
 | `videos.py` | `<videos>` cutscene clips via Wan2.2-TI2V-5B in a **subprocess** (`scripts/generate_video.py` — mlx-gen on Mac, diffusers on Linux). `render_video_paths_block` injects the `<video>`-overlay loader. |
 | `backend.py` | MLX (in-process `mlx_lm`/`mlx_vlm`) + Ollama backends; sampler; VLM image path. |
 | `modality.py` | Genre-free rendering-shape detectors (3D, wireframe, FPS nav modality); shared by `prompts_v1.py` and `memory.py`. |
@@ -512,10 +512,10 @@ Asteroids regression; cosmetic sprite warnings are advisory; don't commit `games
   Playwright opened. Restart `chat.py` / `coder.py` — `assets.preload()` now always preloads audio
   at launch (even when macOS uses FLUX2 klein for sprites). Do not set `SKIP_DIFFUSER_PRELOAD=1`
   if you want `<sounds>`.
-- **Sprites download Z-Image-Turbo on macOS despite local FLUX2:** install mflux in the venv
-  (`./scripts/setup.sh` or `.venv/bin/pip install -r requirements-diffuser.txt`) and ensure
-  `FLUX2-klein-9B-mlx-8bit/` is under `DIFFUSION_MODELS_DIR`. Incomplete HF Z-Image snapshots
-  are skipped automatically.
+- **Sprites try to download Z-Image-Turbo on macOS:** macOS never uses Z-Image — install mflux
+  (`./scripts/setup.sh` or `.venv/bin/pip install -r requirements-diffuser.txt`) and put
+  `FLUX2-klein-9B-mlx-8bit/` under `DIFFUSION_MODELS_DIR`. Without both, sprite gen is skipped
+  (procedural draw) rather than starting a hub download.
 - **Chromium won't launch:** `env -u PLAYWRIGHT_BROWSERS_PATH .venv/bin/python -m playwright install chromium`.
 - **MLX cold-load is slow (~30–60 s first request):** the 27B mxfp8 loads into VRAM in-process; preload with `ollama run --ctx-size N <model>` for the Ollama path.
 - **`Model type minimax_m3 not supported` after an mlx-lm upgrade:** re-copy `minimax_m3.py` from your MiniMax-M3-MLX model dir into `.venv/lib/python3.12/site-packages/mlx_lm/models/` (see **MLX upgrades — MiniMax-M3** above).

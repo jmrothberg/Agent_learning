@@ -5,8 +5,8 @@
 #
 # Optional GPU stack for sprite generation + Stable Audio Open (sounds.py)
 # + Linux Wan cutscene MP4 export (scripts/generate_video.py).
-#   macOS (Apple Silicon): FLUX2-klein-9B-mlx-8bit via mflux CLI (preferred).
-#   Linux / fallback: Z-Image-Turbo (diffusers) + SD-Turbo img2img chain.
+#   macOS (Apple Silicon): FLUX2-klein-9B-mlx-8bit via mflux CLI ONLY (never Z-Image).
+#   Linux: Z-Image-Turbo (diffusers) + SD-Turbo img2img chain.
 #
 # IMPORTANT: this file does NOT pin torch / diffusers because the
 # correct flavor depends on your CUDA version. The install script
@@ -21,7 +21,8 @@
 # After install, the FIRST <assets> request in a session will:
 #   macOS: use FLUX2-klein (mflux) when FLUX2-klein-9B-mlx-8bit is under
 #     DIFFUSION_MODELS_DIR (setup.sh / .env) — ~10-15s first sprite, then faster.
-#   Otherwise: Z-Image-Turbo under DIFFUSION_MODELS_DIR or HF cache (~32 GB
+#     If weights or mflux are missing, sprite gen is skipped (no Z-Image download).
+#   Linux: Z-Image-Turbo under DIFFUSION_MODELS_DIR or HF cache (~32 GB
 #     download if missing), load into GPU VRAM (~30-60s first time), ~2-4s/sprite.
 #
 # All in-process. No HTTP server, no subprocess.

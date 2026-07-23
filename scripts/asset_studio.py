@@ -53,9 +53,12 @@ def _get_generator() -> Any:
         if _generator is None:
             _generator_error = (
                 "Could not construct a sprite generator — run "
-                "./scripts/install_diffuser.sh"
+                "./scripts/install_diffuser.sh "
+                "(macOS needs FLUX2-klein + mflux; Linux needs Z-Image-Turbo)"
             )
-            _generator = assets.ZImageTurboGenerator()
+            # Never force Z-Image on macOS — Studio/other Macs use FLUX2 only.
+            if assets.sys.platform != "darwin":
+                _generator = assets.ZImageTurboGenerator()
     return _generator
 
 

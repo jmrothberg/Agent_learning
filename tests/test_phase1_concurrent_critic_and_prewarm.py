@@ -162,7 +162,7 @@ def test_prewarm_helper_spawns_tasks_when_dedicated_gpu(tmp_path, monkeypatch):
 
     import assets
     import sounds
-    monkeypatch.setattr(assets, "ZImageTurboGenerator", _NoOpGen)
+    monkeypatch.setattr(assets, "try_load_image_generator", lambda: _NoOpGen())
     monkeypatch.setattr(sounds, "StableAudioGenerator", _NoOpGen)
 
     async def _drive():

@@ -668,17 +668,37 @@ class AssetGenerationMixin:
 
                 import assets as _assets
 
-                gen = self._asset_generator or _assets.ZImageTurboGenerator()
-
+                # Use the same selector as chat/coder (FLUX2 on macOS,
+                # Z-Image on Linux). Never hard-code ZImageTurboGenerator —
+                # that would start a hub download on a Mac missing mflux.
+                gen = self._asset_generator or _assets.try_load_image_generator()
+                if gen is None:
+                    self._trace({
+                        "kind": "prefill_warm",
+                        "target": "image",
+                        "elapsed_s": round(_t.monotonic() - t0, 2),
+                        "ok": False,
+                        "hidden_under_phase_a": True,
+                        "reason": "no_image_generator",
+                    })
+                    return
                 self._asset_generator = gen
-
-                ok = await asyncio.to_thread(gen._lazy_init)
+                # FLUX2 (mflux CLI) has no _lazy_init — only a readiness check.
+                if hasattr(gen, "_lazy_init"):
+                    ok = await asyncio.to_thread(gen._lazy_init)
+                    target = "z_image"
+                elif hasattr(gen, "_ensure_ready"):
+                    ok = await asyncio.to_thread(gen._ensure_ready)
+                    target = "flux2"
+                else:
+                    ok = True
+                    target = type(gen).__name__
 
                 self._trace({
 
                     "kind": "prefill_warm",
 
-                    "target": "z_image",
+                    "target": target,
 
                     "elapsed_s": round(_t.monotonic() - t0, 2),
 

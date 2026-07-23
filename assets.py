@@ -128,6 +128,57 @@ def _default_model_search_dirs() -> list[str]:
 _MODEL_SEARCH_DIRS = _default_model_search_dirs()
 _HF_FALLBACK_MODEL_ID = "Tongyi-MAI/Z-Image-Turbo"
 
+
+def _resolve_hf_cache_snapshot(hf_id: str) -> str | None:
+    """Newest local HF-hub snapshot for a repo id, or None when not cached.
+
+    On Macs that download via huggingface-cli instead of copying into
+    ~/Diffusion_Models, weights live under
+    ~/.cache/huggingface/hub/models--<org>--<name>/snapshots/<sha>/.
+    Callers that need completeness guarantees (Z-Image text_encoder shards)
+    must still validate the snapshot before using it.
+    """
+    hf_id = (hf_id or "").strip()
+    if "/" not in hf_id:
+        return None
+    org, name = hf_id.split("/", 1)
+    snapshots = _os.path.join(
+        _os.path.expanduser("~"),
+        ".cache",
+        "huggingface",
+        "hub",
+        f"models--{org}--{name.replace('/', '--')}",
+        "snapshots",
+    )
+    if not _os.path.isdir(snapshots):
+        return None
+    best_path: str | None = None
+    best_mtime = -1.0
+    for entry in _os.scandir(snapshots):
+        if not entry.is_dir():
+            continue
+        if not (
+            _os.path.isfile(_os.path.join(entry.path, "model_index.json"))
+            or _os.path.isfile(_os.path.join(entry.path, "config.json"))
+        ):
+            continue
+        try:
+            mtime = entry.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        if mtime >= best_mtime:
+            best_mtime = mtime
+            best_path = entry.path
+    return best_path
+
+
+def _pretrained_local_kwargs(model_path: str) -> dict[str, Any]:
+    """When weights are on disk, skip HuggingFace Hub metadata HEAD requests."""
+    if _os.path.isdir(model_path):
+        return {"local_files_only": True}
+    return {}
+
+
 # B1: img2img backbone. SD-Turbo (512×512, 1-4 step) chosen because:
 #   - smallest VRAM footprint (~2 GB) of any txt2img+img2img model
 #   - fastest on MPS — runs in fp16 with no NaN issues (unlike Z-Image-Turbo)
@@ -907,10 +958,14 @@ class ZImageTurboGenerator:
             return False
 
         try:
+            # local_files_only when model_path is a directory — otherwise
+            # huggingface_hub still probes the network even for a full
+            # local snapshot (second-Mac / offline pain).
             self._pipeline = ZImagePipeline.from_pretrained(
                 self.model_path,
                 torch_dtype=dtype,
                 low_cpu_mem_usage=False,
+                **_pretrained_local_kwargs(self.model_path),
             )
             self._pipeline.to(device)
             self._device = device
@@ -1259,6 +1314,7 @@ class Img2ImgGenerator:
                 self.model_path,
                 torch_dtype=dtype,
                 low_cpu_mem_usage=False,
+                **_pretrained_local_kwargs(self.model_path),
             )
             self._pipeline.to(device)
             # Disable the safety checker if present — these are tiny
@@ -1384,7 +1440,7 @@ def diffuser_cuda_reuse_index() -> int | None:
 
 
 def preload() -> Any:
-    """Eagerly construct + load the Z-Image-Turbo pipeline RIGHT NOW.
+    """Eagerly construct + load the image pipeline RIGHT NOW.
 
     Call this from your program's main entry, BEFORE any subprocess-
     spawning library (Playwright/Chromium, multiprocessing pools, etc)
@@ -1410,11 +1466,14 @@ def preload() -> Any:
     if backbone in ("flux2", "flux"):
         _preload_stable_audio()
         return None
+    # macOS policy: sprites are FLUX2-klein (mflux) ONLY — never Z-Image.
+    # Cache the FLUX2 wrapper when ready; skip diffusers image preload.
     if sys.platform == "darwin":
-        # macOS default: if FLUX2 is available (model + binary), skip preload.
-        if _resolve_flux2_path() and _resolve_mflux_generate_flux2():
-            _preload_stable_audio()
-            return None
+        gen = _construct_generator()
+        if gen is not None:
+            _PRELOADED = gen
+        _preload_stable_audio()
+        return gen
     gen = _construct_generator()
     if gen is None:
         _preload_stable_audio()
@@ -1436,16 +1495,21 @@ def _construct_generator() -> Any:
     try:
         # Selection order:
         # 1) Explicit env override: DIFFUSER_TXT2IMG_BACKBONE=flux2
-        # 2) macOS default: FLUX2 klein when model+binary are present
-        # 3) fallback: Z-Image-Turbo (diffusers)
+        # 2) macOS: FLUX2 klein ONLY (never Z-Image-Turbo — no hub download)
+        # 3) Linux / non-darwin: Z-Image-Turbo (diffusers)
         backbone = (_os.environ.get("DIFFUSER_TXT2IMG_BACKBONE") or "").strip().lower()
         want_flux2 = backbone in ("flux2", "flux")
-        if (want_flux2 or sys.platform == "darwin"):
+        if want_flux2 or sys.platform == "darwin":
             m = _resolve_flux2_path()
             b = _resolve_mflux_generate_flux2()
-            if m and b and (want_flux2 or sys.platform == "darwin"):
+            if m and b:
                 return Flux2KleinMfluxGenerator(model_path=m)
-        # diffusers fallback
+            # macOS never falls through to Z-Image (Studio + other Macs
+            # use FLUX2; a hub-ID fallback here was starting multi-GB
+            # downloads when mflux was missing).
+            if sys.platform == "darwin":
+                return None
+        # Linux / non-darwin diffusers fallback
         import importlib.util as _iu
         if _iu.find_spec("torch") is None or _iu.find_spec("diffusers") is None:
             return None
@@ -1496,8 +1560,8 @@ def try_load_image_generator(
     model_id: str = "Z-Image-Turbo",  # kept for API stability; unused
     diffuser_dir: str | None = None,  # kept for API stability; unused
 ) -> Any:
-    """Return the active sprite generator (FLUX2 klein on macOS when available,
-    else Z-Image-Turbo via diffusers).
+    """Return the active sprite generator (FLUX2 klein on macOS;
+    Z-Image-Turbo via diffusers on Linux / non-darwin).
 
     If `preload()` ran earlier, reuses that already-loaded pipeline (this is the
     path chat.py takes for diffusers). Otherwise constructs a fresh wrapper that

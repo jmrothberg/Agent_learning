@@ -228,3 +228,27 @@ def test_cache_same_name_different_prompts_coexist_sounds(tmp_path):
     assert len(files) == 2, files
     assert all(f.startswith("explosion__") for f in files)
     assert files[0] != files[1]
+
+
+def test_resolve_stable_audio_uses_hf_cache(tmp_path: Path, monkeypatch) -> None:
+    """Second Mac: Stable Audio often lives only under ~/.cache/huggingface/hub."""
+    import os
+
+    fake_home = tmp_path / "home"
+    snap = (
+        fake_home
+        / ".cache"
+        / "huggingface"
+        / "hub"
+        / "models--stabilityai--stable-audio-open-1.0"
+        / "snapshots"
+        / "deadbeef"
+    )
+    snap.mkdir(parents=True)
+    (snap / "model_index.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(os.path, "expanduser", lambda *_: str(fake_home))
+    monkeypatch.delenv("AUDIO_MODELS_DIR", raising=False)
+    monkeypatch.delenv("DIFFUSION_MODELS_DIR", raising=False)
+    monkeypatch.setattr(sounds, "_MODEL_SEARCH_DIRS", [])
+    assert sounds._resolve_stable_audio_path() == str(snap)
+

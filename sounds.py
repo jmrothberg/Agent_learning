@@ -294,6 +294,13 @@ def _resolve_stable_audio_path() -> str:
     for c in candidates:
         if _os.path.isdir(c):
             return c
+    # Macs that pulled via huggingface-cli keep weights under
+    # ~/.cache/huggingface/hub/ — prefer that over a hub ID download.
+    from assets import _resolve_hf_cache_snapshot  # noqa: WPS433 — shared HF cache scan
+
+    cached = _resolve_hf_cache_snapshot(_HF_FALLBACK_MODEL_ID)
+    if cached:
+        return cached
     return _HF_FALLBACK_MODEL_ID
 
 
@@ -450,9 +457,12 @@ class StableAudioGenerator:
             return False
 
         try:
+            from assets import _pretrained_local_kwargs  # noqa: WPS433
+
             self._pipeline = StableAudioPipeline.from_pretrained(
                 self.model_path,
                 torch_dtype=dtype,
+                **_pretrained_local_kwargs(self.model_path),
             )
             # Workaround for a torchsde float-precision bug. Stable Audio
             # Open's CosineDPMSolverMultistepScheduler uses torchsde's
