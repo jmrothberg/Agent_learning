@@ -1,8 +1,10 @@
 # GPU extras layered AFTER scripts/install_diffuser.sh installs torch + diffusers.
 # That script runs `pip install -r requirements-diffuser.txt` as its final step
-# (soundfile, torchsde for Stable Audio; mflux on macOS for FLUX2-klein sprites).
+# (soundfile, torchsde for Stable Audio; imageio for Linux Wan MP4 export;
+# mflux on macOS for FLUX2-klein sprites).
 #
-# Optional GPU stack for sprite generation + Stable Audio Open (sounds.py).
+# Optional GPU stack for sprite generation + Stable Audio Open (sounds.py)
+# + Linux Wan cutscene MP4 export (scripts/generate_video.py).
 #   macOS (Apple Silicon): FLUX2-klein-9B-mlx-8bit via mflux CLI (preferred).
 #   Linux / fallback: Z-Image-Turbo (diffusers) + SD-Turbo img2img chain.
 #
@@ -38,6 +40,12 @@ soundfile>=0.12.0
 # the last timestep that sounds.py works around by raising the Python
 # recursion limit before each generate() call (see _lazy_init).
 torchsde>=0.2.5
+# imageio + ffmpeg plugin — Linux Wan video (scripts/generate_video.py) uses
+# diffusers.export_to_video, which needs imageio[ffmpeg] (or opencv). Without
+# these, inference can succeed and then crash on MP4 write. macOS mlx-gen
+# writes MP4 itself; the wheels are harmless there and keep one shared file.
+imageio>=2.34.0
+imageio-ffmpeg>=0.5.0
 # torch and diffusers — install via scripts/install_diffuser.sh
 # (cu130 nightly + diffusers git HEAD).
 #

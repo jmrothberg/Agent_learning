@@ -15,7 +15,8 @@
 #
 # RELATED FILES (not merged here on purpose):
 #   requirements-mlx.txt      — mlx_lm.server on Apple Silicon (optional elsewhere)
-#   requirements-diffuser.txt — sprites + Stable Audio (after install_diffuser.sh)
+#   requirements-diffuser.txt — sprites + Stable Audio + Linux Wan MP4 export
+#     (imageio/imageio-ffmpeg) after install_diffuser.sh
 #     macOS: also mflux + FLUX2-klein CLI when install_diffuser.sh runs on Darwin
 #
 # OUTSIDE PIP (handled by ./scripts/setup.sh):

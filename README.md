@@ -438,7 +438,11 @@ video deps ever load into the agent process):
 | Platform | Backend | Model | Install |
 |---|---|---|---|
 | macOS (Apple Silicon) | `mlx-gen` CLI in the dedicated `.venv-video/` | `AbstractFramework/wan2.2-ti2v-5b-diffusers-8bit` (~17 GB, lazy) | `./scripts/setup.sh` (step 7) |
-| Ubuntu / Linux (CUDA) | diffusers `WanPipeline` in the main `.venv` | `Wan-AI/Wan2.2-TI2V-5B-Diffusers` (~25 GB, lazy) | covered by `./scripts/install_diffuser.sh` |
+| Ubuntu / Linux (CUDA) | diffusers `WanPipeline` in the main `.venv` | `Wan-AI/Wan2.2-TI2V-5B-Diffusers` (~25 GB, lazy) | covered by `./scripts/install_diffuser.sh` (includes `imageio` + `imageio-ffmpeg` for MP4 export) |
+
+**Linux model path:** `VIDEO_MODEL` (or the default hub id) must be a **Diffusers** tree — `model_index.json` plus `vae/`, `transformer/`, `text_encoder/`. An original Wan checkpoint folder (flat `*.pth` / sharded safetensors, no `model_index.json`) will not load. Prefer the HF id or a local Diffusers snapshot; leave Macs on mlx-gen.
+
+**Linux VRAM tip (2×24 GB boxes):** Wan needs a mostly free GPU. If Ollama is holding both cards, unload it before cutscenes (`curl` `keep_alive:0`, or TUI `/unload`); the next coder turn reloads the model automatically as long as `ollama serve` is running. Macs are unchanged (mlx-gen / in-process MLX).
 
 Standalone CLI (no LLM needed) — text-to-video and image-to-video:
 
