@@ -1520,17 +1520,21 @@ class StreamMaterializeMixin:
                 "think out loud."
             )
         if (result.stalled or result.crashed) and not result.text.strip():
-            # Backend-aware recovery hint. "num_ctx" is Ollama-specific;
-            # MLX has its own knobs (MLX_MAX_TOKENS, Metal wired-memory
-            # limit); cloud backends rarely zero-stall but if they do
-            # it's usually a rate-limit / connectivity issue. DK trace
-            # 20260513_153626 showed the generic message pointing at
-            # num_ctx during an MLX run, which is the wrong knob.
+            # Backend-aware recovery hint. Silent/thinking-channel stalls
+            # must NOT blame Metal VRAM / MLX_MAX_TOKENS (Mr. Do!
+            # 20260723_135057: empty content for 253s while the model
+            # was "thinking" — UI screamed bogus iogpu.wired_limit advice).
             backend_name = (
                 getattr(self._backend, "info", None)
                 and self._backend.info.name
             ) or "unknown"
-            if backend_name == "mlx":
+            if getattr(result, "silent", False):
+                hint = (
+                    "Model emitted no visible tokens (likely stuck in a "
+                    "thinking/reasoning channel). Next turn should open "
+                    "with <patch> or <html_file> — not more silent thought."
+                )
+            elif backend_name == "mlx":
                 hint = (
                     "Try lowering MLX_MAX_TOKENS, raising "
                     "iogpu.wired_limit_mb (Metal memory), or restarting "
@@ -1558,6 +1562,12 @@ class StreamMaterializeMixin:
             cause = ""
             if getattr(result, "error_message", None):
                 cause = f" cause: {result.error_message}."
+            if getattr(result, "silent", False):
+                raise RuntimeError(
+                    f"Model produced no visible tokens (silent/thinking "
+                    f"stall) at {actual_seconds}s on backend={backend_name}."
+                    f"{cause} {hint}"
+                )
             raise RuntimeError(
                 f"Model produced no tokens before stalling at "
                 f"{actual_seconds}s on backend={backend_name}.{cause} "

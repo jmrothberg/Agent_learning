@@ -1054,6 +1054,9 @@ class GameAgent(
         # doesn't punish the user's max_iters budget. Reset to 0 at the
         # top of each run().
         self._iter_budget_bonus: int = 0
+        # Set when the iterate loop returns early (e.g. stream stall) so
+        # exit-decision UI does NOT claim "iter cap reached" at 2/6.
+        self._stopped_early_reason: str | None = None
         # Per-iter flag: was mid-session media regenerated this turn?
         # Set inside _maybe_generate_assets_and_sounds when at least one
         # asset or sound was successfully produced. Read after
@@ -4076,10 +4079,18 @@ class GameAgent(
         Future Ollama / other backends emitting similar text are
         caught by the same matcher.
         """
-        if not err_text or "no tokens" not in err_text:
+        if not err_text or (
+            "no tokens" not in err_text and "no visible tokens" not in err_text
+        ):
             return None
         import re
         m = re.search(r"stalling at\s+([0-9]+(?:\.[0-9]+)?)\s*s", err_text)
+        if m is None:
+            # Silent-thinking wording: "at 253.05s on backend=…"
+            m = re.search(
+                r"(?:stall(?:ing)?\s+)?at\s+([0-9]+(?:\.[0-9]+)?)\s*s",
+                err_text,
+            )
         seconds = float(m.group(1)) if m else None
         return {
             "kind": "no_tokens_stall",
@@ -4234,6 +4245,7 @@ class GameAgent(
         # ---- PHASE B: build/iterate -------------------------------------
         self._run_session_complete = False
         self._crash_traced_this_session = False
+        self._stopped_early_reason = None
         try:
             async for ev in self._run_phase_a_and_first_build(
                 goal,
@@ -6285,6 +6297,19 @@ class GameAgent(
                             "kind": "feedback_requeued_after_stream_failure",
                             "count": len(self._last_drained_feedback),
                         })
+                    # Early exit — NOT iter-cap. Mr. Do! 20260723_135057
+                    # stalled at iter 2/6; exit UI wrongly said "iter cap".
+                    stall_kind = (stall or {}).get("kind") or "stream_failure"
+                    self._stopped_early_reason = (
+                        f"{stall_kind} at iteration {iteration}"
+                        f"/{self.max_iters}"
+                    )
+                    self._trace({
+                        "kind": "iterate_stopped_early",
+                        "reason": self._stopped_early_reason,
+                        "iteration": iteration,
+                        "max_iters": self.max_iters,
+                    })
                     return
 
             self._messages.append({"role": "assistant", "content": reply})
@@ -9216,10 +9241,20 @@ class GameAgent(
             and not self.has_pending_user_input()
             and not self._user_force_done
         ):
+            early = (self._stopped_early_reason or "").strip()
+            if early:
+                cap_msg = (
+                    f"stopped early ({early}) with a failing build — "
+                    "asking the model to ship-or-ask before ending."
+                )
+            else:
+                cap_msg = (
+                    "iter cap reached with failing build — asking the "
+                    "model to ship-or-ask before exiting silently."
+                )
             yield self._record(AgentEvent(
                 "info",
-                "iter cap reached with failing build — asking the "
-                "model to ship-or-ask before exiting silently.",
+                cap_msg,
             ))
             # Phase 3: tell the model NOT to ship if the on-disk file is
             # structurally broken. Trace 1 (chess 20260522_000304) ended
@@ -9268,9 +9303,18 @@ class GameAgent(
                 )
             except Exception:
                 last_report_facts = ""
+            if early:
+                exit_why = (
+                    f"the run stopped early ({early}) and the last test "
+                    "was not clean"
+                )
+            else:
+                exit_why = (
+                    "the iteration cap has been reached and the last "
+                    "test was not clean"
+                )
             exit_prompt = (
-                "EXIT DECISION TURN — the iteration cap has been "
-                "reached and the last test was not clean. THIS TURN "
+                f"EXIT DECISION TURN — {exit_why}. THIS TURN "
                 "you MUST emit EXACTLY ONE of the following:\n\n"
                 "  1. <done/> followed by <notes>...</notes> — ship "
                 "the current build as-is. Your <notes> should name "
@@ -9393,9 +9437,14 @@ class GameAgent(
                     "error", f"exit-decision turn failed: {e}",
                 ))
 
-        yield self._record(AgentEvent(
-            "info", f"reached max iterations ({self.max_iters}) - stopping"
-        ))
+        early = (self._stopped_early_reason or "").strip()
+        if early:
+            stop_msg = f"stopped early ({early}) — ending session"
+            done_msg = f"Stopped early: {early}."
+        else:
+            stop_msg = f"reached max iterations ({self.max_iters}) - stopping"
+            done_msg = "Iteration cap reached."
+        yield self._record(AgentEvent("info", stop_msg))
         async for ev in self._final_iter_test_if_needed():
             yield ev
         # Outcome: ok if best.html exists (we passed at least once).
@@ -9404,7 +9453,7 @@ class GameAgent(
         # The model's notes claimed success; the file says otherwise.
         ok_outcome = self.best_path.exists() and not self._exit_done_over_broken_file
         self._record_session_outcome(ok=ok_outcome)
-        yield self._record(AgentEvent("done", "Iteration cap reached."))
+        yield self._record(AgentEvent("done", done_msg))
 
     @classmethod
     def run_loop_inspect_source(cls) -> str:
