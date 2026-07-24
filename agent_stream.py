@@ -693,6 +693,26 @@ class StreamMaterializeMixin:
                     "freed": freed,
                     "model_role": role,
                 })
+            # Diagnostic: flag Ollama CPU/RAM offload (size_vram << size).
+            try:
+                bname = getattr(
+                    getattr(active_backend, "info", None), "name", None,
+                )
+                if bname == "ollama":
+                    import gpu_status as _gs
+                    ep = getattr(
+                        getattr(active_backend, "info", None), "endpoint", None,
+                    )
+                    frac = _gs.ollama_cpu_offload_fraction(ep)
+                    if frac is not None and frac > 0.05:
+                        self._trace({
+                            "kind": "ollama_cpu_offload",
+                            "fraction": round(frac, 3),
+                            "model_role": role,
+                            "endpoint": ep,
+                        })
+            except Exception:
+                pass
 
         if (
             is_vlm_active

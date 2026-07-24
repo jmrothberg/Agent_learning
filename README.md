@@ -484,7 +484,7 @@ video deps ever load into the agent process):
 
 **Linux model path:** `VIDEO_MODEL` (or the default hub id) must be a **Diffusers** tree — `model_index.json` plus `vae/`, `transformer/`, `text_encoder/`. An original Wan checkpoint folder (flat `*.pth` / sharded safetensors, no `model_index.json`) will not load. Prefer the HF id or a local Diffusers snapshot; leave Macs on mlx-gen.
 
-**Linux VRAM tip (2×24 GB boxes):** Wan needs a mostly free GPU. If Ollama is holding both cards, unload it before cutscenes (`curl` `keep_alive:0`, or TUI `/unload`); the next coder turn reloads the model automatically as long as `ollama serve` is running. Macs are unchanged (mlx-gen / in-process MLX).
+**Linux VRAM (2×24 GB boxes):** Before sprites/sounds/Wan the harness auto-unloads Ollama when free VRAM on the diffuser GPU is below `AGENT_VIDEO_MIN_FREE_VRAM_GB` (default 12), then after media unloads in-process diffusers so the coder can return to full GPU. The next coder turn reloads via chat as long as `ollama serve` is running. Opt out: `AGENT_ENABLE_MEMORY_RELIEF=0`. Macs are unchanged (mlx-gen / in-process MLX).
 
 Standalone CLI (no LLM needed) — text-to-video and image-to-video:
 

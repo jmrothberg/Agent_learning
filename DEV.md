@@ -63,10 +63,11 @@ MLX upgrades: MiniMax-M3 (`minimax_m3.py` copy after mlx-lm upgrade), GLM-5.2
 - `MLX_MAX_TOKENS` — MLX output cap (default **131072**)
 - `CODING_BOX_NUM_CTX` — context window (default **100000**); compaction fires near ~70% (`_COMPACT_PRESSURE`)
 - `AGENT_COMPACT_TOKEN_CEILING` — absolute token ceiling for compaction (optional override)
-- `AGENT_ENABLE_MEMORY_RELIEF` — set `0` to disable auto-unload of diffusers before video / after asset batches (default **on** when free RAM &lt; `AGENT_MEMORY_RELIEF_MIN_AVAILABLE_GB`, default 64). Skips small MLX models (&lt; `AGENT_MEMORY_RELIEF_SMALL_MODEL_DISK_GB`, default 50 GB on disk).
-- `AGENT_MEMORY_RELIEF_MIN_AVAILABLE_GB` — trip relief when available RAM falls below this (default 64)
-- `AGENT_MEMORY_RELIEF_MAX_PHYS_GB` — also trip relief after sprite/sound gen when physical RAM is at or below this (default **128**). Use on 96 GB Macs so Z-Image unloads before the MLX coder runs even if vm_stat still shows plenty of free pages.
-- `AGENT_MEMORY_RELIEF_SMALL_MODEL_DISK_GB` — never unload for coder models smaller than this on disk (default 50)
+- `AGENT_ENABLE_MEMORY_RELIEF` — set `0` to disable auto VRAM/RAM relief (default **on**). **MLX:** unload diffusers when free RAM &lt; `AGENT_MEMORY_RELIEF_MIN_AVAILABLE_GB` (default 64) or phys RAM ≤ `AGENT_MEMORY_RELIEF_MAX_PHYS_GB`; skips small MLX models (&lt; `AGENT_MEMORY_RELIEF_SMALL_MODEL_DISK_GB`, default 50 GB on disk). **Linux/Ollama+CUDA:** always unload in-process Z-Image/Stable-Audio after sprite/sound gen and before coder streams so the LLM is not forced into CPU offload on 2×24 GB boxes.
+- `AGENT_MEMORY_RELIEF_MIN_AVAILABLE_GB` — trip MLX relief when available RAM falls below this (default 64)
+- `AGENT_MEMORY_RELIEF_MAX_PHYS_GB` — also trip MLX relief after sprite/sound gen when physical RAM is at or below this (default **128**). Use on 96 GB Macs so Z-Image unloads before the MLX coder runs even if vm_stat still shows plenty of free pages.
+- `AGENT_MEMORY_RELIEF_SMALL_MODEL_DISK_GB` — never unload for MLX coder models smaller than this on disk (default 50)
+- `AGENT_VIDEO_MIN_FREE_VRAM_GB` — before Z-Image / Stable-Audio / Wan on Linux/Ollama, unload Ollama if the diffuser GPU has less free VRAM than this (default **12**). Skipped when a dedicated diffuser GPU is detected (4-GPU workstation). Next coder turn reloads via chat; does not start `ollama serve`.
 - MLX `/model` hot-swap — when upsizing (or loading a large model while diffusers are resident), the harness auto-unloads the previous MLX weights and Z-Image/Stable-Audio before the next generation
 - `AGENT_NO_AUTO_OLLAMA_GPU_FIX` — set `1` to disable auto Ollama VRAM unload on `/new`
 - `ANTHROPIC_MAX_TOKENS` — Anthropic output cap (default 32768)

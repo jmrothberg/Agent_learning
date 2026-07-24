@@ -2784,13 +2784,37 @@ class GameAgent(
         except Exception:
             return False, None, None
 
-    def _should_release_diffusers_after_media(self) -> bool:
-        """Unload Z-Image before MLX codegen on tight unified-memory hosts.
+    def _cuda_available_for_relief(self) -> bool:
+        """True when this host has a usable NVIDIA CUDA device for VRAM relief.
 
-        Fieldrunners trace 20260703 (96 GB Mac): vm_stat still showed >64 GB
-        free after sprite gen, so the old available-RAM-only gate kept
-        Z-Image resident on MPS while the 27B MLX coder prefilled — silent
-        stall on iter 2. Also trip when physical RAM is at or below
+        Prefer torch.cuda; fall back to nvidia-smi snapshot so relief still
+        works if torch is briefly unimportable in a test stub.
+        """
+        try:
+            import torch
+            if torch.cuda.is_available():
+                return True
+        except Exception:
+            pass
+        try:
+            import gpu_status as gs
+            snap = gs.snapshot_gpus()
+            return bool(snap and snap.gpus)
+        except Exception:
+            return False
+
+    def _should_release_diffusers_after_media(self) -> bool:
+        """Unload Z-Image before codegen when VRAM/RAM would otherwise thrash.
+
+        **Linux + Ollama (CUDA):** always release in-process diffusers after
+        <assets>/<sounds> (and before coder stream). Leaving Z-Image resident
+        on a 2×24 GB box forces Ollama into CPU/RAM offload (~37% on GPU) —
+        low GPU util, high CPU. Opt out: ``AGENT_ENABLE_MEMORY_RELIEF=0``.
+
+        **MLX (Mac):** Fieldrunners trace 20260703 (96 GB Mac): vm_stat still
+        showed >64 GB free after sprite gen, so the old available-RAM-only
+        gate kept Z-Image resident on MPS while the 27B MLX coder prefilled —
+        silent stall on iter 2. Also trip when physical RAM is at or below
         AGENT_MEMORY_RELIEF_MAX_PHYS_GB (default 128) so 96 GB-class boxes
         always drop diffusers after <assets>/<sounds> even if free pages
         look comfortable.
@@ -2798,9 +2822,16 @@ class GameAgent(
         if self._memory_relief_opt_out():
             return False
         try:
-            if not self._backend or getattr(self._backend.info, "name", None) != "mlx":
-                return False
+            name = (
+                getattr(self._backend.info, "name", None)
+                if self._backend else None
+            )
         except Exception:
+            return False
+        # Linux/Ollama shared-VRAM: free the diffuser GPU for the coder.
+        if name == "ollama" and self._cuda_available_for_relief():
+            return True
+        if name != "mlx":
             return False
         # Phys-RAM ceiling is independent of the small-model opt-out in
         # _mlx_coder_memory_pressure (Qwen3.6-27B ~30 GB on disk must still
@@ -2817,11 +2848,11 @@ class GameAgent(
         return False
 
     def _maybe_release_diffusers_before_coder_stream(self) -> list[str]:
-        """Drop in-process diffusers before a coder stream on MLX when relief trips.
+        """Drop in-process diffusers before a coder stream when relief trips.
 
-        Same gate as post-<assets> unload — do NOT drop on roomy 512 GB boxes
-        just because generators are still resident; only when memory pressure
-        or the phys-RAM ceiling says to.
+        Same gate as post-<assets> unload — MLX phys/pressure, or Linux
+        Ollama+CUDA always. Do NOT drop on roomy Mac boxes just because
+        generators are still resident.
         """
         if not self._should_release_diffusers_after_media():
             return []
@@ -2874,6 +2905,128 @@ class GameAgent(
         tripped, _, _ = self._mlx_coder_memory_pressure()
         return not tripped
 
+    def _video_target_cuda_free_gb(self) -> float | None:
+        """Free GiB on the CUDA device Wan will use, or None if unknown."""
+        try:
+            import gpu_status as gs
+            snap = gs.snapshot_gpus(force=True)
+            if snap is None or not snap.gpus:
+                return None
+            pin = (os.environ.get("DIFFUSER_CUDA_DEVICE") or "").strip()
+            if pin.isdigit():
+                idx = int(pin)
+            else:
+                idx = gs.pick_diffuser_cuda_index(snap)
+                if idx is None:
+                    idx = 0
+            free_mib = gs._gpu_free_mib(snap, idx)
+            if free_mib is None:
+                return None
+            return free_mib / 1024.0
+        except Exception:
+            return None
+
+    def _maybe_unload_ollama_for_media(
+        self, info: dict, *, reason: str = "video",
+    ) -> None:
+        """Evict Ollama from VRAM before diffuser work when the GPU is too full.
+
+        Used before Wan, and before Z-Image / Stable-Audio when they would
+        otherwise OOM on a 2×24 GB box with the coder already resident.
+
+        Skipped when relief is opted out, backend is not Ollama, or
+        ``diffuser_has_dedicated_gpu`` (4-GPU: GPU0 for media, 1–3 for LLM).
+        Threshold: ``AGENT_VIDEO_MIN_FREE_VRAM_GB`` (default 12). Next coder
+        chat reloads the model; does not start ``ollama serve``.
+        """
+        if self._memory_relief_opt_out():
+            return
+        try:
+            name = (
+                getattr(self._backend.info, "name", None)
+                if self._backend else None
+            )
+        except Exception:
+            return
+        if name != "ollama":
+            return
+        try:
+            import gpu_status as gs
+            if gs.diffuser_has_dedicated_gpu():
+                info["ollama_unload_skipped"] = "dedicated_diffuser_gpu"
+                return
+        except Exception:
+            pass
+        min_free = float(os.environ.get("AGENT_VIDEO_MIN_FREE_VRAM_GB", "12"))
+        free_gb = self._video_target_cuda_free_gb()
+        info["video_free_vram_gb"] = (
+            round(free_gb, 2) if free_gb is not None else None
+        )
+        info["video_min_free_vram_gb"] = min_free
+        info["media_reason"] = reason
+        if free_gb is not None and free_gb >= min_free:
+            return
+        try:
+            import backend as backend_mod
+            results = backend_mod.unload_all_ollama_models()
+            unloaded = [n for n, ok, _ in results if ok]
+            info["ollama_unloaded"] = unloaded
+            self._trace({
+                "kind": "media_ollama_unload",
+                "reason": reason,
+                "unloaded": unloaded,
+                "free_vram_gb": info.get("video_free_vram_gb"),
+                "min_free_vram_gb": min_free,
+                "results": [
+                    {"name": n, "ok": ok, "msg": msg[:200]}
+                    for n, ok, msg in results
+                ],
+            })
+            # Back-compat alias for video-only greps.
+            if reason == "video":
+                self._trace({
+                    "kind": "video_ollama_unload",
+                    "unloaded": unloaded,
+                    "free_vram_gb": info.get("video_free_vram_gb"),
+                    "min_free_vram_gb": min_free,
+                    "results": [
+                        {"name": n, "ok": ok, "msg": msg[:200]}
+                        for n, ok, msg in results
+                    ],
+                })
+            if unloaded:
+                info["freed"].extend(
+                    [f"Ollama:{n}" for n in unloaded]
+                )
+        except Exception as e:
+            self._trace({
+                "kind": "media_ollama_unload_error",
+                "reason": reason,
+                "err": str(e)[:300],
+            })
+
+    def _ensure_vram_for_diffuser_media(self, *, reason: str) -> dict:
+        """Unload Ollama when needed so Z-Image / Stable-Audio can load on CUDA.
+
+        Call before sprite or sound generation on Linux/Ollama. Returns the
+        same info dict shape as video relief (``freed``, ``ollama_unloaded``).
+        """
+        info: dict = {"freed": [], "forced": False}
+        self._maybe_unload_ollama_for_media(info, reason=reason)
+        if info.get("ollama_unloaded"):
+            self._trace({
+                "kind": "diffuser_media_vram_relief",
+                "reason": reason,
+                "freed": info.get("freed"),
+                "ollama_unloaded": info.get("ollama_unloaded"),
+                "free_vram_gb": info.get("video_free_vram_gb"),
+            })
+        return info
+
+    def _maybe_unload_ollama_for_video(self, info: dict) -> None:
+        """Back-compat wrapper — prefer ``_maybe_unload_ollama_for_media``."""
+        self._maybe_unload_ollama_for_media(info, reason="video")
+
     def _free_memory_before_video(self) -> dict:
         """Free diffuser pipelines BEFORE launching the Wan video subprocess.
 
@@ -2882,6 +3035,10 @@ class GameAgent(
         loaded alongside the MLX coder LLM + Wan subprocess triggered macOS
         jetsam (vm-compressor-space-shortage) on run_09 games 5–7 even when
         free-RAM looked plentiful. Never drops the in-process MLX LLM.
+
+        Linux/Ollama: also unload Ollama when the video GPU has less than
+        ``AGENT_VIDEO_MIN_FREE_VRAM_GB`` free (unless a dedicated diffuser
+        GPU is available). Next coder turn reloads via chat.
         """
         info: dict = {"freed": [], "forced": True, "available_gb": None}
         try:
@@ -2902,12 +3059,16 @@ class GameAgent(
             except Exception:
                 pass
             self._asset_generator = None
+            self._maybe_unload_ollama_for_media(info, reason="video")
             self._trace({
                 "kind": "video_memory_relief",
                 "available_gb": info["available_gb"],
                 "phys_gb": phys_gb,
                 "freed": info["freed"],
                 "forced": True,
+                "video_free_vram_gb": info.get("video_free_vram_gb"),
+                "ollama_unloaded": info.get("ollama_unloaded"),
+                "ollama_unload_skipped": info.get("ollama_unload_skipped"),
             })
         except Exception as e:
             self._trace({"kind": "video_memory_relief_error", "err": str(e)})

@@ -485,7 +485,9 @@ class StableAudioGenerator:
                 )
             except Exception:
                 pass
-            self._pipeline.to(device)
+            # Pass dtype with .to() so text-encoder weights match float16
+            # activations (Space Invaders 20260723: float != Half in F.linear).
+            self._pipeline.to(device, dtype=dtype)
             self._device = device
             self._cuda_device_index = (
                 int(torch.cuda.current_device())

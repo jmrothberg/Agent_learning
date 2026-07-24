@@ -247,3 +247,147 @@ def test_release_diffusers_vram_clears_session_generators(tmp_path: Path) -> Non
     assert agent._asset_generator is None
     assert agent._sound_generator is None
     assert "Stable-Audio" in freed
+
+
+def _wire_ollama_agent(tmp_path: Path) -> GameAgent:
+    agent = _make_agent(tmp_path)
+    agent._backend = MagicMock()
+    agent._backend.info.name = "ollama"
+    agent._backend.info.model = "qwen3.6-27b-ud-q8:latest"
+    agent._backend.info.endpoint = "http://127.0.0.1:11434"
+    return agent
+
+
+def test_should_release_diffusers_after_media_ollama_cuda(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Linux/Ollama+CUDA: always drop in-process diffusers for the coder."""
+    agent = _wire_ollama_agent(tmp_path)
+    monkeypatch.setattr(
+        GameAgent, "_cuda_available_for_relief", lambda self: True,
+    )
+    assert agent._should_release_diffusers_after_media() is True
+
+
+def test_should_release_diffusers_ollama_opt_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGENT_ENABLE_MEMORY_RELIEF", "0")
+    agent = _wire_ollama_agent(tmp_path)
+    monkeypatch.setattr(
+        GameAgent, "_cuda_available_for_relief", lambda self: True,
+    )
+    assert agent._should_release_diffusers_after_media() is False
+
+
+def test_should_release_diffusers_ollama_no_cuda(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _wire_ollama_agent(tmp_path)
+    monkeypatch.setattr(
+        GameAgent, "_cuda_available_for_relief", lambda self: False,
+    )
+    assert agent._should_release_diffusers_after_media() is False
+
+
+def test_free_memory_before_video_unloads_ollama_when_vram_low(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _wire_ollama_agent(tmp_path)
+    unload_calls: list[object] = []
+
+    def _fake_unload(endpoint=None):
+        unload_calls.append(endpoint)
+        return [("qwen3.6-27b-ud-q8:latest", True, "unloaded")]
+
+    import assets as assets_mod
+    import backend as backend_mod
+    import gpu_status as gs
+
+    monkeypatch.setattr(assets_mod, "release_preloaded_diffusers", lambda: [])
+    monkeypatch.setattr(backend_mod, "unload_all_ollama_models", _fake_unload)
+    monkeypatch.setattr(gs, "diffuser_has_dedicated_gpu", lambda snap=None: False)
+    monkeypatch.setattr(
+        GameAgent, "_video_target_cuda_free_gb", lambda self: 4.0,
+    )
+    monkeypatch.setenv("AGENT_VIDEO_MIN_FREE_VRAM_GB", "12")
+    out = agent._free_memory_before_video()
+    assert unload_calls == [None]
+    assert out.get("ollama_unloaded") == ["qwen3.6-27b-ud-q8:latest"]
+    assert any(x.startswith("Ollama:") for x in out.get("freed", []))
+
+
+def test_free_memory_before_video_skips_ollama_on_dedicated_gpu(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _wire_ollama_agent(tmp_path)
+    unload_calls: list[object] = []
+
+    def _fake_unload(endpoint=None):
+        unload_calls.append(endpoint)
+        return [("qwen", True, "unloaded")]
+
+    import assets as assets_mod
+    import backend as backend_mod
+    import gpu_status as gs
+
+    monkeypatch.setattr(assets_mod, "release_preloaded_diffusers", lambda: [])
+    monkeypatch.setattr(backend_mod, "unload_all_ollama_models", _fake_unload)
+    monkeypatch.setattr(gs, "diffuser_has_dedicated_gpu", lambda snap=None: True)
+    monkeypatch.setattr(
+        GameAgent, "_video_target_cuda_free_gb", lambda self: 1.0,
+    )
+    out = agent._free_memory_before_video()
+    assert unload_calls == []
+    assert out.get("ollama_unload_skipped") == "dedicated_diffuser_gpu"
+
+
+def test_ensure_vram_for_diffuser_media_unloads_before_assets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Space Invaders 20260723: sprites OOM'd because Ollama still held VRAM."""
+    agent = _wire_ollama_agent(tmp_path)
+    unload_calls: list[object] = []
+
+    def _fake_unload(endpoint=None):
+        unload_calls.append(endpoint)
+        return [("qwen3.6-27b-ud-q8:latest", True, "unloaded")]
+
+    import backend as backend_mod
+    import gpu_status as gs
+
+    monkeypatch.setattr(backend_mod, "unload_all_ollama_models", _fake_unload)
+    monkeypatch.setattr(gs, "diffuser_has_dedicated_gpu", lambda snap=None: False)
+    monkeypatch.setattr(
+        GameAgent, "_video_target_cuda_free_gb", lambda self: 2.0,
+    )
+    monkeypatch.setenv("AGENT_VIDEO_MIN_FREE_VRAM_GB", "12")
+    out = agent._ensure_vram_for_diffuser_media(reason="assets")
+    assert unload_calls == [None]
+    assert out.get("ollama_unloaded") == ["qwen3.6-27b-ud-q8:latest"]
+    assert out.get("media_reason") == "assets"
+
+
+def test_ollama_cpu_offload_fraction() -> None:
+    import gpu_status as gs
+    from unittest.mock import patch
+
+    models = [
+        {"size_bytes": 40_000_000_000, "size_vram_bytes": 15_000_000_000},
+    ]
+    with patch.object(gs, "ollama_ps_at_endpoint", return_value=models):
+        frac = gs.ollama_cpu_offload_fraction("http://127.0.0.1:11434")
+    assert frac is not None
+    assert abs(frac - 0.625) < 0.01
+
+    with patch.object(
+        gs,
+        "ollama_ps_at_endpoint",
+        return_value=[
+            {"size_bytes": 40_000_000_000, "size_vram_bytes": 40_000_000_000},
+        ],
+    ):
+        assert gs.ollama_cpu_offload_fraction("http://127.0.0.1:11434") == 0.0
+
+    with patch.object(gs, "ollama_ps_at_endpoint", return_value=[]):
+        assert gs.ollama_cpu_offload_fraction("http://127.0.0.1:11434") is None

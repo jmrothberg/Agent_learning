@@ -188,6 +188,82 @@ class AssetGenerationMixin:
 
 
 
+    @classmethod
+
+    def _scan_html_for_loadable_asset_refs(cls, html: str) -> set[str]:
+
+        """Names with a real file URL in the HTML (safe for no-patch regen).
+
+
+
+        ASSETS['name'] / drawSprite('name') alone do NOT count — Space
+
+        Invaders trace 20260723_162903 referenced those keys but had no
+
+        PATHS / *_assets/*.png strings, so loadAssets never ran and the
+
+        game stayed on procedural fillRect fallbacks despite fresh PNGs.
+
+        Alignment (`_scan_html_for_asset_refs`) still uses the broader
+
+        scan so missing files are coached; mid-session already_in_html
+
+        uses THIS scan so we never claim "No JS patch is required".
+
+        """
+
+        refs: set[str] = set()
+
+        re = __import__("re")
+
+        for m in cls._ASSET_PATH_RE.finditer(html):
+
+            refs.add(m.group(1))
+
+        # PATHS / ASSET_PATHS = { name: './….png' }
+
+        for block_m in re.finditer(
+
+            r"(?:const\s+|let\s+|var\s+)?(?:ASSET_)?PATHS\s*=\s*\{([^}]*)\}",
+
+            html,
+
+            re.DOTALL,
+
+        ):
+
+            block = block_m.group(1)
+
+            for km in re.finditer(
+
+                r"['\"]?(\w+)['\"]?\s*:\s*['\"][^'\"]*\.png['\"]",
+
+                block,
+
+                re.IGNORECASE,
+
+            ):
+
+                refs.add(km.group(1))
+
+        # [['name', './….png'], …] entries (incl. inside loadAssets)
+
+        for km in re.finditer(
+
+            r"\[\s*['\"](\w+)['\"]\s*,\s*['\"][^'\"]*\.png['\"]",
+
+            html,
+
+            re.IGNORECASE,
+
+        ):
+
+            refs.add(km.group(1))
+
+        return refs
+
+
+
     def _check_asset_alignment(self, html: str) -> set[str]:
 
         """Compare HTML asset references against generated files.
@@ -523,6 +599,28 @@ class AssetGenerationMixin:
             for nm in cls._SOUND_LIST_NAME_RE.finditer(m.group(1)):
 
                 refs.add(nm.group(1))
+
+        return refs
+
+
+
+    @classmethod
+
+    def _scan_html_for_loadable_sound_refs(cls, html: str) -> set[str]:
+
+        """Names with a real audio URL in the HTML (safe for no-patch regen).
+
+
+
+        SOUNDS['name'] alone is not enough — same trap as assets.
+
+        """
+
+        refs: set[str] = set()
+
+        for m in cls._SOUND_PATH_RE.finditer(html):
+
+            refs.add(m.group(1))
 
         return refs
 
@@ -1885,6 +1983,26 @@ class AssetGenerationMixin:
 
             ))
 
+            # Linux/Ollama 2×24 GB: free VRAM before Z-Image load (Space Invaders
+            # 20260723_154520 — all 15 sprites OOM'd with coder still resident).
+            _vram = await asyncio.to_thread(
+
+                self._ensure_vram_for_diffuser_media, reason="assets",
+
+            )
+
+            if _vram.get("ollama_unloaded"):
+
+                yield self._record(AgentEvent(
+
+                    "info",
+
+                    "freed GPU for sprites (unloaded Ollama; reloads next coder turn): "
+
+                    + ", ".join(_vram["ollama_unloaded"]),
+
+                ))
+
             if self._asset_generator is None:
 
                 self._asset_generator = await asyncio.to_thread(
@@ -2392,6 +2510,25 @@ class AssetGenerationMixin:
                 },
 
             ))
+
+            # Same VRAM gate as sprites — Stable Audio needs a free CUDA card.
+            _vram_s = await asyncio.to_thread(
+
+                self._ensure_vram_for_diffuser_media, reason="sounds",
+
+            )
+
+            if _vram_s.get("ollama_unloaded"):
+
+                yield self._record(AgentEvent(
+
+                    "info",
+
+                    "freed GPU for sounds (unloaded Ollama; reloads next coder turn): "
+
+                    + ", ".join(_vram_s["ollama_unloaded"]),
+
+                ))
 
             if self._sound_generator is None:
 
@@ -2921,11 +3058,21 @@ class AssetGenerationMixin:
 
             #   - new_to_html: full loader block
 
+            # COMMENT: "already" means a real .png / PATHS URL exists —
+
+            # ASSETS['name'] alone is not enough (invaders 20260723).
+
             html_for_refs = self._current_file or ""
 
-            html_asset_refs = self._scan_html_for_asset_refs(html_for_refs)
+            # COMMENT: path/PATHS only — ASSETS['x'] without a .png URL is
+            # NOT loadable (invaders 20260723_162903 white-box fallback).
+            html_asset_refs = self._scan_html_for_loadable_asset_refs(
+                html_for_refs
+            )
 
-            html_sound_refs = self._scan_html_for_sound_refs(html_for_refs)
+            html_sound_refs = self._scan_html_for_loadable_sound_refs(
+                html_for_refs
+            )
 
             already_assets = {
 

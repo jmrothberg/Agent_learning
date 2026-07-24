@@ -173,6 +173,10 @@ bullet never reaches the prompt — broaden tags if a good bullet doesn’t fire
 - Wrong facing → flip in code (`ctx.scale(-1,1)`), don’t regenerate art.
 - Sprite-key drift (`left_idle` vs `left_fighter_idle`) → silent colored boxes. Use the injected
   `sprite()` resolver; gate `ASSETS_LOADED_BUT_UNDRAWN` catches misses.
+- **Media regen “already in HTML”** (invaders `20260723_162903`): `ASSETS['name']` /
+  `drawSprite('name')` without a `*_assets/*.png` or `PATHS` URL is **not** loadable. Mid-session
+  must emit the full loader block — never “No JS patch is required”. Use
+  `_scan_html_for_loadable_asset_refs` for that split; keep the broader scan for alignment coaching.
 - **Parallel roster cross-wiring** (`f1_walk` / `f2_walk`, `blue_*` / `red_*`): harness `sprite()`
   must not tie-break on action token alone (`walk`) — entity prefix must win. LLM must still clear
   `_spriteCache` on rematch (playbook `versus-fighter-sprite-prefix`).

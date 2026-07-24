@@ -207,9 +207,12 @@ def test_midsession_same_name_skips_loader_block(tmp_path: Path) -> None:
 def test_midsession_same_name_trace_records_old_new_hash(tmp_path: Path) -> None:
     a = _make_agent(tmp_path)
     a._asset_generator = _StubImageGenerator()
+    # Must include a real *_assets/*.png URL — ASSETS.name alone is not
+    # "already loadable" (see test_midsession_assets_name_without_path_*).
     a._current_file = (
         "<html><body><script>"
         "const ASSETS = {}; ASSETS.player_kick = new Image();"
+        "ASSETS.player_kick.src = './g_assets/player_kick.png';"
         "</script></body></html>"
     )
     old = tmp_path / "old_player_kick.png"
@@ -235,6 +238,62 @@ def test_midsession_same_name_trace_records_old_new_hash(tmp_path: Path) -> None
     assert rep["new_hash"] is not None
     assert rep["old_hash"] != rep["new_hash"]
     assert rep["changed"] is True
+
+
+def test_midsession_assets_name_without_path_emits_loader(tmp_path: Path) -> None:
+    """Invaders 20260723_162903: ASSETS['bunker'] / drawSprite('ufo')
+    without a *_assets/*.png (or PATHS) URL must NOT get 'No JS patch
+    required' — loadAssets never runs and the game stays procedural."""
+    a = _make_agent(tmp_path)
+    a._asset_generator = _StubImageGenerator()
+    a._current_file = (
+        "<html><body><canvas></canvas><script>"
+        "const ASSETS = {};"
+        "function drawSprite(name) { const img = ASSETS[name]; }"
+        "const img = ASSETS['bunker'];"
+        "drawSprite('player_ship_idle');"
+        "if (typeof __ASSET_PATHS__ !== 'undefined') loadAssets(__ASSET_PATHS__);"
+        "</script></body></html>"
+    )
+
+    reply = (
+        "<assets>["
+        "{\"name\": \"bunker\", \"prompt\": \"sci-fi bunker\"},"
+        "{\"name\": \"player_ship_idle\", \"prompt\": \"player gun\"}"
+        "]</assets>"
+    )
+    asyncio.run(_drain(a._maybe_generate_assets_and_sounds(
+        reply, trigger="mid_session",
+    )))
+
+    assert a._pending_feedback, "expected queued feedback"
+    fb = a._pending_feedback[0]
+    assert "MEDIA REGEN COMPLETE" not in fb
+    assert "No JS patch is required" not in fb
+    assert "Mid-session asset/sound/video additions" in fb
+    assert "async function loadAssets" in fb or "ULTRA IMPORTANT" in fb
+    assert "bunker" in fb and "player_ship_idle" in fb
+
+
+def test_scan_loadable_requires_path_not_assets_lookup() -> None:
+    """Broader scan sees ASSETS['x']; loadable scan requires a file URL."""
+    from agent import GameAgent
+
+    html = (
+        "const img = ASSETS['bunker'];"
+        "drawSprite('ufo');"
+        "ASSETS.player_ship_idle;"
+        "const PATHS = { 'wired': './g_assets/wired.png' };"
+        "fetch('./g_assets/path_only.png');"
+    )
+    broad = GameAgent._scan_html_for_asset_refs(html)
+    loadable = GameAgent._scan_html_for_loadable_asset_refs(html)
+    assert "bunker" in broad
+    assert "bunker" not in loadable
+    assert "player_ship_idle" in broad
+    assert "player_ship_idle" not in loadable
+    assert "wired" in loadable
+    assert "path_only" in loadable
 
 
 def test_midsession_new_name_still_emits_loader_block(tmp_path: Path) -> None:

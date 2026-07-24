@@ -536,6 +536,37 @@ def ollama_ps_at_endpoint(base: str) -> list[dict[str, Any]]:
     return out
 
 
+def ollama_cpu_offload_fraction(endpoint: str | None = None) -> float | None:
+    """Fraction of loaded Ollama weights *not* in VRAM (CPU/RAM offload).
+
+    Uses ``size`` vs ``size_vram`` from ``/api/ps``. Returns the worst
+    (highest) fraction among loaded models, or None when nothing is
+    loaded / sizes are missing. ~0.0 = fully on GPU; ~0.63 = the 2×24 GB
+    trap where only ~37% of a 27B Q8 fits in VRAM.
+    """
+    base = (endpoint or "").strip() or None
+    if base is None:
+        try:
+            from backend import _ollama_endpoint
+            base = _ollama_endpoint()
+        except Exception:
+            return None
+    models = ollama_ps_at_endpoint(base)
+    if not models:
+        return None
+    worst: float | None = None
+    for m in models:
+        size = int(m.get("size_bytes") or 0)
+        vram = int(m.get("size_vram_bytes") or 0)
+        if size <= 0:
+            continue
+        # Clamp: size_vram can briefly exceed size during load.
+        frac = max(0.0, min(1.0, 1.0 - (vram / float(size))))
+        if worst is None or frac > worst:
+            worst = frac
+    return worst
+
+
 def gpu_indices_for_ollama_loaded_model(
     snapshot: GpuSnapshot | None,
     *,
