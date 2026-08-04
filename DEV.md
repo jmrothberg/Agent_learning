@@ -87,7 +87,7 @@ Stock PyPI `mlx-lm` lacks a working `deepseek_v4` path for that checkpoint.
 | Concern | Setting |
 |---------|---------|
 | **TUI pick Flash** | `/model` / `/load` / `/launch` on DeepSeek-V4-Flash **auto-starts oMLX** (`backend.ensure_omlx_server`) and routes that session to `:8000`; GLM/Qwen/MiniMax stay in-process |
-| **Prompt cache (check first)** | `cache.hot_cache_max_size` ≠ `"0"` (e.g. `"20%"`). Admin UI: **Memory Management → Memory Limit (In-Memory Hot Cache)** — **not** the CACHE panel. Default `"0"` disabled; enabling cut a repeated ~24K prompt **51s → 4.6s** |
+| **Prompt cache (check first)** | `cache.hot_cache_max_size` ≠ `"0"` (e.g. `"32GB"`). Admin UI: **Memory Management → Memory Limit (In-Memory Hot Cache)** — **not** the CACHE panel. Default `"0"` disabled; enabling cut a repeated ~24K prompt **51s → 4.6s**. oMLX CLI rejects `"20%"` — use absolute GB in `settings.json` / `omlx serve` |
 | Parallel agents | `LLM_BACKEND=mlx-server` + `MLX_SERVER_URL=http://127.0.0.1:8000` — one resident model, continuous batch |
 | Idle unload / “server quit” | Global idle timeout **None**; **pin** the coder model; per-model TTL off |
 | Long SSE prefills | SSE keepalive `chunk`; `caffeinate` / menu-bar app auto-restart |

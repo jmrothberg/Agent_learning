@@ -142,7 +142,7 @@ MLX_SERVER_URL=http://127.0.0.1:8000 \
 
 | Setting | Why |
 |---------|-----|
-| **`cache.hot_cache_max_size` ≠ `"0"` (check first)** | oMLX ships disabled (`"0"`). Enabling (e.g. `"20%"`) cut a repeated ~23.7K-token prompt **51.0s → 4.6s** (~11×) — worth more than kernel tweaks for agent traffic. **Admin UI: Memory Management → Memory Limit (In-Memory Hot Cache)** — **not** the CACHE panel |
+| **`cache.hot_cache_max_size` ≠ `"0"` (check first)** | oMLX ships disabled (`"0"`). Enabling cut a repeated ~23.7K-token prompt **51.0s → 4.6s** (~11×). Use absolute size e.g. `"32GB"` — **CLI rejects `"20%"`**. **Admin UI: Memory Management → Memory Limit (In-Memory Hot Cache)** — **not** the CACHE panel |
 | Global **idle timeout = None** (`idle_timeout_seconds: null`) | Stops auto-unload during long quiet gaps between agent turns |
 | **Pin** the coder model in `/admin` | Survives LRU eviction when other models load |
 | Per-model **TTL off** for that model | Same as idle — no surprise unload mid-batch |
@@ -214,7 +214,7 @@ OpenAI-compatible port — same client path, not a repo dependency today.
 
 ```bash
 # Menu bar app, or:
-omlx serve --model-dir ~/MLX_Models --hot-cache-max-size 20% --port 8000
+omlx serve --model-dir ~/MLX_Models --hot-cache-max-size 32GB --port 8000
 # Then in /admin: load + pin DeepSeek-V4-Flash-0731-MXFP4-MLX, mtp_enabled=on,
 # idle timeout=None. Verify:
 curl -s http://127.0.0.1:8000/v1/models | head
@@ -357,7 +357,7 @@ exit codes and generated HTML under `--out-dir`.
 | `mlx_lm.server is not reachable` / empty `/v1/models` | Server not started, wrong port (`8000` oMLX vs `8080` classic), or Mac sleep killed a bare shell |
 | Server unloads mid-batch / “timed out” | Idle TTL or global idle timeout — set to **None**, **pin** model; see anti-quit checklist |
 | Prefill completes, zero tokens | Metal OOM or MLX server starved — use `--jobs 1`, raise `--stall-seconds`, or `iogpu.wired_limit_mb` |
-| Every agent turn re-prefills for 30–60s | **`cache.hot_cache_max_size` is `"0"`** — set e.g. `"20%"` (UI: **Memory Management**, not CACHE panel) |
+| Every agent turn re-prefills for 30–60s | **`cache.hot_cache_max_size` is `"0"`** — set e.g. `"32GB"` (UI: **Memory Management**, not CACHE panel; CLI rejects `"20%"`) |
 | Looping / repeating sentences with V4 MTP | Companion speed-patch conflict — remove patches; use stock oMLX 0.5.7+ `mtp_enabled` only |
 | TUI suddenly uses server | `MLX_SERVER_URL` left set in `.env` / shell — unset it |
 | Art-heavy builds stall mid-stream | Lower `--jobs` to 1; Round 1 tune batch uses serial jobs + 1200s stall |

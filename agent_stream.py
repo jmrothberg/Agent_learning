@@ -923,6 +923,8 @@ class StreamMaterializeMixin:
             "last_hb": _time.monotonic(),
             "tokens": 0,
             "tail": "",
+            # Decode clock — set on first token so tok/s excludes prefill.
+            "first_token_at": None,
             # Phase 0.7 — fire-once flag so the slow-prefill surprise
             # event only emits once per stream when the condition first
             # holds; subsequent regular heartbeats keep flowing.
@@ -955,35 +957,42 @@ class StreamMaterializeMixin:
                     on_token(piece)
                 except Exception:
                     pass
+            now = _time.monotonic()
+            if hb_state["first_token_at"] is None:
+                hb_state["first_token_at"] = now
+                # TTFT for iter_summary.prefill_s (always, not only slow path).
+                self._last_prefill_s = round(now - hb_state["started"], 1)
             hb_state["tokens"] += 1
             # Maintain a small tail buffer; cheap O(1) amortized.
             tail = hb_state["tail"] + piece
             if len(tail) > _STREAM_HEARTBEAT_TAIL_CHARS * 2:
                 tail = tail[-_STREAM_HEARTBEAT_TAIL_CHARS * 2:]
             hb_state["tail"] = tail
-            now = _time.monotonic()
             if now - hb_state["last_hb"] >= _STREAM_HEARTBEAT_SECONDS:
                 hb_state["last_hb"] = now
-                elapsed = now - hb_state["started"]
-                tok_per_s = hb_state["tokens"] / elapsed if elapsed > 0 else 0.0
+                # Wall-clock for "how long has this stream run"; decode for tok/s.
+                wall_elapsed = now - hb_state["started"]
+                decode_elapsed = now - hb_state["first_token_at"]
+                tok_per_s = (
+                    hb_state["tokens"] / decode_elapsed if decode_elapsed > 0 else 0.0
+                )
                 self._trace({
                     "kind": "stream_heartbeat",
                     "tokens": hb_state["tokens"],
-                    "elapsed_s": round(elapsed, 1),
+                    "elapsed_s": round(wall_elapsed, 1),
                     "tok_per_s": round(tok_per_s, 2),
                     "tail": hb_state["tail"][-_STREAM_HEARTBEAT_TAIL_CHARS:],
                 })
                 if (
                     not hb_state["slow_prefill_emitted"]
                     and hb_state["tokens"] < _SLOW_PREFILL_TOK_FLOOR
-                    and elapsed >= _SLOW_PREFILL_ELAPSED_FLOOR
+                    and wall_elapsed >= _SLOW_PREFILL_ELAPSED_FLOOR
                 ):
                     hb_state["slow_prefill_emitted"] = True
-                    self._last_prefill_s = round(elapsed, 1)
                     self._trace({
                         "kind": "slow_prefill",
                         "tokens": hb_state["tokens"],
-                        "elapsed_s": round(elapsed, 1),
+                        "elapsed_s": round(wall_elapsed, 1),
                         "model_role": role,
                         "model_name": getattr(
                             getattr(active_backend, "info", None),
@@ -1005,7 +1014,7 @@ class StreamMaterializeMixin:
                     self._trace({
                         "kind": "runaway_stream_warning",
                         "tokens": hb_state["tokens"],
-                        "elapsed_s": round(elapsed, 1),
+                        "elapsed_s": round(wall_elapsed, 1),
                         "tok_per_s": round(tok_per_s, 2),
                         "model_role": role,
                         "model_name": getattr(
@@ -1157,10 +1166,17 @@ class StreamMaterializeMixin:
         # MODEL (low tok/s) from a HARNESS stall (high tok/s but no output).
         self._last_stream_tokens = int(result.tokens or 0)
         self._last_stream_duration_s = round(result.duration_s, 2)
-        self._last_stream_tok_per_s = (
-            round(result.tokens / result.duration_s, 2)
-            if result.duration_s and result.duration_s > 0 else 0.0
-        )
+        # tok/s = decode rate (after TTFT), not wall-clock including prefill.
+        _ft = hb_state.get("first_token_at")
+        if result.tokens and _ft is not None:
+            _decode_s = max(0.001, _time.monotonic() - _ft)
+            self._last_stream_tok_per_s = round(result.tokens / _decode_s, 2)
+        else:
+            self._last_stream_tok_per_s = (
+                round(result.tokens / result.duration_s, 2)
+                if result.duration_s and result.duration_s > 0 and result.tokens
+                else 0.0
+            )
         self._trace({
             "kind": "stream_done",
             "tokens": result.tokens,

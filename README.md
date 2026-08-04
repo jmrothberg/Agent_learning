@@ -138,51 +138,65 @@ MiniMax-M3 (see above). Example weights: `pipenetwork/GLM-5.2-MLX-4bit`,
 `mlx-community/GLM-5.2-mxfp4` — needs a very large unified-memory Mac (~370–480 GB
 for 4-bit).
 
-**DeepSeek-V4-Flash (Vontra MXFP4) via oMLX:** stock `mlx-lm` cannot load
-`model_type: deepseek_v4`. Weights live at
-`~/MLX_Models/DeepSeek-V4-Flash-0731-MXFP4-MLX` ([Vontra MXFP4](https://huggingface.co/Vontra/DeepSeek-V4-Flash-0731-MXFP4-MLX)).
-Use **oMLX 0.5.7+** (native DSpark MTP). Do **not** install the old companion
-speed-patch repo on oMLX 0.5.4rc2+ — enable `mtp_enabled` in oMLX model settings.
+### DeepSeek-V4-Flash + oMLX (required)
 
-**In the TUI you do not start the server by hand for Flash:** `/list` → `/model`
-(or `/load` / `/launch`) on DeepSeek-V4-Flash calls `ensure_omlx_server()` — starts
-`omlx serve` or opens `oMLX.app` if `:8000` is down, then routes that session
-over HTTP. **GLM / Qwen / MiniMax stay in-process** (no server). Manual parallel
-batches can still use:
+Stock `mlx-lm` **cannot** load `model_type: deepseek_v4`. Flash is served only
+through **[oMLX](https://omlx.ai/) 0.5.7+** (native DSpark MTP). Do **not** install
+the old companion speed-patch repo on oMLX 0.5.4rc2+ — turn on `mtp_enabled` in
+oMLX model settings instead.
+
+| Item | Detail |
+|------|--------|
+| Weights | `~/MLX_Models/DeepSeek-V4-Flash-0731-MXFP4-MLX` (~163 GB on disk) — [Vontra MXFP4](https://huggingface.co/Vontra/DeepSeek-V4-Flash-0731-MXFP4-MLX) |
+| API model id | **basename only** (`DeepSeek-V4-Flash-0731-MXFP4-MLX`). Absolute paths → HTTP 404. Chat normalizes this automatically. |
+| RAM | First real chat completion loads weights into unified memory (~150 GB+). `/model` alone does **not**. macOS “Cached Files” for the safetensors is disk cache, not a loaded model. |
+| CLI / TUI | Chat auto-starts oMLX; binary searched on `PATH`, `~/.omlx/bin/omlx`, or `~/MLX_Models/.omlx-venv/bin/omlx` |
+| Hot prompt cache | `cache.hot_cache_max_size` e.g. `"32GB"` — **CLI rejects `"20%"`** |
+| GLM / Qwen / MiniMax | Stay **in-process** MLX (separate folders). Flash does not replace them. |
+
+**TUI — no hand-started server for Flash:** `/list` → `/model` (or `/load` /
+`/launch`) on DeepSeek-V4-Flash calls `ensure_omlx_server()` — starts
+`omlx serve --model-dir ~/MLX_Models --hot-cache-max-size 32GB` (or opens
+`oMLX.app`) if `:8000` is down, then routes **that** session over HTTP.
+Override base URL with `OMLX_SERVER_URL` (default `http://127.0.0.1:8000`).
+
+**Parallel batches** (oMLX must already be up — `batch_parallel` does not auto-start):
 ```bash
+omlx serve --model-dir ~/MLX_Models --hot-cache-max-size 32GB --port 8000
+# /admin: load + pin DeepSeek-V4-Flash-0731-MXFP4-MLX, mtp_enabled=on
 LLM_BACKEND=mlx-server MLX_SERVER_URL=http://127.0.0.1:8000 \
   .venv/bin/python eval/batch_parallel.py --jobs 2 …
 ```
-(Do **not** leave `MLX_SERVER_URL` in `.env`.)
+Do **not** leave `MLX_SERVER_URL` in `.env` (that would push every MLX pick onto the server).
 
-**Server vs in-process (parallel):** in-process `LLM_BACKEND=mlx` loads weights
-inside each Python process — N agent jobs ⇒ N copies ⇒ OOM. **oMLX / mlx-server**
-keeps **one** model resident and continuous-batches concurrent `/v1/chat/completions`
-streams, so 2–N agent jobs share that load. Per-stream tok/s drops some under load;
-aggregate throughput usually rises (especially MoE like V4-Flash). Details + runbook:
-[`eval/PARALLEL_MLX_TESTING.md`](eval/PARALLEL_MLX_TESTING.md).
+**Server vs in-process:** in-process `LLM_BACKEND=mlx` loads weights **inside each**
+Python process — N jobs ⇒ N copies ⇒ OOM. **oMLX** keeps **one** resident model and
+continuous-batches concurrent streams. Per-stream tok/s may drop under load;
+aggregate usually rises (MoE Flash). Runbook:
+[`eval/PARALLEL_MLX_TESTING.md`](eval/PARALLEL_MLX_TESTING.md). Env notes: `DEV.md`.
 
-**Keep oMLX from quitting / timing out** (common failure with older `mlx_lm.server`):
+**Activity tok/s** (TUI + traces) is **decode rate after the first token** — prefill /
+TTFT is shown separately as wait / `prefill_s`, not folded into tok/s.
 
-0. **Check the prompt cache before anything else.** oMLX ships
-   `hot_cache_max_size` at `"0"` (disabled). Enabling it took a repeated
-   ~23.7K-token prompt from **51.0s → 4.6s** (~11×). In the admin UI this is under
-   **Memory Management → Memory Limit (In-Memory Hot Cache)** — **not** the CACHE
-   panel. In `~/.omlx/settings.json` the key is `cache.hot_cache_max_size` (e.g.
-   `"20%"` or `"32GB"`). Leave it `"0"` and every agent turn re-prefills from scratch.
-1. **Idle unload off** — admin → Resource Management → idle timeout = **None**; or
-   `~/.omlx/settings.json` → `"idle_timeout": {"idle_timeout_seconds": null}`.
-2. **Pin** DeepSeek-V4-Flash (and/or GLM) in `/admin` so LRU eviction cannot drop it.
-3. **Per-model TTL** unset/disabled for the pinned coder model.
-4. **SSE keepalive** = `chunk` (default) so long prefills do not look like a dead socket
-   to `MLXServerBackend`.
+**Keep oMLX from quitting / timing out** (common with bare `mlx_lm.server`):
+
+0. **Prompt cache first.** Default `hot_cache_max_size` is `"0"` (off). Enabling
+   (e.g. `"32GB"`) cut a repeated ~23.7K-token prompt **51.0s → 4.6s** (~11×).
+   Admin UI: **Memory Management → Memory Limit (In-Memory Hot Cache)** — **not**
+   the CACHE panel. Key: `~/.omlx/settings.json` → `cache.hot_cache_max_size`.
+1. **Idle unload off** — Resource Management → idle timeout = **None**; or
+   `"idle_timeout": {"idle_timeout_seconds": null}`.
+2. **Pin** DeepSeek-V4-Flash (and/or GLM) in `/admin` so LRU cannot drop it.
+3. **Per-model TTL** unset for the pinned coder model.
+4. **SSE keepalive** = `chunk` (default) so long prefills do not look dead to
+   `MLXServerBackend`.
 5. Prefer **oMLX app / `brew services` / `omlx start`** (auto-restart) over a bare
-   foreground terminal that dies on sleep; wrap long batches with `caffeinate -dims`.
+   terminal; wrap long batches with `caffeinate -dims`.
 6. No companion MTP patch repos on 0.5.4rc2+.
 
-Does not replace or break GLM-5.2 (separate folder); unload one before loading the
-other if unified memory is tight. `MLXServerBackend` strips images — use in-process
-MLX (or a VLM slot) when you need screenshot / VLM critique.
+Unload one large model before loading another if unified memory is tight.
+`MLXServerBackend` strips images — use in-process MLX (or a VLM slot) for
+screenshot / VLM critique.
 
 **Tests** (pure-function; see `TEST.md`; **batch / overnight commands:** `eval/OPERATIONS.md`):
 ```bash

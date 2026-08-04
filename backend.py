@@ -1399,8 +1399,9 @@ class MLXServerBackend(Backend):
         import httpx
 
         opts = dict(options or {})
+        # oMLX expects basename ids; chat may still hold absolute MLX_Models paths.
         body: dict[str, Any] = {
-            "model": self.info.model,
+            "model": mlx_server_api_model_id(self.info.model, self.info.endpoint),
             "messages": _strip_ollama_only_fields(messages),
             "stream": True,
             "stream_options": {"include_usage": True},
@@ -2974,6 +2975,36 @@ def requires_omlx_server(model: str) -> bool:
     return False
 
 
+def omlx_api_model_id(model: str) -> str:
+    """Map a local folder path to the id oMLX advertises on GET /v1/models.
+
+    oMLX discovers models by scanning --model-dir and registers each by
+    **basename** (e.g. DeepSeek-V4-Flash-0731-MXFP4-MLX). Chat listing often
+    keeps the absolute path; POSTing that path yields 404:
+    Model '/Users/.../DeepSeek-...' not found.
+    """
+    text = (model or "").strip().rstrip("/\\")
+    if not text:
+        return text
+    expanded = os.path.expanduser(text)
+    # Path-like → basename; bare API ids / HF names unchanged.
+    if os.path.isabs(expanded) or (os.sep in expanded) or (
+        os.altsep is not None and os.altsep in expanded
+    ):
+        return os.path.basename(expanded)
+    return text
+
+
+def mlx_server_api_model_id(model: str, endpoint: str | None = None) -> str:
+    """OpenAI `model` field for MLXServerBackend toward oMLX vs mlx_lm.server."""
+    if requires_omlx_server(model):
+        return omlx_api_model_id(model)
+    ep = (endpoint or "").rstrip("/")
+    if ep and ep == omlx_default_endpoint().rstrip("/"):
+        return omlx_api_model_id(model)
+    return model
+
+
 def omlx_reachable(endpoint: str | None = None, *, timeout: float = 1.0) -> bool:
     """True when oMLX (or any OpenAI-compatible server) answers GET /v1/models."""
     ep = (endpoint or omlx_default_endpoint()).rstrip("/")
@@ -3031,7 +3062,9 @@ def _spawn_omlx_serve(endpoint: str) -> tuple[bool, str]:
             "--model-dir",
             model_dir,
             "--hot-cache-max-size",
-            "20%",
+            # oMLX 0.5.7 CLI rejects percentages ("20%") — use absolute GB.
+            # Admin UI may show "%"; settings.json must be parseable by serve.
+            "32GB",
             "--port",
             port,
         ]

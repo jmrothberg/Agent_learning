@@ -395,6 +395,32 @@ def test_requires_omlx_server_by_name():
     assert not backend.requires_omlx_server("")
 
 
+def test_omlx_api_model_id_strips_path():
+    # oMLX log 2026-08-04: POST with absolute path → 404; basename works.
+    assert (
+        backend.omlx_api_model_id(
+            "/Users/jonathanrothberg/MLX_Models/DeepSeek-V4-Flash-0731-MXFP4-MLX"
+        )
+        == "DeepSeek-V4-Flash-0731-MXFP4-MLX"
+    )
+    assert (
+        backend.omlx_api_model_id("DeepSeek-V4-Flash-0731-MXFP4-MLX")
+        == "DeepSeek-V4-Flash-0731-MXFP4-MLX"
+    )
+    assert backend.mlx_server_api_model_id(
+        "/Users/x/MLX_Models/DeepSeek-V4-Flash-0731-MXFP4-MLX",
+        "http://127.0.0.1:8000",
+    ) == "DeepSeek-V4-Flash-0731-MXFP4-MLX"
+    # Classic mlx_lm.server keeps path unless oMLX-required / oMLX endpoint.
+    assert (
+        backend.mlx_server_api_model_id(
+            "/Users/x/MLX_Models/GLM-5.2-MLX-4bit",
+            "http://127.0.0.1:8080",
+        )
+        == "/Users/x/MLX_Models/GLM-5.2-MLX-4bit"
+    )
+
+
 def test_requires_omlx_server_from_config_json(tmp_path: Path):
     d = tmp_path / "some_custom_dir"
     d.mkdir()

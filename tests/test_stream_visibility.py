@@ -235,3 +235,50 @@ def test_run_drains_stream_ui_events_after_stream():
     assert src.count("await self._stream(") == src.count(
         "for _ev in self._drain_stream_ui_events():"
     )
+
+
+def test_tok_per_s_clock_starts_at_first_token():
+    """Prefill wait must not dilute Activity tok/s (decode clock only)."""
+    app = _app_stub()
+    app._model2_stream_tokens = 0
+    app._model2_stream_started_at = 0.0
+    app._model2_last_token_at = 0.0
+    app._model3_stream_tokens = 0
+    app._model3_stream_started_at = 0.0
+    app._model3_last_token_at = 0.0
+    # Simulate: stream started 60s ago (prefill), then first tokens arrive.
+    t_request = time.monotonic() - 60.0
+    app._stream_started_at = t_request
+    app._emit_token("a")
+    # First token resets the decode clock near "now", not request start.
+    assert app._stream_started_at > t_request + 50.0
+    t_first = app._stream_started_at
+    for _ in range(99):
+        app._emit_token("x")
+    assert app._stream_tokens == 100
+    # Subsequent tokens must not move the decode clock.
+    assert app._stream_started_at == t_first
+    detail = app._format_stream_activity_detail(
+        label="streaming coder",
+        tokens=app._stream_tokens,
+        stream_started_at=app._stream_started_at,
+        last_token_at=app._last_token_at,
+        is_streaming=True,
+    )
+    # 100 tok after ~60s prefill would look like ~1.6 tok/s if wall-clock;
+    # decode window is tiny → reported rate should be clearly >> 10.
+    assert "tok/s" in detail
+    # Pull the numeric rate from "… N tok, R tok/s, …"
+    import re
+    m = re.search(r"([\d.]+) tok/s", detail)
+    assert m is not None
+    assert float(m.group(1)) > 10.0
+
+
+def test_heartbeat_tok_per_s_uses_decode_clock():
+    """agent_stream heartbeat / stream_done must exclude prefill from tok/s."""
+    import agent_stream as asm
+    src = inspect.getsource(asm)
+    assert '"first_token_at": None' in src
+    assert "decode_elapsed" in src
+    assert "hb_state.get(\"first_token_at\")" in src or "hb_state['first_token_at']" in src

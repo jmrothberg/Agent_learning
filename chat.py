@@ -1402,21 +1402,23 @@ class CodingBoxApp(App):
             getattr(self.agent, "_last_stream_role", None) if self.agent else None
         ) or "coder"
         slot = self._role_slot_for_stream(role)
+        # Decode clock starts at first token so tok/s excludes prefill wait.
+        # Streaming-start already stamped *_started_at for the waiting line.
         if slot == 2:
+            if self._model2_stream_tokens == 0:
+                self._model2_stream_started_at = now
             self._model2_stream_tokens += 1
             self._model2_last_token_at = now
-            if self._model2_stream_started_at == 0.0:
-                self._model2_stream_started_at = now
         elif slot == 3:
+            if self._model3_stream_tokens == 0:
+                self._model3_stream_started_at = now
             self._model3_stream_tokens += 1
             self._model3_last_token_at = now
-            if self._model3_stream_started_at == 0.0:
-                self._model3_stream_started_at = now
         else:
+            if self._stream_tokens == 0:
+                self._stream_started_at = now
             self._stream_tokens += 1
             self._last_token_at = now
-            if self._stream_started_at == 0.0:
-                self._stream_started_at = now
             # One-shot console mirror of the agent's trace-only
             # runaway_stream_warning (which never reaches the TUI —
             # _record without yield is trace-only).
@@ -4015,10 +4017,19 @@ class CodingBoxApp(App):
                 raise
         return backend_mod.mlx_endpoint_for_model(chosen_name)
 
+    def _normalize_mlx_model_name(self, chosen_name: str) -> str:
+        """oMLX /v1 ids are basenames; keep absolute paths for in-process MLX."""
+        if backend_mod.requires_omlx_server(chosen_name):
+            return backend_mod.omlx_api_model_id(chosen_name)
+        return chosen_name
+
     def _apply_model_to_active_session_slot(
         self, chosen_backend: str, chosen_name: str, slot: int, role: str | None, *, source: str,
     ) -> bool:
         """Point the live agent's slots at a new backend. Returns False on init error."""
+        # oMLX 404s if we keep the absolute MLX_Models path as the API model id.
+        if chosen_backend == "mlx":
+            chosen_name = self._normalize_mlx_model_name(chosen_name)
         if chosen_backend == "mlx":
             try:
                 desired_endpoint = self._mlx_endpoint_for_chosen(chosen_name)
@@ -4100,6 +4111,9 @@ class CodingBoxApp(App):
         self, chosen_backend: str, chosen_name: str, *, source: str,
     ) -> bool:
         """Point the live agent at a new backend. Returns False on init error."""
+        # oMLX 404s if we keep the absolute MLX_Models path as the API model id.
+        if chosen_backend == "mlx":
+            chosen_name = self._normalize_mlx_model_name(chosen_name)
         try:
             if chosen_backend == "mlx":
                 endpoint = self._mlx_endpoint_for_chosen(chosen_name)
@@ -4302,6 +4316,10 @@ class CodingBoxApp(App):
             if chosen_name is None or chosen_backend is None:
                 self._log_error(f"no match for {arg!r} — try /list")
                 return
+
+        # oMLX registers basenames; /list may return absolute paths.
+        if chosen_backend == "mlx" and chosen_name:
+            chosen_name = self._normalize_mlx_model_name(chosen_name)
 
         # Smart role default if not explicitly specified
         if slot > 1 and role is None:
@@ -5171,6 +5189,8 @@ class CodingBoxApp(App):
         """
         if self._next_backend in ("ollama", "mlx", "openai", "anthropic") and self._next_model:
             if self._next_backend == "mlx":
+                # Sticky /model may still hold absolute path from before basename fix.
+                self._next_model = self._normalize_mlx_model_name(self._next_model)
                 try:
                     endpoint = self._mlx_endpoint_for_chosen(self._next_model)
                 except RuntimeError:
@@ -6362,6 +6382,8 @@ class CodingBoxApp(App):
         # Clear with the bare /model and /backend commands.
         if self._next_backend in ("ollama", "mlx", "openai", "anthropic") and self._next_model:
             if self._next_backend == "mlx":
+                # Sticky /model may still hold absolute path from before basename fix.
+                self._next_model = self._normalize_mlx_model_name(self._next_model)
                 try:
                     endpoint = self._mlx_endpoint_for_chosen(self._next_model)
                 except RuntimeError:
