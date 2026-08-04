@@ -138,6 +138,52 @@ MiniMax-M3 (see above). Example weights: `pipenetwork/GLM-5.2-MLX-4bit`,
 `mlx-community/GLM-5.2-mxfp4` — needs a very large unified-memory Mac (~370–480 GB
 for 4-bit).
 
+**DeepSeek-V4-Flash (Vontra MXFP4) via oMLX:** stock `mlx-lm` cannot load
+`model_type: deepseek_v4`. Weights live at
+`~/MLX_Models/DeepSeek-V4-Flash-0731-MXFP4-MLX` ([Vontra MXFP4](https://huggingface.co/Vontra/DeepSeek-V4-Flash-0731-MXFP4-MLX)).
+Use **oMLX 0.5.7+** (native DSpark MTP). Do **not** install the old companion
+speed-patch repo on oMLX 0.5.4rc2+ — enable `mtp_enabled` in oMLX model settings.
+
+**In the TUI you do not start the server by hand for Flash:** `/list` → `/model`
+(or `/launch`) on DeepSeek-V4-Flash calls `ensure_omlx_server()` — starts
+`omlx serve` or opens `oMLX.app` if `:8000` is down, then routes that session
+over HTTP. **GLM / Qwen / MiniMax stay in-process** (no server). Manual parallel
+batches can still use:
+```bash
+LLM_BACKEND=mlx-server MLX_SERVER_URL=http://127.0.0.1:8000 \
+  .venv/bin/python eval/batch_parallel.py --jobs 2 …
+```
+(Do **not** leave `MLX_SERVER_URL` in `.env`.)
+
+**Server vs in-process (parallel):** in-process `LLM_BACKEND=mlx` loads weights
+inside each Python process — N agent jobs ⇒ N copies ⇒ OOM. **oMLX / mlx-server**
+keeps **one** model resident and continuous-batches concurrent `/v1/chat/completions`
+streams, so 2–N agent jobs share that load. Per-stream tok/s drops some under load;
+aggregate throughput usually rises (especially MoE like V4-Flash). Details + runbook:
+[`eval/PARALLEL_MLX_TESTING.md`](eval/PARALLEL_MLX_TESTING.md).
+
+**Keep oMLX from quitting / timing out** (common failure with older `mlx_lm.server`):
+
+0. **Check the prompt cache before anything else.** oMLX ships
+   `hot_cache_max_size` at `"0"` (disabled). Enabling it took a repeated
+   ~23.7K-token prompt from **51.0s → 4.6s** (~11×). In the admin UI this is under
+   **Memory Management → Memory Limit (In-Memory Hot Cache)** — **not** the CACHE
+   panel. In `~/.omlx/settings.json` the key is `cache.hot_cache_max_size` (e.g.
+   `"20%"` or `"32GB"`). Leave it `"0"` and every agent turn re-prefills from scratch.
+1. **Idle unload off** — admin → Resource Management → idle timeout = **None**; or
+   `~/.omlx/settings.json` → `"idle_timeout": {"idle_timeout_seconds": null}`.
+2. **Pin** DeepSeek-V4-Flash (and/or GLM) in `/admin` so LRU eviction cannot drop it.
+3. **Per-model TTL** unset/disabled for the pinned coder model.
+4. **SSE keepalive** = `chunk` (default) so long prefills do not look like a dead socket
+   to `MLXServerBackend`.
+5. Prefer **oMLX app / `brew services` / `omlx start`** (auto-restart) over a bare
+   foreground terminal that dies on sleep; wrap long batches with `caffeinate -dims`.
+6. No companion MTP patch repos on 0.5.4rc2+.
+
+Does not replace or break GLM-5.2 (separate folder); unload one before loading the
+other if unified memory is tight. `MLXServerBackend` strips images — use in-process
+MLX (or a VLM slot) when you need screenshot / VLM critique.
+
 **Tests** (pure-function; see `TEST.md`; **batch / overnight commands:** `eval/OPERATIONS.md`):
 ```bash
 .venv/bin/python -m pytest tests/ -q

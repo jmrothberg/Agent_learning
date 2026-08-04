@@ -3996,12 +3996,34 @@ class CodingBoxApp(App):
             "Then type feedback to continue, or [b]/retry[/b] to re-run planning."
         )
 
+    def _mlx_endpoint_for_chosen(self, chosen_name: str) -> str:
+        """Resolve MLX endpoint; auto-start oMLX for DeepSeek-V4-Flash."""
+        if backend_mod.requires_omlx_server(chosen_name):
+            try:
+                self._log_info(
+                    "[dim]DeepSeek-V4 needs oMLX — ensuring server at "
+                    f"{backend_mod.omlx_default_endpoint()}…[/dim]"
+                )
+                ep = backend_mod.ensure_omlx_server()
+                self._log_info(
+                    f"[green]✓[/green] oMLX ready at [b]{ep}[/b] "
+                    "[dim](MTP/pin still configured in /admin)[/dim]"
+                )
+                return ep
+            except RuntimeError as e:
+                self._log_error(str(e))
+                raise
+        return backend_mod.mlx_endpoint_for_model(chosen_name)
+
     def _apply_model_to_active_session_slot(
         self, chosen_backend: str, chosen_name: str, slot: int, role: str | None, *, source: str,
     ) -> bool:
         """Point the live agent's slots at a new backend. Returns False on init error."""
         if chosen_backend == "mlx":
-            desired_endpoint = backend_mod.mlx_endpoint_url()
+            try:
+                desired_endpoint = self._mlx_endpoint_for_chosen(chosen_name)
+            except RuntimeError:
+                return False
         elif chosen_backend == "openai":
             desired_endpoint = backend_mod.openai_endpoint_url()
         elif chosen_backend == "anthropic":
@@ -4080,7 +4102,7 @@ class CodingBoxApp(App):
         """Point the live agent at a new backend. Returns False on init error."""
         try:
             if chosen_backend == "mlx":
-                endpoint = backend_mod.mlx_endpoint_url()
+                endpoint = self._mlx_endpoint_for_chosen(chosen_name)
             elif chosen_backend == "openai":
                 endpoint = backend_mod.openai_endpoint_url()
             elif chosen_backend == "anthropic":
@@ -4312,6 +4334,17 @@ class CodingBoxApp(App):
         setattr(self, next_model_attr, chosen_name)
         setattr(self, next_role_attr, role)
 
+        # DeepSeek-V4-Flash: ensure oMLX is up when staging (even before /new).
+        if chosen_backend == "mlx" and backend_mod.requires_omlx_server(chosen_name):
+            try:
+                self._mlx_endpoint_for_chosen(chosen_name)
+            except RuntimeError:
+                setattr(self, next_model_attr, None)
+                setattr(self, next_backend_attr, None)
+                setattr(self, next_role_attr, None)
+                self._update_status()
+                return
+
         # Auto-staff architect only — critic screenshot review is explicit
         # via /vlm-critique (or /allroles), not silently enabled here.
         if slot > 1 and role == "architect" and not self._use_architect_split:
@@ -4374,21 +4407,28 @@ class CodingBoxApp(App):
         )
 
         if chosen_backend == "mlx":
-            mlx_active = backend_mod.MLXBackend._loaded_path
-            if mlx_active is None:
+            if backend_mod.requires_omlx_server(chosen_name):
                 self._log_info(
-                    f"[dim]MLX runs in-process; weights for "
-                    f"[b]{_esc(chosen_name)}[/b] will load on the first "
-                    f"request of /new (~30-60s the first time).[/dim]"
+                    f"[dim]routed via oMLX HTTP "
+                    f"({backend_mod.omlx_default_endpoint()}) — "
+                    f"not in-process mlx_lm.[/dim]"
                 )
-            elif mlx_active != chosen_name:
-                self._log_info(
-                    f"[yellow]heads-up:[/yellow] [b]{_esc(mlx_active)}[/b] "
-                    f"is currently loaded in VRAM. The first request of /new "
-                    f"will swap to the staged model (~30-60s pause). To "
-                    f"preload immediately, run [b]/unload mlx[/b] then "
-                    f"trigger a generation."
-                )
+            else:
+                mlx_active = backend_mod.MLXBackend._loaded_path
+                if mlx_active is None:
+                    self._log_info(
+                        f"[dim]MLX runs in-process; weights for "
+                        f"[b]{_esc(chosen_name)}[/b] will load on the first "
+                        f"request of /new (~30-60s the first time).[/dim]"
+                    )
+                elif mlx_active != chosen_name:
+                    self._log_info(
+                        f"[yellow]heads-up:[/yellow] [b]{_esc(mlx_active)}[/b] "
+                        f"is currently loaded in VRAM. The first request of /new "
+                        f"will swap to the staged model (~30-60s pause). To "
+                        f"preload immediately, run [b]/unload mlx[/b] then "
+                        f"trigger a generation."
+                    )
         self._update_status()
         self._update_mode_bar()
 
@@ -4874,13 +4914,22 @@ class CodingBoxApp(App):
             return
 
         currently_loaded = backend_mod.MLXBackend._loaded_path
+        if backend_mod.requires_omlx_server(model_name):
+            try:
+                self._mlx_endpoint_for_chosen(model_name)
+            except RuntimeError:
+                return
         self._next_backend = "mlx"
         self._next_model = model_name
         msg = (
             f"[green]✓[/green] staged MLX model [b]{_esc(model_name)}[/b] "
             "for next /new"
         )
-        if currently_loaded and currently_loaded != model_name:
+        if backend_mod.requires_omlx_server(model_name):
+            msg += (
+                f" · [dim]via oMLX {backend_mod.omlx_default_endpoint()}[/dim]"
+            )
+        elif currently_loaded and currently_loaded != model_name:
             msg += (
                 f" · [yellow]note:[/yellow] [b]{_esc(currently_loaded)}[/b] "
                 f"is still resident in VRAM — run [b]/unload mlx[/b] before "
@@ -5122,7 +5171,10 @@ class CodingBoxApp(App):
         """
         if self._next_backend in ("ollama", "mlx", "openai", "anthropic") and self._next_model:
             if self._next_backend == "mlx":
-                endpoint = backend_mod.mlx_endpoint_url()
+                try:
+                    endpoint = self._mlx_endpoint_for_chosen(self._next_model)
+                except RuntimeError:
+                    return None
             elif self._next_backend == "openai":
                 endpoint = backend_mod.openai_endpoint_url()
             elif self._next_backend == "anthropic":
@@ -6310,7 +6362,11 @@ class CodingBoxApp(App):
         # Clear with the bare /model and /backend commands.
         if self._next_backend in ("ollama", "mlx", "openai", "anthropic") and self._next_model:
             if self._next_backend == "mlx":
-                endpoint = backend_mod.mlx_endpoint_url()
+                try:
+                    endpoint = self._mlx_endpoint_for_chosen(self._next_model)
+                except RuntimeError:
+                    self._session_done = True
+                    return
             elif self._next_backend == "openai":
                 endpoint = backend_mod.openai_endpoint_url()
             elif self._next_backend == "anthropic":
@@ -6382,24 +6438,30 @@ class CodingBoxApp(App):
                 self._session_model2 = info.model
             else:
                 if self._next_backend2 == "mlx":
-                    endpoint = backend_mod.mlx_endpoint_url()
+                    try:
+                        endpoint = self._mlx_endpoint_for_chosen(self._next_model2)
+                    except RuntimeError:
+                        endpoint = None
                 elif self._next_backend2 == "openai":
                     endpoint = backend_mod.openai_endpoint_url()
                 elif self._next_backend2 == "anthropic":
                     endpoint = backend_mod.anthropic_endpoint_url()
                 else:
                     endpoint = backend_mod.ollama_endpoint_url(2)
-                info2 = backend_mod.BackendInfo(
-                    name=self._next_backend2, model=self._next_model2,
-                    source=f"/model2 staged: {self._next_backend2} (sticky)",
-                    endpoint=endpoint,
-                )
-                try:
-                    self._session_backend2 = backend_mod.make_backend(info2)
-                    self._session_backend_info2 = info2
-                    self._session_model2 = info2.model
-                except Exception as e:
-                    self._log_error(f"could not initialize backend2: {e}")
+                if endpoint is None:
+                    self._log_error("could not initialize backend2: oMLX unavailable")
+                else:
+                    info2 = backend_mod.BackendInfo(
+                        name=self._next_backend2, model=self._next_model2,
+                        source=f"/model2 staged: {self._next_backend2} (sticky)",
+                        endpoint=endpoint,
+                    )
+                    try:
+                        self._session_backend2 = backend_mod.make_backend(info2)
+                        self._session_backend_info2 = info2
+                        self._session_model2 = info2.model
+                    except Exception as e:
+                        self._log_error(f"could not initialize backend2: {e}")
 
         self._session_backend3 = None
         self._session_backend_info3 = None
@@ -6440,24 +6502,30 @@ class CodingBoxApp(App):
                 self._session_model3 = self._session_backend_info2.model
             else:
                 if self._next_backend3 == "mlx":
-                    endpoint = backend_mod.mlx_endpoint_url()
+                    try:
+                        endpoint = self._mlx_endpoint_for_chosen(self._next_model3)
+                    except RuntimeError:
+                        endpoint = None
                 elif self._next_backend3 == "openai":
                     endpoint = backend_mod.openai_endpoint_url()
                 elif self._next_backend3 == "anthropic":
                     endpoint = backend_mod.anthropic_endpoint_url()
                 else:
                     endpoint = backend_mod.ollama_endpoint_url(3)
-                info3 = backend_mod.BackendInfo(
-                    name=self._next_backend3, model=self._next_model3,
-                    source=f"/model3 staged: {self._next_backend3} (sticky)",
-                    endpoint=endpoint,
-                )
-                try:
-                    self._session_backend3 = backend_mod.make_backend(info3)
-                    self._session_backend_info3 = info3
-                    self._session_model3 = info3.model
-                except Exception as e:
-                    self._log_error(f"could not initialize backend3: {e}")
+                if endpoint is None:
+                    self._log_error("could not initialize backend3: oMLX unavailable")
+                else:
+                    info3 = backend_mod.BackendInfo(
+                        name=self._next_backend3, model=self._next_model3,
+                        source=f"/model3 staged: {self._next_backend3} (sticky)",
+                        endpoint=endpoint,
+                    )
+                    try:
+                        self._session_backend3 = backend_mod.make_backend(info3)
+                        self._session_backend_info3 = info3
+                        self._session_model3 = info3.model
+                    except Exception as e:
+                        self._log_error(f"could not initialize backend3: {e}")
 
         self.title = f"{CHAT_APP_TITLE} — {info.name.upper()} · {model_name}"
         self._log_info(

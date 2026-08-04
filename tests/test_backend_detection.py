@@ -381,23 +381,84 @@ def test_llm_backend_mlx_server(monkeypatch):
     assert info.model == "local-model"
 
 
-def test_make_backend_routes_http_mlx_to_server():
-    info = backend.BackendInfo(
-        name="mlx",
-        model="foo",
-        source="test",
-        endpoint="http://127.0.0.1:8080",
-    )
-    be = backend.make_backend(info)
-    assert isinstance(be, backend.MLXServerBackend)
+# --- oMLX / DeepSeek-V4 helpers ----------------------------------------------
 
 
-def test_make_backend_routes_in_process_mlx():
-    info = backend.BackendInfo(
-        name="mlx",
-        model="/m/foo",
-        source="test",
-        endpoint="in-process",
+def test_requires_omlx_server_by_name():
+    assert backend.requires_omlx_server(
+        "/Users/x/MLX_Models/DeepSeek-V4-Flash-0731-MXFP4-MLX"
     )
-    be = backend.make_backend(info)
-    assert isinstance(be, backend.MLXBackend)
+    assert backend.requires_omlx_server("DeepSeek-V4-Flash-0731-MXFP4-MLX")
+    assert backend.requires_omlx_server("vontra/deepseek_v4_flash")
+    assert not backend.requires_omlx_server("GLM-5.2-MLX-4bit")
+    assert not backend.requires_omlx_server("Qwen3.6-27B-mxfp8")
+    assert not backend.requires_omlx_server("")
+
+
+def test_requires_omlx_server_from_config_json(tmp_path: Path):
+    d = tmp_path / "some_custom_dir"
+    d.mkdir()
+    (d / "config.json").write_text(
+        '{"model_type": "deepseek_v4", "architectures": ["DeepseekV4ForCausalLM"]}\n',
+        encoding="utf-8",
+    )
+    assert backend.requires_omlx_server(str(d))
+    other = tmp_path / "glm"
+    other.mkdir()
+    (other / "config.json").write_text(
+        '{"model_type": "glm_moe_dsa"}\n', encoding="utf-8"
+    )
+    assert not backend.requires_omlx_server(str(other))
+
+
+def test_omlx_default_endpoint_env(monkeypatch):
+    monkeypatch.delenv("OMLX_SERVER_URL", raising=False)
+    assert backend.omlx_default_endpoint() == "http://127.0.0.1:8000"
+    monkeypatch.setenv("OMLX_SERVER_URL", "127.0.0.1:9000")
+    assert backend.omlx_default_endpoint() == "http://127.0.0.1:9000"
+
+
+def test_mlx_endpoint_for_model_routes_flash_to_omlx(monkeypatch):
+    monkeypatch.delenv("MLX_SERVER_URL", raising=False)
+    monkeypatch.delenv("MLX_HOST", raising=False)
+    monkeypatch.delenv("LLM_BACKEND", raising=False)
+    flash = "/m/DeepSeek-V4-Flash-0731-MXFP4-MLX"
+    assert backend.mlx_endpoint_for_model(flash) == "http://127.0.0.1:8000"
+    assert backend.mlx_endpoint_for_model("/m/GLM-5.2-MLX-4bit") == "in-process"
+
+
+def test_ensure_omlx_server_already_up(monkeypatch):
+    monkeypatch.setattr(backend, "omlx_reachable", lambda *a, **k: True)
+    calls: list = []
+
+    def boom(*_a, **_k):
+        calls.append(1)
+        return False, "should not spawn"
+
+    monkeypatch.setattr(backend, "_spawn_omlx_serve", boom)
+    assert backend.ensure_omlx_server() == "http://127.0.0.1:8000"
+    assert calls == []
+
+
+def test_ensure_omlx_server_spawns_then_ready(monkeypatch):
+    hits = {"n": 0}
+
+    def reachable(*_a, **_k):
+        hits["n"] += 1
+        return hits["n"] >= 2  # first probe fail, after spawn succeed
+
+    monkeypatch.setattr(backend, "omlx_reachable", reachable)
+    monkeypatch.setattr(
+        backend, "_spawn_omlx_serve", lambda ep: (True, "spawned test")
+    )
+    monkeypatch.setattr(backend.time, "sleep", lambda *_: None)
+    assert backend.ensure_omlx_server(timeout_s=5.0) == "http://127.0.0.1:8000"
+
+
+def test_ensure_omlx_server_fails_clearly(monkeypatch):
+    monkeypatch.setattr(backend, "omlx_reachable", lambda *a, **k: False)
+    monkeypatch.setattr(
+        backend, "_spawn_omlx_serve", lambda ep: (False, "no binary")
+    )
+    with pytest.raises(RuntimeError, match="oMLX"):
+        backend.ensure_omlx_server(timeout_s=1.0)

@@ -152,7 +152,7 @@ tail -f games/tune_serial10/run_XX/overnight.log
 | **Tests, scripts, what each suite guards** | **`TEST.md`** |
 | Tune harness / traps / batch learnings | `HARNESS_TUNING.md` |
 | Trace grep workflow | `HARNESS_DEBUG.md` |
-| Serial / overnight eval workflow | **`eval/OPERATIONS.md`** · `eval/PARALLEL_MLX_TESTING.md` |
+| Serial / overnight eval workflow | **`eval/OPERATIONS.md`** · `eval/PARALLEL_MLX_TESTING.md` (oMLX / mlx-server parallel) |
 | Human onboarding | `README.md` |
 
 ### Trace evidence → code (canonical loop)

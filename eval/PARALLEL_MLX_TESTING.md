@@ -11,7 +11,7 @@ using **one MLX model load** and server-side batching. Repo:
 **Start here for serial overnight batches:** [`eval/OPERATIONS.md`](OPERATIONS.md) — run_07 chain
 (`bash eval/tune_run07_chain.sh`), pytest commands, triage workflow.
 
-This file is for **parallel mlx-server throughput** only (one `mlx_lm.server`, N clients) — not the
+This file is for **parallel mlx-server / oMLX throughput** only (one model load, N clients) — not the
 default agent-tuning path.
 
 ---
@@ -104,9 +104,50 @@ without loading the MLX model separately in every Python process.
 
 | Approach | What happens | Use for parallel? |
 |----------|--------------|-------------------|
-| **Wrong:** N × `coder.py` with default `--backend mlx` | N in-process `mlx_lm.load()` copies (~15 GB each for 27B) | No — OOM on most Macs |
+| **Wrong:** N × `coder.py` with default `--backend mlx` | N in-process `mlx_lm.load()` copies (~15 GB each for 27B; ~167 GB each for V4-Flash) | No — OOM on most Macs |
 | **Wrong:** `--best-of-n 3` on MLX | Sequential samples within **one** game | No — not multi-game |
-| **Right:** N clients → **one** `mlx_lm.server` | One model in VRAM; server batches concurrent streams | **Yes** |
+| **Right:** N clients → **one** `mlx_lm.server` **or oMLX** | One model in VRAM; server continuous-batches concurrent streams | **Yes** |
+
+**Expectation (not magic free parallelism):** per-stream tok/s usually drops under concurrency;
+**aggregate** tok/s rises. MoE models (DeepSeek-V4-Flash) amortize weight traffic well at
+small N (2–4). Past `mlx_lm.server` “quit / timeout” on long agent prefills is usually idle
+TTL, missing SSE keepalive, Mac sleep, or a dead foreground shell — see **oMLX anti-quit**
+below.
+
+---
+
+## oMLX (preferred server for DeepSeek-V4-Flash + stay-alive)
+
+Stock `mlx_lm.server` from this repo’s `.venv` **cannot** load Vontra
+`DeepSeek-V4-Flash-0731-MXFP4-MLX` (`model_type: deepseek_v4`). Use **[oMLX](https://omlx.ai/)
+0.5.7+** (native MTP). Weights: `~/MLX_Models/DeepSeek-V4-Flash-0731-MXFP4-MLX`.
+
+```bash
+# After oMLX is installed and serving :8000 with the model loaded + pinned:
+MLX_SERVER_URL=http://127.0.0.1:8000 \
+  .venv/bin/python eval/batch_parallel.py --jobs 2 --headless --max-iters 4 \
+  --goal "snake with wraparound board" \
+  --goal "breakout with paddle and bricks"
+```
+
+### Anti-quit / anti-timeout checklist (do this once)
+
+| Setting | Why |
+|---------|-----|
+| **`cache.hot_cache_max_size` ≠ `"0"` (check first)** | oMLX ships disabled (`"0"`). Enabling (e.g. `"20%"`) cut a repeated ~23.7K-token prompt **51.0s → 4.6s** (~11×) — worth more than kernel tweaks for agent traffic. **Admin UI: Memory Management → Memory Limit (In-Memory Hot Cache)** — **not** the CACHE panel |
+| Global **idle timeout = None** (`idle_timeout_seconds: null`) | Stops auto-unload during long quiet gaps between agent turns |
+| **Pin** the coder model in `/admin` | Survives LRU eviction when other models load |
+| Per-model **TTL off** for that model | Same as idle — no surprise unload mid-batch |
+| SSE keepalive **`chunk`** | Long prefill must not look like a hung socket to `MLXServerBackend` |
+| **`mtp_enabled`** on V4-Flash | Native DSpark MTP — do **not** install companion speed-patch repos |
+| App / `omlx start` / `brew services` + `caffeinate -dims` on batches | Auto-restart + no Mac sleep killing the server |
+
+Admin UI: `http://127.0.0.1:8000/admin`. Durable file: `~/.omlx/settings.json`
+(`cache.hot_cache_max_size`, not under `memory`).
+Human-facing summary: repo root **`README.md`** (DeepSeek-V4-Flash / oMLX) and **`DEV.md`**.
+
+**Caveat:** `MLXServerBackend.is_vlm()` is false — images stripped. Parallel oMLX is for
+**text coder throughput**; keep VLM critique on in-process MLX / a VLM slot / serial tune.
 
 ---
 
@@ -116,8 +157,8 @@ without loading the MLX model separately in every Python process.
 
 Server mode activates **only** when one of these is set:
 
-- `MLX_SERVER_URL=http://127.0.0.1:8080`
-- `MLX_HOST=127.0.0.1:8080` (legacy alias)
+- `MLX_SERVER_URL=http://127.0.0.1:8000`  (oMLX default) or `:8080` (`mlx_lm.server`)
+- `MLX_HOST=127.0.0.1:8000` (legacy alias)
 - `LLM_BACKEND=mlx-server`
 - `--backend mlx-server` on CLI
 
@@ -132,9 +173,9 @@ let `eval/batch_parallel.py` set it for child processes.
 ```
 Terminal 1                          Terminal 2 (batch runner)
 ┌─────────────────────┐            ┌──────────────────────────────┐
-│ mlx_lm.server       │            │ eval/batch_parallel.py       │
-│  (one model load)   │◄──HTTP─────│  spawns N subprocesses:    │
-│  continuous batch   │            │   coder.py --backend mlx-server
+│ oMLX :8000          │            │ eval/batch_parallel.py       │
+│  (or mlx_lm.server) │◄──HTTP─────│  spawns N subprocesses:    │
+│  one model + batch  │            │   coder.py --backend mlx-server
 └─────────────────────┘            │   or eval_seed_edits.py …  │
                                    └──────────────────────────────┘
 ```
@@ -156,6 +197,18 @@ OpenAI-compatible port — same client path, not a repo dependency today.
 ## Runbook (copy-paste)
 
 ### 1. Start the server (once, separate terminal)
+
+**oMLX (DeepSeek-V4-Flash / stay-alive — preferred on this machine):**
+
+```bash
+# Menu bar app, or:
+omlx serve --model-dir ~/MLX_Models --hot-cache-max-size 20% --port 8000
+# Then in /admin: load + pin DeepSeek-V4-Flash-0731-MXFP4-MLX, mtp_enabled=on,
+# idle timeout=None. Verify:
+curl -s http://127.0.0.1:8000/v1/models | head
+```
+
+**Classic `mlx_lm.server` (Qwen / models this venv can load — port 8080):**
 
 ```bash
 cd /Users/jonathanrothberg/Agent_learning
@@ -257,7 +310,7 @@ MLX_SERVER_URL=http://127.0.0.1:8080 .venv/bin/python coder.py \
 
 | Variable | Effect |
 |----------|--------|
-| `MLX_SERVER_URL` | Switch to HTTP server backend |
+| `MLX_SERVER_URL` | Switch to HTTP server backend (`http://127.0.0.1:8000` oMLX, `:8080` classic) |
 | `MLX_HOST` | Same (legacy) |
 | `LLM_BACKEND=mlx-server` | Force server backend |
 | `MLX_MODEL` | Model id/path sent to server (and server-side load hint) |
@@ -269,7 +322,7 @@ MLX_SERVER_URL=http://127.0.0.1:8080 .venv/bin/python coder.py \
 
 When planning parallel MLX testing, the plan should:
 
-1. **Start one server** in a background terminal (or assume user started it).
+1. **Start one server** in a background terminal (oMLX preferred for V4-Flash; else `mlx_lm.server`) — or assume user started it with anti-quit settings above.
 2. **Use `eval/batch_parallel.py`** with `--jobs N`, not N bare `coder.py` with default MLX.
 3. **Set `MLX_SERVER_URL` only for the batch session** — do not change default chat behavior.
 4. **Pick workload:**
@@ -289,12 +342,16 @@ exit codes and generated HTML under `--out-dir`.
 
 | Symptom | Likely cause |
 |---------|----------------|
-| `mlx_lm.server is not reachable` | Server not started or wrong port |
+| `mlx_lm.server is not reachable` / empty `/v1/models` | Server not started, wrong port (`8000` oMLX vs `8080` classic), or Mac sleep killed a bare shell |
+| Server unloads mid-batch / “timed out” | Idle TTL or global idle timeout — set to **None**, **pin** model; see anti-quit checklist |
 | Prefill completes, zero tokens | Metal OOM or MLX server starved — use `--jobs 1`, raise `--stall-seconds`, or `iogpu.wired_limit_mb` |
+| Every agent turn re-prefills for 30–60s | **`cache.hot_cache_max_size` is `"0"`** — set e.g. `"20%"` (UI: **Memory Management**, not CACHE panel) |
+| Looping / repeating sentences with V4 MTP | Companion speed-patch conflict — remove patches; use stock oMLX 0.5.7+ `mtp_enabled` only |
 | TUI suddenly uses server | `MLX_SERVER_URL` left set in `.env` / shell — unset it |
 | Art-heavy builds stall mid-stream | Lower `--jobs` to 1; Round 1 tune batch uses serial jobs + 1200s stall |
 | 5 full art-heavy builds OOM | Lower `--jobs` or use `--seed-edits --patch-only` |
-| Slow with 5 long prompts | Expected on unified memory; try vllm-mlx continuous batching |
+| Slow with 5 long prompts | Expected on unified memory; try fewer jobs or vllm-mlx continuous batching |
+| No VLM / screenshots in parallel batch | Expected — `MLXServerBackend` strips images; use in-process for VLM critique |
 
 ---
 

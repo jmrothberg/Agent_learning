@@ -2929,6 +2929,201 @@ def _try_mlx_server() -> BackendInfo | None:
 
 
 # -----------------------------------------------------------------------------
+# oMLX — DeepSeek-V4-Flash (and other models stock mlx-lm cannot load)
+# -----------------------------------------------------------------------------
+# chat.py auto-starts oMLX when the user /model-picks a deepseek_v4 checkpoint.
+# Other MLX models stay in-process; we do NOT set MLX_SERVER_URL globally.
+
+
+def omlx_default_endpoint() -> str:
+    """oMLX OpenAI base URL (default :8000). Override with OMLX_SERVER_URL."""
+    raw = (os.environ.get("OMLX_SERVER_URL") or "").strip().rstrip("/")
+    if not raw:
+        return "http://127.0.0.1:8000"
+    if not raw.startswith("http"):
+        raw = "http://" + raw
+    return raw
+
+
+def requires_omlx_server(model: str) -> bool:
+    """True when this MLX id/path needs oMLX (stock mlx-lm lacks deepseek_v4).
+
+    Matches Vontra / community DeepSeek-V4-Flash folders by name, or a local
+    config.json with model_type deepseek_v4.
+    """
+    if not model or not str(model).strip():
+        return False
+    text = str(model).strip()
+    low = text.lower().replace("\\", "/")
+    base = os.path.basename(low.rstrip("/"))
+    # Path or basename heuristics (HF folders, aliases).
+    if "deepseek-v4" in low or "deepseek_v4" in low:
+        return True
+    if base.startswith("deepseek-v4") or "v4-flash" in base:
+        return True
+    # Local dir with authoritative config.
+    cfg_path = os.path.join(text, "config.json") if os.path.isdir(text) else ""
+    if cfg_path and os.path.isfile(cfg_path):
+        try:
+            with open(cfg_path, encoding="utf-8") as f:
+                cfg = json.load(f)
+            if isinstance(cfg, dict) and str(cfg.get("model_type") or "").lower() == "deepseek_v4":
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def omlx_reachable(endpoint: str | None = None, *, timeout: float = 1.0) -> bool:
+    """True when oMLX (or any OpenAI-compatible server) answers GET /v1/models."""
+    ep = (endpoint or omlx_default_endpoint()).rstrip("/")
+    data = _http_get_json(ep + "/v1/models", timeout=timeout)
+    return isinstance(data, dict)
+
+
+def _resolve_omlx_bin() -> str | None:
+    """Find an `omlx` CLI: PATH, ~/.omlx/bin, or ~/MLX_Models/.omlx-venv."""
+    which = shutil.which("omlx")
+    if which:
+        return which
+    home = os.path.expanduser("~")
+    for path in (
+        os.path.join(home, ".omlx", "bin", "omlx"),
+        os.path.join(home, "MLX_Models", ".omlx-venv", "bin", "omlx"),
+    ):
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return None
+
+
+def _omlx_model_dir() -> str:
+    """Directory oMLX should scan for MLX model folders."""
+    env = (os.environ.get("OMLX_MODEL_DIR") or os.environ.get("MLX_MODELS_DIR") or "").strip()
+    if env:
+        # MLX_MODELS_DIR may be ':'-separated; take the first existing root.
+        for part in env.split(":"):
+            p = os.path.expanduser(part.strip())
+            if p and os.path.isdir(p):
+                return p
+    default = os.path.join(os.path.expanduser("~"), "MLX_Models")
+    return default
+
+
+def _spawn_omlx_serve(endpoint: str) -> tuple[bool, str]:
+    """Detached `omlx serve` or open oMLX.app. Does not wait for readiness."""
+    bin_path = _resolve_omlx_bin()
+    model_dir = _omlx_model_dir()
+    # Parse port from endpoint for --port (default 8000).
+    port = "8000"
+    try:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(endpoint if "://" in endpoint else "http://" + endpoint)
+        if parsed.port:
+            port = str(parsed.port)
+    except Exception:
+        pass
+
+    if bin_path:
+        cmd = [
+            bin_path,
+            "serve",
+            "--model-dir",
+            model_dir,
+            "--hot-cache-max-size",
+            "20%",
+            "--port",
+            port,
+        ]
+        try:
+            subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            return True, f"spawned {' '.join(cmd)}"
+        except OSError as e:
+            return False, f"failed to spawn omlx serve: {e!r}"
+
+    # Fall back to menu-bar app (auto_start_on_launch in ~/.omlx/settings.json).
+    app_candidates = (
+        "/Applications/oMLX.app",
+        os.path.expanduser("~/Applications/oMLX.app"),
+    )
+    for app in app_candidates:
+        if os.path.isdir(app):
+            try:
+                subprocess.Popen(
+                    ["open", app],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    stdin=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+                return True, f"opened {app}"
+            except OSError as e:
+                return False, f"failed to open {app}: {e!r}"
+    try:
+        subprocess.Popen(
+            ["open", "-a", "oMLX"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return True, "open -a oMLX"
+    except OSError as e:
+        return False, (
+            "oMLX not installed (no `omlx` CLI and no oMLX.app). "
+            f"Install oMLX 0.5.7+ then retry. ({e!r})"
+        )
+
+
+def ensure_omlx_server(*, timeout_s: float = 120.0) -> str:
+    """Ensure oMLX is reachable; spawn it if needed. Returns endpoint URL.
+
+    Raises RuntimeError with an install/start hint when the server never comes up.
+    """
+    endpoint = omlx_default_endpoint()
+    if omlx_reachable(endpoint):
+        return endpoint
+
+    ok, detail = _spawn_omlx_serve(endpoint)
+    if not ok:
+        raise RuntimeError(
+            f"DeepSeek-V4 needs oMLX but could not start it: {detail}\n"
+            "Install oMLX 0.5.7+ (app or `omlx` CLI), or start it once; "
+            "chat will reuse http://127.0.0.1:8000 afterward."
+        )
+
+    # Longer poll than Ollama — oMLX cold start / Metal init is slower.
+    deadline = time.monotonic() + max(5.0, float(timeout_s))
+    while time.monotonic() < deadline:
+        if omlx_reachable(endpoint, timeout=1.5):
+            return endpoint
+        time.sleep(0.5)
+
+    raise RuntimeError(
+        f"oMLX did not become reachable at {endpoint!r} within {timeout_s:.0f}s "
+        f"(start detail: {detail}). Check /Applications/oMLX.app or "
+        "`omlx serve --model-dir ~/MLX_Models`, then /model again."
+    )
+
+
+def mlx_endpoint_for_model(model: str) -> str:
+    """Endpoint for an MLX model pick: oMLX URL for deepseek_v4, else in-process
+    unless the user explicitly requested mlx-server via env.
+    """
+    if requires_omlx_server(model):
+        return omlx_default_endpoint()
+    if _mlx_server_mode_requested():
+        return _mlx_server_endpoint_url()
+    return _MLX_IN_PROCESS_ENDPOINT
+
+
+# -----------------------------------------------------------------------------
 # Convenience listing — used by chat.py /list and similar surfaces.
 # -----------------------------------------------------------------------------
 
