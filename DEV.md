@@ -58,7 +58,9 @@ MLX upgrades: MiniMax-M3 (`minimax_m3.py` copy after mlx-lm upgrade), GLM-5.2
 - `MLX_MODEL` — explicit MLX model path or HF id (in-process `mlx_lm.load`)
 - `MLX_SERVER_URL` — HTTP base for OpenAI-compatible MLX servers (`mlx_lm.server` **or oMLX**, e.g. `http://127.0.0.1:8000`). Enables `MLXServerBackend` continuous batching — **one model load, N clients**. Set **only for that session** (not in `.env`); see `eval/PARALLEL_MLX_TESTING.md` and README **DeepSeek-V4-Flash / oMLX**.
 - `MLX_HOST` — legacy alias for `MLX_SERVER_URL` host:port
-- `MLX_MODELS_DIR` — `:`-separated extra model scan dirs (in-process `/list`; oMLX uses its own `model_dir`, default `~/MLX_Models` once configured)
+- `OMLX_SERVER_URL` — override oMLX base for Flash auto-start (default `http://127.0.0.1:8000`); used by `backend.ensure_omlx_server` / `omlx_default_endpoint`
+- `OMLX_MODEL_DIR` — model scan dir for spawned `omlx serve` (else first existing `MLX_MODELS_DIR` entry, else `~/MLX_Models`)
+- `MLX_MODELS_DIR` — `:`-separated extra model scan dirs (in-process `/list`; oMLX spawn uses first existing root)
 - `MLX_PREFILL_STEP_SIZE` — prefill chunk (512 if path contains `flash`, else 1024) — in-process only
 - `MLX_TOP_P` / `MLX_TOP_K` / `MLX_MIN_P` — MLX sampler (vendor coding preset; repetition penalty stays off)
 - `MLX_MAX_TOKENS` — MLX output cap (default **131072**)
@@ -84,7 +86,7 @@ Stock PyPI `mlx-lm` lacks a working `deepseek_v4` path for that checkpoint.
 
 | Concern | Setting |
 |---------|---------|
-| **TUI pick Flash** | `/model` / `/launch` on DeepSeek-V4-Flash **auto-starts oMLX** (`backend.ensure_omlx_server`) and routes that session to `:8000`; GLM/Qwen/MiniMax stay in-process |
+| **TUI pick Flash** | `/model` / `/load` / `/launch` on DeepSeek-V4-Flash **auto-starts oMLX** (`backend.ensure_omlx_server`) and routes that session to `:8000`; GLM/Qwen/MiniMax stay in-process |
 | **Prompt cache (check first)** | `cache.hot_cache_max_size` ≠ `"0"` (e.g. `"20%"`). Admin UI: **Memory Management → Memory Limit (In-Memory Hot Cache)** — **not** the CACHE panel. Default `"0"` disabled; enabling cut a repeated ~24K prompt **51s → 4.6s** |
 | Parallel agents | `LLM_BACKEND=mlx-server` + `MLX_SERVER_URL=http://127.0.0.1:8000` — one resident model, continuous batch |
 | Idle unload / “server quit” | Global idle timeout **None**; **pin** the coder model; per-model TTL off |

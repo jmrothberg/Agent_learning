@@ -145,7 +145,7 @@ Use **oMLX 0.5.7+** (native DSpark MTP). Do **not** install the old companion
 speed-patch repo on oMLX 0.5.4rc2+ — enable `mtp_enabled` in oMLX model settings.
 
 **In the TUI you do not start the server by hand for Flash:** `/list` → `/model`
-(or `/launch`) on DeepSeek-V4-Flash calls `ensure_omlx_server()` — starts
+(or `/load` / `/launch`) on DeepSeek-V4-Flash calls `ensure_omlx_server()` — starts
 `omlx serve` or opens `oMLX.app` if `:8000` is down, then routes that session
 over HTTP. **GLM / Qwen / MiniMax stay in-process** (no server). Manual parallel
 batches can still use:
@@ -265,7 +265,7 @@ Files that carry the weight:
 | `agent.py` | Orchestrator (`GameAgent.run`); phase methods + mixin map → **`AGENTS.md` §1b** |
 | `assets.py` / `sounds.py` | Sprites: **FLUX2-klein (mflux CLI)** on macOS (never Z-Image); **Z-Image-Turbo** (diffusers) on Linux. Sounds: Stable Audio Open (always preloaded before browser). `render_asset_paths_block` injects the `sprite()` loader. |
 | `videos.py` | `<videos>` cutscene clips via Wan2.2-TI2V-5B in a **subprocess** (`scripts/generate_video.py` — mlx-gen on Mac, diffusers on Linux). `render_video_paths_block` injects the `<video>`-overlay loader. |
-| `backend.py` | MLX (in-process `mlx_lm`/`mlx_vlm`) + Ollama backends; sampler; VLM image path. |
+| `backend.py` | MLX in-process + **oMLX HTTP** (`ensure_omlx_server` for DeepSeek-V4-Flash) + Ollama; sampler; VLM image path. |
 | `modality.py` | Genre-free rendering-shape detectors (3D, wireframe, FPS nav modality); shared by `prompts_v1.py` and `memory.py`. |
 | `prompts_v1.py` | Data-driven system prompt (`build_system_prompt` walks a `FormatSpec` list — don't hand-edit the rendered blob). |
 | `memory.py` | `GameMemory` (skeleton retrieval), `Playbook` (Jaccard bullet retrieval), opening-book outlines/recipes. |

@@ -122,6 +122,14 @@ Stock `mlx_lm.server` from this repo’s `.venv` **cannot** load Vontra
 `DeepSeek-V4-Flash-0731-MXFP4-MLX` (`model_type: deepseek_v4`). Use **[oMLX](https://omlx.ai/)
 0.5.7+** (native MTP). Weights: `~/MLX_Models/DeepSeek-V4-Flash-0731-MXFP4-MLX`.
 
+**TUI:** `/model` / `/load` / `/launch` on DeepSeek-V4-Flash calls
+`backend.ensure_omlx_server()` (spawn `omlx serve` or open `oMLX.app`) and sets the
+session `BackendInfo.endpoint` to `:8000` — **no** `MLX_SERVER_URL` env required.
+GLM / Qwen / MiniMax stay in-process.
+
+**Parallel batches** (`eval/batch_parallel.py`) do **not** auto-start oMLX — start the
+server once, then:
+
 ```bash
 # After oMLX is installed and serving :8000 with the model loaded + pinned:
 MLX_SERVER_URL=http://127.0.0.1:8000 \
@@ -151,11 +159,15 @@ Human-facing summary: repo root **`README.md`** (DeepSeek-V4-Flash / oMLX) and *
 
 ---
 
-## Regular chat is unchanged
+## Regular chat vs server mode
 
-**`chat.py` / interactive TUI still uses in-process MLX by default.**
+**`chat.py` defaults to in-process MLX** for GLM / Qwen / MiniMax.
 
-Server mode activates **only** when one of these is set:
+**Exception:** picking DeepSeek-V4-Flash (`requires_omlx_server`) auto-starts oMLX and
+routes that session over HTTP via `BackendInfo.endpoint` — without setting
+`MLX_SERVER_URL` in the environment.
+
+**Full server mode for all MLX picks / parallel clients** activates when one of these is set:
 
 - `MLX_SERVER_URL=http://127.0.0.1:8000`  (oMLX default) or `:8080` (`mlx_lm.server`)
 - `MLX_HOST=127.0.0.1:8000` (legacy alias)
@@ -163,8 +175,8 @@ Server mode activates **only** when one of these is set:
 - `--backend mlx-server` on CLI
 
 Do **not** put `MLX_SERVER_URL` in `.env` or shell profile unless you want the TUI
-to use the server too. For batch runs, set it **only in the batch terminal** or
-let `eval/batch_parallel.py` set it for child processes.
+to use the server for normal in-process-capable models too. For batch runs, set it
+**only in the batch terminal** or let `eval/batch_parallel.py` set it for child processes.
 
 ---
 
@@ -322,7 +334,7 @@ MLX_SERVER_URL=http://127.0.0.1:8080 .venv/bin/python coder.py \
 
 When planning parallel MLX testing, the plan should:
 
-1. **Start one server** in a background terminal (oMLX preferred for V4-Flash; else `mlx_lm.server`) — or assume user started it with anti-quit settings above.
+1. **Start one server** for parallel batches (oMLX preferred for V4-Flash; else `mlx_lm.server`) — `batch_parallel.py` does not call `ensure_omlx_server`. Interactive Flash picks in `chat.py` auto-start oMLX.
 2. **Use `eval/batch_parallel.py`** with `--jobs N`, not N bare `coder.py` with default MLX.
 3. **Set `MLX_SERVER_URL` only for the batch session** — do not change default chat behavior.
 4. **Pick workload:**
