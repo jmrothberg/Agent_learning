@@ -4023,6 +4023,46 @@ class CodingBoxApp(App):
             return backend_mod.omlx_api_model_id(chosen_name)
         return chosen_name
 
+    def _unload_omlx_if_leaving(
+        self, chosen_backend: str, chosen_name: str,
+    ) -> list[str]:
+        """Unload oMLX-resident Flash when leaving for in-process MLX (GLM…).
+
+        Trace 20260804_182457: /model GLM after Flash only freed Z-Image;
+        MLXBackend._loaded_path was null (Flash lived in oMLX), so ~163GB
+        stayed while chat tried to load GLM → process death. oMLX stayed up.
+        """
+        freed: list[str] = []
+        old = getattr(self, "_session_backend_info", None)
+        if old is None or getattr(old, "name", None) != "mlx":
+            return freed
+        old_model = getattr(old, "model", None) or ""
+        old_ep = getattr(old, "endpoint", None)
+        old_via_omlx = backend_mod.requires_omlx_server(old_model) or (
+            backend_mod.endpoint_is_omlx(old_ep)
+        )
+        if not old_via_omlx:
+            return freed
+        # Staying on the same oMLX model — keep weights warm.
+        if (
+            chosen_backend == "mlx"
+            and backend_mod.requires_omlx_server(chosen_name)
+            and backend_mod.omlx_api_model_id(chosen_name)
+            == backend_mod.omlx_api_model_id(old_model)
+        ):
+            return freed
+        ok, detail = backend_mod.omlx_unload_model(old_model, old_ep)
+        mid = backend_mod.omlx_api_model_id(old_model)
+        if ok:
+            freed.append(f"oMLX ({mid})")
+            self._log_info(f"[dim]unloaded oMLX model [b]{mid}[/b] ({detail})[/dim]")
+        else:
+            self._log_info(
+                f"[yellow]oMLX unload failed for {mid}: {detail}[/yellow] "
+                "[dim]— free RAM in /admin if the next model OOMs[/dim]"
+            )
+        return freed
+
     def _apply_model_to_active_session_slot(
         self, chosen_backend: str, chosen_name: str, slot: int, role: str | None, *, source: str,
     ) -> bool:
@@ -4132,17 +4172,31 @@ class CodingBoxApp(App):
         except Exception as e:
             self._log_error(f"model swap failed: {e}")
             return False
+        # Leave oMLX Flash before in-process GLM/Qwen relief + first load.
+        try:
+            omlx_freed = self._unload_omlx_if_leaving(chosen_backend, chosen_name)
+        except Exception:
+            omlx_freed = []
         if chosen_backend == "mlx" and self.agent is not None:
             try:
                 relief = self.agent._relieve_vram_for_mlx_model_swap(chosen_name)
-                freed = relief.get("freed") or []
+                freed = list(omlx_freed) + list(relief.get("freed") or [])
                 if freed:
                     self._log_info(
                         "[dim]freed VRAM for MLX model swap: "
                         f"{_esc(', '.join(freed))}[/dim]"
                     )
             except Exception:
-                pass
+                if omlx_freed:
+                    self._log_info(
+                        "[dim]freed VRAM for MLX model swap: "
+                        f"{_esc(', '.join(omlx_freed))}[/dim]"
+                    )
+        elif omlx_freed:
+            self._log_info(
+                "[dim]freed VRAM for MLX model swap: "
+                f"{_esc(', '.join(omlx_freed))}[/dim]"
+            )
         if self.agent is not None:
             self.agent._backend = new_backend
         self._session_backend = new_backend
@@ -6422,6 +6476,22 @@ class CodingBoxApp(App):
                 self._log_error(str(e))
                 self._session_done = True
                 return
+        # Orphan Flash (~150GB+) after a dead TUI still sits in oMLX — free it
+        # before in-process GLM/Qwen first weight load.
+        if (
+            info.name == "mlx"
+            and not backend_mod.requires_omlx_server(info.model)
+            and not backend_mod.endpoint_is_omlx(info.endpoint)
+        ):
+            try:
+                orphaned = backend_mod.omlx_unload_loaded_for_inprocess()
+                if orphaned:
+                    self._log_info(
+                        "[dim]unloaded oMLX before in-process MLX: "
+                        f"{_esc(', '.join(orphaned))}[/dim]"
+                    )
+            except Exception:
+                pass
         try:
             self._session_backend = backend_mod.make_backend(info)
         except Exception as e:

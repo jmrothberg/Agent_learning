@@ -3005,6 +3005,98 @@ def mlx_server_api_model_id(model: str, endpoint: str | None = None) -> str:
     return model
 
 
+def omlx_unload_model(
+    model: str,
+    endpoint: str | None = None,
+    *,
+    timeout: float = 180.0,
+) -> tuple[bool, str]:
+    """POST /v1/models/{id}/unload so Flash weights leave unified memory.
+
+    Needed when switching TUI from oMLX Flash → in-process GLM/Qwen: in-process
+    relief only clears MLXBackend._loaded_path (null while Flash was on oMLX),
+    so Flash would stay resident (~150GB+) and the next GLM load OOM-kills chat.
+    """
+    model_id = omlx_api_model_id(model)
+    if not model_id:
+        return False, "empty model id"
+    ep = (endpoint or omlx_default_endpoint()).rstrip("/")
+    from urllib.parse import quote
+
+    url = f"{ep}/v1/models/{quote(model_id, safe='')}/unload"
+    try:
+        req = urllib.request.Request(
+            url,
+            data=b"{}",
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode(errors="replace")
+            try:
+                data = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                data = {}
+            if isinstance(data, dict) and data.get("status") == "ok":
+                return True, f"unloaded {model_id}"
+            return True, f"unload ok ({model_id}): {raw[:120]}"
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode(errors="replace")
+        except Exception:
+            pass
+        low = body.lower()
+        # Already unloaded is success for relief purposes.
+        if e.code == 400 and "not loaded" in low:
+            return True, f"already unloaded: {model_id}"
+        return False, f"HTTP {e.code}: {body[:200] or e.reason}"
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        return False, str(e)
+
+
+def omlx_list_loaded_model_ids(endpoint: str | None = None) -> list[str]:
+    """Ids currently resident in oMLX (`GET /v1/models/status`)."""
+    ep = (endpoint or omlx_default_endpoint()).rstrip("/")
+    data = _http_get_json(ep + "/v1/models/status", timeout=3.0)
+    if not isinstance(data, dict):
+        return []
+    out: list[str] = []
+    for m in data.get("models") or []:
+        if isinstance(m, dict) and m.get("loaded") and m.get("id"):
+            out.append(str(m["id"]))
+    return out
+
+
+def omlx_unload_loaded_for_inprocess(
+    *,
+    keep: str | None = None,
+    endpoint: str | None = None,
+) -> list[str]:
+    """Unload every resident oMLX model except optional `keep` basename.
+
+    Used before an in-process GLM/Qwen load so orphaned Flash (left behind by
+    a dead chat after /model swap) does not OOM the next session.
+    """
+    keep_id = omlx_api_model_id(keep) if keep else ""
+    freed: list[str] = []
+    for mid in omlx_list_loaded_model_ids(endpoint):
+        if keep_id and mid == keep_id:
+            continue
+        ok, _detail = omlx_unload_model(mid, endpoint)
+        if ok:
+            freed.append(mid)
+    return freed
+
+
+def endpoint_is_omlx(endpoint: str | None) -> bool:
+    """True when endpoint is the configured oMLX base (default :8000)."""
+    ep = (endpoint or "").rstrip("/")
+    if not ep:
+        return False
+    return ep == omlx_default_endpoint().rstrip("/")
+
+
 def omlx_reachable(endpoint: str | None = None, *, timeout: float = 1.0) -> bool:
     """True when oMLX (or any OpenAI-compatible server) answers GET /v1/models."""
     ep = (endpoint or omlx_default_endpoint()).rstrip("/")

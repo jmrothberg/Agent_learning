@@ -421,6 +421,40 @@ def test_omlx_api_model_id_strips_path():
     )
 
 
+def test_omlx_unload_model_posts_basename(monkeypatch):
+    calls: list[tuple[str, bytes | None]] = []
+
+    class _Resp:
+        def read(self):
+            return b'{"status":"ok","model_id":"DeepSeek-V4-Flash-0731-MXFP4-MLX"}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=0):
+        calls.append((req.full_url, req.data))
+        return _Resp()
+
+    monkeypatch.setattr(backend.urllib.request, "urlopen", fake_urlopen)
+    ok, detail = backend.omlx_unload_model(
+        "/Users/x/MLX_Models/DeepSeek-V4-Flash-0731-MXFP4-MLX",
+        "http://127.0.0.1:8000",
+    )
+    assert ok
+    assert "unloaded" in detail
+    assert calls and "DeepSeek-V4-Flash-0731-MXFP4-MLX/unload" in calls[0][0]
+
+
+def test_endpoint_is_omlx(monkeypatch):
+    monkeypatch.delenv("OMLX_SERVER_URL", raising=False)
+    assert backend.endpoint_is_omlx("http://127.0.0.1:8000")
+    assert not backend.endpoint_is_omlx("http://127.0.0.1:8080")
+    assert not backend.endpoint_is_omlx("in-process")
+
+
 def test_requires_omlx_server_from_config_json(tmp_path: Path):
     d = tmp_path / "some_custom_dir"
     d.mkdir()
