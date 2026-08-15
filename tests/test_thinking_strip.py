@@ -118,3 +118,46 @@ def test_repair_reply_strips_thinking():
     out = repair_reply(_REPLY_WITH_THINKING)
     assert "I need to emit" not in out
     assert "<plan>arcade shooter</plan>" in out
+
+
+# DK 20260815_085321: xhigh left <html_file> prefill inside open <think>.
+# The model wrote a complete game, then </think>, then leftover <plan>.
+# Strip-first extract discarded the game. Salvage the trapped document;
+# still prefer a post-think html_file when both exist.
+
+
+_GAME_DOC = (
+    "<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">"
+    "<title>DK</title></head><body><canvas id=\"c\"></canvas>"
+    "<script>(function(){const s={x:0};"
+    "function frame(){s.x++;requestAnimationFrame(frame);}"
+    "requestAnimationFrame(frame);})();</script></body></html>"
+)
+
+
+def test_extract_html_salvages_complete_file_trapped_in_think():
+    """Complete html_file before </think> must ship, not plan_only."""
+    reply = (
+        f"<html_file>\n{_GAME_DOC}\n</html_file>\n"
+        "Wait, double-check barrel yAt.\n</think>\n\n"
+        "<plan>leftover plan after think</plan>\n"
+    )
+    out = GameAgent._extract_html(reply)
+    assert out is not None
+    assert out.lstrip().lower().startswith("<!doctype html")
+    assert "requestAnimationFrame" in out
+    assert "<plan>" not in out
+
+
+def test_extract_html_prefers_post_think_document_over_think_draft():
+    """Visible-channel html_file wins when CoT also contains a draft."""
+    draft = _GAME_DOC.replace("DK", "DRAFT")
+    final = _GAME_DOC.replace("DK", "FINAL")
+    reply = (
+        f"<html_file>\n{draft}\n</html_file>\n</think>\n"
+        f"<html_file>\n{final}\n</html_file>\n"
+    )
+    out = GameAgent._extract_html(reply)
+    assert out is not None
+    assert "<title>FINAL</title>" in out
+    assert "<title>DRAFT</title>" not in out

@@ -1,0 +1,576 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Bomberman</title>
+<style>
+  html,body { margin:0; background:#0b1020; color:#fff; overflow:hidden; font-family: monospace; }
+  #wrap { position:fixed; inset:0; display:grid; place-items:center; }
+  canvas { background:#10162e; border-radius:8px; max-width:96vw; max-height:96vh; image-rendering: auto; }
+  #hud { position:fixed; top:12px; left:12px; background:#0008; padding:8px 12px; border-radius:8px; font-size:14px; }
+  #hud span { color:#7cf; }
+  #help { position:fixed; bottom:12px; left:12px; background:#0008; padding:8px 12px; border-radius:8px; font-size:12px; }
+</style></head>
+<body>
+<div id="wrap"><canvas id="c" width="960" height="704"></canvas></div>
+<div id="hud">Score: <span id="score">0</span> | Lives: <span id="lives">3</span> | Level: <span id="level">1</span> | Bombs: <span id="bombs">1</span> | Fire: <span id="fire">1</span></div>
+<div id="help">Arrows: Move | Space: Bomb | R: Restart</div>
+<script>
+(() => {
+  const cvs = document.getElementById("c");
+  const ctx = cvs.getContext("2d");
+  const COLS = 15, ROWS = 11, TILE = 64;
+  const W = COLS * TILE, H = ROWS * TILE;
+  cvs.width = W; cvs.height = H;
+
+  // ---- Asset loader ----
+  const ASSETS = {};
+  let _assetsReady = false;
+  async function loadAssets() {
+    const entries = [
+      ['hero_idle_down','./05_build_a_bomberman_game__grid_gam_assets/hero_idle_down.png'],
+      ['hero_walk_down_1','./05_build_a_bomberman_game__grid_gam_assets/hero_walk_down_1.png'],
+      ['hero_walk_down_2','./05_build_a_bomberman_game__grid_gam_assets/hero_walk_down_2.png'],
+      ['hero_idle_up','./05_build_a_bomberman_game__grid_gam_assets/hero_idle_up.png'],
+      ['hero_walk_up_1','./05_build_a_bomberman_game__grid_gam_assets/hero_walk_up_1.png'],
+      ['hero_idle_right','./05_build_a_bomberman_game__grid_gam_assets/hero_idle_right.png'],
+      ['hero_walk_right_1','./05_build_a_bomberman_game__grid_gam_assets/hero_walk_right_1.png'],
+      ['enemy_idle','./05_build_a_bomberman_game__grid_gam_assets/enemy_idle.png'],
+      ['enemy_walk_1','./05_build_a_bomberman_game__grid_gam_assets/enemy_walk_1.png'],
+      ['bomb','./05_build_a_bomberman_game__grid_gam_assets/bomb.png'],
+      ['soft_block','./05_build_a_bomberman_game__grid_gam_assets/soft_block.png'],
+      ['hard_block','./05_build_a_bomberman_game__grid_gam_assets/hard_block.png'],
+      ['powerup_bomb','./05_build_a_bomberman_game__grid_gam_assets/powerup_bomb.png'],
+      ['powerup_fire','./05_build_a_bomberman_game__grid_gam_assets/powerup_fire.png'],
+      ['exit','./05_build_a_bomberman_game__grid_gam_assets/exit.png'],
+    ];
+    const promises = [];
+    for (const [name, src] of entries) {
+      const img = new Image();
+      img.src = src;
+      ASSETS[name] = img;
+      promises.push(img.decode().catch(e => console.warn('asset failed', name, e)));
+    }
+    await Promise.all(promises);
+    _assetsReady = true;
+  }
+
+  const _spriteCache = {};
+  function sprite(key) {
+    if (_spriteCache[key] !== undefined) {
+      if (_spriteCache[key] === null && !_assetsReady) delete _spriteCache[key];
+      else return _spriteCache[key];
+    }
+    let img = ASSETS[key];
+    if (!img) {
+      const norm = s => String(s).toLowerCase().replace(/[^a-z0-9]/g, '');
+      const want = norm(key), names = Object.keys(ASSETS);
+      let hit = names.find(n => norm(n) === want)
+             || names.find(n => norm(n).includes(want) || want.includes(norm(n)));
+      if (!hit) {
+        const toks = want.match(/[a-z]+|[0-9]+/g) || []; let best = 0;
+        for (const n of names) { const nn = norm(n); let sc = 0;
+          for (const t of toks) if (t.length >= 3 && nn.includes(t)) sc += t.length;
+          if (sc > best) { best = sc; hit = n; } }
+      }
+      img = hit ? ASSETS[hit] : null;
+    }
+    if (img) _spriteCache[key] = img;
+    else if (_assetsReady) { (window.__assetMisses = window.__assetMisses || {})[key] = 1; _spriteCache[key] = null; }
+    return img || null;
+  }
+
+  // ---- Sound loader ----
+  const SOUNDS = {};
+  function loadSounds() {
+    const entries = [
+      ['drop','./05_build_a_bomberman_game__grid_gam_sounds/drop.ogg',false],
+      ['explosion','./05_build_a_bomberman_game__grid_gam_sounds/explosion.ogg',false],
+      ['pickup','./05_build_a_bomberman_game__grid_gam_sounds/pickup.ogg',false],
+      ['enemy_die','./05_build_a_bomberman_game__grid_gam_sounds/enemy_die.ogg',false],
+      ['player_die','./05_build_a_bomberman_game__grid_gam_sounds/player_die.ogg',false],
+      ['win','./05_build_a_bomberman_game__grid_gam_sounds/win.ogg',false],
+      ['music','./05_build_a_bomberman_game__grid_gam_sounds/music.ogg',true],
+    ];
+    for (const [name, src, loop] of entries) {
+      const a = new Audio(src); a.loop = loop; SOUNDS[name] = a;
+    }
+  }
+  loadSounds();
+  function play(name) {
+    const base = SOUNDS[name]; if (!base) return;
+    if (base.loop) { base.play(); return; }
+    const inst = base.cloneNode(); inst.play();
+  }
+  let _audioStarted = false;
+  function _startAudio() { if (_audioStarted) return; _audioStarted = true; if (SOUNDS.music) SOUNDS.music.play().catch(()=>{}); }
+  window.addEventListener('keydown', _startAudio, {once:true});
+  window.addEventListener('pointerdown', _startAudio, {once:true});
+
+  // ---- Game state ----
+  const T_EMPTY=0, T_HARD=1, T_SOFT=2, T_EXIT=3, T_POWER_BOMB=4, T_POWER_FIRE=5;
+  const state = {
+    maze: [], powerups: {}, exitTile: null,
+    player: { tx:1, ty:1, px:1*TILE, py:1*TILE, dir:'down', moving:false, anim:0, alive:true, invuln:0 },
+    enemies: [], bombs: [], blasts: [], particles: [],
+    score: 0, lives: 3, level: 1, maxBombs: 1, fireRange: 1,
+    over: false, won: false, frame: 0, shake: 0, levelClearing: false,
+  };
+  window.state = state;
+  window.game = { reset };
+
+  const keys = {};
+  let pendingBomb = false;
+
+  addEventListener("keydown", e => {
+    keys[e.code] = true;
+    if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) e.preventDefault();
+    if (e.code === 'Space') pendingBomb = true;
+    if (e.code === 'KeyR') reset();
+  });
+  addEventListener("keyup", e => { keys[e.code] = false; });
+
+  function buildMaze(level) {
+    const m = [];
+    for (let r=0; r<ROWS; r++) {
+      m[r] = [];
+      for (let c=0; c<COLS; c++) {
+        if (r===0||c===0||r===ROWS-1||c===COLS-1) m[r][c]=T_HARD;
+        else if (r%2===0 && c%2===0) m[r][c]=T_HARD;
+        else m[r][c]=T_EMPTY;
+      }
+    }
+    // soft blocks random, keep player start clear
+    const startR=1, startC=1;
+    const softChance = 0.55;
+    for (let r=1; r<ROWS-1; r++) {
+      for (let c=1; c<COLS-1; c++) {
+        if (m[r][c]===T_EMPTY) {
+          // keep 3x3 around start clear
+          if (Math.abs(r-startR)<=1 && Math.abs(c-startC)<=1) continue;
+          if (Math.random() < softChance) m[r][c]=T_SOFT;
+        }
+      }
+    }
+    return m;
+  }
+
+  function initLevel(level) {
+    state.maze = buildMaze(level);
+    state.powerups = {};
+    state.exitTile = null;
+    state.bombs = [];
+    state.blasts = [];
+    state.particles = [];
+    state.levelClearing = false;
+
+    // enemies
+    state.enemies = [];
+    const enemyCount = 2 + level;
+    let placed = 0, tries = 0;
+    while (placed < enemyCount && tries < 500) {
+      tries++;
+      const r = 1 + Math.floor(Math.random()*(ROWS-2));
+      const c = 1 + Math.floor(Math.random()*(COLS-2));
+      if (state.maze[r][c] !== T_EMPTY) continue;
+      if (Math.abs(r-1)<=2 && Math.abs(c-1)<=2) continue; // not on player
+      state.enemies.push({ tx:c, ty:r, px:c*TILE, py:r*TILE, dir:'down', moving:false, anim:0, alive:true, lastDir:null, moveCD:0 });
+      placed++;
+    }
+
+    // place exit under a random soft block
+    const softs = [];
+    for (let r=1; r<ROWS-1; r++) for (let c=1; c<COLS-1; c++) if (state.maze[r][c]===T_SOFT) softs.push([r,c]);
+    if (softs.length) {
+      const [er,ec] = softs[Math.floor(Math.random()*softs.length)];
+      state.exitTile = { r:er, c:ec };
+    }
+
+    // player
+    state.player.tx = 1; state.player.ty = 1;
+    state.player.px = 1*TILE; state.player.py = 1*TILE;
+    state.player.dir = 'down'; state.player.moving = false; state.player.anim = 0;
+    state.player.alive = true; state.player.invuln = 90;
+  }
+
+  function reset() {
+    state.score = 0; state.lives = 3; state.level = 1;
+    state.maxBombs = 1; state.fireRange = 1;
+    state.over = false; state.won = false;
+    state.shake = 0;
+    initLevel(1);
+  }
+
+  function canMoveTo(r, c) {
+    if (r<0||c<0||r>=ROWS||c>=COLS) return false;
+    const t = state.maze[r][c];
+    if (t===T_HARD || t===T_SOFT) return false;
+    // bombs block
+    for (const b of state.bombs) if (b.tx===c && b.ty===r) return false;
+    return true;
+  }
+
+  function dropBomb() {
+    if (state.bombs.length >= state.maxBombs) return;
+    const p = state.player;
+    // can't drop on existing bomb
+    if (state.bombs.some(b => b.tx===p.tx && b.ty===p.ty)) return;
+    state.bombs.push({ tx:p.tx, ty:p.ty, fuse: 2.5, range: state.fireRange, owner:'player' });
+    play('drop');
+  }
+
+  function explodeBomb(b) {
+    play('explosion');
+    state.shake = 8;
+    const cells = [{r:b.ty, c:b.tx, center:true}];
+    const dirs = [[0,1],[0,-1],[1,0],[-1,0]];
+    for (const [dr,dc] of dirs) {
+      for (let i=1; i<=b.range; i++) {
+        const r = b.ty + dr*i, c = b.tx + dc*i;
+        if (r<0||c<0||r>=ROWS||c>=COLS) break;
+        const t = state.maze[r][c];
+        if (t===T_HARD) break;
+        cells.push({r,c});
+        if (t===T_SOFT) {
+          // destroy soft block, maybe reveal powerup or exit
+          state.maze[r][c] = T_EMPTY;
+          state.score += 10;
+          if (state.exitTile && state.exitTile.r===r && state.exitTile.c===c) {
+            state.maze[r][c] = T_EXIT;
+          } else if (Math.random() < 0.35) {
+            const pu = Math.random()<0.5 ? T_POWER_BOMB : T_POWER_FIRE;
+            state.powerups[r+','+c] = pu;
+          }
+          break; // blast stops at soft block
+        }
+      }
+    }
+    // create blast visuals
+    for (const cell of cells) {
+      state.blasts.push({ r:cell.r, c:cell.c, t:0.5, center:!!cell.center });
+      // particles
+      for (let i=0;i<3;i++) {
+        state.particles.push({
+          x: cell.c*TILE + TILE/2, y: cell.r*TILE + TILE/2,
+          vx: (Math.random()-0.5)*120, vy: (Math.random()-0.5)*120,
+          life: 0.5, max: 0.5, color: Math.random()<0.5?'#ff8':'#f64'
+        });
+      }
+    }
+    // damage
+    const p = state.player;
+    if (p.alive && cells.some(cell => cell.r===p.ty && cell.c===p.tx) && state.player.invuln<=0) {
+      hurtPlayer();
+    }
+    for (const e of state.enemies) {
+      if (e.alive && cells.some(cell => cell.r===e.ty && cell.c===e.tx)) {
+        e.alive = false; state.score += 100; play('enemy_die');
+      }
+    }
+    // chain reaction: other bombs caught in blast
+    for (const ob of state.bombs) {
+      if (ob === b) continue;
+      if (cells.some(cell => cell.r===ob.ty && cell.c===ob.tx)) {
+        ob.fuse = Math.min(ob.fuse, 0.05);
+      }
+    }
+  }
+
+  function hurtPlayer() {
+    if (!state.player.alive || state.player.invuln>0) return;
+    state.lives--;
+    play('player_die');
+    if (state.lives <= 0) {
+      state.over = true; state.won = false;
+    } else {
+      // respawn
+      state.player.tx = 1; state.player.ty = 1;
+      state.player.px = TILE; state.player.py = TILE;
+      state.player.alive = true; state.player.invuln = 120;
+      state.player.moving = false;
+    }
+  }
+
+  function checkWin() {
+    if (state.enemies.every(e=>!e.alive) && state.enemies.length>0) {
+      // exit should be revealed; if player on exit tile, advance
+      if (state.exitTile) {
+        const er = state.exitTile.r, ec = state.exitTile.c;
+        if (state.maze[er][ec] === T_EXIT && state.player.tx===ec && state.player.ty===er) {
+          state.level++;
+          state.score += 500;
+          play('win');
+          initLevel(state.level);
+        }
+      }
+    }
+  }
+
+  function updatePlayer(dt) {
+    const p = state.player;
+    if (!p.alive) return;
+    if (p.invuln>0) p.invuln--;
+    // grid movement: if at tile center, accept input
+    const targetPx = p.tx * TILE, targetPy = p.ty * TILE;
+    if (Math.abs(p.px - targetPx) < 1 && Math.abs(p.py - targetPy) < 1) {
+      p.px = targetPx; p.py = targetPy;
+      p.moving = false;
+      let nx=p.tx, ny=p.ty, moved=false;
+      if (keys.ArrowLeft) { nx--; p.dir='left'; moved=true; }
+      else if (keys.ArrowRight) { nx++; p.dir='right'; moved=true; }
+      else if (keys.ArrowUp) { ny--; p.dir='up'; moved=true; }
+      else if (keys.ArrowDown) { ny++; p.dir='down'; moved=true; }
+      if (moved && canMoveTo(ny,nx)) {
+        p.tx=nx; p.ty=ny; p.moving=true;
+      }
+    } else {
+      // tween toward target
+      const speed = 200;
+      const dx = targetPx - p.px, dy = targetPy - p.py;
+      const step = speed * dt;
+      if (Math.abs(dx) <= step) p.px = targetPx; else p.px += Math.sign(dx)*step;
+      if (Math.abs(dy) <= step) p.py = targetPy; else p.py += Math.sign(dy)*step;
+      p.moving = true;
+    }
+    if (p.moving) p.anim += dt*8; else p.anim = 0;
+
+    // pickup powerups
+    const key = p.ty+','+p.tx;
+    if (state.powerups[key]) {
+      const pu = state.powerups[key];
+      if (pu === T_POWER_BOMB) state.maxBombs = Math.min(state.maxBombs+1, 8);
+      else if (pu === T_POWER_FIRE) state.fireRange = Math.min(state.fireRange+1, 8);
+      delete state.powerups[key];
+      state.score += 50;
+      play('pickup');
+    }
+
+    // enemy collision
+    if (p.invuln<=0) {
+      for (const e of state.enemies) {
+        if (e.alive && e.tx===p.tx && e.ty===p.ty) { hurtPlayer(); break; }
+      }
+    }
+  }
+
+  function updateEnemies(dt) {
+    for (const e of state.enemies) {
+      if (!e.alive) continue;
+      const targetPx = e.tx*TILE, targetPy = e.ty*TILE;
+      if (Math.abs(e.px - targetPx) < 1 && Math.abs(e.py - targetPy) < 1) {
+        e.px = targetPx; e.py = targetPy;
+        e.moving = false;
+        // pick a direction: prefer not reversing
+        const dirs = [[0,1,'down'],[0,-1,'up'],[1,0,'right'],[-1,0,'left']];
+        const opts = [];
+        for (const [dc,dr,d] of dirs) {
+          if (canMoveTo(e.ty+dr, e.tx+dc)) {
+            if (e.lastDir && d === e.lastDir) continue; // avoid reversing unless dead end
+            opts.push([dc,dr,d]);
+          }
+        }
+        let chosen;
+        if (opts.length===0) {
+          // dead end, allow reverse
+          for (const [dc,dr,d] of dirs) if (canMoveTo(e.ty+dr,e.tx+dc)) { chosen=[dc,dr,d]; break; }
+        } else {
+          chosen = opts[Math.floor(Math.random()*opts.length)];
+        }
+        if (chosen) {
+          const [dc,dr,d] = chosen;
+          e.tx+=dc; e.ty+=dr; e.dir=d; e.lastDir = {down:'up',up:'down',left:'right',right:'left'}[d];
+          e.moving = true;
+        }
+      } else {
+        const speed = 110;
+        const dx = targetPx - e.px, dy = targetPy - e.py;
+        const step = speed * dt;
+        if (Math.abs(dx) <= step) e.px = targetPx; else e.px += Math.sign(dx)*step;
+        if (Math.abs(dy) <= step) e.py = targetPy; else e.py += Math.sign(dy)*step;
+        e.moving = true;
+      }
+      if (e.moving) e.anim += dt*6; else e.anim = 0;
+
+      // collision with player
+      if (state.player.alive && state.player.invuln<=0 && e.tx===state.player.tx && e.ty===state.player.ty) {
+        hurtPlayer();
+      }
+    }
+  }
+
+  function updateBombs(dt) {
+    for (let i=state.bombs.length-1; i>=0; i--) {
+      const b = state.bombs[i];
+      b.fuse -= dt;
+      if (b.fuse <= 0) {
+        state.bombs.splice(i,1);
+        explodeBomb(b);
+      }
+    }
+  }
+
+  function updateBlasts(dt) {
+    for (let i=state.blasts.length-1; i>=0; i--) {
+      state.blasts[i].t -= dt;
+      if (state.blasts[i].t <= 0) state.blasts.splice(i,1);
+    }
+  }
+
+  function updateParticles(dt) {
+    for (let i=state.particles.length-1; i>=0; i--) {
+      const p = state.particles[i];
+      p.x += p.vx*dt; p.y += p.vy*dt;
+      p.vx *= 0.9; p.vy *= 0.9;
+      p.life -= dt;
+      if (p.life <= 0) state.particles.splice(i,1);
+    }
+  }
+
+  function update(dt) {
+    state.frame++;
+    if (state.over) return;
+    if (pendingBomb) { dropBomb(); pendingBomb = false; }
+    updatePlayer(dt);
+    updateEnemies(dt);
+    updateBombs(dt);
+    updateBlasts(dt);
+    updateParticles(dt);
+    if (state.shake>0) state.shake = Math.max(0, state.shake - dt*40);
+    checkWin();
+  }
+
+  // ---- Drawing ----
+  function drawSprite(key, x, y, flip) {
+    const img = sprite(key);
+    if (img && img.complete && img.naturalWidth > 0) {
+      if (flip) {
+        ctx.save();
+        ctx.translate(x+TILE, y);
+        ctx.scale(-1,1);
+        ctx.drawImage(img, 0, 0, TILE, TILE);
+        ctx.restore();
+      } else {
+        ctx.drawImage(img, x, y, TILE, TILE);
+      }
+    } else {
+      ctx.fillStyle = '#f0f'; ctx.fillRect(x, y, TILE, TILE);
+      ctx.fillStyle = '#000'; ctx.font = '12px monospace';
+      ctx.fillText('MISSING '+key, x+2, y+14);
+    }
+  }
+
+  function draw() {
+    ctx.clearRect(0,0,W,H);
+    ctx.save();
+    if (state.shake>0) {
+      ctx.translate((Math.random()-0.5)*state.shake, (Math.random()-0.5)*state.shake);
+    }
+    // background grid
+    for (let r=0; r<ROWS; r++) {
+      for (let c=0; c<COLS; c++) {
+        const x=c*TILE, y=r*TILE;
+        const t = state.maze[r][c];
+        if (t===T_HARD) {
+          drawSprite('hard_block', x, y, false);
+        } else {
+          // floor
+          ctx.fillStyle = (r+c)%2===0 ? '#2a3a5a' : '#243450';
+          ctx.fillRect(x,y,TILE,TILE);
+          if (t===T_SOFT) drawSprite('soft_block', x, y, false);
+          else if (t===T_EXIT) drawSprite('exit', x, y, false);
+        }
+      }
+    }
+    // powerups
+    for (const k in state.powerups) {
+      const [r,c] = k.split(',').map(Number);
+      const pu = state.powerups[k];
+      const key = pu===T_POWER_BOMB?'powerup_bomb':'powerup_fire';
+      const bob = Math.sin(state.frame*0.1 + r + c)*4;
+      drawSprite(key, c*TILE, r*TILE+bob, false);
+    }
+    // bombs
+    for (const b of state.bombs) {
+      const pulse = 1 + Math.sin(state.frame*0.4)*0.08 * (b.fuse<1?1.5:1);
+      const x = b.tx*TILE, y = b.ty*TILE;
+      ctx.save();
+      ctx.translate(x+TILE/2, y+TILE/2);
+      ctx.scale(pulse,pulse);
+      drawSprite('bomb', -TILE/2, -TILE/2, false);
+      ctx.restore();
+    }
+    // blasts
+    for (const bl of state.blasts) {
+      const a = Math.max(0, bl.t/0.5);
+      const x=bl.c*TILE, y=bl.r*TILE;
+      const grad = ctx.createRadialGradient(x+TILE/2,y+TILE/2,4,x+TILE/2,y+TILE/2,TILE/2);
+      grad.addColorStop(0, `rgba(255,255,180,${a})`);
+      grad.addColorStop(0.5, `rgba(255,140,40,${a*0.9})`);
+      grad.addColorStop(1, `rgba(255,60,20,${a*0.4})`);
+      ctx.fillStyle = grad;
+      ctx.fillRect(x,y,TILE,TILE);
+    }
+    // particles
+    for (const p of state.particles) {
+      const a = p.life/p.max;
+      ctx.fillStyle = p.color;
+      ctx.globalAlpha = a;
+      ctx.fillRect(p.x-3, p.y-3, 6, 6);
+      ctx.globalAlpha = 1;
+    }
+    // enemies
+    for (const e of state.enemies) {
+      if (!e.alive) continue;
+      const frame = e.moving && Math.floor(e.anim)%2===0 ? 'enemy_walk_1' : 'enemy_idle';
+      drawSprite(frame, e.px, e.py, false);
+    }
+    // player
+    const p = state.player;
+    if (p.alive) {
+      let frame;
+      if (p.dir==='down') frame = p.moving && Math.floor(p.anim)%2===0 ? 'hero_walk_down_1' : (p.moving?'hero_walk_down_2':'hero_idle_down');
+      else if (p.dir==='up') frame = p.moving ? 'hero_walk_up_1' : 'hero_idle_up';
+      else if (p.dir==='right') frame = p.moving ? 'hero_walk_right_1' : 'hero_idle_right';
+      else frame = p.moving ? 'hero_walk_right_1' : 'hero_idle_right';
+      const flip = p.dir==='left';
+      if (p.invuln>0 && Math.floor(state.frame/4)%2===0) {
+        // blink
+      } else {
+        drawSprite(frame, p.px, p.py, flip);
+      }
+    }
+    ctx.restore();
+
+    // HUD
+    document.getElementById('score').textContent = state.score;
+    document.getElementById('lives').textContent = state.lives;
+    document.getElementById('level').textContent = state.level;
+    document.getElementById('bombs').textContent = state.maxBombs;
+    document.getElementById('fire').textContent = state.fireRange;
+
+    if (state.over) {
+      ctx.fillStyle = 'rgba(0,0,0,0.7)';
+      ctx.fillRect(0,0,W,H);
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 48px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('GAME OVER', W/2, H/2);
+      ctx.font = '20px monospace';
+      ctx.fillText('Press R to restart', W/2, H/2+40);
+      ctx.textAlign = 'left';
+    }
+  }
+
+  function frame() {
+    try {
+      update(0.016);
+      draw();
+    } catch (e) { console.error(e); }
+    requestAnimationFrame(frame);
+  }
+
+  // ---- Init ----
+  initLevel(1);
+  requestAnimationFrame(frame);
+  loadAssets();
+})();
+</script>
+</body></html>

@@ -199,7 +199,7 @@ bullet never reaches the prompt — broaden tags if a good bullet doesn’t fire
 
 - MLX must pass `top_p` / `top_k` (vendor coding preset). Untruncated sampling causes degenerate
   line-repeat loops on large first builds. Repetition penalty stays off for code.
-- **Qwen3.8 thinking levels** (official `chat_template.jinja`): **`xhigh` (default), `medium`, `low` only — there is no `high`**. Passing `high` jinja-raises. DK `20260815_085321` failed on xhigh because first-build `<html_file>` prefill sat *inside* the open `<think>`, not because max is unsupported. Harness keeps native `xhigh` and closes think before code prefill so max still emits tags. Illegal aliases (`high`/`max`) map to `xhigh`. Override: `QWEN_REASONING_EFFORT=medium|low`, `QWEN_ENABLE_THINKING=0`.
+- **Qwen3.8 thinking levels** (official `chat_template.jinja`): **`xhigh` (default), `medium`, `low` only — there is no `high`**. Passing `high` jinja-raises. DK `20260815_085321` failed on xhigh because first-build `<html_file>` prefill sat *inside* the open `<think>`, not because max is unsupported. Harness keeps native `xhigh` (do not turn thinking down to “get code”) and closes think before code prefill so max still emits tags. `_extract_html` also salvages a complete `<html_file>` trapped before `</think>` — that morning run’s 20 KB game was structurally valid; strip-first made it `plan_only`. Illegal aliases (`high`/`max`) map to `xhigh`. Override: `QWEN_REASONING_EFFORT=medium|low`, `QWEN_ENABLE_THINKING=0`.
 
 **Visual critic**
 

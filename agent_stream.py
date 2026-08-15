@@ -1929,8 +1929,20 @@ class StreamMaterializeMixin:
 
     @staticmethod
     def _extract_html(reply: str) -> str | None:
-        reply = _strip_thinking(reply)
-        return StreamMaterializeMixin._extract_html_inner(reply)
+        # Prefer the visible channel (after last </think>) so CoT that
+        # only *mentions* tags cannot win over the real document.
+        # If that yields nothing, salvage a complete <html_file> that
+        # sat INSIDE think — Qwen3.8 xhigh + html_file prefill put the
+        # whole DK first build before </think> (20260815_085321); strip
+        # then leftover <plan> looked like plan_only / no_usable_code.
+        # Keep native xhigh; do not throw away a structurally valid game.
+        stripped = _strip_thinking(reply)
+        html = StreamMaterializeMixin._extract_html_inner(stripped)
+        if html:
+            return html
+        if stripped != reply:
+            return StreamMaterializeMixin._extract_html_inner(reply)
+        return None
 
     @staticmethod
     def _extract_html_inner(reply: str) -> str | None:
