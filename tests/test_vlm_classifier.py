@@ -31,6 +31,7 @@ def test_qwen_vl_variants():
     for name in (
         "qwen-vl-7b", "qwen2-vl-7b", "qwen2.5-vl-7b", "qwen3-vl-32b",
         "qwen3.6-vl-27b", "qwen-omni-7b", "qwen2.5-omni-7b", "qwen3.6:27b",
+        "qwen3.8:27b", "qwen3.8-27b",
     ):
         assert classify_model_modality(name) == "vlm", name
 
@@ -179,7 +180,13 @@ def test_mlx_path_form_also_matches():
     assert classify_model_modality(path) == "vlm"
     path = "/opt/mlx/qwen2.5-vl-7b-mxfp4"
     assert classify_model_modality(path) == "vlm"
-    # Plain Qwen3 (no .6) is still text-only — keep the false-positive
-    # guard so the name-prefix check doesn't bleed beyond the 3.6 family.
+    # Qwen3.8 dense 27B is the same unified-vision packaging as 3.6.
+    path = "/Users/jonathanrothberg/MLX_Models/Qwen3.8-27B-mxfp8"
+    assert classify_model_modality(path) == "vlm"
+    assert classify_model_modality("mlx-community/Qwen3.8-27B-mxfp8") == "vlm"
+    # Plain Qwen3 (no .6/.8) is still text-only — keep the false-positive
+    # guard so the name-prefix check doesn't bleed beyond those families.
     path = "/Users/jmr/MLX_Models/Qwen3-30B-A3B-8bit"
     assert classify_model_modality(path) == "text"
+    # Qwen3.8 2.4T MoE is text-only — must not match the dense 27B patterns.
+    assert classify_model_modality("Qwen3.8-2.4T-A95B") == "text"

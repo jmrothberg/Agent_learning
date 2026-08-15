@@ -381,6 +381,90 @@ def test_llm_backend_mlx_server(monkeypatch):
     assert info.model == "local-model"
 
 
+# --- Qwen3.8 thinking / first-build prefill ----------------------------------
+
+
+def test_qwen38_chat_template_defaults_to_xhigh_not_high():
+    """Official Qwen3.8-27B levels are xhigh (default), medium, low.
+    There is no 'high' — jinja would raise. Harness default matches native."""
+    kw = backend.chat_template_thinking_kwargs(
+        "/Users/jonathanrothberg/MLX_Models/Qwen3.8-27B-mxfp8"
+    )
+    assert kw == {"enable_thinking": True, "reasoning_effort": "xhigh"}
+    assert "high" not in kw.values()
+    assert backend.chat_template_thinking_kwargs("Qwen3.6-27B-mxfp8") == {}
+    assert backend.chat_template_thinking_kwargs(None) == {}
+
+
+def test_qwen38_reasoning_effort_env_and_aliases(monkeypatch):
+    monkeypatch.setenv("QWEN_REASONING_EFFORT", "high")
+    kw = backend.chat_template_thinking_kwargs("qwen3.8-27b")
+    assert kw["reasoning_effort"] == "xhigh"  # 'high' is illegal in jinja
+    monkeypatch.setenv("QWEN_REASONING_EFFORT", "max")
+    assert backend.chat_template_thinking_kwargs("qwen3.8-27b")[
+        "reasoning_effort"
+    ] == "xhigh"
+    monkeypatch.setenv("QWEN_REASONING_EFFORT", "medium")
+    assert backend.chat_template_thinking_kwargs("qwen3.8-27b")[
+        "reasoning_effort"
+    ] == "medium"
+    monkeypatch.setenv("QWEN_REASONING_EFFORT", "low")
+    assert backend.chat_template_thinking_kwargs("qwen3.8-27b")[
+        "reasoning_effort"
+    ] == "low"
+    monkeypatch.setenv("QWEN_ENABLE_THINKING", "0")
+    assert backend.chat_template_thinking_kwargs("qwen3.8-27b") == {
+        "enable_thinking": False
+    }
+
+
+def test_qwen38_never_forwards_illegal_effort(monkeypatch):
+    """Template: raise_exception if effort not in xhigh|medium|low."""
+    for raw in ("high", "max", "ultra", "HIGH", ""):
+        monkeypatch.setenv("QWEN_REASONING_EFFORT", raw)
+        kw = backend.chat_template_thinking_kwargs("qwen3.8-27b")
+        assert kw.get("reasoning_effort") in ("xhigh", "medium", "low")
+
+
+def test_apply_chat_template_safe_retries_on_valueerror():
+    """xhigh/high must not take down the turn if the template raises."""
+    calls: list[dict] = []
+
+    def boom(*_a, **kwargs):
+        calls.append(kwargs)
+        if "reasoning_effort" in kwargs:
+            raise ValueError("Unexpected reasoning effort high")
+        return "OK"
+
+    out = backend.apply_chat_template_safe(
+        boom, "qwen3.8-27b", [{"role": "user", "content": "hi"}]
+    )
+    assert out == "OK"
+    assert any("reasoning_effort" in c for c in calls)
+    assert calls[-1].get("reasoning_effort") is None
+
+
+def test_append_assistant_prefill_closes_open_think():
+    """Open <think> + html_file prefill must not dump code into CoT."""
+    prompt = "<|im_start|>assistant\n<think>\n"
+    prefill = "<html_file>\n<!DOCTYPE html>\n"
+    out = backend.append_assistant_prefill(prompt, prefill)
+    assert "</think>" in out
+    assert out.index("</think>") < out.index("<html_file>")
+    # Already-closed think (enable_thinking=False) stays a simple concat.
+    closed = "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    out2 = backend.append_assistant_prefill(closed, prefill)
+    assert out2 == closed + prefill
+
+
+def test_backend_mlx_passes_qwen38_thinking_kwargs():
+    """Both MLX chat-template call sites must use the safe wrapper and
+    append_assistant_prefill — wiring grep, not a live model load."""
+    src = Path(backend.__file__).read_text(encoding="utf-8")
+    assert src.count("apply_chat_template_safe(") >= 3  # def + 2 call sites
+    assert src.count("append_assistant_prefill(") >= 3
+
+
 # --- oMLX / DeepSeek-V4 helpers ----------------------------------------------
 
 

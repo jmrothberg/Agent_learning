@@ -139,6 +139,7 @@ def test_qwen36_27b_is_detected_as_vlm():
     assert classify_model_modality("qwen3.6-27b") == "vlm"
     assert classify_model_modality("qwen3.6:27b") == "vlm"
     assert classify_model_modality("mlx-community/Qwen3.6-27B-mxfp8") == "vlm"
+    assert classify_model_modality("mlx-community/Qwen3.8-27B-mxfp8") == "vlm"
     # A plain coder model is text-only -> critic correctly skipped.
     assert classify_model_modality("qwen2.5-coder-32b-instruct") != "vlm"
 

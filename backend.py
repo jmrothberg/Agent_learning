@@ -122,10 +122,17 @@ _VLM_NAME_SUBSTRINGS: tuple[str, ...] = (
     # mlx-community/Qwen3.6-27B-bf16 (pipeline_tag: image-text-to-text,
     # library: mlx-vlm). Match the family prefix so any quant
     # (-bf16, -mxfp8, -8bit, etc.) is correctly labeled. Earlier Qwen3
-    # (without ".6") was NOT unified — keep that prefix OUT of this
+    # (without ".6"/".8") was NOT unified — keep that prefix OUT of this
     # list so plain Qwen3-30B etc. stay labeled text-only.
     "qwen3.6-27b", "qwen3.6-7b", "qwen3.6-72b", "qwen3.6-235b",
     "qwen3.6:27b", "qwen3.6:7b", "qwen3.6:72b", "qwen3.6:235b",
+    # 2026-08-15: Qwen3.8 keeps the same unified-vision packaging
+    # (mlx-community/Qwen3.8-27B-mxfp8 is image-text-to-text via
+    # mlx-vlm). Dense sizes only — do not add bare "qwen3.8" because
+    # Qwen3.8-2.4T-A95B is text-only MoE.
+    "qwen3.8-vl",
+    "qwen3.8-27b", "qwen3.8-8b", "qwen3.8-7b", "qwen3.8-6b", "qwen3.8-5b",
+    "qwen3.8:27b", "qwen3.8:8b", "qwen3.8:7b", "qwen3.8:6b", "qwen3.8:5b",
     # LLaVA family
     "llava", "bakllava",
     # DeepSeek vision
@@ -182,6 +189,71 @@ def classify_model_modality(name: str | None) -> str:
         if sub in low:
             return "vlm"
     return "text"
+
+
+# Official Qwen3.8-27B chat_template.jinja (and mlx-community conversion):
+#   reasoning_effort in {xhigh, medium, low} only. Default is xhigh.
+# There is NO "high" — passing it raises in jinja. Aliases below never
+# forward an illegal value. DK 20260815_085321 failed on xhigh because
+# `<html_file>` prefill sat INSIDE the open `<think>`, not because xhigh
+# itself is illegal. Close think before code prefill so max still codes.
+# Override: QWEN_REASONING_EFFORT=medium|low, QWEN_ENABLE_THINKING=0.
+_QWEN38_REASONING_EFFORTS = ("xhigh", "medium", "low")
+_QWEN38_REASONING_ALIASES = {
+    "high": "xhigh",  # not a legal template value; map to native default
+    "max": "xhigh",
+    "x-high": "xhigh",
+}
+
+
+def chat_template_thinking_kwargs(model: str | None) -> dict[str, Any]:
+    """Qwen3.8 apply_chat_template kwargs. Native default is xhigh.
+
+    Must pass enable_thinking=True on the mlx_vlm path — that helper
+    otherwise defaults thinking OFF. Other families return {}.
+    """
+    if not model or "qwen3.8" not in model.lower():
+        return {}
+    enable_raw = os.environ.get("QWEN_ENABLE_THINKING", "1").strip().lower()
+    if enable_raw in ("0", "false", "no", "off"):
+        return {"enable_thinking": False}
+    effort = os.environ.get("QWEN_REASONING_EFFORT", "xhigh").strip().lower()
+    effort = _QWEN38_REASONING_ALIASES.get(effort, effort)
+    if effort not in _QWEN38_REASONING_EFFORTS:
+        effort = "xhigh"
+    return {"enable_thinking": True, "reasoning_effort": effort}
+
+
+def apply_chat_template_safe(apply_fn, model: str | None, *args, **kwargs):
+    """apply_chat_template with Qwen3.8 think kwargs; never fail the turn.
+
+    Illegal effort (`high`) would jinja-raise. We only pass legal values,
+    and if the tokenizer/template still TypeError/ValueError, retry with
+    no extra kwargs instead of dropping to a naive prompt concat.
+    """
+    extra = chat_template_thinking_kwargs(model)
+    if extra:
+        try:
+            return apply_fn(*args, **kwargs, **extra)
+        except (TypeError, ValueError):
+            pass
+    return apply_fn(*args, **kwargs)
+
+
+def append_assistant_prefill(prompt: str, prefill_content: str) -> str:
+    """Glue Continue.dev assistant prefill onto a chat-template prompt.
+
+    Qwen3.x thinking templates (including xhigh) leave an OPEN `<think>`
+    when thinking is on. Appending `<html_file>` there puts the whole
+    first-build inside the reasoning channel (DK 20260815_085321). Close
+    think first so max/xhigh still emits parser-visible code.
+    """
+    if not prefill_content:
+        return prompt
+    stripped = prompt.rstrip()
+    if stripped.endswith("<think>"):
+        return stripped + "\n</think>\n\n" + prefill_content
+    return prompt + prefill_content
 
 
 # -----------------------------------------------------------------------------
@@ -952,8 +1024,12 @@ class MLXBackend(Backend):
                     prefill_content = ""
 
                 try:
-                    prompt = tokenizer.apply_chat_template(
-                        history, tokenize=False, add_generation_prompt=True
+                    prompt = apply_chat_template_safe(
+                        tokenizer.apply_chat_template,
+                        info_model,
+                        history,
+                        tokenize=False,
+                        add_generation_prompt=True,
                     )
                 except Exception:
                     prompt = "\n\n".join(
@@ -962,7 +1038,7 @@ class MLXBackend(Backend):
                     ) + "\n\nassistant:"
 
                 if has_prefill:
-                    prompt += prefill_content
+                    prompt = append_assistant_prefill(prompt, prefill_content)
 
                 from mlx_lm.sample_utils import make_sampler  # type: ignore
                 sampler = make_sampler(
@@ -1036,7 +1112,9 @@ class MLXBackend(Backend):
                     prefill_content = ""
 
                 try:
-                    prompt = _vlm_template(
+                    prompt = apply_chat_template_safe(
+                        _vlm_template,
+                        info_model,
                         processor, config, history,
                         num_images=len(image_paths),
                     )
@@ -1048,7 +1126,7 @@ class MLXBackend(Backend):
                     ) + "\n\nassistant:"
 
                 if has_prefill:
-                    prompt += prefill_content
+                    prompt = append_assistant_prefill(prompt, prefill_content)
 
                 from mlx_vlm import stream_generate as _vlm_stream  # type: ignore
                 # mlx_vlm.stream_generate doesn't take a `sampler` like
