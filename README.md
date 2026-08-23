@@ -23,7 +23,7 @@ Asset pipeline (self-contained, no runtime network once weights cache):
   chroma-keyed to RGBA). SD-Turbo img2img for animation chaining only.
 - **Sounds:** **Stable Audio Open** (OGG, 0.2–12 s) — preloaded at `chat.py` / `coder.py` launch
   *before* Playwright opens (required for diffusers fork safety).
-- **Video:** **Wan2.2-TI2V-5B** cutscenes (MP4, 2–8 s — see [Video cutscenes](#video-cutscenes--wan22-ti2v-5b-local)).
+- **Video:** **LTX-2.5** (Mac default when installed) or **Wan2.2-TI2V-5B** cutscenes (MP4, 2–8 s — TUI `/ltx` `/wan`; see [Video cutscenes](#video-cutscenes--ltx-25-mac--wan22-fallback)).
 
 Pose/animation frames are **txt2img with one shared character description + fixed seed** for
 consistency — *not* img2img pose morphing (see [Animation](#animation--consistency-is-the-hard-constraint)).
@@ -35,7 +35,7 @@ consistency — *not* img2img pose morphing (see [Animation](#animation--consist
 - [Overnight batches](#overnight-batches-10-games) · [Play sample games](#play-sample-games-goodgame) · [Architecture](#architecture)
 - [The verification harness](#the-verification-harness-the-core-lever) · [Assets & animation](#animation--consistency-is-the-hard-constraint)
 - [Memory / opening library](#memory--the-opening-library) · [TUI & CLI](#tui--cli-reference)
-- [Standalone asset tools](#standalone-asset-tools) · [Video cutscenes](#video-cutscenes--wan22-ti2v-5b-local) · [System tests](#system-tests--memory-hygiene)
+- [Standalone asset tools](#standalone-asset-tools) · [Video cutscenes](#video-cutscenes--ltx-25-mac--wan22-fallback) · [System tests](#system-tests--memory-hygiene)
 - [Standing rules](#standing-rules) · [Troubleshooting](#troubleshooting) · [Other docs](#other-docs)
 
 ---
@@ -71,7 +71,7 @@ prompts + harness + memory beats swapping models.** This repo is not a general r
 | **Plan / progress** | plan.md, todo lists | — | Phase A `<criteria>`/`<probes>` + harness-seeded **task ledger** (goal clauses / outline order / optional model `<todos>`) |
 | **Context** | rules, @files, very large ctx | repo + skills | opening book + playbook + lean prompt; **state-anchor compaction** near ~70% of `num_ctx` (default 100K) |
 | **Edits** | search/replace tools | unified diff | `<patch>` SEARCH/REPLACE — 4-tier match cascade; markdown `SEARCH:`/`REPLACE:` pairs repaired in `patches.repair_reply` |
-| **Assets** | none in-loop | none | **FLUX2-klein (mflux) on macOS** or Z-Image-Turbo + Stable Audio; Wan2.2 cutscenes via subprocess |
+| **Assets** | none in-loop | none | **FLUX2-klein (mflux) on macOS** or Z-Image-Turbo + Stable Audio; LTX-2.5 / Wan cutscenes via subprocess |
 | **Memory** | repo files | conversation | hand-curated **`memory/`** opening book (JSONL — one line, no restart) |
 | **Local LLM** | cloud-first | local or cloud | **MLX in-process** (macOS default) or Ollama; cloud only with explicit API key + `/backend` |
 | **Regression** | CI you author | ad hoc | **pytest (~2258 tests)** + stub eval banks + opt-in `eval/eval_seed_edits.py` (materialization with `browser=None`) |
@@ -279,7 +279,7 @@ Files that carry the weight:
 | `tools.py` | **The verifier.** `LiveBrowser.load_and_test` (Chromium), `_input_smoke_test` (presses keys, captures per-action frames, runs the gates), micro-probes. Highest-leverage file. |
 | `agent.py` | Orchestrator (`GameAgent.run`); phase methods + mixin map → **`AGENTS.md` §1b** |
 | `assets.py` / `sounds.py` | Sprites: **FLUX2-klein (mflux CLI)** on macOS (never Z-Image); **Z-Image-Turbo** (diffusers) on Linux. Sounds: Stable Audio Open (always preloaded before browser). `render_asset_paths_block` injects the `sprite()` loader. |
-| `videos.py` | `<videos>` cutscene clips via Wan2.2-TI2V-5B in a **subprocess** (`scripts/generate_video.py` — mlx-gen on Mac, diffusers on Linux). `render_video_paths_block` injects the `<video>`-overlay loader. |
+| `videos.py` | `<videos>` cutscene clips via LTX-2.5 (Mac default) or Wan2.2 in a **subprocess** (`scripts/generate_video.py` — `ltx-2-mlx` or mlx-gen on Mac, diffusers on Linux). TUI `/ltx` `/wan`. `render_video_paths_block` injects the `<video>`-overlay loader. |
 | `backend.py` | MLX in-process + **oMLX HTTP** (`ensure_omlx_server` for DeepSeek-V4-Flash) + Ollama; sampler; VLM image path. |
 | `modality.py` | Genre-free rendering-shape detectors (3D, wireframe, FPS nav modality); shared by `prompts_v1.py` and `memory.py`. |
 | `prompts_v1.py` | Data-driven system prompt (`build_system_prompt` walks a `FormatSpec` list — don't hand-edit the rendered blob). |
@@ -416,10 +416,13 @@ checked model-free by `eval/eval_prompts_plan.py --coverage`.
 **Key TUI slash commands** (`/help` lists all; `/help assets` for art): `/allroles` (architect-split + visual critic on one
 loaded LLM) · `/critique [on|off]` (no-vision review, default on; aliases `/playtest`, `/feedback`) ·
 `/vlm-critique [on|off]` (vision review, default off; alias `/judge`) · `/wait [on|off]`
-(step-mode pause per iter) · `/games [N]` (load a curated prompt) · `/ctx N` (context window) ·
+(**TUI default ON** — `local_manual`; pause after each iter) · `/games [N]` (load a curated prompt) · `/ctx N` (context window) ·
 `/assets <png|folder>` (stage your sprites for next `/new`) · `/seed <game.html>` (continue an existing game) ·
-`/ref <path>` (VLM glance only — not for copying sprites) · `/check [with <model>]` (explicit cloud or
-local VLM screenshot judge — never auto-called) · `/goodgame` (copy the trio into tracked `goodgame/`).
+`/ref <path>` (VLM glance only — not for copying sprites) · `/check [<N|name>]` (on-demand screenshot judge;
+legacy `/check with <model>` still works) · `/media off` / `/640` (simulator: 640×480, no sidecar media) ·
+`/ltx` `/wan` (pin video engine) · `/goodgame` (copy the trio into tracked `goodgame/`).
+
+`/check` is a manual command. The only auto path is `/mode local_plus_review with <model> --auto-apply`, and that still runs only when `/wait` is off.
 
 ### Use your own art (example: Space Invaders)
 
@@ -466,9 +469,12 @@ In-TUI detail: **`/help assets`**.
 `--num-ctx` · `--headless` · `--step` · `--restart-n` · `--playbook` (retrieval; off by default on
 the CLI). Goal is the positional arg.
 
-**Model topologies:** 1 model = all roles multiplex one loaded LLM (the `/allroles` default on a
-single machine). On a multi-GPU box, slots 2/3 can host a dedicated architect/critic; the diffuser
-pins to GPU 0 so the LLM slots stay free (`gpu_status.pick_diffuser_cuda_index`).
+**Model topologies:** On a Mac / one GPU, **load one VLM** (Qwen 27B class). Coder + optional
+vision share that process — do not `/model2`/`/model3` (that loads a second copy). `/wait on`
+(TUI default) means **you** review each iter; `/look` is a one-shot glance. `/watch` / `/solo`
+are for unattended runs (`/wait off`) and add one extra VLM call per iter. Extra GPUs (Linux
+4×48GB): slots 2/3 can host a dedicated architect/critic; diffuser stays on GPU 0. Details:
+in-TUI **`/help roles`**.
 
 ---
 
@@ -512,7 +518,7 @@ works with macOS `afplay` / Preview only.
 
 ---
 
-## Video cutscenes — Wan2.2-TI2V-5B (local)
+## Video cutscenes — LTX-2.5 (Mac) / Wan2.2 (fallback)
 
 The agent can generate short MP4 cutscene clips (intro / death / victory / boss reveal) the same
 way it generates sprites and sounds: the model emits a `<videos>` block at plan time (or
@@ -533,17 +539,19 @@ can never stall the game.
 The optional `"image"` field names a key-art **asset from the same session** — the clip is then
 **image-to-video**, so cutscenes stay style-consistent with the in-game sprites (the recommended
 flow: declare a 768px establishing-shot asset, then animate it). Without `image` it's
-text-to-video. `seconds` clamps to 2–8 (default 4). Clips are silent — pair with `<sounds>`.
+text-to-video. `seconds` clamps to 2–8 (default 4). The in-game overlay stays muted (browser
+autoplay); pair with `<sounds>` if you want a cue. TUI: **`/ltx`** or **`/wan`** (sticky).
 
-**Per-platform backends** (both behind `scripts/generate_video.py`; the agent shells out, so no
+**Per-platform backends** (behind `scripts/generate_video.py`; the agent shells out, so no
 video deps ever load into the agent process):
 
 | Platform | Backend | Model | Install |
 |---|---|---|---|
-| macOS (Apple Silicon) | `mlx-gen` CLI in the dedicated `.venv-video/` | `AbstractFramework/wan2.2-ti2v-5b-diffusers-8bit` (~17 GB, lazy) | `./scripts/setup.sh` (step 7) |
+| macOS default | `ltx-2-mlx` when LTX weights exist under `~/Video_Models` | `PocketAiHub/LTX-2.5-MLX` in `~/Video_Models/LTX-2.5-MLX` | agree on the HF page, then `hf download PocketAiHub/LTX-2.5-MLX --local-dir ~/Video_Models/LTX-2.5-MLX`; CLI: clone `dgrauet/ltx-2-mlx` (pinned + PocketAI patches) into `~/Video_Models/ltx-2-mlx` or set `VIDEO_LTX_BIN`. `/wan` opts out. |
+| macOS `/wan` | `mlx-gen` CLI in `.venv-video/` | `AbstractFramework/wan2.2-ti2v-5b-diffusers-8bit` (~17 GB, lazy) | `./scripts/setup.sh` (step 7) |
 | Ubuntu / Linux (CUDA) | diffusers `WanPipeline` in the main `.venv` | `Wan-AI/Wan2.2-TI2V-5B-Diffusers` (~25 GB, lazy) | covered by `./scripts/install_diffuser.sh` (includes `imageio` + `imageio-ffmpeg` for MP4 export) |
 
-**Linux model path:** `VIDEO_MODEL` (or the default hub id) must be a **Diffusers** tree — `model_index.json` plus `vae/`, `transformer/`, `text_encoder/`. An original Wan checkpoint folder (flat `*.pth` / sharded safetensors, no `model_index.json`) will not load. Prefer the HF id or a local Diffusers snapshot; leave Macs on mlx-gen.
+**Linux model path:** `VIDEO_MODEL` (or the default hub id) must be a **Diffusers** tree — `model_index.json` plus `vae/`, `transformer/`, `text_encoder/`. An original Wan checkpoint folder (flat `*.pth` / sharded safetensors, no `model_index.json`) will not load. Prefer the HF id or a local Diffusers snapshot; Macs use `/ltx` or `/wan`.
 
 **Linux VRAM (2×24 GB boxes):** Before sprites/sounds/Wan the harness auto-unloads Ollama when free VRAM on the diffuser GPU is below `AGENT_VIDEO_MIN_FREE_VRAM_GB` (default 12), then after media unloads in-process diffusers so the coder can return to full GPU. The next coder turn reloads via chat as long as `ollama serve` is running. Opt out: `AGENT_ENABLE_MEMORY_RELIEF=0`. Macs are unchanged (mlx-gen / in-process MLX).
 
@@ -562,13 +570,14 @@ Standalone CLI (no LLM needed) — text-to-video and image-to-video:
     --out games/mygame_videos/dragon_reveal.mp4
 ```
 
-Defaults: 832×480, 49 frames written at 12 fps (~4 s of slow cinematic motion). Width/height must
-be multiples of 32; frames must be 4k+1. Measured cost: **~3 min per 4 s clip on an M3 Ultra**, so
-the prompt guidelines cap sessions at 2–4 clips. Generated clips cache under `games/_video_cache/`
-(re-runs are free). Env vars: `VIDEO_MODEL` (override model id/path for either backend),
-`VIDEO_VENV` (mlxgen venv location, default `.venv-video/`), `DIFFUSER_CUDA_DEVICE` (pin the CUDA
-index on Linux, same var the sprite/sound diffusers honor). If no backend is installed the whole
-feature is a silent no-op — the model is told to ship without cutscenes. Skip the install with
+Defaults: LTX 768×512 / 97 frames @ 24 fps, or Wan 832×480 / 49 frames @ 12 fps (~4 s).
+Width/height must be multiples of 32; Wan frames are 4k+1, LTX frames are 8k+1. Wan cost:
+**~3 min per 4 s clip on an M3 Ultra**; LTX Q8 is faster at the official 768×512 preset.
+The prompt guidelines cap sessions at 2–4 clips. Generated clips cache under `games/_video_cache/`
+(re-runs are free). Env vars: `VIDEO_ENGINE` (`ltx`/`wan`), `VIDEO_MODELS_DIR` (default `~/Video_Models`), `VIDEO_LTX_MODEL`, `VIDEO_LTX_BIN`,
+`VIDEO_MODEL` (Wan override), `VIDEO_VENV` (mlxgen venv, default `.venv-video/`),
+`DIFFUSER_CUDA_DEVICE` (CUDA pin on Linux). If no backend is installed the whole
+feature is a silent no-op — the model is told to ship without cutscenes. Skip Wan install with
 `./scripts/setup.sh --no-video`.
 
 ---

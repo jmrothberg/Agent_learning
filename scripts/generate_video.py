@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Local video generation wrapper — Wan2.2-TI2V-5B, cross-platform.
+"""Local video generation wrapper — LTX-2.5 (Mac default) / Wan2.2, cross-platform.
 
 ONE entry point for humans, the agent (<videos> tag via videos.py), and
-scripts. Backend is picked by platform:
+scripts. Backend is picked by VIDEO_ENGINE then platform:
 
-  - macOS (Apple Silicon): `mlxgen` CLI in the dedicated `.venv-video`
-    virtualenv (installed separately from the agent's main .venv so
-    mlx-gen's own mlx pin can never break the LLM backend).
+  - macOS + LTX ready (default): `ltx-2-mlx` CLI, weights under
+    ~/Video_Models/LTX-2.5-MLX (PocketAiHub/LTX-2.5-MLX). `/ltx` or
+    VIDEO_ENGINE=ltx forces this path.
+  - macOS fallback / `/wan`: `mlxgen` CLI in `.venv-video`
+    (installed separately so mlx-gen's mlx pin cannot break the LLM).
     Default model: AbstractFramework/wan2.2-ti2v-5b-diffusers-8bit (~17 GB).
   - Linux (NVIDIA CUDA): in-process diffusers WanPipeline /
     WanImageToVideoPipeline using the SAME .venv this script runs in
@@ -25,15 +27,19 @@ consistent with in-game sprites):
         --image games/mygame_assets/key_dragon_wake.png \
         --out games/mygame_videos/dragon_reveal.mp4
 
-Defaults are tuned for game cutscenes: 832x480, 49 frames written at
-12 fps (~4 s of slow cinematic motion, ~2-5 min to generate).
-Width/height must be multiples of 32; frames must be 4k+1 (Wan VAE).
-Note: the mlx backend snaps the output to the input image's aspect for
-image-to-video (e.g. square key art -> square clip) — use CSS
-`object-fit:cover` in the game so either shape fills the canvas.
+Defaults: Wan 832x480 / 49f @ 12 fps; LTX 768x512 / 97f @ 24 fps
+(~4 s). Width/height must be multiples of 32. Wan frames are 4k+1;
+LTX frames are 8k+1. Note: the mlx-gen backend snaps the output to the
+input image's aspect for image-to-video (e.g. square key art -> square
+clip) — use CSS `object-fit:cover` in the game so either shape fills
+the canvas.
 
 Env overrides:
-    VIDEO_MODEL          model alias/repo/path (per-backend default above)
+    VIDEO_ENGINE         ltx | wan  (Mac: LTX when CLI+weights exist)
+    VIDEO_MODELS_DIR     scan roots for video weights (default ~/Video_Models)
+    VIDEO_MODEL          Wan model alias/repo/path
+    VIDEO_LTX_MODEL      LTX weights dir or HF id
+    VIDEO_LTX_BIN        path to ltx-2-mlx CLI
     VIDEO_VENV           venv holding mlxgen (default <repo>/.venv-video; macOS only)
     DIFFUSER_CUDA_DEVICE pin the CUDA index on Linux (same var assets.py uses)
 """
@@ -63,6 +69,34 @@ def _mlxgen_bin() -> Path:
             "(./scripts/setup.sh does this automatically on macOS)"
         )
     return exe
+
+
+def _run_ltx(args: argparse.Namespace, out: Path) -> int:
+    """macOS LTX-2.5 backend: shell out to ltx-2-mlx (distilled, 24 fps)."""
+    if str(REPO) not in sys.path:
+        sys.path.insert(0, str(REPO))
+    import videos as _videos  # noqa: E402
+
+    exe = _videos.ltx_bin()
+    if exe is None:
+        sys.exit(_videos.ltx_install_hint())
+    model = _videos.default_video_model_id()
+    cmd = [
+        str(exe), "generate",
+        "--prompt", args.prompt,
+        "--output", str(out),
+        "--model", model,
+        "--distilled",
+        "--frame-rate", str(args.fps),
+        "--width", str(args.width),
+        "--height", str(args.height),
+        "--frames", str(args.frames),
+        "--seed", str(args.seed),
+    ]
+    if args.image:
+        cmd += ["--image", str(Path(args.image).resolve())]
+    print(f"[generate_video] backend=ltx-2-mlx model={model}")
+    return subprocess.run(cmd).returncode
 
 
 def _run_mlx(args: argparse.Namespace, out: Path) -> int:
@@ -152,14 +186,20 @@ def _run_diffusers(args: argparse.Namespace, out: Path) -> int:
 
 
 def main() -> int:
+    if str(REPO) not in sys.path:
+        sys.path.insert(0, str(REPO))
+    import videos as _videos  # noqa: E402
+
+    engine = _videos.resolve_video_engine()
+    d_frames, d_fps, d_w, d_h = _videos.video_clip_params(4.0, engine)
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--prompt", required=True, help="motion/scene description")
     ap.add_argument("--image", help="optional first-frame PNG (image-to-video)")
     ap.add_argument("--out", default="video.mp4", help="output .mp4 path")
-    ap.add_argument("--width", type=int, default=832, help="multiple of 32")
-    ap.add_argument("--height", type=int, default=480, help="multiple of 32")
-    ap.add_argument("--frames", type=int, default=49, help="must be 4k+1 (e.g. 17/49/121)")
-    ap.add_argument("--fps", type=int, default=12, help="container fps (12 = slow cinematic)")
+    ap.add_argument("--width", type=int, default=d_w, help="multiple of 32")
+    ap.add_argument("--height", type=int, default=d_h, help="multiple of 32")
+    ap.add_argument("--frames", type=int, default=d_frames, help="Wan 4k+1 / LTX 8k+1")
+    ap.add_argument("--fps", type=int, default=d_fps, help="12 Wan cinematic / 24 LTX")
     ap.add_argument("--steps", type=int, default=20)
     ap.add_argument("--guidance", type=float, default=5.0)
     ap.add_argument("--seed", type=int, default=42)
@@ -168,7 +208,10 @@ def main() -> int:
 
     if args.width % 32 or args.height % 32:
         sys.exit("width/height must be multiples of 32")
-    if (args.frames - 1) % 4:
+    if engine == "ltx":
+        if (args.frames - 1) % 8:
+            sys.exit("LTX frames must be 8k+1 (25, 49, 97, 121, ...)")
+    elif (args.frames - 1) % 4:
         sys.exit("frames must be 4k+1 (17, 49, 121, ...)")
     if args.image and not Path(args.image).exists():
         sys.exit(f"input image not found: {args.image}")
@@ -176,9 +219,11 @@ def main() -> int:
     out = Path(args.out).resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    print(f"[generate_video] {args.width}x{args.height} x{args.frames}f @ {args.fps}fps -> {out}")
+    print(f"[generate_video] engine={engine} {args.width}x{args.height} x{args.frames}f @ {args.fps}fps -> {out}")
     t0 = time.time()
-    if sys.platform == "darwin":
+    if engine == "ltx":
+        rc = _run_ltx(args, out)
+    elif sys.platform == "darwin":
         rc = _run_mlx(args, out)
     else:
         rc = _run_diffusers(args, out)

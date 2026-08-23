@@ -74,7 +74,7 @@ Legacy per-run tune_runNN.sh scripts under eval/ (when present) still work but *
 | **Plan eval (one model turn per prompt)** | `MLX_MODEL=~/MLX_Models/GLM-5.2-MLX-4bit .venv/bin/python eval/eval_prompts_plan.py` | No browser. |
 | **Seed-edit eval** | `MLX_MODEL=~/MLX_Models/GLM-5.2-MLX-4bit .venv/bin/python eval/eval_seed_edits.py` | Materialization only (`browser=None`). |
 | **One game headless** | `.venv/bin/python coder.py "snake" --max-iters 4 --headless` | Single session; trace under `games/traces/`. |
-| **Interactive TUI** | `.venv/bin/python chat.py` | Visible Chromium; `/bestof off` default. |
+| **Interactive TUI** | `.venv/bin/python chat.py` | Visible Chromium; `/wait on` (`local_manual`) and `/bestof off` by default. |
 | **System smoke (browser)** | `python system_tests.py run --suite smoke --three-model` | Slow; confirms full loop. |
 | **Timeline a trace** | `.venv/bin/python scripts/enrich_trace.py <path-or-stem> --timeline` | Primary triage; see `HARNESS_DEBUG.md`. |
 | **Compare tune runs (scoreboard)** | `.venv/bin/python eval/compare_runs.py run_15 run_16` | Cross-run fresh_pass / wasted_iters / failure_class — measure before/after harness changes. |

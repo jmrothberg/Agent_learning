@@ -192,12 +192,13 @@ def classify_model_modality(name: str | None) -> str:
 
 
 # Official Qwen3.8-27B chat_template.jinja (and mlx-community conversion):
-#   reasoning_effort in {xhigh, medium, low} only. Default is xhigh.
-# There is NO "high" — passing it raises in jinja. Aliases below never
-# forward an illegal value. DK 20260815_085321 failed on xhigh because
-# `<html_file>` prefill sat INSIDE the open `<think>`, not because xhigh
-# itself is illegal. Close think before code prefill so max still codes.
-# Override: QWEN_REASONING_EFFORT=medium|low, QWEN_ENABLE_THINKING=0.
+#   reasoning_effort in {xhigh, medium, low} only. Native template default
+#   is xhigh; harness default is medium (tag parser + plan turns — DK/SF
+#   Aug 15 xhigh plans ran 15k–22k tokens before tags). There is NO "high"
+#   — passing it raises in jinja. Aliases below never forward an illegal
+#   value. Opt in to max: QWEN_REASONING_EFFORT=xhigh. Off:
+#   QWEN_ENABLE_THINKING=0. Close think before code prefill so xhigh still
+#   codes if someone opts back in.
 _QWEN38_REASONING_EFFORTS = ("xhigh", "medium", "low")
 _QWEN38_REASONING_ALIASES = {
     "high": "xhigh",  # not a legal template value; map to native default
@@ -207,20 +208,21 @@ _QWEN38_REASONING_ALIASES = {
 
 
 def chat_template_thinking_kwargs(model: str | None) -> dict[str, Any]:
-    """Qwen3.8 apply_chat_template kwargs. Native default is xhigh.
+    """Qwen3.8 apply_chat_template kwargs. Harness default is medium.
 
-    Must pass enable_thinking=True on the mlx_vlm path — that helper
-    otherwise defaults thinking OFF. Other families return {}.
+    Native jinja default is xhigh; that fights <plan>/<html_file> parsing
+    on long CoT. Must pass enable_thinking=True on the mlx_vlm path —
+    that helper otherwise defaults thinking OFF. Other families return {}.
     """
     if not model or "qwen3.8" not in model.lower():
         return {}
     enable_raw = os.environ.get("QWEN_ENABLE_THINKING", "1").strip().lower()
     if enable_raw in ("0", "false", "no", "off"):
         return {"enable_thinking": False}
-    effort = os.environ.get("QWEN_REASONING_EFFORT", "xhigh").strip().lower()
+    effort = os.environ.get("QWEN_REASONING_EFFORT", "medium").strip().lower()
     effort = _QWEN38_REASONING_ALIASES.get(effort, effort)
     if effort not in _QWEN38_REASONING_EFFORTS:
-        effort = "xhigh"
+        effort = "medium"
     return {"enable_thinking": True, "reasoning_effort": effort}
 
 

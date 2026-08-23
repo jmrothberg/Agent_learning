@@ -1471,6 +1471,11 @@ class GameAgent(
         # Resolved asset paths from Phase A (name → absolute path); used
         # by the first-build prompt assembler.
         self._session_assets: dict[str, Path] = {}
+        # `/640` / `/media off` / AGENT_SIMULATOR=1 — JMR V1 native 640×480
+        # target: no Z-Image / Stable Audio / Wan sidecars; procedural canvas.
+        self._simulator_mode: bool = os.environ.get(
+            "AGENT_SIMULATOR", "",
+        ).strip().lower() in ("1", "true", "yes")
         # Asset names dropped by the per-turn cap (asset_overflow) that still
         # need mid-session generation — re-warned every iter until on disk.
         self._pending_dropped_assets: list[str] = []
@@ -2240,6 +2245,14 @@ class GameAgent(
     def set_lean_prompt(self, value: bool | None) -> None:
         """TUI hook for `/leanprompt on|off|auto`. None resets to auto."""
         self._lean_prompt = value
+
+    def media_pipeline_enabled(self) -> bool:
+        """False when simulator mode (`/640`, `/media off`)."""
+        return not bool(getattr(self, "_simulator_mode", False))
+
+    def set_simulator_mode(self, enabled: bool) -> None:
+        """TUI hook for `/640` and `/media off|on`."""
+        self._simulator_mode = bool(enabled)
 
     # `_LEAN_MEMORY_COMBINED_BUDGET`, `_OPEN_DOMAIN_OUTLINE_FLOOR`,
     # `_apply_lean_memory_budget`, and `_detect_open_domain_build` were moved
@@ -3535,6 +3548,7 @@ class GameAgent(
                     criteria=self._criteria or None,
                     goal=self._goal or "",
                     visual_recipe_id=getattr(self, "_active_visual_playtest_recipe_id", None),
+                    simulator_mode=bool(self._simulator_mode),
                 )
                 extra["report_ok"] = report.get("ok", False)
                 extra["report_summary"] = format_report_for_model(report)[:400]
@@ -4592,6 +4606,7 @@ class GameAgent(
                         goal=goal,
                         force_minimal_first_build=fmfb,
                         model_class=self._system_prompt_class(),
+                        simulator_mode=bool(self._simulator_mode),
                         nudge_ids_out=_plan_nudge_ids,
                         **from_seed_kwargs,
                     )
@@ -4689,7 +4704,9 @@ class GameAgent(
             sys_class = self._system_prompt_class()
             if hasattr(self._p, "build_system_prompt"):
                 sys_prompt = self._p.build_system_prompt(
-                    goal, model_class=sys_class,
+                    goal,
+                    model_class=sys_class,
+                    simulator_mode=bool(self._simulator_mode),
                 )
             else:
                 sys_prompt = self._p.SYSTEM_PROMPT.replace("{goal}", goal)
@@ -4722,6 +4739,8 @@ class GameAgent(
                     getattr(self, "_use_vlm_critique", False) and _model_is_vlm
                 ),
                 "lean_prompt": lean_active,
+                "simulator_mode": bool(getattr(self, "_simulator_mode", False)),
+                "media_pipeline": bool(self.media_pipeline_enabled()),
                 "autonomous_feedback": bool(getattr(self, "_use_autonomous_feedback", False)),
                 "step_mode": bool(getattr(self, "_step_mode", False)),
             })
@@ -4894,6 +4913,10 @@ class GameAgent(
                         "had_probes": bool(probes),
                         "reply_chars": len(plan_reply or ""),
                     })
+                    # Stub the failed plan BEFORE retry stream so the
+                    # next prefill is not 50k–130k of CoT (DK noon
+                    # 20260815_113447 slow_prefill 148s / 1 token).
+                    self._stub_incomplete_plan_in_messages()
                     yield self._record(AgentEvent(
                         "info",
                         "planning reply was incomplete (likely a repetition "
@@ -7852,6 +7875,7 @@ class GameAgent(
                             criteria=self._criteria or None,
                             goal=self._goal or "",
                             visual_recipe_id=getattr(self, "_active_visual_playtest_recipe_id", None),
+                            simulator_mode=bool(self._simulator_mode),
                         )
                         harness_crash = None
                         break
@@ -9845,6 +9869,7 @@ class GameAgent(
                     criteria=self._criteria or None,
                     goal=self._goal or "",
                     visual_recipe_id=getattr(self, "_active_visual_playtest_recipe_id", None),
+                    simulator_mode=bool(self._simulator_mode),
                 )
                 break
             except Exception as e:

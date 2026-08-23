@@ -18,10 +18,11 @@ improvement”** first (read order, harness vs memory, canonical fix loop).
 ## What this project is
 
 A coding agent driving a **local model** (qwen3.6 27B/35B via MLX in-process or Ollama) to write,
-test, and iteratively fix **single-file HTML5 games** with real Chromium verification, in-process
-Z-Image-Turbo sprites, Stable Audio, optional Wan2.2 cutscenes.
+test, and iteratively fix **single-file HTML5 games** with real Chromium verification,
+**FLUX2-klein** sprites on macOS (Z-Image-Turbo on Linux), Stable Audio, optional LTX-2.5 (Mac) /
+Wan2.2 cutscenes.
 
-- `chat.py` — Textual TUI (default; visible Chromium)
+- `chat.py` — Textual TUI (default; visible Chromium). `/wait` **ON** (`local_manual`) so each iter pauses for inspection. `/help` for slash commands.
 - `coder.py` — headless CLI (`--backend {auto,ollama,mlx,mlx-server}`)
 - `memory/playbook.jsonl` — hand-curated rules retrieved at runtime (`memory.py`)
 
@@ -76,7 +77,11 @@ MLX upgrades: MiniMax-M3 (`minimax_m3.py` copy after mlx-lm upgrade), GLM-5.2
 - `ANTHROPIC_MAX_TOKENS` — Anthropic output cap (default 32768)
 - `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` — cloud backends only
 - `DIFFUSION_MODELS_DIR`, `DIFFUSER_CUDA_DEVICE`, `TORCH_CUDA` — sprite/sound GPU stack
+- `VIDEO_ENGINE` — `ltx` | `wan` (TUI `/ltx` `/wan`). Unset on **macOS** = **LTX** when `~/Video_Models/LTX-2.5-MLX` **and** the `ltx-2-mlx` CLI exist; otherwise Wan. `/wan` opts out. Linux stays Wan.
+- `VIDEO_MODELS_DIR` — `:`-separated video-weight scan dirs (default `~/Video_Models`; sibling of `~/MLX_Models`, not LLM weights)
+- `VIDEO_LTX_MODEL`, `VIDEO_LTX_BIN` — LTX-2.5 weights dir / `ltx-2-mlx` CLI path
 - `VIDEO_MODEL`, `VIDEO_VENV` — Wan2.2 cutscene subprocess overrides
+- `AGENT_SIMULATOR` — set `1` to start `chat.py` in simulator mode (`/media off` / `/640`: 640×480 canvas, no sidecar sprites/sounds/videos). TUI `/media on` restores the full pipeline (next `/new`).
 
 ### oMLX (preferred MLX HTTP server on Mac)
 

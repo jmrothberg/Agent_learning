@@ -194,7 +194,7 @@ VIDEOS_FORMAT = FormatSpec(
     name="<videos>",
     snippet=(
         "<videos>[{name,prompt,image?,seconds?}, ...]</videos>  Request "
-        "generated MP4 cutscene clips (Wan2.2, local). Phase A or "
+        "generated MP4 cutscene clips (LTX-2.5 or Wan2.2, local). Phase A or "
         "mid-session. EXPENSIVE — minutes of GPU per clip; cutscenes "
         "only, never gameplay."
     ),
@@ -656,11 +656,49 @@ def _bulleted(items: list[str], indent: str = "  - ") -> str:
     return "\n".join(lines)
 
 
+# Tags omitted when `/640` or `/media off` (simulator / JMR V1 native target).
+_SIMULATOR_FORMAT_DROP = frozenset({
+    "<assets>", "<sounds>", "<videos>", "<lookup_bullet>",
+})
+
+# Distilled from JMR_JS_COMPATIBILITY.md — what actually runs on the 640×480
+# native machine (V1 walls). Full matrix doc is for RTL debuggers, not the LLM.
+SIMULATOR_TARGET_BLOCK = """<simulator-target>
+JMR V1 native machine (640×480) — follow so LOAD+RUN works on hardware.
+
+ONE FILE: inline HTML + CSS + JS only. No external .js/.css, no fetch/XHR,
+no CDN <script src>.
+
+CANVAS: <canvas width="640" height="480">. Draw with getContext('2d'):
+fillRect, clearRect, fillText, paths (beginPath/arc/fill/stroke). drawImage
+only for data:image URLs embedded in THIS file (≤16 distinct sheets).
+
+LOOP: requestAnimationFrame. Keys: addEventListener('keydown'/'keyup'), e.code
+('ArrowUp', 'KeyW', 'Space'); call preventDefault on arrows + space.
+
+MATH: Math.floor, abs, min, max, random, sqrt only.
+
+OK: setTimeout/setInterval, typeof, JSON.parse/stringify, localStorage
+(feature-detect), simple classes (flattened — no dotted new foo.Bar).
+
+V1 WALLS: no Object.keys / for…in (use literal keys); no negative
+ctx.scale(-1,1) mirror (separate L/R art or flip in logic); HUD via canvas
+fillText, not innerHTML.
+
+NEVER: fetch/XHR, WebGL, async/await, Workers, eval, Audio.play / external
+sound files. Procedural canvas + inline Web Audio oscillators are fine.
+
+Do NOT emit <assets>, <sounds>, or <videos> — no sidecar media pipeline.
+</simulator-target>
+"""
+
+
 def build_system_prompt(
     goal: str,
     *,
     formats: list[FormatSpec] | None = None,
     model_class: str = "auto",
+    simulator_mode: bool = False,
 ) -> str:
     """Assemble the system prompt from per-format specs (pi-mono style).
 
@@ -669,6 +707,10 @@ def build_system_prompt(
 
     `formats` defaults to ALL_FORMATS. Pass a subset to disable specific
     output tags (e.g. drop QUESTION_FORMAT for unattended runs).
+
+    `simulator_mode`: when True (`/640`, `/media off`, `AGENT_SIMULATOR=1`),
+    drop <assets>/<sounds>/<videos> tags and inject SIMULATOR_TARGET_BLOCK
+    (JMR V1 native 640×480 rules).
 
     `model_class` (Stop-Losing-To-OneShot todo #6): "mid" trims the
     <anti-patterns> block. Mid-tier models (qwen3.6:27b, gpt-oss:20b
@@ -708,6 +750,8 @@ def build_system_prompt(
             ]
         else:
             fmts = ALL_FORMATS
+        if simulator_mode:
+            fmts = [f for f in fmts if f.name not in _SIMULATOR_FORMAT_DROP]
     else:
         fmts = formats
 
@@ -806,6 +850,10 @@ any plan or default behavior — address it explicitly the same turn.
 
 """
 
+    simulator_block = (
+        (SIMULATOR_TARGET_BLOCK + "\n\n") if simulator_mode else ""
+    )
+
     return f"""<role>
 Act as an expert HTML5 game and UI engineer. You ship single-file HTML
 applications (HTML + CSS + JavaScript in ONE file) that work in real
@@ -860,7 +908,7 @@ ULTRA IMPORTANT — never do these. They have caused failed runs:
 
 {iter_policy_block}
 
-{extras_block}The parser reads tags only. Anything outside tags is ignored. Now wait
+{simulator_block}{extras_block}The parser reads tags only. Anything outside tags is ignored. Now wait
 for the harness's first user turn (planning) and respond with the right
 tags."""
 
@@ -1583,6 +1631,7 @@ def plan_instruction(
     seed_sound_names: list[str] | None = None,
     seed_regen_assets: bool = False,
     model_class: str = "auto",
+    simulator_mode: bool = False,
     nudge_ids_out: list[str] | None = None,
 ) -> str:
     """Phase A planning prompt, optionally prefixed with a Wikipedia
@@ -1627,7 +1676,15 @@ def plan_instruction(
     # stay byte-for-byte identical (the existing test suite still passes).
     # seed_regen_assets: still suppress free invent nudges; dedicated
     # seed_nudge below forces the declared roster instead.
-    if from_seed:
+    if simulator_mode:
+        wireframe_keywords = _detect_wireframe_vector_intent(goal)
+        beat_em_up_keywords = _detect_beat_em_up_intent(goal)
+        art_keywords = ()
+        threed_keywords = () if wireframe_keywords else _detect_3d_intent(goal)
+        audio_keywords = ()
+        video_keywords = ()
+        qte_keywords = _detect_qte_intent(goal)
+    elif from_seed:
         # Suppress art / audio MUST-emit nudges; the seed already has
         # media on disk and re-emitting <assets> wastes generator time
         # AND can wipe the user's existing art if a name collides.

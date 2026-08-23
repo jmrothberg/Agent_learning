@@ -328,3 +328,90 @@ def test_cache_key_normalizes_prompt():
     # image signature changes the key
     c = videos._cache_key("m", "a big clip", 4.0, "123:456")
     assert c != a
+
+
+# ---------------------------------------------------------------------------
+# LTX / Wan engine switch (/ltx, /wan, VIDEO_ENGINE)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_video_engine_forced_wan(monkeypatch):
+    monkeypatch.setenv("VIDEO_ENGINE", "wan")
+    assert videos.resolve_video_engine() == "wan"
+
+
+def test_resolve_video_engine_forced_ltx_on_mac(monkeypatch):
+    monkeypatch.setenv("VIDEO_ENGINE", "ltx")
+    monkeypatch.setattr(videos.sys, "platform", "darwin")
+    assert videos.resolve_video_engine() == "ltx"
+
+
+def test_resolve_video_engine_ltx_on_linux_falls_back(monkeypatch):
+    monkeypatch.setenv("VIDEO_ENGINE", "ltx")
+    monkeypatch.setattr(videos.sys, "platform", "linux")
+    assert videos.resolve_video_engine() == "wan"
+
+
+def test_resolve_video_engine_auto_ltx_when_ready(monkeypatch):
+    monkeypatch.delenv("VIDEO_ENGINE", raising=False)
+    monkeypatch.setattr(videos.sys, "platform", "darwin")
+    monkeypatch.setattr(videos, "ltx_is_ready", lambda: True)
+    assert videos.resolve_video_engine() == "ltx"
+
+
+def test_resolve_video_engine_auto_wan_when_ltx_missing(monkeypatch):
+    monkeypatch.delenv("VIDEO_ENGINE", raising=False)
+    monkeypatch.setattr(videos.sys, "platform", "darwin")
+    monkeypatch.setattr(videos, "ltx_is_ready", lambda: False)
+    assert videos.resolve_video_engine() == "wan"
+
+
+def test_video_clip_params_ltx_and_wan_4s():
+    frames, fps, w, h = videos.video_clip_params(4.0, "ltx")
+    assert frames == 97 and fps == 24 and (w, h) == (768, 512)
+    assert (frames - 1) % 8 == 0
+    frames, fps, w, h = videos.video_clip_params(4.0, "wan")
+    assert frames == 49 and fps == 12 and (w, h) == (832, 480)
+    assert (frames - 1) % 4 == 0
+
+
+def test_ltx_is_ready_needs_bin_and_local_dir(monkeypatch, tmp_path):
+    monkeypatch.setattr(videos.sys, "platform", "darwin")
+    monkeypatch.setattr(videos, "ltx_bin", lambda: None)
+    monkeypatch.delenv("VIDEO_LTX_MODEL", raising=False)
+    assert videos.ltx_is_ready() is False
+    binp = tmp_path / "ltx-2-mlx"
+    binp.write_text("x")
+    model = tmp_path / "LTX-2.5-MLX"
+    model.mkdir()
+    (model / "weights").write_text("x")
+    monkeypatch.setattr(videos, "ltx_bin", lambda: binp)
+    monkeypatch.setenv("VIDEO_LTX_MODEL", str(model))
+    assert videos.ltx_is_ready() is True
+
+
+def test_default_video_model_id_ltx_uses_local_dir(monkeypatch, tmp_path):
+    model = tmp_path / "LTX-2.5-MLX"
+    model.mkdir()
+    (model / "weights").write_text("x")
+    monkeypatch.setenv("VIDEO_ENGINE", "ltx")
+    monkeypatch.setenv("VIDEO_LTX_MODEL", str(model))
+    monkeypatch.setattr(videos.sys, "platform", "darwin")
+    assert videos.default_video_model_id() == str(model)
+
+
+def test_find_ltx_model_scans_video_models_not_mlx(monkeypatch, tmp_path):
+    """Video weights live under ~/Video_Models, never ~/MLX_Models."""
+    video_root = tmp_path / "Video_Models"
+    mlx_root = tmp_path / "MLX_Models"
+    video_pack = video_root / "LTX-2.5-MLX"
+    mlx_pack = mlx_root / "LTX-2.5-MLX"
+    video_pack.mkdir(parents=True)
+    mlx_pack.mkdir(parents=True)
+    (video_pack / "w").write_text("video")
+    (mlx_pack / "w").write_text("llm-tree-must-be-ignored")
+    monkeypatch.delenv("VIDEO_LTX_MODEL", raising=False)
+    monkeypatch.setenv("VIDEO_MODELS_DIR", str(video_root))
+    found = videos.find_ltx_model()
+    assert found == str(video_pack)
+    assert "MLX_Models" not in found

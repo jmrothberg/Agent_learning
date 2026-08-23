@@ -1,4 +1,4 @@
-"""Per-session video cutscene generation pipeline (Wan2.2-TI2V-5B).
+"""Per-session video cutscene generation pipeline (LTX-2.5 / Wan2.2).
 
 Sibling of assets.py / sounds.py — same parse + cache + per-session-dir
 pattern, but for short MP4 cutscene clips. The model can declare a
@@ -18,8 +18,10 @@ clip is text-to-video.
 
 Backend: `scripts/generate_video.py` run as a SUBPROCESS (never imported)
 so neither mlx nor torch video deps leak into the agent process:
-  - macOS (Apple Silicon): mlx-gen CLI in the dedicated `.venv-video`
-    virtualenv, model `AbstractFramework/wan2.2-ti2v-5b-diffusers-8bit`.
+  - macOS default: LTX-2.5 via `ltx-2-mlx` when local LTX weights AND
+    the CLI exist (`~/Video_Models/LTX-2.5-MLX`). `/wan` or
+    `VIDEO_ENGINE=wan` opts out to mlx-gen +
+    `AbstractFramework/wan2.2-ti2v-5b-diffusers-8bit`.
   - Linux (NVIDIA CUDA):  diffusers WanPipeline in the main `.venv`
     (torch + diffusers are already installed by install_diffuser.sh),
     model `Wan-AI/Wan2.2-TI2V-5B-Diffusers`.
@@ -28,8 +30,8 @@ Fully optional. When no `<videos>` tag is emitted, OR no usable backend
 is present, this module is a no-op and the agent proceeds without
 cutscenes exactly as before.
 
-Cost note: a 4-second 832x480 clip takes ~3 minutes on an M3 Ultra —
-two orders of magnitude more than a sprite. The per-turn cap is small
+Cost note: Wan ~3 min per 4s 832x480 clip on an M3 Ultra; LTX Q8 is
+faster at 768x512 / 24 fps when installed. The per-turn cap is small
 (4) and the prompt guidelines steer the model toward 2-4 clips per
 session, cutscenes only.
 """
@@ -40,6 +42,7 @@ import hashlib
 import json
 import os as _os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -61,6 +64,13 @@ _MAX_VIDEOS_PER_TURN = 4
 # Default model ids per backend — must match scripts/generate_video.py.
 _MLX_MODEL_ID = "AbstractFramework/wan2.2-ti2v-5b-diffusers-8bit"
 _DIFFUSERS_MODEL_ID = "Wan-AI/Wan2.2-TI2V-5B-Diffusers"
+_LTX_MODEL_ID = "PocketAiHub/LTX-2.5-MLX"
+_LTX_DIR_NAMES = (
+    "LTX-2.5-MLX",
+    "ltx-2.5-mlx-q8",
+    "LTX-2.5-MLX-Q8",
+    "ltx-2.5-mlx",
+)
 
 # Generation can legitimately take minutes per clip; kill runaways at 30.
 _GEN_TIMEOUT_S = 1800
@@ -200,8 +210,143 @@ def _mlxgen_path() -> Path:
     return venv / "bin" / "mlxgen"
 
 
+def _looks_like_model_dir(path: Path) -> bool:
+    """True when `path` is a non-empty directory (HF snapshot or local pack)."""
+    if not path.is_dir():
+        return False
+    try:
+        next(path.iterdir())
+    except StopIteration:
+        return False
+    return True
+
+
+def _video_models_roots() -> list[Path]:
+    """Scan roots for video weights: VIDEO_MODELS_DIR then ~/Video_Models.
+
+    Sibling of ~/MLX_Models (LLMs) and ~/Diffusion_Models (sprites).
+    Never walks MLX_MODELS_DIR — that path is for coder/VLM weights only.
+    """
+    roots: list[Path] = []
+    extra = (_os.environ.get("VIDEO_MODELS_DIR") or "").strip()
+    if extra:
+        for part in extra.split(":"):
+            p = Path(part).expanduser()
+            if p.is_dir() and p not in roots:
+                roots.append(p)
+    default = Path.home() / "Video_Models"
+    if default.is_dir() and default not in roots:
+        roots.append(default)
+    return roots
+
+
+def ltx_bin() -> Path | None:
+    """ltx-2-mlx CLI: VIDEO_LTX_BIN, .venv-ltx, video-models clone, PATH."""
+    env = (_os.environ.get("VIDEO_LTX_BIN") or "").strip()
+    if env:
+        p = Path(env).expanduser()
+        if p.is_file():
+            return p
+    venv = Path(_os.environ.get("VIDEO_VENV", _REPO_ROOT / ".venv-video"))
+    cands: list[Path] = [
+        _REPO_ROOT / ".venv-ltx" / "bin" / "ltx-2-mlx",
+        venv / "bin" / "ltx-2-mlx",
+    ]
+    # Clone layout from the PocketAI LTX-2.5 README: ~/Video_Models/ltx-2-mlx
+    for root in _video_models_roots():
+        cands.append(root / "ltx-2-mlx" / ".venv" / "bin" / "ltx-2-mlx")
+    for cand in cands:
+        if cand.is_file():
+            return cand
+    found = shutil.which("ltx-2-mlx")
+    return Path(found) if found else None
+
+
+def find_ltx_model() -> str | None:
+    """Local LTX dir, VIDEO_LTX_MODEL path/id, or None."""
+    env = (_os.environ.get("VIDEO_LTX_MODEL") or "").strip()
+    if env:
+        p = Path(env).expanduser()
+        if _looks_like_model_dir(p):
+            return str(p)
+        # HF id (org/name) — generate_video.py can pull it on first use.
+        if "/" in env and not p.exists():
+            return env
+    for root in _video_models_roots():
+        for name in _LTX_DIR_NAMES:
+            cand = root / name
+            if _looks_like_model_dir(cand):
+                return str(cand)
+    return None
+
+
+def ltx_is_ready() -> bool:
+    """Mac + ltx-2-mlx CLI + local weights directory."""
+    if sys.platform != "darwin":
+        return False
+    if ltx_bin() is None:
+        return False
+    model = find_ltx_model()
+    if not model:
+        return False
+    return Path(model).expanduser().is_dir()
+
+
+def resolve_video_engine() -> str:
+    """`ltx` or `wan`. VIDEO_ENGINE / TUI `/ltx` `/wan` pin.
+
+    Mac default is LTX-2.5 when local weights AND the `ltx-2-mlx` CLI
+    are present. `/wan` or VIDEO_ENGINE=wan opts out. Linux has no
+    LTX-2.5-MLX runtime here — forced `/ltx` falls back to wan.
+    """
+    forced = (_os.environ.get("VIDEO_ENGINE") or "").strip().lower()
+    if forced == "wan":
+        return "wan"
+    if forced == "ltx":
+        if sys.platform != "darwin":
+            return "wan"
+        return "ltx"
+    if sys.platform == "darwin" and ltx_is_ready():
+        return "ltx"
+    return "wan"
+
+
+def video_clip_params(
+    seconds: float, engine: str | None = None,
+) -> tuple[int, int, int, int]:
+    """(frames, fps, width, height) for the active video engine."""
+    eng = engine or resolve_video_engine()
+    if eng == "ltx":
+        # LTX VAE is 8x temporal — frames must be 8k+1. 24 fps.
+        frames = int(round(float(seconds) * 24 / 8.0)) * 8 + 1
+        frames = max(25, min(193, frames))
+        return frames, 24, 768, 512
+    # Wan VAE is 4x temporal — frames must be 4k+1. 12 fps cinematic.
+    frames = int(round(float(seconds) * 12 / 4.0)) * 4 + 1
+    frames = max(17, min(97, frames))
+    return frames, 12, 832, 480
+
+
+def ltx_install_hint() -> str:
+    """Printed by /ltx when the Mac LTX backend is not ready."""
+    return (
+        "LTX-2.5 is not ready. On Apple Silicon: (1) agree to the license at "
+        "https://huggingface.co/PocketAiHub/LTX-2.5-MLX  (2) download weights: "
+        "hf download PocketAiHub/LTX-2.5-MLX --local-dir ~/Video_Models/LTX-2.5-MLX  "
+        "(3) install the 2.5-capable CLI (not stock LTX-2.3): clone "
+        "https://github.com/dgrauet/ltx-2-mlx , uv sync, put `ltx-2-mlx` on PATH "
+        "or in .venv-ltx/bin/ (or set VIDEO_LTX_BIN). PocketAI Q8 is the fast "
+        "catalog pick; BF16 is the high-memory reference. Then /ltx again."
+    )
+
+
 def default_video_model_id() -> str:
-    """Model id used by the active backend (env override wins)."""
+    """Model id used by the active engine (env override wins per engine)."""
+    if resolve_video_engine() == "ltx":
+        found = find_ltx_model()
+        if found:
+            return found
+        return _LTX_MODEL_ID
     env = (_os.environ.get("VIDEO_MODEL") or "").strip()
     if env:
         return env
@@ -233,15 +378,16 @@ class VideoGenerator:
         """Run one clip. Returns str(out_path) on success, None on
         failure (with `_last_error` set)."""
         self._last_error = None
-        # 12 fps container; frames must be 4k+1 for Wan's VAE.
-        frames = int(round(seconds * 12 / 4)) * 4 + 1
-        frames = max(17, min(97, frames))
+        frames, fps, width, height = video_clip_params(seconds)
         cmd = [
             sys.executable,
             str(_REPO_ROOT / "scripts" / "generate_video.py"),
             "--prompt", prompt,
             "--out", str(out_path),
             "--frames", str(frames),
+            "--fps", str(fps),
+            "--width", str(width),
+            "--height", str(height),
         ]
         if image_path is not None:
             cmd += ["--image", str(image_path)]
@@ -283,6 +429,18 @@ class VideoGenerator:
 
 def video_backend_status() -> tuple[bool, str]:
     """(usable, human reason) for the video backend on this machine."""
+    engine = resolve_video_engine()
+    if engine == "ltx":
+        exe = ltx_bin()
+        model = find_ltx_model()
+        local = bool(model) and Path(model).expanduser().is_dir()
+        if exe is None:
+            return False, "ltx-2-mlx CLI not found — " + ltx_install_hint()
+        if not local:
+            return False, (
+                "LTX weights not found under ~/Video_Models — " + ltx_install_hint()
+            )
+        return True, f"ltx-2-mlx at {exe} model={model}"
     if sys.platform == "darwin":
         exe = _mlxgen_path()
         if exe.exists():
@@ -396,6 +554,8 @@ def generate_videos(
             "i2v": image_path is not None,
             "cache_hit": False,
             "gen_seconds": 0.0,
+            "engine": resolve_video_engine(),
+            "model_id": mid,
         }
         if cache_path.exists():
             _link_or_copy(cache_path, target_path)

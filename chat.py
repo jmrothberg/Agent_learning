@@ -16,14 +16,17 @@ Layout (Claude-Code-style):
 The actual playable game opens in a real Chromium window beside the terminal
 (LiveBrowser, headless=False). You arrange the windows side by side.
 
+Type /help for slash commands; /help topics for the detail pages (tui_help.py).
+
 Model selection (when you press Enter on your game idea):
   1. backend.detect_backend() defaults to MLX on macOS (Apple GPU) unless
      you set LLM_BACKEND or use /backend. Otherwise it follows the same
-     rules as coder.py --backend.
+     rules as coder.py --backend (TUI /backend has no mlx-server value —
+     Flash /load auto-starts oMLX; GLM/Qwen/MiniMax stay in-process).
        Ollama (port 11434) — loaded model from /api/ps, or OLLAMA_MODEL /
        CHAT_OLLAMA_MODEL overrides.
        MLX (in-process) — MLX_MODEL env, else single auto-discovered model
-       under ~/MLX_Models / HF cache. No mlx_lm.server, no HTTP.
+       under ~/MLX_Models / HF cache. No mlx_lm.server for GLM/Qwen/MiniMax.
   2. With LLM_BACKEND=auto (or explicit --backend auto), if both daemons
      have a loaded model, MLX wins. Force one with LLM_BACKEND=ollama /
      LLM_BACKEND=mlx or /backend in the TUI.
@@ -32,14 +35,15 @@ Model selection (when you press Enter on your game idea):
 
 Workflow:
   1. App launches, asks "What game do you want to build?".
-  2. You type a description, press Enter.
+  2. You type a description (or /games N), press Enter.
   3. Agent starts. You see plan + code + test reports in the agent log.
-  4. Type into the input box ANY time to give feedback - it's queued and
-     injected at the next agent turn.
+  4. Default run profile is local_manual: /wait is ON — pause after each
+     iter to inspect Chromium. Enter continues; typed feedback queues for
+     the next user-turn. /wait off or /mode local_auto for unattended runs.
   5. If the model asks a <question>, the input box shows the question and
      waits for your reply.
-  6. Press Ctrl+D when you're satisfied -> agent finishes the current turn
-     cleanly and exits.
+  6. Press Ctrl+D (or type done / /ship) to ship — finishes the current
+     turn cleanly. Needs 2 consecutive clean iters before <done/> is accepted.
   7. Press Ctrl+Q to quit. (Avoid rebinding Ctrl+C — it can leave the shell
      without echo after exit; if that ever happens, run `reset` or `stty sane`.)
 """
@@ -1111,6 +1115,16 @@ class CodingBoxApp(App):
         # qwen3.6:27b isn't buried under a 20KB schema + 6KB project doc).
         # /leanprompt on|off|auto sets this explicitly.
         self._lean_prompt: bool | None = None
+        # `/640` and `/media off` — JMR V1 native 640×480, no sidecar media.
+        # Default ON (full Z-Image / Stable Audio / Wan pipeline). Sticky across
+        # /new until `/media on`. AGENT_SIMULATOR=1 starts in simulator mode.
+        self._simulator_mode: bool = os.environ.get(
+            "AGENT_SIMULATOR", "",
+        ).strip().lower() in ("1", "true", "yes")
+        # Video engine pin — /ltx or /wan. None = auto (LTX on Mac when
+        # CLI+weights exist, else Wan). Sticky across /new via VIDEO_ENGINE.
+        _ve = (os.environ.get("VIDEO_ENGINE") or "").strip().lower()
+        self._video_engine: str | None = _ve if _ve in ("ltx", "wan") else None
         # Run-profile contract shown in status/mode bar. Default to
         # local_manual so new sessions start in wait mode: the user can
         # inspect each iter before the next model call. Override with
@@ -1254,6 +1268,26 @@ class CodingBoxApp(App):
                 "Set OLLAMA_MODEL=<tag> to override.[/dim]"
             )
         self._log_info("Type your game idea in the input box below and press Enter.")
+        try:
+            import videos as _videos
+            _ve = _videos.resolve_video_engine()
+            _ok, _why = _videos.video_backend_status()
+            if _ve == "ltx":
+                self._log_info(
+                    f"[dim]Cutscenes: [b]LTX-2.5[/b] (Mac default) — {_esc(_why)}[/dim]"
+                )
+            elif _videos.find_ltx_model() and _videos.ltx_bin() is None:
+                self._log_info(
+                    "[dim]Cutscenes: [b]Wan[/b] — LTX-2.5 weights are on disk but "
+                    "the [b]ltx-2-mlx[/b] CLI is missing, so Wan is used. "
+                    "/help videos[/dim]"
+                )
+            else:
+                self._log_info(
+                    f"[dim]Cutscenes: [b]{_esc(_ve)}[/b] — {_esc(_why)}[/dim]"
+                )
+        except Exception:
+            pass
         self._log_info(
             "[dim]Keys: Ctrl+D ship · Ctrl+L show log file paths · Ctrl+S select "
             "in log · Ctrl+Q quit · if the shell stops echoing after exit, run "
@@ -1858,10 +1892,16 @@ class CodingBoxApp(App):
                 "\n[bold]Roles:[/bold] [green]vlm-critique ON[/green] "
                 "[dim]— critic reviews each clean iter (architect-split off)[/dim]"
             )
+        media_line = ""
+        if self._simulator_mode:
+            media_line = (
+                "\n[bold]Target:[/bold] [yellow]/640 simulator[/yellow] "
+                "[dim]— 640×480 JMR V1 native, no sidecar media ( /media on to restore )[/dim]"
+            )
         return (
             f"[bold]Mode:[/bold] {mode_badge}{vlm_hint}\n"
             f"[bold]Profile:[/bold] {profile}{review_hint}"
-            f"{roles_line}\n"
+            f"{roles_line}{media_line}\n"
         )
 
     def _format_run_profile(self) -> str:
@@ -3307,7 +3347,7 @@ class CodingBoxApp(App):
                 self._cmd_set_model_class(arg)
             elif cmd == "launch":
                 self._cmd_launch_mlx(arg)
-            elif cmd == "check":
+            elif cmd in ("check", "look", "glance"):
                 await self._cmd_check(arg)
             elif cmd == "ask":
                 await self._cmd_ask(arg)
@@ -3319,15 +3359,21 @@ class CodingBoxApp(App):
                 self._cmd_toggle_architect(arg)
             elif cmd in ("double-screenshot", "doublescreenshot", "ds"):
                 self._cmd_toggle_double_screenshot(arg)
-            elif cmd in ("vlm-critique", "vlmcritique", "vc", "judge"):
+            elif cmd in ("vlm-critique", "vlmcritique", "vc", "judge", "watch", "vision"):
                 self._cmd_toggle_vlm_critique(arg)
             elif cmd in ("bestof", "best-of-n", "bon", "bestofn"):
                 self._cmd_toggle_bestof(arg)
-            elif cmd in ("allroles", "all-roles"):
+            elif cmd in ("allroles", "all-roles", "solo"):
                 self._cmd_toggle_allroles(arg)
             elif cmd in ("leanprompt", "lean-prompt", "lean"):
                 self._cmd_set_leanprompt(arg)
-            elif cmd in ("critique", "playtest", "feedback"):
+            elif cmd in ("media", "640", "sim", "simulator"):
+                self._cmd_set_media(arg if cmd == "media" else "off")
+            elif cmd == "ltx":
+                self._cmd_set_video_engine("ltx")
+            elif cmd == "wan":
+                self._cmd_set_video_engine("wan")
+            elif cmd in ("critique", "playtest", "feedback", "play"):
                 self._cmd_toggle_autonomous_feedback(arg)
             elif cmd in ("rawfeedback", "raw-feedback", "raw"):
                 self._cmd_toggle_raw_feedback(arg)
@@ -3350,6 +3396,14 @@ class CodingBoxApp(App):
             return
 
         lines = [
+            "[bold cyan]── everyday ──[/bold cyan]",
+            "  Type a game idea, then Enter. Type changes with no slash. [b]done[/b] or Ctrl+D ships.",
+            "  [b]/wait[/b] is ON (pause each iter — you look). [b]/wait off[/b] to run unattended.",
+            "  [b]/look[/b]  glance at the screenshot once (= /check)   [b]/games[/b]  curated prompts",
+            "  [b]/assets[/b]  your PNGs    [b]/seed[/b]  continue an HTML    [b]/sim[/b]  640×480, no art pipeline",
+            "  One loaded VLM (Qwen 27B class) is enough. Extra models: [b]/help roles[/b]",
+            "  Full command list below — old names still work. [b]/help topics[/b] for detail pages.",
+            "",
             "[bold cyan]── what to type when ──[/bold cyan]",
             "  [b]first run[/b]                  describe the game you want, press Enter",
             "  [b]small change to shipped game[/b]  just type it — no slash needed",
@@ -3384,15 +3438,18 @@ class CodingBoxApp(App):
             "",
             "[bold cyan]── images, animation, sound ──[/bold cyan]",
             "  [dim]The agent decides per session; you nudge by what you write in the goal.[/dim]",
-            "  [b]sprites (txt2img)[/b]        model emits [b]<assets>[/b] in Phase A → Z-Image-Turbo PNGs",
-            "                                  saved next to the .html. Encourage with [italic]sprite[/italic],",
-            "                                  [italic]pixel-art[/italic], [italic]icon[/italic], [italic]texture[/italic], [italic]cool art[/italic] in your goal.",
-            "  [b]animation frames (img2img)[/b]  model adds [b]from_image[/b] + [b]strength[/b] to an asset",
-            "                                  → SD-Turbo seeds frame N from frame N-1. Encourage with",
-            "                                  [italic]walk cycle[/italic], [italic]animated[/italic], [italic]two-frame[/italic], [italic]flap[/italic] in your goal.",
+            "  [b]sprites (txt2img)[/b]        model emits [b]<assets>[/b] in Phase A → FLUX2-klein (macOS)",
+            "                                  or Z-Image-Turbo (Linux) PNGs saved next to the .html.",
+            "                                  Encourage with [italic]sprite[/italic], [italic]pixel-art[/italic], [italic]icon[/italic],",
+            "                                  [italic]texture[/italic], [italic]cool art[/italic] in your goal.",
+            "  [b]pose frames (txt2img)[/b]    named action poses share one character prompt + fixed seed",
+            "                                  (img2img cannot change a pose — from_image is recolor/restyle only).",
+            "                                  Encourage with [italic]walk cycle[/italic], [italic]punch[/italic], [italic]animated[/italic] in your goal.",
             "  [b]sound effects (txt2audio)[/b] model emits [b]<sounds>[/b] in Phase A → Stable Audio Open",
             "                                  OGGs saved next to the .html. Encourage with [italic]sound[/italic],",
             "                                  [italic]audio[/italic], [italic]sfx[/italic], [italic]music[/italic], [italic]chiptune[/italic] in your goal.",
+            "  [b]cutscenes[/b]               [b]/ltx[/b] Mac default (LTX-2.5 when installed) · [b]/wan[/b] Wan2.2",
+            "                                  [dim]/help videos · HF: PocketAiHub/LTX-2.5-MLX[/dim]",
             "  [b]opt out[/b]                  launch with [b]SKIP_DIFFUSER_PRELOAD=1[/b] env var to skip",
             "                                  the ~15-30 s diffuser preload on startup; sessions that",
             "                                  don't request assets/sounds are unaffected either way.",
@@ -3408,6 +3465,8 @@ class CodingBoxApp(App):
             "[bold cyan]── session lifecycle ──[/bold cyan]",
             "  [b]/new[/b]                       reset to a clean slate — type your game idea next",
             "  [b]/new <goal>[/b]                start a fresh game (uses staged seed/model if any)",
+            "  [b]/games [N][/b]                 list curated prompts · /games N loads #N into the input box",
+            "                                  [dim]aliases /library /prompts · ship first if a session is running[/dim]",
             "  [b]/goodgame[/b]                  copy best.html + *_assets/ + *_sounds/ → goodgame/ [dim](not gitignored)[/dim]",
             "  [b]/ship[/b]                      ship current build [dim](= Ctrl+D, or type 'done' / 'looks good')[/dim]",
             "  [b]/revert [N][/b]               roll the game file back to the last clean iter [dim](or iter N specifically; aliases /rewind)[/dim]",
@@ -3445,20 +3504,25 @@ class CodingBoxApp(App):
             "                                  [dim]`ollama run --ctx-size N <model>` to avoid a stall[/dim]",
             "  [b]/restarts <N>[/b]              independent full restarts when iter-1 score < 60 · default 2 · 1=off",
             "  [b]/model-class <auto|small|mid|large>[/b]   prompt-size trim · default 'small' = lean ~5 KB",
+            "  [b]/leanprompt [on|off|auto][/b]  compact system prompt · default auto (lean for local backends)",
+            "  [b]/media [on|off][/b]            full pipeline vs simulator · default on · [b]/640[/b] / [b]/sim[/b] = off",
+            "                                  [dim]simulator: 640×480 native canvas, no sidecar sprites/sounds/videos[/dim]",
+            "  [b]/ltx[/b] / [b]/wan[/b]              pin video engine (sticky) · [dim]/help videos[/dim]",
             "  [b]/mode <local_manual|local_auto|local_plus_review with <model> [--auto-apply]|custom>[/b]",
-            "                                  run contract preset · [dim]reviewer auto-apply runs only with /wait off[/dim]",
+            "                                  run contract preset · default [b]local_manual[/b] (= /wait on)",
+            "                                  [dim]reviewer auto-apply runs only with /wait off[/dim]",
             "",
             "[bold cyan]── feature toggles ──[/bold cyan]",
             "  [b]/wait [on|off][/b]             step-mode: pause after each iter; Enter or feedback to continue",
-            "                                  [dim]/wait on auto-disables /vlm-critique (you're the reviewer); restored on /wait off[/dim]",
+            "                                  [dim]TUI default ON (local_manual) · auto-disables /vlm-critique; restored on /wait off[/dim]",
             "  [b]/vlm-critique [on|off][/b]    review WITH vision: looks at the screen, tells the agent \u00b7 default off",
-            "                                  [dim]alias: /judge · uses a memory checklist when one fits the game[/dim]",
-            "  [b]/bestof [on|off][/b]          auto sample 2 fixes when stuck 2+ iters \u00b7 default off",
-            "                                  [dim]aliases: /bon /best-of-n · candidates saved under candidates/iter_NN/[/dim]",
+            "                                  [dim]aliases: /watch /vision /judge /vc · uses a memory checklist when one fits[/dim]",
             "                                  [dim]uses model 2 to look when your main model can't see[/dim]",
             "                                  [dim]RECOMMENDED: OFF when YOU review each iter \u2014 auto review adds paraphrased noise[/dim]",
+            "  [b]/bestof [on|off][/b]          auto sample 2 fixes when stuck 2+ iters \u00b7 default off",
+            "                                  [dim]aliases: /bon /best-of-n · candidates saved under candidates/iter_NN/[/dim]",
             "  [b]/critique [on|off][/b]        review WITHOUT vision: plays it + reads the report, tells the agent \u00b7 default ON",
-            "                                  [dim]aliases: /playtest /feedback · catches frozen loops / dead controls[/dim]",
+            "                                  [dim]aliases: /play /playtest /feedback · catches frozen loops / dead controls[/dim]",
             "                                  [dim]sends problems to the coder so it fixes them next round[/dim]",
             "                                  [dim]test reports, patch diagnostics, and vlm-critique still run when off[/dim]",
             "  [b]/rawfeedback [on|off][/b]     YOUR typed feedback goes to the model verbatim · default ON",
@@ -3469,7 +3533,8 @@ class CodingBoxApp(App):
             "  [b]/architect [on|off][/b]       architect/editor split on complex first-builds · default off [dim](alias /arch)[/dim]",
             "                                  [dim]Phase B split — for the slot use /model2 … --role architect instead[/dim]",
             "  [b]/allroles[/b]                  bundle: /architect on + /vlm-critique on, all on your one loaded LLM",
-            "                                  [dim]no extra GPUs; staged /model2 / /model3 slots still win[/dim]",
+            "                                  [dim]alias /solo · no extra GPUs; staged /model2 / /model3 slots still win[/dim]",
+            "                                  [dim]skip this while /wait is ON — wait turns vision off because you are looking[/dim]",
             "  [b]/prefill [on|off][/b]         force assistant prefill tags · default ON [dim](XML syntax compliance)[/dim]",
             "  [b]/double-screenshot [on|off][/b]  capture startup + after-input screenshots · default off [dim](alias /ds)[/dim]",
             "                                  [dim]helps debug movement; needs /vlm-critique on to be useful[/dim]",
@@ -3480,14 +3545,13 @@ class CodingBoxApp(App):
             "  [b]/log[/b]                       print all session artifact paths [dim](= Ctrl+L; aliases /paths /files)[/dim]",
             "  [b]/audit[/b]                     per-playbook-bullet earnings (fires, pass-rate, avg-iter) from trace history",
             "  [b]/check [<N|name>][/b]         visual review on latest screenshot · bare uses active session VLM",
-            "                                  [dim]WAIT ON: loads suggested feedback into input for edit/Enter[/dim]",
-            "                                  [dim]WAIT OFF: auto-queues guidance into the next coding turn[/dim]",
+            "                                  [dim]aliases: /look /glance · WAIT ON: suggestion in input · WAIT OFF: auto-queues[/dim]",
             "  [b]/ask <question>[/b]            talk to the model anytime — pre-game advice or current game Q&A",
             "                                  [dim]e.g. /ask which 80s game benefits most from rich art?[/dim]",
             "  [b]/ref <path>[/b]               attach a reference image to the NEXT user turn (VLM glance only)",
             "                                  [dim]not for copying sprites — use /assets or /seed · /help assets[/dim]",
             "  [b]/help[/b]                     command list [dim](aliases /h /?)[/dim]",
-            "  [b]/help <topic>[/b]             detail: [b]assets[/b], [b]feedback[/b], [b]vlm-critique[/b], [b]rawfeedback[/b], [b]ask[/b]",
+            "  [b]/help <topic>[/b]             detail pages — [b]/help topics[/b] for the full index",
             "",
             "[bold cyan]── visual playtest recipes (auto-applied) ──[/bold cyan]",
             "  Hand-curated MECHANISM-keyed checklists the VLM critic uses. The matcher",
@@ -3503,7 +3567,7 @@ class CodingBoxApp(App):
             "  Adding a new recipe = append one JSONL line — no Python code change, matches next session.",
             "",
             "[bold cyan]── sticky staging ──[/bold cyan]",
-            "  Run-knob commands (/seed, /load, /iters, /ctx, /restarts, /model-class, /mode)",
+            "  Run-knob commands (/seed, /load, /iters, /ctx, /restarts, /model-class, /leanprompt, /media, /mode, /ltx, /wan)",
             "  PERSIST across multiple /new calls. Set once, reuse forever. Clear individually",
             "  with the bare command (e.g. [b]/seed[/b] alone), or wipe everything with [b]/reset[/b].",
             "",
@@ -5794,6 +5858,8 @@ class CodingBoxApp(App):
             f"  Ollama ctx (next):    {self._num_ctx:,}",
             f"  restart-N:            {self._restart_n if self._restart_n > 1 else '1 (off)'}",
             f"  model-class:          {self._model_class or 'auto (= small, lean ~5KB schema)'}",
+            f"  media pipeline:       {'off (simulator /640)' if self._simulator_mode else 'on (default)'}",
+            f"  video engine:         {self._video_engine_label()}",
             f"  step-mode (/wait):    {step_label}",
             f"  prefill:              {'ON' if self._use_prefill else 'off'}",
             f"  architect-split:      {'ON' if eff_arch_split else 'off'}{' [auto]' if eff_arch_auto and eff_arch_split else ''}",
@@ -6342,6 +6408,64 @@ class CodingBoxApp(App):
         self._log_info(f"/leanprompt {label} — takes effect on the next /new session")
         self._update_status()
 
+    def _video_engine_label(self) -> str:
+        """One-line /status value for LTX vs Wan."""
+        import videos as _videos
+        eng = _videos.resolve_video_engine()
+        usable, reason = _videos.video_backend_status()
+        forced = (os.environ.get("VIDEO_ENGINE") or "").strip().lower()
+        tag = f"/{eng}" if forced in ("ltx", "wan") else f"{eng} (auto)"
+        if usable:
+            return f"{tag} — {reason}"
+        return f"{tag} — not ready ({reason})"
+
+    def _cmd_set_video_engine(self, engine: str) -> None:
+        """/ltx or /wan — pin VIDEO_ENGINE. Sticky across /new."""
+        engine = (engine or "").strip().lower()
+        if engine not in ("ltx", "wan"):
+            self._log_info("usage: /ltx  or  /wan")
+            return
+        if engine == "ltx" and sys.platform != "darwin":
+            self._log_info(
+                "LTX-2.5-MLX is Apple Silicon only — staying on Wan"
+            )
+            return
+        os.environ["VIDEO_ENGINE"] = engine
+        self._video_engine = engine
+        import videos as _videos
+        usable, reason = _videos.video_backend_status()
+        if engine == "ltx" and not usable:
+            self._log_info(f"/ltx selected — {reason}")
+        elif engine == "wan" and not usable:
+            self._log_info(f"/wan selected — {reason}")
+        else:
+            self._log_info(f"/{engine} — {reason}")
+        self._update_status()
+
+    def _cmd_set_media(self, arg: str) -> None:
+        """/media [on|off] and /640 — simulator vs full media pipeline."""
+        a = (arg or "").strip().lower()
+        if not a:
+            mode = "off (simulator)" if self._simulator_mode else "on (full pipeline)"
+            self._log_info(
+                f"/media {mode} — use /media on|off or /640 before /new "
+                "(640×480 JMR V1 native target, no sidecar sprites/sounds)"
+            )
+            return
+        if a in ("on", "full", "pipeline"):
+            self._simulator_mode = False
+            label = "on (full media pipeline)"
+        elif a in ("off", "sim", "simulator", "640"):
+            self._simulator_mode = True
+            label = "off (simulator /640 — JMR V1 640×480, procedural canvas)"
+        else:
+            self._log_info("usage: /media on|off  (alias: /640 → /media off)")
+            return
+        if self.agent is not None:
+            self.agent.set_simulator_mode(self._simulator_mode)
+        self._log_info(f"/media {label} — takes effect on the next /new session")
+        self._update_status()
+
     def _cmd_toggle_allroles(self, arg: str) -> None:
         """/allroles — toggle ON/OFF: run coder + critic + architect on the single loaded LLM.
 
@@ -6374,6 +6498,11 @@ class CodingBoxApp(App):
                 "[green]/allroles ON[/green] — coder + critic + architect "
                 "all running on the loaded LLM (architect-split + vlm-critique on)"
             )
+            if self._effective_step_mode():
+                self._log_info(
+                    "[dim]note: /wait is ON, so the visual critic stays off until "
+                    "/wait off — you are the reviewer. /solo is for unattended runs.[/dim]"
+                )
         else:
             self._log_info(
                 "[yellow]/allroles OFF[/yellow] — architect-split and vlm-critique disabled"
@@ -6798,6 +6927,7 @@ class CodingBoxApp(App):
         # local backends). Only set when the user explicitly toggled it.
         if self._lean_prompt is not None:
             self.agent.set_lean_prompt(self._lean_prompt)
+        self.agent.set_simulator_mode(self._simulator_mode)
         # Apply run-profile step policy on session start.
         if self._run_profile == "local_manual":
             self.agent.set_step_mode(True)

@@ -2451,7 +2451,7 @@ _CANVAS_JS_SIZE_RE = re.compile(
 
 
 def _canvas_default_size_warning(
-    canvas_info: dict | None, html: str | None
+    canvas_info: dict | None, html: str | None, *, simulator_mode: bool = False
 ) -> str | None:
     """Return a gating CANVAS-DEFAULT-SIZE warning when the live canvas is
     exactly the untouched 300x150 browser default AND the source confirms
@@ -2472,11 +2472,15 @@ def _canvas_default_size_warning(
         return None  # markup sizes it — 300x150 must be deliberate
     if _CANVAS_JS_SIZE_RE.search(src):
         return None  # script sizes it (e.g. a fit()/DPR resize)
+    if simulator_mode:
+        size_hint = '<canvas width="640" height="480">'
+    else:
+        size_hint = '<canvas width="800" height="500">'
     return (
         "CANVAS-DEFAULT-SIZE: your <canvas> has no width/height — it is "
         "the 300x150 browser default, so most of the game is drawn "
-        "off-canvas. Fix: add width/height attributes (e.g. <canvas "
-        'width="800" height="500">) or set canvas.width/height in JS '
+        "off-canvas. Fix: add width/height attributes (e.g. "
+        f"{size_hint}) or set canvas.width/height in JS "
         "before first draw."
     )
 
@@ -4177,6 +4181,7 @@ class LiveBrowser:
         goal: str | None = None,
         visual_recipe_id: str | None = None,
         asset_decode_settle: bool = True,
+        simulator_mode: bool = False,
     ) -> dict[str, Any]:
         """Navigate to the file, let it run, return the report.
 
@@ -4592,7 +4597,9 @@ class LiveBrowser:
             _src_html = Path(path).read_text(encoding="utf-8", errors="replace")
         except OSError:
             _src_html = ""
-        _cds = _canvas_default_size_warning(canvas_info, _src_html)
+        _cds = _canvas_default_size_warning(
+            canvas_info, _src_html, simulator_mode=simulator_mode,
+        )
         if _cds:
             report["soft_warnings"].append(_cds)
         # run_18: Playwright PNG emptiness / dim-vector (not readPixels blank).
@@ -4624,9 +4631,10 @@ class LiveBrowser:
         # `*_assets/*.png` glob contaminated Rampage with Prince's hero_pullup
         # when all games share one overnight out-dir.
         try:
-            _osc = opaque_scenery_soft_warning_for_html_assets(path)
-            if _osc:
-                report["soft_warnings"].append(_osc)
+            if not simulator_mode:
+                _osc = opaque_scenery_soft_warning_for_html_assets(path)
+                if _osc:
+                    report["soft_warnings"].append(_osc)
         except Exception:
             pass
         # JS-SOURCE-IN-BODY gate (trace 20260611_213744): visible body text

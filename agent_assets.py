@@ -31,6 +31,7 @@ from videos import (
     generate_videos,
     parse_videos_block,
     render_video_paths_block,
+    resolve_video_engine,
     try_load_video_generator,
 )
 from agent_feedback import _HARNESS_ADVISORY_SENTINEL, _feedback_requests_style_rebrand
@@ -1310,6 +1311,9 @@ class AssetGenerationMixin:
         spam. Failure reasons are surfaced one-per-line either way.
 
         """
+
+        if not self.media_pipeline_enabled():
+            return
 
         # Phase 0.10 — per-session asset cap. Defaults to module-level
 
@@ -2750,9 +2754,9 @@ class AssetGenerationMixin:
 
                 f"{trigger}: requested {len(video_specs)} cutscene "
 
-                "video(s); Wan2.2 runs per-clip in a subprocess "
+                f"video(s); {('LTX-2.5' if resolve_video_engine() == 'ltx' else 'Wan2.2')} "
 
-                "(~2-5 min per clip)…",
+                "runs per-clip in a subprocess (~2-5 min per clip)…",
 
                 {
 
@@ -2871,6 +2875,8 @@ class AssetGenerationMixin:
                     "kind": "videos_generated",
 
                     "trigger": trigger,
+
+                    "engine": resolve_video_engine(),
 
                     "requested": len(video_specs),
 

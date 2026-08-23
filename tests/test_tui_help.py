@@ -17,6 +17,16 @@ def test_normalize_critique_aliases():
     assert tui_help.normalize_help_topic("rewind") == "revert"
     assert tui_help.normalize_help_topic("topics") == "topics"
     assert tui_help.normalize_help_topic("four-gpu") == "gpu"
+    assert tui_help.normalize_help_topic("judge") == "vlm-critique"
+    assert tui_help.normalize_help_topic("640") == "knobs"
+    assert tui_help.normalize_help_topic("leanprompt") == "knobs"
+    assert tui_help.normalize_help_topic("edit") == "inspect"
+    assert tui_help.normalize_help_topic("roles") == "roles"
+    assert tui_help.normalize_help_topic("look") == "check"
+    assert tui_help.normalize_help_topic("watch") == "vlm-critique"
+    assert tui_help.normalize_help_topic("play") == "critique"
+    assert tui_help.normalize_help_topic("solo") == "allroles"
+    assert tui_help.normalize_help_topic("sim") == "knobs"
 
 
 def test_unknown_topic_returns_none():
@@ -117,3 +127,39 @@ def test_cmd_help_overview_includes_topic_index():
     app._update_status = lambda: None  # type: ignore[method-assign]
     app._cmd_help()
     assert any("/help topics" in line for line in rendered)
+    text = "\n".join(rendered)
+    assert "/games" in text
+    assert "/media" in text
+    assert "/leanprompt" in text
+    assert "TUI default ON" in text
+    assert "/look" in text
+    assert "/help roles" in text
+
+
+def test_help_roles_recommends_one_vlm():
+    lines = tui_help.help_topic_lines("roles") or []
+    text = "\n".join(lines).lower()
+    assert "qwen" in text or "27b" in text
+    assert "one" in text
+    assert "model2" in text or "/model2" in text
+    assert "/look" in text or "/watch" in text
+
+
+def test_slash_synonyms_are_wired():
+    import inspect
+    from chat import CodingBoxApp
+
+    src = inspect.getsource(CodingBoxApp._handle_slash)
+    assert '"look"' in src and '"glance"' in src
+    assert '"watch"' in src and '"vision"' in src
+    assert '"play"' in src
+    assert '"sim"' in src and '"simulator"' in src
+    assert '"solo"' in src
+
+
+def test_help_judge_is_vlm_critique_not_check():
+    """/judge is the slash alias for /vlm-critique; /help judge must match."""
+    assert tui_help.normalize_help_topic("judge") == "vlm-critique"
+    lines = tui_help.help_topic_lines("vlm-critique") or []
+    text = "\n".join(lines).lower()
+    assert "vision" in text or "screen" in text

@@ -78,6 +78,43 @@ def test_retry_is_bounded_to_once(tmp_path):
     assert a._plan_retry_done is True
 
 
+def test_oversized_incomplete_plan_is_stubbed_before_retry(tmp_path):
+    """Huge CoT without tags must not sit in history during retry prefill."""
+    a = _agent(tmp_path)
+    huge = "<plan>partial " + ("cooldown reset " * 2000)
+    assert len(huge) > GameAgent._INCOMPLETE_PLAN_STUB_MIN_CHARS
+    _drive(a, [huge, _COMPLETE])
+    planning = [
+        m for m in a._messages
+        if m.get("role") == "assistant" and m.get("phase") == "planning"
+    ]
+    assert planning
+    # Retry recovered: the planning blob is the complete reply, not CoT.
+    assert a._criteria and a._probes
+    assert "cooldown reset" not in (planning[-1].get("content") or "")
+    assert "<criteria>" in (planning[-1].get("content") or "")
+
+
+def test_maybe_stub_incomplete_plan_content_threshold():
+    small = "x" * 100
+    assert GameAgent._maybe_stub_incomplete_plan_content(small) is None
+    huge = "y" * (GameAgent._INCOMPLETE_PLAN_STUB_MIN_CHARS + 1)
+    stub = GameAgent._maybe_stub_incomplete_plan_content(huge)
+    assert stub == GameAgent._INCOMPLETE_PLAN_STUB
+    assert len(stub) < 200
+
+
+def test_stub_incomplete_plan_in_messages_only_planning(tmp_path):
+    a = _agent(tmp_path)
+    huge = "z" * (GameAgent._INCOMPLETE_PLAN_STUB_MIN_CHARS + 50)
+    a._messages = [
+        {"role": "user", "content": "plan"},
+        {"role": "assistant", "phase": "planning", "content": huge},
+    ]
+    assert a._stub_incomplete_plan_in_messages() is True
+    assert a._messages[-1]["content"] == GameAgent._INCOMPLETE_PLAN_STUB
+
+
 # ---------------------------------------------------------------------------
 # Probe-quality retry: a plan that parses fine but whose probes are ALL
 # structural-only gets ONE corrective re-prompt for an input→delta probe.

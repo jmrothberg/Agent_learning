@@ -384,13 +384,15 @@ def test_llm_backend_mlx_server(monkeypatch):
 # --- Qwen3.8 thinking / first-build prefill ----------------------------------
 
 
-def test_qwen38_chat_template_defaults_to_xhigh_not_high():
-    """Official Qwen3.8-27B levels are xhigh (default), medium, low.
-    There is no 'high' — jinja would raise. Harness default matches native."""
+def test_qwen38_chat_template_defaults_to_medium_not_high(monkeypatch):
+    """Official levels are xhigh, medium, low. There is no 'high'.
+    Harness default is medium (tag parser); native jinja default is xhigh."""
+    monkeypatch.delenv("QWEN_REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("QWEN_ENABLE_THINKING", raising=False)
     kw = backend.chat_template_thinking_kwargs(
         "/Users/jonathanrothberg/MLX_Models/Qwen3.8-27B-mxfp8"
     )
-    assert kw == {"enable_thinking": True, "reasoning_effort": "xhigh"}
+    assert kw == {"enable_thinking": True, "reasoning_effort": "medium"}
     assert "high" not in kw.values()
     assert backend.chat_template_thinking_kwargs("Qwen3.6-27B-mxfp8") == {}
     assert backend.chat_template_thinking_kwargs(None) == {}
@@ -412,6 +414,10 @@ def test_qwen38_reasoning_effort_env_and_aliases(monkeypatch):
     assert backend.chat_template_thinking_kwargs("qwen3.8-27b")[
         "reasoning_effort"
     ] == "low"
+    monkeypatch.setenv("QWEN_REASONING_EFFORT", "xhigh")
+    assert backend.chat_template_thinking_kwargs("qwen3.8-27b")[
+        "reasoning_effort"
+    ] == "xhigh"
     monkeypatch.setenv("QWEN_ENABLE_THINKING", "0")
     assert backend.chat_template_thinking_kwargs("qwen3.8-27b") == {
         "enable_thinking": False
@@ -423,7 +429,13 @@ def test_qwen38_never_forwards_illegal_effort(monkeypatch):
     for raw in ("high", "max", "ultra", "HIGH", ""):
         monkeypatch.setenv("QWEN_REASONING_EFFORT", raw)
         kw = backend.chat_template_thinking_kwargs("qwen3.8-27b")
-        assert kw.get("reasoning_effort") in ("xhigh", "medium", "low")
+        effort = kw.get("reasoning_effort")
+        assert effort in ("xhigh", "medium", "low")
+        # high/max alias to xhigh; other junk (ultra, empty) → harness medium.
+        if raw.strip().lower() in ("high", "max"):
+            assert effort == "xhigh"
+        elif raw.strip().lower() not in backend._QWEN38_REASONING_EFFORTS:
+            assert effort == "medium"
 
 
 def test_apply_chat_template_safe_retries_on_valueerror():

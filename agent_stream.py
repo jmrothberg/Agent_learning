@@ -137,6 +137,50 @@ class StreamMaterializeMixin:
             "usable; do not repeat this output]"
         )
 
+    # DK noon 20260815_113447: 130k-char incomplete plan stayed in
+    # _messages during plan_incomplete_retry → 148s / 1-token prefill.
+    # Stub the blob BEFORE the retry stream. Universal — any thinking
+    # model can dump CoT without <criteria>/<probes>.
+    _INCOMPLETE_PLAN_STUB_MIN_CHARS = 8000
+    _INCOMPLETE_PLAN_STUB = (
+        "[plan stream incomplete — tags missing; retrying]"
+    )
+
+    @staticmethod
+    def _maybe_stub_incomplete_plan_content(content: str) -> str | None:
+        """Short stand-in for an oversized incomplete plan, or None.
+
+        None when the blob is small enough that stubbing would not
+        shrink the next prefill.
+        """
+        text = content or ""
+        if len(text) <= StreamMaterializeMixin._INCOMPLETE_PLAN_STUB_MIN_CHARS:
+            return None
+        return StreamMaterializeMixin._INCOMPLETE_PLAN_STUB
+
+    def _stub_incomplete_plan_in_messages(self) -> bool:
+        """Replace the last planning assistant blob if it is huge.
+
+        Returns True when a stub was written. Call before the
+        plan_incomplete_retry stream so retry does not prefill CoT.
+        """
+        for msg in reversed(getattr(self, "_messages", None) or []):
+            if msg.get("role") != "assistant" or msg.get("phase") != "planning":
+                continue
+            stub = StreamMaterializeMixin._maybe_stub_incomplete_plan_content(
+                msg.get("content") or ""
+            )
+            if stub is None:
+                return False
+            orig_len = len(msg.get("content") or "")
+            msg["content"] = stub
+            self._trace({
+                "kind": "plan_incomplete_stubbed",
+                "original_chars": orig_len,
+            })
+            return True
+        return False
+
     @staticmethod
     def _should_skip_format_doctor(
         *,
