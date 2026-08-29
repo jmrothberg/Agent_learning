@@ -4629,7 +4629,7 @@ class CodingBoxApp(App):
         starts the build (the goal path handles a clean relaunch after a
         finished session). A running session is refused, mirroring /new.
         """
-        from prompt_library import load_prompt_library
+        from prompt_library import load_prompt_library, effective_prompt
 
         try:
             games = load_prompt_library()
@@ -4643,12 +4643,23 @@ class CodingBoxApp(App):
             return
         arg = (arg or "").strip()
         if not arg:
-            self._log_info("[bold]Curated game prompts[/bold] — /games <N> to load:")
+            mode = " [/640 pixel-map goals]" if self._simulator_mode else ""
+            self._log_info(
+                f"[bold]Curated game prompts{mode}[/bold] — /games <N> to load:"
+            )
             for g in games:
-                self._log(f"  [cyan]{g['n']:>2}[/cyan]  {_esc(g['title'])}")
+                mark = ""
+                if self._simulator_mode and str(g.get("prompt_640") or "").strip():
+                    mark = " [640]"
+                self._log(f"  [cyan]{g['n']:>2}[/cyan]  {_esc(g['title'])}{mark}")
             self._log_info(
                 f"e.g. [b]/games 1[/b] loads prompt #1 into the input — "
                 "press Enter to build, or edit it first."
+                + (
+                    " With /640 on, loads the prompt_640 (pixel-map) variant."
+                    if self._simulator_mode
+                    else ""
+                )
             )
             return
         try:
@@ -4668,11 +4679,18 @@ class CodingBoxApp(App):
                 f"first, then /games {n}"
             )
             return
+        goal_text = effective_prompt(
+            match, simulator_mode=bool(self._simulator_mode),
+        )
         try:
             inp = self.query_one("#user-input", Input)
-            inp.value = match["prompt"]
+            inp.value = goal_text
+            variant = (
+                "640" if self._simulator_mode and goal_text != match.get("prompt")
+                else "media"
+            )
             inp.placeholder = (
-                f"prompt #{n} ({match['title']}) loaded · press Enter to "
+                f"prompt #{n} ({match['title']}) [{variant}] loaded · press Enter to "
                 "build, or edit first"
             )
             inp.focus()
@@ -4680,8 +4698,8 @@ class CodingBoxApp(App):
             self._awaiting_kind = "goal"
             self._update_mode_bar()
             self._log_info(
-                f"[green]loaded prompt #{n}: {_esc(match['title'])}[/green] — "
-                "press Enter to build, or edit it first."
+                f"[green]loaded prompt #{n}: {_esc(match['title'])}[/green]"
+                f" [{variant}] — press Enter to build, or edit it first."
             )
         except Exception as e:
             self._log_error(f"could not load prompt into input: {e}")

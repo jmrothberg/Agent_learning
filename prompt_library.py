@@ -3,14 +3,14 @@
 `memory/prompt_library.jsonl` holds one JSON object per line:
 
     {"n": 1, "name": "street-fighter", "title": "Street Fighter",
-     "tags": [...], "prompt": "Build a single-screen 2D fighting game ..."}
+     "tags": [...], "prompt": "Build a …", "prompt_640": "Build a … TARGET=/640 …"}
+
+`prompt` = full media pipeline (sprites/sounds/video when the goal asks).
+`prompt_640` = JMR native single-file /640 path (pixel maps, no sidecars).
 
 The TUI `/games` command lists them by number; `/games <N>` loads prompt #N
-into the input box (press Enter to build). Hand-curated like
-`memory/playbook.jsonl` — edited by humans, not learned. Each prompt opens
-with a direct game name ("Build a Doom game"), not "-style" references; body
-text encodes planning lessons: entity poses, controls, win/lose, and routing
-keywords for skeleton/recipe selection.
+into the input box (press Enter to build). When `/640` (simulator) is on,
+`/games N` prefers `prompt_640`. Hand-curated like `memory/playbook.jsonl`.
 """
 from __future__ import annotations
 
@@ -70,3 +70,17 @@ def get_prompt(n: int, path: str | Path | None = None) -> dict | None:
         if rec["n"] == n:
             return rec
     return None
+
+
+def effective_prompt(rec: dict, *, simulator_mode: bool = False) -> str:
+    """Goal text for a library entry.
+
+    `/640` (simulator): prefer `prompt_640` when present so arcade pixel-map
+    goals replace video/CDN/asset-pipeline wording. Media mode: always
+    `prompt`.
+    """
+    if simulator_mode:
+        alt = rec.get("prompt_640")
+        if isinstance(alt, str) and alt.strip():
+            return alt.strip()
+    return str(rec.get("prompt") or "").strip()

@@ -60,6 +60,40 @@ def test_get_prompt_by_number():
     assert get_prompt(999, _SHIPPED) is None
 
 
+def test_every_entry_has_prompt_640_for_simulator():
+    """/640 mode needs a pixel-map variant for every curated game."""
+    from prompt_library import effective_prompt
+
+    for g in load_prompt_library(_SHIPPED):
+        p640 = g.get("prompt_640")
+        assert isinstance(p640, str) and len(p640) > 40, g["name"]
+        assert "TARGET=/640" in p640 or "pixel" in p640.lower(), g["name"]
+        assert "image-to-video" not in p640.lower()
+        # Forbid requiring media tags (footer says do NOT emit them).
+        assert "emit <assets>" not in p640.lower()
+        assert "generate video" not in p640.lower()
+        # Media prompt kept intact for non-/640 runs.
+        assert g["prompt"].startswith(("Build a ", "Build an "))
+        assert effective_prompt(g, simulator_mode=True) == p640.strip()
+        assert effective_prompt(g, simulator_mode=False) == g["prompt"].strip()
+
+
+def test_prompt_640_fieldrunners_demands_pixel_sprites_not_boxes():
+    by_name = {g["name"]: g for g in load_prompt_library(_SHIPPED)}
+    p = by_name["tower-defense-openfield"]["prompt_640"].lower()
+    assert "pixel" in p
+    assert "colored squares" in p or "not colored" in p
+    assert "generate <assets>" not in p
+
+
+def test_prompt_640_strips_video_pipeline_from_fighters():
+    by_name = {g["name"]: g for g in load_prompt_library(_SHIPPED)}
+    for name in ("street-fighter", "mortal-kombat", "super-mario"):
+        p = by_name[name]["prompt_640"]
+        assert "image-to-video" not in p.lower()
+        assert "generate video cutscenes" not in p.lower()
+
+
 def test_malformed_lines_are_skipped(tmp_path: Path):
     p = tmp_path / "lib.jsonl"
     p.write_text(

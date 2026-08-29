@@ -2375,7 +2375,39 @@ class GameAgent(
         )
 
     def _local_should_fallback_skeleton(self, skel: SkeletonHit) -> tuple[bool, str]:
-        """Guard local backends from mismatched won-skeleton media naming."""
+        """Guard local backends from mismatched won-skeleton media naming.
+
+        /640 (simulator): also reject media-heavy or huge won skeletons —
+        Fieldrunners 20260829_083734 retrieved a full win (score=1.0), then
+        Qwen3.8 burned iters on unclosed_html_file / inline_data_bloat while
+        rewriting asset-era HTML with no sidecar PNGs available.
+        """
+        if bool(getattr(self, "_simulator_mode", False)):
+            refs_assets = self._scan_html_for_asset_refs(skel.html)
+            refs_sounds = self._scan_html_for_sound_refs(skel.html)
+            html = skel.html or ""
+            if refs_assets or refs_sounds:
+                return (
+                    True,
+                    (
+                        "simulator /640: skeleton references sidecar "
+                        f"assets/sounds (assets={len(refs_assets)}, "
+                        f"sounds={len(refs_sounds)}) — use default scaffold"
+                    ),
+                )
+            if "data:image" in html or "_assets/" in html or "_sounds/" in html:
+                return (
+                    True,
+                    "simulator /640: skeleton embeds or paths media — "
+                    "use default scaffold",
+                )
+            # Huge wins overflow local first-build streams (prompt ~24k tok).
+            if len(html) > 28_000:
+                return (
+                    True,
+                    f"simulator /640: skeleton too large ({len(html)} chars) "
+                    "— use default scaffold",
+                )
         if not self._is_local_backend():
             return (False, "")
         if skel.source_goal is None:
@@ -5748,6 +5780,7 @@ class GameAgent(
                     current_asset_dir=cur_asset_dir,
                     current_sound_dir=cur_sound_dir,
                     has_generated_assets=bool(self._session_assets),
+                    simulator_mode=bool(self._simulator_mode),
                     **pb_kwargs,
                 )
                 if opening_block:

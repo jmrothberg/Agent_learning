@@ -2522,6 +2522,72 @@ def _js_source_in_body_warning(body_text: str) -> str | None:
     )
 
 
+# /640 Fieldrunners 20260829_093900: probes green, towers/enemies = solid
+# colored squares. Genre-free: require classic pixel maps or inline sheets.
+_PIXEL_MAP_ROW_RE = re.compile(
+    r"\[\s*(?:[01]\s*,\s*){5,}[01]\s*\]"
+)
+_HEX_PALETTE_ROW_RE = re.compile(
+    r"\[\s*(?:['\"]#[0-9a-fA-F]{3,8}['\"]\s*,\s*){3,}['\"]#[0-9a-fA-F]{3,8}['\"]\s*\]"
+)
+_ENTITY_DRAW_FN_RE = re.compile(
+    r"\bfunction\s+draw(?:Tower|Enemy|Enemies|Player|Ship|Creep|Sprite|"
+    r"Entity|Unit|Invader|Ghost|Fighter|Character|Actor|Mob)\b",
+    re.IGNORECASE,
+)
+
+
+def simulator_placeholder_art_soft_warning(
+    html: str, *, goal: str = ""
+) -> str | None:
+    """Blocking soft_warning when /640 HTML draws entities as solid boxes
+    with no pixel maps / data:image / ImageData art.
+
+    Exempt wireframe/vector goals (strokes are the authentic look).
+    """
+    src = html or ""
+    if not src.strip():
+        return None
+    g = (goal or "").lower()
+    if any(
+        k in g
+        for k in (
+            "wireframe",
+            "vector trench",
+            "vector tank",
+            "vector line",
+            "vector stroke",
+        )
+    ):
+        return None
+    if "data:image" in src or "putImageData" in src or "createImageData" in src:
+        return None
+    if len(_PIXEL_MAP_ROW_RE.findall(src)) >= 3:
+        return None
+    if len(_HEX_PALETTE_ROW_RE.findall(src)) >= 2:
+        return None
+    # Canvas-built sprite sheets (offscreen canvas → drawImage) count as art.
+    if re.search(r"\.drawImage\s*\(", src) and re.search(
+        r"(?:toDataURL|createImageData|OffscreenCanvas|document\.createElement\s*\(\s*['\"]canvas['\"])",
+        src,
+    ):
+        return None
+    fill_n = len(re.findall(r"\.fillRect\s*\(", src))
+    arc_n = len(re.findall(r"\.arc\s*\(", src))
+    if fill_n + arc_n < 6:
+        return None
+    if not _ENTITY_DRAW_FN_RE.search(src) and fill_n < 12:
+        return None
+    return (
+        "PLACEHOLDER-GEOMETRY-ART: playfield entities are solid fillRect/arc "
+        "boxes — not classic arcade graphics. For /640 (no sidecar PNGs): "
+        "add compact pixel-map sprites (2D 0/1 or palette-index rows, blit "
+        "with fillRect per texel) or ≤16 inline data:image sheets so "
+        "towers/enemies/ships match the original game look. HUD/grid lines "
+        "may stay fillRect; characters and units must not."
+    )
+
+
 def _bracket_imbalance(js: str) -> dict[str, int]:
     """Return |open - close| count per bracket type after stripping strings
     and comments. Zero = balanced.

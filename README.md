@@ -404,7 +404,7 @@ shape, not subject.
 | `memory/asset_audits.jsonl` | generated-art loader/decode/fallback audits (incl. missing-asset placeholder, chroma-key paths) |
 | `memory/animation_audits.jsonl` | motion audits (midframe, facing-flip, walk-cycle advance, action-frame reset) |
 | `memory/skeletons/` | first-build HTML templates per mechanism (`.html` + `.json` sidecar) |
-| `memory/prompt_library.jsonl` | the curated `/games` prompts |
+| `memory/prompt_library.jsonl` | curated `/games` prompts (`prompt` = media; `prompt_640` = JMR /640 pixel-map variant) |
 | `memory/system_battery.jsonl` | default system-test battery (committed — useful on every machine) |
 
 Grounding is fully offline: the old `/wiki` Wikipedia lookup was **removed** (2026-06-24, 0/10

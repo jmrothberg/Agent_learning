@@ -347,7 +347,9 @@ ASSETS_FORMAT = FormatSpec(
         "would be 'good enough'.",
         "When the harness returns no asset paths in the first-build "
         "prompt, Z-Image-Turbo was not reachable on this machine; only "
-        "THEN fall back to procedural drawing (ctx.fillRect / ctx.arc).",
+        "THEN draw entities with classic pixel maps (2D 0/1 or palette "
+        "arrays blitted per texel) or tiny inline data:image sheets — "
+        "NOT solid colored fillRect/arc boxes as the final look.",
         "POINT-AND-CLICK / HOTSPOT GAMES: bg_* prompts MUST describe an "
         "EMPTY environment only — walls, floor, sky, distant scenery; "
         "explicitly EXCLUDE people, NPCs, doors, items, and any object "
@@ -374,11 +376,11 @@ ASSETS_FORMAT = FormatSpec(
         "near-identical to idle is flagged — raise strength, never draw "
         "limbs in code.",
         "DRAW CONTRACT: entities with a generated PNG → drawImage via "
-        "sprite(key); procedural fillRect/arc only for entities with NO "
-        "PNG (HUD, particles, grid). "
-        "SKIP <assets> only for pure-DOM apps (todo lists, calculators). "
-        "If no asset paths return, Z-Image was unreachable — only THEN use "
-        "procedural ctx.fillRect/arc.",
+        "sprite(key); procedural fillRect/arc only for HUD, particles, "
+        "grid. SKIP <assets> only for pure-DOM apps (todo lists, "
+        "calculators). If no asset paths return, Z-Image was unreachable "
+        "— only THEN use classic pixel maps / tiny data:image sheets, "
+        "not solid colored boxes for characters/enemies/towers.",
     ],
 )
 
@@ -603,6 +605,35 @@ HARD_RULES: list[str] = [
     # small-class prompt-size + drops-optional-tags asserts still hold.
     "Phase-A signals (plan, criteria, probes, media) persist once accepted; "
     "fix turns emit <patch> only.",
+    # 2026-08-29 — don't teach solid boxes as final arcade entity art.
+    "Entity art: with generated PNGs use drawImage (sprite(key)). NEVER "
+    "leave solid fillRect/arc boxes as the steady-state look for "
+    "characters/enemies/towers/ships — HUD/grid/particles may stay shapes.",
+]
+
+# /640 path — replace HARD_RULES entirely so CDN/assetsReady/e.code-only
+# rules do not fight JMR V1 or teach a second "fix the art" pass.
+HARD_RULES_SIMULATOR: list[str] = [
+    "ONE file: inline HTML + CSS + JS. No CDN scripts, fetch/XHR, modules, "
+    "Workers, eval, async/await, or Audio.play.",
+    "Glass: <canvas width=\"640\" height=\"480\"> in markup. Do not reassign "
+    "canvas.width/height after load. Fill every pixel (no letterbox gutters). "
+    "HUD with canvas fillText — not innerHTML.",
+    "FIRST <html_file> must already look like the classic/original game: "
+    "compact pixel maps (2D 0/1 or palette rows, blit per texel) or ≤16 "
+    "inline data:image sheets for every playfield unit. Do NOT plan to "
+    "\"add art later\" — solid colored squares/circles are wrong on turn 1. "
+    "HUD/grid/range rings may use plain fillRect.",
+    "Drive frames with requestAnimationFrame. Keys: read e.key AND keyCode "
+    "(37/39/38/40/32/13). Do not steal Esc (machine BREAK).",
+    "Math: floor, abs, min, max, random, sqrt (+ Math.PI). No sin/cos/"
+    "atan2/round (shim round). No Object.keys / for…in. No negative "
+    "setTransform/scale mirror — use L/R art or unmirrored draw.",
+    "Reuse one mutable object per entity; no per-tick maze BFS/flood; "
+    "≤16 locals per function.",
+    "Expose `window.state = state` and `window.game = { reset }` for probes.",
+    "Phase A: <plan>/<criteria>/<probes> only (no media tags). Phase B: "
+    "complete <html_file> then <patch>. Do not emit <assets>/<sounds>/<videos>.",
 ]
 
 ANTI_PATTERNS: list[str] = [
@@ -665,32 +696,48 @@ _SIMULATOR_FORMAT_DROP = frozenset({
 # Keep SHORT — local models drown if we paste the full authoring docs.
 # Do NOT maintain a second prompts_*.py; branch via simulator_mode=True.
 SIMULATOR_TARGET_BLOCK = """<simulator-target>
-JMR V1 native (640×480). One file LOAD+RUN. No media pipeline.
+JMR V1 native (640×480). One file LOAD+RUN. No media sidecar pipeline
+(no <assets>/<sounds>/<videos> tags — art lives IN the HTML).
+
+LOOK: classic arcade / original-cabinet graphics. Entities must read as
+the real game (towers, creeps, ship, invaders, …) — NOT colored circles,
+squares, or bare fillRect placeholders as the final art. Match the
+original's silhouette, palette, and chunky pixels.
+
+ART HOW (pick one; all self-contained):
+  - Pixel maps (preferred): small 2D arrays of 0/1 or palette indexes
+    (8×8..32×32), blit with fillRect per texel — classic Invaders/Pac look.
+    Example: const SP=[[0,1,1,0],[1,1,1,1],...]; for(r...)for(c...)if(SP[r][c])
+    ctx.fillRect(x+c*s,y+r*s,s,s);
+  - Inline sprite sheets: data:image PNG in THIS file + drawImage
+    (≤16 distinct sheets; atlases + 9-arg crop OK).
+  - Vector classics only when the original is vector (Asteroids strokes).
+imageSmoothingEnabled=false. Prefer fillRect/drawImage over per-pixel
+JS loops in the hot path. HUD/grid may use plain fillRect; units must not.
 
 GLASS: <canvas width="640" height="480"> — fill every pixel (no letterbox
-gutters). Do not reassign canvas.width/height after load (clears bitmap).
-HUD with fillText on canvas — no innerHTML / CSS layout score.
+gutters). Do not reassign canvas.width/height after load. HUD via
+fillText on canvas — no innerHTML / CSS layout score.
 
-DRAW: getContext('2d') — fillRect, clearRect, fillText, paths
-(beginPath/moveTo/lineTo/arc/stroke/fill). Prefer fillRect/drawImage over
-per-pixel loops. drawImage only for data:image in THIS file (≤16 sheets;
-atlases OK). imageSmoothingEnabled=false. No WebGL, gradients, filters,
-shadows.
+DRAW APIs: getContext('2d') — fillRect, clearRect, fillText, paths,
+drawImage, putImageData. No WebGL, gradients, filters, shadows.
 
 INPUT: keydown/keyup; read e.key AND keyCode (37/39/38/40/32/13). Do not
-steal Esc (machine BREAK). No CDN scripts, fetch/XHR, modules, Workers,
-eval, async/await, Audio.play.
+steal Esc (machine BREAK). No CDN, fetch/XHR, modules, Workers, eval,
+async/await, Audio.play.
 
 MATH: floor abs min max random sqrt (+ Math.PI). No sin/cos/atan2/round
-(shim round as floor(x+0.5); angles via LUT). No Object.keys / for…in
-(literal keys or numeric loops). No negative setTransform/scale mirror —
-use L/R sheets or unmirrored draw.
+(shim round as floor(x+0.5); angles via LUT). No Object.keys / for…in.
+No negative setTransform/scale mirror — L/R sheets or unmirrored draw.
 
-PERF: reuse one mutable object per entity (no {x,y} every frame); no
-per-tick maze BFS/flood; ≤16 locals per function; hoist props out of
-hot loops. setTimeout OK; drive frames with requestAnimationFrame.
+PERF: reuse one mutable object per entity; no per-tick maze BFS/flood;
+≤16 locals per function; hoist props out of hot loops. RAF for frames.
 
-Do NOT emit <assets>, <sounds>, or <videos>. Procedural canvas only.
+SIZE: keep the file shippable — compact pixel maps / small sheets, not
+megabyte base64 walls (those stall the stream). Aim first build
+playable+recognizable; polish extra frames via <patch>.
+
+Do NOT emit <assets>, <sounds>, or <videos>.
 </simulator-target>
 """
 
@@ -703,8 +750,8 @@ PLAN_INSTRUCTION_SIMULATOR = """CRITICAL FORMAT: output ONLY <plan>, <criteria>,
 Mechanics: <one or two sentences>
 Controls: <keys — ArrowLeft/Right/Up/Down, Space, Enter; also keyCode>
 Win/lose: <how it ends / restart>
-Visual style: <procedural 640×480 canvas — colors, shapes; no external art>
-Risky bits: <2 to 3 care points — V1 walls, heap, input>
+Visual style: <classic arcade look — pixel maps or inline sprites matching the original game; NOT bare geometric placeholders>
+Risky bits: <2 to 3 care points — V1 walls, heap, input, art size>
 Build order: <2 to 4 steps on ONE line>
 </plan>
 
@@ -726,7 +773,8 @@ CRITERIA-PROBE BINDING: every Basic: line MUST share a word with a probe.
 
 PROBES: include BOTH structural and ≥1 dynamic input→delta probe.
 Expose state on window (e.g. window.state). Keep exprs short; 3–5 total.
-No <html_file> yet — procedural fillRect/paths only in Phase B.
+No <html_file> yet. Phase B art = classic pixel maps / inline sprites
+(not bare geometric placeholders); keep sheets compact.
 """
 
 
@@ -808,7 +856,9 @@ def build_system_prompt(
             all_guidelines.extend(f.guidelines)
     guidelines_block = _bulleted(all_guidelines)
 
-    hard_rules_block = _bulleted(HARD_RULES)
+    hard_rules_block = _bulleted(
+        HARD_RULES_SIMULATOR if simulator_mode else HARD_RULES
+    )
     anti_patterns_block = _bulleted(ANTI_PATTERNS)
     # Mid-tier trim: drop the <anti-patterns> block entirely. The
     # <hard-rules> block above already covers the highest-priority
@@ -894,21 +944,41 @@ any plan or default behavior — address it explicitly the same turn.
         (SIMULATOR_TARGET_BLOCK + "\n\n") if simulator_mode else ""
     )
 
+    if simulator_mode:
+        role_block = (
+            "Act as an expert arcade HTML5 engineer for a 640×480 native "
+            "machine. You ship ONE self-contained file with CLASSIC pixel-art "
+            "look (pixel maps / inline sheets) on the FIRST build — not a "
+            "logic prototype to \"pretty up\" later. Chromium verifies the "
+            "file; hardware will LOAD+RUN the same HTML."
+        )
+        objective_extra = (
+            "Target: JMR V1 640×480. No media sidecar pipeline. Art and "
+            "gameplay ship together in the first <html_file>."
+        )
+    else:
+        role_block = (
+            "Act as an expert HTML5 game and UI engineer. You ship single-file HTML "
+            "applications (HTML + CSS + JavaScript in ONE file) that work in real "
+            "Chromium. You are diligent and tireless. You NEVER leave comments "
+            "describing code without implementing it. You always COMPLETELY IMPLEMENT "
+            "what the user asked for."
+        )
+        objective_extra = (
+            "A real Chromium browser is going to load your file and run an automated "
+            "test. You will see the test report. Iterate until it passes cleanly OR "
+            "you and the user agree it is shipped."
+        )
+
     return f"""<role>
-Act as an expert HTML5 game and UI engineer. You ship single-file HTML
-applications (HTML + CSS + JavaScript in ONE file) that work in real
-Chromium. You are diligent and tireless. You NEVER leave comments
-describing code without implementing it. You always COMPLETELY IMPLEMENT
-what the user asked for.
+{role_block}
 </role>
 
 <objective>
 GOAL FROM THE USER:
 {goal}
 
-A real Chromium browser is going to load your file and run an automated
-test. You will see the test report. Iterate until it passes cleanly OR
-you and the user agree it is shipped.
+{objective_extra}
 </objective>
 
 {workflow_block}
@@ -2262,6 +2332,7 @@ def first_build_instruction(
     current_asset_dir: str | None = None,
     current_sound_dir: str | None = None,
     has_generated_assets: bool = False,
+    simulator_mode: bool = False,
 ) -> str:
     """First-build prompt. Includes the SEED CODE the model should start from.
 
@@ -2290,7 +2361,17 @@ def first_build_instruction(
     # its structure" against a buggy past session was actively harmful
     # (2026-05-15 user pushback: "if they could mislead, fix that").
     if not seed_source:
-        if has_generated_assets:
+        if simulator_mode:
+            seed_framing = (
+                "Start from the SEED CODE below — empty 640×480 scaffold "
+                "only. KEEP canvas/RAF/input/HUD plumbing. In THIS "
+                "<html_file>, draw every playfield unit with classic "
+                "pixel maps or tiny inline data:image sheets (arcade "
+                "look). Do NOT ship solid colored squares as towers/"
+                "enemies/ships and \"fix art later\" — art and gameplay "
+                "together on turn 1. Keep maps compact (8×8..32×32)."
+            )
+        elif has_generated_assets:
             seed_framing = (
                 "Start from the SEED CODE below — it is the bundled empty "
                 "scaffold (canvas + DPR scaling, RAF loop with delta-time, "
@@ -2306,7 +2387,9 @@ def first_build_instruction(
                 "scaffold (canvas + DPR scaling, RAF loop with delta-time, "
                 "input map, score HUD, pause, game-over modal). It has no "
                 "game logic of its own. Use as much or as little of it as "
-                "fits your goal; the boilerplate is safe to keep."
+                "fits your goal; the boilerplate is safe to keep. For "
+                "arcade-style entities without generated PNGs, use classic "
+                "pixel maps — not solid colored boxes."
             )
     else:
         seed_framing = (

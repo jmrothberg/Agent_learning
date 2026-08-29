@@ -32,9 +32,12 @@ def test_small_model_prompt_under_six_kilobytes():
     small class to know the <todos> tag, and one-objective-per-turn is
     the biggest reliability lever for this class.
     2026-07-01: bumped 6_600 to 6_900 for window._assetsReady hard-rule
-    (harness asset-settle contract; run_08 M4/P1)."""
+    (harness asset-settle contract; run_08 M4/P1).
+    2026-08-29: bumped 6_900 to 7_100 for entity-art hard-rule (no solid
+    fillRect boxes as final look for characters/enemies when PNGs exist /
+    pixel maps when they don't — Fieldrunners placeholder-art class)."""
     p = build_system_prompt("snake game", model_class="small")
-    assert len(p) <= 6_900, f"small-model prompt {len(p)} chars exceeds 6.9 KB target"
+    assert len(p) <= 7_100, f"small-model prompt {len(p)} chars exceeds 7.1 KB target"
 
 
 def test_small_model_prompt_drops_optional_tags():

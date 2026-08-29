@@ -171,6 +171,13 @@ class MemoryRetrievalMixin:
                 "fps-minimap-radar-yaw-arrow",
             )
 
+        # /640: no sidecar PNGs — pin classic pixel-map craft so TD/shooter
+        # builds do not ship colored fillRect boxes (Fieldrunners 093900).
+        if bool(getattr(self, "_simulator_mode", False)) and not (
+            webgl_or_voxel or fps_class or voxel_class or wireframe_class
+        ):
+            _add("classic-arcade-pixel-maps")
+
         # Fixed-shooter / top-down shooter *class* (not named games).
         fixed_shooter_class = (
             recipe in ("canvas-fixed-shooter", "canvas-top-down-action")
@@ -765,6 +772,43 @@ class MemoryRetrievalMixin:
         if not self._lean_prompt_active():
             return opening_block, components_block, playbook_block
         budget = self._LEAN_MEMORY_COMBINED_BUDGET
+        # /640 Fieldrunners 20260829: opening (4KB) ate the 4500 budget and
+        # dropped bfs-grid-pathfinding. Simulator: components > playbook > opening.
+        if bool(getattr(self, "_simulator_mode", False)):
+            used = 0
+            blocked = False
+
+            def _fit_sim(block: str) -> str:
+                nonlocal used, blocked
+                if not block:
+                    return ""
+                if blocked or used + len(block) > budget:
+                    blocked = True
+                    return ""
+                used += len(block)
+                return block
+
+            cb = _fit_sim(components_block)
+            pb = _fit_sim(playbook_block)
+            ob = _fit_sim(opening_block)
+            if (
+                ob != (opening_block or "")
+                or cb != (components_block or "")
+                or pb != (playbook_block or "")
+            ):
+                self._trace({
+                    "kind": "lean_memory_budget_applied",
+                    "budget": budget,
+                    "simulator_priority": True,
+                    "kept_opening_chars": len(ob),
+                    "kept_components_chars": len(cb),
+                    "kept_playbook_chars": len(pb),
+                    "dropped_opening": bool(opening_block) and not ob,
+                    "dropped_components": bool(components_block) and not cb,
+                    "dropped_playbook": bool(playbook_block) and not pb,
+                })
+            return ob, cb, pb
+
         used = len(opening_block or "")  # opening (priority 1) always kept
         blocked = False
 

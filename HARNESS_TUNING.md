@@ -195,7 +195,23 @@ bullet never reaches the prompt — broaden tags if a good bullet doesn’t fire
   `warm_prefix` is correctly gated to the **cross-slot** case only (coder slot ≠ architect slot, the
   multi-GPU Ollama box, where asset/sound gen on another GPU IS the idle window) — keep it there.
 
+**/640 simulator (JMR native)**
+
+- **Fieldrunners `20260829_083734`:** `/640` + retrieved media-era won skeleton (`sim=1.00`) + lean
+  budget keeping ~4KB opening-book while **dropping** `bfs-grid-pathfinding` → plan said “emit
+  assets”, first builds hit `inline_data_bloat` / `unclosed_html_file`, `no_usable_code`. Fixes:
+  simulator skeleton fallback when HTML refs sidecars / `data:image` / is >28KB; lean budget
+  priority **components > playbook > opening**; Phase A uses `PLAN_INSTRUCTION_SIMULATOR` (no
+  EXPECTED `<assets>`); LOOK + HARD_RULES_SIMULATOR ask for classic pixel maps on
+  turn 1 (no fail-and-retry art gate — teach in the prompt, do not force a second pass).
+  Pin playbook `classic-arcade-pixel-maps` on `/640` first build.
+  **Library:** every `memory/prompt_library.jsonl` entry has `prompt_640` (pixel-map /
+  animated arcade goal). `/640` then `/games N` loads that variant; media mode still
+  uses `prompt`. Regenerate with `scripts/gen_prompt_640_library.py` after hand-edits
+  to overrides in that script.
+
 **Sampling**
+
 
 - MLX must pass `top_p` / `top_k` (vendor coding preset). Untruncated sampling causes degenerate
   line-repeat loops on large first builds. Repetition penalty stays off for code.
