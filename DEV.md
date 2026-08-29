@@ -85,13 +85,14 @@ MLX upgrades: MiniMax-M3 (`minimax_m3.py` copy after mlx-lm upgrade), GLM-5.2
 
 ### oMLX (preferred MLX HTTP server on Mac)
 
-[oMLX](https://omlx.ai/) 0.5.7+ is the supported way to serve **DeepSeek-V4-Flash**
-(Vontra MXFP4 at `~/MLX_Models/DeepSeek-V4-Flash-0731-MXFP4-MLX`) with native MTP.
-Stock PyPI `mlx-lm` lacks a working `deepseek_v4` path for that checkpoint.
+[oMLX](https://omlx.ai/) 0.6.3+ is the supported way to serve **DeepSeek-V4-Flash**
+(Vontra MXFP4 at `~/MLX_Models/DeepSeek-V4-Flash-0731-MXFP4-MLX`) and
+**GLM-5.3-Flash** (`glm5_next`, e.g. `~/MLX_Models/GLM-5.3-Flash-MLX-6bit`).
+Stock PyPI `mlx-lm` lacks those architectures.
 
 | Concern | Setting |
 |---------|---------|
-| **TUI pick Flash** | `/model` / `/load` / `/launch` on DeepSeek-V4-Flash **auto-starts oMLX** (`backend.ensure_omlx_server`) and routes that session to `:8000`; GLM/Qwen/MiniMax stay in-process |
+| **TUI pick Flash** | `/model` / `/load` / `/launch` on DeepSeek-V4-Flash or GLM-5.3-Flash **auto-starts oMLX** (`backend.ensure_omlx_server`) and routes that session to `:8000`; GLM-5.2/Qwen/MiniMax stay in-process |
 | **Prompt cache (check first)** | `cache.hot_cache_max_size` ≠ `"0"` (e.g. `"32GB"`). Admin UI: **Memory Management → Memory Limit (In-Memory Hot Cache)** — **not** the CACHE panel. Default `"0"` disabled; enabling cut a repeated ~24K prompt **51s → 4.6s**. oMLX CLI rejects `"20%"` — use absolute GB in `settings.json` / `omlx serve` |
 | Parallel agents | `LLM_BACKEND=mlx-server` + `MLX_SERVER_URL=http://127.0.0.1:8000` — one resident model, continuous batch |
 | Idle unload / “server quit” | Global idle timeout **None**; **pin** the coder model; per-model TTL off |

@@ -125,7 +125,7 @@ Stock `mlx_lm.server` from this repo’s `.venv` **cannot** load Vontra
 **TUI:** `/model` / `/load` / `/launch` on DeepSeek-V4-Flash calls
 `backend.ensure_omlx_server()` (spawn `omlx serve` or open `oMLX.app`) and sets the
 session `BackendInfo.endpoint` to `:8000` — **no** `MLX_SERVER_URL` env required.
-GLM / Qwen / MiniMax stay in-process.
+GLM-5.2 / Qwen / MiniMax stay in-process. GLM-5.3-Flash (`glm5_next`) uses oMLX like V4-Flash.
 
 **Parallel batches** (`eval/batch_parallel.py`) do **not** auto-start oMLX — start the
 server once, then:
@@ -161,9 +161,9 @@ Human-facing summary: repo root **`README.md`** (DeepSeek-V4-Flash / oMLX) and *
 
 ## Regular chat vs server mode
 
-**`chat.py` defaults to in-process MLX** for GLM / Qwen / MiniMax.
+**`chat.py` defaults to in-process MLX** for GLM-5.2 / Qwen / MiniMax.
 
-**Exception:** picking DeepSeek-V4-Flash (`requires_omlx_server`) auto-starts oMLX and
+**Exception:** picking DeepSeek-V4-Flash or GLM-5.3-Flash (`requires_omlx_server`) auto-starts oMLX and
 routes that session over HTTP via `BackendInfo.endpoint` — without setting
 `MLX_SERVER_URL` in the environment.
 

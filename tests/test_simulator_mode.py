@@ -29,6 +29,22 @@ def test_build_system_prompt_simulator_drops_media_and_injects_jmr_block():
     assert "<simulator-target>" in sp
     assert "640" in sp
     assert "Object.keys" in sp
+    assert "per-tick maze" in sp or "BFS" in sp
+    # Lean: /640 must not ship the full large schema (~23KB).
+    assert len(sp) < 12000
+
+
+def test_plan_instruction_simulator_has_no_expected_assets_block():
+    sim = prompts_v1.plan_instruction(
+        goal="pixel sprite shooter with doom 3d",
+        simulator_mode=True,
+    )
+    assert "EXPECTED — emit an <assets>" not in sim
+    assert "<sounds>" not in sim or "Do NOT" in sim or "No <assets>" in sim
+    assert "three.js" not in sim.lower()
+    assert "cdn.jsdelivr" not in sim
+    assert "<plan>" in sim
+    assert "640" in sim
 
 
 def test_plan_instruction_simulator_suppresses_art_nudge():
@@ -36,8 +52,9 @@ def test_plan_instruction_simulator_suppresses_art_nudge():
     sim = prompts_v1.plan_instruction(
         goal="pixel sprite shooter", simulator_mode=True,
     )
-    assert "REQUIRED" in normal or "<assets>" in normal
-    assert "REQUIRED" not in sim or sim.count("<assets>") <= normal.count("<assets>")
+    assert "MUST emit an <assets>" in normal or "REQUIRED" in normal
+    assert "MUST emit an <assets>" not in sim
+    assert "canvas-entity" not in sim.lower() or "EMIT <assets>" not in sim
 
 
 def test_game_agent_media_pipeline_toggle():

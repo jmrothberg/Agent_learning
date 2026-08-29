@@ -661,35 +661,72 @@ _SIMULATOR_FORMAT_DROP = frozenset({
     "<assets>", "<sounds>", "<videos>", "<lookup_bullet>",
 })
 
-# Distilled from JMR_JS_COMPATIBILITY.md — what actually runs on the 640×480
-# native machine (V1 walls). Full matrix doc is for RTL debuggers, not the LLM.
+# Distilled from JMR GAME_DESIGN.md + JMR_JS_COMPATIBILITY.md V1 walls.
+# Keep SHORT — local models drown if we paste the full authoring docs.
+# Do NOT maintain a second prompts_*.py; branch via simulator_mode=True.
 SIMULATOR_TARGET_BLOCK = """<simulator-target>
-JMR V1 native machine (640×480) — follow so LOAD+RUN works on hardware.
+JMR V1 native (640×480). One file LOAD+RUN. No media pipeline.
 
-ONE FILE: inline HTML + CSS + JS only. No external .js/.css, no fetch/XHR,
-no CDN <script src>.
+GLASS: <canvas width="640" height="480"> — fill every pixel (no letterbox
+gutters). Do not reassign canvas.width/height after load (clears bitmap).
+HUD with fillText on canvas — no innerHTML / CSS layout score.
 
-CANVAS: <canvas width="640" height="480">. Draw with getContext('2d'):
-fillRect, clearRect, fillText, paths (beginPath/arc/fill/stroke). drawImage
-only for data:image URLs embedded in THIS file (≤16 distinct sheets).
+DRAW: getContext('2d') — fillRect, clearRect, fillText, paths
+(beginPath/moveTo/lineTo/arc/stroke/fill). Prefer fillRect/drawImage over
+per-pixel loops. drawImage only for data:image in THIS file (≤16 sheets;
+atlases OK). imageSmoothingEnabled=false. No WebGL, gradients, filters,
+shadows.
 
-LOOP: requestAnimationFrame. Keys: addEventListener('keydown'/'keyup'), e.code
-('ArrowUp', 'KeyW', 'Space'); call preventDefault on arrows + space.
+INPUT: keydown/keyup; read e.key AND keyCode (37/39/38/40/32/13). Do not
+steal Esc (machine BREAK). No CDN scripts, fetch/XHR, modules, Workers,
+eval, async/await, Audio.play.
 
-MATH: Math.floor, abs, min, max, random, sqrt only.
+MATH: floor abs min max random sqrt (+ Math.PI). No sin/cos/atan2/round
+(shim round as floor(x+0.5); angles via LUT). No Object.keys / for…in
+(literal keys or numeric loops). No negative setTransform/scale mirror —
+use L/R sheets or unmirrored draw.
 
-OK: setTimeout/setInterval, typeof, JSON.parse/stringify, localStorage
-(feature-detect), simple classes (flattened — no dotted new foo.Bar).
+PERF: reuse one mutable object per entity (no {x,y} every frame); no
+per-tick maze BFS/flood; ≤16 locals per function; hoist props out of
+hot loops. setTimeout OK; drive frames with requestAnimationFrame.
 
-V1 WALLS: no Object.keys / for…in (use literal keys); no negative
-ctx.scale(-1,1) mirror (separate L/R art or flip in logic); HUD via canvas
-fillText, not innerHTML.
-
-NEVER: fetch/XHR, WebGL, async/await, Workers, eval, Audio.play / external
-sound files. Procedural canvas + inline Web Audio oscillators are fine.
-
-Do NOT emit <assets>, <sounds>, or <videos> — no sidecar media pipeline.
+Do NOT emit <assets>, <sounds>, or <videos>. Procedural canvas only.
 </simulator-target>
+"""
+
+# Phase A when /640 — same tags as media path MINUS assets/sounds/videos.
+# PLAN_INSTRUCTION's EXPECTED <assets> block would fight simulator mode.
+PLAN_INSTRUCTION_SIMULATOR = """CRITICAL FORMAT: output ONLY <plan>, <criteria>,
+<probes>. No <assets>/<sounds>/<videos>. No prose outside tags.
+
+<plan>
+Mechanics: <one or two sentences>
+Controls: <keys — ArrowLeft/Right/Up/Down, Space, Enter; also keyCode>
+Win/lose: <how it ends / restart>
+Visual style: <procedural 640×480 canvas — colors, shapes; no external art>
+Risky bits: <2 to 3 care points — V1 walls, heap, input>
+Build order: <2 to 4 steps on ONE line>
+</plan>
+
+<criteria>
+Basic:  <one assertion — e.g. canvas 640×480; player moves on ArrowLeft>
+Edge:   <one less-obvious assertion>
+Stress: <one stress / leak assertion>
+</criteria>
+
+CRITERIA-PROBE BINDING: every Basic: line MUST share a word with a probe.
+
+<probes>
+[
+  {"name": "canvas_640", "expr": "(()=>{const c=document.querySelector('canvas');return!!c&&c.width===640&&c.height===480;})()"},
+  {"name": "short-id", "expr": "<truthy JS after ~3s warmup>"},
+  {"name": "input_moves_player", "expr": "{input_moves_player_probe}"}
+]
+</probes>
+
+PROBES: include BOTH structural and ≥1 dynamic input→delta probe.
+Expose state on window (e.g. window.state). Keep exprs short; 3–5 total.
+No <html_file> yet — procedural fillRect/paths only in Phase B.
 """
 
 
@@ -726,6 +763,9 @@ def build_system_prompt(
     keeps the full prompt unchanged.
     """
     is_small = (model_class == "small")
+    # /640: always lean schema — drop media tags + short workflow. Full
+    # "large" prompt still carries CDN/WebGL/asset guidelines that fight JMR.
+    lean_schema = is_small or simulator_mode
     if formats is None:
         if is_small:
             # Drop unused media pipelines and the on-demand playbook lookup
@@ -762,7 +802,7 @@ def build_system_prompt(
     # the heavy media specs don't bury a local model in multi-KB prose.
     all_guidelines: list[str] = []
     for f in fmts:
-        if is_small and f.guidelines_small is not None:
+        if lean_schema and f.guidelines_small is not None:
             all_guidelines.extend(f.guidelines_small)
         else:
             all_guidelines.extend(f.guidelines)
@@ -774,8 +814,8 @@ def build_system_prompt(
     # <hard-rules> block above already covers the highest-priority
     # invariants; ANTI_PATTERNS is largely "don't do X" cautionary
     # detail that 27B-class models tend to enumerate AT us in <notes>
-    # instead of internalizing. Small-tier inherits the trim.
-    skip_anti_patterns = (model_class in ("mid", "small"))
+    # instead of internalizing. Small-tier / simulator inherits the trim.
+    skip_anti_patterns = (model_class in ("mid", "small")) or simulator_mode
 
     workflow_full = """<workflow>
 PHASE A — planning (1 turn). You output ONLY the tags below, no code:
@@ -812,7 +852,7 @@ Phase B iter 1: emit one complete <html_file>.
 Phase B iter 2+: emit <patch> SEARCH/REPLACE blocks against the file on disk.
 Phase C: reply with <confirm_done/> unless a real player would hit a crash.
 </workflow>"""
-    workflow_block = workflow_small if is_small else workflow_full
+    workflow_block = workflow_small if lean_schema else workflow_full
 
     iter_policy_full = """<iteration-policy>
 WORKING > PERFECT. Read this twice.
@@ -833,9 +873,9 @@ WORKING > PERFECT. Read this twice.
 WORKING > PERFECT. After a clean turn, ship with <done/>. Patches only;
 ONE focused change per turn. No regressions on a working game.
 </iteration-policy>"""
-    iter_policy_block = iter_policy_small if is_small else iter_policy_full
+    iter_policy_block = iter_policy_small if lean_schema else iter_policy_full
 
-    extras_block = "" if is_small else """<reasoning-license>
+    extras_block = "" if lean_schema else """<reasoning-license>
 Your reasoning inside <plan>, <criteria>, and <diagnose> can be thorough
 — it's fine if it's long. Format compliance matters more than brevity in
 those tags. Outside tags, be brief: the parser ignores prose anyway.
@@ -1677,10 +1717,11 @@ def plan_instruction(
     # seed_regen_assets: still suppress free invent nudges; dedicated
     # seed_nudge below forces the declared roster instead.
     if simulator_mode:
+        # /640: no media nudges, no CDN three.js (JMR V1 has no WebGL).
         wireframe_keywords = _detect_wireframe_vector_intent(goal)
         beat_em_up_keywords = _detect_beat_em_up_intent(goal)
         art_keywords = ()
-        threed_keywords = () if wireframe_keywords else _detect_3d_intent(goal)
+        threed_keywords = ()
         audio_keywords = ()
         video_keywords = ()
         qte_keywords = _detect_qte_intent(goal)
@@ -1721,7 +1762,8 @@ def plan_instruction(
     canvas_entity_keywords = ()
     canvas_entity_nudge = ""
     if (
-        not from_seed
+        not simulator_mode
+        and not from_seed
         and not wireframe_keywords
         and not art_keywords
     ):
@@ -1734,7 +1776,7 @@ def plan_instruction(
             _record_nudge("canvas-entity-art")
 
     pinball_nudge = ""
-    if not from_seed and not wireframe_keywords:
+    if not simulator_mode and not from_seed and not wireframe_keywords:
         pinball_keywords = _detect_pinball_intent(goal)
         if pinball_keywords:
             kws = ", ".join(repr(k) for k in pinball_keywords)
@@ -1744,7 +1786,7 @@ def plan_instruction(
             _record_nudge("pinball-table")
 
     open_field_td_nudge = ""
-    if not from_seed and not wireframe_keywords:
+    if not simulator_mode and not from_seed and not wireframe_keywords:
         open_field_td_keywords = _detect_open_field_td_intent(goal)
         if open_field_td_keywords:
             kws = ", ".join(repr(k) for k in open_field_td_keywords)
@@ -1812,7 +1854,7 @@ def plan_instruction(
         )
         _record_nudge("point-and-click")
 
-    franchise_asset_nudge = _franchise_asset_nudge(goal)
+    franchise_asset_nudge = "" if simulator_mode else _franchise_asset_nudge(goal)
 
     # Phase 4: scope-pacing nudge for art-heavy + logic-heavy goals.
     # Only fires when BOTH art (or 3D) AND heavy-logic keywords match —
@@ -1830,7 +1872,11 @@ def plan_instruction(
     heavy_logic_keywords = _detect_heavy_logic_intent(goal)
     multi_frame_keywords = _detect_multi_frame_intent(goal)
     scope_nudge = ""
-    if heavy_logic_keywords and (art_keywords or threed_keywords):
+    if (
+        not simulator_mode
+        and heavy_logic_keywords
+        and (art_keywords or threed_keywords)
+    ):
         logic_kws = ", ".join(repr(k) for k in heavy_logic_keywords)
         if multi_frame_keywords:
             mf_kws = ", ".join(repr(k) for k in multi_frame_keywords)
@@ -1851,7 +1897,7 @@ def plan_instruction(
     # because the scope-pacing nudge above only fires when both art and
     # heavy-logic keywords match.
     multi_frame_nudge = ""
-    if multi_frame_keywords and not scope_nudge:
+    if multi_frame_keywords and not scope_nudge and not simulator_mode:
         mf_kws = ", ".join(repr(k) for k in multi_frame_keywords)
         multi_frame_nudge = load_plan_nudge("multi-frame").replace(
             "{mf_kws}", mf_kws
@@ -1927,12 +1973,16 @@ def plan_instruction(
         _record_nudge("minimal-first-build")
 
     local_crisp_nudge = ""
-    if model_class == "small":
+    if model_class == "small" or simulator_mode:
         local_crisp_nudge = load_plan_nudge("local-plan-crisp")
         _record_nudge("local-plan-crisp")
 
     movement_probe = input_moves_player_probe_expr(goal=goal)
-    plan_core = PLAN_INSTRUCTION.replace("{input_moves_player_probe}", movement_probe)
+    # /640: short Phase A without EXPECTED <assets>/<sounds> (fights JMR).
+    _plan_src = (
+        PLAN_INSTRUCTION_SIMULATOR if simulator_mode else PLAN_INSTRUCTION
+    )
+    plan_core = _plan_src.replace("{input_moves_player_probe}", movement_probe)
 
     body = (
         local_crisp_nudge

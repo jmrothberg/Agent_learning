@@ -486,6 +486,11 @@ def test_requires_omlx_server_by_name():
     )
     assert backend.requires_omlx_server("DeepSeek-V4-Flash-0731-MXFP4-MLX")
     assert backend.requires_omlx_server("vontra/deepseek_v4_flash")
+    assert backend.requires_omlx_server("GLM-5.3-Flash-MLX-6bit")
+    assert backend.requires_omlx_server(
+        "/Users/x/MLX_Models/GLM-5.3-Flash-MLX-6bit"
+    )
+    assert backend.requires_omlx_server("orcarouter/GLM-5.3-Flash-MLX")
     assert not backend.requires_omlx_server("GLM-5.2-MLX-4bit")
     assert not backend.requires_omlx_server("Qwen3.6-27B-mxfp8")
     assert not backend.requires_omlx_server("")
@@ -565,6 +570,12 @@ def test_requires_omlx_server_from_config_json(tmp_path: Path):
         '{"model_type": "glm_moe_dsa"}\n', encoding="utf-8"
     )
     assert not backend.requires_omlx_server(str(other))
+    glm53 = tmp_path / "GLM-5.3-Flash-MLX-6bit"
+    glm53.mkdir()
+    (glm53 / "config.json").write_text(
+        '{"model_type": "glm5_next"}\n', encoding="utf-8"
+    )
+    assert backend.requires_omlx_server(str(glm53))
 
 
 def test_omlx_default_endpoint_env(monkeypatch):
@@ -580,6 +591,9 @@ def test_mlx_endpoint_for_model_routes_flash_to_omlx(monkeypatch):
     monkeypatch.delenv("LLM_BACKEND", raising=False)
     flash = "/m/DeepSeek-V4-Flash-0731-MXFP4-MLX"
     assert backend.mlx_endpoint_for_model(flash) == "http://127.0.0.1:8000"
+    assert backend.mlx_endpoint_for_model("/m/GLM-5.3-Flash-MLX-6bit") == (
+        "http://127.0.0.1:8000"
+    )
     assert backend.mlx_endpoint_for_model("/m/GLM-5.2-MLX-4bit") == "in-process"
 
 

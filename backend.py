@@ -3010,10 +3010,11 @@ def _try_mlx_server() -> BackendInfo | None:
 
 
 # -----------------------------------------------------------------------------
-# oMLX — DeepSeek-V4-Flash (and other models stock mlx-lm cannot load)
+# oMLX — models stock mlx-lm cannot load (deepseek_v4, glm5_next)
 # -----------------------------------------------------------------------------
-# chat.py auto-starts oMLX when the user /model-picks a deepseek_v4 checkpoint.
-# Other MLX models stay in-process; we do NOT set MLX_SERVER_URL globally.
+# chat.py auto-starts oMLX when the user /model-picks DeepSeek-V4-Flash or
+# GLM-5.3-Flash. GLM-5.2 / Qwen / MiniMax stay in-process; we do NOT set
+# MLX_SERVER_URL globally.
 
 
 def omlx_default_endpoint() -> str:
@@ -3027,10 +3028,11 @@ def omlx_default_endpoint() -> str:
 
 
 def requires_omlx_server(model: str) -> bool:
-    """True when this MLX id/path needs oMLX (stock mlx-lm lacks deepseek_v4).
+    """True when this MLX id/path needs oMLX (stock mlx-lm cannot load it).
 
-    Matches Vontra / community DeepSeek-V4-Flash folders by name, or a local
-    config.json with model_type deepseek_v4.
+    Matches DeepSeek-V4-Flash (`deepseek_v4`) and GLM-5.3-Flash (`glm5_next`)
+    by folder/HF name, or a local config.json with those model_type values.
+    GLM-5.2 stays in-process mlx-lm — do not match a bare "glm-5" prefix.
     """
     if not model or not str(model).strip():
         return False
@@ -3042,13 +3044,17 @@ def requires_omlx_server(model: str) -> bool:
         return True
     if base.startswith("deepseek-v4") or "v4-flash" in base:
         return True
+    # GLM-5.3-Flash (`glm5_next`) — not GLM-5.2 (`glm_moe_dsa`).
+    if "glm-5.3" in low or "glm_5.3" in low or "glm5.3" in low or "glm5_next" in low:
+        return True
     # Local dir with authoritative config.
     cfg_path = os.path.join(text, "config.json") if os.path.isdir(text) else ""
     if cfg_path and os.path.isfile(cfg_path):
         try:
             with open(cfg_path, encoding="utf-8") as f:
                 cfg = json.load(f)
-            if isinstance(cfg, dict) and str(cfg.get("model_type") or "").lower() == "deepseek_v4":
+            mt = str((cfg or {}).get("model_type") or "").lower()
+            if mt in ("deepseek_v4", "glm5_next"):
                 return True
         except Exception:
             pass
@@ -3282,7 +3288,7 @@ def _spawn_omlx_serve(endpoint: str) -> tuple[bool, str]:
     except OSError as e:
         return False, (
             "oMLX not installed (no `omlx` CLI and no oMLX.app). "
-            f"Install oMLX 0.5.7+ then retry. ({e!r})"
+            f"Install oMLX 0.6.3+ then retry. ({e!r})"
         )
 
 
@@ -3299,7 +3305,7 @@ def ensure_omlx_server(*, timeout_s: float = 120.0) -> str:
     if not ok:
         raise RuntimeError(
             f"DeepSeek-V4 needs oMLX but could not start it: {detail}\n"
-            "Install oMLX 0.5.7+ (app or `omlx` CLI), or start it once; "
+            "Install oMLX 0.6.3+ (app or `omlx` CLI), or start it once; "
             "chat will reuse http://127.0.0.1:8000 afterward."
         )
 
@@ -3318,8 +3324,8 @@ def ensure_omlx_server(*, timeout_s: float = 120.0) -> str:
 
 
 def mlx_endpoint_for_model(model: str) -> str:
-    """Endpoint for an MLX model pick: oMLX URL for deepseek_v4, else in-process
-    unless the user explicitly requested mlx-server via env.
+    """Endpoint for an MLX model pick: oMLX URL for deepseek_v4 / glm5_next,
+    else in-process unless the user explicitly requested mlx-server via env.
     """
     if requires_omlx_server(model):
         return omlx_default_endpoint()

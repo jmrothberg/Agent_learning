@@ -22,11 +22,11 @@ Model selection (when you press Enter on your game idea):
   1. backend.detect_backend() defaults to MLX on macOS (Apple GPU) unless
      you set LLM_BACKEND or use /backend. Otherwise it follows the same
      rules as coder.py --backend (TUI /backend has no mlx-server value —
-     Flash /load auto-starts oMLX; GLM/Qwen/MiniMax stay in-process).
+     Flash /load auto-starts oMLX; GLM-5.2/Qwen/MiniMax stay in-process).
        Ollama (port 11434) — loaded model from /api/ps, or OLLAMA_MODEL /
        CHAT_OLLAMA_MODEL overrides.
        MLX (in-process) — MLX_MODEL env, else single auto-discovered model
-       under ~/MLX_Models / HF cache. No mlx_lm.server for GLM/Qwen/MiniMax.
+       under ~/MLX_Models / HF cache. No mlx_lm.server for GLM-5.2/Qwen/MiniMax.
   2. With LLM_BACKEND=auto (or explicit --backend auto), if both daemons
      have a loaded model, MLX wins. Force one with LLM_BACKEND=ollama /
      LLM_BACKEND=mlx or /backend in the TUI.

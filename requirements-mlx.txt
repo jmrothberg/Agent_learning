@@ -5,3 +5,5 @@
 # Not pulled into requirements.txt so Linux/Ollama-only installs stay lean.
 
 mlx-lm>=0.21.0
+# GLM-5.3-Flash (`glm5_next`) lives in mlx-vlm, not mlx-lm. 0.6.17+ required.
+mlx-vlm>=0.6.17

@@ -138,10 +138,17 @@ MiniMax-M3 (see above). Example weights: `pipenetwork/GLM-5.2-MLX-4bit`,
 `mlx-community/GLM-5.2-mxfp4` — needs a very large unified-memory Mac (~370–480 GB
 for 4-bit).
 
+**MLX upgrades — GLM-5.3-Flash (`glm5_next`):** stock `mlx-lm` cannot load this
+architecture. Same path as DeepSeek-V4-Flash: **[oMLX](https://omlx.ai/) 0.6.3+**
+plus `mlx-vlm>=0.6.17` in this repo’s `.venv`. Weights:
+`~/MLX_Models/GLM-5.3-Flash-MLX-6bit` (~296 GB) —
+[orcarouter 6-bit](https://huggingface.co/orcarouter/GLM-5.3-Flash-MLX). `/model` /
+`/load` auto-starts oMLX. Needs ~320 GB unified memory. GLM-5.2 stays in-process.
+
 ### DeepSeek-V4-Flash + oMLX (required)
 
 Stock `mlx-lm` **cannot** load `model_type: deepseek_v4`. Flash is served only
-through **[oMLX](https://omlx.ai/) 0.5.7+** (native DSpark MTP). Do **not** install
+through **[oMLX](https://omlx.ai/) 0.6.3+** (native DSpark MTP; GLM-5.3-Flash needs 0.6.3). Do **not** install
 the old companion speed-patch repo on oMLX 0.5.4rc2+ — turn on `mtp_enabled` in
 oMLX model settings instead.
 
@@ -152,8 +159,8 @@ oMLX model settings instead.
 | RAM | First real chat completion loads weights into unified memory (~150 GB+). `/model` alone does **not**. macOS “Cached Files” for the safetensors is disk cache, not a loaded model. |
 | CLI / TUI | Chat auto-starts oMLX; binary searched on `PATH`, `~/.omlx/bin/omlx`, or `~/MLX_Models/.omlx-venv/bin/omlx` |
 | Hot prompt cache | `cache.hot_cache_max_size` e.g. `"32GB"` — **CLI rejects `"20%"`** |
-| GLM / Qwen / MiniMax | Stay **in-process** MLX (separate folders). Flash does not replace them. |
-| Leaving Flash → GLM | Chat **unloads** Flash from oMLX first. Otherwise Flash (~150GB+) stays resident and the GLM load can kill `chat.py` while oMLX looks fine. |
+| GLM-5.2 / Qwen / MiniMax | Stay **in-process** MLX (separate folders). Flash / GLM-5.3 do not replace them. |
+| Leaving Flash → GLM-5.2 | Chat **unloads** Flash from oMLX first. Otherwise Flash (~150GB+) stays resident and the GLM-5.2 load can kill `chat.py` while oMLX looks fine. |
 
 **TUI — no hand-started server for Flash:** `/list` → `/model` (or `/load` /
 `/launch`) on DeepSeek-V4-Flash calls `ensure_omlx_server()` — starts
