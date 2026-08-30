@@ -133,6 +133,11 @@ _VLM_NAME_SUBSTRINGS: tuple[str, ...] = (
     "qwen3.8-vl",
     "qwen3.8-27b", "qwen3.8-8b", "qwen3.8-7b", "qwen3.8-6b", "qwen3.8-5b",
     "qwen3.8:27b", "qwen3.8:8b", "qwen3.8:7b", "qwen3.8:6b", "qwen3.8:5b",
+    # 2026-08-29: Qwen3.8-Flash-Next is a qwen4_exp VLM. Name-classifying
+    # it as text routes in-process MLX through mlx_lm, which raises
+    # "Model type qwen4_exp not supported" (trace 20260829_135708).
+    "qwen3.8-flash",
+    "qwen3.8:flash",
     # LLaVA family
     "llava", "bakllava",
     # DeepSeek vision
@@ -224,6 +229,33 @@ def chat_template_thinking_kwargs(model: str | None) -> dict[str, Any]:
     if effort not in _QWEN38_REASONING_EFFORTS:
         effort = "medium"
     return {"enable_thinking": True, "reasoning_effort": effort}
+
+
+def omlx_messages_close_think_prefill(
+    messages: list[dict], model: str | None,
+) -> list[dict]:
+    """Close Qwen `<think>` before an assistant prefill on the oMLX HTTP path.
+
+    In-process MLX does this in `append_assistant_prefill` (DK 20260815_085321).
+    oMLX applies the chat template server-side, so a trailing assistant
+    `<html_file>` prefill lands *inside* the open think block and the game
+    never appears as `content` (trace 20260829_165958). Plan turns (last
+    role=user) are unchanged — the model still thinks. Thinking stays ON.
+    """
+    kw = chat_template_thinking_kwargs(model)
+    if not kw.get("enable_thinking") or not messages:
+        return messages
+    last = messages[-1]
+    if not isinstance(last, dict) or last.get("role") != "assistant":
+        return messages
+    content = last.get("content")
+    if not isinstance(content, str) or not content:
+        return messages
+    if content.lstrip().startswith("</think>"):
+        return messages
+    out = list(messages)
+    out[-1] = {**last, "content": "</think>\n\n" + content}
+    return out
 
 
 def apply_chat_template_safe(apply_fn, model: str | None, *args, **kwargs):
@@ -1482,7 +1514,9 @@ class MLXServerBackend(Backend):
         # oMLX expects basename ids; chat may still hold absolute MLX_Models paths.
         body: dict[str, Any] = {
             "model": mlx_server_api_model_id(self.info.model, self.info.endpoint),
-            "messages": _strip_ollama_only_fields(messages),
+            "messages": omlx_messages_close_think_prefill(
+                _strip_ollama_only_fields(messages), self.info.model,
+            ),
             "stream": True,
             "stream_options": {"include_usage": True},
         }
@@ -1490,8 +1524,18 @@ class MLXServerBackend(Backend):
             if key in opts:
                 body[key] = opts[key]
         env_cap = (os.environ.get("MLX_MAX_TOKENS") or "").strip()
-        default_max = int(env_cap) if env_cap.isdigit() and int(env_cap) > 0 else 16384
+        # Same default as in-process MLXBackend (131072). 16384 truncated
+        # first-builds (classic-doom 20260512) and the Flash-Next oMLX HTML
+        # turn (20260829_165958: finish_reason=length at exactly 16384).
+        default_max = int(env_cap) if env_cap.isdigit() and int(env_cap) > 0 else 131072
         body.setdefault("max_tokens", default_max)
+        # Keep Qwen3.8 thinking ON (medium). oMLX already defaults thinking on;
+        # pass kwargs so effort is medium, not native xhigh.
+        think_kw = chat_template_thinking_kwargs(self.info.model)
+        if think_kw:
+            body["chat_template_kwargs"] = dict(think_kw)
+            if "reasoning_effort" in think_kw:
+                body["reasoning_effort"] = think_kw["reasoning_effort"]
 
         started = time.monotonic()
         parts: list[str] = []
@@ -1503,6 +1547,7 @@ class MLXServerBackend(Backend):
         stall_at: int | None = None
         prompt_tokens: int | None = None
         completion_tokens: int | None = None
+        max_tokens_hit = False
         repeat = RepetitionDetector()
         prompt_eval_done_at: float | None = None
         _MLX_GENERATION_KICKOFF_SECONDS = 30.0
@@ -1613,6 +1658,13 @@ class MLXServerBackend(Backend):
                         if not choices:
                             continue
                         delta = choices[0].get("delta") or {}
+                        fr = choices[0].get("finish_reason")
+                        if fr in ("length", "max_tokens"):
+                            max_tokens_hit = True
+                        # Hidden CoT is not parser-visible but must reset the
+                        # stall clock (20260829_165958).
+                        if delta.get("reasoning_content") or delta.get("reasoning"):
+                            last_activity_at = time.monotonic()
                         piece = delta.get("content") or ""
                         if not piece:
                             continue
@@ -1655,6 +1707,7 @@ class MLXServerBackend(Backend):
             error_message=error_message,
             loop_kind=repeat.stall_reason if looped else None,
             loop_line=repeat.loop_line if looped else None,
+            max_tokens_hit=max_tokens_hit,
         )
 
     async def is_vlm(self) -> bool:
@@ -3030,9 +3083,11 @@ def omlx_default_endpoint() -> str:
 def requires_omlx_server(model: str) -> bool:
     """True when this MLX id/path needs oMLX (stock mlx-lm cannot load it).
 
-    Matches DeepSeek-V4-Flash (`deepseek_v4`) and GLM-5.3-Flash (`glm5_next`)
-    by folder/HF name, or a local config.json with those model_type values.
+    Matches DeepSeek-V4-Flash (`deepseek_v4`), GLM-5.3-Flash (`glm5_next`),
+    and Qwen3.8-Flash-Next (`qwen4_exp`) by folder/HF name, or a local
+    config.json with those model_type values.
     GLM-5.2 stays in-process mlx-lm — do not match a bare "glm-5" prefix.
+    Dense Qwen3.8-27B stays in-process mlx-vlm — do not match bare "qwen3.8".
     """
     if not model or not str(model).strip():
         return False
@@ -3047,6 +3102,12 @@ def requires_omlx_server(model: str) -> bool:
     # GLM-5.3-Flash (`glm5_next`) — not GLM-5.2 (`glm_moe_dsa`).
     if "glm-5.3" in low or "glm_5.3" in low or "glm5.3" in low or "glm5_next" in low:
         return True
+    # Qwen3.8-Flash-Next (`qwen4_exp`). In-process mlx-vlm 0.6.17 loads the
+    # language tower but rejects the 76 native-MTP tensors (strict
+    # "Received 76 parameters not in model: language_model.mtp.*").
+    # Vontra's 8bit-MTP card requires oMLX 0.6.3+ with qwen4_exp MTP.
+    if "qwen3.8-flash" in low or "qwen4_exp" in low:
+        return True
     # Local dir with authoritative config.
     cfg_path = os.path.join(text, "config.json") if os.path.isdir(text) else ""
     if cfg_path and os.path.isfile(cfg_path):
@@ -3054,7 +3115,7 @@ def requires_omlx_server(model: str) -> bool:
             with open(cfg_path, encoding="utf-8") as f:
                 cfg = json.load(f)
             mt = str((cfg or {}).get("model_type") or "").lower()
-            if mt in ("deepseek_v4", "glm5_next"):
+            if mt in ("deepseek_v4", "glm5_next", "qwen4_exp"):
                 return True
         except Exception:
             pass
@@ -3304,7 +3365,7 @@ def ensure_omlx_server(*, timeout_s: float = 120.0) -> str:
     ok, detail = _spawn_omlx_serve(endpoint)
     if not ok:
         raise RuntimeError(
-            f"DeepSeek-V4 needs oMLX but could not start it: {detail}\n"
+            f"This architecture needs oMLX but could not start it: {detail}\n"
             "Install oMLX 0.6.3+ (app or `omlx` CLI), or start it once; "
             "chat will reuse http://127.0.0.1:8000 afterward."
         )
@@ -3324,8 +3385,8 @@ def ensure_omlx_server(*, timeout_s: float = 120.0) -> str:
 
 
 def mlx_endpoint_for_model(model: str) -> str:
-    """Endpoint for an MLX model pick: oMLX URL for deepseek_v4 / glm5_next,
-    else in-process unless the user explicitly requested mlx-server via env.
+    """Endpoint for an MLX model pick: oMLX URL for deepseek_v4 / glm5_next /
+    qwen4_exp, else in-process unless the user explicitly requested mlx-server via env.
     """
     if requires_omlx_server(model):
         return omlx_default_endpoint()

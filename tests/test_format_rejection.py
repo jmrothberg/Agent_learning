@@ -291,6 +291,30 @@ def test_no_usable_code_fallback_no_rejection_falls_back_to_generic():
     assert "could not find a <patch> or <html_file>" in msg
 
 
+def test_no_usable_code_fallback_coaches_palette_clone_loop():
+    """Fieldrunners /640 124033: inline_data_bloat on PAL/PAL2 color arrays."""
+    from agent import GameAgent
+
+    rej = FormatRejection(
+        kind="unclosed_html_file",
+        hint="unclosed",
+        detail="TRUNCATED REPLY — missing closing tags.",
+    )
+    msg, _ = GameAgent._no_usable_code_fallback(
+        plan_only=False,
+        has_existing_file=False,
+        consecutive_plan_only=0,
+        rejection=rej,
+        format_stuck_streak=1,
+        prior_stream_looped=True,
+        prior_loop_kind="inline_data_bloat",
+        prior_loop_line='"#4a4a55","#7a7a88","#b8b8c8","#3a6ea5",',
+        is_local_backend=True,
+    )
+    assert "ONE shared" in msg or "PAL2" in msg
+    assert "<html_file>" in msg
+
+
 # ---------------------------------------------------------------------------
 # Regression check: the existing pipeline still works on well-formed
 # replies (no false-positive fence stripping or misclassification).

@@ -234,17 +234,21 @@ OVERRIDES: dict[str, str] = {
         "circles. Muzzle flash on fire. HUD money/lives/wave via fillText. "
         "Controls: click place, R restart. Expose enemies[], towers[], path."
     ),
+    # Softened 2026-08-29: prior prompt demanded idle+fire+angle sheets for
+    # every tower → local model looped on PAL/PAL2/PAL3 clones (trace
+    # 124033 inline_data_bloat). First build: one shared palette + tiny maps.
     "tower-defense-openfield": (
         "Build a Fieldrunners-style open-field TD. No pre-drawn path: grass "
         "grid, entrance→exit; towers BUILD the maze; enemies BFS (reject "
         "wall-offs; re-path on place). Towers: Rapid Gun, Missile, Goo, "
-        "Mortar, Tesla, Flame. Creeps escalate by wave. Sidebar select/place/"
-        "upgrade/sell. Space starts wave. EVERY tower and creep is a classic "
-        "pixel-map sprite with idle + fire/walk frames — recognizable "
-        "Fieldrunners silhouettes, NOT colored squares. Rotating heads: "
-        "separate L/R or angle pixel sheets (no negative scale). Beam towers: "
-        "upright sprite + procedural bolt/flame to target. Expose "
-        "window.state grid/path/enemies/towers."
+        "Mortar, Tesla, Flame. Creeps escalate by wave. Canvas sidebar "
+        "(click strip or keys 1-6) select/place; Space starts wave. Art: "
+        "ONE shared palette + one tiny (≤12×12) pixel map per tower/creep "
+        "type — recognizable silhouettes, NOT colored squares. Do NOT emit "
+        "PAL2/PAL3 clones or many angle sheets on first build; L/R sheet or "
+        "unmirrored draw is enough; beams = upright map + simple line. Extra "
+        "idle/fire frames via later <patch>. Expose window.state "
+        "grid/path/enemies/towers."
     ),
     "pinball": (
         "Build a Pinball table. Gravity ball, flippers, bumpers, drain, "

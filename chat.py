@@ -4063,11 +4063,12 @@ class CodingBoxApp(App):
         )
 
     def _mlx_endpoint_for_chosen(self, chosen_name: str) -> str:
-        """Resolve MLX endpoint; auto-start oMLX for DeepSeek-V4-Flash."""
+        """Resolve MLX endpoint; auto-start oMLX for Flash / qwen4_exp."""
         if backend_mod.requires_omlx_server(chosen_name):
             try:
                 self._log_info(
-                    "[dim]DeepSeek-V4 needs oMLX — ensuring server at "
+                    "[dim]This architecture needs oMLX (qwen4_exp / "
+                    "DeepSeek-V4 / GLM-5.3) — ensuring server at "
                     f"{backend_mod.omlx_default_endpoint()}…[/dim]"
                 )
                 ep = backend_mod.ensure_omlx_server()

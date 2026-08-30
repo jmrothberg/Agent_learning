@@ -424,6 +424,32 @@ def test_qwen38_reasoning_effort_env_and_aliases(monkeypatch):
     }
 
 
+def test_omlx_qwen38_keeps_thinking_and_closes_html_prefill(monkeypatch):
+    """Plan still thinks. HTML prefill must close </think> first
+    (DK 20260815_085321 / trace 20260829_165958)."""
+    monkeypatch.delenv("QWEN_ENABLE_THINKING", raising=False)
+    monkeypatch.delenv("QWEN_REASONING_EFFORT", raising=False)
+    model = "Qwen3.8-Flash-Next-MLX-8bit-MTP"
+    assert backend.chat_template_thinking_kwargs(model) == {
+        "enable_thinking": True, "reasoning_effort": "medium",
+    }
+    plan = [{"role": "user", "content": "plan please"}]
+    assert backend.omlx_messages_close_think_prefill(plan, model) == plan
+    prefill = [
+        {"role": "user", "content": "build"},
+        {"role": "assistant", "content": "<html_file>\n<!DOCTYPE html>\n"},
+    ]
+    out = backend.omlx_messages_close_think_prefill(prefill, model)
+    assert out[-1]["content"].startswith("</think>\n\n<html_file>")
+    # GLM / non-Qwen3.8: no rewrite.
+    glm_prefill = [
+        {"role": "assistant", "content": "<html_file>\n<!DOCTYPE html>\n"},
+    ]
+    assert backend.omlx_messages_close_think_prefill(
+        glm_prefill, "GLM-5.3-Flash-MLX-6bit"
+    ) == glm_prefill
+
+
 def test_qwen38_never_forwards_illegal_effort(monkeypatch):
     """Template: raise_exception if effort not in xhigh|medium|low."""
     for raw in ("high", "max", "ultra", "HIGH", ""):
@@ -491,8 +517,14 @@ def test_requires_omlx_server_by_name():
         "/Users/x/MLX_Models/GLM-5.3-Flash-MLX-6bit"
     )
     assert backend.requires_omlx_server("orcarouter/GLM-5.3-Flash-MLX")
+    # Qwen3.8-Flash-Next (`qwen4_exp` + native MTP) — not dense Qwen3.8-27B.
+    assert backend.requires_omlx_server(
+        "/Users/x/MLX_Models/Qwen3.8-Flash-Next-MLX-8bit-MTP"
+    )
+    assert backend.requires_omlx_server("Vontra/Qwen3.8-Flash-Next-MLX-8bit-MTP")
     assert not backend.requires_omlx_server("GLM-5.2-MLX-4bit")
     assert not backend.requires_omlx_server("Qwen3.6-27B-mxfp8")
+    assert not backend.requires_omlx_server("Qwen3.8-27B-mxfp8")
     assert not backend.requires_omlx_server("")
 
 
@@ -576,6 +608,12 @@ def test_requires_omlx_server_from_config_json(tmp_path: Path):
         '{"model_type": "glm5_next"}\n', encoding="utf-8"
     )
     assert backend.requires_omlx_server(str(glm53))
+    qwen4 = tmp_path / "Qwen3.8-Flash-Next-MLX-8bit-MTP"
+    qwen4.mkdir()
+    (qwen4 / "config.json").write_text(
+        '{"model_type": "qwen4_exp"}\n', encoding="utf-8"
+    )
+    assert backend.requires_omlx_server(str(qwen4))
 
 
 def test_omlx_default_endpoint_env(monkeypatch):
@@ -594,7 +632,11 @@ def test_mlx_endpoint_for_model_routes_flash_to_omlx(monkeypatch):
     assert backend.mlx_endpoint_for_model("/m/GLM-5.3-Flash-MLX-6bit") == (
         "http://127.0.0.1:8000"
     )
+    assert backend.mlx_endpoint_for_model(
+        "/m/Qwen3.8-Flash-Next-MLX-8bit-MTP"
+    ) == "http://127.0.0.1:8000"
     assert backend.mlx_endpoint_for_model("/m/GLM-5.2-MLX-4bit") == "in-process"
+    assert backend.mlx_endpoint_for_model("/m/Qwen3.8-27B-mxfp8") == "in-process"
 
 
 def test_ensure_omlx_server_already_up(monkeypatch):

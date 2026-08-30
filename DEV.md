@@ -86,18 +86,21 @@ MLX upgrades: MiniMax-M3 (`minimax_m3.py` copy after mlx-lm upgrade), GLM-5.2
 ### oMLX (preferred MLX HTTP server on Mac)
 
 [oMLX](https://omlx.ai/) 0.6.3+ is the supported way to serve **DeepSeek-V4-Flash**
-(Vontra MXFP4 at `~/MLX_Models/DeepSeek-V4-Flash-0731-MXFP4-MLX`) and
-**GLM-5.3-Flash** (`glm5_next`, e.g. `~/MLX_Models/GLM-5.3-Flash-MLX-6bit`).
-Stock PyPI `mlx-lm` lacks those architectures.
+(Vontra MXFP4 at `~/MLX_Models/DeepSeek-V4-Flash-0731-MXFP4-MLX`),
+**GLM-5.3-Flash** (`glm5_next`, e.g. `~/MLX_Models/GLM-5.3-Flash-MLX-6bit`),
+and **Qwen3.8-Flash-Next** (`qwen4_exp` + native MTP, e.g.
+`~/MLX_Models/Qwen3.8-Flash-Next-MLX-8bit-MTP`).
+Stock PyPI `mlx-lm` / in-process `mlx-vlm` 0.6.17 lack those load paths
+(Flash-Next: 76 `language_model.mtp.*` tensors rejected).
 
 | Concern | Setting |
 |---------|---------|
-| **TUI pick Flash** | `/model` / `/load` / `/launch` on DeepSeek-V4-Flash or GLM-5.3-Flash **auto-starts oMLX** (`backend.ensure_omlx_server`) and routes that session to `:8000`; GLM-5.2/Qwen/MiniMax stay in-process |
+| **TUI pick Flash** | `/model` / `/load` / `/launch` on DeepSeek-V4-Flash, GLM-5.3-Flash, or Qwen3.8-Flash-Next **auto-starts oMLX** (`backend.ensure_omlx_server`) and routes that session to `:8000`; GLM-5.2 / dense Qwen3.8-27B / MiniMax stay in-process |
 | **Prompt cache (check first)** | `cache.hot_cache_max_size` ≠ `"0"` (e.g. `"32GB"`). Admin UI: **Memory Management → Memory Limit (In-Memory Hot Cache)** — **not** the CACHE panel. Default `"0"` disabled; enabling cut a repeated ~24K prompt **51s → 4.6s**. oMLX CLI rejects `"20%"` — use absolute GB in `settings.json` / `omlx serve` |
 | Parallel agents | `LLM_BACKEND=mlx-server` + `MLX_SERVER_URL=http://127.0.0.1:8000` — one resident model, continuous batch |
 | Idle unload / “server quit” | Global idle timeout **None**; **pin** the coder model; per-model TTL off |
 | Long SSE prefills | SSE keepalive `chunk`; `caffeinate` / menu-bar app auto-restart |
-| MTP speed | Per-model `mtp_enabled=true` — **no** companion speed-patch repos on 0.5.4rc2+ |
+| MTP speed | Per-model `mtp_enabled=true`, Flash-Next `mtp_num_draft_tokens=3` in `~/.omlx/model_settings.json` — **no** companion speed-patch repos on 0.5.4rc2+. Do **not** use `vlm_mtp_enabled` (that is Gemma’s external drafter) |
 | GLM-5.2 coexistence | Separate weights folder; do not expect both ~390G + ~167G resident unless you have headroom |
 
 `OMLX_SERVER_URL` overrides the default `http://127.0.0.1:8000`. Config file:

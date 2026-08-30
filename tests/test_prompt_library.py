@@ -84,6 +84,9 @@ def test_prompt_640_fieldrunners_demands_pixel_sprites_not_boxes():
     assert "pixel" in p
     assert "colored squares" in p or "not colored" in p
     assert "generate <assets>" not in p
+    # 2026-08-29: avoid PAL2/PAL3 clone loops on local first builds.
+    assert "one shared palette" in p or "pal2" in p
+    assert "angle sheets" not in p or "do not emit" in p
 
 
 def test_prompt_640_strips_video_pipeline_from_fighters():

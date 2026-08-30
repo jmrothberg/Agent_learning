@@ -163,7 +163,7 @@ Human-facing summary: repo root **`README.md`** (DeepSeek-V4-Flash / oMLX) and *
 
 **`chat.py` defaults to in-process MLX** for GLM-5.2 / Qwen / MiniMax.
 
-**Exception:** picking DeepSeek-V4-Flash or GLM-5.3-Flash (`requires_omlx_server`) auto-starts oMLX and
+**Exception:** picking DeepSeek-V4-Flash, GLM-5.3-Flash, or Qwen3.8-Flash-Next (`requires_omlx_server`) auto-starts oMLX and
 routes that session over HTTP via `BackendInfo.endpoint` — without setting
 `MLX_SERVER_URL` in the environment.
 

@@ -32,6 +32,7 @@ def test_qwen_vl_variants():
         "qwen-vl-7b", "qwen2-vl-7b", "qwen2.5-vl-7b", "qwen3-vl-32b",
         "qwen3.6-vl-27b", "qwen-omni-7b", "qwen2.5-omni-7b", "qwen3.6:27b",
         "qwen3.8:27b", "qwen3.8-27b",
+        "qwen3.8-flash-next", "qwen3.8:flash",
     ):
         assert classify_model_modality(name) == "vlm", name
 
@@ -184,6 +185,11 @@ def test_mlx_path_form_also_matches():
     path = "/Users/jonathanrothberg/MLX_Models/Qwen3.8-27B-mxfp8"
     assert classify_model_modality(path) == "vlm"
     assert classify_model_modality("mlx-community/Qwen3.8-27B-mxfp8") == "vlm"
+    # Qwen3.8-Flash-Next is qwen4_exp image-text-to-text; must not go
+    # through mlx_lm (see backend._VLM_NAME_SUBSTRINGS).
+    path = "/Users/jonathanrothberg/MLX_Models/Qwen3.8-Flash-Next-MLX-8bit-MTP"
+    assert classify_model_modality(path) == "vlm"
+    assert classify_model_modality("Vontra/Qwen3.8-Flash-Next-MLX-8bit-MTP") == "vlm"
     # Plain Qwen3 (no .6/.8) is still text-only — keep the false-positive
     # guard so the name-prefix check doesn't bleed beyond those families.
     path = "/Users/jmr/MLX_Models/Qwen3-30B-A3B-8bit"

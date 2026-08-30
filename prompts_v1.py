@@ -620,8 +620,9 @@ HARD_RULES_SIMULATOR: list[str] = [
     "canvas.width/height after load. Fill every pixel (no letterbox gutters). "
     "HUD with canvas fillText — not innerHTML.",
     "FIRST <html_file> must already look like the classic/original game: "
-    "compact pixel maps (2D 0/1 or palette rows, blit per texel) or ≤16 "
-    "inline data:image sheets for every playfield unit. Do NOT plan to "
+    "ONE shared palette + compact pixel maps (≤16×16, blit per texel) or "
+    "≤16 inline data:image sheets for playfield units. Do NOT emit "
+    "PAL2/PAL3 clones or many angle sheets on turn 1. Do NOT plan to "
     "\"add art later\" — solid colored squares/circles are wrong on turn 1. "
     "HUD/grid/range rings may use plain fillRect.",
     "Drive frames with requestAnimationFrame. Keys: read e.key AND keyCode "
@@ -705,10 +706,11 @@ squares, or bare fillRect placeholders as the final art. Match the
 original's silhouette, palette, and chunky pixels.
 
 ART HOW (pick one; all self-contained):
-  - Pixel maps (preferred): small 2D arrays of 0/1 or palette indexes
-    (8×8..32×32), blit with fillRect per texel — classic Invaders/Pac look.
-    Example: const SP=[[0,1,1,0],[1,1,1,1],...]; for(r...)for(c...)if(SP[r][c])
-    ctx.fillRect(x+c*s,y+r*s,s,s);
+  - Pixel maps (preferred): ONE shared palette array + small 2D maps of
+    0/1 or palette indexes (8×8..16×16 first build), blit with fillRect
+    per texel — classic Invaders/Pac look. Example:
+    const PAL=["#000","#3a7"]; const SP=[[0,1,1,0],[1,1,1,1],...];
+    Never emit PAL2/PAL3/... clones of the same colors (token-loop trap).
   - Inline sprite sheets: data:image PNG in THIS file + drawImage
     (≤16 distinct sheets; atlases + 9-arg crop OK).
   - Vector classics only when the original is vector (Asteroids strokes).
@@ -733,9 +735,10 @@ No negative setTransform/scale mirror — L/R sheets or unmirrored draw.
 PERF: reuse one mutable object per entity; no per-tick maze BFS/flood;
 ≤16 locals per function; hoist props out of hot loops. RAF for frames.
 
-SIZE: keep the file shippable — compact pixel maps / small sheets, not
-megabyte base64 walls (those stall the stream). Aim first build
-playable+recognizable; polish extra frames via <patch>.
+SIZE: keep the file shippable — one shared palette, few tiny maps / small
+sheets, not megabyte base64 or duplicated palette constants (those stall
+the stream). First build: playable + recognizable silhouettes; extra
+frames / angles via later <patch>.
 
 Do NOT emit <assets>, <sounds>, or <videos>.
 </simulator-target>

@@ -543,6 +543,25 @@ class StreamMaterializeMixin:
                     f" The repeated content was: `{clue}`."
                 )
             if is_local_backend:
+                # 2026-08-29 Fieldrunners /640: model looped on near-identical
+                # PAL/PAL2/PAL3 color arrays (inline_data_bloat) before any
+                # game logic. Coach ONE shared palette + tiny maps.
+                palette_spam = False
+                _ll = (prior_loop_line or "").lower()
+                if prior_loop_kind == "inline_data_bloat" and (
+                    "pal" in _ll
+                    or _ll.count("#") >= 3
+                    or '"#' in (prior_loop_line or "")
+                ):
+                    palette_spam = True
+                art_recover = ""
+                if palette_spam or prior_loop_kind == "inline_data_bloat":
+                    art_recover = (
+                        " If the loop was palette/pixel-map data: emit ONE "
+                        "shared `const PAL=[...]` (never PAL2/PAL3 clones), "
+                        "one tiny ≤12×12 map per unit type, then ship "
+                        "playable mechanics — polish frames later via <patch>.\n\n"
+                    )
                 fallback = (
                     f"Your previous reply hit a token-repetition loop and the "
                     f"stream was aborted, so {kind_label} block has no closing "
@@ -555,6 +574,7 @@ class StreamMaterializeMixin:
                     "block entirely — don't pad with redundant "
                     "`flag = false; flag = false;` statements (known loop "
                     "trigger on local models).\n\n"
+                    f"{art_recover}"
                     "Keep this turn short and code-only."
                 )
             else:

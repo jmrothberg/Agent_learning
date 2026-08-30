@@ -138,12 +138,15 @@ MiniMax-M3 (see above). Example weights: `pipenetwork/GLM-5.2-MLX-4bit`,
 `mlx-community/GLM-5.2-mxfp4` — needs a very large unified-memory Mac (~370–480 GB
 for 4-bit).
 
-**MLX upgrades — GLM-5.3-Flash (`glm5_next`):** stock `mlx-lm` cannot load this
-architecture. Same path as DeepSeek-V4-Flash: **[oMLX](https://omlx.ai/) 0.6.3+**
-plus `mlx-vlm>=0.6.17` in this repo’s `.venv`. Weights:
+**MLX upgrades — GLM-5.3-Flash (`glm5_next`) and Qwen3.8-Flash-Next (`qwen4_exp`):**
+stock in-process `mlx-lm` / `mlx-vlm` 0.6.17 cannot load these. Same path as
+DeepSeek-V4-Flash: **[oMLX](https://omlx.ai/) 0.6.3+**. GLM weights:
 `~/MLX_Models/GLM-5.3-Flash-MLX-6bit` (~296 GB) —
-[orcarouter 6-bit](https://huggingface.co/orcarouter/GLM-5.3-Flash-MLX). `/model` /
-`/load` auto-starts oMLX. Needs ~320 GB unified memory. GLM-5.2 stays in-process.
+[orcarouter 6-bit](https://huggingface.co/orcarouter/GLM-5.3-Flash-MLX).
+Flash-Next 8-bit MTP: `~/MLX_Models/Qwen3.8-Flash-Next-MLX-8bit-MTP` (~203 GB) —
+[Vontra](https://huggingface.co/Vontra/Qwen3.8-Flash-Next-MLX-8bit-MTP)
+(enable native MTP, draft depth 3 in oMLX `/admin`). `/model` / `/load`
+auto-starts oMLX. GLM-5.2 and dense Qwen3.8-27B stay in-process.
 
 ### DeepSeek-V4-Flash + oMLX (required)
 
@@ -159,7 +162,7 @@ oMLX model settings instead.
 | RAM | First real chat completion loads weights into unified memory (~150 GB+). `/model` alone does **not**. macOS “Cached Files” for the safetensors is disk cache, not a loaded model. |
 | CLI / TUI | Chat auto-starts oMLX; binary searched on `PATH`, `~/.omlx/bin/omlx`, or `~/MLX_Models/.omlx-venv/bin/omlx` |
 | Hot prompt cache | `cache.hot_cache_max_size` e.g. `"32GB"` — **CLI rejects `"20%"`** |
-| GLM-5.2 / Qwen / MiniMax | Stay **in-process** MLX (separate folders). Flash / GLM-5.3 do not replace them. |
+| GLM-5.2 / Qwen3.8-27B / MiniMax | Stay **in-process** MLX (separate folders). Flash / GLM-5.3 / Flash-Next do not replace them. |
 | Leaving Flash → GLM-5.2 | Chat **unloads** Flash from oMLX first. Otherwise Flash (~150GB+) stays resident and the GLM-5.2 load can kill `chat.py` while oMLX looks fine. |
 
 **TUI — no hand-started server for Flash:** `/list` → `/model` (or `/load` /

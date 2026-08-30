@@ -209,13 +209,22 @@ bullet never reaches the prompt — broaden tags if a good bullet doesn’t fire
   animated arcade goal). `/640` then `/games N` loads that variant; media mode still
   uses `prompt`. Regenerate with `scripts/gen_prompt_640_library.py` after hand-edits
   to overrides in that script.
+- **Fieldrunners `20260829_124033`:** `/640` first build aborted with
+  `inline_data_bloat` → `unclosed_html_file` / `no_usable_code` after ~2.4KB.
+  Partial reply was looping on near-identical `const PAL` / `PAL2` / `PAL3`…
+  color arrays (playbook + heavy `prompt_640` asked for every tower’s idle/fire/
+  angle sheets). Not a harness false fail — local model hit the art-data wall.
+  Softened TD `prompt_640` + playbook + `SIMULATOR_TARGET_BLOCK` /
+  `HARD_RULES_SIMULATOR`: **one shared palette**, tiny ≤12×12 maps, no PAL2/PAL3
+  clones; extra frames via later `<patch>`. Recovery coaching for
+  `inline_data_bloat` now names the palette-clone trap.
 
 **Sampling**
 
 
 - MLX must pass `top_p` / `top_k` (vendor coding preset). Untruncated sampling causes degenerate
   line-repeat loops on large first builds. Repetition penalty stays off for code.
-- **Qwen3.8 thinking levels** (official `chat_template.jinja`): **`xhigh`, `medium`, `low` only — there is no `high`**. Passing `high` jinja-raises. Native template default is `xhigh`; **harness default is `medium`** (Aug 15 DK/SF: xhigh plan turns ran 15k–22k tokens / 40 min before tags). DK `20260815_085321` also failed on xhigh because first-build `<html_file>` prefill sat *inside* the open `<think>`. Close think before code prefill; `_extract_html` salvages a complete `<html_file>` trapped before `</think>`. Incomplete plans: stub the huge assistant blob **before** `plan_incomplete_retry` so retry is not a 100k+ CoT prefill. Aliases (`high`/`max`) map to `xhigh`. Override: `QWEN_REASONING_EFFORT=xhigh|low`, `QWEN_ENABLE_THINKING=0`.
+- **Qwen3.8 thinking levels** (official `chat_template.jinja`): **`xhigh`, `medium`, `low` only — there is no `high`**. Passing `high` jinja-raises. Native template default is `xhigh`; **harness default is `medium`** (Aug 15 DK/SF: xhigh plan turns ran 15k–22k tokens / 40 min before tags). DK `20260815_085321` also failed on xhigh because first-build `<html_file>` prefill sat *inside* the open `<think>`. Close think before code prefill; `_extract_html` salvages a complete `<html_file>` trapped before `</think>`. Incomplete plans: stub the huge assistant blob **before** `plan_incomplete_retry` so retry is not a 100k+ CoT prefill. Aliases (`high`/`max`) map to `xhigh`. Override: `QWEN_REASONING_EFFORT=xhigh|low`, `QWEN_ENABLE_THINKING=0`. **oMLX HTTP:** keep thinking ON (`medium`). Close `</think>` on the assistant `<html_file>` prefill the same way in-process does (`omlx_messages_close_think_prefill`). Do not disable thinking to “fix” stalls — trace `20260829_165958` was HTML trapped in CoT plus a 16384 `max_tokens` cap.
 
 **Visual critic**
 
