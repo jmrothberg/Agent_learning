@@ -208,3 +208,14 @@ def test_simulator_first_build_asks_for_pixel_art_upfront():
     )
     assert "pixel map" in msg.lower() or "data:image" in msg
     assert "fix art later" in msg.lower() or "together on turn 1" in msg
+
+
+def test_games_list_header_is_not_a_rich_closing_tag():
+    """`[/640 pixel-map goals]` crashes RichLog (MarkupError on restart+/games)."""
+    src = Path(__file__).resolve().parents[1].joinpath("chat.py").read_text(
+        encoding="utf-8"
+    )
+    assert "[/640 pixel-map goals]" not in src
+    assert "(/640 pixel-map goals)" in src
+    # Error log body must be escaped so a MarkupError cannot crash again.
+    assert 'self._log(f"[red]![/red] {_esc(text)}")' in src

@@ -1392,7 +1392,9 @@ class CodingBoxApp(App):
         self._log(f"[cyan]i[/cyan] {text}")
 
     def _log_error(self, text: str) -> None:
-        self._log(f"[red]![/red] {text}")
+        # Escape the body: exception text can contain "[/...]" which Rich
+        # parses as markup (see /games + /640 MarkupError).
+        self._log(f"[red]![/red] {_esc(text)}")
 
     # Streaming tokens from the model arrive one-piece-at-a-time. Textual's
     # RichLog appends per-call as a new line, which would break sentences.
@@ -4644,14 +4646,16 @@ class CodingBoxApp(App):
             return
         arg = (arg or "").strip()
         if not arg:
-            mode = " [/640 pixel-map goals]" if self._simulator_mode else ""
+            # Do not use "[/640 ...]" — Rich treats "[/name]" as a closing
+            # markup tag and crashes the log pane (restart + /640 + /games).
+            mode = " (/640 pixel-map goals)" if self._simulator_mode else ""
             self._log_info(
                 f"[bold]Curated game prompts{mode}[/bold] — /games <N> to load:"
             )
             for g in games:
                 mark = ""
                 if self._simulator_mode and str(g.get("prompt_640") or "").strip():
-                    mark = " [640]"
+                    mark = " (640)"
                 self._log(f"  [cyan]{g['n']:>2}[/cyan]  {_esc(g['title'])}{mark}")
             self._log_info(
                 f"e.g. [b]/games 1[/b] loads prompt #1 into the input — "
