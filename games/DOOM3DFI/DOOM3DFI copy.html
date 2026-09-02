@@ -12,14 +12,14 @@ html,body{margin:0;height:100%;background:#000;overflow:hidden}
 canvas{display:block;image-rendering:pixelated;touch-action:none}
 </style>
 <script data-host="chrome">
-window.JMR_SPR = ["DOOM3DFI-0.png", "DOOM3DFI-1.png", "DOOM3DFI-2.png", "DOOM3DFI-3.png", "DOOM3DFI-4.png", "DOOM3DFI-5.png", "DOOM3DFI-6.png", "DOOM3DFI-7.png", "DOOM3DFI-8.png", "DOOM3DFI-9.png", "DOOM3DFI-10.png", "DOOM3DFI-11.png", "DOOM3DFI-12.png"];
+window.JMR_SPR = ["DOOM3DFI-12.png", "DOOM3DFI-8.png", "DOOM3DFI-9.png", "DOOM3DFI-11.png", "DOOM3DFI-10.png", "floor_tile.png", "weapon_fire.png", "demon_idle.png", "pickup_health.png", "weapon_idle.png", "pickup_ammo.png", "cutscene_intro.png", "boss_attack.png", "DOOM3DFI-1.png", "DOOM3DFI-0.png", "boss_idle.png", "DOOM3DFI-2.png", "DOOM3DFI-3.png", "cutscene_boss.png", "DOOM3DFI-7.png", "DOOM3DFI-6.png", "DOOM3DFI-4.png", "DOOM3DFI-5.png", "wall_stone.png", "ceil_tile.png", "demon_attack.png"];
 (function(){var o=window.Image;window.Image=function(){var i=new o();var d;Object.defineProperty(i,'src',{get:function(){return d;},set:function(v){var m=/jmr:spr:(\d+)/.exec(v);i.setAttribute('src',m?('DOOM3DFI-'+m[1]+'.png'):v);d=v;}});return i;};})();
 </script>
 </head><body>
 <div id="wrap"><canvas id="c" width="640" height="480"></canvas></div>
 <script data-host="chrome">
 // PNG list make_artx.py reads. Index N is jmr:spr:N.
-window.JMR_SPR = ["DOOM3DFI-0.png", "DOOM3DFI-1.png", "DOOM3DFI-2.png", "DOOM3DFI-3.png", "DOOM3DFI-4.png", "DOOM3DFI-5.png", "DOOM3DFI-6.png", "DOOM3DFI-7.png", "DOOM3DFI-8.png", "DOOM3DFI-9.png", "DOOM3DFI-10.png", "DOOM3DFI-11.png", "DOOM3DFI-12.png"];
+window.JMR_SPR = ["DOOM3DFI-12.png", "DOOM3DFI-8.png", "DOOM3DFI-9.png", "DOOM3DFI-11.png", "DOOM3DFI-10.png", "floor_tile.png", "weapon_fire.png", "demon_idle.png", "pickup_health.png", "weapon_idle.png", "pickup_ammo.png", "cutscene_intro.png", "boss_attack.png", "DOOM3DFI-1.png", "DOOM3DFI-0.png", "boss_idle.png", "DOOM3DFI-2.png", "DOOM3DFI-3.png", "cutscene_boss.png", "DOOM3DFI-7.png", "DOOM3DFI-6.png", "DOOM3DFI-4.png", "DOOM3DFI-5.png", "wall_stone.png", "ceil_tile.png", "demon_attack.png"];
 (function () {
   var d = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, "src");
   Object.defineProperty(HTMLImageElement.prototype, "src", {
@@ -240,16 +240,55 @@ var r=0.25;
 var nx=e.x+mvx;if(cellAt(nx+(mvx>0?r:-r),e.y)===0)e.x=nx;
 var ny=e.y+mvy;if(cellAt(e.x,ny+(mvy>0?r:-r))===0)e.y=ny;
 }
+// floor/ceil texture caster — same perspective sampling the wall columns use
+var TPIX=64;
+var fScr=ctx.createImageData(W,H);
+var fBuf=new Uint32Array(fScr.data.buffer);
+var tileCache=Object.create(null);
+var gLX=0,gLY=0,gRDX=0,gRDY=0;
+function getTileBuf(idx){
+if(tileCache[idx]!==undefined)return tileCache[idx];
+var buf=null;
+try{
+var tc=document.createElement("canvas");tc.width=TPIX;tc.height=TPIX;
+var t2=tc.getContext("2d");
+t2.drawImage(IMG[idx],0,0,TPIX,TPIX);
+var d=t2.getImageData(0,0,TPIX,TPIX);
+var ok=false;
+for(var q=3;q<d.data.length;q+=3988){if(d.data[q]>0){ok=true;break;}}
+if(ok)buf=new Uint32Array(d.data.buffer.slice(0));
+}catch(e){buf=null;}
+if(buf)tileCache[idx]=buf;
+return buf;
+}
+function castRow(y,denom,src){
+var row=y*W;
+if(!src){for(var x=0;x<W;x++)fBuf[row+x]=0xFF404040;return;}
+var rowDist=0.5*H/denom;if(rowDist>24)rowDist=24;
+var stepX=rowDist*gRDX/W,stepY=rowDist*gRDY/W;
+var fx=state.player.x+rowDist*gLX,fy=state.player.y+rowDist*gLY;
+for(var x2=0;x2<W;x2++){
+fBuf[row+x2]=src[((((fy*TPIX)|0)&63)*TPIX)+((((fx*TPIX)|0)&63))];
+fx+=stepX;fy+=stepY;
+}
+}
+function castFloorCeil(p,dx,dy,px,py,po){
+var fb=getTileBuf(T_FLOOR),cb=getTileBuf(T_CEIL);
+var hor=H/2+po,y0=hor|0;
+if(y0<0)y0=0;if(y0>H)y0=H;
+gLX=dx-px;gLY=dy-py;gRDX=dx+px;gRDY=dy+py;
+for(var y=0;y<y0;y++){var dc=hor-y;if(dc<0.5)dc=0.5;castRow(y,dc,cb);}
+for(var y2=y0;y2<H;y2++){var df=y2-hor;if(df<0.5)df=0.5;castRow(y2,df,fb);}
+ctx.putImageData(fScr,0,0);
+}
 // render
 function render(){
 var p=state.player;
-// floor/ceil
-ctx.drawImage(IMG[T_CEIL],0,0,W,H/2);
-ctx.drawImage(IMG[T_FLOOR],0,H/2,W,H/2);
-ctx.fillStyle="rgba(0,0,0,0.45)";ctx.fillRect(0,0,W,H/2);ctx.fillRect(0,H/2,W,H/2);
 var di=fi(p.yaw),dx=LC[di],dy=LS[di];
 var fov=0.66,planeX=-dy*fov,planeY=dx*fov;
 var pitchOff=p.pitch*H*0.6;
+castFloorCeil(p,dx,dy,planeX,planeY,pitchOff);
+ctx.fillStyle="rgba(0,0,0,0.45)";ctx.fillRect(0,0,W,H/2);ctx.fillRect(0,H/2,W,H/2);
 var shx=state.shake>0?(Math.random()-0.5)*4:0;
 for(var x=0;x<W;x++){
 var camx=2*x/W-1;var rdx=dx+planeX*camx,rdy=dy+planeY*camx;

@@ -99,6 +99,63 @@ def _has_embedded_marker(text: str) -> bool:
     return bool(_EMBEDDED_MARKER_RE.search(text or ""))
 
 
+# Prefill `<patch>\n<<<<<<< SEARCH\n` + a model that still wants
+# `<diagnose>` (DOOM3DFI 20260902_131715 iter 2) yields SEARCH bodies
+# that contain diagnose prose and a nested second SEARCH marker. The
+# inner SEARCH/REPLACE is often the real fix — salvage it instead of
+# rejecting the whole turn as "embedded marker" / no usable code.
+_DIAGNOSE_BLOCK_RE = re.compile(
+    r"<diagnose\b[^>]*>.*?</diagnose>\s*",
+    re.DOTALL | re.IGNORECASE,
+)
+_NESTED_SEARCH_LINE_RE = re.compile(
+    r"^[ \t]*<{5,}\s*SEARCH[ \t]*$",
+    re.MULTILINE | re.IGNORECASE,
+)
+_ORPHAN_PATCH_TAG_LINE_RE = re.compile(
+    r"^[ \t]*</?patch>[ \t]*$",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+
+def _salvage_contaminated_search(search: str) -> tuple[str, str | None]:
+    """Clean a SEARCH body that nested diagnose / a second SEARCH marker.
+
+    Returns (cleaned_search, reason) when salvage succeeded and the result
+    has no embedded markers; otherwise (original_search, None).
+    """
+    if not search or not (
+        _has_embedded_marker(search)
+        or "<diagnose" in search.lower()
+        or "<patch>" in search.lower()
+    ):
+        return search, None
+    cleaned = search
+    reason: str | None = None
+    if _DIAGNOSE_BLOCK_RE.search(cleaned):
+        cleaned = _DIAGNOSE_BLOCK_RE.sub("", cleaned)
+        reason = "stripped_diagnose_from_search"
+    nested = list(_NESTED_SEARCH_LINE_RE.finditer(cleaned))
+    if nested:
+        # Keep text after the LAST nested SEARCH line (innermost intent).
+        cleaned = cleaned[nested[-1].end():]
+        if cleaned.startswith("\n"):
+            cleaned = cleaned[1:]
+        reason = "inner_search_after_nested_marker"
+    if _ORPHAN_PATCH_TAG_LINE_RE.search(cleaned):
+        cleaned = _ORPHAN_PATCH_TAG_LINE_RE.sub("", cleaned)
+        reason = reason or "stripped_orphan_patch_tags"
+    # Collapse leftover leading blank lines from the prefill gap.
+    cleaned = cleaned.lstrip("\n")
+    if cleaned == search:
+        return search, None
+    if _has_embedded_marker(cleaned):
+        # Incomplete salvage — leave original so apply_patches reports
+        # the clear embedded-marker failure.
+        return search, None
+    return cleaned, reason or "salvaged_contaminated_search"
+
+
 # Phase 4 (4C): markdown SEARCH:/REPLACE: → <patch> normalization.
 # Fieldrunners trace 20260626_102307 iter 5: instead of the canonical
 # <patch>/<<<<<<< SEARCH/=======/>>>>>>> REPLACE envelope, the model emitted
@@ -520,6 +577,9 @@ class Patch:
 
     search: str
     replace: str
+    # Set when `_salvage_contaminated_search` cleaned a nested/diagnose
+    # SEARCH body (DOOM3DFI 20260902 nested-patch turn).
+    salvage_reason: str | None = None
 
     @property
     def is_prepend(self) -> bool:
@@ -681,13 +741,19 @@ def extract_patches(reply: str) -> list[Patch]:
     Strips stray markdown fences from each patch body so a model that
     wrapped its SEARCH/REPLACE in ```html``` doesn't fail the literal
     match on the fence lines.
+
+    Also salvages SEARCH bodies contaminated by patch-first prefill +
+    nested diagnose / second SEARCH (see `_salvage_contaminated_search`).
     """
     reply = repair_reply(reply)
     out: list[Patch] = []
     for m in _PATCH_RE.finditer(reply):
         search = _strip_internal_fences(m.group("search"))
         replace = _strip_internal_fences(m.group("replace"))
-        out.append(Patch(search=search, replace=replace))
+        search, salvage_reason = _salvage_contaminated_search(search)
+        out.append(Patch(
+            search=search, replace=replace, salvage_reason=salvage_reason,
+        ))
     return out
 
 

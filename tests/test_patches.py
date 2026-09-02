@@ -655,3 +655,44 @@ def test_no_breadcrumb_ambiguous_search_suggests_breadcrumb_in_error():
     assert res.applied == 0
     _, _, msg = res.failed[0]
     assert "@@" in msg, f"error should mention @@ breadcrumb option; got: {msg!r}"
+
+
+def test_salvage_nested_search_after_diagnose_inside_prefill():
+    """DOOM3DFI 20260902_131715 iter 2: patch-first prefill opened SEARCH,
+    model nested <diagnose> + a second SEARCH/REPLACE. Without salvage the
+    turn was 'no usable code' despite a valid inner edit."""
+    reply = (
+        "<patch>\n<<<<<<< SEARCH\n\n\n"
+        "<diagnose>step uses gRDX instead of (gRDX-gLX)</diagnose>\n\n"
+        "<patch>\n<<<<<<< SEARCH\n"
+        "var stepX=rowDist*gRDX/W,stepY=rowDist*gRDY/W;\n"
+        "=======\n"
+        "var stepX=rowDist*(gRDX-gLX)/W,stepY=rowDist*(gRDY-gLY)/W;\n"
+        ">>>>>>> REPLACE\n</patch>\n"
+    )
+    source = (
+        "function castRow(){\n"
+        "var stepX=rowDist*gRDX/W,stepY=rowDist*gRDY/W;\n"
+        "}\n"
+    )
+    ps = extract_patches(reply)
+    assert len(ps) == 1
+    assert ps[0].salvage_reason is not None
+    assert "diagnose" not in ps[0].search.lower()
+    assert "<<<<<<<" not in ps[0].search
+    assert "gRDX-gLX" in ps[0].replace or "(gRDX-gLX)" in ps[0].replace
+    res = apply_patches(source, ps)
+    assert res.applied == 1, res.failed
+    assert "(gRDX-gLX)" in res.text or "gRDX-gLX" in res.text
+
+
+def test_embedded_marker_in_replace_still_rejected_when_unsalvageable():
+    """Salvage must not hide a REPLACE body that still has marker lines."""
+    source = "ALPHA\n"
+    patch = Patch(
+        search="ALPHA\n",
+        replace="new\n>>>>>>> REPLACE\nstuff\n",
+    )
+    res = apply_patches(source, [patch])
+    assert res.applied == 0
+    assert "embedded" in res.failed[0][2].lower() or "marker" in res.failed[0][2].lower()

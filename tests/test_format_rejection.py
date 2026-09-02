@@ -291,6 +291,24 @@ def test_no_usable_code_fallback_no_rejection_falls_back_to_generic():
     assert "could not find a <patch> or <html_file>" in msg
 
 
+def test_no_usable_code_fallback_coaches_embedded_marker_nesting():
+    """DOOM3DFI iter2 residual path: salvage failed → coach diagnose outside."""
+    from agent import GameAgent
+
+    msg, _ = GameAgent._no_usable_code_fallback(
+        plan_only=False,
+        has_existing_file=True,
+        consecutive_plan_only=0,
+        materialize_reject_reason=(
+            "all 1 patches failed to apply — patch body contains an "
+            "embedded SEARCH/REPLACE marker"
+        ),
+    )
+    assert "diagnose" in msg.lower()
+    assert "SEARCH" in msg
+    assert "never inside" in msg.lower() or "INSIDE" in msg
+
+
 def test_no_usable_code_fallback_coaches_palette_clone_loop():
     """Fieldrunners /640 124033: inline_data_bloat on PAL/PAL2 color arrays."""
     from agent import GameAgent

@@ -408,6 +408,29 @@ class StreamMaterializeMixin:
                 "<html_file>."
             )
             return fallback, False
+        # DOOM3DFI 20260902: patch-first prefill + diagnose nested inside
+        # SEARCH → "embedded SEARCH/REPLACE marker" and the turn saved
+        # nothing even when an inner SEARCH/REPLACE was valid. Coach the
+        # shape (salvage in patches.py usually recovers; this is for the
+        # residual unrecoverable cases).
+        if (
+            "embedded" in reject_low
+            and ("search" in reject_low or "marker" in reject_low)
+        ):
+            fallback = (
+                "Your last <patch> failed to apply: SEARCH/REPLACE markers "
+                "were nested or a <diagnose> was placed INSIDE the SEARCH "
+                "body. Nothing was saved.\n\n"
+                "Recovery for THIS turn:\n"
+                "  - Optional ONE-sentence <diagnose>...</diagnose> BEFORE "
+                "the patch (never inside SEARCH).\n"
+                "  - Then ONE <patch> with exactly one "
+                "`<<<<<<< SEARCH` / `=======` / `>>>>>>> REPLACE` set.\n"
+                "  - Do NOT open a second <patch> or second SEARCH inside "
+                "the first.\n"
+                "Keep SEARCH small (the few lines to change)."
+            )
+            return fallback, False
         if consecutive_plan_only >= 2:
             fallback = (
                 "LOOP DETECTED: you have emitted only <plan> for "
@@ -1731,14 +1754,17 @@ class StreamMaterializeMixin:
                                     )
                             blocks.append(entry)
                         else:
-                            blocks.append({
+                            entry = {
                                 "idx": idx,
                                 "applied": True,
                                 "kind": (
                                     "prepend" if p.is_prepend
                                     else ("delete" if p.is_delete else "edit")
                                 ),
-                            })
+                            }
+                            if getattr(p, "salvage_reason", None):
+                                entry["salvage_reason"] = p.salvage_reason
+                            blocks.append(entry)
                     self._trace({
                         "kind": "patch_outcome",
                         "applied": res.applied,
