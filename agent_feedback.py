@@ -211,6 +211,39 @@ _SCOPED_RECOLOR_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bchange\b.{0,20}\bcolou?r\b", re.I),
 )
 
+# Preserve-working + localized render fix (seed edits). DOOM3DFI trace
+# 20260902_121459: "sides … are perfect" + "floor and ceiling … not be
+# static" was NOT classified as small-scope → first build allowed a full
+# <html_file> rewrite that scrambled jmr:spr indices and erased working
+# walls. Genre-free: preserve verbs + floor/ceiling/static draw asks —
+# never game titles. Only consumed via _goal_is_small_scope_edit (seed
+# path), so fresh "build a perfect maze" sessions stay unscoped.
+_PRESERVE_WORKING_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\b(?:are|is|was|were)\s+perfect\b", re.I),
+    re.compile(r"\bkeep\s+(?:the|my|existing)\b", re.I),
+    re.compile(r"\bdon['’]?t\s+(?:touch|change|lose|break)\b", re.I),
+    re.compile(r"\bleave\s+(?:the|my)\b.{0,40}\b(?:alone|untouched)\b", re.I),
+)
+_LOCALIZED_RENDER_FIX_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # Defect language only — bare "floor and ceiling textures" on a fresh
+    # build must NOT classify as small-scope (see seed_edit_scenarios).
+    re.compile(
+        r"\b(?:floor|floors|ceiling|ceilings|ceil)\b.{0,120}\b"
+        r"(?:static|flat|follow|follows|following)\b",
+        re.I,
+    ),
+    re.compile(
+        r"\b(?:static|flat)\b.{0,120}\b"
+        r"(?:floor|floors|ceiling|ceilings|ceil)\b",
+        re.I,
+    ),
+    re.compile(
+        r"\b(?:floor|floors|ceiling|ceilings|ceil)\b.{0,80}\b"
+        r"(?:need|needs|must)\s+(?:to\s+)?(?:be\s+)?draw",
+        re.I,
+    ),
+)
+
 # Patch budget for a small-scope SEED edit. An initial seed goal often
 # bundles several edits ("move the buttons + add upgrade/sell + rotate the
 # guns" = 8 patches in trace 194238_248190), so the single-tweak max of 1
@@ -907,18 +940,19 @@ def _feedback_mentions_scoped_behavior_change(text: str) -> bool:
 
 def _goal_is_small_scope_edit(text: str) -> bool:
     """True when a seed-edit goal is a localized tweak — reposition,
-    resize, rotate/flip, or recolor of existing elements — rather than a
-    structural rebuild.
+    resize, rotate/flip, recolor, or a preserve-working render fix —
+    rather than a structural rebuild.
 
     Used ONLY to arm a single-patch scope lock on a SEED first build (the
     full file is injected for patching by `_seed_html_for_prompt`), so a
     weak local model can't fall back to a doomed full-file `<html_file>`
-    rewrite of a large seed (2026-06-25 trace 161300_697573).
+    rewrite of a large seed (2026-06-25 trace 161300_697573;
+    DOOM3DFI__run_20260902_121459 floor/ceiling-only scramble).
 
     Genre-free: every pattern describes a layout/rendering-modality edit
-    (position, scale, orientation, color), never subject matter. Reuses the
-    existing size + orientation detectors so the vocabulary stays in one
-    place.
+    (position, scale, orientation, color, floor/ceiling draw), never
+    subject matter. Reuses the existing size + orientation detectors so
+    the vocabulary stays in one place.
     """
     if not text:
         return False
@@ -929,6 +963,12 @@ def _goal_is_small_scope_edit(text: str) -> bool:
     if any(p.search(text) for p in _SCOPED_POSITION_PATTERNS):
         return True
     if any(p.search(text) for p in _SCOPED_RECOLOR_PATTERNS):
+        return True
+    # COMMENT: preserve-working OR localized floor/ceiling draw fix —
+    # either alone is enough on a seed (caller gates on seed_file).
+    if any(p.search(text) for p in _PRESERVE_WORKING_PATTERNS):
+        return True
+    if any(p.search(text) for p in _LOCALIZED_RENDER_FIX_PATTERNS):
         return True
     return False
 

@@ -511,6 +511,28 @@ def test_unscoped_initial_goal_passes_through(tmp_path: Path) -> None:
     assert a._scoped_constraints is None
 
 
+def test_seed_preserve_floor_ceil_goal_locks_patch_only(tmp_path: Path) -> None:
+    """DOOM3DFI__run_20260902_121459: walls-perfect + floor/ceil ask must
+    arm INITIAL-GOAL SCOPE LOCK so first build cannot full-rewrite the seed."""
+    a = _make_agent(tmp_path)
+    seed = tmp_path / "seed.html"
+    seed.write_text("<html><body><canvas></canvas></body></html>", encoding="utf-8")
+    a.seed_file = seed
+    a._current_file = seed.read_text(encoding="utf-8")
+    goal = (
+        "the sides of the maze are perfect, the floor and ceiling do not "
+        "follow the maze. they need to be draw just like the walls, not be static."
+    )
+    augmented = a._apply_initial_goal_scoping(goal, "<base>")
+    assert "INITIAL-GOAL SCOPE LOCK" in augmented
+    assert a._scoped_constraints is not None
+    assert a._scoped_constraints.get("mode") == "single_patch"
+    assert a._scoped_constraints.get("is_seed_edit") is True
+    allowed, forbidden = a._derive_allowed_forbidden_tags()
+    assert "<patch>" in allowed
+    assert "<html_file>" in forbidden
+
+
 # ----------------------------------------------------------------------
 # Tier 2.3: bounded asset-only turn prompt for media_only scope.
 # ----------------------------------------------------------------------

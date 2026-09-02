@@ -480,7 +480,7 @@ One file works the same: `/assets ~/Art/space_invaders/player.png`.
 | Want… | Use |
 |-------|-----|
 | Brand-new game + your PNGs | `/assets` then `/new` with stems in the goal |
-| Continue an old HTML (legacy `*_assets/` or a `games/NAME/` folder) | `/seed games/NAME/NAME.html` |
+| Continue an old HTML (legacy `*_assets/` or a `games/NAME/` folder) | `/seed games/NAME/NAME.html` then type what to change (Enter) |
 | Mood/palette glance for a vision model | `/ref` (not for copying sprites) |
 
 In-TUI detail: **`/help assets`**.

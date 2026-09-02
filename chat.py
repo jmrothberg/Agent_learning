@@ -325,6 +325,83 @@ def _slugify(text: str, max_len: int = 30) -> str:
     return s
 
 
+def _pick_file_native(
+    *,
+    prompt: str,
+    default_dir: Path | None = None,
+    filetypes: list[tuple[str, str]] | None = None,
+) -> Path | None:
+    """Native OS file picker (macOS osascript, else tkinter).
+
+    Returns a Path or None if the user cancels / picker unavailable.
+    Drag-drop into Textual is terminal-fragile; bare /seed and /ref use this.
+    """
+    start = str((default_dir or Path.home()).expanduser().resolve())
+    if sys.platform == "darwin":
+        # Prefer of type when we have a short list; otherwise any file.
+        type_clause = ""
+        if filetypes:
+            # AppleScript type names / UTIs / extensions.
+            types: list[str] = []
+            for _label, pattern in filetypes:
+                for part in pattern.replace("*.", "").split():
+                    part = part.strip(";")
+                    if part and part != "*":
+                        types.append(part)
+                        types.append(part.upper())
+            # Dedupe while keeping order
+            seen: set[str] = set()
+            uniq = []
+            for t in types:
+                if t not in seen:
+                    seen.add(t)
+                    uniq.append(t)
+            if uniq:
+                quoted = ", ".join(f'"{t}"' for t in uniq[:12])
+                type_clause = f" of type {{{quoted}}} "
+        # default location keeps the dialog near games/ or home.
+        script = (
+            f'set f to choose file{type_clause}with prompt "{prompt}" '
+            f'default location (POSIX file "{start}")\n'
+            "return POSIX path of f"
+        )
+        try:
+            r = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True,
+                text=True,
+                timeout=600,
+                check=False,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            return None
+        if r.returncode != 0:
+            return None
+        path = (r.stdout or "").strip()
+        return Path(path) if path else None
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except Exception:
+        return None
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        root.attributes("-topmost", True)
+    except Exception:
+        pass
+    path = filedialog.askopenfilename(
+        title=prompt,
+        initialdir=start,
+        filetypes=filetypes or [("All files", "*.*")],
+    )
+    try:
+        root.destroy()
+    except Exception:
+        pass
+    return Path(path) if path else None
+
+
 def _resolve_seed_target(seed: Path) -> Path:
     """Map a seed path back to the canonical games/<basename>.html.
 
@@ -956,6 +1033,10 @@ class CodingBoxApp(App):
         self._status_manual_body: str | None = None
         self._context_menu: ContextMenuOverlay | None = None
         self._context_menu_origin: str = ""
+        # Input selection snapshot for Cut/Copy — OptionList focus clears
+        # the Input selection before the menu action runs.
+        self._context_menu_input_selected: str = ""
+        self._context_menu_input_sel: tuple[int, int] | None = None
         # Per-session paths assigned in _start_session. None until then.
         self._out_path: Path | None = None
         self._best_path: Path | None = None
@@ -2965,6 +3046,16 @@ class CodingBoxApp(App):
             except Exception:
                 pass
 
+    def _snapshot_input_selection(self, inp: MultilinePasteInput) -> None:
+        """Remember selected text before the menu steals focus."""
+        try:
+            start, end = inp.selection
+            selected = inp.selected_text or ""
+        except Exception:
+            start, end, selected = 0, 0, ""
+        self._context_menu_input_selected = selected
+        self._context_menu_input_sel = (int(start), int(end)) if selected else None
+
     async def _show_context_menu(
         self,
         *,
@@ -2974,6 +3065,16 @@ class CodingBoxApp(App):
         origin: str,
     ) -> None:
         await self._dismiss_context_menu()
+        if origin == "input":
+            try:
+                inp = self.query_one("#user-input", MultilinePasteInput)
+                self._snapshot_input_selection(inp)
+            except Exception:
+                self._context_menu_input_selected = ""
+                self._context_menu_input_sel = None
+        else:
+            self._context_menu_input_selected = ""
+            self._context_menu_input_sel = None
         sw = max(1, self.size.width)
         sh = max(1, self.size.height)
         # Keep the whole popup on screen; opening near the bottom used to
@@ -2994,12 +3095,22 @@ class CodingBoxApp(App):
         try:
             if origin == "input":
                 inp = self.query_one("#user-input", MultilinePasteInput)
-                # Focus the input back so cursor state is active and visible
-                inp.focus()
+                # Focus last — focusing the OptionList already cleared the
+                # live selection; use the snapshot for Cut/Copy.
+                snapped = self._context_menu_input_selected or ""
+                snapped_sel = self._context_menu_input_sel
                 if action_id == "cut":
-                    inp.action_cut()
+                    if not snapped:
+                        raise SkipAction()
+                    self.copy_to_clipboard(snapped)
+                    if snapped_sel is not None:
+                        inp.replace("", *snapped_sel)
+                    else:
+                        inp.delete_selection()
                 elif action_id == "copy":
-                    inp.action_copy()
+                    if not snapped:
+                        raise SkipAction()
+                    self.copy_to_clipboard(snapped)
                 elif action_id == "paste":
                     if not self._paste_into_input(inp):
                         raise SkipAction()
@@ -3007,6 +3118,7 @@ class CodingBoxApp(App):
                     inp.action_select_all()
                 else:
                     return
+                inp.focus()
                 self._log_info("[dim]Clipboard action applied to input.[/dim]")
             elif origin == "log":
                 if action_id == "copy_log_tail":
@@ -3050,6 +3162,9 @@ class CodingBoxApp(App):
             self._log_info("[dim]That action is not available right now.[/dim]")
         except Exception as e:
             self._log_info(f"[dim]Clipboard action failed: {e!r}[/dim]")
+        finally:
+            self._context_menu_input_selected = ""
+            self._context_menu_input_sel = None
 
     async def on_context_menu_overlay_closed(
         self, message: ContextMenuOverlay.Closed,
@@ -3213,6 +3328,28 @@ class CodingBoxApp(App):
 
         if text.startswith("/"):
             await self._handle_slash(text)
+            return
+
+        # Staged /seed + plain request → start that edit session.
+        # No need for /new when the seed already means "work on this HTML".
+        # Mid-run feedback still takes priority (don't steal an active loop).
+        if (
+            self._next_seed is not None
+            and self._awaiting_kind not in ("answer", "step")
+            and (self.agent is None or self._session_done)
+        ):
+            message.input.placeholder = "feedback · 'done' or Ctrl+D to ship · /help"
+            self.sub_title = "agent is working"
+            self._log(
+                f"[dim]using staged seed {_esc(str(self._next_seed))}[/dim]"
+            )
+            if self.agent is not None and self._session_done:
+                await self._new_session(text)
+            else:
+                self._goal = text
+                self._log(f"[bold green]>[/bold green] {text}")
+                await self._start_session(text)
+            self._awaiting_kind = "feedback"
             return
 
         if self._awaiting_kind == "goal":
@@ -3438,7 +3575,7 @@ class CodingBoxApp(App):
             "  [b]ship as-is, stop[/b]              type [b]done[/b] / [b]looks good[/b] / [b]ship[/b] (or Ctrl+D)",
             "                                  [dim]Ctrl+D wins: any queued feedback (incl. autonomous playtest) is dropped — re-send after ship if still wanted[/dim]",
             "  [b]brand-new unrelated game[/b]      [b]/new <goal>[/b]",
-            "  [b]start from an existing .html[/b]  [b]/seed <path>[/b]  then type your request (or [b]/new <goal>[/b] for a new game)",
+            "  [b]start from an existing .html[/b]  [b]/seed[/b] (picker) then type what to change",
             "                                  [dim]existing sprites/sounds are reused — the planner won't regenerate them[/dim]",
             "  [b]new game + your PNGs[/b]          [b]/assets <png-or-folder>[/b] then [b]/new <goal>[/b]",
             "                                  [dim]copies into session _assets/; tell the goal to use those names — see /help assets[/dim]",
@@ -3522,7 +3659,7 @@ class CodingBoxApp(App):
             "  [b]/unload [N|name|all|mlx][/b]  free VRAM · bare = active session · all = every Ollama · mlx = drop in-process MLX",
             "",
             "[bold cyan]── run knobs (all sticky across /new) ──[/bold cyan]",
-            "  [b]/seed <path>[/b]               stage a baseline .html · bare = clear",
+            "  [b]/seed[/b] / [b]/seed <path>[/b]   stage baseline .html · bare = file picker · [b]/seed clear[/b]",
             "  [b]/assets <png|folder>[/b]      stage your PNGs for next /new (real sprites, not VLM) · bare = clear",
             "                                  [dim]alias /asset — see /help assets for /seed vs /ref vs /assets[/dim]",
             "  [b]/iters <N>[/b]                 max iterations per session",
@@ -3576,7 +3713,7 @@ class CodingBoxApp(App):
             "                                  [dim]aliases: /look /glance · WAIT ON: suggestion in input · WAIT OFF: auto-queues[/dim]",
             "  [b]/ask <question>[/b]            talk to the model anytime — pre-game advice or current game Q&A",
             "                                  [dim]e.g. /ask which 80s game benefits most from rich art?[/dim]",
-            "  [b]/ref <path>[/b]               attach a reference image to the NEXT user turn (VLM glance only)",
+            "  [b]/ref[/b] / [b]/ref <path>[/b]    attach reference image to NEXT turn · bare = picker · [b]/ref clear[/b]",
             "                                  [dim]not for copying sprites — use /assets or /seed · /help assets[/dim]",
             "  [b]/help[/b]                     command list [dim](aliases /h /?)[/dim]",
             "  [b]/help <topic>[/b]             detail pages — [b]/help topics[/b] for the full index",
@@ -4944,22 +5081,48 @@ class CodingBoxApp(App):
         path ([agent.py:_stream](agent.py) ~line 2785) will pair them.
 
         Notes:
+          - Bare `/ref` opens a native file picker; `/ref clear` drops a
+            staged image. Path form still works (Finder: Cmd+Option+C).
           - This only works when the active model is a VLM. On a
             text-only model the image is dropped and the user sees a
             warning.
-          - Pasting binary into a terminal Input field isn't possible —
-            the user provides a path (drag the file from Finder into
-            the terminal, or copy a path via Cmd+Option+C).
           - The image clears after one use (single-shot). Re-run /ref
             for each turn that needs a reference.
         """
         path_str = (arg or "").strip().strip('"\'')
-        if not path_str:
+        if path_str.lower() in {"clear", "-", "none", "off"}:
+            cleared = False
+            if self.agent is not None and getattr(
+                self.agent, "_next_image_bytes", None
+            ):
+                self.agent._next_image_bytes = None
+                cleared = True
+            if getattr(self, "_staged_ref_image_bytes", None):
+                self._staged_ref_image_bytes = None
+                self._staged_ref_image_name = None
+                cleared = True
             self._log_info(
-                "usage: /ref <path/to/image.png>  "
-                "(then type 'make the game look like this' on the next line)"
+                "cleared staged /ref image" if cleared else "no staged /ref image"
             )
             return
+        if not path_str:
+            self._log_info("[dim]Opening file picker for reference image…[/dim]")
+            picked = _pick_file_native(
+                prompt="Choose reference image (PNG / JPEG / WebP)",
+                default_dir=Path.home(),
+                filetypes=[
+                    ("Images", "*.png *.jpg *.jpeg *.webp"),
+                    ("PNG", "*.png"),
+                    ("All files", "*.*"),
+                ],
+            )
+            if picked is None:
+                self._log_info(
+                    "ref picker cancelled — usage: [b]/ref[/b] (picker) or "
+                    "[b]/ref <path>[/b] · [b]/ref clear[/b] to drop"
+                )
+                return
+            path_str = str(picked)
         path = Path(path_str).expanduser()
         if not path.exists():
             self._log_error(f"/ref: file not found: {path}")
@@ -5651,22 +5814,39 @@ class CodingBoxApp(App):
         )
 
     def _cmd_set_seed(self, arg: str) -> None:
-        """/seed <path> stages an existing HTML file as the baseline for the
-        next /new session. /seed with no argument clears the staged file.
+        """/seed <path> stages an existing HTML as the baseline.
 
-        The file is NOT copied yet — it's just remembered. Path is checked
-        for existence, .html-ness, and a sane size; we error early instead
-        of letting the agent fail mid-run on a bad path.
+        Bare `/seed` opens a native file picker (macOS/Linux). Clear with
+        `/seed clear` or `/seed -`. Path form still works for scripts.
         """
-        if not arg:
+        raw = (arg or "").strip().strip("'\"")
+        if raw.lower() in {"clear", "-", "none", "off"}:
             if self._next_seed is None:
-                self._log_info("no staged seed file (usage: /seed <path>)")
+                self._log_info("no staged seed file")
             else:
                 self._log_info(f"cleared staged seed file (was: {self._next_seed})")
                 self._next_seed = None
             return
+        if not raw:
+            games_dir = Path(__file__).resolve().parent / "games"
+            self._log_info("[dim]Opening file picker for seed HTML…[/dim]")
+            picked = _pick_file_native(
+                prompt="Choose seed HTML to continue editing",
+                default_dir=games_dir if games_dir.is_dir() else Path.home(),
+                filetypes=[
+                    ("HTML", "*.html *.htm"),
+                    ("All files", "*.*"),
+                ],
+            )
+            if picked is None:
+                self._log_info(
+                    "seed picker cancelled — pass a path, or [b]/seed clear[/b] "
+                    "to drop a staged seed"
+                )
+                return
+            raw = str(picked)
         # Allow shell-style ~ expansion and quoted paths.
-        candidate = Path(arg.strip().strip("'\"")).expanduser()
+        candidate = Path(raw).expanduser()
         if not candidate.exists():
             self._log_error(f"seed file does not exist: {candidate}")
             return
@@ -5682,7 +5862,8 @@ class CodingBoxApp(App):
         self._next_seed = candidate.resolve()
         self._log_info(
             f"staged seed for next session: [b]{_esc(str(self._next_seed))}[/b] "
-            f"[dim]({size:,} bytes) — type your request, or /new <goal>[/dim]"
+            f"[dim]({size:,} bytes) — type what to change and press Enter "
+            "(no /new needed)[/dim]"
         )
 
     _STAGED_ASSET_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
