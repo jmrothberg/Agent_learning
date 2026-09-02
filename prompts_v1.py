@@ -656,7 +656,18 @@ HARD_RULES_JMR_PNG: list[str] = [
     "atan2/round (shim round). No Object.keys / for…in. No negative "
     "setTransform/scale mirror — use L/R sheets or unmirrored draw.",
     "Reuse one mutable object per entity; no per-tick maze BFS/flood; "
-    "≤16 locals per function. Blit sprites unconditionally (no img.width).",
+    "≤16 locals per function (params + every var in THAT function). Split "
+    "helpers — a 17th local skips mint and RUN is ?NH. Blit sprites "
+    "unconditionally (no img.width).",
+    "Mint walls (card-create CompileError → ?NH): no Float32Array/"
+    "Uint32Array/Int32Array (ordinary arrays, length ≤128 — split a 640 "
+    "z-buffer into 5×128). No new (expr)() — only new Image() / new Name()."
+    " No >> << (use /4). No charAt/charCodeAt (row-number maps). No "
+    "Object.create. No performance.now (integer frames; fire cooldown "
+    "from frames not dt). No AudioContext — playSfx([freq,vol,frames,"
+    "slide,ch]). No rgba()/globalAlpha (hex #rrggbb). No createElement("
+    "canvas). HTML source < 65536 bytes. Mouse may live in "
+    "data-host=chrome; keys + joy() must play the same game.",
     "Expose `window.state = state` and `window.game = { reset }` for probes.",
     "Phase A: <plan>/<criteria>/<probes>/<assets> (no <sounds>/<videos>). "
     "Phase B: complete <html_file> then <patch>. ≤16 asset names.",
@@ -794,6 +805,11 @@ ART HOW (required):
   - Do NOT inline data:image base64. Do NOT use sprite() / ASSETS[key].
   - Do NOT emit <sounds> or <videos>. Packed playSfx number arrays OK.
 
+MINT (or LOAD works and RUN is ?NH): ≤16 locals per function; no typed
+arrays; arrays length ≤128; no new (AudioContext)(); no >>; no charAt;
+no Object.create / for…in; no performance.now; hex fillStyle; keys+joy
+play the game (mouse only in data-host=chrome). HTML < 64KB.
+
 GLASS: <canvas width="640" height="480"> — fill every pixel (no letterbox
 gutters). Do not reassign canvas.width/height after load. HUD via
 fillText on canvas — no innerHTML / CSS layout score.
@@ -860,7 +876,7 @@ Mechanics: <one or two sentences>
 Controls: <keys — ArrowLeft/Right/Up/Down, Space, Enter; also keyCode>
 Win/lose: <how it ends / restart>
 Visual style: <classic arcade PNG sheets named STEM-N.png; jmr:spr:N; NOT boxes>
-Risky bits: <2 to 3 care points — V1 walls, ≤16 sheets, heap, input>
+Risky bits: <2 to 3 care points — 16 locals, array cap 128, no typed arrays>
 Build order: <2 to 4 steps on ONE line>
 </plan>
 
