@@ -13,7 +13,7 @@ canvas{display:block;image-rendering:pixelated;touch-action:none}
 </style>
 <script data-host="chrome">
 window.JMR_SPR = ["DOOM3DFI-12.png", "DOOM3DFI-8.png", "DOOM3DFI-9.png", "DOOM3DFI-11.png", "DOOM3DFI-10.png", "floor_tile.png", "weapon_fire.png", "demon_idle.png", "pickup_health.png", "weapon_idle.png", "pickup_ammo.png", "cutscene_intro.png", "boss_attack.png", "DOOM3DFI-1.png", "DOOM3DFI-0.png", "boss_idle.png", "DOOM3DFI-2.png", "DOOM3DFI-3.png", "cutscene_boss.png", "DOOM3DFI-7.png", "DOOM3DFI-6.png", "DOOM3DFI-4.png", "DOOM3DFI-5.png", "wall_stone.png", "ceil_tile.png", "demon_attack.png"];
-(function(){var o=window.Image;window.Image=function(){var i=new o();var d;Object.defineProperty(i,'src',{get:function(){return d;},set:function(v){var m=/jmr:spr:(\d+)/.exec(v);i.setAttribute('src',m?('DOOM3DFI-'+m[1]+'.png'):v);d=v;}});return i;};})();
+(function(){var o=window.Image;window.Image=function(){var i=new o();var d;Object.defineProperty(i,'src',{get:function(){return d;},set:function(v){var m=/jmr:spr:(\d+)/.exec(v);var f=v;if(m){var n=+m[1];f=(n===26)?"floor_tile.png":(n===27)?"ceil_tile.png":("DOOM3DFI-"+n+".png");}i.setAttribute('src',f);d=v;}});return i;};})();
 </script>
 </head><body>
 <div id="wrap"><canvas id="c" width="640" height="480"></canvas></div>
@@ -62,7 +62,9 @@ function fi(a){var k=(a*INV2PI*LN)|0;k%=LN;if(k<0)k+=LN;return k;}
 var IMG=[];
 var SPR=["DOOM3DFI-0.png","DOOM3DFI-1.png","DOOM3DFI-2.png","DOOM3DFI-3.png","DOOM3DFI-4.png","DOOM3DFI-5.png","DOOM3DFI-6.png","DOOM3DFI-7.png","DOOM3DFI-8.png","DOOM3DFI-9.png","DOOM3DFI-10.png","DOOM3DFI-11.png","DOOM3DFI-12.png"];
 for(var si=0;si<SPR.length;si++){var im=new Image();im.src="jmr:spr:"+si;IMG[si]=im;}
-var T_WALL=0,T_FLOOR=1,T_CEIL=2,M_IDLE=3,M_ATK=4,B_IDLE=5,B_ATK=6,W_IDLE=7,W_FIRE=8,P_HP=9,P_AM=10,C_INTRO=11,C_BOSS=12;
+var imF=new Image();imF.src="jmr:spr:26";IMG[26]=imF;
+var imC=new Image();imC.src="jmr:spr:27";IMG[27]=imC;
+var T_WALL=0,T_FLOOR=26,T_CEIL=27,M_IDLE=3,M_ATK=4,B_IDLE=5,B_ATK=6,W_IDLE=7,W_FIRE=8,P_HP=9,P_AM=10,C_INTRO=11,C_BOSS=12;
 // map
 var MAPSTR=[
 "########################",
@@ -152,7 +154,7 @@ var am=[[9,2],[17,7],[5,15],[13,19],[21,15]];
 for(var m=0;m<am.length;m++){state.pickups.push({x:am[m][0]+0.5,y:am[m][1]+0.5,type:"am",got:false});}
 }
 function mkMon(x,y,boss){return{x:x,y:y,hp:boss?60:12,boss:boss,alive:true,atk:0,cool:0,anim:0};}
-window.game={reset:reset};
+window.game={reset:reset,skip:skip};
 // raycast
 function castRay(px,py,rdx,rdy,out){
 var mx=px|0,my=py|0;
@@ -265,10 +267,10 @@ function castRow(y,denom,src){
 var row=y*W;
 if(!src){for(var x=0;x<W;x++)fBuf[row+x]=0xFF404040;return;}
 var rowDist=0.5*H/denom;if(rowDist>24)rowDist=24;
-var stepX=rowDist*gRDX/W,stepY=rowDist*gRDY/W;
+var stepX=rowDist*(gRDX-gLX)/W,stepY=rowDist*(gRDY-gLY)/W;
 var fx=state.player.x+rowDist*gLX,fy=state.player.y+rowDist*gLY;
 for(var x2=0;x2<W;x2++){
-fBuf[row+x2]=src[((((fy*TPIX)|0)&63)*TPIX)+((((fx*TPIX)|0)&63))];
+fBuf[row+x2]=0xFF000000|src[((((fy*TPIX)|0)&63)*TPIX)+((((fx*TPIX)|0)&63))];
 fx+=stepX;fy+=stepY;
 }
 }
@@ -288,7 +290,7 @@ var di=fi(p.yaw),dx=LC[di],dy=LS[di];
 var fov=0.66,planeX=-dy*fov,planeY=dx*fov;
 var pitchOff=p.pitch*H*0.6;
 castFloorCeil(p,dx,dy,planeX,planeY,pitchOff);
-ctx.fillStyle="rgba(0,0,0,0.45)";ctx.fillRect(0,0,W,H/2);ctx.fillRect(0,H/2,W,H/2);
+ctx.fillStyle="rgba(0,0,0,0)";ctx.fillRect(0,0,W,H/2);ctx.fillRect(0,H/2,W,H/2);
 var shx=state.shake>0?(Math.random()-0.5)*4:0;
 for(var x=0;x<W;x++){
 var camx=2*x/W-1;var rdx=dx+planeX*camx,rdy=dy+planeY*camx;

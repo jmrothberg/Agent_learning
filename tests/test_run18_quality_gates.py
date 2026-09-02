@@ -262,6 +262,19 @@ def test_ensure_ids_fps_omits_drawimage(tmp_path: Path):
     assert "draw-generated-sprites-not-boxes" not in ids
 
 
+def test_ensure_ids_raycaster_floor_ceil_opaque_bake(tmp_path: Path):
+    """DOOM3DFI 134411: transparent tile margins → small tiles + gaps."""
+    ag = _agent(tmp_path)
+    ids = ag._first_build_playbook_ensure_ids(
+        "add texture to ceiling and floors so like the walls you see movement"
+    )
+    assert ids
+    assert "raycaster-floor-ceil-opaque-tiles" in ids
+    # Must not fire on unrelated games that mention walls alone.
+    ids2 = ag._first_build_playbook_ensure_ids("open-field tower defense maze")
+    assert "raycaster-floor-ceil-opaque-tiles" not in (ids2 or [])
+
+
 def test_ensure_ids_fixed_shooter_keeps_drawimage(tmp_path: Path):
     ag = _agent(tmp_path)
     ag._session_assets = [{"name": "ship"}]

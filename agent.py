@@ -1857,6 +1857,37 @@ class GameAgent(
             return ""
         return " ".join(x for x in parts if x).strip()
 
+    @staticmethod
+    def _auto_revert_should_fire(
+        *,
+        prev_ok: bool,
+        current_ok: bool,
+        new_page_errors: bool,
+        fewer_probes: bool,
+        new_coverage_gaps: bool,
+        user_feedback_honored: bool,
+    ) -> tuple[bool, str]:
+        """Decide whether auto-revert should restore .best.html.
+
+        Returns ``(should_revert, reason_tag)``.
+
+        DOOM3DFI 20260902_134411 iter 3: honored user feedback baked
+        opaque floor/ceil tiles correctly, but a brittle variance probe
+        (``mx-mn>30``) failed → fewer_probes-only revert threw the fix
+        away. Skip probe-count-only regress when this iter honored user
+        feedback and nothing hard broke (no new page errors / coverage
+        gaps). Page errors and new coverage gaps still revert.
+        """
+        if not prev_ok or current_ok:
+            return False, "n/a"
+        if new_page_errors or new_coverage_gaps:
+            return True, "hard_regression"
+        if fewer_probes:
+            if user_feedback_honored:
+                return False, "skip_probe_only_user_feedback"
+            return True, "fewer_probes"
+        return False, "n/a"
+
     def _extract_and_queue_lookups(self, reply: str) -> None:
         """Find <lookup_bullet>id</lookup_bullet> tags in an assistant reply,
         resolve each against the playbook, and queue rendered bodies for
@@ -8708,6 +8739,13 @@ class GameAgent(
             # (capped) so the user's max_iters isn't punished by the
             # rollback. Generic and behavioral — operates only on harness
             # signals, no genre awareness needed.
+            #
+            # DOOM3DFI 20260902_134411 iter 3: exception — when THIS iter
+            # applied honored user feedback and the ONLY regression signal
+            # is fewer probes (no new page errors / coverage gaps), do NOT
+            # revert. Brittle variance probes (e.g. floor mx-mn>30) can fail
+            # after a correct opaque-tile bake; rolling back discards the
+            # user's requested fix.
             prev = self._previous_report or {}
             prev_ok = self._previous_report_ok is True
             current_ok = bool(report.get("ok"))
@@ -8742,7 +8780,50 @@ class GameAgent(
                     bool(report.get("criteria_uncovered"))
                     and not bool(prev.get("criteria_uncovered"))
                 )
-                if new_page_errors or fewer_probes or new_coverage_gaps:
+                _contract = getattr(self, "_last_turn_contract", None) or {}
+                _route = getattr(self, "_feedback_route", None)
+                # had_feedback survives after _last_drained_feedback is
+                # cleared post-reply; honor_user_now False = deferred
+                # behind a blocker (still allow probe-only revert).
+                user_feedback_honored = bool(_contract.get("had_feedback")) and (
+                    _route is None or bool(_route.get("honor_user_now", True))
+                )
+                should_revert, revert_tag = self._auto_revert_should_fire(
+                    prev_ok=prev_ok,
+                    current_ok=current_ok,
+                    new_page_errors=new_page_errors,
+                    fewer_probes=fewer_probes,
+                    new_coverage_gaps=new_coverage_gaps,
+                    user_feedback_honored=user_feedback_honored,
+                )
+                if (
+                    not should_revert
+                    and revert_tag == "skip_probe_only_user_feedback"
+                ):
+                    self._trace({
+                        "kind": "auto_revert_skipped",
+                        "iteration": iteration,
+                        "reason": revert_tag,
+                        "prev_passing": prev_passing,
+                        "cur_passing": cur_passing,
+                        "probes_total": len(cur_probes),
+                    })
+                    yield self._record(AgentEvent(
+                        "info",
+                        f"Kept iter {iteration} patch despite probe drop "
+                        f"({cur_passing}/{len(cur_probes)} vs "
+                        f"{prev_passing}/{len(prev_probes)}) — honored user "
+                        f"feedback this turn; no new page errors.",
+                        {
+                            "iter": iteration,
+                            "reason": revert_tag,
+                            "prev_passing": prev_passing,
+                            "cur_passing": cur_passing,
+                        },
+                    ))
+                elif should_revert and (
+                    new_page_errors or fewer_probes or new_coverage_gaps
+                ):
                     best_html = self._read_best_or_empty()
                     if best_html:
                         try:

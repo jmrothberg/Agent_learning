@@ -171,6 +171,19 @@ class MemoryRetrievalMixin:
                 "fps-minimap-radar-yaw-arrow",
             )
 
+        # 2D DDA raycaster floor+ceiling via putImageData (not three.js):
+        # transparent PNG margins → black seams / "small tiles with gaps".
+        # DOOM3DFI 20260902_134411 — class phrases only, no title pin.
+        if (
+            "floor" in g
+            and ("ceiling" in g or "ceil" in g)
+            and any(
+                k in g
+                for k in ("texture", "tile", "raycast", "raycaster", "walls")
+            )
+        ):
+            _add("raycaster-floor-ceil-opaque-tiles")
+
         # /640: no sidecar PNGs — pin classic pixel-map craft so TD/shooter
         # builds do not ship colored fillRect boxes (Fieldrunners 093900).
         # /640png uses generated STEM-N.png sheets instead.
