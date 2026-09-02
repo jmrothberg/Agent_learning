@@ -189,12 +189,15 @@ OVERRIDES: dict[str, str] = {
         "Timer/checkpoints. NO video — start banner in fillText."
     ),
     "chess": (
-        "Build a holochess-style fantasy chess. PLAYER vs CPU. Every move "
-        "animates: tween drawX/drawY with walk/hop frames (≥3) — never snap. "
-        "Capture: lift then slam poses before remove. Pieces = distinct "
-        "monster pixel-map sprites (idle+walk+lift+slam) for both sides. "
-        "Negamax depth 3; setTimeout CPU. Block input while animating. "
-        "Controls: click, R restart. Expose state.animating."
+        "Build a 2D holochess-style fantasy chess (canvas 2D top-down board, "
+        "not WebGL/3D). PLAYER vs CPU. Every move animates: tween drawX/drawY "
+        "with walk/hop frames (≥3) — never snap. Capture: lift then slam poses "
+        "before remove. Pieces = distinct monster pixel-map sprites "
+        "(idle+walk+lift+slam) for both sides. Negamax default depth 3 ply; "
+        "keys `[` / `]` (or `-` / `=`) lower/raise ply (clamp 1–5), show ply "
+        "on HUD; setTimeout CPU. Block input while animating. Controls: click, "
+        "ply keys, R restart. Expose state.animating and state.searchDepth "
+        "(or equivalent ply)."
     ),
     "zelda": (
         "Build a Zelda-like top-down action RPG. Tile overworld; sword; NPCs; "

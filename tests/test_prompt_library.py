@@ -115,6 +115,17 @@ def test_prompt_640_fieldrunners_demands_pixel_sprites_not_boxes():
     assert "angle sheets" not in p or "do not emit" in p
 
 
+def test_chess_prompts_require_2d_and_ply_keys():
+    by_name = {g["name"]: g for g in load_prompt_library(_SHIPPED)}
+    chess = by_name["chess"]
+    for key in ("prompt", "prompt_640"):
+        p = chess[key].lower()
+        assert "2d" in p, key
+        assert "ply" in p, key
+        assert "[" in chess[key] or "bracket" in p, key
+    assert "default" in chess["prompt"].lower() or "default" in chess["prompt_640"].lower()
+
+
 def test_prompt_640_strips_video_pipeline_from_fighters():
     by_name = {g["name"]: g for g in load_prompt_library(_SHIPPED)}
     for name in ("street-fighter", "mortal-kombat", "super-mario"):
