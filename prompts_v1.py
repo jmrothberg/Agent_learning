@@ -785,7 +785,8 @@ colored circles, squares, or bare fillRect placeholders as the final art.
 ART HOW (required):
   - Phase A emits <assets> (name + prompt + size) for each sheet.
   - Harness saves STEM-0.png, STEM-1.png, … next to the HTML.
-  - HTML: window.JMR_SPR = ["STEM-0.png", "STEM-1.png"] (append-only).
+  - HTML: window.JMR_SPR = ["STEM-0.png", "STEM-1.png"] ONLY (append-only).
+    Never list the <assets> names (floor_tile.png etc.) in JMR_SPR or src.
   - Draw: var img = new Image(); img.src = "jmr:spr:N";
     ctx.drawImage(img, sx,sy,sw,sh, dx,dy,dw,dh);
   - Chrome-only <script data-host="chrome"> interceptor maps jmr:spr:N
@@ -2467,7 +2468,7 @@ def generated_jmr_png_draw_contract() -> str:
         "`img.src = \"jmr:spr:N\"` and `ctx.drawImage` (9-arg crop OK). "
         "Do NOT use sprite() / ASSETS[key] / data:image. Do NOT read "
         "img.width / .complete / onload. Include window.JMR_SPR listing "
-        "the PNG filenames (append-only) plus the chrome data-host shim. "
+        "ONLY STEM-N.png (never the <assets> names) plus the chrome shim. "
         "SELF-CHECK: every listed sheet index appears in a drawImage via "
         "jmr:spr:N in this first build.\n"
         "Expose `window.state = state` (or `window.gameState = state`) "

@@ -2999,24 +2999,21 @@ def render_jmr_png_paths_block(
     if not asset_paths:
         return ""
     s = jmr_title_stem(stem)
-    html_dir = Path(session_html_path).resolve().parent
     rows: list[str] = []
     png_names: list[str] = []
-    for i, (name, path) in enumerate(asset_paths.items()):
+    for i, (name, _path) in enumerate(asset_paths.items()):
         if i >= JMR_PNG_MAX_SHEETS:
             break
         fname = f"{s}-{i}.png"
         png_names.append(fname)
-        try:
-            rel = Path(path).resolve().relative_to(html_dir)
-        except ValueError:
-            rel = Path(fname)
-        rows.append(f"  jmr:spr:{i}  {fname}  ({name})  ./{rel}")
+        rows.append(f"  jmr:spr:{i}  {fname}  // was {name}")
     inner = ", ".join(f'"{n}"' for n in png_names)
     lines = [
         "================ GENERATED PNG SHEETS (JMR /640png) ================",
         f"Title stem (≤8, 8.3-safe): {s}",
         "Art programs wrote these PNGs NEXT TO your HTML as STEM-N.png.",
+        "HTML uses ONLY STEM-N.png / jmr:spr:N. Never put the generate names",
+        "(floor_tile, player, …) in window.JMR_SPR or img.src.",
         "YOU MUST paint with jmr:spr:N handles — not sprite(), not ASSETS[],",
         "not data:image base64, not fillRect boxes for these entities.",
         "",

@@ -1693,9 +1693,13 @@ class StreamMaterializeMixin:
         paths = getattr(self, "_session_assets", None) or {}
         if not paths:
             return html
-        png_names = [Path(p).name for p in paths.values()]
         try:
-            from assets import ensure_jmr_spr_shim
+            from assets import ensure_jmr_spr_shim, jmr_png_filenames, jmr_title_stem
+            # Always STEM-N.png — never the generate names (floor_tile.png).
+            stem = getattr(self, "_jmr_png_stem", "") or jmr_title_stem(
+                getattr(self, "_goal", "") or "GAME"
+            )
+            png_names = jmr_png_filenames(stem, len(paths))
             return ensure_jmr_spr_shim(html, png_names)
         except Exception:
             return html
