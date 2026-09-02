@@ -899,14 +899,49 @@ _OBSTACLE_DEPTH_SAMPLE_JS = """(() => {
 })()"""
 
 
-def companion_assets_dir_for_html(html_path: Path | str) -> Path:
-    """Directory of PNGs belonging to this HTML only (`{stem}_assets`).
+def html_owns_its_folder(html_path: Path | str) -> bool:
+    """True when the HTML lives in `NAME/NAME.html` (per-game folder layout)."""
+    p = Path(html_path)
+    return bool(p.stem) and p.parent.name.upper() == p.stem.upper()
 
-    Serial overnight co-locates many games under one out-dir. Opaque-sprite
-    (and similar) scans must NOT glob sibling `*_assets/` folders.
+
+def companion_assets_dir_for_html(html_path: Path | str) -> Path:
+    """Directory of PNGs belonging to this HTML only.
+
+    Per-game folders (`NAME/NAME.html`) keep sprites next to the HTML.
+    Legacy co-located files use `{stem}_assets` so serial overnight
+    scans must NOT glob sibling games' folders.
     """
     p = Path(html_path)
+    if html_owns_its_folder(p):
+        return p.parent
     return p.with_name(f"{p.stem}_assets")
+
+
+def companion_sounds_dir_for_html(html_path: Path | str) -> Path:
+    """OGGs/WAVs for this HTML: game folder when owned, else `{stem}_sounds`."""
+    p = Path(html_path)
+    if html_owns_its_folder(p):
+        return p.parent
+    return p.with_name(f"{p.stem}_sounds")
+
+
+def companion_videos_dir_for_html(html_path: Path | str) -> Path:
+    """MP4s for this HTML: game folder when owned, else `{stem}_videos`."""
+    p = Path(html_path)
+    if html_owns_its_folder(p):
+        return p.parent
+    return p.with_name(f"{p.stem}_videos")
+
+
+def _count_session_pngs(html_path: Path | str) -> int:
+    d = companion_assets_dir_for_html(html_path)
+    if not d.is_dir():
+        return 0
+    try:
+        return sum(1 for p in d.glob("*.png") if p.is_file())
+    except OSError:
+        return 0
 
 
 def opaque_scenery_soft_warning_for_html_assets(html_path: Path | str) -> str | None:
@@ -3142,6 +3177,9 @@ def _check_sprite_draw_wiring(
     loops used fillRect only — runtime had 0 drawImage calls. Catching
     the static signature (many fillRects, no sprite() calls) saves a
     browser round-trip and surfaces a precise fix prompt on iter 1.
+
+    Loader-class aware (not genre-specific): /640png uses jmr:spr + drawImage
+    and forbids sprite(). Board/HUD fillRects are fine when sheets are blitted.
     """
     if out_path is None or not html:
         return []
@@ -3154,19 +3192,7 @@ def _check_sprite_draw_wiring(
             return []
     except Exception:
         return []
-    png_count = 0
-    try:
-        for sub in base.iterdir():
-            if not sub.is_dir():
-                continue
-            name = sub.name.lower()
-            if not name.endswith("_assets"):
-                continue
-            if session_prefix and session_prefix not in name:
-                continue
-            png_count += sum(1 for p in sub.glob("*.png") if p.is_file())
-    except Exception:
-        return []
+    png_count = _count_session_pngs(out)
     if png_count < 4:
         return []
     scripts = _SCRIPT_BLOCK_RE.findall(html)
@@ -3176,6 +3202,20 @@ def _check_sprite_draw_wiring(
     draw_n = len(re.findall(r"\.drawImage\s*\(", body))
     fill_n = len(re.findall(r"\.fillRect\s*\(", body))
     sprite_calls = len(re.findall(r"\bsprite\s*\(", body))
+    # /640png (and any page using the JMR protocol): require drawImage, never
+    # sprite(). fillRect for grid/HUD must not trip this when sheets blit.
+    uses_jmr = bool(
+        re.search(r"\bjmr:spr:", body) or re.search(r"\bJMR_SPR\b", body)
+    )
+    if uses_jmr:
+        if draw_n < 1:
+            return [
+                f"SPRITE_DRAW_WIRING: {png_count} generated PNG(s) on disk and "
+                "JMR loader (jmr:spr / JMR_SPR) is present but draw code never "
+                "calls ctx.drawImage. Wire entities with img.src='jmr:spr:N' + "
+                "drawImage — fillRect alone is not enough."
+            ]
+        return []
     if fill_n >= 3 and sprite_calls <= 1 and draw_n <= max(1, fill_n // 4):
         return [
             f"SPRITE_DRAW_WIRING: {png_count} generated PNG(s) on disk but "
@@ -3256,19 +3296,7 @@ def _check_paths_key_coverage(
             return []
     except Exception:
         return []
-    png_count = 0
-    try:
-        for sub in base.iterdir():
-            if not sub.is_dir():
-                continue
-            name = sub.name.lower()
-            if not name.endswith("_assets"):
-                continue
-            if session_prefix and session_prefix not in name:
-                continue
-            png_count += sum(1 for p in sub.glob("*.png") if p.is_file())
-    except Exception:
-        return []
+    png_count = _count_session_pngs(out)
     if png_count < 4:
         return []
     scripts = _SCRIPT_BLOCK_RE.findall(html)
@@ -3326,22 +3354,26 @@ def _check_unused_assets(
     sprite_dirs: list[Path] = []
     sound_dirs: list[Path] = []
     try:
-        for child in base.iterdir():
-            if not child.is_dir():
-                continue
-            n = child.name.lower()
-            if (
-                session_prefix
-                and n.startswith(session_prefix + "_")
-                and n.endswith("_assets")
-            ):
-                sprite_dirs.append(child)
-            elif (
-                session_prefix
-                and n.startswith(session_prefix + "_")
-                and n.endswith("_sounds")
-            ):
-                sound_dirs.append(child)
+        if html_owns_its_folder(out):
+            sprite_dirs.append(out.parent)
+            sound_dirs.append(out.parent)
+        else:
+            for child in base.iterdir():
+                if not child.is_dir():
+                    continue
+                n = child.name.lower()
+                if (
+                    session_prefix
+                    and n.startswith(session_prefix + "_")
+                    and n.endswith("_assets")
+                ):
+                    sprite_dirs.append(child)
+                elif (
+                    session_prefix
+                    and n.startswith(session_prefix + "_")
+                    and n.endswith("_sounds")
+                ):
+                    sound_dirs.append(child)
     except OSError:
         return []
     if not sprite_dirs and not sound_dirs:
@@ -3356,6 +3388,13 @@ def _check_unused_assets(
                 continue
             for f in files:
                 if not f.is_file():
+                    continue
+                suf = f.suffix.lower()
+                if kind == "sprite" and suf not in {
+                    ".png", ".jpg", ".jpeg", ".webp", ".gif",
+                }:
+                    continue
+                if kind == "sound" and suf not in {".ogg", ".mp3", ".wav", ".m4a"}:
                     continue
                 # Cheap presence test: either the basename or the full
                 # relative path appears verbatim in the HTML. Avoids

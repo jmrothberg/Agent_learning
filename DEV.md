@@ -82,6 +82,7 @@ MLX upgrades: MiniMax-M3 (`minimax_m3.py` copy after mlx-lm upgrade), GLM-5.2
 - `VIDEO_LTX_MODEL`, `VIDEO_LTX_BIN` — LTX-2.5 weights dir / `ltx-2-mlx` CLI path
 - `VIDEO_MODEL`, `VIDEO_VENV` — Wan2.2 cutscene subprocess overrides
 - `AGENT_SIMULATOR` — set `1` to start `chat.py` in simulator mode (`/media off` / `/640`: 640×480 canvas, no sidecar sprites/sounds/videos). TUI `/media on` restores the full pipeline (next `/new`).
+- `AGENT_JMR_PNG` — set `1` to start in `/640png` mode (JMR V1 640×480 walls + art pipeline writing `STEM-N.png` / `jmr:spr:N`). Wins over `AGENT_SIMULATOR`.
 
 ### oMLX (preferred MLX HTTP server on Mac)
 

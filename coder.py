@@ -13,7 +13,7 @@ Optional flags:
                         (Ollama tag like 'qwen3.6:27b', or MLX local/HF path like
                         '/Users/jonathanrothberg_1/MLX_Models/Qwen3.6-27B-mxfp8'.)
     --max-iters N       Cap iterations (default 6)
-    --out PATH          Where to save the final game (default games/game.html)
+    --out PATH          Where to save the final game (default games/<8-letter-name>/<name>.html)
     --best-of-n N       Sample N candidates per fix turn (default 1)
     --stuck-bon         Enable automatic stuck best-of-2 escalation (default off)
     --num-ctx N         Ollama context window (default 100000; env CODING_BOX_NUM_CTX)
@@ -55,6 +55,7 @@ except ImportError:
 
 import backend as backend_mod
 from agent import AgentEvent, GameAgent, default_num_ctx
+from assets import unique_game_folder_name
 from overlay_identity import PRODUCT_NAME
 from tools import LiveBrowser
 
@@ -75,13 +76,17 @@ def _slugify(text: str, max_len: int = 30) -> str:
 
 
 def _resolve_out_path(arg_out: str, goal: str) -> Path:
-    """If the user accepted the default, give the file a unique meaningful
-    stem so successive runs don't overwrite each other. If they passed
-    --out explicitly, respect their choice verbatim."""
+    """If the user accepted the default, give the game its own folder
+    (`games/NAME/NAME.html`, NAME ≤8 letters from the goal). Explicit
+    `--out` is respected verbatim."""
     if arg_out != _DEFAULT_OUT:
         return Path(arg_out)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return Path("games") / f"{_slugify(goal)}_{ts}.html"
+    games = Path("games")
+    games.mkdir(parents=True, exist_ok=True)
+    name = unique_game_folder_name(goal, games)
+    folder = games / name
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder / f"{name}.html"
 
 
 def _stdout_print(*args: object, **kwargs: object) -> None:
@@ -358,8 +363,8 @@ def main() -> int:
     p.add_argument(
         "--out",
         default=_DEFAULT_OUT,
-        help="Output path. Default: games/<goal-slug>_<timestamp>.html "
-             "(unique per run). Pass an explicit path to override.",
+        help="Output path. Default: games/<8-letter-name>/<name>.html "
+             "(unique folder per run). Pass an explicit path to override.",
     )
     p.add_argument(
         "--playbook",

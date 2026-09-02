@@ -475,6 +475,111 @@ def test_render_block_uses_relative_paths(tmp_path: Path):
     assert "MANDATORY ITER-1 WIRING" in block
 
 
+def test_jmr_title_stem_is_8_3_safe():
+    from assets import jmr_title_stem, jmr_png_filenames, JMR_PNG_MAX_SHEETS
+    assert jmr_title_stem("Build a Space Invaders game") == "SPACEINV"
+    assert jmr_title_stem("Pac-Man") == "PACMAN"
+    assert len(jmr_title_stem("something very long title here")) <= 8
+    names = jmr_png_filenames("invaders", 3)
+    assert names == ["INVADERS-0.png", "INVADERS-1.png", "INVADERS-2.png"]
+    assert len(jmr_png_filenames("x", 99)) == JMR_PNG_MAX_SHEETS
+
+
+def test_unique_game_folder_name_from_goal(tmp_path: Path):
+    from assets import unique_game_folder_name
+    assert unique_game_folder_name("Build a Space Invaders game", tmp_path) == "SPACEINV"
+    assert unique_game_folder_name("Pac-Man", tmp_path) == "PACMAN"
+    (tmp_path / "SPACEINV").mkdir()
+    assert unique_game_folder_name("Build a Space Invaders game", tmp_path) == "SPACEIN2"
+    assert len(unique_game_folder_name("Build a Space Invaders game", tmp_path)) <= 8
+
+
+def test_companion_assets_dir_owned_folder_is_parent(tmp_path: Path):
+    from tools import companion_assets_dir_for_html, companion_sounds_dir_for_html
+    html = tmp_path / "SURECHES" / "SURECHES.html"
+    html.parent.mkdir()
+    html.write_text("<html></html>")
+    assert companion_assets_dir_for_html(html) == html.parent
+    assert companion_sounds_dir_for_html(html) == html.parent
+    legacy = tmp_path / "snake_20260101.html"
+    legacy.write_text("<html></html>")
+    assert companion_assets_dir_for_html(legacy) == tmp_path / "snake_20260101_assets"
+    assert companion_sounds_dir_for_html(legacy) == tmp_path / "snake_20260101_sounds"
+
+
+def test_materialize_jmr_png_sheets_renames_next_to_html(tmp_path: Path):
+    from assets import materialize_jmr_png_sheets
+    src_dir = tmp_path / "sess_assets"
+    src_dir.mkdir()
+    p0 = src_dir / "player.png"
+    p1 = src_dir / "enemy.png"
+    p0.write_bytes(b"\x89PNG a")
+    p1.write_bytes(b"\x89PNG b")
+    out = materialize_jmr_png_sheets(
+        {"player": p0, "enemy": p1}, tmp_path, "SPINVADR",
+    )
+    assert (tmp_path / "SPINVADR-0.png").is_file()
+    assert (tmp_path / "SPINVADR-1.png").is_file()
+    assert out["player"].name == "SPINVADR-0.png"
+    assert out["enemy"].name == "SPINVADR-1.png"
+
+
+def test_ensure_jmr_spr_shim_inserts_and_refreshes():
+    from assets import ensure_jmr_spr_shim
+    html = "<html><body><script>var x=1;</script></body></html>"
+    out = ensure_jmr_spr_shim(html, ["GAME-0.png", "GAME-1.png"])
+    assert "window.JMR_SPR" in out
+    assert "GAME-0.png" in out
+    assert 'data-host="chrome"' in out
+    assert "jmr:spr:" in out
+    out2 = ensure_jmr_spr_shim(out, ["GAME-0.png", "GAME-1.png", "GAME-2.png"])
+    assert "GAME-2.png" in out2
+    assert out2.count('data-host="chrome"') == 1
+    assert out2.count("<script") == 2
+
+
+def test_ensure_jmr_spr_shim_injects_when_list_only_no_interceptor():
+    """Model wrote window.JMR_SPR but omitted the src setter — still inject.
+
+    Generic STEM names only (no title). Without the interceptor,
+    img.src='jmr:spr:0' stays a dead custom URL in Chromium.
+    """
+    from assets import ensure_jmr_spr_shim
+    html = (
+        "<html><body><script>"
+        'window.JMR_SPR = ["GAME-0.png", "GAME-1.png"];'
+        'var im = new Image(); im.src = "jmr:spr:0";'
+        "</script></body></html>"
+    )
+    assert "defineProperty" not in html
+    out = ensure_jmr_spr_shim(html, ["GAME-0.png", "GAME-1.png", "GAME-2.png"])
+    assert 'data-host="chrome"' in out
+    assert "defineProperty" in out
+    assert "HTMLImageElement.prototype" in out
+    assert "GAME-2.png" in out
+    # One chrome shim + the original game script — do not double-insert.
+    assert out.count('data-host="chrome"') == 1
+    out2 = ensure_jmr_spr_shim(out, ["GAME-0.png", "GAME-1.png", "GAME-2.png", "GAME-3.png"])
+    assert out2.count('data-host="chrome"') == 1
+    assert "GAME-3.png" in out2
+
+
+def test_render_jmr_png_paths_block_teaches_handles(tmp_path: Path):
+    from assets import render_jmr_png_paths_block
+    html = tmp_path / "game.html"
+    html.write_text("<html></html>")
+    sheet = tmp_path / "INVADERS-0.png"
+    sheet.write_bytes(b"\x89PNG fake")
+    block = render_jmr_png_paths_block(
+        {"player": sheet}, html, stem="INVADERS",
+    )
+    assert "jmr:spr:0" in block
+    assert "INVADERS-0.png" in block
+    assert "not sprite()" in block.lower() or "not sprite()" in block
+    assert "JMR_SPR" in block
+    assert "drawImage" in block
+
+
 def test_render_block_empty_input_returns_empty():
     assert render_asset_paths_block({}, "/tmp/anywhere.html") == ""
 

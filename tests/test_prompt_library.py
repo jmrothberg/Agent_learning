@@ -78,6 +78,31 @@ def test_every_entry_has_prompt_640_for_simulator():
         assert effective_prompt(g, simulator_mode=False) == g["prompt"].strip()
 
 
+def test_640png_uses_jmr_prompt_not_media_threejs():
+    """/640png = /640 rules + STEM-N sheets — never the media three.js goal."""
+    from prompt_library import effective_prompt
+
+    by_name = {g["name"]: g for g in load_prompt_library(_SHIPPED)}
+    doom = by_name["doom"]
+    media = doom["prompt"].lower()
+    assert "three.js" in media
+    png = effective_prompt(doom, jmr_png_mode=True).lower()
+    assert "three.js" in png  # only as forbidden ("no three.js")
+    assert "using three.js from cdn" not in png
+    assert "target=/640png" in png
+    assert "jmr:spr" in png
+    assert "<assets>" in png or "emit <assets>" in png
+    assert "webglrenderer" not in png
+    # Minecraft media also pushes three.js — 640png must not.
+    mc = effective_prompt(by_name["minecraft"], jmr_png_mode=True).lower()
+    assert "voxel sandbox with three.js" not in mc
+    assert "target=/640png" in mc
+    for g in load_prompt_library(_SHIPPED):
+        out = effective_prompt(g, jmr_png_mode=True)
+        assert "TARGET=/640png" in out, g["name"]
+        assert "using three.js from CDN" not in out, g["name"]
+
+
 def test_prompt_640_fieldrunners_demands_pixel_sprites_not_boxes():
     by_name = {g["name"]: g for g in load_prompt_library(_SHIPPED)}
     p = by_name["tower-defense-openfield"]["prompt_640"].lower()

@@ -83,9 +83,11 @@ _MIN_DURATION_S = 0.2
 #   3. Platform default bases (mirror of assets.py — see
 #      _default_model_search_dirs): ~/.Diffusion_Models (hidden) before
 #      ~/Diffusion_Models, etc.
-#   4. HuggingFace fallback: `stabilityai/stable-audio-open-1.0` is
-#      downloaded to ~/.cache/huggingface/hub/ on first run if no local
-#      path matches (gated — HF login required).
+#   4. No HuggingFace hub-ID fallback and no ~/.cache/huggingface scan —
+#      those started surprise multi-GB downloads on chat.py when the
+#      cache was partial/deleted. Install once into a curated dir:
+#        hf download stabilityai/stable-audio-open-1.0 \
+#          --local-dir ~/Diffusion_Models/audio/stable-audio-open-1.0
 
 
 def _default_model_search_dirs() -> list[str]:
@@ -265,13 +267,20 @@ def _safe_filename(name: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _resolve_stable_audio_path() -> str:
-    """Find Stable Audio Open weights on disk, or return the HF model ID
-    so diffusers downloads on first run. Search order:
+def _resolve_stable_audio_path() -> str | None:
+    """Find Stable Audio Open weights on disk under curated model dirs.
+
+    Search order:
       1. $AUDIO_MODELS_DIR (preferred override)
       2. $DIFFUSION_MODELS_DIR/audio (extends image dir naturally)
-      3. _MODEL_SEARCH_DIRS (the user's standard layout)
-      4. HuggingFace hub fallback ID
+      3. _MODEL_SEARCH_DIRS (e.g. ~/Diffusion_Models/audio/stable-audio-open-1.0)
+
+    Never returns a HuggingFace hub ID and never scans
+    ~/.cache/huggingface — those paths started surprise multi-GB
+    downloads on chat.py startup when the cache was partial/deleted.
+    Put weights here once:
+      hf download stabilityai/stable-audio-open-1.0 \\
+        --local-dir ~/Diffusion_Models/audio/stable-audio-open-1.0
     """
     candidates: list[str] = []
     audio_dir = (_os.environ.get("AUDIO_MODELS_DIR") or "").strip()
@@ -292,16 +301,11 @@ def _resolve_stable_audio_path() -> str:
             _os.path.join(base, "audio", "stable-audio-open-1.0"),
         ])
     for c in candidates:
-        if _os.path.isdir(c):
+        if _os.path.isdir(c) and _os.path.isfile(
+            _os.path.join(c, "model_index.json")
+        ):
             return c
-    # Macs that pulled via huggingface-cli keep weights under
-    # ~/.cache/huggingface/hub/ — prefer that over a hub ID download.
-    from assets import _resolve_hf_cache_snapshot  # noqa: WPS433 — shared HF cache scan
-
-    cached = _resolve_hf_cache_snapshot(_HF_FALLBACK_MODEL_ID)
-    if cached:
-        return cached
-    return _HF_FALLBACK_MODEL_ID
+    return None
 
 
 class StableAudioGenerator:
@@ -320,7 +324,9 @@ class StableAudioGenerator:
     """
 
     def __init__(self, model_path: str | None = None) -> None:
-        self.model_path = model_path or _resolve_stable_audio_path()
+        # Empty string when weights are missing — never a hub ID (no download).
+        resolved = model_path if model_path is not None else _resolve_stable_audio_path()
+        self.model_path = resolved or ""
         self._pipeline: Any = None
         self._device: str | None = None
         # Physical CUDA index after .to("cuda"); status panel (gpu_status).
@@ -356,6 +362,16 @@ class StableAudioGenerator:
     def _lazy_init(self) -> bool:
         if self._pipeline is not None:
             return True
+        if not self.model_path or not _os.path.isdir(self.model_path):
+            self._last_error = (
+                "Stable Audio Open weights not found under "
+                "~/Diffusion_Models/audio/stable-audio-open-1.0 (or "
+                "AUDIO_MODELS_DIR / DIFFUSION_MODELS_DIR). Install once: "
+                "hf download stabilityai/stable-audio-open-1.0 "
+                "--local-dir ~/Diffusion_Models/audio/stable-audio-open-1.0 "
+                "(agree on the HF model page first). No hub auto-download."
+            )
+            return False
         try:
             import torch
             from diffusers import StableAudioPipeline
@@ -606,13 +622,16 @@ def preload() -> Any:
 
 def _construct_generator() -> Any:
     """Internal: check imports and construct a wrapper. Returns None if
-    torch + diffusers + soundfile aren't all available."""
+    torch + diffusers + soundfile aren't all available, or if Stable
+    Audio weights are not installed under a curated model dir."""
     import importlib.util as _iu
     if (
         _iu.find_spec("torch") is None
         or _iu.find_spec("diffusers") is None
         or _iu.find_spec("soundfile") is None
     ):
+        return None
+    if _resolve_stable_audio_path() is None:
         return None
     try:
         return StableAudioGenerator()

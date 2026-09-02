@@ -36,6 +36,28 @@ def test_promote_copies_html_and_asset_dirs(tmp_path: Path) -> None:
     assert copied["html"] == dest / f"{stem}.html"
 
 
+def test_promote_per_game_folder_keeps_media_at_top_level(tmp_path: Path) -> None:
+    games = tmp_path / "games" / "SURECHES"
+    games.mkdir(parents=True)
+    out = games / "SURECHES.html"
+    out.write_text("<html>live</html>", encoding="utf-8")
+    (games / "ship.png").write_bytes(b"png")
+    (games / "beep.ogg").write_bytes(b"ogg")
+    (games / "traces").mkdir()
+    (games / "traces" / "x.jsonl").write_text("{}", encoding="utf-8")
+
+    dest = tmp_path / "goodgame"
+    copied = promote_session_game(out_path=out, dest_root=dest)
+
+    assert (dest / "SURECHES" / "SURECHES.html").read_text(encoding="utf-8") == (
+        "<html>live</html>"
+    )
+    assert (dest / "SURECHES" / "ship.png").read_bytes() == b"png"
+    assert (dest / "SURECHES" / "beep.ogg").read_bytes() == b"ogg"
+    assert not (dest / "SURECHES" / "traces").exists()
+    assert copied["html"] == dest / "SURECHES" / "SURECHES.html"
+
+
 def test_promote_falls_back_to_live_html(tmp_path: Path) -> None:
     games = tmp_path / "games"
     games.mkdir()

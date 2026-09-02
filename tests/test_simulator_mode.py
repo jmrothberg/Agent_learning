@@ -217,5 +217,81 @@ def test_games_list_header_is_not_a_rich_closing_tag():
     )
     assert "[/640 pixel-map goals]" not in src
     assert "(/640 pixel-map goals)" in src
+    assert "(/640png sheet goals)" in src
     # Error log body must be escaped so a MarkupError cannot crash again.
     assert 'self._log(f"[red]![/red] {_esc(text)}")' in src
+
+
+def test_jmr_png_system_prompt_keeps_assets_drops_sounds():
+    sp = prompts_v1.build_system_prompt(
+        "space invaders",
+        model_class="large",
+        jmr_png_mode=True,
+    )
+    tags_start = sp.index("<output-tags>")
+    tags_end = sp.index("</output-tags>")
+    tags_block = sp[tags_start:tags_end]
+    assert "  <assets>" in tags_block
+    assert "  <sounds>" not in tags_block
+    assert "  <videos>" not in tags_block
+    assert "jmr:spr" in sp
+    assert "STEM-N.png" in sp or "STEM-0.png" in sp
+    assert "Object.keys" in sp
+    assert "640" in sp
+    assert "Phaser, three.js" not in sp
+
+
+def test_jmr_png_plan_instruction_expects_assets():
+    plan = prompts_v1.plan_instruction(
+        goal="pixel sprite shooter", jmr_png_mode=True,
+    )
+    assert "<assets>" in plan
+    assert "jmr:spr" in plan or "STEM" in plan
+    assert "No <sounds>" in plan or "No <sounds>/<videos>" in plan
+
+
+def test_jmr_png_enables_sprite_pipeline():
+    a = GameAgent(model="stub", out_path=Path("games/test_jmr.png.html"))
+    a.set_jmr_png_mode(True)
+    assert a.media_pipeline_enabled()
+    assert a._simulator_mode
+    a.set_simulator_mode(True)
+    a.set_jmr_png_mode(False)
+    assert not a.media_pipeline_enabled()
+
+
+def test_jmr_png_playbook_pin():
+    a = GameAgent(model="stub", out_path=Path("games/test_jmr.png.html"))
+    a.set_jmr_png_mode(True)
+    ids = a._first_build_playbook_ensure_ids("open-field tower defense maze")
+    assert ids is not None
+    assert "jmr-png-sheets" in ids
+    assert "classic-arcade-pixel-maps" not in ids
+
+
+def test_jmr_png_first_build_asks_for_jmr_spr():
+    msg = prompts_v1.first_build_instruction(
+        "<html><canvas></canvas></html>",
+        None,
+        jmr_png_mode=True,
+        has_generated_assets=True,
+    )
+    assert "jmr:spr" in msg
+    assert "sprite()" not in msg or "Do NOT use sprite()" in msg
+    assert "640" in msg
+
+
+def test_jmr_png_maybe_generate_not_skipped():
+    a = GameAgent(model="stub", out_path=Path("games/test_jmr.png.html"))
+    a.set_jmr_png_mode(True)
+    reply = '<assets>[{"name":"hero","prompt":"knight"}]</assets>'
+
+    async def _run():
+        events = []
+        async for ev in a._maybe_generate_assets_and_sounds(reply, trigger="phase_a"):
+            events.append(ev)
+        return events
+
+    # Pipeline is enabled; stub has no diffuser so we get info events, not [].
+    events = asyncio.run(_run())
+    assert events != []

@@ -19,9 +19,8 @@ are reachable, this module:
      model actually requested assets).
   3. Generates each missing PNG (cache hit by sha256 of (model, prompt,
      size) so re-runs are free).
-  4. Saves PNGs into `games/<slug>_<ts>_assets/<name>.png` next to the
-     working HTML file. The first-build prompt is later prepended with
-     `render_asset_paths_block(...)` so the model knows the paths.
+  4. Saves PNGs next to the HTML (`games/<NAME>/<name>.png`). Legacy
+     sessions still use `games/<stem>_assets/<name>.png`.
 
 Fully optional. When no `<assets>` tag is emitted, OR no GPU /
 diffusion_manager is reachable, this module is a no-op and the agent
@@ -199,6 +198,8 @@ _HF_IMG2IMG_FALLBACK_MODEL_ID = "stabilityai/sd-turbo"
 # every real-game roster we've seen (DK = 14, Asteroids = 4,
 # Centipede = 12, Galaga = 18) with headroom.
 _MAX_ASSETS_PER_TURN = 24
+# JMR V1 ASET wall (GAME_DESIGN.md): at most 16 sheets per title.
+JMR_PNG_MAX_SHEETS = 16
 
 def _strip_thinking(reply: str) -> str:
     """Drop everything up to and including the LAST `</think>` tag.
@@ -2804,3 +2805,243 @@ def render_asset_paths_block(
         "============================================================"
     )
     return "\n".join(lines)
+
+
+# --- /640png (JMR V1 640×480 + generated STEM-N.png sheets) ----------------
+
+_JMR_STEM_STOP = frozenset({
+    "a", "an", "the", "and", "or", "of", "for", "to", "in", "on", "with",
+    "build", "make", "game", "clone", "inspired", "html", "canvas",
+    "playable", "like", "a", "the",
+})
+
+
+def jmr_title_stem(text: str, fallback: str = "GAME") -> str:
+    """8.3-safe FAT stem: A-Z0-9 only, ≤8 chars (GAME_DESIGN.md card names)."""
+    raw = (text or "").strip()
+    words = re.findall(r"[A-Za-z0-9]+", raw)
+    kept: list[str] = []
+    for w in words:
+        if w.lower() in _JMR_STEM_STOP:
+            continue
+        kept.append(w)
+    joined = "".join(kept).upper()
+    joined = re.sub(r"[^A-Z0-9]", "", joined)
+    if not joined:
+        fb = re.sub(r"[^A-Z0-9]", "", (fallback or "GAME").upper()) or "GAME"
+        return fb[:8]
+    return joined[:8]
+
+
+# Folder names under games/ that are harness dirs, not a playable game.
+_GAME_FOLDER_RESERVED = frozenset({
+    "traces", "snapshots", "candidates", "goodgame",
+})
+
+
+def unique_game_folder_name(
+    goal: str,
+    games_dir: Path | str,
+    *,
+    fallback: str = "GAME",
+) -> str:
+    """≤8-letter A-Z0-9 name from the goal, unique as a folder under games_dir.
+
+    Reuses `jmr_title_stem` (same names as STEM-N.png sheets). On collision
+    appends 2, 3, … keeping the result ≤8 chars.
+    """
+    games_dir = Path(games_dir)
+    base = jmr_title_stem(goal, fallback=fallback)
+
+    def _taken(name: str) -> bool:
+        if not name or name.startswith("_"):
+            return True
+        if name.lower() in _GAME_FOLDER_RESERVED:
+            return True
+        return (games_dir / name).exists()
+
+    if not _taken(base):
+        return base
+    n = 2
+    while n < 1000:
+        suffix = str(n)
+        name = (base[: max(1, 8 - len(suffix))] + suffix)[:8]
+        if not _taken(name):
+            return name
+        n += 1
+    return (base[:4] + "9")[:8]
+
+
+def jmr_png_filenames(stem: str, count: int) -> list[str]:
+    """`STEM-0.png` … `STEM-(n-1).png`, capped at JMR_PNG_MAX_SHEETS."""
+    s = jmr_title_stem(stem)
+    n = max(0, min(int(count), JMR_PNG_MAX_SHEETS))
+    return [f"{s}-{i}.png" for i in range(n)]
+
+
+def materialize_jmr_png_sheets(
+    asset_paths: dict[str, Path],
+    html_dir: Path | str,
+    stem: str,
+) -> dict[str, Path]:
+    """Copy generated PNGs next to the HTML as STEM-0.png, STEM-1.png, …
+
+    Keeps original <assets> name keys (player → STEM-0.png) so the prompt
+    can show both the model's name and the jmr:spr:N index. Caps at 16.
+    """
+    if not asset_paths:
+        return {}
+    html_dir = Path(html_dir)
+    html_dir.mkdir(parents=True, exist_ok=True)
+    s = jmr_title_stem(stem)
+    out: dict[str, Path] = {}
+    for i, (name, src) in enumerate(asset_paths.items()):
+        if i >= JMR_PNG_MAX_SHEETS:
+            break
+        dest = html_dir / f"{s}-{i}.png"
+        src_p = Path(src)
+        if src_p.resolve() != dest.resolve():
+            _link_or_copy(src_p, dest)
+        out[name] = dest.resolve()
+    return out
+
+
+# Chrome-only interceptor from JMR GAME_DESIGN.md / tools/make_artx.py.
+# Placeholder __JMR_SPR_LIST__ is replaced with "STEM-0.png", "STEM-1.png".
+# Mint strips data-host="chrome"; Chromium harness needs this so
+# img.src = "jmr:spr:N" actually loads the PNG. _assetsReady is harness-only
+# (asset-settle poll) — the game script must still blit unconditionally.
+_JMR_SPR_SHIM = """<script data-host="chrome">
+// PNG list make_artx.py reads. Index N is jmr:spr:N.
+window.JMR_SPR = [__JMR_SPR_LIST__];
+(function () {
+  var d = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, "src");
+  Object.defineProperty(HTMLImageElement.prototype, "src", {
+    get: function () { return d.get.call(this); },
+    set: function (v) {
+      var m = /^jmr:spr:(\\d+)$/.exec(v);
+      d.set.call(this, m ? window.JMR_SPR[+m[1]] : v);
+    }
+  });
+  var list = window.JMR_SPR || [];
+  var n = 0;
+  var need = list.length;
+  if (!need) { window._assetsReady = true; return; }
+  var i = 0;
+  while (i < need) {
+    var im = new Image();
+    im.onload = im.onerror = function () {
+      n = n + 1;
+      if (n >= need) window._assetsReady = true;
+    };
+    im.src = list[i];
+    i = i + 1;
+  }
+})();
+</script>
+"""
+
+_JMR_SPR_ASSIGN = re.compile(r"window\.JMR_SPR\s*=\s*\[(.*?)\]", re.S)
+
+# True when Chrome maps jmr:spr:N via HTMLImageElement.prototype.src.
+# A bare window.JMR_SPR = [...] from the model is NOT enough — without this
+# setter, img.src = "jmr:spr:N" throws ERR_UNKNOWN_URL_SCHEME every frame.
+_JMR_SRC_INTERCEPTOR_RE = re.compile(
+    r"defineProperty\s*\(\s*HTMLImageElement\.prototype\s*,\s*[\"']src[\"']",
+    re.I,
+)
+
+
+def ensure_jmr_spr_shim(html: str, png_names: list[str]) -> str:
+    """Insert or refresh window.JMR_SPR + Chrome src interceptor.
+
+    Does not raise — returns html unchanged when there is no <script> to
+    place the block before. Refresh is append-order from png_names.
+
+    Critical: if the model already wrote window.JMR_SPR = [...] but omitted
+    the src interceptor (common under /640png), still inject the shim —
+    list-only HTML leaves jmr:spr:N as a dead custom URL.
+    """
+    if not html or not png_names:
+        return html
+    inner = ", ".join(f'"{n}"' for n in png_names)
+    # Inject full shim whenever the src interceptor is missing (even if a
+    # JMR_SPR list is already present). List-only refresh was the black-screen
+    # hole for any /640png game that followed the prompt's list instruction.
+    if _JMR_SRC_INTERCEPTOR_RE.search(html) is None:
+        block = _JMR_SPR_SHIM.replace("__JMR_SPR_LIST__", inner)
+        inserted = False
+        for m in re.finditer(r"<script([^>]*)>", html, re.I):
+            attrs = m.group(1) or ""
+            if re.search(r'data-host\s*=\s*["\']chrome["\']', attrs, re.I):
+                continue
+            html = html[: m.start()] + block + html[m.start() :]
+            inserted = True
+            break
+        if not inserted:
+            return html
+    # Refresh every JMR_SPR list to disk order (shim + any model copy).
+    if _JMR_SPR_ASSIGN.search(html) is not None:
+        html = _JMR_SPR_ASSIGN.sub(f"window.JMR_SPR = [{inner}]", html)
+    return html
+
+
+def render_jmr_png_paths_block(
+    asset_paths: dict[str, Path],
+    session_html_path: Path | str,
+    *,
+    stem: str,
+) -> str:
+    """Prompt block for /640png: STEM-N.png + jmr:spr:N (not sprite())."""
+    if not asset_paths:
+        return ""
+    asset_paths = _filter_existing_assets(asset_paths)
+    if not asset_paths:
+        return ""
+    s = jmr_title_stem(stem)
+    html_dir = Path(session_html_path).resolve().parent
+    rows: list[str] = []
+    png_names: list[str] = []
+    for i, (name, path) in enumerate(asset_paths.items()):
+        if i >= JMR_PNG_MAX_SHEETS:
+            break
+        fname = f"{s}-{i}.png"
+        png_names.append(fname)
+        try:
+            rel = Path(path).resolve().relative_to(html_dir)
+        except ValueError:
+            rel = Path(fname)
+        rows.append(f"  jmr:spr:{i}  {fname}  ({name})  ./{rel}")
+    inner = ", ".join(f'"{n}"' for n in png_names)
+    lines = [
+        "================ GENERATED PNG SHEETS (JMR /640png) ================",
+        f"Title stem (≤8, 8.3-safe): {s}",
+        "Art programs wrote these PNGs NEXT TO your HTML as STEM-N.png.",
+        "YOU MUST paint with jmr:spr:N handles — not sprite(), not ASSETS[],",
+        "not data:image base64, not fillRect boxes for these entities.",
+        "",
+        "Sheet index N is jmr:spr:N and ARTX sprite N. APPEND-ONLY — do not",
+        "reorder. At most 16 sheets.",
+        "",
+        "  var img = new Image();",
+        '  img.src = "jmr:spr:0";',
+        "  ctx.drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh);",
+        "Blit unconditionally — do NOT read img.width / .complete / onload",
+        "(undefined on the V1 chip; Chrome shim still loads the PNG).",
+        "",
+        "Put this Chrome-only manifest BEFORE the game <script> (mint strips",
+        "data-host=chrome). Copy the interceptor from the seed / keep this list:",
+        f'  window.JMR_SPR = [{inner}];',
+        "",
+        "Sheets:",
+    ]
+    lines.extend(rows)
+    lines += [
+        "",
+        "Do NOT emit <sounds> or <videos>. Packed playSfx recipes in the HTML",
+        "are fine. Do NOT use Object.keys / for…in / async loadAssets in the",
+        "game script. The chrome shim is data-host=chrome only.",
+        "============================================================",
+    ]
+    return "\n".join(lines)
+

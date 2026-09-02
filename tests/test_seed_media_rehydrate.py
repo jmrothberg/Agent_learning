@@ -106,6 +106,25 @@ def test_scan_picks_up_sounds(tmp_path: Path) -> None:
     assert sdir == sounds_dir.resolve()
 
 
+def test_scan_picks_up_top_level_media_in_game_folder(tmp_path: Path) -> None:
+    folder = tmp_path / "SURECHES"
+    folder.mkdir()
+    seed = folder / "SURECHES.html"
+    (folder / "player.png").write_bytes(b"\x89PNG fake")
+    (folder / "laser.ogg").write_bytes(b"OggS fake")
+    seed.write_text(
+        "<script>"
+        'const PATHS={player:"./player.png"};'
+        'new Audio("./laser.ogg");'
+        "</script>"
+    )
+    a, s, adir, sdir = _scan_seed_media(seed.read_text(), seed)
+    assert set(a.keys()) == {"player"}
+    assert set(s.keys()) == {"laser"}
+    assert adir == folder.resolve()
+    assert sdir == folder.resolve()
+
+
 def test_scan_does_not_override_dir_when_prefixes_split(tmp_path: Path) -> None:
     # A seed manually merged from two sessions — two different
     # `_assets` prefixes appear. We refuse to pick one arbitrarily.

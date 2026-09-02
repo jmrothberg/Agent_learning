@@ -114,7 +114,7 @@ Everything under `games/` is **generated at runtime**. Gitignored locally; stays
 
 | Run type | Trace JSONL | Batch log | Monitor |
 |----------|-------------|-----------|---------|
-| TUI / one-shot `coder.py` | `games/traces/<artifact_id>.jsonl` | optional `games/traces/*.log` | — |
+| TUI / one-shot `coder.py` | `games/<NAME>/traces/<artifact_id>.jsonl` (legacy: `games/traces/`) | optional `games/traces/*.log` | — |
 | Serial tune (`run_XX`) | `games/tune_serial10/run_XX/traces/<label>__run_*.jsonl` | `games/tune_serial10/run_XX/overnight.log` | `games/tune_serial10/run_XX/agent_monitor.json` |
 | Checkpoints | — | — | `tune_summary.json`, `tune_checkpoint.json` in same run dir |
 

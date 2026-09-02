@@ -10,7 +10,10 @@ import os
 import re
 from pathlib import Path
 
-from tools import run_micro_probes
+from tools import (
+    html_owns_its_folder,
+    run_micro_probes,
+)
 
 # Maintainer docs used to be injected into the game model (AGENTS.md + CLAUDE.md);
 # traced if still on disk so repos can migrate to AGENTS.md + DEV.md only.
@@ -61,6 +64,15 @@ _SEED_SOUND_RE = re.compile(
     r"""['"](?:\./)?([A-Za-z0-9_\-]+)_sounds/([A-Za-z0-9_\-]+\.(?:ogg|mp3|wav|m4a))['"]""",
     re.IGNORECASE,
 )
+# Per-game folders store media next to the HTML: "./player.png", "./laser.ogg".
+_SEED_LOCAL_IMAGE_RE = re.compile(
+    r"""['"](?:\./)([A-Za-z0-9_\-]+\.(?:png|jpg|jpeg|webp|gif))['"]""",
+    re.IGNORECASE,
+)
+_SEED_LOCAL_SOUND_RE = re.compile(
+    r"""['"](?:\./)([A-Za-z0-9_\-]+\.(?:ogg|mp3|wav|m4a))['"]""",
+    re.IGNORECASE,
+)
 
 
 _IMAGE_EXTS: frozenset[str] = frozenset(
@@ -91,6 +103,16 @@ def _declared_seed_media_names(
             assets.append(stem)
     for m in _SEED_SOUND_RE.finditer(seed_html or ""):
         stem = Path(m.group(2)).stem
+        if stem and stem not in seen_s:
+            seen_s.add(stem)
+            sounds.append(stem)
+    for m in _SEED_LOCAL_IMAGE_RE.finditer(seed_html or ""):
+        stem = Path(m.group(1)).stem
+        if stem and stem not in seen_a:
+            seen_a.add(stem)
+            assets.append(stem)
+    for m in _SEED_LOCAL_SOUND_RE.finditer(seed_html or ""):
+        stem = Path(m.group(1)).stem
         if stem and stem not in seen_s:
             seen_s.add(stem)
             sounds.append(stem)
@@ -176,6 +198,19 @@ def _scan_seed_media(
         if full.exists():
             sound_paths[Path(fname).stem] = full.resolve()
             sound_dirs.add(sdir.resolve())
+    # Same-folder refs (games/NAME/NAME.html layout).
+    for m in _SEED_LOCAL_IMAGE_RE.finditer(seed_html or ""):
+        fname = m.group(1)
+        full = seed_dir / fname
+        if full.exists():
+            asset_paths[Path(fname).stem] = full.resolve()
+            asset_dirs.add(seed_dir)
+    for m in _SEED_LOCAL_SOUND_RE.finditer(seed_html or ""):
+        fname = m.group(1)
+        full = seed_dir / fname
+        if full.exists():
+            sound_paths[Path(fname).stem] = full.resolve()
+            sound_dirs.add(seed_dir)
 
     # Pass 2 — list the canonical media folders directly. The seed
     # path here is already the canonical `games/<basename>.html`
@@ -208,6 +243,19 @@ def _scan_seed_media(
                 sound_paths[name] = f.resolve()
         if canonical_sounds.exists():
             sound_dirs.add(canonical_sounds.resolve())
+    if html_owns_its_folder(seed_path) and seed_dir.is_dir():
+        for f in seed_dir.iterdir():
+            if not f.is_file():
+                continue
+            suf = f.suffix.lower()
+            if suf in _IMAGE_EXTS:
+                if f.stem not in asset_paths:
+                    asset_paths[f.stem] = f.resolve()
+                asset_dirs.add(seed_dir)
+            elif suf in _SOUND_EXTS:
+                if f.stem not in sound_paths:
+                    sound_paths[f.stem] = f.resolve()
+                sound_dirs.add(seed_dir)
 
     assets_dir = next(iter(asset_dirs)) if len(asset_dirs) == 1 else None
     sounds_dir = next(iter(sound_dirs)) if len(sound_dirs) == 1 else None

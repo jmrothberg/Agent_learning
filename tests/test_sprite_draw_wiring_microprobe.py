@@ -54,6 +54,56 @@ def test_sprite_draw_wiring_passes_when_sprite_called(tmp_path: Path) -> None:
     assert not any("SPRITE_DRAW_WIRING" in e for e in rep.get("errors") or [])
 
 
+def test_sprite_draw_wiring_passes_jmr_drawimage_with_fillrects(
+    tmp_path: Path,
+) -> None:
+    """/640png loader class: jmr:spr + drawImage; fillRect HUD/grid is OK.
+
+    Must not require sprite() (forbidden under /640png). Generic STEM names.
+    """
+    assets = tmp_path / "game_20260703_assets"
+    assets.mkdir()
+    for i in range(6):
+        (assets / f"GAME-{i}.png").write_bytes(b"fake")
+    out = tmp_path / "game_20260703.html"
+    out.write_text("x")
+    html = _minimal_html(
+        "window.JMR_SPR=['GAME-0.png','GAME-1.png','GAME-2.png','GAME-3.png'];"
+        "const imgs=[];"
+        "for(let i=0;i<4;i++){const im=new Image();im.src='jmr:spr:'+i;imgs.push(im);}"
+        "function draw(){"
+        "ctx.fillRect(0,0,48,48);ctx.fillRect(50,0,48,48);"
+        "ctx.fillRect(100,0,48,48);ctx.fillRect(150,0,48,48);"
+        "ctx.drawImage(imgs[0],10,10);ctx.drawImage(imgs[1],60,10);"
+        "}"
+        "requestAnimationFrame(draw);"
+    )
+    rep = run_micro_probes(html, out_path=out)
+    assert not any("SPRITE_DRAW_WIRING" in e for e in rep.get("errors") or [])
+
+
+def test_sprite_draw_wiring_flags_jmr_without_drawimage(tmp_path: Path) -> None:
+    """JMR list alone with fillRect-only draws still hard-fails."""
+    assets = tmp_path / "game_20260703_assets"
+    assets.mkdir()
+    for i in range(6):
+        (assets / f"GAME-{i}.png").write_bytes(b"fake")
+    out = tmp_path / "game_20260703.html"
+    out.write_text("x")
+    html = _minimal_html(
+        "window.JMR_SPR=['GAME-0.png','GAME-1.png'];"
+        "function draw(){"
+        "ctx.fillRect(0,0,48,48);ctx.fillRect(50,0,48,48);"
+        "ctx.fillRect(100,0,48,48);ctx.fillRect(150,0,48,48);"
+        "}"
+        "requestAnimationFrame(draw);"
+    )
+    rep = run_micro_probes(html, out_path=out)
+    assert rep["ok"] is False
+    assert any("SPRITE_DRAW_WIRING" in e for e in rep["errors"])
+    assert any("jmr:spr" in e or "JMR" in e for e in rep["errors"])
+
+
 def test_paths_key_coverage_flags_missing_paths_keys(tmp_path: Path) -> None:
     assets = tmp_path / "game_20260703_assets"
     assets.mkdir()

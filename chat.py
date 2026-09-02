@@ -115,7 +115,12 @@ from agent import (
     default_num_ctx,
     parse_num_ctx_arg,
 )
-from tools import LiveBrowser
+from tools import (
+    LiveBrowser,
+    companion_assets_dir_for_html,
+    companion_sounds_dir_for_html,
+)
+from assets import unique_game_folder_name
 
 # Shown in the Textual window header (top bar). Bump when verifying a fresh git pull.
 CHAT_APP_VERSION = "1.1"
@@ -344,12 +349,14 @@ def _resolve_seed_target(seed: Path) -> Path:
     parent = seed.parent
     stem = seed.stem
 
-    # Case 1: games/snapshots/<basename>/iter_*.html — strip both the
-    # snapshot subdir and the iter_* suffix. Only matches when the
-    # immediate grandparent is literally named "snapshots".
+    # Case 1: snapshots/iter_*.html — two layouts:
+    #   games/snapshots/<basename>/iter_*.html  → games/<basename>.html (legacy)
+    #   games/NAME/snapshots/<artifact>/iter_*.html → games/NAME/NAME.html
     if parent.parent.name == "snapshots" and stem.startswith("iter_"):
-        basename = parent.name
-        return parent.parent.parent / f"{basename}.html"
+        snap_root = parent.parent.parent  # games/ or games/NAME/
+        if parent.name.find("__run_") >= 0:
+            return snap_root / f"{snap_root.name}.html"
+        return snap_root / f"{parent.name}.html"
 
     # Case 2: games/<basename>.best.html — drop the .best suffix.
     if stem.endswith(".best"):
@@ -1116,11 +1123,18 @@ class CodingBoxApp(App):
         # /leanprompt on|off|auto sets this explicitly.
         self._lean_prompt: bool | None = None
         # `/640` and `/media off` — JMR V1 native 640×480, no sidecar media.
+        # `/640png` — same JMR walls + art pipeline with STEM-N.png sheets.
         # Default ON (full Z-Image / Stable Audio / Wan pipeline). Sticky across
         # /new until `/media on`. AGENT_SIMULATOR=1 starts in simulator mode.
+        # AGENT_JMR_PNG=1 starts in /640png mode (wins over AGENT_SIMULATOR).
         self._simulator_mode: bool = os.environ.get(
             "AGENT_SIMULATOR", "",
         ).strip().lower() in ("1", "true", "yes")
+        self._jmr_png_mode: bool = os.environ.get(
+            "AGENT_JMR_PNG", "",
+        ).strip().lower() in ("1", "true", "yes")
+        if self._jmr_png_mode:
+            self._simulator_mode = True
         # Video engine pin — /ltx or /wan. None = auto (LTX on Mac when
         # CLI+weights exist, else Wan). Sticky across /new via VIDEO_ENGINE.
         _ve = (os.environ.get("VIDEO_ENGINE") or "").strip().lower()
@@ -1895,7 +1909,13 @@ class CodingBoxApp(App):
                 "[dim]— critic reviews each clean iter (architect-split off)[/dim]"
             )
         media_line = ""
-        if self._simulator_mode:
+        if getattr(self, "_jmr_png_mode", False):
+            media_line = (
+                "\n[bold]Target:[/bold] [yellow]/640png[/yellow] "
+                "[dim]— 640×480 JMR V1 + generated STEM-N.png sheets "
+                "( /media on to restore full pipeline )[/dim]"
+            )
+        elif self._simulator_mode:
             media_line = (
                 "\n[bold]Target:[/bold] [yellow]/640 simulator[/yellow] "
                 "[dim]— 640×480 JMR V1 native, no sidecar media ( /media on to restore )[/dim]"
@@ -3369,8 +3389,12 @@ class CodingBoxApp(App):
                 self._cmd_toggle_allroles(arg)
             elif cmd in ("leanprompt", "lean-prompt", "lean"):
                 self._cmd_set_leanprompt(arg)
-            elif cmd in ("media", "640", "sim", "simulator"):
-                self._cmd_set_media(arg if cmd == "media" else "off")
+            elif cmd in ("media", "640", "sim", "simulator", "640png", "640-png"):
+                self._cmd_set_media(
+                    arg if cmd == "media" else (
+                        "png" if cmd in ("640png", "640-png") else "off"
+                    )
+                )
             elif cmd == "ltx":
                 self._cmd_set_video_engine("ltx")
             elif cmd == "wan":
@@ -3403,6 +3427,7 @@ class CodingBoxApp(App):
             "  [b]/wait[/b] is ON (pause each iter — you look). [b]/wait off[/b] to run unattended.",
             "  [b]/look[/b]  glance at the screenshot once (= /check)   [b]/games[/b]  curated prompts",
             "  [b]/assets[/b]  your PNGs    [b]/seed[/b]  continue an HTML    [b]/sim[/b]  640×480, no art pipeline",
+            "  [b]/640png[/b]  640×480 + generated STEM-N.png sheets (jmr:spr:N)",
             "  One loaded VLM (Qwen 27B class) is enough. Extra models: [b]/help roles[/b]",
             "  Full command list below — old names still work. [b]/help topics[/b] for detail pages.",
             "",
@@ -3469,7 +3494,7 @@ class CodingBoxApp(App):
             "  [b]/new <goal>[/b]                start a fresh game (uses staged seed/model if any)",
             "  [b]/games [N][/b]                 list curated prompts · /games N loads #N into the input box",
             "                                  [dim]aliases /library /prompts · ship first if a session is running[/dim]",
-            "  [b]/goodgame[/b]                  copy best.html + *_assets/ + *_sounds/ → goodgame/ [dim](not gitignored)[/dim]",
+            "  [b]/goodgame[/b]                  copy the game folder (HTML + sprites/sounds) → goodgame/ [dim](not gitignored)[/dim]",
             "  [b]/ship[/b]                      ship current build [dim](= Ctrl+D, or type 'done' / 'looks good')[/dim]",
             "  [b]/revert [N][/b]               roll the game file back to the last clean iter [dim](or iter N specifically; aliases /rewind)[/dim]",
             "                                  [dim]use this when the model breaks something — one keystroke beats typing 'undo that'[/dim]",
@@ -3507,8 +3532,9 @@ class CodingBoxApp(App):
             "  [b]/restarts <N>[/b]              independent full restarts when iter-1 score < 60 · default 2 · 1=off",
             "  [b]/model-class <auto|small|mid|large>[/b]   prompt-size trim · default 'small' = lean ~5 KB",
             "  [b]/leanprompt [on|off|auto][/b]  compact system prompt · default auto (lean for local backends)",
-            "  [b]/media [on|off][/b]            full pipeline vs simulator · default on · [b]/640[/b] / [b]/sim[/b] = off",
+            "  [b]/media [on|off][/b]            full pipeline vs simulator · default on · [b]/640[/b] / [b]/sim[/b] = off · [b]/640png[/b] = JMR + PNG sheets",
             "                                  [dim]simulator: 640×480 native canvas, no sidecar sprites/sounds/videos[/dim]",
+            "                                  [dim]/640png: same JMR walls, art pipeline writes STEM-0.png … (≤16, jmr:spr:N)[/dim]",
             "  [b]/ltx[/b] / [b]/wan[/b]              pin video engine (sticky) · [dim]/help videos[/dim]",
             "  [b]/mode <local_manual|local_auto|local_plus_review with <model> [--auto-apply]|custom>[/b]",
             "                                  run contract preset · default [b]local_manual[/b] (= /wait on)",
@@ -4648,22 +4674,38 @@ class CodingBoxApp(App):
         if not arg:
             # Do not use "[/640 ...]" — Rich treats "[/name]" as a closing
             # markup tag and crashes the log pane (restart + /640 + /games).
-            mode = " (/640 pixel-map goals)" if self._simulator_mode else ""
+            mode = (
+                " (/640png sheet goals)"
+                if getattr(self, "_jmr_png_mode", False)
+                else (" (/640 pixel-map goals)" if self._simulator_mode else "")
+            )
             self._log_info(
                 f"[bold]Curated game prompts{mode}[/bold] — /games <N> to load:"
             )
             for g in games:
                 mark = ""
-                if self._simulator_mode and str(g.get("prompt_640") or "").strip():
+                if getattr(self, "_jmr_png_mode", False) and str(
+                    g.get("prompt_640") or ""
+                ).strip():
+                    mark = " (640png)"
+                elif (
+                    self._simulator_mode
+                    and str(g.get("prompt_640") or "").strip()
+                ):
                     mark = " (640)"
                 self._log(f"  [cyan]{g['n']:>2}[/cyan]  {_esc(g['title'])}{mark}")
             self._log_info(
                 f"e.g. [b]/games 1[/b] loads prompt #1 into the input — "
                 "press Enter to build, or edit it first."
                 + (
-                    " With /640 on, loads the prompt_640 (pixel-map) variant."
-                    if self._simulator_mode
-                    else ""
+                    " With /640png on, loads prompt_640 rewritten for STEM-N.png "
+                    "sheets (same JMR walls as /640 — no three.js/CDN/WebGL)."
+                    if getattr(self, "_jmr_png_mode", False)
+                    else (
+                        " With /640 on, loads the prompt_640 (pixel-map) variant."
+                        if self._simulator_mode
+                        else ""
+                    )
                 )
             )
             return
@@ -4685,14 +4727,20 @@ class CodingBoxApp(App):
             )
             return
         goal_text = effective_prompt(
-            match, simulator_mode=bool(self._simulator_mode),
+            match,
+            simulator_mode=bool(self._simulator_mode),
+            jmr_png_mode=bool(getattr(self, "_jmr_png_mode", False)),
         )
         try:
             inp = self.query_one("#user-input", Input)
             inp.value = goal_text
             variant = (
-                "640" if self._simulator_mode and goal_text != match.get("prompt")
-                else "media"
+                "640png"
+                if getattr(self, "_jmr_png_mode", False)
+                else (
+                    "640" if self._simulator_mode and goal_text != match.get("prompt")
+                    else "media"
+                )
             )
             inp.placeholder = (
                 f"prompt #{n} ({match['title']}) [{variant}] loaded · press Enter to "
@@ -4767,7 +4815,7 @@ class CodingBoxApp(App):
         self._log(f"[bold green]goodgame[/bold green] saved [b]{stem}[/b] → {copied['html']}")
         if not copied.get("assets") and not copied.get("sounds"):
             self._log_info(
-                "[dim]no *_assets/ or *_sounds/ on disk (HTML only is fine)[/dim]"
+                "[dim]no sprites/sounds on disk (HTML only is fine)[/dim]"
             )
 
     def _cmd_revert(self, arg: str) -> None:
@@ -4952,9 +5000,17 @@ class CodingBoxApp(App):
         # Active session -> attach directly to the next user turn.
         if self.agent is not None:
             self.agent._next_image_bytes = data
-            # Surface a hint if the active model is text-only — the bytes
-            # will be ignored in that case.
-            is_vlm = bool(getattr(self.agent, "_is_vlm", False))
+            # Probe latch, else the same name classifier /list uses.
+            # bool(None) used to warn "text-only" on an unprobed VLM.
+            latched = getattr(self.agent, "_is_vlm", None)
+            if latched is None:
+                is_vlm = (
+                    backend_mod.classify_model_modality(
+                        str(getattr(self.agent, "model", "") or "")
+                    ) == "vlm"
+                )
+            else:
+                is_vlm = bool(latched)
             vlm_hint = (
                 "" if is_vlm
                 else " [yellow](active model is text-only — image may be ignored; "
@@ -5193,19 +5249,15 @@ class CodingBoxApp(App):
                     f"[magenta]/check[/magenta] model #{_esc(model_num)} → "
                     f"[b]{_esc(model)}[/b]"
                 )
-        aliases = {
-            "claude": "claude-sonnet-4-6",
-            "sonnet": "claude-sonnet-4-6",
-            "opus": "claude-opus-4-8",
-            "fable": "claude-fable-5",
-            "haiku": "claude-haiku-4-5",
-            "gpt": "gpt-5",
-            "openai": "gpt-5",
-            "gpt5": "gpt-5",
-            "gpt-5-mini": "gpt-5-mini",
-            "gpt5-mini": "gpt-5-mini",
-        }
-        model = aliases.get(model.lower(), model)
+        # Short aliases (fable, gpt, opus, …) → newest id from the
+        # vendor Models API, with hardcoded fallbacks if the list fails.
+        resolved = backend_mod.resolve_cloud_alias(model)
+        if resolved != model:
+            self._log_info(
+                f"[magenta]/check[/magenta] alias [b]{_esc(model)}[/b] → "
+                f"[b]{_esc(resolved)}[/b]"
+            )
+        model = resolved
         # Vendor routing — explicit and ordered. Anything not matched
         # falls through to the local-MLX-VLM resolver.
         try:
@@ -5881,7 +5933,7 @@ class CodingBoxApp(App):
             f"  Ollama ctx (next):    {self._num_ctx:,}",
             f"  restart-N:            {self._restart_n if self._restart_n > 1 else '1 (off)'}",
             f"  model-class:          {self._model_class or 'auto (= small, lean ~5KB schema)'}",
-            f"  media pipeline:       {'off (simulator /640)' if self._simulator_mode else 'on (default)'}",
+            f"  media pipeline:       {self._media_pipeline_status_label()}",
             f"  video engine:         {self._video_engine_label()}",
             f"  step-mode (/wait):    {step_label}",
             f"  prefill:              {'ON' if self._use_prefill else 'off'}",
@@ -6466,28 +6518,46 @@ class CodingBoxApp(App):
         self._update_status()
 
     def _cmd_set_media(self, arg: str) -> None:
-        """/media [on|off] and /640 — simulator vs full media pipeline."""
+        """/media [on|off], /640, /640png — target vs full media pipeline."""
         a = (arg or "").strip().lower()
         if not a:
-            mode = "off (simulator)" if self._simulator_mode else "on (full pipeline)"
             self._log_info(
-                f"/media {mode} — use /media on|off or /640 before /new "
-                "(640×480 JMR V1 native target, no sidecar sprites/sounds)"
+                f"/media {self._media_pipeline_status_label()} — "
+                "use /media on|off, /640, or /640png before /new"
             )
             return
         if a in ("on", "full", "pipeline"):
             self._simulator_mode = False
+            self._jmr_png_mode = False
             label = "on (full media pipeline)"
         elif a in ("off", "sim", "simulator", "640"):
             self._simulator_mode = True
-            label = "off (simulator /640 — JMR V1 640×480, procedural canvas)"
+            self._jmr_png_mode = False
+            label = "off (simulator /640 — JMR V1 640×480, pixel maps, no sidecars)"
+        elif a in ("png", "640png", "art", "sheets"):
+            self._simulator_mode = True
+            self._jmr_png_mode = True
+            label = (
+                "/640png — JMR V1 640×480 + generated STEM-N.png sheets "
+                "(jmr:spr:N, ≤16)"
+            )
         else:
-            self._log_info("usage: /media on|off  (alias: /640 → /media off)")
+            self._log_info(
+                "usage: /media on|off  (aliases: /640 → off; /640png → PNG sheets)"
+            )
             return
         if self.agent is not None:
             self.agent.set_simulator_mode(self._simulator_mode)
+            self.agent.set_jmr_png_mode(self._jmr_png_mode)
         self._log_info(f"/media {label} — takes effect on the next /new session")
         self._update_status()
+
+    def _media_pipeline_status_label(self) -> str:
+        if getattr(self, "_jmr_png_mode", False):
+            return "/640png (JMR + STEM-N.png sheets)"
+        if self._simulator_mode:
+            return "off (simulator /640)"
+        return "on (default)"
 
     def _cmd_toggle_allroles(self, arg: str) -> None:
         """/allroles — toggle ON/OFF: run coder + critic + architect on the single loaded LLM.
@@ -6859,9 +6929,11 @@ class CodingBoxApp(App):
                     "basename — /seed (no arg) to clear)[/dim]"
                 )
         else:
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            self._out_path = GAMES_DIR / f"{_slugify(goal)}_{ts}.html"
-            self._best_path = self._out_path.with_suffix(".best.html")
+            name = unique_game_folder_name(goal, GAMES_DIR)
+            folder = GAMES_DIR / name
+            folder.mkdir(parents=True, exist_ok=True)
+            self._out_path = folder / f"{name}.html"
+            self._best_path = folder / f"{name}.best.html"
         # Single source of truth for the basename downstream code uses —
         # works for both seeded (canonical from _resolve_seed_target)
         # and fresh paths.
@@ -6951,6 +7023,7 @@ class CodingBoxApp(App):
         if self._lean_prompt is not None:
             self.agent.set_lean_prompt(self._lean_prompt)
         self.agent.set_simulator_mode(self._simulator_mode)
+        self.agent.set_jmr_png_mode(getattr(self, "_jmr_png_mode", False))
         # Apply run-profile step policy on session start.
         if self._run_profile == "local_manual":
             self.agent.set_step_mode(True)
@@ -6987,8 +7060,8 @@ class CodingBoxApp(App):
         # the canonical paths; we mirror them here so the panel stays
         # accurate even if the user typed /open or /new mid-flight.
         self._trace_path = self.agent.trace_path
-        self._assets_dir = self._out_path.parent / f"{basename}_assets"
-        self._sounds_dir = self._out_path.parent / f"{basename}_sounds"
+        self._assets_dir = companion_assets_dir_for_html(self._out_path)
+        self._sounds_dir = companion_sounds_dir_for_html(self._out_path)
         # /assets staging: copy PNGs into this session's folder BEFORE Phase A
         # so first-build PATHS + structured summary already list them.
         self._apply_staged_assets_to_session(self.agent, self._assets_dir)

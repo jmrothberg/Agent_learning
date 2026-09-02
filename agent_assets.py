@@ -19,6 +19,10 @@ from assets import (
     parse_assets_block_with_meta,
     prefer_video_seed_assets,
     render_asset_paths_block,
+    render_jmr_png_paths_block,
+    materialize_jmr_png_sheets,
+    jmr_title_stem,
+    JMR_PNG_MAX_SHEETS,
     try_load_image_generator,
 )
 from sounds import (
@@ -33,6 +37,11 @@ from videos import (
     render_video_paths_block,
     resolve_video_engine,
     try_load_video_generator,
+)
+from tools import (
+    companion_assets_dir_for_html,
+    companion_sounds_dir_for_html,
+    companion_videos_dir_for_html,
 )
 from agent_feedback import _HARNESS_ADVISORY_SENTINEL, _feedback_requests_style_rebrand
 from agent_helpers import (
@@ -141,6 +150,41 @@ class AssetGenerationMixin:
     )
 
 
+
+    def _jmr_png_mode_on(self) -> bool:
+        return bool(getattr(self, "_jmr_png_mode", False))
+
+    def _render_session_asset_prompt_block(self, paths: dict | None = None) -> str:
+        """GENERATED ASSETS / JMR PNG sheet list for the next model turn."""
+        if paths is None:
+            paths = getattr(self, "_session_assets", None) or {}
+        if not paths:
+            return ""
+        if self._jmr_png_mode_on():
+            stem = getattr(self, "_jmr_png_stem", "") or jmr_title_stem(
+                getattr(self, "_goal", "") or "GAME"
+            )
+            return render_jmr_png_paths_block(
+                paths, self.out_path, stem=stem,
+            )
+        return render_asset_paths_block(paths, self.out_path)
+
+    def _session_sprite_draw_contract(self) -> str:
+        if self._jmr_png_mode_on():
+            return self._p.generated_jmr_png_draw_contract()
+        return self._p.generated_sprite_draw_contract()
+
+    def _remap_session_assets_to_jmr_png(self, produced: dict) -> dict:
+        """Copy generated files to STEM-N.png next to the HTML (≤16)."""
+        if not produced or not self._jmr_png_mode_on():
+            return produced
+        stem = getattr(self, "_jmr_png_stem", "") or jmr_title_stem(
+            getattr(self, "_goal", "") or "GAME"
+        )
+        self._jmr_png_stem = stem
+        return materialize_jmr_png_sheets(
+            produced, self.out_path.parent, stem,
+        )
 
     # Generic DOM/structural attributes whose values are pure layout noise,
 
@@ -1214,7 +1258,7 @@ class AssetGenerationMixin:
                 "autogen skipped: image generator unavailable",
             ))
             return
-        session_assets_dir = self.out_path.parent / f"{self._session_id}_assets"
+        session_assets_dir = companion_assets_dir_for_html(self.out_path)
         try:
             produced = await asyncio.to_thread(
                 generate_assets,
@@ -1229,6 +1273,7 @@ class AssetGenerationMixin:
             ))
             return
         if produced:
+            produced = self._remap_session_assets_to_jmr_png(produced)
             self._session_assets.update(produced)
             produced_names = set(produced.keys())
             self._pending_dropped_assets = [
@@ -1249,13 +1294,18 @@ class AssetGenerationMixin:
                 f"autogen: generated {len(produced)}/{len(batch)} dropped "
                 f"sprites at {session_assets_dir}",
             ))
-            block = render_asset_paths_block(produced, self.out_path)
+            block = self._render_session_asset_prompt_block(produced)
             if block:
+                wire = (
+                    "Wire these as jmr:spr:N / window.JMR_SPR now."
+                    if self._jmr_png_mode_on()
+                    else "Wire these paths into drawImage/sprite() now."
+                )
                 self._queue_internal_feedback(
                     "HARNESS AUTOGEN: sprites dropped by the per-turn cap "
                     "were generated for you:\n"
                     f"{block}\n"
-                    "Wire these paths into drawImage/sprite() now."
+                    + wire
                 )
 
     async def _maybe_generate_assets_and_sounds(
@@ -1338,6 +1388,16 @@ class AssetGenerationMixin:
         sound_specs = parse_sounds_block(reply)
 
         video_specs = parse_videos_block(reply)
+
+        # /640png: sprites only — JMR sound is packed playSfx in HTML, not
+        # Stable Audio / Wan sidecars. Cap already 16 via session_asset_cap.
+        if self._jmr_png_mode_on():
+            sound_specs = []
+            video_specs = []
+            session_cap = min(
+                int(session_cap or JMR_PNG_MAX_SHEETS), JMR_PNG_MAX_SHEETS,
+            )
+            asset_specs = asset_specs[:JMR_PNG_MAX_SHEETS]
 
         # run_14 Dragon's Lair: FIFO cap dropped key_victory (i2v seed).
         # Prefer keeping video image seeds inside the same cap budget.
@@ -2047,11 +2107,7 @@ class AssetGenerationMixin:
 
                 # folder. No override mechanism needed.
 
-                session_assets_dir = (
-
-                    self.out_path.parent / f"{self._session_id}_assets"
-
-                )
+                session_assets_dir = companion_assets_dir_for_html(self.out_path)
 
                 try:
 
@@ -2087,6 +2143,7 @@ class AssetGenerationMixin:
 
                 # an existing asset on purpose).
 
+                produced = self._remap_session_assets_to_jmr_png(produced)
                 new_asset_paths = dict(produced)
 
                 self._session_assets.update(produced)
@@ -2564,11 +2621,7 @@ class AssetGenerationMixin:
 
                 # which already matches the seed's basename when seeded.
 
-                session_sounds_dir = (
-
-                    self.out_path.parent / f"{self._session_id}_sounds"
-
-                )
+                session_sounds_dir = companion_sounds_dir_for_html(self.out_path)
 
                 try:
 
@@ -2806,11 +2859,7 @@ class AssetGenerationMixin:
 
             else:
 
-                session_videos_dir = (
-
-                    self.out_path.parent / f"{self._session_id}_videos"
-
-                )
+                session_videos_dir = companion_videos_dir_for_html(self.out_path)
 
                 # Memory-pressure guard: on by default when free RAM is low
                 # (see _mlx_coder_memory_pressure). Skips small MLX models.
@@ -3266,9 +3315,9 @@ class AssetGenerationMixin:
 
                 if new_assets:
 
-                    blocks.append(render_asset_paths_block(
+                    blocks.append(self._render_session_asset_prompt_block(
 
-                        new_assets, self.out_path,
+                        new_assets,
 
                     ))
 

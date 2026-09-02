@@ -89,8 +89,8 @@ def test_anthropic_inventory_populated_with_key() -> None:
         assert len(models) >= 2
         assert default == backend_mod._ANTHROPIC_DEFAULT_MODEL
         assert default in models
-        assert "claude-fable-5" in models
-        assert "claude-opus-4-8" in models
+        assert backend_mod._ANTHROPIC_FABLE_FALLBACK in models
+        assert backend_mod._ANTHROPIC_DEFAULT_MODEL in models
 
 
 # ---------------------------------------------------------------------------
@@ -363,6 +363,75 @@ def test_extension_fallback_accepts_mlx() -> None:
     # Old failure mode string is gone (so trace mining can grep for the
     # new "no local MLX or Ollama" phrasing instead).
     assert "no local Ollama backend could" not in src
+
+
+# ---------------------------------------------------------------------------
+# Live Models-API pickers (pure; no network)
+# ---------------------------------------------------------------------------
+
+def test_pick_newest_anthropic_family_prefers_higher_version() -> None:
+    ids = [
+        "claude-fable-5",
+        "claude-fable-5-1",
+        "claude-opus-4-8",
+        "claude-opus-5",
+        "claude-sonnet-4-6",
+        "claude-sonnet-4-6-20250514",
+    ]
+    assert backend_mod._pick_newest_anthropic_family(ids, "fable") == "claude-fable-5-1"
+    assert backend_mod._pick_newest_anthropic_family(ids, "opus") == "claude-opus-5"
+    # Dated snapshot loses to the alias at the same version.
+    assert backend_mod._pick_newest_anthropic_family(ids, "sonnet") == "claude-sonnet-4-6"
+
+
+def test_pick_openai_flagship_prefers_short_alias() -> None:
+    ids = [
+        "gpt-5",
+        "gpt-5.6",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5-mini",
+        "text-embedding-3-large",
+        "gpt-5.6-2026-07-09",
+    ]
+    assert backend_mod._pick_openai_flagship(ids) == "gpt-5.6"
+    assert backend_mod._pick_openai_mini(ids) == "gpt-5-mini"
+
+
+def test_pick_openai_flagship_sol_when_no_short_alias() -> None:
+    ids = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5"]
+    assert backend_mod._pick_openai_flagship(ids) == "gpt-5.6-sol"
+
+
+def test_resolve_cloud_alias_fallbacks_offline() -> None:
+    """Pytest skips the live GET, so aliases hit the curated fallbacks."""
+    assert backend_mod.resolve_cloud_alias("fable") == backend_mod._ANTHROPIC_FABLE_FALLBACK
+    assert backend_mod.resolve_cloud_alias("opus") == backend_mod._ANTHROPIC_DEFAULT_MODEL
+    assert backend_mod.resolve_cloud_alias("gpt") == backend_mod._OPENAI_DEFAULT_MODEL
+    assert backend_mod.resolve_cloud_alias("claude-fable-5-1") == "claude-fable-5-1"
+    assert backend_mod.resolve_cloud_alias("/Users/me/MLX_Models/Qwen") == (
+        "/Users/me/MLX_Models/Qwen"
+    )
+
+
+def test_openai_inventory_uses_live_flagship_when_fetch_returns_ids() -> None:
+    fake = ["gpt-5", "gpt-5.6", "gpt-5.6-sol", "gpt-5-mini"]
+    with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}, clear=False):
+        with patch.object(backend_mod, "_fetch_openai_model_ids", return_value=fake):
+            models, default = backend_mod.list_openai_inventory()
+            assert default == "gpt-5.6"
+            assert models == ["gpt-5.6"]
+
+
+def test_anthropic_inventory_uses_live_families_when_fetch_returns_ids() -> None:
+    fake = ["claude-fable-5", "claude-fable-5-1", "claude-opus-4-8", "claude-opus-5"]
+    with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test"}, clear=False):
+        with patch.object(backend_mod, "_fetch_anthropic_model_ids", return_value=fake):
+            models, default = backend_mod.list_anthropic_inventory()
+            assert default == "claude-opus-5"
+            assert "claude-fable-5-1" in models
+            assert "claude-opus-5" in models
 
 
 def test_extension_fallback_skips_when_not_cloud() -> None:

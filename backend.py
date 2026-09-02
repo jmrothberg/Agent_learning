@@ -315,16 +315,22 @@ class OllamaAutopinResult:
     endpoints: dict[int, str] | None = None
 
 
-# Cloud-backend defaults. The curated single-model-each shape keeps /list
-# tight; edit these constants (or add more entries to the inventory lists
-# below) to expose more variants. API keys are read from env at request
-# time — never from disk, never embedded in BackendInfo.
-_OPENAI_DEFAULT_MODEL = "gpt-5"
-_ANTHROPIC_DEFAULT_MODEL = "claude-opus-4-8"
+# Cloud-backend fallbacks — used when the Models API list is unreachable
+# (offline, bad key, pytest). Live `/list` and short aliases (`fable`,
+# `gpt`, `opus`) prefer GET /v1/models; see resolve_cloud_alias().
+# API keys are read from env at request time — never from disk, never
+# embedded in BackendInfo.
+_OPENAI_DEFAULT_MODEL = "gpt-5.6"
+_OPENAI_MINI_FALLBACK = "gpt-5-mini"
+_ANTHROPIC_DEFAULT_MODEL = "claude-opus-5"
+_ANTHROPIC_FABLE_FALLBACK = "claude-fable-5-1"
+_ANTHROPIC_SONNET_FALLBACK = "claude-sonnet-4-6"
+_ANTHROPIC_HAIKU_FALLBACK = "claude-haiku-4-5"
 _OPENAI_MODELS: tuple[str, ...] = (_OPENAI_DEFAULT_MODEL,)
-# Curated /list inventory — edit here to expose more Claude variants.
+# Curated /list fallback — live inventory replaces these when the
+# Models API answers.
 _ANTHROPIC_MODELS: tuple[str, ...] = (
-    "claude-fable-5",
+    _ANTHROPIC_FABLE_FALLBACK,
     _ANTHROPIC_DEFAULT_MODEL,
 )
 
@@ -1512,10 +1518,17 @@ class MLXServerBackend(Backend):
 
         opts = dict(options or {})
         # oMLX expects basename ids; chat may still hold absolute MLX_Models paths.
+        # Fold PNG bytes into OpenAI image_url parts BEFORE stripping the
+        # raw `images` key. Hardcoded is_vlm=False + strip meant /list
+        # showed [VLM] (name classifier) while /ref warned text-only and
+        # screenshots never left the client (bomberman 20260901 oMLX Flash-Next).
         body: dict[str, Any] = {
             "model": mlx_server_api_model_id(self.info.model, self.info.endpoint),
             "messages": omlx_messages_close_think_prefill(
-                _strip_ollama_only_fields(messages), self.info.model,
+                _strip_ollama_only_fields(
+                    _openai_messages_with_images(messages)
+                ),
+                self.info.model,
             ),
             "stream": True,
             "stream_options": {"include_usage": True},
@@ -1711,7 +1724,14 @@ class MLXServerBackend(Backend):
         )
 
     async def is_vlm(self) -> bool:
-        return False
+        """Same name classifier as /list [VLM]. Do not hardcode False.
+
+        oMLX Flash-Next (Qwen3.8-Flash-Next) is a VLM; /list already
+        badged it. Returning False here latched GameAgent._is_vlm and
+        made /ref print "text-only" (trace runtime_modes.model_is_vlm=true,
+        no vlm_detected).
+        """
+        return classify_model_modality(self.info.model) == "vlm"
 
 
 # -----------------------------------------------------------------------------
@@ -2285,7 +2305,7 @@ def detect_backend(prefer: str | None = None) -> BackendInfo:
             )
         return BackendInfo(
             name="openai",
-            model=_OPENAI_DEFAULT_MODEL,
+            model=_openai_default_model(),
             source="LLM_BACKEND=openai (OPENAI_API_KEY set)",
             endpoint="https://api.openai.com",
         )
@@ -2298,7 +2318,7 @@ def detect_backend(prefer: str | None = None) -> BackendInfo:
             )
         return BackendInfo(
             name="anthropic",
-            model=_ANTHROPIC_DEFAULT_MODEL,
+            model=_anthropic_default_model(),
             source="LLM_BACKEND=anthropic (ANTHROPIC_API_KEY set)",
             endpoint="https://api.anthropic.com",
         )
@@ -2357,21 +2377,250 @@ def list_openai_inventory() -> tuple[list[str], str | None]:
     """(available_models, default_or_None) — for /list display.
 
     Empty when OPENAI_API_KEY is not set, so the TUI hides the entries
-    instead of dangling unusable picks. The list is a curated constant
-    (edit _OPENAI_MODELS in this file to add more); we don't probe the
-    API just to populate /list — that would burn quota every time the
-    user typed it.
+    instead of dangling unusable picks. Prefers the newest flagship id
+    from GET /v1/models (metadata only, cached for the process). Falls
+    back to `_OPENAI_DEFAULT_MODEL` when the list is unreachable.
+    Pin with OPENAI_MODEL if you do not want the live pick.
     """
     if not os.environ.get("OPENAI_API_KEY"):
         return [], None
-    return list(_OPENAI_MODELS), _OPENAI_DEFAULT_MODEL
+    default = _openai_default_model()
+    return [default], default
 
 
 def list_anthropic_inventory() -> tuple[list[str], str | None]:
-    """Mirror of list_openai_inventory for Anthropic / Claude."""
+    """Mirror of list_openai_inventory for Anthropic / Claude.
+
+    /list stays two rows: newest Fable + newest Opus (coding default).
+    Short aliases (`fable`, `opus`, `sonnet`) resolve via
+    resolve_cloud_alias(). Pin with ANTHROPIC_MODEL for the default.
+    """
     if not os.environ.get("ANTHROPIC_API_KEY"):
         return [], None
-    return list(_ANTHROPIC_MODELS), _ANTHROPIC_DEFAULT_MODEL
+    ids = _fetch_anthropic_model_ids() or []
+    fable = _pick_newest_anthropic_family(ids, "fable") or _ANTHROPIC_MODELS[0]
+    opus = _anthropic_default_model()
+    models = [fable]
+    if opus not in models:
+        models.append(opus)
+    return models, opus
+
+
+# Short TUI aliases → Claude family or OpenAI flagship/mini. Full ids
+# (claude-fable-5-1, gpt-5.6-sol) pass through unchanged.
+_CLOUD_ALIAS_FAMILY: dict[str, str] = {
+    "claude": "sonnet",  # /check reviewer — keep the cheap family
+    "sonnet": "sonnet",
+    "opus": "opus",
+    "fable": "fable",
+    "haiku": "haiku",
+    "gpt": "openai_flagship",
+    "openai": "openai_flagship",
+    "gpt5": "openai_flagship",
+    "gpt-5-mini": "openai_mini",
+    "gpt5-mini": "openai_mini",
+}
+
+# Process cache for GET /v1/models. None = fetch failed (do not retry
+# every /list). Missing key = not attempted yet.
+_CLOUD_MODEL_IDS_CACHE: dict[str, list[str] | None] = {}
+
+_OPENAI_SKIP_SUBSTR: tuple[str, ...] = (
+    "embedding", "whisper", "tts", "dall-e", "dalle", "realtime",
+    "audio", "transcribe", "search", "moderation", "davinci",
+    "babbage", "ada", "sora", "gpt-image", "computer-use",
+)
+
+
+def _ids_from_models_payload(data: Any) -> list[str]:
+    if not isinstance(data, dict):
+        return []
+    out: list[str] = []
+    for row in data.get("data") or []:
+        if isinstance(row, dict):
+            mid = (row.get("id") or "").strip()
+            if mid:
+                out.append(mid)
+        elif isinstance(row, str) and row.strip():
+            out.append(row.strip())
+    return out
+
+
+def _is_dated_model_snapshot(mid: str) -> bool:
+    low = mid.lower()
+    return bool(
+        re.search(r"-\d{8}$", low) or re.search(r"-\d{4}-\d{2}-\d{2}$", low)
+    )
+
+
+def _pick_newest_anthropic_family(ids: list[str], family: str) -> str | None:
+    """Newest claude-{family}-* id. Prefer alias ids over dated snapshots."""
+    family = (family or "").strip().lower()
+    if not family or not ids:
+        return None
+    prefix = f"claude-{family}-"
+    matched = [
+        mid for mid in ids
+        if mid.lower().startswith(prefix) or mid.lower() == f"claude-{family}"
+    ]
+    if not matched:
+        return None
+
+    def _key(mid: str) -> tuple:
+        rest = mid.lower().split(prefix, 1)[-1] if prefix in mid.lower() else ""
+        nums = tuple(int(x) for x in re.findall(r"\d+", rest))
+        return (0 if _is_dated_model_snapshot(mid) else 1, nums)
+
+    return max(matched, key=_key)
+
+
+def _gpt_version_tuple(mid: str) -> tuple[int, ...]:
+    m = re.match(r"gpt-(\d+(?:\.\d+)*)", mid.lower())
+    if not m:
+        return (0,)
+    return tuple(int(x) for x in m.group(1).split("."))
+
+
+def _openai_flagship_tier_rank(mid: str) -> int:
+    """Prefer gpt-5.6 (alias) over gpt-5.6-sol; skip mini/terra/luna."""
+    low = mid.lower()
+    if _is_dated_model_snapshot(low):
+        return -10
+    if any(tok in low for tok in ("-mini", "-nano", "-luna", "-terra", "-codex")):
+        return -5
+    rest = re.sub(r"^gpt-\d+(?:\.\d+)*", "", low)
+    if rest == "":
+        return 3
+    if rest == "-sol":
+        return 2
+    return 0
+
+
+def _pick_openai_flagship(ids: list[str]) -> str | None:
+    """Newest GPT chat flagship. Skips embeddings/audio/mini/terra/luna."""
+    cands: list[str] = []
+    for mid in ids:
+        low = mid.lower()
+        if not low.startswith("gpt-"):
+            continue
+        if any(s in low for s in _OPENAI_SKIP_SUBSTR):
+            continue
+        cands.append(mid)
+    if not cands:
+        return None
+    return max(cands, key=lambda m: (_gpt_version_tuple(m), _openai_flagship_tier_rank(m)))
+
+
+def _pick_openai_mini(ids: list[str]) -> str | None:
+    cands = [
+        mid for mid in ids
+        if mid.lower().startswith("gpt-")
+        and "-mini" in mid.lower()
+        and "codex-mini" not in mid.lower()
+        and not _is_dated_model_snapshot(mid)
+    ]
+    if not cands:
+        return None
+    return max(cands, key=_gpt_version_tuple)
+
+
+def _http_get_json_auth(
+    url: str, headers: dict[str, str], timeout: float = 2.5,
+) -> Any:
+    """Authenticated GET. Fail-soft like `_http_get_json` — never raises."""
+    try:
+        req = urllib.request.Request(url, method="GET", headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode())
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, ValueError):
+        return None
+
+
+def _fetch_openai_model_ids() -> list[str] | None:
+    if "openai" in _CLOUD_MODEL_IDS_CACHE:
+        return _CLOUD_MODEL_IDS_CACHE["openai"]
+    # Pytest stays offline; tests mock this helper when they need live picks.
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return None
+    key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+    if not key:
+        return None
+    data = _http_get_json_auth(
+        "https://api.openai.com/v1/models",
+        {"Authorization": f"Bearer {key}"},
+    )
+    ids = _ids_from_models_payload(data)
+    _CLOUD_MODEL_IDS_CACHE["openai"] = ids or None
+    return _CLOUD_MODEL_IDS_CACHE["openai"]
+
+
+def _fetch_anthropic_model_ids() -> list[str] | None:
+    if "anthropic" in _CLOUD_MODEL_IDS_CACHE:
+        return _CLOUD_MODEL_IDS_CACHE["anthropic"]
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return None
+    key = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+    if not key:
+        return None
+    data = _http_get_json_auth(
+        "https://api.anthropic.com/v1/models?limit=100",
+        {
+            "x-api-key": key,
+            "anthropic-version": "2023-06-01",
+        },
+    )
+    ids = _ids_from_models_payload(data)
+    _CLOUD_MODEL_IDS_CACHE["anthropic"] = ids or None
+    return _CLOUD_MODEL_IDS_CACHE["anthropic"]
+
+
+def _openai_default_model() -> str:
+    pinned = (os.environ.get("OPENAI_MODEL") or "").strip()
+    if pinned:
+        return pinned
+    return _pick_openai_flagship(_fetch_openai_model_ids() or []) or _OPENAI_MODELS[0]
+
+
+def _anthropic_default_model() -> str:
+    pinned = (os.environ.get("ANTHROPIC_MODEL") or "").strip()
+    if pinned:
+        return pinned
+    return (
+        _pick_newest_anthropic_family(_fetch_anthropic_model_ids() or [], "opus")
+        or _ANTHROPIC_DEFAULT_MODEL
+    )
+
+
+def resolve_cloud_alias(name: str) -> str:
+    """Map `fable` / `gpt` / `opus` / … to a concrete API id.
+
+    Live Models API list (cached) when the matching key is set; otherwise
+    the fallback constants. Unknown names (full ids, local MLX paths)
+    are returned unchanged.
+    """
+    raw = (name or "").strip()
+    if not raw:
+        return raw
+    family = _CLOUD_ALIAS_FAMILY.get(raw.lower())
+    if family is None:
+        return raw
+    if family == "openai_flagship":
+        return _openai_default_model()
+    if family == "openai_mini":
+        return (
+            _pick_openai_mini(_fetch_openai_model_ids() or [])
+            or _OPENAI_MINI_FALLBACK
+        )
+    fallback = {
+        "opus": _ANTHROPIC_DEFAULT_MODEL,
+        "fable": _ANTHROPIC_FABLE_FALLBACK,
+        "sonnet": _ANTHROPIC_SONNET_FALLBACK,
+        "haiku": _ANTHROPIC_HAIKU_FALLBACK,
+    }.get(family, _ANTHROPIC_DEFAULT_MODEL)
+    return (
+        _pick_newest_anthropic_family(_fetch_anthropic_model_ids() or [], family)
+        or fallback
+    )
 
 
 # -----------------------------------------------------------------------------

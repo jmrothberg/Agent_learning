@@ -37,12 +37,16 @@ def test_cloud_vendor_recognizes_claude_family():
     assert _cloud_vendor("claude-sonnet-4-6") == "anthropic"
     assert _cloud_vendor("claude-opus-4-8") == "anthropic"
     assert _cloud_vendor("claude-fable-5") == "anthropic"
+    assert _cloud_vendor("claude-fable-5-1") == "anthropic"
+    assert _cloud_vendor("claude-opus-5") == "anthropic"
     assert _cloud_vendor("claude-haiku-4-5") == "anthropic"
     assert _cloud_vendor("anthropic-experimental") == "anthropic"
 
 
 def test_cloud_vendor_recognizes_openai_family():
     assert _cloud_vendor("gpt-5") == "openai"
+    assert _cloud_vendor("gpt-5.6") == "openai"
+    assert _cloud_vendor("gpt-5.6-sol") == "openai"
     assert _cloud_vendor("gpt-5-mini") == "openai"
     assert _cloud_vendor("gpt-4o") == "openai"
     assert _cloud_vendor("gpt-4.1-vision") == "openai"

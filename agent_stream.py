@@ -1663,6 +1663,20 @@ class StreamMaterializeMixin:
 
 
 
+    def _maybe_inject_jmr_png_shim(self, html: str) -> str:
+        """Ensure Chrome JMR_SPR interceptor + STEM-N.png list on /640png."""
+        if not html or not bool(getattr(self, "_jmr_png_mode", False)):
+            return html
+        paths = getattr(self, "_session_assets", None) or {}
+        if not paths:
+            return html
+        png_names = [Path(p).name for p in paths.values()]
+        try:
+            from assets import ensure_jmr_spr_shim
+            return ensure_jmr_spr_shim(html, png_names)
+        except Exception:
+            return html
+
     async def _materialize(
         self, reply: str, *, dry_run: bool = False
     ) -> tuple[str | None, str]:
@@ -1793,7 +1807,9 @@ class StreamMaterializeMixin:
                     "total": len(patches),
                     "note": "patches applied but file content unchanged",
                 })
-            return res.text, f"applied {res.applied}/{len(patches)} patches"
+            return self._maybe_inject_jmr_png_shim(res.text), (
+                f"applied {res.applied}/{len(patches)} patches"
+            )
 
         html = self._extract_html(reply)
         if html is not None:
@@ -1944,7 +1960,7 @@ class StreamMaterializeMixin:
                     "send a `<question>` to ask the user how to "
                     "narrow scope instead of shipping a stub."
                 )
-            return html, "full <html_file> rewrite"
+            return self._maybe_inject_jmr_png_shim(html), "full <html_file> rewrite"
 
         return None, "no <patch> or <html_file> in reply"
 

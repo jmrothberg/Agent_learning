@@ -64,3 +64,8 @@ def test_snapshot_without_iter_prefix_passes_through() -> None:
     # we don't claim to know its basename — pass through.
     seed = Path("games/snapshots/snake_x/manual_save.html")
     assert _resolve_seed_target(seed) == seed
+
+
+def test_per_game_folder_snapshot_resolves_to_html() -> None:
+    seed = Path("games/SURECHES/snapshots/SURECHES__run_20260902_103000_000001/iter_03.html")
+    assert _resolve_seed_target(seed) == Path("games/SURECHES/SURECHES.html")

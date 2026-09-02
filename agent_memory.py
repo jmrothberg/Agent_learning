@@ -173,7 +173,12 @@ class MemoryRetrievalMixin:
 
         # /640: no sidecar PNGs — pin classic pixel-map craft so TD/shooter
         # builds do not ship colored fillRect boxes (Fieldrunners 093900).
-        if bool(getattr(self, "_simulator_mode", False)) and not (
+        # /640png uses generated STEM-N.png sheets instead.
+        if bool(getattr(self, "_jmr_png_mode", False)) and not (
+            webgl_or_voxel or fps_class or voxel_class or wireframe_class
+        ):
+            _add("jmr-png-sheets")
+        elif bool(getattr(self, "_simulator_mode", False)) and not (
             webgl_or_voxel or fps_class or voxel_class or wireframe_class
         ):
             _add("classic-arcade-pixel-maps")

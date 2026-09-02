@@ -9,6 +9,7 @@ relevant probes so the test runs offline and deterministically.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import sys
 from pathlib import Path
 from unittest.mock import patch  # noqa: F401 - retained for downstream test additions
@@ -349,6 +350,40 @@ def test_make_backend_routes_in_process_mlx():
     )
     be = backend.make_backend(info)
     assert isinstance(be, backend.MLXBackend)
+
+
+def test_mlx_server_is_vlm_matches_list_badge():
+    """ /list uses classify_model_modality; /ref used backend.is_vlm().
+
+    Hardcoded False on MLXServerBackend made Flash-Next look [VLM] in
+    /list and text-only on /ref (bomberman 20260901).
+    """
+    vlm = backend.MLXServerBackend(backend.BackendInfo(
+        name="mlx-server",
+        model="Qwen3.8-Flash-Next-MLX-8bit-MTP",
+        source="test",
+        endpoint="http://127.0.0.1:8080",
+    ))
+    text = backend.MLXServerBackend(backend.BackendInfo(
+        name="mlx-server",
+        model="GLM-5.2-MLX-4bit",
+        source="test",
+        endpoint="http://127.0.0.1:8080",
+    ))
+    assert asyncio.run(vlm.is_vlm()) is True
+    assert asyncio.run(text.is_vlm()) is False
+
+
+def test_mlx_server_stream_forwards_openai_image_parts():
+    src = inspect.getsource(backend.MLXServerBackend._stream_once)
+    assert "_openai_messages_with_images" in src
+    png = b"\x89PNG\r\n\x1a\nxxxx"
+    msgs = [{"role": "user", "content": "look", "images": [png]}]
+    out = backend._openai_messages_with_images(msgs)
+    assert out[0]["content"][1]["type"] == "image_url"
+    stripped = backend._strip_ollama_only_fields(out)
+    assert "images" not in stripped[0]
+    assert stripped[0]["content"][1]["type"] == "image_url"
 
 
 def test_mlx_server_url_forces_server_backend(monkeypatch):

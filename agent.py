@@ -60,7 +60,6 @@ from assets import (
     generate_assets,
     parse_assets_block,
     parse_assets_block_with_meta,
-    render_asset_paths_block,
     try_load_image_generator,
 )
 from sounds import (
@@ -1473,9 +1472,17 @@ class GameAgent(
         self._session_assets: dict[str, Path] = {}
         # `/640` / `/media off` / AGENT_SIMULATOR=1 — JMR V1 native 640×480
         # target: no Z-Image / Stable Audio / Wan sidecars; procedural canvas.
+        # `/640png` / AGENT_JMR_PNG=1 — same JMR walls but art pipeline ON
+        # with STEM-N.png + jmr:spr:N (GAME_DESIGN.md naming).
         self._simulator_mode: bool = os.environ.get(
             "AGENT_SIMULATOR", "",
         ).strip().lower() in ("1", "true", "yes")
+        self._jmr_png_mode: bool = os.environ.get(
+            "AGENT_JMR_PNG", "",
+        ).strip().lower() in ("1", "true", "yes")
+        if self._jmr_png_mode:
+            self._simulator_mode = True
+        self._jmr_png_stem: str = ""
         # Asset names dropped by the per-turn cap (asset_overflow) that still
         # need mid-session generation — re-warned every iter until on disk.
         self._pending_dropped_assets: list[str] = []
@@ -2247,12 +2254,26 @@ class GameAgent(
         self._lean_prompt = value
 
     def media_pipeline_enabled(self) -> bool:
-        """False when simulator mode (`/640`, `/media off`)."""
+        """Sprite/sound/video sidecars. False for /640 pixel-map.
+
+        `/640png` turns the sprite pipeline back on (sounds/videos still
+        skipped in `_maybe_generate_assets_and_sounds`).
+        """
+        if bool(getattr(self, "_jmr_png_mode", False)):
+            return True
         return not bool(getattr(self, "_simulator_mode", False))
 
     def set_simulator_mode(self, enabled: bool) -> None:
         """TUI hook for `/640` and `/media off|on`."""
         self._simulator_mode = bool(enabled)
+        if not enabled:
+            self._jmr_png_mode = False
+
+    def set_jmr_png_mode(self, enabled: bool) -> None:
+        """TUI hook for `/640png` — JMR V1 walls + generated STEM-N.png."""
+        self._jmr_png_mode = bool(enabled)
+        if enabled:
+            self._simulator_mode = True
 
     # `_LEAN_MEMORY_COMBINED_BUDGET`, `_OPEN_DOMAIN_OUTLINE_FLOOR`,
     # `_apply_lean_memory_budget`, and `_detect_open_domain_build` were moved
@@ -4339,16 +4360,34 @@ class GameAgent(
             # `prompts_v1._detect_multi_frame_intent`.
             try:
                 from prompts_v1 import _detect_multi_frame_intent as _mfi
-                mf_kws = _mfi(goal)
-                if mf_kws:
-                    self._session_asset_cap = 72
+                from assets import (
+                    JMR_PNG_MAX_SHEETS, jmr_title_stem, materialize_jmr_png_sheets,
+                )
+                if bool(getattr(self, "_jmr_png_mode", False)):
+                    # V1 MAX_SPR = 16; do not raise to 72 for multi-frame.
+                    self._session_asset_cap = JMR_PNG_MAX_SHEETS
+                    self._jmr_png_stem = jmr_title_stem(goal)
+                    if self._session_assets:
+                        self._session_assets = materialize_jmr_png_sheets(
+                            self._session_assets, self.out_path.parent,
+                            self._jmr_png_stem,
+                        )
                     self._trace({
-                        "kind": "multi_frame_intent_detected",
-                        "matched_keywords": mf_kws,
-                        "asset_cap_raised_to": 72,
+                        "kind": "jmr_png_mode",
+                        "stem": self._jmr_png_stem,
+                        "asset_cap": JMR_PNG_MAX_SHEETS,
                     })
                 else:
-                    self._session_asset_cap = None
+                    mf_kws = _mfi(goal)
+                    if mf_kws:
+                        self._session_asset_cap = 72
+                        self._trace({
+                            "kind": "multi_frame_intent_detected",
+                            "matched_keywords": mf_kws,
+                            "asset_cap_raised_to": 72,
+                        })
+                    else:
+                        self._session_asset_cap = None
             except Exception as e:
                 # Detector is advisory; never block session start on it.
                 self._session_asset_cap = None
@@ -4639,6 +4678,7 @@ class GameAgent(
                         force_minimal_first_build=fmfb,
                         model_class=self._system_prompt_class(),
                         simulator_mode=bool(self._simulator_mode),
+                        jmr_png_mode=bool(getattr(self, "_jmr_png_mode", False)),
                         nudge_ids_out=_plan_nudge_ids,
                         **from_seed_kwargs,
                     )
@@ -4739,6 +4779,7 @@ class GameAgent(
                     goal,
                     model_class=sys_class,
                     simulator_mode=bool(self._simulator_mode),
+                    jmr_png_mode=bool(getattr(self, "_jmr_png_mode", False)),
                 )
             else:
                 sys_prompt = self._p.SYSTEM_PROMPT.replace("{goal}", goal)
@@ -4772,6 +4813,7 @@ class GameAgent(
                 ),
                 "lean_prompt": lean_active,
                 "simulator_mode": bool(getattr(self, "_simulator_mode", False)),
+                "jmr_png_mode": bool(getattr(self, "_jmr_png_mode", False)),
                 "media_pipeline": bool(self.media_pipeline_enabled()),
                 "autonomous_feedback": bool(getattr(self, "_use_autonomous_feedback", False)),
                 "step_mode": bool(getattr(self, "_step_mode", False)),
@@ -5584,9 +5626,7 @@ class GameAgent(
                     )
                 if components_block:
                     build_msg = f"{components_block}\n\n" + build_msg
-                asset_block = render_asset_paths_block(
-                    self._session_assets, self.out_path,
-                )
+                asset_block = self._render_session_asset_prompt_block()
                 sound_block = render_sound_paths_block(
                     self._session_sounds, self.out_path,
                     looping_names=self._session_looping,
@@ -5620,7 +5660,7 @@ class GameAgent(
                 if self._session_assets:
                     build_msg = (
                         build_msg + "\n\n"
-                        + self._p.generated_sprite_draw_contract()
+                        + self._session_sprite_draw_contract()
                     )
                 self._messages.append({
                     "role": "user",
@@ -5781,6 +5821,7 @@ class GameAgent(
                     current_sound_dir=cur_sound_dir,
                     has_generated_assets=bool(self._session_assets),
                     simulator_mode=bool(self._simulator_mode),
+                    jmr_png_mode=bool(getattr(self, "_jmr_png_mode", False)),
                     **pb_kwargs,
                 )
                 if opening_block:
@@ -5793,9 +5834,7 @@ class GameAgent(
                 # Component skill library (retrieved + budget-capped above).
                 if components_block:
                     build_msg = f"{components_block}\n\n" + build_msg
-                asset_block = render_asset_paths_block(
-                    self._session_assets, self.out_path,
-                )
+                asset_block = self._render_session_asset_prompt_block()
                 sound_block = render_sound_paths_block(
                     self._session_sounds, self.out_path,
                     looping_names=self._session_looping,
@@ -5831,7 +5870,7 @@ class GameAgent(
                 if self._session_assets:
                     build_msg = (
                         build_msg + "\n\n"
-                        + self._p.generated_sprite_draw_contract()
+                        + self._session_sprite_draw_contract()
                     )
                 self._messages.append({
                     "role": "user",

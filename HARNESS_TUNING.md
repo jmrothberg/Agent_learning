@@ -205,6 +205,9 @@ bullet never reaches the prompt — broaden tags if a good bullet doesn’t fire
   EXPECTED `<assets>`); LOOK + HARD_RULES_SIMULATOR ask for classic pixel maps on
   turn 1 (no fail-and-retry art gate — teach in the prompt, do not force a second pass).
   Pin playbook `classic-arcade-pixel-maps` on `/640` first build.
+  **`/640png`:** same JMR V1 640×480 / JS walls, but the art pipeline writes
+  `STEM-0.png` … `STEM-15.png` next to the HTML (`jmr:spr:N` + `window.JMR_SPR`).
+  Pin `jmr-png-sheets` instead of pixel-maps. `/games N` loads the media `prompt`.
   **Library:** every `memory/prompt_library.jsonl` entry has `prompt_640` (pixel-map /
   animated arcade goal). `/640` then `/games N` loads that variant; media mode still
   uses `prompt`. Regenerate with `scripts/gen_prompt_640_library.py` after hand-edits

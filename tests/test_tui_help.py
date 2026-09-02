@@ -27,6 +27,7 @@ def test_normalize_critique_aliases():
     assert tui_help.normalize_help_topic("play") == "critique"
     assert tui_help.normalize_help_topic("solo") == "allroles"
     assert tui_help.normalize_help_topic("sim") == "knobs"
+    assert tui_help.normalize_help_topic("640png") == "knobs"
 
 
 def test_unknown_topic_returns_none():
@@ -154,6 +155,7 @@ def test_slash_synonyms_are_wired():
     assert '"watch"' in src and '"vision"' in src
     assert '"play"' in src
     assert '"sim"' in src and '"simulator"' in src
+    assert '"640png"' in src
     assert '"solo"' in src
 
 

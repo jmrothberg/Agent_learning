@@ -637,6 +637,31 @@ HARD_RULES_SIMULATOR: list[str] = [
     "complete <html_file> then <patch>. Do not emit <assets>/<sounds>/<videos>.",
 ]
 
+# /640png — same JMR V1 walls as HARD_RULES_SIMULATOR, but Phase A emits
+# <assets> and first build paints generated STEM-N.png via jmr:spr:N.
+HARD_RULES_JMR_PNG: list[str] = [
+    "ONE file: inline HTML + CSS + JS. No CDN scripts, fetch/XHR, modules, "
+    "Workers, eval, async/await, or Audio.play.",
+    "Glass: <canvas width=\"640\" height=\"480\"> in markup. Do not reassign "
+    "canvas.width/height after load. Fill every pixel (no letterbox gutters). "
+    "HUD with canvas fillText — not innerHTML.",
+    "FIRST <html_file> paints playfield units from generated PNG sheets: "
+    "window.JMR_SPR = [\"STEM-0.png\", …] (append-only, ≤16) and "
+    "img.src = \"jmr:spr:N\" + 9-arg drawImage. Do NOT use sprite()/ASSETS, "
+    "data:image base64, or solid fillRect/arc boxes as the final look. "
+    "HUD/grid/particles may stay fillRect.",
+    "Drive frames with requestAnimationFrame. Keys: read e.key AND keyCode "
+    "(37/39/38/40/32/13). Do not steal Esc (machine BREAK).",
+    "Math: floor, abs, min, max, random, sqrt (+ Math.PI). No sin/cos/"
+    "atan2/round (shim round). No Object.keys / for…in. No negative "
+    "setTransform/scale mirror — use L/R sheets or unmirrored draw.",
+    "Reuse one mutable object per entity; no per-tick maze BFS/flood; "
+    "≤16 locals per function. Blit sprites unconditionally (no img.width).",
+    "Expose `window.state = state` and `window.game = { reset }` for probes.",
+    "Phase A: <plan>/<criteria>/<probes>/<assets> (no <sounds>/<videos>). "
+    "Phase B: complete <html_file> then <patch>. ≤16 asset names.",
+]
+
 ANTI_PATTERNS: list[str] = [
     "NEVER abbreviate code with '// ... rest unchanged ...', "
     "'// (existing code)', '<- leave original here ->', or any other "
@@ -693,6 +718,11 @@ _SIMULATOR_FORMAT_DROP = frozenset({
     "<assets>", "<sounds>", "<videos>", "<lookup_bullet>",
 })
 
+# /640png keeps <assets> (art pipeline) but still drops audio/video sidecars.
+_JMR_PNG_FORMAT_DROP = frozenset({
+    "<sounds>", "<videos>", "<lookup_bullet>",
+})
+
 # Distilled from JMR GAME_DESIGN.md + JMR_JS_COMPATIBILITY.md V1 walls.
 # Keep SHORT — local models drown if we paste the full authoring docs.
 # Do NOT maintain a second prompts_*.py; branch via simulator_mode=True.
@@ -744,6 +774,46 @@ Do NOT emit <assets>, <sounds>, or <videos>.
 </simulator-target>
 """
 
+# /640png — JMR V1 walls + generated PNG sheets (GAME_DESIGN.md naming).
+SIMULATOR_PNG_TARGET_BLOCK = """<simulator-target>
+JMR V1 native (640×480) WITH generated PNG sheets. One HTML file LOAD+RUN.
+Art programs write STEM-N.png next to the HTML (stem ≤8, ≤16 sheets).
+
+LOOK: classic arcade / original-cabinet graphics via those PNGs — NOT
+colored circles, squares, or bare fillRect placeholders as the final art.
+
+ART HOW (required):
+  - Phase A emits <assets> (name + prompt + size) for each sheet.
+  - Harness saves STEM-0.png, STEM-1.png, … next to the HTML.
+  - HTML: window.JMR_SPR = ["STEM-0.png", "STEM-1.png"] (append-only).
+  - Draw: var img = new Image(); img.src = "jmr:spr:N";
+    ctx.drawImage(img, sx,sy,sw,sh, dx,dy,dw,dh);
+  - Chrome-only <script data-host="chrome"> interceptor maps jmr:spr:N
+    to the PNG filename (copy from GENERATED PNG SHEETS block).
+  - Do NOT inline data:image base64. Do NOT use sprite() / ASSETS[key].
+  - Do NOT emit <sounds> or <videos>. Packed playSfx number arrays OK.
+
+GLASS: <canvas width="640" height="480"> — fill every pixel (no letterbox
+gutters). Do not reassign canvas.width/height after load. HUD via
+fillText on canvas — no innerHTML / CSS layout score.
+
+DRAW APIs: getContext('2d') — fillRect, clearRect, fillText, paths,
+drawImage, putImageData. No WebGL, gradients, filters, shadows.
+imageSmoothingEnabled=false. Blit unconditionally (no img.width gate).
+
+INPUT: keydown/keyup; read e.key AND keyCode (37/39/38/40/32/13). Do not
+steal Esc (machine BREAK). No CDN, fetch/XHR, modules, Workers, eval,
+async/await, Audio.play.
+
+MATH: floor abs min max random sqrt (+ Math.PI). No sin/cos/atan2/round
+(shim round as floor(x+0.5); angles via LUT). No Object.keys / for…in.
+No negative setTransform/scale mirror — L/R sheets or unmirrored draw.
+
+PERF: reuse one mutable object per entity; no per-tick maze BFS/flood;
+≤16 locals per function; hoist props out of hot loops. RAF for frames.
+</simulator-target>
+"""
+
 # Phase A when /640 — same tags as media path MINUS assets/sounds/videos.
 # PLAN_INSTRUCTION's EXPECTED <assets> block would fight simulator mode.
 PLAN_INSTRUCTION_SIMULATOR = """CRITICAL FORMAT: output ONLY <plan>, <criteria>,
@@ -780,6 +850,47 @@ No <html_file> yet. Phase B art = classic pixel maps / inline sprites
 (not bare geometric placeholders); keep sheets compact.
 """
 
+# Phase A when /640png — JMR walls + EXPECTED <assets> for STEM-N.png sheets.
+PLAN_INSTRUCTION_JMR_PNG = """CRITICAL FORMAT: output ONLY <plan>, <criteria>,
+<probes>, <assets>. No <sounds>/<videos>. No prose outside tags.
+
+<plan>
+Mechanics: <one or two sentences>
+Controls: <keys — ArrowLeft/Right/Up/Down, Space, Enter; also keyCode>
+Win/lose: <how it ends / restart>
+Visual style: <classic arcade PNG sheets named STEM-N.png; jmr:spr:N; NOT boxes>
+Risky bits: <2 to 3 care points — V1 walls, ≤16 sheets, heap, input>
+Build order: <2 to 4 steps on ONE line>
+</plan>
+
+<criteria>
+Basic:  <one assertion — e.g. canvas 640×480; player moves on ArrowLeft>
+Edge:   <one less-obvious assertion>
+Stress: <one stress / leak assertion>
+</criteria>
+
+CRITERIA-PROBE BINDING: every Basic: line MUST share a word with a probe.
+
+<probes>
+[
+  {"name": "canvas_640", "expr": "(()=>{const c=document.querySelector('canvas');return!!c&&c.width===640&&c.height===480;})()"},
+  {"name": "short-id", "expr": "<truthy JS after ~3s warmup>"},
+  {"name": "input_moves_player", "expr": "{input_moves_player_probe}"}
+]
+</probes>
+
+<assets>
+[
+  {"name": "sheet0", "prompt": "pixel-art <entity>, transparent bg", "size": "64x64"}
+]
+</assets>
+
+PROBES: include BOTH structural and ≥1 dynamic input→delta probe.
+Expose state on window (e.g. window.state). Keep exprs short; 3–5 total.
+ASSETS: one name per PNG sheet, ≤16 total. Harness writes STEM-N.png in
+declaration order (index N = jmr:spr:N). No <html_file> yet.
+"""
+
 
 def build_system_prompt(
     goal: str,
@@ -787,6 +898,7 @@ def build_system_prompt(
     formats: list[FormatSpec] | None = None,
     model_class: str = "auto",
     simulator_mode: bool = False,
+    jmr_png_mode: bool = False,
 ) -> str:
     """Assemble the system prompt from per-format specs (pi-mono style).
 
@@ -799,6 +911,9 @@ def build_system_prompt(
     `simulator_mode`: when True (`/640`, `/media off`, `AGENT_SIMULATOR=1`),
     drop <assets>/<sounds>/<videos> tags and inject SIMULATOR_TARGET_BLOCK
     (JMR V1 native 640×480 rules).
+
+    `jmr_png_mode`: when True (`/640png`), keep JMR V1 walls but KEEP
+    <assets> and inject SIMULATOR_PNG_TARGET_BLOCK (STEM-N.png / jmr:spr:N).
 
     `model_class` (Stop-Losing-To-OneShot todo #6): "mid" trims the
     <anti-patterns> block. Mid-tier models (qwen3.6:27b, gpt-oss:20b
@@ -814,6 +929,10 @@ def build_system_prompt(
     keeps the full prompt unchanged.
     """
     is_small = (model_class == "small")
+    jmr_png_mode = bool(jmr_png_mode)
+    # /640png reuses JMR V1 walls (canvas/JS/input) plus the art pipeline.
+    if jmr_png_mode:
+        simulator_mode = True
     # /640: always lean schema — drop media tags + short workflow. Full
     # "large" prompt still carries CDN/WebGL/asset guidelines that fight JMR.
     lean_schema = is_small or simulator_mode
@@ -829,7 +948,8 @@ def build_system_prompt(
             # set for size budget) via the minimal TODOS_FORMAT_SMALL —
             # todo-driven CURRENT TASK turns help small models the most.
             _SMALL_DROP = {"<lookup_bullet>"}
-            if not _detect_art_intent(goal):
+            # /640png always needs <assets> even without "sprite" in the goal.
+            if not jmr_png_mode and not _detect_art_intent(goal):
                 _SMALL_DROP.add("<assets>")
             if not _detect_audio_intent(goal):
                 _SMALL_DROP.add("<sounds>")
@@ -841,7 +961,9 @@ def build_system_prompt(
             ]
         else:
             fmts = ALL_FORMATS
-        if simulator_mode:
+        if jmr_png_mode:
+            fmts = [f for f in fmts if f.name not in _JMR_PNG_FORMAT_DROP]
+        elif simulator_mode:
             fmts = [f for f in fmts if f.name not in _SIMULATOR_FORMAT_DROP]
     else:
         fmts = formats
@@ -859,9 +981,13 @@ def build_system_prompt(
             all_guidelines.extend(f.guidelines)
     guidelines_block = _bulleted(all_guidelines)
 
-    hard_rules_block = _bulleted(
-        HARD_RULES_SIMULATOR if simulator_mode else HARD_RULES
-    )
+    if jmr_png_mode:
+        _hard = HARD_RULES_JMR_PNG
+    elif simulator_mode:
+        _hard = HARD_RULES_SIMULATOR
+    else:
+        _hard = HARD_RULES
+    hard_rules_block = _bulleted(_hard)
     anti_patterns_block = _bulleted(ANTI_PATTERNS)
     # Mid-tier trim: drop the <anti-patterns> block entirely. The
     # <hard-rules> block above already covers the highest-priority
@@ -943,11 +1069,24 @@ any plan or default behavior — address it explicitly the same turn.
 
 """
 
-    simulator_block = (
-        (SIMULATOR_TARGET_BLOCK + "\n\n") if simulator_mode else ""
-    )
+    if jmr_png_mode:
+        simulator_block = SIMULATOR_PNG_TARGET_BLOCK + "\n\n"
+    elif simulator_mode:
+        simulator_block = SIMULATOR_TARGET_BLOCK + "\n\n"
+    else:
+        simulator_block = ""
 
-    if simulator_mode:
+    if jmr_png_mode:
+        role_block = (
+            "Act as an expert arcade HTML5 engineer for a 640×480 native "
+            "machine. You ship ONE HTML file plus STEM-N.png sheets "
+            "(jmr:spr:N). Chromium verifies; hardware will LOAD+RUN the HTML."
+        )
+        objective_extra = (
+            "Target: JMR V1 640×480 with generated PNG sheets (STEM-N.png, "
+            "≤16, jmr:spr:N). No <sounds>/<videos>."
+        )
+    elif simulator_mode:
         role_block = (
             "Act as an expert arcade HTML5 engineer for a 640×480 native "
             "machine. You ship ONE self-contained file with CLASSIC pixel-art "
@@ -1745,6 +1884,7 @@ def plan_instruction(
     seed_regen_assets: bool = False,
     model_class: str = "auto",
     simulator_mode: bool = False,
+    jmr_png_mode: bool = False,
     nudge_ids_out: list[str] | None = None,
 ) -> str:
     """Phase A planning prompt, optionally prefixed with a Wikipedia
@@ -1789,11 +1929,20 @@ def plan_instruction(
     # stay byte-for-byte identical (the existing test suite still passes).
     # seed_regen_assets: still suppress free invent nudges; dedicated
     # seed_nudge below forces the declared roster instead.
-    if simulator_mode:
+    if simulator_mode and not jmr_png_mode:
         # /640: no media nudges, no CDN three.js (JMR V1 has no WebGL).
         wireframe_keywords = _detect_wireframe_vector_intent(goal)
         beat_em_up_keywords = _detect_beat_em_up_intent(goal)
         art_keywords = ()
+        threed_keywords = ()
+        audio_keywords = ()
+        video_keywords = ()
+        qte_keywords = _detect_qte_intent(goal)
+    elif jmr_png_mode:
+        # /640png: emit <assets> (art pipeline) but never sounds/videos.
+        wireframe_keywords = _detect_wireframe_vector_intent(goal)
+        beat_em_up_keywords = _detect_beat_em_up_intent(goal)
+        art_keywords = () if wireframe_keywords else _detect_art_intent(goal)
         threed_keywords = ()
         audio_keywords = ()
         video_keywords = ()
@@ -1835,7 +1984,7 @@ def plan_instruction(
     canvas_entity_keywords = ()
     canvas_entity_nudge = ""
     if (
-        not simulator_mode
+        not (simulator_mode and not jmr_png_mode)
         and not from_seed
         and not wireframe_keywords
         and not art_keywords
@@ -1849,7 +1998,7 @@ def plan_instruction(
             _record_nudge("canvas-entity-art")
 
     pinball_nudge = ""
-    if not simulator_mode and not from_seed and not wireframe_keywords:
+    if not (simulator_mode and not jmr_png_mode) and not from_seed and not wireframe_keywords:
         pinball_keywords = _detect_pinball_intent(goal)
         if pinball_keywords:
             kws = ", ".join(repr(k) for k in pinball_keywords)
@@ -1859,7 +2008,7 @@ def plan_instruction(
             _record_nudge("pinball-table")
 
     open_field_td_nudge = ""
-    if not simulator_mode and not from_seed and not wireframe_keywords:
+    if not (simulator_mode and not jmr_png_mode) and not from_seed and not wireframe_keywords:
         open_field_td_keywords = _detect_open_field_td_intent(goal)
         if open_field_td_keywords:
             kws = ", ".join(repr(k) for k in open_field_td_keywords)
@@ -1927,7 +2076,10 @@ def plan_instruction(
         )
         _record_nudge("point-and-click")
 
-    franchise_asset_nudge = "" if simulator_mode else _franchise_asset_nudge(goal)
+    franchise_asset_nudge = (
+        "" if (simulator_mode and not jmr_png_mode)
+        else _franchise_asset_nudge(goal)
+    )
 
     # Phase 4: scope-pacing nudge for art-heavy + logic-heavy goals.
     # Only fires when BOTH art (or 3D) AND heavy-logic keywords match —
@@ -1946,7 +2098,7 @@ def plan_instruction(
     multi_frame_keywords = _detect_multi_frame_intent(goal)
     scope_nudge = ""
     if (
-        not simulator_mode
+        not (simulator_mode and not jmr_png_mode)
         and heavy_logic_keywords
         and (art_keywords or threed_keywords)
     ):
@@ -1970,7 +2122,10 @@ def plan_instruction(
     # because the scope-pacing nudge above only fires when both art and
     # heavy-logic keywords match.
     multi_frame_nudge = ""
-    if multi_frame_keywords and not scope_nudge and not simulator_mode:
+    if (
+        multi_frame_keywords and not scope_nudge
+        and not simulator_mode and not jmr_png_mode
+    ):
         mf_kws = ", ".join(repr(k) for k in multi_frame_keywords)
         multi_frame_nudge = load_plan_nudge("multi-frame").replace(
             "{mf_kws}", mf_kws
@@ -2046,15 +2201,18 @@ def plan_instruction(
         _record_nudge("minimal-first-build")
 
     local_crisp_nudge = ""
-    if model_class == "small" or simulator_mode:
+    if model_class == "small" or simulator_mode or jmr_png_mode:
         local_crisp_nudge = load_plan_nudge("local-plan-crisp")
         _record_nudge("local-plan-crisp")
 
     movement_probe = input_moves_player_probe_expr(goal=goal)
-    # /640: short Phase A without EXPECTED <assets>/<sounds> (fights JMR).
-    _plan_src = (
-        PLAN_INSTRUCTION_SIMULATOR if simulator_mode else PLAN_INSTRUCTION
-    )
+    # /640png: Phase A includes <assets>. /640: no media tags.
+    if jmr_png_mode:
+        _plan_src = PLAN_INSTRUCTION_JMR_PNG
+    elif simulator_mode:
+        _plan_src = PLAN_INSTRUCTION_SIMULATOR
+    else:
+        _plan_src = PLAN_INSTRUCTION
     plan_core = _plan_src.replace("{input_moves_player_probe}", movement_probe)
 
     body = (
@@ -2301,6 +2459,23 @@ def _scrub_seed_paths(
     return _SEED_PATH_RE.sub(_sub, seed_html)
 
 
+def generated_jmr_png_draw_contract() -> str:
+    """Draw contract for /640png — jmr:spr:N, not sprite()."""
+    return (
+        "JMR PNG DRAW CONTRACT — STEM-N.png sheets were written next to "
+        "the HTML. Every entity that has a sheet MUST be drawn with "
+        "`img.src = \"jmr:spr:N\"` and `ctx.drawImage` (9-arg crop OK). "
+        "Do NOT use sprite() / ASSETS[key] / data:image. Do NOT read "
+        "img.width / .complete / onload. Include window.JMR_SPR listing "
+        "the PNG filenames (append-only) plus the chrome data-host shim. "
+        "SELF-CHECK: every listed sheet index appears in a drawImage via "
+        "jmr:spr:N in this first build.\n"
+        "Expose `window.state = state` (or `window.gameState = state`) "
+        "after init so behavioral probes can read player position, score, "
+        "and game flags."
+    )
+
+
 def generated_sprite_draw_contract() -> str:
     """Genre-free draw contract injected when session assets exist."""
     return (
@@ -2336,6 +2511,7 @@ def first_build_instruction(
     current_sound_dir: str | None = None,
     has_generated_assets: bool = False,
     simulator_mode: bool = False,
+    jmr_png_mode: bool = False,
 ) -> str:
     """First-build prompt. Includes the SEED CODE the model should start from.
 
@@ -2364,7 +2540,25 @@ def first_build_instruction(
     # its structure" against a buggy past session was actively harmful
     # (2026-05-15 user pushback: "if they could mislead, fix that").
     if not seed_source:
-        if simulator_mode:
+        if jmr_png_mode:
+            if has_generated_assets:
+                seed_framing = (
+                    "Start from the SEED CODE below — empty 640×480 scaffold "
+                    "only. KEEP canvas/RAF/input/HUD plumbing. In THIS "
+                    "<html_file>, paint playfield units from the generated "
+                    "STEM-N.png sheets via img.src=\"jmr:spr:N\" + drawImage. "
+                    "Include window.JMR_SPR + the chrome data-host shim. "
+                    "Do NOT ship solid colored squares and \"fix art later\". "
+                    "Do NOT use sprite() or data:image."
+                )
+            else:
+                seed_framing = (
+                    "Start from the SEED CODE below — empty 640×480 scaffold "
+                    "only. KEEP canvas/RAF/input/HUD. First build must declare "
+                    "window.JMR_SPR and draw with jmr:spr:N (PNG sheets). "
+                    "Do NOT use pixel maps or sprite() as the primary art."
+                )
+        elif simulator_mode:
             seed_framing = (
                 "Start from the SEED CODE below — empty 640×480 scaffold "
                 "only. KEEP canvas/RAF/input/HUD plumbing. In THIS "
@@ -2416,9 +2610,17 @@ def first_build_instruction(
         )
     asset_contract = ""
     if has_generated_assets:
-        asset_contract = (
-            generated_sprite_draw_contract() + "\n\n"
+        _contract = (
+            generated_jmr_png_draw_contract()
+            if jmr_png_mode
+            else generated_sprite_draw_contract()
         )
+        asset_contract = _contract + "\n\n"
+    canvas_example = (
+        '<canvas width="640" height="480">'
+        if (simulator_mode or jmr_png_mode)
+        else '<canvas width="800" height="500">'
+    )
     base = (
         "Plan accepted. The plan, criteria, and probes are fixed — do NOT "
         "restate requirements or re-plan.\n\n"
@@ -2442,8 +2644,8 @@ def first_build_instruction(
         # seed's canvas sizing → 300x150 browser default → black screen.
         "KEEP the seed's canvas sizing: the width/height attributes and "
         "any fit()/DPR-resize wiring must survive your rewrite (or be "
-        "replaced with equivalent explicit sizing, e.g. <canvas "
-        'width="800" height="500">). A <canvas> with no size renders at '
+        "replaced with equivalent explicit sizing, e.g. "
+        f"{canvas_example}). A <canvas> with no size renders at "
         "the useless 300x150 browser default.\n\n"
         "SEED CODE:\n"
         "```html\n"

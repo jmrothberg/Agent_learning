@@ -103,6 +103,15 @@ router + golden eval banks (`eval/golden_feedback_flows.jsonl`) exist to guard t
 `DIFFUSION_MODELS_DIR` to `.env`). Linux/CUDA: use `Z-Image-Turbo/` in the same tree or let setup
 download (~32 GB). `mflux` ships in `.venv` on Darwin via `requirements-diffuser.txt`.
 
+**Stable Audio (sounds):** put weights under
+`~/Diffusion_Models/audio/stable-audio-open-1.0` (not `~/.cache/huggingface`). Agree on
+[stabilityai/stable-audio-open-1.0](https://huggingface.co/stabilityai/stable-audio-open-1.0), then:
+```bash
+hf download stabilityai/stable-audio-open-1.0 \
+  --local-dir ~/Diffusion_Models/audio/stable-audio-open-1.0
+```
+Missing curated weights skips sound gen — chat.py will **not** auto-download into the HF cache.
+
 **Backend selection** (macOS defaults to MLX; else `auto`):
 ```bash
 MLX_MODEL=~/MLX_Models/Qwen3.6-27B-mxfp8 .venv/bin/python coder.py "snake"   # pin MLX model
@@ -248,7 +257,8 @@ Full rules and legacy `tune_runNN.sh`: **`eval/OPERATIONS.md`**.
 
 Curated wins live in **`goodgame/`**. **Play** links use **GitHub Pages** (same setup as
 [jmrothberg/Games](https://github.com/jmrothberg/Games)) — click to run in your browser, no clone,
-no GPU. Relative `*_assets/` and `*_sounds/` folders load from the same origin.
+no GPU. Game folders (`NAME/NAME.html` plus sprites next to the HTML) and older
+`*_assets/` / `*_sounds/` siblings both load from the same origin.
 
 **Launcher:** [https://jmrothberg.github.io/Agent_learning/goodgame/](https://jmrothberg.github.io/Agent_learning/goodgame/)
 
@@ -407,7 +417,7 @@ shape, not subject.
 | `memory/asset_audits.jsonl` | generated-art loader/decode/fallback audits (incl. missing-asset placeholder, chroma-key paths) |
 | `memory/animation_audits.jsonl` | motion audits (midframe, facing-flip, walk-cycle advance, action-frame reset) |
 | `memory/skeletons/` | first-build HTML templates per mechanism (`.html` + `.json` sidecar) |
-| `memory/prompt_library.jsonl` | curated `/games` prompts (`prompt` = media; `prompt_640` = JMR /640 pixel-map variant) |
+| `memory/prompt_library.jsonl` | curated `/games` prompts (`prompt` = media; `prompt_640` = JMR /640 pixel-map; `/640png` = `prompt_640` rewritten for STEM-N.png sheets — same no-three.js walls) |
 | `memory/system_battery.jsonl` | default system-test battery (committed — useful on every machine) |
 
 Grounding is fully offline: the old `/wiki` Wikipedia lookup was **removed** (2026-06-24, 0/10
@@ -429,7 +439,7 @@ loaded LLM) · `/critique [on|off]` (no-vision review, default on; aliases `/pla
 (**TUI default ON** — `local_manual`; pause after each iter) · `/games [N]` (load a curated prompt) · `/ctx N` (context window) ·
 `/assets <png|folder>` (stage your sprites for next `/new`) · `/seed <game.html>` (continue an existing game) ·
 `/ref <path>` (VLM glance only — not for copying sprites) · `/check [<N|name>]` (on-demand screenshot judge;
-legacy `/check with <model>` still works) · `/media off` / `/640` (simulator: 640×480, no sidecar media) ·
+legacy `/check with <model>` still works) · `/media off` / `/640` (simulator: 640×480, no sidecar media) · `/640png` (same JMR walls + generated `STEM-N.png` sheets, `jmr:spr:N`) ·
 `/ltx` `/wan` (pin video engine) · `/goodgame` (copy the trio into tracked `goodgame/`).
 
 `/check` is a manual command. The only auto path is `/mode local_plus_review with <model> --auto-apply`, and that still runs only when `/wait` is off.
@@ -462,7 +472,7 @@ load them with sprite('player'), sprite('invader_a'), etc.
 What happens:
 
 1. `/assets` remembers those PNGs (sticky until bare `/assets` or `/reset`).
-2. `/new` creates `games/<session>_assets/` and **copies** the files in.
+2. `/new` creates `games/<NAME>/` (8-letter name from the goal) and **copies** the files in next to the HTML.
 3. First build gets a PATHS block listing `player`, `invader_a`, … — the model should draw those keys, not regenerate them.
 
 One file works the same: `/assets ~/Art/space_invaders/player.png`.
@@ -470,7 +480,7 @@ One file works the same: `/assets ~/Art/space_invaders/player.png`.
 | Want… | Use |
 |-------|-----|
 | Brand-new game + your PNGs | `/assets` then `/new` with stems in the goal |
-| Continue an old HTML that already has `*_assets/` | `/seed games/foo.html` |
+| Continue an old HTML (legacy `*_assets/` or a `games/NAME/` folder) | `/seed games/NAME/NAME.html` |
 | Mood/palette glance for a vision model | `/ref` (not for copying sprites) |
 
 In-TUI detail: **`/help assets`**.
@@ -638,6 +648,9 @@ Asteroids regression; cosmetic sprite warnings are advisory; don't commit `games
   (`./scripts/setup.sh` or `.venv/bin/pip install -r requirements-diffuser.txt`) and put
   `FLUX2-klein-9B-mlx-8bit/` under `DIFFUSION_MODELS_DIR`. Without both, sprite gen is skipped
   (procedural draw) rather than starting a hub download.
+- **chat.py tries to download ~10 GB Stable Audio:** weights must live under
+  `~/Diffusion_Models/audio/stable-audio-open-1.0` (see install snippet above). Hub-ID / HF-cache
+  fallbacks were removed so a partial `~/.cache/huggingface` never triggers a re-download.
 - **Chromium won't launch:** `env -u PLAYWRIGHT_BROWSERS_PATH .venv/bin/python -m playwright install chromium`.
 - **MLX cold-load is slow (~30–60 s first request):** the 27B mxfp8 loads into VRAM in-process; preload with `ollama run --ctx-size N <model>` for the Ollama path.
 - **`Model type minimax_m3 not supported` after an mlx-lm upgrade:** re-copy `minimax_m3.py` from your MiniMax-M3-MLX model dir into `.venv/lib/python3.12/site-packages/mlx_lm/models/` (see **MLX upgrades — MiniMax-M3** above).

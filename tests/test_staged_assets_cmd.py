@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -39,6 +40,12 @@ def test_ref_help_points_to_assets_not_copy() -> None:
     text = "\n".join(tui_help.help_topic_lines("ref") or []).lower()
     assert "not" in text and ("sprite" in text or "copy" in text)
     assert "/assets" in text
+
+
+def test_ref_uses_list_vlm_classifier_not_bool_none() -> None:
+    src = inspect.getsource(CodingBoxApp._cmd_attach_ref_image)
+    assert "classify_model_modality" in src
+    assert "latched" in src
 
 
 def test_cmd_stage_assets_file_and_folder(tmp_path: Path) -> None:

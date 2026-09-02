@@ -230,25 +230,25 @@ def test_cache_same_name_different_prompts_coexist_sounds(tmp_path):
     assert files[0] != files[1]
 
 
-def test_resolve_stable_audio_uses_hf_cache(tmp_path: Path, monkeypatch) -> None:
-    """Second Mac: Stable Audio often lives only under ~/.cache/huggingface/hub."""
+def test_resolve_stable_audio_uses_curated_dir(tmp_path: Path, monkeypatch) -> None:
+    """Weights must live under curated dirs — never hub ID / HF cache."""
     import os
 
-    fake_home = tmp_path / "home"
-    snap = (
-        fake_home
-        / ".cache"
-        / "huggingface"
-        / "hub"
-        / "models--stabilityai--stable-audio-open-1.0"
-        / "snapshots"
-        / "deadbeef"
-    )
-    snap.mkdir(parents=True)
-    (snap / "model_index.json").write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(os.path, "expanduser", lambda *_: str(fake_home))
+    audio_root = tmp_path / "Diffusion_Models" / "audio" / "stable-audio-open-1.0"
+    audio_root.mkdir(parents=True)
+    (audio_root / "model_index.json").write_text("{}", encoding="utf-8")
     monkeypatch.delenv("AUDIO_MODELS_DIR", raising=False)
     monkeypatch.delenv("DIFFUSION_MODELS_DIR", raising=False)
-    monkeypatch.setattr(sounds, "_MODEL_SEARCH_DIRS", [])
-    assert sounds._resolve_stable_audio_path() == str(snap)
+    monkeypatch.setattr(
+        sounds, "_MODEL_SEARCH_DIRS", [str(tmp_path / "Diffusion_Models")]
+    )
+    assert sounds._resolve_stable_audio_path() == str(audio_root)
+
+
+def test_resolve_stable_audio_no_hub_id_fallback(tmp_path: Path, monkeypatch) -> None:
+    """Missing curated weights → None (skip), never a hub ID download."""
+    monkeypatch.delenv("AUDIO_MODELS_DIR", raising=False)
+    monkeypatch.delenv("DIFFUSION_MODELS_DIR", raising=False)
+    monkeypatch.setattr(sounds, "_MODEL_SEARCH_DIRS", [str(tmp_path / "empty")])
+    assert sounds._resolve_stable_audio_path() is None
 

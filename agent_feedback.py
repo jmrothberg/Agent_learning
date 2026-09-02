@@ -3005,8 +3005,10 @@ class FeedbackRoutingMixin:
                     lines.extend([
                         "",
                         "Path conventions (the harness sets these for you):",
-                        "  - Sprites land in `./<session>_assets/<name>.png`.",
-                        "  - Sounds land in `./<session>_sounds/<name>.ogg`.",
+                        "  - Sprites land next to the HTML as `./<name>.png`",
+                        "    (older seeds may use `./<session>_assets/<name>.png`).",
+                        "  - Sounds land next to the HTML as `./<name>.ogg`",
+                        "    (older seeds may use `./<session>_sounds/<name>.ogg`).",
                         "Reference the names you emit; the next user turn",
                         "will surface the exact relative paths.",
                         "===================================================================",
