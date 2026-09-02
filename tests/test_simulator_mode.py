@@ -237,6 +237,7 @@ def test_jmr_png_system_prompt_keeps_assets_drops_sounds():
     assert "jmr:spr" in sp
     assert "STEM-N.png" in sp or "STEM-0.png" in sp
     assert "Object.keys" in sp
+    assert "quoted literal" in sp.lower() or "dest x,y" in sp.lower()
     assert "640" in sp
     assert "Phaser, three.js" not in sp
 

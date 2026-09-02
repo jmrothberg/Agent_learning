@@ -91,6 +91,7 @@ def test_640png_uses_jmr_prompt_not_media_threejs():
     assert "using three.js from cdn" not in png
     assert "target=/640png" in png
     assert "jmr:spr" in png
+    assert "quoted literal" in png or "not \"jmr:spr:\"+i" in png or "dest x,y>=0" in png
     assert "<assets>" in png or "emit <assets>" in png
     assert "webglrenderer" not in png
     # Minecraft media also pushes three.js — 640png must not.

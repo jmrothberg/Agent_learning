@@ -31,8 +31,10 @@ _TARGET_640PNG = (
     "no WebGL, no three.js. Emit <assets> (≤16 names) for STEM-N.png sheets; "
     "paint with img.src=\"jmr:spr:N\" + drawImage — not sprite()/ASSETS, not "
     "fillRect-as-sprite placeholders, not solid colored boxes for playfield "
-    "units. Do NOT emit <sounds> or <videos>. imageSmoothingEnabled=false. "
-    "HUD via canvas fillText."
+    "units. src must be a quoted literal (not \"jmr:spr:\"+i). Dest x,y>=0 "
+    "(crop dest AND source if off-glass). No 1px drawImage columns, no "
+    "full-glass black wipe then splash. Do NOT emit <sounds> or <videos>. "
+    "imageSmoothingEnabled=false. HUD via canvas fillText."
 )
 
 

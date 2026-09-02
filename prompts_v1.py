@@ -659,6 +659,12 @@ HARD_RULES_JMR_PNG: list[str] = [
     "≤16 locals per function (params + every var in THAT function). Split "
     "helpers — a 17th local skips mint and RUN is ?NH. Blit sprites "
     "unconditionally (no img.width).",
+    "FPGA vs PYTHON/Chrome: img.src MUST be a quoted literal "
+    "\"jmr:spr:0\" (not \"jmr:spr:\" + i — FPGA dihit=0). drawImage dest "
+    "x,y >= 0: crop dest AND source (9-arg) if a sprite hangs off the "
+    "glass. Never 1-pixel drawImage columns or hundreds of tiny "
+    "fillRects/frame. Never fillRect the whole 640x480 black then blit "
+    "a splash (HDMI shows the wipe). Board ~417k clocks at 30fps.",
     "Mint walls (card-create CompileError → ?NH): no Float32Array/"
     "Uint32Array/Int32Array (ordinary arrays, length ≤128 — split a 640 "
     "z-buffer into 5×128). No new (expr)() — only new Image() / new Name()."
@@ -828,6 +834,13 @@ No negative setTransform/scale mirror — L/R sheets or unmirrored draw.
 
 PERF: reuse one mutable object per entity; no per-tick maze BFS/flood;
 ≤16 locals per function; hoist props out of hot loops. RAF for frames.
+Never 1-pixel drawImage columns or hundreds of tiny fillRects per frame
+(board ~417k clk / 30fps). Never fillRect(0,0,640,480) black then blit
+a splash — HDMI shows that wipe.
+
+FPGA DRAW (PYTHON/Chrome will hide these): img.src is a quoted literal
+"jmr:spr:0" not "jmr:spr:"+i. drawImage dest x,y >= 0 — crop dest AND
+source (9-arg) when a billboard hangs off the glass.
 </simulator-target>
 """
 
@@ -876,7 +889,7 @@ Mechanics: <one or two sentences>
 Controls: <keys — ArrowLeft/Right/Up/Down, Space, Enter; also keyCode>
 Win/lose: <how it ends / restart>
 Visual style: <classic arcade PNG sheets named STEM-N.png; jmr:spr:N; NOT boxes>
-Risky bits: <2 to 3 care points — 16 locals, array cap 128, no typed arrays>
+Risky bits: <2 to 3 care points — 16 locals, jmr:spr literals, dest on-glass, no 1px columns>
 Build order: <2 to 4 steps on ONE line>
 </plan>
 
@@ -2481,9 +2494,11 @@ def generated_jmr_png_draw_contract() -> str:
     return (
         "JMR PNG DRAW CONTRACT — STEM-N.png sheets were written next to "
         "the HTML. Every entity that has a sheet MUST be drawn with "
-        "`img.src = \"jmr:spr:N\"` and `ctx.drawImage` (9-arg crop OK). "
-        "Do NOT use sprite() / ASSETS[key] / data:image. Do NOT read "
-        "img.width / .complete / onload. Include window.JMR_SPR listing "
+        "`img.src = \"jmr:spr:N\"` (quoted literal per N, not "
+        "\"jmr:spr:\"+i) and `ctx.drawImage` (9-arg: dest x,y>=0; crop "
+        "dest AND source if off-glass). Do NOT use sprite() / ASSETS[key] / "
+        "data:image. Do NOT read img.width / .complete / onload. Include "
+        "window.JMR_SPR listing "
         "ONLY STEM-N.png (never the <assets> names) plus the chrome shim. "
         "SELF-CHECK: every listed sheet index appears in a drawImage via "
         "jmr:spr:N in this first build.\n"
@@ -2563,7 +2578,8 @@ def first_build_instruction(
                     "Start from the SEED CODE below — empty 640×480 scaffold "
                     "only. KEEP canvas/RAF/input/HUD plumbing. In THIS "
                     "<html_file>, paint playfield units from the generated "
-                    "STEM-N.png sheets via img.src=\"jmr:spr:N\" + drawImage. "
+                    "STEM-N.png sheets via literal img.src=\"jmr:spr:N\" "
+                    "(not concat) + drawImage with dest on-glass. "
                     "Include window.JMR_SPR + the chrome data-host shim. "
                     "Do NOT ship solid colored squares and \"fix art later\". "
                     "Do NOT use sprite() or data:image."

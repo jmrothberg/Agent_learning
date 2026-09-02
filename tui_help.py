@@ -508,7 +508,7 @@ _HELP_TOPICS: dict[str, list[str]] = {
         "",
         "[b]/media on|off[/b]  Full art/audio/video pipeline vs simulator. Default [b]on[/b].",
         "  [b]/640[/b] [b]/sim[/b] [b]/simulator[/b] = [b]/media off[/b]: 640×480 native canvas, no sidecar sprites/sounds/videos.",
-        "  [b]/640png[/b]: same JMR V1 640×480 walls, but the art programs write [b]STEM-0.png[/b], [b]STEM-1.png[/b], … (≤16, stem ≤8) next to the HTML. Game code uses [b]window.JMR_SPR[/b] and [b]img.src = \"jmr:spr:N\"[/b] (not sprite()).",
+        "  [b]/640png[/b]: same JMR V1 640×480 walls, but the art programs write [b]STEM-0.png[/b], [b]STEM-1.png[/b], … (≤16, stem ≤8) next to the HTML. Game code uses [b]window.JMR_SPR[/b] and literal [b]img.src = \"jmr:spr:N\"[/b] (not concat, not sprite()). Dest on-glass (crop dest+source if off-screen). No 1px [b]drawImage[/b] columns; no full-glass black wipe before a splash.",
         "  Env [b]AGENT_SIMULATOR=1[/b] starts the TUI in simulator mode. [b]AGENT_JMR_PNG=1[/b] starts in /640png. Takes effect on next [b]/new[/b].",
         "  Contrast [b]/help media[/b] — that page is about redrawing one existing asset.",
         "",
