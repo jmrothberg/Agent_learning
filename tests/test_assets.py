@@ -535,7 +535,10 @@ def test_ensure_jmr_spr_shim_inserts_and_refreshes():
     out2 = ensure_jmr_spr_shim(out, ["GAME-0.png", "GAME-1.png", "GAME-2.png"])
     assert "GAME-2.png" in out2
     assert out2.count('data-host="chrome"') == 1
-    assert out2.count("<script") == 2
+    # chrome interceptor + blitSpr helper + original game script
+    assert out2.count("<script") == 3
+    assert "function blitSpr" in out2
+    assert 'S0.src = "jmr:spr:0"' in out2
 
 
 def test_ensure_jmr_spr_shim_injects_when_list_only_no_interceptor():
@@ -578,6 +581,58 @@ def test_render_jmr_png_paths_block_teaches_handles(tmp_path: Path):
     assert "not sprite()" in block.lower() or "not sprite()" in block
     assert "JMR_SPR" in block
     assert "drawImage" in block
+    assert "blitSpr" in block
+
+
+def test_jmr_atlas_group_key_strips_pose_suffix():
+    from assets import jmr_atlas_group_key
+    assert jmr_atlas_group_key("hero_idle") == "hero"
+    assert jmr_atlas_group_key("hero_walk1") == "hero"
+    assert jmr_atlas_group_key("creep") == "creep"
+    assert jmr_atlas_group_key("left_fighter_idle") == "left_fighter"
+
+
+def test_materialize_jmr_png_packs_related_poses(tmp_path: Path):
+    """hero_idle + hero_walk1 → one STEM-0.png strip; creep stays STEM-1."""
+    from PIL import Image
+    from assets import materialize_jmr_png_sheets, jmr_atlas_layout
+    idle = tmp_path / "hero_idle.png"
+    walk = tmp_path / "hero_walk1.png"
+    creep = tmp_path / "creep.png"
+    Image.new("RGBA", (16, 16), (255, 0, 0, 255)).save(idle)
+    Image.new("RGBA", (16, 16), (0, 255, 0, 255)).save(walk)
+    Image.new("RGBA", (8, 8), (0, 0, 255, 255)).save(creep)
+    out = materialize_jmr_png_sheets(
+        {"hero_idle": idle, "hero_walk1": walk, "creep": creep},
+        tmp_path, "GAME",
+    )
+    assert out["hero_idle"].name == "GAME-0.png"
+    assert out["hero_walk1"].name == "GAME-0.png"
+    assert out["hero_idle"] == out["hero_walk1"]
+    assert out["creep"].name == "GAME-1.png"
+    sheet = Image.open(tmp_path / "GAME-0.png")
+    assert sheet.size == (32, 16)
+    layout = jmr_atlas_layout(out, "GAME")
+    assert layout[0]["names"] == ["hero_idle", "hero_walk1"]
+    assert layout[0]["cell_w"] == 16
+    assert layout[1]["names"] == ["creep"]
+
+
+def test_materialize_jmr_png_already_packed_is_idempotent(tmp_path: Path):
+    from PIL import Image
+    from assets import materialize_jmr_png_sheets
+    idle = tmp_path / "hero_idle.png"
+    walk = tmp_path / "hero_walk1.png"
+    Image.new("RGBA", (16, 16), (255, 0, 0, 255)).save(idle)
+    Image.new("RGBA", (16, 16), (0, 255, 0, 255)).save(walk)
+    first = materialize_jmr_png_sheets(
+        {"hero_idle": idle, "hero_walk1": walk}, tmp_path, "GAME",
+    )
+    w0, h0 = Image.open(first["hero_idle"]).size
+    second = materialize_jmr_png_sheets(first, tmp_path, "GAME")
+    w1, h1 = Image.open(second["hero_idle"]).size
+    assert (w0, h0) == (w1, h1) == (32, 16)
+    assert second["hero_idle"] == second["hero_walk1"]
 
 
 def test_render_block_empty_input_returns_empty():

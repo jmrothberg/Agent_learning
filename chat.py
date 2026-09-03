@@ -3671,7 +3671,7 @@ class CodingBoxApp(App):
             "  [b]/leanprompt [on|off|auto][/b]  compact system prompt · default auto (lean for local backends)",
             "  [b]/media [on|off][/b]            full pipeline vs simulator · default on · [b]/640[/b] / [b]/sim[/b] = off · [b]/640png[/b] = JMR + PNG sheets",
             "                                  [dim]simulator: 640×480 native canvas, no sidecar sprites/sounds/videos[/dim]",
-            "                                  [dim]/640png: same JMR walls, art pipeline writes STEM-0.png … (≤16, jmr:spr:N)[/dim]",
+            "                                  [dim]/640png: same JMR walls, packed STEM-N.png strips (≤16, blitSpr / 9-arg crop)[/dim]",
             "  [b]/ltx[/b] / [b]/wan[/b]              pin video engine (sticky) · [dim]/help videos[/dim]",
             "  [b]/mode <local_manual|local_auto|local_plus_review with <model> [--auto-apply]|custom>[/b]",
             "                                  run contract preset · default [b]local_manual[/b] (= /wait on)",
@@ -6719,8 +6719,8 @@ class CodingBoxApp(App):
             self._simulator_mode = True
             self._jmr_png_mode = True
             label = (
-                "/640png — JMR V1 640×480 + generated STEM-N.png sheets "
-                "(jmr:spr:N, ≤16)"
+                "/640png — JMR V1 640×480 + packed STEM-N.png atlases "
+                "(jmr:spr:N, blitSpr, ≤16 sheets)"
             )
         else:
             self._log_info(

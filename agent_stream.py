@@ -1694,13 +1694,15 @@ class StreamMaterializeMixin:
         if not paths:
             return html
         try:
-            from assets import ensure_jmr_spr_shim, jmr_png_filenames, jmr_title_stem
-            # Always STEM-N.png — never the generate names (floor_tile.png).
+            from assets import ensure_jmr_spr_shim, jmr_atlas_layout, jmr_title_stem
+            # Unique packed sheets — not one filename per pose name.
             stem = getattr(self, "_jmr_png_stem", "") or jmr_title_stem(
                 getattr(self, "_goal", "") or "GAME"
             )
-            png_names = jmr_png_filenames(stem, len(paths))
-            return ensure_jmr_spr_shim(html, png_names)
+            layout = jmr_atlas_layout(paths, stem)
+            png_names = [sh["file"] for sh in layout]
+            cells = [(int(sh["cell_w"]), int(sh["cell_h"])) for sh in layout]
+            return ensure_jmr_spr_shim(html, png_names, cells=cells)
         except Exception:
             return html
 

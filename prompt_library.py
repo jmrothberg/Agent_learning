@@ -28,8 +28,9 @@ _REL = Path("memory") / "prompt_library.jsonl"
 _TARGET_640_RE = re.compile(r"TARGET=/640\b.*$", re.S)
 _TARGET_640PNG = (
     "TARGET=/640png JMR native: ONE 640×480 HTML file. No CDN, no fetch, "
-    "no WebGL, no three.js. Emit <assets> (≤16 names) for STEM-N.png sheets; "
-    "paint with img.src=\"jmr:spr:N\" + drawImage — not sprite()/ASSETS, not "
+    "no WebGL, no three.js. Emit <assets> (one name per pose; harness packs "
+    "related frames onto STEM-N.png strips, ≤16 sheets); paint with "
+    "img.src=\"jmr:spr:N\" + 9-arg crop / blitSpr — not sprite()/ASSETS, not "
     "fillRect-as-sprite placeholders, not solid colored boxes for playfield "
     "units. src must be a quoted literal (not \"jmr:spr:\"+i). Dest x,y>=0 "
     "(crop dest AND source if off-glass). No 1px drawImage columns, no "

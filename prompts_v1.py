@@ -645,11 +645,11 @@ HARD_RULES_JMR_PNG: list[str] = [
     "Glass: <canvas width=\"640\" height=\"480\"> in markup. Do not reassign "
     "canvas.width/height after load. Fill every pixel (no letterbox gutters). "
     "HUD with canvas fillText — not innerHTML.",
-    "FIRST <html_file> paints playfield units from generated PNG sheets: "
-    "window.JMR_SPR = [\"STEM-0.png\", …] (append-only, ≤16) and "
-    "img.src = \"jmr:spr:N\" + 9-arg drawImage. Do NOT use sprite()/ASSETS, "
-    "data:image base64, or solid fillRect/arc boxes as the final look. "
-    "HUD/grid/particles may stay fillRect.",
+    "FIRST <html_file> paints playfield units from packed STEM-N.png "
+    "atlases (related poses on one strip): window.JMR_SPR append-only ≤16 "
+    "and literal img.src = \"jmr:spr:N\" + 9-arg crop (blitSpr). Do NOT "
+    "use sprite()/ASSETS, data:image base64, or solid fillRect/arc boxes "
+    "as the final look. HUD/grid/particles may stay fillRect.",
     "Drive frames with requestAnimationFrame. Keys: read e.key AND keyCode "
     "(37/39/38/40/32/13). Do not steal Esc (machine BREAK).",
     "Math: floor, abs, min, max, random, sqrt (+ Math.PI). No sin/cos/"
@@ -795,17 +795,19 @@ Do NOT emit <assets>, <sounds>, or <videos>.
 SIMULATOR_PNG_TARGET_BLOCK = """<simulator-target>
 JMR V1 native (640×480) WITH generated PNG sheets. One HTML file LOAD+RUN.
 Art programs write STEM-N.png next to the HTML (stem ≤8, ≤16 sheets).
+Related poses (hero_idle, hero_walk1) pack onto ONE strip.
 
 LOOK: classic arcade / original-cabinet graphics via those PNGs — NOT
 colored circles, squares, or bare fillRect placeholders as the final art.
 
 ART HOW (required):
-  - Phase A emits <assets> (name + prompt + size) for each sheet.
-  - Harness saves STEM-0.png, STEM-1.png, … next to the HTML.
+  - Phase A emits <assets> one name per pose (hero_idle, hero_walk1).
+  - Harness packs a shared prefix onto STEM-N.png (horizontal cells).
   - HTML: window.JMR_SPR = ["STEM-0.png", "STEM-1.png"] ONLY (append-only).
     Never list the <assets> names (floor_tile.png etc.) in JMR_SPR or src.
-  - Draw: var img = new Image(); img.src = "jmr:spr:N";
-    ctx.drawImage(img, sx,sy,sw,sh, dx,dy,dw,dh);
+  - Draw: var S0 = new Image(); S0.src = "jmr:spr:0";
+    blitSpr(ctx, S0, frameIndex, cellW, cellH, x, y);
+    (9-arg crop: sx = frameIndex * cellW). Do NOT invent sx.
   - Chrome-only <script data-host="chrome"> interceptor maps jmr:spr:N
     to the PNG filename (copy from GENERATED PNG SHEETS block).
   - Do NOT inline data:image base64. Do NOT use sprite() / ASSETS[key].
@@ -917,8 +919,9 @@ CRITERIA-PROBE BINDING: every Basic: line MUST share a word with a probe.
 
 PROBES: include BOTH structural and ≥1 dynamic input→delta probe.
 Expose state on window (e.g. window.state). Keep exprs short; 3–5 total.
-ASSETS: one name per PNG sheet, ≤16 total. Harness writes STEM-N.png in
-declaration order (index N = jmr:spr:N). No <html_file> yet.
+ASSETS: one name per pose (hero_idle, hero_walk1). Shared prefix packs
+onto ONE STEM-N.png strip. ≤48 poses, ≤16 sheets. Index N = jmr:spr:N.
+No <html_file> yet.
 """
 
 
@@ -2492,13 +2495,13 @@ def _scrub_seed_paths(
 def generated_jmr_png_draw_contract() -> str:
     """Draw contract for /640png — jmr:spr:N, not sprite()."""
     return (
-        "JMR PNG DRAW CONTRACT — STEM-N.png sheets were written next to "
-        "the HTML. Every entity that has a sheet MUST be drawn with "
-        "`img.src = \"jmr:spr:N\"` (quoted literal per N, not "
-        "\"jmr:spr:\"+i) and `ctx.drawImage` (9-arg: dest x,y>=0; crop "
-        "dest AND source if off-glass). Do NOT use sprite() / ASSETS[key] / "
-        "data:image. Do NOT read img.width / .complete / onload. Include "
-        "window.JMR_SPR listing "
+        "JMR PNG DRAW CONTRACT — packed STEM-N.png atlases were written "
+        "next to the HTML. Crop with 9-arg drawImage / blitSpr (sx = "
+        "frameIndex * cellW). Every entity MUST use "
+        "`S0.src = \"jmr:spr:N\"` (quoted literal per N, not "
+        "\"jmr:spr:\"+i). Dest x,y>=0; crop dest AND source if off-glass. "
+        "Do NOT use sprite() / ASSETS[key] / data:image. Do NOT read "
+        "img.width / .complete / onload. Include window.JMR_SPR listing "
         "ONLY STEM-N.png (never the <assets> names) plus the chrome shim. "
         "SELF-CHECK: every listed sheet index appears in a drawImage via "
         "jmr:spr:N in this first build.\n"
@@ -2578,8 +2581,8 @@ def first_build_instruction(
                     "Start from the SEED CODE below — empty 640×480 scaffold "
                     "only. KEEP canvas/RAF/input/HUD plumbing. In THIS "
                     "<html_file>, paint playfield units from the generated "
-                    "STEM-N.png sheets via literal img.src=\"jmr:spr:N\" "
-                    "(not concat) + drawImage with dest on-glass. "
+                    "packed STEM-N.png atlases via literal img.src=\"jmr:spr:N\" "
+                    "(not concat) + blitSpr / 9-arg crop, dest on-glass. "
                     "Include window.JMR_SPR + the chrome data-host shim. "
                     "Do NOT ship solid colored squares and \"fix art later\". "
                     "Do NOT use sprite() or data:image."

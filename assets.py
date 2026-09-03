@@ -200,6 +200,8 @@ _HF_IMG2IMG_FALLBACK_MODEL_ID = "stabilityai/sd-turbo"
 _MAX_ASSETS_PER_TURN = 24
 # JMR V1 ASET wall (GAME_DESIGN.md): at most 16 sheets per title.
 JMR_PNG_MAX_SHEETS = 16
+# Pose PNGs we may generate; packer emits ≤ JMR_PNG_MAX_SHEETS strips.
+JMR_PNG_MAX_FRAMES = 48
 
 def _strip_thinking(reply: str) -> str:
     """Drop everything up to and including the LAST `</think>` tag.
@@ -2879,30 +2881,177 @@ def jmr_png_filenames(stem: str, count: int) -> list[str]:
     return [f"{s}-{i}.png" for i in range(n)]
 
 
+# Shared prefix for related poses (hero_idle + hero_walk1 → one strip).
+_ATLAS_POSE_RE = re.compile(
+    r"_(?:idle|walk\d*|run\d*|jump\d*|attack|atk|fire|hurt|hit|"
+    r"death|die|explode|turn|left|right|up|down|"
+    r"n|s|e|w|ne|nw|se|sw|frame\d+|f\d+|\d+)$",
+    re.I,
+)
+
+
+def jmr_atlas_group_key(name: str) -> str:
+    """hero_idle / hero_walk1 → hero; a lone 'creep' stays 'creep'."""
+    raw = (name or "").strip()
+    if not raw:
+        return raw
+    m = _ATLAS_POSE_RE.search(raw)
+    if m:
+        return raw[: m.start()] or raw
+    return raw
+
+
+def jmr_atlas_groups(names: list[str]) -> list[tuple[str, list[str]]]:
+    """Declaration-order groups — one STEM-N.png sheet per group."""
+    buckets: dict[str, list[str]] = {}
+    order: list[str] = []
+    for name in names:
+        key = jmr_atlas_group_key(name)
+        if key not in buckets:
+            buckets[key] = []
+            order.append(key)
+        buckets[key].append(name)
+    return [(k, buckets[k]) for k in order]
+
+
+def _png_wh(path: Path) -> tuple[int, int]:
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            return im.size
+    except Exception:
+        return (64, 64)
+
+
+def _pack_jmr_atlas(src_paths: list[Path], dest: Path) -> tuple[int, int]:
+    """Horizontal strip of related frames. Returns (cell_w, cell_h)."""
+    from PIL import Image
+    frames = [Image.open(p).convert("RGBA") for p in src_paths]
+    cw = max(im.size[0] for im in frames)
+    ch = max(im.size[1] for im in frames)
+    sheet = Image.new("RGBA", (cw * len(frames), ch), (0, 0, 0, 0))
+    for i, im in enumerate(frames):
+        x = i * cw + (cw - im.size[0]) // 2
+        y = (ch - im.size[1]) // 2
+        sheet.paste(im, (x, y), im)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    sheet.save(dest, "PNG")
+    for im in frames:
+        try:
+            im.close()
+        except Exception:
+            pass
+    return cw, ch
+
+
+def jmr_atlas_layout(
+    asset_paths: dict[str, Path],
+    stem: str,
+) -> list[dict]:
+    """Sheets in first-seen dest order: file, names, cell_w, cell_h."""
+    if not asset_paths:
+        return []
+    s = jmr_title_stem(stem)
+    seen: dict[str, dict] = {}
+    order: list[str] = []
+    for name, path in asset_paths.items():
+        p = Path(path)
+        try:
+            key = str(p.resolve())
+        except Exception:
+            key = str(p)
+        if key not in seen:
+            seen[key] = {"path": p, "names": []}
+            order.append(key)
+        seen[key]["names"].append(name)
+    out: list[dict] = []
+    for i, key in enumerate(order):
+        if i >= JMR_PNG_MAX_SHEETS:
+            break
+        rec = seen[key]
+        names = rec["names"]
+        n = max(1, len(names))
+        w, h = _png_wh(rec["path"])
+        cw = max(1, w // n)
+        ch = max(1, h)
+        fname = rec["path"].name
+        if not re.match(r"^[A-Za-z0-9]{1,8}-\d+\.png$", fname, re.I):
+            fname = f"{s}-{i}.png"
+        out.append({
+            "file": fname,
+            "names": names,
+            "cell_w": cw,
+            "cell_h": ch,
+        })
+    return out
+
+
 def materialize_jmr_png_sheets(
     asset_paths: dict[str, Path],
     html_dir: Path | str,
     stem: str,
 ) -> dict[str, Path]:
-    """Copy generated PNGs next to the HTML as STEM-0.png, STEM-1.png, …
+    """Pack related poses onto STEM-N.png strips next to the HTML.
 
-    Keeps original <assets> name keys (player → STEM-0.png) so the prompt
-    can show both the model's name and the jmr:spr:N index. Caps at 16.
+    Groups by pose suffix (hero_idle + hero_walk1 → one sheet). Unrelated
+    names stay one sheet each. Keys stay the <assets> names so the prompt
+    can show both the generate name and jmr:spr:N. Caps at 16 sheets.
     """
     if not asset_paths:
         return {}
     html_dir = Path(html_dir)
     html_dir.mkdir(parents=True, exist_ok=True)
     s = jmr_title_stem(stem)
+    groups = jmr_atlas_groups(list(asset_paths.keys()))
     out: dict[str, Path] = {}
-    for i, (name, src) in enumerate(asset_paths.items()):
-        if i >= JMR_PNG_MAX_SHEETS:
+    sheet_i = 0
+    for _key, names in groups:
+        if sheet_i >= JMR_PNG_MAX_SHEETS:
             break
-        dest = html_dir / f"{s}-{i}.png"
-        src_p = Path(src)
-        if src_p.resolve() != dest.resolve():
-            _link_or_copy(src_p, dest)
-        out[name] = dest.resolve()
+        dest = html_dir / f"{s}-{sheet_i}.png"
+        members = [(n, Path(asset_paths[n])) for n in names if n in asset_paths]
+        if not members:
+            continue
+        srcs: list[Path] = []
+        seen_src: set[str] = set()
+        for _n, src in members:
+            try:
+                rk = str(src.resolve())
+            except Exception:
+                rk = str(src)
+            if rk not in seen_src:
+                seen_src.add(rk)
+                srcs.append(src)
+        try:
+            dest_r = dest.resolve()
+        except Exception:
+            dest_r = dest
+        if len(srcs) == 1:
+            src0 = srcs[0]
+            try:
+                same = src0.resolve() == dest_r
+            except Exception:
+                same = False
+            if not same:
+                _link_or_copy(src0, dest)
+        else:
+            existing = [p for p in srcs if p.exists()]
+            if len(existing) >= 2:
+                try:
+                    _pack_jmr_atlas(existing, dest)
+                except Exception:
+                    _link_or_copy(existing[0], dest)
+            elif existing:
+                try:
+                    same = existing[0].resolve() == dest_r
+                except Exception:
+                    same = False
+                if not same:
+                    _link_or_copy(existing[0], dest)
+        resolved = dest.resolve() if dest.exists() else dest
+        for n, _src in members:
+            out[n] = resolved
+        sheet_i += 1
     return out
 
 
@@ -2951,8 +3100,66 @@ _JMR_SRC_INTERCEPTOR_RE = re.compile(
     re.I,
 )
 
+# Game-script helper (NOT data-host=chrome) — 9-arg crop from a packed strip.
+_JMR_BLIT_SCRIPT_RE = re.compile(
+    r"<script>\s*// JMR atlas helper[\s\S]*?</script>\s*",
+    re.I,
+)
 
-def ensure_jmr_spr_shim(html: str, png_names: list[str]) -> str:
+
+def _jmr_blit_helper_html(
+    png_names: list[str],
+    cells: list[tuple[int, int]] | None = None,
+) -> str:
+    """Pre-bound S0..Sn (literal jmr:spr:N) + blitSpr 9-arg crop."""
+    lines = [
+        "<script>",
+        "// JMR atlas helper — 9-arg crop; src literals only (no concat).",
+    ]
+    if cells and len(cells) == len(png_names):
+        inner = ", ".join(f"[{int(w)},{int(h)}]" for w, h in cells)
+        lines.append(f"window.JMR_CELL = [{inner}];")
+    for i in range(len(png_names)):
+        lines.append(f'var S{i} = new Image(); S{i}.src = "jmr:spr:{i}";')
+    lines.append(
+        "function blitSpr(c, img, fi, cw, ch, dx, dy) {"
+        " c.drawImage(img, fi * cw, 0, cw, ch, dx, dy, cw, ch); }"
+    )
+    lines.append("</script>")
+    return "\n".join(lines) + "\n"
+
+
+def _ensure_jmr_blit_helper(
+    html: str,
+    png_names: list[str],
+    cells: list[tuple[int, int]] | None = None,
+) -> str:
+    if not html or not png_names:
+        return html
+    block = _jmr_blit_helper_html(png_names, cells)
+    if _JMR_BLIT_SCRIPT_RE.search(html):
+        return _JMR_BLIT_SCRIPT_RE.sub(block, html, count=1)
+    chrome_end = None
+    for m in re.finditer(r"<script([^>]*)>[\s\S]*?</script>", html, re.I):
+        attrs = m.group(1) or ""
+        if re.search(r'data-host\s*=\s*["\']chrome["\']', attrs, re.I):
+            chrome_end = m.end()
+    if chrome_end is not None:
+        return html[:chrome_end] + "\n" + block + html[chrome_end:]
+    for m in re.finditer(r"<script([^>]*)>", html, re.I):
+        attrs = m.group(1) or ""
+        if re.search(r'data-host\s*=\s*["\']chrome["\']', attrs, re.I):
+            continue
+        return html[: m.start()] + block + html[m.start():]
+    return html
+
+
+def ensure_jmr_spr_shim(
+    html: str,
+    png_names: list[str],
+    *,
+    cells: list[tuple[int, int]] | None = None,
+) -> str:
     """Insert or refresh window.JMR_SPR + Chrome src interceptor.
 
     Does not raise — returns html unchanged when there is no <script> to
@@ -2961,6 +3168,9 @@ def ensure_jmr_spr_shim(html: str, png_names: list[str]) -> str:
     Critical: if the model already wrote window.JMR_SPR = [...] but omitted
     the src interceptor (common under /640png), still inject the shim —
     list-only HTML leaves jmr:spr:N as a dead custom URL.
+
+    Also injects blitSpr + S0..Sn (game script, not chrome-only) so packed
+    STEM-N.png strips crop with 9-arg drawImage.
     """
     if not html or not png_names:
         return html
@@ -2983,7 +3193,7 @@ def ensure_jmr_spr_shim(html: str, png_names: list[str]) -> str:
     # Refresh every JMR_SPR list to disk order (shim + any model copy).
     if _JMR_SPR_ASSIGN.search(html) is not None:
         html = _JMR_SPR_ASSIGN.sub(f"window.JMR_SPR = [{inner}]", html)
-    return html
+    return _ensure_jmr_blit_helper(html, png_names, cells)
 
 
 def render_jmr_png_paths_block(
@@ -2992,40 +3202,49 @@ def render_jmr_png_paths_block(
     *,
     stem: str,
 ) -> str:
-    """Prompt block for /640png: STEM-N.png + jmr:spr:N (not sprite())."""
+    """Prompt block for /640png: packed STEM-N.png strips + blitSpr."""
     if not asset_paths:
         return ""
     asset_paths = _filter_existing_assets(asset_paths)
     if not asset_paths:
         return ""
     s = jmr_title_stem(stem)
-    rows: list[str] = []
-    png_names: list[str] = []
-    for i, (name, _path) in enumerate(asset_paths.items()):
-        if i >= JMR_PNG_MAX_SHEETS:
-            break
-        fname = f"{s}-{i}.png"
-        png_names.append(fname)
-        rows.append(f"  jmr:spr:{i}  {fname}  // was {name}")
+    layout = jmr_atlas_layout(asset_paths, s)
+    if not layout:
+        return ""
+    png_names = [sh["file"] for sh in layout]
     inner = ", ".join(f'"{n}"' for n in png_names)
+    rows: list[str] = []
+    for i, sh in enumerate(layout):
+        cw, ch = sh["cell_w"], sh["cell_h"]
+        frames = sh["names"]
+        rows.append(
+            f"  jmr:spr:{i}  {sh['file']}  // {cw}x{ch} cells, "
+            f"{len(frames)} frame(s) L→R"
+        )
+        for fi, nm in enumerate(frames):
+            rows.append(f"    [{fi}] {nm}")
+    # Example uses the first sheet's real cell size when we have one.
+    ex_w, ex_h = layout[0]["cell_w"], layout[0]["cell_h"]
     lines = [
         "================ GENERATED PNG SHEETS (JMR /640png) ================",
         f"Title stem (≤8, 8.3-safe): {s}",
-        "Art programs wrote these PNGs NEXT TO your HTML as STEM-N.png.",
+        "Related poses are PACKED on one STEM-N.png (horizontal strip).",
         "HTML uses ONLY STEM-N.png / jmr:spr:N. Never put the generate names",
         "(floor_tile, player, …) in window.JMR_SPR or img.src.",
-        "YOU MUST paint with jmr:spr:N handles — not sprite(), not ASSETS[],",
-        "not data:image base64, not fillRect boxes for these entities.",
+        "YOU MUST paint with jmr:spr:N + 9-arg crop — not sprite(), not",
+        "ASSETS[], not data:image, not fillRect boxes for these entities.",
         "",
-        "Sheet index N is jmr:spr:N and ARTX sprite N. APPEND-ONLY — do not",
-        "reorder. At most 16 sheets.",
+        "Sheet index N is jmr:spr:N. APPEND-ONLY — do not reorder. ≤16 sheets.",
+        "Use blitSpr (injected) or copy it. Do NOT invent sx — use the table.",
         "",
-        "  var img = new Image();",
-        '  img.src = "jmr:spr:0";',
-        "  ctx.drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh);",
+        "  var S0 = new Image();",
+        '  S0.src = "jmr:spr:0";',
+        f"  blitSpr(ctx, S0, 0, {ex_w}, {ex_h}, x, y);  // frame [0]",
+        "  // blitSpr = ctx.drawImage(img, fi*cw, 0, cw, ch, dx, dy, cw, ch)",
         "Blit unconditionally — do NOT read img.width / .complete / onload",
         "(undefined on the V1 chip; Chrome shim still loads the PNG).",
-        'src MUST be a quoted literal: img.src = "jmr:spr:0";  NOT "jmr:spr:" + i',
+        'src MUST be a quoted literal: S0.src = "jmr:spr:0";  NOT "jmr:spr:" + i',
         "(FPGA only binds interned literals; PYTHON/Chrome concat still paints).",
         "Dest x,y >= 0. If a sprite hangs off 640x480, crop dest AND source",
         "(9-arg drawImage). FPGA clamps negative dest to 0 without cropping source.",
@@ -3036,7 +3255,7 @@ def render_jmr_png_paths_block(
         "data-host=chrome). Copy the interceptor from the seed / keep this list:",
         f'  window.JMR_SPR = [{inner}];',
         "",
-        "Sheets:",
+        "Sheets (frame index = 9-arg sx / cellW):",
     ]
     lines.extend(rows)
     lines += [

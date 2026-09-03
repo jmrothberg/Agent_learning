@@ -208,6 +208,7 @@ bullet never reaches the prompt — broaden tags if a good bullet doesn’t fire
   Pin playbook `classic-arcade-pixel-maps` on `/640` first build.
   **`/640png`:** same JMR V1 640×480 / JS walls, but the art pipeline writes
   `STEM-0.png` … `STEM-15.png` next to the HTML (`jmr:spr:N` + `window.JMR_SPR`).
+  Related poses pack onto one strip; games crop with `blitSpr` / 9-arg `drawImage`.
   Pin `jmr-png-sheets` instead of pixel-maps. `/games N` loads the media `prompt`.
   **Library:** every `memory/prompt_library.jsonl` entry has `prompt_640` (pixel-map /
   animated arcade goal). `/640` then `/games N` loads that variant; media mode still

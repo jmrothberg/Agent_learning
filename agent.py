@@ -1483,6 +1483,8 @@ class GameAgent(
         if self._jmr_png_mode:
             self._simulator_mode = True
         self._jmr_png_stem: str = ""
+        # Original pose PNGs (pre-atlas) so /640png can re-pack STEM-N strips.
+        self._jmr_frame_sources: dict[str, Path] = {}
         # Asset names dropped by the per-turn cap (asset_overflow) that still
         # need mid-session generation — re-warned every iter until on disk.
         self._pending_dropped_assets: list[str] = []
@@ -4392,21 +4394,24 @@ class GameAgent(
             try:
                 from prompts_v1 import _detect_multi_frame_intent as _mfi
                 from assets import (
-                    JMR_PNG_MAX_SHEETS, jmr_title_stem, materialize_jmr_png_sheets,
+                    JMR_PNG_MAX_SHEETS, JMR_PNG_MAX_FRAMES,
+                    jmr_title_stem, materialize_jmr_png_sheets,
                 )
                 if bool(getattr(self, "_jmr_png_mode", False)):
-                    # V1 MAX_SPR = 16; do not raise to 72 for multi-frame.
-                    self._session_asset_cap = JMR_PNG_MAX_SHEETS
+                    # Sheets stay ≤16; generate more poses and pack onto strips.
+                    self._session_asset_cap = JMR_PNG_MAX_FRAMES
                     self._jmr_png_stem = jmr_title_stem(goal)
-                    if self._session_assets:
+                    pack_src = getattr(self, "_jmr_frame_sources", None) or self._session_assets
+                    if pack_src:
                         self._session_assets = materialize_jmr_png_sheets(
-                            self._session_assets, self.out_path.parent,
+                            pack_src, self.out_path.parent,
                             self._jmr_png_stem,
                         )
                     self._trace({
                         "kind": "jmr_png_mode",
                         "stem": self._jmr_png_stem,
-                        "asset_cap": JMR_PNG_MAX_SHEETS,
+                        "asset_cap": JMR_PNG_MAX_FRAMES,
+                        "sheet_cap": JMR_PNG_MAX_SHEETS,
                     })
                 else:
                     mf_kws = _mfi(goal)

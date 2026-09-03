@@ -22,7 +22,7 @@ from assets import (
     render_jmr_png_paths_block,
     materialize_jmr_png_sheets,
     jmr_title_stem,
-    JMR_PNG_MAX_SHEETS,
+    JMR_PNG_MAX_FRAMES,
     try_load_image_generator,
 )
 from sounds import (
@@ -175,15 +175,30 @@ class AssetGenerationMixin:
         return self._p.generated_sprite_draw_contract()
 
     def _remap_session_assets_to_jmr_png(self, produced: dict) -> dict:
-        """Copy generated files to STEM-N.png next to the HTML (≤16)."""
+        """Pack related poses onto STEM-N.png strips next to the HTML (≤16)."""
         if not produced or not self._jmr_png_mode_on():
             return produced
         stem = getattr(self, "_jmr_png_stem", "") or jmr_title_stem(
             getattr(self, "_goal", "") or "GAME"
         )
         self._jmr_png_stem = stem
+        sources = getattr(self, "_jmr_frame_sources", None)
+        if not isinstance(sources, dict):
+            self._jmr_frame_sources = {}
+            sources = self._jmr_frame_sources
+        # Keep original pose PNGs so a mid-session add can re-pack the strip.
+        _sheet_name = __import__("re").compile(
+            r"^[A-Za-z0-9]{1,8}-\d+\.png$", __import__("re").I,
+        )
+        for name, path in produced.items():
+            fname = str(path).replace("\\", "/").rsplit("/", 1)[-1]
+            if _sheet_name.match(fname):
+                if name not in sources:
+                    sources[name] = path
+            else:
+                sources[name] = path
         return materialize_jmr_png_sheets(
-            produced, self.out_path.parent, stem,
+            sources, self.out_path.parent, stem,
         )
 
     # Generic DOM/structural attributes whose values are pure layout noise,
@@ -1394,10 +1409,11 @@ class AssetGenerationMixin:
         if self._jmr_png_mode_on():
             sound_specs = []
             video_specs = []
+            # Frames (not sheets): packer folds related poses onto ≤16 strips.
             session_cap = min(
-                int(session_cap or JMR_PNG_MAX_SHEETS), JMR_PNG_MAX_SHEETS,
+                int(session_cap or JMR_PNG_MAX_FRAMES), JMR_PNG_MAX_FRAMES,
             )
-            asset_specs = asset_specs[:JMR_PNG_MAX_SHEETS]
+            asset_specs = asset_specs[:session_cap]
 
         # run_14 Dragon's Lair: FIFO cap dropped key_victory (i2v seed).
         # Prefer keeping video image seeds inside the same cap budget.
