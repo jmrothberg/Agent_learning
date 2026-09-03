@@ -619,7 +619,10 @@ HARD_RULES_SIMULATOR: list[str] = [
     "Workers, eval, async/await, or Audio.play.",
     "Glass: <canvas width=\"640\" height=\"480\"> in markup. Do not reassign "
     "canvas.width/height after load. Fill every pixel (no letterbox gutters). "
-    "HUD with canvas fillText — not innerHTML.",
+    "HUD with canvas fillText — not innerHTML. ASCII 32-126 only "
+    "(no ♦/♥/\\u25C6 — UTF-8 E2 paints as 'b'; textAlign center/right "
+    "uses byte length and overlaps HUD). 8px or 16px; left + x+n*(8*k). "
+    "Lives: fillRect or '*' not unicode.",
     "FIRST <html_file> must already look like the classic/original game: "
     "ONE shared palette + compact pixel maps (≤16×16, blit per texel) or "
     "≤16 inline data:image sheets for playfield units. Do NOT emit "
@@ -645,7 +648,11 @@ HARD_RULES_JMR_PNG: list[str] = [
     "Workers, eval, async/await, or Audio.play.",
     "Glass: <canvas width=\"640\" height=\"480\"> in markup. Do not reassign "
     "canvas.width/height after load. Fill every pixel (no letterbox gutters). "
-    "HUD with canvas fillText — not innerHTML.",
+    "HUD with canvas fillText — not innerHTML. ASCII 32-126 only "
+    "(no ♦/♥/\\u25C6 — UTF-8 E2 paints as 'b' on the chip; center/right "
+    "then overlaps WAVE/LIVES). 16px HUD → 16 glass px per glyph; "
+    "textAlign=left at x+n*16. Lives: fillRect or '*' not unicode. "
+    "fillText(\"SCORE\",x,y) then fillText(score,x+96,y) — never join.",
     "FIRST <html_file> paints playfield units from packed STEM-N.png "
     "atlases (related poses on one strip): window.JMR_SPR append-only ≤16 "
     "and literal img.src = \"jmr:spr:N\" + 9-arg crop (blitSpr). Do NOT "
@@ -657,8 +664,10 @@ HARD_RULES_JMR_PNG: list[str] = [
     "atan2/round (shim round). No Object.keys / for…in. No negative "
     "setTransform/scale mirror — use L/R sheets or unmirrored draw.",
     "Reuse one mutable object per entity; no per-tick maze BFS/flood; "
-    "≤16 locals per function (params + every var in THAT function). Split "
-    "helpers — a 17th local skips mint and RUN is ?NH. Blit sprites "
+    "≤16 locals per function (params + every var in THAT function, plus "
+    "names a tiny inlined blit(im,x,y,w,h) copies into the CALLER). Split "
+    "draw helpers — a 17th local skips mint and RUN is ?NH. 16 locals is "
+    "ENV_SLOTS; 16 PNG sheets is MAX_SPR — they are different. Blit sprites "
     "unconditionally (no img.width).",
     "FPGA vs PYTHON/Chrome: img.src MUST be a quoted literal "
     "\"jmr:spr:0\" (not \"jmr:spr:\" + i — FPGA dihit=0). drawImage dest "
@@ -671,7 +680,10 @@ HARD_RULES_JMR_PNG: list[str] = [
     "z-buffer into 5×128). No new (expr)() — only new Image() / new Name()."
     " No >> << (use /4). No charAt/charCodeAt (row-number maps). No "
     "Object.create. No performance.now (integer frames; fire cooldown "
-    "from frames not dt). No AudioContext — playSfx([freq,vol,frames,"
+    "from frames not dt). No e.preventDefault / {passive:false} in the "
+    "game script. Chromium (harness) is NOT the chip: those mint, then "
+    "PYTHON faults CALL_METHOD on interned 'Object'/'performance' (kind 4). "
+    "No AudioContext — playSfx([freq,vol,frames,"
     "slide,ch]). No rgba()/globalAlpha (hex #rrggbb). No createElement("
     "canvas). HTML source < 65536 bytes. Mouse may live in "
     "data-host=chrome; keys + joy() must play the same game.",
@@ -709,6 +721,16 @@ ANTI_PATTERNS: list[str] = [
     "NEVER place timed-state early-return ABOVE the timer decrement — "
     "hit-stun/knockdown locks control forever (see stun-timer-before-"
     "early-return playbook bullet when CONTROL-NOT-RECOVERED fires).",
+    "NEVER treat Chromium-green as LOAD/RUN. In the game script (not "
+    "data-host=chrome): NEVER Object.create, NEVER performance.now, "
+    "NEVER e.preventDefault / {passive:false}, NEVER img.src = "
+    "\"jmr:spr:\" + n (one quoted \"jmr:spr:0\" per sheet). NEVER one "
+    "fat draw() that inlines blit(im,x,y,w,h) past 16 locals — 16 sheets "
+    "is not 16 locals.",
+    "NEVER fillText unicode (♦ ♥ \\u25C6 em-dash emoji) on /640 or /640png. "
+    "The chip is 8x8 ASCII: UTF-8 E2 paints 'b' and textAlign center/right "
+    "uses byte length so HUD labels overlap. textAlign=left, x+n*(8*k); "
+    "lives via fillRect or '*'.",
 ]
 
 
@@ -767,7 +789,8 @@ JS loops in the hot path. HUD/grid may use plain fillRect; units must not.
 
 GLASS: <canvas width="640" height="480"> — fill every pixel (no letterbox
 gutters). Do not reassign canvas.width/height after load. HUD via
-fillText on canvas — no innerHTML / CSS layout score.
+fillText on canvas — no innerHTML / CSS layout score. ASCII 32–126 only
+(no ♦/♥ — UTF-8 E2 paints 'b'); textAlign=left; 8px or 16px.
 
 DRAW APIs: getContext('2d') — fillRect, clearRect, fillText, paths,
 drawImage, putImageData. No WebGL, gradients, filters, shadows.
@@ -818,14 +841,22 @@ ART HOW (required):
   - Do NOT inline data:image base64. Do NOT use sprite() / ASSETS[key].
   - Do NOT emit <sounds> or <videos>. Packed playSfx number arrays OK.
 
-MINT (or LOAD works and RUN is ?NH): ≤16 locals per function; no typed
-arrays; arrays length ≤128; no new (AudioContext)(); no >>; no charAt;
-no Object.create / for…in; no performance.now; hex fillStyle; keys+joy
-play the game (mouse only in data-host=chrome). HTML < 64KB.
+MINT (or LOAD works and RUN is ?NH): ≤16 locals per function INCLUDING
+names a tiny inlined blit(im,x,y,w,h) adds to the CALLER — split draw
+helpers. 16 locals ≠ 16 PNG sheets. No typed arrays; arrays length ≤128;
+no new (AudioContext)(); no >>; no charAt; no Object.create / for…in;
+no performance.now / preventDefault; hex fillStyle; keys+joy play the
+game (mouse only in data-host=chrome). HTML < 64KB.
+CHROME IS NOT THE CHIP. Harness Chromium will run Object.create,
+performance.now, and "jmr:spr:"+n. PYTHON then kind-4 CALL_METHOD or
+FPGA dihit=0 with HUD still painting.
+BAD: var keys=Object.create(null); im.src="jmr:spr:"+n; t=performance.now();
+GOOD: var keys={l:0,r:0,u:0,d:0,f:0}; im.src="jmr:spr:0"; var frames=0; var DT=0.0167;
 
 GLASS: <canvas width="640" height="480"> — fill every pixel (no letterbox
 gutters). Do not reassign canvas.width/height after load. HUD via
-fillText on canvas — no innerHTML / CSS layout score.
+fillText on canvas — no innerHTML / CSS layout score. ASCII 32–126 only
+(no ♦/♥ — UTF-8 E2 paints 'b'); textAlign=left; 16px HUD is 16 px/glyph.
 
 DRAW APIs: getContext('2d') — fillRect, clearRect, fillText, paths,
 drawImage, putImageData. No WebGL, gradients, filters, shadows.
@@ -2466,7 +2497,11 @@ def generated_jmr_png_draw_contract() -> str:
         "`S0.src = \"jmr:spr:N\"` (quoted literal per N, not "
         "\"jmr:spr:\"+i). Dest x,y>=0; crop dest AND source if off-glass. "
         "Do NOT use sprite() / ASSETS[key] / data:image. Do NOT read "
-        "img.width / .complete / onload. Include window.JMR_SPR listing "
+        "img.width / .complete / onload. Do NOT Object.create / "
+        "performance.now / preventDefault in the game script. HUD fillText "
+        "is ASCII 32-126 only (no \\u25C6/♦/♥ — chip paints 'b'); "
+        "textAlign=left at x+n*(8*k). Include "
+        "window.JMR_SPR listing "
         "ONLY STEM-N.png (never the <assets> names) plus the chrome shim. "
         "SELF-CHECK: every listed sheet index appears in a drawImage via "
         "jmr:spr:N in this first build.\n"

@@ -266,7 +266,7 @@ Every `tests/test_*.py` must appear below (enforced by `tests/test_docs_index.py
 | `test_seed_prompt_budget.py` | `test_seed_resolve.py` | `test_session_outcome_git_sha.py` |
 | `test_session_timeouts.py` | `test_simulator_mode.py` | `test_skeleton_2d_arcade_routing.py` |
 | `test_skeleton_payload.py` | `test_skeleton_retrieval.py` | `test_smoke_vlm_parse.py` |
-| `test_sound_alignment.py` | `test_sounds.py` | `test_sprite_draw_wiring_microprobe.py` |
+| `test_sound_alignment.py` | `test_sounds.py` | `test_sprite_draw_wiring_microprobe.py` (`JMR_CHIP_JS`: unicode HUD / concat `jmr:spr` / `Object.create`) |
 | `test_staged_assets_cmd.py` | `test_stall_classifier.py` | `test_stall_recovery.py` |
 | `test_static_action_gate.py` | `test_status_memory_block.py` | `test_status_panel.py` |
 | `test_status_panel_allroles.py` | `test_stream_instance_method.py` | `test_stream_visibility.py` |

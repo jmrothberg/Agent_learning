@@ -231,7 +231,10 @@ bullet never reaches the prompt — broaden tags if a good bullet doesn’t fire
      cell costs on every frame (8×512 is a 4096px-wide strip).
   5. **Draw contract:** 9-arg `drawImage` / injected `blitSpr` helper crops
      `sx = frameIndex * cellW`. `render_jmr_png_paths_block` emits the exact
-     frame-index table so the model never invents `sx`.
+     frame-index table so the model never invents `sx`. **fillText is 8×8
+     ASCII 32–126** (`♦` / `\u25C6` → chip paints `b`; `textAlign` center/right
+     uses UTF-8 **byte** length so WAVE/LIVES overlap). HUD: `textAlign=left`
+     at `x+n*(8*k)`; lives via `fillRect` or `*`. Playbook `jmr-filltext-ascii-hud`.
   **Library:** every `memory/prompt_library.jsonl` entry has `prompt_640` (pixel-map /
   animated arcade goal + `On-screen sizes:`). `/640` then `/games N` loads that
   variant; `/640png` rewrites it for STEM-N sheets; media mode still uses
@@ -343,6 +346,7 @@ Per-run scores live in **`eval/OPERATIONS.md`** (run_06 snapshot). Mid-batch har
 | Attack limb points away from opponent | Code EXTRA flip — no VLM (`attack-sprite-wrong-direction-flip-in-code`) | `memory/playbook.jsonl` |
 | Versus P2 incomplete pose roster → MISSING boxes | Same pose suffixes both prefixes (`versus-fighter-sprite-prefix`) | `memory/playbook.jsonl` |
 | Sprite opaque when figure touches image edge | Chroma: near-white 5/8 + border-majority fallback | `assets.py`, `tests/test_tier1_2.py` |
+| /640 HUD `♦` lives paint as `b`; WAVE overlaps LIVES | 8×8 ASCII; UTF-8 E2→`b`; `textAlign` uses byte length — left + `x+n*(8*k)` | `prompts_v1.py`, `tools.py` `JMR_CHIP_JS`, playbook `jmr-filltext-ascii-hud` |
 | Pseudo-3D rivals stack / car undrawn | Discrete lanes + z-sort + drawImage (`pseudo3d-curved-road`) | `memory/playbook.jsonl`, racing outline |
 | Maze chase looks frozen | Don’t gate mouth cycle on dir; chasers must move (`maze-chase-sprite-chomp-cycle`) | `memory/playbook.jsonl` |
 | Seed empty `_assets/` + assets-only goal → Asteroids roster into Bomberman PATHS folder | Declared PATHS = roster; skip only when **every** declared stem is on disk; orphans never count; art/replace intent (not keep-code phrases) forces declared regen + media_only | `agent_helpers.py`, `agent_assets.py`, `agent.py`, `prompts_v1.py` |

@@ -70,7 +70,8 @@ def test_sprite_draw_wiring_passes_jmr_drawimage_with_fillrects(
     html = _minimal_html(
         "window.JMR_SPR=['GAME-0.png','GAME-1.png','GAME-2.png','GAME-3.png'];"
         "const imgs=[];"
-        "for(let i=0;i<4;i++){const im=new Image();im.src='jmr:spr:'+i;imgs.push(im);}"
+        "var im0=new Image();im0.src='jmr:spr:0';imgs.push(im0);"
+        "var im1=new Image();im1.src='jmr:spr:1';imgs.push(im1);"
         "function draw(){"
         "ctx.fillRect(0,0,48,48);ctx.fillRect(50,0,48,48);"
         "ctx.fillRect(100,0,48,48);ctx.fillRect(150,0,48,48);"
@@ -230,3 +231,54 @@ def test_paths_key_coverage_passes_loadassets_entries(tmp_path: Path) -> None:
     )
     rep = run_micro_probes(html, out_path=out)
     assert not any("PATHS_KEY_COVERAGE" in e for e in rep.get("errors") or [])
+
+
+def test_jmr_chip_js_flags_unicode_diamond() -> None:
+    html = (
+        "<!DOCTYPE html><html><body>"
+        "<canvas width='640' height='480'></canvas><script>"
+        "var ctx=document.querySelector('canvas').getContext('2d');"
+        r"ctx.fillText('LIVES \u25C6 \u25C6',10,20);"
+        "requestAnimationFrame(function(){});"
+        "</script></body></html>"
+    )
+    html = html + "<!-- " + ("pad " * 40) + " -->"
+    rep = run_micro_probes(html)
+    assert any("JMR_CHIP_JS" in e and "unicode" in e for e in rep["errors"])
+
+
+def test_jmr_chip_js_flags_concat_and_object_create() -> None:
+    html = (
+        "<!DOCTYPE html><html><body>"
+        "<canvas width='640' height='480'></canvas><script>"
+        "window.JMR_SPR=['GAME-0.png'];"
+        "var keys=Object.create(null);"
+        "var im=new Image();im.src='jmr:spr:'+0;"
+        "function draw(){ctx.drawImage(im,0,0);}"
+        "requestAnimationFrame(draw);"
+        "</script></body></html>"
+    )
+    html = html + "<!-- " + ("pad " * 40) + " -->"
+    rep = run_micro_probes(html)
+    blob = " ".join(rep["errors"])
+    assert "Object.create" in blob
+    assert "jmr:spr" in blob
+
+
+def test_jmr_chip_js_skips_chrome_script() -> None:
+    html = (
+        "<!DOCTYPE html><html><body>"
+        "<canvas width='640' height='480'></canvas>"
+        "<script data-host='chrome'>"
+        "window.JMR_SPR=['GAME-0.png'];"
+        "Object.create(null);"
+        "var m=/^jmr:spr:(\\d+)$/.exec(v);"
+        "</script>"
+        "<script>"
+        "var im=new Image();im.src='jmr:spr:0';"
+        "function draw(){ctx.drawImage(im,8,8);}requestAnimationFrame(draw);"
+        "</script></body></html>"
+    )
+    html = html + "<!-- " + ("pad " * 40) + " -->"
+    rep = run_micro_probes(html)
+    assert not any("JMR_CHIP_JS" in e for e in rep.get("errors") or [])

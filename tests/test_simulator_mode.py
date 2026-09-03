@@ -198,6 +198,7 @@ def test_simulator_ensures_pixel_map_playbook():
     ids = a._first_build_playbook_ensure_ids("open-field tower defense maze")
     assert ids is not None
     assert "classic-arcade-pixel-maps" in ids
+    assert "jmr-filltext-ascii-hud" in ids
 
 
 def test_simulator_first_build_asks_for_pixel_art_upfront():
@@ -267,6 +268,7 @@ def test_jmr_png_playbook_pin():
     ids = a._first_build_playbook_ensure_ids("open-field tower defense maze")
     assert ids is not None
     assert "jmr-png-sheets" in ids
+    assert "jmr-filltext-ascii-hud" in ids
     assert "classic-arcade-pixel-maps" not in ids
 
 

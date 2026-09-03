@@ -191,10 +191,12 @@ class MemoryRetrievalMixin:
             webgl_or_voxel or fps_class or voxel_class or wireframe_class
         ):
             _add("jmr-png-sheets")
+            _add("jmr-filltext-ascii-hud")
         elif bool(getattr(self, "_simulator_mode", False)) and not (
             webgl_or_voxel or fps_class or voxel_class or wireframe_class
         ):
             _add("classic-arcade-pixel-maps")
+            _add("jmr-filltext-ascii-hud")
 
         # Fixed-shooter / top-down shooter *class* (not named games).
         fixed_shooter_class = (
