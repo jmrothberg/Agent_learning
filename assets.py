@@ -30,6 +30,34 @@ Generation strategy: Z-Image-Turbo natively renders 768×768 in ~2-4 s
 per image (8-step turbo). We always generate at native and downscale
 with PIL Lanczos to the per-asset target size. Default target 128 px
 square — small enough to be a sprite, big enough to look decent.
+
+--- /640png atlas packing — the clear rules ---------------------------------
+
+`/640png` (JMR V1 native) does NOT save one PNG per `<assets>` name. Related
+poses are packed onto ONE `STEM-N.png` strip so the FPGA loads fewer files,
+fewer `Image` objects, and does less SRAM traffic. See `jmr_atlas_group_key`,
+`jmr_atlas_layout`, `materialize_jmr_png_sheets`.
+
+1. **Sheet cap is a FILE cap, not a per-sheet sprite cap.** At most
+   `JMR_PNG_MAX_SHEETS` (16) PNG files total. A sheet with 8 frames is one
+   file just like a sheet with 1 frame — there is no "N sprites per sheet"
+   ceiling. Adding frames to a strip only makes that ONE file wider.
+2. **Pose cap.** At most `JMR_PNG_MAX_FRAMES` (48) individual pose images are
+   generated per session, THEN folded onto ≤16 sheets. This is the real
+   per-turn `<assets>` cap in `/640png` mode.
+3. **Grouping = name prefix + pose suffix.** `hero_idle` + `hero_walk1` share
+   the stem `hero` (suffix stripped by `_ATLAS_POSE_RE`) → ONE strip, frames
+   left-to-right in declaration order. `hero` and `creep` do NOT share a
+   prefix → separate sheets. Two different chess pieces (`pawn`, `king`) are
+   unrelated names → separate sheets even though both are "chess art".
+4. **Cost driver is cell size (pixels), not frame count.** A strip is
+   `cell_w * frame_count` wide. Keep animated `<assets>` sizes small
+   (e.g. `"64x64"`) — 8 frames at 512×512 each is a 4096px-wide PNG. A
+   single still (no pose suffix) may use the normal larger default size.
+5. **Draw contract:** the game crops with 9-arg `drawImage` (or the injected
+   `blitSpr` helper) — `sx = frameIndex * cellW` — never treats the whole
+   strip as one sprite. `render_jmr_png_paths_block` emits the exact frame
+   index table so the model never has to guess `sx`.
 """
 
 from __future__ import annotations

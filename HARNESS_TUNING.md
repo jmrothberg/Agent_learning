@@ -208,8 +208,26 @@ bullet never reaches the prompt — broaden tags if a good bullet doesn’t fire
   Pin playbook `classic-arcade-pixel-maps` on `/640` first build.
   **`/640png`:** same JMR V1 640×480 / JS walls, but the art pipeline writes
   `STEM-0.png` … `STEM-15.png` next to the HTML (`jmr:spr:N` + `window.JMR_SPR`).
-  Related poses pack onto one strip; games crop with `blitSpr` / 9-arg `drawImage`.
   Pin `jmr-png-sheets` instead of pixel-maps. `/games N` loads the media `prompt`.
+
+  **Atlas packing — the clear rules** (`assets.py`: `jmr_atlas_group_key`,
+  `jmr_atlas_layout`, `materialize_jmr_png_sheets`; full rationale in that
+  file's module docstring):
+  1. **16 is a FILE cap, not a per-sheet frame cap.** A strip with 8 frames
+     is still one file. Adding frames only makes that one PNG wider.
+  2. **48 poses generated per session** (`JMR_PNG_MAX_FRAMES`), then folded
+     onto ≤16 sheets — that's the real `<assets>` cap under `/640png`.
+  3. **Grouping = shared name prefix + pose suffix.** `hero_idle` +
+     `hero_walk1` → one strip (stem `hero`). `hero` and `creep` → separate
+     sheets (no shared prefix). Two chess pieces (`pawn`, `king`) never
+     share a sheet just because both are "chess art" — grouping is on the
+     *name*, not the genre.
+  4. **Cost driver is cell size (px), not frame count.** Strip width =
+     `cellW × frameCount`. Keep animated `<assets>` sizes small
+     (`"size":"64x64"`) — 8 frames at 512×512 is a 4096px strip.
+  5. **Draw contract:** 9-arg `drawImage` / injected `blitSpr` helper crops
+     `sx = frameIndex * cellW`. `render_jmr_png_paths_block` emits the exact
+     frame-index table so the model never invents `sx`.
   **Library:** every `memory/prompt_library.jsonl` entry has `prompt_640` (pixel-map /
   animated arcade goal). `/640` then `/games N` loads that variant; media mode still
   uses `prompt`. Regenerate with `scripts/gen_prompt_640_library.py` after hand-edits

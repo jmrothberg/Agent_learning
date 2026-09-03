@@ -795,7 +795,10 @@ Do NOT emit <assets>, <sounds>, or <videos>.
 SIMULATOR_PNG_TARGET_BLOCK = """<simulator-target>
 JMR V1 native (640×480) WITH generated PNG sheets. One HTML file LOAD+RUN.
 Art programs write STEM-N.png next to the HTML (stem ≤8, ≤16 sheets).
-Related poses (hero_idle, hero_walk1) pack onto ONE strip.
+Related poses (hero_idle, hero_walk1) pack onto ONE strip, frames L→R.
+16 is a FILE cap, not a per-strip frame cap — a strip widens to fit more
+frames. Keep animated pose sizes small ("size":"64x64"); strip width =
+cellW × frame count, so large frames × many poses gets huge fast.
 
 LOOK: classic arcade / original-cabinet graphics via those PNGs — NOT
 colored circles, squares, or bare fillRect placeholders as the final art.
@@ -920,7 +923,10 @@ CRITERIA-PROBE BINDING: every Basic: line MUST share a word with a probe.
 PROBES: include BOTH structural and ≥1 dynamic input→delta probe.
 Expose state on window (e.g. window.state). Keep exprs short; 3–5 total.
 ASSETS: one name per pose (hero_idle, hero_walk1). Shared prefix packs
-onto ONE STEM-N.png strip. ≤48 poses, ≤16 sheets. Index N = jmr:spr:N.
+onto ONE STEM-N.png strip, frames left-to-right. ≤48 poses, ≤16 sheets —
+sheets are a FILE cap, not a per-sheet frame cap (a strip can hold many
+frames; it just gets wider). Keep animated poses SMALL ("size":"64x64")
+since a strip's width = cellW × frame count. Index N = jmr:spr:N.
 No <html_file> yet.
 """
 

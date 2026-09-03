@@ -129,6 +129,17 @@ nav): `modality.py` — shared by `prompts_v1.py` and `memory.py` (no import cyc
 `scripts/enrich_trace.py <path-or-stem> --timeline` — TUI traces: substring under `games/traces/`;
 tune batch: **full path** under `games/tune_serial10/run_XX/traces/`. See **`HARNESS_DEBUG.md`**.
 
+### Sprite atlas packing (`/640png`)
+
+`materialize_jmr_png_sheets` (`assets.py`) packs related poses (shared name
+prefix, e.g. `hero_idle` + `hero_walk1`) onto ONE `STEM-N.png` strip instead
+of one PNG per pose. **16 sheets is a file cap, not a per-sheet frame cap** —
+a strip just gets wider as frames are added; the real per-turn generation
+cap is 48 poses (`JMR_PNG_MAX_FRAMES`). Games crop frames with 9-arg
+`drawImage` / the injected `blitSpr` helper (`sx = frameIndex * cellW`).
+Full rules: `assets.py` module docstring (`--- /640png atlas packing ---`)
+and `HARNESS_TUNING.md` §"/640 simulator (JMR native)".
+
 ### Memory / Playbook
 
 `GameMemory` — skeleton retrieval (runtime fallback **`canvas_basic_v2.html`**; bundled name
