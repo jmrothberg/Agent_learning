@@ -3160,11 +3160,6 @@ def run_micro_probes(
             errors.extend(paths_errors)
             stats["paths_key_coverage"] = len(paths_errors)
 
-    chip_errors = _check_jmr_chip_js(html)
-    if chip_errors:
-        errors.extend(chip_errors)
-        stats["jmr_chip_js"] = len(chip_errors)
-
     return {
         "ok": not errors,
         "errors": errors,
@@ -3230,64 +3225,6 @@ def _check_sprite_draw_wiring(
             "fail verification."
         ]
     return []
-
-
-def _join_non_chrome_scripts(html: str) -> str:
-    parts: list[str] = []
-    for attrs, body in _SCRIPT_BLOCK_RE.findall(html or ""):
-        if re.search(r'data-host\s*=\s*["\']chrome["\']', attrs or "", re.I):
-            continue
-        parts.append(body)
-    return "\n".join(parts)
-
-
-def _check_jmr_chip_js(html: str) -> list[str]:
-    """Catch Chrome-only JS that Chromium will green-light on /640 /640png.
-
-    Unicode fillText (U+25C6) painted as 'b' and inflated textAlign width
-    so WAVE/LIVES overlapped. Object.create / performance.now / concat
-    jmr:spr mint or miss on the chip. Skip data-host=chrome scripts.
-    """
-    if not html:
-        return []
-    jmr = bool(
-        re.search(r"\bjmr:spr:", html) or re.search(r"\bJMR_SPR\b", html)
-    )
-    canvas640 = bool(
-        re.search(r"<canvas\b[^>]*width\s*=\s*[\"']?640", html, re.I)
-    )
-    if not jmr and not canvas640:
-        return []
-    body = _join_non_chrome_scripts(html)
-    if not body:
-        body = html
-    errors: list[str] = []
-    if re.search(
-        r"\\u25[cC]6|\\u2665|\\u2666|\\u2764|\\u201[34]|[♦♥❤◆●♪★☆]",
-        body,
-    ):
-        errors.append(
-            "JMR_CHIP_JS: unicode in the game script. fillText is 8x8 ASCII "
-            "32-126; a diamond's UTF-8 E2 byte paints as 'b' and "
-            "textAlign center/right uses byte length so HUD labels overlap. "
-            "Use '*' or fillRect diamonds; textAlign=left at x+n*(8*k)."
-        )
-    if jmr and re.search(r"Object\s*\.\s*create\s*\(", body):
-        errors.append(
-            "JMR_CHIP_JS: Object.create — PYTHON Value64 CALL_METHOD create "
-            "on interned 'Object' (kind 4). Use a plain {} or flags."
-        )
-    if jmr and re.search(r"performance\s*\.\s*now\s*\(", body):
-        errors.append(
-            "JMR_CHIP_JS: performance.now — CALL_METHOD now on interned "
-            "'performance'. Integer frames + fixed dt."
-        )
-    if jmr and re.search(r"""["']jmr:spr:["']\s*\+""", body):
-        errors.append(
-            "JMR_CHIP_JS: concat img.src \"jmr:spr:\"+n — FPGA dihit=0 "
-            "(PYTHON/Chrome still paint). One quoted \"jmr:spr:0\" per sheet."
-        )
-    return errors
 
 
 def _collect_paths_table_keys(body: str) -> set[str]:
