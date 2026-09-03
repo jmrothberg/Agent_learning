@@ -47,15 +47,21 @@ fewer `Image` objects, and does less SRAM traffic. See `jmr_atlas_group_key`,
    per-turn `<assets>` cap in `/640png` mode. (Raised 48→64 2026-09-03: a
    6-piece-type/2-color chess roster needing idle+walk+lift+slam (4 poses)
    for EVERY type is 48 exactly — zero slack for extras like promotion.)
-3. **Grouping = name prefix + pose suffix.** `hero_idle` + `hero_walk1` share
-   the stem `hero` (suffix stripped by `_ATLAS_POSE_RE`) → ONE strip, frames
-   left-to-right in declaration order. `hero` and `creep` do NOT share a
-   prefix → separate sheets. Two different chess pieces (`pawn`, `king`) are
-   unrelated names → separate sheets even though both are "chess art".
+3. **Grouping = subject prefix (text before the first `_`), never a pose
+   vocabulary.** `hero_idle` + `hero_walk1` → stem `hero` → ONE strip, frames
+   left-to-right in declaration order. `big_grab` + `big_win` → `big`, even
+   though "grab"/"win" are words no fixed list would have. `hero` and `creep`
+   do NOT share a prefix → separate sheets; likewise `pawn` vs `king`. Name
+   assets `<subject>_<pose>` and grouping follows for any game.
+   Then each batch is **split by source pixel size**: cells pad to the
+   largest frame, so a 512px asset never shares a strip with 64px sprites
+   (that would bloat every cell and draw the small art at the padded size).
 4. **Cost driver is cell size (pixels), not frame count.** A strip is
-   `cell_w * frame_count` wide. Keep animated `<assets>` sizes small
-   (e.g. `"64x64"`) — 8 frames at 512×512 each is a 4096px-wide PNG. A
-   single still (no pose suffix) may use the normal larger default size.
+   `cell_w * frame_count` wide. In `/640png`, `"size"` is on-screen px
+   (`blitSpr` draws 1:1) — pick how many fit across the playfield; a big
+   cell costs on every frame (8×512 → 4096px-wide strip). Per-title sizes
+   live in `prompt_library.jsonl` (`On-screen sizes:`). A single still
+   (no pose suffix) may use a larger size when the playfield needs it.
 5. **Draw contract:** the game crops with 9-arg `drawImage` (or the injected
    `blitSpr` helper) — `sx = frameIndex * cellW` — never treats the whole
    strip as one sprite. `render_jmr_png_paths_block` emits the exact frame
@@ -2911,28 +2917,28 @@ def jmr_png_filenames(stem: str, count: int) -> list[str]:
     return [f"{s}-{i}.png" for i in range(n)]
 
 
-# Shared prefix for related poses (hero_idle + hero_walk1 → one strip).
-# Generic pose-suffix list — applies to ANY game's <assets> names, not a
-# per-game/genre list. lift/slam added (2026-09-03): capture/throw-style
-# poses (e.g. pawn_dark_lift, pawn_dark_slam) were falling through and
-# splitting off their own sheet instead of packing onto the idle+walk strip.
-_ATLAS_POSE_RE = re.compile(
-    r"_(?:idle|walk\d*|run\d*|jump\d*|attack|atk|fire|hurt|hit|"
-    r"death|die|explode|turn|left|right|up|down|lift|slam|"
-    r"n|s|e|w|ne|nw|se|sw|frame\d+|f\d+|\d+)$",
-    re.I,
-)
+# Grouping is NAME-PREFIX based — deliberately NOT a pose-word vocabulary.
+# 2026-09-03: a fixed suffix list (idle|walk|attack|…) cannot cover games we
+# have not seen. ANIMATIO shipped big_grab/big_win/small_over/small_impact/
+# small_fall and every unlisted word split onto its own sheet (2 characters →
+# 8 PNGs). Any game may invent any pose word, so the subject prefix — the
+# part before the first "_" — is the group, whatever follows it.
 
 
 def jmr_atlas_group_key(name: str) -> str:
-    """hero_idle / hero_walk1 → hero; a lone 'creep' stays 'creep'."""
+    """Subject prefix: `big_grab` → `big`; a lone `creep` stays `creep`.
+
+    Everything before the FIRST underscore identifies the subject, so all of
+    that subject's poses land on one strip regardless of pose wording
+    (`small_idle`/`small_over`/`small_impact` → `small`). Distinct subjects
+    keep distinct prefixes (`big` vs `small`, `pawn` vs `king`) and stay on
+    separate sheets. The frame-index table from `render_jmr_png_paths_block`
+    tells the model which frame is which name, so a wider strip is free.
+    """
     raw = (name or "").strip()
     if not raw:
         return raw
-    m = _ATLAS_POSE_RE.search(raw)
-    if m:
-        return raw[: m.start()] or raw
-    return raw
+    return raw.split("_", 1)[0] or raw
 
 
 def jmr_atlas_groups(names: list[str]) -> list[tuple[str, list[str]]]:
@@ -3027,9 +3033,10 @@ def materialize_jmr_png_sheets(
 ) -> dict[str, Path]:
     """Pack related poses onto STEM-N.png strips next to the HTML.
 
-    Groups by pose suffix (hero_idle + hero_walk1 → one sheet). Unrelated
-    names stay one sheet each. Keys stay the <assets> names so the prompt
-    can show both the generate name and jmr:spr:N. Caps at 16 sheets.
+    Batch by subject prefix (hero_idle + hero_walk1 → one sheet), then SPLIT
+    each batch by source pixel size. Unrelated names stay one sheet each.
+    Keys stay the <assets> names so the prompt can show both the generate
+    name and jmr:spr:N. Caps at 16 sheets.
     """
     if not asset_paths:
         return {}
@@ -3037,9 +3044,27 @@ def materialize_jmr_png_sheets(
     html_dir.mkdir(parents=True, exist_ok=True)
     s = jmr_title_stem(stem)
     groups = jmr_atlas_groups(list(asset_paths.keys()))
+    # Size split: a strip's cells pad to the LARGEST frame, so mixing e.g. a
+    # 512px asset with 64px sprites would bloat every cell AND draw the small
+    # art at the padded cell size (wrong scale). Same-size frames pack freely
+    # — a wider strip costs nothing at blit time. Data-driven off the actual
+    # PNG dimensions, so no per-game/name rules.
+    sheets: list[list[str]] = []
+    for _key, names in groups:
+        by_size: dict[tuple[int, int], list[str]] = {}
+        size_order: list[tuple[int, int]] = []
+        for n in names:
+            if n not in asset_paths:
+                continue
+            wh = _png_wh(Path(asset_paths[n]))
+            if wh not in by_size:
+                by_size[wh] = []
+                size_order.append(wh)
+            by_size[wh].append(n)
+        sheets.extend(by_size[wh] for wh in size_order)
     out: dict[str, Path] = {}
     sheet_i = 0
-    for _key, names in groups:
+    for names in sheets:
         if sheet_i >= JMR_PNG_MAX_SHEETS:
             break
         dest = html_dir / f"{s}-{sheet_i}.png"

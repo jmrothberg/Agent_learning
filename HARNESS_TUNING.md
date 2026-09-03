@@ -15,7 +15,7 @@ verifies** games. A fresh Cursor agent should follow this path before editing co
 
 | Step | File | Why |
 |------|------|-----|
-| 1 | **`AGENTS.md`** | Source vs artifacts; mixin map; trace paths; **never commit `games/`** |
+| 1 | **`AGENTS.md`** | Source vs artifacts; mixin map; trace paths; prefer not committing generated `games/` trees |
 | 2 | **This file** (`HARNESS_TUNING.md`) | Standing rules + traps |
 | 3 | **`HARNESS_DEBUG.md`** | Gates, `failure_class`, trace timeline |
 | 4 | **`TEST.md`** | What pytest guards; which file to extend per failure class |
@@ -40,9 +40,9 @@ matching `.html` and play it — **do not trust TEST OK alone**.
 
 | Layer | What belongs there |
 |-------|--------------------|
-| **Saved test prompts only** — `memory/prompt_library.jsonl`, `eval/*_goals.txt` | **Game-specific** wording is allowed and expected (e.g. Centipede head/body/tail, named controls, one title’s quirks). |
-| **Memory / retrieval / pins** — `playbook.jsonl`, outlines, nudges, skeletons, `visual_playtests`, `ensure_ids` / first-build pins | Teach **classes of games** (fixed-shooter, pinball, segmented-follower, versus). Pin by recipe id or class phrases (`fixed shooter`, `body segments`, `flipper`) — **never** by a single title (`if "centipede" in goal`, `ensure_ids` for `"galaga"` only). |
-| **Harness Python** — `tools.py`, `agent_*.py`, `assets.py` | Mechanism / structural only — **no** game-title branches. |
+| **Saved test prompts only** — `memory/prompt_library.jsonl`, `eval/*_goals.txt` | **Game-specific** wording is allowed and expected (e.g. Centipede head/body/tail, named controls, one title’s quirks, per-title `On-screen sizes:` px). |
+| **Memory / retrieval / pins** — `playbook.jsonl`, outlines, nudges, skeletons, `visual_playtests`, `ensure_ids` / first-build pins | Teach **classes of games** (fixed-shooter, pinball, segmented-follower, versus). Pin by recipe id or class phrases (`fixed shooter`, `body segments`, `flipper`) — **never** by a single title (`if "centipede" in goal`, `ensure_ids` for `"galaga"` only). Class size/readability OK (`jmr-png-sheets`, `draw-fighters-large`) — no title→px tables. |
+| **Harness Python** — `tools.py`, `agent_*.py`, `assets.py`, `prompts_v1.py` detectors | Mechanism / structural only — **no** game-title branches or franchise art hint tables. Generator `scripts/gen_prompt_640_library.py` must not hardcode titles (preserves jsonl bodies). |
 
 **Mistake to never repeat:** stuffing Centipede/Galaga/… title logic into memory pins or harness “to fix one HTML smell.” Put the named-game sentence in the **library/eval prompt**; put the reusable mechanism in a **class** playbook/outline/skeleton bullet that any matching goal retrieves.
 
@@ -72,16 +72,7 @@ changes (see `tests/test_fix_round.py` source-grep guards, `tests/test_assets.py
 
 ### 3b. Overnight parallel improvement (same every night)
 
-**Two processes. Cursor agent starts both. Never ask the human to paste. User must see the watcher in Cursor.**
-
-Canonical recipe: **`eval/overnight.sh`** + **`eval/OPERATIONS.md` § HARD RULES**.
-
-| | Batch | Watcher |
-|---|--------|---------|
-| Where visible | **macOS Terminal.app** | **Cursor IDE terminals panel** (`monitor:` lines) |
-| How you start it | Double-click `Overnight.command` **or** `bash eval/overnight.sh` / CLI flags (`all` OS perms) | Cursor Shell, **`block_until_ms=0`**, command printed in Terminal |
-| Halting | **Never** (`--wait-for-monitor 0`) | Patch while games continue |
-| Forbidden | Batch in Cursor; asking human to paste; new `tune_runXX.sh` for a normal night | `nohup` / `disown` / invisible watcher |
+**Full HARD RULES (canonical):** [`eval/OPERATIONS.md` § HARD RULES](eval/OPERATIONS.md). Short form: Terminal batch (`Overnight.command` / `overnight.sh`) + Cursor Shell watcher (`block_until_ms=0`); never `nohup` the watcher; never halt the batch; never ask the human to paste.
 
 **When a game finishes (or `agent_monitor.json` moves):**
 
@@ -208,7 +199,8 @@ bullet never reaches the prompt — broaden tags if a good bullet doesn’t fire
   Pin playbook `classic-arcade-pixel-maps` on `/640` first build.
   **`/640png`:** same JMR V1 640×480 / JS walls, but the art pipeline writes
   `STEM-0.png` … `STEM-15.png` next to the HTML (`jmr:spr:N` + `window.JMR_SPR`).
-  Pin `jmr-png-sheets` instead of pixel-maps. `/games N` loads the media `prompt`.
+  Pin `jmr-png-sheets` instead of pixel-maps. `/games N` derives the goal from
+  `prompt_640` (STEM-N.png / `jmr:spr:N` rewrite) — never the media `prompt`.
 
   **Atlas packing — the clear rules** (`assets.py`: `jmr_atlas_group_key`,
   `jmr_atlas_layout`, `materialize_jmr_png_sheets`; full rationale in that
@@ -219,21 +211,33 @@ bullet never reaches the prompt — broaden tags if a good bullet doesn’t fire
      on 2026-09-03 — a 6-type/2-color chess roster at idle+walk+lift+slam
      needs exactly 48, zero slack), then folded onto ≤16 sheets — that's
      the real `<assets>` cap under `/640png`.
-  3. **Grouping = shared name prefix + pose suffix.** `hero_idle` +
-     `hero_walk1` → one strip (stem `hero`). `hero` and `creep` → separate
-     sheets (no shared prefix). Two chess pieces (`pawn`, `king`) never
-     share a sheet just because both are "chess art" — grouping is on the
-     *name*, not the genre.
+  3. **Grouping = subject prefix (before the first `_`), NEVER a pose-word
+     list.** 2026-09-03: the old `idle|walk|attack|…` vocabulary split every
+     unlisted word onto its own sheet (ANIMATIO: `big_grab`/`small_impact`/
+     `small_over` → 2 characters became 8 PNGs). Any game invents any pose
+     word, so only the prefix decides: `hero_idle` + `hero_walk1` → one strip
+     (stem `hero`); `big_*` and `small_*` → exactly two strips. `hero` and
+     `creep` → separate sheets (no shared prefix). Two chess pieces (`pawn`,
+     `king`) never share a sheet just because both are "chess art" — grouping
+     is on the *name*, not the genre. Name assets `<subject>_<pose>`.
+     Each prefix batch is then **split by source pixel size** — cells pad to
+     the largest frame, so a 512px asset never rides a 64px sprite strip
+     (bloats every cell and draws small art at the padded size).
   4. **Cost driver is cell size (px), not frame count.** Strip width =
-     `cellW × frameCount`. Keep animated `<assets>` sizes small
-     (`"size":"64x64"`) — 8 frames at 512×512 is a 4096px strip.
+     `cellW × frameCount`. In `/640png`, `<assets>` `"size"` **is** on-screen
+     px (`blitSpr` draws 1:1 on 640×480) — pick how many fit across the
+     playfield. Per-title numbers live in each library `prompt_640`
+     (`On-screen sizes: …`); class rule in playbook `jmr-png-sheets`. A big
+     cell costs on every frame (8×512 is a 4096px-wide strip).
   5. **Draw contract:** 9-arg `drawImage` / injected `blitSpr` helper crops
      `sx = frameIndex * cellW`. `render_jmr_png_paths_block` emits the exact
      frame-index table so the model never invents `sx`.
   **Library:** every `memory/prompt_library.jsonl` entry has `prompt_640` (pixel-map /
-  animated arcade goal). `/640` then `/games N` loads that variant; media mode still
-  uses `prompt`. Regenerate with `scripts/gen_prompt_640_library.py` after hand-edits
-  to overrides in that script.
+  animated arcade goal + `On-screen sizes:`). `/640` then `/games N` loads that
+  variant; `/640png` rewrites it for STEM-N sheets; media mode still uses
+  `prompt`. Hand-edit game craft in the jsonl only; `scripts/gen_prompt_640_library.py`
+  refreshes the shared TARGET footer and fills missing `prompt_640` — it does not
+  hardcode titles.
 - **Fieldrunners `20260829_124033`:** `/640` first build aborted with
   `inline_data_bloat` → `unclosed_html_file` / `no_usable_code` after ~2.4KB.
   Partial reply was looping on near-identical `const PAL` / `PAL2` / `PAL3`…
@@ -403,4 +407,4 @@ then `DEV.md` → **`eval/OPERATIONS.md`** (run batch / pytest) → `TEST.md` (s
 Cursor/Aider: **`README.md#how-this-compares-to-other-coding-agents`**.
 
 Quick test: `.venv/bin/python -m pytest tests/ -q` (pure-function; no GPU/model). **Full suite must
-pass before push** (~2258 tests, ~1 min).
+pass before push** (~2343 tests / 195 files, ~1 min; see `TEST.md`).

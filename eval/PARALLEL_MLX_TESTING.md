@@ -1,25 +1,29 @@
 # Parallel MLX testing — agent handoff
 
 **Share this file** with another coding agent when you want parallel game/eval runs
-using **one MLX model load** and server-side batching. Repo:
-`/Users/jonathanrothberg/Agent_learning` (or clone of `jmrothberg/Agent_learning`).
+using **one MLX model load** and server-side batching.
+
+**Serial overnight (default tuning path):** use [`eval/OPERATIONS.md`](OPERATIONS.md)
+§ HARD RULES + **`Overnight.command`** / `bash eval/overnight.sh`. This file is for
+**parallel mlx-server / oMLX throughput only** — not tonight’s serial batch.
+
+Repo: `Agent_learning` (or clone of `jmrothberg/Agent_learning`).
 
 ---
 
 ## Primary tuning workflow
 
-**Start here for serial overnight batches:** [`eval/OPERATIONS.md`](OPERATIONS.md) — run_07 chain
-(`bash eval/tune_run07_chain.sh`), pytest commands, triage workflow.
+**Serial overnight:** [`eval/OPERATIONS.md`](OPERATIONS.md) HARD RULES (not this file).
+`failure_class` edit-routing: [`AGENTS.md` §4](../AGENTS.md).
 
-This file is for **parallel mlx-server / oMLX throughput** only (one model load, N clients) — not the
-default agent-tuning path.
+This file = **parallel one-server / N-client lab** (one model load, N clients).
 
 ---
 
-## Historical: run_05 overnight (superseded by run_07)
+## Historical: run_05 overnight (superseded — archive only)
 
 <details>
-<summary>Round 2 serial (12 games, GLM) — archived reference</summary>
+<summary>Round 2 serial (12 games, GLM) — archived reference; do NOT copy the nohup watcher</summary>
 
 | Requirement | Command / setting |
 |-------------|-------------------|
@@ -27,28 +31,23 @@ default agent-tuning path.
 | Serial 10-game eval | [`eval/tune_serial_loop.py`](tune_serial_loop.py) + [`eval/tune_serial10_goals.txt`](tune_serial10_goals.txt) |
 | Round 2 (12 games, GLM) | [`eval/tune_serial10_round2_goals.txt`](tune_serial10_round2_goals.txt) → `games/tune_serial10/run_05` |
 
-### Round 2 overnight (GLM-5.2-MLX-4bit, text-only — no VLM)
-
-Launch in **Terminal.app only** (not Cursor). Script tees to `run_05/overnight.log` internally — **do not** `>> overnight.log` on nohup (duplicates every line). Prefer **GLM-5.2-MLX-4bit** over mxfp4.
+**Today’s serial launch:** Terminal `Overnight.command` / `overnight.sh` + Cursor Shell watcher
+(`block_until_ms=0`). **Never** `nohup` the watcher (HARD RULES). The old `nohup bash
+eval/tune_serial_overnight.sh` recipe below is historical only.
 
 ```bash
+# ARCHIVE ONLY — superseded by Overnight.command / overnight.sh
 cd /Users/jonathanrothberg/Agent_learning
 mkdir -p games/tune_serial10/run_05
-
 caffeinate -dims env \
   TUNE_OUT_DIR=games/tune_serial10/run_05 \
   TUNE_GOALS_FILE=eval/tune_serial10_round2_goals.txt \
   MLX_MODEL="$HOME/MLX_Models/GLM-5.2-MLX-4bit" \
-  nohup bash eval/tune_serial_overnight.sh &
-
-tail -f games/tune_serial10/run_05/overnight.log
+  bash eval/tune_serial_overnight.sh
 ```
 
-Prevent Mac sleep on power adapter: wrap with `caffeinate -dims nohup env TUNE_OUT_DIR=... ...`.
-
-**Autonomous mid-batch (after you launch in Terminal):** poll `eval/tune_overnight_monitor.py --out-dir games/tune_serial10/run_05` → `agent_monitor.json`. Cursor agent may triage traces and apply mid-batch harness fixes when gates pass — **never start the batch from Cursor** (visible Chromium + MLX cold load need Terminal.app).
-
-**Post-batch triage:** read `run_XX/tune_checkpoint.json`, `overnight.log`, traces under `run_XX/traces/`; scratch notes in `run_XX/triage.md` (gitignored). Durable learnings → [`HARNESS_TUNING.md`](../HARNESS_TUNING.md). **Source vs artifacts map** → [`AGENTS.md`](../AGENTS.md). Optional `run_06` partial re-run via `eval/tune_serial10_round2_rerun.txt`.
+**Post-batch triage:** `HARNESS_TUNING.md` · `AGENTS.md`. Optional `run_06` partial re-run via
+`eval/tune_serial10_round2_rerun.txt`.
 
 ```bash
 cd /Users/jonathanrothberg/Agent_learning

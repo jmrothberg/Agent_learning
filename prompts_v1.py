@@ -287,10 +287,11 @@ ASSETS_FORMAT = FormatSpec(
         "for retro / 8-bit / pixel style. Always use transparent backgrounds "
         "for game sprites.",
         "Optional `size` is a string (\"64x64\", \"256x192\") or an int "
-        "(square). Default 512 px square — keeps Z-Image's detail and "
-        "lets the game downscale at draw time as needed. Override per "
-        "asset only when you need something specific (HUD icons 32-64 "
-        "px, full-screen overlays 1024+).",
+        "(square). Media mode default 512 px square — the game downscales "
+        "at draw time. In /640png, `size` IS the on-screen size (blitSpr "
+        "draws 1:1 on 640×480) — pick it from the playfield (how many fit "
+        "across), not a default. Media-mode overrides: HUD icons 32-64 px, "
+        "full-screen overlays 1024+.",
         "ANIMATION FRAMES & ROSTER LIMITS: Real animation is a SERIES of "
         "frames where the BODY PARTS actually move (legs stride, arm "
         "extends), cycled at runtime to simulate motion — not one image "
@@ -797,8 +798,9 @@ JMR V1 native (640×480) WITH generated PNG sheets. One HTML file LOAD+RUN.
 Art programs write STEM-N.png next to the HTML (stem ≤8, ≤16 sheets).
 Related poses (hero_idle, hero_walk1) pack onto ONE strip, frames L→R.
 16 is a FILE cap, not a per-strip frame cap — a strip widens to fit more
-frames. Keep animated pose sizes small ("size":"64x64"); strip width =
-cellW × frame count, so large frames × many poses gets huge fast.
+frames. `size` is on-screen px on the 640×480 glass (blitSpr draws 1:1)
+— pick how many fit across the playfield per entity. Strip width =
+cellW × frame count, so a big cell costs on every frame.
 
 LOOK: classic arcade / original-cabinet graphics via those PNGs — NOT
 colored circles, squares, or bare fillRect placeholders as the final art.
@@ -925,8 +927,10 @@ Expose state on window (e.g. window.state). Keep exprs short; 3–5 total.
 ASSETS: one name per pose (hero_idle, hero_walk1). Shared prefix packs
 onto ONE STEM-N.png strip, frames left-to-right. ≤64 poses, ≤16 sheets —
 sheets are a FILE cap, not a per-sheet frame cap (a strip can hold many
-frames; it just gets wider). Keep animated poses SMALL ("size":"64x64")
-since a strip's width = cellW × frame count. Index N = jmr:spr:N.
+frames; it just gets wider). `size` is on-screen px on the 640×480 glass
+(blitSpr draws 1:1) — pick how many fit across the playfield per entity;
+strip width = cellW × frame count, so a big cell costs on every frame.
+Index N = jmr:spr:N.
 No <html_file> yet.
 """
 
@@ -1833,8 +1837,8 @@ def _detect_multi_frame_intent(goal: str) -> list[str]:
       - "spritesheet of 4 frames per enemy"
 
     Examples that DO NOT match:
-      - "shoot space invaders with a single ship sprite"
-      - "minimax chess engine, no animations needed"
+      - "shoot aliens with a single ship sprite"
+      - "minimax board engine, no animations needed"
 
     Detection layers (any one triggers a match):
       1. Single-token presence from `_MULTI_FRAME_KEYWORDS`
@@ -1871,45 +1875,8 @@ def _detect_multi_frame_intent(goal: str) -> list[str]:
     return matched
 
 
-# Classic franchise goals: nudge asset prompts toward iconic silhouettes
-# (user-editable specific guidance — genre-free mechanism memory stays separate).
-_FRANCHISE_ASSET_HINTS: list[tuple[tuple[str, ...], str]] = [
-    (
-        ("space invaders", "space-invaders", "invaders"),
-        "FRANCHISE ART — Space Invaders: prompt distinct classic arcade "
-        "alien silhouettes (crab, squid, octopus rows) — NOT generic bugs.",
-    ),
-    (
-        ("pac-man", "pacman", "ms pac"),
-        "FRANCHISE ART — Pac-Man: yellow circle hero; pursuers as rounded "
-        "ghost silhouettes with distinct colors.",
-    ),
-    (
-        ("dig dug", "dig-dug"),
-        "FRANCHISE ART — Dig Dug: round digger with pump hose; puffy "
-        "underground monsters that inflate when pumped.",
-    ),
-    (
-        ("minecraft",),
-        "FRANCHISE ART — voxel sandbox: name blocks grass/dirt/stone (or "
-        "similar) in <assets> prompts so hotbar types stay visually distinct.",
-    ),
-    (
-        ("doom", "wolfenstein"),
-        "FRANCHISE ART — FPS: textured wall/floor sprites plus billboard "
-        "monster silhouettes; weapon overlay muzzle points UP in source art.",
-    ),
-]
-
-
-def _franchise_asset_nudge(goal: str) -> str:
-    if not goal:
-        return ""
-    gl = goal.lower()
-    for keys, text in _FRANCHISE_ASSET_HINTS:
-        if any(k in gl for k in keys):
-            return "\n\n" + text + "\n"
-    return ""
+# Title-specific art craft (crab/squid rows, Doom billboards, …) lives in
+# memory/prompt_library.jsonl — never a title→hint table here.
 
 
 def plan_instruction(
@@ -1926,15 +1893,12 @@ def plan_instruction(
     jmr_png_mode: bool = False,
     nudge_ids_out: list[str] | None = None,
 ) -> str:
-    """Phase A planning prompt, optionally prefixed with a Wikipedia
-    reference block fetched by research.fetch().
+    """Phase A planning prompt.
 
-    When a reference is present, we tell the model to treat it as
-    authoritative: a 30B local model has thin world knowledge for
-    arcade-game mechanics, and without grounding it tends to ship a
-    plausible but wrong genre (e.g. Space Invaders when asked for
-    Missile Command). The reference block is short enough to keep in
-    context across the planning + first-build turns.
+    `reference_block` is unused (Wikipedia `/wiki` grounding was removed
+    2026-06-24); callers pass "". Kept as a parameter for API stability.
+    When a non-empty block is passed, it is still prefixed with AUTHORITY
+    prose for tests — production never fetches wiki.
 
     When `goal` contains art-modality keywords (sprite, graphic, art,
     pixel, image, …), we escalate the <assets> requirement — the model
@@ -2115,15 +2079,10 @@ def plan_instruction(
         )
         _record_nudge("point-and-click")
 
-    franchise_asset_nudge = (
-        "" if (simulator_mode and not jmr_png_mode)
-        else _franchise_asset_nudge(goal)
-    )
-
     # Phase 4: scope-pacing nudge for art-heavy + logic-heavy goals.
     # Only fires when BOTH art (or 3D) AND heavy-logic keywords match —
     # so a pure-arcade goal (lots of art, simple rules) and a pure-logic
-    # goal (chess engine, no art) both stay unaffected. The nudge is
+    # goal (board engine, no art) both stay unaffected. The nudge is
     # PROMPT ONLY and genre-free; it tells the model to ship the core
     # skeleton first and defer extra walk-cycle / VFX frames to a later
     # mid-session <assets> turn.
@@ -2256,7 +2215,7 @@ def plan_instruction(
 
     body = (
         local_crisp_nudge
-        + plan_core + art_nudge + illustrated_sprite_nudge + franchise_asset_nudge
+        + plan_core + art_nudge + illustrated_sprite_nudge
         + canvas_entity_nudge + pinball_nudge + open_field_td_nudge
         + threed_nudge + wireframe_nudge
         + beat_em_up_nudge + audio_nudge

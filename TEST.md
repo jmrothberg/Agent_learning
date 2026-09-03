@@ -6,10 +6,10 @@ Three layers, fastest first. **Batch runs and “what command do I run?”** →
 
 ## Layer 1 — unit suite (`tests/`)
 
-Pure-function, deterministic: stub backend, mock browser, `tmp_path` memory. **Run after every harness/agent change. The full suite must pass (~2137 tests) before push.**
+Pure-function, deterministic: stub backend, mock browser, `tmp_path` memory. **Run after every harness/agent change. The full suite must pass (~2343 tests / 195 files) before push.**
 
 ```bash
-.venv/bin/python -m pytest tests/ -q                  # full suite (~2137 tests, ~1 min)
+.venv/bin/python -m pytest tests/ -q                  # full suite (~2343 tests, ~1 min)
 .venv/bin/python -m pytest tests/test_patches.py -v   # one file
 .venv/bin/python -m pytest tests/test_patches.py::test_apply_smart_quote_match -v
 ```
@@ -37,7 +37,7 @@ Do **not** grep `inspect.getsource(agent)` or `inspect.getsource(GameAgent)` for
 | **Agent loop** | `test_iter_loop_guards.py`, `test_stall_recovery.py`, `test_exit_decision_turn.py`, `test_final_iter_test_guarantee.py`, `test_plan_retry.py` | Phase A/B/C, stall recovery, exit honesty, final untested iter |
 | **Compaction / context** | `test_compaction.py`, `test_token_aware_compaction.py`, `test_num_ctx.py` | Token-aware pressure; playbook survives feedback |
 | **Assets / media** | `test_assets.py`, `test_midsession_assets.py`, `test_asset_alignment.py`, `test_seed_phase_a_skip.py`, `test_mid_session_asset_deferral_and_runaway.py` | Alignment scan, rehydrate, style-rebrand deferral; **injected `sprite()` resolver** tie-break + cache flush (`test_sprite_resolver_*`, `test_render_block_flushes_cache_on_assets_ready`); mid-session **loadable** path scan (`test_midsession_assets_name_without_path_emits_loader`); **/640png atlas pack** (`test_materialize_jmr_png_packs_related_poses`, `blitSpr` helper) |
-| **Memory / prompts** | `test_retrieval.py`, `test_prompt_library*.py`, `test_opening_book_memory.py`, `test_open_domain_routing.py`, `test_3d_navigation_conventions.py` | Genre-free retrieval; plan nudges data-driven; 3D/wireframe/modality skeletons |
+| **Memory / prompts** | `test_retrieval.py`, `test_prompt_library*.py`, `test_opening_book_memory.py`, `test_open_domain_routing.py`, `test_3d_navigation_conventions.py` | Genre-free retrieval; plan nudges data-driven; 3D/wireframe/modality skeletons; **`test_prompt_library.py`** requires every `prompt_640` to include `On-screen sizes:` |
 | **Trace / diagnostics** | `test_trace_diagnostics.py`, `test_patch_outcome_trace.py`, `test_failure_class_routing.py` | `failure_class`, `iter_summary`, ephemeral events |
 | **Backend / streaming** | `test_ollama_io.py`, `test_max_tokens_signal.py`, `test_repetition.py`, `test_deliberation_thresholds.py`, `test_backend_detection.py` | Sampling, repetition latch; **mlx-server `is_vlm()` matches `/list` [VLM] (Flash-Next oMLX)** |
 | **TUI (`chat.py`)** | `test_tui_help.py`, `test_tui_keybindings_and_status.py`, `test_wait_mode_defaults.py`, `test_status_panel.py`, `test_check_routing.py`, `test_ask_mode.py`, `test_unqueue.py`, `test_modelall_command.py`, `test_simulator_mode.py`, `test_staged_assets_cmd.py` | Slash-command help matches behavior; `/wait` defaults ON; `/check` / `/ask` / `/unqueue` / `/modelall` / `/assets` routing; simulator `/640`; `/640png` JMR + packed STEM-N.png atlases |
@@ -211,7 +211,7 @@ Fixture: `eval/fixtures/seed_fighters_facing_bug.html` · assets: `eval/fixtures
 <!-- BEGIN AUTO-TEST-INDEX -->
 ## Complete unit-test file index (auto-generated)
 
-Every `tests/test_*.py` must appear below (enforced by `tests/test_docs_index.py`). **193 files**, ~**2215** `def test_` cases. Prefer extending an existing file when the failure class matches — do not delete or rename incident-named files.
+Every `tests/test_*.py` must appear below (enforced by `tests/test_docs_index.py`). **195 files**, ~**2343** `def test_` cases. Prefer extending an existing file when the failure class matches — do not delete or rename incident-named files.
 
 | | | |
 |---|---|---|
@@ -219,23 +219,24 @@ Every `tests/test_*.py` must appear below (enforced by `tests/test_docs_index.py
 | `test_action_gate_non_combat_keys.py` | `test_agent_memory_critique_pass.py` | `test_architect_opening_library.py` |
 | `test_artifact_integrity.py` | `test_ask_mode.py` | `test_asset_alignment.py` |
 | `test_asset_change_feedback.py` | `test_asset_library.py` | `test_asset_request_reprompt.py` |
-| `test_assets.py` | `test_audio_and_integrity_probes.py` | `test_auto_staff.py` |
-| `test_autonomous_playtest.py` | `test_backend_detection.py` | `test_backend_warm_prefix.py` |
-| `test_beat_em_up_routing.py` | `test_bloat_detectors.py` | `test_blocker_first_feedback.py` |
-| `test_canvas_default_size.py` | `test_capability_round.py` | `test_check_routing.py` |
-| `test_checkerboard_chroma.py` | `test_cloud_backends.py` | `test_compaction.py` |
-| `test_compare_runs.py` | `test_consistency_and_context.py` | `test_continuation_context_reset.py` |
-| `test_continuation_stale_context.py` | `test_continuation_truth_source.py` | `test_credit_bullets.py` |
-| `test_dead_animation_gate.py` | `test_deliberation_thresholds.py` | `test_diagnose_patch_coherence.py` |
-| `test_diffuser_memory_relief.py` | `test_doc_links.py` | `test_docs_index.py` |
-| `test_dojo_asset_smoke_fixture.py` | `test_doom_feedback_misroute.py` | `test_doom_general_improvements.py` |
-| `test_doom_trace_fixes.py` | `test_drawn_asset_detector.py` | `test_enrich_trace_paths.py` |
-| `test_entity_render_check_and_autonomous_skip_trace.py` | `test_exit_decision_turn.py` | `test_failure_class_routing.py` |
-| `test_feedback_behavior_bug.py` | `test_feedback_code_lock.py` | `test_feedback_ledger.py` |
-| `test_feedback_router.py` | `test_final_iter_test_guarantee.py` | `test_fix_round.py` |
-| `test_flux2_generator_selection.py` | `test_focused_slice.py` | `test_format_doctor_early_escalation.py` |
-| `test_format_doctor_output_validation.py` | `test_format_rejection.py` | `test_frozen_idle_and_reporting.py` |
-| `test_golden_feedback_flows.py` | `test_goodgame.py` | `test_grid_maze_chase_probes.py` |
+| `test_assets.py` | `test_audio_and_integrity_probes.py` | `test_auto_revert_user_feedback.py` |
+| `test_auto_staff.py` | `test_autonomous_playtest.py` | `test_backend_detection.py` |
+| `test_backend_warm_prefix.py` | `test_beat_em_up_routing.py` | `test_bloat_detectors.py` |
+| `test_blocker_first_feedback.py` | `test_canvas_default_size.py` | `test_capability_round.py` |
+| `test_check_routing.py` | `test_checkerboard_chroma.py` | `test_cloud_backends.py` |
+| `test_compaction.py` | `test_compare_runs.py` | `test_consistency_and_context.py` |
+| `test_continuation_context_reset.py` | `test_continuation_stale_context.py` | `test_continuation_truth_source.py` |
+| `test_credit_bullets.py` | `test_dead_animation_gate.py` | `test_deliberation_thresholds.py` |
+| `test_diagnose_patch_coherence.py` | `test_diffuser_memory_relief.py` | `test_doc_links.py` |
+| `test_docs_index.py` | `test_dojo_asset_smoke_fixture.py` | `test_doom_feedback_misroute.py` |
+| `test_doom_general_improvements.py` | `test_doom_trace_fixes.py` | `test_drawn_asset_detector.py` |
+| `test_enrich_trace_paths.py` | `test_entity_render_check_and_autonomous_skip_trace.py` | `test_exit_decision_turn.py` |
+| `test_failure_class_routing.py` | `test_feedback_behavior_bug.py` | `test_feedback_code_lock.py` |
+| `test_feedback_ledger.py` | `test_feedback_router.py` | `test_file_picker_cmds.py` |
+| `test_final_iter_test_guarantee.py` | `test_fix_round.py` | `test_flux2_generator_selection.py` |
+| `test_focused_slice.py` | `test_format_doctor_early_escalation.py` | `test_format_doctor_output_validation.py` |
+| `test_format_rejection.py` | `test_frozen_idle_and_reporting.py` | `test_golden_feedback_flows.py` |
+| `test_goodgame.py` | `test_grid_maze_chase_probes.py` | `test_honest_stall_exit_messages.py` |
 | `test_input_responsive_synthesis.py` | `test_input_smoke_state_global.py` | `test_inter_game_sync.py` |
 | `test_iter_loop_guards.py` | `test_launch_triage_fixes.py` | `test_lean_prompt_local.py` |
 | `test_lookup.py` | `test_materialize_msg.py` | `test_max_tokens_signal.py` |
@@ -265,20 +266,19 @@ Every `tests/test_*.py` must appear below (enforced by `tests/test_docs_index.py
 | `test_seed_prompt_budget.py` | `test_seed_resolve.py` | `test_session_outcome_git_sha.py` |
 | `test_session_timeouts.py` | `test_simulator_mode.py` | `test_skeleton_2d_arcade_routing.py` |
 | `test_skeleton_payload.py` | `test_skeleton_retrieval.py` | `test_smoke_vlm_parse.py` |
-| `test_sounds.py` | `test_sprite_draw_wiring_microprobe.py` | `test_stall_classifier.py` |
-| `test_stall_recovery.py` | `test_static_action_gate.py` | `test_status_memory_block.py` |
-| `test_status_panel.py` | `test_status_panel_allroles.py` | `test_stream_instance_method.py` |
-| `test_stream_visibility.py` | `test_stuck_hard_gate.py` | `test_style_rebrand_classifier.py` |
-| `test_subsystem_hint.py` | `test_system_tests.py` | `test_task_ledger.py` |
-| `test_thinking_strip.py` | `test_tier1_2.py` | `test_todos_artifact.py` |
-| `test_token_aware_compaction.py` | `test_trace_diagnostics.py` | `test_tui_help.py` |
-| `test_tui_keybindings_and_status.py` | `test_tune_serial_pass.py` | `test_unqueue.py` |
-| `test_videos.py` | `test_vision_coaching.py` | `test_visual_critic_failsafe.py` |
-| `test_visual_playtest_auto_probes.py` | `test_visual_playtest_coverage.py` | `test_visual_playtest_matcher.py` |
-| `test_visual_playtest_wiring.py` | `test_vlm_checklist_plan_injection.py` | `test_vlm_classifier.py` |
-| `test_vlm_facing_sanity.py` | `test_wait_mode_defaults.py` | `test_warning_persistence_dedup.py` |
-| `test_weak_model_hardening.py` | `test_wireframe_vector_routing.py` | `test_wolfenstein_stuck_loop_fixes.py` |
-| `test_zimage_snapshot_completeness.py` | `test_sound_alignment.py` | `test_honest_stall_exit_messages.py` |
-| `test_staged_assets_cmd.py` |  |  |
+| `test_sound_alignment.py` | `test_sounds.py` | `test_sprite_draw_wiring_microprobe.py` |
+| `test_staged_assets_cmd.py` | `test_stall_classifier.py` | `test_stall_recovery.py` |
+| `test_static_action_gate.py` | `test_status_memory_block.py` | `test_status_panel.py` |
+| `test_status_panel_allroles.py` | `test_stream_instance_method.py` | `test_stream_visibility.py` |
+| `test_stuck_hard_gate.py` | `test_style_rebrand_classifier.py` | `test_subsystem_hint.py` |
+| `test_system_tests.py` | `test_task_ledger.py` | `test_thinking_strip.py` |
+| `test_tier1_2.py` | `test_todos_artifact.py` | `test_token_aware_compaction.py` |
+| `test_trace_diagnostics.py` | `test_tui_help.py` | `test_tui_keybindings_and_status.py` |
+| `test_tune_serial_pass.py` | `test_unqueue.py` | `test_videos.py` |
+| `test_vision_coaching.py` | `test_visual_critic_failsafe.py` | `test_visual_playtest_auto_probes.py` |
+| `test_visual_playtest_coverage.py` | `test_visual_playtest_matcher.py` | `test_visual_playtest_wiring.py` |
+| `test_vlm_checklist_plan_injection.py` | `test_vlm_classifier.py` | `test_vlm_facing_sanity.py` |
+| `test_wait_mode_defaults.py` | `test_warning_persistence_dedup.py` | `test_weak_model_hardening.py` |
+| `test_wireframe_vector_routing.py` | `test_wolfenstein_stuck_loop_fixes.py` | `test_zimage_snapshot_completeness.py` |
 
 <!-- END AUTO-TEST-INDEX -->

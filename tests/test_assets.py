@@ -589,7 +589,12 @@ def test_jmr_atlas_group_key_strips_pose_suffix():
     assert jmr_atlas_group_key("hero_idle") == "hero"
     assert jmr_atlas_group_key("hero_walk1") == "hero"
     assert jmr_atlas_group_key("creep") == "creep"
-    assert jmr_atlas_group_key("left_fighter_idle") == "left_fighter"
+    # Subject prefix, not a pose vocabulary: left/right fighters still split.
+    assert jmr_atlas_group_key("left_fighter_idle") == "left"
+    assert jmr_atlas_group_key("right_fighter_idle") == "right"
+    # ANIMATIO 20260903: unlisted pose words must still group by subject.
+    assert jmr_atlas_group_key("big_grab") == "big"
+    assert jmr_atlas_group_key("small_impact") == "small"
 
 
 def test_materialize_jmr_png_packs_related_poses(tmp_path: Path):

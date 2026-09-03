@@ -74,7 +74,7 @@ prompts + harness + memory beats swapping models.** This repo is not a general r
 | **Assets** | none in-loop | none | **FLUX2-klein (mflux) on macOS** or Z-Image-Turbo + Stable Audio; LTX-2.5 / Wan cutscenes via subprocess |
 | **Memory** | repo files | conversation | hand-curated **`memory/`** opening book (JSONL — one line, no restart) |
 | **Local LLM** | cloud-first | local or cloud | **MLX in-process** (macOS default) or Ollama; cloud only with explicit API key + `/backend` |
-| **Regression** | CI you author | ad hoc | **pytest (~2258 tests)** + stub eval banks + opt-in `eval/eval_seed_edits.py` (materialization with `browser=None`) |
+| **Regression** | CI you author | ad hoc | **pytest (~2343 tests)** + stub eval banks + opt-in `eval/eval_seed_edits.py` (materialization with `browser=None`) |
 
 **Real advantages vs general agents:** playable-game verification (input smoke test, per-action
 screenshots, sprite gates), and a full on-machine art/audio pipeline tied to the same loop.
@@ -229,6 +229,8 @@ See **`DEV.md`** for env vars (`LLM_BACKEND`, `MLX_MODEL`, `CODING_BOX_NUM_CTX`,
 
 ## Overnight batches (10 games)
 
+**Canonical HARD RULES:** [`eval/OPERATIONS.md` § HARD RULES](eval/OPERATIONS.md) (full text lives there only).
+
 **Easiest (no command line):** double-click **`Overnight.command`** in Finder. Terminal opens and asks:
 1. prompt numbers (from the canned list)
 2. max iterations
@@ -236,7 +238,7 @@ See **`DEV.md`** for env vars (`LLM_BACKEND`, `MLX_MODEL`, `CODING_BOX_NUM_CTX`,
 4. which MLX model
 then starts the batch. Cursor still needs the watcher (Terminal prints the exact command).
 
-**One sentence for another LLM:** user double-clicks `Overnight.command` (or `bash eval/overnight.sh`); agent starts `.venv/bin/python eval/tune_overnight_monitor.py --out-dir games/tune_serial10/run_N --jobs-total K --interval 30 --sync-loop` in a Cursor Shell (`block_until_ms=0`). CLI: `bash eval/overnight.sh --prompts 54,28 --model GLM-5.2-MLX-4bit --vlm no`.
+**One sentence for another LLM:** user double-clicks `Overnight.command` (or `bash eval/overnight.sh`); agent starts `.venv/bin/python eval/tune_overnight_monitor.py --out-dir games/tune_serial10/run_N --jobs-total K --interval 30 --sync-loop` in a Cursor Shell (`block_until_ms=0`). Never `nohup` the watcher. CLI: `bash eval/overnight.sh --prompts 54,28 --model GLM-5.2-MLX-4bit --vlm no`.
 
 Two processes run in parallel — **both required**:
 
@@ -249,7 +251,7 @@ Two processes run in parallel — **both required**:
 
 **Watcher loop:** when `agent_monitor.json` shows `completed_count` advanced, timeline the newest trace (`scripts/enrich_trace.py <trace> --timeline`), classify `failure_class`, patch source — do **not** stop the Terminal batch.
 
-Full rules and legacy `tune_runNN.sh`: **`eval/OPERATIONS.md`**.
+Legacy `tune_runNN.sh` recipes: **`eval/OPERATIONS.md`** (historical archive under HARD RULES).
 
 ---
 
@@ -620,21 +622,23 @@ Each file has one job — avoid duplicating long gate/env lists across them.
 
 | File | Audience | Purpose |
 |------|----------|---------|
-| `AGENTS.md` | maintainers + LLMs | Source vs artifacts, mixin map, trace paths — **new maintainer start** |
+| **`HARNESS_TUNING.md`** | harness tuners / Cursor agents | **New-agent start** — harness vs memory, titles vs classes, traps, fix loop |
+| `AGENTS.md` | maintainers + LLMs | Router: who reads what, edit vs artifacts, mixin map, trace paths |
 | `DEV.md` | **LLM agents + humans** | Commands, env vars, architecture (maintainer only — not injected into game LLM) |
 | `TEST.md` | humans + LLMs | Three-layer tests, suite map, scripts inventory |
-| **`eval/OPERATIONS.md`** | **humans + LLMs** | **“Run pytest / batch N games / triage run_XX” — natural-language → command** |
-| **`HARNESS_TUNING.md`** | harness tuners | **Start here for new agents** — harness vs memory, traps, fix loop |
+| **`eval/OPERATIONS.md`** | **humans + LLMs** | **Canonical overnight HARD RULES** + “run pytest / batch / triage” NL→shell |
 | `HARNESS_DEBUG.md` | harness tuners | Gate list, `failure_class`, trace timeline workflow |
 | `FOR_NEXT_LLM.md` | — | Legacy redirect → `HARNESS_TUNING.md` |
-| `eval/PARALLEL_MLX_TESTING.md` | batch eval | One MLX server, N parallel clients |
+| `eval/PARALLEL_MLX_TESTING.md` | batch eval | Parallel oMLX / mlx-server lab only (not serial overnight) |
+| `game_rules.md` | — | Tombstone — standing constraints live in `memory/playbook.jsonl` |
 
 ---
 
 ## Standing rules
 
 Full list: **`DEV.md`**. Summary: tune the agent not the model; genre-free code; visible Chromium;
-Asteroids regression; cosmetic sprite warnings are advisory; don't commit `games/` output.
+Asteroids regression; cosmetic sprite warnings are advisory; prefer not committing generated
+`games/` session trees (`.gitignore` is partial — see `AGENTS.md` §2; keepers go in `goodgame/`).
 
 ---
 

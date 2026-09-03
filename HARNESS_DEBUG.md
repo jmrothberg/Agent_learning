@@ -31,7 +31,9 @@ Common on art-heavy builds after user feedback fixed visuals:
 | Playable in browser | `input_responsive` failed | Keys registered but no pixel delta in 3s smoke — often `_assetsReady` gating or closure-scope `keys` bug in **game code**; fix via memory/prompt, not always harness |
 
 Read **`iter_summary.soft_warnings`** line by line. **`ok`** is false if **any** soft warning exists,
-even when probes are 7/8 and the game looks perfect manually.
+even when probes are 7/8 and the game looks perfect manually. Separate from that: **cosmetic** sprite
+notes (dead-frame / pose-delta) are demoted to non-gating `report["warnings"]` and must **not** flip
+`ok` — see `HARNESS_TUNING.md` Do-not list and `DEV.md` standing rules.
 
 **Harness vs memory:** wrong sprite *resolver* for all parallel-prefix games → **`assets.py`**.
 Wrong *wiring in one session* after feedback → often **LLM patch** + playbook (`versus-fighter-sprite-prefix`).
@@ -158,6 +160,7 @@ After the timeline, open the `.jsonl` and search for:
 1. **`agent_crash`** — session killed by an uncaught Python error (NameError, etc.); includes
    `traceback`. Distinct from a browser **`harness_crash`** (Playwright/test layer only).
 2. **`iter_summary`** or **`no_usable_code`** — read `failure_class` and any `soft_warnings` text.
+   Edit-routing table: **`AGENTS.md` §4** (`harness_bug` / `memory_gap` / `local_llm_limit`).
 3. **`structured_compaction`** — fired too early? Context window may be too small; patches “don’t
    stick” because the model lost sight of the file.
 4. **`playbook_injected`** / **`opening_book_retrieved`** — did the memory library actually load?

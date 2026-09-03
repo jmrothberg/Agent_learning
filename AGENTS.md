@@ -1,6 +1,6 @@
 # AGENTS.md — source vs artifacts
 
-Map for maintainers and LLMs: **edit source, read artifacts for triage, never commit generated games.**
+Map for maintainers and LLMs: **edit source, read artifacts for triage, prefer never committing generated session trees under `games/`.**
 
 ---
 
@@ -10,12 +10,14 @@ Map for maintainers and LLMs: **edit source, read artifacts for triage, never co
 |------|:------:|:--------:|---------|
 | `AGENTS.md` | yes | **no** | Router, edit vs artifacts, mixin map |
 | `DEV.md` | yes | **no** | Commands, env vars, architecture |
-| `HARNESS_TUNING.md` | yes | no | Harness traps, onboarding, trace→fix patterns |
+| `HARNESS_TUNING.md` | yes | no | **New-agent start** — traps, onboarding, titles vs classes |
 | `FOR_NEXT_LLM.md` | yes | no | Legacy redirect → `HARNESS_TUNING.md` |
 | `HARNESS_DEBUG.md` | yes | no | Gates, `failure_class`, enrich_trace |
-| `eval/OPERATIONS.md` | yes | no | Natural-language → shell commands |
+| `eval/OPERATIONS.md` | yes | no | **Canonical overnight HARD RULES** + NL→shell |
+| `eval/PARALLEL_MLX_TESTING.md` | yes | no | Parallel oMLX / mlx-server lab only (not serial overnight) |
 | `TEST.md` | yes | no | What each pytest guards |
-| `README.md` | optional | no | Human onboarding |
+| `README.md` | optional | no | Human product onboarding |
+| `game_rules.md` | no | no | Tombstone — constraints live in `memory/playbook.jsonl` |
 | `prompts_v1.py` + `memory/` | no | **yes** | Canonical game-codegen rules + retrieval |
 
 Legacy `CLAUDE.md` is a redirect stub → `DEV.md`.
@@ -29,7 +31,7 @@ Improve the **verification loop and agent**, not generated `games/*.html`. Start
 3. **[`TEST.md`](TEST.md)** — pytest map; extend existing test file for your failure class
 4. Run **`.venv/bin/python -m pytest tests/ -q`** after every change (must stay green)
 
-**Overnight batches:** double-click **`Overnight.command`** (Terminal Q&A: prompts → iters → VLM → model) **or** agent runs `bash eval/overnight.sh …`; then watcher in Cursor Shell with **`block_until_ms=0`**. **Never** batch-in-Cursor, **never** ask the human to paste, **never** `nohup` the watcher, **never** halt the batch. Full rules: **`eval/OPERATIONS.md` § HARD RULES** · **`HARNESS_TUNING.md` §3b**.
+**Overnight batches:** two processes (Terminal batch + Cursor watcher). Full HARD RULES live only in **`eval/OPERATIONS.md` § HARD RULES** (short pointer: **`HARNESS_TUNING.md` §3b**).
 
 | Layer | Edit when… |
 |-------|------------|
@@ -63,7 +65,7 @@ Do **not** patch random `games/*.html` to fix the agent — change harness/memor
 **Rule:** add new logic to the matching mixin — do not grow `run()` inline.
 
 `agent.py` still holds phase orchestration (`_run_phase_a_and_first_build`, `_run_build_iterate_loop`,
-`_run_exit_and_finalize`) — ~9.5K lines. Mixins own prefixed method groups below.
+`_run_exit_and_finalize`) — ~10.2K lines. Mixins own prefixed method groups below.
 
 | Module | Concern |
 |--------|---------|
@@ -106,9 +108,9 @@ Thin `run()` delegates to phase methods. Grep helpers: `GameAgent.run_loop_inspe
 
 ---
 
-## 2. Artifact tree — read for triage, never edit as source, never commit
+## 2. Artifact tree — read for triage, never edit as source
 
-Everything under `games/` is **generated at runtime**. Gitignored locally; stays on disk for debugging.
+Session output under `games/` is **generated at runtime** for debugging. Prefer **not** committing it. `.gitignore` covers depth-1 `games/*.html`, caches, `tune_serial10/`, and similar — nested `games/<NAME>/` trees can still appear in `git status`; wipe with `./scripts/clean_artifacts.sh`. Curated keepers belong in **`goodgame/`** only.
 
 ### Trace and log paths
 

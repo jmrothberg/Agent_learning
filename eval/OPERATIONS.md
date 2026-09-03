@@ -57,15 +57,15 @@ Legacy per-run tune_runNN.sh scripts under eval/ (when present) still work but *
 | User intent | Command | Notes |
 |-------------|---------|-------|
 | **Overnight (default)** | Double-click `Overnight.command` · Cursor Shell watcher | Interactive: prompts → iters → VLM → model. Or CLI `overnight.sh --prompts …`. |
-| **Run Mr. Do! + 10 graphics/3D overnight (run_18)** | legacy `eval/tune_run18.sh` or `overnight.sh --prompts …` | **GLM-5.2-MLX-4bit**, VLM off, `--max-iters 3`. Already launched. |
-| **Run 20 GRAPHICS-BEST games overnight (run_15 — tonight)** | Terminal: `bash eval/tune_run15.sh` · Cursor: watcher below | **GLM-5.2-MLX-4bit**, **`--no-vlm-critique`**, flat-out. High-confidence watcher fixes only. |
+| **Run Mr. Do! + 10 graphics/3D overnight (run_18)** | legacy `eval/tune_run18.sh` or `overnight.sh --prompts …` | **GLM-5.2-MLX-4bit**, VLM off, `--max-iters 3`. Historical. |
+| **Run 20 GRAPHICS-BEST games overnight (run_15 — archive)** | Terminal: `bash eval/tune_run15.sh` · Cursor: watcher below | **GLM-5.2-MLX-4bit**, **`--no-vlm-critique`**, flat-out. Completed 2026-07. |
 | **Run 10 NEW games overnight (run_14)** | Terminal: `bash eval/tune_run14.sh` · Cursor: watcher below | Qwen3.6-27B-mxfp8, VLM critique ON (completed). |
 | **Run 10 NEW games overnight (run_13)** | Terminal: `bash eval/tune_run13.sh` · Cursor: watcher below | GLM-5.2-MLX-4bit, **`--no-vlm-critique`**, flat-out. Watcher fixes in parallel. |
 | **Run 10 games overnight (run_08)** | Terminal: `bash eval/tune_run08.sh` · Cursor: watcher below | Batch runs **flat-out** (no pause). Watcher fixes in parallel. |
 | **Run 10 games validation (run_10 — run_09 fix retest)** | Terminal: `bash eval/tune_run09.sh` · Cursor: watcher below | `--max-iters 4`, fresh `run_10/` dir. See § run_10. |
 | **Run all 11 games overnight (both batches, auto-chained)** | Agent `osascript`s `eval/tune_run07_chain.sh` in Terminal + monitor in Cursor | Batch B starts automatically when A finishes. No wake-up. |
 | **Run 11 games to improve the agent (run_07)** | Same as chain row above | A=GLM no VLM (6) → B=Qwen VLM on (5), watcher handoff between games. |
-| **Run unit tests** / **pytest** / **after a code change** | `.venv/bin/python -m pytest tests/ -q` | ~2330 tests, no GPU. Full map: `TEST.md`. |
+| **Run unit tests** / **pytest** / **after a code change** | `.venv/bin/python -m pytest tests/ -q` | ~2343 tests / 195 files, no GPU. Full map: `TEST.md`. |
 | **Run one test file** | `.venv/bin/python -m pytest tests/test_patches.py -v` | Swap path. |
 | **Run asteroids regression** | `.venv/bin/python -m pytest tests/test_retrieval.py tests/test_patches.py -q -k asteroids` | Ship thrust + irregular asteroids. |
 | **Run 3D navigation guards** | `.venv/bin/python -m pytest tests/test_3d_navigation_conventions.py tests/test_doom_trace_fixes.py -q` | Skeletons, playbook, FPS yaw/movement conventions. |
@@ -84,6 +84,12 @@ Legacy per-run tune_runNN.sh scripts under eval/ (when present) still work but *
 | **Parallel N games (throughput lab)** | See `eval/PARALLEL_MLX_TESTING.md` + `eval/batch_parallel.py` | One `mlx_lm.server`, N clients — **not** in-game BoN. |
 
 ---
+
+## Historical run archive (run_07 … run_18)
+
+Sections below are **completed batch recipes and scoreboards** for triage / comparison.
+**Do not treat them as tonight’s launch path** — use HARD RULES + `Overnight.command` above.
+Durable traps from these runs live in `HARNESS_TUNING.md`.
 
 ## run_07 — both batches, one night (A → B auto-chained)
 
@@ -481,19 +487,21 @@ Artifacts: `games/tune_serial10/run_10/` (`overnight.log`, `traces/`, `tune_chec
 
 ## Serial overnight batch (manual launch)
 
-**Primary workflow:** see **run_07 chain** above. For a custom dir/goals file:
+**Prefer HARD RULES / `Overnight.command` tonight.** This section is for a custom
+dir/goals file. **Watcher must be a Cursor Shell** (`block_until_ms=0`) — never
+`nohup` the monitor (see HARD RULES).
 
 | File | Purpose |
 |------|---------|
-| **`eval/tune_run08_goals.txt`** | **run_08 tonight (10 games)** — see § run_08 above |
-| **`eval/tune_run09_goals.txt`** | **run_10 validation (10 games)** — see § run_10 above |
+| **`eval/tune_run08_goals.txt`** | **run_08 archive (10 games)** — see § run_08 above |
+| **`eval/tune_run09_goals.txt`** | **run_10 validation archive (10 games)** — see § run_10 above |
 | `eval/tune_run07_big.txt` | run_07 Batch A (6 games, GLM, no VLM) |
 | `eval/tune_run07_vlm.txt` | run_07 Batch B (5 games, Qwen + VLM, `--max-iters 2`) |
 | `eval/tune_serial10_goals.txt` | Full 12-game battery |
 | `eval/tune_serial10_round2_goals.txt` | Round 2 subset |
 | `eval/tune_serial10_round2_rerun.txt` | run_06 validation (6 games) → e.g. `run_06` or `run_07` |
 
-**Example launch** (Terminal.app, not Cursor):
+**Example batch launch** (Terminal.app only — not Cursor):
 
 ```bash
 cd /Users/jonathanrothberg/Agent_learning
@@ -502,10 +510,10 @@ caffeinate -dims env \
   TUNE_OUT_DIR=games/tune_serial10/run_06 \
   TUNE_GOALS_FILE=eval/tune_serial10_round2_rerun.txt \
   MLX_MODEL="$HOME/MLX_Models/GLM-5.2-MLX-4bit" \
-  nohup bash eval/tune_serial_overnight.sh &
-tail -f games/tune_serial10/run_06/overnight.log
+  bash eval/tune_serial_overnight.sh
+# Watcher in Cursor Shell (NOT nohup):
+# .venv/bin/python eval/tune_overnight_monitor.py --out-dir games/tune_serial10/run_06 --jobs-total K --interval 30 --sync-loop
 ```
-
 **Defaults baked in:** `--best-of-n 1`, stuck best-of-2 **off**, `--no-vlm-critique`, `--resume`, `--retries 2`, **`--wait-for-monitor 0`** (flat-out — no pause between games).
 
 **Change game count:** edit the goals `.txt` (one goal per non-comment line) or pass `--goal "..."` repeatedly to `eval/tune_serial_loop.py`.
@@ -602,4 +610,4 @@ Corrected run_06 score: **2/6 fresh pass** (01 Donkey Kong, 02 Kung-Fu), **4/6 f
 | `HARNESS_DEBUG.md` | Gates, BoN glossary, trace grep |
 | `HARNESS_TUNING.md` | Tuning traps + batch learnings |
 | `AGENTS.md` | Source vs artifacts map |
-| `eval/PARALLEL_MLX_TESTING.md` | Multi-game parallel via mlx-server |
+| `eval/PARALLEL_MLX_TESTING.md` | Parallel oMLX / mlx-server lab only (not serial overnight) |

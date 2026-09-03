@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+
+
+<html_file>
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Monster Slam</title>
+<style>
+  html,body { margin:0; background:#0c0d14; overflow:hidden; }
+  #wrap { position:fixed; inset:0; display:grid; place-items:center; }
+  canvas { background:#1a1a2e; }
+</style></head>
+<body>
+<div id="wrap"><canvas id="c" width="640" height="480"></canvas></div>
+<script data-host="chrome">
+window.JMR_SPR = ["ANIMATIO-0.png", "ANIMATIO-1.png", "ANIMATIO-2.png", "ANIMATIO-3.png", "ANIMATIO-4.png", "ANIMATIO-5.png", "ANIMATIO-6.png", "ANIMATIO-7.png"];
+(function(){
+  var real = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype,"src");
+  Object.defineProperty(HTMLImageElement.prototype,"src",{
+    get: real.get,
+    set: function(v){
+      var m = /^jmr:spr:(\d+)$/.exec(v);
+      if(m && window.JMR_SPR && window.JMR_SPR[+m[1]]) v = window.JMR_SPR[+m[1]];
+      real.set.call(this,v);
+    }
+  });
+})();
+</script>
+<script>
+// JMR atlas helper — 9-arg crop; src literals only (no concat).
+window.JMR_CELL = [[96,96], [96,96], [96,96], [64,64], [64,64], [64,64], [64,64], [64,64]];
+var S0 = new Image(); S0.src = "jmr:spr:0";
+var S1 = new Image(); S1.src = "jmr:spr:1";
+var S2 = new Image(); S2.src = "jmr:spr:2";
+var S3 = new Image(); S3.src = "jmr:spr:3";
+var S4 = new Image(); S4.src = "jmr:spr:4";
+var S5 = new Image(); S5.src = "jmr:spr:5";
+var S6 = new Image(); S6.src = "jmr:spr:6";
+var S7 = new Image(); S7.src = "jmr:spr:7";
+function blitSpr(c, img, fi, cw, ch, dx, dy) { c.drawImage(img, fi * cw, 0, cw, ch, dx, dy, cw, ch); }
+</script>
+
+<script>
+(() => {
+  const cvs = document.getElementById("c");
+  const ctx = cvs.getContext("2d");
+  const W = 640, H = 480;
+
+  // Animation data: 8 frames. Parallel arrays, indexed by frame 0..7.
+  // Big monster: sheet idx + frame-in-sheet (96x96 cells).
+  const bS = [0,1,0,0,0,2,2,0];
+  const bF = [0,0,1,2,2,0,0,0];
+  // Small monster: sheet idx + frame-in-sheet (64x64 cells).
+  const sS = [3,4,5,6,7,3,3,3];
+  const sF = [0,0,0,0,0,1,1,1];
+  // Small monster screen position per frame.
+  const sX = [392,380,368,392,404,404,404,404];
+  const sY = [352,300,168,280,352,384,384,384];
+  // Big monster screen position (mostly fixed, slight lean on slam).
+  const bX = [180,188,180,196,196,180,180,180];
+  const bY = [288,288,288,300,300,288,288,288];
+
+  const state = { frame: 0, tick: 0, cycles: 0, smallY: sY[0] };
+  window.state = state;
+  window.game = { reset() { state.frame = 0; state.tick = 0; state.smallY = sY[0]; } };
+
+  // Sprite sheets — literal quoted src per sheet index (FPGA rule).
+  const S0 = new Image(); S0.src = "jmr:spr:0";
+  const S1 = new Image(); S1.src = "jmr:spr:1";
+  const S2 = new Image(); S2.src = "jmr:spr:2";
+  const S3 = new Image(); S3.src = "jmr:spr:3";
+  const S4 = new Image(); S4.src = "jmr:spr:4";
+  const S5 = new Image(); S5.src = "jmr:spr:5";
+  const S6 = new Image(); S6.src = "jmr:spr:6";
+  const S7 = new Image(); S7.src = "jmr:spr:7";
+  const SHEETS = [S0,S1,S2,S3,S4,S5,S6,S7];
+
+  function blitSpr(img, fi, cw, ch, dx, dy) {
+    // 9-arg crop; clamp dest on-glass.
+    let dw = cw, dh = ch, sx = fi * cw, sy = 0;
+    if (dx < 0) { sx += -dx; dw += dx; dx = 0; }
+    if (dy < 0) { sy += -dy; dh += dy; dy = 0; }
+    if (dx + dw > W) dw = W - dx;
+    if (dy + dh > H) dh = H - dy;
+    if (dw > 0 && dh > 0) ctx.drawImage(img, sx, sy, dw, dh, dx, dy, dw, dh);
+  }
+
+  addEventListener("keydown", e => {
+    const k = e.key;
+    const c = e.keyCode;
+    if (k === "Enter" || c === 13) { state.frame = 0; state.tick = 0; }
+    if (k === " " || c === 32) { state.frame = (state.frame + 1) % 8; state.tick = 0; }
+  });
+
+  function update() {
+    state.tick++;
+    if (state.tick >= 12) {
+      state.tick = 0;
+      state.frame++;
+      if (state.frame >= 8) { state.frame = 0; state.cycles++; }
+    }
+    state.smallY = sY[state.frame];
+  }
+
+  function draw() {
+    // Sky bands (no gradients allowed).
+    ctx.fillStyle = "#101a3a"; ctx.fillRect(0, 0, W, 160);
+    ctx.fillStyle = "#182a52"; ctx.fillRect(0, 160, W, 120);
+    ctx.fillStyle = "#24406e"; ctx.fillRect(0, 280, W, 100);
+    ctx.fillStyle = "#3a2b1c"; ctx.fillRect(0, 380, W, 100);
+    ctx.fillStyle = "#4a3826"; ctx.fillRect(0, 380, W, 8);
+
+    const f = state.frame;
+    // Big monster (behind small when overhead).
+    blitSpr(SHEETS[bS[f]], bF[f], 96, 96, bX[f], bY[f]);
+    // Small monster.
+    blitSpr(SHEETS[sS[f]], sF[f], 64, 64, sX[f], sY[f]);
+
+    // Impact dust on slam frames.
+    if (f === 4 || f === 5) {
+      ctx.fillStyle = "#c9b48a";
+      ctx.fillRect(sX[f] - 12, 372, 10, 8);
+      ctx.fillRect(sX[f] + 60, 372, 12, 8);
+      ctx.fillRect(sX[f] + 22, 366, 14, 6);
+    }
+
+    // HUD.
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "16px monospace";
+    ctx.fillText("MONSTER SLAM", 16, 26);
+    ctx.fillText("frame " + (f + 1) + "/8", 16, 46);
+    ctx.fillStyle = "#ffd700";
+    ctx.fillText("SPACE step  ENTER restart", 16, 470);
+  }
+
+  let acc = 0;
+  let last = 0;
+  function frameLoop(now) {
+    if (!last) last = now;
+    let dt = now - last; last = now;
+    if (dt > 250) dt = 250;
+    acc += dt;
+    while (acc >= 16) { update(); acc -= 16; }
+    draw();
+    requestAnimationFrame(frameLoop);
+  }
+  requestAnimationFrame(frameLoop);
+})();
+</script>
+</body></html>

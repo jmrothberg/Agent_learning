@@ -56,12 +56,12 @@ def test_first_build_seed_framing_when_assets_exist():
     assert "window.state = state" in body
 
 
-def test_playbook_draw_generated_sprites_has_shooter_tags_for_centipede():
+def test_playbook_draw_generated_sprites_has_class_tags():
     """First-build pins this bullet via ensure_ids when assets exist; tags
-    must include centipede/galaga so plan-stage retrieval can find it."""
+    must be class/mechanism (fixed-shooter, drawimage) — not title-only."""
     pb = Playbook()
     bullet = next(b for b in pb.load_all() if b.id == "draw-generated-sprites-not-boxes")
-    for tag in ("centipede", "galaga", "fixed-shooter", "drawimage"):
+    for tag in ("fixed-shooter", "drawimage"):
         assert tag in bullet.tags
 
 

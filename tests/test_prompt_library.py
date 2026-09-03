@@ -72,6 +72,8 @@ def test_every_entry_has_prompt_640_for_simulator():
         # Forbid requiring media tags (footer says do NOT emit them).
         assert "emit <assets>" not in p640.lower()
         assert "generate video" not in p640.lower()
+        # /640png blitSpr is 1:1 — each library goal states on-screen px sizes.
+        assert "On-screen sizes:" in p640, g["name"]
         # Media prompt kept intact for non-/640 runs.
         assert g["prompt"].startswith(("Build a ", "Build an "))
         assert effective_prompt(g, simulator_mode=True) == p640.strip()

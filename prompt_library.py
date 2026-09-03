@@ -35,7 +35,9 @@ _TARGET_640PNG = (
     "units. src must be a quoted literal (not \"jmr:spr:\"+i). Dest x,y>=0 "
     "(crop dest AND source if off-glass). No 1px drawImage columns, no "
     "full-glass black wipe then splash. Do NOT emit <sounds> or <videos>. "
-    "imageSmoothingEnabled=false. HUD via canvas fillText."
+    "imageSmoothingEnabled=false. HUD via canvas fillText. Each <assets> "
+    "\"size\" is on-screen px on the 640×480 glass (blitSpr draws 1:1) — "
+    "pick how many fit across the playfield and state it per entity."
 )
 
 
