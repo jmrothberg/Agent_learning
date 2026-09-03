@@ -635,7 +635,9 @@ HARD_RULES_SIMULATOR: list[str] = [
     "atan2/round (shim round). No Object.keys / for…in. No negative "
     "setTransform/scale mirror — use L/R art or unmirrored draw.",
     "Reuse one mutable object per entity; no per-tick maze BFS/flood; "
-    "≤16 locals per function.",
+    "≤16 locals per function. Chromium is NOT the chip: do not use the "
+    "return of arr.splice (FPGA is undefined — copy-down the tail); no "
+    "Object.create / performance.now / unicode fillText.",
     "Expose `window.state = state` and `window.game = { reset }` for probes.",
     "Phase A: <plan>/<criteria>/<probes> only (no media tags). Phase B: "
     "complete <html_file> then <patch>. Do not emit <assets>/<sounds>/<videos>.",
@@ -672,7 +674,9 @@ HARD_RULES_JMR_PNG: list[str] = [
     "FPGA vs PYTHON/Chrome: img.src MUST be a quoted literal "
     "\"jmr:spr:0\" (not \"jmr:spr:\" + i — FPGA dihit=0). drawImage dest "
     "x,y >= 0: crop dest AND source (9-arg) if a sprite hangs off the "
-    "glass. Never 1-pixel drawImage columns or hundreds of tiny "
+    "glass. Do not use splice's return (FPGA undefined; PYTHON returns "
+    "the deleted slice — copy-down: dst[w]=src[i]; w++; src.length=w). "
+    "Never 1-pixel drawImage columns or hundreds of tiny "
     "fillRects/frame. Never fillRect the whole 640x480 black then blit "
     "a splash (HDMI shows the wipe). Board ~417k clocks at 30fps.",
     "Mint walls (card-create CompileError → ?NH): no Float32Array/"
@@ -731,6 +735,9 @@ ANTI_PATTERNS: list[str] = [
     "The chip is 8x8 ASCII: UTF-8 E2 paints 'b' and textAlign center/right "
     "uses byte length so HUD labels overlap. textAlign=left, x+n*(8*k); "
     "lives via fillRect or '*'.",
+    "NEVER use the return of arr.splice (var back=a.splice(i,n)). "
+    "FPGA splice is undefined; PYTHON/Chrome return the deleted slice. "
+    "Ghost arrays never drain — copy-down the tail, then a.length=w.",
 ]
 
 
@@ -848,10 +855,14 @@ no new (AudioContext)(); no >>; no charAt; no Object.create / for…in;
 no performance.now / preventDefault; hex fillStyle; keys+joy play the
 game (mouse only in data-host=chrome). HTML < 64KB.
 CHROME IS NOT THE CHIP. Harness Chromium will run Object.create,
-performance.now, and "jmr:spr:"+n. PYTHON then kind-4 CALL_METHOD or
-FPGA dihit=0 with HUD still painting.
+performance.now, "jmr:spr:"+n, unicode fillText, and splice-return.
+PYTHON then kind-4 CALL_METHOD, FPGA dihit=0, 'b' lives, or a ghost
+array so wave 2 never starts. Do not fail the harness on these — just
+do not emit them.
 BAD: var keys=Object.create(null); im.src="jmr:spr:"+n; t=performance.now();
+     back=segs.splice(si,n); hearts="\\u25C6";
 GOOD: var keys={l:0,r:0,u:0,d:0,f:0}; im.src="jmr:spr:0"; var frames=0; var DT=0.0167;
+      copy-down tail; fillRect lives; fillText("SCORE",x,y) then fillText(score,x2,y);
 
 GLASS: <canvas width="640" height="480"> — fill every pixel (no letterbox
 gutters). Do not reassign canvas.width/height after load. HUD via

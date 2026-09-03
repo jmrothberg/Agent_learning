@@ -235,6 +235,9 @@ bullet never reaches the prompt — broaden tags if a good bullet doesn’t fire
      ASCII 32–126** (`♦` / `\u25C6` → chip paints `b`; `textAlign` center/right
      uses UTF-8 **byte** length so WAVE/LIVES overlap). HUD: `textAlign=left`
      at `x+n*(8*k)`; lives via `fillRect` or `*`. Playbook `jmr-filltext-ascii-hud`.
+     **Chip walls are prompt/playbook only — never microprobe-fail Chromium.**
+     Also: do not use `arr.splice`’s return (FPGA `undefined`); copy-down.
+     Playbook `jmr-splice-return-undefined`.
   **Library:** every `memory/prompt_library.jsonl` entry has `prompt_640` (pixel-map /
   animated arcade goal + `On-screen sizes:`). `/640` then `/games N` loads that
   variant; `/640png` rewrites it for STEM-N sheets; media mode still uses
@@ -347,6 +350,7 @@ Per-run scores live in **`eval/OPERATIONS.md`** (run_06 snapshot). Mid-batch har
 | Versus P2 incomplete pose roster → MISSING boxes | Same pose suffixes both prefixes (`versus-fighter-sprite-prefix`) | `memory/playbook.jsonl` |
 | Sprite opaque when figure touches image edge | Chroma: near-white 5/8 + border-majority fallback | `assets.py`, `tests/test_tier1_2.py` |
 | /640 HUD `♦` lives paint as `b`; WAVE overlaps LIVES | Teach in prompts/playbook only (do **not** microprobe-fail Chromium). ASCII fillText; `textAlign=left`; lives via `fillRect`/`*` | `prompts_v1.py`, playbook `jmr-filltext-ascii-hud` |
+| /640 `splice` return used as the tail array | Teach only: FPGA return is undefined (ghost chain, wave 2 never). Copy-down. Never gate Chromium | `prompts_v1.py`, playbook `jmr-splice-return-undefined` |
 | Pseudo-3D rivals stack / car undrawn | Discrete lanes + z-sort + drawImage (`pseudo3d-curved-road`) | `memory/playbook.jsonl`, racing outline |
 | Maze chase looks frozen | Don’t gate mouth cycle on dir; chasers must move (`maze-chase-sprite-chomp-cycle`) | `memory/playbook.jsonl` |
 | Seed empty `_assets/` + assets-only goal → Asteroids roster into Bomberman PATHS folder | Declared PATHS = roster; skip only when **every** declared stem is on disk; orphans never count; art/replace intent (not keep-code phrases) forces declared regen + media_only | `agent_helpers.py`, `agent_assets.py`, `agent.py`, `prompts_v1.py` |
