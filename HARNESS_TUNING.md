@@ -215,8 +215,10 @@ bullet never reaches the prompt — broaden tags if a good bullet doesn’t fire
   file's module docstring):
   1. **16 is a FILE cap, not a per-sheet frame cap.** A strip with 8 frames
      is still one file. Adding frames only makes that one PNG wider.
-  2. **48 poses generated per session** (`JMR_PNG_MAX_FRAMES`), then folded
-     onto ≤16 sheets — that's the real `<assets>` cap under `/640png`.
+  2. **64 poses generated per session** (`JMR_PNG_MAX_FRAMES`, raised from 48
+     on 2026-09-03 — a 6-type/2-color chess roster at idle+walk+lift+slam
+     needs exactly 48, zero slack), then folded onto ≤16 sheets — that's
+     the real `<assets>` cap under `/640png`.
   3. **Grouping = shared name prefix + pose suffix.** `hero_idle` +
      `hero_walk1` → one strip (stem `hero`). `hero` and `creep` → separate
      sheets (no shared prefix). Two chess pieces (`pawn`, `king`) never

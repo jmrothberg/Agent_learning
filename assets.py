@@ -42,9 +42,11 @@ fewer `Image` objects, and does less SRAM traffic. See `jmr_atlas_group_key`,
    `JMR_PNG_MAX_SHEETS` (16) PNG files total. A sheet with 8 frames is one
    file just like a sheet with 1 frame — there is no "N sprites per sheet"
    ceiling. Adding frames to a strip only makes that ONE file wider.
-2. **Pose cap.** At most `JMR_PNG_MAX_FRAMES` (48) individual pose images are
+2. **Pose cap.** At most `JMR_PNG_MAX_FRAMES` (64) individual pose images are
    generated per session, THEN folded onto ≤16 sheets. This is the real
-   per-turn `<assets>` cap in `/640png` mode.
+   per-turn `<assets>` cap in `/640png` mode. (Raised 48→64 2026-09-03: a
+   6-piece-type/2-color chess roster needing idle+walk+lift+slam (4 poses)
+   for EVERY type is 48 exactly — zero slack for extras like promotion.)
 3. **Grouping = name prefix + pose suffix.** `hero_idle` + `hero_walk1` share
    the stem `hero` (suffix stripped by `_ATLAS_POSE_RE`) → ONE strip, frames
    left-to-right in declaration order. `hero` and `creep` do NOT share a
@@ -229,7 +231,7 @@ _MAX_ASSETS_PER_TURN = 24
 # JMR V1 ASET wall (GAME_DESIGN.md): at most 16 sheets per title.
 JMR_PNG_MAX_SHEETS = 16
 # Pose PNGs we may generate; packer emits ≤ JMR_PNG_MAX_SHEETS strips.
-JMR_PNG_MAX_FRAMES = 48
+JMR_PNG_MAX_FRAMES = 64
 
 def _strip_thinking(reply: str) -> str:
     """Drop everything up to and including the LAST `</think>` tag.
@@ -2910,9 +2912,13 @@ def jmr_png_filenames(stem: str, count: int) -> list[str]:
 
 
 # Shared prefix for related poses (hero_idle + hero_walk1 → one strip).
+# Generic pose-suffix list — applies to ANY game's <assets> names, not a
+# per-game/genre list. lift/slam added (2026-09-03): capture/throw-style
+# poses (e.g. pawn_dark_lift, pawn_dark_slam) were falling through and
+# splitting off their own sheet instead of packing onto the idle+walk strip.
 _ATLAS_POSE_RE = re.compile(
     r"_(?:idle|walk\d*|run\d*|jump\d*|attack|atk|fire|hurt|hit|"
-    r"death|die|explode|turn|left|right|up|down|"
+    r"death|die|explode|turn|left|right|up|down|lift|slam|"
     r"n|s|e|w|ne|nw|se|sw|frame\d+|f\d+|\d+)$",
     re.I,
 )

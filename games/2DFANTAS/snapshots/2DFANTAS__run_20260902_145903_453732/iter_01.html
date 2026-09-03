@@ -1,0 +1,683 @@
+<!DOCTYPE html>
+
+The user's message got cut off, but I need to produce the full HTML file now. Let me write a complete 2D fantasy chess game.
+
+Key design decisions:
+
+**Board & Layout**: 8×8 board, TILE = 52, BOARD_OX = 40, BOARD_OY = 40. That's 8*52=416, so board spans x 40..456, y 40..456. Right side panel x 470..630 for HUD (depth control, captured pieces, turn indicator). Bottom strip for messages.
+
+Wait, probes use defaults: `ox=window.BOARD_OX||40,oy=window.BOARD_OY||40,T=window.TILE||70`. The probe clicks at ox+4*T+T/2, oy+6*T+T/2 — that's column 4, row 6 — a light pawn. I should set BOARD_OX=40, BOARD_OY=40 and pick TILE so it fits: TILE=52 gives board 416 wide ending at 456. Good, panel at 470-630.
+
+**Pieces**: The assets only give me pawn (light/dark with walk/lift/slam), knight (idle+walk), rook (idle only), bishop (idle only). No queen, no king sprites! I have 16 sheets, all used. So for queen and king I must reuse existing sprites — that's allowed since I can't add more sheets (append-only max 16... actually I can add more sheets in later turns, but for now). Hmm, but the contract says "every listed sheet index appears in a drawImage". I'll draw queen using... I could reuse rook_light scaled up for queen, and knight for king? That's visually confusing. Better: in a later turn I can add more sheets via <assets> with same names? No — adding new names appends new indices. I have 16 already. Max 16. So I can't add queen/king sheets.
+
+Options: draw queen/king with existing sprites but tinted/scaled. Or use a "hero" approach: king = knight sprite with a crown drawn procedurally over it (allowed - HUD/decoration fillRect is fine), queen = rook sprite with a different scale/color overlay. Actually a cleaner approach: draw the sprite then overlay a small procedural crown/gem marker on the tile for king/queen to distinguish. That's acceptable since the entity itself is drawn from a PNG.
+
+Actually simpler: King uses knight sprite (mounted king) + golden crown pixels; Queen uses rook sprite + purple gem. Plus a small text label? HUD fillText is fine. I'll draw a small "♔"-like crown via fillRect triangles. Keep it simple: draw sprite, then draw a colored gem circle... no arc is discouraged but allowed for decoration. I'll use fillRect diamonds.
+
+**Sprite sheets**: Each sheet is 192x64 — 3 frames of 64x64? The prompts said "idle standing pose" etc. as separate PNGs each 192x64. Likely each PNG is a horizontal strip. Since I don't know actual content, safest: treat each sheet as containing 3 frames horizontally (192/64=3). For idle sheets, I'll cycle frames 0..2 for subtle idle; for walk sheets cycle 0..2 (walk cycle ≥3 frames requirement — good, each walk sheet provides 3 frames). Lift/slam sheets: use frame sequence too. This satisfies "≥3 frames" per animation since each sheet has 3 sub-frames.
+
+Draw: `ctx.drawImage(img, f*64, 0, 64, 64, dx, dy, dw, dh)` — 9-arg crop.
+
+**Piece → sprite index map**:
+- pawn light: idle 0, walk 1, lift 2, slam 3
+- pawn dark: idle 4, walk 5, lift 6, slam 7
+- knight light: idle 8, walk 9
+- knight dark: idle 10, walk 11
+- rook light 12, rook dark 13, bishop light 14, bishop dark 15
+
+For types without walk sheets (rook/bishop/queen/king), during walk animation just cycle frames of the idle sheet (still animates frames + position tween). Lift/slam for those: reuse idle sheet frames with a scale/offset transform (lift = draw higher, slam = draw lower with squash). That's procedural motion on top of PNG — acceptable.
+
+**Chess rules**: Full-ish chess: pawn (double step, capture diagonal, en passant optional — include simple en passant, promotion to queen), knight, bishop, rook, queen, king (no castling to keep compact... playbook mentions castling but optional). I'll skip castling to keep code compact, but include promotion. Check/checkmate detection: generate pseudo-legal moves, filter those leaving king attacked. Detect checkmate/stalemate → game over.
+
+**AI**: Negamax depth 3 with alpha-beta, material eval (P1 N3 B3 R5 Q9 K100) + small mobility/randomness. Run in setTimeout. Keys: '+'/'-' (and =/_, and 38/40? no arrows used?) to raise/lower depth. Also Up/Down arrows could change depth when not animating — fine. R restarts.
+
+**Animation**: state.animating true during move tween. Move tween: step along path (for straight pieces, interpolate from→to over ~300ms; knight hop with arc via manual parabola using t*(1-t) — no sin needed). Capture: after arriving, capturePhase 'lift' (~180ms, victim drawn above capturer, capturer uses lift frame), then 'slam' (~140ms, victim slams to tile, slam frame), then remove victim, commit board.
+
+Actually commit board at anim end: keep board as source; during animation, moving piece is hidden from board draw and drawn at drawX/drawY. Victim hidden when capturePhase active. On finish: board[to]=piece, board[from]=0, victim cell cleared.
+
+**State exposure**: window.state with board, turn, selected, legalMoves, animating, capturePhase, depth, cpuThinking, over, winner, moveAnim {drawX,drawY}. window.game={reset}.
+
+**Click handling**: canvas click → getBoundingClientRect scale to 640x480 internal coords. If animating or cpuThinking or over → ignore.
+
+**Input blocking**: yes.
+
+**HUD**: fillText: "TURN: YOU/CPU", "DEPTH: n (+/-)", captured counts, "R: restart", status (check/checkmate).
+
+**No forbidden APIs**: no sin/cos/atan2/round/Object.keys/for-in. Shim round = floor(x+0.5). Parabola hop: h = 4*t*(1-t)*20.
+
+**Load assets**: array of 16 names, loop creating Images, src="jmr:spr:N". Blit unconditionally (no img.width check). Start RAF immediately (don't wait for load).
+
+**Chrome shim**: data-host="chrome" script mapping jmr:spr:N. Actually JMR_SPR manifest + shim. The seed harness: on native, jmr:spr:N resolves natively. Include the chrome-only interceptor:
+
+```html
+<script data-host="chrome">
+(function(){var L=window.JMR_SPR||[];var d=Object.getOwnPropertyDescriptor(Image.prototype,'src');Object.defineProperty(Image.prototype,'src',{get:d.get,set:function(v){var m=/^jmr:spr:(\d+)$/.exec(v);d.set.call(this,m&&L[m[1]]?L[m[1]]:v);}});})();
+</script>
+```
+
+But JMR_SPR must be defined before this runs — put the manifest script first.
+
+**Locals limit**: keep functions small-ish.
+
+Let me write the chess move generation compactly.
+
+Board representation: board[r][c] = 0 empty, or piece id: 1..6 white (P N B R Q K), 9..14 black (add 8). side = id<7 ? 0 : 1 (0 = light = human, bottom rows 6-7 pawns, row 7 back rank). Row 0 top = dark back rank.
+
+Initial: board[0]=dark back rank [9,10,11,12,13,14? ] wait mapping: 9=P,10=N,11=B,12=R,13=Q,14=K. Dark: row0 = [12,10,11,13,14,11,10,12], row1 = 9s. Light: row6 = 1s, row7=[4,2,3,5,6,3,2,4].
+
+Piece name: id%8 → 1P2N3B4R5Q6K.
+
+Move gen: standard. attacked(r,c,bySide) for legality.
+
+En passant: track state.ep = {r,c} after double push.
+
+Promotion: pawn reaching last rank → queen (5/13). Simple auto-queen.
+
+Negamax:
+
+```
+function negamax(d,a,b,side){ ... }
+```
+Generate moves for side, order captures first. Eval from side-0 perspective; negamax returns from side perspective.
+
+Depth default 3. At depth 3 with alpha-beta, ~fine for setTimeout (a few hundred ms). Use simple move list generation.
+
+Animation timeline implementation: use a queue of animation steps driven by dt in update(). anim = {type:'move', piece, from, to, t, dur, capture, victim,...}. Phases: 'walk' → 'lift' → 'slam' → done. Knight hop only for knight (arc).
+
+Walk frame cycling: frame = floor(t*8)%3.
+
+Drawing pieces: for each cell with piece, unless it's the moving piece (during anim) or victim (during lift/slam), draw at cell. Moving piece drawn at anim drawX/drawY with appropriate sheet (walk sheet if exists else idle). Victim during lift: drawn at capturer pos minus lift offset; during slam: descending to tile, capturer uses slam sheet.
+
+Lift/slam for pieces without dedicated sheets: use their idle sheet, apply vertical offset only.
+
+Highlights: selected cell border, legal moves as small diamond markers (fillRect decoration OK).
+
+Check indicator: glow king tile border red.
+
+Let me handle click coordinates: rect = canvas.getBoundingClientRect(); x=(e.clientX-rect.left)*640/rect.width.
+
+If click on own piece → select + compute legalMoves. If selected and click is a legal target → startAnim(move). Else deselect.
+
+After human move completes: turn=1, cpuThinking=true, setTimeout(pickCpuMove, 250). CPU picks via negamax, then same anim sequence, then turn=0.
+
+Checkmate/stalemate check after each commit: if no legal moves → over, winner = check? other : none.
+
+Now let me write the code carefully, compact but complete.
+
+Sprite draw helper:
+
+```
+function spr(idx,frame,x,y,w,h){var im=IMGS[idx];ctx.drawImage(im,frame*64,0,64,64,x,y,w,h);}
+```
+
+Piece sheet table:
+
+```
+var SH={};
+SH[1]={i:0,w:1,l:2,s:3}; SH[9]={i:4,w:5,l:6,s:7};
+SH[2]={i:8,w:9}; SH[10]={i:10,w:11};
+SH[4]={i:12}; SH[12]={i:13}; SH[3]={i:14}; SH[11]={i:15};
+SH[5]={i:12}; SH[13]={i:13}; // queen uses rook
+SH[6]={i:8}; SH[14]={i:10}; // king uses knight
+```
+
+Distinguish queen/king with procedural crown/gem drawn on top (fillRect). Also king gets a small crown color per side.
+
+Tile size: 52. Piece draw size 52, offset maybe 0.
+
+Panel: x 470..630: title, turn, depth +/-, captured list (draw small captured sprites! nice — use idle sheet at 24px). Keep captured arrays.
+
+Status text bottom: y 464.
+
+Code structure:
+
+```
+init(); RAF loop: dt; if(anim) stepAnim(dt); draw();
+```
+
+stepAnim: t+=dt; phases.
+
+```
+function stepAnim(dt){var A=anim;A.t+=dt;
+ if(A.phase==='walk'){var d=A.dur;var t=A.t/d;if(t>=1){t=1;}A.f=t;
+  if(t>=1){ if(A.cap){A.phase='lift';A.t=0;state.capturePhase='lift';} else finishAnim(); } }
+ else if(A.phase==='lift'){ if(A.t>=0.18){A.phase='slam';A.t=0;state.capturePhase='slam';} }
+ else if(A.phase==='slam'){ if(A.t>=0.16){finishAnim();} }
+}
+```
+
+finishAnim: commit board: board[from]=0; board[to]=piece; if cap board[vr][vc]=0 (victims stored; for en passant victim cell differs). Actually store victim cell (vr,vc). Push to captured list. Then anim=null, state.animating=false, state.capturePhase=null, afterMove().
+
+during walk, drawX = lerp(fx,tx,f), drawY = lerp(fy,ty,f) - hop.
+
+Legal moves stored as list of {r,c,cap,ep,promo}.
+
+Move generation function genMoves(b, side, epR, epC, onlyLegal). attacked(b,r,c,by): scan.
+
+Let me write attacked:
+
+```
+function attacked(b,r,c,by){ // is (r,c) attacked by side 'by'
+ var i,j,t,p;
+ // pawns
+ var dir = by===0?-1:1; // pawn attacks upward for light means from r+dir? light pawns move up (dr=-1) and capture at r-1. So a light pawn attacking (r,c) sits at r+1,c±1.
+ var pr = r + (by===0?1:-1);
+ for(j=c-1;j<=c+1;j+=2){ if(pr>=0&&pr<8&&j>=0&&j<8){p=b[pr][j]; if(p===1+8*by)return true;} }
+ // knights
+ ...
+```
+
+Knight offsets arrays KN=[-2,-1,-2,1,-1,-2,-1,2,1,-2,1,2,2,-1,2,1].
+
+King offsets K8=[-1,-1,-1,0,-1,1,0,-1,0,1,1,-1,1,0,1,1].
+
+Sliding: for each of 4 diagonal dirs check bishop/queen first piece; 4 orthogonal rook/queen.
+
+genMoves: for each piece of side, produce pseudo moves; if onlyLegal, make move on copy and test attacked king.
+
+Copy board: function copyB(b){var o=[];for(var r=0;r<8;r++)o.push(b[r].slice());return o;} — fine.
+
+Eval: material sum light - dark + small center bonus.
+
+negamax(b, d, a, beta, side, ep): if d===0 return eval*sign. generate moves; if none → if inCheck return -9999+d else 0. Loop, alpha-beta.
+
+CPU: from state.board generate legal moves for side 1, score each via negamax(child, depth-1, -inf, inf, 0), pick best with tiny random tiebreak.
+
+Performance: depth 3 full movegen with legality filtering at each node might be slow (legal filtering at every node is expensive). Use pseudo-legal at inner nodes (allow king capture = -inf). Simpler: negamax uses pseudo moves; if a move captures king, return huge. Standard trick:
+
+```
+function nega(b,d,a,bt,side,ep){
+ if(d===0)return evalSide(b,side);
+ var ms=gen(b,side,ep,false); if(!ms.length)return -9999; // approx stalemate
+ var best=-99999,i,m,nb,v;
+ for(i=0;i<ms.length;i++){m=ms[i];nb=apply(b,m); if(nb===2)continue; // king captured => huge for us
+   v=-nega(nb,d-1,-bt,-a,1-side,m.ep); if(v>best){best=v; if(v>a)a=v;} if(a>=bt)break;}
+ return best;
+}
+```
+
+apply returns copy with move done; if captured king set flag. Let me have apply return {b, kingCap}. Simpler: apply(b,m) does move on copy, returns copy; check king capture by scanning? Store piece ids; king is 6/14. In apply, if victim===6||victim===14 → return a sentinel 2? Return object {b:nb,kc:true}. To reduce allocs fine at depth 3.
+
+Root: also filter to legal moves for CPU (so it doesn't pick illegal). Use gen(...,true).
+
+gen with legal filter: for each pseudo move, apply, if own king attacked → drop.
+
+OK. En passant in apply: if m.ep, remove victim pawn behind.
+
+Promotion in apply: if promo, piece becomes queen.
+
+Let me now count function locals — keep ≤16, OK.
+
+Draw order: bg fill, tiles, highlights, pieces (with anim), panel, HUD text, check glow.
+
+Background: fill 640x480 dark purple. Tiles: alternating colors via fillRect (grid allowed).
+
+Frame cycling for idle: frame = floor(now*3)%3 — subtle.
+
+Captured display: store captured array of piece ids; draw small 22px sprites in panel.
+
+Now write the file. Also handle keydown: 'r'/'R' restart (keyCode 82), '+'/'=' depth up, '-'/'_' down, ArrowUp/Down adjust depth too (keyCode 38/40) — but arrows might be expected? Probes only use R. Fine.
+
+preventDefault on arrows/space.
+
+Expose window.BOARD_OX=40, BOARD_OY=40, TILE=52.
+
+Probe click_selects_piece: clicks col4 row6 → light pawn (board[6][4]=1). Must not be over/animating/cpuThinking at 2s. turn=0. Good.
+
+Probe restart_r: dispatch keydown {key:'r'} — my handler reads e.key==='r'||e.keyCode===82. After reset, state.turn===0 and board[0][4]!==0: board[0][4] = 14 (king) ≠0. Good.
+
+negamax_depth probe: state.depth>=3 default 3. Good.
+
+Let me write the html_file now.
+
+One more: "walk/hop frames (≥3)" — each sheet 192x64 assumed 3 frames. If actual PNG is single image 192x64, cropping 64-wide thirds may look odd but acceptable.
+
+Queen/king crown overlay: small gold triangle-ish via fillRects at top center.
+
+Let me write it.
+
+Also state.legalMoves etc.
+
+Anim object fields: piece, fr,fy... store from/to in cells and pixel coords.
+
+drawAnim: compute px,py:
+```
+function animPos(){var A=anim;var f=A.f;var x=(A.fc+(A.tc-A.fc)*f)*TILE+OX;var y=(A.fr+(A.tr-A.fr)*f)*TILE+OY;if(A.hop){var t=A.f;y-=4*t*(1-t)*40;}return[x,y];}
+```
+Return via array — fine.
+
+Victim draw: during lift: y offset = -(f*30), f=A.t/0.18; during slam: from -30 down to 0: y = -30*(1-t/0.16). Capturer stays at target tile.
+
+Also capturer during lift uses lift sheet (pawn only) else idle with frame 2.
+
+OK writing final code.
+
+Text: use ctx.font '14px monospace', fillText.
+
+Panel content:
+- "FANTASY CHESS" title top of panel.
+- Turn: "YOU" / "CPU..." 
+- "DEPTH: n  +/-"
+- Captured pieces icons.
+- "R RESTART"
+- Status: CHECK! / CHECKMATE YOU WIN / etc.
+
+Bottom bar message.
+
+Let me finalize size: OX=40 OY=40 TILE=52 → board right edge 456. Panel x=468 width 164.
+
+Writing code now, being careful about forbidden functions (no Math.round, no Object.keys, no for-in). Use floor.
+
+gen() implementation:
+
+```
+var KN=[-2,-1,-2,1,-1,-2,-1,2,1,-2,1,2,2,-1,2,1];
+var K8=[-1,-1,-1,0,-1,1,0,-1,0,1,1,-1,1,0,1,1];
+var D4=[-1,-1,-1,1,1,-1,1,1];
+var O4=[-1,0,1,0,0,-1,0,1];
+```
+
+gen(b,side,ep,legal):
+
+```
+function gen(b,side,ep,legal){
+ var out=[],r,c,p,t,i,j,dr,dc,nr,nc;
+ for(r=0;r<8;r++)for(c=0;c<8;c++){p=b[r][c];if(!p)continue;if((p<7?0:1)!==side)continue;
+  t=p&7;
+  if(t===1){var dir=side===0?-1:1;var st=side===0?6:1;var pr=r+dir;
+   if(pr>=0&&pr<8&&!b[pr][c])add(out,p,r,c,pr,c,0,pr===0||pr===7);
+   for(i=-1;i<=1;i+=2){nc=c+i;if(pr<0||pr>7||nc<0||nc>7)continue;var v=b[pr][nc];
+    if(v&&((v<7?0:1)!==side))add(out,p,r,c,pr,nc,v,pr===0||pr===7);
+    else if(ep&&ep.r===pr&&ep.c===nc)add(out,p,r,c,pr,nc,1+8*(1-side),0,1);}
+   if(r===st){var pr2=r+2*dir;if(b[pr][c]===0&&b[pr2][c]===0)add(out,p,r,c,pr2,c,0,0,0,1);}
+  } else if(t===2||t===6){var arr=t===2?KN:K8;for(i=0;i<arr.length;i+=2){nr=r+arr[i];nc=c+arr[i+1];if(nr<0||nr>7||nc<0||nc>7)continue;var v2=b[nr][nc];if(!v2||((v2<7?0:1)!==side))add(out,p,r,c,nr,nc,v2,0);} }
+  else {var dirs=(t===3)?D4:(t===4?O4:ALL8);
+   for(i=0;i<dirs.length;i+=2){dr=dirs[i];dc=dirs[i+1];nr=r;nc=c;
+    while(1){nr+=dr;nc+=dc;if(nr<0||nr>7||nc<0||nc>7)break;var v3=b[nr][nc];
+     if(!v3)add(out,p,r,c,nr,nc,0,0);
+     else{if((v3<7?0:1)!==side)add(out,p,r,c,nr,nc,v3,0);break;}}}}
+ }
+ if(legal)out=filterLegal(out,b,side);
+ return out;
+}
+```
+
+add(out,p,fr,fc,tr,tc,v,promo,ep): push {p,fr,fc,tr,tc,v,promo:promo||0,ep:ep||0}.
+
+Wait pawn promo flag: t===1 last-rank push. Double-step flag: I'll set m.dbl to set ep. add signature getting long; use object literal push directly. To keep locals ≤16 I'll use helper `mv` returning object.
+
+filterLegal: find king pos of side; for each m: nb=apply(b,m); kingFind(nb,side) attacked by 1-side → keep.
+
+apply(b,m): copy, b[fr][fc]=0; piece=m.p; if(m.promo)piece=(piece&7)===1?(5+8*side)... need side: side=(m.p<7?0:1); promo → 5+8*side. if(m.ep) remove victim at [m.fr][m.tc]. b[tr][tc]=piece. return copy. Also for dbl set ep later (only at root/for CPU ep tracking). Inner nodes ignore ep mostly — pass m.epR. Keep simple: ep only tracked at root and depth-1; inner ep=null. Acceptable strength-wise.
+
+Actually nega passes ep to gen for pawn ep captures; inner nodes get ep=null. Fine.
+
+kingPos(b,side): loop find 6 or 14.
+
+inCheck(b,side): attacked(kingPos).
+
+evalSide(b,side): VAL=[0,1,3,3,5,9,100]; sum light-dark; return side===0? s : -s. Plus tiny pawn advance.
+
+attacked(b,r,c,by): as above.
+
+Root CPU:
+
+```
+function cpuMove(){ state.cpuThinking=false; if(state.over)return;
+ var ms=gen(state.board,1,state.ep,true); if(!ms.length){endGame(1);return;}
+ var best=null,bs=-9e9,i,m,nb,v;
+ for(i=0;i<ms.length;i++){m=ms[i];nb=apply(state.board,m);
+  v=-nega(nb,state.depth-1,-1e9,1e9,0,null);
+  v+=Math.random()*0.01; if(v>bs){bs=v;best=m;}}
+ startAnim(best);
+}
+```
+
+nega:
+
+```
+function nega(b,d,a,bt,side,ep){
+ if(d<=0)return evalSide(b,side);
+ var ms=gen(b,side,ep,false),i,m,nb,v,best=-1e9,kc=0;
+ for(i=0;i<ms.length;i++){m=ms[i];
+  nb=apply(b,m); if(m.v===6||m.v===14){return 9e8;}
+  v=-nega(nb,d-1,-bt,-a,1-side,null);
+  if(v>best)best=v; if(v>a)a=v; if(a>=bt)break;}
+ if(best===-1e9)return inCheck(b,side)?-9e7+d:0;
+ return best;
+}
+```
+
+startAnim(m): set anim, state.animating=true, selected=null, legalMoves=[].
+
+afterCommit: update ep (if dbl set ep cell else null). Check gen for next side legality; if none → over. If inCheck set state.check=true.
+
+If turn becomes 1 → cpuThinking=true; setTimeout(cpuMove,300).
+
+Human click during cpuThinking blocked.
+
+Draw pieces: skip drawing at from cell while anim (board not yet committed; piece still in board[from]). Skip victim at [vr][vc] during lift/slam phases (and during walk too? victim should remain until lift). Keep victim drawn during walk, hidden during lift/slam (drawn via anim).
+
+Victim cell: ep victim at [fr][tc]; normal at [tr][tc].
+
+Now captured pieces: state.capL (captured light pieces by dark) etc. Draw small.
+
+Check glow: if state.check draw red border around king tile.
+
+I think ready. Also add "GAME OVER - YOU WIN/CPU WINS/DRAW" text and R restart.
+
+endGame(winner): state.over=true; state.winner=winner.
+
+After commit detection: next side ms legal length 0: if inCheck(next) → winner=other else draw.
+
+Write file.
+
+Font: ctx.font='bold 13px monospace'.
+
+Let me make sure no `Math.round`, no `for...in`, no `Object.keys`.
+
+Also `performance.now()` fine.
+
+Length OK. Emit.
+
+<html_file>
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fantasy Chess</title>
+<script data-host="chrome">
+// PNG list make_artx.py reads. Index N is jmr:spr:N.
+window.JMR_SPR = ["2DFANTAS-0.png", "2DFANTAS-1.png", "2DFANTAS-2.png", "2DFANTAS-3.png", "2DFANTAS-4.png", "2DFANTAS-5.png", "2DFANTAS-6.png", "2DFANTAS-7.png", "2DFANTAS-8.png", "2DFANTAS-9.png", "2DFANTAS-10.png", "2DFANTAS-11.png", "2DFANTAS-12.png", "2DFANTAS-13.png", "2DFANTAS-14.png", "2DFANTAS-15.png"];
+(function () {
+  var d = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, "src");
+  Object.defineProperty(HTMLImageElement.prototype, "src", {
+    get: function () { return d.get.call(this); },
+    set: function (v) {
+      var m = /^jmr:spr:(\d+)$/.exec(v);
+      d.set.call(this, m ? window.JMR_SPR[+m[1]] : v);
+    }
+  });
+  var list = window.JMR_SPR || [];
+  var n = 0;
+  var need = list.length;
+  if (!need) { window._assetsReady = true; return; }
+  var i = 0;
+  while (i < need) {
+    var im = new Image();
+    im.onload = im.onerror = function () {
+      n = n + 1;
+      if (n >= need) window._assetsReady = true;
+    };
+    im.src = list[i];
+    i = i + 1;
+  }
+})();
+</script>
+<script>
+window.JMR_SPR = ["2DFANTAS-0.png", "2DFANTAS-1.png", "2DFANTAS-2.png", "2DFANTAS-3.png", "2DFANTAS-4.png", "2DFANTAS-5.png", "2DFANTAS-6.png", "2DFANTAS-7.png", "2DFANTAS-8.png", "2DFANTAS-9.png", "2DFANTAS-10.png", "2DFANTAS-11.png", "2DFANTAS-12.png", "2DFANTAS-13.png", "2DFANTAS-14.png", "2DFANTAS-15.png"];
+</script>
+<script data-host="chrome">
+(function(){var L=window.JMR_SPR||[];var d=Object.getOwnPropertyDescriptor(Image.prototype,"src");
+Object.defineProperty(Image.prototype,"src",{get:d.get,set:function(v){var m=/^jmr:spr:(\d+)$/.exec(String(v));d.set.call(this,m&&L[m[1]]?L[m[1]]:v);}});})();
+</script>
+<style>
+html,body{margin:0;height:100%;background:#0a0812;overflow:hidden}
+#wrap{position:fixed;inset:0;display:grid;place-items:center}
+canvas{display:block;max-width:100vw;max-height:100vh;image-rendering:pixelated;touch-action:none}
+</style>
+</head><body>
+<div id="wrap"><canvas id="c" width="640" height="480"></canvas></div>
+<script>
+(function(){
+"use strict";
+var cvs=document.getElementById("c"),ctx=cvs.getContext("2d");
+ctx.imageSmoothingEnabled=false;
+var OX=40,OY=40,TILE=52,PX=468,PW=164;
+window.BOARD_OX=OX;window.BOARD_OY=OY;window.TILE=TILE;
+var IMGS=[],i0;
+for(i0=0;i0<16;i0++){var im=new Image();im.src="jmr:spr:"+i0;IMGS.push(im);}
+// piece ids: 1P 2N 3B 4R 5Q 6K light; +8 dark
+var SH={1:{i:0,w:1,l:2,s:3},9:{i:4,w:5,l:6,s:7},2:{i:8,w:9},10:{i:10,w:11},4:{i:12},12:{i:13},3:{i:14},11:{i:15},5:{i:12},13:{i:13},6:{i:8},14:{i:10}};
+var KN=[-2,-1,-2,1,-1,-2,-1,2,1,-2,1,2,2,-1,2,1];
+var K8=[-1,-1,-1,0,-1,1,0,-1,0,1,1,-1,1,0,1,1];
+var D4=[-1,-1,-1,1,1,-1,1,1];
+var O4=[-1,0,1,0,0,-1,0,1];
+var A8=[-1,-1,-1,0,-1,1,0,-1,0,1,1,-1,1,0,1,1];
+var VAL=[0,1,3,3,5,9,100];
+var state={board:null,turn:0,selected:null,legalMoves:[],animating:false,capturePhase:null,cpuThinking:false,over:false,winner:-1,depth:3,check:false,ep:null,capL:[],capD:[],msg:"Your move"};
+window.state=state;
+var anim=null;
+function backRank(){return[4,2,3,5,6,3,2,4];}
+function reset(){
+ var b=[],r,c;
+ for(r=0;r<8;r++){b.push([]);for(c=0;c<8;c++)b[r].push(0);}
+ var bk=backRank();
+ for(c=0;c<8;c++){b[0][c]=bk[c]+8;b[1][c]=9;b[6][c]=1;b[7][c]=bk[c];}
+ state.board=b;state.turn=0;state.selected=null;state.legalMoves=[];
+ state.animating=false;state.capturePhase=null;state.cpuThinking=false;
+ state.over=false;state.winner=-1;state.check=false;state.ep=null;
+ state.capL=[];state.capD=[];state.msg="Your move";anim=null;
+}
+function side(p){return p<7?0:1;}
+function copyB(b){var o=[],r;for(r=0;r<8;r++)o.push(b[r].slice());return o;}
+function kingPos(b,s){var r,c,k=s===0?6:14;for(r=0;r<8;r++)for(c=0;c<8;c++)if(b[r][c]===k)return[r,c];return null;}
+function attacked(b,r,c,by){
+ var pr=r+(by===0?1:-1),j,p,i,nr,nc,d,dirs,t;
+ for(j=c-1;j<=c+1;j+=2)if(pr>=0&&pr<8&&j>=0&&j<8){p=b[pr][j];if(p===1+8*by)return true;}
+ for(i=0;i<16;i+=2){nr=r+KN[i];nc=c+KN[i+1];if(nr<0||nr>7||nc<0||nc>7)continue;p=b[nr][nc];if(p===2+8*by)return true;}
+ for(i=0;i<16;i+=2){nr=r+K8[i];nc=c+K8[i+1];if(nr<0||nr>7||nc<0||nc>7)continue;p=b[nr][nc];if(p===6+8*by)return true;}
+ dirs=D4;t=by===0?3:11;
+ for(i=0;i<8;i+=2){nr=r;nc=c;while(1){nr+=D4[i];nc+=D4[i+1];if(nr<0||nr>7||nc<0||nc>7)break;p=b[nr][nc];if(p){if(p===t||p===t+2)return true;break;}}}
+ for(i=0;i<8;i+=2){nr=r;nc=c;while(1){nr+=O4[i];nc+=O4[i+1];if(nr<0||nr>7||nc<0||nc>7)break;p=b[nr][nc];if(p){if(p===4+8*by||p===5+8*by)return true;break;}}}
+ return false;
+}
+function mv(p,fr,fc,tr,tc,v,promo,ep,dbl){return{p:p,fr:fr,fc:fc,tr:tr,tc:tc,v:v||0,promo:promo||0,ep:ep||0,dbl:dbl||0};}
+function gen(b,s,ep,legal){
+ var out=[],r,c,p,t,i,j,dr,dc,nr,nc,v,dir,st,arr,dirs;
+ for(r=0;r<8;r++)for(c=0;c<8;c++){p=b[r][c];if(!p||side(p)!==s)continue;t=p&7;
+  if(t===1){dir=s===0?-1:1;st=s===0?6:1;nr=r+dir;
+   if(nr>=0&&nr<8&&!b[nr][c])out.push(mv(p,r,c,nr,c,0,(nr===0||nr===7)?1:0));
+   for(j=-1;j<=1;j+=2){nc=c+j;if(nr<0||nr>7||nc<0||nc>7)continue;v=b[nr][nc];
+    if(v&&side(v)!==s)out.push(mv(p,r,c,nr,nc,v,(nr===0||nr===7)?1:0));
+    else if(ep&&ep.r===nr&&ep.c===nc)out.push(mv(p,r,c,nr,nc,1+8*(1-s),0,1));}
+   if(r===st&&b[nr][c]===0&&b[r+2*dir][c]===0)out.push(mv(p,r,c,r+2*dir,c,0,0,0,1));
+  }else if(t===2||t===6){arr=t===2?KN:K8;
+   for(i=0;i<16;i+=2){nr=r+arr[i];nc=c+arr[i+1];if(nr<0||nr>7||nc<0||nc>7)continue;v=b[nr][nc];if(!v||side(v)!==s)out.push(mv(p,r,c,nr,nc,v));}
+  }else{dirs=t===3?D4:(t===4?O4:A8);
+   for(i=0;i<16;i+=2){dr=dirs[i];dc=dirs[i+1];nr=r;nc=c;
+    while(1){nr+=dr;nc+=dc;if(nr<0||nr>7||nc<0||nc>7)break;v=b[nr][nc];
+     if(!v)out.push(mv(p,r,c,nr,nc,0));
+     else{if(side(v)!==s)out.push(mv(p,r,c,nr,nc,v));break;}}}}}
+ if(legal){var f=[],k;for(k=0;k<out.length;k++){var nb=apply(b,out[k]);var kp=kingPos(nb,s);if(!kp||!attacked(b===null?nb:nb,kp[0],kp[1],1-s))f.push(out[k]);}out=f;}
+ return out;
+}
+function apply(b,m){
+ var nb=copyB(b),pc=m.p,s=side(pc);
+ if(m.promo)pc=5+8*s;
+ nb[m.fr][m.fc]=0;nb[m.tr][m.tc]=pc;
+ if(m.ep)nb[m.fr][m.tc]=0;
+ return nb;
+}
+function evalSide(b,s){
+ var r,c,p,sc=0;
+ for(r=0;r<8;r++)for(c=0;c<8;c++){p=b[r][c];if(!p)continue;
+  var v=VAL[p&7]+(p&7)===1?0:0;
+  sc+=(p<7?1:-1)*VAL[p&7];}
+ return s===0?sc:-sc;
+}
+function nega(b,d,a,bt,s,ep){
+ if(d<=0)return evalSide(b,s);
+ var ms=gen(b,s,ep,false),i,m,nb,v,best=-1e9;
+ for(i=0;i<ms.length;i++){m=ms[i];
+  if(m.v===6||m.v===14)return 9e8;
+  nb=apply(b,m);
+  v=-nega(nb,d-1,-bt,-a,1-s,null);
+  if(v>best)best=v;if(v>a)a=v;if(a>=bt)break;}
+ if(best===-1e9){var kp=kingPos(b,s);return kp&&attacked(b,kp[0],kp[1],1-s)?-9e7+d:0;}
+ return best;
+}
+function inCheck(b,s){var kp=kingPos(b,s);return!!kp&&attacked(b,kp[0],kp[1],1-s);}
+function startAnim(m){
+ state.selected=null;state.legalMoves=[];
+ anim={m:m,fr:m.fr,fc:m.fc,tr:m.tr,tc:m.tc,piece:m.p,t:0,f:0,phase:"walk",dur:0.32,hop:(m.p&7)===2?1:0,cap:m.v?1:0,vr:m.ep?m.fr:m.tr,vc:m.tc,vp:m.v};
+ state.animating=true;state.capturePhase=null;
+}
+function finishAnim(){
+ var m=anim.m,b=state.board;
+ if(m.v){if((m.v&7)===1)state.capL.push(m.v);else state.capD.push(m.v);}
+ b[m.fr][m.fc]=0;b[m.tr][m.tc]=(m.promo?(5+8*side(m.p)):m.p);
+ if(m.ep)b[m.fr][m.tc]=0;
+ state.ep=m.dbl?{r:(m.fr+m.tr)/2,c:m.fc}:null;
+ anim=null;state.animating=false;state.capturePhase=null;
+ afterMove();
+}
+function afterMove(){
+ var n=1-state.turn;state.turn=n;
+ state.check=inCheck(state.board,n);
+ var ms=gen(state.board,n,state.ep,true);
+ if(!ms.length){state.over=true;state.winner=state.check?(1-n):-1;state.msg=state.check?(n===0?"CHECKMATE - CPU WINS":"CHECKMATE - YOU WIN"):"STALEMATE - DRAW";return;}
+ if(state.check)state.msg="CHECK!";
+ else state.msg=n===0?"Your move":"CPU thinking";
+ if(n===1){state.cpuThinking=true;state.msg="CPU thinking...";setTimeout(cpuMove,300);}
+}
+function cpuMove(){
+ state.cpuThinking=false;
+ if(state.over||state.animating)return;
+ var ms=gen(state.board,1,state.ep,true);
+ if(!ms.length){afterMove();return;}
+ var best=null,bs=-1e9,i,m,nb,v;
+ for(i=0;i<ms.length;i++){m=ms[i];nb=apply(state.board,m);
+  v=-nega(nb,state.depth-1,-1e9,1e9,0,null)+Math.random()*0.05;
+  if(v>bs){bs=v;best=m;}}
+ startAnim(best);
+}
+function stepAnim(dt){
+ var A=anim;A.t+=dt;
+ if(A.phase==="walk"){var t=A.t/A.dur;if(t>1)t=1;A.f=t;if(t>=1){if(A.cap){A.phase="lift";A.t=0;state.capturePhase="lift";}else finishAnim();}}
+ else if(A.phase==="lift"){A.f=A.t/0.18;if(A.t>=0.18){A.phase="slam";A.t=0;state.capturePhase="slam";}}
+ else if(A.phase==="slam"){A.f=A.t/0.16;if(A.t>=0.16)finishAnim();}
+}
+function spr(idx,frame,x,y,w,h){ctx.drawImage(IMGS[idx],frame*64,0,64,64,x,y,w,h);}
+function pieceSheet(p,act){var s=SH[p];if(act==="walk"&&s.w)return s.w;if(act==="lift"&&s.l)return s.l;if(act==="slam"&&s.s)return s.s;return s.i;}
+function drawPiece(p,x,y,sz,act,frame){
+ var f=frame%3;
+ spr(pieceSheet(p,act),f,x,y,sz,sz);
+ var t=p&7;
+ if(t===6||t===5){
+  var col=t===6?(p<7?"#ffd23f":"#c77dff"):(p<7?"#7de8ff":"#ff6b6b");
+  ctx.fillStyle=col;
+  ctx.fillRect(x+sz/2-7,y+2,14,5);
+  ctx.fillRect(x+sz/2-7,y-1,3,4);ctx.fillRect(x+sz/2-1,y-2,3,5);ctx.fillRect(x+sz/2+5,y-1,3,4);
+ }
+}
+function cellPx(c){return OX+c*TILE;}
+function cellPy(r){return OY+r*TILE;}
+function draw(){
+ var r,c,x,y,i,p,b=state.board;
+ ctx.fillStyle="#0a0812";ctx.fillRect(0,0,640,480);
+ for(r=0;r<8;r++)for(c=0;c<8;c++){
+  x=cellPx(c);y=cellPy(r);
+  ctx.fillStyle=((r+c)&1)?"#2a2140":"#4a3a68";
+  ctx.fillRect(x,y,TILE,TILE);
+ }
+ if(state.check){var kp=kingPos(b,state.turn);if(kp){ctx.fillStyle="rgba(255,60,60,0.35)";ctx.fillRect(cellPx(kp[1]),cellPy(kp[0]),TILE,TILE);}}
+ if(state.selected){ctx.strokeStyle="#ffe066";ctx.lineWidth=3;ctx.strokeRect(cellPx(state.selected.c)+2,cellPy(state.selected.r)+2,TILE-4,TILE-4);}
+ for(i=0;i<state.legalMoves.length;i++){var m=state.legalMoves[i];var mx=cellPx(m.tc),my=cellPy(m.tr);
+  ctx.fillStyle=m.v?"rgba(255,80,80,0.55)":"rgba(120,255,160,0.5)";
+  ctx.fillRect(mx+TILE/2-6,my+TILE/2-6,12,12);}
+ var idleF=Math.floor(performance.now()/250)%3;
+ for(r=0;r<8;r++)for(c=0;c<8;c++){p=b[r][c];if(!p)continue;
+  if(anim&&r===anim.fr&&c===anim.fc)continue;
+  if(anim&&anim.cap&&anim.phase!=="walk"&&r===anim.vr&&c===anim.vc)continue;
+  drawPiece(p,cellPx(c),cellPy(r),TILE,"idle",idleF);}
+ if(anim){var A=anim,f=A.f;
+  if(A.phase==="walk"){
+   var px=(A.fc+(A.tc-A.fc)*f)*TILE+OX,py=(A.fr+(A.tr-A.fr)*f)*TILE+OY;
+   if(A.hop)py-=4*f*(1-f)*46;
+   var wf=Math.floor(A.t*9)%3;
+   drawPiece(A.piece,px,py,TILE,"walk",wf);
+  }else{
+   var bx=cellPx(A.tc),by=cellPy(A.tr);
+   var off=A.phase==="lift"?-f*30:-30*(1-f);
+   spr(pieceSheet(A.piece,"lift"),2,bx,by,TILE,TILE);
+   spr(pieceSheet(A.vp,"idle"),0,bx+4,by+off+4,TILE-8,TILE-8);
+   if(A.phase==="slam"){ctx.fillStyle="rgba(255,220,120,0.5)";ctx.fillRect(bx+TILE/2-10,by+TILE-6,20,5);}
+  }}
+ drawPanel();
+}
+function drawPanel(){
+ ctx.fillStyle="#161026";ctx.fillRect(PX,0,164,480);
+ ctx.fillStyle="#c9b8ff";ctx.fillRect(PX,0,2,480);
+ ctx.font="bold 15px monospace";ctx.fillStyle="#ffe066";
+ ctx.fillText("FANTASY CHESS",PX+12,26);
+ ctx.font="12px monospace";
+ ctx.fillStyle=state.turn===0?"#8affb0":"#ff9a6b";
+ ctx.fillText(state.turn===0?"TURN: YOU":"TURN: CPU",PX+12,50);
+ ctx.fillStyle="#e7ecff";
+ ctx.fillText("DEPTH: "+state.depth+"  +/-",PX+12,72);
+ ctx.fillText("UP/DN: depth  R:restart",PX+12,90);
+ ctx.fillText("Captured by CPU:",PX+12,118);
+ var i;
+ for(i=0;i<state.capL.length&&i<8;i++)spr(SH[state.capL[i]].i,0,PX+12+i*18,124,16,16);
+ ctx.fillText("Captured by You:",PX+12,158);
+ for(i=0;i<state.capD.length&&i<8;i++)spr(SH[state.capD[i]].i,0,PX+12+i*18,164,16,16);
+ ctx.fillStyle="#9a8fc0";
+ ctx.fillText("P1 N3 B3 R5 Q9",PX+12,204);
+ ctx.fillStyle="#ffe066";ctx.font="bold 13px monospace";
+ if(state.over){ctx.fillText("GAME OVER",PX+12,240);ctx.fillText(state.msg,PX+12,258);}
+ else if(state.check){ctx.fillStyle="#ff6b6b";ctx.fillText("CHECK!",PX+12,240);}
+ ctx.fillStyle="#7a6f9a";ctx.font="11px monospace";
+ ctx.fillText("Click a piece, then",PX+12,300);
+ ctx.fillText("a highlighted cell.",PX+12,316);
+ ctx.fillStyle="#5a5080";
+ ctx.fillText(state.msg,PX+12,466);
+}
+function pick(cx,cy){
+ var c=Math.floor((cx-OX)/TILE),r=Math.floor((cy-OY)/TILE);
+ if(c<0||c>7||r<0||r>7)return null;
+ return{r:r,c:c};
+}
+cvs.addEventListener("click",function(e){
+ if(state.animating||state.cpuThinking||state.over)return;
+ var rect=cvs.getBoundingClientRect();
+ var cx=(e.clientX-rect.left)*640/rect.width,cy=(e.clientY-rect.top)*480/rect.height;
+ var cell=pick(cx,cy);if(!cell)return;
+ var p=state.board[cell.r][cell.c];
+ if(state.selected){
+  var i,m;
+  for(i=0;i<state.legalMoves.length;i++){m=state.legalMoves[i];
+   if(m.tr===cell.r&&m.tc===cell.c){startAnim(m);return;}}
+  if(p&&side(p)===0){select(cell.r,cell.c);return;}
+  state.selected=null;state.legalMoves=[];return;
+ }
+ if(p&&side(p)===state.turn)select(cell.r,cell.c);
+});
+function select(r,c){
+ state.selected={r:r,c:c};
+ var all=gen(state.board,0,state.ep,true),out=[],i;
+ for(i=0;i<all.length;i++)if(all[i].fr===r&&all[i].fc===c)out.push(all[i]);
+ state.legalMoves=out;
+}
+function setDepth(d){state.depth=Math.max(1,Math.min(5,d));}
+addEventListener("keydown",function(e){
+ var k=e.key,c=e.keyCode;
+ if(k==="r"||k==="R"||c===82){reset();return;}
+ if(k==="+"||k==="="||k==="ArrowUp"||c===38){setDepth(state.depth+1);e.preventDefault();return;}
+ if(k==="-"||k==="_"||k==="ArrowDown"||c===40){setDepth(state.depth-1);e.preventDefault();return;}
+ if(k===" "||k==="ArrowLeft"||k==="ArrowRight")e.preventDefault();
+});
+reset();
+window.game={reset:reset};
+var last=performance.now();
+function frame(now){
+ var dt=(now-last)/1000;if(dt>0.05)dt=0.05;last=now;
+ try{
+  if(anim)stepAnim(dt);
+  draw();
+ }catch(err){console.error(err);}
+ requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+})();
+</script>
+</body></html>

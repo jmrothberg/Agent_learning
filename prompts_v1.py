@@ -923,7 +923,7 @@ CRITERIA-PROBE BINDING: every Basic: line MUST share a word with a probe.
 PROBES: include BOTH structural and ≥1 dynamic input→delta probe.
 Expose state on window (e.g. window.state). Keep exprs short; 3–5 total.
 ASSETS: one name per pose (hero_idle, hero_walk1). Shared prefix packs
-onto ONE STEM-N.png strip, frames left-to-right. ≤48 poses, ≤16 sheets —
+onto ONE STEM-N.png strip, frames left-to-right. ≤64 poses, ≤16 sheets —
 sheets are a FILE cap, not a per-sheet frame cap (a strip can hold many
 frames; it just gets wider). Keep animated poses SMALL ("size":"64x64")
 since a strip's width = cellW × frame count. Index N = jmr:spr:N.

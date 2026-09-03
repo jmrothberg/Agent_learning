@@ -191,9 +191,11 @@ OVERRIDES: dict[str, str] = {
     "chess": (
         "Build a 2D holochess-style fantasy chess (canvas 2D top-down board, "
         "not WebGL/3D). PLAYER vs CPU. Every move animates: tween drawX/drawY "
-        "with walk/hop frames (≥3) — never snap. Capture: lift then slam poses "
+        "with walk/hop frames — never snap. Capture: lift then slam poses "
         "before remove. Pieces = distinct monster pixel-map sprites "
-        "(idle+walk+lift+slam) for both sides. Negamax default depth 3 ply; "
+        "(idle+walk+lift+slam) for ALL SIX piece types EVENLY on both sides — "
+        "do not spend the asset budget only on pawns, leaving other types "
+        "idle-only. Negamax default depth 3 ply; "
         "keys `[` / `]` (or `-` / `=`) lower/raise ply (clamp 1–5), show ply "
         "on HUD; setTimeout CPU. Block input while animating. Controls: click, "
         "ply keys, R restart. Expose state.animating and state.searchDepth "
