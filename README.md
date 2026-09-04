@@ -172,7 +172,7 @@ oMLX model settings instead.
 | CLI / TUI | Chat auto-starts oMLX; binary searched on `PATH`, `~/.omlx/bin/omlx`, or `~/MLX_Models/.omlx-venv/bin/omlx` |
 | Hot prompt cache | `cache.hot_cache_max_size` e.g. `"32GB"` — **CLI rejects `"20%"`** |
 | GLM-5.2 / Qwen3.8-27B / MiniMax | Stay **in-process** MLX (separate folders). Flash / GLM-5.3 / Flash-Next do not replace them. |
-| Leaving Flash → GLM-5.2 | Chat **unloads** Flash from oMLX first. Otherwise Flash (~150GB+) stays resident and the GLM-5.2 load can kill `chat.py` while oMLX looks fine. |
+| Leaving Flash → GLM-5.2 / GLM-5.3 | Chat **unloads** other oMLX models first. Qwen Flash-Next (~198GB) + GLM-5.3 6-bit (~289GB) exceeds the Metal cap (HTTP 507). Unpin Flash-Next in `/admin` if it was pinned. |
 
 **TUI — no hand-started server for Flash:** `/list` → `/model` (or `/load` /
 `/launch`) on DeepSeek-V4-Flash calls `ensure_omlx_server()` — starts

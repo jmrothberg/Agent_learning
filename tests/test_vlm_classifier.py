@@ -196,3 +196,9 @@ def test_mlx_path_form_also_matches():
     assert classify_model_modality(path) == "text"
     # Qwen3.8 2.4T MoE is text-only — must not match the dense 27B patterns.
     assert classify_model_modality("Qwen3.8-2.4T-A95B") == "text"
+    # GLM-5.3-Flash is a VLM (vision_config glm5_next_vision). GLM-5.2 is not.
+    path = "/Users/jonathanrothberg/MLX_Models/GLM-5.3-Flash-MLX-6bit"
+    assert classify_model_modality(path) == "vlm"
+    assert classify_model_modality("GLM-5.3-Flash-MLX-6bit") == "vlm"
+    assert classify_model_modality("glm5_next") == "vlm"
+    assert classify_model_modality("GLM-5.2-MLX-4bit") == "text"

@@ -364,6 +364,12 @@ def test_mlx_server_is_vlm_matches_list_badge():
         source="test",
         endpoint="http://127.0.0.1:8080",
     ))
+    glm53 = backend.MLXServerBackend(backend.BackendInfo(
+        name="mlx-server",
+        model="GLM-5.3-Flash-MLX-6bit",
+        source="test",
+        endpoint="http://127.0.0.1:8080",
+    ))
     text = backend.MLXServerBackend(backend.BackendInfo(
         name="mlx-server",
         model="GLM-5.2-MLX-4bit",
@@ -371,7 +377,22 @@ def test_mlx_server_is_vlm_matches_list_badge():
         endpoint="http://127.0.0.1:8080",
     ))
     assert asyncio.run(vlm.is_vlm()) is True
+    assert asyncio.run(glm53.is_vlm()) is True
     assert asyncio.run(text.is_vlm()) is False
+
+
+def test_mlx_name_is_resident_matches_omlx_basename():
+    """ /list rows are disk paths; oMLX status ids are folder names."""
+    path = "/Users/jonathanrothberg/MLX_Models/GLM-5.3-Flash-MLX-6bit"
+    assert backend.mlx_name_is_resident(
+        path, omlx_loaded=["GLM-5.3-Flash-MLX-6bit"]
+    ) is True
+    assert backend.mlx_name_is_resident(
+        path, omlx_loaded=["Qwen3.8-27B-Uncensored-MLX"]
+    ) is False
+    assert backend.mlx_name_is_resident(
+        path, in_process_active=path, omlx_loaded=[]
+    ) is True
 
 
 def test_mlx_server_stream_forwards_openai_image_parts():
@@ -616,6 +637,31 @@ def test_omlx_unload_model_posts_basename(monkeypatch):
     assert calls and "DeepSeek-V4-Flash-0731-MXFP4-MLX/unload" in calls[0][0]
 
 
+def test_omlx_unload_loaded_keeps_target(monkeypatch):
+    """Switching to GLM must unload the other Flash, not the GLM id."""
+    monkeypatch.setattr(
+        backend,
+        "omlx_list_loaded_model_ids",
+        lambda endpoint=None: [
+            "Qwen3.8-Flash-Next-MLX-8bit-MTP",
+            "GLM-5.3-Flash-MLX-6bit",
+        ],
+    )
+    seen: list[str] = []
+
+    def fake_unload(model, endpoint=None, *, timeout=180.0):
+        seen.append(backend.omlx_api_model_id(model))
+        return True, f"unloaded {model}"
+
+    monkeypatch.setattr(backend, "omlx_unload_model", fake_unload)
+    freed = backend.omlx_unload_loaded_for_inprocess(
+        keep="GLM-5.3-Flash-MLX-6bit",
+        endpoint="http://127.0.0.1:8000",
+    )
+    assert freed == ["Qwen3.8-Flash-Next-MLX-8bit-MTP"]
+    assert seen == ["Qwen3.8-Flash-Next-MLX-8bit-MTP"]
+
+
 def test_endpoint_is_omlx(monkeypatch):
     monkeypatch.delenv("OMLX_SERVER_URL", raising=False)
     assert backend.endpoint_is_omlx("http://127.0.0.1:8000")
@@ -672,6 +718,94 @@ def test_mlx_endpoint_for_model_routes_flash_to_omlx(monkeypatch):
     ) == "http://127.0.0.1:8000"
     assert backend.mlx_endpoint_for_model("/m/GLM-5.2-MLX-4bit") == "in-process"
     assert backend.mlx_endpoint_for_model("/m/Qwen3.8-27B-mxfp8") == "in-process"
+
+
+def test_detect_prefers_omlx_resident_over_disk_order(monkeypatch):
+    """Typing a goal without /load should use whatever oMLX already has loaded.
+
+    BATTLEZ2 20260904_094928: GLM was resident in oMLX; detect still picked
+    a disk path with in-process mlx_lm → glm5_next not supported.
+    Unloaded discovered models must not win.
+    """
+    monkeypatch.setattr(
+        backend, "_http_get_json",
+        _fake_http({
+            "/v1/models/status": {
+                "models": [
+                    {
+                        "id": "GLM-5.3-Flash-MLX-6bit",
+                        "loaded": True,
+                        "pinned": True,
+                    },
+                    {
+                        "id": "Qwen3.8-27B-mxfp8",
+                        "loaded": False,
+                        "pinned": False,
+                    },
+                ]
+            },
+            "/v1/models": {"data": [{"id": "GLM-5.3-Flash-MLX-6bit"}]},
+        }),
+    )
+    monkeypatch.setattr(
+        backend, "list_local_mlx_models",
+        _fake_local_mlx(["/m/AAA-first-on-disk", "/m/GLM-5.3-Flash-MLX-6bit"]),
+    )
+    info = backend.detect_backend("mlx")
+    assert info.model == "GLM-5.3-Flash-MLX-6bit"
+    assert "already loaded" in info.source
+    assert info.endpoint == "http://127.0.0.1:8000"
+
+
+def test_detect_omlx_unloaded_does_not_count_as_resident(monkeypatch):
+    monkeypatch.setattr(
+        backend, "_http_get_json",
+        _fake_http({
+            "/v1/models/status": {
+                "models": [{
+                    "id": "GLM-5.3-Flash-MLX-6bit",
+                    "loaded": False,
+                    "pinned": True,
+                }]
+            },
+            "/v1/models": {"data": [{"id": "GLM-5.3-Flash-MLX-6bit"}]},
+        }),
+    )
+    monkeypatch.setattr(
+        backend, "list_local_mlx_models",
+        _fake_local_mlx(["/m/Qwen3.8-27B-mxfp8"]),
+    )
+    info = backend.detect_backend("mlx")
+    assert info.model == "/m/Qwen3.8-27B-mxfp8"
+    assert info.endpoint == "in-process"
+    assert "already loaded" not in info.source
+
+
+def test_detect_glm53_on_disk_uses_omlx_not_inprocess(monkeypatch):
+    monkeypatch.setattr(backend, "_http_get_json", _fake_http({}))
+    monkeypatch.setattr(
+        backend, "list_local_mlx_models",
+        _fake_local_mlx([
+            "/m/GLM-5.3-Flash-MLX-6bit",
+            "/m/Qwen3.8-27B-mxfp8",
+        ]),
+    )
+    info = backend.detect_backend("mlx")
+    assert info.model == "GLM-5.3-Flash-MLX-6bit"
+    assert info.endpoint == "http://127.0.0.1:8000"
+
+
+def test_make_backend_never_inprocess_glm53():
+    info = backend.BackendInfo(
+        name="mlx",
+        model="/Users/x/MLX_Models/GLM-5.3-Flash-MLX-6bit",
+        source="test",
+        endpoint="in-process",
+    )
+    be = backend.make_backend(info)
+    assert isinstance(be, backend.MLXServerBackend)
+    assert be.info.endpoint == "http://127.0.0.1:8000"
+    assert be.info.model == "GLM-5.3-Flash-MLX-6bit"
 
 
 def test_ensure_omlx_server_already_up(monkeypatch):

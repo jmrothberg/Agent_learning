@@ -28,8 +28,11 @@ and CLI never have to know which daemon they are talking to:
 
 For MLX, "which model" comes from:
   1. `MLX_MODEL` env var (explicit path or HF id)
-  2. The single MLX model found in `~/.MLX_Models/` (or HF cache)
-  3. Otherwise: raise — there's nothing to load.
+  2. Whatever oMLX already has **loaded** (live `/v1/models/status` — not
+     merely discovered/unloaded; TUI can type a goal without `/load`)
+  3. The first local MLX folder under `~/MLX_Models/`
+  4. Otherwise: raise — there's nothing to load.
+  glm5_next / deepseek_v4 / qwen4_exp always talk to oMLX, never in-process mlx_lm.
 """
 
 from __future__ import annotations
@@ -48,7 +51,7 @@ import time
 import urllib.error
 import urllib.request
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Awaitable, Callable, Iterable, Literal
 
 import ollama
@@ -138,6 +141,10 @@ _VLM_NAME_SUBSTRINGS: tuple[str, ...] = (
     # "Model type qwen4_exp not supported" (trace 20260829_135708).
     "qwen3.8-flash",
     "qwen3.8:flash",
+    # 2026-09-04: GLM-5.3-Flash (`glm5_next`) is Glm5NextForConditionalGeneration
+    # with vision_config glm5_next_vision. /list showed [text] because no
+    # substring matched. Do NOT add bare "glm-5" — GLM-5.2 is text-only.
+    "glm-5.3", "glm_5.3", "glm5.3", "glm5_next",
     # LLaVA family
     "llava", "bakllava",
     # DeepSeek vision
@@ -1478,6 +1485,19 @@ class MLXServerBackend(Backend):
         cancel_event: asyncio.Event | None = None,
     ) -> StreamResult:
         last: StreamResult | None = None
+        # GLM-5.3 6-bit (~289GB) cannot share Metal with Qwen Flash-Next (~198GB).
+        # Pinned models are not LRU-evicted; oMLX returns 507 instead
+        # (BATTLEZO 20260904_091702). Drop every other resident oMLX model first.
+        if requires_omlx_server(self.info.model) or endpoint_is_omlx(
+            self.info.endpoint
+        ):
+            try:
+                omlx_unload_loaded_for_inprocess(
+                    keep=omlx_api_model_id(self.info.model),
+                    endpoint=self.info.endpoint,
+                )
+            except Exception:
+                pass
         for attempt in range(max_retries + 1):
             result = await self._stream_once(
                 messages,
@@ -2346,6 +2366,19 @@ def make_backend(info: BackendInfo) -> Backend:
     if info.name == "ollama":
         return OllamaBackend(info)
     if info.name == "mlx":
+        # BATTLEZ2 20260904_094928: detect_backend handed GLM-5.3 with
+        # endpoint=in-process → mlx_lm "glm5_next not supported", 0 tokens.
+        if requires_omlx_server(info.model):
+            ep = (info.endpoint or "").strip()
+            if not ep or ep == _MLX_IN_PROCESS_ENDPOINT:
+                info = replace(
+                    info,
+                    model=omlx_api_model_id(info.model),
+                    endpoint=omlx_default_endpoint(),
+                )
+            else:
+                info = replace(info, model=omlx_api_model_id(info.model))
+            return MLXServerBackend(info)
         ep = (info.endpoint or "").strip()
         if ep and ep != _MLX_IN_PROCESS_ENDPOINT:
             return MLXServerBackend(info)
@@ -3184,45 +3217,91 @@ def _mlx_process_model_arg() -> str | None:
     return None
 
 
+def _mlx_backend_info_for_model(model: str, *, source: str) -> BackendInfo:
+    """Attach oMLX HTTP for glm5_next / deepseek_v4 / qwen4_exp, else in-process."""
+    raw = (model or "").strip()
+    ep = mlx_endpoint_for_model(raw)
+    mid = omlx_api_model_id(raw) if requires_omlx_server(raw) else raw
+    ctx_src = os.path.expanduser(raw)
+    return BackendInfo(
+        name="mlx",
+        model=mid,
+        source=source,
+        endpoint=ep,
+        context_length=_read_mlx_context_length(ctx_src),
+    )
+
+
+def _try_omlx_already_loaded() -> BackendInfo | None:
+    """Session default when oMLX already has a chat model in Metal.
+
+    Live `loaded=true` only — discovered-but-unloaded rows are ignored
+    (BATTLEZ2 20260904: user typed a goal because GLM was already resident;
+    TUI still sent glm5_next through in-process mlx_lm).
+    """
+    ep = omlx_default_endpoint()
+    if not omlx_reachable(ep, timeout=0.4):
+        return None
+    data = _http_get_json(ep + "/v1/models/status", timeout=0.8)
+    if not isinstance(data, dict):
+        return None
+    loaded_rows: list[dict] = []
+    for m in data.get("models") or []:
+        if not isinstance(m, dict) or not m.get("loaded") or not m.get("id"):
+            continue
+        mid = str(m["id"])
+        if not _is_chat_capable_tag(mid):
+            continue
+        loaded_rows.append(m)
+    if not loaded_rows:
+        return None
+    pinned = [m for m in loaded_rows if m.get("pinned")]
+    row = pinned[0] if pinned else loaded_rows[0]
+    mid = str(row["id"])
+    disk = os.path.join(_omlx_model_dir(), mid)
+    return BackendInfo(
+        name="mlx",
+        model=mid,
+        source=f"oMLX already loaded: {mid}",
+        endpoint=ep,
+        context_length=_read_mlx_context_length(disk),
+    )
+
+
 def _try_mlx() -> BackendInfo | None:
-    """Resolve MLX backend — server mode when env requests it, else in-process."""
+    """Resolve MLX: explicit env, else oMLX resident, else first local folder."""
     if _mlx_server_mode_requested():
         return _try_mlx_server()
+    env_model = (os.environ.get("MLX_MODEL") or "").strip()
+    if env_model:
+        return _mlx_backend_info_for_model(
+            env_model, source=f"MLX_MODEL env: {env_model!r}",
+        )
+    resident = _try_omlx_already_loaded()
+    if resident is not None:
+        return resident
     return _try_mlx_in_process()
 
 
 def _try_mlx_in_process() -> BackendInfo | None:
-    """Resolve which MLX model to load in-process. None if nothing usable."""
-    env_model = (os.environ.get("MLX_MODEL") or "").strip()
-    if env_model:
-        return BackendInfo(
-            name="mlx", model=env_model,
-            source=f"MLX_MODEL env: {env_model!r}",
-            endpoint=_MLX_IN_PROCESS_ENDPOINT,
-            context_length=_read_mlx_context_length(env_model),
-        )
-
+    """Resolve which local MLX folder to use when nothing is already loaded."""
     local = list_local_mlx_models()
     chat_local = [p for p in local if _is_chat_capable_tag(p)]
     if len(chat_local) == 1:
         path = chat_local[0]
-        return BackendInfo(
-            name="mlx", model=path,
+        return _mlx_backend_info_for_model(
+            path,
             source=f"only local MLX chat model: {os.path.basename(path)!r}",
-            endpoint=_MLX_IN_PROCESS_ENDPOINT,
-            context_length=_read_mlx_context_length(path),
         )
     if chat_local:
         path = chat_local[0]
-        return BackendInfo(
-            name="mlx", model=path,
+        return _mlx_backend_info_for_model(
+            path,
             source=(
                 f"first of {len(chat_local)} local MLX models: "
                 f"{os.path.basename(path)!r} "
                 "(set MLX_MODEL to override)"
             ),
-            endpoint=_MLX_IN_PROCESS_ENDPOINT,
-            context_length=_read_mlx_context_length(path),
         )
     return None
 
@@ -3451,10 +3530,14 @@ def omlx_unload_model(
         return False, str(e)
 
 
-def omlx_list_loaded_model_ids(endpoint: str | None = None) -> list[str]:
-    """Ids currently resident in oMLX (`GET /v1/models/status`)."""
+def omlx_list_loaded_model_ids(
+    endpoint: str | None = None,
+    *,
+    timeout: float = 3.0,
+) -> list[str]:
+    """Ids currently resident in oMLX (`GET /v1/models/status`). Unloaded = omitted."""
     ep = (endpoint or omlx_default_endpoint()).rstrip("/")
-    data = _http_get_json(ep + "/v1/models/status", timeout=3.0)
+    data = _http_get_json(ep + "/v1/models/status", timeout=timeout)
     if not isinstance(data, dict):
         return []
     out: list[str] = []
@@ -3462,6 +3545,31 @@ def omlx_list_loaded_model_ids(endpoint: str | None = None) -> list[str]:
         if isinstance(m, dict) and m.get("loaded") and m.get("id"):
             out.append(str(m["id"]))
     return out
+
+
+def mlx_name_is_resident(
+    name: str,
+    *,
+    in_process_active: str | None = None,
+    omlx_loaded: list[str] | None = None,
+) -> bool:
+    """True when /list should show * for this MLX path or basename.
+
+    `list_mlx_inventory` only knows the in-process mlx_lm cache
+    (`MLXBackend._loaded_path`). GLM-5.3 lives in oMLX, so a pinned
+    load never got a star (TUI 20260904). Compare via omlx_api_model_id
+    because listing rows are full disk paths and oMLX ids are basenames.
+    """
+    if not name:
+        return False
+    if in_process_active:
+        if name == in_process_active:
+            return True
+        if omlx_api_model_id(name) == omlx_api_model_id(in_process_active):
+            return True
+    ids = omlx_loaded if omlx_loaded is not None else omlx_list_loaded_model_ids()
+    want = omlx_api_model_id(name)
+    return any(omlx_api_model_id(x) == want for x in ids)
 
 
 def omlx_unload_loaded_for_inprocess(

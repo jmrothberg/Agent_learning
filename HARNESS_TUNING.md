@@ -173,6 +173,14 @@ bullet never reaches the prompt — broaden tags if a good bullet doesn’t fire
   must not tie-break on action token alone (`walk`) — entity prefix must win. LLM must still clear
   `_spriteCache` on rematch (playbook `versus-fighter-sprite-prefix`).
 
+**Backend / oMLX**
+
+- **GLM-5.3 already loaded ≠ TUI session** (BATTLEZ2 `20260904_094928`): typing a goal without
+  `/load` still went through in-process `mlx_lm` → `ValueError: Model type glm5_next not supported`,
+  0 tokens. `detect_backend` now uses oMLX **currently loaded** models (`loaded=true` on
+  `/v1/models/status`); unloaded/discovered rows do not get a `*` and are not auto-picked.
+  `glm5_next` never uses in-process mlx_lm.
+
 **Compaction / context**
 
 - Pressure = `prompt_tokens / num_ctx`. A too-small `num_ctx` denominator (e.g. treating 32K as the

@@ -2452,6 +2452,18 @@ class CodingBoxApp(App):
                     slot_gpus, snap, vram_gib=vram_gib,
                 )
             if bi and bi.name == "mlx":
+                # oMLX is a different process than chat.py — PID GPU map
+                # always said "not loaded" while GLM sat in oMLX. Star/label
+                # only when /v1/models/status says loaded=true.
+                via_omlx = backend_mod.endpoint_is_omlx(
+                    bi.endpoint
+                ) or backend_mod.requires_omlx_server(model or "")
+                if via_omlx:
+                    if backend_mod.mlx_name_is_resident(
+                        model or "", omlx_loaded=omlx_loaded,
+                    ):
+                        return "oMLX · loaded"
+                    return gs.format_model_gpu_placement([], snap, not_loaded=True)
                 gpus = gs.pids_on_gpus(snap, pid=my_pid) or gs.large_python_gpu_indices(
                     snap, exclude_pid=my_pid,
                 )
@@ -2492,6 +2504,10 @@ class CodingBoxApp(App):
 
         slots = _collect_slots()
         ollama_ps = gs.ollama_loaded_models()
+        try:
+            omlx_loaded = backend_mod.omlx_list_loaded_model_ids(timeout=0.4)
+        except Exception:
+            omlx_loaded = []
 
         if slots:
             rows.append("  [b]LLM[/b]")
@@ -3795,9 +3811,15 @@ class CodingBoxApp(App):
             return
 
         self._log("[bold cyan]── available models ──[/bold cyan]")
+        # oMLX residency is separate from in-process mlx_lm (_loaded_path).
+        # Without this, GLM-5.3 pinned in oMLX showed no * (TUI 20260904).
+        try:
+            omlx_loaded = backend_mod.omlx_list_loaded_model_ids(timeout=0.8)
+        except Exception:
+            omlx_loaded = []
         self._log(
             "[dim]  [O]llama / [M]LX / open[X]AI / [C]laude  ·  "
-            "* = loaded in Ollama VRAM now  ·  ← active = bound to this session  ·  "
+            "* = loaded now (Ollama / oMLX / in-process MLX)  ·  ← active = bound to this session  ·  "
             "← staged = next /new  ·  "
             "[magenta]VLM[/magenta] = can read screenshots (vision-language) · "
             "[dim]text[/dim] = text-only[/dim]"
@@ -3813,7 +3835,15 @@ class CodingBoxApp(App):
                 loaded = "*" if name in ollama_loaded else " "
             elif b == "mlx":
                 tag = "M"
-                loaded = "*" if name == mlx_active else " "
+                loaded = (
+                    "*"
+                    if backend_mod.mlx_name_is_resident(
+                        name,
+                        in_process_active=mlx_active,
+                        omlx_loaded=omlx_loaded,
+                    )
+                    else " "
+                )
             elif b == "openai":
                 tag = "X"
                 loaded = " "
@@ -6879,6 +6909,23 @@ class CodingBoxApp(App):
                 self._log_error(str(e))
                 self._session_done = True
                 return
+        # glm5_next cannot use in-process mlx_lm (BATTLEZ2 20260904_094928:
+        # user typed a goal because GLM was already in oMLX; session still
+        # used MLXBackend → "Model type glm5_next not supported", 0 tokens).
+        if info.name == "mlx" and backend_mod.requires_omlx_server(info.model):
+            try:
+                ep = backend_mod.ensure_omlx_server()
+            except RuntimeError as e:
+                self._log_error(str(e))
+                self._session_done = True
+                return
+            info = backend_mod.BackendInfo(
+                name="mlx",
+                model=backend_mod.omlx_api_model_id(info.model),
+                source=info.source,
+                endpoint=ep,
+                context_length=info.context_length,
+            )
         # Orphan Flash (~150GB+) after a dead TUI still sits in oMLX — free it
         # before in-process GLM/Qwen first weight load.
         if (
