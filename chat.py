@@ -1047,6 +1047,7 @@ class CodingBoxApp(App):
         self._activity_role: str = "coder"    # coder | critic | architect
         self._activity_started_at: float = 0.0  # monotonic; for "Ns" age
         self._stream_tokens: int = 0          # tokens this stream
+        self._stream_think_tokens: int = 0    # hidden CoT chunks this stream
         self._stream_started_at: float = 0.0  # monotonic; for tok/s
         self._last_token_at: float = 0.0      # monotonic; for stall age
         self._is_streaming: bool = False
@@ -1061,10 +1062,12 @@ class CodingBoxApp(App):
         self._runaway_console_warned: bool = False
         # Model 2 / Model 3 sidecar stream stats (same shape as coder Activity).
         self._model2_stream_tokens: int = 0
+        self._model2_stream_think_tokens: int = 0
         self._model2_stream_started_at: float = 0.0
         self._model2_last_token_at: float = 0.0
         self._model2_is_streaming: bool = False
         self._model3_stream_tokens: int = 0
+        self._model3_stream_think_tokens: int = 0
         self._model3_stream_started_at: float = 0.0
         self._model3_last_token_at: float = 0.0
         self._model3_is_streaming: bool = False
@@ -1203,6 +1206,11 @@ class CodingBoxApp(App):
         # qwen3.6:27b isn't buried under a 20KB schema + 6KB project doc).
         # /leanprompt on|off|auto sets this explicitly.
         self._lean_prompt: bool | None = None
+        # /showthinking — print hidden CoT to the log. Default OFF: counting
+        # think tokens is cheap; dumping GLM CoT into RichLog can lag the TUI.
+        # Does not change sampling or what the parser sees.
+        self._show_thinking: bool = False
+        self._think_buf: str = ""
         # `/640` and `/media off` — JMR V1 native 640×480, no sidecar media.
         # `/640png` — same JMR walls + art pipeline with STEM-N.png sheets.
         # Default ON (full Z-Image / Stable Audio / Wan pipeline). Sticky across
@@ -1589,11 +1597,62 @@ class CodingBoxApp(App):
             self._stream_buf = ""
             self._last_console_flush_at = now
 
+    def _emit_thinking_token(self, piece: str) -> None:
+        """Count hidden CoT so Activity is not stuck on 'waiting for first token'.
+
+        Display-only. Prints CoT only when /showthinking is ON (BATTLEZO 20260904_095910).
+        """
+        now = time.monotonic()
+        role = (
+            getattr(self.agent, "_last_stream_role", None) if self.agent else None
+        ) or "coder"
+        slot = self._role_slot_for_stream(role)
+        if slot == 2:
+            if self._model2_stream_tokens == 0 and self._model2_stream_think_tokens == 0:
+                self._model2_stream_started_at = now
+            self._model2_stream_think_tokens += 1
+            self._model2_last_token_at = now
+        elif slot == 3:
+            if self._model3_stream_tokens == 0 and self._model3_stream_think_tokens == 0:
+                self._model3_stream_started_at = now
+            self._model3_stream_think_tokens += 1
+            self._model3_last_token_at = now
+        else:
+            if self._stream_tokens == 0 and self._stream_think_tokens == 0:
+                self._stream_started_at = now
+            self._stream_think_tokens += 1
+            self._last_token_at = now
+        # Opt-in CoT dump (/showthinking). Off by default — GLM thinking
+        # can be thousands of chunks; printing them does not slow the
+        # model but can stall the Textual log pane.
+        if getattr(self, "_show_thinking", False) and piece:
+            self._think_buf += piece
+            if "\n" in self._think_buf:
+                *complete, self._think_buf = self._think_buf.split("\n")
+                for line in complete:
+                    if line.strip():
+                        self._log_raw("[think] " + line)
+                self._last_console_flush_at = now
+            elif len(self._think_buf) >= self._STREAM_PARTIAL_FLUSH_CHARS:
+                self._log_raw("[think] " + self._think_buf)
+                self._think_buf = ""
+                self._last_console_flush_at = now
+        if self._is_streaming or self._model2_is_streaming or self._model3_is_streaming:
+            if now - self._last_emit_status_at >= 1.0:
+                self._last_emit_status_at = now
+                try:
+                    self._update_status()
+                except Exception:
+                    pass
+
     def _flush_stream(self) -> None:
         """Push any remaining buffered tokens (no trailing newline)."""
         if self._stream_buf.strip():
             self._log_raw(self._stream_buf)
         self._stream_buf = ""
+        if getattr(self, "_think_buf", "").strip():
+            self._log_raw("[think] " + self._think_buf)
+        self._think_buf = ""
 
     def _update_status(self, extra: str | None = None) -> None:
         """Render the right-hand status panel.
@@ -1711,6 +1770,7 @@ class CodingBoxApp(App):
         stream_started_at: float,
         last_token_at: float,
         is_streaming: bool,
+        think_tokens: int = 0,
     ) -> str:
         """tok/s line matching the main Activity row (for any model slot)."""
         if not is_streaming:
@@ -1721,6 +1781,14 @@ class CodingBoxApp(App):
         stalled = tokens > 0 and since_last > 30.0
         if tokens == 0:
             wait = time.monotonic() - stream_started_at if stream_started_at else 0.0
+            if think_tokens > 0:
+                think_per_s = think_tokens / elapsed if elapsed > 0 else 0.0
+                think_stalled = since_last > 30.0
+                tag = "[red]STALLED[/red]" if think_stalled else "[green]live[/green]"
+                return (
+                    f"{label} — [magenta]thinking {think_tokens:,} tok[/magenta], "
+                    f"{think_per_s:.1f} tok/s, last {since_last:.1f}s ago {tag}"
+                )
             progress_total = getattr(self.agent, "_stream_progress_total", 0) or 0
             progress_current = getattr(self.agent, "_stream_progress_current", 0) or 0
             progress_stage = getattr(self.agent, "_stream_progress_stage", None)
@@ -1739,16 +1807,19 @@ class CodingBoxApp(App):
                 return f"{label} — [red]waiting {wait:.0f}s for first token[/red]"
             return f"{label} — [dim]waiting for first token ({wait:.0f}s)[/dim]"
         tag = "[red]STALLED[/red]" if stalled else "[green]live[/green]"
+        think_note = (
+            f" [dim]+{think_tokens:,} think[/dim]" if think_tokens else ""
+        )
         return (
-            f"{label} — {tokens:,} tok, {tok_per_s:.1f} tok/s, "
+            f"{label} — {tokens:,} tok, {tok_per_s:.1f} tok/s{think_note}, "
             f"last {since_last:.1f}s ago {tag}"
         )
 
     def _slot_stream_state(
         self,
         slot: int | None,
-    ) -> tuple[bool, int, float, float, str]:
-        """(is_streaming, tokens, started_at, last_token_at, idle_label) per slot."""
+    ) -> tuple[bool, int, float, float, str, int]:
+        """(is_streaming, tokens, started_at, last_token_at, idle_label, think_tokens) per slot."""
         if slot == 2:
             return (
                 self._model2_is_streaming,
@@ -1759,6 +1830,7 @@ class CodingBoxApp(App):
                     getattr(self.agent, "_model2_activity", None)
                     if self.agent else None
                 ) or "idle",
+                self._model2_stream_think_tokens,
             )
         if slot == 3:
             return (
@@ -1770,6 +1842,7 @@ class CodingBoxApp(App):
                     getattr(self.agent, "_model3_activity", None)
                     if self.agent else None
                 ) or "idle",
+                self._model3_stream_think_tokens,
             )
         return (
             self._is_streaming,
@@ -1777,6 +1850,7 @@ class CodingBoxApp(App):
             self._stream_started_at,
             self._last_token_at,
             self._activity_label or "idle",
+            self._stream_think_tokens,
         )
 
     def _render_role_activity_line(
@@ -1788,7 +1862,7 @@ class CodingBoxApp(App):
         model_name: str | None = None,
     ) -> str:
         """One Activity row per role — same tok/tok/s display as the coder line."""
-        streaming, tokens, started, last_tok, idle_tag = self._slot_stream_state(slot)
+        streaming, tokens, started, last_tok, idle_tag, think_tokens = self._slot_stream_state(slot)
         hdr = self._activity_header(role)
         if streaming:
             if slot is None:
@@ -1805,6 +1879,7 @@ class CodingBoxApp(App):
                 stream_started_at=started,
                 last_token_at=last_tok,
                 is_streaming=True,
+                think_tokens=think_tokens,
             )
         elif idle_tag and idle_tag != "idle":
             age = (
@@ -3508,6 +3583,8 @@ class CodingBoxApp(App):
                 self._cmd_status()
             elif cmd == "wait":
                 self._cmd_toggle_wait(arg)
+            elif cmd in ("showthinking", "show-thinking"):
+                self._cmd_toggle_showthinking(arg)
             elif cmd in ("iter-detail", "iterdetail"):
                 self._cmd_iter_detail(arg)
             elif cmd == "mode":
@@ -3696,6 +3773,8 @@ class CodingBoxApp(App):
             "[bold cyan]── feature toggles ──[/bold cyan]",
             "  [b]/wait [on|off][/b]             step-mode: pause after each iter; Enter or feedback to continue",
             "                                  [dim]TUI default ON (local_manual) · auto-disables /vlm-critique; restored on /wait off[/dim]",
+            "  [b]/showthinking [on|off][/b]    print hidden CoT to the log · default OFF (Activity still counts thinking tok)",
+            "                                  [dim]display-only — does not slow the model; long CoT can flood the log pane[/dim]",
             "  [b]/vlm-critique [on|off][/b]    review WITH vision: looks at the screen, tells the agent \u00b7 default off",
             "                                  [dim]aliases: /watch /vision /judge /vc · uses a memory checklist when one fits[/dim]",
             "                                  [dim]uses model 2 to look when your main model can't see[/dim]",
@@ -5647,7 +5726,9 @@ class CodingBoxApp(App):
         if self.agent is not None:
             return self.agent
         if self._ask_only_agent is not None:
-            self._ask_only_agent.set_token_callback(self._emit_token)
+            self._ask_only_agent.set_token_callback(
+                self._emit_token, thinking_cb=self._emit_thinking_token
+            )
             return self._ask_only_agent
         if not self._ensure_coder_backend_for_ask():
             return None
@@ -5675,7 +5756,9 @@ class CodingBoxApp(App):
             playbook_writeback=False,
         )
         agent._goal = self._goal or ""
-        agent.set_token_callback(self._emit_token)
+        agent.set_token_callback(
+            self._emit_token, thinking_cb=self._emit_thinking_token
+        )
         self._ask_only_agent = agent
         return agent
 
@@ -6147,6 +6230,7 @@ class CodingBoxApp(App):
             f"  media pipeline:       {self._media_pipeline_status_label()}",
             f"  video engine:         {self._video_engine_label()}",
             f"  step-mode (/wait):    {step_label}",
+            f"  show thinking:        {'ON' if self._show_thinking else 'off'}  [dim](/showthinking — print hidden CoT; default off)[/dim]",
             f"  prefill:              {'ON' if self._use_prefill else 'off'}",
             f"  architect-split:      {'ON' if eff_arch_split else 'off'}{' [auto]' if eff_arch_auto and eff_arch_split else ''}",
             f"  double-screenshot:    {'ON' if self._use_double_screenshot else 'off'}",
@@ -6371,6 +6455,34 @@ class CodingBoxApp(App):
         # Surface the new mode in the bottom bar immediately, not only
         # at the next iter-pause event.
         self._update_mode_bar()
+
+    def _cmd_toggle_showthinking(self, arg: str) -> None:
+        """/showthinking — print hidden CoT to the log pane.
+
+        Default OFF. Counting think tokens (Activity row) is always on
+        and does not print CoT. Turning this ON is display-only: same
+        tokens already streamed from oMLX; the model is not slower.
+        Long GLM CoT can flood RichLog — leave OFF unless debugging.
+        Sticky across /new. Alias: /show-thinking.
+        """
+        arg_lc = arg.strip().lower()
+        if arg_lc in ("on", "true", "1", "enable"):
+            new_state = True
+        elif arg_lc in ("off", "false", "0", "disable"):
+            new_state = False
+        else:
+            new_state = not bool(getattr(self, "_show_thinking", False))
+        self._show_thinking = new_state
+        status = "[green]ON[/green]" if new_state else "[yellow]OFF[/yellow]"
+        self._log_info(
+            f"show thinking {status} — hidden CoT "
+            + (
+                "prints as think-prefixed log lines (does not slow the model; can flood the log)"
+                if new_state
+                else "stays off the log (Activity still counts thinking tok)"
+            )
+        )
+        self._update_status()
 
     def _cmd_audit_playbook(self) -> None:
         """/audit — shell out to scripts/audit_playbook.py and print
@@ -7261,7 +7373,9 @@ class CodingBoxApp(App):
             # Default for non-manual flows: keep running without forced
             # checkpoints; user can always /wait on when desired.
             self.agent.set_auto_step_on_failure(False)
-        self.agent.set_token_callback(self._emit_token)
+        self.agent.set_token_callback(
+            self._emit_token, thinking_cb=self._emit_thinking_token
+        )
         # Pre-session /ref staging: if the user attached an image before
         # starting, feed it into the very first user turn of this run.
         if self._staged_ref_image_bytes is not None:
@@ -7321,17 +7435,21 @@ class CodingBoxApp(App):
         self._activity_role = "coder"
         self._activity_started_at = 0.0
         self._stream_tokens = 0
+        self._stream_think_tokens = 0
         self._stream_started_at = 0.0
         self._last_token_at = 0.0
         self._is_streaming = False
+        self._think_buf = ""
         self._last_console_flush_at = 0.0
         self._last_stream_alive_note_at = 0.0
         self._runaway_console_warned = False
         self._model2_stream_tokens = 0
+        self._model2_stream_think_tokens = 0
         self._model2_stream_started_at = 0.0
         self._model2_last_token_at = 0.0
         self._model2_is_streaming = False
         self._model3_stream_tokens = 0
+        self._model3_stream_think_tokens = 0
         self._model3_stream_started_at = 0.0
         self._model3_last_token_at = 0.0
         self._model3_is_streaming = False
@@ -7397,9 +7515,18 @@ class CodingBoxApp(App):
         tps = self._stream_tokens / elapsed if elapsed > 0 else 0.0
         mins = int(silent_for // 60)
         silent_label = f"{mins}m" if mins else f"{int(silent_for)}s"
+        think_n = int(getattr(self, "_stream_think_tokens", 0) or 0)
+        if self._stream_tokens == 0 and think_n > 0:
+            think_tps = think_n / elapsed if elapsed > 0 else 0.0
+            count_bit = (
+                f"thinking {think_n:,} tok · {think_tps:.0f} tok/s"
+            )
+        else:
+            think_bit = f" · {think_n:,} thinking" if think_n else ""
+            count_bit = f"{self._stream_tokens:,} tokens{think_bit} · {tps:.0f} tok/s"
         self._log_info(
-            f"[dim][stream alive] {self._stream_tokens:,} tokens · "
-            f"{tps:.0f} tok/s · no printable output for {silent_label} — "
+            f"[dim][stream alive] {count_bit} · "
+            f"no printable output for {silent_label} — "
             "model is mid-reasoning; /done ships the last clean build[/dim]"
         )
 
@@ -7918,18 +8045,22 @@ class CodingBoxApp(App):
                     if slot == 2:
                         self._model2_is_streaming = True
                         self._model2_stream_tokens = 0
+                        self._model2_stream_think_tokens = 0
                         self._model2_stream_started_at = now
                         self._model2_last_token_at = 0.0
                     elif slot == 3:
                         self._model3_is_streaming = True
                         self._model3_stream_tokens = 0
+                        self._model3_stream_think_tokens = 0
                         self._model3_stream_started_at = now
                         self._model3_last_token_at = 0.0
                     else:
                         self._is_streaming = True
                         self._stream_tokens = 0
+                        self._stream_think_tokens = 0
                         self._stream_started_at = now
                         self._last_token_at = 0.0
+                        self._think_buf = ""
                         # Per-stream visibility bookkeeping resets.
                         self._last_console_flush_at = 0.0
                         self._last_stream_alive_note_at = 0.0

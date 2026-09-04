@@ -182,6 +182,42 @@ _VLM_NAME_SUBSTRINGS: tuple[str, ...] = (
 )
 
 
+def _delta_thinking_text(delta: Any) -> str:
+    """Hidden CoT from an OpenAI-style stream delta (dict or object).
+
+    oMLX GLM-5.3 puts thinking in `reasoning_content` / `reasoning`.
+    Those chunks never hit `content`, so the TUI showed 0 tokens while
+    the model was talking to itself (BATTLEZO 20260904_095910).
+    """
+    if delta is None:
+        return ""
+    keys = ("reasoning_content", "reasoning")
+    if isinstance(delta, dict):
+        for key in keys:
+            v = delta.get(key)
+            if isinstance(v, str) and v:
+                return v
+        return ""
+    for key in keys:
+        v = getattr(delta, key, None)
+        if isinstance(v, str) and v:
+            return v
+    return ""
+
+
+def _notify_thinking(on_token: Callable[[str], None] | None, piece: str) -> None:
+    """Forward hidden-CoT chunks to `on_token.on_thinking` if the TUI bound one."""
+    if not piece or on_token is None:
+        return
+    cb = getattr(on_token, "on_thinking", None)
+    if cb is None:
+        return
+    try:
+        cb(piece)
+    except Exception:
+        pass
+
+
 def classify_model_modality(name: str | None) -> str:
     """Return "vlm" if the model NAME is a known Vision-Language Model
     pattern, else "text". Case-insensitive substring match.
@@ -1573,6 +1609,7 @@ class MLXServerBackend(Backend):
         started = time.monotonic()
         parts: list[str] = []
         n_tokens = 0
+        n_think = 0
         stalled = False
         looped = False
         crashed = False
@@ -1630,6 +1667,7 @@ class MLXServerBackend(Backend):
                             if (
                                 prompt_eval_done_at is not None
                                 and n_tokens == 0
+                                and n_think == 0
                                 and time.monotonic() - prompt_eval_done_at
                                 > _MLX_GENERATION_KICKOFF_SECONDS
                             ):
@@ -1643,6 +1681,7 @@ class MLXServerBackend(Backend):
                             if (
                                 time.monotonic() - last_activity_at > stall_seconds
                                 and n_tokens == 0
+                                and n_think == 0
                             ):
                                 stalled = True
                                 stall_at = 0
@@ -1695,9 +1734,14 @@ class MLXServerBackend(Backend):
                         if fr in ("length", "max_tokens"):
                             max_tokens_hit = True
                         # Hidden CoT is not parser-visible but must reset the
-                        # stall clock (20260829_165958).
-                        if delta.get("reasoning_content") or delta.get("reasoning"):
+                        # stall clock (20260829_165958) and TUI think counter
+                        # (BATTLEZO 20260904_095910 — GLM thinking looked like
+                        # a dead 0-token stream).
+                        think_piece = _delta_thinking_text(delta)
+                        if think_piece:
                             last_activity_at = time.monotonic()
+                            n_think += 1
+                            _notify_thinking(on_token, think_piece)
                         piece = delta.get("content") or ""
                         if not piece:
                             continue
@@ -1720,7 +1764,13 @@ class MLXServerBackend(Backend):
             if stall_at is None:
                 stall_at = n_tokens
 
-        if stalled and not crashed and prompt_eval_done_at is not None and n_tokens == 0:
+        if (
+            stalled
+            and not crashed
+            and prompt_eval_done_at is not None
+            and n_tokens == 0
+            and n_think == 0
+        ):
             crashed = True
             if error_message is None:
                 error_message = (
@@ -1741,6 +1791,7 @@ class MLXServerBackend(Backend):
             loop_kind=repeat.stall_reason if looped else None,
             loop_line=repeat.loop_line if looped else None,
             max_tokens_hit=max_tokens_hit,
+            thinking_tokens=n_think,
         )
 
     async def is_vlm(self) -> bool:
@@ -1874,6 +1925,7 @@ class OpenAIBackend(Backend):
 
         parts: list[str] = []
         tokens = 0
+        think_tokens = 0
         prompt_tokens: int | None = None
         completion_tokens: int | None = None
         t0 = time.monotonic()
@@ -1882,7 +1934,7 @@ class OpenAIBackend(Backend):
         max_tokens_hit = False
 
         async def _run(call_params: dict[str, Any]) -> None:
-            nonlocal tokens, prompt_tokens, completion_tokens, cancelled
+            nonlocal tokens, think_tokens, prompt_tokens, completion_tokens, cancelled
             nonlocal max_tokens_hit
             stream = await self._client.chat.completions.create(**call_params)
             async for chunk in stream:
@@ -1891,6 +1943,10 @@ class OpenAIBackend(Backend):
                     break
                 if chunk.choices:
                     delta = chunk.choices[0].delta
+                    think_piece = _delta_thinking_text(delta)
+                    if think_piece:
+                        think_tokens += 1
+                        _notify_thinking(on_token, think_piece)
                     piece = getattr(delta, "content", None)
                     if piece:
                         parts.append(piece)
@@ -1937,6 +1993,7 @@ class OpenAIBackend(Backend):
                         error_message=err_payload,
                         prompt_tokens=prompt_tokens,
                         completion_tokens=completion_tokens,
+                        thinking_tokens=think_tokens,
                     )
             else:
                 raise
@@ -1961,6 +2018,7 @@ class OpenAIBackend(Backend):
                 error_message=err_payload,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
+                thinking_tokens=think_tokens,
             )
 
         return StreamResult(
@@ -1971,6 +2029,7 @@ class OpenAIBackend(Backend):
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             max_tokens_hit=max_tokens_hit,
+            thinking_tokens=think_tokens,
         )
 
     async def is_vlm(self) -> bool:

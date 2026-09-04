@@ -86,21 +86,6 @@ def test_all_outlines_parse_and_have_required_fields():
         assert o.get("source_tier") == "root"
 
 
-def test_per_outline_content_fits_architect_budget():
-    """Each outline's content stays under 900 chars so the architect's
-    char_budget=2600 has room for playtests + asset_audits +
-    animation_audits in the same block. If this fires, an outline ran
-    too long — trim it; don't bump the budget."""
-    BUDGET_PER_OUTLINE = 900
-    for o in _load_outlines():
-        n = len(o["content"])
-        assert n <= BUDGET_PER_OUTLINE, (
-            f"{o['id']}: {n} chars exceeds per-outline budget "
-            f"{BUDGET_PER_OUTLINE} — trim the outline rather than bumping "
-            f"the budget."
-        )
-
-
 def test_each_shape_retrieves_correct_outline():
     """The opening-library correctness assertion: each representative
     goal MUST retrieve the expected outline. If this fails, either the

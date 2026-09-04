@@ -899,6 +899,9 @@ class StreamResult:
     # standalone field so the agent can route to a specific recovery
     # ("emit a tag immediately, skip the reasoning preamble").
     silent: bool = False
+    # Hidden CoT chunks (oMLX/OpenAI `reasoning_content`). Not in `text`.
+    # TUI Activity uses this so GLM thinking does not look like a dead stream.
+    thinking_tokens: int = 0
     # Diagnose-bloat signal (chess-trace fix 2026-06-22): the model opened
     # <diagnose> and never closed it within the char budget, nor moved on
     # to <patch>/<html_file> — the iter-2 unclosed-diagnose runaway. Folded

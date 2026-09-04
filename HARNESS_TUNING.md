@@ -180,6 +180,10 @@ bullet never reaches the prompt — broaden tags if a good bullet doesn’t fire
   0 tokens. `detect_backend` now uses oMLX **currently loaded** models (`loaded=true` on
   `/v1/models/status`); unloaded/discovered rows do not get a `*` and are not auto-picked.
   `glm5_next` never uses in-process mlx_lm.
+- **GLM thinking looks dead in TUI** (BATTLEZO `20260904_095910`): hidden CoT
+  (`reasoning_content`) already reset the stall clock but Activity stayed at
+  0 tokens / "waiting for first token". TUI now counts thinking chunks live
+  and does **not** print the chain-of-thought.
 
 **Compaction / context**
 

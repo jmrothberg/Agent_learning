@@ -1450,6 +1450,8 @@ class GameAgent(
         # check off doesn't get re-nagged forever (cap 2 per task).
         self._todo_nag_counts: dict[str, int] = {}
         self._token_cb = None
+        # Hidden-CoT callback (TUI think counter). None = count in heartbeat only.
+        self._thinking_cb = None
         self._goal: str = ""
         # Tracks the most recent test-report summary for memory.record_outcome.
         self._last_report_summary: str = ""
@@ -2487,8 +2489,9 @@ class GameAgent(
             ),
         )
 
-    def set_token_callback(self, cb) -> None:
+    def set_token_callback(self, cb, thinking_cb=None) -> None:
         self._token_cb = cb
+        self._thinking_cb = thinking_cb
 
     def _estimate_ctx_fill(self) -> int:
         """Return the total character count across `_messages`.
@@ -2557,6 +2560,14 @@ class GameAgent(
         if self._token_cb is not None:
             try:
                 self._token_cb(piece)
+            except Exception:
+                pass
+
+    def _thinking_cb_wrapper(self, piece: str) -> None:
+        # Display-only: TUI increments think count. Never print CoT.
+        if self._thinking_cb is not None:
+            try:
+                self._thinking_cb(piece)
             except Exception:
                 pass
 

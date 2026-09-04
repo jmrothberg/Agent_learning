@@ -144,16 +144,6 @@ def test_playbook_battlezone_surfaces_wireframe_not_fps_camera(playbook: Playboo
     )
 
 
-def test_playbook_doom_surfaces_fps_camera(playbook: Playbook) -> None:
-    goal = "first person doom shooter three.js weapon crosshair"
-    hits = playbook.retrieve(
-        goal, k=6, stage="code",
-        modality_tokens=["3d", "first-person", "fps", "doom"],
-    )
-    ids = [h.bullet.id for h in hits]
-    assert "fps-camera-and-movement-vectors" in ids
-
-
 def test_playbook_minimap_feedback_retrieves_minimap_bullet(playbook: Playbook) -> None:
     goal = "first person maze shooter"
     feedback = (

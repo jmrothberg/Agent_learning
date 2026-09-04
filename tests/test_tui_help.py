@@ -157,6 +157,7 @@ def test_slash_synonyms_are_wired():
     assert '"sim"' in src and '"simulator"' in src
     assert '"640png"' in src
     assert '"solo"' in src
+    assert '"showthinking"' in src
 
 
 def test_help_judge_is_vlm_critique_not_check():

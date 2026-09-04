@@ -90,6 +90,9 @@ def _make_agent_for_test(tmpdir: Path):
     a._record = _record
     a._trace = _trace
     a._save_best = _save_best
+    # load_and_test kwargs + crash retry (final_iter_test_if_needed).
+    a._simulator_mode = False
+    a._trace_exception = lambda *args, **kwargs: None
     return a
 
 

@@ -96,7 +96,7 @@ Stock PyPI `mlx-lm` / in-process `mlx-vlm` 0.6.17 lack those load paths
 
 | Concern | Setting |
 |---------|---------|
-| **TUI pick Flash** | `/model` / `/load` / `/launch` on DeepSeek-V4-Flash, GLM-5.3-Flash, or Qwen3.8-Flash-Next **auto-starts oMLX** (`backend.ensure_omlx_server`) and routes that session to `:8000`. Typing a goal **without** `/load` uses whatever oMLX already has `loaded=true` (BATTLEZ2 20260904). GLM-5.2 / dense Qwen3.8-27B / MiniMax stay in-process |
+| **TUI pick Flash** | `/model` / `/load` / `/launch` on DeepSeek-V4-Flash, GLM-5.3-Flash, or Qwen3.8-Flash-Next **auto-starts oMLX** (`backend.ensure_omlx_server`) and routes that session to `:8000`. Typing a goal **without** `/load` uses whatever oMLX already has `loaded=true` (BATTLEZ2 20260904). GLM-5.2 / dense Qwen3.8-27B / MiniMax stay in-process. GLM-5.3 hidden CoT shows as **thinking N tok** on Activity (not a dead 0-token wait) |
 | **Prompt cache (check first)** | `cache.hot_cache_max_size` ≠ `"0"` (e.g. `"32GB"`). Admin UI: **Memory Management → Memory Limit (In-Memory Hot Cache)** — **not** the CACHE panel. Default `"0"` disabled; enabling cut a repeated ~24K prompt **51s → 4.6s**. oMLX CLI rejects `"20%"` — use absolute GB in `settings.json` / `omlx serve` |
 | Parallel agents | `LLM_BACKEND=mlx-server` + `MLX_SERVER_URL=http://127.0.0.1:8000` — one resident model, continuous batch |
 | Idle unload / “server quit” | Global idle timeout **None**; **pin** the coder model; per-model TTL off |

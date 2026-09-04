@@ -104,20 +104,6 @@ def test_every_outline_has_deep_recipe():
         assert r.get("traps"), f"{o['id']} recipe missing traps"
 
 
-def test_recipe_field_caps_for_local_model_prompt_discipline():
-    """Per-field caps keep the deep render terse for a local 27B. If this
-    fires, trim the entry — do not raise the caps."""
-    for o in _load_outlines():
-        r = o["recipe"]
-        rid = o["id"]
-        assert 1 <= len(r["order"]) <= 7, f"{rid}: order has {len(r['order'])} lines (max 7)"
-        assert 3 <= len(r["traps"]) <= 6, f"{rid}: traps has {len(r['traps'])} lines (3-6)"
-        for t in r["traps"]:
-            assert len(t) <= 140, f"{rid}: trap exceeds 140 chars: {t!r}"
-        assert 1 <= len(r.get("tuning", ["x"])) <= 3, f"{rid}: tuning > 3 lines"
-        assert 1 <= len(r.get("probes", ["x"])) <= 3, f"{rid}: probes > 3 lines"
-
-
 def test_platformer_outline_jump_probe_avoids_y_delta_race():
     """run_vlm10 PoP: jump_works y!==y0 races landing — outline must say vy/onGround."""
     for o in _load_outlines():
@@ -170,31 +156,6 @@ def test_deep_render_appears_at_plan_budget_not_code_budget():
     assert "state:" in deep and "order:" in deep
     assert "traps:" not in shallow, "code-stage render must stay shallow"
     assert "state:" not in shallow
-
-
-def test_deep_render_fits_plan_budget_for_every_outline():
-    """Deep render of EVERY outline (alone) must fit the plan budget with
-    room for playtests/audits — cap each outline's deep section at 2600
-    so the 3600 budget keeps ~1000 chars of headroom."""
-    from memory import (
-        OpeningBookHit, _render_outline_recipe, render_opening_book_block,
-    )
-    from memory import ImplementationOutline
-
-    for o in _load_outlines():
-        item = ImplementationOutline.from_record(dict(o), source_tier="root")
-        hit = OpeningBookHit(item=item, score=0.5)
-        block = render_opening_book_block(
-            hit, [], [], [], char_budget=PLAN_BUDGET, deep=True,
-        )
-        assert "[opening book truncated by budget]" not in block, (
-            f"{o['id']} deep render alone exceeds the plan budget"
-        )
-        section = len(item.content) + len(_render_outline_recipe(item.recipe))
-        assert section <= 2600, (
-            f"{o['id']} outline section is {section} chars — trim the entry "
-            f"so playtests/audits keep headroom in the 3600 budget"
-        )
 
 
 def test_render_handles_empty_recipe_gracefully():

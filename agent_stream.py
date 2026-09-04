@@ -1009,9 +1009,15 @@ class StreamMaterializeMixin:
             "started": _time.monotonic(),
             "last_hb": _time.monotonic(),
             "tokens": 0,
+            # Hidden CoT chunk count (not in `tokens` / not in heartbeat tail).
+            "think_tokens": 0,
             "tail": "",
-            # Decode clock — set on first token so tok/s excludes prefill.
+            # Decode clock — set on first *content* token so tok/s excludes
+            # prefill AND hidden CoT. Thinking is live decode but is not
+            # parser-visible, so it has its own counter.
             "first_token_at": None,
+            # First content OR thinking chunk — TTFT / not-a-dead-stream.
+            "first_activity_at": None,
             # Phase 0.7 — fire-once flag so the slow-prefill surprise
             # event only emits once per stream when the condition first
             # holds; subsequent regular heartbeats keep flowing.
@@ -1038,6 +1044,81 @@ class StreamMaterializeMixin:
         # gone wrong. Fires-once, no behavior change — pure visibility.
         _RUNAWAY_TOKEN_FLOOR = 15000
 
+        def _mark_first_activity(now: float) -> None:
+            if hb_state["first_activity_at"] is None:
+                hb_state["first_activity_at"] = now
+                # TTFT for iter_summary.prefill_s (first visible OR hidden chunk).
+                self._last_prefill_s = round(now - hb_state["started"], 1)
+
+        def _maybe_emit_heartbeat(now: float) -> None:
+            if now - hb_state["last_hb"] < _STREAM_HEARTBEAT_SECONDS:
+                return
+            hb_state["last_hb"] = now
+            # Wall-clock for "how long has this stream run"; decode for tok/s.
+            wall_elapsed = now - hb_state["started"]
+            _ft = hb_state["first_token_at"]
+            decode_elapsed = (now - _ft) if _ft is not None else 0.0
+            tok_per_s = (
+                hb_state["tokens"] / decode_elapsed if decode_elapsed > 0 else 0.0
+            )
+            self._trace({
+                "kind": "stream_heartbeat",
+                "tokens": hb_state["tokens"],
+                "thinking_tokens": hb_state["think_tokens"],
+                "elapsed_s": round(wall_elapsed, 1),
+                "tok_per_s": round(tok_per_s, 2),
+                "tail": hb_state["tail"][-_STREAM_HEARTBEAT_TAIL_CHARS:],
+            })
+            if (
+                not hb_state["slow_prefill_emitted"]
+                and hb_state["tokens"] < _SLOW_PREFILL_TOK_FLOOR
+                and hb_state["think_tokens"] == 0
+                and wall_elapsed >= _SLOW_PREFILL_ELAPSED_FLOOR
+            ):
+                hb_state["slow_prefill_emitted"] = True
+                self._trace({
+                    "kind": "slow_prefill",
+                    "tokens": hb_state["tokens"],
+                    "elapsed_s": round(wall_elapsed, 1),
+                    "model_role": role,
+                    "model_name": getattr(
+                        getattr(active_backend, "info", None),
+                        "model",
+                        "unknown",
+                    ),
+                    "hint": (
+                        "tokens<5 after 120s+ usually means a cold KV "
+                        "cache after a cross-slot role switch — "
+                        "Backend.warm_prefix on the next role's slot "
+                        "during the prior role's stream avoids it."
+                    ),
+                })
+            if (
+                not hb_state["runaway_warned"]
+                and hb_state["tokens"] >= _RUNAWAY_TOKEN_FLOOR
+            ):
+                hb_state["runaway_warned"] = True
+                self._trace({
+                    "kind": "runaway_stream_warning",
+                    "tokens": hb_state["tokens"],
+                    "elapsed_s": round(wall_elapsed, 1),
+                    "tok_per_s": round(tok_per_s, 2),
+                    "model_role": role,
+                    "model_name": getattr(
+                        getattr(active_backend, "info", None),
+                        "model",
+                        "unknown",
+                    ),
+                    "hint": (
+                        f"completion >{_RUNAWAY_TOKEN_FLOOR} tokens — "
+                        "typical iter is 1-4k. Likely a token-repetition "
+                        "loop, an oversized rewrite, or the model "
+                        "concatenating multiple drafts. Press Ctrl+D to "
+                        "ship the current best build and re-queue your "
+                        "feedback if waiting feels wrong."
+                    ),
+                })
+
         def _heartbeat_on_token(piece: str) -> None:
             if on_token is not None:
                 try:
@@ -1045,79 +1126,29 @@ class StreamMaterializeMixin:
                 except Exception:
                     pass
             now = _time.monotonic()
+            _mark_first_activity(now)
             if hb_state["first_token_at"] is None:
                 hb_state["first_token_at"] = now
-                # TTFT for iter_summary.prefill_s (always, not only slow path).
-                self._last_prefill_s = round(now - hb_state["started"], 1)
             hb_state["tokens"] += 1
             # Maintain a small tail buffer; cheap O(1) amortized.
             tail = hb_state["tail"] + piece
             if len(tail) > _STREAM_HEARTBEAT_TAIL_CHARS * 2:
                 tail = tail[-_STREAM_HEARTBEAT_TAIL_CHARS * 2:]
             hb_state["tail"] = tail
-            if now - hb_state["last_hb"] >= _STREAM_HEARTBEAT_SECONDS:
-                hb_state["last_hb"] = now
-                # Wall-clock for "how long has this stream run"; decode for tok/s.
-                wall_elapsed = now - hb_state["started"]
-                decode_elapsed = now - hb_state["first_token_at"]
-                tok_per_s = (
-                    hb_state["tokens"] / decode_elapsed if decode_elapsed > 0 else 0.0
-                )
-                self._trace({
-                    "kind": "stream_heartbeat",
-                    "tokens": hb_state["tokens"],
-                    "elapsed_s": round(wall_elapsed, 1),
-                    "tok_per_s": round(tok_per_s, 2),
-                    "tail": hb_state["tail"][-_STREAM_HEARTBEAT_TAIL_CHARS:],
-                })
-                if (
-                    not hb_state["slow_prefill_emitted"]
-                    and hb_state["tokens"] < _SLOW_PREFILL_TOK_FLOOR
-                    and wall_elapsed >= _SLOW_PREFILL_ELAPSED_FLOOR
-                ):
-                    hb_state["slow_prefill_emitted"] = True
-                    self._trace({
-                        "kind": "slow_prefill",
-                        "tokens": hb_state["tokens"],
-                        "elapsed_s": round(wall_elapsed, 1),
-                        "model_role": role,
-                        "model_name": getattr(
-                            getattr(active_backend, "info", None),
-                            "model",
-                            "unknown",
-                        ),
-                        "hint": (
-                            "tokens<5 after 120s+ usually means a cold KV "
-                            "cache after a cross-slot role switch — "
-                            "Backend.warm_prefix on the next role's slot "
-                            "during the prior role's stream avoids it."
-                        ),
-                    })
-                if (
-                    not hb_state["runaway_warned"]
-                    and hb_state["tokens"] >= _RUNAWAY_TOKEN_FLOOR
-                ):
-                    hb_state["runaway_warned"] = True
-                    self._trace({
-                        "kind": "runaway_stream_warning",
-                        "tokens": hb_state["tokens"],
-                        "elapsed_s": round(wall_elapsed, 1),
-                        "tok_per_s": round(tok_per_s, 2),
-                        "model_role": role,
-                        "model_name": getattr(
-                            getattr(active_backend, "info", None),
-                            "model",
-                            "unknown",
-                        ),
-                        "hint": (
-                            f"completion >{_RUNAWAY_TOKEN_FLOOR} tokens — "
-                            "typical iter is 1-4k. Likely a token-repetition "
-                            "loop, an oversized rewrite, or the model "
-                            "concatenating multiple drafts. Press Ctrl+D to "
-                            "ship the current best build and re-queue your "
-                            "feedback if waiting feels wrong."
-                        ),
-                    })
+            _maybe_emit_heartbeat(now)
+
+        def _heartbeat_on_thinking(piece: str) -> None:
+            # Do not put CoT in the heartbeat tail (would leak into jsonl).
+            try:
+                self._thinking_cb_wrapper(piece)
+            except Exception:
+                pass
+            now = _time.monotonic()
+            _mark_first_activity(now)
+            hb_state["think_tokens"] += 1
+            _maybe_emit_heartbeat(now)
+
+        _heartbeat_on_token.on_thinking = _heartbeat_on_thinking
 
         # Backend-reported pre-token progress (today only MLX surfaces
         # it — parsed from mlx_lm.server's SSE keepalive frames during
@@ -1281,6 +1312,9 @@ class StreamMaterializeMixin:
             "prompt_tokens": result.prompt_tokens,
             "completion_tokens": result.completion_tokens,
             "max_tokens_hit": result.max_tokens_hit,
+            "thinking_tokens": int(
+                getattr(result, "thinking_tokens", 0) or hb_state.get("think_tokens") or 0
+            ),
         })
         # Context-pressure detector. When prompt_tokens approaches
         # num_ctx, the model has no headroom to emit a complete

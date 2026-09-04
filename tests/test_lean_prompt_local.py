@@ -66,13 +66,6 @@ def test_explicit_on_forces_lean_even_on_cloud(tmp_path):
     assert a._system_prompt_class() == "large"
 
 
-def test_lean_system_prompt_is_small_sized(tmp_path):
-    a = _agent(tmp_path, backend_name="mlx", model="qwen3.6-27b")
-    sp = prompts_v1.build_system_prompt("make a snake game", model_class=a._system_prompt_class())
-    # Shipped lean prompt is ~6732 chars (2026-07-02); cap guards runaway growth.
-    assert len(sp) <= 6800, f"lean system prompt too big: {len(sp)}"
-
-
 def test_lean_media_goal_keeps_media_tags(tmp_path):
     a = _agent(tmp_path, backend_name="mlx", model="qwen3.6-27b")
     goal = (

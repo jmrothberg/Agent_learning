@@ -32,6 +32,7 @@ def _app_stub() -> CodingBoxApp:
     app.agent = None  # _emit_token resolves role "coder" without an agent
     app._stream_buf = ""
     app._stream_tokens = 0
+    app._stream_think_tokens = 0
     app._stream_started_at = 0.0
     app._last_token_at = 0.0
     app._is_streaming = True
@@ -43,6 +44,18 @@ def _app_stub() -> CodingBoxApp:
     app._info_lines: list[str] = []
     app._log_raw = lambda line: app._raw_lines.append(line)
     app._log_info = lambda line: app._info_lines.append(line)
+    app._model2_stream_tokens = 0
+    app._model2_stream_think_tokens = 0
+    app._model2_stream_started_at = 0.0
+    app._model2_last_token_at = 0.0
+    app._model2_is_streaming = False
+    app._model3_stream_tokens = 0
+    app._model3_stream_think_tokens = 0
+    app._model3_stream_started_at = 0.0
+    app._model3_last_token_at = 0.0
+    app._model3_is_streaming = False
+    app._think_buf = ""
+    app._show_thinking = False
     return app
 
 
@@ -212,12 +225,15 @@ def test_info_stall_reason_sets_last_stall_and_banner():
     app._model2_is_streaming = False
     app._model3_is_streaming = False
     app._stream_tokens = 0
+    app._stream_think_tokens = 0
     app._stream_started_at = 0.0
     app._last_token_at = 0.0
     app._model2_stream_tokens = 0
+    app._model2_stream_think_tokens = 0
     app._model2_stream_started_at = 0.0
     app._model2_last_token_at = 0.0
     app._model3_stream_tokens = 0
+    app._model3_stream_think_tokens = 0
     app._model3_stream_started_at = 0.0
     app._model3_last_token_at = 0.0
     app._session_model = "stub"
@@ -282,3 +298,95 @@ def test_heartbeat_tok_per_s_uses_decode_clock():
     assert '"first_token_at": None' in src
     assert "decode_elapsed" in src
     assert "hb_state.get(\"first_token_at\")" in src or "hb_state['first_token_at']" in src
+    assert "think_tokens" in src
+    assert "on_thinking" in src
+    assert "thinking_tokens" in src
+
+
+def test_thinking_tokens_do_not_print_cot():
+    """GLM hidden CoT must bump the think counter without dumping text (BATTLEZO)."""
+    app = _app_stub()
+    app._emit_thinking_token("secret chain of thought")
+    assert app._raw_lines == []
+    assert app._stream_buf == ""
+    assert app._stream_think_tokens == 1
+    assert app._last_token_at > 0.0
+    assert app._stream_tokens == 0
+
+
+def test_showthinking_prints_cot_prefixed():
+    app = _app_stub()
+    app._show_thinking = True
+    app._emit_thinking_token("hello think\n")
+    assert app._stream_think_tokens == 1
+    assert any(l.startswith("[think] ") and "hello think" in l for l in app._raw_lines)
+
+
+def test_showthinking_toggle_on_off():
+    app = _app_stub()
+    app._update_status = lambda: None  # type: ignore[method-assign]
+    logged: list[str] = []
+    app._log_info = lambda line: logged.append(str(line))  # type: ignore[method-assign]
+    app._cmd_toggle_showthinking("on")
+    assert app._show_thinking is True
+    app._cmd_toggle_showthinking("off")
+    assert app._show_thinking is False
+    assert any("ON" in l for l in logged)
+    assert any("OFF" in l for l in logged)
+
+
+def test_activity_shows_thinking_not_waiting():
+    app = _app_stub()
+    now = time.monotonic()
+    app._stream_started_at = now - 5.0
+    app._last_token_at = now
+    detail = app._format_stream_activity_detail(
+        label="streaming coder",
+        tokens=0,
+        stream_started_at=app._stream_started_at,
+        last_token_at=app._last_token_at,
+        is_streaming=True,
+        think_tokens=1234,
+    )
+    assert "waiting" not in detail
+    assert "thinking" in detail
+    assert "1,234" in detail
+    assert "live" in detail
+
+
+def test_activity_waiting_when_no_think_and_no_content():
+    app = _app_stub()
+    now = time.monotonic()
+    detail = app._format_stream_activity_detail(
+        label="streaming coder",
+        tokens=0,
+        stream_started_at=now - 5.0,
+        last_token_at=0.0,
+        is_streaming=True,
+        think_tokens=0,
+    )
+    assert "waiting for first token" in detail
+
+
+def test_activity_content_plus_think_note():
+    app = _app_stub()
+    now = time.monotonic()
+    detail = app._format_stream_activity_detail(
+        label="streaming coder",
+        tokens=80,
+        stream_started_at=now - 2.0,
+        last_token_at=now,
+        is_streaming=True,
+        think_tokens=400,
+    )
+    assert "80 tok" in detail
+    assert "+400 think" in detail
+
+
+def test_delta_thinking_text_openai_and_omlx_keys():
+    from backend import _delta_thinking_text
+
+    assert _delta_thinking_text({"reasoning_content": "hmm"}) == "hmm"
+    assert _delta_thinking_text({"reasoning": "plan"}) == "plan"
+    assert _delta_thinking_text({"content": "hi"}) == ""
+    assert _delta_thinking_text(None) == ""
