@@ -405,6 +405,49 @@ def test_jmr_png_playbook_pin():
     assert "classic-arcade-pixel-maps" not in ids
 
 
+def test_jmr_png_no_threejs_footer_still_pins_sheets_not_webgl():
+    """DIGDUGD2: TARGET says 'no three.js' / 'no WebGL'. That must not
+    flip webgl_or_voxel (which skipped jmr-png-sheets and draw-sprites)."""
+    a = GameAgent(model="stub", out_path=Path("games/test_jmr_dug.html"))
+    a.set_jmr_png_mode(True)
+    a._session_assets = {"digger_idle": "x.png"}
+    goal = (
+        "Build a Dig Dug game. TARGET=/640png JMR native: ONE 640×480 HTML "
+        "file. No CDN, no fetch, no WebGL, no three.js. Emit <assets>."
+    )
+    ids = a._first_build_playbook_ensure_ids(goal)
+    assert ids is not None
+    assert "jmr-png-sheets" in ids
+    assert "classic-arcade-pixel-maps" not in ids
+    assert "draw-generated-sprites-not-boxes" in ids
+    assert "fps-camera-and-movement-vectors" not in ids
+
+
+def test_jmr_png_playbook_retrieve_drops_inline_pixel_maps():
+    """DIGDUGD2 first-build Jaccard injected classic-arcade-pixel-maps next
+    to jmr-png-sheets (contradictory art → inline_data_bloat)."""
+    a = GameAgent(model="stub", out_path=Path("games/test_jmr_dug2.html"))
+    a.set_jmr_png_mode(True)
+    # Phrase that would otherwise Jaccard-rank the /640 pixel-map bullet,
+    # plus the /640png TARGET that must suppress it.
+    goal = (
+        "classic arcade pixel maps maze. TARGET=/640png JMR native: "
+        "ONE 640×480 HTML file. No CDN, no fetch, no WebGL, no three.js."
+    )
+    events: list[dict] = []
+    orig = a._trace
+    a._trace = lambda obj: events.append(obj) or orig(obj)
+    a._retrieve_playbook_block(
+        goal, code="", stage="plan",
+        ensure_ids=a._first_build_playbook_ensure_ids(goal),
+    )
+    evs = [e for e in events if e.get("kind") == "playbook_retrieved"]
+    assert evs
+    ids = evs[-1].get("ids") or []
+    assert "classic-arcade-pixel-maps" not in ids
+    assert "jmr-png-sheets" in ids
+
+
 def test_jmr_png_first_build_asks_for_jmr_spr():
     msg = prompts_v1.first_build_instruction(
         "<html><canvas></canvas></html>",

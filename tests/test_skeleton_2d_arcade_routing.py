@@ -84,6 +84,28 @@ def test_2d_arcade_avoids_3d_board_dungeon_skeleton(mem, arcade_prompts):
     assert not misses, "2D arcade goals routed to specialized scaffolds: " + ", ".join(misses)
 
 
+def test_640png_arcade_does_not_inherit_threejs_skeleton(mem):
+    """DIGDUGD2 20260905_153855: /640png footer 'no three.js' made
+    detect_3d_intent return ['three','threejs'] (MIN_HITS=2) and seeded
+    canvas_3d_basic. Dig Dug is a 2D grid game — recipe must win."""
+    from prompt_library import effective_prompt, load_prompt_library
+    lib = {g["name"]: g for g in load_prompt_library(
+        Path(__file__).resolve().parents[1] / "memory" / "prompt_library.jsonl"
+    )}
+    goal = effective_prompt(lib["dig-dug"], jmr_png_mode=True)
+    hit = mem.retrieve_skeleton(goal)
+    assert hit.name == "canvas_grid_basic.html", hit.name
+    assert hit.name not in _SPECIALIZED_3D_BOARD_DUNGEON
+    # Same for other 2D arcade /640png goals.
+    misses = []
+    for name in ("centipede", "galaga", "frogger", "dig-dug"):
+        g = effective_prompt(lib[name], jmr_png_mode=True)
+        h = mem.retrieve_skeleton(g)
+        if h.name in _SPECIALIZED_3D_BOARD_DUNGEON:
+            misses.append(f"{name} -> {h.name}")
+    assert not misses, "640png arcade routed to WebGL/board scaffold: " + ", ".join(misses)
+
+
 def test_genuine_specialized_picks_still_win(mem):
     """The distinctiveness gate must not over-correct: goals that share a
     distinctive token with a specialized sidecar still get that scaffold."""

@@ -188,6 +188,16 @@ def test_playbook_suppression_threejs_blocks_wireframe_bullet() -> None:
     assert "wireframe-minimap-radar-yaw-arrow" in suppressed
 
 
+def test_playbook_suppression_640png_blocks_inline_pixel_maps() -> None:
+    suppressed = GameAgent._playbook_suppressed_bullet_ids(
+        goal="TARGET=/640png JMR native: no three.js. Dig Dug maze.",
+        active_skeleton="canvas_grid_basic.html",
+        code="",
+    )
+    assert "classic-arcade-pixel-maps" in suppressed
+    assert "jmr-png-sheets" not in suppressed
+
+
 def test_threejs_navigation_basis_risk_detector() -> None:
     bad = (
         "const fx = Math.sin(yaw), fz = -Math.cos(yaw);\n"

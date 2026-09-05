@@ -30,6 +30,28 @@ THREE_D_KEYWORDS: frozenset[str] = frozenset({
     "perspective",
 })
 
+# DIGDUGD2 20260905_153855: /640png TARGET says "no three.js"; tokenize
+# ("three" + join "three"+"js") hit _MODALITY_MIN_HITS and seeded the
+# three.js skeleton. A prohibition is not 3D intent.
+_NEGATED_THREEJS_RE = re.compile(
+    r"\b(?:not|no|never|without)\s+three(?:\.js|js)?\b", re.I,
+)
+_NEGATED_WEBGL_RE = re.compile(
+    r"\b(?:not|no|never|without)\s+webgl\b", re.I,
+)
+
+
+def strip_negated_webgl_threejs(goal: str) -> str:
+    """Remove 'no/not/never/without three.js|webgl' so detectors see intent."""
+    s = _NEGATED_THREEJS_RE.sub(" ", goal or "")
+    return _NEGATED_WEBGL_RE.sub(" ", s)
+
+
+def jmr_target_forbids_webgl(goal: str) -> bool:
+    """True when the goal is a JMR /640 or /640png target (no WebGL)."""
+    gl = (goal or "").lower()
+    return "target=/640" in gl or "jmr native" in gl
+
 
 def detect_3d_intent(goal: str) -> list[str]:
     """Return a list of 3D-modality keywords found in `goal`. Empty list
@@ -42,6 +64,7 @@ def detect_3d_intent(goal: str) -> list[str]:
     """
     if not goal:
         return []
+    goal = strip_negated_webgl_threejs(goal)
     words = [w.lower() for w in re.findall(r"[a-zA-Z0-9]+", goal)]
     out: list[str] = []
     seen: set[str] = set()

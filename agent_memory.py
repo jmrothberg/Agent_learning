@@ -88,6 +88,10 @@ class MemoryRetrievalMixin:
                 "fps-minimap-radar-yaw-arrow",
                 "wireframe-minimap-radar-yaw-arrow",
             })
+        # /640png: PNG sheets, not inline pixel maps (DIGDUGD2 retrieved both
+        # and the first-build looped on inline_data_bloat).
+        if "target=/640png" in (goal or "").lower():
+            suppressed.add("classic-arcade-pixel-maps")
         return suppressed
 
     # Failing model probe name -> playbook ids to pin on fix turns (run_vlm10).
@@ -116,17 +120,23 @@ class MemoryRetrievalMixin:
 
         recipe = getattr(self, "_active_visual_playtest_recipe_id", None) or ""
         g = (goal or "").lower()
+        from modality import jmr_target_forbids_webgl, strip_negated_webgl_threejs
+        g_pos = strip_negated_webgl_threejs(g).lower()
 
         # run_18: 3D/WebGL/voxel classes — do NOT pin drawImage bullets (Doom
         # green iters retrieved only those while art was THREE.Texture).
+        # DIGDUGD2: "no three.js" / "no WebGL" in the /640png footer is a
+        # prohibition, not a WebGL game — those substrings must not fire.
         webgl_or_voxel = (
             recipe in (
                 "canvas-3d-first-person",
                 "canvas-voxel-sandbox",
                 "canvas-3d-racing",
             )
-            or "three.js" in g
-            or "webgl" in g
+            or (
+                not jmr_target_forbids_webgl(g)
+                and ("three.js" in g_pos or "webgl" in g_pos)
+            )
             or "voxel" in g
             or "first-person" in g
             or "first person" in g
@@ -146,7 +156,7 @@ class MemoryRetrievalMixin:
         )
         fps_class = (
             recipe == "canvas-3d-first-person"
-            or ("three.js" in g and ("first-person" in g or "first person" in g or "fps" in g or "maze" in g))
+            or ("three.js" in g_pos and ("first-person" in g or "first person" in g or "fps" in g or "maze" in g))
             or ("pointer-lock" in g or "pointer lock" in g)
         )
 

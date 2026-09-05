@@ -4419,7 +4419,13 @@ class GameMemory:
         """
         # 3D is checked first because some 3D goals also mention "board"
         # ("3D chess") but should pick the 3D scaffold, not the board one.
+        # JMR /640 / /640png has no WebGL — never seed canvas_3d_basic
+        # (DIGDUGD2: "no three.js" in the TARGET footer). Recipe routing
+        # still picks grid/platformer/etc. below.
+        from modality import jmr_target_forbids_webgl
         threed_hits = _detect_3d_intent(goal)
+        if jmr_target_forbids_webgl(goal):
+            threed_hits = []
         # Voxel/Minecraft goals share the 3D modality bucket but have a dedicated
         # scaffold with raycast break/place (voxel trace 20260622_133931).
         if any(h in ("voxel", "voxels") for h in threed_hits):
