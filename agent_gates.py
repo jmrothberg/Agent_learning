@@ -12,6 +12,23 @@ class GateProcessingMixin:
 
     """Report post-processing gates for GameAgent."""
 
+    @staticmethod
+    def _partial_patch_is_advisory(report: dict[str, Any]) -> bool:
+        """True when a partial patch apply should NOT force ok=False.
+
+        DOOM3DFI 20260902_112850 iter 2: 7/7 probes green, no page errors,
+        yet `partial patch apply` flipped ok=False and burned two 0/1 patch
+        turns. When the report is already ok, every probe passed and the
+        page has no errors, the build works — keep ok=True and surface the
+        note as an advisory `warning` instead.
+        """
+        if not report.get("ok"):
+            return False
+        probes = report.get("probes") or []
+        if not probes or not all(bool(p.get("ok")) for p in probes):
+            return False
+        return not (report.get("page_errors") or [])
+
     def _apply_undrawn_art_intent_gate(self, report: dict[str, Any]) -> None:
 
         """Phase 0C (Fieldrunners trace 20260626_102307): keep

@@ -72,6 +72,9 @@ class MemoryRetrievalMixin:
             suppressed.update({
                 "fps-camera-and-movement-vectors",
                 "fps-minimap-radar-yaw-arrow",
+                # Plan-time retrieve still scores this from TARGET=/640png
+                # tags even when first-build ensure_ids skip it (BATTLE10).
+                "jmr-png-sheets",
             })
         elif mod == "threejs":
             suppressed.update({
@@ -773,6 +776,44 @@ class MemoryRetrievalMixin:
             self._trace({"kind": "components_error", "stage": stage, "err": str(e)})
             return ""
 
+    # Smallest remaining lean budget worth spending on a traps-only outline
+    # slice (header line + ~2 traps). Below this, drop the opening as before.
+    _LEAN_OPENING_TRAPS_MIN_CHARS = 200
+
+    def _outline_traps_only_for_goal(self, goal: str, *, char_budget: int) -> str:
+        """Traps/tuning slice of the goal's opening-book outline, or "".
+
+        Lean-budget fallback for simulator first builds (see
+        `_apply_lean_memory_budget`). Same retrieval as
+        `_retrieve_outline_traps_block` minus the fix-turn physics gate.
+        """
+        if not goal:
+            return ""
+        try:
+            mod_toks: list[str] = []
+            try:
+                from memory import (
+                    _detect_3d_intent, _detect_board_intent, _detect_dom_intent,
+                )
+                mod_toks = (
+                    _detect_3d_intent(goal)
+                    + _detect_board_intent(goal)
+                    + _detect_dom_intent(goal)
+                )
+            except Exception:
+                mod_toks = []
+            outline = self._memory.retrieve_implementation_outline(goal, mod_toks)
+            if outline is None:
+                return ""
+            recipe = getattr(outline.item, "recipe", None)
+            return render_outline_traps_only(
+                recipe if isinstance(recipe, dict) else {},
+                char_budget=char_budget,
+            )
+        except Exception as e:
+            self._trace({"kind": "outline_traps_error", "err": str(e)})
+            return ""
+
     def _apply_lean_memory_budget(
         self, opening_block: str, components_block: str, playbook_block: str,
         *, protect_components: bool = False, protect_playbook: bool = False,
@@ -813,6 +854,24 @@ class MemoryRetrievalMixin:
             cb = _fit_sim(components_block)
             pb = _fit_sim(playbook_block)
             ob = _fit_sim(opening_block)
+            # CENTIPED / ANIMATIO / BATTLE10 (Sept 2026): dropped_opening=True
+            # on every /640 first build — the class outline (build order +
+            # traps) never reached the model. Before dropping to "", fall
+            # back to the traps-only slice of the same outline if it fits
+            # the remaining budget.
+            kept_opening_mode = "full" if ob else "dropped"
+            if opening_block and not ob:
+                remaining = budget - used
+                if remaining >= self._LEAN_OPENING_TRAPS_MIN_CHARS:
+                    # -20: render_outline_traps_only appends a
+                    # "[traps truncated]" tail past char_budget.
+                    traps = self._outline_traps_only_for_goal(
+                        getattr(self, "_goal", "") or "", char_budget=remaining - 20,
+                    )
+                    if traps and len(traps) <= remaining:
+                        ob = traps
+                        used += len(traps)
+                        kept_opening_mode = "traps_only"
             if (
                 ob != (opening_block or "")
                 or cb != (components_block or "")
@@ -823,6 +882,7 @@ class MemoryRetrievalMixin:
                     "budget": budget,
                     "simulator_priority": True,
                     "kept_opening_chars": len(ob),
+                    "kept_opening_mode": kept_opening_mode,
                     "kept_components_chars": len(cb),
                     "kept_playbook_chars": len(pb),
                     "dropped_opening": bool(opening_block) and not ob,

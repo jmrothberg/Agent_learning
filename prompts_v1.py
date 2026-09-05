@@ -1018,6 +1018,11 @@ def build_system_prompt(
     # /640png reuses JMR V1 walls (canvas/JS/input) plus the art pipeline.
     if jmr_png_mode:
         simulator_mode = True
+    # Vector-stroke class: keep JMR walls, drop PNG-sheet <assets> contract.
+    # Inline the "wireframe" check — `_effective_jmr_png_mode` is defined
+    # below, and SYSTEM_PROMPT = build_system_prompt("{goal}") runs at import.
+    if jmr_png_mode and "wireframe" in (goal or "").lower():
+        jmr_png_mode = False
     # /640: always lean schema — drop media tags + short workflow. Full
     # "large" prompt still carries CDN/WebGL/asset guidelines that fight JMR.
     lean_schema = is_small or simulator_mode
@@ -1738,6 +1743,20 @@ def _detect_wireframe_vector_intent(goal: str) -> list[str]:
     return out
 
 
+def _effective_jmr_png_mode(goal: str, jmr_png_mode: bool) -> bool:
+    """PNG-sheet /640png pipeline is for sprite games, not 2D vector strokes.
+
+    COMMENT: BATTLE10 — TUI /640png still demands <assets> + jmr:spr while
+    the wireframe class nudge says do NOT emit <assets>. Keep JMR 640×480
+    walls (caller already set simulator_mode) but drop the sheet contract.
+    """
+    if not jmr_png_mode:
+        return False
+    if _detect_wireframe_vector_intent(goal):
+        return False
+    return True
+
+
 def _perspective_wireframe_nudge_needed(goal: str) -> bool:
     """Perspective projection nudge for FPS-style wireframe, not top-down."""
     gl = goal.lower()
@@ -1968,6 +1987,9 @@ def plan_instruction(
     def _record_nudge(nudge_id: str) -> None:
         if nudge_ids_out is not None:
             nudge_ids_out.append(nudge_id)
+
+    # Vector-stroke + /640png: use /640 Phase A (no <assets>), not sheets.
+    jmr_png_mode = _effective_jmr_png_mode(goal, jmr_png_mode)
 
     # P1: seed continuation flips art / audio "MUST emit" nudges off.
     # Detection is opt-in via the from_seed kwarg so non-seed sessions
@@ -2558,6 +2580,7 @@ def first_build_instruction(
     has_generated_assets: bool = False,
     simulator_mode: bool = False,
     jmr_png_mode: bool = False,
+    goal: str = "",
 ) -> str:
     """First-build prompt. Includes the SEED CODE the model should start from.
 
@@ -2573,6 +2596,10 @@ def first_build_instruction(
     so the seed remains copy-pasteable. When omitted, stale paths are
     replaced with a self-describing sentinel that fails loudly at runtime.
     """
+    _raw_jmr = bool(jmr_png_mode)
+    jmr_png_mode = _effective_jmr_png_mode(goal, jmr_png_mode)
+    if _raw_jmr and not jmr_png_mode:
+        simulator_mode = True
     seed_html = _scrub_seed_paths(
         seed_html,
         current_asset_dir=current_asset_dir,
@@ -3278,6 +3305,82 @@ When in doubt, ship. Working > perfect. Reply with EXACTLY ONE of:
   (b) one or more <patch> blocks plus a <notes> tag naming the specific
       crash bug being fixed.
 """
+
+
+# ===========================================================================
+# Code critic sidecar (Sept 2026) — text review that runs concurrently with
+# the coder on continuous-batching servers (oMLX). Same model as the coder;
+# its value is what deterministic probes cannot see: mechanics the plan
+# promised but the file lacks, wrong view/genre, dead controls, FPGA rule
+# hazards. Stable text first (system → goal/criteria/rules), the changing
+# file LAST, so the critic's own KV prefix caches across iterations.
+# ===========================================================================
+
+CODE_CRITIC_SYSTEM = (
+    "You are a terse senior reviewer of a single-file HTML5 canvas game "
+    "written by another model. You read the CODE ONLY — do not run it, do "
+    "not guess at pixels. Report only concrete, verifiable problems. Never "
+    "emit code, <patch>, <html_file>, or any harness tag."
+)
+
+# Max bullets the critic may return / the harness will inject.
+CODE_CRITIC_MAX_BULLETS = 5
+
+_CODE_CRITIC_640_RULES = (
+    "TARGET RULES (JMR 640x480 FPGA target; rule breaks are severity=teach, "
+    "NEVER 'remove working code'): no Object.keys / for..in; no Math.sin/"
+    "cos/atan2/round (LUT or floor(x+0.5)); splice() return value is "
+    "undefined on the FPGA (copy-down instead); no performance.now / "
+    "async/await / fetch / CDN / WebGL / gradients / shadows; fillText "
+    "ASCII 32-126 only; do not reassign canvas.width/height; <=16 locals "
+    "per function."
+)
+
+
+def code_critic_instruction(
+    *,
+    goal: str,
+    criteria: str,
+    current_html: str,
+    simulator_mode: bool = False,
+    micro_probe_summary: str = "",
+) -> str:
+    """User turn for the code critic. See CODE_CRITIC_SYSTEM.
+
+    Output contract (one bullet per line, ≤CODE_CRITIC_MAX_BULLETS, or the
+    single word LGTM):
+      severity | what is wrong and what the coder should do | `anchor`
+    where `anchor` is a SHORT verbatim snippet (≤80 chars) copied from the
+    file so the harness can drop the bullet if that code has since changed.
+    severity ∈ {blocker, bug, missing, teach}.
+    """
+    rules = ("\n" + _CODE_CRITIC_640_RULES + "\n") if simulator_mode else "\n"
+    probes = (
+        f"\nHARNESS STATIC CHECKS (already known to the coder):\n{micro_probe_summary.strip()}\n"
+        if micro_probe_summary.strip() else ""
+    )
+    return (
+        "REVIEW THE GAME FILE BELOW against the goal and acceptance criteria.\n"
+        f"GOAL: {goal.strip()}\n"
+        f"ACCEPTANCE CRITERIA:\n{criteria.strip() or '(none recorded)'}\n"
+        f"{rules}{probes}\n"
+        "Look for, in this order: (1) the goal's view/genre/mechanic is not "
+        "what the code implements (e.g. goal says first-person, code is "
+        "top-down); (2) a control, entity, or mechanic named in the goal/"
+        "criteria is absent or unreachable; (3) a state the probes read "
+        "(window.state.*) is never updated by real gameplay; (4) crash-class "
+        "bugs a player would hit; (5) target-rule hazards (teach only).\n"
+        "Do NOT report style, naming, refactors, performance guesses, or "
+        "anything the HARNESS STATIC CHECKS already list.\n\n"
+        f"FORMAT — at most {CODE_CRITIC_MAX_BULLETS} lines, most important first, "
+        "each exactly:\n"
+        "severity | one sentence: problem + concrete fix | `verbatim anchor from the file, <=80 chars`\n"
+        "severity is one of blocker, bug, missing, teach. If nothing "
+        "qualifies reply with the single word LGTM. No preamble, no code.\n\n"
+        "===== CURRENT FILE =====\n"
+        f"{current_html}\n"
+        "===== END FILE ====="
+    )
 
 
 # ===========================================================================

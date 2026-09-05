@@ -98,6 +98,12 @@ _BLOCK_MAX_REPEATS = 3        # 3 identical blocks within one response → loop
 # now, not just "the window happens to be low-cardinality." Fires at 4
 # entries, ~3× faster than Window 1 for the donkey-kong shape.
 _ADJACENT_SPAM_REPEATS = 4    # 4 identical consecutive normalized lines
+# BATTLE10 20260904_215158: `const c1 = { x:0, y:0 };` … `c4` are four
+# DISTINCT raw lines that normalize to one template (digit strip) and
+# killed a progressing 10 kB wireframe first build at N=4. Raw-identical
+# runs still fire at _ADJACENT_SPAM_REPEATS; digit-collapsed-only runs
+# (numbered vertex/corner tables are normal code) need this longer run.
+_ADJACENT_SPAM_NORM_ONLY_REPEATS = 8
 
 # Window 5 (INTRA-LINE repetition): Windows 1-4 all key off completed
 # lines (split on \n / ;). A stream that NEVER emits a boundary —
@@ -323,8 +329,12 @@ def _should_grace_inline_data_bloat(
 
     `grace_already_used` is retained for call-site tracing only; grace is
     not one-shot inside open output blocks.
+
+    BATTLE10 20260904_215158: `adjacent_line_spam` gets the SAME grace —
+    it cut a progressing first-build <html_file> on a numbered corner
+    table and the format doctor (same detector) could not recover it.
     """
-    if stall_reason != "inline_data_bloat":
+    if stall_reason not in ("inline_data_bloat", "adjacent_line_spam"):
         return False
     if completion_tokens >= _LOOP_GRACE_TOKEN_CEILING:
         return False
@@ -355,7 +365,7 @@ class RepetitionDetector:
     __slots__ = (
         "_line_buf", "_recent_lines", "_recent_lines_norm",
         "_all_lines", "_block_counts", "stall_reason",
-        "_adjacent_tail", "loop_line", "_intra_scan_at",
+        "_adjacent_tail", "_adjacent_tail_raw", "loop_line", "_intra_scan_at",
     )
 
     def __init__(self) -> None:
@@ -380,6 +390,9 @@ class RepetitionDetector:
         # model is stuck emitting one statement on repeat. Strictly
         # tighter than Window 1.
         self._adjacent_tail: list[str] = []
+        # BATTLE10: raw (un-normalized) twin of _adjacent_tail so numbered
+        # variants (c1..c4) are not mistaken for one line repeated.
+        self._adjacent_tail_raw: list[str] = []
         # When feed() returns True the caller can read this to discriminate
         # ("short_line_loop" / "near_dup_template_loop" / "inline_data_bloat"
         # / "adjacent_line_spam") and customize the recovery message.
@@ -435,14 +448,23 @@ class RepetitionDetector:
                 # Window 4 (adjacency): keep just the last N normalized
                 # lines. If they're all identical the model is stuck.
                 self._adjacent_tail.append(norm)
-                if len(self._adjacent_tail) > _ADJACENT_SPAM_REPEATS:
+                self._adjacent_tail_raw.append(s)
+                if len(self._adjacent_tail) > _ADJACENT_SPAM_NORM_ONLY_REPEATS:
                     self._adjacent_tail.pop(0)
+                    self._adjacent_tail_raw.pop(0)
+                # BATTLE10: fire at N=4 only when the RAW lines are identical
+                # (true stuck loop). Lines that only match after digit strip
+                # (`c1`/`c2`/`c3`/`c4 = { x:0, y:0 }`) need a longer run.
+                tail_raw = self._adjacent_tail_raw[-_ADJACENT_SPAM_REPEATS:]
                 if (
-                    len(self._adjacent_tail) == _ADJACENT_SPAM_REPEATS
+                    len(tail_raw) == _ADJACENT_SPAM_REPEATS
+                    and len(set(tail_raw)) == 1
+                ) or (
+                    len(self._adjacent_tail) == _ADJACENT_SPAM_NORM_ONLY_REPEATS
                     and len(set(self._adjacent_tail)) == 1
                 ):
                     self.stall_reason = "adjacent_line_spam"
-                    self.loop_line = self._adjacent_tail[0]
+                    self.loop_line = self._adjacent_tail[-1]
                     return True
             # Window 3 (block-level): hash the trailing N lines as a
             # single block. If we see the same block hash >
@@ -908,6 +930,11 @@ class StreamResult:
     # into `stalled`; standalone field routes the agent to patch-first
     # coaching instead of a generic retry.
     diagnose_bloat: bool = False
+    # KV prefix-cache reuse (Sept 2026): prompt tokens the backend did NOT
+    # have to prefill this turn. In-process MLX measures it exactly; oMLX
+    # reports it via `usage.prompt_tokens_details.cached_tokens` when
+    # available. None = backend gave no signal (Ollama caches silently).
+    cached_prompt_tokens: int | None = None
 
 
 async def stream_chat(
@@ -1051,7 +1078,8 @@ async def stream_chat(
                     completion_tokens=n_tokens,
                 ):
                     loop_grace_used = True
-                    loop_grace_reason = "inline_data_bloat_unclosed_output_block"
+                    # BATTLE10: reason names the graced detector (bloat or spam).
+                    loop_grace_reason = f"{repeat.stall_reason}_unclosed_output_block"
                     repeat = RepetitionDetector()
                     continue
                 looped = True

@@ -1932,6 +1932,14 @@ _CANVAS_HASH_JS = """
 # Pac-Man trace where pacman_exists passed on state but no Pac-Man
 # was drawn. Returns None when nothing to check, else
 # {checked: N, missing: [{name, x, y, bg_fraction, position_kind}]}.
+# Recipes whose player is the VIEWPOINT (never drawn at its own x/y):
+# ENTITY-NOT-RENDERED skips these entity names there (DOOM3DFI/BATTLE*
+# /640png sessions, Sept 2026 — false [player] on every fix prompt).
+_VIEWPOINT_RECIPE_IDS = frozenset({
+    "canvas-3d-first-person",
+    "canvas-vector-wireframe",
+})
+_VIEWPOINT_ENTITY_NAMES = frozenset({"player", "camera", "cam", "eye", "viewer"})
 _ENTITY_RENDERED_JS = """
 (() => {
   const s = window.state || window.gameState;
@@ -3325,6 +3333,22 @@ def _check_paths_key_coverage(
     ]
 
 
+_JMR_SHEET_FILE_RE = re.compile(r"^.+-(\d+)\.png$", re.IGNORECASE)
+# Dynamic sheet URL, e.g. `"jmr:spr:" + i` — FPGA-illegal but Chrome-working;
+# every sheet is potentially referenced, so none is "unused".
+_JMR_SPR_DYNAMIC_RE = re.compile(r"""jmr:spr:["']\s*\+""")
+
+
+def _jmr_sheet_referenced(filename: str, html_text: str) -> bool:
+    """True when a JMR sheet `STEM-N.png` is used via jmr:spr:N in `html_text`."""
+    m = _JMR_SHEET_FILE_RE.match(filename or "")
+    if not m or "jmr:spr:" not in html_text:
+        return False
+    if f"jmr:spr:{int(m.group(1))}" in html_text:
+        return True
+    return _JMR_SPR_DYNAMIC_RE.search(html_text) is not None
+
+
 def _check_unused_assets(
     html: str, out_path: "Path | None"
 ) -> list[str]:
@@ -3407,6 +3431,13 @@ def _check_unused_assets(
                 except Exception:
                     rel = name
                 if rel in html_text:
+                    continue
+                # /640png (JMR): sheets are addressed as jmr:spr:N, never by
+                # filename (CENTIPED 20260902_230904 shipped 100/100 with
+                # unused_assets=8 in every fix prompt). STEM-N.png counts as
+                # referenced when the HTML uses jmr:spr:N, builds the URL
+                # dynamically ("jmr:spr:" + i), or lists it in window.JMR_SPR.
+                if kind == "sprite" and _jmr_sheet_referenced(name, html_text):
                     continue
                 out_warnings.append(
                     f"{kind} {name!r} was generated to {rel!r} but is "
@@ -4897,10 +4928,17 @@ class LiveBrowser:
                 p.get("ok") for p in report.get("probes") or []
             )
             _ent_no_errors = not report.get("errors") and not report.get("page_errors")
+            # First-person / wireframe-vector recipes: the player IS the
+            # camera and is never drawn at its own (x,y) — every DOOM3DFI
+            # and BATTLE* /640png fix prompt carried a false
+            # ENTITY-NOT-RENDERED [player]. Skip that entity only.
+            _ent_viewpoint_recipe = (visual_recipe_id or "") in _VIEWPOINT_RECIPE_IDS
             for m in missing:
                 if not isinstance(m, dict):
                     continue
                 name = m.get("name", "?")
+                if _ent_viewpoint_recipe and str(name).lower() in _VIEWPOINT_ENTITY_NAMES:
+                    continue
                 bg_frac = m.get("bg_fraction", 0)
                 pk = m.get("position_kind", "?")
                 ex = m.get("x", 0)

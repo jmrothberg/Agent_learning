@@ -6,7 +6,9 @@ Moved VERBATIM from `GameAgent` (no behavior change).
 from __future__ import annotations
 
 
+import os
 import re
+from typing import Any
 
 
 from agent_helpers import (
@@ -16,6 +18,10 @@ from agent_helpers import (
     _COMPACT_PRESSURE,
 
     _COMPACT_TOKEN_CEILING,
+
+    _LAZY_ELISION_FRACTION,
+
+    _PREFIX_CACHE_BACKENDS_DEFAULT,
 
     _PRUNE_KEEP_RECENT_TURNS,
 
@@ -30,6 +36,24 @@ from agent_helpers import (
     _SUMMARIZE_MIN_PROBES_BYTES,
 
 )
+
+
+def _prefix_cache_friendly(agent_like: Any) -> bool:
+    """True when the backend reuses KV prefill across turns, so history
+    should stay append-only (see `_LAZY_ELISION_FRACTION`).
+
+    AGENT_PREFIX_CACHE_FRIENDLY=0 → never; =1 → any backend (Ollama
+    opt-in); unset → in-process MLX and oMLX (`mlx-server`) only.
+    Module-level (not a mixin method) so tests can drive `_prune_messages`
+    with a bare stub `self`.
+    """
+    raw = (os.environ.get("AGENT_PREFIX_CACHE_FRIENDLY") or "").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return False
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    info = getattr(getattr(agent_like, "_backend", None), "info", None)
+    return getattr(info, "name", None) in _PREFIX_CACHE_BACKENDS_DEFAULT
 
 
 class CompactionMixin:
@@ -273,6 +297,30 @@ class CompactionMixin:
             })
             self._messages = new_messages
             return
+
+        # KV prefix-cache friendliness: on backends that reuse the prefill
+        # of the previous turn, rewriting an older message every turn is
+        # the single biggest cache-breaker. Defer this elision until the
+        # projected prompt is large enough that context budget matters;
+        # in between, history is append-only and the whole prefix is a hit.
+        if _prefix_cache_friendly(self):
+            lazy_ceiling = (
+                _COMPACT_TOKEN_CEILING if _COMPACT_TOKEN_CEILING > 0
+                else int(getattr(self, "num_ctx", 0) or 0) * _COMPACT_PRESSURE
+            )
+            # Real prompt_tokens (last stream) beat the chars/4 estimate
+            # when available — code tokenizes denser than prose.
+            if lazy_ceiling > 0 and max(projected_tokens, last_tokens) < lazy_ceiling * _LAZY_ELISION_FRACTION:
+                if not getattr(self, "_lazy_elision_deferred_traced", False):
+                    # One trace per deferral streak (not per turn).
+                    self._lazy_elision_deferred_traced = True
+                    self._trace({
+                        "kind": "prune_deferred_prefix_cache",
+                        "projected_tokens": projected_tokens,
+                        "elide_at_tokens": int(lazy_ceiling * _LAZY_ELISION_FRACTION),
+                    })
+                return
+            self._lazy_elision_deferred_traced = False
 
         # Default elision path: keep message shape, strip embedded HTML
         # bodies. Cheap, lossy on iteration history, but safe.

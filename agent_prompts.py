@@ -1182,6 +1182,17 @@ class PromptBuildingMixin:
             lines.append("```")
         return "\n".join(lines)
 
+    def _effective_polish_turn_cap(self) -> int:
+        """Polish turns allowed this session.
+
+        `_POLISH_TURN_CAP` (2) in media mode; **0** in simulator mode
+        (`/640` and `/640png`) so FPGA builds ship as soon as probes are
+        green (CENTIPED 20260902_230904: 36% of wall clock on polish).
+        """
+        if getattr(self, "_simulator_mode", False):
+            return 0
+        return _POLISH_TURN_CAP
+
     def _build_fix_prompt(
         self,
         *,
@@ -1382,8 +1393,13 @@ class PromptBuildingMixin:
             # Skipped when user feedback is pending (their wish wins) or
             # the user already asked to ship. Never blocks shipping: the
             # prompt itself re-offers <done/>.
+            # /640 + /640png (simulator mode): cap 0 — ship as soon as
+            # probes are green. CENTIPED 20260902_230904 spent 263 s (36%)
+            # on 2 polish turns after 8/8; DOOM3DFI run 4 polish regressed
+            # and auto-reverted. FPGA targets do not want browser juice.
+            _polish_cap = self._effective_polish_turn_cap()
             if (
-                self._polish_turns_used < _POLISH_TURN_CAP
+                self._polish_turns_used < _polish_cap
                 and self._iters_remaining >= 1
                 and not self.has_pending_user_input()
                 and not self._user_force_done
@@ -1402,7 +1418,7 @@ class PromptBuildingMixin:
                 self._trace({
                     "kind": "polish_turn_started",
                     "turn": self._polish_turns_used,
-                    "cap": _POLISH_TURN_CAP,
+                    "cap": _polish_cap,
                     "iters_remaining": self._iters_remaining,
                     "has_critic_note": bool(self._last_critic_note),
                     "has_component": bool(juice_block),
@@ -1413,7 +1429,7 @@ class PromptBuildingMixin:
                     critic_note=self._last_critic_note or "",
                     component_block=juice_block,
                     turn=self._polish_turns_used,
-                    cap=_POLISH_TURN_CAP,
+                    cap=_polish_cap,
                 )
             # Truth-source inject for post-clean follow-up turns.
             # Evidence: fighing-game trace 20260519_153115 iter 3→4 — the

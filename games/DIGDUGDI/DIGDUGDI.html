@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dig Dug</title>
+<style>
+  :root{color-scheme:dark;}
+  html,body{margin:0;height:100%;background:#0b1020;overflow:hidden;}
+  #wrap{position:fixed;inset:0;display:grid;place-items:center;}
+  canvas{display:block;max-width:100vw;max-height:100vh;image-rendering:pixelated;}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c" width="640" height="480"></canvas></div>
+<script data-host="chrome">
+  window.JMR_SPR = ["DIGDUGDI-0.png", "DIGDUGDI-1.png", "DIGDUGDI-2.png"];
+  (function(){
+    var m = window.JMR_SPR;
+    var orig = HTMLImageElement.prototype;
+    Object.defineProperty(orig, "src", {
+      get: function(){ return this._jmrSrc || ""; },
+      set: function(v){
+        if (typeof v === "string" && v.indexOf("jmr:spr:") === 0) {
+          var n = parseInt(v.substr(10), 10);
+          if (m[n]) v = m[n];
+        }
+        this._jmrSrc = v;
+        this._realSrc = v;
+        // use real src via Image
+        var im = new Image();
+        im.src = v;
+        this._img = im;
+      }
+    });
+  })();
+</script>
+<script data-host="chrome">
+// PNG list make_artx.py reads. Index N is jmr:spr:N.
+window.JMR_SPR = ["DIGDUGDI-0.png", "DIGDUGDI-1.png", "DIGDUGDI-2.png"];
+(function () {
+  var d = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, "src");
+  Object.defineProperty(HTMLImageElement.prototype, "src", {
+    get: function () { return d.get.call(this); },
+    set: function (v) {
+      var m = /^jmr:spr:(\d+)$/.exec(v);
+      d.set.call(this, m ? window.JMR_SPR[+m[1]] : v);
+    }
+  });
+  var list = window.JMR_SPR || [];
+  var n = 0;
+  var need = list.length;
+  if (!need) { window._assetsReady = true; return; }
+  var i = 0;
+  while (i < need) {
+    var im = new Image();
+    im.onload = im.onerror = function () {
+      n = n + 1;
+      if (n >= need) window._assetsReady = true;
+    };
+    im.src = list[i];
+    i = i + 1;
+  }
+})();
+</script>
+<script>
+// JMR atlas helper — 9-arg crop; src literals only (no concat).
+window.JMR_CELL = [[24,24], [24,24], [24,24]];
+var S0 = new Image(); S0.src = "jmr:spr:0";
+var S1 = new Image(); S1.src = "jmr:spr:1";
+var S2 = new Image(); S2.src = "jmr:spr:2";
+function blitSpr(c, img, fi, cw, ch, dx, dy) { c.drawImage(img, fi * cw, 0, cw, ch, dx, dy, cw, ch); }
+</script>
+
+<script>
+(function(){
+"use strict";
+var cvs = document.getElementById("c");
+var ctx = cvs.getContext("2d");
+ctx.imageSmoothingEnabled = false;
+
+var S0 = new Image(); S0.src = "jmr:spr:0";
+var S1 = new Image(); S1.src = "jmr:spr:1";
+var S2 = new Image(); S2.src = "jmr:spr:2";
+
+function blitSpr(im, fi, cw, ch, x, y){
+  ctx.drawImage(im, fi*cw, 0, cw, ch, x, y, cw, ch);
+}
+
+var TILE = 24;
+var COLS = 25;
+var ROWS = 18;
+var OX = 20;
+var OY = 24;
+
+var state = {
+  score: 0,
+  wave: 1,
+  over: false,
+  won: false,
+  player: { tx: 2, ty: 2, x: OX+2*TILE, y: OY+2*TILE, dir: 0, anim: 0, animT: 0, pumpT: 0, digT: 0 },
+  monsters: [],
+  rocks: [],
+  monstersLeft: 0,
+  grid: []
+};
+window.state = state;
+window.gameState = state;
+
+var keys = { l:0, r:0, u:0, d:0, f:0, rock:0 };
+
+function buildGrid(){
+  state.grid = [];
+  for (var r=0; r<ROWS; r++){
+    var row = [];
+    for (var c=0; c<COLS; c++){
+      row.push(1); // 1 = soil
+    }
+    state.grid.push(row);
+  }
+  // carve some initial tunnels
+  for (var c2=0; c2<COLS; c2++){ state.grid[2][c2]=0; }
+  for (var r2=0; r2<ROWS; r2++){ state.grid[r2][2]=0; }
+  // player start
+  state.grid[2][2]=0;
+}
+
+function spawnMonsters(){
+  state.monsters = [];
+  var n = 3 + Math.min(state.wave, 4);
+  for (var i=0; i<n; i++){
+    // spawn at top row in open columns
+    var c = 3 + (i * 5) % (COLS-4);
+    state.grid[0][c] = 0;
+    state.monsters.push({
+      tx: c, ty: 0,
+      x: OX + c*TILE, y: OY + 0*TILE,
+      dir: 2, // 0=right 1=down 2=left 3=up
+      anim: 0, animT: 0,
+      inflate: 0, // 0 normal, 1 inflating, 2 inflated
+      inflateT: 0,
+      dead: false,
+      deadT: 0
+    });
+  }
+  state.monstersLeft = n;
+}
+
+function reset(){
+  state.score = 0;
+  state.wave = 1;
+  state.over = false;
+  state.won = false;
+  state.rocks = [];
+  state.player.tx = 2; state.player.ty = 2;
+  state.player.x = OX + 2*TILE; state.player.y = OY + 2*TILE;
+  state.player.dir = 0; state.player.anim = 0; state.player.animT = 0;
+  state.player.pumpT = 0; state.player.digT = 0;
+  buildGrid();
+  spawnMonsters();
+}
+window.game = { reset: reset };
+
+function nextWave(){
+  state.wave++;
+  state.rocks = [];
+  state.player.tx = 2; state.player.ty = 2;
+  state.player.x = OX + 2*TILE; state.player.y = OY + 2*TILE;
+  state.player.dir = 0; state.player.pumpT = 0; state.player.digT = 0;
+  buildGrid();
+  spawnMonsters();
+}
+
+function inBounds(tx, ty){
+  return tx >= 0 && tx < COLS && ty >= 0 && ty < ROWS;
+}
+
+function isSoil(tx, ty){
+  return inBounds(tx,ty) && state.grid[ty][tx] === 1;
+}
+
+function isOpen(tx, ty){
+  return inBounds(tx,ty) && state.grid[ty][tx] === 0;
+}
+
+function playerPx(){
+  return OX + state.player.tx * TILE;
+}
+function playerPy(){
+  return OY + state.player.ty * TILE;
+}
+
+function updatePlayer(dt){
+  var p = state.player;
+  // facing
+  if (keys.l) p.dir = 2;
+  else if (keys.r) p.dir = 0;
+  else if (keys.u) p.dir = 3;
+  else if (keys.d) p.dir = 1;
+
+  // movement (dig into soil)
+  var moved = false;
+  var ntx = p.tx, nty = p.ty;
+  if (p.dir === 0 && keys.r){ ntx = p.tx + 1; moved = true; }
+  else if (p.dir === 2 && keys.l){ ntx = p.tx - 1; moved = true; }
+  else if (p.dir === 3 && keys.u){ nty = p.ty - 1; moved = true; }
+  else if (p.dir === 1 && keys.d){ nty = p.ty + 1; moved = true; }
+
+  if (moved){
+    if (isSoil(ntx, nty)){
+      // dig
+      state.grid[nty][ntx] = 0;
+      p.digT = 8;
+    }
+    if (inBounds(ntx, nty)){
+      // check no monster in target
+      var blocked = false;
+      for (var i=0; i<state.monsters.length; i++){
+        var m = state.monsters[i];
+        if (!m.dead && m.tx === ntx && m.ty === nty){ blocked = true; break; }
+      }
+      if (!blocked){
+        p.tx = ntx; p.ty = nty;
+        p.x = OX + p.tx * TILE;
+        p.y = OY + p.ty * TILE;
+      }
+    }
+  }
+
+  // pump
+  if (keys.f && p.pumpT <= 0){
+    p.pumpT = 20;
+    // pump: inflate any monster in same row facing player
+    for (var j=0; j<state.monsters.length; j++){
+      var mm = state.monsters[j];
+      if (mm.dead) continue;
+      if (mm.ty === p.ty && mm.inflate === 0){
+        mm.inflate = 1; mm.inflateT = 30;
+        break;
+      }
+    }
+  }
+  if (p.pumpT > 0) p.pumpT--;
+  if (p.digT > 0) p.digT--;
+
+  // rock drop
+  if (keys.rock && !state.rocks.length){
+    // drop a rock below player
+    var ry = p.ty + 1;
+    if (ry < ROWS && isSoil(p.tx, ry)){
+      // carve a gap and place rock
+      state.grid[ry][p.tx] = 0;
+      state.rocks.push({ tx: p.tx, ty: ry, vy: 0, resting: false });
+    }
+  }
+  keys.rock = 0;
+}
+
+function updateMonsters(dt){
+  for (var i=0; i<state.monsters.length; i++){
+    var m = state.monsters[i];
+    if (m.dead){
+      m.deadT++;
+      continue;
+    }
+    // inflate logic
+    if (m.inflate === 1){
+      m.inflateT--;
+      if (m.inflateT <= 0){
+        m.inflate = 2; // inflated (stuck)
+        // after a while, pop
+        m.inflateT = 40;
+      }
+    } else if (m.inflate === 2){
+      m.inflateT--;
+      if (m.inflateT <= 0){
+        // pop -> dead
+        m.dead = true; m.deadT = 0;
+        state.score += 100 * state.wave;
+        state.monstersLeft--;
+        if (state.monstersLeft <= 0){
+          nextWave();
+        }
+      }
+    }
+
+    // movement (only if not inflated)
+    if (m.inflate !== 0 && m.inflate !== 2){
+      // wait, inflate 1 = inflating (can't move), inflate 2 = inflated (can't move)
+      // so only move when inflate === 0
+    }
+    if (m.inflate === 0){
+      // simple chase: move toward player
+      var p = state.player;
+      var dx = p.tx - m.tx;
+      var dy = p.ty - m.ty;
+      // pick direction
+      var ntx = m.tx, nty = m.ty;
+      if (Math.abs(dx) > Math.abs(dy)){
+        if (dx > 0){ ntx = m.tx + 1; m.dir = 0; }
+        else { ntx = m.tx - 1; m.dir = 2; }
+      } else {
+        if (dy > 0){ nty = m.ty + 1; m.dir = 1; }
+        else { nty = m.ty - 1; m.dir = 3; }
+      }
+      // try to move; if blocked by soil, try alternate
+      if (isSoil(ntx, nty)){
+        // try perpendicular
+        if (Math.abs(dx) > Math.abs(dy)){
+          // try up/down
+          nty = m.ty + (dy > 0 ? 1 : -1);
+          ntx = m.tx;
+          m.dir = (dy > 0) ? 1 : 3;
+        } else {
+          ntx = m.tx + (dx > 0 ? 1 : -1);
+          nty = m.ty;
+          m.dir = (dx > 0) ? 0 : 2;
+        }
+        if (isSoil(ntx, nty)){
+          // stuck, wait
+          ntx = m.tx; nty = m.ty;
+        }
+      }
+      // check player collision
+      if (ntx === p.tx && nty === p.ty){
+        // player caught
+        state.over = true;
+        return;
+      }
+      // check other monsters
+      var occ = false;
+      for (var k=0; k<state.monsters.length; k++){
+        if (k === i) continue;
+        var o = state.monsters[k];
+        if (!o.dead && o.tx === ntx && o.ty === nty){ occ = true; break; }
+      }
+      if (occ){ ntx = m.tx; nty = m.ty; }
+      // check rock
+      for (var rk=0; rk<state.rocks.length; rk++){
+        var r = state.rocks[rk];
+        if (r.tx === ntx && r.ty === nty && !r.resting){
+          // rock hits monster -> inflate
+          m.inflate = 1; m.inflateT = 30;
+          ntx = m.tx; nty = m.ty;
+          break;
+        }
+      }
+      if (inBounds(ntx, nty)){
+        m.tx = ntx; m.ty = nty;
+        m.x = OX + m.tx * TILE;
+        m.y = OY + m.ty * TILE;
+      }
+    }
+  }
+}
+
+function updateRocks(dt){
+  for (var i=0; i<state.rocks.length; i++){
+    var r = state.rocks[i];
+    if (r.resting) continue;
+    // fall
+    r.ty++;
+    r.vy += 0.5;
+    // check if resting on soil or monster
+    if (r.ty >= ROWS){
+      r.ty = ROWS-1; r.resting = true;
+    } else {
+      // if below is soil, rest
+      if (isSoil(r.tx, r.ty+1)){
+        r.resting = true;
+      } else {
+        // check monster below
+        var hit = false;
+        for (var j=0; j<state.monsters.length; j++){
+          var m = state.monsters[j];
+          if (!m.dead && m.tx === r.tx && m.ty === r.ty){
+            m.inflate = 1; m.inflateT = 30;
+            hit = true; break;
+          }
+        }
+        if (hit){ r.resting = true; }
+      }
+    }
+  }
+}
+
+function update(dt){
+  if (state.over || state.won) return;
+  updatePlayer(dt);
+  updateMonsters(dt);
+  updateRocks(dt);
+}
+
+function drawSoil(){
+  // layered soil colors
+  for (var r=0; r<ROWS; r++){
+    for (var c=0; c<COLS; c++){
+      if (state.grid[r][c] === 1){
+        // layered color by row
+        var col;
+        if (r < 4) col = "#8b5a2b";
+        else if (r < 9) col = "#6b4423";
+        else if (r < 14) col = "#4a2f1a";
+        else col = "#2e1d0f";
+        ctx.fillStyle = col;
+        ctx.fillRect(OX + c*TILE, OY + r*TILE, TILE, TILE);
+        // subtle texture
+        ctx.fillStyle = "#00000022";
+        ctx.fillRect(OX + c*TILE + 4, OY + r*TILE + 4, 4, 4);
+        ctx.fillRect(OX + c*TILE + 14, OY + r*TILE + 14, 4, 4);
+      } else {
+        // open tunnel
+        ctx.fillStyle = "#1a0f08";
+        ctx.fillRect(OX + c*TILE, OY + r*TILE, TILE, TILE);
+      }
+    }
+  }
+}
+
+function drawPlayer(){
+  var p = state.player;
+  var x = OX + p.tx * TILE;
+  var y = OY + p.ty * TILE;
+  // choose frame
+  var fi = 0; // idle
+  if (p.digT > 0) fi = 1; // dig
+  else if (p.pumpT > 0) fi = 2; // pump
+  // facing: 0=right,2=left use same (no mirror per rules)
+  blitSpr(S0, fi, 24, 24, x, y);
+}
+
+function drawMonsters(){
+  for (var i=0; i<state.monsters.length; i++){
+    var m = state.monsters[i];
+    if (m.dead && m.deadT > 20) continue; // gone
+    var x = OX + m.tx * TILE;
+    var y = OY + m.ty * TILE;
+    var fi = 1; // walk
+    if (m.inflate === 2) fi = 2; // inflated
+    else if (m.inflate === 1) fi = 2; // inflating
+    else fi = 1; // walk
+    // dead: draw inflate then fade
+    if (m.dead){
+      fi = 2;
+    }
+    blitSpr(S1, fi, 24, 24, x, y);
+  }
+}
+
+function drawRocks(){
+  for (var i=0; i<state.rocks.length; i++){
+    var r = state.rocks[i];
+    var x = OX + r.tx * TILE;
+    var y = OY + r.ty * TILE;
+    blitSpr(S2, 0, 24, 24, x, y);
+  }
+}
+
+function drawHUD(){
+  ctx.fillStyle = "#0b1020";
+  ctx.fillRect(0, 0, 640, OY);
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "14px monospace";
+  ctx.textAlign = "left";
+  ctx.fillText("SCORE", 12, 16);
+  ctx.fillText(String(state.score), 80, 16);
+  ctx.fillText("WAVE", 200, 16);
+  ctx.fillText(String(state.wave), 260, 16);
+  ctx.fillText("LEFT", 340, 16);
+  ctx.fillText(String(state.monstersLeft), 400, 16);
+  // lives
+  ctx.fillStyle = "#ff5555";
+  ctx.fillText("LIVES", 480, 16);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillText("*", 540, 16);
+  // help
+  ctx.fillStyle = "#8899bb";
+  ctx.font = "10px monospace";
+  ctx.fillText("Arrows move/dig  Space pump  Up rock  R restart", 12, OY + ROWS*TILE + 14);
+}
+
+function drawOver(){
+  ctx.fillStyle = "#000000aa";
+  ctx.fillRect(0, 0, 640, 480);
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "28px monospace";
+  ctx.textAlign = "center";
+  ctx.fillText("GAME OVER", 320, 220);
+  ctx.font = "16px monospace";
+  ctx.fillText("Score: " + state.score, 320, 250);
+  ctx.fillText("Press R to restart", 320, 280);
+  ctx.textAlign = "left";
+}
+
+function draw(){
+  // clear
+  ctx.fillStyle = "#0b1020";
+  ctx.fillRect(0, 0, 640, 480);
+  drawSoil();
+  drawRocks();
+  drawMonsters();
+  drawPlayer();
+  drawHUD();
+  if (state.over) drawOver();
+}
+
+var last = 0;
+function loop(now){
+  var dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+function onKey(e){
+  var k = e.key;
+  var code = e.keyCode;
+  if (k === "ArrowLeft" || code === 37) keys.l = 1;
+  else if (k === "ArrowRight" || code === 39) keys.r = 1;
+  else if (k === "ArrowUp" || code === 38) keys.u = 1;
+  else if (k === "ArrowDown" || code === 40) keys.d = 1;
+  else if (k === " " || code === 32) keys.f = 1;
+  else if (k === "r" || k === "R" || code === 82){ reset(); }
+  // rock: use Up? No, Up is move. Use a separate: use "KeyE" or Enter? 
+  // Per plan: Up drops rock. But Up also moves. Let's use Enter (13) for rock.
+  else if (code === 13 || k === "Enter") keys.rock = 1;
+}
+function onKeyUp(e){
+  var k = e.key;
+  var code = e.keyCode;
+  if (k === "ArrowLeft" || code === 37) keys.l = 0;
+  else if (k === "ArrowRight" || code === 39) keys.r = 0;
+  else if (k === "ArrowUp" || code === 38) keys.u = 0;
+  else if (k === "ArrowDown" || code === 40) keys.d = 0;
+  else if (k === " " || code === 32) keys.f = 0;
+  else if (code === 13 || k === "Enter") keys.rock = 0;
+}
+addEventListener("keydown", onKey);
+addEventListener("keyup", onKeyUp);
+
+reset();
+requestAnimationFrame(loop);
+})();
+</script>
+</body></html>

@@ -39,6 +39,14 @@ _TARGET_640PNG = (
     "\"size\" is on-screen px on the 640×480 glass (blitSpr draws 1:1) — "
     "pick how many fit across the playfield and state it per entity."
 )
+# Vector-stroke class (/640png): keep JMR walls, do NOT demand PNG sheets.
+# BATTLE10: the sprite TARGET's "drawImage columns" strong-hooked puzzle-grid.
+_TARGET_640PNG_WIREFRAME = (
+    "TARGET=/640png JMR native: ONE 640×480 HTML file. No CDN, no fetch, "
+    "no WebGL, no three.js. Draw with 2D canvas strokes (beginPath/lineTo/"
+    "stroke) — do NOT emit <assets>, <sounds>, or <videos>. "
+    "HUD via canvas fillText."
+)
 
 
 def _resolve_path(path: str | Path | None) -> Path:
@@ -105,6 +113,10 @@ def _prompt_640_to_640png(text: str) -> str:
         return body
     # Drop old /640 TARGET before body rewrites.
     body = _TARGET_640_RE.sub("", body).rstrip()
+    # Vector-stroke class: PNG sheets + "Emit <assets>" contradict 2D line
+    # art (BATTLE10). Keep strokes; do not rewrite to the sprite TARGET.
+    if "wireframe" in body.lower():
+        return (body + " " + _TARGET_640PNG_WIREFRAME).strip()
     replacements = (
         (r"\bpixel-map(?:s)?\b", "PNG-sheet"),
         (r"\bpixel maps?\b", "PNG sheets"),

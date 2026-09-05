@@ -120,6 +120,7 @@ def test_known_assignments() -> None:
         # short_goal_text → recipe id
         "maze chase pellets ghosts": "canvas-grid-navigation",
         "falling block puzzle rotation line clearing": "canvas-puzzle-grid",
+        "columns falling gems match three puzzle well": "canvas-puzzle-grid",
         "breakout paddle ball bricks power-ups": "canvas-paddle-ball",
         "racing road perspective speed steering": "canvas-racing-perspective",
         "two fighters health bars special moves blocking": "canvas-two-actors-facing",

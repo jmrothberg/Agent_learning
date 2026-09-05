@@ -480,6 +480,39 @@ def test_qwen38_reasoning_effort_env_and_aliases(monkeypatch):
     }
 
 
+def test_qwen38_stage_aware_effort_low_on_fix_turns(monkeypatch):
+    """Sept 2026 /640png traces: 91-98% of completion tokens were hidden CoT;
+    patch turns burned 60-105 s for <=67 visible tokens. Fix/patch turns drop
+    to low; plan / first build keep medium; explicit env wins everywhere;
+    GLM and other families still return {}."""
+    monkeypatch.delenv("QWEN_REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("QWEN_ENABLE_THINKING", raising=False)
+    m = "Qwen3.8-Flash-Next-MLX-8bit-MTP"
+    assert backend.chat_template_thinking_kwargs(m, stage="fix")["reasoning_effort"] == "low"
+    assert backend.chat_template_thinking_kwargs(m, stage="patch")["reasoning_effort"] == "low"
+    assert backend.chat_template_thinking_kwargs(m, stage="plan")["reasoning_effort"] == "medium"
+    assert backend.chat_template_thinking_kwargs(m, stage="first_build")["reasoning_effort"] == "medium"
+    assert backend.chat_template_thinking_kwargs(m, stage=None)["reasoning_effort"] == "medium"
+    # Explicit env overrides the stage default.
+    monkeypatch.setenv("QWEN_REASONING_EFFORT", "xhigh")
+    assert backend.chat_template_thinking_kwargs(m, stage="fix")["reasoning_effort"] == "xhigh"
+    monkeypatch.delenv("QWEN_REASONING_EFFORT", raising=False)
+    # Non-Qwen3.8 unchanged.
+    assert backend.chat_template_thinking_kwargs("GLM-5.3-Flash-MLX-6bit", stage="fix") == {}
+    # apply_chat_template_safe consumes `_stage` and does not forward it.
+    seen: dict = {}
+
+    def _apply(*a, **kw):
+        seen.update(kw)
+        return "P"
+
+    assert backend.apply_chat_template_safe(_apply, m, [], tokenize=False, _stage="fix") == "P"
+    assert "_stage" not in seen
+    assert seen["reasoning_effort"] == "low"
+    # `_stage` never reaches the oMLX wire body (not an _MLX_OPTION_KEYS entry).
+    assert "_stage" not in backend._MLX_OPTION_KEYS
+
+
 def test_omlx_qwen38_keeps_thinking_and_closes_html_prefill(monkeypatch):
     """Plan still thinks. HTML prefill must close </think> first
     (DK 20260815_085321 / trace 20260829_165958)."""
@@ -660,6 +693,43 @@ def test_omlx_unload_loaded_keeps_target(monkeypatch):
     )
     assert freed == ["Qwen3.8-Flash-Next-MLX-8bit-MTP"]
     assert seen == ["Qwen3.8-Flash-Next-MLX-8bit-MTP"]
+
+
+def test_omlx_unload_loaded_keeps_session_role_models(monkeypatch):
+    """Sept 2026: a critic/architect staged on the same oMLX must not be
+    evicted by the coder's pre-stream unload (and vice versa)."""
+    monkeypatch.setattr(
+        backend,
+        "omlx_list_loaded_model_ids",
+        lambda endpoint=None: [
+            "Qwen3.8-Flash-Next-MLX-8bit-MTP",
+            "GLM-5.3-Flash-MLX-6bit",
+            "Orphan-Model",
+        ],
+    )
+    seen: list[str] = []
+
+    def fake_unload(model, endpoint=None, *, timeout=180.0):
+        seen.append(backend.omlx_api_model_id(model))
+        return True, "ok"
+
+    monkeypatch.setattr(backend, "omlx_unload_model", fake_unload)
+    monkeypatch.setattr(
+        backend, "OMLX_SESSION_KEEP_MODELS",
+        {"/Users/x/MLX_Models/Qwen3.8-Flash-Next-MLX-8bit-MTP"},
+    )
+    freed = backend.omlx_unload_loaded_for_inprocess(
+        keep="GLM-5.3-Flash-MLX-6bit", endpoint="http://127.0.0.1:8000",
+    )
+    assert freed == ["Orphan-Model"] and seen == ["Orphan-Model"]
+
+
+def test_qwen38_critic_stage_runs_low_effort(monkeypatch):
+    """The code/visual critic sidecar must finish while the coder streams."""
+    monkeypatch.delenv("QWEN_REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("QWEN_ENABLE_THINKING", raising=False)
+    m = "Qwen3.8-Flash-Next-MLX-8bit-MTP"
+    assert backend.chat_template_thinking_kwargs(m, stage="critic")["reasoning_effort"] == "low"
 
 
 def test_endpoint_is_omlx(monkeypatch):
@@ -925,3 +995,71 @@ def test_spawnv_passfds_filter_drops_closed_fds(monkeypatch):
     mp_util.spawnv_passfds("/bin/true", ["true"], [0, 1, 2, 999999])
     assert 999999 not in seen["passfds"]
     assert 0 in seen["passfds"]
+
+
+# ---------------------------------------------------------------------------
+# KV prefix cache (Sept 2026) — pure planner + usage parse + oMLX settings
+# ---------------------------------------------------------------------------
+
+def test_prompt_cache_plan_pure_append_reuses_everything():
+    """History grew by one user turn: keep the whole cache, trim nothing."""
+    cached = list(range(200))
+    new = cached + [900, 901, 902]
+    assert backend.plan_prompt_cache_reuse(cached, new, trimmable=True) == (200, 0)
+    # Untrimmable caches (rotating/hybrid layers) still reuse pure appends.
+    assert backend.plan_prompt_cache_reuse(cached, new, trimmable=False) == (200, 0)
+
+
+def test_prompt_cache_plan_trims_diverged_tail():
+    """Assistant reply re-tokenized differently from generated ids → trim
+    the diverged suffix, keep the shared prefix."""
+    cached = list(range(300))
+    new = list(range(250)) + [7, 7, 7]
+    assert backend.plan_prompt_cache_reuse(cached, new, trimmable=True) == (250, 50)
+    # Cannot trim → must start from an empty cache.
+    assert backend.plan_prompt_cache_reuse(cached, new, trimmable=False) == (0, 0)
+
+
+def test_prompt_cache_plan_identical_prompt_leaves_one_token_to_feed():
+    cached = list(range(100))
+    assert backend.plan_prompt_cache_reuse(cached, list(cached), trimmable=True) == (99, 1)
+
+
+def test_prompt_cache_plan_short_prefix_not_worth_it():
+    cached = list(range(500))
+    new = list(range(10)) + [1] * 400
+    assert backend.plan_prompt_cache_reuse(cached, new, trimmable=True) == (0, 0)
+    assert backend.plan_prompt_cache_reuse(None, new, trimmable=True) == (0, 0)
+    assert backend.plan_prompt_cache_reuse(cached, [], trimmable=True) == (0, 0)
+
+
+def test_mlx_prompt_cache_env_toggle(monkeypatch):
+    monkeypatch.delenv("MLX_PROMPT_CACHE", raising=False)
+    assert backend.mlx_prompt_cache_enabled() is True
+    monkeypatch.setenv("MLX_PROMPT_CACHE", "0")
+    assert backend.mlx_prompt_cache_enabled() is False
+
+
+def test_usage_cached_prompt_tokens_parses_openai_and_flat_shapes():
+    f = backend._usage_cached_prompt_tokens
+    assert f({"prompt_tokens": 30000, "prompt_tokens_details": {"cached_tokens": 27500}}) == 27500
+    assert f({"prompt_tokens": 30000, "cached_tokens": 100}) == 100
+    assert f({"prompt_tokens": 30000, "prompt_cache_hit_tokens": 5}) == 5
+    assert f({"prompt_tokens": 30000}) is None
+    assert f(None) is None
+
+
+def test_omlx_hot_cache_status_reads_local_settings(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    ep = backend.omlx_default_endpoint()
+    # No settings file → unknown.
+    assert backend.omlx_hot_cache_status(ep) is None
+    cfg = tmp_path / ".omlx"
+    cfg.mkdir()
+    (cfg / "settings.json").write_text('{"cache": {"hot_cache_max_size": "0"}}')
+    assert backend.omlx_hot_cache_status(ep) == "off"
+    (cfg / "settings.json").write_text('{"cache": {"hot_cache_max_size": "32GB"}}')
+    assert backend.omlx_hot_cache_status(ep) == "32GB"
+    # Remote oMLX: the local file says nothing about it.
+    assert backend.omlx_hot_cache_status("http://studio.local:8000") is None
+    assert backend.omlx_hot_cache_status(None) is None

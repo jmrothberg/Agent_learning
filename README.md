@@ -67,14 +67,14 @@ prompts + harness + memory beats swapping models.** This repo is not a general r
 |---|---|---|---|
 | **Primary loop** | chat + tools + subagents | chat + apply_patch / edit | Phase A plan → Phase B patch/rewrite → Phase C self-critique |
 | **Verification** | you run tests / linter | tests if configured | **always-on:** micro-probes → Playwright → model `<probes>` + genre-free gates (`tools.py`) |
-| **Second opinion** | parallel subagents | — | `/critique` (scripted playtests) + `/vlm-critique` (VLM checklist); **serial on one GPU** — no hidden cloud reviewer |
+| **Second opinion** | parallel subagents | — | `/critique` (scripted playtests) + `/critic` (code review, **parallel on oMLX**, auto) + `/vlm-critique` (VLM checklist); serial on Ollama / in-process MLX — no hidden cloud reviewer |
 | **Plan / progress** | plan.md, todo lists | — | Phase A `<criteria>`/`<probes>` + harness-seeded **task ledger** (goal clauses / outline order / optional model `<todos>`) |
 | **Context** | rules, @files, very large ctx | repo + skills | opening book + playbook + lean prompt; **state-anchor compaction** near ~70% of `num_ctx` (default 100K) |
 | **Edits** | search/replace tools | unified diff | `<patch>` SEARCH/REPLACE — 4-tier match cascade; markdown `SEARCH:`/`REPLACE:` pairs repaired in `patches.repair_reply` |
 | **Assets** | none in-loop | none | **FLUX2-klein (mflux) on macOS** or Z-Image-Turbo + Stable Audio; LTX-2.5 / Wan cutscenes via subprocess |
 | **Memory** | repo files | conversation | hand-curated **`memory/`** opening book (JSONL — one line, no restart) |
 | **Local LLM** | cloud-first | local or cloud | **MLX in-process** (macOS default) or Ollama; cloud only with explicit API key + `/backend` |
-| **Regression** | CI you author | ad hoc | **pytest (~2343 tests)** + stub eval banks + opt-in `eval/eval_seed_edits.py` (materialization with `browser=None`) |
+| **Regression** | CI you author | ad hoc | **pytest (~2616 tests)** + stub eval banks + opt-in `eval/eval_seed_edits.py` (materialization with `browser=None`) |
 
 **Real advantages vs general agents:** playable-game verification (input smoke test, per-action
 screenshots, sprite gates), and a full on-machine art/audio pipeline tied to the same loop.
@@ -324,7 +324,7 @@ wrong; this project layers structural, behavioral, and visual checks on every it
 1. **Micro-probes** (pre-Chromium) — HTML completeness, bracket balance, elision sentinels.
 2. **Chromium** (`LiveBrowser.load_and_test`) — console/page errors, RAF, input smoke test, model
    `<probes>`, screenshots, behavioral gates (`PLAYER-STUCK`, `ACTION_DRAWN_NOT_SPRITED`, …).
-3. **Optional reviews** — `/critique` (scripted playtests) and `/vlm-critique` (local VLM checklist).
+3. **Optional reviews** — `/critique` (scripted playtests), `/critic` (source review, auto on oMLX), `/vlm-critique` (local VLM checklist).
 
 `<done/>` needs a **clean streak** (default 2 consecutive `ok=True` iters). Gate reference,
 `failure_class` triage, and the trace timeline workflow: **`HARNESS_DEBUG.md`**.
@@ -356,15 +356,16 @@ admitted sprites/sounds compound across sessions like the playbook does.
 
 ---
 
-## Two reviews: `/critique` and `/vlm-critique`
+## Three reviews: `/critique`, `/critic`, `/vlm-critique`
 
-Everything collapses into **two reviews**. Both look for problems and **hand them back to the
-coding agent so it fixes them next round**. The only difference is whether it uses eyes.
+Everything collapses into **three reviews**. All look for problems and **hand them back to the
+coding agent so it fixes them next round**. They differ in what they look at.
 
-| Command | Looks at the screen? | Default | What it does |
+| Command | Looks at | Default | What it does |
 |---|---|---|---|
-| **`/critique`** | No | ON | Plays the game (scripted input from `memory/playtests.jsonl`) + reads the report, sends problems to the agent |
-| **`/vlm-critique`** | Yes | OFF | A vision model looks at the screenshot, uses a memory checklist when one fits, sends problems to the agent |
+| **`/critique`** | the running game | ON | Plays the game (scripted input from `memory/playtests.jsonl`) + reads the report, sends problems to the agent |
+| **`/critic`** | the **source code** | **auto** | Same LLM reads the file after every iter (≤5 findings). **auto** = ON on oMLX (parallel, free), off on in-process MLX / Ollama. `/critic on` forces it. Independent of `/wait`. |
+| **`/vlm-critique`** | the screenshot | OFF | A vision model looks at the screenshot, uses a memory checklist when one fits, sends problems to the agent |
 | *(harness — always on)* | — | on | Chromium load, probes, console errors |
 | `/check` | Yes | — | Look at the screen once, on demand |
 | your typed notes | — | — | Type any time (`/rawfeedback` controls wrappers) |
@@ -387,15 +388,20 @@ There is **one** structured critic path: it pulls a mechanism checklist from
 is staged, the coder reviews its own screenshot — no second model is loaded. Staging `--role critic`
 only changes **which** model looks, not the path (the old lightweight open-ended judge is retired).
 
-For a full "is it good?" answer, run **both**.
+For a full "is it good?" answer, run **all three**. `/wait on` turns **vision** off (you are looking);
+it does **not** turn `/critic` off.
 
-**Typical setup (Mac + large coder LLM):**
+**Typical setup:**
 
 ```text
-/model2 2 --role critic    # optional: a small VLM does the looking so the huge coder isn't fed screenshots
-/vlm-critique on           # vision review (off by default)
-/critique on               # no-vision review (on by default; complements vision, doesn't replace it)
+/critic                    # show state (auto: ON on oMLX, off on in-process MLX)
+/vlm-critique on           # vision — skip while /wait is on; you are looking
+/allroles                  # one switch: architect + vision + code critic
 ```
+
+**Do I need to do anything for `/critic`?** No on **oMLX** (Studio Qwen/GLM): session start says
+`code critic: ON (parallel)`. On in-process MLX or Ollama it says `off (serial backend; /critic on to force)`.
+Same switch: `AGENT_CODE_CRITIC=on|off|auto` and `coder.py --critic on|off|auto`.
 
 Manual spot-check while iterating: `/check`, or type notes at a `/wait` pause.
 
@@ -435,9 +441,8 @@ checked model-free by `eval/eval_prompts_plan.py --coverage`.
 
 ## TUI & CLI reference
 
-**Key TUI slash commands** (`/help` lists all; `/help assets` for art): `/allroles` (architect-split + visual critic on one
-loaded LLM) · `/critique [on|off]` (no-vision review, default on; aliases `/playtest`, `/feedback`) ·
-`/vlm-critique [on|off]` (vision review, default off; alias `/judge`) · `/wait [on|off]`
+**Key TUI slash commands** (`/help` lists all; `/help critic` / `/help assets` for detail): `/critic [on|off|auto]` (reads the source each iter; auto = ON on oMLX, off on in-process MLX) · `/allroles` (architect + vision + code critic on one loaded LLM) · `/critique [on|off]` (plays the game, default on; aliases `/playtest`, `/feedback`) ·
+`/vlm-critique [on|off]` (looks at the screen, default off; `/wait on` turns this off) · `/wait [on|off]`
 (**TUI default ON** — `local_manual`; pause after each iter) · `/games [N]` (load a curated prompt) · `/ctx N` (context window) ·
 `/assets <png|folder>` (stage your sprites for next `/new`) · `/seed <game.html>` (continue an existing game) ·
 `/ref <path>` (VLM glance only — not for copying sprites) · `/check [<N|name>]` (on-demand screenshot judge;

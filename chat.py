@@ -1253,6 +1253,11 @@ class CodingBoxApp(App):
         # failed iters the agent samples two fix attempts and picks the
         # higher Chromium score (cap 2/session). Opt in via /bestof on.
         self._stuck_bon_enabled: bool = False
+        # Code critic sidecar (Sept 2026): "auto" | "on" | "off". auto =
+        # ON when the backend runs streams in parallel (oMLX), off on
+        # serial backends. /critic on|off|auto; env AGENT_CODE_CRITIC.
+        # None = not set here → GameAgent resolves env/"auto" itself.
+        self._code_critic_mode: str | None = None
         # Phase 1.5 — autonomous self-feedback loop. After each clean
         # iter, runs a short scripted playtest, captures multi-window
         # screenshots, evaluates genre-free behavior recipes, and queues
@@ -1297,9 +1302,8 @@ class CodingBoxApp(App):
         self._use_double_screenshot: bool = False
         self._use_architect_split: bool = False
         self._architect_split_auto: bool = False
-        # Bundle toggle: /allroles flips architect-split + vlm-critique together
-        # so a single loaded LLM covers coder + critic + architect roles
-        # without needing /model2 / /model3 staging or extra GPUs.
+        # Bundle toggle: /allroles = /architect + /vlm-critique + /critic
+        # on the one loaded LLM. Staged /model2 / /model3 still win.
         self._all_roles_enabled: bool = False
 
     # ----------------------------- layout ---------------------------------
@@ -3618,6 +3622,8 @@ class CodingBoxApp(App):
                 self._cmd_toggle_bestof(arg)
             elif cmd in ("allroles", "all-roles", "solo"):
                 self._cmd_toggle_allroles(arg)
+            elif cmd in ("critic", "codecritic", "code-critic", "review"):
+                self._cmd_set_code_critic(arg)
             elif cmd in ("leanprompt", "lean-prompt", "lean"):
                 self._cmd_set_leanprompt(arg)
             elif cmd in ("media", "640", "sim", "simulator", "640png", "640-png"):
@@ -3782,10 +3788,12 @@ class CodingBoxApp(App):
             "                                  [dim]RECOMMENDED: OFF when YOU review each iter \u2014 auto review adds paraphrased noise[/dim]",
             "  [b]/bestof [on|off][/b]          auto sample 2 fixes when stuck 2+ iters \u00b7 default off",
             "                                  [dim]aliases: /bon /best-of-n · candidates saved under candidates/iter_NN/[/dim]",
-            "  [b]/critique [on|off][/b]        review WITHOUT vision: plays it + reads the report, tells the agent \u00b7 default ON",
-            "                                  [dim]aliases: /play /playtest /feedback · catches frozen loops / dead controls[/dim]",
-            "                                  [dim]sends problems to the coder so it fixes them next round[/dim]",
-            "                                  [dim]test reports, patch diagnostics, and vlm-critique still run when off[/dim]",
+            "  [b]/critic [on|off|auto][/b]     reads the SOURCE after each iter, tells the coder \u00b7 default auto",
+            "                                  [dim]auto = ON on oMLX (free, parallel) · off on in-process MLX / Ollama[/dim]",
+            "                                  [dim]/critic on forces it · independent of /wait · aliases /codecritic /review[/dim]",
+            "  [b]/critique [on|off][/b]        plays the game + reads the report, tells the coder \u00b7 default ON",
+            "                                  [dim]aliases: /play /playtest /feedback · frozen loops / dead controls[/dim]",
+            "                                  [dim]harness tests still run when this is off[/dim]",
             "  [b]/rawfeedback [on|off][/b]     YOUR typed feedback goes to the model verbatim · default ON",
             "                                  [dim]flip OFF to opt-in to MEDIA-CHANGE / ORIENTATION / SCOPE wrappers on your feedback[/dim]",
             "                                  [dim]machine bug feedback (test reports, console errors, probes) is UNAFFECTED[/dim]",
@@ -3793,9 +3801,8 @@ class CodingBoxApp(App):
             "                                  [dim]A/B vs one-shot when iters feel worse than no agent[/dim]",
             "  [b]/architect [on|off][/b]       architect/editor split on complex first-builds · default off [dim](alias /arch)[/dim]",
             "                                  [dim]Phase B split — for the slot use /model2 … --role architect instead[/dim]",
-            "  [b]/allroles[/b]                  bundle: /architect on + /vlm-critique on, all on your one loaded LLM",
-            "                                  [dim]alias /solo · no extra GPUs; staged /model2 / /model3 slots still win[/dim]",
-            "                                  [dim]skip this while /wait is ON — wait turns vision off because you are looking[/dim]",
+            "  [b]/allroles[/b]                  architect + vision + code critic on your one loaded LLM",
+            "                                  [dim]alias /solo · /wait on still turns vision off (you are looking)[/dim]",
             "  [b]/prefill [on|off][/b]         force assistant prefill tags · default ON [dim](XML syntax compliance)[/dim]",
             "  [b]/double-screenshot [on|off][/b]  capture startup + after-input screenshots · default off [dim](alias /ds)[/dim]",
             "                                  [dim]helps debug movement; needs /vlm-critique on to be useful[/dim]",
@@ -6238,6 +6245,7 @@ class CodingBoxApp(App):
             f"  vlm-critique (vision):{'ON' if eff_vlm_critique else 'off'}{' [auto]' if eff_vlm_auto and eff_vlm_critique else ''}  [dim](looks at the screen; sends problems to the agent)[/dim]",
             f"  stuck best-of-2:      {'ON' if self._stuck_bon_enabled else 'off'}  [dim](/bestof on — auto sample 2 fixes when stuck; candidates/iter_NN/)[/dim]",
             f"  /allroles bundle:     {'ON' if self._all_roles_enabled else 'off'}",
+            f"  code critic:          {_esc(self._code_critic_label())}  [dim](/critic on|off|auto — reads the source each iter)[/dim]",
             f"  critique (no vision): {'ON' if self._use_autonomous_feedback else 'OFF'}  [dim](reviews without looking; sends problems to the agent; /critique off to disable)[/dim]",
             f"  raw user feedback:    {'ON · directives suppressed (default)' if not self._use_feedback_directives else 'off · classifier wrapping ACTIVE'}  [dim](/rawfeedback on|off — bypass MEDIA-CHANGE / ORIENTATION / SCOPE wrappers; machine bug feedback always on)[/dim]",
             f"  iter detail:          {self._iter_decision_verbose}",
@@ -6783,6 +6791,50 @@ class CodingBoxApp(App):
         )
         self._update_status()
 
+    def _code_critic_label(self) -> str:
+        """Status text for the code critic: what it will do on the NEXT
+        iteration and why. Live agent wins (it knows the real backend)."""
+        if self.agent is not None:
+            try:
+                return self.agent._code_critic_status_label()
+            except Exception:
+                pass
+        mode = self._code_critic_mode or "auto"
+        if mode == "off":
+            return "off"
+        if mode == "on" or self._all_roles_enabled:
+            return "ON"
+        return "auto (ON when the backend is oMLX/parallel, else off)"
+
+    def _cmd_set_code_critic(self, arg: str) -> None:
+        """/critic [on|off|auto] — read the game SOURCE after each iter.
+
+        auto (default): ON on oMLX (parallel, free), off on in-process MLX /
+        Ollama. on / off force it. Independent of /wait. Bare `/critic` shows
+        state. Aliases: /codecritic /review. Same switch: AGENT_CODE_CRITIC,
+        coder.py --critic.
+        """
+        arg_lc = arg.strip().lower()
+        if arg_lc in ("on", "true", "1", "enable"):
+            new_mode = "on"
+        elif arg_lc in ("off", "false", "0", "disable"):
+            new_mode = "off"
+        elif arg_lc in ("auto", "default"):
+            new_mode = "auto"
+        elif arg_lc:
+            self._log_info("[yellow]usage: /critic on|off|auto[/yellow]")
+            return
+        else:
+            self._log_info(f"code critic: {self._code_critic_label()}  [dim](/critic on|off|auto)[/dim]")
+            return
+        self._code_critic_mode = new_mode
+        if self.agent is not None:
+            self.agent._code_critic_mode = new_mode
+        self._log_info(
+            f"code critic: [b]{new_mode}[/b] → {self._code_critic_label()}"
+        )
+        self._update_status()
+
     def _cmd_set_leanprompt(self, arg: str) -> None:
         """/leanprompt on|off|auto — control the compact system-prompt schema.
 
@@ -6884,12 +6936,10 @@ class CodingBoxApp(App):
         return "on (default)"
 
     def _cmd_toggle_allroles(self, arg: str) -> None:
-        """/allroles — toggle ON/OFF: run coder + critic + architect on the single loaded LLM.
+        """/allroles — architect + vision + code critic on the loaded LLM.
 
-        Bundles architect-split and vlm-critique so one bare command covers
-        every role without /model2 / /model3 staging or a second GPU. If a
-        critic- or architect-tagged slot 2/3 IS staged, the router still
-        prefers it — this toggle just turns the role-using features on.
+        Alias /solo. Staged /model2 / /model3 slots still win. /wait on still
+        turns vision off (you are looking); /critic stays on.
         """
         arg_lc = arg.strip().lower()
         if arg_lc in ("on", "true", "1", "enable"):
@@ -6912,17 +6962,19 @@ class CodingBoxApp(App):
             self.agent._all_roles_enabled = new_state
         if new_state:
             self._log_info(
-                "[green]/allroles ON[/green] — coder + critic + architect "
-                "all running on the loaded LLM (architect-split + vlm-critique on)"
+                "[green]/allroles ON[/green] — architect + vision + code critic "
+                "on the loaded LLM"
             )
             if self._effective_step_mode():
                 self._log_info(
-                    "[dim]note: /wait is ON, so the visual critic stays off until "
-                    "/wait off — you are the reviewer. /solo is for unattended runs.[/dim]"
+                    "[dim]/wait is ON, so vision stays off until /wait off "
+                    "(you are looking). /critic still runs.[/dim]"
                 )
         else:
             self._log_info(
-                "[yellow]/allroles OFF[/yellow] — architect-split and vlm-critique disabled"
+                "[yellow]/allroles OFF[/yellow] — architect and vision off "
+                f"(code critic back to /critic {self._code_critic_mode or 'auto'}: "
+                f"{self._code_critic_label()})"
             )
         self._update_status()
 
@@ -7363,6 +7415,7 @@ class CodingBoxApp(App):
             playbook_writeback=True,
             use_prefill=self._use_prefill,
             use_vlm_critique=self._use_vlm_critique,
+            code_critic_mode=self._code_critic_mode,
             use_double_screenshot=self._use_double_screenshot,
             use_architect_split=self._use_architect_split,
             backend2=self._session_backend2,
@@ -7381,6 +7434,12 @@ class CodingBoxApp(App):
         self.agent._use_feedback_directives = self._use_feedback_directives
         self.agent._all_roles_enabled = self._all_roles_enabled
         self.agent.set_stuck_bon_enabled(self._stuck_bon_enabled)
+        # Code critic sidecar: one line so the user knows whether a
+        # reviewer is on this session and why (see /critic).
+        try:
+            self._log_info(f"[dim]code critic: {self.agent._code_critic_status_label()}  (/critic on|off|auto)[/dim]")
+        except Exception:
+            pass
         # Lean system-prompt override (None = agent auto-decides: on for
         # local backends). Only set when the user explicitly toggled it.
         if self._lean_prompt is not None:

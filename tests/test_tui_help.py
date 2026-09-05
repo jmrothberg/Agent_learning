@@ -26,6 +26,9 @@ def test_normalize_critique_aliases():
     assert tui_help.normalize_help_topic("watch") == "vlm-critique"
     assert tui_help.normalize_help_topic("play") == "critique"
     assert tui_help.normalize_help_topic("solo") == "allroles"
+    assert tui_help.normalize_help_topic("critic") == "critic"
+    assert tui_help.normalize_help_topic("review") == "critic"
+    assert tui_help.normalize_help_topic("codecritic") == "critic"
     assert tui_help.normalize_help_topic("sim") == "knobs"
     assert tui_help.normalize_help_topic("640png") == "knobs"
 
@@ -45,6 +48,7 @@ def test_topics_page_lists_other_topics():
     lines = tui_help.help_topic_lines("topics") or []
     text = "\n".join(lines)
     assert "/help critique" in text
+    assert "/help critic" in text
     assert "/help gpu" in text
     assert "/help getting-started" in text
 
@@ -72,18 +76,39 @@ def test_vlm_critique_topic_mentions_critique_distinction():
     assert "model 2" in text
 
 
-def test_feedback_flows_explains_two_reviews():
+def test_feedback_flows_explains_three_reviews():
     lines = tui_help.help_topic_lines("feedback-flows") or []
     text = "\n".join(lines).lower()
     assert "/critique" in text
+    assert "/critic" in text
     assert "vlm-critique" in text
+    assert "source" in text
     assert "vision" in text
+
+
+def test_critic_topic_explains_auto_default():
+    lines = tui_help.help_topic_lines("critic") or []
+    text = "\n".join(lines).lower()
+    assert "source" in text
+    assert "auto" in text
+    assert "omlx" in text
+    assert "/wait" in text
+    assert "allroles" in text
 
 
 def test_help_index_lists_topics_command():
     index = "\n".join(tui_help.help_topics_index_lines())
     assert "/help topics" in index
     assert "/help feedback-flows" in index
+    assert "/help critic" in index
+
+
+def test_help_allroles_includes_code_critic():
+    lines = tui_help.help_topic_lines("allroles") or []
+    text = "\n".join(lines).lower()
+    assert "/critic" in text
+    assert "vision" in text or "vlm-critique" in text
+    assert "architect" in text
 
 
 def test_format_unknown_topic_message():
@@ -135,6 +160,7 @@ def test_cmd_help_overview_includes_topic_index():
     assert "TUI default ON" in text
     assert "/look" in text
     assert "/help roles" in text
+    assert "/critic" in text
 
 
 def test_help_roles_recommends_one_vlm():
@@ -144,6 +170,7 @@ def test_help_roles_recommends_one_vlm():
     assert "one" in text
     assert "model2" in text or "/model2" in text
     assert "/look" in text or "/watch" in text
+    assert "/critic" in text
 
 
 def test_slash_synonyms_are_wired():
@@ -158,6 +185,7 @@ def test_slash_synonyms_are_wired():
     assert '"640png"' in src
     assert '"solo"' in src
     assert '"showthinking"' in src
+    assert '"critic"' in src and '"review"' in src
 
 
 def test_help_judge_is_vlm_critique_not_check():

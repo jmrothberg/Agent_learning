@@ -2693,9 +2693,19 @@ class CriticMixin:
 
         """
 
-        if critic_backend is None or critic_backend is self._backend:
+        if critic_backend is None:
 
             return False
+
+        if critic_backend is self._backend:
+
+            # Same slot as the coder. Sept 2026: on a continuous-batching
+            # server (oMLX) the SAME backend instance serves a second
+            # stream in parallel — each `_stream_once` opens its own HTTP
+            # stream — so the critic can still overlap the next coder turn.
+            # In-process MLX / loopback Ollama stay inline (they queue).
+
+            return bool(self._backend_supports_concurrency(critic_backend))
 
         try:
 
@@ -2832,6 +2842,281 @@ class CriticMixin:
             "queued": queued,
 
         })
+
+    # ---- Code critic sidecar (Sept 2026) --------------------------------
+    #
+    # Text review of the CURRENT FILE by the critic-role model, spawned
+    # right after materialize so it overlaps the Chromium test and — on a
+    # continuous-batching server (oMLX) — the next coder stream. Findings
+    # are anchored to verbatim snippets; at harvest time any bullet whose
+    # anchor no longer exists in the on-disk file is dropped (stale), the
+    # rest are queued as `[CODE CRITIC] …` coaching for the next user turn.
+    # Prompt text lives in prompts_v1 (CODE_CRITIC_SYSTEM /
+    # code_critic_instruction). Never blocks the loop; never emits code.
+
+    _CODE_CRITIC_SEVERITIES = ("blocker", "bug", "missing", "teach")
+    _CODE_CRITIC_MAX_INJECT_CHARS = 900
+    _CODE_CRITIC_MAX_FILE_CHARS = 60_000
+
+    def _code_critic_enabled(self) -> bool:
+        """auto = ON on oMLX/cloud (parallel, free); off on in-process MLX
+        and Ollama. `/allroles` and `/critic on` force it. `/wait` does not."""
+        mode = getattr(self, "_code_critic_mode", "auto")
+        if mode == "off":
+            return False
+        if mode == "on" or getattr(self, "_all_roles_enabled", False):
+            return True
+        bk = self.get_backend("critic") or self._backend
+        return bool(self._backend_supports_concurrency(bk))
+
+    def _code_critic_status_label(self) -> str:
+        """One short phrase for /status and the session-start info line."""
+        if not self._code_critic_enabled():
+            if getattr(self, "_code_critic_mode", "auto") == "auto":
+                return "off (serial backend; /critic on to force)"
+            return "off"
+        bk = self.get_backend("critic") or self._backend
+        par = self._backend_supports_concurrency(bk)
+        return "ON (parallel)" if par else "ON (inline, +30-90 s/iter)"
+
+    async def run_code_critic(self, html: str, iteration: int) -> str | None:
+        """One critic-role call over `html`. Returns raw reply text or None."""
+        backend = self.get_backend("critic") or self._backend
+        if backend is None:
+            return None
+        from prompts_v1 import CODE_CRITIC_SYSTEM, code_critic_instruction
+        criteria = ""
+        try:
+            crit = getattr(self, "_criteria", None)
+            criteria = crit if isinstance(crit, str) else "\n".join(str(c) for c in (crit or []))
+        except Exception:
+            criteria = ""
+        body = html if len(html) <= self._CODE_CRITIC_MAX_FILE_CHARS else (
+            html[: self._CODE_CRITIC_MAX_FILE_CHARS] + "\n<!-- [file truncated for review] -->"
+        )
+        micro = getattr(self, "_last_micro_probe_summary", "") or ""
+        messages = [
+            {"role": "system", "content": CODE_CRITIC_SYSTEM},
+            {"role": "user", "content": code_critic_instruction(
+                goal=self._goal or "",
+                criteria=criteria,
+                current_html=body,
+                simulator_mode=bool(getattr(self, "_simulator_mode", False)),
+                micro_probe_summary=micro,
+            )},
+        ]
+        self._set_role_activity("critic", f"Reviewing iter {iteration} code...")
+        # Inline (serial backend) reviews are paid in wall-clock — cap the
+        # reply tighter; 5 bullets need well under 600 tokens.
+        max_tokens = 1500 if self._backend_supports_concurrency(backend) else 600
+        try:
+            result = await backend.stream_chat(
+                messages,
+                on_token=None,
+                options={
+                    "temperature": 0.2,
+                    "num_ctx": self.num_ctx,
+                    "max_tokens": max_tokens,
+                    "_stage": "critic",
+                },
+                keep_alive=self._keep_alive_for_backend(backend),
+                stall_seconds=120.0,
+                overall_seconds=300.0,
+                max_retries=0,
+            )
+        finally:
+            self._set_role_activity("critic", "idle")
+        if result.crashed or result.stalled:
+            self._trace({
+                "kind": "code_critic_skipped",
+                "iteration": iteration,
+                "reason": "stream_" + ("crashed" if result.crashed else "stalled"),
+            })
+            return None
+        return (result.text or "").strip() or None
+
+    @classmethod
+    def _parse_code_critic_bullets(cls, text: str) -> list[dict]:
+        """`severity | claim | \\`anchor\\`` lines → dicts. LGTM → []."""
+        out: list[dict] = []
+        if not text or text.strip().upper().startswith("LGTM"):
+            return out
+        for raw in text.splitlines():
+            line = raw.strip().lstrip("-*• ").strip()
+            if "|" not in line:
+                continue
+            parts = [p.strip() for p in line.split("|")]
+            if len(parts) < 2:
+                continue
+            sev = parts[0].lower().rstrip(":")
+            if sev not in cls._CODE_CRITIC_SEVERITIES:
+                continue
+            claim = parts[1]
+            anchor = ""
+            if len(parts) >= 3:
+                m = re.search(r"`([^`]{3,120})`", parts[2])
+                anchor = (m.group(1) if m else parts[2].strip("`")).strip()
+            if claim:
+                out.append({"severity": sev, "claim": claim, "anchor": anchor})
+        return out
+
+    async def _spawn_code_critic(self, html: str, iteration: int) -> None:
+        """Start a background review of `html` (one in flight at a time)."""
+        if not self._code_critic_enabled():
+            return
+        prev = self._code_critic_task
+        if prev is not None and not prev.done():
+            # Still reviewing the previous file — harvesting later will
+            # stale-filter it; do not stack a second stream.
+            self._trace({
+                "kind": "code_critic_skipped",
+                "iteration": iteration,
+                "reason": "previous_review_in_flight",
+            })
+            return
+        import hashlib
+        sha = hashlib.sha256(html.encode("utf-8", "replace")).hexdigest()[:16]
+        self._code_critic_pending = (iteration, sha)
+        self._trace({"kind": "code_critic_spawned", "iteration": iteration, "html_sha256": sha})
+
+        async def _worker() -> str | None:
+            try:
+                return await self.run_code_critic(html, iteration)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._trace({
+                    "kind": "code_critic_skipped",
+                    "iteration": iteration,
+                    "reason": "error",
+                    "error": str(exc)[:240],
+                })
+                return None
+
+        self._code_critic_task = asyncio.create_task(_worker())
+        # Serial backend (in-process MLX, loopback Ollama) with the critic
+        # forced on: finish the review HERE so it never sits in the single
+        # Metal executor ahead of the feedback router or the next coder
+        # turn (BATTLEZ3 20260905_144613). Cost is the explicit
+        # "ON (inline, +30-90 s/iter)" the status line promises.
+        backend = self.get_backend("critic") or self._backend
+        if not self._backend_supports_concurrency(backend):
+            self._trace({"kind": "code_critic_inline", "iteration": iteration})
+            try:
+                await self._code_critic_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    async def _harvest_code_critic(self, current_html: str | None, *, wait: bool = False) -> str | None:
+        """Queue finished review bullets as coaching. Returns the queued
+        `[CODE CRITIC] …` note (also appended to `_pending_coaching`) or None.
+
+        Non-blocking by default: an unfinished review is left running and
+        picked up at the next boundary. Bullets whose anchor is no longer
+        in `current_html` are dropped as stale (the coder already changed
+        that code); when the reviewed file is byte-identical to the
+        current one, every bullet is kept.
+        """
+        task = self._code_critic_task
+        if task is None:
+            return None
+        if not task.done():
+            if not wait:
+                return None
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                self._code_critic_task = None
+                return None
+        self._code_critic_task = None
+        pending = self._code_critic_pending or (0, "")
+        self._code_critic_pending = None
+        try:
+            text = task.result()
+        except (asyncio.CancelledError, Exception):
+            return None
+        bullets = self._parse_code_critic_bullets(text or "")
+        import hashlib
+        cur = current_html or ""
+        same_file = bool(cur) and hashlib.sha256(
+            cur.encode("utf-8", "replace")
+        ).hexdigest()[:16] == pending[1]
+        kept: list[dict] = []
+        stale = 0
+        for b in bullets:
+            if not same_file and b["anchor"] and cur and b["anchor"] not in cur:
+                stale += 1
+                continue
+            kept.append(b)
+        lines: list[str] = []
+        total = 0
+        for b in kept:
+            line = f"{b['severity']}: {b['claim']}" + (f" (at `{b['anchor']}`)" if b["anchor"] else "")
+            if total + len(line) > self._CODE_CRITIC_MAX_INJECT_CHARS:
+                break
+            lines.append(line)
+            total += len(line)
+        queued: str | None = None
+        if lines:
+            note = "[CODE CRITIC] review of iter %d:\n  - %s" % (pending[0], "\n  - ".join(lines))
+            fp = self._critic_note_fingerprint(note)
+            if fp not in self._recent_critic_note_fingerprints:
+                self._pending_coaching.append(note)
+                self._recent_critic_note_fingerprints.append(fp)
+                self._last_critic_note = "\n".join(lines)
+                queued = note
+        self._trace({
+            "kind": "code_critic_done",
+            "iteration": pending[0],
+            "bullets": len(bullets),
+            "stale_dropped": stale,
+            "queued": len(lines) if queued else 0,
+            "lgtm": bool(text) and not bullets,
+            "same_file": same_file,
+            "preview": (text or "")[:240],
+        })
+        return queued
+
+    async def _fold_code_critic_into_next_turn(self) -> bool:
+        """Top-of-iteration hook: if the review of the previous file has
+        finished, move its note out of `_pending_coaching` and append it
+        to the ALREADY-QUEUED next user turn so the coder sees it THIS
+        iteration (the turn was composed at the end of the last iter,
+        before the critic finished). Unfinished reviews stay in flight and
+        surface via `_pending_coaching` at the following boundary. Appending
+        to the tail message keeps the KV prefix intact."""
+        note = await self._harvest_code_critic(self._current_file, wait=False)
+        if not note:
+            return False
+        msgs = getattr(self, "_messages", None)
+        if not (msgs and isinstance(msgs[-1], dict) and msgs[-1].get("role") == "user"
+                and isinstance(msgs[-1].get("content"), str)):
+            return False  # left in _pending_coaching for the next flush
+        try:
+            self._pending_coaching.remove(note)
+        except ValueError:
+            return False
+        msgs[-1]["content"] = (
+            msgs[-1]["content"].rstrip()
+            + "\n\n================ AGENT COACHING ================\n"
+            f"[CRITIC]\n- {note}\n[/CRITIC]\n"
+            "================================================"
+        )
+        self._trace({"kind": "coaching_injected", "text": note, "via": "code_critic_fold"})
+        return True
+
+    async def _cancel_code_critic(self) -> None:
+        """Force-done / exit: stop an in-flight review (its coaching would
+        target an iteration that will never run)."""
+        task = self._code_critic_task
+        self._code_critic_task = None
+        self._code_critic_pending = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
 
 
 

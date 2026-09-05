@@ -95,6 +95,29 @@ def test_entity_rendered_js_skips_fog_hidden_tiles():
     assert "fog[ent.y][ent.x] === false" in _ENTITY_RENDERED_JS
 
 
+def test_entity_not_rendered_skips_viewpoint_player_for_first_person_recipes():
+    """/640png DOOM3DFI + BATTLE* (Sept 2026): the player IS the camera in
+    first-person / wireframe-vector recipes and is never drawn at its own
+    (x,y) — every fix prompt carried a false ENTITY-NOT-RENDERED [player].
+    Skip ONLY the viewpoint entity, ONLY for those recipes (class ids, not
+    titles); every other entity/recipe still gets the check."""
+    import inspect
+    import tools
+
+    assert tools._VIEWPOINT_RECIPE_IDS == frozenset({
+        "canvas-3d-first-person", "canvas-vector-wireframe",
+    })
+    assert "player" in tools._VIEWPOINT_ENTITY_NAMES
+    assert "camera" in tools._VIEWPOINT_ENTITY_NAMES
+    # Enemies etc. are never skipped.
+    assert "enemy" not in tools._VIEWPOINT_ENTITY_NAMES
+    src = inspect.getsource(tools.LiveBrowser.load_and_test)
+    assert "_VIEWPOINT_RECIPE_IDS" in src
+    assert "_VIEWPOINT_ENTITY_NAMES" in src
+    # The skip is keyed on the active visual recipe id passed to load_and_test.
+    assert "(visual_recipe_id or \"\") in _VIEWPOINT_RECIPE_IDS" in src
+
+
 def test_entity_rendered_js_still_genre_free_after_dir_skip():
     """The direction/velocity skip is by ATTRIBUTE shape (vector name /
     magnitude), not by genre — adding it must not introduce any genre name."""

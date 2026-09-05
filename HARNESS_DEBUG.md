@@ -71,7 +71,14 @@ etc.
 
 If enabled and you have a **vision-capable** model loaded, a second pass looks at screenshots and
 answers yes/no questions (“Is the fighter facing left?”, “Is a projectile visible?”). Text-only
-models skip this. Details: **`HARNESS_TUNING.md`**.
+models skip this. `/wait on` auto-disables it (you are looking). Details: **`HARNESS_TUNING.md`**.
+
+## Source review (`/critic`)
+
+A second stream of the **same** LLM reads the HTML after each iter (not the screenshot). Default
+**auto**: ON on oMLX (parallel, free), off on in-process MLX / Ollama. Independent of `/wait`.
+Trace kinds: `code_critic_spawned`, `code_critic_done`, `code_critic_skipped`, `code_critic_inline`.
+BATTLEZ3 trap: in-process MLX is **never** concurrent — see **`HARNESS_TUNING.md`**.
 
 ---
 

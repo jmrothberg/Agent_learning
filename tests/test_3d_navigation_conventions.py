@@ -165,6 +165,7 @@ def test_playbook_suppression_wireframe_blocks_fps_camera() -> None:
     assert "fps-camera-and-movement-vectors" in suppressed
     assert "fps-minimap-radar-yaw-arrow" in suppressed
     assert "wireframe-fps-movement-vectors" not in suppressed
+    assert "jmr-png-sheets" in suppressed
 
 
 def test_playbook_suppression_plan_time_wireframe_goal() -> None:
@@ -174,6 +175,7 @@ def test_playbook_suppression_plan_time_wireframe_goal() -> None:
         code="",
     )
     assert "fps-camera-and-movement-vectors" in suppressed
+    assert "jmr-png-sheets" in suppressed
 
 
 def test_playbook_suppression_threejs_blocks_wireframe_bullet() -> None:

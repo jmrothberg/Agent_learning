@@ -772,6 +772,12 @@ class GameAgent(
         # ("ship is half off-canvas", "score invisible") stop slipping
         # past CONFIRM_DONE.
         use_vlm_critique: bool = False,
+        # Code critic sidecar (Sept 2026): "auto" = ON when the coder
+        # backend can serve a second stream in parallel (oMLX), OFF on
+        # serial backends; "on" / "off" force it. TUI `/critic`, env
+        # AGENT_CODE_CRITIC, coder.py --critic. See agent_critic.py
+        # `_code_critic_enabled`.
+        code_critic_mode: str | None = None,
         # Automatic stuck best-of-2 escalation (cap 2/session). Default
         # OFF — on slow single-GPU MLX it doubles wall time with little
         # gain when failures are structural. Opt in via /bestof on (TUI)
@@ -829,6 +835,17 @@ class GameAgent(
         self._model2_role: str | None = model2_role
         self._backend3: Backend | None = backend3
         self._model3_role: str | None = model3_role
+        # Sept 2026: register every oMLX role model so one role's
+        # pre-stream unload never evicts another's weights (backend.py
+        # `omlx_unload_loaded_for_inprocess`).
+        try:
+            from backend import OMLX_SESSION_KEEP_MODELS
+            for _bk in (backend, backend2, backend3):
+                _info = getattr(_bk, "info", None)
+                if getattr(_info, "name", None) == "mlx-server" and getattr(_info, "model", None):
+                    OMLX_SESSION_KEEP_MODELS.add(str(_info.model))
+        except Exception:
+            pass
         self._model2_activity: str = "idle"
         self._model3_activity: str = "idle"
         # Role passed to the in-flight _stream() call — chat.py routes
@@ -1531,6 +1548,21 @@ class GameAgent(
         # backend == coder backend (single-slot fallback), we await
         # inline (no benefit, no extra complexity).
         self._critic_task: "asyncio.Task | None" = None
+        # Code critic sidecar (Sept 2026) — see agent_critic.py
+        # `_code_critic_enabled` / `_spawn_code_critic` / `_harvest_code_critic`.
+        # Mode resolution: explicit arg > AGENT_CODE_CRITIC env > "auto".
+        _cc_env = (os.environ.get("AGENT_CODE_CRITIC") or "").strip().lower()
+        self._code_critic_mode: str = (
+            (code_critic_mode or "").strip().lower()
+            or {"1": "on", "true": "on", "0": "off", "false": "off"}.get(_cc_env, _cc_env)
+            or "auto"
+        )
+        if self._code_critic_mode not in ("auto", "on", "off"):
+            self._code_critic_mode = "auto"
+        self._code_critic_task: "asyncio.Task | None" = None
+        # Per spawned review: (iteration, sha256 of the reviewed file) so
+        # harvest can tell whether anchors must be re-checked.
+        self._code_critic_pending: tuple[int, str] | None = None
         # Same lazy-load pattern for Stable Audio Open. Only loaded when
         # the model emits a <sounds> block in Phase A.
         self._sound_generator: Any = None
@@ -2295,6 +2327,16 @@ class GameAgent(
         skipped in `_maybe_generate_assets_and_sounds`).
         """
         if bool(getattr(self, "_jmr_png_mode", False)):
+            # Vector-stroke class paints with canvas paths, not PNG sheets
+            # (BATTLE10: /640png + Battlezone still ran the asset pipeline).
+            try:
+                from prompts_v1 import _detect_wireframe_vector_intent
+                if _detect_wireframe_vector_intent(
+                    getattr(self, "_goal", "") or ""
+                ):
+                    return False
+            except Exception:
+                pass
             return True
         return not bool(getattr(self, "_simulator_mode", False))
 
@@ -3478,9 +3520,42 @@ class GameAgent(
         if not endpoint:
             return False
         ep = endpoint.lower()
+        # BATTLEZ3 20260905_144613: in-process MLX carries the sentinel
+        # endpoint "in-process" (no scheme) — not a URL at all. It is ONE
+        # Metal thread; a second stream queues behind the first (the code
+        # critic blocked the feedback router and the iter-2 coder turn).
+        if "://" not in ep:
+            return False
         # Loopback patterns — single-daemon, serialize.
         loopback_markers = ("127.", "localhost", "[::1]", "0.0.0.0")
-        return not any(m in ep for m in loopback_markers)
+        if not any(m in ep for m in loopback_markers):
+            return True
+        # Exception (Sept 2026): a loopback oMLX server is a continuous-
+        # batching engine — N concurrent streams share one weight load
+        # and run in parallel. Treating it as a serial daemon forced the
+        # critic inline and best-of-N sequential on the Studio.
+        try:
+            from backend import endpoint_is_omlx
+            return bool(endpoint_is_omlx(endpoint))
+        except Exception:
+            return False
+
+    @classmethod
+    def _backend_supports_concurrency(cls, bk) -> bool:
+        """True when `bk` can serve a second stream while one is in
+        flight: any `mlx-server` (oMLX / mlx_lm.server continuous
+        batching) or a concurrency-capable endpoint. In-process MLX
+        (single Metal thread) and loopback Ollama are serial."""
+        if bk is None:
+            return False
+        # In-process MLX owns a single-worker Metal executor — never
+        # concurrent, whatever its info says (BATTLEZ3 20260905_144613).
+        if type(bk).__name__ == "MLXBackend":
+            return False
+        info = getattr(bk, "info", None)
+        if getattr(info, "name", None) == "mlx-server":
+            return True
+        return cls._endpoint_supports_concurrency(getattr(info, "endpoint", "") or "")
 
     def _available_sampler_slots(self) -> list[tuple["Backend", str]]:
         """List of (backend, label) tuples that can run a best-of-N
@@ -3537,6 +3612,12 @@ class GameAgent(
             if ep:
                 seen_endpoints.add(ep)
             out.append((bk, label))
+        # Sept 2026: a single concurrency-capable slot (oMLX continuous
+        # batching) can run the stuck-escalation best-of-2 in parallel by
+        # itself — offer slot 1 twice so `_fan_out_best_of_n_across_slots`
+        # takes the parallel path instead of the sequential fallback.
+        if len(out) == 1 and self._backend_supports_concurrency(self._backend):
+            out.append((self._backend, "slot1b"))
         return out
 
     @staticmethod
@@ -4975,7 +5056,9 @@ class GameAgent(
                     {"label": "planning reply", "role": planning_role},
                 ))
                 try:
-                    plan_reply = await self._stream(self._token_cb_wrapper, role=planning_role)
+                    # stage="plan": token cap + medium effort (BATTLE10 runaway)
+                    plan_reply = await self._stream(
+                        self._token_cb_wrapper, role=planning_role, stage="plan")
                 except Exception as e:
                     yield self._record(AgentEvent("activity", "idle"))
                     err_msg = (
@@ -5063,7 +5146,7 @@ class GameAgent(
                     retry_reply = None
                     try:
                         retry_reply = await self._stream(
-                            self._token_cb_wrapper, role=_retry_role)
+                            self._token_cb_wrapper, role=_retry_role, stage="plan")
                     except Exception:
                         retry_reply = None
                     for _ev in self._drain_stream_ui_events():
@@ -5175,7 +5258,7 @@ class GameAgent(
                     pq_reply = None
                     try:
                         pq_reply = await self._stream(
-                            self._token_cb_wrapper, role=_pq_role)
+                            self._token_cb_wrapper, role=_pq_role, stage="plan")
                     except Exception:
                         pq_reply = None
                     for _ev in self._drain_stream_ui_events():
@@ -5365,7 +5448,7 @@ class GameAgent(
                         syn_reply = None
                         try:
                             syn_reply = await self._stream(
-                                self._token_cb_wrapper, role=_syn_role,
+                                self._token_cb_wrapper, role=_syn_role, stage="plan",
                             )
                         except Exception:
                             syn_reply = None
@@ -5443,7 +5526,8 @@ class GameAgent(
                         {"label": "streaming plan after question", "role": planning_role},
                     ))
                     try:
-                        plan_reply = await self._stream(self._token_cb_wrapper, role=planning_role)
+                        plan_reply = await self._stream(
+                            self._token_cb_wrapper, role=planning_role, stage="plan")
                     except Exception as e:
                         yield self._record(AgentEvent("activity", "idle"))
                         err_msg = (
@@ -5869,6 +5953,7 @@ class GameAgent(
                     has_generated_assets=bool(self._session_assets),
                     simulator_mode=bool(self._simulator_mode),
                     jmr_png_mode=bool(getattr(self, "_jmr_png_mode", False)),
+                    goal=goal,
                     **pb_kwargs,
                 )
                 if opening_block:
@@ -6025,6 +6110,7 @@ class GameAgent(
                     except (asyncio.CancelledError, Exception):
                         pass
                     self._critic_task = None
+                await self._cancel_code_critic()  # Sept 2026 sidecar
                 yield self._record(AgentEvent(
                     "info", "user requested ship - exiting iteration loop",
                 ))
@@ -6092,6 +6178,20 @@ class GameAgent(
             else:
                 phase_text = f"iteration {iteration}/{self.max_iters}"
             yield self._record(AgentEvent("phase", phase_text))
+
+            # Code critic sidecar (Sept 2026): a finished review of the
+            # previous file is folded into the queued next-user turn so
+            # the coder acts on it this iteration; unfinished reviews keep
+            # running and land via _pending_coaching later.
+            if iteration > start_iter and self._code_critic_task is not None:
+                try:
+                    if await self._fold_code_critic_into_next_turn():
+                        yield self._record(AgentEvent(
+                            "info", "[dim]code critic notes added to this turn[/dim]",
+                        ))
+                except Exception as exc:
+                    self._trace({"kind": "code_critic_skipped", "reason": "fold_error",
+                                 "error": str(exc)[:240]})
 
             # Prune older turns before generating, so we don't hit context.
             self._prune_messages()
@@ -6290,6 +6390,13 @@ class GameAgent(
                             self._token_cb_wrapper,
                             prefill=reply_prefill,
                             prefill_force=prefill_force,
+                            # Stage-aware effort: first build keeps default
+                            # thinking effort; patch/fix turns drop to low.
+                            stage=(
+                                "first_build"
+                                if (self._current_file is None or self._snapshot_n == 0)
+                                else "fix"
+                            ),
                         )
                         for _ev in self._drain_stream_ui_events():
                             yield _ev
@@ -7779,6 +7886,26 @@ class GameAgent(
                 },
             ))
 
+            # ---- code critic sidecar (Sept 2026) ------------------------
+            # Spawn the text review of THIS file now so it overlaps the
+            # Chromium test below and (on oMLX) the next coder stream.
+            # Findings are harvested at the top of the next iteration.
+            if self._code_critic_enabled() and not self._user_force_done:
+                try:
+                    await self._spawn_code_critic(new_html, iteration)
+                    yield self._record(AgentEvent(
+                        "info",
+                        f"[dim]code critic reviewing iter {iteration} "
+                        f"({self._code_critic_status_label()})[/dim]",
+                    ))
+                except Exception as exc:
+                    self._trace({
+                        "kind": "code_critic_skipped",
+                        "iteration": iteration,
+                        "reason": "spawn_error",
+                        "error": str(exc)[:240],
+                    })
+
             # ---- asset-reference alignment scan -------------------------
             # Static check before Chromium load: do the asset names the
             # HTML references actually have files on disk? In the
@@ -8031,18 +8158,38 @@ class GameAgent(
                 # Partial patch-apply means intended fixes are not fully
                 # landed, even if probes happen to pass. Force one focused
                 # recovery turn so unresolved SEARCH targets are addressed.
-                sw = list(report.get("soft_warnings") or [])
-                sw.append(
+                #
+                # DOOM3DFI 20260902_112850 iter 2: all 7 probes green but
+                # this forced ok=False (self-classified harness_bug) and
+                # burned two 0/1 patch turns. When every probe passed and
+                # there are no page errors the build IS working — keep
+                # ok=True and demote the note to an advisory `warning`
+                # (agent_gates._partial_patch_is_advisory); the recovery
+                # block still rides the next prompt (see _build_fix_prompt
+                # call site).
+                _pp_note = (
                     f"partial patch apply: {len(partial_failed)} patch block(s) "
                     "did not apply; fix not complete."
                 )
-                report["soft_warnings"] = sw
-                report["ok"] = False
-                self._trace({
-                    "kind": "partial_patch_forced_retry",
-                    "failed_count": len(partial_failed),
-                    "iteration": iteration,
-                })
+                if self._partial_patch_is_advisory(report):
+                    w = list(report.get("warnings") or [])
+                    w.append(_pp_note)
+                    report["warnings"] = w
+                    self._trace({
+                        "kind": "partial_patch_advisory",
+                        "failed_count": len(partial_failed),
+                        "iteration": iteration,
+                    })
+                else:
+                    sw = list(report.get("soft_warnings") or [])
+                    sw.append(_pp_note)
+                    report["soft_warnings"] = sw
+                    report["ok"] = False
+                    self._trace({
+                        "kind": "partial_patch_forced_retry",
+                        "failed_count": len(partial_failed),
+                        "iteration": iteration,
+                    })
             self._handle_probe_eval_errors(report, iteration)
             self._apply_scoped_check_to_report(report)
             self._apply_dead_animation_check_to_report(report)
@@ -9305,6 +9452,13 @@ class GameAgent(
             next_user = self._build_fix_prompt(
                 report=report, regressed=regressed, partial_failed=partial_failed,
             )
+            # Advisory partial patch (probes green, ok kept True): the ok
+            # branch of _build_fix_prompt does not attach the recovery
+            # block — add it here so the unresolved SEARCH is still shown.
+            if partial_failed and report.get("ok"):
+                _pp_block = self._partial_patch_recovery_block(partial_failed)
+                if _pp_block:
+                    next_user += "\n\n" + _pp_block
             # Item 3 (context discipline): wrap the report turn in collapse
             # sentinels so it shrinks to a 3-line digest once superseded.
             next_user = self._wrap_report_block(next_user, report)
@@ -9341,7 +9495,7 @@ class GameAgent(
                 {"label": "bonus turn (cap reached)", "role": "coder"},
             ))
             try:
-                reply = await self._stream(self._token_cb_wrapper)
+                reply = await self._stream(self._token_cb_wrapper, stage="fix")
                 for _ev in self._drain_stream_ui_events():
                     yield _ev
                 yield self._record(AgentEvent("activity", "idle"))
@@ -9418,6 +9572,9 @@ class GameAgent(
 
     async def _run_exit_and_finalize(self) -> AsyncIterator[AgentEvent]:
         """Exit-decision turn, final test, session outcome."""
+        # Code critic sidecar (Sept 2026): no more coder turns will read
+        # its notes — stop an in-flight review instead of burning the slot.
+        await self._cancel_code_critic()
         # ---- Item 5: exit-decision turn before silent loop end ------
         # DK trace 20260514_175012 ended with patches emitted but no
         # <done/> / <confirm_done/> — the user got back a half-fixed

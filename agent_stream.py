@@ -181,6 +181,51 @@ class StreamMaterializeMixin:
             return True
         return False
 
+    # BATTLE10 20260904_215158: plan-stage completion-token ceiling.
+    # Counts thinking + visible tokens (that is what max_tokens means on
+    # every backend). Traces: healthy plans 840-2320 completion tokens;
+    # the runaway was 50 250. Env PLAN_MAX_TOKENS overrides; 0 disables.
+    _PLAN_STAGE_MAX_TOKENS_DEFAULT = 12000
+
+    @staticmethod
+    def _plan_stage_max_tokens() -> int:
+        raw = (os.environ.get("PLAN_MAX_TOKENS") or "").strip()
+        if raw.isdigit():
+            return int(raw)
+        return StreamMaterializeMixin._PLAN_STAGE_MAX_TOKENS_DEFAULT
+
+    def _maybe_report_prefix_cache_status(self) -> None:
+        """Once per session: say whether the backend can reuse KV prefixes.
+
+        oMLX only reuses prefill across turns when `cache.hot_cache_max_size`
+        is non-zero in `~/.omlx/settings.json`; with it off every fix turn
+        re-prefills 25-35k tokens (60-120 s). The harness now keeps history
+        append-only for that reuse (agent_compaction lazy elision), so a
+        disabled server cache silently throws the win away — surface it.
+        """
+        if getattr(self, "_prefix_cache_status_reported", False):
+            return
+        self._prefix_cache_status_reported = True
+        info = getattr(self._backend, "info", None)
+        name = getattr(info, "name", None)
+        if name != "mlx-server":
+            return
+        try:
+            from backend import omlx_hot_cache_status
+            status = omlx_hot_cache_status(getattr(info, "endpoint", None))
+        except Exception:
+            status = None
+        self._trace({"kind": "prefix_cache_status", "backend": name, "hot_cache": status})
+        if status == "off":
+            from agent import AgentEvent  # late import — agent loads this module first
+            self._queue_stream_ui_event(AgentEvent(
+                "info",
+                "[yellow]oMLX KV hot cache is OFF[/yellow] (cache.hot_cache_max_size=0 in "
+                "~/.omlx/settings.json) — every turn re-prefills the whole prompt. "
+                "Set it to e.g. 32GB in the oMLX admin UI for 5-10x faster fix turns.",
+                {"hot_cache": status},
+            ))
+
     @staticmethod
     def _should_skip_format_doctor(
         *,
@@ -749,8 +794,14 @@ class StreamMaterializeMixin:
         prefill: str = "",
         prefill_force: bool = False,
         role: str = "coder",
+        stage: str | None = None,
     ) -> str:
         """Stream once, with watchdog. Recovers from stalls by raising/logging.
+
+        `stage` (optional): "plan" | "first_build" | "fix". Drives the
+        plan-stage token cap and stage-aware Qwen reasoning effort
+        (BATTLE10 20260904_215158: 80-min / 18k-token plan runaway;
+        patch turns burning 60-105 s of CoT for <=67 visible tokens).
 
         Image attachment: if VLM is detected and self._next_image_bytes is set,
         attach to the LAST user message and clear the buffer.
@@ -1212,6 +1263,20 @@ class StreamMaterializeMixin:
             opts: dict[str, Any] = {"temperature": temp, "num_ctx": self.num_ctx}
             if self._restart_attempt_seed is not None:
                 opts["seed"] = int(self._restart_attempt_seed)
+            # Plan-stage hard cap (BATTLE10 20260904_215158: plan streamed
+            # 50k completion / 18k visible tokens over 80 min; normal plans
+            # are <2.5k completion tokens). On cap hit the reply lacks
+            # <criteria>/<probes> and the existing plan_incomplete_retry
+            # path re-streams once. Build/fix turns stay uncapped.
+            if stage == "plan":
+                _plan_cap = self._plan_stage_max_tokens()
+                if _plan_cap > 0:
+                    opts.setdefault("max_tokens", _plan_cap)
+                    self._trace({"kind": "plan_stage_token_cap", "max_tokens": _plan_cap})
+            if stage:
+                # Harness-internal key: backends read it for stage-aware
+                # reasoning effort and strip it before the wire.
+                opts["_stage"] = stage
             if getattr(active_backend, "info", None) and active_backend.info.name == "ollama":
                 try:
                     import gpu_status as _gs
@@ -1315,7 +1380,15 @@ class StreamMaterializeMixin:
             "thinking_tokens": int(
                 getattr(result, "thinking_tokens", 0) or hb_state.get("think_tokens") or 0
             ),
+            # KV prefix-cache triage (Sept 2026): time-to-first-token and
+            # prompt tokens the backend reused. A turn whose prompt grew by
+            # ~5k tokens but shows ttft_s ≈ 10 s hit the cache; ~60-120 s
+            # on a 30k prompt means the prefix was invalidated (something
+            # rewrote an earlier message — see HARNESS_TUNING.md).
+            "ttft_s": self._last_prefill_s,
+            "cached_prompt_tokens": getattr(result, "cached_prompt_tokens", None),
         })
+        self._maybe_report_prefix_cache_status()
         # Context-pressure detector. When prompt_tokens approaches
         # num_ctx, the model has no headroom to emit a complete
         # <html_file>; output truncates, parser rejects, the agent

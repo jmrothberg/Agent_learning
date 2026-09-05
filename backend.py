@@ -260,19 +260,36 @@ _QWEN38_REASONING_ALIASES = {
 }
 
 
-def chat_template_thinking_kwargs(model: str | None) -> dict[str, Any]:
+# Stage-aware effort (Sept 2026 /640png traces: 91-98% of completion tokens
+# were hidden CoT; patch turns burned 60-105 s for <=67 visible tokens).
+# Applies ONLY when QWEN_REASONING_EFFORT is NOT set explicitly.
+# "critic" (code/visual review sidecar) also runs low: it must finish
+# while the coder streams, and its output is a short bullet list.
+_QWEN38_STAGE_EFFORT_LOW = ("fix", "patch", "critic")
+
+
+def chat_template_thinking_kwargs(
+    model: str | None, stage: str | None = None,
+) -> dict[str, Any]:
     """Qwen3.8 apply_chat_template kwargs. Harness default is medium.
 
     Native jinja default is xhigh; that fights <plan>/<html_file> parsing
     on long CoT. Must pass enable_thinking=True on the mlx_vlm path —
     that helper otherwise defaults thinking OFF. Other families return {}.
+
+    `stage`: "plan" / "first_build" keep the default (medium); "fix" /
+    "patch" drop to low. An explicit QWEN_REASONING_EFFORT wins for
+    every stage.
     """
     if not model or "qwen3.8" not in model.lower():
         return {}
     enable_raw = os.environ.get("QWEN_ENABLE_THINKING", "1").strip().lower()
     if enable_raw in ("0", "false", "no", "off"):
         return {"enable_thinking": False}
-    effort = os.environ.get("QWEN_REASONING_EFFORT", "medium").strip().lower()
+    env_effort = os.environ.get("QWEN_REASONING_EFFORT")
+    if env_effort is None and stage in _QWEN38_STAGE_EFFORT_LOW:
+        return {"enable_thinking": True, "reasoning_effort": "low"}
+    effort = (env_effort if env_effort is not None else "medium").strip().lower()
     effort = _QWEN38_REASONING_ALIASES.get(effort, effort)
     if effort not in _QWEN38_REASONING_EFFORTS:
         effort = "medium"
@@ -306,14 +323,18 @@ def omlx_messages_close_think_prefill(
     return out
 
 
-def apply_chat_template_safe(apply_fn, model: str | None, *args, **kwargs):
+def apply_chat_template_safe(
+    apply_fn, model: str | None, *args, _stage: str | None = None, **kwargs,
+):
     """apply_chat_template with Qwen3.8 think kwargs; never fail the turn.
 
     Illegal effort (`high`) would jinja-raise. We only pass legal values,
     and if the tokenizer/template still TypeError/ValueError, retry with
     no extra kwargs instead of dropping to a naive prompt concat.
+    `_stage` (harness turn stage) selects the reasoning effort; it is
+    consumed here and never forwarded to `apply_fn`.
     """
-    extra = chat_template_thinking_kwargs(model)
+    extra = chat_template_thinking_kwargs(model, stage=_stage)
     if extra:
         try:
             return apply_fn(*args, **kwargs, **extra)
@@ -607,6 +628,13 @@ class OllamaBackend(Backend):
         # progress mid-stream; cancellation here propagates through
         # task.cancel() — the ollama AsyncClient closes its socket and
         # the call unwinds.
+        # Harness-internal `_stage` (agent_stream plan cap / effort) must
+        # not reach Ollama's options; Ollama spells the output cap
+        # `num_predict`, so translate `max_tokens` when the caller set one.
+        if options and ("_stage" in options or "max_tokens" in options):
+            options = {k: v for k, v in options.items() if not k.startswith("_")}
+            if "max_tokens" in options:
+                options.setdefault("num_predict", int(options.pop("max_tokens")))
         return await stream_chat_with_retry(
             self._client,
             self.info.model,
@@ -634,6 +662,111 @@ class OllamaBackend(Backend):
 # -----------------------------------------------------------------------------
 
 
+# --- In-process MLX cross-turn KV prompt cache (Sept 2026) ------------------
+# Before this, `stream_generate` ran with no `prompt_cache`, so every turn
+# re-prefilled the whole conversation (60-120 s on 24-35k-token prompts).
+# The agent loop is append-only most of the time (system + history stay
+# byte-identical; only the newest user turn changes), so we keep the KV
+# cache from the previous turn and only prefill the divergent suffix.
+# MLX_PROMPT_CACHE=0 disables. Minimum shared prefix worth reusing:
+_MLX_PROMPT_CACHE_MIN_REUSE_TOKENS = 64
+
+
+def mlx_prompt_cache_enabled() -> bool:
+    raw = (os.environ.get("MLX_PROMPT_CACHE") or "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def plan_prompt_cache_reuse(
+    cached_tokens: list[int] | None,
+    new_tokens: list[int],
+    *,
+    trimmable: bool,
+    min_reuse: int = _MLX_PROMPT_CACHE_MIN_REUSE_TOKENS,
+) -> tuple[int, int]:
+    """Decide how much of the previous turn's KV cache to keep.
+
+    Returns ``(reuse, trim)``:
+      * ``reuse`` — number of leading tokens of ``new_tokens`` already in
+        the cache (0 → start from an empty cache).
+      * ``trim``  — number of trailing cache entries to drop first
+        (cache held ``len(cached_tokens)`` tokens; only ``reuse`` match).
+
+    Rules (pure, unit-tested — no Metal):
+      * Common prefix shorter than ``min_reuse`` → (0, 0): not worth it.
+      * At least ONE new token must be fed to the model, so a prompt that
+        equals the cached sequence exactly reuses ``len(new)-1``.
+      * A non-trimmable cache (rotating / hybrid layers) can only be
+        reused when nothing needs trimming (pure append); otherwise reset.
+    """
+    if not cached_tokens or not new_tokens:
+        return 0, 0
+    n = min(len(cached_tokens), len(new_tokens))
+    k = 0
+    while k < n and cached_tokens[k] == new_tokens[k]:
+        k += 1
+    if k >= len(new_tokens):
+        k = len(new_tokens) - 1
+    if k < min_reuse:
+        return 0, 0
+    trim = len(cached_tokens) - k
+    if trim and not trimmable:
+        return 0, 0
+    return k, trim
+
+
+def _usage_cached_prompt_tokens(usage: Any) -> int | None:
+    """Pull the prefix-cache hit count out of an OpenAI-style `usage` dict.
+
+    Accepts both the standard `prompt_tokens_details.cached_tokens` and a
+    flat `cached_tokens` / `prompt_cache_hit_tokens` (DeepSeek-style).
+    """
+    if not isinstance(usage, dict):
+        return None
+    details = usage.get("prompt_tokens_details")
+    if isinstance(details, dict) and isinstance(details.get("cached_tokens"), int):
+        return int(details["cached_tokens"])
+    for key in ("cached_tokens", "prompt_cache_hit_tokens"):
+        if isinstance(usage.get(key), int):
+            return int(usage[key])
+    return None
+
+
+def omlx_hot_cache_status(endpoint: str | None) -> str | None:
+    """Read the local oMLX settings file and report its KV hot-cache size.
+
+    Returns ``"off"`` when `cache.hot_cache_max_size` is 0 (prefix reuse
+    disabled — every turn re-prefills), the configured size string when
+    set, or ``None`` when unknown (remote endpoint, no file, unreadable).
+    Only consulted for loopback endpoints: the settings file describes the
+    oMLX on THIS machine.
+    """
+    try:
+        if not endpoint or not endpoint_is_omlx(endpoint):
+            return None
+        from urllib.parse import urlparse
+        host = (urlparse(endpoint).hostname or "").lower()
+        if host not in ("127.0.0.1", "localhost", "::1", "0.0.0.0"):
+            return None
+        path = os.path.expanduser("~/.omlx/settings.json")
+        if not os.path.isfile(path):
+            return None
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        cache_cfg = data.get("cache") if isinstance(data, dict) else None
+        if not isinstance(cache_cfg, dict):
+            return None
+        size = cache_cfg.get("hot_cache_max_size")
+        if size is None:
+            return None
+        text = str(size).strip()
+        if text in ("0", "0B", "0GB", "0MB"):
+            return "off"
+        return text
+    except Exception:
+        return None
+
+
 # MLX request fields we forward when present in the agent's `options` dict.
 # Anything else (including `num_ctx`) is silently dropped — MLX uses the
 # model's native context, no equivalent knob.
@@ -641,6 +774,10 @@ _MLX_OPTION_KEYS: tuple[str, ...] = (
     "temperature", "top_p", "top_k", "min_p",
     "seed", "max_tokens",
 )
+
+# BATTLEZO 20260904_095910: first-token watchdog for MLXServerBackend when
+# the model is already resident (see _stream_once). min() with stall_seconds.
+_MLX_SERVER_FIRST_TOKEN_WATCHDOG_S = 300.0
 
 # SSE keepalive / prompt-eval progress inside mlx_lm.server streams.
 _MLX_PROGRESS_RE = re.compile(
@@ -803,6 +940,12 @@ class MLXBackend(Backend):
     _loaded_vlm_processor: Any = None
     _loaded_vlm_config: Any = None
     _loaded_vlm_path: str | None = None
+    # Cross-turn KV prompt cache (text pipeline only; see
+    # `plan_prompt_cache_reuse`). `_prompt_cache_tokens` is the exact token
+    # sequence the cache currently holds (prompt + generated ids). Dropped
+    # with the weights in `release_weights` / on a different-path load.
+    _prompt_cache: Any = None
+    _prompt_cache_tokens: list[int] | None = None
     _load_lock: asyncio.Lock | None = None
     # All MLX work runs on this single dedicated thread. MLX/Metal
     # binds GPU contexts to the calling thread; if we loaded the model
@@ -857,6 +1000,9 @@ class MLXBackend(Backend):
         cls._loaded_model = None
         cls._loaded_tokenizer = None
         cls._loaded_path = None
+        # KV prompt cache belongs to these weights — drop it with them.
+        cls._prompt_cache = None
+        cls._prompt_cache_tokens = None
         cls._loaded_vlm_model = None
         cls._loaded_vlm_processor = None
         cls._loaded_vlm_config = None
@@ -1014,6 +1160,8 @@ class MLXBackend(Backend):
         cancel_event: asyncio.Event | None = None,
     ) -> StreamResult:
         opts = dict(options or {})
+        # Harness turn stage (agent_stream._stream) → Qwen reasoning effort.
+        turn_stage = opts.get("_stage")
         # Drop fields that mean nothing to MLX (e.g. num_ctx). Carry
         # only the sampler knobs MLX understands.
         sampler_opts = {k: opts[k] for k in _MLX_OPTION_KEYS if k in opts}
@@ -1100,6 +1248,7 @@ class MLXBackend(Backend):
         stall_at: int | None = None
         prompt_tokens: int | None = None
         completion_tokens: int | None = None
+        cached_prompt_tokens: int | None = None  # KV prefix reused this turn
         # Shared repetition detector — same class both backends use.
         repeat = RepetitionDetector()
         # A2: shared deliberation detector for unique-text reasoning loops.
@@ -1237,6 +1386,7 @@ class MLXBackend(Backend):
                         history,
                         tokenize=False,
                         add_generation_prompt=True,
+                        _stage=turn_stage,
                     )
                 except Exception:
                     prompt = "\n\n".join(
@@ -1253,6 +1403,56 @@ class MLXBackend(Backend):
                 )
 
                 from mlx_lm import stream_generate  # type: ignore
+                # --- Cross-turn KV prompt cache -----------------------------
+                # Tokenize here (same bos rule as stream_generate) so the
+                # common prefix with the previous turn can be measured and
+                # only the divergent suffix is prefilled. Full prompt length
+                # is reported as prompt_tokens; the reused count rides the
+                # "done" payload (StreamResult.cached_prompt_tokens).
+                gen_kwargs: dict[str, Any] = {}
+                n_prompt_full: int | None = None
+                cached_reused = 0
+                gen_token_ids: list[int] = []
+                cache_active = False
+                if mlx_prompt_cache_enabled():
+                    try:
+                        from mlx_lm.models import cache as _mlx_cache  # type: ignore
+                        import mlx.core as _mx  # type: ignore
+                        bos = getattr(tokenizer, "bos_token", None)
+                        add_special = bos is None or not prompt.startswith(bos)
+                        full_ids = list(tokenizer.encode(prompt, add_special_tokens=add_special))
+                        n_prompt_full = len(full_ids)
+                        pc = self.__class__._prompt_cache
+                        pc_tokens = self.__class__._prompt_cache_tokens
+                        if pc is None or pc_tokens is None:
+                            pc = _mlx_cache.make_prompt_cache(model)
+                            pc_tokens = []
+                        reuse, trim = plan_prompt_cache_reuse(
+                            pc_tokens, full_ids,
+                            trimmable=_mlx_cache.can_trim_prompt_cache(pc),
+                        )
+                        if reuse == 0 and pc_tokens:
+                            # Prefix diverged too early (or untrimmable) —
+                            # start from a fresh cache instead of trimming.
+                            pc = _mlx_cache.make_prompt_cache(model)
+                            pc_tokens = []
+                        elif trim:
+                            _mlx_cache.trim_prompt_cache(pc, trim)
+                        cached_reused = reuse
+                        gen_kwargs["prompt_cache"] = pc
+                        prompt = _mx.array(full_ids[reuse:])
+                        # Cache will hold the full prompt once prefilled;
+                        # generated ids are appended as they stream.
+                        self.__class__._prompt_cache = pc
+                        self.__class__._prompt_cache_tokens = list(full_ids)
+                        cache_active = True
+                    except Exception:
+                        # Any cache plumbing failure → plain uncached turn.
+                        gen_kwargs = {}
+                        cached_reused = 0
+                        cache_active = False
+                        self.__class__._prompt_cache = None
+                        self.__class__._prompt_cache_tokens = None
                 last_gen = None
                 for gen in stream_generate(
                     model, tokenizer, prompt,
@@ -1260,16 +1460,37 @@ class MLXBackend(Backend):
                     sampler=sampler,
                     prompt_progress_callback=_prompt_progress,
                     prefill_step_size=prefill_step_size,
+                    **gen_kwargs,
                 ):
+                    # Record the id BEFORE the cancel check: generate_step
+                    # has already fed every yielded token to the model, so
+                    # the cache holds it even if we stop consuming here.
+                    if cache_active:
+                        gen_token_ids.append(int(gen.token))
                     if worker_cancel.is_set():
                         break
                     last_gen = gen
                     loop.call_soon_threadsafe(
-                        q.put_nowait, ("text", gen.text, gen.prompt_tokens, gen.generation_tokens)
+                        q.put_nowait,
+                        (
+                            "text", gen.text,
+                            n_prompt_full if n_prompt_full is not None else gen.prompt_tokens,
+                            gen.generation_tokens,
+                        ),
                     )
-                pt = getattr(last_gen, "prompt_tokens", None) if last_gen else None
+                if cache_active and self.__class__._prompt_cache_tokens is not None:
+                    # generate_step prefetches one step ahead, so every
+                    # yielded token has already been fed to the model —
+                    # the cache holds prompt + all yielded ids.
+                    self.__class__._prompt_cache_tokens.extend(gen_token_ids)
+                pt = (
+                    n_prompt_full if n_prompt_full is not None
+                    else (getattr(last_gen, "prompt_tokens", None) if last_gen else None)
+                )
                 ct = getattr(last_gen, "generation_tokens", None) if last_gen else None
-                loop.call_soon_threadsafe(q.put_nowait, ("done", None, pt, ct))
+                loop.call_soon_threadsafe(
+                    q.put_nowait, ("done", cached_reused if cache_active else None, pt, ct)
+                )
             except BaseException as e:  # noqa: BLE001 - surface MLX errors too
                 # Format the exception ON this thread — the consumer
                 # is in asyncio land and doesn't have the live frame.
@@ -1324,6 +1545,7 @@ class MLXBackend(Backend):
                         info_model,
                         processor, config, history,
                         num_images=len(image_paths),
+                        _stage=turn_stage,
                     )
                 except Exception:
                     # Same naive fallback as text-only.
@@ -1492,6 +1714,9 @@ class MLXBackend(Backend):
                         prompt_tokens = pt
                     if isinstance(ct, int):
                         completion_tokens = ct
+                    # KV prompt-cache reuse count rides the done payload.
+                    if isinstance(payload, int):
+                        cached_prompt_tokens = payload
                     break
                 # kind == "text"
                 piece = payload or ""
@@ -1549,7 +1774,8 @@ class MLXBackend(Backend):
                         completion_tokens=n_tokens,
                     ):
                         loop_grace_used = True
-                        loop_grace_reason = "inline_data_bloat_unclosed_output_block"
+                        # BATTLE10: reason names the graced detector (bloat or spam).
+                        loop_grace_reason = f"{repeat.stall_reason}_unclosed_output_block"
                         # Reset the detector while the output block is still
                         # open — SEARCH bodies legitimately repeat source lines.
                         repeat = RepetitionDetector()
@@ -1586,6 +1812,7 @@ class MLXBackend(Backend):
             loop_grace_reason=loop_grace_reason,
             silent=silent,
             diagnose_bloat=diagnose_bloat,
+            cached_prompt_tokens=cached_prompt_tokens,
         )
 
     async def is_vlm(self) -> bool:
@@ -1723,8 +1950,11 @@ class MLXServerBackend(Backend):
         default_max = int(env_cap) if env_cap.isdigit() and int(env_cap) > 0 else 131072
         body.setdefault("max_tokens", default_max)
         # Keep Qwen3.8 thinking ON (medium). oMLX already defaults thinking on;
-        # pass kwargs so effort is medium, not native xhigh.
-        think_kw = chat_template_thinking_kwargs(self.info.model)
+        # pass kwargs so effort is medium, not native xhigh. `_stage` (harness
+        # turn stage, never sent on the wire) drops fix turns to low.
+        think_kw = chat_template_thinking_kwargs(
+            self.info.model, stage=opts.get("_stage"),
+        )
         if think_kw:
             body["chat_template_kwargs"] = dict(think_kw)
             if "reasoning_effort" in think_kw:
@@ -1741,6 +1971,7 @@ class MLXServerBackend(Backend):
         stall_at: int | None = None
         prompt_tokens: int | None = None
         completion_tokens: int | None = None
+        cached_prompt_tokens: int | None = None  # oMLX usage.prompt_tokens_details
         max_tokens_hit = False
         repeat = RepetitionDetector()
         prompt_eval_done_at: float | None = None
@@ -1751,6 +1982,17 @@ class MLXServerBackend(Backend):
         # stream_start in the trace while progress kept the socket alive.
         last_activity_at = started
         _line_poll_s = min(stall_seconds, 30.0)
+        # BATTLEZO 20260904_095910: 1800 s at 0 tokens with the model already
+        # resident. The quiet-window checks below live in the read-TIMEOUT
+        # branch, so SSE keepalive lines (no digits → not progress) kept
+        # wait_for from ever timing out and only the cold-load cap ended it.
+        # First-token watchdog: runs every loop pass; keepalives do not count
+        # as activity; fires only when /v1/models/status says loaded=true
+        # (a genuine cold load still gets the full overall_seconds).
+        first_token_watchdog_s = min(stall_seconds, _MLX_SERVER_FIRST_TOKEN_WATCHDOG_S)
+        # Next monotonic time the loaded-status probe may run (re-armed
+        # after a "not loaded" answer so a cold load is re-checked later).
+        first_token_watchdog_next = started + first_token_watchdog_s
 
         try:
             async with httpx.AsyncClient(
@@ -1769,6 +2011,23 @@ class MLXServerBackend(Backend):
                             stalled = True
                             stall_at = n_tokens
                             break
+                        if (
+                            n_tokens == 0
+                            and n_think == 0
+                            and time.monotonic() >= first_token_watchdog_next
+                            and time.monotonic() - last_activity_at > first_token_watchdog_s
+                        ):
+                            first_token_watchdog_next = (
+                                time.monotonic() + first_token_watchdog_s
+                            )
+                            if await self._model_reported_loaded():
+                                stalled = True
+                                stall_at = 0
+                                error_message = (
+                                    f"oMLX model loaded but emitted no tokens in "
+                                    f"{first_token_watchdog_s:.0f}s (first-token watchdog)"
+                                )
+                                break
                         if time.monotonic() - started > overall_seconds:
                             stalled = True
                             stall_at = n_tokens
@@ -1850,6 +2109,12 @@ class MLXServerBackend(Backend):
                                 prompt_tokens = pt
                             if isinstance(ct, int):
                                 completion_tokens = ct
+                            # KV prefix-cache hit size (OpenAI-compatible
+                            # field; oMLX emits it when its tiered cache
+                            # served part of the prompt). Absent → None.
+                            cpt = _usage_cached_prompt_tokens(usage)
+                            if cpt is not None:
+                                cached_prompt_tokens = cpt
                         choices = chunk.get("choices") or []
                         if not choices:
                             continue
@@ -1916,7 +2181,24 @@ class MLXServerBackend(Backend):
             loop_line=repeat.loop_line if looped else None,
             max_tokens_hit=max_tokens_hit,
             thinking_tokens=n_think,
+            cached_prompt_tokens=cached_prompt_tokens,
         )
+
+    async def _model_reported_loaded(self) -> bool:
+        """True when the server lists this model `loaded=true`.
+
+        Used by the first-token watchdog (BATTLEZO 20260904_095910). Plain
+        mlx_lm.server has no /v1/models/status → [] → False → the watchdog
+        never fires there and the cold-load cap applies as before.
+        """
+        try:
+            ids = await asyncio.to_thread(
+                omlx_list_loaded_model_ids, self.info.endpoint,
+            )
+        except Exception:
+            return False
+        want = omlx_api_model_id(self.info.model)
+        return any(omlx_api_model_id(x) == want for x in ids)
 
     async def is_vlm(self) -> bool:
         """Same name classifier as /list [VLM]. Do not hardcode False.
@@ -3766,14 +4048,26 @@ def omlx_unload_loaded_for_inprocess(
     a dead chat after /model swap) does not OOM the next session.
     """
     keep_id = omlx_api_model_id(keep) if keep else ""
+    # Sept 2026: every model staged for a role this session (coder /
+    # critic / architect on the same oMLX) is also kept — otherwise the
+    # coder's per-stream unload evicts the critic's weights and vice versa.
+    keep_ids = {keep_id} if keep_id else set()
+    keep_ids |= {omlx_api_model_id(m) for m in OMLX_SESSION_KEEP_MODELS if m}
     freed: list[str] = []
     for mid in omlx_list_loaded_model_ids(endpoint):
-        if keep_id and mid == keep_id:
+        if mid in keep_ids:
             continue
         ok, _detail = omlx_unload_model(mid, endpoint)
         if ok:
             freed.append(mid)
     return freed
+
+
+# Model ids/paths every staged role backend uses this session (filled by
+# chat.py / coder.py when slots are staged). Read by
+# `omlx_unload_loaded_for_inprocess` so role models are never evicted by
+# each other's pre-stream cleanup. Same-model setups are unaffected.
+OMLX_SESSION_KEEP_MODELS: set[str] = set()
 
 
 def endpoint_is_omlx(endpoint: str | None) -> bool:

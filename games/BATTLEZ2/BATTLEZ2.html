@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Battlezone 2D</title>
+<style>
+  html,body{margin:0;background:#000;overflow:hidden;color:#0f0;font:14px monospace;}
+  #wrap{position:fixed;inset:0;display:grid;place-items:center;}
+  canvas{display:block;background:#000;}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c" width="640" height="480"></canvas></div>
+<script>
+(function(){
+  "use strict";
+  const W=640,H=480,ctx=document.getElementById("c").getContext("2d");
+  const N=256, sinLUT=[], cosLUT=[];
+  for(let i=0;i<N;i++){ sinLUT[i]=Math.sin(i*(2*Math.PI)/N); cosLUT[i]=Math.cos(i*(2*Math.PI)/N); }
+  function sinA(a){ let i=(a/(2*Math.PI)*N)%N; if(i<0)i+=N; return sinLUT[i|0]; }
+  function cosA(a){ let i=(a/(2*Math.PI)*N)%N; if(i<0)i+=N; return cosLUT[i|0]; }
+
+  const state={ mode:"playing", player:{x:0,y:0,yaw:0}, enemies:[], bullets:[], ebullets:[], mountains:[], score:0, lives:3, radarBlips:[] };
+  window.state=state;
+  window.game={ reset(){ state.mode="playing"; state.player={x:0,y:0,yaw:0}; state.enemies=[]; state.bullets=[]; state.ebullets=[]; state.score=0; state.lives=3; genWorld(); } };
+
+  const keys={};
+  addEventListener("keydown",e=>{ keys[e.code]=true; if(e.code==="KeyR") window.game.reset(); if(["ArrowUp","ArrowDown","ArrowLeft","ArrowRight","Space"].includes(e.code)) e.preventDefault(); });
+  addEventListener("keyup",e=>{ keys[e.code]=false; });
+
+  function genWorld(){
+    state.mountains=[];
+    for(let i=0;i<12;i++){
+      const cx=(Math.random()*2-1)*500, cy=(Math.random()*2-1)*500, r=40+Math.random()*60, verts=[];
+      const n=5+((Math.random()*4)|0);
+      for(let j=0;j<n;j++){ const a=(j/n)*2*Math.PI+Math.random()*0.5; verts.push({x:cx+sinA(a)*r*(0.7+Math.random()*0.5), y:cy+cosA(a)*r*(0.7+Math.random()*0.5)}); }
+      state.mountains.push(verts);
+    }
+    state.enemies=[];
+    for(let i=0;i<5;i++){ state.enemies.push({x:(Math.random()*2-1)*400, y:(Math.random()*2-1)*400, yaw:Math.random()*2*Math.PI, hp:1, cd:0}); }
+  }
+  genWorld();
+
+  function pointInPoly(px,py,poly){ let inside=false; for(let i=0,j=poly.length-1;i<poly.length;j=i++){ const xi=poly[i].x, yi=poly[i].y, xj=poly[j].x, yj=poly[j].y; if(((yi>py)!=(yj>py)) && (px < (xj-xi)*(py-yi)/(yj-yi)+xi)) inside=!inside; } return inside; }
+  function collides(x,y){ for(const poly of state.mountains) if(pointInPoly(x,y,poly)) return true; return false; }
+
+  function update(dt){
+    if(state.mode!=="playing") return;
+    const p=state.player;
+    if(keys.ArrowLeft) p.yaw-=2.5*dt;
+    if(keys.ArrowRight) p.yaw+=2.5*dt;
+    const spd=120;
+    let dx=0,dy=0;
+    if(keys.ArrowUp){ dx+=sinA(p.yaw)*spd*dt; dy+=cosA(p.yaw)*spd*dt; }
+    if(keys.ArrowDown){ dx-=sinA(p.yaw)*spd*dt; dy-=cosA(p.yaw)*spd*dt; }
+    const nx=p.x+dx, ny=p.y+dy;
+    if(!collides(nx,ny)){ p.x=nx; p.y=ny; }
+
+    if(keys.Space && state.bullets.length<8){ state.bullets.push({x:p.x+sinA(p.yaw)*20, y:p.y+cosA(p.yaw)*20, vx:sinA(p.yaw)*300, vy:cosA(p.yaw)*300, life:2}); }
+
+    for(let i=0;i<state.bullets.length;i++){ const b=state.bullets[i]; b.x+=b.vx*dt; b.y+=b.vy*dt; b.life-=dt; if(b.life<=0) state.bullets.splice(i--,1); }
+    for(let i=0;i<state.ebullets.length;i++){ const b=state.ebullets[i]; b.x+=b.vx*dt; b.y+=b.vy*dt; b.life-=dt; if(b.life<=0) state.ebullets.splice(i--,1); }
+
+    for(const e of state.enemies){
+      const ddx=p.x-e.x, ddy=p.y-e.y, dist=Math.sqrt(ddx*ddx+ddy*ddy);
+      if(dist>50) e.yaw+=(Math.atan2(ddx,ddy)-e.yaw)*0.05; // approximate turn
+      e.x+=sinA(e.yaw)*60*dt; e.y+=cosA(e.yaw)*60*dt;
+      e.cd-=dt;
+      if(e.cd<=0 && dist<250){ state.ebullets.push({x:e.x+sinA(e.yaw)*15, y:e.y+cosA(e.yaw)*15, vx:sinA(e.yaw)*200, vy:cosA(e.yaw)*200, life:2}); e.cd=1.5+Math.random(); }
+    }
+
+    // bullet vs enemy
+    for(let i=0;i<state.bullets.length;i++){ const b=state.bullets[i]; for(let j=0;j<state.enemies.length;j++){ const e=state.enemies[j]; const ddx=b.x-e.x, ddy=b.y-e.y; if(ddx*ddx+ddy*ddy<20*20){ state.score+=100; state.enemies.splice(j,1); state.bullets.splice(i,1); break; } } }
+    // ebullet vs player
+    for(let i=0;i<state.ebullets.length;i++){ const b=state.ebullets[i]; const ddx=b.x-p.x, ddy=b.y-p.y; if(ddx*ddx+ddy*ddy<15*15){ state.lives--; state.ebullets.splice(i,1); if(state.lives<=0) state.mode="over"; break; } }
+
+    state.radarBlips=[];
+    for(const e of state.enemies){ state.radarBlips.push({x:e.x-p.x, y:e.y-p.y}); }
+  }
+
+  function draw(){
+    ctx.fillStyle="#000"; ctx.fillRect(0,0,W,H);
+    const p=state.player;
+    const camX=(W/2-p.x)*0.5, camY=(H/2-p.y)*0.5; // simple camera follow
+
+    // grid
+    ctx.strokeStyle="#005577"; ctx.lineWidth=1;
+    for(let gx=-1000;gx<=1000;gx+=50){ ctx.beginPath(); ctx.moveTo(gx+camX,0); ctx.lineTo(gx+camX,H); ctx.stroke(); }
+    for(let gy=-1000;gy<=1000;gy+=50){ ctx.beginPath(); ctx.moveTo(0,gy+camY); ctx.lineTo(W,gy+camY); ctx.stroke(); }
+
+    // mountains
+    ctx.strokeStyle="#00ff88"; ctx.lineWidth=2;
+    for(const poly of state.mountains){ ctx.beginPath(); for(let i=0;i<poly.length;i++){ const v=poly[i]; const sx=v.x+camX, sy=v.y+camY; if(i===0) ctx.moveTo(sx,sy); else ctx.lineTo(sx,sy); } ctx.closePath(); ctx.stroke(); }
+
+    // enemies
+    ctx.strokeStyle="#0ff"; ctx.lineWidth=2;
+    for(const e of state.enemies){ const sx=e.x+camX, sy=e.y+camY; ctx.beginPath(); ctx.moveTo(sx,sy-10); ctx.lineTo(sx+8,sy+6); ctx.lineTo(sx,sy+10); ctx.lineTo(sx-8,sy+6); ctx.closePath(); ctx.stroke(); }
+
+    // player
+    ctx.strokeStyle="#0f0"; ctx.lineWidth=2;
+    const px=W/2, py=H/2;
+    ctx.beginPath(); ctx.moveTo(px,py-12); ctx.lineTo(px+10,py+8); ctx.lineTo(px,py+12); ctx.lineTo(px-10,py+8); ctx.closePath(); ctx.stroke();
+
+    // bullets
+    ctx.strokeStyle="#ff0"; ctx.lineWidth=2;
+    for(const b of state.bullets){ const sx=b.x+camX, sy=b.y+camY; ctx.beginPath(); ctx.moveTo(sx,sy); ctx.lineTo(sx-b.vx*0.05,sy-b.vy*0.05); ctx.stroke(); }
+    ctx.strokeStyle="#f00";
+    for(const b of state.ebullets){ const sx=b.x+camX, sy=b.y+camY; ctx.beginPath(); ctx.moveTo(sx,sy); ctx.lineTo(sx-b.vx*0.05,sy-b.vy*0.05); ctx.stroke(); }
+
+    // radar 16x16+ in corner
+    const rx=W-60, ry=60, rr=40;
+    ctx.strokeStyle="#0f0"; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.arc(rx,ry,rr,0,2*Math.PI); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(rx-rr,ry); ctx.lineTo(rx+rr,ry); ctx.moveTo(rx,ry-rr); ctx.lineTo(rx,ry+rr); ctx.stroke();
+    ctx.fillStyle="#0f0";
+    for(const blip of state.radarBlips){ const bx=rx+blip.x*0.05, by=ry+blip.y*0.05; if(Math.sqrt((bx-rx)*(bx-rx)+(by-ry)*(by-ry))<rr) ctx.fillRect(bx-2,by-2,4,4); }
+
+    // HUD
+    ctx.fillStyle="#0f0"; ctx.font="16px monospace"; ctx.textAlign="left";
+    ctx.fillText("SCORE:"+state.score, 10, 20);
+    ctx.fillText("LIVES:"+state.lives, 10, 40);
+    if(state.mode==="over") ctx.fillText("GAME OVER - PRESS R", 200, 240);
+  }
+
+  let last=0;
+  function loop(now){ const dt=Math.min(0.05,(now-last)/1000); last=now; update(dt); draw(); requestAnimationFrame(loop); }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

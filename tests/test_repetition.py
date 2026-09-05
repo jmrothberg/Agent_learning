@@ -109,8 +109,15 @@ def test_inline_data_bloat_grace_gate():
         assembled_text=partial_patch,
         grace_already_used=True,
     ) is True
+    # BATTLE10 20260904_215158: adjacent_line_spam inside an open
+    # <html_file> gets the same grace as inline_data_bloat.
     assert ollama_io._should_grace_inline_data_bloat(
         stall_reason="adjacent_line_spam",
+        assembled_text=partial_html,
+        grace_already_used=False,
+    ) is True
+    assert ollama_io._should_grace_inline_data_bloat(
+        stall_reason="short_line_loop",
         assembled_text=partial_html,
         grace_already_used=False,
     ) is False
@@ -119,6 +126,35 @@ def test_inline_data_bloat_grace_gate():
         assembled_text="still planning, no tags yet\n",
         grace_already_used=False,
     ) is False
+
+
+def test_adjacent_spam_ignores_numbered_corner_table():
+    """BATTLE10 20260904_215158: `const c1..c4 = { x:0, y:0 };` are four
+    distinct raw lines that share one digit-stripped template. That is a
+    normal vertex/corner table, not a stuck loop — must NOT abort at 4."""
+    det = ollama_io.RepetitionDetector()
+    fired = False
+    for i in range(1, 5):
+        if det.feed(f"    const c{i} = {{ x:0, y:0 }};\n"):
+            fired = True
+            break
+    assert fired is False, det.stall_reason
+    # Continue with real code — still no trip.
+    assert det.feed("    function drawTank() {\n") is False
+    assert det.feed("      ctx.beginPath();\n") is False
+
+
+def test_adjacent_spam_still_fires_on_long_numbered_run():
+    """A digit-only-varying template repeated many times IS a loop."""
+    det = ollama_io.RepetitionDetector()
+    fired_at = None
+    for i in range(1, 40):
+        if det.feed(f"var asset{i} = load('a');\n"):
+            fired_at = i
+            break
+    assert fired_at is not None
+    assert fired_at <= ollama_io._ADJACENT_SPAM_NORM_ONLY_REPEATS
+    assert det.stall_reason == "adjacent_line_spam"
 
 
 def test_inline_data_bloat_graced_inside_markdown_patch():

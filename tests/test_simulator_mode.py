@@ -139,6 +139,130 @@ def test_simulator_lean_budget_prefers_components():
     assert len(cb) >= len(ob)  # components kept preferentially
 
 
+def test_simulator_lean_budget_keeps_outline_traps_when_full_opening_drops():
+    """CENTIPED/ANIMATIO/BATTLE10 (Sept 2026): `dropped_opening=True` on every
+    /640 first build. When the full opening does not fit, the traps-only slice
+    of the same outline must be kept (kept_opening_mode="traps_only")."""
+    a = GameAgent(model="stub", out_path=Path("games/test_sim.html"))
+    a.set_simulator_mode(True)
+    a.set_lean_prompt(True)
+    a._goal = "centipede fixed shooter"
+    traces: list[dict] = []
+    a._trace = traces.append  # type: ignore[assignment]
+    a._outline_traps_only_for_goal = (  # type: ignore[method-assign]
+        lambda goal, *, char_budget: "OUTLINE TRAPS (match your failure — do not add scope):\n- trap one"
+    )
+    budget = a._LEAN_MEMORY_COMBINED_BUDGET
+    opening = "O" * 4064
+    components = "C" * (budget - 1200)
+    playbook = "P" * 600
+    ob, cb, pb = a._apply_lean_memory_budget(opening, components, playbook)
+    assert cb == components and pb == playbook
+    assert ob.startswith("OUTLINE TRAPS")
+    assert len(ob) + len(cb) + len(pb) <= budget
+    ev = [t for t in traces if t.get("kind") == "lean_memory_budget_applied"]
+    assert ev and ev[-1]["kept_opening_mode"] == "traps_only"
+    assert ev[-1]["dropped_opening"] is False
+
+
+def test_simulator_lean_budget_drops_opening_when_no_room_for_traps():
+    """Below _LEAN_OPENING_TRAPS_MIN_CHARS remaining → drop as before."""
+    a = GameAgent(model="stub", out_path=Path("games/test_sim.html"))
+    a.set_simulator_mode(True)
+    a.set_lean_prompt(True)
+    a._goal = "centipede fixed shooter"
+    called = []
+    a._outline_traps_only_for_goal = (  # type: ignore[method-assign]
+        lambda goal, *, char_budget: called.append(char_budget) or "X"
+    )
+    budget = a._LEAN_MEMORY_COMBINED_BUDGET
+    ob, cb, pb = a._apply_lean_memory_budget("O" * 4000, "C" * (budget - 50), "")
+    assert ob == "" and not called
+
+
+def test_fpga_only_rule_violations_never_fail_micro_probes(tmp_path):
+    """Standing policy pin: /640 and /640png TEACH the JMR FPGA rules but
+    never kill Chrome-working code for breaking them. Every construct below
+    is FPGA-illegal (Object.keys, performance.now, dynamic "jmr:spr:"+i,
+    splice return value, unicode fillText) yet valid browser JS — CENTIPED
+    20260902_230904 shipped 100/100 with all of them. Micro-probes must keep
+    ok=True (warnings allowed); the FPGA guidance lives in prompts/memory."""
+    from tools import run_micro_probes
+
+    game = tmp_path / "CENTIPED"
+    game.mkdir()
+    out = game / "CENTIPED.html"
+    for i in range(2):
+        (game / f"CENTIPED-{i}.png").write_bytes(b"\x89PNG")
+    html = (
+        "<!DOCTYPE html><html><head><title>Centipede</title></head><body>"
+        "<canvas id='c' width='640' height='480'></canvas><script>"
+        "var cv=document.getElementById('c'),ctx=cv.getContext('2d');"
+        "var S=[];for(var i=0;i<2;i++){var im=new Image();im.src='jmr:spr:'+i;S.push(im);}"
+        "var state={player:{x:320,y:440},segs:[{x:10,y:10},{x:30,y:10}],score:0};"
+        "window.gameState=state;"
+        "var keys={};document.addEventListener('keydown',function(e){keys[e.key]=true;});"
+        "document.addEventListener('keyup',function(e){keys[e.key]=false;});"
+        "var t0=performance.now();"
+        "function update(dt){"
+        "  if(keys['ArrowLeft'])state.player.x-=4;if(keys['ArrowRight'])state.player.x+=4;"
+        "  var dead=state.segs.splice(0,1);state.score+=dead.length;"
+        "  Object.keys(keys).forEach(function(k){if(!keys[k])delete keys[k];});"
+        "}"
+        "function draw(){ctx.fillStyle='#000';ctx.fillRect(0,0,640,480);"
+        "  ctx.drawImage(S[0],0,0,16,16,state.player.x,state.player.y,16,16);"
+        "  for(var i=0;i<state.segs.length;i++)ctx.drawImage(S[1],0,0,16,16,state.segs[i].x,state.segs[i].y,16,16);"
+        "  ctx.fillStyle='#fff';ctx.fillText('\\u25C6 '+state.score,8,12);"
+        "}"
+        "function loop(){var now=performance.now();update((now-t0)/16);t0=now;draw();requestAnimationFrame(loop);}"
+        "requestAnimationFrame(loop);"
+        "</script></body></html>"
+    )
+    rep = run_micro_probes(html, out_path=out)
+    assert rep["ok"] is True, rep["errors"]
+    assert rep["errors"] == []
+    # Nothing in the harness grades these as FPGA rule errors either.
+    blob = " ".join(rep["errors"] + rep["warnings"]).lower()
+    for token in ("object.keys", "performance.now", "splice", "fpga", "jmr rule"):
+        assert token not in blob, f"FPGA-only rule {token!r} surfaced as a gate: {blob}"
+
+
+def test_unused_assets_recognizes_jmr_spr_sheet_references(tmp_path):
+    """/640png: sheets are addressed as jmr:spr:N, never by filename.
+    CENTIPED 20260902_230904 shipped 100/100 with `unused_assets=8` noise in
+    every fix prompt. STEM-N.png counts as referenced via jmr:spr:N, via a
+    dynamic "jmr:spr:" + i (Chrome-working, FPGA-illegal — teach, don't
+    flag as unused), or via window.JMR_SPR listing."""
+    from tools import _check_unused_assets, _jmr_sheet_referenced
+
+    game = tmp_path / "CENTIPED"
+    game.mkdir()
+    out = game / "CENTIPED.html"
+    for i in range(3):
+        (game / f"CENTIPED-{i}.png").write_bytes(b"\x89PNG")
+    (game / "orphan.png").write_bytes(b"\x89PNG")
+
+    literal = '<script>var S0=new Image();S0.src="jmr:spr:0";var S1=new Image();S1.src="jmr:spr:1";</script>'
+    warns = _check_unused_assets(literal, out)
+    flagged = " ".join(warns)
+    assert "CENTIPED-0.png" not in flagged and "CENTIPED-1.png" not in flagged
+    assert "CENTIPED-2.png" in flagged   # sheet 2 truly unused
+    assert "orphan.png" in flagged        # non-JMR file still flagged
+
+    dynamic = '<script>for(var i=0;i<3;i++){var im=new Image();im.src="jmr:spr:"+i;}</script>'
+    warns = _check_unused_assets(dynamic, out)
+    flagged = " ".join(warns)
+    assert "CENTIPED-" not in flagged
+    assert "orphan.png" in flagged
+
+    listed = '<script>window.JMR_SPR = ["CENTIPED-0.png","CENTIPED-1.png","CENTIPED-2.png"];</script>'
+    assert not [w for w in _check_unused_assets(listed, out) if "CENTIPED-" in w]
+
+    # Helper edge cases: no jmr usage at all / non-sheet filename.
+    assert _jmr_sheet_referenced("CENTIPED-0.png", "<canvas></canvas>") is False
+    assert _jmr_sheet_referenced("hero.png", 'S0.src="jmr:spr:0"') is False
+
+
 def test_simulator_placeholder_art_helper_still_detects_boxes():
     """Detector kept for diagnostics; harness no longer fails the run on it."""
     from tools import simulator_placeholder_art_soft_warning
@@ -260,6 +384,13 @@ def test_jmr_png_enables_sprite_pipeline():
     assert a._simulator_mode
     a.set_simulator_mode(True)
     a.set_jmr_png_mode(False)
+    assert not a.media_pipeline_enabled()
+
+
+def test_jmr_png_wireframe_disables_sprite_pipeline():
+    a = GameAgent(model="stub", out_path=Path("games/test_jmr_wf.html"))
+    a.set_jmr_png_mode(True)
+    a._goal = "Build a 2D wireframe vector tank game, glowing lines on black"
     assert not a.media_pipeline_enabled()
 
 
