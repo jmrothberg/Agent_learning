@@ -120,3 +120,58 @@ def test_plan_incomplete_retry_replaces_failed_blob(tmp_path: Path):
     assert len(planning_msgs) == 1
     assert planning_msgs[0]["content"] == retry
     assert len(planning_msgs[0]["content"]) < len(failed)
+
+
+def test_lean_compact_drops_untagged_plan_essay(tmp_path: Path):
+    """DIGDUGD3: 30k untagged essay must not ride into first-build prefill."""
+    agent = _make_agent(tmp_path)
+    essay = "Let me think about mechanics. " * 800
+    agent._messages = [{
+        "role": "assistant",
+        "phase": "planning",
+        "content": (
+            essay
+            + "<plan>Mechanics: dig tunnels</plan>"
+            + "<criteria>Basic: ArrowRight moves player</criteria>"
+            + "<probes>[{\"name\":\"input_moves_player\",\"expr\":\"true\"}]</probes>"
+        ),
+    }]
+    assert agent._should_pre_lean_plan_before_first_build() is True
+    agent._lean_compact_planning_message()
+    kept = agent._messages[0]["content"]
+    assert "Let me think about mechanics" not in kept
+    assert "<criteria>" in kept
+    assert "<probes>" in kept
+    assert "input_moves_player" in kept
+
+
+def test_jmr_pre_lean_fires_on_modest_untagged_prose(tmp_path: Path):
+    agent = _make_agent(tmp_path)
+    agent.set_jmr_png_mode(True)
+    agent._messages = [{
+        "role": "assistant",
+        "phase": "planning",
+        "content": (
+            ("FPGA notes. " * 80)
+            + "<plan>Mechanics: tiles</plan>"
+            + "<criteria>Basic: moves</criteria>"
+            + "<probes>[]</probes>"
+        ),
+    }]
+    assert agent._should_pre_lean_plan_before_first_build() is True
+
+
+def test_full_html_keeps_short_tagged_plan(tmp_path: Path):
+    """Media/full-HTML: a crisp tagged plan is not pre-leaned away."""
+    agent = _make_agent(tmp_path)
+    agent._session_assets = {"hero": tmp_path / "hero.png"}
+    agent._messages = [{
+        "role": "assistant",
+        "phase": "planning",
+        "content": (
+            "<plan>Mechanics: ship flies</plan>"
+            "<criteria>Basic: moves</criteria>"
+            "<probes>[]</probes>"
+        ),
+    }]
+    assert agent._should_pre_lean_plan_before_first_build() is False

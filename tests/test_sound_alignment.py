@@ -92,6 +92,17 @@ def test_local_first_build_nudge_only_for_local_backend(tmp_path: Path):
     assert cloud_agent._local_first_build_nudge() == ""
 
 
+def test_jmr_first_build_nudge_does_not_demand_sprite(tmp_path: Path):
+    agent = _make_agent(tmp_path, backend_name="ollama")
+    agent.set_jmr_png_mode(True)
+    for i in range(10):
+        agent._session_assets[f"pose_{i}"] = tmp_path / f"p{i}.png"
+    body = agent._local_first_build_nudge()
+    assert "jmr:spr" in body
+    assert "SPRITE DRAW" not in body
+    assert "Keep first-build code compact" not in body
+
+
 def test_local_skeleton_guard_fallback_on_low_overlap(tmp_path: Path):
     agent = _make_agent(tmp_path, backend_name="ollama")
     agent._session_assets = {"player_ship": tmp_path / "player_ship.png"}

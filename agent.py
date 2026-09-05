@@ -2357,25 +2357,53 @@ class GameAgent(
     # VERBATIM to agent_memory.MemoryRetrievalMixin (GameAgent inherits them).
 
     _PLAN_ELIDE_RE = re.compile(r"<plan>.*?</plan>", re.DOTALL)
+    # Same tags measure_plan_reply uses — keep structured Phase-A, drop essay.
+    _PLAN_KEEP_TAGS_RE = re.compile(
+        r"<(plan|criteria|probes|assets|sounds|videos)>.*?</\1>",
+        re.DOTALL | re.IGNORECASE,
+    )
+
+    def _planning_keep_structured_tags(self, content: str) -> str:
+        """Keep Phase-A tags; drop untagged essay (DIGDUGD3 ~30k preamble).
+
+        Other coding agents compact narrative and retain structured state.
+        A huge untagged plan essay in first-build prefill caused a silent
+        0-token stall; inner <plan> elision alone saved 707 chars.
+        """
+        if not content:
+            return content
+        matches = list(self._PLAN_KEEP_TAGS_RE.finditer(content))
+        if not matches:
+            if len(content) > 4000:
+                return (
+                    "<plan>[plan prose elided after first build to save local "
+                    "context; criteria/probes retained]</plan>"
+                )
+            return content
+        parts: list[str] = []
+        for m in matches:
+            block = m.group(0)
+            tag = (m.group(1) or "").lower()
+            if tag == "plan" and len(block) > 2000:
+                block = (
+                    "<plan>[plan prose elided after first build to save local "
+                    "context; criteria/probes retained]</plan>"
+                )
+            parts.append(block)
+        return "\n".join(parts)
 
     def _lean_compact_planning_message(self) -> None:
-        """Elide the verbose <plan> prose from the retained Phase-A assistant
-        turn (lean mode, after first build). The plan's <criteria>/<probes>
-        were already extracted into self._criteria / self._probes and survive
-        compaction independently, so the full plan prose re-loading on every
-        coder prefill is pure overhead for a local model. Idempotent."""
+        """Drop untagged Phase-A essay (and stub a huge <plan>) from the
+        retained planning turn so first-build / later prefills stay small.
+        criteria/probes already live on self._criteria / self._probes.
+        Idempotent."""
         for msg in self._messages:
             if msg.get("phase") != "planning":
                 continue
             content = msg.get("content") or ""
-            if "<plan>" not in content or "[plan prose elided" in content:
+            if "[plan prose elided" in content and "<criteria>" not in content:
                 return
-            new_content = self._PLAN_ELIDE_RE.sub(
-                "<plan>[plan prose elided after first build to save local "
-                "context; criteria/probes retained]</plan>",
-                content,
-                count=1,
-            )
+            new_content = self._planning_keep_structured_tags(content)
             if new_content != content:
                 msg["content"] = new_content
                 self._trace({
@@ -2397,7 +2425,10 @@ class GameAgent(
         ]
         n_assets = len(self._session_assets)
         n_sounds = len(self._session_sounds)
-        if n_assets >= 10 or n_sounds >= 6:
+        jmr = bool(getattr(self, "_jmr_png_mode", False))
+        # Compact-loader hint is for media/full-HTML sprite() games. /640png
+        # already packs poses onto STEM-N.png — don't fight jmr:spr with it.
+        if (not jmr) and (n_assets >= 10 or n_sounds >= 6):
             parts.append(
                 "LOCAL MODEL SAFETY NUDGE: Keep first-build code compact to "
                 "avoid token loops. Use short name arrays + loops for media "
@@ -2406,19 +2437,36 @@ class GameAgent(
                 "ASSETS/SOUNDS blocks above."
             )
         if n_assets >= 1:
-            parts.append(
-                "SPRITE DRAW (required): PNG paths were generated above — "
-                "every tower/enemy/projectile draw path MUST call "
-                "`sprite(key)` or `ctx.drawImage` with the EXACT asset names. "
-                "Do NOT draw entities with fillRect/arc placeholders when a "
-                "PNG exists; the harness counts undrawn sprites as a failure."
-            )
+            if jmr:
+                parts.append(
+                    "JMR DRAW: packed STEM-N.png sheets — paint with "
+                    "`jmr:spr:N` / blitSpr. Do NOT call sprite() or "
+                    "drawImage a leftover pose filename."
+                )
+            else:
+                parts.append(
+                    "SPRITE DRAW (required): PNG paths were generated above — "
+                    "every tower/enemy/projectile draw path MUST call "
+                    "`sprite(key)` or `ctx.drawImage` with the EXACT asset names. "
+                    "Do NOT draw entities with fillRect/arc placeholders when a "
+                    "PNG exists; the harness counts undrawn sprites as a failure."
+                )
         return "\n".join(parts)
 
+    def _planning_untagged_prose_chars(self, content: str) -> int:
+        tagged = sum(len(m.group(0)) for m in self._PLAN_KEEP_TAGS_RE.finditer(content or ""))
+        return max(0, len(content or "") - tagged)
+
     def _should_pre_lean_plan_before_first_build(self) -> bool:
-        """Gate pre-iter-1 plan prose elision: local backend + heavy context."""
+        """Gate pre-iter-1 plan elision: local backend + leftover essay.
+
+        /640png: FPGA context is tight — drop untagged prose early.
+        Full HTML: keep a crisp tagged plan; only strip a large essay so
+        stronger local models can still use a short structured plan.
+        """
         if not self._is_local_backend():
             return False
+        jmr = bool(getattr(self, "_jmr_png_mode", False))
         if len(self._session_assets) >= 10 or len(self._session_sounds) >= 6:
             return True
         for msg in self._messages:
@@ -2427,6 +2475,12 @@ class GameAgent(
             content = msg.get("content") or ""
             if "[plan prose elided" in content:
                 return False
+            prose = self._planning_untagged_prose_chars(content)
+            # FPGA: any real essay. Full HTML: only a large untagged dump.
+            if jmr and prose > 400:
+                return True
+            if (not jmr) and prose > 2500:
+                return True
             if len(content) > 8000:
                 return True
             m = self._PLAN_ELIDE_RE.search(content)

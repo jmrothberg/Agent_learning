@@ -20,7 +20,9 @@ improvement”** first (read order, harness vs memory, canonical fix loop).
 A coding agent driving a **local model** (qwen3.6 27B/35B via MLX in-process or Ollama) to write,
 test, and iteratively fix **single-file HTML5 games** with real Chromium verification,
 **FLUX2-klein** sprites on macOS (Z-Image-Turbo on Linux), Stable Audio, optional LTX-2.5 (Mac) /
-Wan2.2 cutscenes.
+Wan2.2 cutscenes. Two tracks: **full HTML** (`sprite()`, audio, video — local models are getting
+good at these) and **FPGA `/640` `/640png`** (640×480, packed `STEM-N.png`, `jmr:spr:N`). Do not
+collapse one into the other.
 
 - `chat.py` — Textual TUI (default; visible Chromium). `/wait` **ON** (`local_manual`) so each iter pauses for inspection. `/help` for slash commands.
 - `coder.py` — headless CLI (`--backend {auto,ollama,mlx,mlx-server}`)
@@ -69,7 +71,7 @@ MLX upgrades: MiniMax-M3 (`minimax_m3.py` copy after mlx-lm upgrade), GLM-5.2
 - `QWEN_REASONING_EFFORT` — Qwen3.8 effort (`xhigh|medium|low`). Unset → stage-aware: plan/first build `medium`, fix/patch turns `low`
 - `MLX_PROMPT_CACHE` — in-process MLX cross-turn KV prompt cache (default **on**; `0` disables). Keeps the previous turn's cache, trims to the shared prefix, prefills only the new suffix. Trace `stream_done.cached_prompt_tokens` / `ttft_s`
 - `AGENT_PREFIX_CACHE_FRIENDLY` — append-only history for KV prefix reuse. Unset → on for `mlx` + `mlx-server` (oMLX); `1` also Ollama; `0` eager per-turn elision as before. Per-turn HTML elision is deferred until projected prompt ≥ 80% of `AGENT_COMPACT_TOKEN_CEILING`, then runs as one batch (trace `prune_deferred_prefix_cache`). oMLX users: keep `cache.hot_cache_max_size` > 0 in `~/.omlx/settings.json` (session traces `prefix_cache_status`; TUI warns when off)
-- `AGENT_CODE_CRITIC` — `/critic` sidecar (`auto|on|off`; TUI `/critic`, `coder.py --critic`). **auto** = ON on oMLX / cloud (parallel), off on in-process MLX and loopback Ollama. `/allroles` forces on. Traces: `code_critic_spawned` / `code_critic_done` / `code_critic_skipped` / `code_critic_inline`
+- `AGENT_CODE_CRITIC` — `/critic` sidecar (`auto|on|off`; TUI `/critic`, `coder.py --critic`). **auto** = ON on oMLX / cloud (parallel), off on in-process MLX and loopback Ollama. TUI **`/server on`** or **`/model N server`** puts dense Qwen3.8-27B on oMLX so auto turns on. `/allroles` forces on.
 - `CODING_BOX_NUM_CTX` — context window (default **100000**); compaction fires near ~70% (`_COMPACT_PRESSURE`)
 - `AGENT_COMPACT_TOKEN_CEILING` — absolute token ceiling for compaction (optional override)
 - `AGENT_ENABLE_MEMORY_RELIEF` — set `0` to disable auto VRAM/RAM relief (default **on**). **MLX:** unload diffusers when free RAM &lt; `AGENT_MEMORY_RELIEF_MIN_AVAILABLE_GB` (default 64) or phys RAM ≤ `AGENT_MEMORY_RELIEF_MAX_PHYS_GB`; skips small MLX models (&lt; `AGENT_MEMORY_RELIEF_SMALL_MODEL_DISK_GB`, default 50 GB on disk). **Linux/Ollama+CUDA:** always unload in-process Z-Image/Stable-Audio after sprite/sound gen and before coder streams so the LLM is not forced into CPU offload on 2×24 GB boxes.
@@ -101,7 +103,7 @@ Stock PyPI `mlx-lm` / in-process `mlx-vlm` 0.6.17 lack those load paths
 
 | Concern | Setting |
 |---------|---------|
-| **TUI pick Flash** | `/model` / `/load` / `/launch` on DeepSeek-V4-Flash, GLM-5.3-Flash, or Qwen3.8-Flash-Next **auto-starts oMLX** (`backend.ensure_omlx_server`) and routes that session to `:8000`. Typing a goal **without** `/load` uses whatever oMLX already has `loaded=true` (BATTLEZ2 20260904). GLM-5.2 / dense Qwen3.8-27B / MiniMax stay in-process. GLM-5.3 hidden CoT shows as **thinking N tok** on Activity (not a dead 0-token wait) |
+| **TUI pick Flash** | `/model` / `/load` / `/launch` on DeepSeek-V4-Flash, GLM-5.3-Flash, or Qwen3.8-Flash-Next **auto-starts oMLX** and routes that session to `:8000`. Dense Qwen3.8-27B / GLM-5.2 / MiniMax stay in-process unless TUI **`/server on`** or **`/model N server`**. Typing a goal **without** `/load` uses whatever oMLX already has `loaded=true`. |
 | **Prompt cache (check first)** | `cache.hot_cache_max_size` ≠ `"0"` (e.g. `"32GB"`). Admin UI: **Memory Management → Memory Limit (In-Memory Hot Cache)** — **not** the CACHE panel. Default `"0"` disabled; enabling cut a repeated ~24K prompt **51s → 4.6s**. oMLX CLI rejects `"20%"` — use absolute GB in `settings.json` / `omlx serve` |
 | Parallel agents | `LLM_BACKEND=mlx-server` + `MLX_SERVER_URL=http://127.0.0.1:8000` — one resident model, continuous batch |
 | Idle unload / “server quit” | Global idle timeout **None**; **pin** the coder model; per-model TTL off |

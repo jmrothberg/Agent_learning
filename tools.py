@@ -613,20 +613,22 @@ _RECOLOR_PROBE_RE = re.compile(
 
 
 def _effectful_probe_sort_key(probe: dict) -> tuple[int, int]:
-    """Order within the side-effecting probe group: recolor/read checks
-    before movement dispatches so hops do not invalidate recolor probes."""
+    """Order within the side-effecting probe group: recolor, then the
+    model's input_moves_player, then other effectful autos (chasers).
+
+    Recolor-before-hop is Q*bert (cube_recolors must not run after a hop).
+    Movement-before-auto-chaser is DIGDUGD3: auto_chaser_moves_autonomously
+    dispatched keys and poisoned the model's input_moves_player.
+    """
     name = str(probe.get("name") or "").lower()
     expr = str(probe.get("expr") or "")
     blob = f"{name} {expr}".lower()
     if _RECOLOR_PROBE_RE.search(blob):
         return (0, 0)
-    if (
-        "input_moves" in name
-        or "moves_player" in name
-        or ("dispatchevent" in blob and "arrow" in blob)
-    ):
-        return (2, 0)
-    return (1, 0)
+    # Name only — auto_chaser also dispatches Arrow keys (DIGDUGD3).
+    if "input_moves" in name or "moves_player" in name or "player_moves" in name:
+        return (1, 0)
+    return (2, 0)
 
 
 def _html_referenced_asset_count(html_text: str) -> int:
@@ -3349,6 +3351,22 @@ def _jmr_sheet_referenced(filename: str, html_text: str) -> bool:
     return _JMR_SPR_DYNAMIC_RE.search(html_text) is not None
 
 
+def _jmr_packed_pose_leftover(filename: str, html_text: str) -> bool:
+    """True when `filename` is a pose PNG left next to packed STEM-N.png.
+
+    /640png packing keeps entity_pose.png sources on disk (never deleted)
+    while HTML paints `jmr:spr:N`. Flagging them as unused_assets coaches
+    the model to drawImage('digger_idle.png') (DIGDUGD3). orphan.png and
+    other non-pose leftovers still warn.
+    """
+    if "jmr:spr:" not in (html_text or "") and "JMR_SPR" not in (html_text or ""):
+        return False
+    if _JMR_SHEET_FILE_RE.match(filename or ""):
+        return False
+    stem = (filename or "").rsplit(".", 1)[0]
+    return "_" in stem
+
+
 def _check_unused_assets(
     html: str, out_path: "Path | None"
 ) -> list[str]:
@@ -3438,6 +3456,9 @@ def _check_unused_assets(
                 # referenced when the HTML uses jmr:spr:N, builds the URL
                 # dynamically ("jmr:spr:" + i), or lists it in window.JMR_SPR.
                 if kind == "sprite" and _jmr_sheet_referenced(name, html_text):
+                    continue
+                # Packed pose leftovers next to STEM-N.png (jmr:spr in HTML).
+                if kind == "sprite" and _jmr_packed_pose_leftover(name, html_text):
                     continue
                 out_warnings.append(
                     f"{kind} {name!r} was generated to {rel!r} but is "

@@ -263,6 +263,25 @@ def test_unused_assets_recognizes_jmr_spr_sheet_references(tmp_path):
     assert _jmr_sheet_referenced("hero.png", 'S0.src="jmr:spr:0"') is False
 
 
+def test_unused_assets_skips_jmr_packed_pose_leftovers(tmp_path):
+    """DIGDUGD3: pose PNGs next to packed STEM-N.png are not unused_assets."""
+    from tools import _check_unused_assets
+
+    game = tmp_path / "DIGDUG"
+    game.mkdir()
+    out = game / "DIGDUG.html"
+    (game / "DIGDUG-0.png").write_bytes(b"\x89PNG")
+    (game / "digger_idle.png").write_bytes(b"\x89PNG")
+    (game / "monster_walk1.png").write_bytes(b"\x89PNG")
+    (game / "orphan.png").write_bytes(b"\x89PNG")
+    html = '<script>window.JMR_SPR=["DIGDUG-0.png"];S0.src="jmr:spr:0";</script>'
+    flagged = " ".join(_check_unused_assets(html, out))
+    assert "digger_idle.png" not in flagged
+    assert "monster_walk1.png" not in flagged
+    assert "orphan.png" in flagged
+    assert "DIGDUG-0.png" not in flagged
+
+
 def test_simulator_placeholder_art_helper_still_detects_boxes():
     """Detector kept for diagnostics; harness no longer fails the run on it."""
     from tools import simulator_placeholder_art_soft_warning

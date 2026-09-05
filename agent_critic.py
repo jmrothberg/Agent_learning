@@ -23,6 +23,10 @@ from memory import (
 )
 from tools import format_report_for_model
 from agent import AgentEvent
+from agent_helpers import (
+    _GRID_CHASE_AUTO_PROBE_NAMES,
+    grid_chase_class_in_goal,
+)
 
 
 # ---- Point-and-click VLM grounding (bg object locations) -------------------
@@ -542,6 +546,15 @@ class CriticMixin:
 
             if not name or not expr or name in existing_names:
 
+                continue
+
+            # DIGDUGD3: skip maze-chase autos on dig/tunnel (and snake) grids.
+            # Wall / solid-tile probes still inject. Class phrases, not titles.
+            if (
+                recipe.id == "canvas-grid-navigation"
+                and name in _GRID_CHASE_AUTO_PROBE_NAMES
+                and not grid_chase_class_in_goal(self._goal or "")
+            ):
                 continue
 
             if self._probes is None:

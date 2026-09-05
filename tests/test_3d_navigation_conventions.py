@@ -69,6 +69,14 @@ def test_input_moves_player_probe_threejs_for_fps_goal() -> None:
     assert "player.x" in expr or "p.x" in expr
 
 
+def test_input_moves_player_probe_grid_snaps_tx_ty() -> None:
+    """DIGDUGD3: default 2D probe must notice tx/ty, not only player.x."""
+    expr = input_moves_player_probe_expr(goal="underground tunnel soil grid")
+    assert "tx" in expr
+    assert "ty" in expr
+    assert "ArrowRight" in expr
+
+
 def test_input_moves_player_probe_wireframe_for_battlezone() -> None:
     expr = input_moves_player_probe_expr(
         goal="battlezone wireframe vector tank first person",

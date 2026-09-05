@@ -160,6 +160,25 @@ def test_effectful_probes_sort_recolor_before_movement():
     assert "effectful.sort" in loop
 
 
+def test_effectful_probes_sort_input_moves_before_auto_chaser():
+    """DIGDUGD3: auto_chaser_moves_autonomously must not run before input_moves."""
+    from tools import _effectful_probe_sort_key
+
+    recolor = {"name": "cube_recolors", "expr": "await hop()"}
+    moves = {
+        "name": "input_moves_player",
+        "expr": "dispatchEvent(new KeyboardEvent('keydown',{code:'ArrowRight'}))",
+    }
+    chaser = {
+        "name": "auto_chaser_moves_autonomously",
+        "expr": "dispatchEvent(new KeyboardEvent('keydown',{code:'ArrowLeft'}))",
+    }
+    assert _effectful_probe_sort_key(recolor) < _effectful_probe_sort_key(moves)
+    assert _effectful_probe_sort_key(moves) < _effectful_probe_sort_key(chaser)
+    # Arrow dispatch in a chaser expr must not steal the movement bucket.
+    assert _effectful_probe_sort_key(chaser)[0] == 2
+
+
 # ---------------------------------------------------------------------------
 # 2. ACTION_DRAWN_NOT_SPRITED persistence downgrade (source-pinned,
 #    mirroring test_undrawn_gates_first_occurrence_then_demotes)

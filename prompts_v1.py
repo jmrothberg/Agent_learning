@@ -1373,12 +1373,18 @@ from modality import THREE_D_KEYWORDS as _3D_KEYWORDS
 from modality import detect_3d_intent as _detect_3d_intent
 
 # Modality-aware dynamic probe for input_moves_player (3D navigation fix 2026-06-30).
+# Default = 2D (full HTML or /640png tile). Snap x/y AND tx/ty so a grid
+# game that stores tiles as tx is not failed by an FPS-shaped x-only probe
+# (DIGDUGD3). FPS / wireframe / mode7 still use the specialized exprs below.
 _INPUT_MOVES_PLAYER_DEFAULT = (
-    "(async()=>{if(!window.state||!state.player)return false;const x0=state.player.x;"
+    "(async()=>{if(!window.state)return false;"
+    "const p=state.player||state.digger||state.hero;if(!p)return false;"
+    "const snap=o=>[o.x,o.y,o.tx,o.ty,o.gx,o.gy,o.col,o.row,o.gridX,o.gridY];"
+    "const a=snap(p);"
     "window.dispatchEvent(new KeyboardEvent('keydown',{code:'ArrowRight',bubbles:true}));"
     "await new Promise(r=>setTimeout(r,250));"
     "window.dispatchEvent(new KeyboardEvent('keyup',{code:'ArrowRight',bubbles:true}));"
-    "return state.player.x!==x0;})()"
+    "const b=snap(p);return a.some((v,i)=>v!==b[i]);})()"
 )
 _INPUT_MOVES_PLAYER_THREEJS_FPS = (
     "(async()=>{if(!window.state||!state.player)return false;const p=state.player;"

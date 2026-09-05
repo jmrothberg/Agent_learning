@@ -171,14 +171,14 @@ oMLX model settings instead.
 | RAM | First real chat completion loads weights into unified memory (~150 GB+). `/model` alone does **not**. macOS “Cached Files” for the safetensors is disk cache, not a loaded model. |
 | CLI / TUI | Chat auto-starts oMLX; binary searched on `PATH`, `~/.omlx/bin/omlx`, or `~/MLX_Models/.omlx-venv/bin/omlx` |
 | Hot prompt cache | `cache.hot_cache_max_size` e.g. `"32GB"` — **CLI rejects `"20%"`** |
-| GLM-5.2 / Qwen3.8-27B / MiniMax | Stay **in-process** MLX (separate folders). Flash / GLM-5.3 / Flash-Next do not replace them. |
+| GLM-5.2 / Qwen3.8-27B / MiniMax | Default **in-process** MLX. TUI: `/server on` or `/model N server` to run them on oMLX (`/critic auto` then ON). Flash / GLM-5.3 / Flash-Next already use oMLX. |
 | Leaving Flash → GLM-5.2 / GLM-5.3 | Chat **unloads** other oMLX models first. Qwen Flash-Next (~198GB) + GLM-5.3 6-bit (~289GB) exceeds the Metal cap (HTTP 507). Unpin Flash-Next in `/admin` if it was pinned. |
 
-**TUI — no hand-started server for Flash:** `/list` → `/model` (or `/load` /
-`/launch`) on DeepSeek-V4-Flash calls `ensure_omlx_server()` — starts
-`omlx serve --model-dir ~/MLX_Models --hot-cache-max-size 32GB` (or opens
-`oMLX.app`) if `:8000` is down, then routes **that** session over HTTP.
-Override base URL with `OMLX_SERVER_URL` (default `http://127.0.0.1:8000`).
+**TUI — no env vars for the server:** `/list` → `/model` (or `/load` /
+`/launch`) on Flash auto-starts oMLX. For **Qwen3.8-27B** (or any in-process
+MLX pick) type **`/server on`** or **`/model N server`** — same oMLX path,
+and `/critic auto` turns on. `/help server`. Override base URL with
+`OMLX_SERVER_URL` (default `http://127.0.0.1:8000`).
 
 **Parallel batches** (oMLX must already be up — `batch_parallel` does not auto-start):
 ```bash
@@ -446,7 +446,7 @@ checked model-free by `eval/eval_prompts_plan.py --coverage`.
 (**TUI default ON** — `local_manual`; pause after each iter) · `/games [N]` (load a curated prompt) · `/ctx N` (context window) ·
 `/assets <png|folder>` (stage your sprites for next `/new`) · `/seed <game.html>` (continue an existing game) ·
 `/ref <path>` (VLM glance only — not for copying sprites) · `/check [<N|name>]` (on-demand screenshot judge;
-legacy `/check with <model>` still works) · `/media off` / `/640` (simulator: 640×480, no sidecar media) · `/640png` (same JMR walls + generated `STEM-N.png` sheets, `jmr:spr:N`) ·
+legacy `/check with <model>` still works) · `/media off` / `/640` (simulator: 640×480, no sidecar media) · `/640png` (same JMR walls + generated `STEM-N.png` sheets, `jmr:spr:N` — a limited FPGA design, not a dumbed-down full HTML game) ·
 `/ltx` `/wan` (pin video engine) · `/goodgame` (copy the trio into tracked `goodgame/`).
 
 `/check` is a manual command. The only auto path is `/mode local_plus_review with <model> --auto-apply`, and that still runs only when `/wait` is off.

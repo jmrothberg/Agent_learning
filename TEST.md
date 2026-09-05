@@ -40,7 +40,7 @@ Do **not** grep `inspect.getsource(agent)` or `inspect.getsource(GameAgent)` for
 | **Memory / prompts** | `test_retrieval.py`, `test_prompt_library*.py`, `test_opening_book_memory.py`, `test_open_domain_routing.py`, `test_3d_navigation_conventions.py` | Genre-free retrieval; plan nudges data-driven; 3D/wireframe/modality skeletons; **`test_prompt_library.py`** requires every `prompt_640` to include `On-screen sizes:` |
 | **Trace / diagnostics** | `test_trace_diagnostics.py`, `test_patch_outcome_trace.py`, `test_failure_class_routing.py` | `failure_class`, `iter_summary`, ephemeral events |
 | **Backend / streaming** | `test_ollama_io.py`, `test_max_tokens_signal.py`, `test_repetition.py`, `test_deliberation_thresholds.py`, `test_backend_detection.py` | Sampling, repetition latch; **mlx-server `is_vlm()` matches `/list` [VLM] (Flash-Next oMLX, GLM-5.3-Flash)**; **detect_backend prefers oMLX `loaded=true` (BATTLEZ2 glm5_next in-process miss)**; **in-process MLX warm-load before Playwright + FD CLOEXEC (BATTLEZ4 Qwen3.8 `fds_to_keep`)** |
-| **TUI (`chat.py`)** | `test_tui_help.py`, `test_tui_keybindings_and_status.py`, `test_wait_mode_defaults.py`, `test_status_panel.py`, `test_check_routing.py`, `test_ask_mode.py`, `test_unqueue.py`, `test_modelall_command.py`, `test_simulator_mode.py`, `test_staged_assets_cmd.py`, `test_stream_visibility.py` | Slash-command help matches behavior (`/critic` source review, three-review `/help feedback-flows`); `/wait` defaults ON; `/check` / `/ask` / `/unqueue` / `/modelall` / `/assets` routing; simulator `/640`; `/640png` JMR + packed STEM-N.png atlases; **thinking-token Activity (GLM CoT ≠ dead stream)**; **`/showthinking` dumps CoT to log (default off)** |
+| **TUI (`chat.py`)** | `test_tui_help.py`, `test_tui_keybindings_and_status.py`, `test_wait_mode_defaults.py`, `test_status_panel.py`, `test_check_routing.py`, `test_ask_mode.py`, `test_unqueue.py`, `test_modelall_command.py`, `test_tui_server_command.py`, `test_simulator_mode.py`, `test_staged_assets_cmd.py`, `test_stream_visibility.py` | Slash-command help matches behavior (`/critic` source review, three-review `/help feedback-flows`); `/server on` / `/model N server` routes MLX through oMLX so `/critic auto` is ON; `/wait` defaults ON; `/check` / `/ask` / `/unqueue` / `/modelall` / `/assets` routing; simulator `/640`; `/640png` JMR + packed STEM-N.png atlases; **thinking-token Activity (GLM CoT ≠ dead stream)**; **`/showthinking` dumps CoT to log (default off)** |
 
 ### Trace-backed regression guards
 
@@ -62,6 +62,7 @@ These pin fixes from specific production traces. Prefer **extending** an existin
 | `test_trace_diagnostics.py` (`test_undrawn_present_counts_soft_warnings_only`, `test_class_harness_bug_when_undrawn_demoted_to_advisory_only`) | run_19: advisory undrawn must not force `memory_gap` over green-probe soft gates |
 | `test_wireframe_vector_routing.py` (`test_640png_appendix_keeps_wireframe_class`) | BATTLE10: `/640png` "drawImage columns" must not route vector-stroke → `canvas-puzzle-grid` |
 | `test_probe_gate.py` (`test_b1_3d_negated_threejs_is_not_3d_intent`), `test_skeleton_2d_arcade_routing.py` (`test_640png_arcade_does_not_inherit_threejs_skeleton`), `test_simulator_mode.py` (`test_jmr_png_no_threejs_footer_still_pins_sheets_not_webgl`, `test_jmr_png_playbook_retrieve_drops_inline_pixel_maps`), `test_3d_navigation_conventions.py` (`test_playbook_suppression_640png_blocks_inline_pixel_maps`) | DIGDUGD2: `/640png` "no three.js" is a prohibition, not 3D intent — grid skeleton + PNG sheets, not `canvas_3d_basic` / inline pixel-maps |
+| `test_plan_crisp_prevention.py` (`test_lean_compact_drops_untagged_plan_essay`, `test_jmr_pre_lean_fires_on_modest_untagged_prose`, `test_full_html_keeps_short_tagged_plan`), `test_visual_playtest_auto_probes.py` (`test_dig_tunnel_grid_skips_chase_auto_probes`), `test_simulator_mode.py` (`test_unused_assets_skips_jmr_packed_pose_leftovers`), `test_probe_ordering_and_cosmetic_gates.py` (`test_effectful_probes_sort_input_moves_before_auto_chaser`) | DIGDUGD3: drop untagged Phase-A essay before first-build; FPGA vs full-HTML pre-lean thresholds; dig/tunnel grids skip chase autos; leftover pose PNGs not unused; `input_moves_player` before auto-chaser |
 | `test_repetition.py` (`test_adjacent_spam_ignores_numbered_corner_table`, `test_adjacent_spam_still_fires_on_long_numbered_run`, `test_inline_data_bloat_grace_gate`) | BATTLE10: `c1..c4 = {x:0,y:0}` must not trip Window 4; identical-line spam still fires; `adjacent_line_spam` graced inside open `<html_file>`/`<patch>` |
 | `test_capability_round.py` (`test_polish_cap_zero_in_simulator_mode`) | `/640` + `/640png`: no polish turns after green; media mode keeps `_POLISH_TURN_CAP` |
 | `test_post_clean_truth_source.py` (`test_partial_patch_advisory_only_when_probes_green_and_no_page_errors`) | DOOM3DFI r1: partial patch stays advisory only when ok + all probes green + no page errors |
@@ -76,8 +77,9 @@ These pin fixes from specific production traces. Prefer **extending** an existin
 | `test_phase1_concurrent_critic_and_prewarm.py` (`test_code_critic_*`) | Code critic sidecar: `auto` ON only on parallel backends, `on`/`off`/env/`/allroles` override, explicit arg beats env; bullet parser (severity whitelist, anchor extraction, LGTM); harvest drops stale anchors and folds survivors into the queued next user turn; disabled → no spawn, cancel/harvest safe; `[CODE CRITIC]` + `[VLM-CRITIQUE]` survive clean-pass coaching suppression |
 | `test_backend_detection.py` (`test_omlx_unload_loaded_keeps_session_role_models`, `test_qwen38_critic_stage_runs_low_effort`) | `OMLX_SESSION_KEEP_MODELS` protects staged role models from per-stream unload; `_stage=critic` → Qwen `low` |
 | `test_status_panel_allroles.py` (`test_critic_command_sets_mode_and_status_line_explains_it`) | `/critic on|off|auto` one-word switch, bad arg rejected, `/allroles` counts as on, live agent label wins |
+| `test_tui_server_command.py` | `/server on` and `/model N server` route dense MLX through oMLX (no `LLM_BACKEND=mlx-server`); Ollama picks ignore `server`; `/help server` |
 | `test_prompt_library.py` (`test_prompt_640_keeps_first_person_view_for_wireframe_games`) | BATTLEZ2: every first-person wireframe entry keeps "first-person" + a view word (horizon/ahead/top-down) in `prompt_640` |
-| `test_simulator_mode.py` (`test_unused_assets_recognizes_jmr_spr_sheet_references`), `test_entity_render_check_and_autonomous_skip_trace.py` (`test_entity_not_rendered_skips_viewpoint_player_for_first_person_recipes`) | JMR `STEM-N.png` referenced via `jmr:spr:N`; viewpoint entity skipped for first-person / wireframe recipes |
+| `test_simulator_mode.py` (`test_unused_assets_recognizes_jmr_spr_sheet_references`, `test_unused_assets_skips_jmr_packed_pose_leftovers`), `test_entity_render_check_and_autonomous_skip_trace.py` (`test_entity_not_rendered_skips_viewpoint_player_for_first_person_recipes`) | JMR `STEM-N.png` referenced via `jmr:spr:N`; packed pose leftovers (`digger_idle.png`) skipped; viewpoint entity skipped for first-person / wireframe recipes |
 | `test_simulator_mode.py` (`test_fpga_only_rule_violations_never_fail_micro_probes`) | Teach-only policy: FPGA-illegal but Chrome-working constructs keep micro-probe `ok=True` |
 
 **Stub regression banks** (no model; loaded by pytest): `eval/golden_feedback_flows.jsonl`, `eval/modality_scenarios.jsonl`, `eval/seed_edit_scenarios.jsonl`, `eval/failure_class_routing.jsonl`.
@@ -293,11 +295,12 @@ Every `tests/test_*.py` must appear below (enforced by `tests/test_docs_index.py
 | `test_system_tests.py` | `test_task_ledger.py` | `test_thinking_strip.py` |
 | `test_tier1_2.py` | `test_todos_artifact.py` | `test_token_aware_compaction.py` |
 | `test_trace_diagnostics.py` | `test_tui_help.py` | `test_tui_keybindings_and_status.py` |
-| `test_tune_serial_pass.py` | `test_unqueue.py` | `test_videos.py` |
-| `test_vision_coaching.py` | `test_visual_critic_failsafe.py` | `test_visual_playtest_auto_probes.py` |
-| `test_visual_playtest_coverage.py` | `test_visual_playtest_matcher.py` | `test_visual_playtest_wiring.py` |
-| `test_vlm_checklist_plan_injection.py` | `test_vlm_classifier.py` | `test_vlm_facing_sanity.py` |
-| `test_wait_mode_defaults.py` | `test_warning_persistence_dedup.py` | `test_weak_model_hardening.py` |
-| `test_wireframe_vector_routing.py` | `test_wolfenstein_stuck_loop_fixes.py` | `test_zimage_snapshot_completeness.py` |
+| `test_tui_server_command.py` | `test_tune_serial_pass.py` | `test_unqueue.py` |
+| `test_videos.py` | `test_vision_coaching.py` | `test_visual_critic_failsafe.py` |
+| `test_visual_playtest_auto_probes.py` | `test_visual_playtest_coverage.py` | `test_visual_playtest_matcher.py` |
+| `test_visual_playtest_wiring.py` | `test_vlm_checklist_plan_injection.py` | `test_vlm_classifier.py` |
+| `test_vlm_facing_sanity.py` | `test_wait_mode_defaults.py` | `test_warning_persistence_dedup.py` |
+| `test_weak_model_hardening.py` | `test_wireframe_vector_routing.py` | `test_wolfenstein_stuck_loop_fixes.py` |
+| `test_zimage_snapshot_completeness.py` |
 
 <!-- END AUTO-TEST-INDEX -->
