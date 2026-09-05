@@ -50,6 +50,7 @@ Workflow:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import shutil
@@ -6956,19 +6957,6 @@ class CodingBoxApp(App):
             self._log_info(f"[yellow]Ollama placement:[/yellow] {_esc(self._ollama_placement_status)}")
         self._update_status()
 
-        if self.browser is None:
-            self.browser = LiveBrowser(run_seconds=3.0)
-            try:
-                await self.browser.start()
-            except Exception as e:
-                self._log_error(
-                    f"Could not launch Chromium: {e}\n"
-                    "Make sure you ran `playwright install chromium` and that you "
-                    "have a graphical display (this needs headless=False)."
-                )
-                self._session_done = True
-                return
-
         # Resolve the LLM backend (Ollama or MLX) and the model id within
         # it. Three sticky-staging tiers, in order of specificity:
         #   1. /model <N> or /load <N>  → both _next_backend AND _next_model
@@ -7066,6 +7054,41 @@ class CodingBoxApp(App):
         # Latch for the next /new — keeps the backend+model unless /load clears it.
         self._next_backend = info.name
         self._next_model = info.model
+
+        # Close Chromium BEFORE in-process MLX load. /new after GLM leaves
+        # Playwright pipes in the fd table; mlx_vlm.load then raises
+        # fds_to_keep (BATTLEZ8/9 20260904). GLM/oMLX HTTP skips this —
+        # it is MLXServerBackend, not MLXBackend.
+        if isinstance(self._session_backend, backend_mod.MLXBackend):
+            if self.browser is not None:
+                try:
+                    await self.browser.close()
+                except Exception:
+                    pass
+                self.browser = None
+            self._phase_label = "loading model"
+            self._update_status()
+            try:
+                await asyncio.to_thread(self._session_backend.warm_load)
+            except Exception as e:
+                self._log_error(f"MLX warm-load failed: {e}")
+                self._session_done = True
+                return
+
+        if self.browser is None:
+            self._phase_label = "starting browser"
+            self._update_status()
+            self.browser = LiveBrowser(run_seconds=3.0)
+            try:
+                await self.browser.start()
+            except Exception as e:
+                self._log_error(
+                    f"Could not launch Chromium: {e}\n"
+                    "Make sure you ran `playwright install chromium` and that you "
+                    "have a graphical display (this needs headless=False)."
+                )
+                self._session_done = True
+                return
 
         # Resolve staged model2 and model3
         self._session_backend2 = None
@@ -8314,6 +8337,14 @@ class CodingBoxApp(App):
 
 
 def main() -> int:
+    # Filter closed FDs out of multiprocessing spawn BEFORE Playwright
+    # or mlx_vlm.load. After GLM left Chromium running, Qwen3.8 died
+    # with fds_to_keep (BATTLEZ8/9 20260904). Install once for the
+    # process; GLM/oMLX HTTP does not spawn in this process.
+    try:
+        backend_mod._install_spawnv_passfds_filter()
+    except Exception:
+        pass
     # Pre-load diffuser pipelines NOW, before Textual mounts and before
     # Playwright/Chromium opens its IPC pipes. diffusers from_pretrained
     # forks a subprocess (via huggingface_hub / safetensors); doing that

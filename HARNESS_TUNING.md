@@ -184,6 +184,13 @@ bullet never reaches the prompt — broaden tags if a good bullet doesn’t fire
   (`reasoning_content`) already reset the stall clock but Activity stayed at
   0 tokens / "waiting for first token". TUI now counts thinking chunks live
   and does **not** print the chain-of-thought.
+- **Qwen3.8 / in-process MLX `fds_to_keep` after GLM/oMLX** (BATTLEZ2/4/5/6/7
+  `20260904`): switching to Qwen3.8-27B after GLM left Chromium running, then
+  `mlx_vlm.load` forked and died at 0 tokens
+  (`ValueError: bad value(s) in fds_to_keep`). Warm-load before a *new*
+  browser is not enough — `/new` reuses the live Playwright. Close Chromium
+  before in-process `warm_load`, then start it after; also filter closed FDs
+  out of `multiprocessing.util.spawnv_passfds`. GLM/oMLX HTTP is unchanged.
 
 **Compaction / context**
 

@@ -843,3 +843,85 @@ def test_ensure_omlx_server_fails_clearly(monkeypatch):
     )
     with pytest.raises(RuntimeError, match="oMLX"):
         backend.ensure_omlx_server(timeout_s=1.0)
+
+
+def test_mark_open_fds_noninheritable_is_safe():
+    """Must not raise — called on every in-process MLX cold load."""
+    backend._mark_open_fds_noninheritable()
+
+
+def test_mlx_fork_guard_disables_close_fds(monkeypatch):
+    """BATTLEZ7 20260904: Playwright-up + mlx_vlm.load → fds_to_keep.
+
+    The guard must force close_fds=False so fork_exec does not walk
+    Chromium's dangling pipes. GLM/oMLX HTTP does not use this path.
+    """
+    seen: dict = {}
+
+    class _FakePopen:
+        def __init__(self, *args, **kwargs):
+            seen["kwargs"] = kwargs
+
+    monkeypatch.setattr(backend.subprocess, "Popen", _FakePopen)
+    with backend._mlx_subprocess_fork_guard():
+        backend.subprocess.Popen(["true"])
+    assert seen["kwargs"].get("close_fds") is False
+    assert "pass_fds" not in seen["kwargs"]
+    # Guard restores Popen; monkeypatch still points at _FakePopen.
+    assert backend.subprocess.Popen is _FakePopen
+
+
+def test_mlx_load_uses_fork_guard():
+    """Both in-process load paths wrap import+load (BATTLEZ7 Qwen3.8)."""
+    sync_src = inspect.getsource(backend.MLXBackend._load_sync)
+    vlm_src = inspect.getsource(backend.MLXBackend._load_vlm_sync)
+    stream_src = inspect.getsource(backend.MLXBackend._stream_once)
+    assert "_mlx_subprocess_fork_guard" in sync_src
+    assert "_mlx_subprocess_fork_guard" in vlm_src
+    assert "_mlx_subprocess_fork_guard" in stream_src
+    assert sync_src.index("_mlx_subprocess_fork_guard") < sync_src.index("_mlx_load")
+    assert vlm_src.index("_mlx_subprocess_fork_guard") < vlm_src.index("_vlm_load")
+
+
+def test_mlx_warm_load_uses_same_slots_as_stream():
+    src = inspect.getsource(backend.MLXBackend.warm_load)
+    assert "_load_vlm_sync" in src
+    assert "_load_sync" in src
+
+
+def test_start_session_closes_playwright_before_inprocess_mlx_load():
+    """BATTLEZ8/9: /new after GLM must close Chromium, then warm_load, then start.
+
+    GLM/oMLX is MLXServerBackend and must not hit this close+load path.
+    """
+    chat_src = (Path(__file__).resolve().parent.parent / "chat.py").read_text(
+        encoding="utf-8"
+    )
+    start = chat_src.find("async def _start_session")
+    assert start != -1
+    chunk = chat_src[start:start + 14000]
+    close_at = chunk.find("await self.browser.close()")
+    warm = chunk.find("warm_load")
+    browser = chunk.find("await self.browser.start()")
+    assert close_at != -1 and warm != -1 and browser != -1
+    assert close_at < warm < browser
+    assert "isinstance(self._session_backend, backend_mod.MLXBackend)" in chunk
+
+
+def test_spawnv_passfds_filter_drops_closed_fds(monkeypatch):
+    """Invalid fds must not reach fork_exec (BATTLEZ9 fds_to_keep)."""
+    import multiprocessing.util as mp_util
+
+    seen: dict = {}
+
+    def fake_orig(path, args, passfds):
+        seen["passfds"] = list(passfds)
+        return 0
+
+    monkeypatch.setattr(mp_util, "spawnv_passfds", fake_orig)
+    backend._SPAWNV_PASSFDS_PATCHED = False
+    backend._install_spawnv_passfds_filter()
+    # stdin/stdout/stderr are valid; 999999 is not
+    mp_util.spawnv_passfds("/bin/true", ["true"], [0, 1, 2, 999999])
+    assert 999999 not in seen["passfds"]
+    assert 0 in seen["passfds"]

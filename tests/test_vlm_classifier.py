@@ -43,6 +43,17 @@ def test_llava_variants():
         assert classify_model_modality(name) == "vlm", name
 
 
+def test_muse_glimmer_is_vlm():
+    """Meta Muse Glimmer is multimodal; must route via mlx_vlm not mlx_lm."""
+    for name in (
+        "Muse-Glimmer-30B-4bit",
+        "muse_glimmer",
+        "/Users/jonathanrothberg_1/MLX_Models/Muse-Glimmer-30B-mxfp8",
+        "mlx-community/Muse-Glimmer-30B-4bit",
+    ):
+        assert classify_model_modality(name) == "vlm", name
+
+
 def test_deepseek_vl():
     assert classify_model_modality("deepseek-vl-7b") == "vlm"
     assert classify_model_modality("deepseek-vl2") == "vlm"

@@ -51,6 +51,7 @@ import time
 import urllib.error
 import urllib.request
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from typing import Any, Awaitable, Callable, Iterable, Literal
 
@@ -145,6 +146,10 @@ _VLM_NAME_SUBSTRINGS: tuple[str, ...] = (
     # with vision_config glm5_next_vision. /list showed [text] because no
     # substring matched. Do NOT add bare "glm-5" — GLM-5.2 is text-only.
     "glm-5.3", "glm_5.3", "glm5.3", "glm5_next",
+    # Meta Muse Glimmer (2026-08) — multimodal agentic; mlx-vlm only
+    # (model_type muse_glimmer). Without this tag, MLXBackend routes through
+    # mlx_lm and fails with "Model type muse_glimmer not supported".
+    "muse-glimmer", "muse_glimmer",
     # LLaVA family
     "llava", "bakllava",
     # DeepSeek vision
@@ -673,6 +678,96 @@ def _resolve_prefill_step_size(model_path: str) -> int:
     return _MLX_PREFILL_STEP_SIZE_DEFAULT
 
 
+def _mark_open_fds_noninheritable() -> None:
+    """Stop Playwright/oMLX pipes from being passed into mlx load forks.
+
+    After Chromium is up, mlx_lm/mlx_vlm.load (huggingface/safetensors)
+    forks and `_posixsubprocess.fork_exec` raises
+    `ValueError: bad value(s) in fds_to_keep` (BATTLEZ2/4/5/6 20260904 —
+    Qwen3.8/3.6 died at 0 tokens once GLM work started Playwright first).
+    Same trap as `assets.preload()` in chat.py main().
+    """
+    fd_dir = "/dev/fd" if os.path.isdir("/dev/fd") else "/proc/self/fd"
+    try:
+        names = os.listdir(fd_dir)
+    except OSError:
+        return
+    for name in names:
+        try:
+            fd = int(name)
+        except ValueError:
+            continue
+        if fd < 3:
+            continue
+        try:
+            os.set_inheritable(fd, False)
+        except OSError:
+            pass
+
+
+_SPAWNV_PASSFDS_PATCHED = False
+
+
+def _install_spawnv_passfds_filter() -> None:
+    """Drop closed FDs from multiprocessing spawn (Playwright leftovers).
+
+    `subprocess.Popen(close_fds=False)` is not enough: huggingface/tokenizers
+    use `multiprocessing.util.spawnv_passfds`, which still calls
+    `_posixsubprocess.fork_exec` and raises fds_to_keep (BATTLEZ8/9 20260904).
+    Filtering invalid fds is safe for Playwright's own spawns. GLM/oMLX HTTP
+    never hits this.
+    """
+    global _SPAWNV_PASSFDS_PATCHED
+    if _SPAWNV_PASSFDS_PATCHED:
+        return
+    try:
+        import multiprocessing.util as mp_util
+    except Exception:
+        return
+    orig = getattr(mp_util, "spawnv_passfds", None)
+    if orig is None:
+        return
+
+    def _filtered(path, args, passfds):
+        cleaned = []
+        for fd in passfds:
+            try:
+                os.fstat(int(fd))
+            except (OSError, TypeError, ValueError):
+                continue
+            cleaned.append(fd)
+        return orig(path, args, cleaned)
+
+    mp_util.spawnv_passfds = _filtered
+    _SPAWNV_PASSFDS_PATCHED = True
+
+
+@contextmanager
+def _mlx_subprocess_fork_guard():
+    """Let in-process mlx load spawn while Playwright pipes are already open.
+
+    `close_fds=True` (Python default) walks the fd table and raises
+    `ValueError: bad value(s) in fds_to_keep` when Chromium has dangling
+    pipes. BATTLEZ7 20260904: Qwen3.8 died in 0.79s at planning because
+    the GLM session had already started the browser; set_inheritable
+    alone was not enough. GLM/oMLX HTTP never enters this guard.
+    """
+    _install_spawnv_passfds_filter()
+    _mark_open_fds_noninheritable()
+    orig = subprocess.Popen
+
+    def _popen(*args, **kwargs):
+        kwargs["close_fds"] = False
+        kwargs.pop("pass_fds", None)
+        return orig(*args, **kwargs)
+
+    subprocess.Popen = _popen
+    try:
+        yield
+    finally:
+        subprocess.Popen = orig
+
+
 class MLXBackend(Backend):
     """In-process MLX backend. Loads the model into this process's GPU
     VRAM on first request and streams generations via
@@ -804,9 +899,11 @@ class MLXBackend(Backend):
         if cls._loaded_model is not None or cls._loaded_vlm_model is not None:
             cls.release_weights()
         # Defer the mlx_lm import so Ollama-only users don't pay its
-        # ~1-2 s cold-start cost.
-        from mlx_lm import load as _mlx_load  # type: ignore
-        model, tokenizer = _mlx_load(path)
+        # ~1-2 s cold-start cost. Import+load both fork — guard while
+        # Playwright pipes may already be open (BATTLEZ7 20260904).
+        with _mlx_subprocess_fork_guard():
+            from mlx_lm import load as _mlx_load  # type: ignore
+            model, tokenizer = _mlx_load(path)
         cls._loaded_model = model
         cls._loaded_tokenizer = tokenizer
         cls._loaded_path = path
@@ -843,15 +940,39 @@ class MLXBackend(Backend):
         # Free either slot if it holds a different (or any) model.
         if cls._loaded_vlm_model is not None or cls._loaded_model is not None:
             cls.release_weights()
-        from mlx_vlm import load as _vlm_load  # type: ignore
-        from mlx_vlm.utils import load_config as _vlm_load_config  # type: ignore
-        model, processor = _vlm_load(path)
-        config = _vlm_load_config(path)
+        with _mlx_subprocess_fork_guard():
+            from mlx_vlm import load as _vlm_load  # type: ignore
+            from mlx_vlm.utils import load_config as _vlm_load_config  # type: ignore
+            model, processor = _vlm_load(path)
+            config = _vlm_load_config(path)
         cls._loaded_vlm_model = model
         cls._loaded_vlm_processor = processor
         cls._loaded_vlm_config = config
         cls._loaded_vlm_path = path
         return model, processor, config
+
+    def warm_load(self) -> None:
+        """Load weights on the MLX thread before Playwright is up.
+
+        mlx_lm/mlx_vlm.load forks. After Chromium opens IPC pipes that
+        fork raises fds_to_keep (BATTLEZ4 20260904 Qwen3.8). Same trap
+        as assets.preload() in chat.py main(). Idempotent if cached.
+        """
+        path = self.info.model
+        is_vlm = classify_model_modality(path) == "vlm"
+        if is_vlm:
+            try:
+                import mlx_vlm  # noqa: F401
+            except ImportError:
+                is_vlm = False
+
+        def _do() -> None:
+            if is_vlm:
+                self._load_vlm_sync(path)
+            else:
+                self._load_sync(path)
+
+        self._get_mlx_executor().submit(_do).result(timeout=600)
 
     async def stream_chat(
         self,
@@ -1000,7 +1121,10 @@ class MLXBackend(Backend):
         is_vlm_model = classify_model_modality(self.info.model) == "vlm"
         if is_vlm_model:
             try:
-                import mlx_vlm  # noqa: F401
+                # First import can subprocess-fork (tokenizers/hf). Same
+                # fds_to_keep trap as load if Chromium is already up.
+                with _mlx_subprocess_fork_guard():
+                    import mlx_vlm  # noqa: F401
             except ImportError:
                 is_vlm_model = False
         # Track separately so the load-check below picks the right slot.
