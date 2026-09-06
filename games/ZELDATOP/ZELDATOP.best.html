@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Zelda Top-Down RPG</title>
+<style>
+  html,body { margin:0; background:#0c0d14; overflow:hidden; }
+  #wrap { position:fixed; inset:0; display:grid; place-items:center; }
+  canvas { background:#1a1a2e; image-rendering:pixelated; }
+</style></head>
+<body>
+<div id="wrap"><canvas id="c" width="640" height="480"></canvas></div>
+
+<script data-host="chrome">
+  // Chrome-only shim: map jmr:spr:N to the real PNG filename.
+  (function(){
+    var SPR = ["ZELDATOP-0.png","ZELDATOP-1.png","ZELDATOP-2.png","ZELDATOP-3.png","ZELDATOP-4.png"];
+    var orig = HTMLImageElement.prototype;
+    var setter = Object.getOwnPropertyDescriptor(orig, "src");
+    Object.defineProperty(orig, "src", {
+      get: setter.get,
+      set: function(v){
+        if (typeof v === "string" && v.indexOf("jmr:spr:") === 0) {
+          var n = parseInt(v.substring(10), 10);
+          if (SPR[n]) v = SPR[n];
+        }
+        setter.set.call(this, v);
+      },
+      configurable: true
+    });
+  })();
+</script>
+
+<script data-host="chrome">
+// PNG list make_artx.py reads. Index N is jmr:spr:N.
+window.JMR_SPR = ["ZELDATOP-0.png", "ZELDATOP-1.png", "ZELDATOP-2.png", "ZELDATOP-3.png", "ZELDATOP-4.png"];
+(function () {
+  var d = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, "src");
+  Object.defineProperty(HTMLImageElement.prototype, "src", {
+    get: function () { return d.get.call(this); },
+    set: function (v) {
+      var m = /^jmr:spr:(\d+)$/.exec(v);
+      d.set.call(this, m ? window.JMR_SPR[+m[1]] : v);
+    }
+  });
+  var list = window.JMR_SPR || [];
+  var n = 0;
+  var need = list.length;
+  if (!need) { window._assetsReady = true; return; }
+  var i = 0;
+  while (i < need) {
+    var im = new Image();
+    im.onload = im.onerror = function () {
+      n = n + 1;
+      if (n >= need) window._assetsReady = true;
+    };
+    im.src = list[i];
+    i = i + 1;
+  }
+})();
+</script>
+<script>
+// JMR atlas helper — 9-arg crop; src literals only (no concat).
+window.JMR_CELL = [[40,40], [40,40], [40,40], [24,24], [40,40]];
+var S0 = new Image(); S0.src = "jmr:spr:0";
+var S1 = new Image(); S1.src = "jmr:spr:1";
+var S2 = new Image(); S2.src = "jmr:spr:2";
+var S3 = new Image(); S3.src = "jmr:spr:3";
+var S4 = new Image(); S4.src = "jmr:spr:4";
+function blitSpr(c, img, fi, cw, ch, dx, dy) { c.drawImage(img, fi * cw, 0, cw, ch, dx, dy, cw, ch); }
+</script>
+
+<script>
+(() => {
+  const cvs = document.getElementById("c");
+  const ctx = cvs.getContext("2d");
+  ctx.imageSmoothingEnabled = false;
+  const W = 640, H = 480;
+
+  // Packed sheet images (jmr:spr:N literals).
+  const S0 = new Image(); S0.src = "jmr:spr:0"; // hero: [0]idle [1]walk [2]sword [3]hit
+  const S1 = new Image(); S1.src = "jmr:spr:1"; // npc
+  const S2 = new Image(); S2.src = "jmr:spr:2"; // enemy
+  const S3 = new Image(); S3.src = "jmr:spr:3"; // heart (24x24)
+  const S4 = new Image(); S4.src = "jmr:spr:4"; // [0]grass [1]wall
+
+  // 9-arg crop blit: sx = fi*cw.
+  function blitSpr(im, fi, cw, ch, x, y) {
+    ctx.drawImage(im, fi * cw, 0, cw, ch, x, y, cw, ch);
+  }
+
+  // ---- World: 20x15 grid of 32px tiles (640x480 fills glass) ----
+  const TW = 32, COLS = 20, ROWS = 15;
+  // 0 = grass, 1 = wall
+  const map = [];
+  for (let r = 0; r < ROWS; r++) {
+    const row = [];
+    for (let c = 0; c < COLS; c++) {
+      // border walls + a few interior walls
+      if (r === 0 || r === ROWS-1 || c === 0 || c === COLS-1) row.push(1);
+      else if ((r===4&&c===6)||(r===4&&c===7)||(r===10&&c===12)||(r===10&&c===13)) row.push(1);
+      else row.push(0);
+    }
+    map.push(row);
+  }
+
+  const state = {
+    hero: { tx: 3, ty: 3, x: 3*TW, y: 3*TW, facing: "down", moving: false,
+            attacking: false, atkT: 0, hitT: 0, hp: 3, maxHp: 3 },
+    npcs: [
+      { tx: 8, ty: 6, x: 8*TW, y: 6*TW, name: "Villager",
+        lines: ["Welcome, hero!", "Slay the slimes", "to save the field."] },
+      { tx: 14, ty: 9, x: 14*TW, y: 9*TW, name: "Elder",
+        lines: ["The slimes", "grow strong.", "Good luck!"] }
+    ],
+    enemies: [
+      { tx: 12, ty: 3, x: 12*TW, y: 3*TW, hp: 2, alive: true, vx: 0, vy: 0, t: 0 },
+      { tx: 6, ty: 11, x: 6*TW, y: 11*TW, hp: 2, alive: true, vx: 0, vy: 0, t: 0 },
+      { tx: 16, ty: 12, x: 16*TW, y: 12*TW, hp: 2, alive: true, vx: 0, vy: 0, t: 0 }
+    ],
+    hearts: [
+      { tx: 10, ty: 8, x: 10*TW, y: 8*TW, taken: false }
+    ],
+    dialogue: { open: false, npc: null, idx: 0 },
+    score: 0,
+    won: false,
+    lost: false
+  };
+  window.state = state;
+  window.game = { reset() { location.reload(); } };
+
+  const keys = {};
+  const keyEdge = {};
+  addEventListener("keydown", e => {
+    const k = e.key;
+    const code = e.keyCode;
+    if (k === "ArrowLeft" || code === 37) keys.l = true;
+    else if (k === "ArrowRight" || code === 39) keys.r = true;
+    else if (k === "ArrowUp" || code === 38) keys.u = true;
+    else if (k === "ArrowDown" || code === 40) keys.d = true;
+    else if (k === "z" || k === "Z" || code === 90 || k === " " || code === 32) { keys.f = true; keyEdge.f = true; }
+    else if (k === "Enter" || code === 13) { keys.t = true; keyEdge.t = true; }
+    else if (k === "r" || k === "R" || code === 82) { keyEdge.r = true; }
+  });
+  addEventListener("keyup", e => {
+    const k = e.key; const code = e.keyCode;
+    if (k === "ArrowLeft" || code === 37) keys.l = false;
+    else if (k === "ArrowRight" || code === 39) keys.r = false;
+    else if (k === "ArrowUp" || code === 38) keys.u = false;
+    else if (k === "ArrowDown" || code === 40) keys.d = false;
+    else if (k === "z" || k === "Z" || code === 90 || k === " " || code === 32) keys.f = false;
+    else if (k === "Enter" || code === 13) keys.t = false;
+  });
+
+  function solidAt(c, r) {
+    if (c < 0 || r < 0 || c >= COLS || r >= ROWS) return true;
+    if (map[r][c] === 1) return true;
+    for (let i = 0; i < state.npcs.length; i++) if (state.npcs[i].tx === c && state.npcs[i].ty === r) return true;
+    for (let i = 0; i < state.enemies.length; i++) if (state.enemies[i].alive && state.enemies[i].tx === c && state.enemies[i].ty === r) return true;
+    return false;
+  }
+
+  const STEP = 0.12; // seconds per tile
+  let moveT = 0;
+  let fromX = 0, fromY = 0, toX = 0, toY = 0;
+
+  function tryMove(dx, dy, dir) {
+    const h = state.hero;
+    h.facing = dir;
+    const nc = h.tx + dx, nr = h.ty + dy;
+    if (solidAt(nc, nr)) return;
+    h.tx = nc; h.ty = nr;
+    h.moving = true;
+    fromX = h.x; fromY = h.y;
+    toX = nc * TW; toY = nr * TW;
+    moveT = 0;
+  }
+
+  function update(dt) {
+    if (keyEdge.r) { location.reload(); keyEdge.r = false; return; }
+
+    const h = state.hero;
+
+    // Dialogue gating: only advance/close while open.
+    if (state.dialogue.open) {
+      if (keyEdge.t) {
+        const d = state.dialogue;
+        const npc = d.npc;
+        if (d.idx < npc.lines.length - 1) d.idx++;
+        else d.open = false;
+      }
+      keyEdge.f = false; keyEdge.t = false;
+      return;
+    }
+
+    // Talk: check the tile the hero FACES.
+    if (keyEdge.t) {
+      keyEdge.t = false;
+      const fc = h.tx + (h.facing === "left" ? -1 : h.facing === "right" ? 1 : 0);
+      const fr = h.ty + (h.facing === "up" ? -1 : h.facing === "down" ? 1 : 0);
+      for (let i = 0; i < state.npcs.length; i++) {
+        const n = state.npcs[i];
+        if (n.tx === fc && n.ty === fr) {
+          state.dialogue.open = true; state.dialogue.npc = n; state.dialogue.idx = 0;
+          break;
+        }
+      }
+      return;
+    }
+
+    // Sword attack (edge).
+    if (keyEdge.f) {
+      keyEdge.f = false;
+      h.attacking = true; h.atkT = 0.25;
+      // hit enemies on the faced tile + adjacent
+      const fc = h.tx + (h.facing === "left" ? -1 : h.facing === "right" ? 1 : 0);
+      const fr = h.ty + (h.facing === "up" ? -1 : h.facing === "down" ? 1 : 0);
+      for (let i = 0; i < state.enemies.length; i++) {
+        const e = state.enemies[i];
+        if (e.alive && (Math.abs(e.tx - fc) <= 1 && Math.abs(e.ty - fr) <= 1)) {
+          e.hp -= 1;
+          if (e.hp <= 0) { e.alive = false; state.score += 100; }
+        }
+      }
+    }
+
+    // Attack / hit timers.
+    if (h.attacking) { h.atkT -= dt; if (h.atkT <= 0) h.attacking = false; }
+    if (h.hitT > 0) h.hitT -= dt;
+
+    // Movement (tile-by-tile, snap).
+    if (h.moving) {
+      moveT += dt;
+      const p = Math.min(1, moveT / STEP);
+      h.x = fromX + (toX - fromX) * p;
+      h.y = fromY + (toY - fromY) * p;
+      if (p >= 1) { h.x = toX; h.y = toY; h.moving = false; }
+    } else {
+      if (keys.l) tryMove(-1, 0, "left");
+      else if (keys.r) tryMove(1, 0, "right");
+      else if (keys.u) tryMove(0, -1, "up");
+      else if (keys.d) tryMove(0, 1, "down");
+    }
+
+    // Enemies: simple wander + chase if close.
+    for (let i = 0; i < state.enemies.length; i++) {
+      const e = state.enemies[i];
+      if (!e.alive) continue;
+      e.t += dt;
+      if (e.t > 0.6) {
+        e.t = 0;
+        const dx = h.tx - e.tx, dy = h.ty - e.ty;
+        const dist = Math.sqrt(dx*dx + dy*dy);
+        let mx = 0, my = 0;
+        if (dist < 5) { if (Math.abs(dx) > Math.abs(dy)) mx = dx > 0 ? 1 : -1; else my = dy > 0 ? 1 : -1; }
+        else { const r = Math.floor(Math.random() * 4); if (r===0)mx=-1; else if(r===1)mx=1; else if(r===2)my=-1; else my=1; }
+        const nc = e.tx + mx, nr = e.ty + my;
+        if (!solidAt(nc, nr)) { e.tx = nc; e.ty = nr; }
+      }
+      // snap enemy pixels to tile
+      e.x = e.tx * TW; e.y = e.ty * TW;
+      // contact damage
+      if (Math.abs(e.tx - h.tx) <= 1 && Math.abs(e.ty - h.ty) <= 1 && h.hitT <= 0) {
+        h.hp -= 1; h.hitT = 0.8;
+        if (h.hp <= 0) state.lost = true;
+      }
+    }
+
+    // Hearts pickup.
+    for (let i = 0; i < state.hearts.length; i++) {
+      const hp2 = state.hearts[i];
+      if (!hp2.taken && hp2.tx === h.tx && hp2.ty === h.ty) {
+        hp2.taken = true;
+        if (h.hp < h.maxHp) h.hp++;
+        state.score += 50;
+      }
+    }
+
+    // Win check.
+    if (!state.won && !state.lost) {
+      let any = false;
+      for (let i = 0; i < state.enemies.length; i++) if (state.enemies[i].alive) any = true;
+      if (!any) state.won = true;
+    }
+  }
+
+  function drawTiles() {
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        const x = c * TW, y = r * TW;
+        if (map[r][c] === 1) blitSpr(S4, 1, TW, TW, x, y);
+        else blitSpr(S4, 0, TW, TW, x, y);
+      }
+    }
+  }
+
+  function drawNpcs() {
+    for (let i = 0; i < state.npcs.length; i++) {
+      const n = state.npcs[i];
+      blitSpr(S1, 0, TW, TW, n.x, n.y);
+    }
+  }
+
+  function drawEnemies() {
+    for (let i = 0; i < state.enemies.length; i++) {
+      const e = state.enemies[i];
+      if (e.alive) blitSpr(S2, 0, TW, TW, e.x, e.y);
+    }
+  }
+
+  function drawHearts() {
+    for (let i = 0; i < state.hearts.length; i++) {
+      const hp2 = state.hearts[i];
+      if (!hp2.taken) blitSpr(S3, 0, 24, 24, hp2.x + 4, hp2.y + 4);
+    }
+  }
+
+  function drawHero() {
+    const h = state.hero;
+    let fi = 0;
+    if (h.hitT > 0) fi = 3;
+    else if (h.attacking) fi = 2;
+    else if (h.moving) fi = 1;
+    else fi = 0;
+    blitSpr(S0, fi, TW, TW, h.x, h.y);
+  }
+
+  function drawHUD() {
+    ctx.fillStyle = "#000000";
+    ctx.fillRect(0, 0, W, 22);
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "14px monospace";
+    ctx.textAlign = "left";
+    ctx.fillText("SCORE", 8, 16);
+    ctx.fillText(String(state.score), 64, 16);
+    // hearts as filled boxes (ASCII-safe)
+    ctx.fillStyle = "#ff2b2b";
+    for (let i = 0; i < state.hero.maxHp; i++) {
+      const x = 200 + i * 22;
+      if (i < state.hero.hp) ctx.fillRect(x, 5, 16, 12);
+      else { ctx.fillStyle = "#333333"; ctx.fillRect(x, 5, 16, 12); ctx.fillStyle = "#ff2b2b"; }
+    }
+    ctx.fillStyle = "#ffffff";
+    ctx.fillText("Z:slay  Enter:talk  R:reset", 320, 16);
+  }
+
+  function drawOverlay() {
+    if (state.won || state.lost) {
+      ctx.fillStyle = "#000000";
+      ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = state.won ? "#4dff4d" : "#ff4d4d";
+      ctx.font = "32px monospace";
+      ctx.textAlign = "center";
+      ctx.fillText(state.won ? "YOU WIN!" : "GAME OVER", W/2, H/2 - 10);
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "16px monospace";
+      ctx.fillText("Press R to restart", W/2, H/2 + 24);
+      ctx.textAlign = "left";
+    } else if (state.dialogue.open) {
+      const d = state.dialogue;
+      const npc = d.npc;
+      ctx.fillStyle = "#000000";
+      ctx.fillRect(40, H - 90, W - 80, 70);
+      ctx.fillStyle = "#ffd24d";
+      ctx.font = "14px monospace";
+      ctx.textAlign = "left";
+      ctx.fillText(npc.name + ":", 56, H - 68);
+      ctx.fillStyle = "#ffffff";
+      ctx.fillText(npc.lines[d.idx], 56, H - 44);
+      ctx.fillStyle = "#888888";
+      ctx.fillText("(Enter to continue)", 56, H - 26);
+    }
+  }
+
+  function draw() {
+    ctx.fillStyle = "#1a1a2e";
+    ctx.fillRect(0, 0, W, H);
+    drawTiles();
+    drawHearts();
+    drawNpcs();
+    drawEnemies();
+    drawHero();
+    drawHUD();
+    drawOverlay();
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    let dt = (now - last) / 1000; last = now;
+    if (dt > 0.25) dt = 0.25;
+    update(dt);
+    draw();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body></html>
