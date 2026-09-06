@@ -23,6 +23,7 @@ from assets import (
     materialize_jmr_png_sheets,
     jmr_title_stem,
     JMR_PNG_MAX_FRAMES,
+    apply_jmr_size_floor,
     try_load_image_generator,
 )
 from sounds import (
@@ -1414,6 +1415,13 @@ class AssetGenerationMixin:
                 int(session_cap or JMR_PNG_MAX_FRAMES), JMR_PNG_MAX_FRAMES,
             )
             asset_specs = asset_specs[:session_cap]
+            # Floor animated subjects at 32 px on glass (FROGGERC 24 px frog).
+            asset_specs, _floor_changes = apply_jmr_size_floor(asset_specs)
+            if _floor_changes:
+                self._trace({
+                    "kind": "jmr_size_floor_applied",
+                    "changes": _floor_changes[:16],
+                })
 
         # run_14 Dragon's Lair: FIFO cap dropped key_victory (i2v seed).
         # Prefer keeping video image seeds inside the same cap budget.

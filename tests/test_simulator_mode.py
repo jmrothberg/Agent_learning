@@ -493,3 +493,35 @@ def test_jmr_png_maybe_generate_not_skipped():
     # Pipeline is enabled; stub has no diffuser so we get info events, not [].
     events = asyncio.run(_run())
     assert events != []
+
+
+def test_jmr_png_size_floor_reaches_generator_and_traces(tmp_path, monkeypatch):
+    """FROGGERC: 24x24 animated frog frames are floored to 32 before generation."""
+    import agent_assets
+
+    a = GameAgent(model="stub", out_path=tmp_path / "FROGGER.html")
+    a.set_jmr_png_mode(True)
+    a._asset_generator = object()  # pretend a diffuser is loaded
+    seen: dict = {}
+
+    def _fake_generate(specs, out_dir, image_generator=None):
+        seen["specs"] = [dict(s) for s in specs]
+        return {}
+
+    monkeypatch.setattr(agent_assets, "generate_assets", _fake_generate)
+    reply = (
+        '<assets>[{"name":"frog_up","prompt":"frog","size":"24x24"},'
+        '{"name":"frog_up_hop","prompt":"frog hop","size":"24x24"},'
+        '{"name":"car_red","prompt":"car","size":"32x16"}]</assets>'
+    )
+
+    async def _run():
+        async for _ in a._maybe_generate_assets_and_sounds(reply, trigger="phase_a"):
+            pass
+
+    asyncio.run(_run())
+    sizes = {s["name"]: tuple(s["size"]) for s in seen["specs"]}
+    assert sizes["frog_up"] == (32, 32)
+    assert sizes["frog_up_hop"] == (32, 32)
+    assert sizes["car_red"] == (32, 16)
+    assert "jmr_size_floor_applied" in a.trace_path.read_text(encoding="utf-8")

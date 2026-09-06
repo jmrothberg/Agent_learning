@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Frogger</title>
+<style>
+  html,body { margin:0; background:#0c0d14; overflow:hidden; }
+  #wrap { position:fixed; inset:0; display:grid; place-items:center; }
+  canvas { background:#1a1a2e; }
+</style></head>
+<body>
+<div id="wrap"><canvas id="c" width="640" height="480"></canvas></div>
+<script data-host="chrome">
+window.JMR_SPR = ["FROGGERC-0.png", "FROGGERC-1.png", "FROGGERC-2.png"];
+(function(){
+  var orig=HTMLImageElement.prototype;
+  Object.defineProperty(orig,'src',{
+    get:function(){return this._jmrSrc||'';},
+    set:function(v){
+      if(v&&v.indexOf('jmr:spr:')===0){
+        var n=parseInt(v.substring(10),10);
+        var list=window.JMR_SPR;
+        if(list&&list[n])v=list[n];
+      }
+      this._jmrSrc=v;
+      this.setAttribute('src',v);
+    }
+  });
+})();
+</script>
+<script data-host="chrome">
+// PNG list make_artx.py reads. Index N is jmr:spr:N.
+window.JMR_SPR = ["FROGGERC-0.png", "FROGGERC-1.png", "FROGGERC-2.png"];
+(function () {
+  var d = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, "src");
+  Object.defineProperty(HTMLImageElement.prototype, "src", {
+    get: function () { return d.get.call(this); },
+    set: function (v) {
+      var m = /^jmr:spr:(\d+)$/.exec(v);
+      d.set.call(this, m ? window.JMR_SPR[+m[1]] : v);
+    }
+  });
+  var list = window.JMR_SPR || [];
+  var n = 0;
+  var need = list.length;
+  if (!need) { window._assetsReady = true; return; }
+  var i = 0;
+  while (i < need) {
+    var im = new Image();
+    im.onload = im.onerror = function () {
+      n = n + 1;
+      if (n >= need) window._assetsReady = true;
+    };
+    im.src = list[i];
+    i = i + 1;
+  }
+})();
+</script>
+<script>
+// JMR atlas helper — 9-arg crop; src literals only (no concat).
+window.JMR_CELL = [[24,24], [32,16], [64,16]];
+var S0 = new Image(); S0.src = "jmr:spr:0";
+var S1 = new Image(); S1.src = "jmr:spr:1";
+var S2 = new Image(); S2.src = "jmr:spr:2";
+function blitSpr(c, img, fi, cw, ch, dx, dy) { c.drawImage(img, fi * cw, 0, cw, ch, dx, dy, cw, ch); }
+</script>
+
+<script>
+(function(){
+var cvs=document.getElementById("c");
+var ctx=cvs.getContext("2d");
+ctx.imageSmoothingEnabled=false;
+
+var S0=new Image(); S0.src="jmr:spr:0";
+var S1=new Image(); S1.src="jmr:spr:1";
+var S2=new Image(); S2.src="jmr:spr:2";
+
+function blitSpr(im,fi,cw,ch,x,y){
+  ctx.drawImage(im,fi*cw,0,cw,ch,x,y,cw,ch);
+}
+
+var COLS=16, ROWS=12, TW=40, TH=40;
+var HOME_COLS=[3,6,9,12,14];
+var LANE_DEFS=[
+  {row:2,dir:1,spd:60,ent:[{t:0,x:0,w:32},{t:0,x:160,w:32},{t:0,x:320,w:32},{t:0,x:480,w:32}]},
+  {row:3,dir:-1,spd:90,ent:[{t:0,x:40,w:32},{t:0,x:200,w:32},{t:0,x:360,w:32},{t:0,x:520,w:32}]},
+  {row:4,dir:1,spd:120,ent:[{t:1,x:0,w:48},{t:1,x:240,w:48},{t:1,x:480,w:48}]},
+  {row:5,dir:-1,spd:80,ent:[{t:0,x:80,w:32},{t:0,x:240,w:32},{t:0,x:400,w:32},{t:0,x:560,w:32}]},
+  {row:6,dir:1,spd:140,ent:[{t:0,x:20,w:32},{t:0,x:180,w:32},{t:0,x:340,w:32},{t:0,x:500,w:32}]},
+  {row:8,dir:1,spd:50,ent:[{t:2,x:0,w:64},{t:2,x:200,w:64},{t:2,x:400,w:64}]},
+  {row:9,dir:-1,spd:70,ent:[{t:2,x:60,w:64},{t:2,x:260,w:64},{t:2,x:460,w:64}]},
+  {row:10,dir:1,spd:40,ent:[{t:3,x:30,w:32},{t:3,x:230,w:32},{t:3,x:430,w:32}]}
+];
+
+var state={
+  frog:{col:7,row:11,facing:0,hopTimer:0},
+  lanes:[],
+  score:0,
+  lives:3,
+  timer:60,
+  over:false,
+  won:false,
+  homes:[{col:3,f:false},{col:6,f:false},{col:9,f:false},{col:12,f:false},{col:14,f:false}],
+  frame:0
+};
+window.state=state;
+window.game={reset:function(){init();}};
+
+var keys={u:false,d:false,l:false,r:false};
+var keyDown={u:false,d:false,l:false,r:false};
+
+function init(){
+  state.frog={col:7,row:11,facing:0,hopTimer:0};
+  state.score=0;
+  state.lives=3;
+  state.timer=60;
+  state.over=false;
+  state.won=false;
+  state.frame=0;
+  state.homes=[{col:3,f:false},{col:6,f:false},{col:9,f:false},{col:12,f:false},{col:14,f:false}];
+  state.lanes=[];
+  var i,j;
+  for(i=0;i<LANE_DEFS.length;i++){
+    var d=LANE_DEFS[i];
+    var lane={row:d.row,dir:d.dir,spd:d.spd,entities:[]};
+    for(j=0;j<d.ent.length;j++){
+      var e=d.ent[j];
+      lane.entities.push({x:e.x,w:e.w,t:e.t});
+    }
+    state.lanes.push(lane);
+  }
+}
+
+addEventListener("keydown",function(e){
+  var k=e.key, c=e.keyCode;
+  if(k==="ArrowUp"||c===38){keys.u=true;keyDown.u=true;}
+  else if(k==="ArrowDown"||c===40){keys.d=true;keyDown.d=true;}
+  else if(k==="ArrowLeft"||c===37){keys.l=true;keyDown.l=true;}
+  else if(k==="ArrowRight"||c===39){keys.r=true;keyDown.r=true;}
+  else if(k==="r"||k==="R"||c===82){init();}
+});
+addEventListener("keyup",function(e){
+  var k=e.key, c=e.keyCode;
+  if(k==="ArrowUp"||c===38){keys.u=false;keyDown.u=false;}
+  else if(k==="ArrowDown"||c===40){keys.d=false;keyDown.d=false;}
+  else if(k==="ArrowLeft"||c===37){keys.l=false;keyDown.l=false;}
+  else if(k==="ArrowRight"||c===39){keys.r=false;keyDown.r=false;}
+});
+
+function hopFrog(dir){
+  if(state.over||state.won)return;
+  var f=state.frog;
+  var nc=f.col, nr=f.row;
+  if(dir===0){nr=f.row-1;f.facing=0;}
+  else if(dir===1){nr=f.row+1;f.facing=1;}
+  else if(dir===2){nc=f.col-1;f.facing=2;}
+  else{nc=f.col+1;f.facing=3;}
+  if(nc<0||nc>=COLS||nr<0||nr>=ROWS)return;
+  f.col=nc; f.row=nr; f.hopTimer=8;
+}
+
+function loseLife(){
+  state.lives--;
+  if(state.lives<=0){state.over=true;return;}
+  state.frog={col:7,row:11,facing:0,hopTimer:0};
+  state.timer=60;
+}
+
+function checkHit(){
+  var f=state.frog;
+  var px=f.col*TW+TW/2, py=f.row*TH+TH/2;
+  var i,j;
+  for(i=0;i<state.lanes.length;i++){
+    var ln=state.lanes[i];
+    if(ln.row!==f.row)continue;
+    for(j=0;j<ln.entities.length;j++){
+      var e=ln.entities[j];
+      var ex=e.x, ew=e.w;
+      var cx=px, cy=py;
+      var fw=24, fh=24;
+      var l1=cx-fw/2, r1=cx+fw/2, t1=cy-fh/2, b1=cy+fh/2;
+      var l2=ex, r2=ex+ew, t2=ln.row*TH+4, b2=ln.row*TH+TH-4;
+      if(l1<r2&&r1>l2&&t1<b2&&b1>t2){
+        loseLife();return;
+      }
+    }
+  }
+}
+
+function checkWater(){
+  var f=state.frog;
+  if(f.row<8||f.row>10)return;
+  var px=f.col*TW+TW/2, py=f.row*TH+TH/2;
+  var i,j;
+  for(i=0;i<state.lanes.length;i++){
+    var ln=state.lanes[i];
+    if(ln.row!==f.row)continue;
+    for(j=0;j<ln.entities.length;j++){
+      var e=ln.entities[j];
+      var ex=e.x, ew=e.w;
+      var cx=px, cy=py;
+      var fw=24, fh=24;
+      var l1=cx-fw/2, r1=cx+fw/2, t1=cy-fh/2, b1=cy+fh/2;
+      var l2=ex, r2=ex+ew, t2=ln.row*TH+4, b2=ln.row*TH+TH-4;
+      if(l1<r2&&r1>l2&&t1<b2&&b1>t2){return;}
+    }
+  }
+  loseLife();
+}
+
+function checkHome(){
+  var f=state.frog;
+  if(f.row!==0)return;
+  var i;
+  for(i=0;i<state.homes.length;i++){
+    if(state.homes[i].col===f.col&&!state.homes[i].f){
+      state.homes[i].f=true;
+      state.score+=500;
+      var all=true;
+      for(var j=0;j<state.homes.length;j++){if(!state.homes[j].f)all=false;}
+      if(all)state.won=true;
+      state.frog={col:7,row:11,facing:0,hopTimer:0};
+      state.timer=60;
+      return;
+    }
+  }
+}
+
+function update(dt){
+  if(state.over||state.won)return;
+  state.frame++;
+  state.timer-=dt;
+  if(state.timer<=0){loseLife();return;}
+
+  var i,j;
+  for(i=0;i<state.lanes.length;i++){
+    var ln=state.lanes[i];
+    var dx=ln.dir*ln.spd*dt;
+    for(j=0;j<ln.entities.length;j++){
+      var e=ln.entities[j];
+      e.x+=dx;
+      if(ln.dir>0&&e.x>640+e.w){e.x=-e.w-10;}
+      if(ln.dir<0&&e.x<-e.w-10){e.x=640+10;}
+    }
+  }
+
+  var f=state.frog;
+  if(f.hopTimer>0)f.hopTimer--;
+
+  if(keyDown.u){hopFrog(0);keyDown.u=false;}
+  if(keyDown.d){hopFrog(1);keyDown.d=false;}
+  if(keyDown.l){hopFrog(2);keyDown.l=false;}
+  if(keyDown.r){hopFrog(3);keyDown.r=false;}
+
+  checkHit();
+  if(state.over)return;
+  checkWater();
+  if(state.over)return;
+  checkHome();
+}
+
+function drawBg(){
+  ctx.fillStyle="#1a3a1a";
+  ctx.fillRect(0,0,640,480);
+  ctx.fillStyle="#333333";
+  ctx.fillRect(0,80,640,200);
+  ctx.fillStyle="#1a3a1a";
+  ctx.fillRect(0,280,640,40);
+  ctx.fillStyle="#1a2a4a";
+  ctx.fillRect(0,320,640,160);
+}
+
+function drawHomes(){
+  var i;
+  ctx.fillStyle="#2a5a2a";
+  ctx.fillRect(0,0,640,40);
+  for(i=0;i<state.homes.length;i++){
+    var h=state.homes[i];
+    var hx=h.col*TW, hy=0;
+    ctx.fillStyle=h.f?"#44aa44":"#336633";
+    ctx.fillRect(hx+4,4,TW-8,TH-8);
+    ctx.fillStyle="#ffffff";
+    ctx.font="10px monospace";
+    ctx.textAlign="center";
+    ctx.fillText(h.f?"OK":"",hx+TW/2,hy+24);
+  }
+}
+
+function drawFrog(){
+  var f=state.frog;
+  var x=f.col*TW+(TW-24)/2;
+  var y=f.row*TH+(TH-24)/2;
+  var fi=0;
+  if(f.facing===0)fi=0;
+  else if(f.facing===1)fi=2;
+  else if(f.facing===2)fi=4;
+  else fi=6;
+  if(f.hopTimer>0)fi++;
+  blitSpr(S0,fi,24,24,x,y);
+}
+
+function drawLanes(){
+  var i,j;
+  for(i=0;i<state.lanes.length;i++){
+    var ln=state.lanes[i];
+    for(j=0;j<ln.entities.length;j++){
+      var e=ln.entities[j];
+      var ex=e.x, ey=ln.row*TH+4;
+      var ew=e.w, eh=32;
+      if(ex<0){
+        var cx=-ex;
+        if(cx<ew){
+          ctx.drawImage(S1,0,0,ew-cx,eh,0,ey,ew-cx,eh);
+        }
+        continue;
+      }
+      if(ex+ew>640){
+        var cx2=640-ex;
+        if(cx2>0){
+          ctx.drawImage(S1,0,0,cx2,eh,ex,ey,cx2,eh);
+        }
+        continue;
+      }
+      ctx.drawImage(S1,0,0,ew,eh,ex,ey,ew,eh);
+    }
+  }
+}
+
+function drawHUD(){
+  ctx.fillStyle="#ffffff";
+  ctx.font="14px monospace";
+  ctx.textAlign="left";
+  ctx.fillText("SCORE",16,470);
+  ctx.fillText(String(state.score),112,470);
+  ctx.fillText("LIVES",320,470);
+  ctx.fillText(String(state.lives),400,470);
+  ctx.fillText("TIME",480,470);
+  ctx.fillText(String(Math.max(0,Math.floor(state.timer))),560,470);
+}
+
+function drawOver(){
+  ctx.fillStyle="#000000";
+  ctx.fillRect(160,180,320,120);
+  ctx.fillStyle="#ff4444";
+  ctx.font="24px monospace";
+  ctx.textAlign="center";
+  ctx.fillText(state.won?"YOU WIN":"GAME OVER",320,230);
+  ctx.fillStyle="#ffffff";
+  ctx.font="14px monospace";
+  ctx.fillText("Press R to restart",320,270);
+}
+
+function draw(){
+  drawBg();
+  drawHomes();
+  drawLanes();
+  drawFrog();
+  drawHUD();
+  if(state.over||state.won)drawOver();
+}
+
+init();
+
+var last=0;
+function frame(ts){
+  if(!last)last=ts;
+  var dt=(ts-last)/1000;
+  last=ts;
+  if(dt>0.25)dt=0.25;
+  update(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+})();
+</script>
+</body></html>

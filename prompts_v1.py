@@ -290,7 +290,9 @@ ASSETS_FORMAT = FormatSpec(
         "(square). Media mode default 512 px square — the game downscales "
         "at draw time. In /640png, `size` IS the on-screen size (blitSpr "
         "draws 1:1 on 640×480) — pick it from the playfield (how many fit "
-        "across), not a default. Media-mode overrides: HUD icons 32-64 px, "
+        "across), not a default; arcade-native 16 px art is ~40 px on the "
+        "glass, so playfield characters are 32-48 px, never 16-24. "
+        "Media-mode overrides: HUD icons 32-64 px, "
         "full-screen overlays 1024+.",
         "ANIMATION FRAMES & ROSTER LIMITS: Real animation is a SERIES of "
         "frames where the BODY PARTS actually move (legs stride, arm "
@@ -829,8 +831,9 @@ Art programs write STEM-N.png next to the HTML (stem ≤8, ≤16 sheets).
 Related poses (hero_idle, hero_walk1) pack onto ONE strip, frames L→R.
 16 is a FILE cap, not a per-strip frame cap — a strip widens to fit more
 frames. `size` is on-screen px on the 640×480 glass (blitSpr draws 1:1)
-— pick how many fit across the playfield per entity. Strip width =
-cellW × frame count, so a big cell costs on every frame.
+— pick how many fit across the playfield per entity. Arcade 16 px art is
+~40 px here: characters/tiles 32-48 px, never 16-24 (postage-stamp).
+Strip width = cellW × frame count, so a big cell costs on every frame.
 
 LOOK: classic arcade / original-cabinet graphics via those PNGs — NOT
 colored circles, squares, or bare fillRect placeholders as the final art.
@@ -971,6 +974,7 @@ onto ONE STEM-N.png strip, frames left-to-right. ≤64 poses, ≤16 sheets —
 sheets are a FILE cap, not a per-sheet frame cap (a strip can hold many
 frames; it just gets wider). `size` is on-screen px on the 640×480 glass
 (blitSpr draws 1:1) — pick how many fit across the playfield per entity;
+characters/tiles 32-48 px (arcade 16 px ≈ 40 px here), never 16-24;
 strip width = cellW × frame count, so a big cell costs on every frame.
 Index N = jmr:spr:N.
 No <html_file> yet.

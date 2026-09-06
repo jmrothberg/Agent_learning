@@ -142,7 +142,8 @@ tune batch: **full path** under `games/tune_serial10/run_XX/traces/`. See **`HAR
 `STEM-N.png` strip (subject prefix before the first `_`, then split by
 source pixel size). **16 sheets = file cap**; **64 poses** =
 `JMR_PNG_MAX_FRAMES`. Crop with 9-arg `drawImage` / injected `blitSpr`.
-In `/640png`, `<assets>` `"size"` is **on-screen px** (1:1 blit on 640×480).
+In `/640png`, `<assets>` `"size"` is **on-screen px** (1:1 blit on 640×480). Arcade 16 px art ≈ 40 px
+here; animated subjects below 32 px are floored by `apply_jmr_size_floor` (trace `jmr_size_floor_applied`).
 Full rules: `HARNESS_TUNING.md` (Fieldrunners `/640png` atlas section) and
 the `assets.py` module docstring.
 

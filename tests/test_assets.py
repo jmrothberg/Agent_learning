@@ -623,6 +623,34 @@ def test_materialize_jmr_png_packs_related_poses(tmp_path: Path):
     assert layout[1]["names"] == ["creep"]
 
 
+def test_apply_jmr_size_floor_scales_animated_subjects_only():
+    """FROGGERC/DIGDUGD3: 24 px animated frogs/diggers → 32 px; singles kept."""
+    from assets import apply_jmr_size_floor
+
+    specs = [
+        {"name": "frog_up", "prompt": "frog", "size": (24, 24)},
+        {"name": "frog_up_hop", "prompt": "frog hop", "size": (24, 24)},
+        {"name": "car_red", "prompt": "car", "size": (32, 16)},   # single
+        {"name": "shot", "prompt": "shot", "size": (8, 24)},      # single
+        {"name": "boss_idle", "prompt": "boss", "size": (64, 48)},
+        {"name": "boss_roar", "prompt": "boss", "size": (64, 48)},
+        {"name": "bug_a", "prompt": "bug", "size": (16, 24)},
+        {"name": "bug_b", "prompt": "bug", "size": (16, 24)},
+    ]
+    out, changes = apply_jmr_size_floor(specs)
+    by = {s["name"]: s["size"] for s in out}
+    assert by["frog_up"] == (32, 32) and by["frog_up_hop"] == (32, 32)
+    assert by["car_red"] == (32, 16)
+    assert by["shot"] == (8, 24)
+    assert by["boss_idle"] == (64, 48)
+    assert by["bug_a"] == (32, 48)  # aspect kept
+    names = {c["name"] for c in changes}
+    assert names == {"frog_up", "frog_up_hop", "bug_a", "bug_b"}
+    # Originals untouched.
+    assert specs[0]["size"] == (24, 24)
+    assert apply_jmr_size_floor([]) == ([], [])
+
+
 def test_materialize_jmr_png_already_packed_is_idempotent(tmp_path: Path):
     from PIL import Image
     from assets import materialize_jmr_png_sheets
