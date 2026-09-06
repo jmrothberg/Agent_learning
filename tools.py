@@ -3352,19 +3352,19 @@ def _jmr_sheet_referenced(filename: str, html_text: str) -> bool:
 
 
 def _jmr_packed_pose_leftover(filename: str, html_text: str) -> bool:
-    """True when `filename` is a pose PNG left next to packed STEM-N.png.
+    """True when `filename` is packing residue next to STEM-N.png.
 
-    /640png packing keeps entity_pose.png sources on disk (never deleted)
+    /640png packing keeps generate-name PNGs on disk (never deleted)
     while HTML paints `jmr:spr:N`. Flagging them as unused_assets coaches
-    the model to drawImage('digger_idle.png') (DIGDUGD3). orphan.png and
-    other non-pose leftovers still warn.
+    the model to drawImage('npc.png') / drawImage('digger_idle.png')
+    (ZELDATOP singles, DIGDUGD3 poses). Unused-sheet detection stays on
+    STEM-N.png via `_jmr_sheet_referenced`.
     """
     if "jmr:spr:" not in (html_text or "") and "JMR_SPR" not in (html_text or ""):
         return False
     if _JMR_SHEET_FILE_RE.match(filename or ""):
         return False
-    stem = (filename or "").rsplit(".", 1)[0]
-    return "_" in stem
+    return True
 
 
 def _check_unused_assets(

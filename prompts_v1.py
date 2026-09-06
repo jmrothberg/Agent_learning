@@ -846,6 +846,8 @@ ART HOW (required):
   - Draw: var S0 = new Image(); S0.src = "jmr:spr:0";
     blitSpr(ctx, S0, frameIndex, cellW, cellH, x, y);
     (9-arg crop: sx = frameIndex * cellW). Do NOT invent sx.
+    cellW/cellH MUST match the sheet table (window.JMR_CELL), not TILE,
+    when TILE is a different size — sx=fi*wrongCell crops the next frame.
   - Chrome-only <script data-host="chrome"> interceptor maps jmr:spr:N
     to the PNG filename (copy from GENERATED PNG SHEETS block).
   - Do NOT inline data:image base64. Do NOT use sprite() / ASSETS[key].

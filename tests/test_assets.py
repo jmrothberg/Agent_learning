@@ -582,6 +582,7 @@ def test_render_jmr_png_paths_block_teaches_handles(tmp_path: Path):
     assert "JMR_SPR" in block
     assert "drawImage" in block
     assert "blitSpr" in block
+    assert "JMR_CELL" in block
 
 
 def test_jmr_atlas_group_key_strips_pose_suffix():
@@ -705,6 +706,22 @@ def test_parse_preserves_from_image_and_strength():
     assert "from_image" not in out[0]
     assert out[1]["from_image"] == "alien1"
     assert abs(out[1]["strength"] - 0.4) < 1e-9
+
+
+def test_parse_drops_self_from_image():
+    """ZELDATOP: from_image equal to own name is not a pose chain."""
+    reply = '''
+<assets>
+[
+  {"name": "hero_idle", "prompt": "hero", "from_image": "hero_idle", "strength": 0.5},
+  {"name": "hero_walk", "prompt": "hero walk", "from_image": "hero_idle", "strength": 0.55}
+]
+</assets>
+'''
+    out = parse_assets_block(reply)
+    by = {s["name"]: s for s in out}
+    assert "from_image" not in by["hero_idle"]
+    assert by["hero_walk"]["from_image"] == "hero_idle"
 
 
 def test_parse_strength_clamps_and_defaults():

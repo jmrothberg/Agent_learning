@@ -150,6 +150,8 @@ def test_fix3_recipe_skip_carries_diagnostics_map():
         )
     # The skip-event payload picks up the diagnostics field.
     assert '"diagnostics"' in src
+    import agent_critic
+    assert "s.hero" in inspect.getsource(agent_critic)
 
 
 # ---------------------------------------------------------------------------

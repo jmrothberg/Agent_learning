@@ -247,13 +247,15 @@ def test_unused_assets_recognizes_jmr_spr_sheet_references(tmp_path):
     flagged = " ".join(warns)
     assert "CENTIPED-0.png" not in flagged and "CENTIPED-1.png" not in flagged
     assert "CENTIPED-2.png" in flagged   # sheet 2 truly unused
-    assert "orphan.png" in flagged        # non-JMR file still flagged
+    # ZELDATOP: generate-name leftovers (orphan.png, npc.png) are packing
+    # residue when HTML paints jmr:spr — only STEM-N.png can be unused.
+    assert "orphan.png" not in flagged
 
     dynamic = '<script>for(var i=0;i<3;i++){var im=new Image();im.src="jmr:spr:"+i;}</script>'
     warns = _check_unused_assets(dynamic, out)
     flagged = " ".join(warns)
     assert "CENTIPED-" not in flagged
-    assert "orphan.png" in flagged
+    assert "orphan.png" not in flagged
 
     listed = '<script>window.JMR_SPR = ["CENTIPED-0.png","CENTIPED-1.png","CENTIPED-2.png"];</script>'
     assert not [w for w in _check_unused_assets(listed, out) if "CENTIPED-" in w]
@@ -273,12 +275,14 @@ def test_unused_assets_skips_jmr_packed_pose_leftovers(tmp_path):
     (game / "DIGDUG-0.png").write_bytes(b"\x89PNG")
     (game / "digger_idle.png").write_bytes(b"\x89PNG")
     (game / "monster_walk1.png").write_bytes(b"\x89PNG")
+    (game / "npc.png").write_bytes(b"\x89PNG")
     (game / "orphan.png").write_bytes(b"\x89PNG")
     html = '<script>window.JMR_SPR=["DIGDUG-0.png"];S0.src="jmr:spr:0";</script>'
     flagged = " ".join(_check_unused_assets(html, out))
     assert "digger_idle.png" not in flagged
     assert "monster_walk1.png" not in flagged
-    assert "orphan.png" in flagged
+    assert "npc.png" not in flagged  # ZELDATOP packed singles (no underscore)
+    assert "orphan.png" not in flagged
     assert "DIGDUG-0.png" not in flagged
 
 

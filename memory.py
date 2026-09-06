@@ -92,6 +92,9 @@ _RECIPE_TO_SKELETON: dict[str, str] = {
     "canvas-vertical-platformer": "canvas_platformer_basic",
     "canvas-racing-perspective": "canvas_mode7_basic",
     "canvas-grid-navigation": "canvas_grid_basic",
+    # ZELDATOP: overworld-rpg was ABSENT → Jaccard 0.05 pinball. Tile
+    # overworld is the same scaffold as maze/grid (tx/ty, TILE, snap).
+    "canvas-overworld-rpg": "canvas_grid_basic",
     "canvas-vfx-fluid": "canvas_vfx_particles_basic",
     "canvas-3d-first-person": "canvas_3d_basic",
     "canvas-board-game": "canvas_board_turn_basic",
@@ -108,7 +111,7 @@ _RECIPE_TO_SKELETON: dict[str, str] = {
     "canvas-side-scroll-beat-em-up": "canvas_platformer_basic",
     # NOTE deliberately ABSENT (no dedicated/safe skeleton — fall through to v2):
     # top-down-action, paddle-ball, lane-crossing, puzzle-grid, isometric-tile,
-    # overworld-rpg, two-actors-facing, point-and-click, city-builder,
+    # two-actors-facing, point-and-click, city-builder,
     # space-trading, single-fighter, controllable-player, generic-baseline.
 }
 

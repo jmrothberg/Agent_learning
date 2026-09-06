@@ -167,6 +167,7 @@ def test_outline_traps_skipped_when_unrelated_failure(tmp_path: Path) -> None:
 def test_pinball_skeleton_mapped() -> None:
     from memory import _RECIPE_TO_SKELETON
     assert _RECIPE_TO_SKELETON.get("canvas-pinball") == "canvas_pinball_basic"
+    assert _RECIPE_TO_SKELETON.get("canvas-overworld-rpg") == "canvas_grid_basic"
     skel = PROJECT_ROOT / "memory" / "skeletons" / "canvas_pinball_basic.html"
     assert skel.exists()
     assert "resolveCircle" in skel.read_text()

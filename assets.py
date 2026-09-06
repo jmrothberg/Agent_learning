@@ -440,12 +440,16 @@ def parse_assets_block_with_meta(
         # silhouette while allowing pose changes.
         from_image = item.get("from_image")
         if isinstance(from_image, str) and from_image.strip():
-            spec["from_image"] = from_image.strip()
-            try:
-                strength = float(item.get("strength", 0.45))
-            except (TypeError, ValueError):
-                strength = 0.45
-            spec["strength"] = max(0.05, min(1.0, strength))
+            parent = from_image.strip()
+            # ZELDATOP: from_image equal to own name is not a pose chain —
+            # treating it as derived burns pose-retry GPU for no delta.
+            if parent != name:
+                spec["from_image"] = parent
+                try:
+                    strength = float(item.get("strength", 0.45))
+                except (TypeError, ValueError):
+                    strength = 0.45
+                spec["strength"] = max(0.05, min(1.0, strength))
         if len(out) >= effective_cap:
             dropped.append(name)
             dropped_specs.append(dict(spec))
@@ -3346,6 +3350,8 @@ def render_jmr_png_paths_block(
         "",
         "Sheet index N is jmr:spr:N. APPEND-ONLY — do not reorder. ≤16 sheets.",
         "Use blitSpr (injected) or copy it. Do NOT invent sx — use the table.",
+        "cw,ch MUST match this table (window.JMR_CELL), not TILE, when TILE",
+        "differs — sx=fi*wrongCell crops the next frame.",
         "",
         "  var S0 = new Image();",
         '  S0.src = "jmr:spr:0";',

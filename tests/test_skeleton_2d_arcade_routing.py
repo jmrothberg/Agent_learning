@@ -132,6 +132,15 @@ def test_recipe_routed_skeletons_lift_coverage(mem):
     ).name == "canvas_mode7_basic.html"
 
 
+def test_overworld_rpg_gets_grid_not_pinball(mem):
+    """ZELDATOP: canvas-overworld-rpg was ABSENT → Jaccard 0.05 pinball."""
+    hit = mem.retrieve_skeleton(
+        "Build a Zelda-like top-down action RPG. Tile overworld; sword; NPCs; hearts."
+    )
+    assert hit.name == "canvas_grid_basic.html", hit.name
+    assert hit.name != "canvas_pinball_basic.html"
+
+
 def test_recipe_routed_stage_does_not_break_arcade_guard(mem):
     """The new recipe-routed stage must NOT route a flat 2D arcade goal to a
     forbidden 3D/board/dungeon skeleton (the recipe layer sends those to

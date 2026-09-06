@@ -3653,13 +3653,17 @@ class CriticMixin:
 
             "return !!c&&c.width>0&&c.height>0;})();"
 
-            "out.has_player_xy=!!(s&&(typeof s.player?.x==='number'&&typeof s.player?.y==='number'));"
+            # ZELDATOP: games expose state.hero not state.player.
+            "out.has_player_xy=(()=>{if(!s)return false;"
+            "const p=s.player||s.hero||s.ship||s.digger||s.avatar;"
+            "return!!(p&&typeof p.x==='number'&&typeof p.y==='number');})();"
 
-            "out.has_player_facing=!!(s&&(typeof s.player?.facing==='number'||"
-
-            "typeof s.player?.angle==='number'||typeof s.player?.heading==='number'||"
-
-            "typeof s.player?.rot==='number'||typeof s.player?.rotation==='number'));"
+            "out.has_player_facing=(()=>{if(!s)return false;"
+            "const p=s.player||s.hero||s.ship||s.digger||s.avatar;if(!p)return false;"
+            "const f=p.facing;"
+            "return typeof f==='number'||typeof f==='string'||"
+            "typeof p.angle==='number'||typeof p.heading==='number'||"
+            "typeof p.rot==='number'||typeof p.rotation==='number';})();"
 
             "out.top_level_xy_count=(()=>{if(!s||typeof s!=='object')return 0;let n=0;"
 
