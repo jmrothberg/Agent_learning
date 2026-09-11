@@ -351,6 +351,23 @@ def test_b1_3d_keyword_three_d():
     assert "voxel" in kws
 
 
+def test_b1_3d_negated_threejs_is_not_3d_intent():
+    """DIGDUGD2 20260905_153855: /640png TARGET 'no three.js' tokenized to
+    three+threejs and seeded canvas_3d_basic. A prohibition is not 3D."""
+    from prompt_library import effective_prompt, load_prompt_library
+    lib = {g["name"]: g for g in load_prompt_library(
+        Path(__file__).resolve().parents[1] / "memory" / "prompt_library.jsonl"
+    )}
+    png = effective_prompt(lib["dig-dug"], jmr_png_mode=True)
+    assert "no three.js" in png.lower()
+    assert prompts_v1._detect_3d_intent(png) == []
+    assert prompts_v1._detect_3d_intent(
+        "Build a maze. No CDN, no WebGL, no three.js."
+    ) == []
+    hits = prompts_v1._detect_3d_intent("Build a 3D game with three.js from CDN")
+    assert "threejs" in hits or "three" in hits
+
+
 def test_b1_3d_no_match_for_2d():
     """Plain 2D goals should not trigger the 3D nudge."""
     assert prompts_v1._detect_3d_intent("make a snake game") == []

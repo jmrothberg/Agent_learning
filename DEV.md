@@ -20,7 +20,9 @@ improvement”** first (read order, harness vs memory, canonical fix loop).
 A coding agent driving a **local model** (qwen3.6 27B/35B via MLX in-process or Ollama) to write,
 test, and iteratively fix **single-file HTML5 games** with real Chromium verification,
 **FLUX2-klein** sprites on macOS (Z-Image-Turbo on Linux), Stable Audio, optional LTX-2.5 (Mac) /
-Wan2.2 cutscenes.
+Wan2.2 cutscenes. Two tracks: **full HTML** (`sprite()`, audio, video — local models are getting
+good at these) and **FPGA `/640` `/640png`** (640×480, packed `STEM-N.png`, `jmr:spr:N`). Do not
+collapse one into the other.
 
 - `chat.py` — Textual TUI (default; visible Chromium). `/wait` **ON** (`local_manual`) so each iter pauses for inspection. `/help` for slash commands.
 - `coder.py` — headless CLI (`--backend {auto,ollama,mlx,mlx-server}`)
@@ -65,7 +67,11 @@ MLX upgrades: MiniMax-M3 (`minimax_m3.py` copy after mlx-lm upgrade), GLM-5.2
 - `MLX_PREFILL_STEP_SIZE` — prefill chunk (512 if path contains `flash`, else 1024) — in-process only
 - `MLX_TOP_P` / `MLX_TOP_K` / `MLX_MIN_P` — MLX sampler (vendor coding preset; repetition penalty stays off)
 - `MLX_MAX_TOKENS` — MLX output cap (default **131072**)
-- `REASONING_EFFORT` / `QWEN_REASONING_EFFORT` — CoT effort `off|low|medium|high|max` (default **medium**). TUI `/thinking` (shortcuts `/low` `/medium` `/high` `/max`). Qwen3.8 maps `high`/`max` → native `xhigh` (there is no native `high`). GLM-5.3 maps `medium` → native `high`; **omitting** the field is native **max**. `QWEN_ENABLE_THINKING=0` is `/thinking off` for Qwen.
+- `PLAN_MAX_TOKENS` — Phase A plan-turn completion cap, all backends (default **12000**; `0` disables). Cap hit → `plan_incomplete_retry` (BATTLE10 80-min plan runaway)
+- `REASONING_EFFORT` / `QWEN_REASONING_EFFORT` — CoT effort `off|low|medium|high|max` (default **medium**). TUI `/thinking` (shortcuts `/low` `/medium` `/high` `/max`). Qwen3.8 maps `high`/`max` → native `xhigh` (there is no native `high`). GLM-5.3 maps `medium` → native `high`; **omitting** the field is native **max**. **Unset → stage-aware:** plan/first build keep `medium`, fix/patch/critic turns drop to `low`; an explicit env value (or `/thinking`) wins for every stage. `QWEN_ENABLE_THINKING=0` is `/thinking off` for Qwen.
+- `MLX_PROMPT_CACHE` — in-process MLX cross-turn KV prompt cache (default **on**; `0` disables). Keeps the previous turn's cache, trims to the shared prefix, prefills only the new suffix. Trace `stream_done.cached_prompt_tokens` / `ttft_s`
+- `AGENT_PREFIX_CACHE_FRIENDLY` — append-only history for KV prefix reuse. Unset → on for `mlx` + `mlx-server` (oMLX); `1` also Ollama; `0` eager per-turn elision as before. Per-turn HTML elision is deferred until projected prompt ≥ 80% of `AGENT_COMPACT_TOKEN_CEILING`, then runs as one batch (trace `prune_deferred_prefix_cache`). oMLX users: keep `cache.hot_cache_max_size` > 0 in `~/.omlx/settings.json` (session traces `prefix_cache_status`; TUI warns when off)
+- `AGENT_CODE_CRITIC` — `/critic` sidecar (`auto|on|off`; TUI `/critic`, `coder.py --critic`). **auto** = ON on oMLX / cloud (parallel), off on in-process MLX and loopback Ollama. TUI **`/server on`** or **`/model N server`** puts dense Qwen3.8-27B on oMLX so auto turns on. `/allroles` forces on.
 - `CODING_BOX_NUM_CTX` — context window (default **100000**); compaction fires near ~70% (`_COMPACT_PRESSURE`)
 - `AGENT_COMPACT_TOKEN_CEILING` — absolute token ceiling for compaction (optional override)
 - `AGENT_ENABLE_MEMORY_RELIEF` — set `0` to disable auto VRAM/RAM relief (default **on**). **MLX:** unload diffusers when free RAM &lt; `AGENT_MEMORY_RELIEF_MIN_AVAILABLE_GB` (default 64) or phys RAM ≤ `AGENT_MEMORY_RELIEF_MAX_PHYS_GB`; skips small MLX models (&lt; `AGENT_MEMORY_RELIEF_SMALL_MODEL_DISK_GB`, default 50 GB on disk). **Linux/Ollama+CUDA:** always unload in-process Z-Image/Stable-Audio after sprite/sound gen and before coder streams so the LLM is not forced into CPU offload on 2×24 GB boxes.
@@ -97,7 +103,7 @@ Stock PyPI `mlx-lm` / in-process `mlx-vlm` 0.6.17 lack those load paths
 
 | Concern | Setting |
 |---------|---------|
-| **TUI pick Flash** | `/model` / `/load` / `/launch` on DeepSeek-V4-Flash, GLM-5.3-Flash, or Qwen3.8-Flash-Next **auto-starts oMLX** (`backend.ensure_omlx_server`) and routes that session to `:8000`. Typing a goal **without** `/load` uses whatever oMLX already has `loaded=true` (BATTLEZ2 20260904). GLM-5.2 / dense Qwen3.8-27B / MiniMax stay in-process. GLM-5.3 hidden CoT shows as **thinking N tok** on Activity (not a dead 0-token wait) |
+| **TUI pick Flash** | `/model` / `/load` / `/launch` on DeepSeek-V4-Flash, GLM-5.3-Flash, or Qwen3.8-Flash-Next **auto-starts oMLX** and routes that session to `:8000`. Dense Qwen3.8-27B / GLM-5.2 / MiniMax stay in-process unless TUI **`/server on`** or **`/model N server`**. Typing a goal **without** `/load` uses whatever oMLX already has `loaded=true`. |
 | **Prompt cache (check first)** | `cache.hot_cache_max_size` ≠ `"0"` (e.g. `"32GB"`). Admin UI: **Memory Management → Memory Limit (In-Memory Hot Cache)** — **not** the CACHE panel. Default `"0"` disabled; enabling cut a repeated ~24K prompt **51s → 4.6s**. oMLX CLI rejects `"20%"` — use absolute GB in `settings.json` / `omlx serve` |
 | Parallel agents | `LLM_BACKEND=mlx-server` + `MLX_SERVER_URL=http://127.0.0.1:8000` — one resident model, continuous batch |
 | Idle unload / “server quit” | Global idle timeout **None**; **pin** the coder model; per-model TTL off |
@@ -136,7 +142,9 @@ tune batch: **full path** under `games/tune_serial10/run_XX/traces/`. See **`HAR
 `STEM-N.png` strip (subject prefix before the first `_`, then split by
 source pixel size). **16 sheets = file cap**; **64 poses** =
 `JMR_PNG_MAX_FRAMES`. Crop with 9-arg `drawImage` / injected `blitSpr`.
-In `/640png`, `<assets>` `"size"` is **on-screen px** (1:1 blit on 640×480).
+In `/640png`, `<assets>` `"size"` is **on-screen px** (1:1 blit on 640×480). Arcade 16 px art ≈ 40 px
+here; animated subjects below 32 px are floored by `apply_jmr_size_floor` (trace `jmr_size_floor_applied`).
+`canvas-overworld-rpg` seeds `canvas_grid_basic` (not pinball). Packed generate-name PNGs next to `STEM-N.png` are not unused assets.
 Full rules: `HARNESS_TUNING.md` (Fieldrunners `/640png` atlas section) and
 the `assets.py` module docstring.
 

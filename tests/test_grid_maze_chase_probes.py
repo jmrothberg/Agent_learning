@@ -103,6 +103,15 @@ def test_playbook_grid_chase_bullet_exists() -> None:
     assert any(b.id == "grid-chase-vulnerability-timer" for b in pb.load_all())
 
 
+def test_grid_chase_class_detects_pellets_not_tunnels() -> None:
+    from agent_helpers import grid_chase_class_in_goal
+
+    assert grid_chase_class_in_goal("maze chase pellets four pursuers") is True
+    assert grid_chase_class_in_goal(
+        "underground tunnel digger pump inflates monsters soil"
+    ) is False
+
+
 def _probe_expr(name: str) -> str:
     recipe = _load_grid_recipe()
     for ap in recipe.recipe.get("auto_probes") or []:

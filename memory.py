@@ -92,6 +92,9 @@ _RECIPE_TO_SKELETON: dict[str, str] = {
     "canvas-vertical-platformer": "canvas_platformer_basic",
     "canvas-racing-perspective": "canvas_mode7_basic",
     "canvas-grid-navigation": "canvas_grid_basic",
+    # ZELDATOP: overworld-rpg was ABSENT → Jaccard 0.05 pinball. Tile
+    # overworld is the same scaffold as maze/grid (tx/ty, TILE, snap).
+    "canvas-overworld-rpg": "canvas_grid_basic",
     "canvas-vfx-fluid": "canvas_vfx_particles_basic",
     "canvas-3d-first-person": "canvas_3d_basic",
     "canvas-board-game": "canvas_board_turn_basic",
@@ -108,7 +111,7 @@ _RECIPE_TO_SKELETON: dict[str, str] = {
     "canvas-side-scroll-beat-em-up": "canvas_platformer_basic",
     # NOTE deliberately ABSENT (no dedicated/safe skeleton — fall through to v2):
     # top-down-action, paddle-ball, lane-crossing, puzzle-grid, isometric-tile,
-    # overworld-rpg, two-actors-facing, point-and-click, city-builder,
+    # two-actors-facing, point-and-click, city-builder,
     # space-trading, single-fighter, controllable-player, generic-baseline.
 }
 
@@ -179,6 +182,16 @@ _FPS_SHOOTER_SIGNALS: frozenset[str] = frozenset({
 })
 _STACKING_SIGNALS: frozenset[str] = frozenset({
     "stacking", "crane", "topple", "jenga", "stacker", "wobble", "teeter",
+})
+# Vector-stroke class vs falling-block puzzle. "columns" is too generic
+# (BATTLE10: /640png "1px drawImage columns" tied puzzle-grid with
+# canvas-vector-wireframe; id sort picked puzzle-grid).
+_WIREFRAME_VECTOR_SIGNALS: frozenset[str] = frozenset({
+    "wireframe", "battlezone", "starwars", "star-wars", "trench",
+})
+_PUZZLE_GRID_CONFIRM: frozenset[str] = frozenset({
+    "tetris", "tetromino", "bejeweled", "puyo", "candy",
+    "match-three", "matchthree",
 })
 
 _SKELETON_MIN_SIM = 0.3
@@ -2623,12 +2636,16 @@ _VISUAL_MATCH_STOPWORDS: frozenset[str] = frozenset({
 })
 
 
-# Eval goal appendices that must NOT feed visual-recipe strong_hooks
+# Eval / TUI goal appendices that must NOT feed visual-recipe strong_hooks
 # (run_17: "SPRITE SCALE … invaders …" mis-routed Roguelike/Pinball →
-# canvas-fixed-shooter). Matching markers is case-insensitive.
+# canvas-fixed-shooter; BATTLE10: TARGET=/640png "drawImage columns"
+# strong-hooked canvas-puzzle-grid). Matching markers is case-insensitive.
+# TARGET=/640 also matches TARGET=/640png (prefix).
 _GOAL_APPENDIX_MARKERS = (
     "SPRITE SCALE (required):",
     "SPRITE SCALE:",
+    "TARGET=/640png",
+    "TARGET=/640",
 )
 
 
@@ -3018,6 +3035,17 @@ def _disambiguate_visual_mechanism(
             for r in recipes:
                 if r.id == "canvas-stacking-physics":
                     return r
+    # BATTLE10: puzzle-grid must not win a vector-stroke goal just because
+    # harness appendix text said "columns". Keep puzzle-grid when the goal
+    # actually names a falling-block / match-3 class.
+    if (
+        recipe.id == "canvas-puzzle-grid"
+        and (_WIREFRAME_VECTOR_SIGNALS & ctx_toks)
+        and not (_PUZZLE_GRID_CONFIRM & ctx_toks)
+    ):
+        for r in recipes:
+            if r.id == "canvas-vector-wireframe":
+                return r
     return recipe
 
 
@@ -4394,7 +4422,13 @@ class GameMemory:
         """
         # 3D is checked first because some 3D goals also mention "board"
         # ("3D chess") but should pick the 3D scaffold, not the board one.
+        # JMR /640 / /640png has no WebGL — never seed canvas_3d_basic
+        # (DIGDUGD2: "no three.js" in the TARGET footer). Recipe routing
+        # still picks grid/platformer/etc. below.
+        from modality import jmr_target_forbids_webgl
         threed_hits = _detect_3d_intent(goal)
+        if jmr_target_forbids_webgl(goal):
+            threed_hits = []
         # Voxel/Minecraft goals share the 3D modality bucket but have a dedicated
         # scaffold with raycast break/place (voxel trace 20260622_133931).
         if any(h in ("voxel", "voxels") for h in threed_hits):

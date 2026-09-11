@@ -582,6 +582,7 @@ def test_render_jmr_png_paths_block_teaches_handles(tmp_path: Path):
     assert "JMR_SPR" in block
     assert "drawImage" in block
     assert "blitSpr" in block
+    assert "JMR_CELL" in block
 
 
 def test_jmr_atlas_group_key_strips_pose_suffix():
@@ -621,6 +622,34 @@ def test_materialize_jmr_png_packs_related_poses(tmp_path: Path):
     assert layout[0]["names"] == ["hero_idle", "hero_walk1"]
     assert layout[0]["cell_w"] == 16
     assert layout[1]["names"] == ["creep"]
+
+
+def test_apply_jmr_size_floor_scales_animated_subjects_only():
+    """FROGGERC/DIGDUGD3: 24 px animated frogs/diggers → 32 px; singles kept."""
+    from assets import apply_jmr_size_floor
+
+    specs = [
+        {"name": "frog_up", "prompt": "frog", "size": (24, 24)},
+        {"name": "frog_up_hop", "prompt": "frog hop", "size": (24, 24)},
+        {"name": "car_red", "prompt": "car", "size": (32, 16)},   # single
+        {"name": "shot", "prompt": "shot", "size": (8, 24)},      # single
+        {"name": "boss_idle", "prompt": "boss", "size": (64, 48)},
+        {"name": "boss_roar", "prompt": "boss", "size": (64, 48)},
+        {"name": "bug_a", "prompt": "bug", "size": (16, 24)},
+        {"name": "bug_b", "prompt": "bug", "size": (16, 24)},
+    ]
+    out, changes = apply_jmr_size_floor(specs)
+    by = {s["name"]: s["size"] for s in out}
+    assert by["frog_up"] == (32, 32) and by["frog_up_hop"] == (32, 32)
+    assert by["car_red"] == (32, 16)
+    assert by["shot"] == (8, 24)
+    assert by["boss_idle"] == (64, 48)
+    assert by["bug_a"] == (32, 48)  # aspect kept
+    names = {c["name"] for c in changes}
+    assert names == {"frog_up", "frog_up_hop", "bug_a", "bug_b"}
+    # Originals untouched.
+    assert specs[0]["size"] == (24, 24)
+    assert apply_jmr_size_floor([]) == ([], [])
 
 
 def test_materialize_jmr_png_already_packed_is_idempotent(tmp_path: Path):
@@ -677,6 +706,22 @@ def test_parse_preserves_from_image_and_strength():
     assert "from_image" not in out[0]
     assert out[1]["from_image"] == "alien1"
     assert abs(out[1]["strength"] - 0.4) < 1e-9
+
+
+def test_parse_drops_self_from_image():
+    """ZELDATOP: from_image equal to own name is not a pose chain."""
+    reply = '''
+<assets>
+[
+  {"name": "hero_idle", "prompt": "hero", "from_image": "hero_idle", "strength": 0.5},
+  {"name": "hero_walk", "prompt": "hero walk", "from_image": "hero_idle", "strength": 0.55}
+]
+</assets>
+'''
+    out = parse_assets_block(reply)
+    by = {s["name"]: s for s in out}
+    assert "from_image" not in by["hero_idle"]
+    assert by["hero_walk"]["from_image"] == "hero_idle"
 
 
 def test_parse_strength_clamps_and_defaults():

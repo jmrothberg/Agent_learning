@@ -69,6 +69,14 @@ def test_input_moves_player_probe_threejs_for_fps_goal() -> None:
     assert "player.x" in expr or "p.x" in expr
 
 
+def test_input_moves_player_probe_grid_snaps_tx_ty() -> None:
+    """DIGDUGD3: default 2D probe must notice tx/ty, not only player.x."""
+    expr = input_moves_player_probe_expr(goal="underground tunnel soil grid")
+    assert "tx" in expr
+    assert "ty" in expr
+    assert "ArrowRight" in expr
+
+
 def test_input_moves_player_probe_wireframe_for_battlezone() -> None:
     expr = input_moves_player_probe_expr(
         goal="battlezone wireframe vector tank first person",
@@ -165,6 +173,7 @@ def test_playbook_suppression_wireframe_blocks_fps_camera() -> None:
     assert "fps-camera-and-movement-vectors" in suppressed
     assert "fps-minimap-radar-yaw-arrow" in suppressed
     assert "wireframe-fps-movement-vectors" not in suppressed
+    assert "jmr-png-sheets" in suppressed
 
 
 def test_playbook_suppression_plan_time_wireframe_goal() -> None:
@@ -174,6 +183,7 @@ def test_playbook_suppression_plan_time_wireframe_goal() -> None:
         code="",
     )
     assert "fps-camera-and-movement-vectors" in suppressed
+    assert "jmr-png-sheets" in suppressed
 
 
 def test_playbook_suppression_threejs_blocks_wireframe_bullet() -> None:
@@ -184,6 +194,16 @@ def test_playbook_suppression_threejs_blocks_wireframe_bullet() -> None:
     )
     assert "wireframe-fps-movement-vectors" in suppressed
     assert "wireframe-minimap-radar-yaw-arrow" in suppressed
+
+
+def test_playbook_suppression_640png_blocks_inline_pixel_maps() -> None:
+    suppressed = GameAgent._playbook_suppressed_bullet_ids(
+        goal="TARGET=/640png JMR native: no three.js. Dig Dug maze.",
+        active_skeleton="canvas_grid_basic.html",
+        code="",
+    )
+    assert "classic-arcade-pixel-maps" in suppressed
+    assert "jmr-png-sheets" not in suppressed
 
 
 def test_threejs_navigation_basis_risk_detector() -> None:

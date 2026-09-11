@@ -440,12 +440,16 @@ def parse_assets_block_with_meta(
         # silhouette while allowing pose changes.
         from_image = item.get("from_image")
         if isinstance(from_image, str) and from_image.strip():
-            spec["from_image"] = from_image.strip()
-            try:
-                strength = float(item.get("strength", 0.45))
-            except (TypeError, ValueError):
-                strength = 0.45
-            spec["strength"] = max(0.05, min(1.0, strength))
+            parent = from_image.strip()
+            # ZELDATOP: from_image equal to own name is not a pose chain —
+            # treating it as derived burns pose-retry GPU for no delta.
+            if parent != name:
+                spec["from_image"] = parent
+                try:
+                    strength = float(item.get("strength", 0.45))
+                except (TypeError, ValueError):
+                    strength = 0.45
+                spec["strength"] = max(0.05, min(1.0, strength))
         if len(out) >= effective_cap:
             dropped.append(name)
             dropped_specs.append(dict(spec))
@@ -2941,6 +2945,56 @@ def jmr_atlas_group_key(name: str) -> str:
     return raw.split("_", 1)[0] or raw
 
 
+# /640png on-glass floor for ANIMATED subjects (a prefix with ≥2 poses =
+# a character). FROGGERC / DIGDUGD3 shipped 24 px frogs and diggers because
+# the library said "~24x24"; arcade-native 16 px art is ~40 px at 640×480.
+# Singles (bullets, dots, balls, HUD icons) are left alone — they are
+# legitimately small. Mechanism-only: keyed on frame count, not names.
+JMR_PNG_MIN_ANIMATED_PX = 32
+
+
+def apply_jmr_size_floor(
+    specs: list[dict], *, floor: int = JMR_PNG_MIN_ANIMATED_PX,
+) -> tuple[list[dict], list[dict]]:
+    """Scale up under-sized multi-frame subjects (aspect kept).
+
+    Returns (specs, changes) where each change is
+    {"name", "from": [w,h], "to": [w,h]}. Specs are shallow-copied when
+    changed; unchanged specs are returned as-is.
+    """
+    if not specs:
+        return specs, []
+    counts: dict[str, int] = {}
+    for sp in specs:
+        counts[jmr_atlas_group_key(str(sp.get("name") or ""))] = (
+            counts.get(jmr_atlas_group_key(str(sp.get("name") or "")), 0) + 1
+        )
+    out: list[dict] = []
+    changes: list[dict] = []
+    for sp in specs:
+        name = str(sp.get("name") or "")
+        size = sp.get("size")
+        if counts.get(jmr_atlas_group_key(name), 0) < 2 or not size:
+            out.append(sp)
+            continue
+        try:
+            w, h = int(size[0]), int(size[1])
+        except Exception:
+            out.append(sp)
+            continue
+        m = min(w, h)
+        if m <= 0 or m >= floor:
+            out.append(sp)
+            continue
+        k = floor / m
+        nw, nh = max(floor, int(round(w * k))), max(floor, int(round(h * k)))
+        new = dict(sp)
+        new["size"] = (nw, nh)
+        out.append(new)
+        changes.append({"name": name, "from": [w, h], "to": [nw, nh]})
+    return out, changes
+
+
 def jmr_atlas_groups(names: list[str]) -> list[tuple[str, list[str]]]:
     """Declaration-order groups — one STEM-N.png sheet per group."""
     buckets: dict[str, list[str]] = {}
@@ -3296,6 +3350,8 @@ def render_jmr_png_paths_block(
         "",
         "Sheet index N is jmr:spr:N. APPEND-ONLY — do not reorder. ≤16 sheets.",
         "Use blitSpr (injected) or copy it. Do NOT invent sx — use the table.",
+        "cw,ch MUST match this table (window.JMR_CELL), not TILE, when TILE",
+        "differs — sx=fi*wrongCell crops the next frame.",
         "",
         "  var S0 = new Image();",
         '  S0.src = "jmr:spr:0";',

@@ -3346,6 +3346,12 @@ class FeedbackRoutingMixin:
                     must_keep_keywords = (
                         "VISUAL CRITIC",
                         "VISUAL JUDGE",
+                        # Sept 2026: the visual critic's actual prefix
+                        # (`_queue_visual_critic_coaching`) and the code
+                        # critic sidecar. Both exist precisely to catch
+                        # what a green probe report cannot see.
+                        "VLM-CRITIQUE",
+                        "CODE CRITIC",
                         "REGRESSION SUSPECTED",
                         "STATIC SCREEN",
                         "STATE LOCOMOTION",
@@ -3380,6 +3386,7 @@ class FeedbackRoutingMixin:
                     # speaking (user override > critic suggestion).
                     has_critic = any(
                         "VISUAL CRITIC" in c or "VISUAL JUDGE" in c
+                        or "VLM-CRITIQUE" in c or "CODE CRITIC" in c
                         for c in coaching_to_inject
                     )
                     label_open = "[CRITIC]\n" if has_critic else ""

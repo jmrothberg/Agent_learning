@@ -830,6 +830,24 @@ _POLISH_TURN_CAP = 2
 # bound cost on slow local backends.
 _STUCK_BON_ESCALATION_CAP = 2
 
+# KV prefix-cache friendliness (Sept 2026). Local backends (oMLX tiered
+# cache, in-process mlx_lm prompt_cache, Ollama slot cache) skip prefill for
+# the byte-identical prefix of the previous turn. The per-turn elision in
+# `_prune_messages` rewrites the message that just left the keep window,
+# which invalidates everything after it (~K recent turns re-prefilled each
+# turn). On prefix-cache backends we therefore DEFER elision — history stays
+# append-only — until the projected prompt reaches this fraction of the
+# compaction ceiling; then one batch elision runs (one cache miss), and the
+# loop is append-only again. Same content as before, just later. 0.8 of the
+# 45k ceiling = 36k: cached prefix tokens are free to prefill, so the only
+# reason to elide early is to stay clear of lossy structured compaction;
+# the remaining 9k is one turn of growth (report + inlined file + reply).
+# Env AGENT_PREFIX_CACHE_FRIENDLY=0 restores eager elision; =1 forces it
+# on for Ollama too (its slot cache is evicted by parallel slots, so it is
+# opt-in there).
+_LAZY_ELISION_FRACTION = 0.8
+_PREFIX_CACHE_BACKENDS_DEFAULT = ("mlx", "mlx-server")
+
 # Only elide genuinely large inline HTML blobs during message compaction.
 # Small examples (e.g. `<html_file>...</html_file>` in instructions) must
 # remain verbatim or we mutate the semantics of prior user guidance.
@@ -852,3 +870,25 @@ _REPORT_BLOCK_RE = re.compile(
 # superseded the moment self._probes updates. Bodies above this size are
 # collapsed by _summarize_content; small examples stay verbatim.
 _SUMMARIZE_MIN_PROBES_BYTES = 300
+
+# canvas-grid-navigation ships chase/pellet auto-probes AND wall/dig probes
+# in one recipe (strong_hooks include both maze-chase and dig/tunnel). The
+# chase set is side-effecting (auto_chaser_moves_autonomously dispatches
+# keys) and false-fails tile-digger goals that never asked for pellets
+# (DIGDUGD3 20260905_161144). Class phrases only — not a title branch.
+_GRID_CHASE_AUTO_PROBE_NAMES = frozenset({
+    "auto_chasers_array_present",
+    "auto_chaser_moves_autonomously",
+    "auto_vulnerability_mechanism_exposed",
+    "auto_collectibles_counter",
+})
+_GRID_CHASE_CLASS_RE = re.compile(
+    r"\b(chase|chaser|chasers|pursuer|pursuers|pellet|pellets|"
+    r"dots|vulnerable|flee|scared|power-?up|powerup)\b",
+    re.I,
+)
+
+
+def grid_chase_class_in_goal(goal: str) -> bool:
+    """True when the goal is maze-chase / pellet-collect, not merely a grid."""
+    return bool(_GRID_CHASE_CLASS_RE.search(goal or ""))

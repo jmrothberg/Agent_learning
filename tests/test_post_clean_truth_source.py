@@ -201,3 +201,24 @@ def test_post_clean_failed_branch_unchanged(tmp_path):
     assert "if you emit a <patch>" not in prompt
     # The failed branch still gets the file body via fix_instruction.
     assert "FAILED_BRANCH_SENTINEL" in prompt
+
+
+def test_partial_patch_advisory_only_when_probes_green_and_no_page_errors():
+    """DOOM3DFI 20260902_112850 iter 2: 7/7 probes green but `partial patch
+    apply` forced ok=False and burned two 0/1 patch turns. Advisory ONLY
+    when ok, every probe passed and no page errors."""
+    green = _clean_report()
+    green["probes"] = [{"name": "a", "ok": True}, {"name": "b", "ok": True}]
+    assert GameAgent._partial_patch_is_advisory(green) is True
+    # Any red probe → still force the recovery turn.
+    red = dict(green, probes=[{"name": "a", "ok": True}, {"name": "b", "ok": False}])
+    assert GameAgent._partial_patch_is_advisory(red) is False
+    # Page errors → still force.
+    err = dict(green, page_errors=["ReferenceError: x"])
+    assert GameAgent._partial_patch_is_advisory(err) is False
+    # No probes at all → nothing proves the build works → force.
+    none = dict(green, probes=[])
+    assert GameAgent._partial_patch_is_advisory(none) is False
+    # Report not ok → force.
+    notok = dict(green, ok=False)
+    assert GameAgent._partial_patch_is_advisory(notok) is False

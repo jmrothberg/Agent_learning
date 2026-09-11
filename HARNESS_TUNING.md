@@ -46,6 +46,17 @@ matching `.html` and play it — **do not trust TEST OK alone**.
 
 **Mistake to never repeat:** stuffing Centipede/Galaga/… title logic into memory pins or harness “to fix one HTML smell.” Put the named-game sentence in the **library/eval prompt**; put the reusable mechanism in a **class** playbook/outline/skeleton bullet that any matching goal retrieves.
 
+#### Standing rule — two product tracks (do not collapse)
+
+Local models are getting good enough to write **full** HTML5 games (`sprite()`, audio, video). `/640` and `/640png` are a **different product**: FPGA-legal 640×480 with packed `STEM-N.png` / `jmr:spr:N`. Keep both sharp.
+
+| Track | What “good” means | Do not |
+|-------|-------------------|--------|
+| Full HTML (`/media on`) | Rich first-build: `sprite(key)`, sounds, video; keep a **crisp tagged** `<plan>` in context when the model stayed inside tags | Weaken this path to unstick FPGA (don’t strip sprite() contracts, don’t cap a well-formed plan) |
+| `/640` / `/640png` | JMR walls, packed sheets, `tx`/`ty` probes, no three.js, no leftover pose-filename coaching | Leak `sprite()` / 30k plan essays / Pac-Man chase autos into a dig/tunnel first-build |
+
+Other coding agents keep **structured state** and drop narrative before the write turn. Do that here too: elide untagged Phase-A essays; never dumb down the Dig Dug *prompt* because a false-positive gate fired.
+
 **Prompt / memory style (local LLMs):** library goals and playbook bullets must state **one** best
 practice, not a menu (`raycaster or three.js` → prefer three.js). Prefer extending an existing
 bullet over adding a new ID. Keep bullets short (~250–500 chars); put mechanics in playbook /
@@ -187,7 +198,16 @@ bullet never reaches the prompt — broaden tags if a good bullet doesn’t fire
 - **oMLX 1800s overall must not kill a live think** (BATTLEZO `20260904_095910`): TUI already
   says active streams are not wall-clock capped; ollama + in-process MLX honor that. `MLXServerBackend`
   still aborted GLM CoT at 1800s (GPU 98%). `overall_seconds` now fires only when **both** content
-  and thinking token counts are still 0. Runaway is repetition/max_tokens, not wall-clock.
+  and thinking token counts are still 0. Runaway is repetition/max_tokens, not wall-clock. The
+  MacBook first-token watchdog (`_model_reported_loaded`) sits alongside it: it aborts only when
+  oMLX says the model is loaded yet nothing at all has streamed.
+- **Qwen3.8 / in-process MLX `fds_to_keep` after GLM/oMLX** (BATTLEZ2/4/5/6/7
+  `20260904`): switching to Qwen3.8-27B after GLM left Chromium running, then
+  `mlx_vlm.load` forked and died at 0 tokens
+  (`ValueError: bad value(s) in fds_to_keep`). Warm-load before a *new*
+  browser is not enough — `/new` reuses the live Playwright. Close Chromium
+  before in-process `warm_load`, then start it after; also filter closed FDs
+  out of `multiprocessing.util.spawnv_passfds`. GLM/oMLX HTTP is unchanged.
 
 **Compaction / context**
 
@@ -195,9 +215,20 @@ bullet never reaches the prompt — broaden tags if a good bullet doesn’t fire
   window on a 100K+ session) triggers lossy compaction every turn — shredding playbook, user
   feedback, and file view (“patches don’t stick”). Default `num_ctx` is **100000**; compact only
   near a genuinely full window (~70% pressure), not on message count alone.
-- **Do NOT add a `warm_prefix` after compaction** (Phase 4B investigation). MLX (`backend.py`
-  `stream_generate`) is called fresh each turn with **no `prompt_cache`** → zero cross-call KV reuse,
-  so a warm just re-prefills on the next real call (dead overhead). On Ollama, compaction rewrites
+- **KV prefix cache (Sept 2026) — keep history append-only.** Local backends reuse the prefill of the
+  previous turn only for the **byte-identical prefix**: oMLX tiered cache (`hot_cache_max_size` > 0),
+  in-process `mlx_lm` via the harness's cross-turn `prompt_cache` (`MLX_PROMPT_CACHE`), Ollama slot
+  cache. Anything that rewrites an earlier message (per-turn HTML elision, report collapse, plan
+  elision, stage-effort change in the system prompt) invalidates everything after it. So: on
+  `mlx`/`mlx-server` the default elision is **deferred** until projected prompt ≥ 80% of the compaction
+  ceiling and then runs as a batch (`AGENT_PREFIX_CACHE_FRIENDLY`); the Qwen `medium→low` effort switch
+  costs exactly one miss at the first fix turn; structured compaction is still a full miss (rare, under
+  pressure). Triage: `stream_done.ttft_s` vs `prompt_tokens` — ~10 s on a 30k prompt = hit, 60-120 s =
+  miss; in-process also reports `cached_prompt_tokens`. **Never** add per-turn edits to messages other
+  than the newest user turn.
+- **Do NOT add a `warm_prefix` after compaction** (Phase 4B investigation). In-process MLX now keeps a
+  cross-turn `prompt_cache`, but compaction rewrites the prefix, so a warm still just re-prefills
+  what the next real call would prefill anyway (dead overhead). On Ollama, compaction rewrites
   the prefix (state-anchor replaces msgs 1..cutoff) so the cached KV is invalid at the divergence
   point, and there is no idle window right after compaction to hide prefill in. The existing
   `warm_prefix` is correctly gated to the **cross-slot** case only (coder slot ≠ architect slot, the
@@ -217,6 +248,10 @@ bullet never reaches the prompt — broaden tags if a good bullet doesn’t fire
   `STEM-0.png` … `STEM-15.png` next to the HTML (`jmr:spr:N` + `window.JMR_SPR`).
   Pin `jmr-png-sheets` instead of pixel-maps. `/games N` derives the goal from
   `prompt_640` (STEM-N.png / `jmr:spr:N` rewrite) — never the media `prompt`.
+  **Vector-stroke class** (2D wireframe, not sprites): keep JMR walls but do
+  not rewrite to Emit `<assets>` / `jmr:spr`. The sprite TARGET's
+  "1px drawImage columns" strong-hooked `canvas-puzzle-grid` over
+  `canvas-vector-wireframe` (BATTLE10).
 
   **Atlas packing — the clear rules** (`assets.py`: `jmr_atlas_group_key`,
   `jmr_atlas_layout`, `materialize_jmr_png_sheets`; full rationale in that
@@ -245,9 +280,20 @@ bullet never reaches the prompt — broaden tags if a good bullet doesn’t fire
      playfield. Per-title numbers live in each library `prompt_640`
      (`On-screen sizes: …`); class rule in playbook `jmr-png-sheets`. A big
      cell costs on every frame (8×512 is a 4096px-wide strip).
+     **Scale (Sept 2026, FROGGERC/DIGDUGD3 "4× too small"):** the first
+     library pass used arcade-*native* px (16 px frog on a 224 px screen →
+     `~24x24`), which is ~1/27 of the 640 glass instead of ~1/14. Library is
+     now ~2× / arcade-faithful (16 px arcade ≈ 40 px; grid games capped so the
+     arena still fits: Pac-Man/Dig Dug/Zelda tiles 40, Tetris well unchanged,
+     fighters/Doom/laserdisc unchanged). Harness floor: `apply_jmr_size_floor`
+     scales any **animated** subject (prefix with ≥2 poses) whose short side is
+     < `JMR_PNG_MIN_ANIMATED_PX` (32) up to 32, aspect kept; singles (bullets,
+     dots, balls, HUD icons) untouched; trace `jmr_size_floor_applied`.
   5. **Draw contract:** 9-arg `drawImage` / injected `blitSpr` helper crops
      `sx = frameIndex * cellW`. `render_jmr_png_paths_block` emits the exact
-     frame-index table so the model never invents `sx`. **fillText is 8×8
+     frame-index table so the model never invents `sx`. **cellW/cellH must
+     match that table**, not `TILE`, when TILE is a different size (ZELDATOP
+     blit 32 on 40px sheets cropped neighboring frames). **fillText is 8×8
      ASCII 32–126** (`♦` / `\u25C6` → chip paints `b`; `textAlign` center/right
      uses UTF-8 **byte** length so WAVE/LIVES overlap). HUD: `textAlign=left`
      at `x+n*(8*k)`; lives via `fillRect` or `*`. Playbook `jmr-filltext-ascii-hud`.
@@ -365,7 +411,23 @@ Per-run scores live in **`eval/OPERATIONS.md`** (run_06 snapshot). Mid-batch har
 | Game looks perfect to human but trace shows 2 `soft_warnings` | Often probe timing or partial patch — not always a visual bug; read `iter_summary.soft_warnings` | trace + `HARNESS_DEBUG.md` § “looks fine” |
 | Cascade hazards roll uphill / skip mid-span tumble | INITIAL vx from slopeDir + ladder gaps (`ramp-hazard-roll-then-tumble`) | `memory/playbook.jsonl`, outline trap |
 | Ladder mid-climb stuck then thrash-revert (DK 20260722) | Full-span `findLadderAt` + top-exit; pin ladder craft for vertical-platformer; drop bare `"climb"`→Rampage pin | `memory/playbook.jsonl`, `outline-vertical-platformer`, `agent_memory.py` |
-| Maze FPS missing overview map | Short goal HUD line + `3d-navigation-modality-invariants` + outline trap | `prompt_library.jsonl` (doom), playbook, outline |
+| `/640png` appendix "1px drawImage columns" strong-hooked puzzle-grid over vector-wireframe (BATTLE10) | Strip `TARGET=/640*` before recipe match; drop generic `columns` strong_hook; wireframe vs puzzle disambiguate; `/640png` + vector-stroke uses /640 plan (no `<assets>`) | `memory.py`, `visual_playtests.jsonl`, `prompts_v1.py`, `prompt_library.py` |
+| `/640png` footer `no three.js` tokenized as 3D (`three`+`threejs`, MIN_HITS=2) → Dig Dug seeded `canvas_3d_basic` + Jaccard mixed `jmr-png-sheets` with `classic-arcade-pixel-maps` → first-build `inline_data_bloat` (DIGDUGD2 `20260905_153855`; morning DIGDUGDI same wrong skeleton but still emitted HTML) | Strip `no/not/never/without three.js` and `no WebGL` before 3D detect; JMR `/640` `/640png` never seeds WebGL skeleton (recipe still picks grid); `/640png` suppresses inline pixel-maps; `ensure_ids` ignores negated three.js as WebGL intent. Do **not** dumb down `/critic auto` or the Dig Dug prompt — this is a false-positive, not "defaults too rich" | `modality.py`, `memory.py` `_modality_skeleton`, `agent_memory.py`; tests `test_b1_3d_negated_threejs_is_not_3d_intent`, `test_640png_arcade_does_not_inherit_threejs_skeleton`, `test_jmr_png_no_threejs_footer_still_pins_sheets_not_webgl` |
+| `/640png` sprites "4× too small" (FROGGERC `20260905_191823`, DIGDUGD3): 24 px frog/digger on 640×480 — art was exactly the library's arcade-native `On-screen sizes:` | Library `prompt_640` sizes ~2× (arcade 16 px ≈ 40 px on glass; grid arenas capped); `jmr-png-sheets` + Phase-A blocks teach 32-48 px characters; harness floors animated subjects at 32 px (`apply_jmr_size_floor`, singles untouched) | `memory/prompt_library.jsonl`, `memory/playbook.jsonl`, `prompts_v1.py`, `assets.py`, `agent_assets.py`; tests `test_apply_jmr_size_floor_scales_animated_subjects_only`, `test_jmr_png_size_floor_reaches_generator_and_traces` |
+| ZELDATOP (`20260905_200400`): TEST OK 6/6 but `unused_assets` nagged packed singles `npc.png`/`enemy.png`/`heart.png` (DIGDUGD3 leftover skip required `_` in the name); first-build skeleton `canvas_pinball_basic` at Jaccard 0.05 because `canvas-overworld-rpg` was ABSENT from the recipe→skeleton map; skip diagnostics `has_player_xy=false` on `state.hero`; self-`from_image` (`hero_idle`←`hero_idle`) burned pose-retry GPU; blitSpr used TILE=32 on 40px cells | Skip **all** non-`STEM-N.png` leftovers when HTML paints `jmr:spr` (not only underscore poses). Map `canvas-overworld-rpg` → `canvas_grid_basic`. Playtest diagnostics read `player\|\|hero\|\|ship\|\|digger\|\|avatar` (string facing counts). Drop `from_image` when it equals own name. Playbook/prompt: blitSpr cw,ch = sheet table, not TILE | `tools.py`, `memory.py`, `agent_critic.py`, `assets.py`, `prompts_v1.py`, `memory/playbook.jsonl`; tests `test_unused_assets_skips_jmr_packed_pose_leftovers`, `test_overworld_rpg_gets_grid_not_pinball`, `test_parse_drops_self_from_image` |
+| DIGDUGD3 (`20260905_161144`): 30k untagged plan essay → 68k first-build history → silent 0-token stall; restart then failed `input_moves_player` after Pac-Man `auto_chaser_moves_autonomously`; `unused_assets=8` on leftover `digger_idle.png` | Keep Phase-A **tags**, drop untagged essay before first-build (`_planning_keep_structured_tags`); FPGA elides modest prose, full HTML keeps a crisp tagged plan. Skip chase auto-probes unless the goal has chase/pellet/pursuer class words. Run `input_moves_player` before other effectful autos. Default movement probe snaps `tx`/`ty` as well as `x`. Skip pose-filename unused-asset nags when HTML uses `jmr:spr`. `/640png` first-build nudge says `jmr:spr`, not `sprite()` | `agent.py`, `agent_critic.py`, `agent_helpers.py`, `tools.py`, `prompts_v1.py`; tests `test_lean_compact_drops_untagged_plan_essay`, `test_dig_tunnel_grid_skips_chase_auto_probes`, `test_unused_assets_skips_jmr_packed_pose_leftovers` |
+| `adjacent_line_spam` killed a progressing 10 kB first build on `const c1..c4 = {x:0,y:0}` (BATTLE10) | Window 4 fires at 4 only for RAW-identical lines (digit-collapsed runs need 8); spam gets the same open-`<html_file>`/`<patch>` grace as `inline_data_bloat` (both call sites) | `ollama_io.py`, `backend.py`, `tests/test_repetition.py` |
+| Plan streamed 50k completion / 18k visible tokens over 80 min (BATTLE10) | `stage="plan"` → `max_tokens` cap (`PLAN_MAX_TOKENS`, default 12000; 0 disables); cap hit → existing `plan_incomplete_retry`. Build/fix turns stay uncapped | `agent_stream.py` `_plan_stage_max_tokens`, `agent.py` plan `_stream(...)` calls |
+| 36% of wall clock on polish turns after 8/8 probes; polish regressed + auto-reverted (CENTIPED, DOOM3DFI r4) | Polish cap **0** in simulator mode (`/640`, `/640png`); media mode keeps 2 | `agent_prompts.py` `_effective_polish_turn_cap`, `tests/test_capability_round.py` |
+| 7/7 probes green but `partial patch apply` forced `ok=False` → two 0/1 patch turns (DOOM3DFI r1) | Advisory `warning` + recovery block on next prompt when ok, all probes green, no page errors; else forced retry as before | `agent_gates.py` `_partial_patch_is_advisory`, `agent.py` |
+| oMLX 1800 s at 0 tokens with model already resident — keepalive lines kept the read from timing out (BATTLEZO) | First-token watchdog every loop pass: `min(stall, 300 s)` quiet + `/v1/models/status loaded=true` → abort with clear message; cold load still gets the full cap | `backend.py` `MLXServerBackend._stream_once`, `_model_reported_loaded` |
+| `dropped_opening=True` on every `/640` first build — class outline never reached the model (CENTIPED, ANIMATIO, BATTLE10) | Simulator lean budget falls back to traps-only outline slice before dropping (`kept_opening_mode: traps_only`) | `agent_memory.py` `_outline_traps_only_for_goal` |
+| 91-98% of Qwen completion tokens hidden CoT; patch turns 60-105 s for ≤67 visible tokens | Stage-aware effort: `fix`/`patch` → `low`; plan / first build keep `medium`; explicit `QWEN_REASONING_EFFORT` wins. `_stage` rides `options`, stripped before the wire | `backend.py` `chat_template_thinking_kwargs(stage=)`, `agent_stream.py` |
+| `/640` Battlezone shipped a **top-down** tank game with 5/6 probes green (BATTLEZ2 `20260905_112313`) — the planner asked "2D... top-down?" and no gate disagreed | `prompt_640` said only "2D wireframe vector tank"; the full prompt's class-defining "First-person… recede toward a horizon" was dropped by the /640 shortening. Fixed #28 battlezone / #29 star-wars; test guards that first-person wireframe prompts keep the view words in `prompt_640`. This is a **memory_gap**, not something a critic fixes — the critic sees the same shortened goal | `memory/prompt_library.jsonl`, `tests/test_prompt_library.py::test_prompt_640_keeps_first_person_view_for_wireframe_games` |
+| Code critic spawned "ON (parallel)" on **in-process MLX** (BATTLEZ3 `20260905_144613`): feedback router timed out (`feedback_router_parse_failed` after 60 s), iter-2 coder turn queued behind the review | In-process `BackendInfo.endpoint` is the sentinel `"in-process"` — not a loopback URL, so `_endpoint_supports_concurrency` fell through to "non-loopback ⇒ concurrent". Now: no `://` ⇒ serial; `MLXBackend` instances are never concurrent; a forced-on critic on a serial backend runs **inline** inside `_spawn_code_critic` (`code_critic_inline` trace, 600-token cap) so nothing shares the single Metal executor with the coder. TUI **`/server on`** or **`/model N server`** is how you put Qwen3.8-27B on oMLX so `/critic auto` is actually parallel — no `LLM_BACKEND=mlx-server` | `agent.py`, `agent_critic.py`, `chat.py` `/server`; tests `test_inprocess_mlx_is_never_concurrent`, `test_tui_server_command.py` |
+| Every fix turn re-prefilled 24-35k tokens (60-120 s TTFT) on oMLX / in-process MLX although only the newest user turn changed | In-process: cross-turn `prompt_cache` (trim to shared prefix, prefill suffix only). All local: defer per-turn elision so history is append-only until 80% of ceiling (`prune_deferred_prefix_cache`). oMLX hot-cache off → one-shot TUI warning + `prefix_cache_status` trace | `backend.py` `plan_prompt_cache_reuse`, `agent_compaction.py` `_prefix_cache_friendly`, `agent_stream.py` `_maybe_report_prefix_cache_status` |
+| `unused_assets=8` on JMR pages using `jmr:spr:N`; false `ENTITY-NOT-RENDERED [player]` on first-person/wireframe builds | `STEM-N.png` referenced via `jmr:spr:N` / `"jmr:spr:"+i` / `window.JMR_SPR`; skip viewpoint entity for `canvas-3d-first-person` / `canvas-vector-wireframe` | `tools.py` `_jmr_sheet_referenced`, `_VIEWPOINT_RECIPE_IDS` |
+| Policy pin: FPGA-only rule violations (`Object.keys`, `performance.now`, `"jmr:spr:"+i`, splice return, unicode `fillText`) must never fail Chrome-working code | Regression test only — harness already teach-only | `tests/test_simulator_mode.py::test_fpga_only_rule_violations_never_fail_micro_probes` |
 | Attack limb points away from opponent | Code EXTRA flip — no VLM (`attack-sprite-wrong-direction-flip-in-code`) | `memory/playbook.jsonl` |
 | Versus P2 incomplete pose roster → MISSING boxes | Same pose suffixes both prefixes (`versus-fighter-sprite-prefix`) | `memory/playbook.jsonl` |
 | Sprite opaque when figure touches image edge | Chroma: near-white 5/8 + border-majority fallback | `assets.py`, `tests/test_tier1_2.py` |
@@ -396,6 +458,9 @@ Per-run scores live in **`eval/OPERATIONS.md`** (run_06 snapshot). Mid-batch har
 | Stall / repeat errors | `_pending_coaching` | `AGENT COACHING` block |
 | `/critique` playtest | `_queue_internal_feedback` | After **clean** iter only |
 | `/vlm-critique` | `_pending_coaching` + `[CRITIC]` | Needs VLM model or local vision judge + toggle ON |
+| `/critic` (code critic, Sept 2026) | spawned after materialize → folded into the queued next user turn (`[CODE CRITIC]`), else `_pending_coaching` | `auto` = ON on oMLX / cloud (parallel stream), off on serial backends; `/allroles` or `AGENT_CODE_CRITIC=on` force it. Works with or without `/wait` |
+
+**Three-role reality check (Sept 2026):** architect = Phase A planner + exit decision; coder = every build/fix turn; critic = **three independent reviewers** that all end in the coder's next prompt — `/critique` (scripted playtest, no LLM), `/vlm-critique` (screenshot, needs a VLM), `/critic` (source review, any text model). Before Sept 2026 a loopback oMLX endpoint was classed as a serial daemon (`_endpoint_supports_concurrency`), so any same-instance critic ran inline and stuck best-of-2 ran sequentially — on a continuous-batching server both now run in parallel (`_backend_supports_concurrency`; `_available_sampler_slots` offers `slot1b`). `OMLX_SESSION_KEEP_MODELS` stops one role's pre-stream unload from evicting another role's weights. Critic notes were also silently dropped on a clean probe report because the real prefix `[VLM-CRITIQUE]` was missing from `must_keep_keywords` in `agent_feedback.py` — fixed alongside `[CODE CRITIC]`.
 
 **Triage traps (TD seed trace `20260630_114658`):**
 

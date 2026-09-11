@@ -385,6 +385,30 @@ def test_sprite_scale_appendix_does_not_strong_hook_fixed_shooter() -> None:
     assert winner.id in ("canvas-roguelike", "canvas-grid-navigation")
 
 
+def test_640png_appendix_does_not_strong_hook_puzzle_grid() -> None:
+    """BATTLE10: TARGET=/640png '1px drawImage columns' must not beat
+    a vector-stroke goal into canvas-puzzle-grid."""
+    from pathlib import Path
+    from memory import GameMemory, find_best_visual_playtest, _strip_goal_appendices_for_match
+
+    root = Path(__file__).resolve().parents[1] / "memory"
+    mem = GameMemory(root=str(root))
+    recipes = mem.load_visual_playtests()
+    appendix = (
+        " TARGET=/640png JMR native: ONE 640×480 HTML file. Emit <assets>. "
+        "No 1px drawImage columns, no full-glass black wipe."
+    )
+    wire = (
+        "Build a 2D wireframe vector tank game. First-person wireframe "
+        "tank combat, glowing vector lines on black, radar minimap."
+    )
+    stripped = _strip_goal_appendices_for_match(wire + appendix)
+    assert "columns" not in stripped.lower()
+    winner, diag = find_best_visual_playtest(recipes, goal=wire + appendix)
+    assert winner is not None, diag
+    assert winner.id == "canvas-vector-wireframe", diag.get("top_candidates")
+
+
 # ----------------------------------------------------------------------
 # Module wiring: the constants + class exist and are loadable.
 # ----------------------------------------------------------------------

@@ -277,6 +277,30 @@ def test_polish_cap_reached_falls_back_to_post_clean(tmp_path):
     assert a._polish_pending is False
 
 
+def test_polish_cap_zero_in_simulator_mode(tmp_path):
+    """/640 and /640png: ship as soon as probes are green — no polish turns
+    (CENTIPED 20260902_230904 spent 36% of wall clock on 2 polish turns)."""
+    a = _make_agent(tmp_path)
+    a._goal = "centipede clone"
+    a._current_file = "<html><body>game</body></html>"
+    a._iters_remaining = 2
+    a.set_simulator_mode(True)
+    assert a._effective_polish_turn_cap() == 0
+    prompt = a._build_fix_prompt(
+        report=_clean_report(), regressed=False, partial_failed=[],
+    )
+    assert "polish turn" not in prompt
+    assert a._polish_turns_used == 0
+    assert a._polish_pending is False
+    # /640png implies simulator mode too.
+    b = _make_agent(tmp_path)
+    b.set_jmr_png_mode(True)
+    assert b._effective_polish_turn_cap() == 0
+    # Media mode keeps the default cap.
+    a.set_simulator_mode(False)
+    assert a._effective_polish_turn_cap() == _POLISH_TURN_CAP
+
+
 def test_polish_skipped_when_no_iters_remaining(tmp_path):
     a = _make_agent(tmp_path)
     a._goal = "fighting game"

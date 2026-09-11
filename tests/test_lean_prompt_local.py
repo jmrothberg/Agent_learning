@@ -141,7 +141,8 @@ def test_allroles_help_no_longer_claims_separate_architect_pass():
     import tui_help
     arch = "\n".join(tui_help.help_topic_lines("architect") or [])
     assert "does NOT add a second planning generation" in arch
-    allroles = "\n".join(tui_help.help_topic_lines("allroles") or [])
-    assert "per-iter visual critic" in allroles
-    assert "VLM-capable" in allroles
+    allroles = "\n".join(tui_help.help_topic_lines("allroles") or []).lower()
+    assert "/critic" in allroles
+    assert "vlm-critique" in allroles or "vision" in allroles
+    assert "architect" in allroles
 

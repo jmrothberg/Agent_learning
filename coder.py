@@ -16,6 +16,9 @@ Optional flags:
     --out PATH          Where to save the final game (default games/<8-letter-name>/<name>.html)
     --best-of-n N       Sample N candidates per fix turn (default 1)
     --stuck-bon         Enable automatic stuck best-of-2 escalation (default off)
+    --critic MODE       Code critic: auto (ON on oMLX, off on in-process MLX /
+                        Ollama) | on | off. Same as TUI /critic. Env AGENT_CODE_CRITIC.
+    --allroles          TUI /allroles: architect + vision + code critic
     --num-ctx N         Ollama context window (default 100000; env CODING_BOX_NUM_CTX)
     --stall-seconds N   Per-stream no-activity watchdog (default 300; fail-open floor)
     --headless          Run Chromium headless (no visible window). Use this
@@ -189,6 +192,9 @@ async def _run(
     use_vlm_critique: bool = False,
     stuck_bon_enabled: bool = False,
     no_auto_step: bool = False,
+    # Code critic sidecar: "auto" | "on" | "off" (None = env/auto).
+    code_critic: str | None = None,
+    all_roles: bool = False,
 ) -> int:
     # Resolve which LLM daemon we'll talk to. --backend overrides the
     # LLM_BACKEND env. If --model was given, build a BackendInfo
@@ -251,9 +257,14 @@ async def _run(
         # outcomes keep updating the bullet counters.
         playbook_top_k=6 if playbook_on else 0,
         playbook_writeback=playbook_writeback,
-        use_vlm_critique=use_vlm_critique,
+        use_vlm_critique=use_vlm_critique or all_roles,
+        use_architect_split=all_roles,
+        code_critic_mode=code_critic,
         stuck_bon_enabled=stuck_bon_enabled,
     )
+    # --allroles: same bundle as TUI /allroles (architect + vision + code critic).
+    agent._all_roles_enabled = bool(all_roles)
+    print(f"code critic: {agent._code_critic_status_label()}", file=sys.stderr)
 
     # Stream tokens to stdout, one chunk at a time. Newlines flush.
     def on_token(piece: str) -> None:
@@ -433,6 +444,19 @@ def main() -> int:
              "Requires a VLM-capable backend (in-process --backend mlx with mlx_vlm).",
     )
     p.add_argument(
+        "--critic",
+        choices=("auto", "on", "off"),
+        default=None,
+        help="Code critic (TUI /critic): reads the game source after each iter. "
+             "auto (default) = ON on oMLX (parallel), off on in-process MLX / "
+             "Ollama. Env AGENT_CODE_CRITIC.",
+    )
+    p.add_argument(
+        "--allroles",
+        action="store_true",
+        help="TUI /allroles: architect + vision + code critic on the loaded LLM.",
+    )
+    p.add_argument(
         "--no-auto-step",
         action="store_true",
         help="Do not auto-arm step-mode on first test failure (unattended "
@@ -520,6 +544,8 @@ def main() -> int:
         use_vlm_critique=args.vlm_critique,
         stuck_bon_enabled=args.stuck_bon,
         no_auto_step=args.no_auto_step,
+        code_critic=args.critic,
+        all_roles=args.allroles,
     ))
 
 

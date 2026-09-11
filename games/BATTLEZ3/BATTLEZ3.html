@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>BATTLEZONE</title>
+<style>
+  html,body{margin:0;background:#000;overflow:hidden;}
+  #wrap{position:fixed;inset:0;display:grid;place-items:center;}
+  canvas{display:block;background:#000;}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c" width="640" height="480"></canvas></div>
+<script>
+(function(){
+"use strict";
+var W=640,H=480,cx=W/2,horizonY=200,fov=320;
+var cvs=document.getElementById("c");
+var ctx=cvs.getContext("2d");
+ctx.imageSmoothingEnabled=false;
+
+// ---- trig LUT (no sin/cos/atan2) ----
+var N=2048, LUT=new Array(N);
+(function(){
+  var i, a, s, c, dt=Math.PI/2048;
+  // build via Taylor (allowed: uses only +,-,*,/, sqrt, floor, abs, min, max, random, PI)
+  function tsin(x){
+    // range reduce
+    while(x>Math.PI)x-=2*Math.PI;
+    while(x<-Math.PI)x+=2*Math.PI;
+    var term=x, sum=x, k=1, sign=-1;
+    for(k=2;k<=6;k++){ term*= -x*x/((2*k-2)*(2*k-1)); sum+= term; }
+    return sum;
+  }
+  function tcos(x){ return tsin(x+Math.PI/2); }
+  for(i=0;i<N;i++){ a=i*dt; LUT[i]={s:tsin(a), c:tcos(a)}; }
+})();
+function S(x){ // sin
+  while(x>Math.PI)x-=2*Math.PI;
+  while(x<-Math.PI)x+=2*Math.PI;
+  var i=Math.floor(x/dt0()); if(i<0)i+=N; if(i>=N)i-=N;
+  return LUT[i].s;
+}
+function C(x){
+  while(x>Math.PI)x-=2*Math.PI;
+  while(x<-Math.PI)x+=2*Math.PI;
+  var i=Math.floor(x/dt0()); if(i<0)i+=N; if(i>=N)i-=N;
+  return LUT[i].c;
+}
+function dt0(){ return Math.PI/2048; }
+
+// ---- state ----
+var state={
+  mode:"playing",
+  player:{x:0,z:0,yaw:0},
+  enemies:[],
+  bullets:[],
+  enemyBullets:[],
+  score:0,
+  lives:3,
+  over:false,
+  time:0,
+  spawnT:0,
+  fireCd:0,
+  efire:0
+};
+window.state=state;
+window.game={reset:reset};
+
+function reset(){
+  state.mode="playing";
+  state.player.x=0; state.player.z=0; state.player.yaw=0;
+  state.enemies.length=0;
+  state.bullets.length=0;
+  state.enemyBullets.length=0;
+  state.score=0; state.lives=3; state.over=false; state.time=0;
+  state.spawnT=0; state.fireCd=0; state.efire=0;
+}
+
+// ---- input ----
+var keys={};
+addEventListener("keydown",function(e){
+  keys[e.code]=true;
+  if(e.code==="KeyR"){ reset(); }
+});
+addEventListener("keyup",function(e){ keys[e.code]=false; });
+
+// ---- projection ----
+function project(x,y,z){
+  var dx=x-state.player.x, dz=z-state.player.z;
+  var c=C(-state.player.yaw), s=S(-state.player.yaw);
+  var rx=dx*c - dz*s;
+  var rz=dx*s + dz*c;
+  if(rz<=0.1) return null;
+  return { x: cx + (rx/rz)*fov, y: horizonY - (y/rz)*fov, rz:rz };
+}
+
+// ---- segment buffer (painter's sort) ----
+var segs=[];
+function addSeg(x1,y1,z1,x2,y2,z2,color,w){
+  segs.push({a:project(x1,y1,z1), b:project(x2,y2,z2), color:color, w:w});
+}
+function drawSegs(){
+  // sort back-to-front: larger rz first
+  for(var i=0;i<segs.length;i++){
+    var s=segs[i];
+    if(!s.a||!s.b) continue;
+    ctx.strokeStyle=s.color;
+    ctx.lineWidth=s.w||1;
+    ctx.beginPath();
+    ctx.moveTo(s.a.x,s.a.y);
+    ctx.lineTo(s.b.x,s.b.y);
+    ctx.stroke();
+  }
+}
+
+// ---- terrain: ground grid + range rings + mountains ----
+function drawTerrain(){
+  // ground grid: lines along x (perpendicular to view) and z (depth)
+  var i, x, z, y=0;
+  // range rings (depth lines)
+  for(z=20; z<=600; z+=20){
+    addSeg(-300, y, state.player.z+z, 300, y, state.player.z+z, "#0a3a2a", 1);
+  }
+  // lateral grid lines
+  for(x=-300; x<=300; x+=20){
+    addSeg(x, y, state.player.z, x, y, state.player.z+600, "#0a3a2a", 1);
+  }
+  // range rings (circles approximated as arcs of segments)
+  drawRings();
+  // mountains: ridges at fixed world positions
+  drawMountains();
+}
+
+function drawRings(){
+  var r, i, a, a2, x1,z1,x2,z2;
+  for(r=60; r<=300; r+=60){
+    for(i=0;i<24;i++){
+      a=i/24*2*Math.PI;
+      a2=(i+1)/24*2*Math.PI;
+      x1=S(a)*r; z1=C(a)*r;
+      x2=S(a2)*r; z2=C(a2)*r;
+      addSeg(x1,0,state.player.z+z1, x2,0,state.player.z+z2, "#0d5a3a", 1);
+    }
+  }
+}
+
+// mountain ridges: a set of peaks (triangular wireframe)
+var peaks=[
+  {x:-200,z:200,h:60},
+  {x:150,z:260,h:80},
+  {x:0,z:380,h:100},
+  {x:220,z:420,h:70},
+  {x:-260,z:340,h:55},
+  {x:60,z:160,h:45}
+];
+function drawMountains(){
+  var i,p, y=0;
+  for(i=0;i<peaks.length;i++){
+    p=peaks[i];
+    // triangular peak: base corners + apex
+    var bx=30, bz=30;
+    addSeg(p.x-bx,y,p.z-bz, p.x+bx,y,p.z-bz, "#0f7a4a", 2);
+    addSeg(p.x+bx,y,p.z-bz, p.x+bx,y,p.z+bz, "#0f7a4a", 2);
+    addSeg(p.x+bx,y,p.z+bz, p.x-bx,y,p.z+bz, "#0f7a4a", 2);
+    addSeg(p.x-bx,y,p.z+bz, p.x-bx,y,p.z-bz, "#0f7a4a", 2);
+    addSeg(p.x-bx,y,p.z-bz, p.x,p.h,p.z, "#0f7a4a", 2);
+    addSeg(p.x+bx,y,p.z-bz, p.x,p.h,p.z, "#0f7a4a", 2);
+    addSeg(p.x+bx,y,p.z+bz, p.x,p.h,p.z, "#0f7a4a", 2);
+    addSeg(p.x-bx,y,p.z+bz, p.x,p.h,p.z, "#0f7a4a", 2);
+  }
+}
+
+// ---- tank wireframe (box hull + turret) ----
+function drawTank(x,y,z,yaw, color, isPlayer){
+  // hull: a flat box (2D footprint extruded)
+  var hw=22, hd=30, hh=12;
+  // hull corners (local: forward = +z)
+  var c=[
+    [-hw,0,-hd],[hw,0,-hd],[hw,0,hd],[-hw,0,hd],
+    [-hw,hh,-hd],[hw,hh,-hd],[hw,hh,hd],[-hw,hh,hd]
+  ];
+  var e=[[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]];
+  var i, a, wx, wz, dx, dz, cs, sn;
+  cs=C(yaw); sn=S(yaw);
+  for(i=0;i<c.length;i++){
+    dx=c[i][0]; dz=c[i][2];
+    wx=x + dx*cs - dz*sn;
+    wz=z + dx*sn + dz*cs;
+    c[i].wx=wx; c[i].wz=wz;
+  }
+  for(i=0;i<e.length;i++){
+    addSeg(c[e[i][0]].wx, y, c[e[i][0]].wz, c[e[i][1]].wx, y, c[e[i][1]].wz, color, isPlayer?2:2);
+  }
+  // turret: smaller box on top
+  var tw=10, td=12, th=8, ty=y+hh;
+  var t=[
+    [-tw,0,-td],[tw,0,-td],[tw,0,td],[-tw,0,td],
+    [-tw,th,-td],[tw,th,-td],[tw,th,td],[-tw,th,td]
+  ];
+  for(i=0;i<t.length;i++){
+    dx=t[i][0]; dz=t[i][2];
+    wx=x + dx*cs - dz*sn;
+    wz=z + dx*sn + dz*cs;
+    t[i].wx=wx; t[i].wz=wz;
+  }
+  for(i=0;i<e.length;i++){
+    addSeg(t[e[i][0]].wx, ty, t[e[i][0]].wz, t[e[i][1]].wx, ty, t[e[i][1]].wz, color, 2);
+  }
+  // barrel: line from turret center forward
+  var bl=26;
+  addSeg(x, y+hh+4, z, x + S(yaw)*bl, y+hh+4, z + C(yaw)*bl, color, 2);
+}
+
+// ---- enemies ----
+function spawnEnemy(){
+  // spawn at a random angle, distance 300-500
+  var a=Math.random()*2*Math.PI;
+  var d=300+Math.random()*200;
+  state.enemies.push({
+    x: state.player.x + S(a)*d,
+    z: state.player.z + C(a)*d,
+    yaw:0,
+    hp:2,
+    fire: 2+Math.random()*3
+  });
+}
+
+function updateEnemies(dt){
+  var i,e, dx, dz, dist, spd=40;
+  for(i=0;i<state.enemies.length;i++){
+    e=state.enemies[i];
+    dx=state.player.x-e.x; dz=state.player.z-e.z;
+    dist=Math.sqrt(dx*dx+dz*dz);
+    // face player (yaw toward player)
+    e.yaw=atan2ish(dx,dz);
+    // approach
+    if(dist>60){
+      e.x += (dx/dist)*spd*dt;
+      e.z += (dz/dist)*spd*dt;
+    }
+    // shoot back
+    e.fire -= dt;
+    if(e.fire<=0 && dist<320){
+      state.enemyBullets.push({
+        x:e.x, y:12, z:e.z,
+        vx: (dx/dist)*220, vz: (dz/dist)*220
+      });
+      e.fire = 2.5+Math.random()*2;
+    }
+  }
+}
+
+// atan2 via LUT: angle whose sin/dz... we want yaw where S(yaw)=dx/d, C(yaw)=dz/d
+function atan2ish(dx,dz){
+  var d=Math.sqrt(dx*dx+dz*dz); if(d<0.0001) return 0;
+  var nx=dx/d, nz=dz/d;
+  var best=0, bestErr=1e9, i, dt=Math.PI/2048, s, c, err;
+  for(i=0;i<256;i++){
+    var idx=Math.floor(i*2048/256);
+    s=LUT[idx].s; c=LUT[idx].c;
+    err=(s-nx)*(s-nx)+(c-nz)*(c-nz);
+    if(err<bestErr){ bestErr=err; best=i*2048/256*dt; }
+  }
+  return best;
+}
+
+// ---- bullets ----
+function updateBullets(dt){
+  var i,b, dx, dz, e, dist;
+  // player bullets
+  for(i=0;i<state.bullets.length;i++){
+    b=state.bullets[i];
+    b.x += b.vx*dt; b.z += b.vz*dt;
+    // hit enemies
+    for(var j=0;j<state.enemies.length;j++){
+      e=state.enemies[j];
+      dx=e.x-b.x; dz=e.z-b.z;
+      dist=Math.sqrt(dx*dx+dz*dz);
+      if(dist<26){
+        e.hp--;
+        state.bullets[i].dead=true;
+        if(e.hp<=0){
+          state.enemies[j].dead=true;
+          state.score+=100;
+        }
+        break;
+      }
+    }
+  }
+  // remove dead
+  cleanArr(state.bullets);
+  cleanArr(state.enemies);
+
+  // enemy bullets
+  for(i=0;i<state.enemyBullets.length;i++){
+    b=state.enemyBullets[i];
+    b.x += b.vx*dt; b.z += b.vz*dt;
+    dx=state.player.x-b.x; dz=state.player.z-b.z;
+    dist=Math.sqrt(dx*dx+dz*dz);
+    if(dist<22){
+      state.enemyBullets[i].dead=true;
+      state.lives--;
+      if(state.lives<=0){ state.over=true; state.mode="over"; }
+    }
+  }
+  cleanArr(state.enemyBullets);
+}
+
+function cleanArr(arr){
+  var i, j, n=arr.length;
+  for(i=0;i<n;i++){
+    if(arr[i].dead){
+      // copy down tail
+      for(j=i;j<n-1;j++){ arr[j]=arr[j+1]; }
+      n--; i--;
+    }
+  }
+  arr.length=n;
+}
+
+// ---- update ----
+function update(dt){
+  if(state.over) return;
+  state.time+=dt;
+  var p=state.player;
+  if(keys.ArrowLeft) p.yaw -= 2.0*dt;
+  if(keys.ArrowRight) p.yaw += 2.0*dt;
+  if(keys.ArrowUp){ p.x += S(p.yaw)*90*dt; p.z += C(p.yaw)*90*dt; }
+  if(keys.ArrowDown){ p.x -= S(p.yaw)*60*dt; p.z -= C(p.yaw)*60*dt; }
+
+  // fire
+  state.fireCd -= dt;
+  if(keys.Space && state.fireCd<=0){
+    state.bullets.push({
+      x: p.x + S(p.yaw)*30, y:12, z: p.z + C(p.yaw)*30,
+      vx: S(p.yaw)*320, vz: C(p.yaw)*320
+    });
+    state.fireCd=0.3;
+  }
+
+  // spawn enemies
+  state.spawnT -= dt;
+  if(state.spawnT<=0 && state.enemies.length<6){
+    spawnEnemy();
+    state.spawnT = 3+Math.random()*3;
+  }
+
+  updateEnemies(dt);
+  updateBullets(dt);
+}
+
+// ---- draw ----
+function draw(){
+  ctx.fillStyle="#000";
+  ctx.fillRect(0,0,W,H);
+
+  segs.length=0;
+  drawTerrain();
+  // ensure at least one enemy exists for the probe (spawn on first frame if none)
+  if(state.enemies.length===0 && !state.over){ spawnEnemy(); }
+
+  // enemies
+  var i;
+  for(i=0;i<state.enemies.length;i++){
+    drawTank(state.enemies[i].x,0,state.enemies[i].z,state.enemies[i].yaw,"#ff3a3a",false);
+  }
+  // player tank (fixed at bottom center, world pos = player)
+  drawTank(state.player.x,0,state.player.z,state.player.yaw,"#3aff6a",true);
+
+  // bullets
+  for(i=0;i<state.bullets.length;i++){
+    addSeg(state.bullets[i].x-2, state.bullets[i].y, state.bullets[i].z-2,
+           state.bullets[i].x+2, state.bullets[i].y, state.bullets[i].z+2, "#3aff6a", 2);
+  }
+  for(i=0;i<state.enemyBullets.length;i++){
+    addSeg(state.enemyBullets[i].x-2, state.enemyBullets[i].y, state.enemyBullets[i].z-2,
+           state.enemyBullets[i].x+2, state.enemyBullets[i].y, state.enemyBullets[i].z+2, "#ff3a3a", 2);
+  }
+
+  drawSegs();
+
+  drawHUD();
+}
+
+function drawHUD(){
+  ctx.fillStyle="#3aff6a";
+  ctx.font="16px monospace";
+  ctx.textAlign="left";
+  ctx.fillText("SCORE "+state.score, 12, 22);
+  ctx.fillText("LIVES", 12, 42);
+  var i;
+  for(i=0;i<state.lives;i++){ ctx.fillText("*", 60+i*12, 42); }
+
+  // crosshair
+  ctx.strokeStyle="#3aff6a";
+  ctx.lineWidth=1;
+  ctx.beginPath();
+  ctx.moveTo(cx-8,horizonY); ctx.lineTo(cx+8,horizonY);
+  ctx.moveTo(cx,horizonY-8); ctx.lineTo(cx,horizonY+8);
+  ctx.stroke();
+
+  // radar (bottom-right)
+  drawRadar();
+
+  if(state.over){
+    ctx.fillStyle="#ff3a3a";
+    ctx.font="32px monospace";
+    ctx.textAlign="left";
+    ctx.fillText("GAME OVER", 200, 240);
+    ctx.font="16px monospace";
+    ctx.fillText("PRESS R TO RESTART", 200, 270);
+  }
+}
+
+function drawRadar(){
+  var rx=W-90, ry=H-90, rr=70;
+  ctx.strokeStyle="#3aff6a";
+  ctx.lineWidth=1;
+  ctx.beginPath();
+  ctx.moveTo(rx-rr,ry); ctx.lineTo(rx+rr,ry);
+  ctx.moveTo(rx,ry-rr); ctx.lineTo(rx,ry+rr);
+  ctx.stroke();
+  // range rings
+  ctx.beginPath();
+  ctx.moveTo(rx-rr*0.5,ry); ctx.lineTo(rx+rr*0.5,ry);
+  ctx.moveTo(rx,ry-rr*0.5); ctx.lineTo(rx,ry+rr*0.5);
+  ctx.stroke();
+
+  // player blip center + facing arrow (same yaw basis: fx=S(yaw), fz=C(yaw))
+  ctx.fillStyle="#3aff6a";
+  ctx.fillRect(rx-2,ry-2,4,4);
+  ctx.strokeStyle="#3aff6a";
+  ctx.lineWidth=2;
+  ctx.beginPath();
+  ctx.moveTo(rx,ry);
+  ctx.lineTo(rx + S(state.player.yaw)*20, ry + C(state.player.yaw)*20);
+  ctx.stroke();
+
+  // enemy blips: relative to player, scale to radar
+  var i,e, dx, dz, scale=rr/300;
+  ctx.fillStyle="#ff3a3a";
+  for(i=0;i<state.enemies.length;i++){
+    e=state.enemies[i];
+    dx=e.x-state.player.x; dz=e.z-state.player.z;
+    ctx.fillRect(rx + dx*scale -2, ry + dz*scale -2, 4,4);
+  }
+}
+
+// ---- loop ----
+var last=0;
+function loop(now){
+  if(!last) last=now;
+  var dt=Math.min(0.05,(now-last)/1000);
+  last=now;
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

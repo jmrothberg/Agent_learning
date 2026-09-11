@@ -199,3 +199,37 @@ def test_mode_line_prefers_agent_state_when_session_running() -> None:
 
     line = app._render_mode_row()
     assert "/allroles ON" in line
+
+
+# --- Sept 2026: /critic command + status line ----------------------------
+
+
+def test_critic_command_sets_mode_and_status_line_explains_it() -> None:
+    """`/critic on|off|auto` must be a one-word switch, and /status must say
+    what the critic WILL do and why (the user asked for "easy and clear")."""
+    app = CodingBoxApp()
+    logged: list[str] = []
+    app._log_info = logged.append  # type: ignore[method-assign]  # no Textual screen in tests
+    app._update_status = lambda: None  # type: ignore[method-assign]
+    assert app._code_critic_mode is None  # not set → agent resolves env/auto
+    assert "auto" in app._code_critic_label()
+    app._cmd_set_code_critic("on")
+    assert app._code_critic_mode == "on" and app._code_critic_label() == "ON"
+    app._cmd_set_code_critic("off")
+    assert app._code_critic_mode == "off" and app._code_critic_label() == "off"
+    app._cmd_set_code_critic("auto")
+    assert app._code_critic_mode == "auto"
+    # /allroles counts as on.
+    app._cmd_toggle_allroles("on")
+    assert app._code_critic_label() == "ON"
+    app._cmd_toggle_allroles("off")
+    # Bogus arg is rejected without changing state.
+    app._cmd_set_code_critic("maybe")
+    assert app._code_critic_mode == "auto"
+    # Live agent wins.
+    from unittest.mock import MagicMock
+    app.agent = MagicMock()
+    app.agent._code_critic_status_label.return_value = "ON (parallel)"
+    assert app._code_critic_label() == "ON (parallel)"
+    app._cmd_set_code_critic("off")
+    assert app.agent._code_critic_mode == "off"

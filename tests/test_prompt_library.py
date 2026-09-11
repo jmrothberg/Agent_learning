@@ -45,6 +45,27 @@ def test_every_entry_has_title_and_nonempty_prompt():
         assert isinstance(g["prompt"], str) and len(g["prompt"]) > 40
 
 
+def test_prompt_640_keeps_first_person_view_for_wireframe_games():
+    """BATTLEZ2 20260905_112313: the /640 short prompt said only "2D
+    wireframe vector tank"; the planner read "2D" literally ("top-down?")
+    and built a top-down game (5/6 probes green). The full prompt's
+    class-defining clause — FIRST-PERSON, horizon — must survive the /640
+    (and therefore /640png) shortening for every first-person vector game.
+    Doom/Minecraft deliberately switch to top-down for /640 and say so;
+    they are not first-person in `prompt_640` by design.
+    """
+    for g in load_prompt_library(_SHIPPED):
+        full = (g.get("prompt") or "").lower()
+        short = (g.get("prompt_640") or "").lower()
+        if not short or "wireframe" not in full or "first-person" not in full:
+            continue
+        assert "first-person" in short, f"{g['name']}: prompt_640 lost first-person"
+        assert "top-down" in short or "horizon" in short or "ahead" in short, (
+            f"{g['name']}: prompt_640 should spell out the 3D view (horizon/ahead) "
+            "or forbid top-down"
+        )
+
+
 def test_character_prompts_name_action_poses():
     """The animation showcase prompts must enumerate the poses so the
     multi-frame planner generates a frame per named action up front."""
@@ -104,6 +125,14 @@ def test_640png_uses_jmr_prompt_not_media_threejs():
         out = effective_prompt(g, jmr_png_mode=True)
         assert "TARGET=/640png" in out, g["name"]
         assert "using three.js from CDN" not in out, g["name"]
+    # Vector-stroke class: /640png must not demand PNG sheets or "columns"
+    # (BATTLE10 strong-hooked canvas-puzzle-grid from that appendix).
+    for name in ("battlezone", "star-wars"):
+        out = effective_prompt(by_name[name], jmr_png_mode=True)
+        assert "TARGET=/640png" in out, name
+        assert "drawImage columns" not in out, name
+        assert "Emit <assets>" not in out, name
+        assert "jmr:spr" not in out, name
 
 
 def test_prompt_640_fieldrunners_demands_pixel_sprites_not_boxes():

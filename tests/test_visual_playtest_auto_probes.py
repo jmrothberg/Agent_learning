@@ -278,6 +278,34 @@ def test_inject_when_probes_none(tmp_path: Path) -> None:
     assert "auto_player_not_in_wall" in names
 
 
+def test_dig_tunnel_grid_skips_chase_auto_probes(tmp_path: Path) -> None:
+    """DIGDUGD3: dig/tunnel grids keep wall probes, not Pac-Man chase autos."""
+    a = _make_agent(
+        tmp_path,
+        goal="dig tunnels through a soil grid with walls, pump inflates monsters",
+    )
+    a._probes = []
+    a._maybe_inject_visual_playtest_auto_probes()
+    names = [p["name"] for p in a._probes]
+    assert "auto_player_not_in_wall" in names
+    assert "auto_maze_has_walls" in names
+    assert "auto_solid_tile_blocks_move" in names
+    assert "auto_chaser_moves_autonomously" not in names
+    assert "auto_collectibles_counter" not in names
+
+
+def test_pellet_chase_grid_still_injects_chase_auto_probes(tmp_path: Path) -> None:
+    a = _make_agent(
+        tmp_path,
+        goal="maze chase pellets four pursuers corridors",
+    )
+    a._probes = []
+    a._maybe_inject_visual_playtest_auto_probes()
+    names = [p["name"] for p in a._probes]
+    assert "auto_chaser_moves_autonomously" in names
+    assert "auto_collectibles_counter" in names
+
+
 # ----------------------------------------------------------------------
 # The motivating regression: would the new probe catch the mortal-kombat
 # iter-12 flip? Simulate with a fake state-shape evaluation.
