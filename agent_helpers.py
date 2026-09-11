@@ -404,6 +404,35 @@ def _baseline_structurally_broken(html: str) -> str | None:
     return errors[0][:240]
 
 
+# Reasons from `_baseline_structurally_broken` that are a one-line code fix,
+# not a shape problem. Only these qualify a first build for salvage.
+_SALVAGEABLE_BROKEN_PREFIXES = (
+    "inline <script> has a JavaScript syntax error",
+    "unbalanced ",
+)
+
+
+def _first_build_parse_error_salvageable(html: str, broken: str) -> bool:
+    """True when a first build failed `_baseline_structurally_broken` ONLY
+    on a JS parse / bracket error inside an otherwise complete document
+    (DOOM3DF2 20260911_170915: 26 KB build, one hallucinated token).
+    Leading prose, elisions, placeholders, duplicated drafts and truncated
+    files stay rejected — those need a re-emit, not a patch.
+    """
+    if not html or not broken:
+        return False
+    if not broken.startswith(_SALVAGEABLE_BROKEN_PREFIXES):
+        return False
+    if len(html) < 4096:
+        return False
+    if _truncation_reason(html) is not None:
+        return False
+    low = html.lower()
+    if "</html>" not in low or "<script" not in low:
+        return False
+    return True
+
+
 # Trace 20260612_171752: cosmetic sprite-audit findings that may gate ok on
 # their FIRST occurrence but never indicate a behaviorally-broken build.
 # A report whose only gating soft_warnings are from this family — with all

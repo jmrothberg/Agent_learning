@@ -63,6 +63,7 @@ MLX upgrades: MiniMax-M3 (`minimax_m3.py` copy after mlx-lm upgrade), GLM-5.2
 - `MLX_HOST` — legacy alias for `MLX_SERVER_URL` host:port
 - `OMLX_SERVER_URL` — override oMLX base for Flash auto-start (default `http://127.0.0.1:8000`); used by `backend.ensure_omlx_server` / `omlx_default_endpoint`
 - `OMLX_MODEL_DIR` — model scan dir for spawned `omlx serve` (else first existing `MLX_MODELS_DIR` entry, else `~/MLX_Models`)
+- `OMLX_ALLOW_NO_KERNELS` — **experiments only.** `ensure_omlx_server()` refuses an oMLX whose `/api/status → custom_kernels` has any `available: false` (HARD RULE: Mac runs Metal kernels — install the prebuilt release wheel, see `HARNESS_TUNING.md`). `1` downgrades the refusal to a stderr warning.
 - `MLX_MODELS_DIR` — `:`-separated extra model scan dirs (in-process `/list`; oMLX spawn uses first existing root)
 - `MLX_PREFILL_STEP_SIZE` — prefill chunk (512 if path contains `flash`, else 1024) — in-process only
 - `MLX_TOP_P` / `MLX_TOP_K` / `MLX_MIN_P` — MLX sampler (vendor coding preset; repetition penalty stays off)

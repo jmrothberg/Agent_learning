@@ -1,0 +1,23 @@
+[Loading text encoder (Gemma)] ...
+You are using a model of type `gemma4_text` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+You are using a model of type `gemma4_text` to instantiate a model of type ``. This may be expected if you are loading a checkpoint that shares a subset of the architecture (e.g., loading a `sam2_video` checkpoint into `Sam2Model`), but is otherwise not supported and can yield errors. Please verify that the checkpoint is compatible with the model you are instantiating.
+The tokenizer you are loading from '/Users/jonathanrothberg/Video_Models/LTX-2.5-MLX/gemma4-text-encoder' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
+[Loading text encoder (Gemma)] done in 5.1s
+[Encoding prompt] ...
+[Encoding prompt] done in 1.8s
+[Loading transformer (transformer.safetensors)] ...
+[Loading transformer (transformer.safetensors)] done in 1.3s
+Mode: Distilled Two-Stage (half-res + upscale + distilled refine)
+  Model: /Users/jonathanrothberg/Video_Models/LTX-2.5-MLX
+Denoising:   0%|          | 0/8 [00:00<?, ?it/s]Denoising:  12%|█▎        | 1/8 [00:02<00:19,  2.73s/it]Denoising:  25%|██▌       | 2/8 [00:05<00:15,  2.63s/it]Denoising:  38%|███▊      | 3/8 [00:07<00:13,  2.60s/it]Denoising:  50%|█████     | 4/8 [00:10<00:10,  2.59s/it]Denoising:  62%|██████▎   | 5/8 [00:13<00:07,  2.59s/it]Denoising:  75%|███████▌  | 6/8 [00:15<00:05,  2.59s/it]Denoising:  88%|████████▊ | 7/8 [00:18<00:02,  2.58s/it]Denoising: 100%|██████████| 8/8 [00:20<00:00,  2.57s/it]Denoising: 100%|██████████| 8/8 [00:20<00:00,  2.59s/it]
+Denoising:   0%|          | 0/3 [00:00<?, ?it/s]Denoising:  33%|███▎      | 1/3 [00:09<00:19,  9.52s/it]Denoising:  67%|██████▋   | 2/3 [00:18<00:09,  9.49s/it]Denoising: 100%|██████████| 3/3 [00:28<00:00,  9.48s/it]Denoising: 100%|██████████| 3/3 [00:28<00:00,  9.49s/it]
+[Loading decoders (VAE + audio + vocoder)] ...
+[Loading decoders (VAE + audio + vocoder)] done in 0.0s
+[Decoding video + audio + muxing] ...
+[Decoding video + audio + muxing] done in 4.4s
+
+Saved to: /Users/jonathanrothberg/Agent_learning/games/DOOM3DF2/boss_cutscene.mp4
+Time: 63.2s
+[generate_video] engine=ltx 768x512 x97f @ 24fps -> /Users/jonathanrothberg/Agent_learning/games/DOOM3DF2/boss_cutscene.mp4
+[generate_video] backend=ltx-2-mlx model=/Users/jonathanrothberg/Video_Models/LTX-2.5-MLX
+[generate_video] OK in 63s — /Users/jonathanrothberg/Agent_learning/games/DOOM3DF2/boss_cutscene.mp4 (0.9 MB)

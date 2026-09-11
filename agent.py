@@ -6434,14 +6434,17 @@ class GameAgent(
                             # cloud (Anthropic) path is untouched. Once iter 1
                             # materializes, _current_file is set and this branch
                             # no longer fires (iters 2+ patch as before).
-                            # Ends in `<html` (DIGDUGDI 20260910_162103): GLM's
-                            # chat template strip()s the final assistant message,
-                            # so a prefill ending at `<!DOCTYPE html>` + newline
-                            # left the prompt at the bare `>` boundary and the
-                            # model emitted EOS immediately (0 tokens, verified
-                            # via oMLX /v1/completions). An open `<html` tag is a
-                            # boundary every model continues from.
-                            reply_prefill = "<html_file>\n<!DOCTYPE html>\n<html"
+                            # Ends in `<html lang` (DIGDUGDI 20260910_162103 +
+                            # DOOM3DF2 20260911_170915): GLM's chat template
+                            # strip()s the final assistant message, and on oMLX
+                            # ANY prefill ending in `>` (`<!DOCTYPE html>`,
+                            # `<html>`, `<html lang="en">`) makes GLM emit EOS at
+                            # once (0 tokens, verified 3/3 via curl). oMLX also
+                            # drops the leading space of the first continued
+                            # token, so `<html` + ` lang=` became `<htmllang=`.
+                            # `<html lang` continues as `="en">` — no `>`
+                            # boundary and no leading-space token to lose.
+                            reply_prefill = "<html_file>\n<!DOCTYPE html>\n<html lang"
                             prefill_force = True
                         yield self._record(AgentEvent(
                             "activity", "streaming",

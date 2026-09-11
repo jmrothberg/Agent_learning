@@ -924,6 +924,13 @@ def test_make_backend_never_inprocess_glm53():
     assert be.info.model == "GLM-5.3-Flash-MLX-6bit"
 
 
+@pytest.fixture(autouse=True)
+def _kernels_present(monkeypatch):
+    """ensure_omlx_server now enforces the Metal-kernel HARD RULE via
+    /api/status; keep these lifecycle tests off the network / real server."""
+    monkeypatch.setattr(backend, "omlx_missing_metal_kernels", lambda *a, **k: [])
+
+
 def test_ensure_omlx_server_already_up(monkeypatch):
     monkeypatch.setattr(backend, "omlx_reachable", lambda *a, **k: True)
     calls: list = []
@@ -959,6 +966,46 @@ def test_ensure_omlx_server_fails_clearly(monkeypatch):
     )
     with pytest.raises(RuntimeError, match="oMLX"):
         backend.ensure_omlx_server(timeout_s=1.0)
+
+
+# --- HARD RULE: oMLX must have native Metal kernels -------------------------
+# Bound before the autouse fixture swaps the module attribute.
+_orig_missing_kernels = backend.omlx_missing_metal_kernels
+
+
+def test_missing_metal_kernels_parses_api_status():
+    """/api/status shape from the real venv install (DOOM3DF2 day): every
+    `_ext` missing → all five names; all available → []; field absent → []."""
+    bad = {"custom_kernels": {
+        "bonsai": {"available": False, "import_error": "No module named ..._ext"},
+        "glm_moe_dsa": {"available": False, "import_error": "cannot import name '_ext'"},
+        "decode_fast": {"available": True, "import_error": None},
+    }}
+    assert _orig_missing_kernels(bad) == ["bonsai", "glm_moe_dsa"]
+    good = {"custom_kernels": {"glm_moe_dsa": {"available": True, "import_error": None}}}
+    assert _orig_missing_kernels(good) == []
+    assert _orig_missing_kernels({"version": "0.6.4"}) == []
+    assert _orig_missing_kernels({}) == []  # unreachable/empty → nothing to judge
+
+
+def test_ensure_omlx_server_refuses_kernel_less_server(monkeypatch):
+    monkeypatch.setattr(backend, "omlx_reachable", lambda *a, **k: True)
+    monkeypatch.setattr(
+        backend, "omlx_missing_metal_kernels", lambda *a, **k: ["glm_moe_dsa"]
+    )
+    monkeypatch.delenv("OMLX_ALLOW_NO_KERNELS", raising=False)
+    with pytest.raises(RuntimeError, match="WITHOUT native Metal kernels"):
+        backend.ensure_omlx_server()
+
+
+def test_ensure_omlx_server_kernel_override_warns_only(monkeypatch, capsys):
+    monkeypatch.setattr(backend, "omlx_reachable", lambda *a, **k: True)
+    monkeypatch.setattr(
+        backend, "omlx_missing_metal_kernels", lambda *a, **k: ["glm_moe_dsa"]
+    )
+    monkeypatch.setenv("OMLX_ALLOW_NO_KERNELS", "1")
+    assert backend.ensure_omlx_server() == "http://127.0.0.1:8000"
+    assert "NO Metal kernels" in capsys.readouterr().err
 
 
 def test_mark_open_fds_noninheritable_is_safe():

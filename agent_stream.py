@@ -40,6 +40,8 @@ from agent_helpers import (
 
     _detect_skeleton_payload,
 
+    _first_build_parse_error_salvageable,
+
     _is_degenerate_baseline,
 
     _is_placeholder_first_build,
@@ -1966,6 +1968,35 @@ class StreamMaterializeMixin:
                 html = normalized
             broken = _baseline_structurally_broken(html)
             if broken is not None:
+                # First-build parse-error salvage (DOOM3DF2 20260911_170915):
+                # a complete 26 KB three.js build was discarded because of ONE
+                # hallucinated token (`{ map: per-pixel ceilTex }`), and the
+                # retry was a full 7800-token regeneration — 26 min at 5 tok/s
+                # for a one-line fix. When there is no baseline yet and the
+                # document is complete (not truncated, real code, only a JS
+                # parse/bracket error), write it anyway so the next turn is a
+                # cheap <patch> against the reported line. Chromium + micro-
+                # probes still report the error; nothing is marked ok.
+                if (
+                    not dry_run
+                    and not (self._current_file or "").strip()
+                    and _first_build_parse_error_salvageable(html, broken)
+                ):
+                    self._trace({
+                        "kind": "first_build_syntax_salvaged",
+                        "reason": broken[:240],
+                        "bytes": len(html),
+                    })
+                    self._pending_coaching.append(
+                        "Your first build was SAVED to disk but has a "
+                        f"JavaScript parse error: {broken[:240]} — next turn "
+                        "emit ONE small <patch> that fixes exactly that line. "
+                        "Do NOT re-emit <html_file>."
+                    )
+                    return self._maybe_inject_jmr_png_shim(html), (
+                        f"first build saved with a parse error to patch next "
+                        f"turn: {broken[:160]}"
+                    )
                 return None, (
                     f"<html_file> rejected: {broken}. "
                     "Emit ONE complete document with a single <script> "

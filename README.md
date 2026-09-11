@@ -170,6 +170,7 @@ oMLX model settings instead.
 | API model id | **basename only** (`DeepSeek-V4-Flash-0731-MXFP4-MLX`). Absolute paths → HTTP 404. Chat normalizes this automatically. |
 | RAM | First real chat completion loads weights into unified memory (~150 GB+). `/model` alone does **not**. macOS “Cached Files” for the safetensors is disk cache, not a loaded model. |
 | CLI / TUI | Chat auto-starts oMLX; binary searched on `PATH`, `~/.omlx/bin/omlx`, or `~/MLX_Models/.omlx-venv/bin/omlx` |
+| **Metal kernels (required)** | Install oMLX from the **prebuilt release wheel** (`omlx-<ver>-cp312-…-macosx_15_0_universal2.whl`) or oMLX.app — **never** `pip install git+…` / `-e .` (no `_ext`, ~30x slower GLM prefill). Check `curl -s :8000/api/status \| jq .custom_kernels`; chat refuses a kernel-less server. |
 | Hot prompt cache | `cache.hot_cache_max_size` e.g. `"32GB"` — **CLI rejects `"20%"`** |
 | GLM-5.2 / Qwen3.8-27B / MiniMax | Default **in-process** MLX. TUI: `/server on` or `/model N server` to run them on oMLX (`/critic auto` then ON). Flash / GLM-5.3 / Flash-Next already use oMLX. |
 | Leaving Flash → GLM-5.2 / GLM-5.3 | Chat **unloads** other oMLX models first. Qwen Flash-Next (~198GB) + GLM-5.3 6-bit (~289GB) exceeds the Metal cap (HTTP 507). Unpin Flash-Next in `/admin` if it was pinned. |

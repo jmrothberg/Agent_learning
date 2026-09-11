@@ -24,6 +24,8 @@ bash eval/overnight.sh --list
 | **Batch** | **macOS Terminal.app** (visible Chromium) | Double-click `Overnight.command` **or** agent runs `overnight.sh` with `all` perms | Cursor integrated terminal · asking human to paste |
 | **Watcher** | **Cursor IDE terminals panel** (`monitor:` lines) | Cursor **Shell**, `block_until_ms=0`, command printed after batch starts | `nohup` · skipping the watcher |
 
+**oMLX must have native Metal kernels (Mac).** Before any batch: `curl -s :8000/api/status | jq .custom_kernels` → all `available: true`. A source/git pip install has none (Aug 4–Sep 11 2026 ran that way); install the prebuilt release wheel — `HARNESS_TUNING.md` "HARD RULE (Mac) — oMLX must run with native Metal kernels". `chat.py` / `ensure_omlx_server()` refuses a kernel-less server.
+
 ### When the user starts an overnight
 
 1. They double-click **`Overnight.command`** (or run `bash eval/overnight.sh` in Terminal) and answer the questions.

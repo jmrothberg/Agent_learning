@@ -4191,6 +4191,59 @@ def omlx_reachable(endpoint: str | None = None, *, timeout: float = 1.0) -> bool
     return isinstance(data, dict)
 
 
+def omlx_missing_metal_kernels(
+    status: dict | None = None, endpoint: str | None = None, *, timeout: float = 3.0,
+) -> list[str]:
+    """Names of oMLX native Metal kernel packages that are NOT compiled in.
+
+    Reads `GET /api/status` → `custom_kernels` (or a pre-fetched `status`).
+    A pip/git `omlx` install without `OMLX_WITH_CUSTOM_KERNEL=1` ships NO
+    `_ext` — GLM-5.3 then silently falls back to generic paths (~30x slower
+    prefill; this repo ran at 5 tok/s for weeks: DIGDUGDI 20260910, DOOM3DF2
+    20260911). Returns [] when every kernel is available OR the server does
+    not report the field (older oMLX / non-oMLX server — nothing to judge).
+    """
+    if status is None:
+        ep = (endpoint or omlx_default_endpoint()).rstrip("/")
+        status = _http_get_json(ep + "/api/status", timeout=timeout)
+    kernels = (status or {}).get("custom_kernels") if isinstance(status, dict) else None
+    if not isinstance(kernels, dict):
+        return []
+    return sorted(
+        name for name, info in kernels.items()
+        if isinstance(info, dict) and not info.get("available")
+    )
+
+
+def omlx_require_metal_kernels(endpoint: str) -> None:
+    """HARD RULE (Mac): refuse an oMLX server whose Metal kernels are missing.
+
+    Escape hatch for deliberate experiments only: OMLX_ALLOW_NO_KERNELS=1.
+    Fix = install the prebuilt release wheel (ships `_ext` + `.metallib`) into
+    the venv, or use oMLX.app — see HARNESS_TUNING.md "oMLX Metal kernels".
+    """
+    missing = omlx_missing_metal_kernels(endpoint=endpoint)
+    if not missing:
+        return
+    if os.environ.get("OMLX_ALLOW_NO_KERNELS", "").lower() in ("1", "true", "yes"):
+        print(
+            f"WARNING: oMLX at {endpoint} has NO Metal kernels for {missing} — "
+            "running ~30x slower (OMLX_ALLOW_NO_KERNELS set).",
+            file=sys.stderr,
+        )
+        return
+    raise RuntimeError(
+        f"oMLX at {endpoint} is running WITHOUT native Metal kernels "
+        f"({', '.join(missing)}). This is a plain pip/git install — GLM/Qwen "
+        "decode ~30x slower. Refusing to use it. Fix: install the prebuilt "
+        "release wheel into ~/MLX_Models/.omlx-venv (pip install --no-deps "
+        "--force-reinstall omlx-<ver>-cp312-*-macosx_15_0_universal2.whl from "
+        "github.com/jundot/omlx/releases) and restart the server; verify with "
+        "GET /api/status → custom_kernels all available. "
+        "Override only for experiments: OMLX_ALLOW_NO_KERNELS=1."
+    )
+
+
 def _resolve_omlx_bin() -> str | None:
     """Find an `omlx` CLI: PATH, ~/.omlx/bin, or ~/MLX_Models/.omlx-venv."""
     which = shutil.which("omlx")
@@ -4300,6 +4353,8 @@ def ensure_omlx_server(*, timeout_s: float = 120.0) -> str:
     """
     endpoint = omlx_default_endpoint()
     if omlx_reachable(endpoint):
+        # HARD RULE (Mac): never build on an oMLX without Metal kernels.
+        omlx_require_metal_kernels(endpoint)
         return endpoint
 
     ok, detail = _spawn_omlx_serve(endpoint)
@@ -4314,6 +4369,7 @@ def ensure_omlx_server(*, timeout_s: float = 120.0) -> str:
     deadline = time.monotonic() + max(5.0, float(timeout_s))
     while time.monotonic() < deadline:
         if omlx_reachable(endpoint, timeout=1.5):
+            omlx_require_metal_kernels(endpoint)  # HARD RULE, see above
             return endpoint
         time.sleep(0.5)
 
