@@ -244,49 +244,130 @@ def classify_model_modality(name: str | None) -> str:
 #   is xhigh; harness default is medium (tag parser + plan turns — DK/SF
 #   Aug 15 xhigh plans ran 15k–22k tokens before tags). There is NO "high"
 #   — passing it raises in jinja. Aliases below never forward an illegal
-#   value. Opt in to max: QWEN_REASONING_EFFORT=xhigh. Off:
-#   QWEN_ENABLE_THINKING=0. Close think before code prefill so xhigh still
-#   codes if someone opts back in.
+#   value. Opt in to max: /thinking max or QWEN_REASONING_EFFORT=xhigh. Off:
+#   /thinking off or QWEN_ENABLE_THINKING=0.
+#
+# GLM-5.3 chat_template.jinja:
+#   legal reasoning_effort is {low, high}; anything else (including OMITTED)
+#   becomes **max**. BATTLEZO 20260904_095910 omitted it → max CoT, 30 min,
+#   0 visible tokens. Harness user-level "medium" maps to GLM high (the
+#   middle rung). There is no GLM "medium".
 _QWEN38_REASONING_EFFORTS = ("xhigh", "medium", "low")
 _QWEN38_REASONING_ALIASES = {
     "high": "xhigh",  # not a legal template value; map to native default
     "max": "xhigh",
     "x-high": "xhigh",
 }
+_USER_THINK_LEVELS = ("off", "low", "medium", "high", "max")
+_USER_THINK_ALIASES = {
+    "med": "medium",
+    "mid": "medium",
+    "xhigh": "max",
+    "x-high": "max",
+    "maximum": "max",
+    "ultra": "max",
+    "none": "off",
+    "minimal": "low",
+}
+
+
+def _thinking_family(model: str | None) -> str | None:
+    """Which chat-template effort ladder this model uses, or None."""
+    if not model:
+        return None
+    low = model.lower()
+    if "qwen3.8" in low:
+        return "qwen38"
+    # GLM-5.3 only — not GLM-5.2 (text, no this template).
+    if (
+        "glm5_next" in low
+        or "glm-5.3" in low
+        or "glm_5.3" in low
+        or "glm5.3" in low
+    ):
+        return "glm53"
+    return None
+
+
+def requested_think_level() -> str:
+    """User-facing level: off|low|medium|high|max. Default medium."""
+    raw = (
+        os.environ.get("REASONING_EFFORT")
+        or os.environ.get("QWEN_REASONING_EFFORT")
+        or "medium"
+    ).strip().lower()
+    raw = _USER_THINK_ALIASES.get(raw, raw)
+    if raw not in _USER_THINK_LEVELS:
+        return "medium"
+    return raw
+
+
+def map_think_level_for_model(model: str | None, level: str | None = None) -> str | None:
+    """Native template token for /status, or None if this model has no knob."""
+    family = _thinking_family(model)
+    if family is None:
+        return None
+    lvl = (level or requested_think_level()).strip().lower()
+    lvl = _USER_THINK_ALIASES.get(lvl, lvl)
+    if lvl not in _USER_THINK_LEVELS:
+        lvl = "medium"
+    if family == "qwen38":
+        if lvl == "off":
+            return "off"
+        return {"low": "low", "medium": "medium", "high": "xhigh", "max": "xhigh"}[lvl]
+    # glm53
+    if lvl == "off":
+        return "low"  # template always opens <think>; low is the floor
+    return {"low": "low", "medium": "high", "high": "high", "max": "max"}[lvl]
 
 
 def chat_template_thinking_kwargs(model: str | None) -> dict[str, Any]:
-    """Qwen3.8 apply_chat_template kwargs. Harness default is medium.
+    """apply_chat_template / oMLX kwargs for Qwen3.8 and GLM-5.3.
 
-    Native jinja default is xhigh; that fights <plan>/<html_file> parsing
-    on long CoT. Must pass enable_thinking=True on the mlx_vlm path —
-    that helper otherwise defaults thinking OFF. Other families return {}.
+    User level (REASONING_EFFORT or QWEN_REASONING_EFFORT, default medium)
+    is mapped to a legal native value. Other families return {}.
     """
-    if not model or "qwen3.8" not in model.lower():
+    family = _thinking_family(model)
+    if family is None:
         return {}
     enable_raw = os.environ.get("QWEN_ENABLE_THINKING", "1").strip().lower()
-    if enable_raw in ("0", "false", "no", "off"):
-        return {"enable_thinking": False}
-    effort = os.environ.get("QWEN_REASONING_EFFORT", "medium").strip().lower()
-    effort = _QWEN38_REASONING_ALIASES.get(effort, effort)
-    if effort not in _QWEN38_REASONING_EFFORTS:
-        effort = "medium"
-    return {"enable_thinking": True, "reasoning_effort": effort}
+    level = requested_think_level()
+    off = enable_raw in ("0", "false", "no", "off") or level == "off"
+    if family == "qwen38":
+        if off:
+            return {"enable_thinking": False}
+        effort = map_think_level_for_model(model, level) or "medium"
+        return {"enable_thinking": True, "reasoning_effort": effort}
+    # GLM-5.3: always pass reasoning_effort so jinja does not default to max.
+    native = map_think_level_for_model(model, "low" if off else level) or "high"
+    return {"reasoning_effort": native}
 
 
 def omlx_messages_close_think_prefill(
     messages: list[dict], model: str | None,
 ) -> list[dict]:
-    """Close Qwen `<think>` before an assistant prefill on the oMLX HTTP path.
+    """Mark a trailing assistant prefill as `partial` on the oMLX HTTP path.
 
-    In-process MLX does this in `append_assistant_prefill` (DK 20260815_085321).
-    oMLX applies the chat template server-side, so a trailing assistant
-    `<html_file>` prefill lands *inside* the open think block and the game
-    never appears as `content` (trace 20260829_165958). Plan turns (last
-    role=user) are unchanged — the model still thinks. Thinking stays ON.
+    In-process MLX glues the prefill in `append_assistant_prefill`
+    (DK 20260815_085321). oMLX applies the chat template server-side.
+    Without `partial: true` the template renders the prefill as a
+    *finished* assistant turn and then appends a fresh `<|assistant|><think>`
+    generation prompt — so the model thinks again and re-emits the whole
+    opener (DIGDUGDI 20260910_162103: reply began
+    `<html_file>\\n<!DOCTYPE html>\\n<html_file>\\n<!DOCTYPE html>` and the
+    prefill bought nothing). oMLX's `detect_and_strip_partial` turns
+    `partial: true` into `continue_final_message=True`, so the prompt ends
+    exactly at the prefill text with the think block already closed.
+
+    Verified against both local templates (tokenizer-only render):
+    GLM-5.3 and Qwen3.8 each emit an empty closed `<think></think>` before
+    a trailing assistant message, so NO `</think>` prefix is needed — and
+    prefixing one BREAKS GLM under continue_final_message (HF raises
+    "final message does not appear in the chat" because the template
+    splits `</think>` out of content) and doubles `</think>` on Qwen.
+    Plan turns (last role=user) are unchanged — the model still thinks.
     """
-    kw = chat_template_thinking_kwargs(model)
-    if not kw.get("enable_thinking") or not messages:
+    if not messages:
         return messages
     last = messages[-1]
     if not isinstance(last, dict) or last.get("role") != "assistant":
@@ -294,10 +375,12 @@ def omlx_messages_close_think_prefill(
     content = last.get("content")
     if not isinstance(content, str) or not content:
         return messages
+    # Legacy callers may still pass a `</think>\n\n` prefix — strip it so
+    # continue_final_message's substring check cannot fail on GLM.
     if content.lstrip().startswith("</think>"):
-        return messages
+        content = content.lstrip()[len("</think>"):].lstrip("\n")
     out = list(messages)
-    out[-1] = {**last, "content": "</think>\n\n" + content}
+    out[-1] = {**last, "content": content, "partial": True}
     return out
 
 
@@ -1645,12 +1728,25 @@ class MLXServerBackend(Backend):
                             stalled = True
                             stall_at = n_tokens
                             break
-                        if time.monotonic() - started > overall_seconds:
+                        # overall_seconds is the MLX cold-load / no-output
+                        # cap only. TUI + ollama + in-process MLX already
+                        # refuse to cut a working stream (street-fighter
+                        # 20260518_220003). oMLX still used this as a hard
+                        # wall clock and killed GLM CoT at 1800s with GPU
+                        # at 98% (BATTLEZO 20260904_095910). Keepalives
+                        # every 10s are not output — n_think/n_tokens must
+                        # both still be 0 to fire.
+                        if (
+                            time.monotonic() - started > overall_seconds
+                            and n_tokens == 0
+                            and n_think == 0
+                        ):
                             stalled = True
                             stall_at = n_tokens
                             error_message = (
                                 f"mlx_lm.server exceeded overall timeout "
-                                f"({overall_seconds:.0f}s)"
+                                f"({overall_seconds:.0f}s) with no content "
+                                "or thinking tokens"
                             )
                             break
                         try:

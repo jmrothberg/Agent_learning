@@ -30,6 +30,12 @@ THREE_D_KEYWORDS: frozenset[str] = frozenset({
     "perspective",
 })
 
+# Words that negate the 3D keyword right after them ("no three.js",
+# "not first-person", "without WebGL"). See detect_3d_intent.
+_NEGATION_WORDS: frozenset[str] = frozenset({
+    "no", "not", "without", "never", "non",
+})
+
 
 def detect_3d_intent(goal: str) -> list[str]:
     """Return a list of 3D-modality keywords found in `goal`. Empty list
@@ -43,15 +49,27 @@ def detect_3d_intent(goal: str) -> list[str]:
     if not goal:
         return []
     words = [w.lower() for w in re.findall(r"[a-zA-Z0-9]+", goal)]
+    # Negation guard (DIGDUGDI 20260910_162103): the /640png JMR suffix says
+    # "no WebGL, no three.js" and that tokenized to three + threejs, routing
+    # a 2D Dig Dug to canvas_3d_basic.html (sim=1.00) and tagging every
+    # /640png retrieval with 3D modality tokens. A keyword directly after a
+    # negation word is NOT a 3D request — skip it (and the join starting at it).
+    negated = {
+        i for i in range(1, len(words)) if words[i - 1] in _NEGATION_WORDS
+    }
     out: list[str] = []
     seen: set[str] = set()
     # Single-word match.
-    for w in words:
+    for i, w in enumerate(words):
+        if i in negated:
+            continue
         if w in THREE_D_KEYWORDS and w not in seen:
             seen.add(w)
             out.append(w)
     # Two-word join match for "first person", "doom like", etc.
     for i in range(len(words) - 1):
+        if i in negated:
+            continue
         j = words[i] + words[i + 1]
         if j in THREE_D_KEYWORDS and j not in seen:
             seen.add(j)

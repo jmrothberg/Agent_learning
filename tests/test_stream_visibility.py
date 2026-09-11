@@ -16,6 +16,7 @@ Nothing here aborts or truncates a stream (standing no-cutoff rule).
 from __future__ import annotations
 
 import inspect
+import os
 import sys
 import time
 from pathlib import Path
@@ -333,6 +334,39 @@ def test_showthinking_toggle_on_off():
     assert app._show_thinking is False
     assert any("ON" in l for l in logged)
     assert any("OFF" in l for l in logged)
+
+
+def test_thinking_level_maps_and_sets_env(monkeypatch):
+    """/thinking medium is the default; GLM sends high, Qwen sends medium."""
+    monkeypatch.setenv("REASONING_EFFORT", "medium")
+    app = _app_stub()
+    app._update_status = lambda: None  # type: ignore[method-assign]
+    app._thinking_level = "medium"
+    app._session_model = "GLM-5.3-Flash-MLX-6bit"
+    app._next_model = None
+    logged: list[str] = []
+    app._log_info = lambda line: logged.append(str(line))  # type: ignore[method-assign]
+    app._cmd_set_thinking("medium")
+    assert app._thinking_level == "medium"
+    assert os.environ.get("REASONING_EFFORT") == "medium"
+    assert any("high" in l for l in logged)  # GLM native mapping
+    logged.clear()
+    app._session_model = "Qwen3.8-27B-mxfp8"
+    app._cmd_set_thinking("high")
+    assert app._thinking_level == "high"
+    assert any("xhigh" in l for l in logged)
+
+
+def test_stream_does_not_double_prepend_echoed_prefill():
+    """DIGDUGDI 20260910_162103: oMLX rendered the `<html_file>` prefill as a
+    finished turn, the model re-emitted it, and _stream prepended it again →
+    reply began with two `<html_file>` openers. The return path must detect
+    a reply that already starts with the prefill and skip the prepend."""
+    src = inspect.getsource(GameAgent._stream)
+    assert "prefill_echo_detected" in src
+    assert "result.text.lstrip().startswith(_pf)" in src
+    # The normal (non-echo) prepend is still the fallback.
+    assert "(prefill + result.text) if prefill_used else result.text" in src
 
 
 def test_activity_shows_thinking_not_waiting():

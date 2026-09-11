@@ -28,6 +28,8 @@ def test_normalize_critique_aliases():
     assert tui_help.normalize_help_topic("solo") == "allroles"
     assert tui_help.normalize_help_topic("sim") == "knobs"
     assert tui_help.normalize_help_topic("640png") == "knobs"
+    assert tui_help.normalize_help_topic("thinking") == "thinking"
+    assert tui_help.normalize_help_topic("showthinking") == "showthinking"
 
 
 def test_unknown_topic_returns_none():
@@ -158,6 +160,8 @@ def test_slash_synonyms_are_wired():
     assert '"640png"' in src
     assert '"solo"' in src
     assert '"showthinking"' in src
+    assert '"thinking"' in src and '"think-level"' in src
+    assert 'cmd in ("low", "medium", "high", "max")' in src
 
 
 def test_help_judge_is_vlm_critique_not_check():

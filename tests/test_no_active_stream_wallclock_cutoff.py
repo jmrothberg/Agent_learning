@@ -55,3 +55,16 @@ def test_slow_active_stream_ignores_overall_wallclock_cap() -> None:
     assert result.stalled is False
     assert result.text.endswith("</html></html_file>")
     assert result.completion_tokens == 3
+
+
+def test_omlx_overall_cap_does_not_kill_thinking_or_content() -> None:
+    """MLXServerBackend must match ollama/in-process: overall_seconds is
+    a no-output cap, not an active-stream wall clock (BATTLEZO 20260904_095910).
+    """
+    import inspect
+    import backend
+
+    src = inspect.getsource(backend.MLXServerBackend._stream_once)
+    assert "n_tokens == 0" in src
+    assert "n_think == 0" in src
+    assert "with no content" in src or "thinking tokens" in src

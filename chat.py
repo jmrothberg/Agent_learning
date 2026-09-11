@@ -1211,6 +1211,10 @@ class CodingBoxApp(App):
         # Does not change sampling or what the parser sees.
         self._show_thinking: bool = False
         self._think_buf: str = ""
+        # /thinking low|medium|high|max|off — user-facing CoT effort.
+        # Mapped per family (Qwen3.8 vs GLM-5.3). Default medium.
+        # Sticky; applies on the next model turn (env REASONING_EFFORT).
+        self._thinking_level: str = backend_mod.requested_think_level()
         # `/640` and `/media off` — JMR V1 native 640×480, no sidecar media.
         # `/640png` — same JMR walls + art pipeline with STEM-N.png sheets.
         # Default ON (full Z-Image / Stable Audio / Wan pipeline). Sticky across
@@ -3585,6 +3589,12 @@ class CodingBoxApp(App):
                 self._cmd_toggle_wait(arg)
             elif cmd in ("showthinking", "show-thinking"):
                 self._cmd_toggle_showthinking(arg)
+            elif cmd in ("thinking", "think-level", "thinklevel"):
+                self._cmd_set_thinking(arg)
+            elif cmd in ("low", "medium", "high", "max") and not arg:
+                # Shortcuts for /thinking <level> — do not steal /high as a
+                # topic; these are exact command names with no args.
+                self._cmd_set_thinking(cmd)
             elif cmd in ("iter-detail", "iterdetail"):
                 self._cmd_iter_detail(arg)
             elif cmd == "mode":
@@ -3775,6 +3785,8 @@ class CodingBoxApp(App):
             "                                  [dim]TUI default ON (local_manual) · auto-disables /vlm-critique; restored on /wait off[/dim]",
             "  [b]/showthinking [on|off][/b]    print hidden CoT to the log · default OFF (Activity still counts thinking tok)",
             "                                  [dim]display-only — does not slow the model; long CoT can flood the log pane[/dim]",
+            "  [b]/thinking [low|medium|high|max|off][/b]  CoT effort · default [b]medium[/b] · aliases [b]/low /medium /high /max[/b]",
+            "                                  [dim]Qwen3.8: low / medium / xhigh (there is no native high) · GLM-5.3: low / high / max (omit=max)[/dim]",
             "  [b]/vlm-critique [on|off][/b]    review WITH vision: looks at the screen, tells the agent \u00b7 default off",
             "                                  [dim]aliases: /watch /vision /judge /vc · uses a memory checklist when one fits[/dim]",
             "                                  [dim]uses model 2 to look when your main model can't see[/dim]",
@@ -6231,6 +6243,7 @@ class CodingBoxApp(App):
             f"  video engine:         {self._video_engine_label()}",
             f"  step-mode (/wait):    {step_label}",
             f"  show thinking:        {'ON' if self._show_thinking else 'off'}  [dim](/showthinking — print hidden CoT; default off)[/dim]",
+            f"  thinking effort:      {self._thinking_status_label()}",
             f"  prefill:              {'ON' if self._use_prefill else 'off'}",
             f"  architect-split:      {'ON' if eff_arch_split else 'off'}{' [auto]' if eff_arch_auto and eff_arch_split else ''}",
             f"  double-screenshot:    {'ON' if self._use_double_screenshot else 'off'}",
@@ -6481,6 +6494,52 @@ class CodingBoxApp(App):
                 if new_state
                 else "stays off the log (Activity still counts thinking tok)"
             )
+        )
+        self._update_status()
+
+    def _thinking_status_label(self) -> str:
+        """One /status line: user level + native token for the loaded model."""
+        level = getattr(self, "_thinking_level", None) or backend_mod.requested_think_level()
+        model = getattr(self, "_session_model", None) or getattr(self, "_next_model", None) or ""
+        native = backend_mod.map_think_level_for_model(model, level)
+        if native is None:
+            return f"{level}  [dim](/thinking — this model has no effort knob)[/dim]"
+        if native == level:
+            return f"{level}  [dim](/thinking · sent as {native})[/dim]"
+        return f"{level} → {native}  [dim](/thinking · family-mapped)[/dim]"
+
+    def _cmd_set_thinking(self, arg: str) -> None:
+        """/thinking [low|medium|high|max|off] — CoT effort for Qwen3.8 + GLM-5.3.
+
+        Default medium. Qwen native high is illegal (maps to xhigh). GLM
+        omit/unknown is max — that was BATTLEZO 30 min CoT. Medium→GLM high.
+        Sticky via REASONING_EFFORT; next model turn picks it up.
+        Shortcuts: /low /medium /high /max.
+        """
+        a = arg.strip().lower()
+        if not a:
+            self._log_info(
+                f"thinking effort [b]{self._thinking_status_label()}[/b] — "
+                "usage: /thinking low|medium|high|max|off"
+            )
+            return
+        aliases = {
+            "med": "medium", "mid": "medium",
+            "xhigh": "max", "x-high": "max",
+            "maximum": "max", "none": "off",
+        }
+        a = aliases.get(a, a)
+        if a not in ("off", "low", "medium", "high", "max"):
+            self._log_info("usage: /thinking low|medium|high|max|off")
+            return
+        self._thinking_level = a
+        os.environ["REASONING_EFFORT"] = a
+        model = getattr(self, "_session_model", None) or getattr(self, "_next_model", None) or ""
+        native = backend_mod.map_think_level_for_model(model, a)
+        extra = f" (sends {native})" if native and native != a else ""
+        self._log_info(
+            f"/thinking [b]{a}[/b]{extra} — applies on the next model turn "
+            "(does not restart the current stream)"
         )
         self._update_status()
 

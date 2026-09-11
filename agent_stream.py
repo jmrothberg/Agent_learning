@@ -1712,6 +1712,15 @@ class StreamMaterializeMixin:
             )
         # Prepend the prefill so downstream parsers (regex for <plan>,
         # <diagnose>, etc.) match against the full intended output.
+        # DIGDUGDI 20260910_162103: when the server renders the prefill as a
+        # finished turn (no continue_final_message), the model re-emits the
+        # opener itself; prepending again yields a doubled `<html_file>`.
+        # If the reply already starts with the prefill text, return it as-is.
+        if prefill_used and prefill:
+            _pf = prefill.strip()
+            if _pf and result.text.lstrip().startswith(_pf):
+                self._trace({"kind": "prefill_echo_detected", "len": len(_pf)})
+                return result.text.lstrip()
         return (prefill + result.text) if prefill_used else result.text
 
     # -- best-of-N for fix iterations --------------------------------------

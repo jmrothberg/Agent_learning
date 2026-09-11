@@ -226,6 +226,26 @@ def test_dotted_elision_rest_unchanged_variant():
     assert any("elision" in e.lower() for e in r["errors"]), r["errors"]
 
 
+def test_bare_code_ellipsis_elision_errors():
+    """DIGDUGDI 20260910_162103 iter 1: model gave up mid-function with a
+    bare `...` in CODE (`for(var i=0;i<state.crush... }`), not a comment.
+    `...` directly before `}` `)` `]` `;` is never valid JS."""
+    html = _wrap("function updateRocks(){\n  for(var i=0;i<state.crush... }\n}")
+    r = run_micro_probes(html)
+    assert r["ok"] is False
+    assert any("elision" in e.lower() for e in r["errors"]), r["errors"]
+
+
+def test_real_spread_syntax_is_not_elision():
+    """Spread/rest operands must not trip the bare-ellipsis sentinel."""
+    html = _wrap(
+        "function f(...args){return [...args, ...[1,2]];}\n"
+        "var o={...{a:1}};\nvar s='wait...';\n"
+    )
+    r = run_micro_probes(html)
+    assert not any("elision" in e.lower() for e in r["errors"]), r["errors"]
+
+
 def test_duplicate_top_level_const_detected():
     """Donkey-kong trace 20260516_124628 iter 2 had `const ctx`,
     `const state`, and `function buildLevels` each declared twice

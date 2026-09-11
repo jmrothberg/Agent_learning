@@ -438,7 +438,7 @@ checked model-free by `eval/eval_prompts_plan.py --coverage`.
 **Key TUI slash commands** (`/help` lists all; `/help assets` for art): `/allroles` (architect-split + visual critic on one
 loaded LLM) · `/critique [on|off]` (no-vision review, default on; aliases `/playtest`, `/feedback`) ·
 `/vlm-critique [on|off]` (vision review, default off; alias `/judge`) · `/wait [on|off]`
-(**TUI default ON** — `local_manual`; pause after each iter) · `/games [N]` (load a curated prompt) · `/ctx N` (context window) ·
+(**TUI default ON** — `local_manual`; pause after each iter) · `/thinking [low|medium|high|max|off]` (CoT effort, default **medium**; Qwen3.8/`xhigh` vs GLM-5.3/`max` mapped per family) · `/games [N]` (load a curated prompt) · `/ctx N` (context window) ·
 `/assets <png|folder>` (stage your sprites for next `/new`) · `/seed <game.html>` (continue an existing game) ·
 `/ref <path>` (VLM glance only — not for copying sprites) · `/check [<N|name>]` (on-demand screenshot judge;
 legacy `/check with <model>` still works) · `/media off` / `/640` (simulator: 640×480, no sidecar media) · `/640png` (same JMR walls + generated `STEM-N.png` sheets, `jmr:spr:N`) ·

@@ -65,6 +65,7 @@ MLX upgrades: MiniMax-M3 (`minimax_m3.py` copy after mlx-lm upgrade), GLM-5.2
 - `MLX_PREFILL_STEP_SIZE` — prefill chunk (512 if path contains `flash`, else 1024) — in-process only
 - `MLX_TOP_P` / `MLX_TOP_K` / `MLX_MIN_P` — MLX sampler (vendor coding preset; repetition penalty stays off)
 - `MLX_MAX_TOKENS` — MLX output cap (default **131072**)
+- `REASONING_EFFORT` / `QWEN_REASONING_EFFORT` — CoT effort `off|low|medium|high|max` (default **medium**). TUI `/thinking` (shortcuts `/low` `/medium` `/high` `/max`). Qwen3.8 maps `high`/`max` → native `xhigh` (there is no native `high`). GLM-5.3 maps `medium` → native `high`; **omitting** the field is native **max**. `QWEN_ENABLE_THINKING=0` is `/thinking off` for Qwen.
 - `CODING_BOX_NUM_CTX` — context window (default **100000**); compaction fires near ~70% (`_COMPACT_PRESSURE`)
 - `AGENT_COMPACT_TOKEN_CEILING` — absolute token ceiling for compaction (optional override)
 - `AGENT_ENABLE_MEMORY_RELIEF` — set `0` to disable auto VRAM/RAM relief (default **on**). **MLX:** unload diffusers when free RAM &lt; `AGENT_MEMORY_RELIEF_MIN_AVAILABLE_GB` (default 64) or phys RAM ≤ `AGENT_MEMORY_RELIEF_MAX_PHYS_GB`; skips small MLX models (&lt; `AGENT_MEMORY_RELIEF_SMALL_MODEL_DISK_GB`, default 50 GB on disk). **Linux/Ollama+CUDA:** always unload in-process Z-Image/Stable-Audio after sprite/sound gen and before coder streams so the LLM is not forced into CPU offload on 2×24 GB boxes.

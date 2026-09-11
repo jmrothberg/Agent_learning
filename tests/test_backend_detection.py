@@ -444,6 +444,7 @@ def test_qwen38_chat_template_defaults_to_medium_not_high(monkeypatch):
     """Official levels are xhigh, medium, low. There is no 'high'.
     Harness default is medium (tag parser); native jinja default is xhigh."""
     monkeypatch.delenv("QWEN_REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("REASONING_EFFORT", raising=False)
     monkeypatch.delenv("QWEN_ENABLE_THINKING", raising=False)
     kw = backend.chat_template_thinking_kwargs(
         "/Users/jonathanrothberg/MLX_Models/Qwen3.8-27B-mxfp8"
@@ -455,6 +456,7 @@ def test_qwen38_chat_template_defaults_to_medium_not_high(monkeypatch):
 
 
 def test_qwen38_reasoning_effort_env_and_aliases(monkeypatch):
+    monkeypatch.delenv("REASONING_EFFORT", raising=False)
     monkeypatch.setenv("QWEN_REASONING_EFFORT", "high")
     kw = backend.chat_template_thinking_kwargs("qwen3.8-27b")
     assert kw["reasoning_effort"] == "xhigh"  # 'high' is illegal in jinja
@@ -481,10 +483,15 @@ def test_qwen38_reasoning_effort_env_and_aliases(monkeypatch):
 
 
 def test_omlx_qwen38_keeps_thinking_and_closes_html_prefill(monkeypatch):
-    """Plan still thinks. HTML prefill must close </think> first
-    (DK 20260815_085321 / trace 20260829_165958)."""
+    """Plan still thinks. HTML prefill must be sent as a `partial` assistant
+    message so oMLX continues it (continue_final_message) instead of
+    rendering it as a finished turn + new <think> (DIGDUGDI 20260910_162103
+    doubled `<html_file>`). No `</think>` prefix: both local templates emit a
+    closed empty think block themselves, and a prefix breaks GLM's
+    continue_final_message substring check."""
     monkeypatch.delenv("QWEN_ENABLE_THINKING", raising=False)
     monkeypatch.delenv("QWEN_REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("REASONING_EFFORT", raising=False)
     model = "Qwen3.8-Flash-Next-MLX-8bit-MTP"
     assert backend.chat_template_thinking_kwargs(model) == {
         "enable_thinking": True, "reasoning_effort": "medium",
@@ -496,14 +503,44 @@ def test_omlx_qwen38_keeps_thinking_and_closes_html_prefill(monkeypatch):
         {"role": "assistant", "content": "<html_file>\n<!DOCTYPE html>\n"},
     ]
     out = backend.omlx_messages_close_think_prefill(prefill, model)
-    assert out[-1]["content"].startswith("</think>\n\n<html_file>")
-    # GLM / non-Qwen3.8: no rewrite.
+    assert out[-1]["content"] == "<html_file>\n<!DOCTYPE html>\n"
+    assert out[-1]["partial"] is True
+    assert "partial" not in prefill[-1]  # input not mutated
+    # GLM-5.3: same shape; a legacy `</think>` prefix is stripped.
     glm_prefill = [
-        {"role": "assistant", "content": "<html_file>\n<!DOCTYPE html>\n"},
+        {"role": "assistant", "content": "</think>\n\n<html_file>\n<!DOCTYPE html>\n"},
     ]
-    assert backend.omlx_messages_close_think_prefill(
+    glm_out = backend.omlx_messages_close_think_prefill(
         glm_prefill, "GLM-5.3-Flash-MLX-6bit"
-    ) == glm_prefill
+    )
+    assert glm_out[-1]["content"] == "<html_file>\n<!DOCTYPE html>\n"
+    assert glm_out[-1]["partial"] is True
+
+
+def test_glm53_thinking_default_is_high_not_max(monkeypatch):
+    """GLM jinja: omit/unknown → max. Harness must send high for medium."""
+    monkeypatch.delenv("REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("QWEN_REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("QWEN_ENABLE_THINKING", raising=False)
+    glm = "GLM-5.3-Flash-MLX-6bit"
+    assert backend.chat_template_thinking_kwargs(glm) == {
+        "reasoning_effort": "high",
+    }
+    assert backend.map_think_level_for_model(glm, "medium") == "high"
+    monkeypatch.setenv("REASONING_EFFORT", "max")
+    assert backend.chat_template_thinking_kwargs(glm) == {
+        "reasoning_effort": "max",
+    }
+    monkeypatch.setenv("REASONING_EFFORT", "low")
+    assert backend.chat_template_thinking_kwargs(glm)["reasoning_effort"] == "low"
+    monkeypatch.setenv("REASONING_EFFORT", "high")
+    assert backend.chat_template_thinking_kwargs(glm)["reasoning_effort"] == "high"
+    monkeypatch.setenv("REASONING_EFFORT", "off")
+    assert backend.chat_template_thinking_kwargs(glm)["reasoning_effort"] == "low"
+    # Folder / oMLX ids that are glm5_next, not GLM-5.2.
+    assert backend._thinking_family("glm5_next") == "glm53"
+    assert backend._thinking_family("GLM-5.2-MLX") is None
+    assert backend.chat_template_thinking_kwargs("Qwen3.6-27B") == {}
 
 
 def test_qwen38_never_forwards_illegal_effort(monkeypatch):
@@ -513,8 +550,8 @@ def test_qwen38_never_forwards_illegal_effort(monkeypatch):
         kw = backend.chat_template_thinking_kwargs("qwen3.8-27b")
         effort = kw.get("reasoning_effort")
         assert effort in ("xhigh", "medium", "low")
-        # high/max alias to xhigh; other junk (ultra, empty) → harness medium.
-        if raw.strip().lower() in ("high", "max"):
+        # high/max/ultra alias to xhigh; other junk (empty) → harness medium.
+        if raw.strip().lower() in ("high", "max", "ultra"):
             assert effort == "xhigh"
         elif raw.strip().lower() not in backend._QWEN38_REASONING_EFFORTS:
             assert effort == "medium"

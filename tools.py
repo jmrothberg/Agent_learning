@@ -3123,6 +3123,17 @@ def run_micro_probes(
         )
         if m_re:
             matched_marker = m_re.group(0)
+    if matched_marker is None:
+        # DIGDUGDI 20260910_162103 iter 1: the model gave up mid-function
+        # with a bare ellipsis in CODE (`for(var i=0;i<state.crush... }`),
+        # not in a comment. `...` directly followed by `}` `)` `]` or `;`
+        # is never valid JS (spread needs an operand), so this cannot hit
+        # real spread syntax. Checked on comment/string-stripped bodies.
+        for (_attrs, body) in scripts:
+            m_code = re.search(r"\.{3}\s*[})\];]", _strip_js_noise(body))
+            if m_code:
+                matched_marker = m_code.group(0)
+                break
     if matched_marker is not None:
         errors.append(
             f"elision marker found in source: {matched_marker!r} — the file is "

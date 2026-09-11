@@ -113,6 +113,29 @@ def test_2d_shooter_not_3d_skeleton(mem):
     assert sk.name not in _SPECIALIZED_3D
 
 
+def test_negated_threejs_in_640png_suffix_is_not_3d(mem):
+    """DIGDUGDI 20260910_162103: the harness's own /640png suffix
+    ("No CDN, no fetch, no WebGL, no three.js") tokenized to three/threejs
+    and routed a 2D Dig Dug to canvas_3d_basic.html at sim=1.00. A keyword
+    right after a negation word must not count as 3D intent."""
+    from modality import detect_3d_intent
+    from prompt_library import effective_prompt, load_prompt_library
+
+    assert detect_3d_intent("dig dug tunnels. No WebGL, no three.js.") == []
+    assert detect_3d_intent("not first-person, top-down tiles") == []
+    # Positive intent still detected when NOT negated.
+    assert "three" in detect_3d_intent("use three.js WebGL first person")
+    # Every shipped /640png prompt: a 2D goal must not land on a 3D skeleton.
+    lib = {g["name"]: g for g in load_prompt_library(_REPO / "memory" / "prompt_library.jsonl")}
+    for name in ("pac-man", "tetris", "breakout"):
+        if name not in lib:
+            continue
+        png = effective_prompt(lib[name], jmr_png_mode=True)
+        assert "no three.js" in png.lower()
+        assert detect_3d_intent(png) == [], name
+        assert mem.retrieve_skeleton(png).name not in _SPECIALIZED_3D, name
+
+
 # ---------------------------------------------------------------------------
 # GENERALITY — "works for ANY game", not just the genres above.
 #
