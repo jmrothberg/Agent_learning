@@ -66,3 +66,41 @@ def test_unused_media_warning_becomes_stale_context_on_rewrite():
     assert all("NEVER referenced" not in w for w in mp["warnings"])
     assert any("previous build appears stale" in w for w in mp["warnings"])
     assert "ordinary warning" in mp["warnings"]
+
+
+def test_probe_lint_skips_getComputedStyle_cssom_reads():
+    """DOOM3DF3: weapon_overlay_visible read getComputedStyle(w).visibility
+    and was flagged as unassigned 3×. CSSOM properties are not game state."""
+    probes = [
+        {
+            "name": "weapon_overlay_visible",
+            "expr": (
+                "(()=>{const w=document.getElementById('weapon');"
+                "if(!w)return false;"
+                "return getComputedStyle(w).visibility!=='hidden'"
+                "&&getComputedStyle(w).display!=='none'"
+                "&&getComputedStyle(w).opacity!=='0';})()"
+            ),
+        },
+        {
+            "name": "still_flags_real_unassigned",
+            "expr": "window.state && typeof state.ghostField === 'number'",
+        },
+    ]
+    html = """<!doctype html><html><body><div id=weapon></div><script>
+const state = { player: { x: 10 } };
+window.state = state;
+</script></body></html>"""
+    findings = GameAgent._probes_referencing_unassigned_props(probes, html)
+    names = {f["name"] for f in findings}
+    assert "weapon_overlay_visible" not in names
+    assert "still_flags_real_unassigned" in names
+
+
+def test_lint_probes_flags_cross_probe_name_reference():
+    probes = [
+        {"name": "canvas_640", "expr": "document.querySelector('canvas')"},
+        {"name": "raf_ok", "expr": "(()=>canvas_640 && state.frame>0)()"},
+    ]
+    findings = GameAgent._lint_probes(probes)
+    assert any(f["kind"] == "cross_probe_name_reference" for f in findings)

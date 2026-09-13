@@ -1297,10 +1297,8 @@ _CANVAS_ENTITY_KEYWORDS = frozenset({
     "card", "cards", "tower", "towers", "block", "blocks", "sprite",
 })
 
-_PINBALL_KEYWORDS = frozenset({
-    "pinball", "flipper", "flippers", "bumper", "bumpers", "plunger",
-    "drain", "multiball", "tilt", "nudge", "slingshot-pin", "arcade-table",
-})
+# Phase 3: pinball class keywords live on canvas-pinball applies_keywords /
+# strong_hooks in visual_playtests.jsonl (see memory.detect_recipe_intent_keywords).
 
 # Open-field / Fieldrunners TD — beam vs rotating turret split (20260703).
 _OPEN_FIELD_TD_SHAPE = frozenset({
@@ -1348,20 +1346,16 @@ def _detect_canvas_entity_intent(goal: str) -> list[str]:
 
 
 def _detect_pinball_intent(goal: str) -> list[str]:
-    """Return pinball-family keywords for table-physics plan nudge."""
-    if not goal:
-        return []
-    import re
-    words = re.findall(r"[a-zA-Z]+", goal.lower())
-    seen: set[str] = set()
-    out: list[str] = []
-    for w in words:
-        if w in _PINBALL_KEYWORDS and w not in seen:
-            seen.add(w)
-            out.append(w)
-    if "pinball" in seen or len(out) >= 2:
-        return out
-    return []
+    """Return pinball-family keywords for table-physics plan nudge.
+
+    Phase 3: keywords from plan_nudges.jsonl `pinball-table` applies_keywords
+    (not Python literals).
+    """
+    from memory import detect_plan_nudge_keywords
+
+    return detect_plan_nudge_keywords(
+        goal, "pinball-table", min_hits=2, strong_alone=True
+    )
 
 
 # Modality keywords that signal the goal needs a 3D rendering technique.

@@ -696,3 +696,48 @@ def test_embedded_marker_in_replace_still_rejected_when_unsalvageable():
     res = apply_patches(source, [patch])
     assert res.applied == 0
     assert "embedded" in res.failed[0][2].lower() or "marker" in res.failed[0][2].lower()
+
+
+def test_focused_slice_marker_in_search_is_stripped_before_matching():
+    """DOOM3DF3 20260911 iter 4: the model copied the harness header
+    `// --- function `update` (focused slice) ---` into SEARCH. That line is
+    prompt prose, not file text — the patch must still apply, and the marker
+    must never be written into the game via REPLACE."""
+    source = (
+        "function update(dt){\n"
+        "  if(state.phase!=='play') return;\n"
+        "  p.yaw=camera.rotation.y; p.pitch=camera.rotation.x;\n"
+        "  syncCamera();\n"
+        "}\n"
+    )
+    patch = Patch(
+        search=(
+            "// --- function `update` (focused slice: marker line, NOT in file"
+            " — never put it in SEARCH) ---\n"
+            "function update(dt){\n"
+            "  if(state.phase!=='play') return;\n"
+            "  p.yaw=camera.rotation.y; p.pitch=camera.rotation.x;\n"
+        ),
+        replace=(
+            "// --- function `update` (focused slice) ---\n"
+            "function update(dt){\n"
+            "  if(state.phase!=='play') return;\n"
+        ),
+    )
+    res = apply_patches(source, [patch])
+    assert res.applied == 1, res.failed
+    assert "p.yaw=camera.rotation.y" not in res.text
+    assert "focused slice" not in res.text
+    assert "syncCamera();" in res.text
+
+
+def test_focused_slice_marker_strip_leaves_real_comments_alone():
+    """Only the harness marker shape is removed; ordinary `// ---` comments
+    in game code stay."""
+    src = "// --- Update ---\nfunction update(){}\n"
+    assert patches._strip_focused_slice_markers(src) == src
+    marked = (
+        "// --- related state assignments (focused slice: marker line, NOT in file) ---\n"
+        "state.score=0;\n"
+    )
+    assert patches._strip_focused_slice_markers(marked) == "state.score=0;\n"

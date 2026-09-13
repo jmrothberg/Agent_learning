@@ -100,22 +100,25 @@ def test_entity_not_rendered_skips_viewpoint_player_for_first_person_recipes():
     first-person / wireframe-vector recipes and is never drawn at its own
     (x,y) — every fix prompt carried a false ENTITY-NOT-RENDERED [player].
     Skip ONLY the viewpoint entity, ONLY for those recipes (class ids, not
-    titles); every other entity/recipe still gets the check."""
+    titles); every other entity/recipe still gets the check.
+
+    Phase 3: viewpoint lists live on recipe.viewpoint_entity in JSONL.
+    """
     import inspect
     import tools
+    from memory import recipe_viewpoint_entities
 
-    assert tools._VIEWPOINT_RECIPE_IDS == frozenset({
-        "canvas-3d-first-person", "canvas-vector-wireframe",
+    fps = recipe_viewpoint_entities("canvas-3d-first-person")
+    wire = recipe_viewpoint_entities("canvas-vector-wireframe")
+    assert fps == wire == frozenset({
+        "player", "camera", "cam", "eye", "viewer",
     })
-    assert "player" in tools._VIEWPOINT_ENTITY_NAMES
-    assert "camera" in tools._VIEWPOINT_ENTITY_NAMES
-    # Enemies etc. are never skipped.
-    assert "enemy" not in tools._VIEWPOINT_ENTITY_NAMES
+    assert "enemy" not in fps
+    assert not recipe_viewpoint_entities("canvas-grid-navigation")
     src = inspect.getsource(tools.LiveBrowser.load_and_test)
-    assert "_VIEWPOINT_RECIPE_IDS" in src
-    assert "_VIEWPOINT_ENTITY_NAMES" in src
+    assert "recipe_viewpoint_entities" in src
     # The skip is keyed on the active visual recipe id passed to load_and_test.
-    assert "(visual_recipe_id or \"\") in _VIEWPOINT_RECIPE_IDS" in src
+    assert "recipe_viewpoint_entities(visual_recipe_id" in src
 
 
 def test_entity_rendered_js_still_genre_free_after_dir_skip():

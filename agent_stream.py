@@ -204,6 +204,10 @@ class StreamMaterializeMixin:
         re-prefills 25-35k tokens (60-120 s). The harness now keeps history
         append-only for that reuse (agent_compaction lazy elision), so a
         disabled server cache silently throws the win away — surface it.
+
+        Also reports `sampling.max_context_window` (32768 clamps long
+        prompts even when the model card says 262k) and live
+        `cache_efficiency` from `/api/status` (DOOM3DF3 campaign Phase 1).
         """
         if getattr(self, "_prefix_cache_status_reported", False):
             return
@@ -213,11 +217,16 @@ class StreamMaterializeMixin:
         if name != "mlx-server":
             return
         try:
-            from backend import omlx_hot_cache_status
+            from backend import omlx_hot_cache_status, omlx_prefix_cache_diagnostics
             status = omlx_hot_cache_status(getattr(info, "endpoint", None))
+            diag = omlx_prefix_cache_diagnostics(getattr(info, "endpoint", None))
         except Exception:
             status = None
-        self._trace({"kind": "prefix_cache_status", "backend": name, "hot_cache": status})
+            diag = {}
+        payload = {"kind": "prefix_cache_status", "backend": name, "hot_cache": status}
+        if isinstance(diag, dict):
+            payload.update(diag)
+        self._trace(payload)
         if status == "off":
             from agent import AgentEvent  # late import — agent loads this module first
             self._queue_stream_ui_event(AgentEvent(
@@ -226,6 +235,17 @@ class StreamMaterializeMixin:
                 "~/.omlx/settings.json) — every turn re-prefills the whole prompt. "
                 "Set it to e.g. 32GB in the oMLX admin UI for 5-10x faster fix turns.",
                 {"hot_cache": status},
+            ))
+        ctx = (diag or {}).get("max_context_window")
+        if isinstance(ctx, int) and ctx > 0 and ctx < 65536:
+            from agent import AgentEvent
+            self._queue_stream_ui_event(AgentEvent(
+                "info",
+                f"[yellow]oMLX sampling.max_context_window={ctx}[/yellow] — "
+                "prompts longer than this re-prefill from scratch. Raise to "
+                "100000+ in ~/.omlx/settings.json if fix turns show "
+                "cached_prompt_tokens=0 on large contexts.",
+                {"max_context_window": ctx},
             ))
 
     @staticmethod
@@ -1279,6 +1299,26 @@ class StreamMaterializeMixin:
                 # Harness-internal key: backends read it for stage-aware
                 # reasoning effort and strip it before the wire.
                 opts["_stage"] = stage
+            # DOOM3DF3 20260911: assistant prefill closes think (oMLX
+            # partial / in-process append_assistant_prefill) → 0 thinking
+            # tokens. Keep effort at plan/first_build level so the system
+            # prompt stays cache-identical (medium→low was a free TTFT miss).
+            if prefill_used and not anthropic_prefill_folded:
+                opts["_thinking_closed_prefill"] = True
+                if stage in ("fix", "patch"):
+                    self._trace({
+                        "kind": "stage_effort_held_for_cache",
+                        "stage": stage,
+                        "held_at": "plan_default",
+                    })
+                # Qwen non-thinking guidance: presence_penalty on prefilled
+                # (thinking-closed) patch turns. Env override wins.
+                import os as _os
+                _pp = (_os.environ.get("QWEN_PRESENCE_PENALTY") or "1.5").strip()
+                try:
+                    opts["presence_penalty"] = float(_pp)
+                except ValueError:
+                    opts["presence_penalty"] = 1.5
             if getattr(active_backend, "info", None) and active_backend.info.name == "ollama":
                 try:
                     import gpu_status as _gs
@@ -1389,6 +1429,8 @@ class StreamMaterializeMixin:
             # rewrote an earlier message — see HARNESS_TUNING.md).
             "ttft_s": self._last_prefill_s,
             "cached_prompt_tokens": getattr(result, "cached_prompt_tokens", None),
+            "tok_per_s": self._last_stream_tok_per_s,
+            "presence_penalty": opts.get("presence_penalty"),
         })
         self._maybe_report_prefix_cache_status()
         # Context-pressure detector. When prompt_tokens approaches
@@ -1900,6 +1942,24 @@ class StreamMaterializeMixin:
                     # agent so iter_summary shows "applied N/M" inline.
                     self._last_patch_applied = res.applied
                     self._last_patch_total = len(patches)
+                    # Repeat-complaint ledger (DOOM3DF3 20260911): remember
+                    # WHERE applied patches landed (SEARCH first lines) so a
+                    # re-raised user complaint can say "you already edited
+                    # X — the bug is elsewhere". Notes are attached later by
+                    # the caller when the reply's <notes> are extracted.
+                    if res.applied:
+                        _applied_heads = [
+                            ((p.search or "").strip().splitlines() or [""])[0][:100]
+                            for idx, p in enumerate(patches)
+                            if idx not in failed_idxs and (p.search or "").strip()
+                        ]
+                        if not hasattr(self, "_fix_attempt_ledger"):
+                            self._fix_attempt_ledger = []
+                        self._fix_attempt_ledger.append({
+                            "applied_heads": _applied_heads[:4],
+                            "notes": getattr(self, "_last_reply_notes", "") or "",
+                        })
+                        self._fix_attempt_ledger = self._fix_attempt_ledger[-6:]
                 except Exception as e:
                     self._trace_exception("patch_outcome_error", e)
             if res.applied == 0:

@@ -669,6 +669,8 @@ def _filter_existing_videos(video_paths: dict[str, Path]) -> dict[str, Path]:
 def render_video_paths_block(
     video_paths: dict[str, Path],
     session_html_path: Path | str,
+    *,
+    pending: bool = False,
 ) -> str:
     """Build the injection block listing generated cutscene paths.
 
@@ -680,14 +682,22 @@ def render_video_paths_block(
     """
     if not video_paths:
         return ""
-    video_paths = _filter_existing_videos(video_paths)
+    if not pending:
+        video_paths = _filter_existing_videos(video_paths)
     if not video_paths:
         return ""
     html_dir = Path(session_html_path).resolve().parent
     lines = [
-        "================ GENERATED CUTSCENE VIDEOS ================",
-        "Wan2.2 generated these MP4 cutscene clips and saved them next",
-        "to your HTML file. Play them as full-screen overlays at the",
+        ("================ GENERATED CUTSCENE VIDEOS (pending — generating now) ================"
+         if pending else
+         "================ GENERATED CUTSCENE VIDEOS ================"),
+        ("These MP4 paths are reserved and will exist before the browser test. "
+         "Wire the overlay NOW."
+         if pending else
+         "Wan2.2 generated these MP4 cutscene clips and saved them next"),
+        ("Do not invent other names."
+         if pending else
+         "to your HTML file. Play them as full-screen overlays at the"),
         "matching moments (intro on start, death clip on life lost,",
         "victory on win, ...). They have NO audio track.",
         "",

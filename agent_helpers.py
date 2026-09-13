@@ -900,24 +900,18 @@ _REPORT_BLOCK_RE = re.compile(
 # collapsed by _summarize_content; small examples stay verbatim.
 _SUMMARIZE_MIN_PROBES_BYTES = 300
 
-# canvas-grid-navigation ships chase/pellet auto-probes AND wall/dig probes
-# in one recipe (strong_hooks include both maze-chase and dig/tunnel). The
-# chase set is side-effecting (auto_chaser_moves_autonomously dispatches
-# keys) and false-fails tile-digger goals that never asked for pellets
-# (DIGDUGD3 20260905_161144). Class phrases only — not a title branch.
-_GRID_CHASE_AUTO_PROBE_NAMES = frozenset({
-    "auto_chasers_array_present",
-    "auto_chaser_moves_autonomously",
-    "auto_vulnerability_mechanism_exposed",
-    "auto_collectibles_counter",
-})
-_GRID_CHASE_CLASS_RE = re.compile(
-    r"\b(chase|chaser|chasers|pursuer|pursuers|pellet|pellets|"
-    r"dots|vulnerable|flee|scared|power-?up|powerup)\b",
-    re.I,
-)
-
 
 def grid_chase_class_in_goal(goal: str) -> bool:
-    """True when the goal is maze-chase / pellet-collect, not merely a grid."""
-    return bool(_GRID_CHASE_CLASS_RE.search(goal or ""))
+    """True when the goal is maze-chase / pellet-collect, not merely a grid.
+
+    Phase 3: words live on canvas-grid-navigation `auto_probe_requires_words`
+    in visual_playtests.jsonl — no Python title/class literal set here.
+    """
+    from memory import auto_probe_goal_allows, visual_recipe_get
+
+    rec = visual_recipe_get("canvas-grid-navigation")
+    req = rec.get("auto_probe_requires_words") or {}
+    if not isinstance(req, dict) or not req:
+        return False
+    # Chase class ⇔ at least one gated probe would inject for this goal.
+    return any(auto_probe_goal_allows(rec, name, goal or "") for name in req)

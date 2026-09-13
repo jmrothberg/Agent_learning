@@ -656,6 +656,25 @@ def find_anchor(source: str, search: str, *, ctx_lines: int = 4) -> str | None:
 
 _BREADCRUMB_RE = re.compile(r"^\s*@@\s+(.+?)\s*$")
 
+# Harness-inserted focused-slice marker lines (agent_prompts._focused_slice
+# renders `// --- function `update` (focused slice) ---` and
+# `// --- related state assignments (focused slice) ---` above each
+# excerpt). They are NOT in the file. DOOM3DF3 20260911 iter 4: the model
+# copied the header into SEARCH → "SEARCH block not found" → partial patch →
+# a whole extra turn re-applying the same fix. Strip them from both sides
+# before locating, so the excerpt the model saw can be pasted verbatim.
+_FOCUSED_SLICE_MARKER_RE = re.compile(
+    r"^[ \t]*//[ \t]*---.*\(focused slice[^)]*\)[ \t]*---[ \t]*\r?\n?",
+    re.MULTILINE,
+)
+
+
+def _strip_focused_slice_markers(text: str) -> str:
+    """Drop harness slice-marker lines from a SEARCH/REPLACE body."""
+    if not text or "focused slice" not in text:
+        return text
+    return _FOCUSED_SLICE_MARKER_RE.sub("", text)
+
 
 def _parse_breadcrumb_lines(search: str) -> tuple[str, list[str]]:
     """Strip leading `@@ <ident>` lines from a SEARCH block.
@@ -956,7 +975,13 @@ def apply_patches(source: str, patches: list[Patch]) -> PatchResult:
         # more surrounding lines. The breadcrumbs are advisory — if
         # they don't resolve to anything in source, normal matching
         # proceeds against the residual.
-        residual_search, breadcrumbs = _parse_breadcrumb_lines(p.search)
+        # Focused-slice header lines are harness prose, not file text —
+        # drop them from SEARCH (so it can match) and REPLACE (so they are
+        # never written into the game). See _FOCUSED_SLICE_MARKER_RE.
+        residual_search, breadcrumbs = _parse_breadcrumb_lines(
+            _strip_focused_slice_markers(p.search)
+        )
+        replace_text = _strip_focused_slice_markers(p.replace)
 
         # --- locate ----------------------------------------------------
         matches, layer = _locate(source, residual_search)
@@ -1002,7 +1027,7 @@ def apply_patches(source: str, patches: list[Patch]) -> PatchResult:
             continue
 
         start, end = matches[0]
-        spans.append((i, start, end, p.replace, layer))
+        spans.append((i, start, end, replace_text, layer))
 
     # --- non-overlap validation across surviving spans ----------------
     # Sort by start; any pair with prev.end > next.start is an overlap.

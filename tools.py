@@ -60,6 +60,70 @@ def _input_evidence_is_plausible(path: str) -> bool:
     return True
 
 
+def static_state_writer_lines(html: str, field: str, *, cap: int = 8) -> list[dict]:
+    """Every line that WRITES `state.<field>` (dotted path), alias-aware.
+
+    DOOM3DF3 20260911: four user complaints ("mouse doesn't turn me") failed
+    because `mousemove` wrote `p.yaw` and `update()` overwrote it every
+    frame with `p.yaw=camera.rotation.y`. The focused slice only scanned
+    literal `state.player.yaw` writes, so the alias `p` hid the culprit.
+    This resolves `const p = state.player` style aliases (plus `state.x`
+    itself) and returns [{line, in, text}] where `in` is the nearest
+    enclosing `function NAME(` / `NAME = (...) =>` / addEventListener('EVT')
+    header found scanning upward. Pure, genre-free, bounded by `cap`.
+    """
+    parts = [p for p in str(field or "").split(".") if p]
+    if not html or not parts:
+        return []
+    leaf = parts[-1]
+    parent_path = ".".join(parts[:-1])  # "" when field is a root leaf
+    # Object expressions that denote the parent: `state.player`, plus any
+    # alias `X` from `const|let|var X = state.player` (also `= window.state.player`).
+    parents: list[str] = []
+    if parent_path:
+        parents.append(rf"(?:window\.)?state\.{re.escape(parent_path)}")
+        for m in re.finditer(
+            rf"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:window\.)?state\.{re.escape(parent_path)}\b(?![\w$.\[])",
+            html,
+        ):
+            parents.append(re.escape(m.group(1)))
+        # `const {player} = state` / `const {player: p} = state`
+        for m in re.finditer(
+            rf"\b(?:const|let|var)\s*\{{([^}}]*)\}}\s*=\s*(?:window\.)?state\b",
+            html,
+        ):
+            for piece in m.group(1).split(","):
+                k, _, alias = piece.partition(":")
+                if k.strip() == parent_path:
+                    parents.append(re.escape((alias or k).strip()))
+    else:
+        parents.append(r"(?:window\.)?state")
+    obj_alt = "|".join(dict.fromkeys(parents))
+    write_re = re.compile(
+        rf"\b(?:{obj_alt})\.{re.escape(leaf)}\s*(?:(?:[+\-*/%]|\*\*)?=(?!=)|\+\+|--)"
+    )
+    header_re = re.compile(
+        r"\bfunction\s+([A-Za-z_$][\w$]*)\s*\(|"
+        r"\b([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>|"
+        r"addEventListener\(\s*['\"]([A-Za-z]+)['\"]",
+    )
+    lines = html.splitlines()
+    out: list[dict] = []
+    for idx, line in enumerate(lines):
+        if not write_re.search(line):
+            continue
+        where = "?"
+        for back in range(idx, max(-1, idx - 80), -1):
+            hm = header_re.search(lines[back])
+            if hm:
+                where = hm.group(1) or hm.group(2) or f"on {hm.group(3)}"
+                break
+        out.append({"line": idx + 1, "in": where, "text": line.strip()[:110]})
+        if len(out) >= cap:
+            break
+    return out
+
+
 # Leaf names that represent a movable entity's POSITION. A movement key that
 # registers input (sets a direction/flag) but never changes any of these means
 # the entity is STUCK (spawned in a wall, collision blocking every move) — the
@@ -946,13 +1010,26 @@ def _count_session_pngs(html_path: Path | str) -> int:
         return 0
 
 
-def opaque_scenery_soft_warning_for_html_assets(html_path: Path | str) -> str | None:
-    """First OPAQUE-SPRITE soft_warning for this HTML's companion assets only."""
+def opaque_scenery_soft_warning_for_html_assets(
+    html_path: Path | str,
+    *,
+    skip_names: set[str] | frozenset[str] | None = None,
+) -> str | None:
+    """First OPAQUE-SPRITE soft_warning for this HTML's companion assets only.
+
+    `skip_names`: stems that are i2v cutscene source plates (the `<videos>`
+    `image:` field). DOOM3DF3 20260911: boss_key / intro_key are 900KB–1MB
+    plates for LTX i2v, not in-world character sprites — they must not arm
+    OPAQUE-SPRITE-SCENERY and block a probe-green build.
+    """
     asset_dir = companion_assets_dir_for_html(html_path)
     if not asset_dir.is_dir():
         return None
+    skip = {str(n).lower() for n in (skip_names or ()) if n}
     for png in asset_dir.glob("*.png"):
-        osc = opaque_scenery_soft_warning_for_png(png.stem, png)
+        if png.stem.lower() in skip:
+            continue
+        osc = opaque_scenery_soft_warning_for_png(png.stem, png, skip_names=skip)
         if osc:
             return osc
     return None
@@ -966,17 +1043,24 @@ _CHARACTER_SPRITE_NAME_RE = re.compile(
 
 # Role skip for OPAQUE-SPRITE-SCENERY (not a genre special-case).
 # Title/cutscene plates are opaque scene art on purpose. Their stems often
-# also match _CHARACTER_SPRITE_NAME_RE (e.g. keyart_boss → "boss") and would
-# hard soft_warning a probe-green build. Same idea as bg_/sky below.
-# Trace: build-a-doom-game-first-person_20260721_132716 (harness_bug).
+# also match _CHARACTER_SPRITE_NAME_RE (e.g. keyart_boss → "boss", boss_key
+# → "boss") and would hard soft_warning a probe-green build. Same idea as
+# bg_/sky below.
+# Trace: build-a-doom-game-first-person_20260721_132716 (harness_bug);
+# DOOM3DF3 20260911 (boss_key / intro_key i2v plates).
+# `key|keyframe|plate|splash|poster` cover i2v source naming without
+# title-specific branches (role tokens only).
 _CUTSCENE_OR_KEYART_NAME_RE = re.compile(
-    r"(^|_)(keyart|title|intro|cutscene)(_|$)",
+    r"(^|_)(keyart|title|intro|cutscene|key|keyframe|plate|splash|poster)(_|$)",
     re.I,
 )
 
 
 def opaque_scenery_soft_warning_for_png(
-    name: str, png_path: Path
+    name: str,
+    png_path: Path,
+    *,
+    skip_names: set[str] | frozenset[str] | None = None,
 ) -> str | None:
     """Warn when a *character* PNG keeps opaque non-white edge scenery.
 
@@ -989,9 +1073,11 @@ def opaque_scenery_soft_warning_for_png(
     if not name or _CHARACTER_SPRITE_NAME_RE.search(name) is None:
         return None
     low = name.lower()
+    if skip_names and low in {str(n).lower() for n in skip_names if n}:
+        return None
     if low.startswith("bg_") or low.startswith("sky"):
         return None
-    # Cutscene/title/keyart role skip — see _CUTSCENE_OR_KEYART_NAME_RE.
+    # Cutscene/title/keyart/keyframe role skip — see _CUTSCENE_OR_KEYART_NAME_RE.
     if _CUTSCENE_OR_KEYART_NAME_RE.search(low):
         return None
     try:
@@ -1218,6 +1304,9 @@ def _parse_action_keys(*texts: str) -> list[str]:
     pressed otherwise, so an attack animation is never triggered and never
     captured as an action frame. Pressing the keys the SPEC names is
     input-derived, not a genre key-table.
+
+    Also expands bare WASD / arrows prose in a Controls: line (goal text
+    often says "WASD move" without KeyW tokens — DOOM3DF3 coaching mismatch).
     """
     seen: list[str] = []
     for text in texts:
@@ -1227,6 +1316,16 @@ def _parse_action_keys(*texts: str) -> list[str]:
             tok = m.group(0)
             if tok not in seen:
                 seen.append(tok)
+        # Controls:/controls prose: WASD → KeyW..KeyD; arrow words → Arrow*.
+        low = text.lower()
+        if "wasd" in low or re.search(r"\bw\s*a\s*s\s*d\b", low):
+            for tok in ("KeyW", "KeyA", "KeyS", "KeyD"):
+                if tok not in seen:
+                    seen.append(tok)
+        if re.search(r"\barrows?\b", low) or "arrow keys" in low:
+            for tok in ("ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"):
+                if tok not in seen:
+                    seen.append(tok)
     return seen
 
 
@@ -1937,11 +2036,8 @@ _CANVAS_HASH_JS = """
 # Recipes whose player is the VIEWPOINT (never drawn at its own x/y):
 # ENTITY-NOT-RENDERED skips these entity names there (DOOM3DFI/BATTLE*
 # /640png sessions, Sept 2026 — false [player] on every fix prompt).
-_VIEWPOINT_RECIPE_IDS = frozenset({
-    "canvas-3d-first-person",
-    "canvas-vector-wireframe",
-})
-_VIEWPOINT_ENTITY_NAMES = frozenset({"player", "camera", "cam", "eye", "viewer"})
+# Phase 3: recipe ids + entity names live on visual_playtests.jsonl
+# `viewpoint_entity` — loaded via memory.recipe_viewpoint_entities.
 _ENTITY_RENDERED_JS = """
 (() => {
   const s = window.state || window.gameState;
@@ -4350,6 +4446,7 @@ class LiveBrowser:
         visual_recipe_id: str | None = None,
         asset_decode_settle: bool = True,
         simulator_mode: bool = False,
+        opaque_skip_names: set[str] | frozenset[str] | list[str] | None = None,
     ) -> dict[str, Any]:
         """Navigate to the file, let it run, return the report.
 
@@ -4362,8 +4459,15 @@ class LiveBrowser:
 
         All of that ends up as additional report fields and soft_warnings the
         model treats with the same urgency as crashes.
+
+        `opaque_skip_names`: asset stems that are i2v cutscene source plates
+        (from `<videos image:…>`) — never arm OPAQUE-SPRITE-SCENERY.
         """
         import asyncio
+        _opaque_skip = frozenset(
+            str(n).lower() for n in (opaque_skip_names or ()) if n
+        )
+        report_intro_dismissed: str | None = None
 
         # Auto-reopen logic: if the user (or the system) closed the browser window unexpectedly,
         # or if _page has become closed/unusable, we proactively reconstruct and reopen it.
@@ -4482,7 +4586,7 @@ class LiveBrowser:
         # Most small-model bugs we miss are "controls don't work". Fire a few
         # standard inputs and check if pixels change. Captured pre/post
         # snapshots are compared via a key-set hash from the same probe.
-        input_test = await self._input_smoke_test(criteria=criteria)
+        input_test = await self._input_smoke_test(criteria=criteria, goal=goal)
 
         # ---- action frame (peak input-attributable transient) -------------
         # The smoke test captures one screenshot at the moment a held key was
@@ -4538,6 +4642,44 @@ class LiveBrowser:
         # game. We run each in the page context. Per-probe results join the
         # report so the model sees its own assertions checked.
         probe_results: list[dict[str, Any]] = []
+        # Intro dismissal (DOOM3DF3 / OutRun): if state is still on
+        # intro/title/menu, probes that expect play state fail. Press
+        # Enter/Space and click canvas once, then re-sample.
+        if probes:
+            try:
+                _mode = await self._safe_eval(
+                    "(()=>{const s=window.state||window.gameState||{};"
+                    "const m=s.phase||s.mode||s.scene||s.screen||'';"
+                    "return (typeof m==='string')?m.toLowerCase():'';})()"
+                )
+                if isinstance(_mode, str) and _mode in (
+                    "intro", "title", "menu", "start", "attract", "splash",
+                ):
+                    try:
+                        await self._page.keyboard.press("Enter")
+                        await asyncio.sleep(0.15)
+                        await self._page.keyboard.press("Space")
+                        await asyncio.sleep(0.15)
+                        _c = await self._safe_eval(
+                            "(()=>{const c=document.querySelector('canvas');"
+                            "if(!c)return null;const r=c.getBoundingClientRect();"
+                            "return {x:r.left+r.width/2,y:r.top+r.height/2};})()"
+                        )
+                        if isinstance(_c, dict):
+                            await self._page.mouse.click(
+                                float(_c["x"]), float(_c["y"]),
+                            )
+                            await asyncio.sleep(0.2)
+                    except Exception:
+                        pass
+                    # Best-effort: stash for format_report / traces.
+                    report_intro_dismissed = _mode
+                else:
+                    report_intro_dismissed = None
+            except Exception:
+                report_intro_dismissed = None
+        else:
+            report_intro_dismissed = None
         if probes:
             # Probe-ordering fix (trace 20260612_171752): run READ-ONLY
             # probes first so a side-effecting probe (e.g. restart_resets
@@ -4738,6 +4880,8 @@ class LiveBrowser:
             list(self._errors), list(self._warnings), list(self._logs),
             title, canvas_info, listener_info, body_text,
         )
+        if report_intro_dismissed:
+            report["intro_dismissed_for_probes"] = report_intro_dismissed
         # Attach the new fields. The model never sees raw bytes - just paths
         # and small booleans / counts via format_report_for_model.
         report["screenshot"] = screenshot_saved
@@ -4751,6 +4895,21 @@ class LiveBrowser:
             )
         except Exception:
             report["state_timeline"] = ""
+        # Numeric leaf NAMES of window.state (no array-indexed paths), so the
+        # feedback router can map a complaint ("mouse doesn't turn me") onto
+        # concrete fields (player.yaw) for the writer audit / stickiness
+        # check (DOOM3DF3 20260911). Names only — bounded, no values.
+        try:
+            _last_gs = next(
+                (s for s in reversed(state_samples) if isinstance(s, dict)), None,
+            )
+            report["state_leaves"] = sorted(
+                k for k, v in (_last_gs or {}).items()
+                if isinstance(v, (int, float))
+                and not any(p.isdigit() for p in str(k).split("."))
+            )[:80]
+        except Exception:
+            report["state_leaves"] = []
         # Moved here from the per-action-frame save block above: `report`
         # only exists from this point on (UnboundLocalError fix, 2026-06-10).
         if action_frame_paths:
@@ -4800,7 +4959,9 @@ class LiveBrowser:
         # when all games share one overnight out-dir.
         try:
             if not simulator_mode:
-                _osc = opaque_scenery_soft_warning_for_html_assets(path)
+                _osc = opaque_scenery_soft_warning_for_html_assets(
+                    path, skip_names=_opaque_skip,
+                )
                 if _osc:
                     report["soft_warnings"].append(_osc)
         except Exception:
@@ -4964,12 +5125,14 @@ class LiveBrowser:
             # camera and is never drawn at its own (x,y) — every DOOM3DFI
             # and BATTLE* /640png fix prompt carried a false
             # ENTITY-NOT-RENDERED [player]. Skip that entity only.
-            _ent_viewpoint_recipe = (visual_recipe_id or "") in _VIEWPOINT_RECIPE_IDS
+            # Phase 3: viewpoint recipes/names from recipe.viewpoint_entity.
+            from memory import recipe_viewpoint_entities
+            _ent_viewpoint_names = recipe_viewpoint_entities(visual_recipe_id or "")
             for m in missing:
                 if not isinstance(m, dict):
                     continue
                 name = m.get("name", "?")
-                if _ent_viewpoint_recipe and str(name).lower() in _VIEWPOINT_ENTITY_NAMES:
+                if _ent_viewpoint_names and str(name).lower() in _ent_viewpoint_names:
                     continue
                 bg_frac = m.get("bg_fraction", 0)
                 pk = m.get("position_kind", "?")
@@ -6470,7 +6633,62 @@ class LiveBrowser:
                 pass
         return _format_falsy_probe_diag(path_values, undefined)
 
-    async def _input_smoke_test(self, criteria: str | None = None) -> dict[str, Any]:
+    # Runtime "does a write to this field STICK?" probe. Pokes a numeric
+    # leaf of window.state by a small delta, waits two animation frames,
+    # and reports whether a per-frame writer snapped it back. This is the
+    # decisive evidence for the DOOM3DF3 20260911 class of bug (handler
+    # writes player.yaw, update() overwrites it from the camera every
+    # frame) that no static read of the handler can reveal.
+    _STATE_STICKINESS_JS = """
+    async (path) => {
+        const cands = ['state', 'gameState', 'game', 'GAME', 'world'];
+        let gs = null;
+        for (const n of cands) { const v = window[n]; if (v != null && typeof v === 'object') { gs = v; break; } }
+        if (!gs) return {error: 'no state global'};
+        const parts = String(path || '').split('.').filter(Boolean);
+        let obj = gs;
+        for (let i = 0; i < parts.length - 1; i++) obj = obj ? obj[parts[i]] : undefined;
+        if (obj == null) return {error: 'missing parent object'};
+        const k = parts[parts.length - 1];
+        const v = obj[k];
+        if (typeof v !== 'number' || !isFinite(v)) return {error: 'not a finite number', type: typeof v};
+        const raf = () => new Promise(r => requestAnimationFrame(() => r()));
+        await raf(); await raf();
+        const a1 = obj[k];
+        const drift = Math.abs(a1 - v) > 1e-6;
+        const delta = Math.abs(a1) > 1e3 ? Math.abs(a1) * 0.05 : 0.5;
+        obj[k] = a1 + delta;
+        await raf(); await raf();
+        const after = obj[k];
+        const stuck = Math.abs(after - (a1 + delta)) <= delta * 0.5;
+        try { obj[k] = a1; } catch (e) {}
+        return {before: a1, poked: a1 + delta, after: after, drift: drift, reverted: !stuck && !drift};
+    }
+    """
+
+    async def state_field_stickiness(self, fields: list[str]) -> dict[str, dict]:
+        """{field: {before, poked, after, drift, reverted}} for ≤4 fields.
+
+        `reverted` means the poke was undone within two frames while the
+        field was otherwise stable → something in the frame loop
+        overwrites it, so input handlers writing it are discarded.
+        Errors are reported per field (`error`), never raised."""
+        out: dict[str, dict] = {}
+        if self._page is None:
+            return out
+        for f in [str(x) for x in (fields or []) if x][:4]:
+            try:
+                res = await self._page.evaluate(self._STATE_STICKINESS_JS, f)
+                out[f] = res if isinstance(res, dict) else {"error": "no result"}
+            except Exception as e:
+                out[f] = {"error": str(e)[:120]}
+        return out
+
+    async def _input_smoke_test(
+        self,
+        criteria: str | None = None,
+        goal: str | None = None,
+    ) -> dict[str, Any]:
         """Hold each test key for a few frames; report whether the canvas changed.
 
         Two big differences vs the original 9-pixel version:
@@ -6496,6 +6714,9 @@ class LiveBrowser:
               even when the canvas is also drifting), and only fall back
               to canvas-hash change when ambient was stable.
         Generic and behavioral — works for any HTML/JS game.
+
+        `goal` is also scanned for KeyboardEvent.code tokens (Controls:
+        line) so smoke and dynamic probes press the same declared keys.
         """
         import asyncio
 
@@ -6506,11 +6727,13 @@ class LiveBrowser:
             return {"ran": False, "reason": "no canvas"}
 
         # Movement defaults (always tried), plus the actual action keys the
-        # model declared in <criteria> (KeyF punch, KeyG kick, KeyZ ability,
-        # …) so attack/ability animations actually fire and get captured as an
-        # action frame. Genre-free: we press the input tokens the spec names.
+        # model declared in <criteria> AND the goal's Controls: line
+        # (DOOM3DF3: WASD in goal but smoke only pressed arrows → coaching
+        # contradicted input_moves_player). Genre-free: press named codes.
         default_keys = ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space", "KeyW", "KeyA", "KeyS", "KeyD"]
-        keys = list(dict.fromkeys(default_keys + _parse_action_keys(criteria or "")))[:16]
+        keys = list(dict.fromkeys(
+            default_keys + _parse_action_keys(criteria or "", goal or ""),
+        ))[:16]
         if not keys:
             keys = default_keys
         # Phase 0: criteria-declared non-combat keys (Space to pause, Enter to
@@ -6793,6 +7016,10 @@ class LiveBrowser:
                 if first_responsive_key is None:
                     first_responsive_key = k
 
+        # Pointer-drag verdict ({"ran", "leaves"}); None when the game has no
+        # pointer/mouse listeners so the drag smoke never ran.
+        pointer_drag: dict[str, Any] | None = None
+
         # run_13: Elite Trader / SimCity are click-primary (starmap / place
         # tiles). Keyboard-only smoke reported FAIL despite working mouse
         # handlers because R-restart still registers a key listener. When
@@ -6869,6 +7096,57 @@ class LiveBrowser:
                         if first_responsive_key is None:
                             first_responsive_key = _label
                         break
+                # Pointer-DRAG smoke (DOOM3DF3 20260911: "use the mouse to
+                # turn" failed 4 turns because nothing ever moved the mouse —
+                # the smoke only clicked). Real CDP mouse events: press at the
+                # canvas centre, move +120px right in steps (Chromium fills
+                # movementX), release. Credit input-only state leaves exactly
+                # like keys; ALWAYS record the verdict (even "no state
+                # change") so the report can name a dead mouse-look/drag path.
+                # Genre-free: any drag/aim/look/slingshot game is covered.
+                try:
+                    _dx0, _dy0 = _cl + _cw * 0.50, _ct + _ch * 0.50
+                    before = await self._safe_eval(_CANVAS_HASH_JS)
+                    before_gs = await self._safe_eval(_GAMESTATE_SNAPSHOT_JS)
+                    await self._page.mouse.move(_dx0, _dy0)
+                    await self._page.mouse.down()
+                    await self._page.mouse.move(_dx0 + 120, _dy0 + 8, steps=6)
+                    await asyncio.sleep(0.12)
+                    await self._page.mouse.up()
+                    # Bare mousemove too (pointer-lock style handlers read
+                    # movementX without a button held).
+                    await self._page.mouse.move(_dx0 + 40, _dy0 + 8, steps=4)
+                    await asyncio.sleep(0.2)
+                    after_held = await self._safe_eval(_CANVAS_HASH_JS)
+                    after_gs = await self._safe_eval(_GAMESTATE_SNAPSHOT_JS)
+                    tried.append("Drag")
+                    _drag_leaves: set[str] = set()
+                    if has_gamestate:
+                        _drag_leaves = {
+                            leaf for leaf in (
+                                _gs_changed_leaves(before_gs, after_gs)
+                                - ambient_gs_changes
+                            )
+                            if _input_evidence_is_plausible(leaf)
+                        }
+                    _drag_canvas = (
+                        after_held is not None and before is not None
+                        and after_held != before and not ambient_canvas_changed
+                    )
+                    if _drag_leaves:
+                        pointer_drag = {"ran": True, "leaves": sorted(_drag_leaves)[:5]}
+                        responsive_evidence["Drag"] = pointer_drag["leaves"]
+                        any_change = True
+                        if first_responsive_key is None:
+                            first_responsive_key = "Drag"
+                    elif _drag_canvas:
+                        pointer_drag = {"ran": True, "leaves": ["<canvas-pixel-change>"]}
+                        responsive_evidence["Drag"] = pointer_drag["leaves"]
+                        any_change = True
+                    else:
+                        pointer_drag = {"ran": True, "leaves": []}
+                except Exception:
+                    pass
 
         # Select the action frame: among captured candidates, keep only keys
         # that are (a) input-attributable (in responsive_evidence) and (b)
@@ -7054,8 +7332,22 @@ class LiveBrowser:
         if any_change:
             parts = []
             for k, leaves in responsive_evidence.items():
+                if k == "Drag":
+                    continue  # appended below so the 4-part cap never hides it
                 parts.append(f"{k}→[{', '.join(leaves)}]")
             summary = "; ".join(parts[:4])
+            # Mouse drag verdict is always named when it ran — a dead
+            # mouse-look/aim path must be visible to the model even when
+            # every key works (DOOM3DF3 20260911 ×4 user complaints).
+            if pointer_drag is not None:
+                if pointer_drag["leaves"]:
+                    summary += f"; Drag→[{', '.join(pointer_drag['leaves'])}]"
+                else:
+                    summary += (
+                        "; Drag→NO state change (mouse drag/move across the "
+                        "canvas changed no numeric field — mouse-look/aim/"
+                        "drag is not wired, or a per-frame writer overwrites it)"
+                    )
         elif has_gamestate:
             summary = (
                 f"window.state IS exposed but zero numeric fields "
@@ -7113,6 +7405,10 @@ class LiveBrowser:
             # position after gameplay (retry included). None when recovered or
             # not applicable.
             "control_not_recovered": control_not_recovered,
+            # Pointer-drag smoke verdict ({"ran", "leaves"}) or None when the
+            # game has no pointer listeners. Recipes / feedback coaching read
+            # `leaves == []` as "mouse input changes nothing".
+            "pointer_drag": pointer_drag,
         }
 
     async def open_url(self, url: str) -> None:

@@ -111,3 +111,29 @@ def test_prompt_and_smoke_test_agree_on_window_state():
     assert "window.state" in prompt_src
     smoke = _smoke_test_src()
     assert "'state'" in smoke
+
+
+def test_smoke_test_runs_a_pointer_drag_and_always_names_its_verdict():
+    """DOOM3DF3 20260911: "use the mouse to turn the player" failed four
+    turns in a row because the smoke test only clicked — it never MOVED the
+    mouse, so a dead mouse-look path produced no report line at all. The
+    drag smoke must (a) press+move+release with real CDP mouse events,
+    (b) credit input-only state leaves exactly like keys, and (c) put a
+    Drag verdict into the summary even when every key works and even when
+    the drag changed nothing."""
+    src = _smoke_test_src()
+    assert "mouse.down()" in src and "mouse.up()" in src
+    assert "steps=6" in src, "drag must move in steps so Chromium emits mousemove/movementX"
+    assert 'tried.append("Drag")' in src
+    assert '"pointer_drag": pointer_drag' in src
+    # The verdict is appended outside the 4-part cap and names the dead path.
+    assert "Drag→NO state change" in src
+    # yaw/pitch style leaves are plausible input evidence (not array noise).
+    assert tools._input_evidence_is_plausible("player.yaw") is True
+    assert tools._input_evidence_is_plausible("camera.rotation.y") is True
+
+
+def test_parse_action_keys_expands_wasd_prose():
+    from tools import _parse_action_keys
+    keys = _parse_action_keys("Controls: WASD move, Space shoot")
+    assert "KeyW" in keys and "KeyA" in keys and "Space" in keys

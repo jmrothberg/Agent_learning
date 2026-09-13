@@ -77,3 +77,20 @@ def test_dropped_assets_pending_does_not_blame_code():
         ],
     }
     assert GameAgent._failure_blames_code(report) is False
+
+
+def test_soft_warning_only_with_green_probes_does_not_blame_code():
+    """DOOM3DF3 20260911: OPAQUE FP on i2v plate must not harmful++ playbook."""
+    report = {
+        "page_errors": [],
+        "ok": False,
+        "soft_warnings": [
+            "OPAQUE-SPRITE-SCENERY [boss_key]: character PNG has opaque "
+            "non-white edge scenery (walls baked into sprite)."
+        ],
+        "probes": [
+            {"name": "auto_fp_player_has_yaw_or_angle", "ok": True},
+            {"name": "auto_fp_map_has_structure", "ok": True},
+        ],
+    }
+    assert GameAgent._failure_blames_code(report) is False

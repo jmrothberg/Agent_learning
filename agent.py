@@ -103,6 +103,8 @@ from patches import FormatRejection, apply_patches, classify_format_failure, ext
 
 from tools import (
     LiveBrowser,
+    companion_sounds_dir_for_html,
+    companion_videos_dir_for_html,
     format_micro_probes_for_model,
     format_report_for_model,
     run_micro_probes,
@@ -1577,6 +1579,9 @@ class GameAgent(
         # live in the scripts/generate_video.py child process per batch.
         self._video_generator: Any = None
         self._session_videos: dict[str, Path] = {}
+        # Asset stems used as i2v seed images for <videos> — role-skip them
+        # in OPAQUE-SPRITE-SCENERY (DOOM3DF3 20260911 boss_key / intro_key).
+        self._video_i2v_source_names: set[str] = set()
         self.restart_n: int = max(1, int(restart_n))
         self.restart_score_threshold: float = float(restart_score_threshold)
         # restart-N attempt index (0-based). Attempt 0 keeps the default
@@ -3062,7 +3067,14 @@ class GameAgent(
         Same gate as post-<assets> unload — MLX phys/pressure, or Linux
         Ollama+CUDA always. Do NOT drop on roomy Mac boxes just because
         generators are still resident.
+
+        Phase 1 media overlap: if sounds/videos are still generating in
+        a background task, do NOT release — Stable Audio / video i2v
+        need those pipelines (DOOM3DF3 overlap).
         """
+        _pend = getattr(self, "_pending_media_task", None)
+        if _pend is not None and not _pend.done():
+            return []
         if not self._should_release_diffusers_after_media():
             return []
         return self._release_diffusers_vram()
@@ -3781,6 +3793,7 @@ class GameAgent(
                     goal=self._goal or "",
                     visual_recipe_id=getattr(self, "_active_visual_playtest_recipe_id", None),
                     simulator_mode=bool(self._simulator_mode),
+                    opaque_skip_names=getattr(self, "_video_i2v_source_names", None) or None,
                 )
                 extra["report_ok"] = report.get("ok", False)
                 extra["report_summary"] = format_report_for_model(report)[:400]
@@ -4013,6 +4026,21 @@ class GameAgent(
         if report.get("page_errors"):
             return True
         soft = report.get("soft_warnings") or []
+        # DOOM3DF3 20260911: probes all green, ok=False solely from
+        # OPAQUE-SPRITE-SCENERY (harness FP on an i2v keyframe) → harmful++
+        # on character-sprite-isolation. Soft-warning-only blockers with
+        # green probes are harness/cosmetic gates, not playbook craft
+        # failures — never credit harmful. Require at least one probe so
+        # soft-warning-only reports with no probes (FROZEN-CANVAS etc.)
+        # still attribute as code defects.
+        probes = report.get("probes") or []
+        if (
+            probes
+            and all(bool(p.get("ok")) for p in probes)
+            and soft
+            and not report.get("page_errors")
+        ):
+            return False
         non_probe = [
             str(w) for w in soft
             if not str(w).startswith("PROBE FAILED [")
@@ -5681,14 +5709,66 @@ class GameAgent(
                     # Background task — runs concurrent with asset/sound gen.
                     self._coder_warm_task = asyncio.create_task(_warm_coder_slot())
 
-                # ---- Phase A → first-build: optional asset + sound generation --
-                # Delegated to a shared helper so the same code path also
-                # runs mid-session when the model emits a fresh <assets>/
-                # <sounds> block in response to user feedback.
+                # ---- Phase A → first-build: sprites first; sounds/videos
+                # overlap the first-build stream (DOOM3DF3: 6 min serial
+                # media before first browser test). Sprites stay sync so
+                # the draw contract + i2v video seeds are on disk.
                 async for ev in self._maybe_generate_assets_and_sounds(
                     plan_reply, trigger="phase_a",
+                    media_kinds={"assets"},
                 ):
                     yield ev
+
+                self._pending_media_task = None
+                self._media_paths_pending = False
+                if not self._jmr_png_mode_on():
+                    _snd_specs = parse_sounds_block(plan_reply)
+                    _vid_specs = parse_videos_block(plan_reply)
+                    if _snd_specs or _vid_specs:
+                        _sdir = companion_sounds_dir_for_html(self.out_path)
+                        _vdir = companion_videos_dir_for_html(self.out_path)
+                        for _s in _snd_specs:
+                            _n = str((_s or {}).get("name") or "").strip()
+                            if _n:
+                                self._session_sounds.setdefault(
+                                    _n, _sdir / f"{_n}.ogg",
+                                )
+                                if (_s or {}).get("loop"):
+                                    self._session_looping.add(_n)
+                        for _s in _vid_specs:
+                            _n = str((_s or {}).get("name") or "").strip()
+                            if _n:
+                                self._session_videos.setdefault(
+                                    _n, _vdir / f"{_n}.mp4",
+                                )
+                        self._media_paths_pending = True
+                        import time as _time
+                        _t0 = _time.monotonic()
+
+                        async def _deferred_av():
+                            events = []
+                            async for ev in self._maybe_generate_assets_and_sounds(
+                                plan_reply,
+                                trigger="phase_a_deferred",
+                                media_kinds={"sounds", "videos"},
+                            ):
+                                events.append(ev)
+                            return events, _time.monotonic() - _t0
+
+                        self._pending_media_task = asyncio.create_task(
+                            _deferred_av(),
+                        )
+                        self._trace({
+                            "kind": "media_overlap_started",
+                            "sounds": len(_snd_specs),
+                            "videos": len(_vid_specs),
+                        })
+                        yield self._record(AgentEvent(
+                            "info",
+                            f"overlapping {len(_snd_specs)} sound(s) + "
+                            f"{len(_vid_specs)} video(s) with first-build "
+                            "stream…",
+                        ))
 
             # ---- seed file OR memory skeleton for the first build ----------
             if self.seed_file is not None:
@@ -5812,12 +5892,15 @@ class GameAgent(
                 if components_block:
                     build_msg = f"{components_block}\n\n" + build_msg
                 asset_block = self._render_session_asset_prompt_block()
+                _media_pending = bool(getattr(self, "_media_paths_pending", False))
                 sound_block = render_sound_paths_block(
                     self._session_sounds, self.out_path,
                     looping_names=self._session_looping,
+                    pending=_media_pending,
                 )
                 video_block = render_video_paths_block(
                     self._session_videos, self.out_path,
+                    pending=_media_pending,
                 )
                 seed_media_contract = self._render_seed_media_contract(
                     seed_html,
@@ -6021,12 +6104,15 @@ class GameAgent(
                 if components_block:
                     build_msg = f"{components_block}\n\n" + build_msg
                 asset_block = self._render_session_asset_prompt_block()
+                _media_pending = bool(getattr(self, "_media_paths_pending", False))
                 sound_block = render_sound_paths_block(
                     self._session_sounds, self.out_path,
                     looping_names=self._session_looping,
+                    pending=_media_pending,
                 )
                 video_block = render_video_paths_block(
                     self._session_videos, self.out_path,
+                    pending=_media_pending,
                 )
                 prelude = "\n\n".join(
                     b for b in (
@@ -6368,6 +6454,15 @@ class GameAgent(
                             _stall_light = getattr(
                                 self, "_mlx_stall_retries_this_iter", 0
                             ) >= 1
+                            # Repeat complaint (DOOM3DF3 20260911): the user
+                            # re-raised an ask the last patch didn't fix. A
+                            # <patch>-first prefill would re-edit the same
+                            # handler; start in <diagnose> so the model must
+                            # first find the OTHER writer. One turn only.
+                            _repeat_escalated = bool(
+                                getattr(self, "_repeat_feedback_escalated", False)
+                            )
+                            self._repeat_feedback_escalated = False
                             if _stall_light:
                                 # Post-stall retry: lighter prefill than
                                 # patch_first — heavy prefill + VLM image
@@ -6375,6 +6470,12 @@ class GameAgent(
                                 reply_prefill = "<diagnose>"
                                 self._trace({
                                     "kind": "mlx_stall_light_prefill",
+                                    "iteration": iteration,
+                                })
+                            elif _repeat_escalated and self._current_file:
+                                reply_prefill = "<diagnose>"
+                                self._trace({
+                                    "kind": "repeat_feedback_diagnose_prefill",
                                     "iteration": iteration,
                                 })
                             elif (
@@ -6858,6 +6959,8 @@ class GameAgent(
                     ))
 
             notes = self._extract_notes(reply)
+            # Kept for the repeat-complaint ledger (agent_stream patch_outcome).
+            self._last_reply_notes = (notes or "")[:200]
             if notes:
                 yield self._record(AgentEvent("info", f"notes: {notes[:200]}"))
 
@@ -8171,6 +8274,23 @@ class GameAgent(
                 # 2 iterations shrinking a working build.
                 report = None
                 harness_crash: Exception | None = None
+                # Phase 1: join deferred sounds/videos before Chromium so
+                # the OGGs/MP4s exist for the browser test.
+                _pend = getattr(self, "_pending_media_task", None)
+                if _pend is not None:
+                    try:
+                        _evs, _elapsed = await _pend
+                        for _ev in (_evs or []):
+                            yield _ev
+                        self._trace({
+                            "kind": "media_overlapped_seconds",
+                            "seconds": round(float(_elapsed or 0.0), 1),
+                        })
+                    except Exception as _e:
+                        self._trace_exception("pending_media_error", _e)
+                    finally:
+                        self._pending_media_task = None
+                        self._media_paths_pending = False
                 for _test_attempt in (1, 2):
                     try:
                         report = await self.browser.load_and_test(
@@ -8186,6 +8306,7 @@ class GameAgent(
                             goal=self._goal or "",
                             visual_recipe_id=getattr(self, "_active_visual_playtest_recipe_id", None),
                             simulator_mode=bool(self._simulator_mode),
+                            opaque_skip_names=getattr(self, "_video_i2v_source_names", None) or None,
                         )
                         harness_crash = None
                         break
@@ -8652,9 +8773,37 @@ class GameAgent(
                 except Exception:
                     after_bytes = None
                 if self._is_vlm is not False:
-                    self._next_image_bytes = after_bytes
+                    # Phase 1 cache hygiene: a 530 KB screenshot on every
+                    # turn busts the text prefix cache even when no VLM
+                    # critic will read it. Attach only when VLM critique
+                    # is on, or the iter failed a visual soft gate.
+                    _visual_sw = any(
+                        any(
+                            tag in str(w)
+                            for tag in (
+                                "FROZEN-CANVAS", "EMPTY-3D", "OPAQUE-SPRITE",
+                                "STATIC-ACTION", "ENTITY-NOT-RENDERED",
+                                "DIM-VECTOR", "ASSETS_LOADED_BUT_UNDRAWN",
+                            )
+                        )
+                        for w in (report.get("soft_warnings") or [])
+                    )
+                    _attach_shot = bool(
+                        getattr(self, "_use_vlm_critique", False)
+                        or (not report.get("ok") and _visual_sw)
+                    )
                     self._last_screenshot_after = after_bytes
                     self._last_screenshot_after_path = after_path if after_bytes else None
+                    if _attach_shot:
+                        self._next_image_bytes = after_bytes
+                    else:
+                        self._next_image_bytes = None
+                        if after_bytes:
+                            self._trace({
+                                "kind": "image_attach_skipped",
+                                "reason": "no_vlm_critic_or_visual_gate",
+                                "bytes": len(after_bytes),
+                            })
                 elif after_bytes is None:
                     self._next_image_bytes = None
                     self._last_screenshot_after = None
@@ -10137,6 +10286,10 @@ class GameAgent(
         self._probe_names_ever_passed = set()
         self._pending_probe_quarantine_notices = []
         self._recent_feedback_texts = []
+        # Repeat-complaint ledger / evidence (DOOM3DF3 20260911) is per attempt.
+        self._fix_attempt_ledger = []
+        self._feedback_state_evidence = ""
+        self._repeat_feedback_escalated = False
         self._user_force_done = False
         # Todo-driven execution: a fresh attempt gets a fresh checklist
         # (the model will re-emit <todos> from its new plan/build).
@@ -10260,6 +10413,7 @@ class GameAgent(
                     goal=self._goal or "",
                     visual_recipe_id=getattr(self, "_active_visual_playtest_recipe_id", None),
                     simulator_mode=bool(self._simulator_mode),
+                    opaque_skip_names=getattr(self, "_video_i2v_source_names", None) or None,
                 )
                 break
             except Exception as e:

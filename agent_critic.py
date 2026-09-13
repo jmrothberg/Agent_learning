@@ -20,13 +20,10 @@ from memory import (
     ASSET_AUDITS_FILENAME,
     PLAYTESTS_FILENAME,
     OpeningBookItem,
+    auto_probe_goal_allows,
 )
 from tools import format_report_for_model
 from agent import AgentEvent
-from agent_helpers import (
-    _GRID_CHASE_AUTO_PROBE_NAMES,
-    grid_chase_class_in_goal,
-)
 
 
 # ---- Point-and-click VLM grounding (bg object locations) -------------------
@@ -548,12 +545,12 @@ class CriticMixin:
 
                 continue
 
-            # DIGDUGD3: skip maze-chase autos on dig/tunnel (and snake) grids.
-            # Wall / solid-tile probes still inject. Class phrases, not titles.
-            if (
-                recipe.id == "canvas-grid-navigation"
-                and name in _GRID_CHASE_AUTO_PROBE_NAMES
-                and not grid_chase_class_in_goal(self._goal or "")
+            # Phase 3: recipe.auto_probe_requires_words gates chase/pellet
+            # autos on dig/tunnel grids (DIGDUGD3) — words live in JSONL.
+            if not auto_probe_goal_allows(
+                recipe.recipe if isinstance(recipe.recipe, dict) else {},
+                name,
+                self._goal or "",
             ):
                 continue
 

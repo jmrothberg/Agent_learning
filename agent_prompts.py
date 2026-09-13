@@ -1051,7 +1051,13 @@ class PromptBuildingMixin:
         for (_score, name, seg) in chunks:
             if used + len(seg) > 5000:
                 break
-            kept.append(f"// --- function `{name}` (focused slice) ---\n{seg}")
+            # Marker is harness prose, NOT a line in the file (DOOM3DF3
+            # 20260911 iter 4 copied it into SEARCH). patches.py strips
+            # `(focused slice …)` marker lines anyway; say so in the text.
+            kept.append(
+                f"// --- function `{name}` (focused slice: marker line, "
+                f"NOT in file — never put it in SEARCH) ---\n{seg}"
+            )
             used += len(seg) + 60
             # Cap raised from 3 → 5 to absorb 1–2 callee promotions
             # without pushing out higher-signal functions. Byte cap
@@ -1107,7 +1113,8 @@ class PromptBuildingMixin:
                 "count": len(assignment_snips),
             })
             kept_text += (
-                "\n\n// --- related state assignments (focused slice) ---\n"
+                "\n\n// --- related state assignments (focused slice: "
+                "marker line, NOT in file) ---\n"
                 + "\n\n".join(assignment_snips)
             )
         return kept_text

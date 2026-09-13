@@ -813,7 +813,7 @@ class Flux2KleinMfluxGenerator:
         for FLUX.2 base models"), so we do NOT pass it. `--base-model` names
         the klein family so a local pre-quantized mflux path loads correctly.
         """
-        return [
+        cmd = [
             self._mflux_bin,
             "--model", str(self.model_path),
             "--base-model", "flux2-klein-9b",
@@ -826,6 +826,28 @@ class Flux2KleinMfluxGenerator:
             "--seed", "42",
             "--output", out_path,
         ]
+        # COMMENT: Phase 5 A/B — AGENT_SPRITE_SHEET_LORA=/path/to.safetensors
+        # (or a directory). Off by default; only append when the path exists so
+        # missing weights never break the default FLUX2 klein path.
+        lora = (_os.environ.get("AGENT_SPRITE_SHEET_LORA") or "").strip()
+        if lora and lora.lower() not in ("0", "false", "no", "off"):
+            if lora.lower() in ("1", "true", "yes", "on"):
+                # Convention: sibling LoRA next to the klein model dir.
+                cand = _os.path.join(
+                    str(self.model_path),
+                    "sprite-sheet-lora.safetensors",
+                )
+                lora = cand if _os.path.isfile(cand) else ""
+            if lora and (_os.path.isfile(lora) or _os.path.isdir(lora)):
+                cmd.extend(["--lora-paths", lora])
+            elif (_os.environ.get("AGENT_SPRITE_SHEET_LORA") or "").strip():
+                # Keep default generator; surface once on stderr for A/B ops.
+                print(
+                    f"[assets] AGENT_SPRITE_SHEET_LORA set but path missing "
+                    f"({lora or 'unresolved'}) — using base klein",
+                    flush=True,
+                )
+        return cmd
 
     def generate(self, prompt: str) -> str | None:
         """txt2img via `mflux-generate-flux2`."""

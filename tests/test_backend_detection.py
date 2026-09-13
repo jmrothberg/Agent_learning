@@ -524,6 +524,46 @@ def test_qwen38_stage_aware_effort_low_on_fix_turns(monkeypatch):
     assert "_stage" not in backend._MLX_OPTION_KEYS
 
 
+
+def test_thinking_closed_prefill_holds_effort_for_prefix_cache(monkeypatch):
+    """DOOM3DF3 20260911: <patch> prefill closes think → 0 thinking tokens;
+    medium→low still rewrote the system prompt and busted the 32k prefix
+    cache (TTFT 41s). Hold effort at plan default when thinking is closed.
+    """
+    monkeypatch.delenv("QWEN_REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("QWEN_ENABLE_THINKING", raising=False)
+    m = "Qwen3.8-Flash-Next-MLX-8bit-MTP"
+    # Without the flag: fix turns still drop to low.
+    assert backend.chat_template_thinking_kwargs(m, stage="fix")["reasoning_effort"] == "low"
+    # With thinking-closed prefill: stay at medium (cache-identical to plan).
+    held = backend.chat_template_thinking_kwargs(
+        m, stage="fix", thinking_closed_prefill=True,
+    )
+    assert held["reasoning_effort"] == "medium"
+    assert held["enable_thinking"] is True
+    # Explicit env still wins.
+    monkeypatch.setenv("QWEN_REASONING_EFFORT", "low")
+    assert backend.chat_template_thinking_kwargs(
+        m, stage="fix", thinking_closed_prefill=True,
+    )["reasoning_effort"] == "low"
+    monkeypatch.delenv("QWEN_REASONING_EFFORT", raising=False)
+    # apply_chat_template_safe consumes the flag.
+    seen: dict = {}
+
+    def _apply(*a, **kw):
+        seen.update(kw)
+        return "P"
+
+    out = backend.apply_chat_template_safe(
+        _apply, m, [], _stage="fix", _thinking_closed_prefill=True,
+    )
+    assert out == "P"
+    assert seen.get("reasoning_effort") == "medium"
+    assert "_thinking_closed_prefill" not in seen
+    assert "_stage" not in seen
+
+
 def test_omlx_qwen38_keeps_thinking_and_closes_html_prefill(monkeypatch):
     """Plan still thinks. HTML prefill must be sent as a `partial` assistant
     message so oMLX continues it (continue_final_message) instead of

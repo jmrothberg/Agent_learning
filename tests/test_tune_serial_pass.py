@@ -207,3 +207,30 @@ def test_run_vlm10_goal_assembly_produces_ten_goals():
     assert goals[0].startswith("Build a Prince of Persia")
     assert goals[6].startswith("Build a Monkey Island")
     assert goals[9].startswith("Build a Dragon's Lair")
+
+
+def test_child_env_for_goal_arms_jmr_png_only_when_target_says_so():
+    """Campaign mix: /640png goals get AGENT_JMR_PNG; full-HTML clears it."""
+    base = {"LLM_BACKEND": "mlx", "AGENT_JMR_PNG": "1", "AGENT_SIMULATOR": "1"}
+    png = loop._child_env_for_goal(base, "Build Dig Dug. TARGET=/640png JMR sheets.")
+    assert png.get("AGENT_JMR_PNG") == "1"
+    assert png.get("AGENT_SIMULATOR") == "1"
+    full = loop._child_env_for_goal(base, "Build a Doom game with three.js CDN.")
+    assert "AGENT_JMR_PNG" not in full
+    assert "AGENT_SIMULATOR" not in full
+    sim = loop._child_env_for_goal({}, "Build Asteroids. TARGET=/640 only.")
+    assert sim.get("AGENT_SIMULATOR") == "1"
+    assert "AGENT_JMR_PNG" not in sim
+
+
+def test_campaign_goals_file_has_twelve_mixed_modes():
+    path = REPO / "eval/tune_campaign_qwen38_goals.txt"
+    goals = [
+        line.strip()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+    assert len(goals) == 12
+    assert sum(1 for g in goals if "TARGET=/640png" in g) == 8
+    assert goals[8].lower().startswith("build a doom")
+    assert goals[11].lower().startswith("build a pinball")

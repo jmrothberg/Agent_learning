@@ -213,56 +213,16 @@ class MemoryRetrievalMixin:
             _add("jmr-filltext-ascii-hud")
             _add("jmr-splice-return-undefined")
 
-        # Fixed-shooter / top-down shooter *class* (not named games).
-        fixed_shooter_class = (
-            recipe in ("canvas-fixed-shooter", "canvas-top-down-action")
-            or "fixed shooter" in g
-            or "formation shooter" in g
-            or "vertical-shooter" in g
-            or "vertical shooter" in g
-        )
-        if fixed_shooter_class:
-            _add("top-down-sprite-draw-orientation", "draw-fighters-large")
-
         # Segmented-follower *class* (history trail) — class words only.
         if any(k in g for k in ("segmented", "segments", "segment chain", "body segments")):
             _add("segmented-entity-follow")
 
-        # Pinball / charged-launch *class*.
-        pinball_class = (
-            recipe == "canvas-pinball"
-            or any(k in g for k in ("pinball", "flipper", "plunger", "launch lane"))
-        )
-        if pinball_class:
-            _add("launch-into-playfield")
+        # Fixed-shooter / top-down shooter / pinball / climb-smash / ladder:
+        # Phase 3 — ensure_ids (+ when_any) live on visual_playtests.jsonl.
+        from memory import collect_recipe_ensure_ids
 
-        # Climb-smash / character pose isolation (Rampage-class).
-        # Do NOT match bare "climb" — vertical-platformer goals say "climbs ladders"
-        # and that wrongly crowded out ladder craft (DK ladder thrash 20260722).
-        if any(k in g for k in ("skyscraper", "punch/smash", "cling", "rampage")):
-            _add("character-sprite-isolation")
-
-        # Vertical platformer / ladders class — pin climb detect+top-exit (swap, not bloat).
-        vertical_ladder_class = (
-            recipe == "canvas-vertical-platformer"
-            or (
-                any(k in g for k in ("ladder", "ladders"))
-                and any(
-                    k in g
-                    for k in (
-                        "girder",
-                        "girders",
-                        "vertical",
-                        "platform",
-                        "platforms",
-                        "floor",
-                        "floors",
-                    )
-                )
-            )
-        )
-        if vertical_ladder_class:
-            _add("ladder-climb-detect-and-top-exit", "ladder-snap-to-platform-y")
+        for bid in collect_recipe_ensure_ids(goal, active_recipe_id=recipe or None):
+            _add(bid)
 
         return out or None
 

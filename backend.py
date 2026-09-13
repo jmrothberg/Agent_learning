@@ -337,6 +337,7 @@ _QWEN38_STAGE_EFFORT_LOW = ("fix", "patch", "critic")
 
 def chat_template_thinking_kwargs(
     model: str | None, stage: str | None = None,
+    *, thinking_closed_prefill: bool = False,
 ) -> dict[str, Any]:
     """apply_chat_template / oMLX kwargs for Qwen3.8 and GLM-5.3.
 
@@ -350,6 +351,13 @@ def chat_template_thinking_kwargs(
     "fix" / "patch" / "critic" drop to low. An explicit env level wins for
     every stage. (Merged 2026-09-11: Studio /thinking family mapping +
     MacBook stage-aware effort.)
+
+    `thinking_closed_prefill`: DOOM3DF3 20260911 — a trailing assistant
+    prefill (`<patch>` / `<diagnose>`) makes oMLX close the think block
+    (`partial: true`); the model emits 0 thinking tokens. Dropping
+    medium→low still rewrote the system prompt and busted the 32k prefix
+    cache (TTFT 41 s). When True, skip the stage→low demotion so the
+    system prompt stays byte-identical to plan/first_build.
     """
     family = _thinking_family(model)
     if family is None:
@@ -360,7 +368,11 @@ def chat_template_thinking_kwargs(
         os.environ.get("REASONING_EFFORT") is not None
         or os.environ.get("QWEN_REASONING_EFFORT") is not None
     )
-    if not explicit_env and stage in _QWEN38_STAGE_EFFORT_LOW:
+    if (
+        not explicit_env
+        and stage in _QWEN38_STAGE_EFFORT_LOW
+        and not thinking_closed_prefill
+    ):
         level = "low"
     off = enable_raw in ("0", "false", "no", "off") or level == "off"
     if family == "qwen38":
@@ -415,7 +427,8 @@ def omlx_messages_close_think_prefill(
 
 
 def apply_chat_template_safe(
-    apply_fn, model: str | None, *args, _stage: str | None = None, **kwargs,
+    apply_fn, model: str | None, *args, _stage: str | None = None,
+    _thinking_closed_prefill: bool = False, **kwargs,
 ):
     """apply_chat_template with Qwen3.8 think kwargs; never fail the turn.
 
@@ -425,7 +438,10 @@ def apply_chat_template_safe(
     `_stage` (harness turn stage) selects the reasoning effort; it is
     consumed here and never forwarded to `apply_fn`.
     """
-    extra = chat_template_thinking_kwargs(model, stage=_stage)
+    extra = chat_template_thinking_kwargs(
+        model, stage=_stage,
+        thinking_closed_prefill=_thinking_closed_prefill,
+    )
     if extra:
         try:
             return apply_fn(*args, **kwargs, **extra)
@@ -858,12 +874,58 @@ def omlx_hot_cache_status(endpoint: str | None) -> str | None:
         return None
 
 
+def omlx_prefix_cache_diagnostics(endpoint: str | None) -> dict[str, Any]:
+    """Extra prefix-cache fields for `prefix_cache_status` (Phase 1 hygiene).
+
+    Returns a dict that may include:
+      - max_context_window (int from ~/.omlx/settings.json sampling)
+      - cache_efficiency (float from live /api/status)
+      - total_cached_tokens (int from /api/status)
+    Empty dict when unavailable. Loopback-only for the settings file;
+    /api/status is fetched from the given endpoint when reachable.
+    """
+    out: dict[str, Any] = {}
+    try:
+        if endpoint and endpoint_is_omlx(endpoint):
+            from urllib.parse import urlparse
+            host = (urlparse(endpoint).hostname or "").lower()
+            if host in ("127.0.0.1", "localhost", "::1", "0.0.0.0"):
+                path = os.path.expanduser("~/.omlx/settings.json")
+                if os.path.isfile(path):
+                    with open(path, encoding="utf-8") as fh:
+                        data = json.load(fh)
+                    sampling = data.get("sampling") if isinstance(data, dict) else None
+                    if isinstance(sampling, dict):
+                        ctx = sampling.get("max_context_window")
+                        if isinstance(ctx, int) and ctx > 0:
+                            out["max_context_window"] = ctx
+                        elif isinstance(ctx, str) and ctx.strip().isdigit():
+                            out["max_context_window"] = int(ctx.strip())
+    except Exception:
+        pass
+    try:
+        if endpoint and endpoint_is_omlx(endpoint):
+            import urllib.request
+            url = endpoint.rstrip("/") + "/api/status"
+            with urllib.request.urlopen(url, timeout=1.5) as resp:
+                body = json.loads(resp.read().decode("utf-8", errors="replace"))
+            if isinstance(body, dict):
+                if "cache_efficiency" in body:
+                    out["cache_efficiency"] = body["cache_efficiency"]
+                if "total_cached_tokens" in body:
+                    out["total_cached_tokens"] = body["total_cached_tokens"]
+    except Exception:
+        pass
+    return out
+
+
 # MLX request fields we forward when present in the agent's `options` dict.
 # Anything else (including `num_ctx`) is silently dropped — MLX uses the
 # model's native context, no equivalent knob.
 _MLX_OPTION_KEYS: tuple[str, ...] = (
     "temperature", "top_p", "top_k", "min_p",
     "seed", "max_tokens",
+    "presence_penalty", "repetition_penalty",
 )
 
 # BATTLEZO 20260904_095910: first-token watchdog for MLXServerBackend when
@@ -1253,6 +1315,7 @@ class MLXBackend(Backend):
         opts = dict(options or {})
         # Harness turn stage (agent_stream._stream) → Qwen reasoning effort.
         turn_stage = opts.get("_stage")
+        thinking_closed_prefill = bool(opts.get("_thinking_closed_prefill"))
         # Drop fields that mean nothing to MLX (e.g. num_ctx). Carry
         # only the sampler knobs MLX understands.
         sampler_opts = {k: opts[k] for k in _MLX_OPTION_KEYS if k in opts}
@@ -1478,6 +1541,7 @@ class MLXBackend(Backend):
                         tokenize=False,
                         add_generation_prompt=True,
                         _stage=turn_stage,
+                        _thinking_closed_prefill=thinking_closed_prefill,
                     )
                 except Exception:
                     prompt = "\n\n".join(
@@ -1637,6 +1701,7 @@ class MLXBackend(Backend):
                         processor, config, history,
                         num_images=len(image_paths),
                         _stage=turn_stage,
+                        _thinking_closed_prefill=thinking_closed_prefill,
                     )
                 except Exception:
                     # Same naive fallback as text-only.
@@ -2045,6 +2110,7 @@ class MLXServerBackend(Backend):
         # turn stage, never sent on the wire) drops fix turns to low.
         think_kw = chat_template_thinking_kwargs(
             self.info.model, stage=opts.get("_stage"),
+            thinking_closed_prefill=bool(opts.get("_thinking_closed_prefill")),
         )
         if think_kw:
             body["chat_template_kwargs"] = dict(think_kw)

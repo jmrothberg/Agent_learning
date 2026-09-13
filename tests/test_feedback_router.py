@@ -198,3 +198,100 @@ def test_route_wants_assets_arms_reprompt(tmp_path):
     out = a._flush_user_injections("REPORT: ok")
     assert "ASSET GENERATION REQUIRED" in out
     assert a._unhonored_asset_request is not None
+
+
+# ---- 4. DOOM3DF3 20260911: state_fields + repeat-complaint escalation ----
+
+_DOOM_LIKE_HTML = """<html><script>
+window.state = {phase:'play', player:{x:1,z:2,yaw:0,pitch:0}};
+const p = state.player;
+document.addEventListener('mousemove', (e) => {
+  p.yaw -= e.movementX * 0.002;
+  p.pitch -= e.movementY * 0.002;
+});
+function syncCamera(){ camera.rotation.y = p.yaw; }
+function update(dt){
+  if(state.phase!=='play') return;
+  p.yaw=camera.rotation.y; p.pitch=camera.rotation.x;
+  syncCamera();
+}
+</script></html>"""
+
+
+def test_parse_route_extracts_state_fields(tmp_path):
+    a = _agent(tmp_path)
+    txt = (
+        '{"primary_intent":"code_fix","state_fields":["player.yaw","player.pitch",'
+        '"bad field!", 42, "a.b.c.d.e.f"]}'
+    )
+    route = a._parse_feedback_route_json(txt)
+    assert route["state_fields"] == ["player.yaw", "player.pitch", "a.b.c.d.e.f"]
+    # Missing → empty list, never None.
+    assert a._parse_feedback_route_json('{"primary_intent":"code_fix"}')["state_fields"] == []
+
+
+def test_static_state_writer_lines_resolves_alias_and_names_frame_writer():
+    """The focused slice only saw literal `state.player.yaw` writes; the
+    DOOM3DF3 culprit was `p.yaw=camera.rotation.y` via `const p=state.player`
+    inside update(). The audit must list BOTH writers with their function."""
+    from tools import static_state_writer_lines
+    rows = static_state_writer_lines(_DOOM_LIKE_HTML, "player.yaw")
+    where = {r["in"]: r["text"] for r in rows}
+    assert "on mousemove" in where and "p.yaw -= e.movementX" in where["on mousemove"]
+    assert "update" in where and "p.yaw=camera.rotation.y" in where["update"]
+    # `camera.rotation.y = p.yaw` is a READ of yaw, not a write.
+    assert not any("camera.rotation.y = p.yaw" in r["text"] for r in rows)
+    assert static_state_writer_lines(_DOOM_LIKE_HTML, "player.nope") == []
+
+
+def test_state_field_evidence_block_names_overwrite(tmp_path):
+    """Writer audit + runtime stickiness → one measured block under the user
+    note, with a VERDICT when the poke reverted."""
+    import asyncio
+
+    class _B:
+        async def state_field_stickiness(self, fields):
+            return {"player.yaw": {"before": 0, "poked": 0.5, "after": 0, "drift": False, "reverted": True}}
+
+    a = _agent(tmp_path)
+    a.browser = _B()
+    a._current_file = tmp_path / "game.html"
+    a._current_file.write_text(_DOOM_LIKE_HTML)
+    block = asyncio.run(a._build_state_field_evidence(["player.yaw"]))
+    assert "STATE-FIELD EVIDENCE" in block
+    assert "VERDICT: state.player.yaw is OVERWRITTEN EVERY FRAME" in block
+    assert "in update: p.yaw=camera.rotation.y" in block
+    assert "in on mousemove" in block
+
+
+def test_raw_mode_repeat_complaint_escalates_and_attaches_evidence(tmp_path):
+    """Raw feedback mode (the default) never ran repeat detection, so the
+    same ask was re-patched 4× in the handler. Second identical complaint
+    must: prefix the note, add the CHANGE APPROACH block naming prior
+    attempts, attach the measured evidence, and arm the diagnose prefill."""
+    a = _agent(tmp_path)
+    a._use_feedback_directives = False  # raw mode
+    a._recent_feedback_texts = ["use the mouse to turn the player and look around"]
+    a._fix_attempt_ledger = [{"applied_heads": ["document.addEventListener('mousemove'"], "notes": "wired mousemove yaw"}]
+    a._feedback_state_evidence = "================ STATE-FIELD EVIDENCE (harness, measured) ================\nx"
+    a._pending_feedback = ["the mouse still does not turn the player to look around"]
+    a._feedback_route = {"primary_intent": "code_fix", "honor_user_now": True,
+                         "allow_assets_block": False, "defer_behind_blocker": False}
+    out = a._flush_user_injections("REPORT: ok")
+    assert "USER HAS RAISED THIS BEFORE" in out
+    assert "REPEAT COMPLAINT — CHANGE APPROACH" in out
+    assert "attempt 1: edited near document.addEventListener('mousemove'" in out
+    assert "STATE-FIELD EVIDENCE" in out
+    assert a._repeat_feedback_escalated is True
+
+
+def test_raw_mode_first_complaint_does_not_escalate(tmp_path):
+    a = _agent(tmp_path)
+    a._use_feedback_directives = False
+    a._recent_feedback_texts = []
+    a._pending_feedback = ["use the mouse to turn the player"]
+    a._feedback_route = {"primary_intent": "code_fix", "honor_user_now": True,
+                         "allow_assets_block": False, "defer_behind_blocker": False}
+    out = a._flush_user_injections("REPORT: ok")
+    assert "REPEAT COMPLAINT" not in out
+    assert not getattr(a, "_repeat_feedback_escalated", False)

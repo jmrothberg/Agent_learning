@@ -283,11 +283,34 @@ class ProbeHandlingMixin:
         probe provides no behavioral signal.
         """
         findings: list[dict] = []
+        probe_names = {
+            str(p.get("name", "")).strip()
+            for p in probes
+            if str(p.get("name", "")).strip()
+        }
         for p in probes:
             name = str(p.get("name", "?"))
             expr = str(p.get("expr", ""))
             if not expr:
                 continue
+            # Cross-probe reference (BATTLEZ3: canvas_640 is not defined) —
+            # a probe's expr must not treat another probe's NAME as a JS
+            # global. Flag at Phase A so the plan re-stream can rewrite.
+            for other in probe_names:
+                if other == name or len(other) < 4:
+                    continue
+                if re.search(rf"\b{re.escape(other)}\b", expr):
+                    findings.append({
+                        "name": name,
+                        "kind": "cross_probe_name_reference",
+                        "message": (
+                            f"probe `{name}` references `{other}` which is "
+                            "another probe's NAME, not a JS global — that "
+                            "identifier will be undefined at runtime. Inline "
+                            "the check or read window.state / DOM directly."
+                        ),
+                    })
+                    break
             m = ProbeHandlingMixin._PROBE_TAUTOLOGY_RE.search(expr)
             if m:
                 temp_name = m.group(1)
@@ -471,7 +494,15 @@ class ProbeHandlingMixin:
             "right", "bottom", "data", "value", "textContent",
             "innerText", "innerHTML", "style", "className", "id", "name",
             "parent", "child", "next", "prev", "node", "type", "kind",
+            # CSSOM / layout reads (DOOM3DF3 weapon_overlay_visible FP:
+            # getComputedStyle(w).visibility flagged as unassigned).
+            "visibility", "display", "opacity", "transform",
         }
+        # Receiver is a DOM/CSS API result — never flag the CSSOM property.
+        _DOM_CSS_RECEIVER_RE = re.compile(
+            r"(?:getComputedStyle|getBoundingClientRect)\s*\([^)]*\)\s*\.\s*$"
+            r"|\.style\s*\.\s*$"
+        )
         # Extract candidate property *accesses* (not method *calls*).
         # Negative lookahead `(?!\s*\()` skips `obj.method(args)` —
         # methods aren't assignable state, so flagging them as
@@ -514,6 +545,10 @@ class ProbeHandlingMixin:
             for m in prop_re.finditer(expr):
                 prop = m.group(1)
                 if prop in _IGNORE or prop.startswith("_"):
+                    continue
+                # Skip CSSOM / layout reads off DOM APIs (DOOM3DF3:
+                # getComputedStyle(w).visibility → false unassigned lint).
+                if _DOM_CSS_RECEIVER_RE.search(expr[:m.start()]):
                     continue
                 # The probe accesses obj.prop; if `prop` is never
                 # assigned anywhere in the file, flag it.

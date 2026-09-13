@@ -1327,6 +1327,7 @@ class AssetGenerationMixin:
     async def _maybe_generate_assets_and_sounds(
 
         self, reply: str, *, trigger: str,
+        media_kinds: frozenset[str] | set[str] | None = None,
 
     ) -> AsyncIterator[AgentEvent]:
 
@@ -1439,6 +1440,21 @@ class AssetGenerationMixin:
         asset_specs, sound_specs = self._coerce_specs_to_declared_seed_roster(
             asset_specs, sound_specs, trigger=trigger,
         )
+
+        # Phase 1 media overlap (DOOM3DF3: 6 min serial media before first
+        # build): caller can run assets now and defer sounds/videos as a
+        # background task overlapping the first-build stream. Default None
+        # = all kinds (mid-session / legacy).
+        if media_kinds is not None:
+            _kinds = {str(k) for k in media_kinds}
+            if "assets" not in _kinds:
+                asset_specs = []
+                dropped_asset_names = []
+                dropped_asset_specs = []
+            if "sounds" not in _kinds:
+                sound_specs = []
+            if "videos" not in _kinds:
+                video_specs = []
 
         # Parse-failure coaching (GLM-5.2 trace 20260625_124038): the model
 
@@ -2824,6 +2840,14 @@ class AssetGenerationMixin:
         # Each clip costs minutes of GPU; surface per-clip progress.
 
         if video_specs:
+            # Role-skip i2v seed plates in OPAQUE-SPRITE (DOOM3DF3 boss_key).
+            if not hasattr(self, "_video_i2v_source_names") or self._video_i2v_source_names is None:
+                self._video_i2v_source_names = set()
+            for _vs in video_specs:
+                if isinstance(_vs, dict) and _vs.get("image"):
+                    _img = str(_vs["image"]).strip()
+                    if _img:
+                        self._video_i2v_source_names.add(_img)
 
             yield self._record(AgentEvent(
 

@@ -59,6 +59,7 @@ Legacy per-run tune_runNN.sh scripts under eval/ (when present) still work but *
 | User intent | Command | Notes |
 |-------------|---------|-------|
 | **Overnight (default)** | Double-click `Overnight.command` · Cursor Shell watcher | Interactive: prompts → iters → VLM → model. Or CLI `overnight.sh --prompts …`. |
+| **Campaign bench run_20 (Qwen3.8-Flash-Next, 8 `/640png` + 4 HTML)** | Terminal: `bash eval/launch_overnight_batch.sh eval/tune_run20.sh` · Cursor: watcher for `run_20` | **Qwen3.8-Flash-Next-MLX-8bit-MTP**, VLM off, `--max-iters 3`. Goals: `eval/tune_campaign_qwen38_goals.txt`. |
 | **Run Mr. Do! + 10 graphics/3D overnight (run_18)** | legacy `eval/tune_run18.sh` or `overnight.sh --prompts …` | **GLM-5.2-MLX-4bit**, VLM off, `--max-iters 3`. Historical. |
 | **Run 20 GRAPHICS-BEST games overnight (run_15 — archive)** | Terminal: `bash eval/tune_run15.sh` · Cursor: watcher below | **GLM-5.2-MLX-4bit**, **`--no-vlm-critique`**, flat-out. Completed 2026-07. |
 | **Run 10 NEW games overnight (run_14)** | Terminal: `bash eval/tune_run14.sh` · Cursor: watcher below | Qwen3.6-27B-mxfp8, VLM critique ON (completed). |
@@ -79,11 +80,35 @@ Legacy per-run tune_runNN.sh scripts under eval/ (when present) still work but *
 | **Interactive TUI** | `.venv/bin/python chat.py` | Visible Chromium; `/wait on` (`local_manual`) and `/bestof off` by default. |
 | **System smoke (browser)** | `python system_tests.py run --suite smoke --three-model` | Slow; confirms full loop. |
 | **Timeline a trace** | `.venv/bin/python scripts/enrich_trace.py <path-or-stem> --timeline` | Primary triage; see `HARNESS_DEBUG.md`. |
-| **Compare tune runs (scoreboard)** | `.venv/bin/python eval/compare_runs.py run_15 run_16` | Cross-run fresh_pass / wasted_iters / failure_class — measure before/after harness changes. |
+| **Compare tune runs (scoreboard)** | `.venv/bin/python eval/compare_runs.py run_15 run_16` | Cross-run fresh_pass / wasted_iters / failure_class — measure before/after harness changes. Also reports avg ttft_s / cached_prompt / media_s / ttf_test_s (Phase 1 timing columns). |
 | **Run 10 graphics-heavy games (run_16)** | **completed** — `games/tune_serial10/run_16/` | **5/10 fresh_pass** · GLM-5.2 · `--max-iters 3` · scoreboard below. |
 | **Offline playbook credit (dry-run)** | `.venv/bin/python scripts/credit_bullets.py games/tune_serial10/run_15 --dry-run` | Helpful/harmful deltas from traces; omit `--dry-run` to apply + ledger dedupe. |
 | **Batch dashboard / watcher (run_07 chain)** | `.venv/bin/python eval/tune_overnight_monitor.py --run07-chain --interval 30 --sync-loop` | Polls every **30 seconds** (not minutes). Triage + patch while batch keeps running. |
 | **Parallel N games (throughput lab)** | See `eval/PARALLEL_MLX_TESTING.md` + `eval/batch_parallel.py` | One `mlx_lm.server`, N clients — **not** in-game BoN. |
+
+---
+
+## Campaign bench — Qwen3.8-Flash-Next (HTML + `/640png`) — run_20 ready 2026-09-12
+
+Fixed 12-game mix after the DOOM3DF3 harness Step 0 / Phase 1–3 fixes. Goals: `eval/tune_campaign_qwen38_goals.txt` (8 `/640png` arcade + 4 full-HTML: Doom, Street Fighter, Galaga, Pinball). Per-goal `TARGET=/640png` arms `AGENT_JMR_PNG` inside `tune_serial_loop` so the mix can share one batch.
+
+| | Terminal.app (batch) | Cursor watcher |
+|---|----------------------|----------------|
+| Model | `Qwen3.8-Flash-Next-MLX-8bit-MTP` on oMLX | triage traces; do **not** stop the batch |
+| Launch | `bash eval/launch_overnight_batch.sh eval/tune_run20.sh` | `.venv/bin/python eval/tune_overnight_monitor.py --out-dir games/tune_serial10/run_20 --jobs-total 12 --interval 30 --sync-loop` |
+| Scoreboard | `.venv/bin/python eval/compare_runs.py run_20` (ttft / cached_prompt / media_s / ttf_test_s) | snapshot each round below |
+
+Exit criteria: fresh_pass stable across two rounds, no `harness_bug` iters, median time-to-first-test ≤ half of DOOM3DF3 baseline (~12 min).
+
+oMLX hygiene: `sampling.max_context_window=131072`, MTP `mtp_num_draft_tokens=4`, hot cache 32GB.
+
+**Optional Phase 5 A/B (off by default):** `AGENT_SPRITE_SHEET_LORA=/path/to.safetensors` (klein sprite-sheet LoRA) · `AGENT_SA3_SMALL_SFX=1` (prefer Stable Audio Small when weights exist). Default generators stay unchanged without these flags.
+
+**Round snapshots**
+
+| Round | Dir | fresh_pass | notes |
+|-------|-----|------------|-------|
+| R1 (in progress) | `games/tune_serial10/run_20/` | — | first campaign pass; mid-batch human playtest → memory/recipe fixes landed (lives, DK bottom+slants, mushrooms/death flash, wireframe fire, Pac-Man maze, Dig pace, Zelda enemies) — apply on **next** round |
 
 ---
 

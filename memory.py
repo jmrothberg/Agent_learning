@@ -176,22 +176,23 @@ _VOXEL_SANDBOX_SIGNALS: frozenset[str] = frozenset({
     "place", "break", "hotbar", "chunk", "chunks", "terrain",
     "cube", "cubes", "mine", "mining", "build",
 })
-_FPS_SHOOTER_SIGNALS: frozenset[str] = frozenset({
-    "doom", "wolfenstein", "quake", "shooter", "weapon", "gun",
-    "monster", "monsters", "ammo", "crosshair", "raycaster",
-})
+# Phase 3: FPS / wireframe / puzzle title+class signals load from recipe
+# disambiguation_signals (canvas-3d-first-person / canvas-vector-wireframe /
+# canvas-puzzle-grid). Thin shims keep call sites readable.
+def _fps_shooter_signals() -> frozenset[str]:
+    return recipe_disambiguation_signals("canvas-3d-first-person")
+
+
+def _wireframe_vector_signals() -> frozenset[str]:
+    return recipe_disambiguation_signals("canvas-vector-wireframe")
+
+
+def _puzzle_grid_confirm() -> frozenset[str]:
+    return recipe_disambiguation_signals("canvas-puzzle-grid")
+
+
 _STACKING_SIGNALS: frozenset[str] = frozenset({
     "stacking", "crane", "topple", "jenga", "stacker", "wobble", "teeter",
-})
-# Vector-stroke class vs falling-block puzzle. "columns" is too generic
-# (BATTLE10: /640png "1px drawImage columns" tied puzzle-grid with
-# canvas-vector-wireframe; id sort picked puzzle-grid).
-_WIREFRAME_VECTOR_SIGNALS: frozenset[str] = frozenset({
-    "wireframe", "battlezone", "starwars", "star-wars", "trench",
-})
-_PUZZLE_GRID_CONFIRM: frozenset[str] = frozenset({
-    "tetris", "tetromino", "bejeweled", "puyo", "candy",
-    "match-three", "matchthree",
 })
 
 _SKELETON_MIN_SIM = 0.3
@@ -2801,6 +2802,244 @@ def goal_suppresses_nudge(goal: str, nudge: str) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# Phase 3: game-class literals live in visual_playtests.jsonl recipe fields
+# (viewpoint_entity, auto_probe_requires_words, disambiguation_signals,
+# ensure_ids, gate_skips, plan_nudge) — Python only loads them.
+# ---------------------------------------------------------------------------
+_VISUAL_RECIPE_BY_ID_CACHE: dict[str, dict] | None = None
+
+
+def _load_visual_recipe_by_id() -> dict[str, dict]:
+    """Map visual_playtest id → recipe dict. Cached; {} on read/parse error."""
+    global _VISUAL_RECIPE_BY_ID_CACHE
+    if _VISUAL_RECIPE_BY_ID_CACHE is not None:
+        return _VISUAL_RECIPE_BY_ID_CACHE
+    out: dict[str, dict] = {}
+    try:
+        text = _NUDGE_SUPPRESSOR_PATH.read_text(encoding="utf-8")
+    except Exception:
+        _VISUAL_RECIPE_BY_ID_CACHE = {}
+        return _VISUAL_RECIPE_BY_ID_CACHE
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(row, dict) or not row.get("id"):
+            continue
+        rec = row.get("recipe")
+        if isinstance(rec, dict):
+            out[str(row["id"])] = rec
+    _VISUAL_RECIPE_BY_ID_CACHE = out
+    return _VISUAL_RECIPE_BY_ID_CACHE
+
+
+def visual_recipe_get(recipe_id: str) -> dict:
+    """Return the recipe dict for `recipe_id`, or {} if missing."""
+    if not recipe_id:
+        return {}
+    return dict(_load_visual_recipe_by_id().get(str(recipe_id)) or {})
+
+
+def recipe_viewpoint_entities(recipe_id: str) -> frozenset[str]:
+    """Entity names to skip for ENTITY-NOT-RENDERED when recipe is viewpoint.
+
+    Recipe field `viewpoint_entity` is a list of names (player/camera/…).
+    Empty frozenset ⇒ not a viewpoint recipe.
+    """
+    ve = visual_recipe_get(recipe_id).get("viewpoint_entity")
+    if isinstance(ve, list) and ve:
+        return frozenset(str(x).lower() for x in ve if str(x).strip())
+    if ve is True:
+        # Bool form: default viewpoint names (prefer list form in JSONL).
+        return frozenset({"player", "camera", "cam", "eye", "viewer"})
+    return frozenset()
+
+
+def recipe_disambiguation_signals(recipe_id: str) -> frozenset[str]:
+    """Tokens for mechanism disambiguation (FPS vs voxel, wireframe vs puzzle).
+
+    Prefers recipe.disambiguation_signals; falls back to strong_hooks.
+    """
+    rec = visual_recipe_get(recipe_id)
+    raw = rec.get("disambiguation_signals")
+    if not raw:
+        raw = rec.get("strong_hooks") or []
+    return frozenset(str(x).lower() for x in raw if str(x).strip())
+
+
+def recipe_gate_skips(recipe_id: str) -> frozenset[str]:
+    """Soft-gate names this recipe may skip (e.g. player_stuck for pinball)."""
+    raw = visual_recipe_get(recipe_id).get("gate_skips") or []
+    return frozenset(str(x).lower() for x in raw if str(x).strip())
+
+
+def auto_probe_goal_allows(
+    recipe_dict: dict | None, probe_name: str, goal: str
+) -> bool:
+    """False when recipe.auto_probe_requires_words gates this probe out.
+
+    If probe_name is listed, the goal must contain at least one required word
+    (word-boundary). Unlisted probes always allow. Used so dig/tunnel grids
+    skip chase/pellet autos without a Python title/class branch.
+    """
+    req = (recipe_dict or {}).get("auto_probe_requires_words") or {}
+    if not isinstance(req, dict):
+        return True
+    words = req.get(probe_name)
+    if not words:
+        return True
+    gl = goal or ""
+    for w in words:
+        w = str(w).strip()
+        if not w:
+            continue
+        if re.search(rf"\b{re.escape(w)}\b", gl, flags=re.I):
+            return True
+    return False
+
+
+def detect_recipe_intent_keywords(
+    goal: str,
+    recipe_id: str,
+    *,
+    min_hits: int = 2,
+    strong_alone: bool = True,
+) -> list[str]:
+    """Return matched applies_keywords for `recipe_id` (plan-nudge detectors).
+
+    Mirrors former pinball detector: strong_hook alone OR >= min_hits applies.
+    """
+    if not goal:
+        return []
+    rec = visual_recipe_get(recipe_id)
+    applies = {
+        str(x).lower() for x in (rec.get("applies_keywords") or []) if str(x).strip()
+    }
+    strong = {
+        str(x).lower() for x in (rec.get("strong_hooks") or []) if str(x).strip()
+    }
+    if not applies and not strong:
+        return []
+    words = re.findall(r"[a-zA-Z]+", goal.lower())
+    # Also accept hyphenated goal tokens (multi-ball → multiball already split)
+    gl = goal.lower()
+    gl_dash = gl.replace("_", "-").replace(" ", "-")
+    seen: set[str] = set()
+    out: list[str] = []
+    for w in words:
+        if w in applies and w not in seen:
+            seen.add(w)
+            out.append(w)
+    # Multi-word / hyphen applies (launch lane, fixed-shooter)
+    for kw in sorted(applies, key=len, reverse=True):
+        if kw in seen:
+            continue
+        if "-" in kw or " " in kw:
+            if kw in gl or kw in gl_dash or kw.replace("-", " ") in gl:
+                seen.add(kw)
+                out.append(kw)
+    if strong_alone and (seen & strong):
+        return out
+    if len(out) >= min_hits:
+        return out
+    # Single strong token present even if not in applies word list
+    if strong_alone:
+        for s in strong:
+            if s in gl or s in gl_dash or s.replace("-", " ") in gl:
+                if s not in out:
+                    out.append(s)
+                return out
+    return []
+
+
+def collect_recipe_ensure_ids(
+    goal: str, active_recipe_id: str | None = None
+) -> list[str]:
+    """Playbook ensure_ids declared on visual recipes (string or when_any dict).
+
+    - Active recipe id → all string ensure_ids for that recipe.
+    - Keyword path for pinball / fixed-shooter / vertical-platformer classes.
+    - Dict entries `{id, when_any}` fire when any when_any substring hits goal.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    g = (goal or "").lower()
+
+    def _add(bid: str) -> None:
+        s = str(bid).strip()
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+
+    # when_any entries (any recipe) — climb-smash isolation etc.
+    for rid, rec in _load_visual_recipe_by_id().items():
+        for item in rec.get("ensure_ids") or []:
+            if not isinstance(item, dict):
+                continue
+            bid = str(item.get("id") or "").strip()
+            when = [str(x).lower() for x in (item.get("when_any") or []) if str(x).strip()]
+            if bid and when and any(w in g for w in when):
+                _add(bid)
+
+    active = (active_recipe_id or "").strip()
+    if active:
+        for item in visual_recipe_get(active).get("ensure_ids") or []:
+            if isinstance(item, str):
+                _add(item)
+
+    # Pinball class without an active recipe yet (first-build before match).
+    # Use plan_nudge vocab (discriminative) — not broad recipe applies (table/launch).
+    if detect_plan_nudge_keywords(goal, "pinball-table", min_hits=2):
+        for item in visual_recipe_get("canvas-pinball").get("ensure_ids") or []:
+            if isinstance(item, str):
+                _add(item)
+
+    # Fixed-shooter class phrases from recipe applies (not title if-branches).
+    if active not in ("canvas-fixed-shooter", "canvas-top-down-action"):
+        gl_norm = g.replace("_", "-")
+        fs_rec = visual_recipe_get("canvas-fixed-shooter")
+        fs_hit = False
+        for kw in fs_rec.get("applies_keywords") or []:
+            kw = str(kw).lower()
+            if "shooter" in kw and (
+                kw in gl_norm or kw.replace("-", " ") in g
+            ):
+                fs_hit = True
+                break
+        if not fs_hit and "formation" in g and "shooter" in g:
+            fs_hit = True
+        if fs_hit:
+            for item in fs_rec.get("ensure_ids") or []:
+                if isinstance(item, str):
+                    _add(item)
+            for item in visual_recipe_get("canvas-top-down-action").get("ensure_ids") or []:
+                if isinstance(item, str):
+                    _add(item)
+
+    # Vertical / ladder class (recipe applies: ladder + platform/girder/…).
+    if active != "canvas-vertical-platformer":
+        vp = visual_recipe_get("canvas-vertical-platformer")
+        ladder_words = {"ladder", "ladders"}
+        struct_words = {
+            "girder", "girders", "vertical", "platform", "platforms", "floor", "floors",
+        }
+        applies = {
+            str(x).lower() for x in (vp.get("applies_keywords") or []) if str(x).strip()
+        }
+        if (ladder_words & applies) and (struct_words & applies):
+            if any(w in g for w in ladder_words) and any(w in g for w in struct_words):
+                for item in vp.get("ensure_ids") or []:
+                    if isinstance(item, str):
+                        _add(item)
+
+    return out
+
+
 # Phase 4 (4A): plan-turn nudge PROSE lives in data (memory/plan_nudges.jsonl);
 # prompts_v1 owns only the detectors + slot interpolation. Bodies carry literal
 # {kws}/{logic_kws}/{mf_kws} placeholders the caller fills with str.replace.
@@ -2886,6 +3125,92 @@ def load_plan_nudge(nudge_id: str) -> str:
                 cache[str(row["id"])] = str(row.get("body", ""))
         _PLAN_NUDGES_CACHE = cache
     return _PLAN_NUDGES_CACHE.get(nudge_id, "")
+
+
+# Phase 3: optional detector vocab on plan_nudges.jsonl rows (applies_keywords /
+# strong_hooks) so prompts_v1 does not hardcode class title lists.
+_PLAN_NUDGE_META_CACHE: dict[str, dict] | None = None
+
+
+def _load_plan_nudge_meta() -> dict[str, dict]:
+    global _PLAN_NUDGE_META_CACHE
+    if _PLAN_NUDGE_META_CACHE is not None:
+        return _PLAN_NUDGE_META_CACHE
+    cache: dict[str, dict] = {}
+    try:
+        text = _PLAN_NUDGES_PATH.read_text(encoding="utf-8")
+    except Exception:
+        text = ""
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(row, dict) and row.get("id"):
+            cache[str(row["id"])] = {
+                "applies_keywords": [
+                    str(x).lower()
+                    for x in (row.get("applies_keywords") or [])
+                    if str(x).strip()
+                ],
+                "strong_hooks": [
+                    str(x).lower()
+                    for x in (row.get("strong_hooks") or [])
+                    if str(x).strip()
+                ],
+            }
+    _PLAN_NUDGE_META_CACHE = cache
+    return _PLAN_NUDGE_META_CACHE
+
+
+def detect_plan_nudge_keywords(
+    goal: str,
+    nudge_id: str,
+    *,
+    min_hits: int = 2,
+    strong_alone: bool = True,
+) -> list[str]:
+    """Match goal against plan_nudges.jsonl applies_keywords / strong_hooks."""
+    if not goal:
+        return []
+    meta = _load_plan_nudge_meta().get(nudge_id) or {}
+    applies = set(meta.get("applies_keywords") or [])
+    strong = set(meta.get("strong_hooks") or [])
+    if not applies and not strong:
+        # Fall back to visual recipe of the same class id when nudge has no vocab.
+        return detect_recipe_intent_keywords(
+            goal, nudge_id, min_hits=min_hits, strong_alone=strong_alone
+        )
+    words = re.findall(r"[a-zA-Z]+", goal.lower())
+    gl = goal.lower()
+    gl_dash = gl.replace("_", "-").replace(" ", "-")
+    seen: set[str] = set()
+    out: list[str] = []
+    for w in words:
+        if w in applies and w not in seen:
+            seen.add(w)
+            out.append(w)
+    for kw in sorted(applies, key=len, reverse=True):
+        if kw in seen:
+            continue
+        if "-" in kw or " " in kw:
+            if kw in gl or kw in gl_dash or kw.replace("-", " ") in gl:
+                seen.add(kw)
+                out.append(kw)
+    if strong_alone and (seen & strong):
+        return out
+    if len(out) >= min_hits:
+        return out
+    if strong_alone:
+        for s in strong:
+            if s in gl or s in gl_dash or s.replace("-", " ") in gl:
+                if s not in out:
+                    out.append(s)
+                return out
+    return []
 
 
 def find_best_visual_playtest(
@@ -3040,8 +3365,8 @@ def _disambiguate_visual_mechanism(
     # actually names a falling-block / match-3 class.
     if (
         recipe.id == "canvas-puzzle-grid"
-        and (_WIREFRAME_VECTOR_SIGNALS & ctx_toks)
-        and not (_PUZZLE_GRID_CONFIRM & ctx_toks)
+        and (_wireframe_vector_signals() & ctx_toks)
+        and not (_puzzle_grid_confirm() & ctx_toks)
     ):
         for r in recipes:
             if r.id == "canvas-vector-wireframe":
@@ -3080,7 +3405,7 @@ def _disambiguate_fps_vs_voxel_sandbox(
             if r.id == "canvas-voxel-sandbox":
                 return r
     if recipe.id == "canvas-voxel-sandbox" and not has_voxel:
-        has_fps = bool(_FPS_SHOOTER_SIGNALS & ctx_toks)
+        has_fps = bool(_fps_shooter_signals() & ctx_toks)
         has_place_break = bool({"place", "break", "hotbar", "sandbox"} & ctx_toks)
         if has_fps and not has_place_break:
             for r in recipes:
@@ -4233,7 +4558,7 @@ class GameMemory:
             if voxel_hit is not None:
                 return voxel_hit
         if winner.item.id == "outline-voxel-sandbox" and not (_VOXEL_SANDBOX_SIGNALS & ctx_toks):
-            has_fps = bool(_FPS_SHOOTER_SIGNALS & ctx_toks)
+            has_fps = bool(_fps_shooter_signals() & ctx_toks)
             has_place_break = bool({"place", "break", "hotbar", "sandbox"} & ctx_toks)
             if has_fps and not has_place_break:
                 fps_hit = self._outline_item_by_id("outline-3d-first-person")

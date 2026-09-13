@@ -67,6 +67,12 @@ def _trace_metrics(run_dir: Path) -> dict[str, Any]:
     tok_rates: list[float] = []
     fail_hist: Counter[str] = Counter()
     n_traces = 0
+    # Phase 1 timing columns (DOOM3DF3 campaign): time-to-first-test,
+    # media gen, TTFT, cached prompt tokens.
+    ttft_s: list[float] = []
+    cached_prompt: list[float] = []
+    media_s: list[float] = []
+    time_to_first_test_s: list[float] = []
 
     for trace in traces:
         try:
@@ -78,6 +84,56 @@ def _trace_metrics(run_dir: Path) -> dict[str, Any]:
         n_traces += 1
         n_wasted, _ = _compute_wasted_iters(records)
         wasted_total += n_wasted
+        # Per-trace timing from stream_done / media_overlapped / first
+        # load_and_test (iter_summary with iteration==1).
+        _trace_ttf_test: float | None = None
+        _trace_media = 0.0
+        for rec in records:
+            if not isinstance(rec, dict):
+                continue
+            kind = rec.get("kind")
+            if kind == "stream_done":
+                t = rec.get("ttft_s")
+                if t is not None:
+                    try:
+                        ttft_s.append(float(t))
+                    except (TypeError, ValueError):
+                        pass
+                c = rec.get("cached_prompt_tokens")
+                if c is not None:
+                    try:
+                        cached_prompt.append(float(c))
+                    except (TypeError, ValueError):
+                        pass
+            if kind == "media_overlapped_seconds":
+                try:
+                    media_s.append(float(rec.get("seconds") or 0.0))
+                except (TypeError, ValueError):
+                    pass
+            if kind in ("assets_generated", "sounds_generated", "videos_generated"):
+                # Fallback when overlap isn't used: sum per_video gen_seconds
+                # or session-level duration if present.
+                try:
+                    if rec.get("duration_s") is not None:
+                        _trace_media += float(rec["duration_s"])
+                    for pv in (rec.get("per_video") or []):
+                        if isinstance(pv, dict) and pv.get("gen_seconds") is not None:
+                            _trace_media += float(pv["gen_seconds"])
+                except (TypeError, ValueError):
+                    pass
+            if kind == "iter_summary" and rec.get("iteration") in (1, "1"):
+                # Prefer explicit field; else duration of first iter wall.
+                for key in ("time_to_first_test_s", "test_s", "browser_s"):
+                    if rec.get(key) is not None:
+                        try:
+                            _trace_ttf_test = float(rec[key])
+                            break
+                        except (TypeError, ValueError):
+                            pass
+        if _trace_media > 0:
+            media_s.append(_trace_media)
+        if _trace_ttf_test is not None:
+            time_to_first_test_s.append(_trace_ttf_test)
         n_iter = sum(
             1 for r in records
             if isinstance(r, dict) and r.get("kind") == "iter_summary"
@@ -128,6 +184,10 @@ def _trace_metrics(run_dir: Path) -> dict[str, Any]:
     avg_wasted = (wasted_total / n_traces) if n_traces else 0.0
     avg_first = (sum(first_cleans) / len(first_cleans)) if first_cleans else None
     avg_tok = (sum(tok_rates) / len(tok_rates)) if tok_rates else None
+
+    def _avg(xs: list[float]) -> float | None:
+        return round(sum(xs) / len(xs), 2) if xs else None
+
     return {
         "n_traces": n_traces,
         "avg_wasted_iters": round(avg_wasted, 2),
@@ -135,6 +195,10 @@ def _trace_metrics(run_dir: Path) -> dict[str, Any]:
         "never_clean": never_clean,
         "infra_failed": infra_failed,
         "avg_tok_per_s": round(avg_tok, 2) if avg_tok is not None else None,
+        "avg_ttft_s": _avg(ttft_s),
+        "avg_cached_prompt_tokens": _avg(cached_prompt),
+        "avg_media_s": _avg(media_s),
+        "avg_time_to_first_test_s": _avg(time_to_first_test_s),
         "failure_class": dict(fail_hist.most_common()),
     }
 
@@ -173,11 +237,13 @@ def render_markdown(rows: list[dict[str, Any]]) -> str:
     lines.append("")
     lines.append(
         "| run | status | jobs | fresh_pass | artifact_pass | fail | "
-        "avg wasted_iters | avg first_clean | never_clean | infra_failed | avg tok/s |"
+        "avg wasted_iters | avg first_clean | never_clean | infra_failed | "
+        "avg tok/s | avg ttft_s | avg cached_prompt | avg media_s | avg ttf_test_s |"
     )
     lines.append(
         "|-----|--------|------|------------|---------------|------|"
-        "-----------------|-----------------|-------------|--------------|-----------|"
+        "-----------------|-----------------|-------------|--------------|"
+        "-----------|------------|------------------|-------------|----------------|"
     )
     for r in rows:
         lines.append(
@@ -185,7 +251,9 @@ def render_markdown(rows: list[dict[str, Any]]) -> str:
             f"{_fmt(r.get('fresh_passed'))} | {_fmt(r.get('artifact_passed'))} | "
             f"{_fmt(r.get('fresh_failed'))} | {_fmt(r.get('avg_wasted_iters'))} | "
             f"{_fmt(r.get('avg_first_clean'))} | {_fmt(r.get('never_clean'))} | "
-            f"{_fmt(r.get('infra_failed'))} | {_fmt(r.get('avg_tok_per_s'))} |"
+            f"{_fmt(r.get('infra_failed'))} | {_fmt(r.get('avg_tok_per_s'))} | "
+            f"{_fmt(r.get('avg_ttft_s'))} | {_fmt(r.get('avg_cached_prompt_tokens'))} | "
+            f"{_fmt(r.get('avg_media_s'))} | {_fmt(r.get('avg_time_to_first_test_s'))} |"
         )
     lines.append("")
     lines.append("## failure_class histogram (iter_summary, non-ok classes)")

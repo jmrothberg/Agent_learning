@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from pathlib import Path  # state-field evidence reads the current HTML
 from typing import Any
 
 from agent_helpers import _ASSETS_OPEN_RE, _SOUNDS_OPEN_RE, _is_degenerate_baseline
@@ -1826,6 +1827,47 @@ class FeedbackRoutingMixin:
             "shared_terms": shared_words,
         }
 
+    def _repeat_feedback_escalation_block(self) -> str:
+        """Prompt block for a complaint the user has already raised once.
+
+        DOOM3DF3 20260911: the same "mouse should turn the player" ask was
+        re-patched four times in the input handler while the real cause
+        (a per-frame overwrite in update()) sat elsewhere. Name what the
+        prior attempt(s) already changed (from `_fix_attempt_ledger`,
+        filled at patch_outcome time) and force a diagnose-first turn.
+        Sets `_repeat_feedback_escalated` so the stream skips the
+        <patch>-first prefill for this one turn."""
+        self._repeat_feedback_escalated = True
+        ledger = list(getattr(self, "_fix_attempt_ledger", []) or [])[-3:]
+        tried_lines: list[str] = []
+        for n, att in enumerate(ledger, 1):
+            heads = att.get("applied_heads") or []
+            notes = (att.get("notes") or "").strip()
+            if heads or notes:
+                tried_lines.append(
+                    f"  attempt {n}: edited near "
+                    f"{'; '.join(h[:70] for h in heads[:3]) or '?'}"
+                    + (f" — notes: {notes[:120]}" if notes else "")
+                )
+        self._trace({
+            "kind": "repeat_feedback_escalated",
+            "attempts": len(tried_lines),
+        })
+        return (
+            "================ REPEAT COMPLAINT — CHANGE APPROACH ================\n"
+            "The user already reported this and your previous fix did NOT "
+            "resolve it. The code you changed last time is NOT where the bug "
+            "is. Before patching: emit a short <diagnose> that (1) traces the "
+            "value from the input handler to the screen, (2) lists EVERY other "
+            "line that writes the same state field (grep the whole file, "
+            "including aliases like `const p = state.player`), and (3) names "
+            "the one line that discards the handler's write (a per-frame "
+            "overwrite in update()/draw(), a reset, or a stale copy). Then "
+            "patch THAT line.\n"
+            + ("Already tried:\n" + "\n".join(tried_lines) + "\n" if tried_lines else "")
+            + "===================================================================="
+        )
+
 
 
     def _maybe_clear_asset_reprompt_via_code(self, reply: str) -> None:
@@ -1987,6 +2029,10 @@ class FeedbackRoutingMixin:
         ]
         quarantined = list(getattr(self, "_quarantined_probe_names", []) or [])[:5]
         unhonored = getattr(self, "_unhonored_asset_request", None)
+        # Numeric leaf names of window.state from the last browser run, so
+        # the router can name the concrete fields a behavior complaint is
+        # about (→ writer audit + stickiness evidence, DOOM3DF3 20260911).
+        state_leaves = [str(x) for x in (prev.get("state_leaves") or [])][:80]
         joined_feedback = "\n- ".join(feedback_texts)
         sys_prompt = (
             "You route a user's feedback on a single-file HTML5 game to the "
@@ -2005,6 +2051,9 @@ class FeedbackRoutingMixin:
             "if the user said to fix the test/blocker first\n"
             '  "user_visible_issue": short string or "",\n'
             '  "harness_blocker_ack": short string or "",\n'
+            '  "state_fields": [],  // dotted window.state paths from STATE '
+            "LEAVES that the complaint is about (e.g. [\"player.yaw\"] for "
+            "'mouse doesn't turn me'); [] when not a behavior/state complaint\n"
             '  "confidence": 0..1\n'
             "}\n"
             "Rules: 'use/load/wire the existing sprites', 'show the full "
@@ -2020,6 +2069,7 @@ class FeedbackRoutingMixin:
             f"TOP SOFT WARNINGS: {soft_warnings or 'none'}\n"
             f"QUARANTINED PROBES: {quarantined or 'none'}\n"
             f"OUTSTANDING ASSET REQUEST: {(unhonored or 'none')[:160]}\n"
+            f"STATE LEAVES: {', '.join(state_leaves) or 'none'}\n"
             "\nUSER FEEDBACK (verbatim):\n"
             f"- {joined_feedback}\n"
             "\nReply with the JSON object only."
@@ -2107,6 +2157,14 @@ class FeedbackRoutingMixin:
             "defer_behind_blocker": _as_bool(obj.get("defer_behind_blocker"), False),
             "user_visible_issue": str(obj.get("user_visible_issue", ""))[:200],
             "harness_blocker_ack": str(obj.get("harness_blocker_ack", ""))[:200],
+            # Dotted state paths the complaint targets (≤4, identifier-shaped).
+            "state_fields": [
+                str(f).strip() for f in (
+                    obj.get("state_fields") if isinstance(obj.get("state_fields"), list) else []
+                )
+                if isinstance(f, str)
+                and re.fullmatch(r"[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*", f.strip())
+            ][:4],
             "confidence": float(obj.get("confidence", 0.0))
             if isinstance(obj.get("confidence"), (int, float)) else 0.0,
         }
@@ -2139,8 +2197,94 @@ class FeedbackRoutingMixin:
         route = await self._route_user_feedback_llm(feedback_texts)
         self._feedback_route = route
         self._feedback_route_key = key if route is not None else None
+        # State-field evidence (DOOM3DF3 20260911): when the router named the
+        # fields a behavior complaint is about, audit every writer line and
+        # poke the live game to see whether writes stick. Stored as text for
+        # the sync `_flush_user_injections` to append under the user note.
+        self._feedback_state_evidence = ""
+        try:
+            if route and route.get("state_fields"):
+                self._feedback_state_evidence = (
+                    await self._build_state_field_evidence(route["state_fields"])
+                )
+        except Exception as e:
+            self._trace_exception("state_field_evidence_error", e)
 
+    async def _build_state_field_evidence(self, fields: list[str]) -> str:
+        """Writer-line audit (static, alias-aware) + runtime stickiness poke
+        for each routed state field. Returns a prompt block or "".
 
+        Static half: `tools.static_state_writer_lines` lists every line that
+        assigns the field with its enclosing function/handler. Runtime half:
+        `LiveBrowser.state_field_stickiness` bumps the field and reports
+        whether a per-frame writer snapped it back. Together they name the
+        overwrite the model could not find by reading the handler alone.
+        """
+        from tools import static_state_writer_lines
+        html = ""
+        try:
+            if self._current_file and Path(self._current_file).exists():
+                html = Path(self._current_file).read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            html = ""
+        if not html:
+            return ""
+        runtime: dict[str, dict] = {}
+        browser = getattr(self, "browser", None)
+        if browser is not None and hasattr(browser, "state_field_stickiness"):
+            try:
+                runtime = await browser.state_field_stickiness(fields)
+            except Exception:
+                runtime = {}
+        lines: list[str] = []
+        overwritten: list[str] = []
+        for f in fields[:4]:
+            writers = static_state_writer_lines(html, f)
+            rt = runtime.get(f) or {}
+            if not writers and not rt:
+                continue
+            lines.append(f"state.{f}:")
+            for w in writers:
+                lines.append(f"  L{w['line']} in {w['in']}: {w['text']}")
+            if not writers:
+                lines.append("  (no line assigns this field)")
+            if rt.get("reverted"):
+                overwritten.append(f)
+                lines.append(
+                    f"  RUNTIME: set to {rt.get('poked')} → read back "
+                    f"{rt.get('after')} two frames later = REVERTED. A "
+                    "per-frame writer (one of the lines above, in the "
+                    "update/loop path) overwrites it — handler writes are "
+                    "discarded."
+                )
+            elif rt and "error" not in rt:
+                lines.append(
+                    "  RUNTIME: a direct write sticks for two frames "
+                    f"({'drifts on its own' if rt.get('drift') else 'stable'})."
+                )
+        self._trace({
+            "kind": "state_field_evidence",
+            "fields": fields[:4],
+            "overwritten": overwritten,
+            "writer_counts": {
+                f: len(static_state_writer_lines(html, f)) for f in fields[:4]
+            },
+        })
+        if not lines:
+            return ""
+        head = (
+            "================ STATE-FIELD EVIDENCE (harness, measured) ================\n"
+            "Every line that writes the field(s) the user's complaint is about, "
+            "plus a live poke test.\n"
+        )
+        if overwritten:
+            head += (
+                f"VERDICT: {', '.join('state.' + f for f in overwritten)} is "
+                "OVERWRITTEN EVERY FRAME. Fix the per-frame writer (delete or "
+                "invert it: state is the source of truth, derive the camera/"
+                "view FROM state), not the input handler.\n"
+            )
+        return head + "\n".join(lines) + "\n=========================================================================="
 
     def _flush_user_injections(self, base_message: str) -> str:
         """Main router: drain queued user input, inject directives, and
@@ -2568,13 +2712,34 @@ class FeedbackRoutingMixin:
             ]
             if user_items:
                 joined_raw = "\n- ".join(user_items)
+                # Repeat detection ran only in the directive path before;
+                # raw mode (the default) let DOOM3DF3 20260911 re-ask "use
+                # the mouse to turn" four times with zero escalation.
+                repeated_raw = self._detect_repeated_feedback(joined_raw)
+                repeat_prefix_raw = ""
+                if repeated_raw:
+                    repeat_prefix_raw = (
+                        "[USER HAS RAISED THIS BEFORE — your last fix did NOT "
+                        "work]\n"
+                    )
+                    self._trace({
+                        "kind": "repeated_user_request",
+                        **repeated_raw,
+                        "raw_mode": True,
+                        "text_preview": joined_raw[:240],
+                    })
                 parts.append(
                     "================ USER FEEDBACK (HIGHEST PRIORITY) ================\n"
                     "The user just typed this while watching your game. It OVERRIDES\n"
                     "any plan or default behavior. Address it explicitly in this turn:\n"
-                    f"\n[USER NOTE]\n- {joined_raw}\n[/USER NOTE]\n"
+                    f"\n[USER NOTE]\n{repeat_prefix_raw}- {joined_raw}\n[/USER NOTE]\n"
                     "=================================================================="
                 )
+                if repeated_raw:
+                    parts.append(self._repeat_feedback_escalation_block())
+                _ev = getattr(self, "_feedback_state_evidence", "")
+                if _ev:
+                    parts.append(_ev)
                 for fb in user_items:
                     self._trace({
                         "kind": "feedback_injected",
@@ -2676,6 +2841,13 @@ class FeedbackRoutingMixin:
                 f"\n[USER NOTE]\n{repeat_prefix}- {joined}\n[/USER NOTE]\n"
                 "=================================================================="
             )
+            # Same escalation + measured state-field evidence as raw mode
+            # (DOOM3DF3 20260911 repeat-complaint fix).
+            if repeated:
+                parts.append(self._repeat_feedback_escalation_block())
+            _ev = getattr(self, "_feedback_state_evidence", "")
+            if _ev:
+                parts.append(_ev)
             for fb in selected_feedback:
                 self._trace({"kind": "feedback_injected", "text": fb})
             if strict_scope_dropped:

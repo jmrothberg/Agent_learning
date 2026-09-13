@@ -102,6 +102,27 @@ def _build_cmd(*, goal: str, out_path: Path, args) -> list[str]:
     return cmd
 
 
+def _child_env_for_goal(base_env: dict[str, str], goal: str) -> dict[str, str]:
+    """Per-goal mode for mixed benches (campaign: 8×/640png + 4× full HTML).
+
+    COMMENT: TARGET=/640png in the goal arms AGENT_JMR_PNG for that child only
+    so a serial batch can mix JMR sheets with three.js/media games. Full-HTML
+    goals clear both simulator flags so parent shell exports cannot leak.
+    """
+    env = dict(base_env)
+    g = (goal or "").lower()
+    if "target=/640png" in g or "/640png" in g:
+        env["AGENT_JMR_PNG"] = "1"
+        env["AGENT_SIMULATOR"] = "1"
+    elif "target=/640" in g:
+        env["AGENT_SIMULATOR"] = "1"
+        env.pop("AGENT_JMR_PNG", None)
+    else:
+        env.pop("AGENT_JMR_PNG", None)
+        env.pop("AGENT_SIMULATOR", None)
+    return env
+
+
 def _is_game_delivered(out_path: Path) -> bool:
     """True when a prior run left a playable artifact (resume / crash recovery).
 
@@ -461,13 +482,15 @@ async def main_async(args) -> int:
                     flush=True,
                 )
                 await asyncio.sleep(args.retry_delay)
+            # COMMENT: campaign mix — arm /640png only for goals that declare it.
+            job_env = _child_env_for_goal(child_env, goal)
             result = await _run_job(
                 index=i,
                 label=label,
                 goal=goal,
                 cmd=cmd,
                 out_path=out_path,
-                env=child_env,
+                env=job_env,
                 job_timeout=args.job_timeout,
             )
             result.attempts = attempt

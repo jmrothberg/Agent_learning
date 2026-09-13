@@ -281,21 +281,49 @@ def _resolve_stable_audio_path() -> str | None:
     Put weights here once:
       hf download stabilityai/stable-audio-open-1.0 \\
         --local-dir ~/Diffusion_Models/audio/stable-audio-open-1.0
+
+    COMMENT: Phase 5 A/B — when AGENT_SA3_SMALL_SFX=1, prefer
+    stable-audio-open-small (or SA3-Small) dirs first; fall back to 1.0.
     """
     candidates: list[str] = []
+    # COMMENT: opt-in SA3-Small / open-small before the default 1.0 path.
+    prefer_small = (_os.environ.get("AGENT_SA3_SMALL_SFX") or "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+    small_names = (
+        "stable-audio-3-small",
+        "stable-audio-open-small",
+        "SA3-Small",
+        "sa3-small",
+    )
     audio_dir = (_os.environ.get("AUDIO_MODELS_DIR") or "").strip()
     if audio_dir:
+        if prefer_small:
+            for name in small_names:
+                candidates.append(_os.path.join(audio_dir, name))
         candidates.extend([
             _os.path.join(audio_dir, "stable-audio-open-1.0"),
             _os.path.join(audio_dir, "stable-audio-open"),
         ])
     diff_dir = (_os.environ.get("DIFFUSION_MODELS_DIR") or "").strip()
     if diff_dir:
+        if prefer_small:
+            for name in small_names:
+                candidates.extend([
+                    _os.path.join(diff_dir, "audio", name),
+                    _os.path.join(diff_dir, name),
+                ])
         candidates.extend([
             _os.path.join(diff_dir, "audio", "stable-audio-open-1.0"),
             _os.path.join(diff_dir, "stable-audio-open-1.0"),
         ])
     for base in _MODEL_SEARCH_DIRS:
+        if prefer_small:
+            for name in small_names:
+                candidates.extend([
+                    _os.path.join(base, name),
+                    _os.path.join(base, "audio", name),
+                ])
         candidates.extend([
             _os.path.join(base, "stable-audio-open-1.0"),
             _os.path.join(base, "audio", "stable-audio-open-1.0"),
@@ -889,6 +917,7 @@ def render_sound_paths_block(
     session_html_path: Path | str,
     *,
     looping_names: set[str] | None = None,
+    pending: bool = False,
 ) -> str:
     """Build the injection block listing generated sound paths.
 
@@ -901,6 +930,8 @@ def render_sound_paths_block(
     sets `Audio.loop = true` for those so background music doesn't
     require manual restart.
 
+    `pending`: keep paths even if OGGs are not on disk yet (Phase 1 media overlap with first-build stream).
+
     Phrasing mirrors render_asset_paths_block: aggressive about
     actually using the generated assets, because mid-tier models
     default to silent games when their training distribution didn't
@@ -908,15 +939,23 @@ def render_sound_paths_block(
     """
     if not sound_paths:
         return ""
-    sound_paths = _filter_existing_sounds(sound_paths)
+    if not pending:
+        sound_paths = _filter_existing_sounds(sound_paths)
     if not sound_paths:
         return ""
     looping = set(looping_names or [])
     html_dir = Path(session_html_path).resolve().parent
     lines = [
-        "================ GENERATED SOUNDS ================",
-        "Stable Audio Open generated these OGG files and saved them",
-        "next to your HTML file. YOU MUST USE THEM via `new Audio(...)`",
+        ("================ GENERATED SOUNDS (pending — generating now) ================"
+         if pending else
+         "================ GENERATED SOUNDS ================"),
+        ("These OGG paths are reserved and will exist before the browser test. "
+         "Wire them NOW via `new Audio(...)`."
+         if pending else
+         "Stable Audio Open generated these OGG files and saved them"),
+        ("Do not invent other names."
+         if pending else
+         "next to your HTML file. YOU MUST USE THEM via `new Audio(...)`"),
         "for every event the user will hear (firing, hits, pickups,",
         "background music). A silent game when sound files were",
         "generated IS A REGRESSION on this turn.",

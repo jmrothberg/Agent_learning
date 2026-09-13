@@ -127,7 +127,11 @@ def detect_wireframe_navigation_intent(goal: str) -> bool:
             return True
     if "line art" in gl and "vector" in gl:
         return True
-    if any(w in gl for w in ("wireframe", "battlezone", "trench")) and "tank" in gl:
+    # Phase 3: battlezone/trench (+ tank) from recipe disambiguation_signals.
+    from memory import recipe_disambiguation_signals
+
+    wf_sigs = recipe_disambiguation_signals("canvas-vector-wireframe")
+    if "tank" in gl and any(s in gl for s in wf_sigs):
         return True
     return False
 

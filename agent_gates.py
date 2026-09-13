@@ -665,9 +665,11 @@ class GateProcessingMixin:
 
         # COMMENT: run_17 pinball — arrows change flipper angle, not player x/y;
         # PLAYER-STUCK burned iters while launch geometry was the real bug.
-        pinball_recipe = (
-            getattr(self, "_active_visual_playtest_recipe_id", None) == "canvas-pinball"
-        )
+        # Phase 3: gate_skips from recipe JSON (canvas-pinball → player_stuck).
+        from memory import recipe_gate_skips
+
+        _recipe_id = getattr(self, "_active_visual_playtest_recipe_id", None)
+        pinball_recipe = "player_stuck" in recipe_gate_skips(_recipe_id or "")
 
         dynamic_probe_passed = any(
 

@@ -91,6 +91,8 @@ MLX upgrades: MiniMax-M3 (`minimax_m3.py` copy after mlx-lm upgrade), GLM-5.2
 - `VIDEO_MODEL`, `VIDEO_VENV` — Wan2.2 cutscene subprocess overrides
 - `AGENT_SIMULATOR` — set `1` to start `chat.py` in simulator mode (`/media off` / `/640`: 640×480 canvas, no sidecar sprites/sounds/videos). TUI `/media on` restores the full pipeline (next `/new`).
 - `AGENT_JMR_PNG` — set `1` to start in `/640png` mode (JMR V1 640×480 walls + art pipeline writing `STEM-N.png` / `jmr:spr:N`). Wins over `AGENT_SIMULATOR`.
+- `AGENT_SPRITE_SHEET_LORA` — optional Phase 5 A/B: path to a klein sprite-sheet LoRA (`.safetensors` or dir), or `1` to use `<klein-model>/sprite-sheet-lora.safetensors`. Off/unset = default FLUX2 klein. Missing path logs once and falls back.
+- `AGENT_SA3_SMALL_SFX` — optional Phase 5 A/B: set `1` to prefer Stable Audio 3 Small / `stable-audio-open-small` weights when present; otherwise unchanged `stable-audio-open-1.0` path.
 
 ### oMLX (preferred MLX HTTP server on Mac)
 
