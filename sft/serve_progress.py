@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -9,6 +10,7 @@ from pathlib import Path
 ROOT = Path("/Users/jonathanrothberg/MLX_Models/html_game_sft")
 DB = ROOT / "games.sqlite"
 HTML = Path(__file__).resolve().parent / "progress.html"
+_LOSS = re.compile(r"Iter \d+: Train loss .*?([0-9]+\.[0-9]+)")
 
 
 def status() -> dict:
@@ -63,6 +65,18 @@ def status() -> dict:
             if line.startswith("--- slice"):
                 cut = i
         tail = "\n".join(lines[cut:][-24:])
+    # This GPU run starts at the last fresh LoRA. Losses after that are the plot.
+    losses: list[float] = []
+    if log.exists():
+        lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
+        start = 0
+        for i, line in enumerate(lines):
+            if "resume=None" in line:
+                start = i
+        for line in lines[start:]:
+            m = _LOSS.search(line)
+            if m:
+                losses.append(float(m.group(1)))
     return {
         "unique_html_games": unique,
         "gold_rows": gold,
@@ -76,6 +90,7 @@ def status() -> dict:
         "ingest": ingest,
         "rebuild": rebuild,
         "log_tail": tail,
+        "losses": losses,
     }
 
 

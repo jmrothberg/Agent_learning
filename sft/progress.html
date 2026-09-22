@@ -31,6 +31,9 @@
   <div class="card"><div class="num" id="gold">–</div><div class="label">/640png files inside that set</div></div>
   <div class="card"><div class="num" id="added">–</div><div class="label">New games this download</div></div>
 </div>
+<h2>Loss, average of the last 18 steps</h2>
+<canvas id="chart" width="880" height="280" style="width:100%;background:#1c1f28;border-radius:10px"></canvas>
+<p class="sub" id="avgLabel">waiting for steps</p>
 <h2>Training</h2>
 <p id="train">waiting</p>
 <h2>Downloads</h2>
@@ -76,9 +79,97 @@ async function tick() {
       (g.unique != null ? ` · unique ${g.unique}` : "") +
       (g.updated ? ` · ${g.updated}` : "");
     document.getElementById("log").textContent = s.log_tail || "no log yet";
+    drawLoss(s.losses || []);
   } catch (e) {
     document.getElementById("train").textContent = "status fetch failed";
   }
+}
+function drawLoss(losses) {
+  const canvas = document.getElementById("chart");
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  const label = document.getElementById("avgLabel");
+  if (!losses.length) {
+    label.textContent = "waiting for steps";
+    return;
+  }
+  const avg = [];
+  for (let i = 0; i < losses.length; i++) {
+    const a = losses.slice(Math.max(0, i - 17), i + 1);
+    avg.push(a.reduce((s, x) => s + x, 0) / a.length);
+  }
+  // Plot box leaves room for tick labels. X always maps step 1..N across the full width.
+  const left = 58, right = 16, top = 16, bottom = 42;
+  const pw = w - left - right, ph = h - top - bottom;
+  const all = losses.concat(avg);
+  let lo = Math.min(...all), hi = Math.max(...all);
+  const pad = ((hi - lo) || 0.1) * 0.08;
+  lo -= pad;
+  hi += pad;
+  const span = (hi - lo) || 1;
+  const n = losses.length;
+  const xOf = (i) => left + pw * (n === 1 ? 0.5 : i / (n - 1));
+  const yOf = (v) => top + ph * (1 - (v - lo) / span);
+  ctx.strokeStyle = "#3a3e48";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(left, top);
+  ctx.lineTo(left, top + ph);
+  ctx.lineTo(left + pw, top + ph);
+  ctx.stroke();
+  ctx.fillStyle = "#9a968e";
+  ctx.font = "12px ui-sans-serif, system-ui, sans-serif";
+  ctx.textAlign = "right";
+  ctx.textBaseline = "middle";
+  for (let t = 0; t < 5; t++) {
+    const v = lo + span * t / 4;
+    const y = yOf(v);
+    ctx.strokeStyle = "#3a3e48";
+    ctx.beginPath();
+    ctx.moveTo(left - 5, y);
+    ctx.lineTo(left, y);
+    ctx.stroke();
+    ctx.fillText(v.toFixed(2), left - 8, y);
+  }
+  const xIdx = [];
+  const want = Math.min(n, 6);
+  for (let t = 0; t < want; t++) {
+    xIdx.push(Math.round(t * (n - 1) / Math.max(1, want - 1)));
+  }
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+  [...new Set(xIdx)].forEach((i) => {
+    const x = xOf(i);
+    ctx.strokeStyle = "#3a3e48";
+    ctx.beginPath();
+    ctx.moveTo(x, top + ph);
+    ctx.lineTo(x, top + ph + 5);
+    ctx.stroke();
+    ctx.fillText(String(i + 1), x, top + ph + 8);
+  });
+  ctx.fillStyle = "#9a968e";
+  ctx.textAlign = "center";
+  ctx.fillText("Step", left + pw / 2, h - 16);
+  ctx.save();
+  ctx.translate(14, top + ph / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.fillText("Loss", 0, 0);
+  ctx.restore();
+  function line(series, color, width) {
+    ctx.beginPath();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width;
+    series.forEach((v, i) => {
+      const x = xOf(i), y = yOf(v);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+  line(losses, "#6a675f", 1);
+  line(avg, "#8fd49a", 2);
+  const last = avg[avg.length - 1];
+  label.textContent = `green = average of the last 18 steps (${last.toFixed(3)}). gray = each file. ${n} steps in this run.`;
 }
 tick();
 setInterval(tick, 2000);
