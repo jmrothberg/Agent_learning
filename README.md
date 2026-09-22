@@ -448,7 +448,7 @@ checked model-free by `eval/eval_prompts_plan.py --coverage`.
 `/assets <png|folder>` (stage your sprites for next `/new`) · `/seed <game.html>` (continue an existing game) ·
 `/ref <path>` (VLM glance only — not for copying sprites) · `/check [<N|name>]` (on-demand screenshot judge;
 legacy `/check with <model>` still works) · `/media off` / `/640` (simulator: 640×480, no sidecar media) · `/640png` (same JMR walls + generated `STEM-N.png` sheets, `jmr:spr:N` — a limited FPGA design, not a dumbed-down full HTML game) ·
-`/ltx` `/wan` (pin video engine) · `/goodgame` (copy the trio into tracked `goodgame/`) · `/lora [latest|N|off]` (language adapter on the base VLM for the next `/new`; vision tower stays the base model; in-process only, so `/server off`).
+`/ltx` `/wan` (pin video engine) · `/goodgame` (copy the trio into tracked `goodgame/`) · `/lora [latest|N|off]` (HTML-game adapter on the Qwen3.8-27B you already picked with `/model`; `/lora latest` is the newest dated checkpoint; then `/new <goal>` as usual; `/640png` is unchanged; in-process only, so `/server off`).
 
 `/check` is a manual command. The only auto path is `/mode local_plus_review with <model> --auto-apply`, and that still runs only when `/wait` is off.
 
@@ -626,6 +626,32 @@ Battery: `memory/system_battery.jsonl`.
 
 Language-only LoRA on **Qwen3.8-27B-mxfp8** (mlx-vlm, rank 16, alpha 32, lr 1e-5). The base folder `~/MLX_Models/Qwen3.8-27B-mxfp8` is never rewritten, so the vision tower stays the original weights. There is no fused copy.
 
+### Start from Terminal (survives quitting Cursor)
+
+Paste this in **Terminal.app**, not in a Cursor chat. Each job starts in its own session, so closing Terminal or quitting Cursor leaves it running. A second trainer refuses to start while one is already up (`trainer already running`).
+
+```bash
+PY=~/Agents/.venv/bin/python
+cd ~/MLX_Models/html_game_sft
+
+nohup "$PY" scripts/serve_progress.py >> logs/dashboard.log 2>&1 &
+disown
+SKIP_SPLIT=1 nohup "$PY" scripts/ingest.py >> logs/ingest.log 2>&1 &
+disown
+nohup "$PY" scripts/run_slices.py >> logs/supervisor.log 2>&1 &
+disown
+```
+
+The progress page is **http://127.0.0.1:8766/**. The training log is `logs/train.log`. Cursor can read both without owning the processes.
+
+```bash
+tail -f ~/MLX_Models/html_game_sft/logs/train.log
+```
+
+`scripts/run_slices.py` continues the saved adapter in `adapters/`. It does not start a new LoRA when that file is already there. HOLD on the progress page is only for testing the agent: it frees the GPU, you run `/model` and `/lora latest`, then RESUME. Do not use HOLD to survive a Cursor upgrade.
+
+Stop `chat.py` before training if chat has the 27B loaded. The trainer loads the 27B itself. A second copy does not fit in 192 GB.
+
 The programs are `sft/` in this repo. Downloaded games, jsonl, logs, and adapter weights stay on disk under `~/MLX_Models/html_game_sft/` and are not committed.
 
 | On disk (not in git) | What |
@@ -639,41 +665,26 @@ The programs are `sft/` in this repo. Downloaded games, jsonl, logs, and adapter
 
 Most rows are ordinary HTML/JS games. The system text is `build_system_prompt("{goal}")` from `prompts_v1.py`, and the assistant text is the game inside `<html_file>`. Files under `~/JMR-JS-CSS-FPGA-COMPUTER/storage` are the `/640png` rows: same function with `jmr_png_mode=True`. Chip rules are applied when you run `/640png`, not by dropping games that use `fetch` or `sprite()`.
 
-Stop `chat.py` before training. The trainer loads the 27B itself. A second copy does not fit in 192 GB.
-
-Python is `~/Agents/.venv` (mlx-vlm). From this repo:
+Python is `~/Agents/.venv` (mlx-vlm). `sft/` in this repo is the git copy of those scripts. The running job uses `~/MLX_Models/html_game_sft/scripts/`. Rebuild the training file only when the trainer is stopped:
 
 ```bash
 PY=~/Agents/.venv/bin/python
-
-$PY sft/serve_progress.py
-# http://127.0.0.1:8766/   (8765 is Asset Studio inside chat.py)
-
-$PY sft/rebuild_corpus.py
+cd ~/MLX_Models/html_game_sft
+"$PY" scripts/rebuild_corpus.py
 # walks storage/, goodgame/, and raw/ into jsonl/html_corpus.jsonl
-
-$PY sft/ingest.py
-# keeps cloning HTML/JS repos into raw/ and appends jsonl/added.jsonl
-
-$PY sft/run_slices.py
-# waits until jsonl/seed.jsonl is non-empty and logs/seed.ready exists
-# (ingest writes the ready file), then trains ~30 minute slices.
-# Each slice reloads jsonl/html_corpus.jsonl + jsonl/added.jsonl
-# and overwrites adapters/adapters.safetensors.
 ```
 
-Run the progress page, the download, and the trainer as three processes. Leave the trainer unloaded from chat until a slice finishes.
-
-Try a snapshot only while the trainer is stopped:
+Try a snapshot only while the trainer is stopped. `/new` does not pick the model. You still choose Qwen with `/model`, the same way as a normal session. Bare `/new` only clears the game and waits. It leaves `/model`, `/lora`, and `/640png` alone.
 
 ```text
+/model          pick Qwen3.8-27B-mxfp8
 /server off
-/lora latest
-/640png
-/new <your game>
+/lora latest    newest dated checkpoint (not an old smoke folder)
+/640png         only for a 640×480 sheet game; leave it off for a normal Chrome game
+/new your game idea
 ```
 
-`/status` shows the base model path and the LoRA directory. The header shows `[VLM]` plus the snapshot name. `/lora off` is the base VLM only. `/lora` lists snapshots. For a normal Chrome game, leave `/640png` off so the model uses the same HTML/JS prompt it trained on.
+`/lora` lists the snapshots and marks the newest dated one as `latest`. `/lora off` is the base model only. `/status` shows the LoRA path. The header shows `[VLM]` plus the snapshot name once a session is running.
 
 ---
 

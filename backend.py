@@ -793,6 +793,33 @@ def current_mlx_adapter() -> str:
     return (os.environ.get("MLX_ADAPTER") or "").strip()
 
 
+_LORA_STAMP = re.compile(r"\d{8}T\d{6}Z")
+
+
+def lora_snapshot_dirs(root: str | os.PathLike | None = None):
+    """Training snapshots, oldest dated folder first.
+
+    Returns (dirs, latest). `latest` is the newest YYYYMMDDTHHMMSSZ
+    checkpoint. Named leftovers such as long-prompt-smoke stay in the
+    list so they can be picked by number, and they are not `latest`.
+    """
+    from pathlib import Path
+
+    folder = Path.home() / "MLX_Models" / "html_game_sft" / "snapshots" if root is None else Path(root)
+    if not folder.is_dir():
+        return [], None
+    snaps = [
+        p for p in folder.iterdir()
+        if p.is_dir() and (p / "adapters.safetensors").is_file()
+    ]
+    stamps = sorted((p for p in snaps if _LORA_STAMP.fullmatch(p.name)), key=lambda p: p.name)
+    stamp_ids = {p.name for p in stamps}
+    others = sorted((p for p in snaps if p.name not in stamp_ids), key=lambda p: p.name)
+    ordered = stamps + others
+    latest = stamps[-1] if stamps else (others[-1] if others else None)
+    return ordered, latest
+
+
 def vlm_load_is_current(
     loaded_path: str | None,
     loaded_adapter: str | None,

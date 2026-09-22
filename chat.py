@@ -3694,6 +3694,8 @@ class CodingBoxApp(App):
             "  [b]/look[/b]  glance at the screenshot once (= /check)   [b]/games[/b]  curated prompts",
             "  [b]/assets[/b]  your PNGs    [b]/seed[/b]  continue an HTML    [b]/sim[/b]  640×480, no art pipeline",
             "  [b]/640png[/b]  640×480 + generated STEM-N.png sheets (jmr:spr:N)",
+            "  [b]HTML LoRA[/b]  /model Qwen3.8-27B, /server off, /lora latest, then /new <goal>",
+            "                                  [dim]/640png stays as you set it. bare /new does not change /model, /lora, or /640png[/dim]",
             "  One loaded VLM (Qwen 27B class) is enough. Extra models: [b]/help roles[/b]",
             "  Full command list below — old names still work. [b]/help topics[/b] for detail pages.",
             "",
@@ -3757,7 +3759,8 @@ class CodingBoxApp(App):
             # =====================================================================
             "[bold cyan]── session lifecycle ──[/bold cyan]",
             "  [b]/new[/b]                       reset to a clean slate — type your game idea next",
-            "  [b]/new <goal>[/b]                start a fresh game (uses staged seed/model if any)",
+            "  [b]/new <goal>[/b]                start a fresh game with the /model already picked (and /lora if staged)",
+            "                                  [dim]bare /new clears the game and waits. It does not change /model, /lora, or /640png[/dim]",
             "  [b]/games [N][/b]                 list curated prompts · /games N loads #N into the input box",
             "                                  [dim]aliases /library /prompts · ship first if a session is running[/dim]",
             "  [b]/goodgame[/b]                  copy the game folder (HTML + sprites/sounds) → goodgame/ [dim](not gitignored)[/dim]",
@@ -3788,8 +3791,9 @@ class CodingBoxApp(App):
             "                                  [dim]ON → /critic auto is free. off → Qwen3.8-27B stays in-process. Sticky. /help server[/dim]",
             "  [b]/launch <N|name|path> [server][/b]  stage an MLX model for next /new",
             "                                  [dim]in-process unless /server on or you add [b]server[/b] · MLX stalls do not fall back to Ollama[/dim]",
-            "  [b]/lora [latest|N|off][/b]     language LoRA on the base VLM for the next /new",
-            "                                  [dim]vision tower stays the base model · in-process only (/server off) · /lora lists snapshots[/dim]",
+            "  [b]/lora [latest|N|off][/b]     HTML-game LoRA on the Qwen3.8-27B you picked with /model",
+            "                                  [dim]/lora lists them. /lora latest = newest dated checkpoint. Then /new <goal>[/dim]",
+            "                                  [dim]/server off or it is ignored. /640png and the other controls stay as they are[/dim]",
             "  [b]/unload [N|name|all|mlx][/b]  free VRAM · bare = active session · all = every Ollama · mlx = drop in-process MLX",
             "",
             "[bold cyan]── run knobs (all sticky across /new) ──[/bold cyan]",
@@ -5581,25 +5585,27 @@ class CodingBoxApp(App):
             )
         self._log_info(msg)
 
-    def _cmd_lora(self, arg: str) -> None:
-        """/lora [latest|N|stamp|off] — stage a language LoRA for the next /new.
+    def _lora_status_label(self) -> str:
+        shown = backend_mod.current_mlx_adapter() or "off"
+        if shown != "off" and getattr(self, "_mlx_via_server", False):
+            return shown + " (ignored while /server on)"
+        return shown
 
-        The base folder (vision tower included) stays the loaded VLM.
-        In-process mlx_vlm only; /server on talks to oMLX and ignores it.
+    def _cmd_lora(self, arg: str) -> None:
+        """/lora [latest|N|stamp|off] — stage the HTML-game LoRA for the next /new.
+
+        /model still picks Qwen3.8-27B. /new <goal> then loads that model
+        plus this adapter. /640png and the other controls are unchanged.
+        In-process only; /server on ignores the adapter.
         """
-        root = Path.home() / "MLX_Models" / "html_game_sft" / "snapshots"
-        snaps = []
-        if root.is_dir():
-            snaps = sorted(
-                p for p in root.iterdir()
-                if p.is_dir() and (p / "adapters.safetensors").is_file()
-            )
+        snaps, latest = backend_mod.lora_snapshot_dirs()
         a = arg.strip()
         cur = backend_mod.current_mlx_adapter()
         if not a or a in ("status", "?"):
             shown = cur or "off"
             self._log_info(
-                f"LoRA: [b]{_esc(shown)}[/b] — applies on the next in-process /new"
+                f"LoRA: [b]{_esc(shown)}[/b]. "
+                "Pick Qwen3.8-27B with /model, then /new <goal>. /640png stays as you set it."
             )
             if not snaps:
                 self._log_info(
@@ -5608,22 +5614,26 @@ class CodingBoxApp(App):
                 )
                 return
             for i, p in enumerate(snaps, 1):
-                mark = " [green]← on[/green]" if cur == str(p) else ""
-                self._log_info(f"  {i}. {_esc(p.name)}{mark}")
-            self._log_info("usage: /lora latest   /lora <N>   /lora off")
+                marks = ""
+                if latest is not None and p == latest:
+                    marks += " [green]← latest[/green]"
+                if cur == str(p):
+                    marks += " [green]← on[/green]"
+                self._log_info(f"  {i}. {_esc(p.name)}{marks}")
+            self._log_info("usage: /lora latest   /lora <N>   /lora off    (/server off)")
             return
         if a in ("off", "clear", "none"):
             os.environ.pop("MLX_ADAPTER", None)
             self._update_status()
             self._log_info(
-                "LoRA off — next /new loads the base VLM only (vision tower unchanged)"
+                "LoRA off — next /new uses your /model only. /640png is unchanged."
             )
             return
         if a in ("latest", "on", "last"):
-            if not snaps:
+            if latest is None:
                 self._log_info("no LoRA snapshot yet")
                 return
-            chosen = snaps[-1]
+            chosen = latest
         elif a.isdigit():
             idx = int(a)
             if idx < 1 or idx > len(snaps):
@@ -5646,8 +5656,9 @@ class CodingBoxApp(App):
                 "/server off so this LoRA loads in-process[/yellow]"
             )
         self._log_info(
-            f"[green]✓[/green] LoRA [b]{_esc(chosen.name)}[/b] for the next /new. "
-            "Base model stays put, vision tower included."
+            f"[green]✓[/green] LoRA [b]{_esc(chosen.name)}[/b] staged. "
+            "Next /new <goal> loads it with the Qwen you picked in /model. "
+            "/640png and the other controls stay as they are."
             + note
         )
 
@@ -6436,6 +6447,7 @@ class CodingBoxApp(App):
             f"  MLX via oMLX:         {'ON' if getattr(self, '_mlx_via_server', False) else 'off'}  [dim](/server on · /model N server)[/dim]",
             f"  model (active):       {_esc(self._session_model or '—')}",
             f"  model (next /new):    {_esc(self._next_model or '(auto-detect)')}",
+            f"  LoRA (next /new):     {_esc(self._lora_status_label())}",
         ]
         
         if self._session_backend_info2 or self._next_model2:

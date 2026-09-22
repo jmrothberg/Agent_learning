@@ -206,6 +206,11 @@ def _search_queries() -> list[str]:
         "pure javascript browser game",
         "javascript requestAnimationFrame canvas game",
         "html css javascript game canvas",
+        "three.js mini game",
+        "webgl game html javascript",
+        "html5 canvas game javascript",
+        "single html file game javascript",
+        "vanilla js game canvas",
     )
     out = list(topics)
     for year in range(2013, 2027):
@@ -246,9 +251,13 @@ def _known_sources() -> set[str]:
             if not line:
                 continue
             try:
-                known.add(json.loads(line).get("source") or "")
+                obj = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            # A bad line can be a bare number. Skip it instead of dying.
+            if not isinstance(obj, dict):
+                continue
+            known.add(obj.get("source") or "")
     known.discard("")
     return known
 

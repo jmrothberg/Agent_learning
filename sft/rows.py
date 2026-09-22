@@ -290,6 +290,26 @@ def _goal_general(card: dict) -> str:
     return f"Build a browser HTML5 game: {card['title']}."
 
 
+def game_rank(line: str) -> int:
+    """2 = a file we already know is a game, 1 = canvas or three.js game HTML, 0 = other.
+
+    Looks only at the assistant HTML. The system prompt also mentions three.js
+    and requestAnimationFrame, so the first <html_file> in the line is not the page.
+    """
+    if '"kind": "gold"' in line or '"kind":"gold"' in line:
+        return 2
+    if "/goodgame/" in line.lower():
+        return 2
+    cut = line.rfind("<html_file>")
+    html = line[cut:].lower() if cut >= 0 else ""
+    has_canvas = "<canvas" in html or "getcontext" in html
+    has_loop = "requestanimationframe" in html
+    has_three = "three.js" in html or "three.min.js" in html or "new three." in html
+    if has_three or (has_canvas and has_loop):
+        return 1
+    return 0
+
+
 def is_jmr_storage(path: Path) -> bool:
     """True for canonical JMR /640png HTML under storage/."""
     try:

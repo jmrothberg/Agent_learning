@@ -1182,6 +1182,21 @@ def test_usage_cached_prompt_tokens_parses_openai_and_flat_shapes():
     assert f(None) is None
 
 
+def test_lora_latest_is_newest_dated_snapshot(tmp_path):
+    """latest is the newest dated checkpoint, not a named smoke folder."""
+    for name in ("long-prompt-smoke", "20260922T114826Z", "20260922T024840Z"):
+        folder = tmp_path / name
+        folder.mkdir()
+        (folder / "adapters.safetensors").write_bytes(b"x")
+    snaps, latest = backend.lora_snapshot_dirs(tmp_path)
+    assert [p.name for p in snaps] == [
+        "20260922T024840Z",
+        "20260922T114826Z",
+        "long-prompt-smoke",
+    ]
+    assert latest is not None and latest.name == "20260922T114826Z"
+
+
 def test_current_mlx_adapter_and_cache_key(monkeypatch):
     """Empty MLX_ADAPTER is base-only. A different adapter is a cache miss."""
     monkeypatch.delenv("MLX_ADAPTER", raising=False)

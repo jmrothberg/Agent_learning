@@ -9,6 +9,8 @@ import subprocess
 import time
 from pathlib import Path
 
+from rows import game_rank
+
 ROOT = Path("/Users/jonathanrothberg/MLX_Models/html_game_sft")
 PY = "/Users/jonathanrothberg/Agents/.venv/bin/python"
 SEED = ROOT / "jsonl" / "seed.jsonl"
@@ -73,9 +75,18 @@ def _assemble() -> int:
         if sha not in by_sha:
             order.append(sha)
         by_sha[sha] = line
+    # The trainer draws a random handful from this file. Keep known games
+    # in it. Other HTML stays in the corpus and is not deleted.
+    ranked = [(game_rank(by_sha[sha]), sha) for sha in order]
+    games = [sha for rank, sha in ranked if rank]
+    if not games:
+        games = list(order)
+    games.sort(key=lambda sha: -game_rank(by_sha[sha]))
+    held = len(order) - len(games)
     TRAIN.parent.mkdir(parents=True, exist_ok=True)
-    TRAIN.write_text("\n".join(by_sha[s] for s in order) + ("\n" if order else ""))
-    return len(order)
+    TRAIN.write_text("\n".join(by_sha[s] for s in games) + ("\n" if games else ""))
+    print(f"assemble games={len(games)} held_back={held}", flush=True)
+    return len(games)
 
 
 def _run(iters: int, resume: bool) -> tuple[int, float | None]:
@@ -150,10 +161,14 @@ def main() -> None:
     while True:
         rows = _assemble()
         iters = max(8, int(SLICE_SECONDS * rate))
-        label = "first 30m" if first else "~30m slice"
+        # A new process must keep the saved LoRA. resume=False trains a new
+        # adapter and overwrites adapters/adapters.safetensors.
+        has_weights = (ADAPTERS / "adapters.safetensors").exists()
+        resume = (not first) or has_weights
+        label = "~30m slice" if resume else "first 30m"
         _state(state="running", detail=f"{rows} rows, {label}", iters_this_slice=iters, step=0)
         t0 = time.time()
-        code, new_rate = _run(iters, resume=not first)
+        code, new_rate = _run(iters, resume=resume)
         first = False
         if new_rate and new_rate > 0:
             rate = new_rate
