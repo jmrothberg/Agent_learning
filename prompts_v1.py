@@ -647,55 +647,42 @@ HARD_RULES_SIMULATOR: list[str] = [
 
 # /640png — same JMR V1 walls as HARD_RULES_SIMULATOR, but Phase A emits
 # <assets> and first build paints generated STEM-N.png via jmr:spr:N.
+# This list is the one contract. SIMULATOR_PNG_TARGET_BLOCK is draw
+# wiring only — do not paste these walls a second time.
 HARD_RULES_JMR_PNG: list[str] = [
     "ONE file: inline HTML + CSS + JS. No CDN scripts, fetch/XHR, modules, "
     "Workers, eval, async/await, or Audio.play.",
     "Glass: <canvas width=\"640\" height=\"480\"> in markup. Do not reassign "
-    "canvas.width/height after load. Fill every pixel (no letterbox gutters). "
-    "HUD with canvas fillText — not innerHTML. ASCII 32-126 only "
-    "(no ♦/♥/\\u25C6 — UTF-8 E2 paints as 'b' on the chip; center/right "
-    "then overlaps WAVE/LIVES). 16px HUD → 16 glass px per glyph; "
-    "textAlign=left at x+n*16. Lives: fillRect or '*' not unicode. "
-    "fillText(\"SCORE\",x,y) then fillText(score,x+96,y) — never join.",
-    "FIRST <html_file> paints playfield units from packed STEM-N.png "
-    "atlases (related poses on one strip): window.JMR_SPR append-only ≤16 "
-    "and literal img.src = \"jmr:spr:N\" + 9-arg crop (blitSpr). Do NOT "
-    "use sprite()/ASSETS, data:image base64, or solid fillRect/arc boxes "
-    "as the final look. HUD/grid/particles may stay fillRect.",
+    "canvas.width/height after load. Fill every pixel. HUD is canvas "
+    "fillText, ASCII 32-126, textAlign=left, 16px at x+n*16. Lives: "
+    "fillRect or '*'. fillText(\"SCORE\",x,y) then fillText(score,x+96,y) "
+    "— never join.",
+    "Art: packed STEM-N.png strips (related poses, frames left to right), "
+    "≤16 sheets, stem ≤8. window.JMR_SPR append-only. img.src is a quoted "
+    "literal \"jmr:spr:N\" (not \"jmr:spr:\" + i). Blit with blitSpr or "
+    "9-arg drawImage; dest x,y >= 0 (crop dest and source if it hangs off "
+    "the glass). cellW/cellH match window.JMR_CELL. No sprite(), ASSETS, "
+    "or data:image. Blit unconditionally (no img.width). HUD/grid/"
+    "particles may stay fillRect. size is on-screen px: characters/tiles "
+    "32-48, never 16-24.",
     "Drive frames with requestAnimationFrame. Keys: read e.key AND keyCode "
     "(37/39/38/40/32/13). Do not steal Esc (machine BREAK).",
     "Math: floor, abs, min, max, random, sqrt (+ Math.PI). No sin/cos/"
     "atan2/round (shim round). No Object.keys / for…in. No negative "
     "setTransform/scale mirror — use L/R sheets or unmirrored draw.",
-    "Reuse one mutable object per entity; no per-tick maze BFS/flood; "
-    "≤16 locals per function (params + every var in THAT function, plus "
-    "names a tiny inlined blit(im,x,y,w,h) copies into the CALLER). Split "
-    "draw helpers — a 17th local skips mint and RUN is ?NH. 16 locals is "
-    "ENV_SLOTS; 16 PNG sheets is MAX_SPR — they are different. Blit sprites "
-    "unconditionally (no img.width).",
-    "FPGA vs PYTHON/Chrome: img.src MUST be a quoted literal "
-    "\"jmr:spr:0\" (not \"jmr:spr:\" + i — FPGA dihit=0). drawImage dest "
-    "x,y >= 0: crop dest AND source (9-arg) if a sprite hangs off the "
-    "glass. Do not use splice's return (FPGA undefined; PYTHON returns "
-    "the deleted slice — copy-down: dst[w]=src[i]; w++; src.length=w). "
-    "Never 1-pixel drawImage columns or hundreds of tiny "
-    "fillRects/frame. Never fillRect the whole 640x480 black then blit "
-    "a splash (HDMI shows the wipe). Board ~417k clocks at 30fps.",
-    "Mint walls (card-create CompileError → ?NH): no Float32Array/"
-    "Uint32Array/Int32Array (ordinary arrays, length ≤128 — split a 640 "
-    "z-buffer into 5×128). No new (expr)() — only new Image() / new Name()."
-    " No >> << (use /4). No charAt/charCodeAt (row-number maps). No "
-    "Object.create. No performance.now (integer frames; fire cooldown "
-    "from frames not dt). No e.preventDefault / {passive:false} in the "
-    "game script. Chromium (harness) is NOT the chip: those mint, then "
-    "PYTHON faults CALL_METHOD on interned 'Object'/'performance' (kind 4). "
-    "No AudioContext — playSfx([freq,vol,frames,"
-    "slide,ch]). No rgba()/globalAlpha (hex #rrggbb). No createElement("
-    "canvas). HTML source < 65536 bytes. Mouse may live in "
-    "data-host=chrome; keys + joy() must play the same game.",
+    "≤16 locals per function (an inlined blit counts in the caller). "
+    "16 locals is not 16 PNG sheets. Ordinary arrays only, length ≤128. "
+    "No Object.create, performance.now, e.preventDefault, >> <<, "
+    "charAt/charCodeAt, rgba()/globalAlpha, createElement(\"canvas\"), "
+    "or AudioContext. Do not use splice's return — copy-down the tail. "
+    "playSfx([freq,vol,frames,slide,ch]). Hex #rrggbb. HTML < 65536 bytes. "
+    "Mouse only in data-host=chrome; keys + joy() play the same game. "
+    "No 1-pixel drawImage columns. Never fillRect the whole 640x480 black "
+    "then blit a splash.",
     "Expose `window.state = state` and `window.game = { reset }` for probes.",
     "Phase A: <plan>/<criteria>/<probes>/<assets> (no <sounds>/<videos>). "
-    "Phase B: complete <html_file> then <patch>. ≤16 asset names.",
+    "Phase B: complete <html_file> then <patch>. ≤16 asset names, one "
+    "name per pose.",
 ]
 
 ANTI_PATTERNS: list[str] = [
@@ -824,77 +811,21 @@ Do NOT emit <assets>, <sounds>, or <videos>.
 </simulator-target>
 """
 
-# /640png — JMR V1 walls + generated PNG sheets (GAME_DESIGN.md naming).
+# /640png — draw wiring only (GAME_DESIGN.md naming). The walls are
+# HARD_RULES_JMR_PNG; repeating them here ate the context window.
 SIMULATOR_PNG_TARGET_BLOCK = """<simulator-target>
-JMR V1 native (640×480) WITH generated PNG sheets. One HTML file LOAD+RUN.
-Art programs write STEM-N.png next to the HTML (stem ≤8, ≤16 sheets).
-Related poses (hero_idle, hero_walk1) pack onto ONE strip, frames L→R.
-16 is a FILE cap, not a per-strip frame cap — a strip widens to fit more
-frames. `size` is on-screen px on the 640×480 glass (blitSpr draws 1:1)
-— pick how many fit across the playfield per entity. Arcade 16 px art is
-~40 px here: characters/tiles 32-48 px, never 16-24 (postage-stamp).
-Strip width = cellW × frame count, so a big cell costs on every frame.
+JMR V1 native (640×480) with generated PNG sheets. One HTML file LOAD+RUN.
+Art programs write STEM-N.png next to the HTML.
 
-LOOK: classic arcade / original-cabinet graphics via those PNGs — NOT
-colored circles, squares, or bare fillRect placeholders as the final art.
-
-ART HOW (required):
-  - Phase A emits <assets> one name per pose (hero_idle, hero_walk1).
-  - Harness packs a shared prefix onto STEM-N.png (horizontal cells).
-  - HTML: window.JMR_SPR = ["STEM-0.png", "STEM-1.png"] ONLY (append-only).
-    Never list the <assets> names (floor_tile.png etc.) in JMR_SPR or src.
-  - Draw: var S0 = new Image(); S0.src = "jmr:spr:0";
+  - Phase A: <assets> one name per pose (hero_idle, hero_walk1). No <sounds>/<videos>.
+  - Harness packs a shared prefix onto one STEM-N.png strip, frames left to right.
+  - window.JMR_SPR = ["STEM-0.png", "STEM-1.png"] only (append-only).
+    Do not put pose filenames in JMR_SPR or img.src.
+  - var S0 = new Image(); S0.src = "jmr:spr:0";
     blitSpr(ctx, S0, frameIndex, cellW, cellH, x, y);
-    (9-arg crop: sx = frameIndex * cellW). Do NOT invent sx.
-    cellW/cellH MUST match the sheet table (window.JMR_CELL), not TILE,
-    when TILE is a different size — sx=fi*wrongCell crops the next frame.
-  - Chrome-only <script data-host="chrome"> interceptor maps jmr:spr:N
-    to the PNG filename (copy from GENERATED PNG SHEETS block).
-  - Do NOT inline data:image base64. Do NOT use sprite() / ASSETS[key].
-  - Do NOT emit <sounds> or <videos>. Packed playSfx number arrays OK.
-
-MINT (or LOAD works and RUN is ?NH): ≤16 locals per function INCLUDING
-names a tiny inlined blit(im,x,y,w,h) adds to the CALLER — split draw
-helpers. 16 locals ≠ 16 PNG sheets. No typed arrays; arrays length ≤128;
-no new (AudioContext)(); no >>; no charAt; no Object.create / for…in;
-no performance.now / preventDefault; hex fillStyle; keys+joy play the
-game (mouse only in data-host=chrome). HTML < 64KB.
-CHROME IS NOT THE CHIP. Harness Chromium will run Object.create,
-performance.now, "jmr:spr:"+n, unicode fillText, and splice-return.
-PYTHON then kind-4 CALL_METHOD, FPGA dihit=0, 'b' lives, or a ghost
-array so wave 2 never starts. Do not fail the harness on these — just
-do not emit them.
-BAD: var keys=Object.create(null); im.src="jmr:spr:"+n; t=performance.now();
-     back=segs.splice(si,n); hearts="\\u25C6";
-GOOD: var keys={l:0,r:0,u:0,d:0,f:0}; im.src="jmr:spr:0"; var frames=0; var DT=0.0167;
-      copy-down tail; fillRect lives; fillText("SCORE",x,y) then fillText(score,x2,y);
-
-GLASS: <canvas width="640" height="480"> — fill every pixel (no letterbox
-gutters). Do not reassign canvas.width/height after load. HUD via
-fillText on canvas — no innerHTML / CSS layout score. ASCII 32–126 only
-(no ♦/♥ — UTF-8 E2 paints 'b'); textAlign=left; 16px HUD is 16 px/glyph.
-
-DRAW APIs: getContext('2d') — fillRect, clearRect, fillText, paths,
-drawImage, putImageData. No WebGL, gradients, filters, shadows.
-imageSmoothingEnabled=false. Blit unconditionally (no img.width gate).
-
-INPUT: keydown/keyup; read e.key AND keyCode (37/39/38/40/32/13). Do not
-steal Esc (machine BREAK). No CDN, fetch/XHR, modules, Workers, eval,
-async/await, Audio.play.
-
-MATH: floor abs min max random sqrt (+ Math.PI). No sin/cos/atan2/round
-(shim round as floor(x+0.5); angles via LUT). No Object.keys / for…in.
-No negative setTransform/scale mirror — L/R sheets or unmirrored draw.
-
-PERF: reuse one mutable object per entity; no per-tick maze BFS/flood;
-≤16 locals per function; hoist props out of hot loops. RAF for frames.
-Never 1-pixel drawImage columns or hundreds of tiny fillRects per frame
-(board ~417k clk / 30fps). Never fillRect(0,0,640,480) black then blit
-a splash — HDMI shows that wipe.
-
-FPGA DRAW (PYTHON/Chrome will hide these): img.src is a quoted literal
-"jmr:spr:0" not "jmr:spr:"+i. drawImage dest x,y >= 0 — crop dest AND
-source (9-arg) when a billboard hangs off the glass.
+    sx = frameIndex * cellW. cellW/cellH come from window.JMR_CELL.
+  - Chrome-only <script data-host="chrome"> maps jmr:spr:N to the PNG
+    (copy from the GENERATED PNG SHEETS block).
 </simulator-target>
 """
 
@@ -1071,6 +1002,16 @@ def build_system_prompt(
     # the heavy media specs don't bury a local model in multi-KB prose.
     all_guidelines: list[str] = []
     for f in fmts:
+        # Generic <assets> guidelines teach sprite() and await img.decode().
+        # Those calls are illegal on /640png; the contract is HARD_RULES_JMR_PNG.
+        if jmr_png_mode and f.name == "<assets>":
+            all_guidelines.append(
+                "EMIT <assets> one name per pose. size is on-screen px "
+                "(characters/tiles 32-48). Paint with a quoted literal "
+                "\"jmr:spr:N\" and blitSpr — not sprite(), not await, "
+                "not data:image."
+            )
+            continue
         if lean_schema and f.guidelines_small is not None:
             all_guidelines.extend(f.guidelines_small)
         else:

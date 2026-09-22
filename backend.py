@@ -784,6 +784,29 @@ def mlx_prompt_cache_enabled() -> bool:
     return raw not in ("0", "false", "no", "off")
 
 
+def current_mlx_adapter() -> str:
+    """LoRA directory from MLX_ADAPTER. Empty means the base VLM, no adapter.
+
+    The base folder (vision tower included) stays the MLX_MODEL path.
+    Adapters are language-only and are shown in the TUI when this is set.
+    """
+    return (os.environ.get("MLX_ADAPTER") or "").strip()
+
+
+def vlm_load_is_current(
+    loaded_path: str | None,
+    loaded_adapter: str | None,
+    model_path: str,
+    adapter: str | None,
+) -> bool:
+    """True when the cached VLM is this base and this LoRA.
+
+    Empty adapter means base only. A different LoRA must not reuse the cache,
+    and the vision weights still come from model_path either way.
+    """
+    return loaded_path == model_path and (loaded_adapter or "") == (adapter or "")
+
+
 def plan_prompt_cache_reuse(
     cached_tokens: list[int] | None,
     new_tokens: list[int],
@@ -1093,6 +1116,10 @@ class MLXBackend(Backend):
     _loaded_vlm_processor: Any = None
     _loaded_vlm_config: Any = None
     _loaded_vlm_path: str | None = None
+    # LoRA dir last applied on the VLM slot. "" = base only. Part of the
+    # cache key so a new MLX_ADAPTER cannot reuse a no-LoRA load, and
+    # the vision tower stays the weights from the base directory.
+    _loaded_vlm_adapter: str = ""
     # Cross-turn KV prompt cache (text pipeline only; see
     # `plan_prompt_cache_reuse`). `_prompt_cache_tokens` is the exact token
     # sequence the cache currently holds (prompt + generated ids). Dropped
@@ -1160,6 +1187,7 @@ class MLXBackend(Backend):
         cls._loaded_vlm_processor = None
         cls._loaded_vlm_config = None
         cls._loaded_vlm_path = None
+        cls._loaded_vlm_adapter = ""
         import gc
         gc.collect()
 
@@ -1213,6 +1241,7 @@ class MLXBackend(Backend):
             cls._loaded_vlm_processor = None
             cls._loaded_vlm_config = None
             cls._loaded_vlm_path = None
+            cls._loaded_vlm_adapter = ""
             import gc as _gc
             _gc.collect()
         return model, tokenizer
@@ -1227,9 +1256,12 @@ class MLXBackend(Backend):
         model and the vision tower — same files on disk as the mlx_lm
         load, different python objects, different VRAM footprint.
         """
+        adapter = current_mlx_adapter()
         if (
-            cls._loaded_vlm_path == path
-            and cls._loaded_vlm_model is not None
+            cls._loaded_vlm_model is not None
+            and vlm_load_is_current(
+                cls._loaded_vlm_path, cls._loaded_vlm_adapter, path, adapter,
+            )
         ):
             return (
                 cls._loaded_vlm_model,
@@ -1242,12 +1274,17 @@ class MLXBackend(Backend):
         with _mlx_subprocess_fork_guard():
             from mlx_vlm import load as _vlm_load  # type: ignore
             from mlx_vlm.utils import load_config as _vlm_load_config  # type: ignore
-            model, processor = _vlm_load(path)
+            # adapter_path wraps language linears only. Vision tensors
+            # still load from `path` (the untouched mxfp8 base).
+            model, processor = _vlm_load(
+                path, adapter_path=adapter or None,
+            )
             config = _vlm_load_config(path)
         cls._loaded_vlm_model = model
         cls._loaded_vlm_processor = processor
         cls._loaded_vlm_config = config
         cls._loaded_vlm_path = path
+        cls._loaded_vlm_adapter = adapter
         return model, processor, config
 
     def warm_load(self) -> None:
@@ -1435,8 +1472,13 @@ class MLXBackend(Backend):
             (
                 is_vlm_model
                 and (
-                    self._loaded_vlm_path != self.info.model
-                    or self._loaded_vlm_model is None
+                    self._loaded_vlm_model is None
+                    or not vlm_load_is_current(
+                        self._loaded_vlm_path,
+                        self._loaded_vlm_adapter,
+                        self.info.model,
+                        current_mlx_adapter(),
+                    )
                 )
             )
             or (

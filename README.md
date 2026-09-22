@@ -35,7 +35,7 @@ consistency — *not* img2img pose morphing (see [Animation](#animation--consist
 - [Overnight batches](#overnight-batches-10-games) · [Play sample games](#play-sample-games-goodgame) · [Architecture](#architecture)
 - [The verification harness](#the-verification-harness-the-core-lever) · [Assets & animation](#animation--consistency-is-the-hard-constraint)
 - [Memory / opening library](#memory--the-opening-library) · [TUI & CLI](#tui--cli-reference)
-- [Standalone asset tools](#standalone-asset-tools) · [Video cutscenes](#video-cutscenes--ltx-25-mac--wan22-fallback) · [System tests](#system-tests--memory-hygiene)
+- [Standalone asset tools](#standalone-asset-tools) · [Video cutscenes](#video-cutscenes--ltx-25-mac--wan22-fallback) · [HTML-game LoRA](#html-game-lora) · [System tests](#system-tests--memory-hygiene)
 - [Standing rules](#standing-rules) · [Troubleshooting](#troubleshooting) · [Other docs](#other-docs)
 
 ---
@@ -448,7 +448,7 @@ checked model-free by `eval/eval_prompts_plan.py --coverage`.
 `/assets <png|folder>` (stage your sprites for next `/new`) · `/seed <game.html>` (continue an existing game) ·
 `/ref <path>` (VLM glance only — not for copying sprites) · `/check [<N|name>]` (on-demand screenshot judge;
 legacy `/check with <model>` still works) · `/media off` / `/640` (simulator: 640×480, no sidecar media) · `/640png` (same JMR walls + generated `STEM-N.png` sheets, `jmr:spr:N` — a limited FPGA design, not a dumbed-down full HTML game) ·
-`/ltx` `/wan` (pin video engine) · `/goodgame` (copy the trio into tracked `goodgame/`).
+`/ltx` `/wan` (pin video engine) · `/goodgame` (copy the trio into tracked `goodgame/`) · `/lora [latest|N|off]` (language adapter on the base VLM for the next `/new`; vision tower stays the base model; in-process only, so `/server off`).
 
 `/check` is a manual command. The only auto path is `/mode local_plus_review with <model> --auto-apply`, and that still runs only when `/wait` is off.
 
@@ -619,6 +619,61 @@ See **`TEST.md`** and **`eval/OPERATIONS.md`**. Quick check:
 ```
 
 Battery: `memory/system_battery.jsonl`.
+
+---
+
+## HTML-game LoRA
+
+Language-only LoRA on **Qwen3.8-27B-mxfp8** (mlx-vlm, rank 16, alpha 32, lr 1e-5). The base folder `~/MLX_Models/Qwen3.8-27B-mxfp8` is never rewritten, so the vision tower stays the original weights. There is no fused copy.
+
+The programs are `sft/` in this repo. Downloaded games, jsonl, logs, and adapter weights stay on disk under `~/MLX_Models/html_game_sft/` and are not committed.
+
+| On disk (not in git) | What |
+|------|------|
+| `raw/` | Downloaded HTML/JS games |
+| `jsonl/` | Training rows |
+| `adapters/` | Live LoRA (`adapters.safetensors`). Step files `00000NN_adapters.safetensors` are checkpoints |
+| `snapshots/<stamp>/` | Copy of the live adapter after each slice, plus a `READY` file |
+| `logs/` | Trainer and download status |
+| `games.sqlite` | Index of files already turned into rows |
+
+Most rows are ordinary HTML/JS games. The system text is `build_system_prompt("{goal}")` from `prompts_v1.py`, and the assistant text is the game inside `<html_file>`. Files under `~/JMR-JS-CSS-FPGA-COMPUTER/storage` are the `/640png` rows: same function with `jmr_png_mode=True`. Chip rules are applied when you run `/640png`, not by dropping games that use `fetch` or `sprite()`.
+
+Stop `chat.py` before training. The trainer loads the 27B itself. A second copy does not fit in 192 GB.
+
+Python is `~/Agents/.venv` (mlx-vlm). From this repo:
+
+```bash
+PY=~/Agents/.venv/bin/python
+
+$PY sft/serve_progress.py
+# http://127.0.0.1:8766/   (8765 is Asset Studio inside chat.py)
+
+$PY sft/rebuild_corpus.py
+# walks storage/, goodgame/, and raw/ into jsonl/html_corpus.jsonl
+
+$PY sft/ingest.py
+# keeps cloning HTML/JS repos into raw/ and appends jsonl/added.jsonl
+
+$PY sft/run_slices.py
+# waits until jsonl/seed.jsonl is non-empty and logs/seed.ready exists
+# (ingest writes the ready file), then trains ~30 minute slices.
+# Each slice reloads jsonl/html_corpus.jsonl + jsonl/added.jsonl
+# and overwrites adapters/adapters.safetensors.
+```
+
+Run the progress page, the download, and the trainer as three processes. Leave the trainer unloaded from chat until a slice finishes.
+
+Try a snapshot only while the trainer is stopped:
+
+```text
+/server off
+/lora latest
+/640png
+/new <your game>
+```
+
+`/status` shows the base model path and the LoRA directory. The header shows `[VLM]` plus the snapshot name. `/lora off` is the base VLM only. `/lora` lists snapshots. For a normal Chrome game, leave `/640png` off so the model uses the same HTML/JS prompt it trained on.
 
 ---
 

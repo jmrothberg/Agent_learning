@@ -1364,7 +1364,16 @@ class GameAgent(
             model_class if model_class in ("small", "mid", "large")
             else self._classify_model(model)
         )
-        self._trace({"kind": "model_class_resolved", "model": model, "model_class": self._model_class})
+        _trace_rec = {
+            "kind": "model_class_resolved",
+            "model": model,
+            "model_class": self._model_class,
+        }
+        # Set by chat.py /lora. Empty when the session is the base VLM only.
+        _lora = (os.environ.get("MLX_ADAPTER") or "").strip()
+        if _lora:
+            _trace_rec["lora"] = _lora
+        self._trace(_trace_rec)
         # Lean system-prompt mode (2026-06-13): render the compact `small`
         # schema for LOCAL models (MLX/Ollama) even when they classify as
         # `mid`, so a local VLM like qwen3.6:27b spends its attention on the

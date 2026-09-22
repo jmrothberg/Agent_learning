@@ -1182,6 +1182,24 @@ def test_usage_cached_prompt_tokens_parses_openai_and_flat_shapes():
     assert f(None) is None
 
 
+def test_current_mlx_adapter_and_cache_key(monkeypatch):
+    """Empty MLX_ADAPTER is base-only. A different adapter is a cache miss."""
+    monkeypatch.delenv("MLX_ADAPTER", raising=False)
+    assert backend.current_mlx_adapter() == ""
+    assert backend.vlm_load_is_current("/base", "", "/base", "") is True
+    assert backend.vlm_load_is_current("/base", "", "/base", None) is True
+    monkeypatch.setenv("MLX_ADAPTER", "/snap/lora")
+    assert backend.current_mlx_adapter() == "/snap/lora"
+    assert backend.vlm_load_is_current("/base", "", "/base", "/snap/lora") is False
+    assert backend.vlm_load_is_current(
+        "/base", "/snap/lora", "/base", "/snap/lora",
+    ) is True
+    # Vision stays on the base path — a different folder is not this load.
+    assert backend.vlm_load_is_current(
+        "/other", "/snap/lora", "/base", "/snap/lora",
+    ) is False
+
+
 def test_omlx_hot_cache_status_reads_local_settings(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     ep = backend.omlx_default_endpoint()

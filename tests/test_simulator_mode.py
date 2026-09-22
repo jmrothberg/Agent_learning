@@ -389,6 +389,11 @@ def test_jmr_png_system_prompt_keeps_assets_drops_sounds():
     assert "quoted literal" in sp.lower() or "dest x,y" in sp.lower()
     assert "640" in sp
     assert "Phaser, three.js" not in sp
+    # Generic asset guidelines must not teach the calls /640png forbids.
+    assert "sprite(key)" not in sp
+    assert "await img.decode" not in sp
+    # One contract, not the old doubled essay (~13 KB / ~3k tokens).
+    assert len(sp) < 9_000, f"/640png system prompt is {len(sp)} chars"
 
 
 def test_jmr_png_plan_instruction_expects_assets():

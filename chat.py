@@ -2029,6 +2029,13 @@ class CodingBoxApp(App):
             vlm_hint = "  [dim]\\[text-only][/dim]"
         else:
             vlm_hint = ""  # unprobed — stay silent
+        # MLX_ADAPTER is language-only LoRA on the base VLM. Show it next
+        # to [VLM] so a snapshot is obvious and the vision tower is still
+        # the base model's.
+        lora_hint = ""
+        lora_dir = backend_mod.current_mlx_adapter()
+        if lora_dir:
+            lora_hint = f"  [cyan]+ LoRA {_esc(os.path.basename(lora_dir.rstrip('/')))}[/cyan]"
         profile = self._format_run_profile()
         review_hint = ""
         if self._run_profile == "local_plus_review" and self._profile_review_model:
@@ -2091,7 +2098,7 @@ class CodingBoxApp(App):
                 "[dim]— 640×480 JMR V1 native, no sidecar media ( /media on to restore )[/dim]"
             )
         return (
-            f"[bold]Mode:[/bold] {mode_badge}{vlm_hint}\n"
+            f"[bold]Mode:[/bold] {mode_badge}{vlm_hint}{lora_hint}\n"
             f"[bold]Profile:[/bold] {profile}{review_hint}"
             f"{roles_line}{media_line}\n"
         )
@@ -2163,6 +2170,9 @@ class CodingBoxApp(App):
             out += f"[b]Backend:[/b] {self._session_backend_info.name.upper()}\n"
         if self._session_model:
             out += f"[b]Model:[/b] {self._session_model}\n"
+        lora_dir = backend_mod.current_mlx_adapter()
+        if lora_dir:
+            out += f"[b]LoRA:[/b] {_esc(lora_dir)}\n"
         if self._session_backend_info2 is not None:
             out += f"[b]Model 2 Backend:[/b] {self._session_backend_info2.name.upper()} [dim]({self._session_role2})[/dim]\n"
         if self._session_model2:
@@ -3621,6 +3631,8 @@ class CodingBoxApp(App):
                 self._cmd_set_model_class(arg)
             elif cmd == "launch":
                 self._cmd_launch_mlx(arg)
+            elif cmd == "lora":
+                self._cmd_lora(arg)
             elif cmd in ("check", "look", "glance"):
                 await self._cmd_check(arg)
             elif cmd == "ask":
@@ -3776,6 +3788,8 @@ class CodingBoxApp(App):
             "                                  [dim]ON → /critic auto is free. off → Qwen3.8-27B stays in-process. Sticky. /help server[/dim]",
             "  [b]/launch <N|name|path> [server][/b]  stage an MLX model for next /new",
             "                                  [dim]in-process unless /server on or you add [b]server[/b] · MLX stalls do not fall back to Ollama[/dim]",
+            "  [b]/lora [latest|N|off][/b]     language LoRA on the base VLM for the next /new",
+            "                                  [dim]vision tower stays the base model · in-process only (/server off) · /lora lists snapshots[/dim]",
             "  [b]/unload [N|name|all|mlx][/b]  free VRAM · bare = active session · all = every Ollama · mlx = drop in-process MLX",
             "",
             "[bold cyan]── run knobs (all sticky across /new) ──[/bold cyan]",
@@ -5567,6 +5581,76 @@ class CodingBoxApp(App):
             )
         self._log_info(msg)
 
+    def _cmd_lora(self, arg: str) -> None:
+        """/lora [latest|N|stamp|off] — stage a language LoRA for the next /new.
+
+        The base folder (vision tower included) stays the loaded VLM.
+        In-process mlx_vlm only; /server on talks to oMLX and ignores it.
+        """
+        root = Path.home() / "MLX_Models" / "html_game_sft" / "snapshots"
+        snaps = []
+        if root.is_dir():
+            snaps = sorted(
+                p for p in root.iterdir()
+                if p.is_dir() and (p / "adapters.safetensors").is_file()
+            )
+        a = arg.strip()
+        cur = backend_mod.current_mlx_adapter()
+        if not a or a in ("status", "?"):
+            shown = cur or "off"
+            self._log_info(
+                f"LoRA: [b]{_esc(shown)}[/b] — applies on the next in-process /new"
+            )
+            if not snaps:
+                self._log_info(
+                    "no snapshot yet — training writes one under "
+                    "~/MLX_Models/html_game_sft/snapshots/"
+                )
+                return
+            for i, p in enumerate(snaps, 1):
+                mark = " [green]← on[/green]" if cur == str(p) else ""
+                self._log_info(f"  {i}. {_esc(p.name)}{mark}")
+            self._log_info("usage: /lora latest   /lora <N>   /lora off")
+            return
+        if a in ("off", "clear", "none"):
+            os.environ.pop("MLX_ADAPTER", None)
+            self._update_status()
+            self._log_info(
+                "LoRA off — next /new loads the base VLM only (vision tower unchanged)"
+            )
+            return
+        if a in ("latest", "on", "last"):
+            if not snaps:
+                self._log_info("no LoRA snapshot yet")
+                return
+            chosen = snaps[-1]
+        elif a.isdigit():
+            idx = int(a)
+            if idx < 1 or idx > len(snaps):
+                self._log_info(f"no snapshot {idx} — /lora to list")
+                return
+            chosen = snaps[idx - 1]
+        else:
+            matches = [p for p in snaps if p.name == a or a in p.name]
+            if len(matches) != 1:
+                self._log_info("usage: /lora latest | /lora <N|stamp> | /lora off")
+                return
+            chosen = matches[0]
+        os.environ["MLX_ADAPTER"] = str(chosen)
+        self._update_status()
+        note = ""
+        model = self._next_model or self._session_model or ""
+        if self._mlx_uses_omlx(model):
+            note = (
+                " [yellow]ignored while /server is on — "
+                "/server off so this LoRA loads in-process[/yellow]"
+            )
+        self._log_info(
+            f"[green]✓[/green] LoRA [b]{_esc(chosen.name)}[/b] for the next /new. "
+            "Base model stays put, vision tower included."
+            + note
+        )
+
     async def _cmd_check(self, arg: str) -> None:
         """/check [<N|model>] — visual check + guidance injection.
 
@@ -7310,6 +7394,12 @@ class CodingBoxApp(App):
                 self._log_error(f"MLX warm-load failed: {e}")
                 self._session_done = True
                 return
+            lora = backend_mod.current_mlx_adapter()
+            if lora:
+                self._log_info(
+                    f"LoRA on: [b]{_esc(lora)}[/b] — base [b]{_esc(model_name)}[/b] "
+                    "(vision tower from the base)"
+                )
 
         if self.browser is None:
             self._phase_label = "starting browser"
