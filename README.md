@@ -624,7 +624,20 @@ Battery: `memory/system_battery.jsonl`.
 
 ## HTML-game LoRA
 
-Language-only LoRA on **Qwen3.8-27B-mxfp8** (mlx-vlm, rank 16, alpha 32, lr 1e-5). The base folder `~/MLX_Models/Qwen3.8-27B-mxfp8` is never rewritten, so the vision tower stays the original weights. There is no fused copy.
+Language-only LoRA on **Qwen3.8-27B-mxfp8** (mlx-vlm, rank 16, alpha 32, lr 5e-5 since Sep 23; was 1e-5). The base folder `~/MLX_Models/Qwen3.8-27B-mxfp8` is never rewritten, so the vision tower stays the original weights. There is no fused copy.
+
+**Speed settings (`sft/train_lora.py` defaults, ~10x vs the first runs — trained answer tokens per second 12 → ~125; 143 s per fragment → ~22 s per whole game):**
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--system short` | on | General html rows train with a 60-token prompt instead of the 6,100-token agent prompt. /640png gold rows keep their contract. |
+| `--whole-games 1` | on | Glues split pieces back into whole `<!doctype…</html>` games that fit in 8k tokens and drops mid-file fragments. |
+| `--dequantize 1` | on | Unpacks the frozen mxfp8 base to bf16 in memory so training uses dense GEMM. Same values, so the adapter still fits the mxfp8 model. |
+| `--lora-top-layers 32` | on | Only layers 32–63 train, so backward stops halfway. Layers 0–31 keep their learned LoRA and are still saved. |
+| `--grad-checkpoint 1` | on | Needed: off runs out of GPU memory. |
+| `--batch-size 1` | 1 | 2 gave no speedup (the GPU is compute-bound). |
+
+Use `--system full --whole-games 0 --dequantize 0 --lora-top-layers 0 --learning-rate 1e-5` to go back to the old behavior.
 
 ### Start from Terminal (survives quitting Cursor)
 

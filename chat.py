@@ -2035,7 +2035,8 @@ class CodingBoxApp(App):
         lora_hint = ""
         lora_dir = backend_mod.current_mlx_adapter()
         if lora_dir:
-            lora_hint = f"  [cyan]+ LoRA {_esc(os.path.basename(lora_dir.rstrip('/')))}[/cyan]"
+            # MULTI-LORA: project/stamp so two LoRA projects are told apart.
+            lora_hint = f"  [cyan]+ LoRA {_esc(backend_mod.lora_label(lora_dir.rstrip('/')))}[/cyan]"
         profile = self._format_run_profile()
         review_hint = ""
         if self._run_profile == "local_plus_review" and self._profile_review_model:
@@ -5597,9 +5598,17 @@ class CodingBoxApp(App):
         /model still picks Qwen3.8-27B. /new <goal> then loads that model
         plus this adapter. /640png and the other controls are unchanged.
         In-process only; /server on ignores the adapter.
+
+        MULTI-LORA: lists every ~/MLX_Models/<project>/snapshots/ as
+        project/stamp. /lora latest <project> picks the newest in one project.
         """
-        snaps, latest = backend_mod.lora_snapshot_dirs()
         a = arg.strip()
+        # MULTI-LORA: "/lora latest <project>" narrows to that project's snapshots.
+        project = None
+        parts = a.split()
+        if len(parts) == 2 and parts[0] in ("latest", "on", "last"):
+            a, project = parts[0], parts[1]
+        snaps, latest = backend_mod.lora_snapshot_dirs(project=project)
         cur = backend_mod.current_mlx_adapter()
         if not a or a in ("status", "?"):
             shown = cur or "off"
@@ -5619,8 +5628,8 @@ class CodingBoxApp(App):
                     marks += " [green]← latest[/green]"
                 if cur == str(p):
                     marks += " [green]← on[/green]"
-                self._log_info(f"  {i}. {_esc(p.name)}{marks}")
-            self._log_info("usage: /lora latest   /lora <N>   /lora off    (/server off)")
+                self._log_info(f"  {i}. {_esc(backend_mod.lora_label(p))}{marks}")
+            self._log_info("usage: /lora latest [project]   /lora <N>   /lora off    (/server off)")
             return
         if a in ("off", "clear", "none"):
             os.environ.pop("MLX_ADAPTER", None)
@@ -5631,7 +5640,7 @@ class CodingBoxApp(App):
             return
         if a in ("latest", "on", "last"):
             if latest is None:
-                self._log_info("no LoRA snapshot yet")
+                self._log_info("no LoRA snapshot yet" + (f" for project {_esc(project)}" if project else ""))
                 return
             chosen = latest
         elif a.isdigit():
@@ -5641,7 +5650,8 @@ class CodingBoxApp(App):
                 return
             chosen = snaps[idx - 1]
         else:
-            matches = [p for p in snaps if p.name == a or a in p.name]
+            # MULTI-LORA: match "stamp" or "project/stamp".
+            matches = [p for p in snaps if p.name == a or a in backend_mod.lora_label(p)]
             if len(matches) != 1:
                 self._log_info("usage: /lora latest | /lora <N|stamp> | /lora off")
                 return
@@ -5655,8 +5665,12 @@ class CodingBoxApp(App):
                 " [yellow]ignored while /server is on — "
                 "/server off so this LoRA loads in-process[/yellow]"
             )
+        # MULTI-LORA: an adapter only fits the base it was trained on (READY file).
+        trained_on = backend_mod.lora_base_model(chosen)
+        if trained_on:
+            note += f" [dim]trained on {_esc(Path(trained_on).name)} — pick that in /model[/dim]"
         self._log_info(
-            f"[green]✓[/green] LoRA [b]{_esc(chosen.name)}[/b] staged. "
+            f"[green]✓[/green] LoRA [b]{_esc(backend_mod.lora_label(chosen))}[/b] staged. "
             "Next /new <goal> loads it with the Qwen you picked in /model. "
             "/640png and the other controls stay as they are."
             + note

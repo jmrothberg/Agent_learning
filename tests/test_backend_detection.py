@@ -1197,6 +1197,26 @@ def test_lora_latest_is_newest_dated_snapshot(tmp_path):
     assert latest is not None and latest.name == "20260922T114826Z"
 
 
+def test_lora_snapshot_dirs_lists_every_project(tmp_path, monkeypatch):
+    """MULTI-LORA: each ~/MLX_Models/<project>/snapshots/ is listed; project filters."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    for proj, stamp in (("html_game_sft", "20260922T024840Z"), ("sprite_sft", "20260923T010000Z")):
+        snap = tmp_path / "MLX_Models" / proj / "snapshots" / stamp
+        snap.mkdir(parents=True)
+        (snap / "adapters.safetensors").write_bytes(b"x")
+        (snap / "READY").write_text(f"MLX_MODEL=/m/{proj}-base\n")
+    (tmp_path / "MLX_Models" / "Qwen-base").mkdir()  # a model folder, no snapshots/
+    snaps, latest = backend.lora_snapshot_dirs()
+    assert [backend.lora_label(p) for p in snaps] == [
+        "html_game_sft/20260922T024840Z",
+        "sprite_sft/20260923T010000Z",
+    ]
+    assert backend.lora_label(latest) == "sprite_sft/20260923T010000Z"
+    snaps, latest = backend.lora_snapshot_dirs(project="html_game_sft")
+    assert [backend.lora_label(p) for p in snaps] == ["html_game_sft/20260922T024840Z"]
+    assert backend.lora_base_model(latest) == "/m/html_game_sft-base"
+
+
 def test_current_mlx_adapter_and_cache_key(monkeypatch):
     """Empty MLX_ADAPTER is base-only. A different adapter is a cache miss."""
     monkeypatch.delenv("MLX_ADAPTER", raising=False)

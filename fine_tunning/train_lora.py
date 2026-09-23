@@ -2,10 +2,14 @@
 
 Writes adapters under html_game_sft/adapters/. The base model directory
 is opened read-only by mlx-vlm.
+
+MULTI-LORA: LORA_ROOT (project folder) and LORA_BASE (base model folder)
+pick a different LoRA / base. Defaults are the HTML-game run. See README.md.
 """
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 import mlx.core as mx
@@ -19,8 +23,9 @@ from mlx_vlm.trainer.datasets import VisionDataset
 from mlx_vlm.trainer.sft_trainer import TrainingArgs, train
 from mlx_vlm.utils import load
 
-ROOT = Path("/Users/jonathanrothberg/MLX_Models/html_game_sft")
-BASE = "/Users/jonathanrothberg/MLX_Models/Qwen3.8-27B-mxfp8"
+# MULTI-LORA: env overrides; defaults = the HTML-game LoRA on Qwen3.8-27B.
+ROOT = Path(os.environ.get("LORA_ROOT", "/Users/jonathanrothberg/MLX_Models/html_game_sft")).expanduser()
+BASE = os.path.expanduser(os.environ.get("LORA_BASE", "/Users/jonathanrothberg/MLX_Models/Qwen3.8-27B-mxfp8"))
 
 
 # SPEED: general "html" rows carried the full ~6,100-token agent prompt, which was
@@ -159,6 +164,7 @@ def main() -> None:
     resume = str(args.adapter_path) if args.adapter_path else None
     model = setup_model_for_training(model, train_args_ns, resume)
     if args.lora_top_layers:
+        # MULTI-LORA: layer path is Qwen-VL style (mlx-vlm). Other VLM layouts: --lora-top-layers 0.
         layers = model.language_model.model.layers
         for layer in layers[: max(0, len(layers) - args.lora_top_layers)]:
             layer.freeze()

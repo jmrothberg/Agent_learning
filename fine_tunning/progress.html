@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>HTML game LoRA progress</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font: 16px/1.4 ui-sans-serif, system-ui, sans-serif; margin: 32px auto; max-width: 880px; background: #12141a; color: #e8e6e3; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 8px; }
+  .sub { color: #9a968e; margin-bottom: 24px; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .card { background: #1c1f28; border-radius: 10px; padding: 16px; }
+  .num { font-size: 36px; font-variant-numeric: tabular-nums; font-weight: 650; }
+  .label { color: #9a968e; font-size: 13px; margin-top: 4px; }
+  h2 { font-size: 15px; margin: 28px 0 8px; }
+  pre { background: #1c1f28; padding: 12px; border-radius: 10px; overflow: auto; font-size: 12px; line-height: 1.45; white-space: pre-wrap; }
+  ul { margin: 0; padding-left: 18px; }
+  li { margin: 4px 0; }
+  .ok { color: #8fd49a; }
+  .bad { color: #f0a0a0; }
+  .panel { background: #1c1f28; border-radius: 10px; padding: 16px; margin-top: 12px; }
+  .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .dot { width: 14px; height: 14px; border-radius: 50%; background: #a33; flex: none; }
+  .dot.safe { background: #8fd49a; }
+  .dot.wait { background: #e0b45a; }
+  button { font: inherit; background: #2a2e3a; color: #e8e6e3; border: 0; border-radius: 8px; padding: 8px 14px; cursor: pointer; }
+  button:disabled { opacity: 0.4; cursor: default; }
+</style>
+</head>
+<body>
+<h1>HTML game LoRA</h1>
+<p class="sub" id="banner">HTML and JavaScript games. The regular agent prompt is on the downloads. /640png is only the JMR storage files.</p>
+<div class="grid">
+  <div class="card"><div class="num" id="rows">–</div><div class="label" id="rowsLabel">HTML/JS slices written</div></div>
+  <div class="card"><div class="num" id="step">–</div><div class="label">Step in this 30-minute block</div></div>
+  <div class="card"><div class="num" id="loss">–</div><div class="label">Loss on the last file</div></div>
+</div>
+<div class="grid" style="margin-top:12px">
+  <div class="card"><div class="num" id="stepsDone">–</div><div class="label">Steps trained on this LoRA</div></div>
+  <div class="card"><div class="num" id="ckptCount">–</div><div class="label" id="ckptLabel">Checkpoints kept</div></div>
+  <div class="card"><div class="num" id="epoch">–</div><div class="label" id="epochLabel">Of one pass through the set</div></div>
+</div>
+<div class="grid" style="margin-top:12px">
+  <div class="card"><div class="num" id="html">–</div><div class="label">HTML/JS games</div></div>
+  <div class="card"><div class="num" id="gold">–</div><div class="label">/640png files inside that set</div></div>
+  <div class="card"><div class="num" id="added">–</div><div class="label">New games this download</div></div>
+</div>
+<h2>Loss</h2>
+<canvas id="chart" width="880" height="280" style="width:100%;background:#1c1f28;border-radius:10px"></canvas>
+<p class="sub" id="avgLabel">waiting for steps</p>
+<h2>Checkpoints kept</h2>
+<p class="sub">Each 30-minute save is a new folder with the date. Older checkpoints stay on disk.</p>
+<ul id="ckpts"><li>none yet</li></ul>
+<div class="panel">
+  <div class="row">
+    <div class="dot" id="safeDot"></div>
+    <strong id="safeText">checking</strong>
+  </div>
+  <p class="sub" id="safeNote"></p>
+  <div class="row">
+    <button id="holdBtn" type="button">HOLD training</button>
+    <button id="resumeBtn" type="button">RESUME training</button>
+  </div>
+</div>
+<h2>Training</h2>
+<p id="train">waiting</p>
+<h2>Downloads</h2>
+<p id="ingest">waiting</p>
+<h2>Trainer log</h2>
+<pre id="log">no log yet</pre>
+<script>
+async function tick() {
+  try {
+    const r = await fetch("/status.json", {cache: "no-store"});
+    const s = await r.json();
+    const t = s.train || {};
+    const g = s.ingest || {};
+    document.getElementById("html").textContent = s.html_files ?? s.html_rows ?? 0;
+    const rb = s.rebuild || {};
+    const writing = rb.state === "rebuilding";
+    const written = (rb.html || 0) + (rb.gold || 0);
+    const runMatch = t.detail && String(t.detail).match(/(\d+)\s+rows/);
+    const runRows = writing ? written : (runMatch ? runMatch[1] : (s.training_rows ?? "–"));
+    document.getElementById("rows").textContent = runRows;
+    document.getElementById("rowsLabel").textContent = writing
+      ? "Pieces written so far (training has not loaded these yet)"
+      : "Pieces loaded for training";
+    document.getElementById("gold").textContent = s.gold_files ?? s.gold_rows ?? 0;
+    document.getElementById("added").textContent = g.html_added ?? 0;
+    const stepCap = t.iters_this_slice ? ` / ${t.iters_this_slice}` : "";
+    document.getElementById("step").textContent = `${t.step ?? 0}${stepCap}`;
+    const loading = (t.step == null || t.step === 0) && !(s.log_tail || "").includes("Iter ");
+    document.getElementById("loss").textContent = loading ? "loading" : ((t.loss == null) ? "–" : Number(t.loss).toFixed(3));
+    const banner = document.getElementById("banner");
+    banner.textContent = `Training is the HTML and JavaScript games (${s.html_files ?? 0} files, ${s.html_rows ?? 0} slices). ${s.gold_files ?? 0} of the files use the /640png prompt. Long games are split and added at each 30-minute checkpoint.`;
+    const st = t.state || "not started";
+    const cls = st === "error" ? "bad" : "ok";
+    document.getElementById("train").innerHTML =
+      `<span class="${cls}">${st}</span> — ${t.detail || ""}` +
+      (t.it_per_sec ? ` · ${Number(t.it_per_sec).toFixed(3)} it/s` : "") +
+      (t.peak_gb ? ` · peak ${t.peak_gb} GB` : "") +
+      (t.snapshot ? `<br>latest adapter: ${t.snapshot}` : "") +
+      (t.updated ? `<br><span class="sub">updated ${t.updated}</span>` : "");
+    document.getElementById("ingest").textContent =
+      `${g.state || "not started"}` +
+      (g.source ? ` — ${g.source}` : "") +
+      (g.unique != null ? ` · unique ${g.unique}` : "") +
+      (g.updated ? ` · ${g.updated}` : "");
+    document.getElementById("stepsDone").textContent = s.steps_trained ?? (s.losses || []).length;
+    const ckpts = s.checkpoints || [];
+    document.getElementById("ckptCount").textContent = ckpts.length;
+    document.getElementById("ckptLabel").textContent = s.slice_starts
+      ? `Dated saves kept. ${s.slice_starts} blocks started. Old ones are not deleted.`
+      : "Dated saves kept. Old ones are not deleted.";
+    const ep = s.epochs;
+    document.getElementById("epoch").textContent = ep == null ? "–" : (ep * 100).toFixed(2) + "%";
+    const days = s.epoch_days;
+    document.getElementById("epochLabel").textContent = s.epoch_rows
+      ? `Of one pass through ${Number(s.epoch_rows).toLocaleString()} pieces. One full pass is 1 epoch` + (days ? ` (about ${Math.round(days)} days at this speed).` : ".")
+      : "Of one pass through the set";
+    document.getElementById("ckpts").innerHTML = ckpts.length
+      ? ckpts.slice().reverse().map((c) => `<li><b>${c.when}</b> <span class="sub">${c.name}</span></li>`).join("")
+      : "<li>none yet</li>";
+    document.getElementById("log").textContent = s.log_tail || "no log yet";
+    drawLoss(s.losses || []);
+    const dot = document.getElementById("safeDot");
+    const text = document.getElementById("safeText");
+    const note = document.getElementById("safeNote");
+    dot.className = "dot";
+    if (s.safe_to_test) {
+      dot.classList.add("safe");
+      text.textContent = "SAFE to test AGENT";
+      note.textContent = "Trainer is stopped and memory is free. In chat: /server off, then /lora " + (s.checkpoint || "");
+    } else if (s.agent_loaded) {
+      dot.classList.add("wait");
+      text.textContent = "Agent model is loaded";
+      note.textContent = "RESUME quits that model, waits for the memory to clear, then continues this LoRA from the saved checkpoint.";
+    } else if (s.trainer_running) {
+      text.textContent = "Training — do not load the agent model";
+      note.textContent = "HOLD stops the GPU job and frees memory. The adapter you can test is the last finished checkpoint" + (s.checkpoint ? ": " + s.checkpoint : "") + ". Steps since that save stay in memory until the next save.";
+    } else {
+      dot.classList.add("wait");
+      text.textContent = "Trainer is stopped";
+      note.textContent = s.checkpoint ? ("Checkpoint: " + s.checkpoint) : "No checkpoint yet.";
+    }
+    document.getElementById("holdBtn").disabled = !s.trainer_running || busy;
+    document.getElementById("resumeBtn").disabled = !!s.trainer_running || busy;
+  } catch (e) {
+    document.getElementById("train").textContent = "status fetch failed";
+  }
+}
+function drawLoss(losses) {
+  const canvas = document.getElementById("chart");
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  const label = document.getElementById("avgLabel");
+  if (!losses.length) {
+    label.textContent = "waiting for steps";
+    return;
+  }
+  function rolling(window) {
+    const out = [];
+    for (let i = 0; i < losses.length; i++) {
+      const a = losses.slice(Math.max(0, i - window + 1), i + 1);
+      out.push(a.reduce((s, x) => s + x, 0) / a.length);
+    }
+    return out;
+  }
+  const avg = rolling(18);
+  const avg50 = rolling(50);
+  // Plot box leaves room for tick labels. X always maps step 1..N across the full width.
+  const left = 58, right = 16, top = 16, bottom = 42;
+  const pw = w - left - right, ph = h - top - bottom;
+  const all = losses.concat(avg, avg50);
+  let lo = Math.min(...all), hi = Math.max(...all);
+  const pad = ((hi - lo) || 0.1) * 0.08;
+  lo -= pad;
+  hi += pad;
+  const span = (hi - lo) || 1;
+  const n = losses.length;
+  const xOf = (i) => left + pw * (n === 1 ? 0.5 : i / (n - 1));
+  const yOf = (v) => top + ph * (1 - (v - lo) / span);
+  ctx.strokeStyle = "#3a3e48";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(left, top);
+  ctx.lineTo(left, top + ph);
+  ctx.lineTo(left + pw, top + ph);
+  ctx.stroke();
+  ctx.fillStyle = "#9a968e";
+  ctx.font = "12px ui-sans-serif, system-ui, sans-serif";
+  ctx.textAlign = "right";
+  ctx.textBaseline = "middle";
+  for (let t = 0; t < 5; t++) {
+    const v = lo + span * t / 4;
+    const y = yOf(v);
+    ctx.strokeStyle = "#3a3e48";
+    ctx.beginPath();
+    ctx.moveTo(left - 5, y);
+    ctx.lineTo(left, y);
+    ctx.stroke();
+    ctx.fillText(v.toFixed(2), left - 8, y);
+  }
+  const xIdx = [];
+  const want = Math.min(n, 6);
+  for (let t = 0; t < want; t++) {
+    xIdx.push(Math.round(t * (n - 1) / Math.max(1, want - 1)));
+  }
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+  [...new Set(xIdx)].forEach((i) => {
+    const x = xOf(i);
+    ctx.strokeStyle = "#3a3e48";
+    ctx.beginPath();
+    ctx.moveTo(x, top + ph);
+    ctx.lineTo(x, top + ph + 5);
+    ctx.stroke();
+    ctx.fillText(String(i + 1), x, top + ph + 8);
+  });
+  ctx.fillStyle = "#9a968e";
+  ctx.textAlign = "center";
+  ctx.fillText("Step", left + pw / 2, h - 16);
+  ctx.save();
+  ctx.translate(14, top + ph / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.fillText("Loss", 0, 0);
+  ctx.restore();
+  function line(series, color, width) {
+    ctx.beginPath();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width;
+    series.forEach((v, i) => {
+      const x = xOf(i), y = yOf(v);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+  line(losses, "#6a675f", 1);
+  line(avg, "#8fd49a", 2);
+  line(avg50, "#e06a6a", 2);
+  const last = avg[avg.length - 1];
+  const last50 = avg50[avg50.length - 1];
+  label.textContent = `green = last 18 steps (${last.toFixed(3)}). red = last 50 steps (${last50.toFixed(3)}). gray = each file. ${n} steps in this run. Until 50 steps exist, the red line uses however many have finished.`;
+}
+let busy = false;
+async function control(path) {
+  busy = true;
+  document.getElementById("holdBtn").disabled = true;
+  document.getElementById("resumeBtn").disabled = true;
+  document.getElementById("safeText").textContent = path === "/hold" ? "Stopping the GPU job…" : "Clearing memory, then resuming…";
+  try {
+    await fetch(path, {method: "POST"});
+  } catch (e) {
+    document.getElementById("safeNote").textContent = "The control request failed. Training was not restarted from this page.";
+  }
+  busy = false;
+  tick();
+}
+document.getElementById("holdBtn").onclick = () => control("/hold");
+document.getElementById("resumeBtn").onclick = () => control("/resume");
+tick();
+setInterval(tick, 2000);
+</script>
+</body>
+</html>

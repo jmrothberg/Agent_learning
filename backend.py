@@ -796,28 +796,70 @@ def current_mlx_adapter() -> str:
 _LORA_STAMP = re.compile(r"\d{8}T\d{6}Z")
 
 
-def lora_snapshot_dirs(root: str | os.PathLike | None = None):
+def lora_snapshot_dirs(root: str | os.PathLike | None = None, project: str | None = None):
     """Training snapshots, oldest dated folder first.
 
     Returns (dirs, latest). `latest` is the newest YYYYMMDDTHHMMSSZ
     checkpoint. Named leftovers such as long-prompt-smoke stay in the
     list so they can be picked by number, and they are not `latest`.
+
+    MULTI-LORA: with no `root`, every ~/MLX_Models/<project>/snapshots/
+    folder is listed (one per LoRA project, e.g. html_game_sft). `project`
+    keeps only that one. Order is per project; `latest` is the newest
+    dated checkpoint across the listed projects.
     """
     from pathlib import Path
 
-    folder = Path.home() / "MLX_Models" / "html_game_sft" / "snapshots" if root is None else Path(root)
-    if not folder.is_dir():
-        return [], None
-    snaps = [
-        p for p in folder.iterdir()
-        if p.is_dir() and (p / "adapters.safetensors").is_file()
-    ]
-    stamps = sorted((p for p in snaps if _LORA_STAMP.fullmatch(p.name)), key=lambda p: p.name)
-    stamp_ids = {p.name for p in stamps}
-    others = sorted((p for p in snaps if p.name not in stamp_ids), key=lambda p: p.name)
-    ordered = stamps + others
-    latest = stamps[-1] if stamps else (others[-1] if others else None)
+    if root is None:
+        models = Path.home() / "MLX_Models"
+        folders = sorted(
+            p / "snapshots" for p in models.iterdir() if (p / "snapshots").is_dir()
+        ) if models.is_dir() else []
+        if project:
+            folders = [f for f in folders if f.parent.name == project]
+    else:
+        folders = [Path(root)]
+    ordered: list = []
+    all_stamps: list = []
+    for folder in folders:
+        if not folder.is_dir():
+            continue
+        snaps = [
+            p for p in folder.iterdir()
+            if p.is_dir() and (p / "adapters.safetensors").is_file()
+        ]
+        stamps = sorted((p for p in snaps if _LORA_STAMP.fullmatch(p.name)), key=lambda p: p.name)
+        stamp_ids = {p.name for p in stamps}
+        others = sorted((p for p in snaps if p.name not in stamp_ids), key=lambda p: p.name)
+        ordered += stamps + others
+        all_stamps += stamps
+    if all_stamps:
+        latest = max(all_stamps, key=lambda p: p.name)
+    else:
+        latest = ordered[-1] if ordered else None
     return ordered, latest
+
+
+def lora_label(path) -> str:
+    """MULTI-LORA: '<project>/<stamp>' so snapshots from two LoRAs are not confused."""
+    from pathlib import Path
+
+    p = Path(path)
+    return f"{p.parent.parent.name}/{p.name}"
+
+
+def lora_base_model(path) -> str:
+    """MLX_MODEL line from the snapshot READY file (the base it was trained on), or ''."""
+    from pathlib import Path
+
+    ready = Path(path) / "READY"
+    try:
+        for line in ready.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("MLX_MODEL="):
+                return line.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    return ""
 
 
 def vlm_load_is_current(
