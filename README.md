@@ -624,6 +624,19 @@ Battery: `memory/system_battery.jsonl`.
 
 ## HTML-game LoRA
 
+> **Full training guide: [`fine_tunning/README.md`](fine_tunning/README.md)**. It covers the data sources, processing, row format, every flag, training a new LoRA or another Qwen-style (mlx-vlm) base, and troubleshooting. `fine_tunning/` is the current code. `sft/` is the older copy.
+>
+> ```bash
+> cd ~/Agent_learning/fine_tunning
+> ./start.sh            # monitor + trainer (HTML-game LoRA defaults)
+> ./start.sh monitor    # progress page only → http://127.0.0.1:8766/
+> # another LoRA / base:
+> LORA_ROOT=~/MLX_Models/my_lora LORA_BASE=~/MLX_Models/<qwen-vl-model> LORA_PORT=8767 \
+>   LORA_GAME_FILTER=0 LORA_TRAIN_ARGS="--system full --whole-games 0" ./start.sh
+> ```
+>
+> In the TUI, `/lora` lists snapshots from every `~/MLX_Models/<project>/snapshots/` as `project/stamp`, and `/lora latest <project>` picks one project.
+
 Language-only LoRA on **Qwen3.8-27B-mxfp8** (mlx-vlm, rank 16, alpha 32, lr 5e-5 since Sep 23; was 1e-5). The base folder `~/MLX_Models/Qwen3.8-27B-mxfp8` is never rewritten, so the vision tower stays the original weights. There is no fused copy.
 
 **Speed settings (`sft/train_lora.py` defaults, ~10x vs the first runs — trained answer tokens per second 12 → ~125; 143 s per fragment → ~22 s per whole game):**
