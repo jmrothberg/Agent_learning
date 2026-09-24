@@ -219,24 +219,93 @@ def _scan_shards() -> dict:
     return scan
 
 
-def _small_corpus() -> dict:
-    """Training-set size and quality-worker progress for the small-model page."""
-    scan = _scan_shards()
-    unique = scan["unique"]
+def _quality_modes() -> list[str]:
+    """Which CPU review passes are running: score, edu, browser. Empty if none."""
+    out = subprocess.check_output(["ps", "-ax", "-o", "command="], text=True, errors="replace")
+    modes = []
+    for cmd in out.splitlines():
+        if "small/quality_worker.py" not in cmd or "Python" not in cmd or "zsh" in cmd:
+            continue
+        if "--edu" in cmd:
+            modes.append("edu")
+        elif "--browser" in cmd:
+            modes.append("browser")
+        else:
+            modes.append("score")
+    return modes
+
+
+def _quality_rate() -> dict:
+    """Last 'edu: N docs X/s' or 'browser: N pages' line. Reads the tail only."""
+    info = {"edu_rate": 0.0, "edu_session": 0, "browser_session": 0}
+    for name, kind in (("quality.out", "edu"), ("browser.out", "browser")):
+        path = ROOT / "logs" / name
+        if not path.exists():
+            continue
+        try:
+            size = path.stat().st_size
+            with path.open("rb") as f:
+                f.seek(max(0, size - 12000))
+                tail = f.read().decode("utf-8", "replace")
+        except OSError:
+            continue
+        if kind == "edu":
+            hits = re.findall(r"edu: (\d+) docs ([0-9.]+)/s", tail)
+            if hits:
+                info["edu_session"] = int(hits[-1][0])
+                info["edu_rate"] = float(hits[-1][1])
+        else:
+            hits = re.findall(r"browser: (\d+) pages", tail)
+            if hits:
+                info["browser_session"] = int(hits[-1])
+    return info
+
+
+_quality_cache: dict = {"at": 0.0, "row": {}}
+
+
+def _quality_row() -> dict:
+    """Counts from quality.sqlite. Cached 60s — the eligible-file count takes several seconds."""
+    now = time.time()
+    if now - _quality_cache["at"] < 60 and _quality_cache["row"]:
+        return _quality_cache["row"]
+    shards = ROOT / "shards"
+    row = {
+        "shards": len(list(shards.glob("*.jsonl"))) if shards.is_dir() else 0,
+        "shards_done": 0, "scored": 0, "dropped": 0, "edu": 0, "edu_left": 0,
+        "browser": 0, "browser_left": 0,
+    }
     q = ROOT / "quality.sqlite"
-    quality = {"scored": 0, "dropped": 0, "edu": 0, "browser": 0, "browser_left": 0}
     if q.exists():
         try:
             con = sqlite3.connect(f"file:{q}?mode=ro", uri=True, timeout=5)
-            quality["scored"] = con.execute("select count(*) from quality").fetchone()[0]
-            quality["dropped"] = con.execute("select count(*) from quality where weight = 0").fetchone()[0]
-            quality["edu"] = con.execute("select count(*) from edu").fetchone()[0]
-            quality["browser"] = con.execute("select count(*) from browser").fetchone()[0]
-            quality["browser_left"] = con.execute("select count(*) from pending_browser").fetchone()[0]
+            row["shards_done"] = con.execute("select count(*) from done").fetchone()[0]
+            row["scored"] = con.execute("select count(*) from quality").fetchone()[0]
+            row["dropped"] = con.execute("select count(*) from quality where weight = 0").fetchone()[0]
+            row["edu"] = con.execute("select count(*) from edu").fetchone()[0]
+            row["browser"] = con.execute("select count(*) from browser").fetchone()[0]
+            row["browser_left"] = con.execute("select count(*) from pending_browser").fetchone()[0]
+            # Github files still eligible for Stack-Edu: not already scored, not a near-dup (weight 0).
+            row["edu_left"] = con.execute(
+                "select count(*) from feat f "
+                "left join edu e on e.norm = f.norm "
+                "left join quality q on q.norm = f.norm and q.weight = 0 "
+                "where f.src = 'gcc' and e.norm is null and q.norm is null"
+            ).fetchone()[0]
             con.close()
         except sqlite3.Error:
             pass
-    return {**scan, **quality}
+    _quality_cache["at"] = now
+    _quality_cache["row"] = row
+    return row
+
+
+def _small_corpus() -> dict:
+    """Training-set size and quality-worker progress for the small-model page."""
+    # Counts are cached. Running/not and the files-per-second line update every poll.
+    row = {**_scan_shards(), **_quality_row(), **_quality_rate()}
+    row["modes"] = _quality_modes()
+    return row
 
 
 def status() -> dict:

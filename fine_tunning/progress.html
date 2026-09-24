@@ -49,7 +49,8 @@
   <div class="card"><div class="num" id="cDrop">–</div><div class="label" id="cDropLabel">Near-duplicates dropped</div></div>
 </div>
 <div class="panel" id="corpusPanel" style="margin-top:12px">
-  <p id="corpusLine" class="sub" style="margin:0">waiting for quality scores</p>
+  <p id="qualityHow" class="sub" style="margin:0 0 8px">The CPU review changes how often each file is trained. Waiting for scores.</p>
+  <div id="qualityPasses"></div>
 </div>
 </div>
 <div class="grid lora">
@@ -111,7 +112,6 @@ async function tick() {
       const uniqueTok = Number(c.tokens || 0);
       const epochs = uniqueTok > 0 ? (t.tokens || 0) / uniqueTok : null;
       const left = tps > 0 ? (total - (t.tokens || 0)) / tps / 86400 : null;
-      const src = c.by_src || {};
       document.getElementById("banner").textContent =
         "Stage 1: continued pretraining on HTML and JavaScript only. Loss is averaged over the last 10 updates.";
       document.getElementById("epoch").textContent = epochs == null ? "–" : epochs.toFixed(2);
@@ -145,14 +145,33 @@ async function tick() {
       const dropPct = c.unique ? Math.round(100 * (c.dropped || 0) / c.unique) : 0;
       document.getElementById("cDrop").textContent = (c.dropped || 0).toLocaleString();
       document.getElementById("cDropLabel").textContent = `Near-duplicates at weight 0 (${dropPct}% of unique)`;
-      const eduLeft = Math.max(0, (src.gcc || 0) - (c.edu || 0));
-      const brTotal = (c.browser || 0) + (c.browser_left || 0);
-      document.getElementById("corpusLine").innerHTML =
-        `Quality worker (CPU, beside training; trainer reloads weights every 30 min).<br>` +
-        `Stack-Edu scores: <b>${(c.edu || 0).toLocaleString()}</b> github files scored` +
-        (eduLeft ? ` · about ${eduLeft.toLocaleString()} left` : ` · done`) + `.<br>` +
-        `Browser check: <b>${(c.browser || 0).toLocaleString()}</b> of ${brTotal.toLocaleString()} game-like HTML pages` +
-        ((c.browser_left || 0) ? ` · ${(c.browser_left || 0).toLocaleString()} left` : ` · done`) + `.`;
+      const modes = c.modes || [];
+      const running = modes.length ? "running" : "idle";
+      const eduLeft = Number(c.edu_left || 0);
+      const eduDone = eduLeft === 0 && (c.edu || 0) > 0;
+      const scoreDone = (c.shards || 0) > 0 && (c.shards_done || 0) >= c.shards;
+      const brLeft = Number(c.browser_left || 0);
+      const mark = (on) => on ? `<span class="ok">running</span>` : `<span class="sub">idle</span>`;
+      document.getElementById("qualityHow").innerHTML =
+        `A CPU job reviews files beside the GPU. <b>Weight 0 is never trained. Above 1 is trained more often.</b> ` +
+        `The trainer reloads these weights every 30 minutes. Review is ${running === "running" ? `<span class="ok">running</span>` : `<span class="sub">not running</span>`}` +
+        (modes.length ? ` (${modes.join(", ")})` : "") + `.`;
+      const eduRate = Number(c.edu_rate || 0);
+      const eduEta = eduRate > 0 && eduLeft > 0 ? ` · about ${(eduLeft / eduRate / 3600).toFixed(1)} h left` : "";
+      document.getElementById("qualityPasses").innerHTML = [
+        `<p class="sub" style="margin:6px 0"><b>1. File check</b> ${scoreDone ? `<span class="ok">done</span>` : mark(modes.includes("score"))}` +
+          ` — ${(c.shards_done || 0).toLocaleString()} / ${(c.shards || 0).toLocaleString()} shards. ` +
+          `Drops near-copies. Broken JavaScript is trained at 0.3×. Repeated or generated files at 0.2–0.3×.</p>`,
+        `<p class="sub" style="margin:6px 0"><b>2. Code quality</b> ${eduDone ? `<span class="ok">done</span>` : mark(modes.includes("edu"))}` +
+          ` — ${(c.edu || 0).toLocaleString()} github files scored` +
+          (eduDone ? "" : `, ${eduLeft.toLocaleString()} left`) +
+          (eduRate ? ` · ${eduRate.toFixed(1)} files/s${eduEta}` : "") +
+          `. Strong examples train up to 2× more. Boilerplate trains less. Your own games are not reweighted.</p>`,
+        `<p class="sub" style="margin:6px 0"><b>3. Browser</b> ${brLeft ? mark(modes.includes("browser")) : `<span class="ok">done</span>`}` +
+          ` — ${(c.browser || 0).toLocaleString()} game-like pages checked` +
+          (brLeft ? `, ${brLeft.toLocaleString()} waiting` : "") +
+          `. A canvas that draws trains at 1.5×. A self-contained page that errors trains at 0.5×.</p>`,
+      ].join("");
       document.getElementById("ckptNote").textContent =
         "Weights overwrite checkpoints/latest every 30 minutes; a dated weights-only snapshot is kept every 6 hours.";
       document.getElementById("train").innerHTML = `<span class="ok">${t.state || "not started"}</span> — ${t.detail || ""}` +
