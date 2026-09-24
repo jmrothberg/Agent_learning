@@ -10,6 +10,14 @@ cd ~/Agent_learning/fine_tunning
 
 `continue` is the only non-default. It resumes `logs/stack_state.json`. Model folder, port, and worker counts stay at the defaults in `start.sh`.
 
+**The 30-minute save is what you test.** `checkpoints/latest` is overwritten every 30 minutes. The progress page **Test** button loads that folder. The agent finds the same folder: `/list` shows it as `latest`. Stop training first so the GPU is free, then in chat type `/model latest`, or start with:
+
+```bash
+MLX_MODEL=~/MLX_Models/html_js_small/checkpoints/latest python chat.py
+```
+
+Dated copies every 6 hours stay in `snapshots/` and are not deleted. Test and `/model latest` do not use those.
+
 This folder has everything needed to train, monitor, and use a LoRA adapter on a local MLX model: the code, the start script, and this guide. The first project is the **HTML-game LoRA** on `Qwen3.8-27B-mxfp8`. The same code trains other LoRAs by pointing it at a different project folder, as described below.
 
 - **Code (in git):** this folder, `Agent_learning/fine_tunning/`.
@@ -308,8 +316,8 @@ rsync -a --progress ~/MLX_Models/html_js_small/quality.sqlite /Volumes/DRIVE/htm
 |---|---|---|---|
 | **yes** | `shards/` | 11 GB | Token ids + one JSON line per doc (`src`, `path`, `rank`, `norm`, …). Includes `shards/tokenizer.json`. |
 | **yes** | `quality.sqlite` | 0.6 GB | Quality weights keyed by text hash (`norm`). Works with any tokenizer. |
-| only to continue | `checkpoints/latest/` | 6.1 GB | Weights + optimizer + counters for this run |
-| optional | `snapshots/` | 2 GB each | Dated weights-only copies every 6 hours |
+| only to continue | `checkpoints/latest/` | about 6 GB | Newest weights + optimizer. Overwritten every 30 minutes. Training resumes from here. |
+| kept | `snapshots/<date>/` | about 2 GB each | Weights-only copy every 6 hours. Nothing deletes these. |
 | **no** | `~/MLX_Models/html_game_sft/raw/` (138 GB) | — | Source HTML/JS files. **Not needed** — the shards already hold the text. |
 | **no** | `logs/` | — | Rebuilds on the new Mac |
 
@@ -427,7 +435,7 @@ cp ~/MLX_Models/html_js_small/quality.sqlite $SMALL_ROOT/
 | File | Job |
 |---|---|
 | `small/data.py` | Builds `shards/`. `--source own` = games from `html_game_sft/games.sqlite`; `--source gcc` = [codeparrot/github-code-clean](https://huggingface.co/datasets/codeparrot/github-code-clean) HTML + JavaScript (streamed); `--source retok --from DIR` = re-tokenize for a new base. Filters size / minified / base64 / symbol soup / HTML without `<script>`. Resumes. |
-| `small/train_small.py` | Trainer: weighted, deduplicated packing; compiled step; AdamW, warmup + cosine. Every 30 min saves `checkpoints/latest/` and re-reads `shards/` + `quality.sqlite`. Resumes automatically. |
+| `small/train_small.py` | Trainer: weighted, deduplicated packing; compiled step; AdamW, warmup + cosine. Every 30 min overwrites `checkpoints/latest/` and re-reads `shards/` + `quality.sqlite`. Every 6 hours keeps a dated weights-only copy in `snapshots/`. Those copies are never deleted. Resumes from `checkpoints/latest/`. |
 | `small/quality_worker.py` | CPU quality scoring (niced). Writes `quality.sqlite` → `quality(norm, weight)`. |
 | `start.sh small*` | One-line starts (§9b) |
 | `serve_progress.py` + `progress.html` | Monitor; small-model root shows speed first |
@@ -451,7 +459,7 @@ Where the data came from: own games (`html_game_sft/raw/`) → 14,470 unique fil
 | `--accum` | 4 | Micro-steps per optimizer update (update = 32,768 tokens) |
 | `--lr` / `--warmup` | 5e-5 / 200 | Peak LR, warmup updates; cosine to 10% after |
 | `--total-tokens` | 2e9 | Stop after this many trained tokens |
-| `--save-minutes` | 30 | Save `checkpoints/latest/` + re-read data and quality |
+| `--save-minutes` | 30 | Overwrite `checkpoints/latest/` and re-read data and quality. A dated copy is kept every 6 hours. |
 | `--bench N` | 0 | Time N micro-steps, save nothing |
 
 ### Use a checkpoint

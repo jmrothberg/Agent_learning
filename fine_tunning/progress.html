@@ -25,6 +25,8 @@
   .dot.wait { background: #e0b45a; }
   button { font: inherit; background: #2a2e3a; color: #e8e6e3; border: 0; border-radius: 8px; padding: 8px 14px; cursor: pointer; }
   button:disabled { opacity: 0.4; cursor: default; }
+  textarea, input[type=text] { font: 14px/1.4 ui-monospace, monospace; width: 100%; box-sizing: border-box; background: #12141a; color: #e8e6e3; border: 0; border-radius: 8px; padding: 8px; }
+  iframe#preview { width: 640px; height: 480px; max-width: 100%; background: #fff; border: 0; border-radius: 8px; }
 </style>
 </head>
 <body>
@@ -55,6 +57,26 @@
 <div class="panel" id="corpusPanel" style="margin-top:12px">
   <p id="qualityHow" class="sub" style="margin:0 0 8px">The CPU review changes how often each file is trained. Waiting for scores.</p>
   <div id="qualityPasses"></div>
+</div>
+<h2>Test the latest checkpoint</h2>
+<div class="panel" id="testPanel">
+  <p id="testNote" class="sub" style="margin:0 0 8px">Stop training to free the GPU, then Test loads checkpoints/latest.</p>
+  <div class="row">
+    <button id="smallStop" type="button">Stop training</button>
+    <button id="smallResume" type="button">Resume training</button>
+  </div>
+  <p class="sub" style="margin:8px 0">Stop drops whatever was trained since the last 30-minute save. Resume continues from that save. Quality scoring and the Stack download keep going.</p>
+  <textarea id="prompt" rows="4"><!DOCTYPE html>
+<html><head><title>Snake</title></textarea>
+  <div class="row" style="margin-top:8px">
+    <button id="testBtn" type="button">Test</button>
+    <input id="saveName" type="text" placeholder="filename, e.g. snake.html" style="max-width:280px">
+    <button id="saveBtn" type="button">Save file</button>
+    <button id="openBtn" type="button">Open in Chrome</button>
+  </div>
+  <p id="testStatus" class="sub" style="margin:8px 0 0">No test yet.</p>
+  <pre id="testOut" style="max-height:180px;margin-top:8px"> </pre>
+  <iframe id="preview" title="Chrome preview" sandbox="allow-scripts"></iframe>
 </div>
 </div>
 <div class="grid lora">
@@ -206,15 +228,23 @@ async function tick() {
           `. A canvas that draws trains at 1.5×. A self-contained page that errors trains at 0.5×.</p>`,
       ].join("");
       document.getElementById("ckptNote").textContent =
-        "Weights overwrite checkpoints/latest every 30 minutes; a dated weights-only snapshot is kept every 6 hours.";
+        "Every 30 minutes, checkpoints/latest is overwritten. That is the resume point. Every 6 hours a dated copy is kept in snapshots/, and those are never deleted.";
       document.getElementById("train").innerHTML = `<span class="ok">${t.state || "not started"}</span> — ${t.detail || ""}` +
         (t.updated ? `<br><span class="sub">updated ${t.updated}</span>` : "");
       document.getElementById("log").textContent = s.log_tail || "no log yet";
       const ck = s.checkpoints || [];
       document.getElementById("ckpts").innerHTML = ck.length
         ? ck.slice().reverse().map((c) => `<li><b>${c.when}</b> <span class="sub">${c.name}</span></li>`).join("")
-        : "<li>none yet (first snapshot after 6 hours)</li>";
+        : "<li>none yet (a dated copy is kept every 6 hours)</li>";
       drawLoss(s.losses || [], "Log point (every 10 updates)");
+      document.getElementById("smallStop").disabled = !s.trainer_running || busy;
+      document.getElementById("smallResume").disabled = !!s.trainer_running || busy;
+      document.getElementById("testBtn").disabled = !!s.trainer_running || busy || !s.checkpoint;
+      document.getElementById("testNote").textContent = s.trainer_running
+        ? "Training is using the GPU. Stop it, then Test loads " + (s.checkpoint || "checkpoints/latest") + "."
+        : (s.checkpoint
+          ? "GPU is free. Test continues your prompt with " + s.checkpoint + "."
+          : "No checkpoint yet. The first save is 30 minutes in.");
       return;
     }
     document.getElementById("html").textContent = s.html_files ?? s.html_rows ?? 0;
@@ -386,21 +416,86 @@ function drawLoss(losses, xName) {
   label.textContent = `green = last 18 steps (${last.toFixed(3)}). red = last 50 steps (${last50.toFixed(3)}). gray = each file. ${n} steps in this run. Until 50 steps exist, the red line uses however many have finished.`;
 }
 let busy = false;
+let lastPage = "";
+let lastName = "";
+function setControlDisabled(dis) {
+  ["holdBtn", "resumeBtn", "smallStop", "smallResume"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = dis;
+  });
+}
 async function control(path) {
   busy = true;
-  document.getElementById("holdBtn").disabled = true;
-  document.getElementById("resumeBtn").disabled = true;
-  document.getElementById("safeText").textContent = path === "/hold" ? "Stopping the GPU job…" : "Clearing memory, then resuming…";
+  setControlDisabled(true);
+  const msg = path === "/hold" ? "Stopping the GPU job…" : "Resuming training from the last save…";
+  const note = document.getElementById("testNote");
+  const safe = document.getElementById("safeText");
+  if (note) note.textContent = msg;
+  if (safe) safe.textContent = msg;
   try {
     await fetch(path, {method: "POST"});
   } catch (e) {
-    document.getElementById("safeNote").textContent = "The control request failed. Training was not restarted from this page.";
+    if (note) note.textContent = "The control request failed. Training was not changed.";
   }
   busy = false;
   tick();
 }
 document.getElementById("holdBtn").onclick = () => control("/hold");
 document.getElementById("resumeBtn").onclick = () => control("/resume");
+document.getElementById("smallStop").onclick = () => control("/hold");
+document.getElementById("smallResume").onclick = () => control("/resume");
+document.getElementById("testBtn").onclick = async () => {
+  const btn = document.getElementById("testBtn");
+  const status = document.getElementById("testStatus");
+  btn.disabled = true;
+  status.textContent = "Loading the checkpoint and generating. This can take a minute.";
+  try {
+    const r = await fetch("/test", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({prompt: document.getElementById("prompt").value, max_tokens: 400}),
+    });
+    const body = await r.json();
+    if (!body.ok) {
+      status.textContent = body.error || "Test failed.";
+      return;
+    }
+    lastPage = body.html || body.text || "";
+    document.getElementById("testOut").textContent = body.text || "";
+    document.getElementById("preview").srcdoc = body.html || "<p style='font-family:sans-serif'>No HTML page in the output.</p>";
+    status.textContent = body.html ? "Preview is below. Save keeps the HTML file." : "The model did not produce an HTML page. The text is above.";
+  } catch (e) {
+    status.textContent = "Test request failed.";
+  }
+  tick();
+};
+document.getElementById("saveBtn").onclick = async () => {
+  const status = document.getElementById("testStatus");
+  if (!lastPage) { status.textContent = "Test first, then save."; return; }
+  const name = document.getElementById("saveName").value;
+  const r = await fetch("/save", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({html: lastPage, name}),
+  });
+  const body = await r.json();
+  if (!body.ok) { status.textContent = body.error || "Save failed."; return; }
+  lastName = body.name;
+  document.getElementById("saveName").value = body.name;
+  status.textContent = "Saved " + body.path;
+};
+document.getElementById("openBtn").onclick = async () => {
+  const status = document.getElementById("testStatus");
+  const name = lastName || document.getElementById("saveName").value;
+  if (!name) { status.textContent = "Save the file first."; return; }
+  const r = await fetch("/open", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({name}),
+  });
+  const body = await r.json();
+  status.textContent = body.ok ? "Opened in Chrome: " + body.path : (body.error || "Could not open Chrome.");
+};
 tick();
 setInterval(tick, 2000);
 </script>

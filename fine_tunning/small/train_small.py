@@ -7,8 +7,10 @@ loss on every token), and trains every weight of MiniCPM5-1B-Base.
   python train_small.py --bench 20      # timing only, nothing saved
 
 Every --save-minutes it writes checkpoints/latest/ (weights + optimizer +
-counters) and re-reads shards/ and quality.sqlite, so new shards and new
-quality scores join the next blocks without a restart.
+counters), overwriting that folder, and re-reads shards/ and quality.sqlite.
+Every 6 hours it also keeps a dated weights-only copy in snapshots/<date>/.
+Those dated copies are never deleted. New shards and quality scores join the
+next blocks without a restart.
 """
 from __future__ import annotations
 
@@ -171,13 +173,14 @@ def main() -> None:
                 shutil.copy2(BASE / f, latest / f)
         (latest / "counters.tmp.json").write_text(json.dumps(counters))
         os.replace(latest / "counters.tmp.json", latest / "counters.json")
-        # Weights-only snapshot every 6 h (~2.2 GB) for evals and rollback.
+        # Dated weights-only copy every 6 h. Nothing deletes these folders.
         if time.time() - last_snap[0] > 6 * 3600:
             snap = ROOT / "snapshots" / time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
             snap.mkdir(parents=True, exist_ok=True)
             for f in latest.iterdir():
-                if f.name != "optimizer.safetensors" and f.is_file():
-                    shutil.copy2(f, snap / f.name)
+                if f.name != "optimizer.safetensors" and f.is_file() and not f.name.endswith(".tmp"):
+                    if not (snap / f.name).exists():
+                        shutil.copy2(f, snap / f.name)
             last_snap[0] = time.time()
 
     data = Blocks(args.block, seed=counters["seed"])

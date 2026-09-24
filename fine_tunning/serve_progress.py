@@ -128,13 +128,26 @@ def _latest_snapshot() -> str | None:
     return str(best) if best else None
 
 
+def _is_small() -> bool:
+    # The small-model project keeps token shards. The LoRA project does not.
+    return (ROOT / "shards").is_dir()
+
+
+def _test_checkpoint() -> str | None:
+    """Folder the Test button loads. The 30-minute save, else the newest 6-hour snapshot."""
+    latest = ROOT / "checkpoints" / "latest" / "model.safetensors"
+    if latest.is_file() and latest.stat().st_size > 100_000_000:
+        return str(latest.parent)
+    return _latest_snapshot()
+
+
 def _control() -> dict:
     try:
         # SMALL MODEL: train_small.py counts as a running trainer too.
         trainer = (_python_script_pids("train_lora.py") + _python_script_pids("run_slices.py")
                    + _python_script_pids("train_small.py"))
         agent = [] if trainer else _agent_model_pids()
-        checkpoint = _latest_snapshot()
+        checkpoint = _test_checkpoint()
         running = bool(trainer)
     except (OSError, subprocess.SubprocessError, ValueError):
         # Unknown is not safe. Do not tell the page the GPU is free.
@@ -153,10 +166,15 @@ def _control() -> dict:
 
 
 def hold_training() -> dict:
-    # The live supervisor was started before it knew this file. Stopping the
-    # Python PIDs is what frees the GPU. The file stops the next start.
+    # Stopping the Python PID frees the GPU. Quality scoring and the Stack
+    # download are CPU jobs and keep running.
     HOLD.parent.mkdir(parents=True, exist_ok=True)
     HOLD.write_text(json.dumps({"state": "held"}))
+    if _is_small():
+        _signal_gone(_python_script_pids("train_small.py"), signal.SIGTERM, 45)
+        _signal_gone(_python_script_pids("train_small.py"), signal.SIGKILL, 10)
+        return status()
+    # The live LoRA supervisor was started before it knew this file.
     _signal_gone(_python_script_pids("train_lora.py"), signal.SIGTERM, 45)
     _signal_gone(_python_script_pids("train_lora.py"), signal.SIGKILL, 10)
     _signal_gone(_python_script_pids("run_slices.py"), signal.SIGTERM, 20)
@@ -165,6 +183,28 @@ def hold_training() -> dict:
 
 
 def resume_training() -> dict:
+    if _is_small():
+        if _python_script_pids("train_small.py"):
+            return status()
+        # The test load and chat.py both hold the GPU. Training needs it back.
+        _signal_gone(_agent_model_pids(), signal.SIGTERM, 20)
+        _signal_gone(_agent_model_pids(), signal.SIGKILL, 10)
+        HOLD.write_text(json.dumps({"state": "running"}))
+        log = open(ROOT / "logs" / "train.out", "a", encoding="utf-8")
+        env = os.environ.copy()
+        env["SMALL_ROOT"] = str(ROOT)
+        subprocess.Popen(
+            [PY, str(HERE / "small" / "train_small.py")],
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            cwd=str(ROOT),
+            env=env,
+        )
+        deadline = time.time() + 8
+        while time.time() < deadline and not _python_script_pids("train_small.py"):
+            time.sleep(0.2)
+        return status()
     if _python_script_pids("train_lora.py") or _python_script_pids("run_slices.py"):
         return status()
     # Quit the agent model first. A second 27B does not fit beside training.
@@ -185,6 +225,85 @@ def resume_training() -> dict:
     while time.time() < deadline and not _python_script_pids("run_slices.py"):
         time.sleep(0.2)
     return status()
+
+
+def _tests_dir() -> Path:
+    path = ROOT / "tests"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _safe_html_name(name: str) -> str:
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", (name or "").strip()).strip("._")[:80]
+    if not stem:
+        stem = time.strftime("test_%Y%m%d_%H%M%S")
+    if not stem.lower().endswith(".html"):
+        stem += ".html"
+    return stem
+
+
+def test_checkpoint(prompt: str, max_tokens: int) -> dict:
+    """Generate from checkpoints/latest. Refuses while a trainer holds the GPU."""
+    if (_python_script_pids("train_small.py") or _python_script_pids("train_lora.py")
+            or _python_script_pids("run_slices.py")):
+        return {"ok": False, "error": "Training is using the GPU. Press Stop first."}
+    ckpt = _test_checkpoint()
+    if not ckpt:
+        return {"ok": False, "error": "No checkpoint yet. The first save is 30 minutes in."}
+    max_tokens = max(32, min(int(max_tokens or 400), 800))
+    script = (
+        "import sys\n"
+        "from mlx_lm import load, generate\n"
+        "model, tok = load(sys.argv[1])\n"
+        "prompt = sys.stdin.read()\n"
+        "out = generate(model, tok, prompt=prompt, max_tokens=int(sys.argv[2]), verbose=False)\n"
+        "sys.stdout.write(out if isinstance(out, str) else str(out))\n"
+    )
+    try:
+        proc = subprocess.run(
+            [PY, "-c", script, ckpt, str(max_tokens)],
+            input=prompt, capture_output=True, text=True, timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "Generation took more than 5 minutes and was stopped."}
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "generate failed").strip()
+        return {"ok": False, "error": err[-1500:]}
+    text = proc.stdout or ""
+    # Some mlx_lm builds echo the prompt; others return only the new tokens.
+    if not text.startswith(prompt):
+        text = prompt + text
+    lower = text.lower()
+    html = ""
+    for mark in ("<!doctype", "<html"):
+        at = lower.find(mark)
+        if at >= 0:
+            html = text[at:]
+            break
+    return {"ok": True, "text": text, "html": html, "checkpoint": ckpt}
+
+
+def save_test(html: str, name: str) -> dict:
+    path = _tests_dir() / _safe_html_name(name)
+    path.write_text(html, encoding="utf-8")
+    return {"ok": True, "path": str(path), "name": path.name}
+
+
+def open_test(name: str) -> dict:
+    path = _tests_dir() / _safe_html_name(name)
+    if not path.is_file():
+        return {"ok": False, "error": "Save the page first."}
+    # Real Chrome window. Fall back to the default browser if Chrome is absent.
+    try:
+        subprocess.Popen(
+            ["open", "-a", "Google Chrome", str(path)],
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        subprocess.Popen(["open", str(path)], start_new_session=True)
+    return {"ok": True, "path": str(path)}
 
 
 _corpus_cache: dict = {"at": 0.0, "scan": {}}
@@ -508,10 +627,28 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = self.path.split("?", 1)[0]
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = 0
+        if n > 2_000_000:
+            self._send(413, b"too large", "text/plain")
+            return
+        raw = self.rfile.read(n) if n else b""
+        try:
+            payload = json.loads(raw.decode("utf-8") or "{}") if raw else {}
+        except json.JSONDecodeError:
+            payload = {}
         if path == "/hold":
             body = hold_training()
         elif path == "/resume":
             body = resume_training()
+        elif path == "/test":
+            body = test_checkpoint(str(payload.get("prompt") or ""), int(payload.get("max_tokens") or 400))
+        elif path == "/save":
+            body = save_test(str(payload.get("html") or ""), str(payload.get("name") or ""))
+        elif path == "/open":
+            body = open_test(str(payload.get("name") or ""))
         else:
             self._send(404, b"not found", "text/plain")
             return
