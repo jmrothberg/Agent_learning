@@ -48,6 +48,10 @@
   <div class="card"><div class="num" id="cTok">–</div><div class="label" id="cTokLabel">Tokens in the set</div></div>
   <div class="card"><div class="num" id="cDrop">–</div><div class="label" id="cDropLabel">Near-duplicates dropped</div></div>
 </div>
+<h2>Download</h2>
+<div class="panel" id="downloadPanel">
+  <p id="downloadLine" class="sub" style="margin:0">Waiting for the Stack download.</p>
+</div>
 <div class="panel" id="corpusPanel" style="margin-top:12px">
   <p id="qualityHow" class="sub" style="margin:0 0 8px">The CPU review changes how often each file is trained. Waiting for scores.</p>
   <div id="qualityPasses"></div>
@@ -152,6 +156,35 @@ async function tick() {
       const scoreDone = (c.shards || 0) > 0 && (c.shards_done || 0) >= c.shards;
       const brLeft = Number(c.browser_left || 0);
       const mark = (on) => on ? `<span class="ok">running</span>` : `<span class="sub">idle</span>`;
+      const dl = c.download || {};
+      const dropNames = {vendor: "vendor or generated", size: "wrong length", minified: "minified",
+        symbols: "symbol soup", dup: "already in the set", base64: "base64", fetch: "download failed"};
+      const drops = dl.drops || {};
+      const skipped = Object.values(drops).reduce((a, b) => a + Number(b || 0), 0);
+      const dropText = Object.entries(drops).filter(([, n]) => n)
+        .map(([k, n]) => `${Number(n).toLocaleString()} ${dropNames[k] || k}`).join(", ");
+      const dlTok = Number(dl.tokens || 0);
+      const dlCap = Number(dl.cap || 0);
+      const dlRate = Number(dl.tok_per_sec || 0);
+      const dlLeft = dlRate > 0 && dlCap > dlTok ? (dlCap - dlTok) / dlRate / 3600 : 0;
+      const where = dl.lang
+        ? `${dl.lang} file ${dl.part} of ${dl.parts}, ${Number(dl.row || 0).toLocaleString()} rows into this file`
+        : "no file yet";
+      document.getElementById("downloadLine").innerHTML =
+        `The Stack (JavaScript, then HTML). ` +
+        (dl.running ? `<span class="ok">running</span>` : `<span class="sub">not running</span>`) +
+        ` — ${where}.<br>` +
+        `Kept <b>${Number(dl.docs || 0).toLocaleString()}</b> files` +
+        (dlTok ? `, ${(dlTok / 1e9).toFixed(2)}B tokens` : "") +
+        (dlCap ? ` of ${(dlCap / 1e9).toFixed(0)}B` : "") +
+        (dlCap ? ` (${Math.round(100 * dlTok / dlCap)}%)` : "") +
+        `. ${Number(dl.shards || 0).toLocaleString()} shards` +
+        (dl.workers ? ` · ${dl.workers} workers` : "") +
+        (dlRate ? ` · ${Math.round(dlRate / 1000)}k tokens/s kept` : "") +
+        (dlLeft ? ` · about ${dlLeft.toFixed(1)} h to the cap` : "") +
+        `.<br>` +
+        (skipped ? `Skipped ${skipped.toLocaleString()} (${dropText}). ` : "") +
+        `New shards join training at the next 30-minute save.`;
       document.getElementById("qualityHow").innerHTML =
         `A CPU job reviews files beside the GPU. <b>Weight 0 is never trained. Above 1 is trained more often.</b> ` +
         `The trainer reloads these weights every 30 minutes. Review is ${running === "running" ? `<span class="ok">running</span>` : `<span class="sub">not running</span>`}` +

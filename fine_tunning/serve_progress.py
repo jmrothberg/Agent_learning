@@ -224,7 +224,9 @@ def _quality_modes() -> list[str]:
     out = subprocess.check_output(["ps", "-ax", "-o", "command="], text=True, errors="replace")
     modes = []
     for cmd in out.splitlines():
-        if "small/quality_worker.py" not in cmd or "Python" not in cmd or "zsh" in cmd:
+        # small/quality_worker.py, or a bare name when started from fine_tunning/small/.
+        # Skip the shell wrapper; its command line mentions the script too.
+        if "quality_worker.py" not in cmd or "Python" not in cmd or "zsh" in cmd:
             continue
         if "--edu" in cmd:
             modes.append("edu")
@@ -238,7 +240,8 @@ def _quality_modes() -> list[str]:
 def _quality_rate() -> dict:
     """Last 'edu: N docs X/s' or 'browser: N pages' line. Reads the tail only."""
     info = {"edu_rate": 0.0, "edu_session": 0, "browser_session": 0}
-    for name, kind in (("quality.out", "edu"), ("browser.out", "browser")):
+    # This run logs code-quality to edu.out. quality.out is the file-check log.
+    for name, kind in (("quality.out", "edu"), ("edu.out", "edu"), ("browser.out", "browser")):
         path = ROOT / "logs" / name
         if not path.exists():
             continue
@@ -305,7 +308,73 @@ def _small_corpus() -> dict:
     # Counts are cached. Running/not and the files-per-second line update every poll.
     row = {**_scan_shards(), **_quality_row(), **_quality_rate()}
     row["modes"] = _quality_modes()
+    row["download"] = _stack_download()
     return row
+
+
+_stack_sample = {"tokens": None, "at": 0.0, "rate": 0.0}
+
+
+def _python_cmd(script: str, flag: str) -> str:
+    """Command line of a Python process running script with flag. Skips the shell wrapper."""
+    out = subprocess.check_output(["ps", "-ax", "-o", "command="], text=True, errors="replace")
+    for cmd in out.splitlines():
+        if script not in cmd or "Python" not in cmd or "zsh" in cmd or flag not in cmd:
+            continue
+        return cmd
+    return ""
+
+
+def _stack_download() -> dict:
+    """The Stack v2 downloader (data.py --source stack). State file plus whether it is running."""
+    cmd = _python_cmd("data.py", "--source stack")
+    path = ROOT / "logs" / "stack_state.json"
+    state: dict = {}
+    if path.exists():
+        try:
+            state = json.loads(path.read_text())
+        except json.JSONDecodeError:
+            state = {}
+    tokens = int(state.get("tokens") or 0)
+    cap = 0
+    workers = 0
+    found = re.search(r"--max-tokens(?:=|\s+)([0-9.eE+]+)", cmd)
+    if found:
+        cap = int(float(found.group(1)))
+    found = re.search(r"--workers(?:=|\s+)(\d+)", cmd)
+    if found:
+        workers = int(found.group(1))
+    now = time.time()
+    prev = _stack_sample["tokens"]
+    if prev is not None and tokens > prev and now > _stack_sample["at"]:
+        _stack_sample["rate"] = (tokens - prev) / (now - _stack_sample["at"])
+        _stack_sample["tokens"] = tokens
+        _stack_sample["at"] = now
+    elif prev is None:
+        _stack_sample["tokens"] = tokens
+        _stack_sample["at"] = now
+    name = str(state.get("file") or "")
+    if "/JavaScript/" in name:
+        lang = "JavaScript"
+    elif "/HTML/" in name:
+        lang = "HTML"
+    else:
+        lang = ""
+    part = re.search(r"train-(\d+)-of-(\d+)", name)
+    return {
+        "running": bool(cmd),
+        "tokens": tokens,
+        "cap": cap,
+        "docs": int(state.get("docs") or 0),
+        "shards": int(state.get("shard") or 0),
+        "row": int(state.get("row") or 0),
+        "lang": lang,
+        "part": int(part.group(1)) + 1 if part else 0,
+        "parts": int(part.group(2)) if part else 0,
+        "drops": state.get("drops") or {},
+        "tok_per_sec": _stack_sample["rate"],
+        "workers": workers,
+    }
 
 
 def status() -> dict:

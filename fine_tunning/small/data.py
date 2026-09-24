@@ -178,14 +178,164 @@ def _retok_chunk(job: tuple[str, str]) -> dict:
     return out
 
 
+def _stack_run(workers: int, max_tokens: int, chunk: int) -> None:
+    """Add HTML + JavaScript from bigcode/the-stack-v2.
+
+    The Hugging Face files are ids, not source. The source is gzip on Software
+    Heritage's public bucket, keyed by blob_id. Requires `hf auth login` and
+    the dataset terms accepted. Dedups against shards already on disk. Stops
+    after max_tokens new tokens. The trainer loads new stack_*.bin shards at
+    its next 30-minute save.
+    """
+    import gzip
+    from concurrent.futures import ThreadPoolExecutor
+
+    import httpx
+    import pyarrow.parquet as pq
+    from huggingface_hub import HfApi, HfFileSystem
+
+    norms: set[str] = set()
+    for meta in sorted(SHARDS.glob("*.jsonl")):
+        for line in meta.read_text().splitlines():
+            try:
+                norms.add(json.loads(line)["norm"])
+            except json.JSONDecodeError:
+                pass
+    files = sorted(
+        (0 if "/JavaScript/" in f else 1, f)
+        for f in HfApi().list_repo_files("bigcode/the-stack-v2", repo_type="dataset")
+        if f.startswith("data/JavaScript/") or f.startswith("data/HTML/")
+    )
+    files = [f for _, f in files]
+    state_path = ROOT / "logs" / "stack_state.json"
+    state = json.loads(state_path.read_text()) if state_path.exists() else {}
+    file_i0 = int(state.get("file_i", 0))
+    skip_rows = int(state.get("row", 0))
+    tokens = int(state.get("tokens", 0))
+    docs_n = int(state.get("docs", 0))
+    shard_i = int(state.get("shard", 0))
+    drops: dict[str, int] = state.get("drops", {})
+    print(f"stack: {len(norms)} docs already on disk, {len(files)} parquet files, "
+          f"cap {max_tokens/1e9:.1f}B new tokens, resume file {file_i0} row {skip_rows}", flush=True)
+
+    s3 = "https://softwareheritage.s3.amazonaws.com/content/{}"
+    client = httpx.Client(timeout=40, follow_redirects=True,
+                           limits=httpx.Limits(max_connections=workers, max_keepalive_connections=workers))
+
+    def fetch(blob: str) -> str | None:
+        for _ in range(3):
+            try:
+                r = client.get(s3.format(blob))
+                if r.status_code == 404:
+                    return None
+                if r.status_code != 200:
+                    time.sleep(0.3)
+                    continue
+                raw = r.content
+                if raw[:2] == b"\x1f\x8b":
+                    raw = gzip.decompress(raw)
+                return raw.decode("utf-8", "replace")
+            except (httpx.HTTPError, OSError, gzip.BadGzipFile, EOFError):
+                time.sleep(0.3)
+        return None
+
+    def save_state(fi: int, row: int) -> None:
+        payload = {"file_i": fi, "row": row, "tokens": tokens, "docs": docs_n,
+                   "shard": shard_i, "drops": drops,
+                   "file": files[fi] if fi < len(files) else "done"}
+        tmp = state_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload))
+        tmp.replace(state_path)
+
+    fs = HfFileSystem()
+    buf: list[tuple[str, dict]] = []
+    t0 = time.time()
+    cols = ["blob_id", "path", "repo_name", "language", "is_vendor", "is_generated", "length_bytes"]
+    try:
+        with ThreadPoolExecutor(workers) as pool:
+            for fi in range(file_i0, len(files)):
+                if tokens >= max_tokens:
+                    break
+                path = files[fi]
+                print(f"stack file {fi + 1}/{len(files)} {path}", flush=True)
+                row = 0
+                with fs.open(f"datasets/bigcode/the-stack-v2/{path}", "rb") as f:
+                    pf = pq.ParquetFile(f)
+                    for batch in pf.iter_batches(columns=cols, batch_size=256):
+                        if tokens >= max_tokens:
+                            break
+                        d = batch.to_pydict()
+                        todo = []
+                        for i in range(len(d["blob_id"])):
+                            if fi == file_i0 and row < skip_rows:
+                                row += 1
+                                continue
+                            row += 1
+                            if d["is_vendor"][i] or d["is_generated"][i]:
+                                drops["vendor"] = drops.get("vendor", 0) + 1
+                                continue
+                            ln = d["length_bytes"][i] or 0
+                            if ln < MIN_BYTES or ln > MAX_BYTES:
+                                drops["size"] = drops.get("size", 0) + 1
+                                continue
+                            todo.append(i)
+                        if not todo:
+                            continue
+                        texts = list(pool.map(fetch, [d["blob_id"][i] for i in todo]))
+                        for i, text in zip(todo, texts):
+                            if not text:
+                                drops["fetch"] = drops.get("fetch", 0) + 1
+                                continue
+                            is_html = (d["language"][i] or "") == "HTML"
+                            why = quality(text, is_html=is_html)
+                            if why:
+                                drops[why] = drops.get(why, 0) + 1
+                                continue
+                            norm = hashlib.sha1(_WS.sub(" ", text).encode()).hexdigest()[:16]
+                            if norm in norms:
+                                drops["dup"] = drops.get("dup", 0) + 1
+                                continue
+                            norms.add(norm)
+                            buf.append((text, {
+                                "sha": hashlib.sha1(text.encode("utf-8", "replace")).hexdigest(),
+                                "src": "stack", "path": f"{d['repo_name'][i]}/{d['path'][i]}",
+                                "lang": "HTML" if is_html else "JavaScript",
+                                "rank": rank(text), "norm": norm}))
+                            docs_n += 1
+                            if len(buf) >= chunk:
+                                tokens += _write(f"stack_{shard_i:05d}", buf)["tokens"]
+                                shard_i += 1
+                                buf = []
+                                save_state(fi, row)
+                                print(f"stack docs={docs_n} tokens={tokens/1e9:.3f}B drops={drops} "
+                                      f"{time.time()-t0:.0f}s", flush=True)
+                                if tokens >= max_tokens:
+                                    break
+                if tokens >= max_tokens:
+                    save_state(fi, row)
+                    break
+                save_state(fi + 1, 0)
+        if buf and tokens < max_tokens:
+            tokens += _write(f"stack_{shard_i:05d}", buf)["tokens"]
+            shard_i += 1
+            buf = []
+            save_state(len(files), 0)
+    finally:
+        client.close()
+    print(f"stack done docs={docs_n} tokens={tokens/1e9:.3f}B drops={drops}", flush=True)
+    (ROOT / "logs" / "data_stack.json").write_text(json.dumps({"docs": docs_n, "tokens": tokens, "drops": drops}))
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--source", choices=("own", "gcc", "retok"), required=True)
+    p.add_argument("--source", choices=("own", "gcc", "retok", "stack"), required=True)
     p.add_argument("--from", dest="from_root", default="",
                    help="retok: another SMALL_ROOT whose shards/ (+ shards/tokenizer.json) to re-tokenize for SMALL_BASE")
     p.add_argument("--workers", type=int, default=20)
     p.add_argument("--chunk", type=int, default=2000, help="own: files per shard")
     p.add_argument("--max-chunks", type=int, default=0, help="gcc: stop after this many parquet files (0 = all)")
+    p.add_argument("--max-tokens", type=float, default=8e9,
+                   help="stack: stop after this many new tokens (about 3x the current set)")
     args = p.parse_args()
     SHARDS.mkdir(parents=True, exist_ok=True)
     (ROOT / "logs").mkdir(parents=True, exist_ok=True)
@@ -193,6 +343,10 @@ def main() -> None:
     if not (SHARDS / "tokenizer.json").exists():
         shutil.copy2(BASE / "tokenizer.json", SHARDS / "tokenizer.json")
     print(f"base={BASE} bos={BOS} eos={EOS}", flush=True)
+
+    if args.source == "stack":
+        _stack_run(args.workers, int(args.max_tokens), args.chunk)
+        return
 
     if args.source == "retok":
         src = Path(args.from_root).expanduser() / "shards"
