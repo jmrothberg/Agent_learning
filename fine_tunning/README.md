@@ -1,5 +1,15 @@
 # fine_tunning — LoRA training system
 
+**Other Mac — small HTML/JS model.** One command. Copy `shards/` and `quality.sqlite` into `~/MLX_Models/html_js_small` first (not the raw HTML). If `~/Agents/.venv` or `~/MLX_Models/MiniCPM5-1B-Base` is missing, the command creates them. Jobs stay running if you quit Cursor.
+
+```bash
+cd ~/Agent_learning/fine_tunning
+./start.sh small                 # page + trainer + quality → http://127.0.0.1:8767/
+./start.sh small continue        # same, and resume the Stack download
+```
+
+`continue` is the only non-default. It resumes `logs/stack_state.json`. Model folder, port, and worker counts stay at the defaults in `start.sh`.
+
 This folder has everything needed to train, monitor, and use a LoRA adapter on a local MLX model: the code, the start script, and this guide. The first project is the **HTML-game LoRA** on `Qwen3.8-27B-mxfp8`. The same code trains other LoRAs by pointing it at a different project folder, as described below.
 
 - **Code (in git):** this folder, `Agent_learning/fine_tunning/`.
@@ -32,7 +42,8 @@ Then open **http://127.0.0.1:8766/** (LoRA) or **http://127.0.0.1:8767/** (small
 | `./start.sh monitor` | the progress page only. This is safe while a trainer is already running. |
 | `./start.sh train` | the trainer only |
 | `./start.sh ingest` | the downloader only |
-| `./start.sh small` | **small HTML/JS model:** monitor + full fine-tune (§9) → :8767 |
+| `./start.sh small` | **small HTML/JS model:** page + trainer + quality → :8767 |
+| `./start.sh small continue` | same, and resume the Stack download (the only non-default) |
 
 A second trainer for the same project refuses to start (`trainer already running pid N` in `logs/supervisor.log`), so running `./start.sh` twice is harmless.
 
@@ -278,7 +289,7 @@ A ~1B model trained only on HTML and JavaScript. **Every weight is trained (not 
 | Code (git) | `fine_tunning/small/` — **no training data in git** |
 | Data + checkpoints (not in git) | `$SMALL_ROOT`, default `~/MLX_Models/html_js_small/` |
 
-**Quick path after a git update:** fill a drive on the source Mac (§9a) → on the new Mac run the five commands in §9b → open http://127.0.0.1:8767/. To try a 0.5B instead, use §9d.
+**Quick path after a git update:** fill a drive on the source Mac (§9a) → on the new Mac, `./start.sh small` (top of this file). `continue` resumes the Stack download. To try a 0.5B instead, use §9d.
 
 ### 9a. Fill the drive (on the Mac that already has the data)
 

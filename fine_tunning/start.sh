@@ -19,7 +19,8 @@
 #   LORA_SLICE_MIN=30                        minutes per slice / snapshot
 #
 # SMALL MODEL (full fine-tune of a ~1B base on HTML/JS, code in small/, README §9):
-#   ./start.sh small              monitor + train_small.py (starts or resumes)
+#   ./start.sh small              page + trainer + quality (other Mac: this is the one command)
+#   ./start.sh small continue     same, and resume the Stack download (the only non-default)
 #   ./start.sh small-train        train_small.py only
 #   ./start.sh small-monitor      progress page only
 #   ./start.sh small-data         build shards from scratch: own games + github-code-clean
@@ -80,6 +81,22 @@ if [[ "$what" == small* ]]; then
   cd "$SMALL_ROOT"
   echo "SMALL_ROOT=$SMALL_ROOT"
   echo "SMALL_BASE=$SMALL_BASE"
+  # First run on a Mac: make the venv and fetch the default 1B base. Shards must already be copied.
+  if [[ "$what" == "small" ]]; then
+    ls "$SMALL_ROOT"/shards/*.jsonl >/dev/null 2>&1 || { echo "no shards in $SMALL_ROOT/shards — copy shards/ and quality.sqlite first"; exit 1; }
+    if [[ ! -x "$LORA_PY" ]]; then
+      echo "creating ${LORA_PY:h:h}"
+      python3.12 -m venv "${LORA_PY:h:h}"
+      "$LORA_PY" -m pip install mlx mlx-lm tokenizers numpy pyarrow huggingface_hub torch transformers playwright
+      "$LORA_PY" -m playwright install chromium
+    fi
+    [[ -x "$BROWSER_PY" ]] || BROWSER_PY="$LORA_PY"
+    if [[ ! -f "$SMALL_BASE/config.json" && "$SMALL_BASE" == "$HOME/MLX_Models/MiniCPM5-1B-Base" ]]; then
+      echo "downloading MiniCPM5-1B-Base"
+      mkdir -p "${SMALL_BASE:h}"
+      "${LORA_PY:h}/hf" download openbmb/MiniCPM5-1B-Base --local-dir "$SMALL_BASE"
+    fi
+  fi
   [[ -f "$SMALL_BASE/config.json" ]] || { echo "no model at SMALL_BASE (see README §9 to download)"; exit 1; }
   small_monitor() {
     LORA_ROOT="$SMALL_ROOT" LORA_PORT="$SMALL_PORT" detach "$SMALL_ROOT/logs/dashboard.log" "$LORA_PY" "$HERE/serve_progress.py"
@@ -95,7 +112,22 @@ if [[ "$what" == small* ]]; then
     echo "trainer  (log: $SMALL_ROOT/logs/train.log)   tail -f $SMALL_ROOT/logs/train.log"
   }
   case "$what" in
-    small)         small_monitor; small_train ;;
+    small)
+      # Page, trainer, and quality. `continue` is the only extra: resume the Stack download.
+      small_monitor
+      small_train
+      small_quality
+      if [[ "${2:-}" == "continue" ]]; then
+        if pgrep -f "data.py --source stack" > /dev/null; then
+          echo "stack download already running (pid $(pgrep -f 'data.py --source stack' | head -1))"
+        else
+          detach "$SMALL_ROOT/logs/stack.out" nice -n 5 "$LORA_PY" -u "$HERE/small/data.py" --source stack --workers 32 --max-tokens 8000000000
+          echo "stack    (log: $SMALL_ROOT/logs/stack.out)   resumes logs/stack_state.json"
+        fi
+      elif [[ -n "${2:-}" ]]; then
+        echo "usage: $0 small [continue]"; exit 1
+      fi
+      ;;
     small-train)   small_train ;;
     small-monitor) small_monitor ;;
     small-data)
@@ -106,6 +138,10 @@ if [[ "$what" == small* ]]; then
       detach "$SMALL_ROOT/logs/data.out" "$LORA_PY" "$HERE/small/data.py" --source retok --from "$2" --workers 12
       echo "retok    $2/shards -> $SMALL_ROOT/shards   (log: $SMALL_ROOT/logs/data.out)" ;;
     small-quality)
+      # One review at a time. A second pass would rewrite quality.sqlite while the first is writing it.
+      if pgrep -f "quality_worker.py" > /dev/null; then
+        echo "quality already running (pid $(pgrep -f quality_worker.py | head -1))"; return
+      fi
       detach "$SMALL_ROOT/logs/quality.out" zsh -c "nice -n 19 '$LORA_PY' '$HERE/small/quality_worker.py' --workers 16 && \
         { PLAYWRIGHT_BROWSERS_PATH=\$HOME/Library/Caches/ms-playwright nice -n 19 '$BROWSER_PY' '$HERE/small/quality_worker.py' --browser --workers 6 >> logs/browser.out 2>&1 & \
           nice -n 19 '$LORA_PY' '$HERE/small/quality_worker.py' --edu --workers 12; wait; }"
