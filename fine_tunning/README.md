@@ -271,8 +271,10 @@ A ~1B model trained only on HTML and JavaScript. **Every weight is trained (not 
 | | |
 |---|---|
 | Base (first run) | `openbmb/MiniCPM5-1B-Base` (Apache 2.0, 2026), loaded by **mlx-lm** |
+| Base (M3 Ultra run) | `openbmb/MiniCPM5-2B-Base` — same tokenizer as the 1B shards, so no retok. See §9f |
 | Speed, M2 Ultra 192 GB | ~2,080 tokens/s, 16× the 27B LoRA (130 tokens/s), peak 57 GB |
-| Budget | 2B tokens = 61,035 updates ≈ 11 days on the M2 Ultra |
+| Speed, M3 Ultra 512 GB, 2B base | ~1,120 tokens/s at batch 2, peak 103 GB. Same 2B-token budget ≈ 22 days |
+| Budget | 2B tokens = 61,035 updates ≈ 11 days on the M2 Ultra (1B) |
 | Code (git) | `fine_tunning/small/` — **no training data in git** |
 | Data + checkpoints (not in git) | `$SMALL_ROOT`, default `~/MLX_Models/html_js_small/` |
 
@@ -433,7 +435,7 @@ Where the data came from: own games (`html_game_sft/raw/`) → 14,470 unique fil
 | Flag | Default | Effect |
 |---|---|---|
 | `--block` | 4096 | Tokens per packed sequence |
-| `--batch` | 2 | Sequences per micro-step (1, 2, 4 ran at the same tokens/s on the M2; 2 = 57 GB) |
+| `--batch` | 2 | Sequences per micro-step. On the M2, batch 1/2/4 were the same tokens/s (2 = 57 GB). On the M3 Ultra with the 2B, batch 4 and 8 were no faster and used 180 GB and 343 GB |
 | `--accum` | 4 | Micro-steps per optimizer update (update = 32,768 tokens) |
 | `--lr` / `--warmup` | 5e-5 / 200 | Peak LR, warmup updates; cosine to 10% after |
 | `--total-tokens` | 2e9 | Stop after this many trained tokens |
@@ -449,3 +451,34 @@ Where the data came from: own games (`html_game_sft/raw/`) → 14,470 unique fil
   --ignore-chat-template --max-tokens 400 --prompt '<!DOCTYPE html>
 <html><head><title>Snake</title>'
 ```
+
+### 9f. MiniCPM5-2B on the M3 Ultra (Sep 24, 2026)
+
+`openbmb/MiniCPM5-2B-Base` is the newer base (Sep 7, 2026). It is a normal Llama, 2.52B parameters, bf16 weights about 4.7 GB. The 1B shards already use this tokenizer (same `tokenizer.json`), so train them in place. Do not retokenize.
+
+| | |
+|---|---|
+| Weights | `~/MLX_Models/MiniCPM5-2B-Base` (never modified) |
+| Data + checkpoints | `/Users/jonathanrothberg/Data/html_js_small` (`SMALL_ROOT`) |
+| Page | http://127.0.0.1:8767/ |
+| Measured speed | batch 2 → ~1,060–1,120 tokens/s, 103 GB. Batch 4 → ~1,110 tok/s, 180 GB. Batch 8 → ~990 tok/s, 343 GB. Stay at batch 2 |
+| 2B-token budget | about 22 days at that speed |
+
+8-bit and MXFP8 are not faster. MLX dequantizes them and then runs the bf16 GEMM, and those kernels are tuned for decoding. The 27B LoRA trainer already unpacks MXFP8 to bf16 for the same reason (`train_lora.py --dequantize`).
+
+A throwaway speed test lives in `~/MLX_Models/html_js_MiniCPM5-2B-Base-bench`. Those shards are random tokens. Do not train on that folder.
+
+Start from **Terminal.app**. A Cursor chat shell kills its children when the command ends, including `nohup`. A job only survives quitting Cursor when its parent is launchd (PPID 1).
+
+```bash
+cd ~/Agent_learning/fine_tunning
+export SMALL_ROOT=/Users/jonathanrothberg/Data/html_js_small
+export SMALL_BASE=~/MLX_Models/MiniCPM5-2B-Base
+./start.sh small-monitor    # page first
+./start.sh small-train
+# After tokens/s is moving. This script uses 16 score workers, then edu 12 + browser 6.
+# The Sep 24 run used 8, then edu 4 + browser 2, so the GPU stayed at ~1,120 tokens/s.
+./start.sh small-quality
+```
+
+Node 25 aborts the syntax checker on some bad scripts (`Assertion failed: (end) >= (start)`), which used to kill the whole score pass. `quality_worker.py` restarts node and counts that script as bad JS. A checkpoint of this 2B run is much larger than the 1B's 6.1 GB: weights plus AdamW state are on the order of 25 GB.

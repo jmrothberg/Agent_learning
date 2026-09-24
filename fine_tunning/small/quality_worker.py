@@ -111,6 +111,16 @@ def _minhash(text: str) -> bytes:
     return sig.astype(np.uint32).tobytes()
 
 
+def _restart_node() -> None:
+    """Node 25 aborts the syntax checker on some bad scripts. Start a fresh one."""
+    old = _state.get("node")
+    if old is not None and old.poll() is None:
+        old.kill()
+    _state["node"] = subprocess.Popen(
+        ["node", "--experimental-vm-modules", "--no-warnings", "-e", _NODE_CHECK],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
+
+
 def _syntax_ok(text: str, is_html: bool) -> int:
     if is_html:
         parts = []
@@ -126,9 +136,19 @@ def _syntax_ok(text: str, is_html: bool) -> int:
         parts = [{"c": text, "m": False}]
     if not parts:
         return 1
-    p = _state["node"]
-    p.stdin.write(json.dumps(parts) + "\n")
-    return int(p.stdout.readline().strip() or 1)
+    # One crash must not kill the pool. Retry once; if that script kills node, count it as bad JS.
+    for _ in range(2):
+        p = _state["node"]
+        try:
+            p.stdin.write(json.dumps(parts) + "\n")
+            p.stdin.flush()
+            line = p.stdout.readline()
+        except (BrokenPipeError, OSError):
+            line = ""
+        if line:
+            return int(line.strip() or 1)
+        _restart_node()
+    return 0
 
 
 def _junk(text: str) -> float:
