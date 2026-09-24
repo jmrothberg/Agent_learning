@@ -22,6 +22,8 @@ HTML = HERE / "progress.html"
 PY = os.path.expanduser(os.environ.get("LORA_PY", "/Users/jonathanrothberg/Agents/.venv/bin/python"))
 HOLD = ROOT / "logs" / "hold.json"
 _LOSS = re.compile(r"Iter \d+: Train loss .*?([0-9]+\.[0-9]+)")
+# SMALL MODEL: train_small.py logs Tokens/sec on every Iter line; the page plots it.
+_SPEED = re.compile(r"Tokens/sec ([0-9]+\.?[0-9]*)")
 _STAMP = re.compile(r"\d{8}T\d{6}Z")
 
 
@@ -37,6 +39,9 @@ def _python_script_pids(script_name: str) -> list[int]:
         pid_s, cmd = parts
         # MULTI-LORA: fine_tunning/ copy, or the older <data>/scripts/ copy still in use.
         needles = (f"{HERE}/{script_name}", f"/{ROOT.name}/scripts/{script_name}")
+        # SMALL MODEL: train_small.py is started from fine_tunning/small/ with a bare name.
+        if script_name == "train_small.py":
+            needles += (f"Python {script_name}", f"small/{script_name}")
         if not any(n in cmd for n in needles) or "Python" not in cmd or "zsh" in cmd:
             continue
         found.append(int(pid_s))
@@ -56,7 +61,9 @@ def _agent_model_pids() -> list[int]:
         pid_s, rss_s, cmd = parts
         if "Python" not in cmd or "zsh" in cmd:
             continue
-        if any(skip in cmd for skip in ("serve_progress.py", "train_lora.py", "run_slices.py", "ingest.py")):
+        # SMALL MODEL: train_small.py is a trainer (>20 GB), never treat it as the agent model.
+        if any(skip in cmd for skip in ("serve_progress.py", "train_lora.py", "run_slices.py", "ingest.py",
+                                        "train_small.py")):
             continue
         named = any(mark in cmd for mark in ("chat.py", "coder.py", "mlx_vlm.server", "mlx_lm.server"))
         huge = int(rss_s) > 20_000_000  # rss is KB; 20 GB is a loaded 27B, not the dashboard
@@ -95,6 +102,8 @@ def _checkpoints() -> list[dict]:
         if not path.is_dir() or not _STAMP.fullmatch(path.name):
             continue
         weights = path / "adapters.safetensors"
+        if not weights.exists():
+            weights = path / "model.safetensors"  # SMALL MODEL: full-weight snapshots
         if not weights.exists() or weights.stat().st_size < 100_000_000:
             continue
         parsed = time.strptime(path.name, "%Y%m%dT%H%M%SZ")
@@ -121,7 +130,9 @@ def _latest_snapshot() -> str | None:
 
 def _control() -> dict:
     try:
-        trainer = _python_script_pids("train_lora.py") + _python_script_pids("run_slices.py")
+        # SMALL MODEL: train_small.py counts as a running trainer too.
+        trainer = (_python_script_pids("train_lora.py") + _python_script_pids("run_slices.py")
+                   + _python_script_pids("train_small.py"))
         agent = [] if trainer else _agent_model_pids()
         checkpoint = _latest_snapshot()
         running = bool(trainer)
@@ -230,6 +241,7 @@ def status() -> dict:
         tail = "\n".join(lines[cut:][-24:])
     # This GPU run starts at the last fresh LoRA. Losses after that are the plot.
     losses: list[float] = []
+    speeds: list[float] = []  # SMALL MODEL: Tokens/sec per Iter line
     if log.exists():
         lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
         start = 0
@@ -243,6 +255,9 @@ def status() -> dict:
             m = _LOSS.search(line)
             if m:
                 losses.append(float(m.group(1)))
+                sp = _SPEED.search(line)
+                if sp:
+                    speeds.append(float(sp.group(1)))
     else:
         slice_starts = 0
     rows_this = 0
@@ -267,6 +282,8 @@ def status() -> dict:
         "rebuild": rebuild,
         "log_tail": tail,
         "losses": losses,
+        "speeds": speeds,
+        "small": bool(train.get("tok_per_sec")),  # SMALL MODEL: train_small.py state.json
         "steps_trained": len(losses),
         "slice_starts": slice_starts,
         "epochs": epochs,

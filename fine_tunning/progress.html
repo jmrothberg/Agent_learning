@@ -30,17 +30,33 @@
 <body>
 <h1>HTML game LoRA</h1>
 <p class="sub" id="banner">HTML and JavaScript games. The regular agent prompt is on the downloads. /640png is only the JMR storage files.</p>
+<!-- SMALL MODEL: speed-first panel, shown only when the trainer is train_small.py -->
+<div id="speedPanel" style="display:none">
 <div class="grid">
+  <div class="card"><div class="num ok" id="tps">–</div><div class="label">Tokens per second (now)</div></div>
+  <div class="card"><div class="num ok" id="xfaster">–</div><div class="label">Faster than the 27B LoRA (130 tokens/s)</div></div>
+  <div class="card"><div class="num" id="eta">–</div><div class="label" id="etaLabel">Days left at this speed</div></div>
+</div>
+<div class="grid" style="margin-top:12px">
+  <div class="card"><div class="num" id="tokDone">–</div><div class="label" id="tokLabel">Tokens trained</div></div>
+  <div class="card"><div class="num" id="upd">–</div><div class="label" id="updLabel">Updates done</div></div>
+  <div class="card"><div class="num" id="sloss">–</div><div class="label">Loss (last 10 updates)</div></div>
+</div>
+<h2>Speed</h2>
+<canvas id="speedChart" width="880" height="160" style="width:100%;background:#1c1f28;border-radius:10px"></canvas>
+<p class="sub" id="speedLabel">waiting for steps</p>
+</div>
+<div class="grid lora">
   <div class="card"><div class="num" id="rows">–</div><div class="label" id="rowsLabel">HTML/JS slices written</div></div>
   <div class="card"><div class="num" id="step">–</div><div class="label">Step in this 30-minute block</div></div>
   <div class="card"><div class="num" id="loss">–</div><div class="label">Loss on the last file</div></div>
 </div>
-<div class="grid" style="margin-top:12px">
+<div class="grid lora" style="margin-top:12px">
   <div class="card"><div class="num" id="stepsDone">–</div><div class="label">Steps trained on this LoRA</div></div>
   <div class="card"><div class="num" id="ckptCount">–</div><div class="label" id="ckptLabel">Checkpoints kept</div></div>
   <div class="card"><div class="num" id="epoch">–</div><div class="label" id="epochLabel">Of one pass through the set</div></div>
 </div>
-<div class="grid" style="margin-top:12px">
+<div class="grid lora" style="margin-top:12px">
   <div class="card"><div class="num" id="html">–</div><div class="label">HTML/JS games</div></div>
   <div class="card"><div class="num" id="gold">–</div><div class="label">/640png files inside that set</div></div>
   <div class="card"><div class="num" id="added">–</div><div class="label">New games this download</div></div>
@@ -49,9 +65,9 @@
 <canvas id="chart" width="880" height="280" style="width:100%;background:#1c1f28;border-radius:10px"></canvas>
 <p class="sub" id="avgLabel">waiting for steps</p>
 <h2>Checkpoints kept</h2>
-<p class="sub">Each 30-minute save is a new folder with the date. Older checkpoints stay on disk.</p>
+<p class="sub" id="ckptNote">Each 30-minute save is a new folder with the date. Older checkpoints stay on disk.</p>
 <ul id="ckpts"><li>none yet</li></ul>
-<div class="panel">
+<div class="panel lora">
   <div class="row">
     <div class="dot" id="safeDot"></div>
     <strong id="safeText">checking</strong>
@@ -64,8 +80,8 @@
 </div>
 <h2>Training</h2>
 <p id="train">waiting</p>
-<h2>Downloads</h2>
-<p id="ingest">waiting</p>
+<h2 class="lora">Downloads</h2>
+<p id="ingest" class="lora">waiting</p>
 <h2>Trainer log</h2>
 <pre id="log">no log yet</pre>
 <script>
@@ -75,6 +91,42 @@ async function tick() {
     const s = await r.json();
     const t = s.train || {};
     const g = s.ingest || {};
+    // SMALL MODEL: train_small.py run (full fine-tune of MiniCPM5-1B). Speed first, LoRA cards hidden.
+    if (s.small) {
+      document.querySelectorAll(".lora").forEach((el) => { el.style.display = "none"; });
+      document.getElementById("speedPanel").style.display = "";
+      document.title = "Small HTML/JS model progress";
+      const baseName = (String(t.detail || "").match(/base=(\S+)/) || [0, "MiniCPM5-1B-Base"])[1];
+      document.querySelector("h1").textContent = `Small HTML/JS model — ${baseName} full fine-tune`;
+      const tps = Number(t.tok_per_sec || 0);
+      const perUpd = t.step ? t.tokens / t.step : 0;
+      const total = perUpd * (t.iters_this_slice || 0);
+      const left = tps > 0 ? (total - (t.tokens || 0)) / tps / 86400 : null;
+      document.getElementById("banner").textContent =
+        "Stage 1: continued pretraining on HTML and JavaScript only (own games + github-code-clean, deduplicated and quality-weighted).";
+      document.getElementById("tps").textContent = tps ? Math.round(tps).toLocaleString() : "–";
+      document.getElementById("xfaster").textContent = tps ? (tps / 130).toFixed(1) + "×" : "–";
+      document.getElementById("eta").textContent = left == null ? "–" : left.toFixed(1);
+      document.getElementById("etaLabel").textContent = left == null ? "Days left at this speed"
+        : `Days left at this speed (finishes ${new Date(Date.now() + left * 86400000).toLocaleDateString()})`;
+      document.getElementById("tokDone").textContent = ((t.tokens || 0) / 1e6).toFixed(1) + "M";
+      document.getElementById("tokLabel").textContent = `Tokens trained of ${(total / 1e9).toFixed(2)}B (${total ? (100 * t.tokens / total).toFixed(2) : 0}%)`;
+      document.getElementById("upd").textContent = (t.step || 0).toLocaleString();
+      document.getElementById("updLabel").textContent = `Updates of ${(t.iters_this_slice || 0).toLocaleString()} · peak ${t.peak_gb ? Number(t.peak_gb).toFixed(1) : "–"} GB`;
+      document.getElementById("sloss").textContent = t.loss == null ? "–" : Number(t.loss).toFixed(3);
+      document.getElementById("ckptNote").textContent =
+        "Weights overwrite checkpoints/latest every 30 minutes; a dated weights-only snapshot is kept every 6 hours.";
+      document.getElementById("train").innerHTML = `<span class="ok">${t.state || "not started"}</span> — ${t.detail || ""}` +
+        (t.updated ? `<br><span class="sub">updated ${t.updated}</span>` : "");
+      document.getElementById("log").textContent = s.log_tail || "no log yet";
+      const ck = s.checkpoints || [];
+      document.getElementById("ckpts").innerHTML = ck.length
+        ? ck.slice().reverse().map((c) => `<li><b>${c.when}</b> <span class="sub">${c.name}</span></li>`).join("")
+        : "<li>none yet (first snapshot after 6 hours)</li>";
+      drawSpeed(s.speeds || []);
+      drawLoss(s.losses || [], "Log point (every 10 updates)");
+      return;
+    }
     document.getElementById("html").textContent = s.html_files ?? s.html_rows ?? 0;
     const rb = s.rebuild || {};
     const writing = rb.state === "rebuilding";
@@ -149,7 +201,37 @@ async function tick() {
     document.getElementById("train").textContent = "status fetch failed";
   }
 }
-function drawLoss(losses) {
+// SMALL MODEL: tokens/sec per log point, with the 27B LoRA's 130 tokens/s as a reference line.
+function drawSpeed(speeds) {
+  const canvas = document.getElementById("speedChart");
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width, h = canvas.height, left = 58, right = 16, top = 12, bottom = 24;
+  const pw = w - left - right, ph = h - top - bottom;
+  ctx.clearRect(0, 0, w, h);
+  const label = document.getElementById("speedLabel");
+  if (!speeds.length) { label.textContent = "waiting for steps"; return; }
+  const hi = Math.max(...speeds) * 1.15, n = speeds.length;
+  const xOf = (i) => left + pw * (n === 1 ? 0.5 : i / (n - 1));
+  const yOf = (v) => top + ph * (1 - v / hi);
+  ctx.fillStyle = "#9a968e";
+  ctx.font = "12px ui-sans-serif, system-ui, sans-serif";
+  ctx.textAlign = "right";
+  ctx.textBaseline = "middle";
+  [0, hi / 2, hi].forEach((v) => ctx.fillText(Math.round(v), left - 8, yOf(v)));
+  ctx.strokeStyle = "#e06a6a";
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath(); ctx.moveTo(left, yOf(130)); ctx.lineTo(left + pw, yOf(130)); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.strokeStyle = "#8fd49a";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  speeds.forEach((v, i) => { if (i === 0) ctx.moveTo(xOf(i), yOf(v)); else ctx.lineTo(xOf(i), yOf(v)); });
+  ctx.stroke();
+  ctx.lineWidth = 1;
+  const avg = speeds.reduce((a, b) => a + b, 0) / n;
+  label.textContent = `green = tokens/s at each log point (average ${Math.round(avg)}, min ${Math.round(Math.min(...speeds))}). red dashed = the 27B LoRA at 130 tokens/s.`;
+}
+function drawLoss(losses, xName) {
   const canvas = document.getElementById("chart");
   const ctx = canvas.getContext("2d");
   const w = canvas.width, h = canvas.height;
@@ -220,7 +302,7 @@ function drawLoss(losses) {
   });
   ctx.fillStyle = "#9a968e";
   ctx.textAlign = "center";
-  ctx.fillText("Step", left + pw / 2, h - 16);
+  ctx.fillText(xName || "Step", left + pw / 2, h - 16);
   ctx.save();
   ctx.translate(14, top + ph / 2);
   ctx.rotate(-Math.PI / 2);

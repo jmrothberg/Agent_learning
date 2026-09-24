@@ -6,6 +6,8 @@ This folder has everything needed to train, monitor, and use a LoRA adapter on a
 - **Data, weights, and logs (not in git, large):** one project folder per LoRA under `~/MLX_Models/`, e.g. `~/MLX_Models/html_game_sft/`.
 - **Base models (never modified):** `~/MLX_Models/<model>/`, e.g. `~/MLX_Models/Qwen3.8-27B-mxfp8/`.
 
+> **Small HTML/JS model** (full fine-tune of a ~1B base, no LoRA): code in `small/`, data in `~/MLX_Models/html_js_small/`, start with `./start.sh small`. Everything about it, including moving it to another Mac and trying another base model, is in **§9**.
+
 > `sft/` in the repo root is the older copy of these scripts. `fine_tunning/` is the current one: it has the HOLD/RESUME dashboard and the env-var settings. The Sep 21–23 run was started from `~/MLX_Models/html_game_sft/scripts/`, which is the same code without the env vars. A restart with `./start.sh` uses this folder.
 
 ---
@@ -256,3 +258,133 @@ Scripting/eval without the TUI: `MLX_MODEL=<base> MLX_ADAPTER=<snapshot dir>` (t
 | `KeyError: 'source'` or `whole games 0 of N sources` in `train.log` | Non-HTML data with `--whole-games 1`. Pass `LORA_TRAIN_ARGS="--system full --whole-games 0"`. |
 | `AttributeError … language_model` | The base is not Qwen-VL shaped. Pass `--lora-top-layers 0`. |
 | `No Metal device available` | Running inside a sandbox / headless shell. Use Terminal.app. |
+
+---
+
+## 9. Small HTML/JS model (full fine-tune, `small/`)
+
+A ~1B model trained only on HTML and JavaScript. **Every weight is trained (not LoRA).** Stage 1 is continued pretraining on packed 4,096-token blocks, with loss on every token. Stage 2 (spec → whole game, planned) teaches it the short spec prompt the agent will send.
+
+| | |
+|---|---|
+| Base (first run) | `openbmb/MiniCPM5-1B-Base` (Apache 2.0, 2026), loaded by **mlx-lm** |
+| Speed, M2 Ultra 192 GB | ~2,080 tokens/s, 16× the 27B LoRA (130 tokens/s), peak 57 GB |
+| Budget | 2B tokens = 61,035 updates ≈ 11 days on the M2 Ultra |
+| Code (git) | `fine_tunning/small/` |
+| Data + checkpoints (not in git) | `$SMALL_ROOT`, default `~/MLX_Models/html_js_small/` |
+
+### Files
+
+| File | Job |
+|---|---|
+| `small/data.py` | Builds `shards/` (uint32 token ids + one JSON line per doc). `--source own` = your games from `html_game_sft/games.sqlite`; `--source gcc` = [codeparrot/github-code-clean](https://huggingface.co/datasets/codeparrot/github-code-clean) HTML + JavaScript, streamed (nothing stored but the shards); `--source retok --from DIR` = re-tokenize another root's shards for a new base. Filters size, minified, base64, symbol soup, HTML without `<script>`. Resumes. |
+| `small/train_small.py` | Trainer. Weighted, deduplicated, shuffled packing; compiled step; AdamW, warmup + cosine. Every 30 min: saves `checkpoints/latest/` and re-reads `shards/` + `quality.sqlite`, so new data and new scores join without a restart. Resumes automatically. |
+| `small/quality_worker.py` | CPU-only quality scoring (run niced beside training). Writes `quality.sqlite` → `quality(norm, weight)`. |
+| `start.sh small*` | One-line starts (below) |
+| `serve_progress.py` + `progress.html` | Same monitor. With a small-model root it shows speed first (tokens/s, × faster, days left, speed chart). |
+
+### Data folder layout (`$SMALL_ROOT`)
+
+| Path | Size (Sep 24) | What | Copy to a new Mac? |
+|---|---|---|---|
+| `shards/*.bin` + `*.jsonl` | 11 GB | Token ids + doc metadata (`src`, `path`, `rank`, `norm`, `offset`, `ntok`). 1,101,571 docs, 949,410 unique | **yes — this is the training set** |
+| `shards/tokenizer.json` | 10 MB | The tokenizer the ids belong to (needed by `retok`) | yes (inside `shards/`) |
+| `quality.sqlite` | 0.6 GB | Quality scores per doc, keyed by `norm` (a hash of the text), so they apply to **any** tokenizer | **yes** |
+| `checkpoints/latest/` | 6.1 GB | Weights + optimizer + counters. A normal mlx-lm model folder. | only to **continue this exact run** |
+| `snapshots/<stamp>/` | 2 GB each | Weights-only copy every 6 hours (never deleted) | optional |
+| `logs/` | small | `train.log`, `state.json`, data/quality logs | no |
+
+Where the data came from: own games (`~/MLX_Models/html_game_sft/raw/`, 138 GB, **not needed** on the new Mac, since the shards hold the text) gave 14,470 unique files, about 33M tokens. The copies (three.js examples vendored into hundreds of repos) are deduplicated. github-code-clean (49 parquet files) gave 916,493 docs, 2.22B tokens.
+
+Sampling weights: own canvas/three.js games with a loop ×3, other own ×2/×1; github ×1.5/×1/×0.7 by the same rank. `quality.sqlite` multiplies them:
+
+| Pass | Weight |
+|---|---|
+| Near-duplicate (MinHash, ~0.77 Jaccard), not the keeper | 0 (25% of docs) |
+| JS syntax error (node `vm` parse, never run) | 0.3 |
+| Repeated lines / "generated, do not edit" | 0.3 / 0.2 |
+| Stack-Edu JavaScript classifier ([SmolLM2](https://arxiv.org/abs/2502.02737)), github docs only | score <1.5 → 0.3, <2.5 → 0.7, <3.5 → 1.3, else 2.0 |
+| Headless Chromium, 2 s, network blocked | self-contained page with errors 0.5, canvas drew 1.5 |
+
+### Start on another Mac (e.g. M3 Ultra 512 GB)
+
+```bash
+# 1) code
+git clone https://github.com/jmrothberg/Agent_learning.git ~/Agent_learning
+
+# 2) python (one venv; the scripts default to ~/Agents/.venv/bin/python, or set LORA_PY=...)
+python3.12 -m venv ~/Agents/.venv
+~/Agents/.venv/bin/pip install mlx mlx-lm tokenizers numpy pyarrow huggingface_hub torch transformers
+# browser quality pass only (optional): a python with playwright + chromium
+~/Agents/.venv/bin/pip install playwright && ~/Agents/.venv/bin/python -m playwright install chromium
+export BROWSER_PY=~/Agents/.venv/bin/python     # else it uses ~/Agent_learning/.venv/bin/python
+
+# 3) base model (2 GB)
+~/Agents/.venv/bin/hf download openbmb/MiniCPM5-1B-Base --local-dir ~/MLX_Models/MiniCPM5-1B-Base
+
+# 4) training set from the drive (drive name is an example)
+mkdir -p ~/MLX_Models/html_js_small
+rsync -a --progress /Volumes/DRIVE/html_js_small/shards /Volumes/DRIVE/html_js_small/quality.sqlite ~/MLX_Models/html_js_small/
+#    to CONTINUE the M2 run instead of starting fresh, also copy checkpoints/latest/
+
+# 5) go (Terminal.app, not a Cursor chat: jobs use nohup and survive closing it)
+cd ~/Agent_learning/fine_tunning && ./start.sh small
+# monitor: http://127.0.0.1:8767/
+```
+
+To fill the drive on this Mac: `rsync -a ~/MLX_Models/html_js_small/{shards,quality.sqlite} /Volumes/DRIVE/html_js_small/` (add `checkpoints` to take the run along). Training directly off a fast external SSD also works: `SMALL_ROOT=/Volumes/DRIVE/html_js_small ./start.sh small`.
+
+**Do not continue the same run on both Macs at once.** Each Mac would diverge from the same checkpoint. To compare, start a fresh `SMALL_ROOT` (a different base, or the same base with a different setting).
+
+| Command | Does |
+|---|---|
+| `./start.sh small` | monitor + trainer (starts, or resumes `checkpoints/latest/`) |
+| `./start.sh small-train` / `small-monitor` | one of the two |
+| `./start.sh small-data` | shards from scratch (own games need `html_game_sft/games.sqlite` + `raw/`; github is re-streamed, ~20 min) |
+| `./start.sh small-retok DIR` | re-tokenize `DIR/shards` for `SMALL_BASE` into `SMALL_ROOT/shards` |
+| `./start.sh small-quality` | all quality passes, niced (score ~2 min; edu ~11 h; browser ~2 h) |
+
+Env vars: `SMALL_ROOT` (data/checkpoints), `SMALL_BASE` (model), `SMALL_PORT` (page, default 8767), `SMALL_TRAIN_ARGS` (extra trainer flags), `LORA_PY`, `BROWSER_PY`.
+
+**Stop:** `pkill -f train_small.py`. Up to 30 minutes since the last save are lost. The next start resumes from `checkpoints/latest/`.
+
+### Train a different base model (e.g. a 0.5B) and compare
+
+The shards are token ids of one tokenizer, so a new base gets its own `SMALL_ROOT` and a re-tokenized copy of the same data. Retok decodes and re-encodes; 2,996 of 3,000 sampled docs round-trip exactly, and every doc keeps its original `norm`, so `quality.sqlite` applies unchanged.
+
+```bash
+M=Qwen-X-0.5B-Base                                   # any text model mlx-lm can load
+~/Agents/.venv/bin/hf download <org>/$M --local-dir ~/MLX_Models/$M
+cd ~/Agent_learning/fine_tunning
+export SMALL_ROOT=~/MLX_Models/html_js_$M SMALL_BASE=~/MLX_Models/$M SMALL_PORT=8768
+./start.sh small-retok ~/MLX_Models/html_js_small    # ~15 min for 11 GB; log: $SMALL_ROOT/logs/data.out
+cp ~/MLX_Models/html_js_small/quality.sqlite $SMALL_ROOT/
+./start.sh small                                     # monitor: http://127.0.0.1:8768/
+```
+
+- **Check the base first:** `~/Agents/.venv/bin/python -c "from mlx_lm import load; load('$SMALL_BASE')"`. BOS/EOS come from its `config.json` (no BOS → EOS on both sides of each doc).
+- **Speed test before committing days:** `~/Agents/.venv/bin/python small/train_small.py --bench 20` (with the env above) prints tokens/s and peak GB and saves nothing. Speed scales roughly with 1/parameters, so a 0.5B should run about 2× the 1B. A large vocabulary (150k+) costs extra memory for the logits. If memory is short: `SMALL_TRAIN_ARGS="--batch 1 --accum 8"` (same update size).
+- **One GPU job at a time per Mac.** `start.sh` refuses a second `train_small.py`.
+- **Comparing runs:** train both on the same shards and the same `--total-tokens`. **Do not compare raw loss across different tokenizers** (a token is a different amount of text). Compare with the held-out game eval (`small/eval_small.py`, planned: 30 specs → headless Chromium checks), or at matched tokens on the same base.
+
+### `train_small.py` flags
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--block` | 4096 | Tokens per packed sequence |
+| `--batch` | 2 | Sequences per micro-step (1, 2, 4 ran at the same tokens/s on the M2; 2 = 57 GB) |
+| `--accum` | 4 | Micro-steps per optimizer update (update = 32,768 tokens) |
+| `--lr` / `--warmup` | 5e-5 / 200 | Peak LR, warmup updates; cosine to 10% after |
+| `--total-tokens` | 2e9 | Stop after this many trained tokens |
+| `--save-minutes` | 30 | Save `checkpoints/latest/` + re-read data and quality |
+| `--bench N` | 0 | Time N micro-steps, save nothing |
+
+### Use a checkpoint
+
+`checkpoints/latest/` (and every `snapshots/<stamp>/`) is a normal mlx-lm model folder. Stage 1 is a base model, so use a raw prompt, not a chat template:
+
+```bash
+~/Agents/.venv/bin/python -m mlx_lm generate --model ~/MLX_Models/html_js_small/checkpoints/latest \
+  --ignore-chat-template --max-tokens 400 --prompt '<!DOCTYPE html>
+<html><head><title>Snake</title>'
+```

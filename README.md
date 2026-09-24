@@ -626,6 +626,8 @@ Battery: `memory/system_battery.jsonl`.
 
 > **Full training guide: [`fine_tunning/README.md`](fine_tunning/README.md)**. It covers the data sources, processing, row format, every flag, training a new LoRA or another Qwen-style (mlx-vlm) base, and troubleshooting. `fine_tunning/` is the current code. `sft/` is the older copy.
 >
+> **Small HTML/JS model** (full fine-tune of MiniCPM5-1B, 16× the 27B LoRA's speed): `./start.sh small` → http://127.0.0.1:8767/. Moving it to another Mac, where the training set lives, and training a different base (e.g. 0.5B) for comparison: [`fine_tunning/README.md` §9](fine_tunning/README.md#9-small-htmljs-model-full-fine-tune-small).
+>
 > ```bash
 > cd ~/Agent_learning/fine_tunning
 > ./start.sh            # monitor + trainer (HTML-game LoRA defaults)
