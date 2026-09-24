@@ -4850,7 +4850,7 @@ def _scan_mlx_models_dir(root: str) -> list[str]:
 
     Direct children that look like model dirs win. We also walk one
     level into HF-cache style layouts (`models--org--name/snapshots/<sha>/`)
-    so the HF cache is covered without a separate scanner.
+    and into `<project>/checkpoints/latest` (the small model's 30-minute save).
     """
     out: list[str] = []
     if not root or not os.path.isdir(root):
@@ -4869,6 +4869,13 @@ def _scan_mlx_models_dir(root: str) -> list[str]:
                 out.append(ap)
                 seen.add(ap)
             continue
+        # Small-model trainer overwrites this every 30 minutes. /list shows it as "latest".
+        latest = os.path.join(entry.path, "checkpoints", "latest")
+        if os.path.isdir(latest) and _is_mlx_model_dir(latest):
+            ap = os.path.abspath(latest)
+            if ap not in seen:
+                out.append(ap)
+                seen.add(ap)
         snapshots = os.path.join(entry.path, "snapshots")
         if os.path.isdir(snapshots):
             try:
