@@ -187,6 +187,58 @@ def resume_training() -> dict:
     return status()
 
 
+_corpus_cache: dict = {"at": 0.0, "scan": {}}
+
+
+def _scan_shards() -> dict:
+    """One pass over shard metadata. Cached 60s — the files change slowly."""
+    now = time.time()
+    if now - _corpus_cache["at"] < 60 and _corpus_cache["scan"]:
+        return _corpus_cache["scan"]
+    docs = tokens = 0
+    by_src: dict[str, int] = {}
+    norms: set[str] = set()
+    shards = ROOT / "shards"
+    if shards.is_dir():
+        for meta in shards.glob("*.jsonl"):
+            for line in meta.read_text(encoding="utf-8", errors="replace").splitlines():
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                docs += 1
+                tokens += int(d.get("ntok") or 0)
+                src = d.get("src") or "?"
+                by_src[src] = by_src.get(src, 0) + 1
+                n = d.get("norm")
+                if n:
+                    norms.add(n)
+    scan = {"docs": docs, "unique": len(norms), "tokens": tokens, "by_src": by_src}
+    _corpus_cache["at"] = now
+    _corpus_cache["scan"] = scan
+    return scan
+
+
+def _small_corpus() -> dict:
+    """Training-set size and quality-worker progress for the small-model page."""
+    scan = _scan_shards()
+    unique = scan["unique"]
+    q = ROOT / "quality.sqlite"
+    quality = {"scored": 0, "dropped": 0, "edu": 0, "browser": 0, "browser_left": 0}
+    if q.exists():
+        try:
+            con = sqlite3.connect(f"file:{q}?mode=ro", uri=True, timeout=5)
+            quality["scored"] = con.execute("select count(*) from quality").fetchone()[0]
+            quality["dropped"] = con.execute("select count(*) from quality where weight = 0").fetchone()[0]
+            quality["edu"] = con.execute("select count(*) from edu").fetchone()[0]
+            quality["browser"] = con.execute("select count(*) from browser").fetchone()[0]
+            quality["browser_left"] = con.execute("select count(*) from pending_browser").fetchone()[0]
+            con.close()
+        except sqlite3.Error:
+            pass
+    return {**scan, **quality}
+
+
 def status() -> dict:
     unique = gold = html = plan = unfitted = 0
     gold_files = html_files = 0
@@ -284,6 +336,7 @@ def status() -> dict:
         "losses": losses,
         "speeds": speeds,
         "small": bool(train.get("tok_per_sec")),  # SMALL MODEL: train_small.py state.json
+        "corpus": _small_corpus() if train.get("tok_per_sec") else {},
         "steps_trained": len(losses),
         "slice_starts": slice_starts,
         "epochs": epochs,

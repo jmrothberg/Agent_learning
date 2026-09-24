@@ -381,6 +381,8 @@ Env vars: `SMALL_ROOT` (data/checkpoints), `SMALL_BASE` (model), `SMALL_PORT` (p
 
 ### 9d. Train a different base model (e.g. a 0.5B) and compare
 
+A smaller base (about 0.5B) trains about twice as fast and can learn this HTML/JS set well: short pages, canvas games, the patterns in the data. It will not match a 7B+ coder at long games, new mechanics, or fixing its own bugs. Use it as a fast HTML writer that the 27B agent prompts with a short spec. Compare it to the 1B with the same data and the same `--total-tokens`, then judge games in the browser, not by loss.
+
 The shards are token ids of one tokenizer, so a new base gets its **own** `SMALL_ROOT` and a re-tokenized copy of the same data. Retok decodes and re-encodes (~15 min for 11 GB). Documents keep their original `norm`, so the same `quality.sqlite` applies. Use a **different port** so both progress pages can run.
 
 ```bash

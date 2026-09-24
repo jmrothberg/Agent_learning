@@ -33,18 +33,24 @@
 <!-- SMALL MODEL: speed-first panel, shown only when the trainer is train_small.py -->
 <div id="speedPanel" style="display:none">
 <div class="grid">
-  <div class="card"><div class="num ok" id="tps">–</div><div class="label">Tokens per second (now)</div></div>
-  <div class="card"><div class="num ok" id="xfaster">–</div><div class="label">Faster than the 27B LoRA (130 tokens/s)</div></div>
-  <div class="card"><div class="num" id="eta">–</div><div class="label" id="etaLabel">Days left at this speed</div></div>
+  <div class="card"><div class="num" id="epoch">–</div><div class="label" id="epochLabel">Passes through the unique set</div></div>
+  <div class="card"><div class="num" id="sloss">–</div><div class="label" id="lossLabel">Loss (last 10 updates)</div></div>
+  <div class="card"><div class="num ok" id="tps">–</div><div class="label" id="tpsLabel">Tokens per second</div></div>
 </div>
 <div class="grid" style="margin-top:12px">
   <div class="card"><div class="num" id="tokDone">–</div><div class="label" id="tokLabel">Tokens trained</div></div>
   <div class="card"><div class="num" id="upd">–</div><div class="label" id="updLabel">Updates done</div></div>
-  <div class="card"><div class="num" id="sloss">–</div><div class="label">Loss (last 10 updates)</div></div>
+  <div class="card"><div class="num" id="eta">–</div><div class="label" id="etaLabel">Days left at this speed</div></div>
 </div>
-<h2>Speed</h2>
-<canvas id="speedChart" width="880" height="160" style="width:100%;background:#1c1f28;border-radius:10px"></canvas>
-<p class="sub" id="speedLabel">waiting for steps</p>
+<h2>Training set</h2>
+<div class="grid">
+  <div class="card"><div class="num" id="cDocs">–</div><div class="label" id="cDocsLabel">Unique HTML/JS files</div></div>
+  <div class="card"><div class="num" id="cTok">–</div><div class="label" id="cTokLabel">Tokens in the set</div></div>
+  <div class="card"><div class="num" id="cDrop">–</div><div class="label" id="cDropLabel">Near-duplicates dropped</div></div>
+</div>
+<div class="panel" id="corpusPanel" style="margin-top:12px">
+  <p id="corpusLine" class="sub" style="margin:0">waiting for quality scores</p>
+</div>
 </div>
 <div class="grid lora">
   <div class="card"><div class="num" id="rows">–</div><div class="label" id="rowsLabel">HTML/JS slices written</div></div>
@@ -99,21 +105,54 @@ async function tick() {
       const baseName = (String(t.detail || "").match(/base=(\S+)/) || [0, "MiniCPM5-1B-Base"])[1];
       document.querySelector("h1").textContent = `Small HTML/JS model — ${baseName} full fine-tune`;
       const tps = Number(t.tok_per_sec || 0);
+      const c = s.corpus || {};
       const perUpd = t.step ? t.tokens / t.step : 0;
       const total = perUpd * (t.iters_this_slice || 0);
+      const uniqueTok = Number(c.tokens || 0);
+      const epochs = uniqueTok > 0 ? (t.tokens || 0) / uniqueTok : null;
       const left = tps > 0 ? (total - (t.tokens || 0)) / tps / 86400 : null;
+      const src = c.by_src || {};
       document.getElementById("banner").textContent =
-        "Stage 1: continued pretraining on HTML and JavaScript only (own games + github-code-clean, deduplicated and quality-weighted).";
-      document.getElementById("tps").textContent = tps ? Math.round(tps).toLocaleString() : "–";
-      document.getElementById("xfaster").textContent = tps ? (tps / 130).toFixed(1) + "×" : "–";
-      document.getElementById("eta").textContent = left == null ? "–" : left.toFixed(1);
-      document.getElementById("etaLabel").textContent = left == null ? "Days left at this speed"
-        : `Days left at this speed (finishes ${new Date(Date.now() + left * 86400000).toLocaleDateString()})`;
-      document.getElementById("tokDone").textContent = ((t.tokens || 0) / 1e6).toFixed(1) + "M";
-      document.getElementById("tokLabel").textContent = `Tokens trained of ${(total / 1e9).toFixed(2)}B (${total ? (100 * t.tokens / total).toFixed(2) : 0}%)`;
-      document.getElementById("upd").textContent = (t.step || 0).toLocaleString();
-      document.getElementById("updLabel").textContent = `Updates of ${(t.iters_this_slice || 0).toLocaleString()} · peak ${t.peak_gb ? Number(t.peak_gb).toFixed(1) : "–"} GB`;
+        "Stage 1: continued pretraining on HTML and JavaScript only. Loss is averaged over the last 10 updates.";
+      document.getElementById("epoch").textContent = epochs == null ? "–" : epochs.toFixed(2);
+      document.getElementById("epochLabel").textContent = uniqueTok
+        ? `Passes through ${(uniqueTok / 1e9).toFixed(2)}B unique tokens. 1.00 = one full pass.`
+        : "Passes through the unique set";
       document.getElementById("sloss").textContent = t.loss == null ? "–" : Number(t.loss).toFixed(3);
+      const losses = s.losses || [];
+      const avg50 = losses.length ? losses.slice(-50).reduce((a, b) => a + b, 0) / Math.min(50, losses.length) : null;
+      document.getElementById("lossLabel").textContent = avg50 == null
+        ? "Loss (last 10 updates)"
+        : `Loss (last 10 updates). Last-50 average ${avg50.toFixed(3)}`;
+      document.getElementById("tps").textContent = tps ? Math.round(tps).toLocaleString() : "–";
+      document.getElementById("tpsLabel").textContent = tps
+        ? `Tokens per second · ${(tps / 130).toFixed(1)}× the 27B LoRA (130 tok/s)`
+        : "Tokens per second";
+      document.getElementById("eta").textContent = left == null ? "–" : left.toFixed(1);
+      document.getElementById("etaLabel").textContent = left == null ? "Days left of the 2B-token budget"
+        : `Days left of the 2B-token budget (about ${new Date(Date.now() + left * 86400000).toLocaleDateString()})`;
+      document.getElementById("tokDone").textContent = ((t.tokens || 0) / 1e6).toFixed(1) + "M";
+      document.getElementById("tokLabel").textContent = `Tokens trained of ${(total / 1e9).toFixed(2)}B budget (${total ? (100 * (t.tokens || 0) / total).toFixed(2) : 0}%)`;
+      document.getElementById("upd").textContent = (t.step || 0).toLocaleString();
+      document.getElementById("updLabel").textContent = `Updates of ${(t.iters_this_slice || 0).toLocaleString()} · peak ${t.peak_gb ? Number(t.peak_gb).toFixed(1) : "–"} GB · lr ${t.detail && /lr=([0-9.e-]+)/.test(t.detail) ? "" : ""}`.replace(" · lr ", "");
+      const lr = String(t.detail || "").match(/lr=([0-9.eE+-]+)/);
+      if (lr) document.getElementById("updLabel").textContent += ` · lr ${lr[1]}`;
+      document.getElementById("cDocs").textContent = (c.unique || 0).toLocaleString();
+      document.getElementById("cDocsLabel").textContent =
+        `Unique files after text-hash dedup (${(c.docs || 0).toLocaleString()} rows on disk, including copies)`;
+      document.getElementById("cTok").textContent = uniqueTok ? (uniqueTok / 1e9).toFixed(2) + "B" : "–";
+      document.getElementById("cTokLabel").textContent = "Tokens in the unique set (before quality weights)";
+      const dropPct = c.unique ? Math.round(100 * (c.dropped || 0) / c.unique) : 0;
+      document.getElementById("cDrop").textContent = (c.dropped || 0).toLocaleString();
+      document.getElementById("cDropLabel").textContent = `Near-duplicates at weight 0 (${dropPct}% of unique)`;
+      const eduLeft = Math.max(0, (src.gcc || 0) - (c.edu || 0));
+      const brTotal = (c.browser || 0) + (c.browser_left || 0);
+      document.getElementById("corpusLine").innerHTML =
+        `Quality worker (CPU, beside training; trainer reloads weights every 30 min).<br>` +
+        `Stack-Edu scores: <b>${(c.edu || 0).toLocaleString()}</b> github files scored` +
+        (eduLeft ? ` · about ${eduLeft.toLocaleString()} left` : ` · done`) + `.<br>` +
+        `Browser check: <b>${(c.browser || 0).toLocaleString()}</b> of ${brTotal.toLocaleString()} game-like HTML pages` +
+        ((c.browser_left || 0) ? ` · ${(c.browser_left || 0).toLocaleString()} left` : ` · done`) + `.`;
       document.getElementById("ckptNote").textContent =
         "Weights overwrite checkpoints/latest every 30 minutes; a dated weights-only snapshot is kept every 6 hours.";
       document.getElementById("train").innerHTML = `<span class="ok">${t.state || "not started"}</span> — ${t.detail || ""}` +
@@ -123,7 +162,6 @@ async function tick() {
       document.getElementById("ckpts").innerHTML = ck.length
         ? ck.slice().reverse().map((c) => `<li><b>${c.when}</b> <span class="sub">${c.name}</span></li>`).join("")
         : "<li>none yet (first snapshot after 6 hours)</li>";
-      drawSpeed(s.speeds || []);
       drawLoss(s.losses || [], "Log point (every 10 updates)");
       return;
     }
@@ -200,36 +238,6 @@ async function tick() {
   } catch (e) {
     document.getElementById("train").textContent = "status fetch failed";
   }
-}
-// SMALL MODEL: tokens/sec per log point, with the 27B LoRA's 130 tokens/s as a reference line.
-function drawSpeed(speeds) {
-  const canvas = document.getElementById("speedChart");
-  const ctx = canvas.getContext("2d");
-  const w = canvas.width, h = canvas.height, left = 58, right = 16, top = 12, bottom = 24;
-  const pw = w - left - right, ph = h - top - bottom;
-  ctx.clearRect(0, 0, w, h);
-  const label = document.getElementById("speedLabel");
-  if (!speeds.length) { label.textContent = "waiting for steps"; return; }
-  const hi = Math.max(...speeds) * 1.15, n = speeds.length;
-  const xOf = (i) => left + pw * (n === 1 ? 0.5 : i / (n - 1));
-  const yOf = (v) => top + ph * (1 - v / hi);
-  ctx.fillStyle = "#9a968e";
-  ctx.font = "12px ui-sans-serif, system-ui, sans-serif";
-  ctx.textAlign = "right";
-  ctx.textBaseline = "middle";
-  [0, hi / 2, hi].forEach((v) => ctx.fillText(Math.round(v), left - 8, yOf(v)));
-  ctx.strokeStyle = "#e06a6a";
-  ctx.setLineDash([4, 4]);
-  ctx.beginPath(); ctx.moveTo(left, yOf(130)); ctx.lineTo(left + pw, yOf(130)); ctx.stroke();
-  ctx.setLineDash([]);
-  ctx.strokeStyle = "#8fd49a";
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  speeds.forEach((v, i) => { if (i === 0) ctx.moveTo(xOf(i), yOf(v)); else ctx.lineTo(xOf(i), yOf(v)); });
-  ctx.stroke();
-  ctx.lineWidth = 1;
-  const avg = speeds.reduce((a, b) => a + b, 0) / n;
-  label.textContent = `green = tokens/s at each log point (average ${Math.round(avg)}, min ${Math.round(Math.min(...speeds))}). red dashed = the 27B LoRA at 130 tokens/s.`;
 }
 function drawLoss(losses, xName) {
   const canvas = document.getElementById("chart");
