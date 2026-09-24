@@ -14,7 +14,7 @@ This folder has everything needed to train, monitor, and use a LoRA adapter on a
 
 ## 1. Quick start (no agent needed)
 
-Run this in **Terminal.app**, not in a Cursor chat. The jobs run with `nohup`, so closing Terminal or quitting Cursor leaves them running.
+`./start.sh` detaches each job to launchd (PPID 1), so closing Terminal or quitting Cursor leaves it running.
 
 ```bash
 cd ~/Agent_learning/fine_tunning
@@ -304,7 +304,7 @@ rsync -a --progress ~/MLX_Models/html_js_small/quality.sqlite /Volumes/DRIVE/htm
 
 ### 9b. Start on another Mac (e.g. M3 Ultra 512 GB)
 
-Run these in **Terminal.app**, not in a Cursor chat. Jobs use `nohup` and keep running if you close Terminal or quit Cursor.
+`./start.sh` detaches each job to launchd (PPID 1). Closing Terminal or quitting Cursor leaves it running.
 
 ```bash
 # 1) code (clone once; later visits: cd ~/Agent_learning && git pull)
@@ -358,6 +358,7 @@ SMALL_ROOT=/Volumes/DRIVE/html_js_small ./start.sh small
 | `./start.sh small-data` | build shards from scratch (own games need `html_game_sft/games.sqlite` + `raw/`; github re-streams, ~20 min) |
 | `./start.sh small-retok DIR` | re-tokenize `DIR/shards` for `SMALL_BASE` into `SMALL_ROOT/shards` |
 | `./start.sh small-quality` | all quality passes, niced (score ~2 min; edu ~11 h; browser ~2 h) |
+| `./start.sh small-stack` | The Stack v2 download. Resumes `logs/stack_state.json`. 32 workers, stop after 8B new tokens |
 
 Env vars: `SMALL_ROOT` (data/checkpoints), `SMALL_BASE` (model), `SMALL_PORT` (page, default 8767), `SMALL_TRAIN_ARGS` (extra trainer flags), `LORA_PY`, `BROWSER_PY`.
 
@@ -468,7 +469,7 @@ Where the data came from: own games (`html_game_sft/raw/`) → 14,470 unique fil
 
 A throwaway speed test lives in `~/MLX_Models/html_js_MiniCPM5-2B-Base-bench`. Those shards are random tokens. Do not train on that folder.
 
-Start from **Terminal.app**. A Cursor chat shell kills its children when the command ends, including `nohup`. A job only survives quitting Cursor when its parent is launchd (PPID 1).
+`./start.sh` puts each job under launchd (PPID 1), in its own session. Quitting Cursor does not stop it. `nohup` alone does not, because a Cursor shell kills its process group.
 
 ```bash
 cd ~/Agent_learning/fine_tunning
