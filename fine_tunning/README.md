@@ -537,34 +537,39 @@ Where the data came from: own games (`html_game_sft/raw/`) → 14,470 unique fil
 
 ### Restart when the loss blows up
 
-A healthy continued-pretrain loss on these shards starts near **1.0** (the base already uses this tokenizer). A wrong tokenizer starts near `ln(vocab)` (~11.8 for MiniCPM5, vocab 130560) on the first logged update. A learning-rate blow-up looks different: loss stays near 1 through warmup, then jumps to about 7–10 within a few updates of the peak and stays there. The shards are fine. The weights in `checkpoints/latest/` are not. Loading them again at a lower rate does not repair them.
+A healthy continued-pretrain loss on these shards starts near **1.0** (the base already uses this tokenizer). A wrong tokenizer starts near `ln(vocab)` (~11.8 for MiniCPM5, vocab 130560) on the first logged update. A learning-rate blow-up looks different: loss stays near 1 through warmup, then jumps to about 7–10 within a few updates of the peak and stays there. The shards are fine. Resume the last checkpoint that still had loss near 1, at a lower peak. Do not resume a checkpoint written after the jump, and do not throw away a healthy run to start over at the base.
 
-`5e-5` is the `--lr` default and is what the 1B run uses. On MiniCPM5-2B it reached that peak at update 200 and the loss went from 1.08 to 10.1 at update 220 (Sep 24, 2026). Restart the 2B at `1e-5`.
+`checkpoints/latest/` is overwritten every 30 minutes, and the dated snapshot is only every 6 hours. On Sep 24, 2026 the 2B hit `5e-5` at update 200, and the loss went from 1.08 to 10.1 at update 220. The only files still on disk after that were update 728 (snapshot `20260925T011623Z`) and update 850. Both are past the jump. There was no earlier save left to resume, so the restart had to load `MiniCPM5-2B-Base`. While a run is healthy, copy `checkpoints/latest/` to `checkpoints/last_good/` after each save so the next restart has that point.
 
-`./start.sh small` will not help until three things are true: the old trainer is dead (`start.sh` refuses a second one), `checkpoints/latest/counters.json` is gone (otherwise it resumes those weights even with a new `--lr`), and `logs/train.log` is not the dead run. The page plots every `Iter` line in that file, and `logs/state.json` keeps the last loss until update 10 of the new run (~5 minutes, the first time a loss is printed).
+`5e-5` is the `--lr` default and is what the 1B run uses. Restart the 2B at `1e-5`. If `1e-5` also jumps, resume `last_good` at `3e-6`.
 
 ```bash
 # 1) stop the run that diverged
 pkill -f train_small.py
 
-# 2) keep the dead checkpoint, out of the resume path. Do not delete it.
+# 2) park the dead latest. Do not delete it. Do not copy it back.
 mv "$SMALL_ROOT/checkpoints/latest" \
    "$SMALL_ROOT/checkpoints/diverged_$(date -u +%Y%m%dT%H%M%SZ)"
 
-# 3) same for the log, or the page keeps drawing the old curve
+# 3) resume the last healthy save. This is the whole point.
+cp -cR "$SMALL_ROOT/checkpoints/last_good" "$SMALL_ROOT/checkpoints/latest"
+
+# 4) hide the dead curve. The page plots every Iter line in this file.
 mv "$SMALL_ROOT/logs/train.log" \
    "$SMALL_ROOT/logs/train_diverged_$(date -u +%Y%m%dT%H%M%SZ).log"
 
-# 4) new peak. Warmup still climbs to it over the first 200 updates.
+# 5) lower peak. resume=True loads last_good, including its update count.
 cd ~/Agent_learning/fine_tunning
-export SMALL_TRAIN_ARGS="--lr 1e-5"
+export SMALL_TRAIN_ARGS="--lr 1e-5"   # 2B. Use 3e-6 if 1e-5 already blew up.
 # New shell: also export SMALL_ROOT and SMALL_BASE (§9b, or §9f for the 2B).
 ./start.sh small
 ```
 
-The first line of `logs/train.log` must say `lr=1e-05` and `resume=False`. The `Iter 10` loss should be near 1.0. `resume=True` means `checkpoints/latest/` was still there.
+The first line of `logs/train.log` must say the new `lr=` and `resume=True`, and the `Iter` loss should be near 1.0, not 7–10. `resume=False` means `checkpoints/latest/` was missing and the run started at the base again.
 
 Set the rate on any start, not only a restart: `SMALL_TRAIN_ARGS="--lr 1e-5" ./start.sh small`. Other trainer flags go in that same variable (`--lr 1e-5 --warmup 400`).
+
+`./start.sh small-watch` does the restart by itself, every 30 minutes. `./start.sh small` starts it too. On a healthy save it copies `checkpoints/latest/` to `checkpoints/last_good/` (older copies move to `checkpoints/kept/`, nothing is deleted). If the loss goes above 3, it resumes `last_good` at the next lower peak: `1e-5`, then `3e-6`, then `1e-6`, then it stops restarting. If the trainer dies while the loss is still near 1, it resumes `checkpoints/latest/` at the same peak. It will not start from the base when a checkpoint exists. One line per check: `$SMALL_ROOT/logs/watch.log`.
 
 
 ### Use a checkpoint
@@ -599,7 +604,7 @@ A throwaway speed test lives in `~/MLX_Models/html_js_MiniCPM5-2B-Base-bench`. T
 
 `./start.sh` puts each job under launchd (PPID 1), in its own session. Quitting Cursor does not stop it. `nohup` alone does not, because a Cursor shell kills its process group.
 
-The 2B does not use the default `5e-5` learning rate. That peak wrecked a fresh start on Sep 24, 2026 (loss ~1 through warmup, then ~10). Use `1e-5`. If a later run does the same, follow [Restart when the loss blows up](#restart-when-the-loss-blows-up) — move `checkpoints/latest/` aside and do not resume it.
+The 2B does not use the default `5e-5` learning rate. That peak wrecked a fresh start on Sep 24, 2026 (loss ~1 through warmup, then ~10). Use `1e-5`. If a later run does the same, follow [Restart when the loss blows up](#restart-when-the-loss-blows-up) and resume `checkpoints/last_good/`, not the base and not the save from after the jump.
 
 ```bash
 cd ~/Agent_learning/fine_tunning

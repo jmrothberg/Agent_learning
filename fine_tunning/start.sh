@@ -27,6 +27,7 @@
 #   ./start.sh small-retok DIR    re-tokenize DIR/shards for SMALL_BASE (new model, same data)
 #   ./start.sh small-quality      CPU quality passes (score, then edu + browser), niced
 #   ./start.sh small-stack        The Stack v2 download (resumes logs/stack_state.json)
+#   ./start.sh small-watch        every 30 min: keep last_good, resume it if loss blows up
 #   SMALL_ROOT=~/MLX_Models/html_js_small     shards + quality.sqlite + checkpoints + logs
 #   SMALL_BASE=~/MLX_Models/MiniCPM5-1B-Base  base model (never modified)
 #   SMALL_PORT=8767                           progress page port
@@ -129,6 +130,15 @@ if [[ "$what" == small* ]]; then
     detach "$SMALL_ROOT/logs/train.out" "$LORA_PY" "$HERE/small/train_small.py" ${=SMALL_TRAIN_ARGS}
     echo "trainer  (log: $SMALL_ROOT/logs/train.log)   tail -f $SMALL_ROOT/logs/train.log"
   }
+  small_watch() {
+    # Shell only. Keeps last_good and restarts from it. Does not call an agent.
+    if pgrep -f "small/watch_train.sh" > /dev/null; then
+      echo "watch already running (pid $(pgrep -f small/watch_train.sh | head -1))"
+      return
+    fi
+    detach "$SMALL_ROOT/logs/watch.log" /bin/zsh "$HERE/small/watch_train.sh"
+    echo "watch    every 30 min (log: $SMALL_ROOT/logs/watch.log)"
+  }
   small_quality() {
     # Each pass on its own. File check stays up and scores shards the download adds.
     # Running this again starts only the passes that are not already up.
@@ -157,6 +167,7 @@ if [[ "$what" == small* ]]; then
       # Page, trainer, and quality. `continue` is the only extra: resume the Stack download.
       small_monitor
       small_train
+      small_watch
       small_quality
       if [[ "${2:-}" == "continue" ]]; then
         if pgrep -f "data.py --source stack" > /dev/null; then
@@ -179,6 +190,7 @@ if [[ "$what" == small* ]]; then
       detach "$SMALL_ROOT/logs/data.out" "$LORA_PY" "$HERE/small/data.py" --source retok --from "$2" --workers 12
       echo "retok    $2/shards -> $SMALL_ROOT/shards   (log: $SMALL_ROOT/logs/data.out)" ;;
     small-quality) small_quality ;;
+    small-watch)   small_watch ;;
     small-stack)
       # Resumes logs/stack_state.json. Same workers and cap as the Sep 24 run.
       if pgrep -f "data.py --source stack" > /dev/null; then
@@ -186,7 +198,7 @@ if [[ "$what" == small* ]]; then
       fi
       detach "$SMALL_ROOT/logs/stack.out" nice -n 5 "$LORA_PY" -u "$HERE/small/data.py" --source stack --workers 32 --max-tokens 8000000000
       echo "stack    (log: $SMALL_ROOT/logs/stack.out)   resumes logs/stack_state.json" ;;
-    *) echo "usage: $0 [small|small-train|small-monitor|small-data|small-retok DIR|small-quality|small-stack]"; exit 1 ;;
+    *) echo "usage: $0 [small|small-train|small-monitor|small-data|small-retok DIR|small-quality|small-stack|small-watch]"; exit 1 ;;
   esac
   exit 0
 fi
