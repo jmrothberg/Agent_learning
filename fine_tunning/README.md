@@ -437,7 +437,7 @@ SMALL_ROOT=/Volumes/DRIVE/html_js_small ./start.sh small
 
 Env vars: `SMALL_ROOT` (data/checkpoints), `SMALL_BASE` (model), `SMALL_PORT` (page, default 8767), `SMALL_TRAIN_ARGS` (extra trainer flags), `LORA_PY`, `BROWSER_PY`.
 
-**Stop:** `pkill -f train_small.py`. Up to 30 minutes since the last save are lost. The next `./start.sh small` resumes from `checkpoints/latest/` and starts anything else that stopped, except the Stack download. Use `./start.sh small continue` to resume that too.
+**Stop:** `pkill -f train_small.py`. Up to 30 minutes since the last save are lost. The next `./start.sh small` resumes from `checkpoints/latest/` and starts anything else that stopped, except the Stack download. Use `./start.sh small continue` to resume that too. If the loss has blown up, do not resume that checkpoint — follow [Restart when the loss blows up](#restart-when-the-loss-blows-up).
 
 ### 9c. Confirm it is running / common failures
 
@@ -459,6 +459,7 @@ Env vars: `SMALL_ROOT` (data/checkpoints), `SMALL_BASE` (model), `SMALL_PORT` (p
 | `No Metal device available`      | Run in Terminal.app, not a sandboxed Cursor shell                                                                   |
 | Page blank / old LoRA curves     | Wrong port — small model is **8767**, LoRA is 8766                                                                  |
 | Out of memory                    | Quit any other GPU model (`chat.py`, another trainer). Or `SMALL_TRAIN_ARGS="--batch 1 --accum 8" ./start.sh small` |
+| Loss near 7–10 after a start near 1 | The learning rate wrecked the weights. Shards are fine. [Restart when the loss blows up](#restart-when-the-loss-blows-up). |
 
 
 
@@ -528,12 +529,42 @@ Where the data came from: own games (`html_game_sft/raw/`) → 14,470 unique fil
 | `--block`           | 4096       | Tokens per packed sequence                                                                                                                                                |
 | `--batch`           | 2          | Sequences per micro-step. On the M2, batch 1/2/4 were the same tokens/s (2 = 57 GB). On the M3 Ultra with the 2B, batch 4 and 8 were no faster and used 180 GB and 343 GB |
 | `--accum`           | 4          | Micro-steps per optimizer update (update = 32,768 tokens)                                                                                                                 |
-| `--lr` / `--warmup` | 5e-5 / 200 | Peak LR, warmup updates; cosine to 10% after                                                                                                                              |
+| `--lr` / `--warmup` | 5e-5 / 200 | Peak LR, warmup updates; cosine to 10% after. Set with `SMALL_TRAIN_ARGS="--lr 1e-5"`. Default `5e-5` fits the 1B. The 2B diverged at that peak — use `1e-5`. |
 | `--total-tokens`    | 2e9        | Stop after this many trained tokens                                                                                                                                       |
 | `--save-minutes`    | 30         | Overwrite `checkpoints/latest/` and re-read data and quality. A dated copy is kept every 6 hours.                                                                         |
 | `--bench N`         | 0          | Time N micro-steps, save nothing                                                                                                                                          |
 
 
+### Restart when the loss blows up
+
+A healthy continued-pretrain loss on these shards starts near **1.0** (the base already uses this tokenizer). A wrong tokenizer starts near `ln(vocab)` (~11.8 for MiniCPM5, vocab 130560) on the first logged update. A learning-rate blow-up looks different: loss stays near 1 through warmup, then jumps to about 7–10 within a few updates of the peak and stays there. The shards are fine. The weights in `checkpoints/latest/` are not. Loading them again at a lower rate does not repair them.
+
+`5e-5` is the `--lr` default and is what the 1B run uses. On MiniCPM5-2B it reached that peak at update 200 and the loss went from 1.08 to 10.1 at update 220 (Sep 24, 2026). Restart the 2B at `1e-5`.
+
+`./start.sh small` will not help until three things are true: the old trainer is dead (`start.sh` refuses a second one), `checkpoints/latest/counters.json` is gone (otherwise it resumes those weights even with a new `--lr`), and `logs/train.log` is not the dead run. The page plots every `Iter` line in that file, and `logs/state.json` keeps the last loss until update 10 of the new run (~5 minutes, the first time a loss is printed).
+
+```bash
+# 1) stop the run that diverged
+pkill -f train_small.py
+
+# 2) keep the dead checkpoint, out of the resume path. Do not delete it.
+mv "$SMALL_ROOT/checkpoints/latest" \
+   "$SMALL_ROOT/checkpoints/diverged_$(date -u +%Y%m%dT%H%M%SZ)"
+
+# 3) same for the log, or the page keeps drawing the old curve
+mv "$SMALL_ROOT/logs/train.log" \
+   "$SMALL_ROOT/logs/train_diverged_$(date -u +%Y%m%dT%H%M%SZ).log"
+
+# 4) new peak. Warmup still climbs to it over the first 200 updates.
+cd ~/Agent_learning/fine_tunning
+export SMALL_TRAIN_ARGS="--lr 1e-5"
+# New shell: also export SMALL_ROOT and SMALL_BASE (§9b, or §9f for the 2B).
+./start.sh small
+```
+
+The first line of `logs/train.log` must say `lr=1e-05` and `resume=False`. The `Iter 10` loss should be near 1.0. `resume=True` means `checkpoints/latest/` was still there.
+
+Set the rate on any start, not only a restart: `SMALL_TRAIN_ARGS="--lr 1e-5" ./start.sh small`. Other trainer flags go in that same variable (`--lr 1e-5 --warmup 400`).
 
 
 ### Use a checkpoint
@@ -568,10 +599,13 @@ A throwaway speed test lives in `~/MLX_Models/html_js_MiniCPM5-2B-Base-bench`. T
 
 `./start.sh` puts each job under launchd (PPID 1), in its own session. Quitting Cursor does not stop it. `nohup` alone does not, because a Cursor shell kills its process group.
 
+The 2B does not use the default `5e-5` learning rate. That peak wrecked a fresh start on Sep 24, 2026 (loss ~1 through warmup, then ~10). Use `1e-5`. If a later run does the same, follow [Restart when the loss blows up](#restart-when-the-loss-blows-up) — move `checkpoints/latest/` aside and do not resume it.
+
 ```bash
 cd ~/Agent_learning/fine_tunning
 export SMALL_ROOT=/Users/jonathanrothberg/Data/html_js_small
 export SMALL_BASE=~/MLX_Models/MiniCPM5-2B-Base
+export SMALL_TRAIN_ARGS="--lr 1e-5"
 ./start.sh small-monitor    # page first
 ./start.sh small-train
 # After tokens/s is moving. This script uses 16 score workers, then edu 12 + browser 6.
