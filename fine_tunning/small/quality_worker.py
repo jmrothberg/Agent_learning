@@ -69,7 +69,9 @@ rl.on('line', l => { let r = 1; try { for (const s of JSON.parse(l)) if (!ok(s.c
 
 
 def _db() -> sqlite3.Connection:
-    con = sqlite3.connect(DB, timeout=60)
+    # File check rebuilds the weight table while code quality is inserting.
+    # 60s was not long enough for that rebuild, and the insert then failed.
+    con = sqlite3.connect(DB, timeout=300)
     con.execute("pragma journal_mode=wal")
     con.executescript("""
         create table if not exists feat(norm text primary key, src text, rank int, ntok int,
@@ -227,12 +229,16 @@ def score(workers: int) -> None:
     from multiprocessing import Pool
     con = _db()
     done = {r[0] for r in con.execute("select shard from done")}
+    pending = [meta for meta in sorted(SHARDS.glob("*.jsonl")) if meta.stem not in done]
+    # --follow calls this every few seconds. Nothing new: do not rebuild weights.
+    if not pending:
+        print("score: caught up", flush=True)
+        con.close()
+        return
     have = {r[0] for r in con.execute("select norm from feat")}
     jobs: dict[str, list[dict]] = {}
     shards = []
-    for meta in sorted(SHARDS.glob("*.jsonl")):
-        if meta.stem in done:
-            continue
+    for meta in pending:
         shards.append(meta.stem)
         for line in meta.read_text().splitlines():
             d = json.loads(line)
@@ -251,6 +257,26 @@ def score(workers: int) -> None:
             if i % 10 == 0 or i == len(shards):
                 print(f"{i}/{len(shards)} shards {time.time()-t0:.0f}s", flush=True)
     print("combine:", _combine(con), flush=True)
+    con.close()
+
+
+def follow(workers: int) -> None:
+    """Score shards as the Stack download writes them. Stays up so the page does not show idle."""
+    while True:
+        score(workers)
+        time.sleep(15)
+
+
+def follow_browser(workers: int) -> None:
+    """Run the browser pass whenever file check queues new pages."""
+    while True:
+        con = _db()
+        n = con.execute("select count(*) from pending_browser").fetchone()[0]
+        con.close()
+        if n:
+            browser(workers)
+        else:
+            time.sleep(60)
 
 
 # -------------------------------------------------------------- browser mode
@@ -370,9 +396,15 @@ def main() -> None:
     p.add_argument("--workers", type=int, default=16)
     p.add_argument("--browser", action="store_true", help="run the Chromium pass (harness venv)")
     p.add_argument("--edu", action="store_true", help="Stack-Edu classifier pass (CPU torch threads = --workers)")
+    p.add_argument("--follow", action="store_true", help="keep scoring new shards")
+    p.add_argument("--follow-browser", action="store_true", help="keep checking newly queued pages")
     args = p.parse_args()
     ROOT.mkdir(parents=True, exist_ok=True)
-    if args.browser:
+    if args.follow:
+        follow(args.workers)
+    elif args.follow_browser:
+        follow_browser(args.workers)
+    elif args.browser:
         browser(args.workers)
     elif args.edu:
         edu(args.workers)

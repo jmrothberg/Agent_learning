@@ -71,21 +71,50 @@ def _quality() -> dict[str, float]:
         con.close()
 
 
+# Each reload used to memmap every shard and leave the previous maps open.
+# Raise the soft limit, keep one set of maps, and close that set before the next reload.
+# If a machine cannot hold one map per shard, only a few stay open.
+_MAX_OPEN_SHARDS = 32
+
+
+def _fd_budget() -> int:
+    import resource
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    inf = resource.RLIM_INFINITY
+    target = 65536 if hard == inf else min(int(hard), 65536)
+    if soft < target:
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+            soft = target
+        except (ValueError, OSError):
+            pass
+    # numpy memmap keeps one fd per shard. Leave room for the model and logs.
+    return max(_MAX_OPEN_SHARDS, (int(soft) - 1024) // 2)
+
+
+def _close_memmap(mm: np.memmap) -> None:
+    mapped = getattr(mm, "_mmap", None)
+    if mapped is not None:
+        mapped.close()
+
+
 class Blocks:
     """Weighted, deduplicated, shuffled stream of packed token blocks."""
 
     def __init__(self, block: int, seed: int):
         self.block = block
         q = _quality()
-        self.bins: list[np.memmap] = []
+        self.paths: list[Path] = []
+        self._open: dict[int, np.memmap] = {}
+        self._lru: list[int] = []
         docs = []  # (bin index, offset, ntok, weight)
         seen: set[str] = set()
         for meta in sorted(SHARDS.glob("*.jsonl")):
             b = meta.with_suffix(".bin")
             if not b.exists() or b.stat().st_size == 0:
                 continue
-            bi = len(self.bins)
-            self.bins.append(np.memmap(b, dtype=np.uint32, mode="r"))
+            bi = len(self.paths)
+            self.paths.append(b)
             for line in meta.read_text().splitlines():
                 d = json.loads(line)
                 if d["norm"] in seen:
@@ -103,6 +132,44 @@ class Blocks:
         self.docs, self.order = docs, order
         self.tokens = sum(docs[i][2] for i in order)
         self.pos, self.buf = 0, np.zeros(0, np.uint32)
+        self._cap = _fd_budget()
+        # Open every shard when the limit allows. A miss opens and closes a file
+        # on almost every document, which is slower than holding the maps.
+        if len(self.paths) <= self._cap:
+            try:
+                for bi, path in enumerate(self.paths):
+                    self._open[bi] = np.memmap(path, dtype=np.uint32, mode="r")
+                    self._lru.append(bi)
+            except OSError as exc:
+                if exc.errno != 24:
+                    raise
+                self.close()
+                self._cap = _MAX_OPEN_SHARDS
+
+    def _bin(self, bi: int) -> np.memmap:
+        mm = self._open.get(bi)
+        if mm is not None:
+            # All shards are already open. Skip the LRU shuffle; it is O(shards) per doc.
+            if len(self._open) < len(self.paths):
+                self._lru.remove(bi)
+                self._lru.append(bi)
+            return mm
+        while self._lru and len(self._open) >= self._cap:
+            self._drop(self._lru.pop(0))
+        mm = np.memmap(self.paths[bi], dtype=np.uint32, mode="r")
+        self._open[bi] = mm
+        self._lru.append(bi)
+        return mm
+
+    def _drop(self, bi: int) -> None:
+        mm = self._open.pop(bi, None)
+        if mm is not None:
+            _close_memmap(mm)
+
+    def close(self) -> None:
+        for bi in list(self._open):
+            self._drop(bi)
+        self._lru.clear()
 
     def next(self, batch: int) -> mx.array | None:
         need = batch * (self.block + 1)
@@ -111,7 +178,7 @@ class Blocks:
                 return None
             bi, off, n, _ = self.docs[self.order[self.pos]]
             self.pos += 1
-            self.buf = np.concatenate([self.buf, self.bins[bi][off:off + n]])
+            self.buf = np.concatenate([self.buf, self._bin(bi)[off:off + n]])
         x, self.buf = self.buf[:need], self.buf[need:]
         return mx.array(x.astype(np.int32).reshape(batch, self.block + 1))
 
@@ -134,6 +201,7 @@ def main() -> None:
     p.add_argument("--save-minutes", type=float, default=30)
     p.add_argument("--bench", type=int, default=0, help="time N micro-steps, save nothing")
     args = p.parse_args()
+    _fd_budget()
     for d in (CKPT, LOG.parent):
         d.mkdir(parents=True, exist_ok=True)
 
@@ -198,6 +266,7 @@ def main() -> None:
     while counters["update"] < total_updates:
         x = data.next(args.batch)
         if x is None:  # sampled order used up: reshuffle with a new seed
+            data.close()
             counters["seed"] += 1
             data = Blocks(args.block, seed=counters["seed"])
             continue
@@ -213,6 +282,7 @@ def main() -> None:
             dt = time.time() - t_rep
             print(f"bench micro={counters['micro']} tok/s={tok_rep/dt:.0f} "
                   f"peak={mx.get_peak_memory()/1e9:.1f}GB", flush=True)
+            data.close()
             return
         if n_micro < args.accum:
             continue
@@ -241,9 +311,12 @@ def main() -> None:
             resume = True
             t_save = time.time()
             # New shards and quality scores join here; order restarts with a new seed.
+            # Close the previous maps first. Leaving them open hit "too many open files".
+            data.close()
             counters["seed"] += 1
             data = Blocks(args.block, seed=counters["seed"])
             t_rep, tok_rep = time.time(), 0
+    data.close()
     save()
     _state(state="done")
 

@@ -626,7 +626,7 @@ Battery: `memory/system_battery.jsonl`.
 
 > **Full training guide: [`fine_tunning/README.md`](fine_tunning/README.md)**. It covers the data sources, processing, row format, every flag, training a new LoRA or another Qwen-style (mlx-vlm) base, and troubleshooting. `fine_tunning/` is the current code. `sft/` is the older copy.
 >
-> **Small HTML/JS model** (full fine-tune of MiniCPM5-1B): put `shards/` + `quality.sqlite` in `~/MLX_Models/html_js_small`, then `cd fine_tunning && ./start.sh small` → http://127.0.0.1:8767/. Add `continue` only to resume the Stack download. Full guide, top of [`fine_tunning/README.md`](fine_tunning/README.md).
+> **Small HTML/JS model** (full fine-tune of MiniCPM5-1B): put `shards/` + `quality.sqlite` in `~/MLX_Models/html_js_small`, then `cd fine_tunning && ./start.sh small` → http://127.0.0.1:8767/. That starts the page, the trainer, and the review. Add `continue` only to also resume the Stack download. Full guide, top of [`fine_tunning/README.md`](fine_tunning/README.md).
 >
 > ```bash
 > cd ~/Agent_learning/fine_tunning

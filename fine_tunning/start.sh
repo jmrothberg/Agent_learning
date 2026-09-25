@@ -19,8 +19,8 @@
 #   LORA_SLICE_MIN=30                        minutes per slice / snapshot
 #
 # SMALL MODEL (full fine-tune of a ~1B base on HTML/JS, code in small/, README §9):
-#   ./start.sh small              page + trainer + quality (other Mac: this is the one command)
-#   ./start.sh small continue     same, and resume the Stack download (the only non-default)
+#   ./start.sh small              page + trainer + review (no Stack download)
+#   ./start.sh small continue     same, plus the Stack download
 #   ./start.sh small-train        train_small.py only
 #   ./start.sh small-monitor      progress page only
 #   ./start.sh small-data         build shards from scratch: own games + github-code-clean
@@ -98,7 +98,25 @@ if [[ "$what" == small* ]]; then
     fi
   fi
   [[ -f "$SMALL_BASE/config.json" ]] || { echo "no model at SMALL_BASE (see README §9 to download)"; exit 1; }
+  # Python only. A zsh wrapper's command line names every pass, including ones that already exited.
+  quality_py() {
+    local flag="$1"
+    ps -ax -o command= | awk -v flag="$flag" '
+      /quality_worker\.py/ && /Python/ && !/zsh/ && !/awk/ {
+        if (flag == "") found = 1
+        else {
+          n = split($0, a, " ")
+          for (i = 1; i <= n; i++) if (a[i] == flag) found = 1
+        }
+      }
+      END { exit found ? 0 : 1 }
+    '
+  }
   small_monitor() {
+    if curl -sf -o /dev/null --max-time 3 "http://127.0.0.1:$SMALL_PORT/"; then
+      echo "monitor already up  http://127.0.0.1:$SMALL_PORT/"
+      return
+    fi
     LORA_ROOT="$SMALL_ROOT" LORA_PORT="$SMALL_PORT" detach "$SMALL_ROOT/logs/dashboard.log" "$LORA_PY" "$HERE/serve_progress.py"
     echo "monitor  http://127.0.0.1:$SMALL_PORT/   (log: $SMALL_ROOT/logs/dashboard.log)"
   }
@@ -110,6 +128,29 @@ if [[ "$what" == small* ]]; then
     ls shards/*.jsonl > /dev/null 2>&1 || { echo "no shards in $SMALL_ROOT/shards (run small-data or small-retok)"; exit 1; }
     detach "$SMALL_ROOT/logs/train.out" "$LORA_PY" "$HERE/small/train_small.py" ${=SMALL_TRAIN_ARGS}
     echo "trainer  (log: $SMALL_ROOT/logs/train.log)   tail -f $SMALL_ROOT/logs/train.log"
+  }
+  small_quality() {
+    # Each pass on its own. File check stays up and scores shards the download adds.
+    # Running this again starts only the passes that are not already up.
+    if ! quality_py "--follow"; then
+      detach "$SMALL_ROOT/logs/quality.out" nice -n 19 "$LORA_PY" -u "$HERE/small/quality_worker.py" --follow --workers 16
+      echo "file check   (log: $SMALL_ROOT/logs/quality.out)"
+    else
+      echo "file check already running"
+    fi
+    if ! quality_py "--edu"; then
+      detach "$SMALL_ROOT/logs/edu.out" nice -n 19 "$LORA_PY" -u "$HERE/small/quality_worker.py" --edu --workers 12
+      echo "code quality (log: $SMALL_ROOT/logs/edu.out)"
+    else
+      echo "code quality already running"
+    fi
+    if ! quality_py "--follow-browser"; then
+      detach "$SMALL_ROOT/logs/browser.out" env PLAYWRIGHT_BROWSERS_PATH="$HOME/Library/Caches/ms-playwright" \
+        nice -n 19 "$BROWSER_PY" -u "$HERE/small/quality_worker.py" --follow-browser --workers 6
+      echo "browser      (log: $SMALL_ROOT/logs/browser.out)"
+    else
+      echo "browser already running"
+    fi
   }
   case "$what" in
     small)
@@ -137,15 +178,7 @@ if [[ "$what" == small* ]]; then
       [[ -n "$2" ]] || { echo "usage: $0 small-retok <other SMALL_ROOT with shards/>"; exit 1; }
       detach "$SMALL_ROOT/logs/data.out" "$LORA_PY" "$HERE/small/data.py" --source retok --from "$2" --workers 12
       echo "retok    $2/shards -> $SMALL_ROOT/shards   (log: $SMALL_ROOT/logs/data.out)" ;;
-    small-quality)
-      # One review at a time. A second pass would rewrite quality.sqlite while the first is writing it.
-      if pgrep -f "quality_worker.py" > /dev/null; then
-        echo "quality already running (pid $(pgrep -f quality_worker.py | head -1))"; return
-      fi
-      detach "$SMALL_ROOT/logs/quality.out" zsh -c "nice -n 19 '$LORA_PY' '$HERE/small/quality_worker.py' --workers 16 && \
-        { PLAYWRIGHT_BROWSERS_PATH=\$HOME/Library/Caches/ms-playwright nice -n 19 '$BROWSER_PY' '$HERE/small/quality_worker.py' --browser --workers 6 >> logs/browser.out 2>&1 & \
-          nice -n 19 '$LORA_PY' '$HERE/small/quality_worker.py' --edu --workers 12; wait; }"
-      echo "quality  (logs: $SMALL_ROOT/logs/quality.out, browser.out)" ;;
+    small-quality) small_quality ;;
     small-stack)
       # Resumes logs/stack_state.json. Same workers and cap as the Sep 24 run.
       if pgrep -f "data.py --source stack" > /dev/null; then
