@@ -365,30 +365,44 @@ def edu(threads: int, batch: int = 32, combine_every: int = 50_000) -> None:
     for meta in sorted(SHARDS.glob("*.jsonl")):
         ids = np.memmap(meta.with_suffix(".bin"), dtype=np.uint32, mode="r")
         norms, texts = [], []
-        for line in meta.read_text().splitlines():
-            d = json.loads(line)
-            if d["norm"] in skip or d["src"] != "gcc":  # own games are never edu-reweighted
-                continue
-            skip.add(d["norm"])
-            text = tok.decode(ids[d["offset"] + 1: d["offset"] + d["ntok"] - 1].tolist())
-            if d.get("lang", "HTML") == "HTML":
-                text = "\n".join(b for a, b in _SCRIPT.findall(text) if "src=" not in a.lower() and b.strip())
-                if not text:
+        try:
+            for line in meta.read_text().splitlines():
+                d = json.loads(line)
+                if d["norm"] in skip or d["src"] != "gcc":  # own games are never edu-reweighted
                     continue
-            norms.append(d["norm"])
-            texts.append(text[:8000])
-            if len(norms) == batch:
+                skip.add(d["norm"])
+                text = tok.decode(ids[d["offset"] + 1: d["offset"] + d["ntok"] - 1].tolist())
+                if d.get("lang", "HTML") == "HTML":
+                    text = "\n".join(b for a, b in _SCRIPT.findall(text) if "src=" not in a.lower() and b.strip())
+                    if not text:
+                        continue
+                norms.append(d["norm"])
+                texts.append(text[:8000])
+                if len(norms) == batch:
+                    flush(norms, texts)
+                    n, since, norms, texts = n + batch, since + batch, [], []
+                    if n % 2000 < batch:
+                        print(f"edu: {n} docs {n / (time.time() - t0):.1f}/s", flush=True)
+                    if since >= combine_every:
+                        print("combine:", _combine(con), flush=True)
+                        since = 0
+            if norms:
                 flush(norms, texts)
-                n, since, norms, texts = n + batch, since + batch, [], []
-                if n % 2000 < batch:
-                    print(f"edu: {n} docs {n / (time.time() - t0):.1f}/s", flush=True)
-                if since >= combine_every:
-                    print("combine:", _combine(con), flush=True)
-                    since = 0
-        if norms:
-            flush(norms, texts)
-            n += len(norms)
+                n += len(norms)
+        finally:
+            # Close this shard before the next. Leaving them open dies once the download passes a few thousand.
+            mapped = getattr(ids, "_mmap", None)
+            if mapped is not None:
+                mapped.close()
     print("combine:", _combine(con), flush=True)
+    con.close()
+
+
+def follow_edu(threads: int) -> None:
+    """Keep scoring GitHub files. One pass exits when it reaches the last shard, including shards added later."""
+    while True:
+        edu(threads)
+        time.sleep(20)
 
 
 def main() -> None:
@@ -400,7 +414,9 @@ def main() -> None:
     p.add_argument("--follow-browser", action="store_true", help="keep checking newly queued pages")
     args = p.parse_args()
     ROOT.mkdir(parents=True, exist_ok=True)
-    if args.follow:
+    if args.follow and args.edu:
+        follow_edu(args.workers)
+    elif args.follow:
         follow(args.workers)
     elif args.follow_browser:
         follow_browser(args.workers)

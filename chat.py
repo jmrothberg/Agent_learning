@@ -2648,15 +2648,23 @@ class CodingBoxApp(App):
         sgen = getattr(agent, "_sound_generator", None) if agent else None
         z_line = gs.format_diffuser_line("Z-Image-Turbo", None)
         flux_line = gs.format_diffuser_line("FLUX2-klein (mflux)", None)
+        qwen_line = gs.format_diffuser_line("Qwen-Image-2.1 (mflux)", None)
         sd_line = gs.format_diffuser_line("SD-Turbo img2img", None)
+        kind = ""
         if zgen is not None:
             kind = gs.diffuser_kind(zgen)
             if kind == "Z-Image-Turbo":
                 z_line = gs.format_diffuser_line(kind, zgen)
             elif kind == "FLUX2-klein (mflux)":
                 flux_line = gs.format_diffuser_line(kind, zgen)
+            elif kind == "Qwen-Image-2.1 (mflux)":
+                qwen_line = gs.format_diffuser_line(kind, zgen)
             elif kind == "SD-Turbo img2img":
                 sd_line = gs.format_diffuser_line(kind, zgen)
+        # Qwen row only on Mac (or when that generator is actually loaded)
+        # so Linux status output stays the same.
+        if sys.platform == "darwin" or kind == "Qwen-Image-2.1 (mflux)":
+            rows.append(f"  {qwen_line}")
         rows.append(f"  {flux_line}")
         rows.append(f"  {z_line}")
         rows.append(f"  {sd_line}")
@@ -3734,8 +3742,8 @@ class CodingBoxApp(App):
             "",
             "[bold cyan]── images, animation, sound ──[/bold cyan]",
             "  [dim]The agent decides per session; you nudge by what you write in the goal.[/dim]",
-            "  [b]sprites (txt2img)[/b]        model emits [b]<assets>[/b] in Phase A → FLUX2-klein (macOS)",
-            "                                  or Z-Image-Turbo (Linux) PNGs saved next to the .html.",
+            "  [b]sprites (txt2img)[/b]        model emits [b]<assets>[/b] in Phase A → FLUX2-klein (macOS, 4 steps)",
+            "                                  else Qwen-Image-2.1; Z-Image-Turbo (Linux). PNGs saved next to the .html.",
             "                                  Encourage with [italic]sprite[/italic], [italic]pixel-art[/italic], [italic]icon[/italic],",
             "                                  [italic]texture[/italic], [italic]cool art[/italic] in your goal.",
             "  [b]pose frames (txt2img)[/b]    named action poses share one character prompt + fixed seed",

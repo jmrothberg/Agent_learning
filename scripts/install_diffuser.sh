@@ -189,7 +189,10 @@ if gen is None:
     print("  Still None — no local weights and/or no GPU/mflux on this host.")
 else:
     kind = type(gen).__name__
-    if kind == "Flux2KleinMfluxGenerator":
+    if kind == "QwenImage21MfluxGenerator":
+        print("  ✓ Qwen-Image-2.1 (mflux) selected — sprites generate via mflux-generate-qwen-2.1")
+        print("    FLUX2-klein remains the backup when this weight tree is absent")
+    elif kind == "Flux2KleinMfluxGenerator":
         print("  ✓ FLUX2-klein (mflux) selected — sprites generate via mflux-generate-flux2")
         print("    (~10-15s first image incl. load, then faster; ~13 GB peak MLX RAM)")
     else:

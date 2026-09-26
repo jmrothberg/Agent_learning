@@ -50,8 +50,9 @@ imageio-ffmpeg>=0.5.0
 # torch and diffusers — install via scripts/install_diffuser.sh
 # (cu130 nightly + diffusers git HEAD).
 #
-# mflux — FLUX2-klein sprite CLI on macOS (assets.py Flux2KleinMfluxGenerator).
+# mflux — macOS sprite CLIs. 0.20 adds mflux-generate-qwen-2.1
+# (QwenImage21MfluxGenerator). FLUX2-klein stays the backup CLI.
 # install_diffuser.sh pip-installs this on Darwin only; Linux/CUDA hosts keep
 # Z-Image-Turbo + SD-Turbo img2img. Put FLUX2-klein-9B-mlx-8bit under
 # DIFFUSION_MODELS_DIR (setup.sh writes .env when it finds local weights).
-mflux>=0.18.0; sys_platform == 'darwin'
+mflux>=0.20.0; sys_platform == 'darwin'

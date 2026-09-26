@@ -1130,6 +1130,8 @@ def test_construct_generator_skips_hub_zimage_when_flux2_local(
     monkeypatch.setattr(assets, "_resolve_zimage_path", lambda: str(zimg))
     monkeypatch.setattr(assets, "_resolve_flux2_path", lambda: None)
     monkeypatch.setattr(assets, "_resolve_mflux_generate_flux2", lambda: None)
+    monkeypatch.setattr(assets, "_resolve_qwen21_path", lambda: None)
+    monkeypatch.setattr(assets, "_resolve_mflux_generate_qwen21", lambda: None)
     monkeypatch.setattr(assets.sys, "platform", "darwin")
     monkeypatch.delenv("DIFFUSER_TXT2IMG_BACKBONE", raising=False)
     assert assets._construct_generator() is None

@@ -758,6 +758,211 @@ def _resolve_mflux_generate_flux2() -> str | None:
     return None
 
 
+# Local mflux save of Qwen-Image-2.1 (numeric shards). The mlx-community
+# single-file quant uses transformer/model.safetensors and is not loadable
+# by mflux-generate-qwen-2.1, so it must not win selection.
+_QWEN21_MLX_DIR_NAMES = (
+    "Qwen-Image-2.1-MLX-4bit-mflux",
+    "Qwen-Image-2.1-MLX-4bit",
+)
+
+
+def _is_runnable_qwen21_mflux_dir(path: str) -> bool:
+    """True for an mflux-saved Qwen-Image-2.1 tree (transformer/0.safetensors)."""
+    try:
+        return _os.path.isfile(_os.path.join(path, "transformer", "0.safetensors"))
+    except OSError:
+        return False
+
+
+def _resolve_qwen21_path() -> str | None:
+    """Local Qwen-Image-2.1 MLX weights, or None.
+
+    Used on macOS only when FLUX2-klein is not installed (or when
+    DIFFUSER_TXT2IMG_BACKBONE=qwen). Missing weights must return None
+    so Linux keeps Z-Image.
+    """
+    raw_env = (_os.environ.get("DIFFUSION_MODELS_DIR") or "").strip()
+    env_bases = [p.strip() for p in raw_env.split(":") if p.strip()]
+    home = _os.path.expanduser("~")
+    bases = env_bases + [_os.path.join(home, "Diffusers")] + list(_MODEL_SEARCH_DIRS)
+    seen: set[str] = set()
+    for base in bases:
+        if not base or base in seen:
+            continue
+        seen.add(base)
+        for name in _QWEN21_MLX_DIR_NAMES:
+            cand = _os.path.join(base, name)
+            if _is_runnable_qwen21_mflux_dir(cand):
+                return cand
+    return None
+
+
+def _resolve_mflux_cli(binary_name: str, env_var: str) -> str | None:
+    """Find an mflux CLI next to this interpreter, on PATH, or under uv tools."""
+    override = (_os.environ.get(env_var) or "").strip()
+    if override:
+        try:
+            if _os.path.isfile(override):
+                return override
+        except OSError:
+            return None
+        return None
+    try:
+        venv_bin = _os.path.dirname(sys.executable or "")
+        if venv_bin:
+            cand = _os.path.join(venv_bin, binary_name)
+            if _os.path.isfile(cand):
+                return cand
+    except OSError:
+        pass
+    try:
+        import shutil
+        hit = shutil.which(binary_name)
+        if hit:
+            return hit
+    except Exception:
+        pass
+    try:
+        home = _os.path.expanduser("~")
+        uv_tools = _os.path.join(home, ".local", "share", "uv", "tools")
+        if _os.path.isdir(uv_tools):
+            for tool_dir in _os.listdir(uv_tools):
+                cand = _os.path.join(uv_tools, tool_dir, "bin", binary_name)
+                if _os.path.isfile(cand):
+                    return cand
+    except OSError:
+        pass
+    return None
+
+
+def _resolve_mflux_generate_qwen21() -> str | None:
+    """mflux Qwen-Image-2.1 CLI (mflux>=0.20). None when that build is absent."""
+    return _resolve_mflux_cli("mflux-generate-qwen-2.1", "MFLUX_GENERATE_QWEN21")
+
+
+class QwenImage21MfluxGenerator:
+    """Qwen-Image-2.1 sprites via mflux CLI (local MLX weights, no hub download).
+
+    Not the fast default: 2.1 wants ~40 steps. macOS uses FLUX2-klein (4 steps)
+    when that tree is installed, and this model only when klein is missing or
+    DIFFUSER_TXT2IMG_BACKBONE=qwen.
+    """
+
+    def __init__(self, *, model_path: str | None = None) -> None:
+        self.model_path = model_path or (_resolve_qwen21_path() or "")
+        self._mflux_bin = _resolve_mflux_generate_qwen21() or ""
+        self._last_error: str | None = None
+
+    def _ensure_ready(self) -> bool:
+        if not self.model_path or not _is_runnable_qwen21_mflux_dir(self.model_path):
+            self._last_error = (
+                "Qwen-Image-2.1 selected but no mflux weight directory was found. "
+                "Put `Qwen-Image-2.1-MLX-4bit-mflux/` under `~/Diffusers` or "
+                "set DIFFUSION_MODELS_DIR to the parent directory."
+            )
+            return False
+        if not self._mflux_bin:
+            self._last_error = (
+                "Qwen-Image-2.1 selected but `mflux-generate-qwen-2.1` was not found. "
+                "Install mflux>=0.20, or set MFLUX_GENERATE_QWEN21 to that binary."
+            )
+            return False
+        return True
+
+    def _fresh_out_path(self) -> str:
+        """Unique PNG path. mflux will not overwrite an existing --output file."""
+        import tempfile
+        import uuid
+        d = tempfile.mkdtemp(prefix="qwenimage21_")
+        return _os.path.join(d, f"{uuid.uuid4().hex}.png")
+
+    def _steps(self) -> str:
+        """2.1 is guidance-free and wants ~40 steps. QWEN_IMAGE_STEPS overrides."""
+        raw = (_os.environ.get("QWEN_IMAGE_STEPS") or "").strip()
+        if raw.isdigit() and int(raw) > 0:
+            return raw
+        return "40"
+
+    def _base_cmd(self, prompt: str, out_path: str) -> list[str]:
+        # --base-model is required for a local path that is not a built-in name.
+        # Do not pass -q: these weights are already 4-bit. Do not pass --low-ram:
+        # that path is slower; this Studio has the memory to keep the model up.
+        return [
+            self._mflux_bin,
+            "--model", str(self.model_path),
+            "--base-model", "qwen-image-2.1",
+            "--prompt", str(prompt),
+            "--width", "768",
+            "--height", "768",
+            "--steps", self._steps(),
+            "--seed", "42",
+            "--output", out_path,
+        ]
+
+    def generate(self, prompt: str) -> str | None:
+        """txt2img via `mflux-generate-qwen-2.1`."""
+        self._last_error = None
+        if not self._ensure_ready():
+            return None
+        try:
+            import subprocess
+
+            out_path = self._fresh_out_path()
+            cmd = self._base_cmd(prompt, out_path)
+            proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if proc.returncode != 0:
+                self._last_error = (
+                    f"mflux qwen txt2img failed (exit {proc.returncode}): "
+                    f"{(proc.stderr or proc.stdout or '').strip()[:400]}"
+                )
+                return None
+            return out_path
+        except Exception as e:
+            import traceback as _tb
+            self._last_error = (
+                f"mflux qwen txt2img invoke failed: {type(e).__name__}: {e!s} | "
+                f"trace: {_tb.format_exc().splitlines()[-3:]}"
+            )
+            return None
+
+    def generate_img2img(
+        self,
+        prompt: str,
+        init_image_path: str,
+        *,
+        strength: float = 0.5,
+    ) -> str | None:
+        """img2img via mflux `--image-path` / `--image-strength`."""
+        self._last_error = None
+        if not self._ensure_ready():
+            return None
+        try:
+            import subprocess
+
+            out_path = self._fresh_out_path()
+            strength = max(0.0, min(1.0, float(strength)))
+            cmd = self._base_cmd(prompt, out_path) + [
+                "--image-path", str(init_image_path),
+                "--image-strength", str(strength),
+            ]
+            proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if proc.returncode != 0:
+                self._last_error = (
+                    f"mflux qwen img2img failed (exit {proc.returncode}): "
+                    f"{(proc.stderr or proc.stdout or '').strip()[:400]}"
+                )
+                return None
+            return out_path
+        except Exception as e:
+            import traceback as _tb
+            self._last_error = (
+                f"mflux qwen img2img invoke failed: {type(e).__name__}: {e!s} | "
+                f"trace: {_tb.format_exc().splitlines()[-3:]}"
+            )
+            return None
+
+
 class Flux2KleinMfluxGenerator:
     """FLUX2 klein sprite generator via mflux CLI (local, no diffusers).
 
@@ -1531,8 +1736,8 @@ def preload() -> Any:
     if backbone in ("flux2", "flux"):
         _preload_stable_audio()
         return None
-    # macOS policy: sprites are FLUX2-klein (mflux) ONLY — never Z-Image.
-    # Cache the FLUX2 wrapper when ready; skip diffusers image preload.
+    # macOS policy: FLUX2-klein (4-step, fast) when installed, else
+    # Qwen-Image-2.1. Never Z-Image. Cache that wrapper; skip diffusers preload.
     if sys.platform == "darwin":
         gen = _construct_generator()
         if gen is not None:
@@ -1559,19 +1764,31 @@ def _construct_generator() -> Any:
     out of try_load_image_generator so preload() can share it."""
     try:
         # Selection order:
-        # 1) Explicit env override: DIFFUSER_TXT2IMG_BACKBONE=flux2
-        # 2) macOS: FLUX2 klein ONLY (never Z-Image-Turbo — no hub download)
-        # 3) Linux / non-darwin: Z-Image-Turbo (diffusers)
+        # 1) DIFFUSER_TXT2IMG_BACKBONE=qwen → Qwen-Image-2.1 (slow, ~40 steps)
+        # 2) DIFFUSER_TXT2IMG_BACKBONE=flux2, or macOS default: FLUX2-klein
+        #    (4 steps). Fastest local sprite path.
+        # 3) macOS, klein missing: Qwen-Image-2.1 if that tree is installed
+        # 4) Linux / non-darwin: Z-Image-Turbo (diffusers). Never Z-Image on Mac.
         backbone = (_os.environ.get("DIFFUSER_TXT2IMG_BACKBONE") or "").strip().lower()
         want_flux2 = backbone in ("flux2", "flux")
+        want_qwen = backbone in ("qwen", "qwen21", "qwen-image", "qwen-image-2.1")
+        if want_qwen and sys.platform == "darwin":
+            qpath = _resolve_qwen21_path()
+            qbin = _resolve_mflux_generate_qwen21()
+            if qpath and qbin:
+                return QwenImage21MfluxGenerator(model_path=qpath)
         if want_flux2 or sys.platform == "darwin":
             m = _resolve_flux2_path()
             b = _resolve_mflux_generate_flux2()
             if m and b:
                 return Flux2KleinMfluxGenerator(model_path=m)
-            # macOS never falls through to Z-Image (Studio + other Macs
-            # use FLUX2; a hub-ID fallback here was starting multi-GB
-            # downloads when mflux was missing).
+            # Klein is the fast default. Qwen is only the fallback when the
+            # 4-step klein tree is not on this Mac.
+            if sys.platform == "darwin" and not want_flux2:
+                qpath = _resolve_qwen21_path()
+                qbin = _resolve_mflux_generate_qwen21()
+                if qpath and qbin:
+                    return QwenImage21MfluxGenerator(model_path=qpath)
             if sys.platform == "darwin":
                 return None
         # Linux / non-darwin diffusers fallback
@@ -1625,8 +1842,10 @@ def try_load_image_generator(
     model_id: str = "Z-Image-Turbo",  # kept for API stability; unused
     diffuser_dir: str | None = None,  # kept for API stability; unused
 ) -> Any:
-    """Return the active sprite generator (FLUX2 klein on macOS;
-    Z-Image-Turbo via diffusers on Linux / non-darwin).
+    """Return the active sprite generator.
+
+    macOS: FLUX2-klein (4 steps) when that tree exists, else Qwen-Image-2.1.
+    Linux / non-darwin: Z-Image-Turbo via diffusers.
 
     If `preload()` ran earlier, reuses that already-loaded pipeline (this is the
     path chat.py takes for diffusers). Otherwise constructs a fresh wrapper that
@@ -2355,14 +2574,22 @@ def _is_flux2_mflux_generator(generator: Any) -> bool:
     return type(generator).__name__ == "Flux2KleinMfluxGenerator"
 
 
+def _needs_keyed_white_bg(generator: Any) -> bool:
+    """mflux sprite models draw a checkerboard if asked for transparency."""
+    return type(generator).__name__ in (
+        "Flux2KleinMfluxGenerator",
+        "QwenImage21MfluxGenerator",
+    )
+
+
 def _ensure_sprite_bg_prompt(prompt: str, generator: Any) -> str:
     """Background wording matched to the active sprite generator.
 
     Deliverable is always an RGBA PNG with real alpha (via chroma-key below).
-    FLUX2 cannot paint literal transparency — we ask for solid white, then
-    key it out. Z-Image gets 'transparent background' in the prompt; same key.
+    FLUX2 and Qwen-Image-2.1 cannot paint literal transparency — we ask for
+    solid white, then key it out. Z-Image gets 'transparent background'.
     """
-    if not _is_flux2_mflux_generator(generator):
+    if not _needs_keyed_white_bg(generator):
         return _ensure_transparent_prompt(prompt)
     p = prompt.strip()
     if "transparent" in p.lower():
