@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Barrel Blast — Donkey Kong</title>
+<style>
+  html,body{margin:0;padding:0;background:#000;height:100%;}
+  #wrap{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;font-family:monospace;}
+  canvas{background:#000;image-rendering:pixelated;border:2px solid #333;}
+  #hint{color:#888;font-size:12px;margin-top:8px;}
+</style>
+</head>
+<body>
+<div id="wrap">
+<canvas id="c" width="640" height="640"></canvas>
+<div id="hint">arrows: move/climb &nbsp; space: jump &nbsp; M: music &nbsp; Enter: start / restart</div>
+</div>
+<script>
+"use strict";
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const W = cv.width, H = cv.height;
+
+/* ---------- sounds (assets from _sound_cache) ---------- */
+const SND = {};
+function loadSound(name, file){
+  const a = new Audio('_sound_cache/' + file);
+  a.preload = 'auto';
+  SND[name] = a;
+}
+loadSound('music','music__349d0b.ogg');
+loadSound('throw','drop__5b9e96.ogg');
+loadSound('hammer','explosion__473430.ogg');
+loadSound('pickup','pickup__6f133b.ogg');
+loadSound('jump','drop__e579cf.ogg');
+loadSound('die','player_die__96220b.ogg');
+loadSound('win','win__8329bc.ogg');
+function snd(name, vol){
+  const a = SND[name];
+  if(!a) return;
+  try{
+    const b = a.cloneNode();
+    b.volume = vol||0.6;
+    b.play().catch(()=>{});
+  }catch(e){}
+}
+/* ---------- sprite assets ---------- */
+const ADIR = 'games/build-a-donkey-kong-game-singl_20260722_154601_assets/';
+const IMG = {};
+['barrel','dk_idle','dk_throw1','dk_throw2','princess_dance1','princess_dance2','princess_idle']
+  .forEach(n=>{ const i=new Image(); i.src=ADIR+n+'.png'; IMG[n]=i; });
+// hero animation frames come from the newer set (20260815)
+const ADIR2 = 'games/build-a-donkey-kong-game-singl_20260815_085321_assets/';
+['hero_climb','hero_hit','hero_idle','hero_idle2','hero_jump','hero_run']
+  .forEach(n=>{ const i=new Image(); i.src=ADIR2+n+'.png'; IMG[n]=i; });
+
+// alpha bounding boxes (measured offline) so figures anchor at the feet despite PNG padding
+const BB = {
+  hero_climb:{x:130,y:34,w:253,h:447,W:512,H:512},
+  hero_hit:  {x:68, y:45,w:363,h:430,W:512,H:512},
+  hero_idle: {x:20, y:6, w:25, h:86, W:64, H:96},
+  hero_idle2:{x:159,y:24,w:196,h:466,W:512,H:512},
+  hero_jump: {x:105,y:39,w:303,h:436,W:512,H:512},
+  hero_run:  {x:77, y:44,w:352,h:432,W:512,H:512},
+};
+// draw so the figure's bbox is centered on cx with feet at feetY, figure height=targetH
+function drawFig(name,cx,feetY,targetH,flip){
+  const im=IMG[name], bb=BB[name];
+  if(!im||!im.complete||!im.naturalWidth){
+    ctx.fillStyle='#666'; ctx.fillRect(cx-targetH*0.35,feetY-targetH,targetH*0.7,targetH); return;
+  }
+  const s=targetH/bb.h;
+  ctx.save();
+  ctx.translate(cx,feetY);
+  if(flip) ctx.scale(-1,1);
+  ctx.drawImage(im, -(bb.x+bb.w/2)*s, -(bb.y+bb.h)*s, bb.W*s, bb.H*s);
+  ctx.restore();
+}
+
+let musicOn = false;
+function toggleMusic(){
+  musicOn = !musicOn;
+  const m = SND.music;
+  if(!m) return;
+  if(musicOn){ m.loop = true; m.volume=0.35; m.play().catch(()=>{}); }
+  else m.pause();
+}
+
+/* ---------- girders (f0 = bottom ... f5, 6 = DK pad, 7 = Pauline pad) ---------- */
+const G = [
+  {x1:20, y1:600, x2:620, y2:600},
+  {x1:20, y1:515, x2:620, y2:527},
+  {x1:20, y1:442, x2:620, y2:430},
+  {x1:20, y1:345, x2:620, y2:357},
+  {x1:20, y1:272, x2:620, y2:260},
+  {x1:20, y1:175, x2:620, y2:187},
+  {x1:30, y1:100, x2:150, y2:100, y1:100},   // DK platform
+  {x1:450,y1:100, x2:570, y2:100, y1:100},   // Pauline platform
+];
+function girderY(gi,x){
+  const g=G[gi];
+  if(x<g.x1||x>g.x2) return null;
+  const t=(x-g.x1)/(g.x2-g.x1);
+  return g.y1+(g.y2-g.y1)*t;
+}
+function slopeDir(gi){ return G[gi].y2>G[gi].y1 ? 1 : -1; } // downhill dir
+
+/* ---------- ladders: {x, lower girder index, upper girder index} ---------- */
+const L = [
+  {x:120,f:0,t:1},{x:520,f:0,t:1},
+  {x:240,f:1,t:2},{x:560,f:1,t:2},
+  {x:80, f:2,t:3},{x:420,f:2,t:3},
+  {x:300,f:3,t:4},{x:560,f:3,t:4},
+  {x:100,f:4,t:5},{x:380,f:4,t:5},
+  {x:510,f:5,t:7},
+];
+for(const l of L){ l.topY=girderY(l.t,l.x); l.botY=girderY(l.f,l.x); }
+
+/* ---------- game state ---------- */
+const S = {mode:'title', level:1, score:0, lives:3, bonus:0, t:0};
+const P = { // player
+  x:60, y:600, vy:0, dir:1, onFloor:0, climbing:null,
+  walk:0, hammer:0, deadT:0,
+};
+const PW=22, PH=34;
+let barrels=[], hammers=[], sparkles=[];
+let spawnT=0, dkAnim=0, thrown=false;
+
+function resetLevel(){
+  barrels=[]; sparkles=[];
+  P.x=60; P.y=600; P.vy=0; P.onFloor=0; P.climbing=null; P.hammer=0; P.deadT=0; P.dir=1;
+  hammers=[
+    {x:170, gi:2, taken:false},
+    {x:480, gi:4, taken:false},
+  ];
+  for(const h of hammers) h.y=girderY(h.gi,h.x);
+  S.bonus=5000;
+  spawnT=1200;
+  S.t=0;
+}
+function startGame(){
+  S.level=1; S.score=0; S.lives=3; S.mode='play'; resetLevel();
+}
+
+/* ---------- input ---------- */
+const keys={};
+addEventListener('keydown',e=>{
+  if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown',' '].includes(e.key)) e.preventDefault();
+  keys[e.key]=true;
+  if(e.key==='Enter'){
+    if(S.mode==='title'||S.mode==='over') startGame();
+  }
+  if(e.key==='m'||e.key==='M') toggleMusic();
+});
+addEventListener('keyup',e=>{keys[e.key]=false;});
+
+/* ---------- player update ---------- */
+function playerDie(){
+  if(P.deadT>0) return;
+  P.deadT=150; P.hammer=0;
+  snd('die',0.7);
+}
+function updatePlayer(){
+  if(P.deadT>0){
+    P.deadT--;
+    if(P.deadT===0){
+      S.lives--;
+      if(S.lives<=0){ S.mode='over'; }
+      else { P.x=60;P.y=600;P.vy=0;P.onFloor=0;P.climbing=null; }
+    }
+    return;
+  }
+  const spd=2.6;
+  if(P.climbing){
+    const l=P.climbing;
+    P.x=l.x;
+    if(keys['ArrowUp']) P.y-=1.7;
+    if(keys['ArrowDown']) P.y+=1.7;
+    P.walk=0;
+    if(P.y<=l.topY){ P.y=l.topY; P.climbing=null; P.onFloor=l.t; }
+    else if(P.y>=l.botY){ P.y=l.botY; P.climbing=null; P.onFloor=l.f; }
+    return;
+  }
+  let moving=false;
+  if(keys['ArrowLeft']){ P.x-=spd; P.dir=-1; moving=true; }
+  if(keys['ArrowRight']){ P.x+=spd; P.dir=1; moving=true; }
+  P.x=Math.max(26,Math.min(W-26,P.x));
+  P.walk = moving? P.walk+0.25 : 0;
+
+  // stay on / land on floor
+  const gy=P.onFloor>=0 ? girderY(P.onFloor,P.x) : null;
+  if(gy!==null && P.y>=gy-20 && P.vy>=0 && P.y<=gy+18){
+    P.y=gy; P.vy=0;
+  } else if(P.onFloor>=0 && gy===null){
+    P.onFloor=-1;
+  }
+  if(P.onFloor===-1){ // falling
+    P.vy+=0.5; P.y+=P.vy;
+    for(let i=0;i<G.length;i++){
+      const yy=girderY(i,P.x);
+      if(yy!==null && P.vy>0 && P.y>=yy && P.y-P.vy<=yy+4){
+        P.y=yy; P.vy=0; P.onFloor=i; break;
+      }
+    }
+    if(P.y>H+40) playerDie();
+  }
+
+  // jump
+  if(keys[' '] && P.onFloor>=0 && P.onFloor!==6 && P.onFloor!==7){
+    P.vy=-9.6; P.onFloor=-1; snd('jump',0.4);
+  }
+
+  // ladders
+  if(P.onFloor>=0){
+    if(keys['ArrowUp']){
+      for(const l of L){
+        if(l.f!==P.onFloor) continue;
+        if(Math.abs(P.x-l.x)<12 && P.y>l.topY-6){
+          P.climbing=l; P.x=l.x; break;
+        }
+      }
+    } else if(keys['ArrowDown']){
+      for(const l of L){
+        if(l.t!==P.onFloor) continue;
+        if(Math.abs(P.x-l.x)<12 && P.y<l.topY+18){
+          P.climbing=l; P.x=l.x; P.y=l.topY+2; break;
+        }
+      }
+    }
+  }
+
+  // hammers
+  for(const h of hammers){
+    if(!h.taken && Math.abs(P.x-h.x)<16 && Math.abs(P.y-h.y)<40){
+      h.taken=true; P.hammer=420; snd('pickup',0.6);
+    }
+  }
+  if(P.hammer>0) P.hammer--;
+
+  // win?
+  if(P.onFloor===7 && P.x>440 && P.x<580){
+    S.mode='win'; snd('win',0.7);
+  }
+
+  // bonus countdown
+  S.t++;
+  if(S.t%4===0 && S.bonus>0){ S.bonus-=25; if(S.bonus<=0){ S.bonus=0; playerDie(); } }
+}
+
+/* ---------- barrels ---------- */
+function spawnBarrel(){
+  barrels.push({x:150,y:112,vy:2,st:'roll',gi:5,dir:slopeDir(5),rot:0,thrown:true});
+  dkAnim=40; snd('throw',0.5);
+}
+function updateBarrels(){
+  spawnT--;
+  if(spawnT<=0){
+    spawnBarrel();
+    spawnT=Math.max(900,2600-S.level*220)+Math.random()*800;
+  }
+  const spd=1.35+S.level*0.22;
+  for(let i=barrels.length-1;i>=0;i--){
+    const b=barrels[i];
+    if(b.st==='roll'){
+      b.x+=b.dir*spd;
+      const yy=girderY(b.gi,b.x);
+      if(yy===null){ // fell off end
+        let landed=false;
+        for(let j=b.gi-1;j>=0;j--){
+          const ty=girderY(j,b.x<20?24:b.x>W-20?W-24:b.x);
+          if(ty!==null){ b.st='drop'; b.ty=ty; b.tg=j; landed=true; break; }
+        }
+        if(!landed){ barrels.splice(i,1); continue; }
+      }else{
+        b.y=yy; b.rot+=b.dir*0.15;
+      }
+    }else{ // drop
+      b.vy+=0.45; b.y+=b.vy; b.rot+=0.2;
+      if(b.y>=b.ty){ b.y=b.ty; b.st='roll'; b.gi=b.tg; b.dir=slopeDir(b.gi); b.vy=0; }
+    }
+    if(b.x<-30||b.x>W+30||b.y>H+30){ barrels.splice(i,1); continue; }
+
+    // collision with player
+    if(P.deadT===0 &&
+       Math.abs(b.x-P.x)<PW/2+9 && b.y-PH< P.y-2 && b.y>P.y-PH-4){
+      if(P.hammer>0){
+        barrels.splice(i,1);
+        S.score+=300;
+        sparkles.push({x:b.x,y:b.y-8,t:24});
+        snd('hammer',0.5);
+      }else if(P.climbing){
+        playerDie();
+      }else{
+        playerDie();
+      }
+      continue;
+    }
+    // jump-over scoring: player airborne above this barrel, it passes under
+    if(b.st==='roll' && !b.scored && P.onFloor===-1 && P.deadT===0){
+      const gyB=girderY(b.gi,P.x);
+      if(gyB!==null && P.y<gyB-26 && Math.abs(P.x-b.x)<8){
+        b.scored=true; S.score+=100;
+      }
+    }
+  }
+  for(let i=sparkles.length-1;i>=0;i--){ sparkles[i].t--; if(sparkles[i].t<=0) sparkles.splice(i,1); }
+}
+
+/* ---------- drawing ---------- */
+function drawGirder(g){
+  ctx.fillStyle='#f86c6c';
+  const h=14;
+  for(const yy of [0,h]){
+    ctx.beginPath();
+    ctx.moveTo(g.x1,g.y1+yy); ctx.lineTo(g.x2,g.y2+yy);
+    ctx.lineTo(g.x2,g.y2+yy+4); ctx.lineTo(g.x1,g.y1+yy+4);
+    ctx.closePath(); ctx.fill();
+  }
+  // cross braces
+  ctx.strokeStyle='#f86c6c'; ctx.lineWidth=2;
+  const step=22;
+  for(let x=g.x1;x<g.x2-step;x+=step){
+    const yA=girderY(G.indexOf(g),x), yB=girderY(G.indexOf(g),x+step);
+    if(yA===null||yB===null) continue;
+    ctx.beginPath(); ctx.moveTo(x,yA+3); ctx.lineTo(x+step,yB+h); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x,yA+h); ctx.lineTo(x+step,yB+3); ctx.stroke();
+  }
+}
+function drawLadder(l){
+  ctx.strokeStyle='#4fd8eb'; ctx.lineWidth=3;
+  ctx.beginPath(); ctx.moveTo(l.x-9,l.topY-2); ctx.lineTo(l.x-9,l.botY+2); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(l.x+9,l.topY-2); ctx.lineTo(l.x+9,l.botY+2); ctx.stroke();
+  ctx.lineWidth=2;
+  for(let y=l.topY+6;y<l.botY;y+=10){
+    ctx.beginPath(); ctx.moveTo(l.x-9,y); ctx.lineTo(l.x+9,y); ctx.stroke();
+  }
+}
+function drawImg(name,cx,feetY,w,h,flip){
+  const im=IMG[name];
+  if(!im||!im.complete||!im.naturalWidth){
+    ctx.fillStyle='#666'; ctx.fillRect(cx-w/2,feetY-h,w,h); return;
+  }
+  ctx.save();
+  ctx.translate(cx,feetY);
+  if(flip) ctx.scale(-1,1);
+  ctx.drawImage(im,-w/2,-h,w,h);
+  ctx.restore();
+}
+function drawDK(x,y,anim){
+  // feet at (x,y); animate throw frames right after a toss
+  const name = anim>20 ? 'dk_throw1' : (anim>0 ? 'dk_throw2' : 'dk_idle');
+  drawImg(name,x,y,104,104,false);
+}
+function drawPauline(x,y){
+  if(S.mode==='win'){
+    drawImg(Math.floor(S.t/14)%2===0?'princess_dance1':'princess_dance2',x,y,70,70,false);
+  }else{
+    drawImg('princess_idle',x,y,40,60,false);
+    if(Math.floor(S.t/30)%2===0){
+      ctx.fillStyle='#fff'; ctx.font='bold 12px monospace';
+      ctx.fillText('HELP!',x+26,y-52);
+    }
+  }
+}
+function drawBarrel(b){
+  ctx.save();
+  ctx.translate(b.x,b.y-15);
+  ctx.rotate(b.rot);
+  const im=IMG.barrel;
+  if(im&&im.complete&&im.naturalWidth) ctx.drawImage(im,-15,-15,30,30);
+  else { ctx.fillStyle='#c07830'; ctx.fillRect(-13,-13,26,26); }
+  ctx.restore();
+}
+function drawPlayer(){
+  const x=P.x, y=P.y; // feet
+  ctx.save();
+  const dead=P.deadT>0;
+  if(dead && Math.floor(P.deadT/6)%2===0) ctx.globalAlpha=0.4;
+  let name='hero_idle', h=48, dy=0;
+  if(dead){ name='hero_hit'; h=50; }
+  else if(P.climbing){ name='hero_climb'; h=50; }
+  else if(P.onFloor===-1){ name='hero_jump'; h=46; }
+  else if(P.walk>0){ name='hero_run'; h=46; dy=-Math.abs(Math.sin(P.walk*1.1))*2; }
+  else { name=Math.floor(S.t/28)%2===0?'hero_idle':'hero_idle2'; }
+  ctx.save();
+  ctx.translate(0,dy);
+  drawFig(name,x,y,h,P.dir<0);
+  ctx.restore();
+  // hammer in hand (no sprite asset — drawn)
+  if(P.hammer>0 && !dead){
+    const up=Math.floor(S.t/8)%2===0;
+    ctx.save();
+    ctx.translate(x,y);
+    if(P.dir<0) ctx.scale(-1,1);
+    ctx.fillStyle='#c98a4b'; ctx.fillRect(9,-44-(up?12:0),4,22);
+    ctx.fillStyle='#d8d8d8'; ctx.fillRect(4,-50-(up?12:0),15,9);
+    ctx.restore();
+  }
+  ctx.restore();
+}
+function drawHammerItem(h){
+  if(h.taken) return;
+  ctx.save();
+  ctx.translate(h.x,h.y-10);
+  ctx.fillStyle='#c98a4b'; ctx.fillRect(-2,0,4,14);
+  ctx.fillStyle='#d8d8d8'; ctx.fillRect(-7,-8,14,8);
+  ctx.restore();
+}
+function drawHUD(){
+  ctx.fillStyle='#fff'; ctx.font='bold 14px monospace';
+  ctx.fillText('1UP',60,24);
+  ctx.fillText(String(S.score).padStart(6,'0'),180,24);
+  ctx.fillStyle='#ff5'; ctx.fillText('LEVEL '+S.level,300,24);
+  ctx.fillStyle='#5f5';
+  ctx.fillText('BONUS',450,24);
+  ctx.fillStyle='#fff';
+  ctx.fillText(String(Math.max(0,S.bonus)).padStart(4,'0'),520,24);
+  ctx.fillStyle='#f66';
+  for(let i=0;i<S.lives-1;i++){
+    ctx.fillRect(60+i*18,32,12,10);
+  }
+  if(P.hammer>0){
+    ctx.fillStyle='#ff0';
+    ctx.fillRect(60,50,Math.min(120,P.hammer/3.5),4);
+  }
+}
+function centerText(txt,y,color,size){
+  ctx.fillStyle=color||'#fff';
+  ctx.font='bold '+(size||24)+'px monospace';
+  ctx.fillText(txt,W/2-ctx.measureText(txt).width/2,y);
+}
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle='#000'; ctx.fillRect(0,0,W,H);
+  for(const g of G) drawGirder(g);
+  for(const l of L) drawLadder(l);
+  drawDK(90,100,dkAnim);
+  drawPauline(510,100);
+  for(const h of hammers) drawHammerItem(h);
+  for(const b of barrels) drawBarrel(b);
+  drawPlayer();
+  for(const s of sparkles){
+    ctx.fillStyle='#ff0';
+    ctx.font='bold 12px monospace';
+    ctx.fillText('+300',s.x-12,s.y-(24-s.t));
+  }
+  drawHUD();
+  if(S.mode==='title'){
+    ctx.fillStyle='rgba(0,0,0,0.75)'; ctx.fillRect(0,0,W,H);
+    centerText('BARREL BLAST',220,'#f86c6c',42);
+    centerText('a donkey kong game',255,'#fff',16);
+    centerText('press ENTER to start',330,'#ff0',20);
+    centerText('climb the girders and reach pauline!',380,'#4fd8eb',14);
+    centerText('stomp barrels with hammers · leap over them for 100',410,'#aaa',12);
+  }else if(S.mode==='over'){
+    ctx.fillStyle='rgba(0,0,0,0.75)'; ctx.fillRect(0,0,W,H);
+    centerText('GAME OVER',280,'#f44',40);
+    centerText('score '+S.score,330,'#fff',20);
+    centerText('press ENTER to retry',380,'#ff0',16);
+  }else if(S.mode==='win'){
+    ctx.fillStyle='rgba(0,0,0,0.75)'; ctx.fillRect(0,0,W,H);
+    centerText('YOU GOT HER!',260,'#ff7ab8',36);
+    centerText('level '+(S.level)+' clear · bonus +'+S.bonus,310,'#fff',18);
+    centerText('score '+S.score,345,'#fff',18);
+    centerText('press ENTER for level '+(S.level+1),400,'#ff0',16);
+  }
+}
+
+/* ---------- main loop ---------- */
+let last=0;
+function loop(ts){
+  requestAnimationFrame(loop);
+  const dt=ts-last; last=ts;
+  if(S.mode==='play'){
+    updatePlayer();
+    updateBarrels();
+    if(dkAnim>0) dkAnim--;
+  }else if(S.mode==='win'){
+    S.t++;
+    if(keys['Enter']){
+      S.level++; S.score+=S.bonus; S.mode='play'; resetLevel();
+    }
+  }else{
+    S.t++;
+  }
+  draw();
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

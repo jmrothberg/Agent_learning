@@ -1,0 +1,43 @@
+# Claude Code on local models
+
+One command. It starts a small proxy if needed, then opens Claude Code against oMLX at `http://127.0.0.1:8000`.
+
+oMLX must already be running, and the model must be loaded. Only one big model fits at a time.
+
+```bash
+cd ~/Agent_learning && claude-local
+```
+
+That uses the default, `qwen-flash`.
+
+## Pick a model
+
+```bash
+cd ~/Agent_learning && claude-local qwen-flash
+cd ~/Agent_learning && claude-local glm-flash
+cd ~/Agent_learning && claude-local qwen-27b
+cd ~/Agent_learning && claude-local deepseek
+```
+
+| Nickname | Weights in `~/MLX_Models` |
+|---|---|
+| `qwen-flash` | `Qwen3.8-Flash-Next-MLX-8bit-MTP` |
+| `glm-flash` | `GLM-5.3-Flash-MLX-6bit` |
+| `qwen-27b` | `Qwen3.8-27B-mxfp8` |
+| `deepseek` | `DeepSeek-V4.1-Flash-oQ4e-mtp` |
+
+`deepseek` works only after that download finishes and the model is loaded in oMLX. Unload GLM and Flash-Next first. It needs most of the 512 GB.
+
+Anything after the nickname is passed to Claude Code:
+
+```bash
+claude-local qwen-flash -p "hello"
+```
+
+## Stop the proxy
+
+```bash
+claude-local --stop
+```
+
+Do this once after the model list changes (`~/.litellm/local-claude.yaml`), then start `claude-local` again. A proxy that is already running will not see a new nickname.
