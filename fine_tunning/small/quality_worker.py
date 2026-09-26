@@ -183,7 +183,10 @@ def _combine(con: sqlite3.Connection) -> dict:
     import numpy as np
     feats = con.execute("select norm, src, rank, ntok, junk, syntax, sig from feat").fetchall()
     browser = dict(con.execute("select norm, weight from browser"))
-    edu = {n: next(w for hi, w in EDU_WEIGHTS if s < hi) for n, s in con.execute("select norm, score from edu")}
+    # NULL score: HTML with no inline JS. Counted done, training weight stays 1.
+    edu = {}
+    for n, s in con.execute("select norm, score from edu"):
+        edu[n] = 1.0 if s is None else next(w for hi, w in EDU_WEIGHTS if s < hi)
     parent = list(range(len(feats)))
 
     def find(i: int) -> int:
@@ -341,7 +344,19 @@ def browser(workers: int, batch: int = 200) -> None:
 
 
 # ------------------------------------------------------------------ edu mode
-def edu(threads: int, batch: int = 32, combine_every: int = 50_000) -> None:
+def _mark_noscript(con: sqlite3.Connection, norms: list[str]) -> None:
+    """HTML whose scripts are only src= links. Nothing for the classifier to read.
+
+    A NULL score keeps the training weight at 1 (_combine). Writing the row is
+    what removes the file from the page's "left" count. Skipping it without a
+    row makes that count stick forever.
+    """
+    with con:
+        con.executemany("insert or ignore into edu (norm, score) values (?, ?)",
+                        [(n, None) for n in norms])
+
+
+def edu(threads: int, batch: int = 32, combine_every: int = 50_000) -> int:
     import numpy as np
     import torch
     from tokenizers import Tokenizer
@@ -354,6 +369,7 @@ def edu(threads: int, batch: int = 32, combine_every: int = 50_000) -> None:
     skip = {r[0] for r in con.execute("select norm from edu")}
     skip |= {r[0] for r in con.execute("select norm from quality where weight = 0")}
     t0, n, since = time.time(), 0, 0
+    noscript: list[str] = []
 
     def flush(norms: list[str], texts: list[str]) -> None:
         x = etok(texts, truncation=True, max_length=512, padding=True, return_tensors="pt")
@@ -375,6 +391,10 @@ def edu(threads: int, batch: int = 32, combine_every: int = 50_000) -> None:
                 if d.get("lang", "HTML") == "HTML":
                     text = "\n".join(b for a, b in _SCRIPT.findall(text) if "src=" not in a.lower() and b.strip())
                     if not text:
+                        noscript.append(d["norm"])
+                        if len(noscript) >= 2000:
+                            _mark_noscript(con, noscript)
+                            noscript = []
                         continue
                 norms.append(d["norm"])
                 texts.append(text[:8000])
@@ -389,20 +409,30 @@ def edu(threads: int, batch: int = 32, combine_every: int = 50_000) -> None:
             if norms:
                 flush(norms, texts)
                 n += len(norms)
+            if noscript:
+                _mark_noscript(con, noscript)
+                noscript = []
         finally:
             # Close this shard before the next. Leaving them open dies once the download passes a few thousand.
             mapped = getattr(ids, "_mmap", None)
             if mapped is not None:
                 mapped.close()
+    # A pass that only marked no-inline-JS pages did not change any weight.
+    # Rebuilding quality here rewrites the whole table and the "left" count never moves.
+    if n == 0:
+        print("edu: nothing new to score", flush=True)
+        con.close()
+        return 0
     print("combine:", _combine(con), flush=True)
     con.close()
+    return n
 
 
 def follow_edu(threads: int) -> None:
     """Keep scoring GitHub files. One pass exits when it reaches the last shard, including shards added later."""
     while True:
-        edu(threads)
-        time.sleep(20)
+        n = edu(threads)
+        time.sleep(20 if n else 120)
 
 
 def main() -> None:
