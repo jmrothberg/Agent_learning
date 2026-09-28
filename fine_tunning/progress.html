@@ -217,7 +217,7 @@ async function tick() {
         `<p class="sub" style="margin:6px 0"><b>1. File check</b> ${scoreDone ? `<span class="ok">done</span>` : mark(modes.includes("score"))}` +
           ` — ${(c.shards_done || 0).toLocaleString()} / ${(c.shards || 0).toLocaleString()} shards. ` +
           `Drops near-copies. Broken JavaScript is trained at 0.3×. Repeated or generated files at 0.2–0.3×.</p>`,
-        `<p class="sub" style="margin:6px 0"><b>2. Code quality</b> ${eduDone ? `<span class="ok">done</span>` : mark(modes.includes("edu"))}` +
+        `<p class="sub" style="margin:6px 0"><b>2. Code quality</b> ${eduDone ? `<span class="ok">finished</span>` : mark(modes.includes("edu"))}` +
           ` — ${(c.edu || 0).toLocaleString()} github files scored` +
           (eduDone ? "" : `, ${eduLeft.toLocaleString()} left`) +
           (eduRate ? ` · ${eduRate.toFixed(1)} files/s${eduEta}` : "") +

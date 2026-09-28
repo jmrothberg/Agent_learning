@@ -429,10 +429,13 @@ def edu(threads: int, batch: int = 32, combine_every: int = 50_000) -> int:
 
 
 def follow_edu(threads: int) -> None:
-    """Keep scoring GitHub files. One pass exits when it reaches the last shard, including shards added later."""
+    """Score until a pass finds nothing new, then exit so the page can say finished."""
     while True:
         n = edu(threads)
-        time.sleep(20 if n else 120)
+        if n == 0:
+            print("edu: finished", flush=True)
+            return
+        time.sleep(20)
 
 
 def main() -> None:

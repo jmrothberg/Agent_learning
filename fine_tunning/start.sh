@@ -149,9 +149,9 @@ if [[ "$what" == small* ]]; then
       echo "file check already running"
     fi
     if ! quality_py "--edu"; then
-      # The pass exits when it finishes the shards it can see, and a kill leaves it idle.
-      # This loop starts it again. The command line includes --edu so the page shows it running.
-      detach "$SMALL_ROOT/logs/edu.out" zsh -c "while true; do nice -n 19 '$LORA_PY' -u '$HERE/small/quality_worker.py' --edu --follow --workers 12 || true; sleep 15; done"
+      # A clean exit means nothing left to score: stop. A crash starts the pass again.
+      # The command line includes --edu so the page shows it running until that exit.
+      detach "$SMALL_ROOT/logs/edu.out" zsh -c "while true; do nice -n 19 '$LORA_PY' -u '$HERE/small/quality_worker.py' --edu --follow --workers 12; status=\$?; if [[ \$status -eq 0 ]]; then exit 0; fi; sleep 15; done"
       echo "code quality (log: $SMALL_ROOT/logs/edu.out)"
     else
       echo "code quality already running"
