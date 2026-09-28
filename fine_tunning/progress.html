@@ -535,7 +535,7 @@ async function generateSide(which, label, outId, frameId) {
   const reader = r.body.getReader();
   const dec = new TextDecoder();
   let buf = "";
-  let gen = "";
+  let shown = "";
   while (true) {
     const step = await reader.read();
     if (step.done) break;
@@ -554,9 +554,17 @@ async function generateSide(which, label, outId, frameId) {
       if (msg.status === "loading") {
         status.textContent = "Loading " + label + "…";
       }
+      if (msg.status === "html") {
+        status.textContent = "This model continues an HTML page. Your sentence starts the script.";
+      }
+      if (msg.seed) {
+        shown = msg.seed;
+        pre.textContent = shown;
+        pre.scrollTop = pre.scrollHeight;
+      }
       if (msg.t) {
-        gen += msg.t;
-        pre.textContent = gen.startsWith(userPrompt) ? gen : userPrompt + gen;
+        shown += msg.t;
+        pre.textContent = shown;
         pre.scrollTop = pre.scrollHeight;
         status.textContent = "Writing " + label + "…";
       }

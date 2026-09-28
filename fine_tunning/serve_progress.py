@@ -408,16 +408,32 @@ def test_checkpoint(prompt: str, max_tokens: int, which: str = "latest") -> dict
     max_tokens = max(32, min(int(max_tokens or 400), 32000))
     # Qwen3.8 and the other vision models: same mlx_vlm load and chat template as chat.py.
     # Thinking stays off so the token count is the answer, not a hidden chain of thought.
-    # MiniCPM checkpoints stay on mlx_lm; they were trained as raw text, not chat.
+    # MiniCPM is continued pretraining on HTML, not a chat model. A bare sentence
+    # is the start of a page, or the model just repeats the sentence.
+    vlm = _is_vlm(ckpt)
     return {
         "ok": True,
-        "vlm": _is_vlm(ckpt),
-        "py": _chat_python() if _is_vlm(ckpt) else PY,
+        "vlm": vlm,
+        "py": _chat_python() if vlm else PY,
         "ckpt": ckpt,
         "which": which,
         "max_tokens": max_tokens,
-        "prompt": prompt,
+        "prompt": prompt if vlm else _lm_prompt(prompt),
     }
+
+
+def _lm_prompt(user: str) -> str:
+    """HTML continuation seed. Leave a prompt alone when it is already a page."""
+    text = (user or "").lstrip()
+    low = text.lower()
+    if low.startswith("<!doctype") or low.startswith("<html") or text.startswith("<"):
+        return user
+    note = text.replace("-->", "").strip() or "a page"
+    return (
+        "<!DOCTYPE html>\n<html>\n<head><meta charset=\"utf-8\"><title>Page</title></head>\n"
+        "<body>\n<canvas id=\"c\" width=\"800\" height=\"600\"></canvas>\n<script>\n"
+        f"// {note}\n"
+    )
 
 
 def _stream_script(vlm: bool) -> str:
@@ -450,13 +466,18 @@ def _stream_script(vlm: bool) -> str:
     return (
         "import json, sys\n"
         "from mlx_lm import load, stream_generate\n"
+        "from mlx_lm.sample_utils import make_sampler, make_logits_processors\n"
         + emit +
         "log = sys.stdout\n"
         "sys.stdout = sys.stderr\n"
         "model, tok = load(sys.argv[1])\n"
         "sys.stdout = log\n"
         "prompt = sys.stdin.read()\n"
-        "for gen in stream_generate(model, tok, prompt, max_tokens=int(sys.argv[2])):\n"
+        # Default sampler is argmax. On this model that locks onto one sentence.
+        "sampler = make_sampler(temp=0.7, top_p=0.9)\n"
+        "procs = make_logits_processors(repetition_penalty=1.1, repetition_context_size=64)\n"
+        "for gen in stream_generate(model, tok, prompt, max_tokens=int(sys.argv[2]),\n"
+        "                           sampler=sampler, logits_processors=procs):\n"
         "    emit(getattr(gen, 'text', '') or '')\n"
     )
 
@@ -492,6 +513,10 @@ def stream_test(handler: BaseHTTPRequestHandler, prompt: str, max_tokens: int, w
 
     if not send({"status": "loading"}):
         return
+    # Show the HTML seed before the first token so the box is a page, not a loop of the sentence.
+    if not ready["vlm"]:
+        if not send({"status": "html", "seed": ready["prompt"]}):
+            return
     proc = subprocess.Popen(
         [ready["py"], "-c", _stream_script(ready["vlm"]), ready["ckpt"], str(ready["max_tokens"])],
         stdin=subprocess.PIPE,
