@@ -68,9 +68,23 @@
     <button id="smallResume" type="button">Resume training</button>
   </div>
   <p class="sub" style="margin:8px 0">Stop drops whatever was trained since the last 30-minute save. Resume continues from that save.</p>
-  <p class="sub" style="margin:0 0 4px">Prompt</p>
-  <textarea id="prompt" rows="4"><!DOCTYPE html>
-<html><head><title>Snake</title></textarea>
+  <p class="sub" style="margin:0 0 4px">Starter</p>
+  <select id="promptPick">
+    <option value="red">Red square</option>
+    <option value="pong">Pong</option>
+    <option value="hangman">Hangman</option>
+    <option value="invaders">Space invaders</option>
+    <option value="breakout">Breakout</option>
+    <option value="snake">Snake</option>
+    <option value="circles">Bouncing circles</option>
+    <option value="flappy">Flappy</option>
+    <option value="tictactoe">Tic tac toe</option>
+    <option value="asteroids">Asteroids</option>
+    <option value="catch">Catch</option>
+    <option value="fireworks">Fireworks</option>
+  </select>
+  <p class="sub" style="margin:8px 0 4px">Prompt</p>
+  <textarea id="prompt" rows="16"></textarea>
   <div class="row" style="margin-top:8px">
     <span class="sub">New tokens</span>
     <select id="maxTokens">
@@ -623,6 +637,225 @@ async function onGenerate(selectId, outId, frameId) {
   busy = false;
   tick();
 }
+// Stage 1 continues raw HTML. Each starter is a real page, cut off inside the script.
+const STARTERS = {
+  red: `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Red square</title></head>
+<body>
+<canvas id="c" width="800" height="600"></canvas>
+<script>
+const c = document.getElementById("c");
+const ctx = c.getContext("2d");
+ctx.fillStyle = "#111";
+ctx.fillRect(0, 0, c.width, c.height);
+ctx.fillStyle = "red";
+`,
+  pong: `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Pong</title></head>
+<body>
+<canvas id="c" width="800" height="600"></canvas>
+<script>
+const c = document.getElementById("c");
+const ctx = c.getContext("2d");
+const keys = {};
+addEventListener("keydown", e => keys[e.key] = true);
+addEventListener("keyup", e => keys[e.key] = false);
+const left = {x: 30, y: 250, w: 14, h: 90};
+const right = {x: 756, y: 250, w: 14, h: 90};
+const ball = {x: 400, y: 300, vx: 5, vy: 3, r: 8};
+function frame() {
+`,
+  hangman: `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Hangman</title></head>
+<body>
+<canvas id="c" width="800" height="600"></canvas>
+<script>
+const word = "canvas";
+let misses = 0;
+const guessed = new Set();
+const c = document.getElementById("c");
+const ctx = c.getContext("2d");
+function draw() {
+`,
+  invaders: `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Space Invaders</title></head>
+<body>
+<canvas id="c" width="800" height="600"></canvas>
+<script>
+const c = document.getElementById("c");
+const ctx = c.getContext("2d");
+const keys = {};
+addEventListener("keydown", e => keys[e.key] = true);
+addEventListener("keyup", e => keys[e.key] = false);
+const ship = {x: 380, y: 540, w: 40, h: 18};
+const aliens = [];
+for (let row = 0; row < 4; row++) {
+  for (let col = 0; col < 8; col++) {
+    aliens.push({x: 80 + col * 70, y: 40 + row * 40, w: 36, h: 24, alive: true});
+  }
+}
+const bullets = [];
+function frame() {
+`,
+  breakout: `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Breakout</title></head>
+<body>
+<canvas id="c" width="800" height="600"></canvas>
+<script>
+const c = document.getElementById("c");
+const ctx = c.getContext("2d");
+const keys = {};
+addEventListener("keydown", e => keys[e.key] = true);
+addEventListener("keyup", e => keys[e.key] = false);
+const paddle = {x: 340, y: 560, w: 120, h: 14};
+const ball = {x: 400, y: 520, vx: 4, vy: -4, r: 8};
+const bricks = [];
+for (let row = 0; row < 5; row++) {
+  for (let col = 0; col < 10; col++) {
+    bricks.push({x: 40 + col * 74, y: 40 + row * 28, w: 68, h: 20, alive: true});
+  }
+}
+function frame() {
+`,
+  snake: `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Snake</title></head>
+<body>
+<canvas id="c" width="800" height="600"></canvas>
+<script>
+const c = document.getElementById("c");
+const ctx = c.getContext("2d");
+const grid = 20;
+let dir = {x: 1, y: 0};
+let snake = [{x: 10, y: 15}];
+let food = {x: 20, y: 10};
+addEventListener("keydown", e => {
+  if (e.key === "ArrowLeft") dir = {x: -1, y: 0};
+  if (e.key === "ArrowRight") dir = {x: 1, y: 0};
+  if (e.key === "ArrowUp") dir = {x: 0, y: -1};
+  if (e.key === "ArrowDown") dir = {x: 0, y: 1};
+});
+function frame() {
+`,
+  circles: `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Bouncing circles</title></head>
+<body>
+<canvas id="c" width="800" height="600"></canvas>
+<script>
+const c = document.getElementById("c");
+const ctx = c.getContext("2d");
+const dots = [];
+for (let i = 0; i < 40; i++) {
+  dots.push({
+    x: Math.random() * c.width,
+    y: Math.random() * c.height,
+    vx: (Math.random() - 0.5) * 6,
+    vy: (Math.random() - 0.5) * 6,
+    r: 8 + Math.random() * 18,
+    color: "hsl(" + (i * 9) + ",80%,60%)"
+  });
+}
+function frame() {
+`,
+  flappy: `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Flappy</title></head>
+<body>
+<canvas id="c" width="800" height="600"></canvas>
+<script>
+const c = document.getElementById("c");
+const ctx = c.getContext("2d");
+const bird = {x: 160, y: 280, vy: 0};
+const pipes = [{x: 800, gapY: 220}];
+addEventListener("mousedown", () => { bird.vy = -7; });
+function frame() {
+`,
+  tictactoe: `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Tic tac toe</title></head>
+<body>
+<canvas id="c" width="600" height="600"></canvas>
+<script>
+const c = document.getElementById("c");
+const ctx = c.getContext("2d");
+const board = ["", "", "", "", "", "", "", "", ""];
+let turn = "X";
+c.addEventListener("click", e => {
+  const rect = c.getBoundingClientRect();
+  const col = Math.floor((e.clientX - rect.left) / 200);
+  const row = Math.floor((e.clientY - rect.top) / 200);
+  const i = row * 3 + col;
+`,
+  asteroids: `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Asteroids</title></head>
+<body>
+<canvas id="c" width="800" height="600"></canvas>
+<script>
+const c = document.getElementById("c");
+const ctx = c.getContext("2d");
+const keys = {};
+addEventListener("keydown", e => keys[e.key] = true);
+addEventListener("keyup", e => keys[e.key] = false);
+const ship = {x: 400, y: 300, a: 0, vx: 0, vy: 0};
+const rocks = [
+  {x: 120, y: 80, vx: 1.2, vy: 0.6, r: 40},
+  {x: 640, y: 140, vx: -1, vy: 0.8, r: 36},
+  {x: 500, y: 480, vx: 0.5, vy: -1.1, r: 44}
+];
+const shots = [];
+function frame() {
+`,
+  catch: `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Catch</title></head>
+<body>
+<canvas id="c" width="800" height="600"></canvas>
+<script>
+const c = document.getElementById("c");
+const ctx = c.getContext("2d");
+const keys = {};
+addEventListener("keydown", e => keys[e.key] = true);
+addEventListener("keyup", e => keys[e.key] = false);
+const basket = {x: 360, y: 540, w: 90, h: 24};
+const apples = [{x: 200, y: 0, vy: 3}];
+let score = 0;
+function frame() {
+`,
+  fireworks: `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Fireworks</title></head>
+<body>
+<canvas id="c" width="800" height="600"></canvas>
+<script>
+const c = document.getElementById("c");
+const ctx = c.getContext("2d");
+const sparks = [];
+c.addEventListener("click", e => {
+  const rect = c.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+  for (let i = 0; i < 60; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const s = 1 + Math.random() * 4;
+    sparks.push({x: x, y: y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 40});
+  }
+});
+function frame() {
+`,
+};
+function applyStarter() {
+  const id = document.getElementById("promptPick").value;
+  document.getElementById("prompt").value = STARTERS[id] || "";
+}
+document.getElementById("promptPick").onchange = applyStarter;
+applyStarter();
 document.getElementById("genLeft").onclick = () => onGenerate("compareModel", "testOutBase", "previewBase");
 document.getElementById("genRight").onclick = () => onGenerate("testModel", "testOut", "preview");
 document.getElementById("clearLeft").onclick = () => clearColumn("testOutBase", "previewBase");
