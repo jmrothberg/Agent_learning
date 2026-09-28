@@ -515,24 +515,65 @@ function runColumn(outId, frameId) {
 }
 async function generateSide(which, label, outId, frameId) {
   const status = document.getElementById("testStatus");
+  const pre = document.getElementById(outId);
+  const userPrompt = document.getElementById("prompt").value;
   status.textContent = (trainerOn ? "Stopping training to free the GPU, then loading " : "Loading ") + label + "…";
+  pre.textContent = "";
   const r = await fetch("/test", {
     method: "POST",
     headers: {"Content-Type": "application/json"},
     body: JSON.stringify({
-      prompt: document.getElementById("prompt").value,
+      prompt: userPrompt,
       max_tokens: Number(document.getElementById("maxTokens").value || 400),
       model: which,
     }),
   });
-  const body = await r.json();
-  if (!body.ok) {
-    status.textContent = body.error || "Generate failed.";
+  if (!r.ok || !r.body) {
+    status.textContent = "Generate failed.";
     return;
   }
-  showGenerated(outId, frameId, body);
-  status.textContent = label + (body.html ? " is on screen." : " did not produce an HTML page. The text is above.") +
-    (body.checkpoint ? " Loaded " + body.checkpoint + "." : "");
+  const reader = r.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  let gen = "";
+  while (true) {
+    const step = await reader.read();
+    if (step.done) break;
+    buf += dec.decode(step.value, {stream: true});
+    let nl;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl);
+      buf = buf.slice(nl + 1);
+      if (!line.trim()) continue;
+      let msg;
+      try { msg = JSON.parse(line); } catch (e) { continue; }
+      if (msg.error) {
+        status.textContent = msg.error;
+        return;
+      }
+      if (msg.status === "loading") {
+        status.textContent = "Loading " + label + "…";
+      }
+      if (msg.t) {
+        gen += msg.t;
+        pre.textContent = gen.startsWith(userPrompt) ? gen : userPrompt + gen;
+        pre.scrollTop = pre.scrollHeight;
+        status.textContent = "Writing " + label + "…";
+      }
+      if (msg.done) {
+        showGenerated(outId, frameId, msg);
+        status.textContent = label + (msg.html ? " is on screen." : " did not produce an HTML page. The text is above. Press Run if the code is in the box.") +
+          (msg.checkpoint ? " Loaded " + msg.checkpoint + "." : "");
+      }
+    }
+  }
+  if (buf.trim()) {
+    try {
+      const msg = JSON.parse(buf);
+      if (msg.error) status.textContent = msg.error;
+      if (msg.done) showGenerated(outId, frameId, msg);
+    } catch (e) { /* leftover was not a whole message */ }
+  }
 }
 function setControlDisabled(dis) {
   ["holdBtn", "resumeBtn", "smallStop", "smallResume"].forEach((id) => {

@@ -4,10 +4,12 @@ from __future__ import annotations
 import calendar
 import json
 import os
+import queue
 import re
 import signal
 import sqlite3
 import subprocess
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -407,14 +409,33 @@ def test_checkpoint(prompt: str, max_tokens: int, which: str = "latest") -> dict
     # Qwen3.8 and the other vision models: same mlx_vlm load and chat template as chat.py.
     # Thinking stays off so the token count is the answer, not a hidden chain of thought.
     # MiniCPM checkpoints stay on mlx_lm; they were trained as raw text, not chat.
-    vlm = _is_vlm(ckpt)
+    return {
+        "ok": True,
+        "vlm": _is_vlm(ckpt),
+        "py": _chat_python() if _is_vlm(ckpt) else PY,
+        "ckpt": ckpt,
+        "which": which,
+        "max_tokens": max_tokens,
+        "prompt": prompt,
+    }
+
+
+def _stream_script(vlm: bool) -> str:
+    # One JSON line per token, flushed, so the page can show it immediately.
+    # Load logs stay on stderr and are not part of the answer.
+    emit = (
+        "def emit(piece):\n"
+        "    if piece:\n"
+        "        sys.stdout.write(json.dumps({'t': piece}) + '\\n')\n"
+        "        sys.stdout.flush()\n"
+    )
     if vlm:
-        py = _chat_python()
-        script = (
-            "import sys\n"
+        return (
+            "import json, sys\n"
             "from mlx_vlm import load, stream_generate\n"
             "from mlx_vlm.prompt_utils import apply_chat_template\n"
             "from mlx_vlm.utils import load_config\n"
+            + emit +
             "log = sys.stdout\n"
             "sys.stdout = sys.stderr\n"
             "model, processor = load(sys.argv[1])\n"
@@ -422,49 +443,143 @@ def test_checkpoint(prompt: str, max_tokens: int, which: str = "latest") -> dict
             "sys.stdout = log\n"
             "user = sys.stdin.read()\n"
             "prompt = apply_chat_template(processor, config, user, num_images=0)\n"
-            "parts = []\n"
             "for gen in stream_generate(model, processor, prompt, image=None,\n"
             "                           max_tokens=int(sys.argv[2]), temperature=0.7, verbose=False):\n"
-            "    parts.append(getattr(gen, 'text', '') or '')\n"
-            "sys.stdout.write(''.join(parts))\n"
+            "    emit(getattr(gen, 'text', '') or '')\n"
         )
-    else:
-        py = PY
-        script = (
-            "import sys\n"
-            "from mlx_lm import load, generate\n"
-            "log = sys.stdout\n"
-            "sys.stdout = sys.stderr\n"
-            "model, tok = load(sys.argv[1])\n"
-            "sys.stdout = log\n"
-            "prompt = sys.stdin.read()\n"
-            "out = generate(model, tok, prompt=prompt, max_tokens=int(sys.argv[2]), verbose=False)\n"
-            "sys.stdout.write(out if isinstance(out, str) else str(out))\n"
-        )
-    try:
-        # 32k tokens on a 27B can take well over an hour. The 2B checkpoint is faster.
-        proc = subprocess.run(
-            [py, "-c", script, ckpt, str(max_tokens)],
-            input=prompt, capture_output=True, text=True, timeout=7200,
-        )
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "Generation took more than 2 hours and was stopped."}
-    if proc.returncode != 0:
-        return {"ok": False, "error": _gen_error(proc)}
-    text = proc.stdout or ""
-    if vlm:
-        text = re.sub(r"<think>.*?</think>\s*", "", text, count=1, flags=re.DOTALL)
-    # Some mlx_lm builds echo the prompt; others return only the new tokens.
-    if not text.startswith(prompt):
-        text = prompt + text
+    return (
+        "import json, sys\n"
+        "from mlx_lm import load, stream_generate\n"
+        + emit +
+        "log = sys.stdout\n"
+        "sys.stdout = sys.stderr\n"
+        "model, tok = load(sys.argv[1])\n"
+        "sys.stdout = log\n"
+        "prompt = sys.stdin.read()\n"
+        "for gen in stream_generate(model, tok, prompt, max_tokens=int(sys.argv[2])):\n"
+        "    emit(getattr(gen, 'text', '') or '')\n"
+    )
+
+
+def _html_from_answer(text: str) -> str:
     lower = text.lower()
-    html = ""
     for mark in ("<!doctype", "<html"):
         at = lower.find(mark)
         if at >= 0:
-            html = text[at:]
+            return text[at:]
+    return ""
+
+
+def stream_test(handler: BaseHTTPRequestHandler, prompt: str, max_tokens: int, which: str) -> None:
+    """Write the answer as it is generated. One JSON object per line."""
+    ready = test_checkpoint(prompt, max_tokens, which)
+    if not ready.get("ok"):
+        handler._send(200, (json.dumps({"error": ready.get("error") or "Generate failed."}) + "\n").encode(),
+                      "application/x-ndjson; charset=utf-8")
+        return
+    handler.send_response(200)
+    handler.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+    handler.send_header("Cache-Control", "no-store")
+    handler.end_headers()
+
+    def send(obj: dict) -> bool:
+        try:
+            handler.wfile.write((json.dumps(obj) + "\n").encode())
+            handler.wfile.flush()
+            return True
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return False
+
+    if not send({"status": "loading"}):
+        return
+    proc = subprocess.Popen(
+        [ready["py"], "-c", _stream_script(ready["vlm"]), ready["ckpt"], str(ready["max_tokens"])],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
+    try:
+        proc.stdin.write(ready["prompt"])
+        proc.stdin.close()
+    except BrokenPipeError:
+        pass
+    err_box: list[str] = []
+
+    def drain_err() -> None:
+        data = proc.stderr.read() if proc.stderr is not None else ""
+        if data:
+            err_box.append(data[-4000:])
+
+    err_thread = threading.Thread(target=drain_err, daemon=True)
+    err_thread.start()
+    lines: queue.Queue[str | None] = queue.Queue()
+
+    def drain_out() -> None:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            lines.put(line)
+        lines.put(None)
+
+    threading.Thread(target=drain_out, daemon=True).start()
+    parts: list[str] = []
+    deadline = time.time() + 7200
+    timed_out = False
+    while True:
+        try:
+            line = lines.get(timeout=1)
+        except queue.Empty:
+            if time.time() > deadline:
+                timed_out = True
+                proc.kill()
+                break
+            continue
+        if line is None:
             break
-    return {"ok": True, "text": text, "html": html, "checkpoint": ckpt, "model": which}
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        piece = msg.get("t") or ""
+        if not piece:
+            continue
+        parts.append(piece)
+        if not send({"t": piece}):
+            proc.kill()
+            return
+    try:
+        proc.wait(timeout=20)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+    err_thread.join(timeout=5)
+    if timed_out:
+        send({"error": "Generation took more than 2 hours and was stopped."})
+        return
+    if proc.returncode not in (0, None):
+        err = "".join(err_box).strip() or "generate failed"
+        if "parameters not in model" in err or err.count("vision_tower") > 2:
+            err = err.split("\n", 1)[0][:300]
+        else:
+            err = err[-1500:]
+        send({"error": err})
+        return
+    text = "".join(parts)
+    if ready["vlm"]:
+        text = re.sub(r"<think>.*?</think>\s*", "", text, count=1, flags=re.DOTALL)
+    # Some builds echo the prompt; others return only the new tokens.
+    if not text.startswith(ready["prompt"]):
+        text = ready["prompt"] + text
+    send({
+        "done": True,
+        "text": text,
+        "html": _html_from_answer(text),
+        "checkpoint": ready["ckpt"],
+    })
 
 
 def save_test(html: str, name: str) -> dict:
@@ -828,11 +943,13 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/resume":
             body = resume_training()
         elif path == "/test":
-            body = test_checkpoint(
+            stream_test(
+                self,
                 str(payload.get("prompt") or ""),
                 int(payload.get("max_tokens") or 400),
                 str(payload.get("model") or "latest"),
             )
+            return
         elif path == "/save":
             body = save_test(str(payload.get("html") or ""), str(payload.get("name") or ""))
         elif path == "/open":
