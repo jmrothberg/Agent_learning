@@ -2,6 +2,7 @@
 # Manage train_small.py. One status line per check. No agent in the loop.
 #
 # Every SMALL_WATCH_SEC (default 30 min):
+#   logs/hold.json says held -> leave the trainer stopped (page Stop). Do not resume.
 #   healthy loss  -> copy checkpoints/latest to checkpoints/last_good
 #   loss above 3  -> resume last_good at a lower peak (1e-5, then 3e-6, then 1e-6)
 #   trainer dead, last loss still healthy -> resume checkpoints/latest at the same peak
@@ -21,6 +22,12 @@ STATE="$ROOT/logs/watch_state"
 mkdir -p "$ROOT/logs" "$CKPT"
 
 say() { print -r -- "$(date -u +%Y-%m-%dT%H:%M:%SZ) $*"; }
+
+# Page Stop writes this. Resume writes "running". Missing file means the watcher may restart.
+held() {
+  [[ -f "$ROOT/logs/hold.json" ]] || return 1
+  grep -q '"state": "held"' "$ROOT/logs/hold.json"
+}
 
 trainer_pid() {
   pgrep -f '/small/train_small.py' | head -n 1 || true
@@ -147,6 +154,17 @@ restart_at() {
 
 check() {
   local pid line loss step lr n
+  # A Stop on the page must stay stopped. If the trainer is still up, finish that stop.
+  if held; then
+    pid=$(trainer_pid)
+    if [[ -n "$pid" ]]; then
+      say "page stop is set; stopping trainer pid=$pid"
+      stop_trainer
+    else
+      say "page stop is set; trainer stays down"
+    fi
+    return 0
+  fi
   pid=$(trainer_pid)
   line=$(last_iter || true)
   loss=""

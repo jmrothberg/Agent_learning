@@ -30,6 +30,8 @@ _STAMP = re.compile(r"\d{8}T\d{6}Z")
 def _python_script_pids(script_name: str) -> list[int]:
     # Match the Python process only. A shell whose command line mentions the
     # script path is not the trainer and must not be signaled.
+    # The script is its own argv word (.../small/train_small.py). Do not require
+    # it to sit next to this file: train_small.py lives in fine_tunning/small/.
     out = subprocess.check_output(["ps", "-ax", "-o", "pid=,command="], text=True, errors="replace")
     found = []
     for line in out.splitlines():
@@ -37,12 +39,9 @@ def _python_script_pids(script_name: str) -> list[int]:
         if len(parts) != 2:
             continue
         pid_s, cmd = parts
-        # MULTI-LORA: fine_tunning/ copy, or the older <data>/scripts/ copy still in use.
-        needles = (f"{HERE}/{script_name}", f"/{ROOT.name}/scripts/{script_name}")
-        # SMALL MODEL: train_small.py is started from fine_tunning/small/ with a bare name.
-        if script_name == "train_small.py":
-            needles += (f"Python {script_name}", f"small/{script_name}")
-        if not any(n in cmd for n in needles) or "Python" not in cmd or "zsh" in cmd:
+        if "Python" not in cmd or "zsh" in cmd:
+            continue
+        if not any(word == script_name or word.endswith("/" + script_name) for word in cmd.split()):
             continue
         found.append(int(pid_s))
     return found
@@ -122,6 +121,8 @@ def _latest_snapshot() -> str | None:
         if not path.is_dir() or not _STAMP.fullmatch(path.name):
             continue
         weights = path / "adapters.safetensors"
+        if not weights.exists():
+            weights = path / "model.safetensors"  # small-model 6-hour copy
         if weights.exists() and weights.stat().st_size > 100_000_000:
             if best is None or path.name > best.name:
                 best = path
@@ -140,15 +141,96 @@ def _base_model() -> str | None:
     base = Path(os.environ.get("SMALL_BASE", "~/MLX_Models/MiniCPM5-1B-Base")).expanduser()
     if (base / "config.json").is_file():
         return str(base)
+    # The page process may not have SMALL_BASE. The train header names the folder.
+    log = ROOT / "logs" / "train.log"
+    if not log.is_file():
+        return None
+    name = ""
+    for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
+        if line.startswith("train ") and " base=" in line:
+            name = line.split(" base=", 1)[1].split()[0]
+    if not name:
+        return None
+    guessed = Path.home() / "MLX_Models" / name
+    if (guessed / "config.json").is_file():
+        return str(guessed)
     return None
+
+
+def _weights_dir(path: Path) -> bool:
+    """True when this folder is a loadable model (full weights or a LoRA adapter)."""
+    for name in ("model.safetensors", "adapters.safetensors"):
+        weights = path / name
+        if weights.is_file() and weights.stat().st_size > 100_000_000:
+            return True
+    return False
 
 
 def _test_checkpoint() -> str | None:
     """Folder the Test button loads. The 30-minute save, else the newest 6-hour snapshot."""
-    latest = ROOT / "checkpoints" / "latest" / "model.safetensors"
-    if latest.is_file() and latest.stat().st_size > 100_000_000:
-        return str(latest.parent)
+    latest = ROOT / "checkpoints" / "latest"
+    if _weights_dir(latest):
+        return str(latest)
     return _latest_snapshot()
+
+
+def _mlx_model_dir(path: Path) -> bool:
+    """A base model folder: config plus weights. Sharded models have no single model.safetensors."""
+    if not (path / "config.json").is_file():
+        return False
+    return any(path.glob("*.safetensors"))
+
+
+def _compare_models() -> list[dict]:
+    """Left column. This run's base, plus other local models (Qwen 27B and the rest)."""
+    if not _is_small():
+        return []
+    models = []
+    seen: set[Path] = set()
+    base = _base_model()
+    if base:
+        models.append({"id": "base", "label": Path(base).name, "path": base})
+        seen.add(Path(base).resolve())
+    root = Path.home() / "MLX_Models"
+    if not root.is_dir():
+        return models
+    for path in sorted(root.iterdir(), key=lambda item: item.name.lower()):
+        if not path.is_dir() or path.name.startswith("html_js"):
+            continue
+        if path.resolve() in seen or not _mlx_model_dir(path):
+            continue
+        if not re.fullmatch(r"[A-Za-z0-9._+-]+", path.name):
+            continue
+        models.append({"id": path.name, "label": path.name, "path": str(path)})
+    return models
+
+
+def _test_models() -> list[dict]:
+    """Right column. The 30-minute save and each dated snapshot. No other folder."""
+    if not _is_small():
+        return []
+    models = []
+    latest = ROOT / "checkpoints" / "latest"
+    if _weights_dir(latest):
+        models.append({"id": "latest", "label": "Latest save", "path": str(latest)})
+    for item in reversed(_checkpoints()):
+        models.append({"id": item["name"], "label": item["when"], "path": item["path"]})
+    return models
+
+
+def _resolve_test_model(which: str) -> tuple[str | None, str | None]:
+    """Return (folder, error). which is a left-side model id, latest, or a snapshot stamp."""
+    which = (which or "latest").strip()
+    for item in _compare_models() + _test_models():
+        if item["id"] == which:
+            return item["path"], None
+    if which == "base":
+        return None, "Original base model was not found."
+    if which == "latest":
+        return None, "No checkpoint yet. The first save is 30 minutes in."
+    if _STAMP.fullmatch(which):
+        return None, "That snapshot is not on disk."
+    return None, "Unknown model. Pick one from the list."
 
 
 def _control() -> dict:
@@ -168,6 +250,8 @@ def _control() -> dict:
             "safe_to_test": False,
             "checkpoint": None,
             "base_model": None,
+            "test_models": [],
+            "compare_models": [],
         }
     return {
         "trainer_running": running,
@@ -175,6 +259,8 @@ def _control() -> dict:
         "safe_to_test": (not running) and (not agent) and bool(checkpoint or base),
         "checkpoint": checkpoint,
         "base_model": base,
+        "test_models": _test_models(),
+        "compare_models": _compare_models(),
     }
 
 
@@ -184,7 +270,9 @@ def hold_training() -> dict:
     HOLD.parent.mkdir(parents=True, exist_ok=True)
     HOLD.write_text(json.dumps({"state": "held"}))
     if _is_small():
-        _signal_gone(_python_script_pids("train_small.py"), signal.SIGTERM, 45)
+        pids = _python_script_pids("train_small.py")
+        print(f"hold train_small pids={pids}", flush=True)
+        _signal_gone(pids, signal.SIGTERM, 45)
         _signal_gone(_python_script_pids("train_small.py"), signal.SIGKILL, 10)
         return status()
     # The live LoRA supervisor was started before it knew this file.
@@ -206,8 +294,19 @@ def resume_training() -> dict:
         log = open(ROOT / "logs" / "train.out", "a", encoding="utf-8")
         env = os.environ.copy()
         env["SMALL_ROOT"] = str(ROOT)
+        base = _base_model()
+        if base:
+            env["SMALL_BASE"] = base
+        # Peak from the last train header. The default 5e-5 already blew up this 2B.
+        peak = "1e-5"
+        log_path = ROOT / "logs" / "train.log"
+        if log_path.is_file():
+            for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                if line.startswith("train ") and " lr=" in line:
+                    peak = line.split(" lr=", 1)[1].split()[0]
+        print(f"resume train_small lr={peak} base={env.get('SMALL_BASE', '')}", flush=True)
         subprocess.Popen(
-            [PY, str(HERE / "small" / "train_small.py")],
+            [PY, str(HERE / "small" / "train_small.py"), "--lr", peak],
             stdout=log,
             stderr=subprocess.STDOUT,
             start_new_session=True,
@@ -255,41 +354,98 @@ def _safe_html_name(name: str) -> str:
     return stem
 
 
+def _chat_python() -> str:
+    """Interpreter chat.py uses. Its mlx_vlm knows Qwen3.8; the trainer venv does not."""
+    py = HERE.parent / ".venv" / "bin" / "python"
+    if py.is_file():
+        return str(py)
+    return PY
+
+
+def _is_vlm(path: str) -> bool:
+    """True for models chat.py loads with mlx_vlm (Qwen3.8, GLM, DeepSeek)."""
+    cfg_path = Path(path) / "config.json"
+    if not cfg_path.is_file():
+        return False
+    try:
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return False
+    if cfg.get("vision_config") is not None or cfg.get("image_token_id") is not None:
+        return True
+    arch = " ".join(cfg.get("architectures") or [])
+    return "ConditionalGeneration" in arch
+
+
+def _gen_error(proc: subprocess.CompletedProcess) -> str:
+    """Keep a load failure readable. A VLM loaded as text dumps every weight name."""
+    err = (proc.stderr or proc.stdout or "generate failed").strip()
+    if "parameters not in model" in err or err.count("vision_tower") > 2:
+        return err.split("\n", 1)[0][:300]
+    return err[-1500:]
+
+
 def test_checkpoint(prompt: str, max_tokens: int, which: str = "latest") -> dict:
-    """Generate from the original base or checkpoints/latest. Refuses while a trainer holds the GPU."""
+    """Generate from a menu choice. Refuses while a trainer holds the GPU."""
     if (_python_script_pids("train_small.py") or _python_script_pids("train_lora.py")
             or _python_script_pids("run_slices.py")):
         return {"ok": False, "error": "Training is using the GPU. Press Stop first."}
-    # The page only offers these two. A request cannot point the loader at another folder.
-    if which == "base":
-        ckpt = _base_model()
-        if not ckpt:
-            return {"ok": False, "error": "Original base model was not found."}
-    else:
-        which = "latest"
-        ckpt = _test_checkpoint()
-        if not ckpt:
-            return {"ok": False, "error": "No checkpoint yet. The first save is 30 minutes in."}
+    # Left column (base or another local model) or right column (latest / a snapshot). No other path.
+    ckpt, err = _resolve_test_model(which)
+    if err or not ckpt:
+        return {"ok": False, "error": err or "That model was not found."}
+    which = (which or "latest").strip()
     max_tokens = max(32, min(int(max_tokens or 400), 800))
-    script = (
-        "import sys\n"
-        "from mlx_lm import load, generate\n"
-        "model, tok = load(sys.argv[1])\n"
-        "prompt = sys.stdin.read()\n"
-        "out = generate(model, tok, prompt=prompt, max_tokens=int(sys.argv[2]), verbose=False)\n"
-        "sys.stdout.write(out if isinstance(out, str) else str(out))\n"
-    )
+    # Qwen3.8 and the other vision models: same mlx_vlm load and chat template as chat.py.
+    # Thinking stays off so the token count is the answer, not a hidden chain of thought.
+    # MiniCPM checkpoints stay on mlx_lm; they were trained as raw text, not chat.
+    vlm = _is_vlm(ckpt)
+    if vlm:
+        py = _chat_python()
+        script = (
+            "import sys\n"
+            "from mlx_vlm import load, stream_generate\n"
+            "from mlx_vlm.prompt_utils import apply_chat_template\n"
+            "from mlx_vlm.utils import load_config\n"
+            "log = sys.stdout\n"
+            "sys.stdout = sys.stderr\n"
+            "model, processor = load(sys.argv[1])\n"
+            "config = load_config(sys.argv[1])\n"
+            "sys.stdout = log\n"
+            "user = sys.stdin.read()\n"
+            "prompt = apply_chat_template(processor, config, user, num_images=0)\n"
+            "parts = []\n"
+            "for gen in stream_generate(model, processor, prompt, image=None,\n"
+            "                           max_tokens=int(sys.argv[2]), temperature=0.7, verbose=False):\n"
+            "    parts.append(getattr(gen, 'text', '') or '')\n"
+            "sys.stdout.write(''.join(parts))\n"
+        )
+    else:
+        py = PY
+        script = (
+            "import sys\n"
+            "from mlx_lm import load, generate\n"
+            "log = sys.stdout\n"
+            "sys.stdout = sys.stderr\n"
+            "model, tok = load(sys.argv[1])\n"
+            "sys.stdout = log\n"
+            "prompt = sys.stdin.read()\n"
+            "out = generate(model, tok, prompt=prompt, max_tokens=int(sys.argv[2]), verbose=False)\n"
+            "sys.stdout.write(out if isinstance(out, str) else str(out))\n"
+        )
     try:
+        # A 27B load can take several minutes. The 2B checkpoint is much faster.
         proc = subprocess.run(
-            [PY, "-c", script, ckpt, str(max_tokens)],
-            input=prompt, capture_output=True, text=True, timeout=300,
+            [py, "-c", script, ckpt, str(max_tokens)],
+            input=prompt, capture_output=True, text=True, timeout=900,
         )
     except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "Generation took more than 5 minutes and was stopped."}
+        return {"ok": False, "error": "Generation took more than 15 minutes and was stopped."}
     if proc.returncode != 0:
-        err = (proc.stderr or proc.stdout or "generate failed").strip()
-        return {"ok": False, "error": err[-1500:]}
+        return {"ok": False, "error": _gen_error(proc)}
     text = proc.stdout or ""
+    if vlm:
+        text = re.sub(r"<think>.*?</think>\s*", "", text, count=1, flags=re.DOTALL)
     # Some mlx_lm builds echo the prompt; others return only the new tokens.
     if not text.startswith(prompt):
         text = prompt + text

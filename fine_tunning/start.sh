@@ -113,15 +113,55 @@ if [[ "$what" == small* ]]; then
       END { exit found ? 0 : 1 }
     '
   }
-  small_monitor() {
-    if curl -sf -o /dev/null --max-time 3 "http://127.0.0.1:$SMALL_PORT/"; then
-      echo "monitor already up  http://127.0.0.1:$SMALL_PORT/"
-      return
+  # macOS ps lstart is "Thu Sep 24 22:44:19 2026" (day may be space-padded).
+  # Returns 0 when any file is newer than the process, or the start time cannot be read.
+  files_newer_than_pid() {
+    local pid="$1" proc src f
+    shift
+    proc=$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^ *//')
+    proc=$(date -j -f "%a %b %e %T %Y" "$proc" +%s 2>/dev/null || true)
+    [[ -n "$proc" ]] || return 0
+    for f in "$@"; do
+      src=$(stat -f %m "$f")
+      if (( src > proc )); then
+        return 0
+      fi
+    done
+    return 1
+  }
+  # Wait until pid is gone. The trainer is never in this list.
+  wait_gone() {
+    local pid="$1" i=0
+    kill "$pid" 2>/dev/null || true
+    while kill -0 "$pid" 2>/dev/null && (( i < 25 )); do
+      sleep 0.2
+      i=$((i + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -9 "$pid" 2>/dev/null || true
     fi
-    LORA_ROOT="$SMALL_ROOT" LORA_PORT="$SMALL_PORT" detach "$SMALL_ROOT/logs/dashboard.log" "$LORA_PY" "$HERE/serve_progress.py"
+  }
+  small_monitor() {
+    local pid
+    pid=$(lsof -nP -iTCP:"$SMALL_PORT" -sTCP:LISTEN -t 2>/dev/null | head -1 || true)
+    if [[ -n "$pid" ]]; then
+      if files_newer_than_pid "$pid" "$HERE/serve_progress.py" "$HERE/progress.html"; then
+        echo "monitor code is newer than pid $pid; reloading the page only"
+        wait_gone "$pid"
+      else
+        echo "monitor already up  http://127.0.0.1:$SMALL_PORT/"
+        return
+      fi
+    fi
+    LORA_ROOT="$SMALL_ROOT" LORA_PORT="$SMALL_PORT" SMALL_BASE="$SMALL_BASE" detach "$SMALL_ROOT/logs/dashboard.log" "$LORA_PY" "$HERE/serve_progress.py"
     echo "monitor  http://127.0.0.1:$SMALL_PORT/   (log: $SMALL_ROOT/logs/dashboard.log)"
   }
   small_train() {
+    # Page Stop stays stopped until Resume. Do not undo it from this script.
+    if [[ -f "$SMALL_ROOT/logs/hold.json" ]] && grep -q '"state": "held"' "$SMALL_ROOT/logs/hold.json"; then
+      echo "training is stopped from the page (logs/hold.json). Press Resume there. This does not start the trainer."
+      return
+    fi
     # One GPU: refuse a second trainer, whichever SMALL_ROOT it uses.
     if pgrep -f "train_small.py" > /dev/null; then
       echo "train_small.py already running (pid $(pgrep -f train_small.py | head -1))"; return
@@ -132,9 +172,17 @@ if [[ "$what" == small* ]]; then
   }
   small_watch() {
     # Shell only. Keeps last_good and restarts from it. Does not call an agent.
-    if pgrep -f "small/watch_train.sh" > /dev/null; then
-      echo "watch already running (pid $(pgrep -f small/watch_train.sh | head -1))"
-      return
+    # A newer script is reloaded. The trainer is left for the new watcher (it honors page Stop).
+    local pid
+    pid=$(pgrep -f "small/watch_train.sh" | head -1 || true)
+    if [[ -n "$pid" ]]; then
+      if files_newer_than_pid "$pid" "$HERE/small/watch_train.sh"; then
+        echo "watch script is newer than pid $pid; reloading"
+        wait_gone "$pid"
+      else
+        echo "watch already running (pid $pid)"
+        return
+      fi
     fi
     detach "$SMALL_ROOT/logs/watch.log" /bin/zsh "$HERE/small/watch_train.sh"
     echo "watch    every 30 min (log: $SMALL_ROOT/logs/watch.log)"

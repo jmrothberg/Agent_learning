@@ -14,13 +14,9 @@ Run either line again any time. Anything already running is left alone, and anyt
 pkill -f "data.py --source stack"
 ```
 
-**The 30-minute save is what you test against the original.** `checkpoints/latest` is overwritten every 30 minutes. On the progress page, stop training, then run the same prompt on the original base model and on that checkpoint. Both outputs stay on screen. The agent finds the checkpoint: `/list` shows it as `latest`. In chat type `/model latest`, or start with:
+**Try a prompt on the progress page.** Press Stop training. That frees the GPU and stays stopped until you press Resume (the 30-minute watcher will not start the trainer again). Type a prompt, pick how many new tokens, then press Generate on one side only. The left side is a model to compare against (this run's base, or another local model such as Qwen3.8-27B). The right side is a checkpoint (`checkpoints/latest` or a dated snapshot).
 
-```bash
-MLX_MODEL=~/MLX_Models/html_js_small/checkpoints/latest python chat.py
-```
-
-Dated copies every 6 hours stay in `snapshots/` and are not deleted. Test and `/model latest` do not use those.
+`./start.sh small` reloads the page when `serve_progress.py` or `progress.html` is newer than the process. It does not start the trainer while `logs/hold.json` says held. Resume on the page continues from `checkpoints/latest` at the learning rate already in `logs/train.log`.
 
 This folder has everything needed to train, monitor, and use a LoRA adapter on a local MLX model: the code, the start script, and this guide. The first project is the **HTML-game LoRA** on `Qwen3.8-27B-mxfp8`. The same code trains other LoRAs by pointing it at a different project folder, as described below.
 
@@ -437,7 +433,7 @@ SMALL_ROOT=/Volumes/DRIVE/html_js_small ./start.sh small
 
 Env vars: `SMALL_ROOT` (data/checkpoints), `SMALL_BASE` (model), `SMALL_PORT` (page, default 8767), `SMALL_TRAIN_ARGS` (extra trainer flags), `LORA_PY`, `BROWSER_PY`.
 
-**Stop:** `pkill -f train_small.py`. Up to 30 minutes since the last save are lost. The next `./start.sh small` resumes from `checkpoints/latest/` and starts anything else that stopped, except the Stack download. Use `./start.sh small continue` to resume that too. If the loss has blown up, do not resume that checkpoint — follow [Restart when the loss blows up](#restart-when-the-loss-blows-up).
+**Stop:** On the page, press Stop training. That writes `logs/hold.json` and ends `train_small.py`. The watcher will not start it again until you press Resume. Up to 30 minutes since the last save are lost. `./start.sh small` reloads the page if this code is newer, and it leaves the trainer stopped while that file says held. Resume continues from `checkpoints/latest/` at the `lr=` in `logs/train.log`. If the loss has blown up, do not resume that checkpoint — follow [Restart when the loss blows up](#restart-when-the-loss-blows-up).
 
 ### 9c. Confirm it is running / common failures
 
@@ -569,15 +565,17 @@ The first line of `logs/train.log` must say the new `lr=` and `resume=True`, and
 
 Set the rate on any start, not only a restart: `SMALL_TRAIN_ARGS="--lr 1e-5" ./start.sh small`. Other trainer flags go in that same variable (`--lr 1e-5 --warmup 400`).
 
-`./start.sh small-watch` does the restart by itself, every 30 minutes. `./start.sh small` starts it too. On a healthy save it copies `checkpoints/latest/` to `checkpoints/last_good/` (older copies move to `checkpoints/kept/`, nothing is deleted). If the loss goes above 3, it resumes `last_good` at the next lower peak: `1e-5`, then `3e-6`, then `1e-6`, then it stops restarting. If the trainer dies while the loss is still near 1, it resumes `checkpoints/latest/` at the same peak. It will not start from the base when a checkpoint exists. One line per check: `$SMALL_ROOT/logs/watch.log`.
+`./start.sh small-watch` does the restart by itself, every 30 minutes. `./start.sh small` starts it too. On a healthy save it copies `checkpoints/latest/` to `checkpoints/last_good/` (older copies move to `checkpoints/kept/`, nothing is deleted). If the loss goes above 3, it resumes `last_good` at the next lower peak: `1e-5`, then `3e-6`, then `1e-6`, then it stops restarting. If the trainer dies while the loss is still near 1, it resumes `checkpoints/latest/` at the same peak. It will not start from the base when a checkpoint exists. If `logs/hold.json` says held, it leaves the trainer stopped — that is a Stop from the page, not a crash. One line per check: `$SMALL_ROOT/logs/watch.log`.
 
 
 ### Use a checkpoint
 
-`checkpoints/latest/` (and every `snapshots/<stamp>/`) is a normal mlx-lm model folder. Stage 1 is a base model, so use a raw prompt, not a chat template:
+On the progress page, Stop training. The left Generate runs the model you picked there (the base, or another folder under `~/MLX_Models` such as Qwen3.8-27B). Qwen and the other vision models load with `mlx_vlm` and their chat template, the same way `chat.py` does. The right Generate runs the checkpoint you picked (latest, or a snapshot) as plain text. Each button runs only that side.
+
+The same folders are normal mlx-lm models. Stage 1 is a base model, so use a raw prompt, not a chat template:
 
 ```bash
-~/Agents/.venv/bin/python -m mlx_lm generate --model ~/MLX_Models/html_js_small/checkpoints/latest \
+"$LORA_PY" -m mlx_lm generate --model "$SMALL_ROOT/checkpoints/latest" \
   --ignore-chat-template --max-tokens 400 --prompt '<!DOCTYPE html>
 <html><head><title>Snake</title>'
 ```
@@ -605,6 +603,8 @@ A throwaway speed test lives in `~/MLX_Models/html_js_MiniCPM5-2B-Base-bench`. T
 `./start.sh` puts each job under launchd (PPID 1), in its own session. Quitting Cursor does not stop it. `nohup` alone does not, because a Cursor shell kills its process group.
 
 The 2B does not use the default `5e-5` learning rate. That peak wrecked a fresh start on Sep 24, 2026 (loss ~1 through warmup, then ~10). Use `1e-5`. If a later run does the same, follow [Restart when the loss blows up](#restart-when-the-loss-blows-up) and resume `checkpoints/last_good/`, not the base and not the save from after the jump.
+
+Stop and Generate are on the page (http://127.0.0.1:8767/). Left Generate runs the comparison model you picked. Right Generate runs the checkpoint you picked. Resume there keeps the `lr=` from `logs/train.log`. `./start.sh small-monitor` reloads the page when the code is newer and does not touch the trainer. While `logs/hold.json` says held, `./start.sh small-train` does not start the trainer.
 
 ```bash
 cd ~/Agent_learning/fine_tunning
