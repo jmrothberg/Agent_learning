@@ -431,6 +431,15 @@ SMALL_ROOT=/Volumes/DRIVE/html_js_small ./start.sh small
 | `./start.sh small-stack`                   | The Stack v2 download. Resumes `logs/stack_state.json`. 32 workers, stop after 8B new tokens                 |
 
 
+**Instruction pages (Vulcan, in this repo).** `fine_tunning/small/instruct/vulcan/` is the 5,000-row request→page set (MIT, about 8MB). On the other Mac, after `git pull` and with the base model already downloaded:
+
+```bash
+cd ~/Agent_learning/fine_tunning/small
+~/Agents/.venv/bin/python data.py --source vulcan
+```
+
+That writes `vulcan_*.bin` shards for whatever `SMALL_BASE` is set to. The trainer draws each of those pages 400 times per pass (about 1 in 10 tokens). Resume training after the shards exist. The token files are not in git, because they only match one tokenizer.
+
 Env vars: `SMALL_ROOT` (data/checkpoints), `SMALL_BASE` (model), `SMALL_PORT` (page, default 8767), `SMALL_TRAIN_ARGS` (extra trainer flags), `LORA_PY`, `BROWSER_PY`.
 
 **Stop:** On the page, press Stop training. That writes `logs/hold.json` and ends `train_small.py`. The watcher will not start it again until you press Resume. Up to 30 minutes since the last save are lost. `./start.sh small` reloads the page if this code is newer, and it leaves the trainer stopped while that file says held. Resume continues from `checkpoints/latest/` at the `lr=` in `logs/train.log`. If the loss has blown up, do not resume that checkpoint — follow [Restart when the loss blows up](#restart-when-the-loss-blows-up).

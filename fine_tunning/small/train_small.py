@@ -41,9 +41,12 @@ QUALITY = ROOT / "quality.sqlite"
 
 # Sampling weight per (source, rank). Own games are the target domain, so they
 # repeat more; rank 2 = canvas/three.js game with a loop.
+# vulcan = instruction → full page. Weight 400 makes these about 1 in 10 training
+# tokens, instead of a few thousand pages disappearing inside billions of raw files.
 WEIGHTS = {("own", 2): 3.0, ("own", 1): 2.0, ("own", 0): 1.0,
            ("gcc", 2): 1.5, ("gcc", 1): 1.0, ("gcc", 0): 0.7,
-           ("stack", 2): 1.5, ("stack", 1): 1.0, ("stack", 0): 0.7}
+           ("stack", 2): 1.5, ("stack", 1): 1.0, ("stack", 0): 0.7,
+           ("vulcan", 2): 400.0}
 
 
 def _state(**kw) -> None:

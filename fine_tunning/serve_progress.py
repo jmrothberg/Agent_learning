@@ -746,10 +746,37 @@ def _quality_row() -> dict:
     return row
 
 
+_corpus_refresh_lock = threading.Lock()
+
+
+def _refresh_corpus_cache() -> None:
+    """Recount shards and the quality database off the page request.
+
+    This Mac has thousands of shards and a multi-GB score file. Doing that
+    recount inside /status.json meant the browser gave up, so the model
+    tester (hidden until status returns) never appeared. A smaller machine
+    finishes the recount before the next poll, so the same page shows there.
+    """
+    try:
+        _scan_shards()
+        _quality_row()
+    finally:
+        _corpus_refresh_lock.release()
+
+
 def _small_corpus() -> dict:
     """Training-set size and quality-worker progress for the small-model page."""
     # Counts are cached. Running/not and the files-per-second line update every poll.
-    row = {**_scan_shards(), **_quality_row(), **_quality_rate()}
+    now = time.time()
+    stale = (now - _corpus_cache["at"] >= 60) or not _corpus_cache["scan"]
+    if stale and _corpus_refresh_lock.acquire(blocking=False):
+        threading.Thread(target=_refresh_corpus_cache, daemon=True).start()
+    scan = _corpus_cache["scan"] or {"docs": 0, "unique": 0, "tokens": 0, "by_src": {}}
+    quality = _quality_cache["row"] or {
+        "shards": 0, "shards_done": 0, "scored": 0, "dropped": 0,
+        "edu": 0, "edu_left": 0, "browser": 0, "browser_left": 0,
+    }
+    row = {**scan, **quality, **_quality_rate()}
     row["modes"] = _quality_modes()
     row["download"] = _stack_download()
     return row

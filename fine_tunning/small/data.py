@@ -326,9 +326,112 @@ def _stack_run(workers: int, max_tokens: int, chunk: int) -> None:
     (ROOT / "logs" / "data_stack.json").write_text(json.dumps({"docs": docs_n, "tokens": tokens, "drops": drops}))
 
 
+_CLASS = re.compile(r"(?:^|[\s,{])\.([A-Za-z_][\w-]*)")
+
+
+def _css_to_page(css: str) -> str:
+    """Wrap a stylesheet in a complete page that actually uses its classes."""
+    classes: list[str] = []
+    for m in _CLASS.finditer(css):
+        name = m.group(1)
+        if name not in classes:
+            classes.append(name)
+    root = classes[0] if classes else "page"
+    extra = "".join(f'<div class="{c}"></div>' for c in classes[1:8])
+    spans = "<span></span><span></span><span></span>" if "span" in css else ""
+    cells = "<div></div><div></div><div></div><div></div>"
+    return (
+        "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+        "<title>Page</title>\n<style>\n" + css.strip() + "\n"
+        "body { margin: 0; min-height: 100vh; background: var(--bg, #111); "
+        "color: var(--text, #eee); font-family: var(--font, sans-serif); }\n"
+        "</style>\n</head>\n<body>\n"
+        f'<div class="{root}">{spans}{extra}{cells}</div>\n'
+        "</body>\n</html>\n"
+    )
+
+
+def _vulcan_page(assistant: str) -> str | None:
+    """Return one complete HTML page, or None if this answer is not usable."""
+    text = assistant.strip()
+    low = text.lower()
+    if "<!doctype" in low or "<html" in low:
+        at = low.find("<!doctype")
+        if at < 0:
+            at = low.find("<html")
+        page = text[at:]
+        if "</html>" not in page.lower():
+            return None
+        return page
+    if not text.startswith(":root") or "{" not in text:
+        return None
+    return _css_to_page(text)
+
+
+def _vulcan_run() -> None:
+    """xlelords/vulcan: request, then a full HTML page. Heavy-weighted by train_small.
+
+    1,800 answers are already a whole page. The other 3,200 are a stylesheet only;
+    those are wrapped into a page that uses the classes, so every kept row is a
+    complete document. A row is dropped if it still is not one page.
+    """
+    from huggingface_hub import snapshot_download
+    bundled = Path(__file__).resolve().parent / "instruct" / "vulcan"
+    if (bundled / "train.jsonl").exists():
+        dest = bundled
+    else:
+        dest = ROOT / "instruct" / "vulcan"
+        dest.mkdir(parents=True, exist_ok=True)
+        if not (dest / "train.jsonl").exists():
+            snapshot_download("xlelords/vulcan", repo_type="dataset", local_dir=str(dest))
+    docs = []
+    seen: set[str] = set()
+    n_html = n_css = n_drop = 0
+    for name in ("train.jsonl", "val.jsonl"):
+        path = dest / name
+        if not path.exists():
+            continue
+        for line in path.read_text().splitlines():
+            row = json.loads(line)
+            msgs = row.get("messages") or []
+            user = " ".join(m.get("content", "") for m in msgs if m.get("role") == "user").strip()
+            assistant = " ".join(m.get("content", "") for m in msgs if m.get("role") == "assistant")
+            raw = assistant.strip()
+            if len(user) < 12 or not raw:
+                n_drop += 1
+                continue
+            kind_html = "<html" in raw.lower() or "<!doctype" in raw.lower()
+            page = _vulcan_page(raw)
+            if not page or "</html>" not in page.lower() or len(page) < 400:
+                n_drop += 1
+                continue
+            text = user + "\n" + page
+            norm = hashlib.sha1(_WS.sub(" ", text).encode()).hexdigest()[:16]
+            if norm in seen:
+                n_drop += 1
+                continue
+            seen.add(norm)
+            n_html += kind_html
+            n_css += not kind_html
+            docs.append((text, {
+                "sha": hashlib.sha1(text.encode("utf-8", "replace")).hexdigest(),
+                "src": "vulcan", "path": f"vulcan/{norm}", "lang": "HTML",
+                "rank": 2, "norm": norm}))
+    print(f"vulcan: kept {len(docs)} (full pages {n_html}, css wrapped {n_css}), dropped {n_drop}", flush=True)
+    total = {"docs": 0, "tokens": 0}
+    for i in range(0, len(docs), 2000):
+        part = _write(f"vulcan_{i // 2000:05d}", docs[i:i + 2000])
+        total["docs"] += part["docs"]
+        total["tokens"] += part["tokens"]
+    print(f"vulcan: tokens={total['tokens']/1e6:.1f}M", flush=True)
+    (ROOT / "logs" / "data_vulcan.json").write_text(json.dumps({"docs": total["docs"], "tokens": total["tokens"],
+                                                                "html": n_html, "css_wrapped": n_css, "dropped": n_drop}))
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--source", choices=("own", "gcc", "retok", "stack"), required=True)
+    p.add_argument("--source", choices=("own", "gcc", "retok", "stack", "vulcan"), required=True)
     p.add_argument("--from", dest="from_root", default="",
                    help="retok: another SMALL_ROOT whose shards/ (+ shards/tokenizer.json) to re-tokenize for SMALL_BASE")
     p.add_argument("--workers", type=int, default=20)
@@ -346,6 +449,9 @@ def main() -> None:
 
     if args.source == "stack":
         _stack_run(args.workers, int(args.max_tokens), args.chunk)
+        return
+    if args.source == "vulcan":
+        _vulcan_run()
         return
 
     if args.source == "retok":
