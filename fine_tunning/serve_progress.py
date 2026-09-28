@@ -133,6 +133,16 @@ def _is_small() -> bool:
     return (ROOT / "shards").is_dir()
 
 
+def _base_model() -> str | None:
+    """The untouched model training started from. Test uses this to compare a prompt."""
+    if not _is_small():
+        return None
+    base = Path(os.environ.get("SMALL_BASE", "~/MLX_Models/MiniCPM5-1B-Base")).expanduser()
+    if (base / "config.json").is_file():
+        return str(base)
+    return None
+
+
 def _test_checkpoint() -> str | None:
     """Folder the Test button loads. The 30-minute save, else the newest 6-hour snapshot."""
     latest = ROOT / "checkpoints" / "latest" / "model.safetensors"
@@ -148,6 +158,7 @@ def _control() -> dict:
                    + _python_script_pids("train_small.py"))
         agent = [] if trainer else _agent_model_pids()
         checkpoint = _test_checkpoint()
+        base = _base_model()
         running = bool(trainer)
     except (OSError, subprocess.SubprocessError, ValueError):
         # Unknown is not safe. Do not tell the page the GPU is free.
@@ -156,12 +167,14 @@ def _control() -> dict:
             "agent_loaded": False,
             "safe_to_test": False,
             "checkpoint": None,
+            "base_model": None,
         }
     return {
         "trainer_running": running,
         "agent_loaded": bool(agent),
-        "safe_to_test": (not running) and (not agent) and bool(checkpoint),
+        "safe_to_test": (not running) and (not agent) and bool(checkpoint or base),
         "checkpoint": checkpoint,
+        "base_model": base,
     }
 
 
@@ -242,14 +255,21 @@ def _safe_html_name(name: str) -> str:
     return stem
 
 
-def test_checkpoint(prompt: str, max_tokens: int) -> dict:
-    """Generate from checkpoints/latest. Refuses while a trainer holds the GPU."""
+def test_checkpoint(prompt: str, max_tokens: int, which: str = "latest") -> dict:
+    """Generate from the original base or checkpoints/latest. Refuses while a trainer holds the GPU."""
     if (_python_script_pids("train_small.py") or _python_script_pids("train_lora.py")
             or _python_script_pids("run_slices.py")):
         return {"ok": False, "error": "Training is using the GPU. Press Stop first."}
-    ckpt = _test_checkpoint()
-    if not ckpt:
-        return {"ok": False, "error": "No checkpoint yet. The first save is 30 minutes in."}
+    # The page only offers these two. A request cannot point the loader at another folder.
+    if which == "base":
+        ckpt = _base_model()
+        if not ckpt:
+            return {"ok": False, "error": "Original base model was not found."}
+    else:
+        which = "latest"
+        ckpt = _test_checkpoint()
+        if not ckpt:
+            return {"ok": False, "error": "No checkpoint yet. The first save is 30 minutes in."}
     max_tokens = max(32, min(int(max_tokens or 400), 800))
     script = (
         "import sys\n"
@@ -280,7 +300,7 @@ def test_checkpoint(prompt: str, max_tokens: int) -> dict:
         if at >= 0:
             html = text[at:]
             break
-    return {"ok": True, "text": text, "html": html, "checkpoint": ckpt}
+    return {"ok": True, "text": text, "html": html, "checkpoint": ckpt, "model": which}
 
 
 def save_test(html: str, name: str) -> dict:
@@ -644,7 +664,11 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/resume":
             body = resume_training()
         elif path == "/test":
-            body = test_checkpoint(str(payload.get("prompt") or ""), int(payload.get("max_tokens") or 400))
+            body = test_checkpoint(
+                str(payload.get("prompt") or ""),
+                int(payload.get("max_tokens") or 400),
+                str(payload.get("model") or "latest"),
+            )
         elif path == "/save":
             body = save_test(str(payload.get("html") or ""), str(payload.get("name") or ""))
         elif path == "/open":

@@ -25,8 +25,9 @@
   .dot.wait { background: #e0b45a; }
   button { font: inherit; background: #2a2e3a; color: #e8e6e3; border: 0; border-radius: 8px; padding: 8px 14px; cursor: pointer; }
   button:disabled { opacity: 0.4; cursor: default; }
-  textarea, input[type=text] { font: 14px/1.4 ui-monospace, monospace; width: 100%; box-sizing: border-box; background: #12141a; color: #e8e6e3; border: 0; border-radius: 8px; padding: 8px; }
-  iframe#preview { width: 640px; height: 480px; max-width: 100%; background: #fff; border: 0; border-radius: 8px; }
+  textarea, input[type=text], select { font: 14px/1.4 ui-monospace, monospace; width: 100%; box-sizing: border-box; background: #12141a; color: #e8e6e3; border: 0; border-radius: 8px; padding: 8px; }
+  select { width: auto; max-width: 100%; }
+  iframe.preview { width: 640px; height: 360px; max-width: 100%; background: #fff; border: 0; border-radius: 8px; }
 </style>
 </head>
 <body>
@@ -58,9 +59,9 @@
   <p id="qualityHow" class="sub" style="margin:0 0 8px">The CPU review changes how often each file is trained. Waiting for scores.</p>
   <div id="qualityPasses"></div>
 </div>
-<h2>Test the latest checkpoint</h2>
+<h2>Test a prompt</h2>
 <div class="panel" id="testPanel">
-  <p id="testNote" class="sub" style="margin:0 0 8px">Stop training to free the GPU, then Test loads checkpoints/latest.</p>
+  <p id="testNote" class="sub" style="margin:0 0 8px">Stop training to free the GPU. The same prompt can run on the original base model and on checkpoints/latest. Both outputs stay on screen.</p>
   <div class="row">
     <button id="smallStop" type="button">Stop training</button>
     <button id="smallResume" type="button">Resume training</button>
@@ -69,14 +70,28 @@
   <textarea id="prompt" rows="4"><!DOCTYPE html>
 <html><head><title>Snake</title></textarea>
   <div class="row" style="margin-top:8px">
+    <select id="testModel">
+      <option value="base">Original base model</option>
+      <option value="latest" selected>Latest checkpoint</option>
+    </select>
     <button id="testBtn" type="button">Test</button>
     <input id="saveName" type="text" placeholder="filename, e.g. snake.html" style="max-width:280px">
     <button id="saveBtn" type="button">Save file</button>
     <button id="openBtn" type="button">Open in Chrome</button>
   </div>
   <p id="testStatus" class="sub" style="margin:8px 0 0">No test yet.</p>
-  <pre id="testOut" style="max-height:180px;margin-top:8px"> </pre>
-  <iframe id="preview" title="Chrome preview" sandbox="allow-scripts"></iframe>
+  <div class="row" style="align-items:flex-start;margin-top:8px">
+    <div style="flex:1;min-width:280px">
+      <p class="sub" style="margin:0 0 6px"><b>Original</b></p>
+      <pre id="testOutBase" style="max-height:180px;margin-top:0"> </pre>
+      <iframe id="previewBase" class="preview" title="Original model" sandbox="allow-scripts"></iframe>
+    </div>
+    <div style="flex:1;min-width:280px">
+      <p class="sub" style="margin:0 0 6px"><b>Latest checkpoint</b></p>
+      <pre id="testOut" style="max-height:180px;margin-top:0"> </pre>
+      <iframe id="preview" class="preview" title="Latest checkpoint" sandbox="allow-scripts"></iframe>
+    </div>
+  </div>
 </div>
 </div>
 <div class="grid lora">
@@ -239,12 +254,15 @@ async function tick() {
       drawLoss(s.losses || [], "Log point (every 10 updates)");
       document.getElementById("smallStop").disabled = !s.trainer_running || busy;
       document.getElementById("smallResume").disabled = !!s.trainer_running || busy;
-      document.getElementById("testBtn").disabled = !!s.trainer_running || busy || !s.checkpoint;
+      const which = document.getElementById("testModel").value;
+      const canTest = which === "base" ? !!s.base_model : !!s.checkpoint;
+      document.getElementById("testBtn").disabled = !!s.trainer_running || busy || !canTest;
+      const baseName = s.base_model ? s.base_model.split("/").pop() : "the original base";
       document.getElementById("testNote").textContent = s.trainer_running
-        ? "Training is using the GPU. Stop it, then Test loads " + (s.checkpoint || "checkpoints/latest") + "."
-        : (s.checkpoint
-          ? "GPU is free. Test continues your prompt with " + s.checkpoint + "."
-          : "No checkpoint yet. The first save is 30 minutes in.");
+        ? "Training is using the GPU. Stop it, then run this prompt on the original model or on " + (s.checkpoint || "checkpoints/latest") + "."
+        : (canTest
+          ? "GPU is free. The same prompt runs on " + baseName + " or on " + (s.checkpoint || "the latest checkpoint") + ". Both outputs stay on screen."
+          : "No checkpoint yet, and the original base model was not found.");
       return;
     }
     document.getElementById("html").textContent = s.html_files ?? s.html_rows ?? 0;
@@ -447,13 +465,19 @@ document.getElementById("smallResume").onclick = () => control("/resume");
 document.getElementById("testBtn").onclick = async () => {
   const btn = document.getElementById("testBtn");
   const status = document.getElementById("testStatus");
+  const which = document.getElementById("testModel").value;
+  const label = which === "base" ? "original base model" : "latest checkpoint";
   btn.disabled = true;
-  status.textContent = "Loading the checkpoint and generating. This can take a minute.";
+  status.textContent = "Loading the " + label + " and generating. This can take a minute.";
   try {
     const r = await fetch("/test", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({prompt: document.getElementById("prompt").value, max_tokens: 400}),
+      body: JSON.stringify({
+        prompt: document.getElementById("prompt").value,
+        max_tokens: 400,
+        model: which,
+      }),
     });
     const body = await r.json();
     if (!body.ok) {
@@ -461,9 +485,13 @@ document.getElementById("testBtn").onclick = async () => {
       return;
     }
     lastPage = body.html || body.text || "";
-    document.getElementById("testOut").textContent = body.text || "";
-    document.getElementById("preview").srcdoc = body.html || "<p style='font-family:sans-serif'>No HTML page in the output.</p>";
-    status.textContent = body.html ? "Preview is below. Save keeps the HTML file." : "The model did not produce an HTML page. The text is above.";
+    const outId = which === "base" ? "testOutBase" : "testOut";
+    const frameId = which === "base" ? "previewBase" : "preview";
+    document.getElementById(outId).textContent = body.text || "";
+    document.getElementById(frameId).srcdoc = body.html || "<p style='font-family:sans-serif'>No HTML page in the output.</p>";
+    status.textContent = (which === "base" ? "Original" : "Latest checkpoint") +
+      (body.html ? " is on screen. The other column is unchanged, so you can compare. Save keeps the HTML from this run."
+                 : " did not produce an HTML page. The text is in its column.");
   } catch (e) {
     status.textContent = "Test request failed.";
   }

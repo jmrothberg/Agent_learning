@@ -14,7 +14,7 @@ Run either line again any time. Anything already running is left alone, and anyt
 pkill -f "data.py --source stack"
 ```
 
-**The 30-minute save is what you test.** `checkpoints/latest` is overwritten every 30 minutes. The progress page **Test** button loads that folder. The agent finds the same folder: `/list` shows it as `latest`. Stop training first so the GPU is free, then in chat type `/model latest`, or start with:
+**The 30-minute save is what you test against the original.** `checkpoints/latest` is overwritten every 30 minutes. On the progress page, stop training, then run the same prompt on the original base model and on that checkpoint. Both outputs stay on screen. The agent finds the checkpoint: `/list` shows it as `latest`. In chat type `/model latest`, or start with:
 
 ```bash
 MLX_MODEL=~/MLX_Models/html_js_small/checkpoints/latest python chat.py
