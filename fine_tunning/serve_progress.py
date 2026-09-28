@@ -264,9 +264,10 @@ def _control() -> dict:
     }
 
 
-def hold_training() -> dict:
+def _hold_trainers() -> None:
     # Stopping the Python PID frees the GPU. Quality scoring and the Stack
-    # download are CPU jobs and keep running.
+    # download are CPU jobs and keep running. hold.json stays "held" so the
+    # 30-minute watcher does not start training again during a generate.
     HOLD.parent.mkdir(parents=True, exist_ok=True)
     HOLD.write_text(json.dumps({"state": "held"}))
     if _is_small():
@@ -274,12 +275,16 @@ def hold_training() -> dict:
         print(f"hold train_small pids={pids}", flush=True)
         _signal_gone(pids, signal.SIGTERM, 45)
         _signal_gone(_python_script_pids("train_small.py"), signal.SIGKILL, 10)
-        return status()
+        return
     # The live LoRA supervisor was started before it knew this file.
     _signal_gone(_python_script_pids("train_lora.py"), signal.SIGTERM, 45)
     _signal_gone(_python_script_pids("train_lora.py"), signal.SIGKILL, 10)
     _signal_gone(_python_script_pids("run_slices.py"), signal.SIGTERM, 20)
     _signal_gone(_python_script_pids("run_slices.py"), signal.SIGKILL, 10)
+
+
+def hold_training() -> dict:
+    _hold_trainers()
     return status()
 
 
@@ -386,16 +391,19 @@ def _gen_error(proc: subprocess.CompletedProcess) -> str:
 
 
 def test_checkpoint(prompt: str, max_tokens: int, which: str = "latest") -> dict:
-    """Generate from a menu choice. Refuses while a trainer holds the GPU."""
+    """Generate from a menu choice. Stops the trainer first so the GPU is free."""
     if (_python_script_pids("train_small.py") or _python_script_pids("train_lora.py")
             or _python_script_pids("run_slices.py")):
-        return {"ok": False, "error": "Training is using the GPU. Press Stop first."}
+        _hold_trainers()
+    if (_python_script_pids("train_small.py") or _python_script_pids("train_lora.py")
+            or _python_script_pids("run_slices.py")):
+        return {"ok": False, "error": "Training is still using the GPU. Press Stop, then Generate again."}
     # Left column (base or another local model) or right column (latest / a snapshot). No other path.
     ckpt, err = _resolve_test_model(which)
     if err or not ckpt:
         return {"ok": False, "error": err or "That model was not found."}
     which = (which or "latest").strip()
-    max_tokens = max(32, min(int(max_tokens or 400), 800))
+    max_tokens = max(32, min(int(max_tokens or 400), 32000))
     # Qwen3.8 and the other vision models: same mlx_vlm load and chat template as chat.py.
     # Thinking stays off so the token count is the answer, not a hidden chain of thought.
     # MiniCPM checkpoints stay on mlx_lm; they were trained as raw text, not chat.
@@ -434,13 +442,13 @@ def test_checkpoint(prompt: str, max_tokens: int, which: str = "latest") -> dict
             "sys.stdout.write(out if isinstance(out, str) else str(out))\n"
         )
     try:
-        # A 27B load can take several minutes. The 2B checkpoint is much faster.
+        # 32k tokens on a 27B can take well over an hour. The 2B checkpoint is faster.
         proc = subprocess.run(
             [py, "-c", script, ckpt, str(max_tokens)],
-            input=prompt, capture_output=True, text=True, timeout=900,
+            input=prompt, capture_output=True, text=True, timeout=7200,
         )
     except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "Generation took more than 15 minutes and was stopped."}
+        return {"ok": False, "error": "Generation took more than 2 hours and was stopped."}
     if proc.returncode != 0:
         return {"ok": False, "error": _gen_error(proc)}
     text = proc.stdout or ""

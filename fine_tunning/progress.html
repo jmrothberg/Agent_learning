@@ -79,6 +79,11 @@
       <option value="256">256</option>
       <option value="400" selected>400</option>
       <option value="800">800</option>
+      <option value="2000">2,000</option>
+      <option value="4000">4,000</option>
+      <option value="8000">8,000</option>
+      <option value="16000">16,000</option>
+      <option value="32000">32,000</option>
     </select>
   </div>
   <p id="testStatus" class="sub" style="margin:8px 0 0">No test yet.</p>
@@ -86,15 +91,23 @@
     <div style="flex:1;min-width:280px">
       <p class="sub" style="margin:0 0 6px"><b>Compare to</b></p>
       <select id="compareModel" class="wide"></select>
-      <button id="genLeft" type="button" style="margin-top:8px">Generate</button>
-      <pre id="testOutBase" style="max-height:180px;margin-top:8px"> </pre>
+      <div class="row" style="margin-top:8px">
+        <button id="genLeft" type="button">Generate</button>
+        <button id="runLeft" type="button">Run</button>
+        <button id="clearLeft" type="button">Clear</button>
+      </div>
+      <pre id="testOutBase" style="max-height:480px;margin-top:8px"> </pre>
       <iframe id="previewBase" class="preview" title="Comparison model" sandbox="allow-scripts"></iframe>
     </div>
     <div style="flex:1;min-width:280px">
       <p class="sub" style="margin:0 0 6px"><b>Checkpoint</b></p>
       <select id="testModel" class="wide"></select>
-      <button id="genRight" type="button" style="margin-top:8px">Generate</button>
-      <pre id="testOut" style="max-height:180px;margin-top:8px"> </pre>
+      <div class="row" style="margin-top:8px">
+        <button id="genRight" type="button">Generate</button>
+        <button id="runRight" type="button">Run</button>
+        <button id="clearRight" type="button">Clear</button>
+      </div>
+      <pre id="testOut" style="max-height:480px;margin-top:8px"> </pre>
       <iframe id="preview" class="preview" title="Checkpoint" sandbox="allow-scripts"></iframe>
     </div>
   </div>
@@ -269,11 +282,12 @@ async function tick() {
       fillMenu("testModel", s.test_models || [], "latest");
       const cmp = (s.compare_models || []).some((m) => m.id === document.getElementById("compareModel").value);
       const ckpt = (s.test_models || []).some((m) => m.id === document.getElementById("testModel").value);
-      document.getElementById("genLeft").disabled = !!s.trainer_running || busy || !cmp;
-      document.getElementById("genRight").disabled = !!s.trainer_running || busy || !ckpt;
+      trainerOn = !!s.trainer_running;
+      document.getElementById("genLeft").disabled = busy || !cmp;
+      document.getElementById("genRight").disabled = busy || !ckpt;
       document.getElementById("testNote").textContent = s.trainer_running
-        ? "Training is using the GPU. Stop it, then press Generate on the side you want."
-        : "GPU is free. Left is a model to compare against. Right is a checkpoint. Generate runs only the button you press.";
+        ? "Generate is on. It stops training to free the GPU, then runs only the side you press. Resume starts training again."
+        : "GPU is free. Generate runs only the side you press. Resume starts training again.";
       return;
     }
     document.getElementById("html").textContent = s.html_files ?? s.html_rows ?? 0;
@@ -445,6 +459,7 @@ function drawLoss(losses, xName) {
   label.textContent = `green = last 18 steps (${last.toFixed(3)}). red = last 50 steps (${last50.toFixed(3)}). gray = each file. ${n} steps in this run. Until 50 steps exist, the red line uses however many have finished.`;
 }
 let busy = false;
+let trainerOn = false;
 let lastPage = "";
 let lastName = "";
 function esc(s) {
@@ -464,14 +479,43 @@ function fillMenu(id, models, prefer) {
   else if (prefer && ids.includes(prefer)) sel.value = prefer;
   else if (ids.length) sel.value = ids[0];
 }
+function pageFromText(text) {
+  const raw = text || "";
+  const lower = raw.toLowerCase();
+  for (const mark of ["<!doctype", "<html"]) {
+    const at = lower.indexOf(mark);
+    if (at >= 0) return raw.slice(at);
+  }
+  if (/<(script|canvas|body|div|svg|style)\b/i.test(raw)) {
+    return "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"></head><body>\n" + raw + "\n</body></html>";
+  }
+  return "";
+}
 function showGenerated(outId, frameId, body) {
   document.getElementById(outId).textContent = body.text || "";
-  document.getElementById(frameId).srcdoc = body.html || "<p style='font-family:sans-serif'>No HTML page in the output.</p>";
-  lastPage = body.html || body.text || "";
+  const html = body.html || pageFromText(body.text || "");
+  document.getElementById(frameId).srcdoc = html || "<p style='font-family:sans-serif'>No HTML page in the output. Press Run if the code is in the box above.</p>";
+  if (html) lastPage = html;
+}
+function clearColumn(outId, frameId) {
+  document.getElementById(outId).textContent = " ";
+  document.getElementById(frameId).srcdoc = "";
+  document.getElementById("testStatus").textContent = "Cleared.";
+}
+function runColumn(outId, frameId) {
+  const html = pageFromText(document.getElementById(outId).textContent || "");
+  const status = document.getElementById("testStatus");
+  if (!html) {
+    status.textContent = "Nothing to run in that column.";
+    return;
+  }
+  document.getElementById(frameId).srcdoc = html;
+  lastPage = html;
+  status.textContent = "Running in the white box under that column.";
 }
 async function generateSide(which, label, outId, frameId) {
   const status = document.getElementById("testStatus");
-  status.textContent = "Loading " + label + "…";
+  status.textContent = (trainerOn ? "Stopping training to free the GPU, then loading " : "Loading ") + label + "…";
   const r = await fetch("/test", {
     method: "POST",
     headers: {"Content-Type": "application/json"},
@@ -532,6 +576,10 @@ async function onGenerate(selectId, outId, frameId) {
 }
 document.getElementById("genLeft").onclick = () => onGenerate("compareModel", "testOutBase", "previewBase");
 document.getElementById("genRight").onclick = () => onGenerate("testModel", "testOut", "preview");
+document.getElementById("clearLeft").onclick = () => clearColumn("testOutBase", "previewBase");
+document.getElementById("clearRight").onclick = () => clearColumn("testOut", "preview");
+document.getElementById("runLeft").onclick = () => runColumn("testOutBase", "previewBase");
+document.getElementById("runRight").onclick = () => runColumn("testOut", "preview");
 document.getElementById("saveBtn").onclick = async () => {
   const status = document.getElementById("testStatus");
   if (!lastPage) { status.textContent = "Test first, then save."; return; }
