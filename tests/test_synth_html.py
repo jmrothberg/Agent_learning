@@ -40,6 +40,9 @@ def test_ideas_3000_one_game_each() -> None:
     assert "tetris use nice 8 bit graphics as close to the original as possible" in keys
     assert "tetris" not in keys
     assert sum("three js" in k for k in keys) == 100
+    assert sum(k.endswith(" in phaser") for k in keys) == 122
+    assert sum(k.endswith(" in pixijs") for k in keys) == 57
+    assert sum(k.endswith(" in howler js") for k in keys) == 15
     assert "hades" in keys
     assert "god of war 2018" in keys
     assert "god of war 2005" in keys

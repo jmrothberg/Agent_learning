@@ -1,6 +1,6 @@
 # One request per line. Each game or graphic appears once.
 # A small working version of each top game, then ideas_1000.txt lines that are different.
-# Includes late 1970s CP/M games and small 1980s games.
+# Includes late 1970s CP/M games, TRS-80, Commodore 64, early Mac, and small 1980s games.
 # Built by expand_ideas.py. Openings vary. Do not hand-edit.
 Write me a small working version of Tetris. Use nice 8-bit graphics, as close to the original as possible.
 Make a small working version of Resident Evil 4.
@@ -1180,6 +1180,191 @@ Put together a small working version of Space Quest.
 How about a small working version of Gaplus?
 Could you make a small working version of Sky Kid?
 Let's make a small working version of Motos.
+Write me a small working version of Super Nova. Use nice 8-bit graphics, as close to the original as possible.
+Make a small working version of Galaxy Invasion. Use nice 8-bit graphics, as close to the original as possible.
+Build a small working version of Attack Force. Use nice 8-bit graphics, as close to the original as possible.
+Create a small working version of Cosmic Fighter. Use nice 8-bit graphics, as close to the original as possible.
+Code a small working version of Meteor Mission 2. Use nice 8-bit graphics, as close to the original as possible.
+Give me a small working version of Robot Attack. Use nice 8-bit graphics, as close to the original as possible.
+I want a small working version of Defense Command. Use nice 8-bit graphics, as close to the original as possible.
+Make me a small working version of Stellar Escort. Use nice 8-bit graphics, as close to the original as possible.
+Build me a small working version of Weerd. Use nice 8-bit graphics, as close to the original as possible.
+Can you make a small working version of Bounceoids. Use nice 8-bit graphics, as close to the original as possible.
+Can you build a small working version of Armored Patrol. Use nice 8-bit graphics, as close to the original as possible.
+Please make a small working version of Sea Dragon. Use nice 8-bit graphics, as close to the original as possible.
+Please build a small working version of Android Nim. Use nice 8-bit graphics, as close to the original as possible.
+I'd like a small working version of Dancing Demon. Use nice 8-bit graphics, as close to the original as possible.
+Show me a small working version of Bee Wary. Use nice 8-bit graphics, as close to the original as possible.
+Put together a small working version of Scarfman. Use nice 8-bit graphics, as close to the original as possible.
+How about a small working version of Taipan. Use nice 8-bit graphics, as close to the original as possible.
+Could you make a small working version of Microchess. Use nice 8-bit graphics, as close to the original as possible.
+Let's make a small working version of Deathmaze 5000. Use nice 8-bit graphics, as close to the original as possible.
+Write me a small working version of Asylum. Use nice 8-bit graphics, as close to the original as possible.
+Make a small working version of Asylum II. Use nice 8-bit graphics, as close to the original as possible.
+Build a small working version of Raaka-Tu. Use nice 8-bit graphics, as close to the original as possible.
+Create a small working version of Pyramid 2000. Use nice 8-bit graphics, as close to the original as possible.
+Code a small working version of Cytron Masters. Use nice 8-bit graphics, as close to the original as possible.
+Give me a small working version of Dungeons of Daggorath. Use nice 8-bit graphics, as close to the original as possible.
+I want a small working version of Downland. Use nice 8-bit graphics, as close to the original as possible.
+Make me a small working version of Mega-Bug. Use nice 8-bit graphics, as close to the original as possible.
+Build me a small working version of Canyon Climber. Use nice 8-bit graphics, as close to the original as possible.
+Can you make a small working version of Time Bandit. Use nice 8-bit graphics, as close to the original as possible.
+Can you build a small working version of The Sands of Egypt. Use nice 8-bit graphics, as close to the original as possible.
+Please make a small working version of Doubleback. Use nice 8-bit graphics, as close to the original as possible.
+Please build a small working version of Reactoid. Use nice 8-bit graphics, as close to the original as possible.
+I'd like a small working version of Buzzard Bait. Use nice 8-bit graphics, as close to the original as possible.
+Show me a small working version of Dallas Quest. Use nice 8-bit graphics, as close to the original as possible.
+Put together a small working version of Calixto Island. Use nice 8-bit graphics, as close to the original as possible.
+How about a small working version of The Last Ninja. Use nice 8-bit graphics, as close to the original as possible.
+Could you make a small working version of Last Ninja 2. Use nice 8-bit graphics, as close to the original as possible.
+Let's make a small working version of Dropzone. Use nice 8-bit graphics, as close to the original as possible.
+Write me a small working version of Pastfinder. Use nice 8-bit graphics, as close to the original as possible.
+Make a small working version of Beach-Head II. Use nice 8-bit graphics, as close to the original as possible.
+Build a small working version of Raid Over Moscow. Use nice 8-bit graphics, as close to the original as possible.
+Create a small working version of B.C.'s Quest for Tires. Use nice 8-bit graphics, as close to the original as possible.
+Code a small working version of Congo Bongo. Use nice 8-bit graphics, as close to the original as possible.
+Give me a small working version of Spy vs. Spy: The Island Caper. Use nice 8-bit graphics, as close to the original as possible.
+I want a small working version of Ghostbusters. Use nice 8-bit graphics, as close to the original as possible.
+Make me a small working version of Little Computer People. Use nice 8-bit graphics, as close to the original as possible.
+Build me a small working version of The Great Giana Sisters. Use nice 8-bit graphics, as close to the original as possible.
+Can you make a small working version of Monty on the Run. Use nice 8-bit graphics, as close to the original as possible.
+Can you build a small working version of Auf Wiedersehen Monty. Use nice 8-bit graphics, as close to the original as possible.
+Please make a small working version of Rick Dangerous. Use nice 8-bit graphics, as close to the original as possible.
+Please build a small working version of Rick Dangerous 2. Use nice 8-bit graphics, as close to the original as possible.
+I'd like a small working version of Finders Keepers. Use nice 8-bit graphics, as close to the original as possible.
+Show me a small working version of Nodes of Yesod. Use nice 8-bit graphics, as close to the original as possible.
+Put together a small working version of Cybernoid. Use nice 8-bit graphics, as close to the original as possible.
+How about a small working version of Cybernoid II. Use nice 8-bit graphics, as close to the original as possible.
+Could you make a small working version of Sanxion. Use nice 8-bit graphics, as close to the original as possible.
+Let's make a small working version of Quedex. Use nice 8-bit graphics, as close to the original as possible.
+Write me a small working version of Zynaps. Use nice 8-bit graphics, as close to the original as possible.
+Make a small working version of Armalyte. Use nice 8-bit graphics, as close to the original as possible.
+Build a small working version of Katakis. Use nice 8-bit graphics, as close to the original as possible.
+Create a small working version of Turrican. Use nice 8-bit graphics, as close to the original as possible.
+Code a small working version of Mayhem in Monsterland. Use nice 8-bit graphics, as close to the original as possible.
+Give me a small working version of Impossible Mission II. Use nice 8-bit graphics, as close to the original as possible.
+I want a small working version of Zak McKracken and the Alien Mindbenders. Use nice 8-bit graphics, as close to the original as possible.
+Make me a small working version of Neuromancer. Use nice 8-bit graphics, as close to the original as possible.
+Build me a small working version of Project Firestart. Use nice 8-bit graphics, as close to the original as possible.
+Can you make a small working version of Rocket Ranger. Use nice 8-bit graphics, as close to the original as possible.
+Can you build a small working version of The Three Stooges. Use nice 8-bit graphics, as close to the original as possible.
+Please make a small working version of King of Chicago. Use nice 8-bit graphics, as close to the original as possible.
+Please build a small working version of Autoduel. Use nice 8-bit graphics, as close to the original as possible.
+I'd like a small working version of Phantasie. Use nice 8-bit graphics, as close to the original as possible.
+Show me a small working version of Phantasie II. Use nice 8-bit graphics, as close to the original as possible.
+Put together a small working version of Wizard's Crown. Use nice 8-bit graphics, as close to the original as possible.
+How about a small working version of The Eternal Dagger. Use nice 8-bit graphics, as close to the original as possible.
+Could you make a small working version of Legacy of the Ancients. Use nice 8-bit graphics, as close to the original as possible.
+Let's make a small working version of Silent Service. Use nice 8-bit graphics, as close to the original as possible.
+Write me a small working version of F-15 Strike Eagle. Use nice 8-bit graphics, as close to the original as possible.
+Make a small working version of Solo Flight. Use nice 8-bit graphics, as close to the original as possible.
+Build a small working version of Hellcat Ace. Use nice 8-bit graphics, as close to the original as possible.
+Create a small working version of Airborne Ranger. Use nice 8-bit graphics, as close to the original as possible.
+Code a small working version of Racing Destruction Set. Use nice 8-bit graphics, as close to the original as possible.
+Give me a small working version of Mail Order Monsters. Use nice 8-bit graphics, as close to the original as possible.
+I want a small working version of Heart of Africa. Use nice 8-bit graphics, as close to the original as possible.
+Make me a small working version of Skyfox. Use nice 8-bit graphics, as close to the original as possible.
+Build me a small working version of Raid on Bungeling Bay. Use nice 8-bit graphics, as close to the original as possible.
+Can you make a small working version of Bounty Bob Strikes Back. Use nice 8-bit graphics, as close to the original as possible.
+Can you build a small working version of Shamus. Use nice 8-bit graphics, as close to the original as possible.
+Please make a small working version of Dino Eggs. Use nice 8-bit graphics, as close to the original as possible.
+Please build a small working version of Serpentine. Use nice 8-bit graphics, as close to the original as possible.
+I'd like a small working version of Jawbreaker. Use nice 8-bit graphics, as close to the original as possible.
+Show me a small working version of Leader Board. Use nice 8-bit graphics, as close to the original as possible.
+Put together a small working version of World Class Leader Board. Use nice 8-bit graphics, as close to the original as possible.
+How about a small working version of Hardball. Use nice 8-bit graphics, as close to the original as possible.
+Could you make a small working version of Mean 18. Use nice 8-bit graphics, as close to the original as possible.
+Let's make a small working version of World Games. Use nice 8-bit graphics, as close to the original as possible.
+Write me a small working version of Summer Games II. Use nice 8-bit graphics, as close to the original as possible.
+Make a small working version of Pitstop II. Use nice 8-bit graphics, as close to the original as possible.
+Build a small working version of The Games: Summer Edition. Use nice 8-bit graphics, as close to the original as possible.
+Create a small working version of Barbarian II: The Dungeon of Drax. Use nice 8-bit graphics, as close to the original as possible.
+Code a small working version of Target: Renegade. Use nice 8-bit graphics, as close to the original as possible.
+Give me a small working version of Batman: The Movie. Use nice 8-bit graphics, as close to the original as possible.
+I want a small working version of RoboCop. Use nice 8-bit graphics, as close to the original as possible.
+Make me a small working version of Platoon. Use nice 8-bit graphics, as close to the original as possible.
+Build me a small working version of Laser Squad. Use nice 8-bit graphics, as close to the original as possible.
+Can you make a small working version of Driller. Use nice 8-bit graphics, as close to the original as possible.
+Can you build a small working version of The Lords of Midnight. Use nice 8-bit graphics, as close to the original as possible.
+Please make a small working version of Gridrunner. Use nice 8-bit graphics, as close to the original as possible.
+Please build a small working version of Attack of the Mutant Camels. Use nice 8-bit graphics, as close to the original as possible.
+I'd like a small working version of Sheep in Space. Use nice 8-bit graphics, as close to the original as possible.
+Show me a small working version of Hover Bovver. Use nice 8-bit graphics, as close to the original as possible.
+Put together a small working version of Iridis Alpha. Use nice 8-bit graphics, as close to the original as possible.
+How about a small working version of Alter Ego. Use nice 8-bit graphics, as close to the original as possible.
+Could you make a small working version of Test Drive. Use nice 8-bit graphics, as close to the original as possible.
+Let's make a small working version of Microprose Soccer. Use nice 8-bit graphics, as close to the original as possible.
+Write me a small working version of Kick Off. Use nice 8-bit graphics, as close to the original as possible.
+Make a small working version of Ikari Warriors. Use nice 8-bit graphics, as close to the original as possible.
+Build a small working version of Speedball. Use nice 8-bit graphics, as close to the original as possible.
+Create a small working version of Ace of Aces. Use nice 8-bit graphics, as close to the original as possible.
+Code a small working version of Law of the West. Use nice 8-bit graphics, as close to the original as possible.
+Give me a small working version of Psi-5 Trading Company. Use nice 8-bit graphics, as close to the original as possible.
+I want a small working version of David's Midnight Magic. Use nice 8-bit graphics, as close to the original as possible.
+Make me a small working version of Lunar Leeper. Use nice 8-bit graphics, as close to the original as possible.
+Build me a small working version of Cannonball Blitz. Use nice 8-bit graphics, as close to the original as possible.
+Can you make a small working version of Championship Lode Runner. Use nice 8-bit graphics, as close to the original as possible.
+Can you build a small working version of Dan Dare: Pilot of the Future. Use nice 8-bit graphics, as close to the original as possible.
+Please make a small working version of Kikstart. Use nice 8-bit graphics, as close to the original as possible.
+Please build a small working version of Buggy Boy. Use nice 8-bit graphics, as close to the original as possible.
+I'd like a small working version of Super Cycle. Use nice 8-bit graphics, as close to the original as possible.
+Show me a small working version of Fight Night. Use nice 8-bit graphics, as close to the original as possible.
+Put together a small working version of Killed Until Dead. Use nice 8-bit graphics, as close to the original as possible.
+How about a small working version of Grand Prix Circuit. Use nice 8-bit graphics, as close to the original as possible.
+Could you make a small working version of Indiana Jones and the Last Crusade. Use nice 8-bit graphics, as close to the original as possible.
+Let's make a small working version of Below the Root. Use nice 8-bit graphics, as close to the original as possible.
+Write me a small working version of Myth: History in the Making. Use nice 8-bit graphics, as close to the original as possible.
+Make a small working version of Curse of the Azure Bonds. Use nice 8-bit graphics, as close to the original as possible.
+Build a small working version of Hillsfar. Use nice 8-bit graphics, as close to the original as possible.
+Create a small working version of Champions of Krynn. Use nice 8-bit graphics, as close to the original as possible.
+Code a small working version of The Bard's Tale II: The Destiny Knight. Use nice 8-bit graphics, as close to the original as possible.
+Give me a small working version of Times of Lore. Use nice 8-bit graphics, as close to the original as possible.
+I want a small working version of Starflight. Use nice 8-bit graphics, as close to the original as possible.
+Make me a small working version of Switchblade. Use nice 8-bit graphics, as close to the original as possible.
+Build me a small working version of Pang. Use nice 8-bit graphics, as close to the original as possible.
+Can you make a small working version of Gunship. Use nice 8-bit graphics, as close to the original as possible.
+Can you build a small working version of Reach for the Stars. Use nice 8-bit graphics, as close to the original as possible.
+Please make a small working version of BattleTech: The Crescent Hawk's Inception. Use nice 8-bit graphics, as close to the original as possible.
+Please build a small working version of Tycoon: The Commodity Market Simulation. Use nice 8-bit graphics, as close to the original as possible.
+I'd like a small working version of Baron: The Real Estate Simulation. Use nice 8-bit graphics, as close to the original as possible.
+Show me a small working version of Squire: The Financial Planning Simulation. Use nice 8-bit graphics, as close to the original as possible.
+Put together a small working version of Enchanted Scepters.
+How about a small working version of Airborne!?
+Could you make a small working version of Dark Castle?
+Let's make a small working version of Beyond Dark Castle.
+Write me a small working version of Crystal Quest.
+Make a small working version of Shufflepuck Cafe.
+Build a small working version of Glider.
+Create a small working version of Sky Shadow.
+Code a small working version of The Fool's Errand.
+Give me a small working version of Shanghai.
+I want a small working version of The Ancient Art of War at Sea.
+Make me a small working version of Patton Versus Rommel.
+Build me a small working version of Strategic Conquest.
+Can you make a small working version of Empire: Wargame of the Century?
+Can you build a small working version of Falcon?
+Please make a small working version of GATO.
+Please build a small working version of Orbiter.
+I'd like a small working version of Deja Vu: A Nightmare Comes True.
+Show me a small working version of Uninvited.
+Put together a small working version of Shadowgate.
+How about a small working version of Deja Vu II: Lost in Las Vegas?
+Could you make a small working version of Quarterstaff?
+Let's make a small working version of The Colony.
+Write me a small working version of Trust and Betrayal: The Legacy of Siboot.
+Make a small working version of Hidden Agenda.
+Build a small working version of The Manhole.
+Create a small working version of Cosmic Osmo and the Worlds Beyond the Mackerel.
+Code a small working version of Scarab of Ra.
+Give me a small working version of Through the Looking Glass.
+I want a small working version of Apache Strike.
+Make me a small working version of Stunt Copter.
+Build me a small working version of Fokker Triplane.
+Can you make a small working version of Zork Zero?
+Can you build a small working version of Arthur: The Quest for Excalibur?
+Please make a small working version of James Clavell's Shogun.
+Please build a small working version of Loom.
+I'd like a small working version of Welltris.
 Write me a small working version of The Last of Us in three.js.
 Make a small working version of Half-Life 2 in three.js.
 Build a small working version of The Legend of Zelda: Breath of the Wild in three.js.
@@ -1280,6 +1465,200 @@ Make a small working version of Mirror's Edge in three.js.
 Build a small working version of Turok: Dinosaur Hunter in three.js.
 Create a small working version of Return to Castle Wolfenstein in three.js.
 Code a small working version of Resident Evil 4 in three.js.
+Write me a small working version of Super Mario Bros. in Phaser.
+Make a small working version of Super Mario Bros. 2 in Phaser.
+Build a small working version of Super Mario Bros. 3 in Phaser.
+Create a small working version of Super Mario World in Phaser.
+Code a small working version of Super Mario World 2: Yoshi's Island in Phaser.
+Give me a small working version of Super Mario Land 2: 6 Golden Coins in Phaser.
+I want a small working version of Mega Man in Phaser.
+Make me a small working version of Mega Man 2 in Phaser.
+Build me a small working version of Mega Man 3 in Phaser.
+Can you make a small working version of Mega Man X in Phaser?
+Can you build a small working version of Castlevania in Phaser?
+Please make a small working version of Castlevania II: Simon's Quest in Phaser.
+Please build a small working version of Castlevania: Symphony of the Night in Phaser.
+I'd like a small working version of Castlevania: Rondo of Blood in Phaser.
+Show me a small working version of Castlevania: Aria of Sorrow in Phaser.
+Put together a small working version of Castlevania III: Dracula's Curse in Phaser.
+How about a small working version of Super Castlevania IV in Phaser?
+Could you make a small working version of Metroid in Phaser?
+Let's make a small working version of Super Metroid in Phaser.
+Write me a small working version of Metroid II: Return of Samus in Phaser.
+Make a small working version of Contra in Phaser.
+Build a small working version of Contra III: The Alien Wars in Phaser.
+Create a small working version of Super C in Phaser.
+Code a small working version of Sonic the Hedgehog in Phaser.
+Give me a small working version of Sonic the Hedgehog 2 in Phaser.
+I want a small working version of Sonic the Hedgehog 3 in Phaser.
+Make me a small working version of Sonic and Knuckles in Phaser.
+Build me a small working version of Sonic CD in Phaser.
+Can you make a small working version of Celeste in Phaser?
+Can you build a small working version of Hollow Knight in Phaser?
+Please make a small working version of Shovel Knight in Phaser.
+Please build a small working version of Cuphead in Phaser.
+I'd like a small working version of Spelunky in Phaser.
+Show me a small working version of Spelunky 2 in Phaser.
+Put together a small working version of Hotline Miami in Phaser.
+How about a small working version of Super Meat Boy in Phaser?
+Could you make a small working version of Streets of Rage 2 in Phaser?
+Let's make a small working version of Final Fight in Phaser.
+Write me a small working version of Double Dragon in Phaser.
+Make a small working version of River City Ransom in Phaser.
+Build a small working version of Metal Slug in Phaser.
+Create a small working version of Metal Slug 3 in Phaser.
+Code a small working version of Gunstar Heroes in Phaser.
+Give me a small working version of The Legend of Zelda in Phaser.
+I want a small working version of Zelda II: The Adventure of Link in Phaser.
+Make me a small working version of The Legend of Zelda: A Link to the Past in Phaser.
+Build me a small working version of The Legend of Zelda: Link’s Awakening in Phaser.
+Can you make a small working version of EarthBound in Phaser?
+Can you build a small working version of Undertale in Phaser?
+Please make a small working version of Chrono Trigger in Phaser.
+Please build a small working version of Secret of Mana in Phaser.
+I'd like a small working version of Terranigma in Phaser.
+Show me a small working version of Ninja Gaiden (1988) in Phaser.
+Put together a small working version of Prince of Persia in Phaser.
+How about a small working version of Prince of Persia 2: The Shadow and the Flame in Phaser?
+Could you make a small working version of Flashback in Phaser?
+Let's make a small working version of Out of This World in Phaser.
+Write me a small working version of Blaster Master in Phaser.
+Make a small working version of Kid Icarus in Phaser.
+Build a small working version of Ghouls N Ghosts in Phaser.
+Create a small working version of Super Ghouls N Ghosts in Phaser.
+Code a small working version of Ghosts N Goblins in Phaser.
+Give me a small working version of Ori and the Will of the Wisps in Phaser.
+I want a small working version of Ori and the Blind Forest in Phaser.
+Make me a small working version of Hades in Phaser.
+Build me a small working version of The Binding of Isaac in Phaser.
+Can you make a small working version of TowerFall in Phaser?
+Can you build a small working version of Braid in Phaser?
+Please make a small working version of Fez in Phaser.
+Please build a small working version of Limbo in Phaser.
+I'd like a small working version of Inside in Phaser.
+Show me a small working version of Street Fighter II in Phaser.
+Put together a small working version of Street Fighter III in Phaser.
+How about a small working version of Street Fighter IV in Phaser?
+Could you make a small working version of Street Fighter Alpha 3 in Phaser?
+Let's make a small working version of Mortal Kombat in Phaser.
+Write me a small working version of Mortal Kombat II in Phaser.
+Make a small working version of Mortal Kombat 3 in Phaser.
+Build a small working version of X-Men Vs Street Fighter in Phaser.
+Create a small working version of R-Type in Phaser.
+Code a small working version of R-Type Final in Phaser.
+Give me a small working version of R-Type Delta in Phaser.
+I want a small working version of Gradius in Phaser.
+Make me a small working version of Gradius Gaiden in Phaser.
+Build me a small working version of Life Force in Phaser.
+Can you make a small working version of 1942 in Phaser?
+Can you build a small working version of 1943 in Phaser?
+Please make a small working version of Xevious in Phaser.
+Please build a small working version of Ikaruga in Phaser.
+I'd like a small working version of Gauntlet in Phaser.
+Show me a small working version of DuckTales in Phaser.
+Put together a small working version of Kirby Super Star in Phaser.
+How about a small working version of Kirby's Adventure in Phaser?
+Could you make a small working version of Kirby's Dream Land in Phaser?
+Let's make a small working version of Oddworld: Abe’s Oddyssee in Phaser.
+Write me a small working version of Oddworld: Abe's Exoddus in Phaser.
+Make a small working version of Commando in Phaser.
+Build a small working version of Rush'n Attack in Phaser.
+Create a small working version of Bionic Commando in Phaser.
+Code a small working version of Altered Beast in Phaser.
+Give me a small working version of Super Bomberman in Phaser.
+I want a small working version of Super Bomberman 2 in Phaser.
+Make me a small working version of Mega Bomberman in Phaser.
+Build me a small working version of Saturn Bomberman in Phaser.
+Can you make a small working version of Bomberman in Phaser?
+Can you build a small working version of Moon Patrol in Phaser?
+Please make a small working version of Super Cobra in Phaser.
+Please build a small working version of Scramble in Phaser.
+I'd like a small working version of Shinobi in Phaser.
+Show me a small working version of Golden Axe in Phaser.
+Put together a small working version of Strider in Phaser.
+How about a small working version of Jackal in Phaser?
+Could you make a small working version of Rolling Thunder in Phaser?
+Let's make a small working version of TwinBee in Phaser.
+Write me a small working version of Fantasy Zone in Phaser.
+Make a small working version of Fantasy Zone II in Phaser.
+Build a small working version of Battle Garegga in Phaser.
+Create a small working version of Batsugun in Phaser.
+Code a small working version of DoDonPachi in Phaser.
+Give me a small working version of Wonder Boy in Phaser.
+I want a small working version of Wonder Boy III: The Dragon's Trap in Phaser.
+Make me a small working version of Wonder Boy in Monster Land in Phaser.
+Write me a small working version of Tetris in PixiJS.
+Make a small working version of Pac-Man in PixiJS.
+Build a small working version of Ms. Pac-Man in PixiJS.
+Create a small working version of Galaga in PixiJS.
+Code a small working version of Galaxian in PixiJS.
+Give me a small working version of Space Invaders in PixiJS.
+I want a small working version of Asteroids in PixiJS.
+Make me a small working version of Centipede in PixiJS.
+Build me a small working version of Missile Command in PixiJS.
+Can you make a small working version of Frogger in PixiJS?
+Can you build a small working version of Dig Dug in PixiJS?
+Please make a small working version of Dig Dug II in PixiJS.
+Please build a small working version of Breakout in PixiJS.
+I'd like a small working version of Arkanoid in PixiJS.
+Show me a small working version of Pong in PixiJS.
+Put together a small working version of Snake in PixiJS.
+How about a small working version of Bubble Bobble in PixiJS?
+Could you make a small working version of Joust in PixiJS?
+Let's make a small working version of Defender in PixiJS.
+Write me a small working version of Robotron 2084 in PixiJS.
+Make a small working version of Qix in PixiJS.
+Build a small working version of Lunar Lander in PixiJS.
+Create a small working version of Pengo in PixiJS.
+Code a small working version of BurgerTime in PixiJS.
+Give me a small working version of Donkey Kong in PixiJS.
+I want a small working version of Mario Bros. in PixiJS.
+Make me a small working version of Popeye in PixiJS.
+Build me a small working version of Elevator Action in PixiJS.
+Can you make a small working version of Tapper in PixiJS?
+Can you build a small working version of Rally-X in PixiJS?
+Please make a small working version of Time Pilot in PixiJS.
+Please build a small working version of Millipede in PixiJS.
+I'd like a small working version of Phoenix in PixiJS.
+Show me a small working version of Berzerk in PixiJS.
+Put together a small working version of Amidar in PixiJS.
+How about a small working version of Gorf in PixiJS?
+Could you make a small working version of Crystal Castles in PixiJS?
+Let's make a small working version of Mr. Do! in PixiJS.
+Write me a small working version of Bosconian in PixiJS.
+Make a small working version of Bomb Jack in PixiJS.
+Build a small working version of Pac-Land in PixiJS.
+Create a small working version of Balloon Fight in PixiJS.
+Code a small working version of Donkey Kong Jr in PixiJS.
+Give me a small working version of Donkey Kong 3 in PixiJS.
+I want a small working version of Mappy in PixiJS.
+Make me a small working version of Paperboy in PixiJS.
+Build me a small working version of Tempest 2000 in PixiJS.
+Can you make a small working version of Marble Madness in PixiJS?
+Can you build a small working version of OutRun in PixiJS?
+Please make a small working version of Space Harrier in PixiJS.
+Please build a small working version of Zaxxon in PixiJS.
+I'd like a small working version of Jr. Pac-Man in PixiJS.
+Show me a small working version of Super Pac-Man in PixiJS.
+Put together a small working version of Dr. Mario in PixiJS.
+How about a small working version of Hang-On in PixiJS?
+Could you make a small working version of Super Hang-On in PixiJS?
+Let's make a small working version of After Burner in PixiJS.
+Write me a small working version of Guitar Hero in Howler.js.
+Make a small working version of Rock Band in Howler.js.
+Build a small working version of Dance Dance Revolution in Howler.js.
+Create a small working version of PaRappa the Rapper in Howler.js.
+Code a small working version of Amplitude in Howler.js.
+Give me a small working version of BeatMania in Howler.js.
+I want a small working version of Elite Beat Agents in Howler.js.
+Make me a small working version of SingStar in Howler.js.
+Build me a small working version of Rez in Howler.js.
+Can you make a small working version of The Typing of the Dead in Howler.js?
+Can you build a small working version of Lumines in Howler.js?
+Please make a small working version of Vib Ribbon in Howler.js.
+Please build a small working version of Space Channel 5 in Howler.js.
+I'd like a small working version of Frequency in Howler.js.
+Show me a small working version of Samba De Amigo in Howler.js.
 Write me a game of hangman.
 Write me a two-player game of a maze chase.
 Write me a two-player game of pinball.
