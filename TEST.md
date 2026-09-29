@@ -305,5 +305,6 @@ Every `tests/test_*.py` must appear below (enforced by `tests/test_docs_index.py
 | `test_vlm_checklist_plan_injection.py` | `test_vlm_classifier.py` | `test_vlm_facing_sanity.py` |
 | `test_wait_mode_defaults.py` | `test_warning_persistence_dedup.py` | `test_weak_model_hardening.py` |
 | `test_wireframe_vector_routing.py` | `test_wolfenstein_stuck_loop_fixes.py` | `test_zimage_snapshot_completeness.py` |
+| `test_synth_html.py` | | |
 
 <!-- END AUTO-TEST-INDEX -->

@@ -59,6 +59,9 @@ def _whole_games(path: Path, tokenizer, max_tokens: int) -> list[dict]:
             if not line.strip():
                 continue
             row = json.loads(line)
+            # A down vote on the synth monitor stores weight 0. Skip those.
+            if row.get("weight") == 0:
+                continue
             if row.get("kind") == "gold":
                 gold.append(row)
             else:
@@ -143,6 +146,8 @@ def main() -> None:
         dataset = Dataset.from_list(_whole_games(args.jsonl, tok, args.max_seq_length - 300))
     else:
         dataset = load_dataset("json", data_files=str(args.jsonl), split="train")
+        if "weight" in dataset.column_names:
+            dataset = dataset.filter(lambda row: row.get("weight") != 0)
     if args.system == "short":
         dataset = dataset.map(_short_system)
     dataset = transform_dataset_to_messages(dataset, model_type, None)

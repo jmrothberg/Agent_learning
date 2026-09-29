@@ -1,0 +1,2271 @@
+# One request per line. Each game or graphic appears once.
+# A small working version of each top game, then ideas_1000.txt lines that are different.
+# Includes late 1970s CP/M games and small 1980s games.
+# Built by expand_ideas.py. Openings vary. Do not hand-edit.
+Write me a small working version of Tetris. Use nice 8-bit graphics, as close to the original as possible.
+Make a small working version of Resident Evil 4.
+Build a small working version of The Last of Us.
+Create a small working version of Half-Life 2.
+Code a small working version of The Legend of Zelda: Breath of the Wild.
+Give me a small working version of The Witcher 3: Wild Hunt.
+I want a small working version of Hades.
+Make me a small working version of The Legend of Zelda: Ocarina of Time.
+Build me a small working version of Super Mario 64.
+Can you make a small working version of Mass Effect 2?
+Can you build a small working version of The Legend of Zelda: A Link to the Past?
+Please make a small working version of BioShock.
+Please build a small working version of Grand Theft Auto V.
+I'd like a small working version of Super Metroid.
+Show me a small working version of Shadow of the Colossus.
+Put together a small working version of God of War (2018).
+How about a small working version of Street Fighter II. Use nice 8-bit graphics, as close to the original as possible.
+Could you make a small working version of Call of Duty 4: Modern Warfare?
+Let's make a small working version of Final Fantasy VII.
+Write me a small working version of World of Warcraft.
+Make a small working version of Red Dead Redemption.
+Build a small working version of Doom (1993).
+Create a small working version of The Elder Scrolls V: Skyrim.
+Code a small working version of Halo: Combat Evolved.
+Give me a small working version of GoldenEye 007.
+I want a small working version of Red Dead Redemption 2.
+Make me a small working version of Chrono Trigger.
+Build me a small working version of Super Mario World. Use nice 8-bit graphics, as close to the original as possible.
+Can you make a small working version of Castlevania: Symphony of the Night?
+Can you build a small working version of Bloodborne?
+Please make a small working version of Metal Gear Solid.
+Please build a small working version of Portal.
+I'd like a small working version of Uncharted 2: Among Thieves.
+Show me a small working version of Journey.
+Put together a small working version of Portal 2.
+How about a small working version of Minecraft?
+Could you make a small working version of Dark Souls?
+Let's make a small working version of Super Mario Bros. 3. Use nice 8-bit graphics, as close to the original as possible.
+Write me a small working version of Metroid Prime.
+Make a small working version of StarCraft.
+Build a small working version of Super Mario Kart.
+Create a small working version of Deus Ex.
+Code a small working version of Star Wars: Knights of the Old Republic.
+Give me a small working version of Final Fantasy VI.
+I want a small working version of Disco Elysium.
+Make me a small working version of The Last of Us Part II.
+Build me a small working version of Rock Band.
+Can you make a small working version of Tony Hawk's Pro Skater?
+Can you build a small working version of Diablo II?
+Please make a small working version of Half-Life.
+Please build a small working version of Counter-Strike.
+I'd like a small working version of Silent Hill 2.
+Show me a small working version of Super Mario Bros. Use nice 8-bit graphics, as close to the original as possible.
+Put together a small working version of Pokemon Blue/Red/Yellow. Use nice 8-bit graphics, as close to the original as possible.
+How about a small working version of Inside?
+Could you make a small working version of Metal Gear Solid 3: Snake Eater?
+Let's make a small working version of Tomb Raider (1996).
+Write me a small working version of Ico.
+Make a small working version of Grand Theft Auto III.
+Build a small working version of Sonic the Hedgehog. Use nice 8-bit graphics, as close to the original as possible.
+Create a small working version of Super Smash Bros. Ultimate.
+Code a small working version of Fallout 3.
+Give me a small working version of Donkey Kong. Use nice 8-bit graphics, as close to the original as possible.
+I want a small working version of Animal Crossing: New Horizons.
+Make me a small working version of Super Mario Odyssey.
+Build me a small working version of Celeste.
+Can you make a small working version of Stardew Valley?
+Can you build a small working version of Undertale?
+Please make a small working version of Ms. Pac-Man. Use nice 8-bit graphics, as close to the original as possible.
+Please build a small working version of Batman: Arkham City.
+I'd like a small working version of Super Mario Galaxy 2.
+Show me a small working version of EarthBound.
+Put together a small working version of System Shock 2.
+How about a small working version of Overwatch?
+Could you make a small working version of Super Smash Bros. Melee?
+Let's make a small working version of SimCity.
+Write me a small working version of Pac-Man. Use nice 8-bit graphics, as close to the original as possible.
+Make a small working version of The Legend of Zelda: The Wind Waker.
+Build a small working version of Grim Fandango.
+Create a small working version of SimCity 2000.
+Code a small working version of Mega Man 2. Use nice 8-bit graphics, as close to the original as possible.
+Give me a small working version of Super Mario World 2: Yoshi's Island. Use nice 8-bit graphics, as close to the original as possible.
+I want a small working version of Resident Evil.
+Make me a small working version of League of Legends.
+Build me a small working version of The Sims.
+Can you make a small working version of The Legend of Zelda. Use nice 8-bit graphics, as close to the original as possible.
+Can you build a small working version of Space Invaders. Use nice 8-bit graphics, as close to the original as possible.
+Please make a small working version of Batman: Arkham Asylum.
+Please build a small working version of Okami.
+I'd like a small working version of Grand Theft Auto IV.
+Show me a small working version of Braid.
+Put together a small working version of The Walking Dead.
+How about a small working version of The Secret of Monkey Island?
+Could you make a small working version of Outer Wilds?
+Let's make a small working version of Lemmings.
+Write me a small working version of Final Fantasy Tactics.
+Make a small working version of Prince of Persia: The Sands of Time.
+Build a small working version of Civilization IV.
+Create a small working version of NBA Jam.
+Code a small working version of Galaga. Use nice 8-bit graphics, as close to the original as possible.
+Give me a small working version of Persona 5.
+I want a small working version of Super Mario Galaxy.
+Make me a small working version of Mike Tyson's Punch-Out!!. Use nice 8-bit graphics, as close to the original as possible.
+Build me a small working version of X-COM: UFO Defense.
+Can you make a small working version of Secret of Mana?
+Can you build a small working version of Half-Life: Alyx?
+Please make a small working version of Grand Theft Auto: Vice City.
+Please build a small working version of Grand Theft Auto: San Andreas.
+I'd like a small working version of Planescape: Torment.
+Show me a small working version of Return of the Obra Dinn.
+Put together a small working version of Fortnite.
+How about a small working version of Quake?
+Could you make a small working version of Persona 4?
+Let's make a small working version of Assassin's Creed II.
+Write me a small working version of Advance Wars.
+Make a small working version of Sonic the Hedgehog 2. Use nice 8-bit graphics, as close to the original as possible.
+Build a small working version of God of War (2005).
+Create a small working version of Mario Kart 8.
+Code a small working version of Spelunky.
+Give me a small working version of Gauntlet. Use nice 8-bit graphics, as close to the original as possible.
+I want a small working version of Zork.
+Make me a small working version of Fire Emblem: Three Houses.
+Build me a small working version of Gran Turismo.
+Can you make a small working version of Guitar Hero?
+Can you build a small working version of Civilization?
+Please make a small working version of Age of Empires II: The Age of Kings.
+Please build a small working version of Left 4 Dead 2.
+I'd like a small working version of Pong. Use nice 8-bit graphics, as close to the original as possible.
+Show me a small working version of Madden NFL Football.
+Put together a small working version of Burnout 3: Takedown.
+How about a small working version of Team Fortress 2?
+Could you make a small working version of Genshin Impact?
+Let's make a small working version of Contra. Use nice 8-bit graphics, as close to the original as possible.
+Write me a small working version of Warcraft II: Tides of Darkness.
+Make a small working version of Day of the Tentacle.
+Build a small working version of Resident Evil 2.
+Create a small working version of Wii Sports.
+Code a small working version of Baldur’s Gate II: Shadows of Amn.
+Give me a small working version of Soul Calibur.
+I want a small working version of Rocket League.
+Make me a small working version of Crusader Kings III.
+Build me a small working version of Myst.
+Can you make a small working version of The Elder Scrolls IV: Oblivion?
+Can you build a small working version of Star Wars: TIE Fighter?
+Please make a small working version of Rez.
+Please build a small working version of Civilization II.
+I'd like a small working version of Wolfenstein 3D.
+Show me a small working version of Halo 3.
+Put together a small working version of Limbo.
+How about a small working version of Asteroids. Use nice 8-bit graphics, as close to the original as possible.
+Could you make a small working version of Double Dragon. Use nice 8-bit graphics, as close to the original as possible.
+Let's make a small working version of Apex Legends.
+Write me a small working version of Dishonored.
+Make a small working version of The Legend of Zelda: Majora's Mask.
+Build a small working version of Metroid. Use nice 8-bit graphics, as close to the original as possible.
+Create a small working version of Dota 2.
+Code a small working version of Thief: The Dark Project.
+Give me a small working version of Civilization V.
+I want a small working version of Spider-Man.
+Make me a small working version of Hotline Miami.
+Build me a small working version of Left 4 Dead.
+Can you make a small working version of Elite?
+Can you build a small working version of Pitfall!. Use nice 8-bit graphics, as close to the original as possible.
+Please make a small working version of Shenmue.
+Please build a small working version of NHL Hockey.
+I'd like a small working version of Nier: Automata.
+Show me a small working version of Mortal Kombat II.
+Put together a small working version of Pokemon Gold/Silver/Crystal.
+How about a small working version of Donkey Kong Country?
+Could you make a small working version of Prince of Persia. Use nice 8-bit graphics, as close to the original as possible.
+Let's make a small working version of XCOM: Enemy Unknown.
+Write me a small working version of Divinity: Original Sin II.
+Make a small working version of Command & Conquer: Red Alert.
+Build a small working version of Defender. Use nice 8-bit graphics, as close to the original as possible.
+Create a small working version of Quake III Arena.
+Code a small working version of Doom II.
+Give me a small working version of Into the Breach.
+I want a small working version of FIFA Soccer.
+Make me a small working version of Diablo.
+Build me a small working version of Ultima Online.
+Can you make a small working version of Spelunky 2?
+Can you build a small working version of Command & Conquer?
+Please make a small working version of Star Fox 64.
+Please build a small working version of The Elder Scrolls III: Morrowind.
+I'd like a small working version of 13 Sentinels: Aegis Rim.
+Show me a small working version of The Legend of Zelda: Link’s Awakening.
+Put together a small working version of Halo 2.
+How about a small working version of Destiny?
+Could you make a small working version of Dead Space?
+Let's make a small working version of Robotron 2084. Use nice 8-bit graphics, as close to the original as possible.
+Write me a small working version of Bayonetta 2.
+Make a small working version of Tecmo Bowl.
+Build a small working version of Ori and the Will of the Wisps.
+Create a small working version of Fallout.
+Code a small working version of Final Fantasy X.
+Give me a small working version of Gran Turismo 3: A-Spec.
+I want a small working version of EverQuest.
+Make me a small working version of Gears of War.
+Build me a small working version of Doom Eternal.
+Can you make a small working version of Hearthstone: Heroes of Warcraft?
+Can you build a small working version of Untitled Goose Game?
+Please make a small working version of Fallout 2.
+Please build a small working version of Fez.
+I'd like a small working version of Tom Clancy's Splinter Cell: Chaos Theory.
+Show me a small working version of Final Fantasy IV.
+Put together a small working version of Tekken 3.
+How about a small working version of StarCraft II: Wings of Liberty?
+Could you make a small working version of The Oregon Trail?
+Let's make a small working version of Papers Please.
+Write me a small working version of Mortal Kombat.
+Make a small working version of Street Fighter IV.
+Build a small working version of Homeworld.
+Create a small working version of Katamari Damacy.
+Code a small working version of Streets of Rage 2.
+Give me a small working version of Super Meat Boy.
+I want a small working version of Monkey Island 2: LeChuck's Revenge.
+Make me a small working version of Sensible Soccer.
+Build me a small working version of Warcraft III: Reign of Chaos.
+Can you make a small working version of Metal Gear Solid 2: Sons of Liberty?
+Can you build a small working version of Animal Crossing?
+Please make a small working version of Castlevania. Use nice 8-bit graphics, as close to the original as possible.
+Please build a small working version of Mass Effect.
+I'd like a small working version of Psychonauts.
+Show me a small working version of Battlefield 1942.
+Put together a small working version of Rome: Total War.
+How about a small working version of Dishonored 2?
+Could you make a small working version of Dance Dance Revolution?
+Let's make a small working version of Thief II: The Metal Age.
+Write me a small working version of Gone Home.
+Make a small working version of Doom (2016).
+Build a small working version of Duke Nukem 3D.
+Create a small working version of Ninja Gaiden (1988). Use nice 8-bit graphics, as close to the original as possible.
+Code a small working version of Gears of War 2.
+Give me a small working version of Star Wars: The Arcade Game.
+I want a small working version of Monster Hunter: World.
+Make me a small working version of Fire Emblem: Awakening.
+Build me a small working version of Super Bomberman. Use nice 8-bit graphics, as close to the original as possible.
+Can you make a small working version of Uncharted 4: A Thief's End?
+Can you build a small working version of Ultima IV: Quest of the Avatar?
+Please make a small working version of Horizon: Zero Dawn.
+Please build a small working version of Street Fighter III.
+I'd like a small working version of Devil May Cry 3: Dante's Awakening.
+Show me a small working version of Bayonetta.
+Put together a small working version of Phantasy Star IV.
+How about a small working version of Max Payne?
+Could you make a small working version of Dragon Quest Builders 2?
+Let's make a small working version of Sam & Max Hit the Road.
+Write me a small working version of Soul Calibur II.
+Make a small working version of Ultima Underworld: The Stygian Abyss.
+Build a small working version of Jet Grind Radio.
+Create a small working version of Borderlands 2.
+Code a small working version of Pro Evolution Soccer.
+Give me a small working version of OutRun. Use nice 8-bit graphics, as close to the original as possible.
+I want a small working version of Star Fox.
+Make me a small working version of Banjo-Kazooie.
+Build me a small working version of Sonic CD.
+Can you make a small working version of Ikaruga?
+Can you build a small working version of Hitman: Blood Money?
+Please make a small working version of Out of This World.
+Please build a small working version of Sekiro: Shadows Die Twice.
+I'd like a small working version of Death Stranding.
+Show me a small working version of Pokemon Sword/Shield.
+Put together a small working version of Star Wars Jedi: Fallen Order.
+How about a small working version of Quake II?
+Could you make a small working version of Ultima VII: The Black Gate?
+Let's make a small working version of Star Wars: X-Wing.
+Write me a small working version of Mega Man X. Use nice 8-bit graphics, as close to the original as possible.
+Make a small working version of The Witness (2016).
+Build a small working version of WarioWare Inc: Mega Microgames!.
+Create a small working version of Unreal Tournament.
+Code a small working version of Beyond Good & Evil.
+Give me a small working version of Populous.
+I want a small working version of BioShock Infinite.
+Make me a small working version of Wipeout.
+Build me a small working version of Bubble Bobble. Use nice 8-bit graphics, as close to the original as possible.
+Can you make a small working version of Baldur's Gate?
+Can you build a small working version of Xenoblade Chronicles?
+Please make a small working version of Lode Runner.
+Please build a small working version of Wing Commander.
+I'd like a small working version of Gunstar Heroes. Use nice 8-bit graphics, as close to the original as possible.
+Show me a small working version of Nights Into Dreams.
+Put together a small working version of Super Mario RPG: Legend of the Seven Stars.
+How about a small working version of Suikoden II?
+Could you make a small working version of Fallout: New Vegas?
+Let's make a small working version of Crazy Taxi.
+Write me a small working version of Speedball 2: Brutal Deluxe.
+Make a small working version of Adventure.
+Build a small working version of Pirates!.
+Create a small working version of Geometry Wars: Retro Evolved.
+Code a small working version of Super Smash Bros..
+Give me a small working version of Age of Empires.
+I want a small working version of Mario Kart 64.
+Make me a small working version of Super Mario Bros. 2. Use nice 8-bit graphics, as close to the original as possible.
+Build me a small working version of Assassin's Creed IV: Black Flag.
+Can you make a small working version of Dune II: The Building of a Dynasty?
+Can you build a small working version of Panzer Dragoon Saga?
+Please make a small working version of Missile Command. Use nice 8-bit graphics, as close to the original as possible.
+Please build a small working version of Deltarune.
+I'd like a small working version of Frogger. Use nice 8-bit graphics, as close to the original as possible.
+Show me a small working version of Dragon Quest VIII: Journey of the Cursed King.
+Put together a small working version of The Stanley Parable.
+How about a small working version of Dragon Warrior?
+Could you make a small working version of Silent Hill?
+Let's make a small working version of Angry Birds.
+Write me a small working version of Final Fantasy.
+Make a small working version of Sega Rally Championship.
+Build a small working version of Slay the Spire.
+Create a small working version of Her Story.
+Code a small working version of Contra III: The Alien Wars. Use nice 8-bit graphics, as close to the original as possible.
+Give me a small working version of PaRappa the Rapper.
+I want a small working version of Mortal Kombat 11.
+Make me a small working version of Demon's Souls.
+Build me a small working version of The Legend of Zelda: Twilight Princess.
+Can you make a small working version of Arkanoid. Use nice 8-bit graphics, as close to the original as possible.
+Can you build a small working version of Perfect Dark?
+Please make a small working version of Wipeout XL.
+Please build a small working version of MULE.
+I'd like a small working version of Virtua Fighter 2.
+Show me a small working version of Devil May Cry.
+Put together a small working version of R-Type. Use nice 8-bit graphics, as close to the original as possible.
+How about a small working version of Phantasy Star Online?
+Could you make a small working version of Wave Race 64?
+Let's make a small working version of Hollow Knight.
+Write me a small working version of Marvel Vs Capcom 2: New Age of Heroes.
+Make a small working version of God of War II.
+Build a small working version of Heroes of Might and Magic III.
+Create a small working version of MechWarrior 2.
+Code a small working version of Company of Heroes.
+Give me a small working version of Diablo III.
+I want a small working version of Star Control II.
+Make me a small working version of PlayerUnknown's Battlegrounds.
+Build me a small working version of LittleBigPlanet.
+Can you make a small working version of Burnout Paradise?
+Can you build a small working version of The Sims 2?
+Please make a small working version of Herzog Zwei.
+Please build a small working version of Kentucky Route Zero.
+I'd like a small working version of Final Fantasy VIII.
+Show me a small working version of Joust. Use nice 8-bit graphics, as close to the original as possible.
+Put together a small working version of Breakout. Use nice 8-bit graphics, as close to the original as possible.
+How about a small working version of Marble Madness?
+Could you make a small working version of Metal Gear Solid V: The Phantom Pain?
+Let's make a small working version of Worms Armageddon.
+Write me a small working version of Cuphead.
+Make a small working version of Animal Crossing: New Leaf.
+Build a small working version of Total Annihilation.
+Create a small working version of The Sims 3.
+Code a small working version of Hitman 2.
+Give me a small working version of Valkyria Chronicles.
+I want a small working version of Alien: Isolation.
+Make me a small working version of F-Zero GX.
+Build me a small working version of Dungeon Master.
+Can you make a small working version of Crash Bandicoot: Warped?
+Can you build a small working version of F-Zero. Use nice 8-bit graphics, as close to the original as possible.
+Please make a small working version of Dragon Age: Origins.
+Please build a small working version of Tempest 2000.
+I'd like a small working version of Ultima.
+Show me a small working version of Metal Slug. Use nice 8-bit graphics, as close to the original as possible.
+Put together a small working version of Assassin's Creed Odyssey.
+How about a small working version of NBA 2K?
+Could you make a small working version of Life Is Strange?
+Let's make a small working version of Among Us.
+Write me a small working version of Kingdom Hearts II.
+Make a small working version of Wizardry: Proving Grounds of the Mad Overlord.
+Build a small working version of Phoenix Wright: Ace Attorney.
+Create a small working version of Sonic and Knuckles.
+Code a small working version of Mega Man 3. Use nice 8-bit graphics, as close to the original as possible.
+Give me a small working version of Final Fight. Use nice 8-bit graphics, as close to the original as possible.
+I want a small working version of Daytona USA.
+Make me a small working version of Max Payne 2: The Fall of Max Payne.
+Build me a small working version of Championship Manager.
+Can you make a small working version of OutRun 2?
+Can you build a small working version of Warlords?
+Please make a small working version of Alone in the Dark.
+Please build a small working version of Saturn Bomberman.
+I'd like a small working version of FTL: Faster Than Light.
+Show me a small working version of NFL 2K.
+Put together a small working version of Mass Effect 3.
+How about a small working version of Colossal Cave Adventure?
+Could you make a small working version of Bionic Commando?
+Let's make a small working version of Battlefield 2.
+Write me a small working version of King's Quest.
+Make a small working version of Mega Man. Use nice 8-bit graphics, as close to the original as possible.
+Build a small working version of Call of Duty 2.
+Create a small working version of Crusader Kings II.
+Code a small working version of California Games.
+Give me a small working version of Kingdom Hearts.
+I want a small working version of Alpha Centauri.
+Make me a small working version of We Happy Few.
+Build me a small working version of Worms.
+Can you make a small working version of A Mind Forever Voyaging?
+Can you build a small working version of Control?
+Please make a small working version of Virtua Fighter 4.
+Please build a small working version of Combat.
+I'd like a small working version of Virtua Fighter.
+Show me a small working version of Shovel Knight.
+Put together a small working version of Donkey Kong '94.
+How about a small working version of Star Wars: Jedi Knight - Dark Forces II?
+Could you make a small working version of Tekken 2?
+Let's make a small working version of Legacy of Kain: Soul Reaver.
+Write me a small working version of Super Monkey Ball.
+Make a small working version of Rogue.
+Build a small working version of The Sentinel.
+Create a small working version of Fable.
+Code a small working version of Titanfall 2.
+Give me a small working version of Bust-A-Move.
+I want a small working version of Tetris Attack.
+Make me a small working version of Call of Duty.
+Build me a small working version of Pac-Man Championship Edition.
+Can you make a small working version of Ultima III: Exodus?
+Can you build a small working version of Final Fantasy IX?
+Please make a small working version of Freespace 2.
+Please build a small working version of Ninja Gaiden (2004).
+I'd like a small working version of Virtua Racing.
+Show me a small working version of Sonic the Hedgehog 3.
+Put together a small working version of Syndicate.
+How about a small working version of Twisted Metal 2?
+Could you make a small working version of Flower?
+Let's make a small working version of Ghouls N Ghosts. Use nice 8-bit graphics, as close to the original as possible.
+Write me a small working version of God Hand.
+Make a small working version of Samurai Shodown.
+Build a small working version of Super Bomberman 2.
+Create a small working version of Star Wars: X-Wing vs TIE Fighter.
+Code a small working version of TowerFall.
+Give me a small working version of God of War III.
+I want a small working version of Peggle.
+Make me a small working version of Centipede. Use nice 8-bit graphics, as close to the original as possible.
+Build me a small working version of The Operative: No One Lives Forever.
+Can you make a small working version of Virtua Tennis?
+Can you build a small working version of Mega Bomberman?
+Please make a small working version of Snake. Use nice 8-bit graphics, as close to the original as possible.
+Please build a small working version of Grand Theft Auto.
+I'd like a small working version of Elite Beat Agents.
+Show me a small working version of Maniac Mansion.
+Put together a small working version of Dig Dug. Use nice 8-bit graphics, as close to the original as possible.
+How about a small working version of Flashback?
+Could you make a small working version of Phantasy Star II?
+Let's make a small working version of Mother 3.
+Write me a small working version of Assassin's Creed: Brotherhood.
+Make a small working version of Battlezone.
+Build a small working version of Sea of Thieves.
+Create a small working version of Impossible Mission.
+Code a small working version of Oddworld: Abe’s Oddyssee.
+Give me a small working version of What Remains of Edith Finch.
+I want a small working version of The Chronicles of Riddick: Escape From Butcher Bay.
+Make me a small working version of The Binding of Isaac.
+Build me a small working version of Virtua Fighter 5.
+Can you make a small working version of Super Smash Bros. Brawl?
+Can you build a small working version of Tomb Raider II?
+Please make a small working version of Zelda II: The Adventure of Link. Use nice 8-bit graphics, as close to the original as possible.
+Please build a small working version of Dungeon Keeper.
+I'd like a small working version of Spacewar!.
+Show me a small working version of The World Ends With You.
+Put together a small working version of Pole Position.
+How about a small working version of Eve Online?
+Could you make a small working version of Fable II?
+Let's make a small working version of Ghosts N Goblins.
+Write me a small working version of Track & Field.
+Make a small working version of Tetris Effect.
+Build a small working version of Dragon's Lair.
+Create a small working version of Unreal.
+Code a small working version of Cave Story.
+Give me a small working version of Street Fighter Alpha 3.
+I want a small working version of Viewtiful Joe.
+Make me a small working version of Borderlands.
+Build me a small working version of Crash Bandicoot.
+Can you make a small working version of Archon: The Light and the Dark?
+Can you build a small working version of RollerCoaster Tycoon?
+Please make a small working version of Castlevania III: Dracula's Curse.
+Please build a small working version of Gran Turismo 2.
+I'd like a small working version of Ultima V: Warriors of Destiny.
+Show me a small working version of Ultima VI: The False Prophet.
+Put together a small working version of Jet Set Radio Future.
+How about a small working version of Forza Horizon 4?
+Could you make a small working version of Ridge Racer?
+Let's make a small working version of Gran Turismo 4.
+Write me a small working version of Skies of Arcadia.
+Make a small working version of Grand Prix Legends.
+Build a small working version of Stunt Car Racer.
+Create a small working version of DuckTales.
+Code a small working version of Super Puzzle Fighter II Turbo.
+Give me a small working version of Pac-Man Championship Edition DX.
+I want a small working version of Rayman 2: The Great Escape.
+Make me a small working version of Guardian Heroes.
+Build me a small working version of Lumines.
+Can you make a small working version of Super Mario Sunshine?
+Can you build a small working version of Earthworm Jim?
+Please make a small working version of Chrono Cross.
+Please build a small working version of Hot Shots Golf.
+I'd like a small working version of Manic Miner.
+Show me a small working version of Final Fantasy XII.
+Put together a small working version of Dragon Age: Inquisition.
+How about a small working version of Diddy Kong Racing?
+Could you make a small working version of Vanquish?
+Let's make a small working version of Bomberman.
+Write me a small working version of Geometry Wars: Retro Evolved 2.
+Make a small working version of Final Fantasy XIV.
+Build a small working version of Super Castlevania IV.
+Create a small working version of Shinobi.
+Code a small working version of Dragon's Dogma.
+Give me a small working version of Indiana Jones and the Fate of Atlantis.
+I want a small working version of Tempest.
+Make me a small working version of Ultima II: The Revenge of the Enchantress.
+Build me a small working version of Head Over Heels.
+Can you make a small working version of Pilotwings?
+Can you build a small working version of Ultima Underworld II: Labyrinth of Worlds?
+Please make a small working version of Ultima VII Part Two: Serpent Isle.
+Please build a small working version of Tomb Raider (2013).
+I'd like a small working version of Guild Wars 2.
+Show me a small working version of SimCity 3000.
+Put together a small working version of Killer 7.
+How about a small working version of After Burner?
+Could you make a small working version of Wing Commander II: Vengeance of the Kilrathi?
+Let's make a small working version of NFL Blitz.
+Write me a small working version of Defense of the Ancients.
+Make a small working version of Xenogears.
+Build a small working version of Boulderdash.
+Create a small working version of King's Quest VI: Heir Today, Gone Tomorrow.
+Code a small working version of Carmageddon.
+Give me a small working version of Warcraft: Orcs & Humans.
+I want a small working version of Descent.
+Make me a small working version of Snatcher.
+Build me a small working version of Star Raiders.
+Can you make a small working version of System Shock?
+Can you build a small working version of International Karate +?
+Please make a small working version of Vib Ribbon.
+Please build a small working version of Shining Force II.
+I'd like a small working version of Hunt the Wumpus.
+Show me a small working version of Tom Clancy's Rainbow Six.
+Put together a small working version of NetHack.
+How about a small working version of Paper Mario: The Thousand-Year Door?
+Could you make a small working version of Super Mario Maker?
+Let's make a small working version of Conker's Bad Fur Day.
+Write me a small working version of Paperboy.
+Make a small working version of Excitebike.
+Build a small working version of Paradroid.
+Create a small working version of Football Manager.
+Code a small working version of Vagrant Story.
+Give me a small working version of Medal of Honor.
+I want a small working version of Teenage Mutant Ninja Turtles: Turtles in Time.
+Make me a small working version of Kirby's Adventure.
+Build me a small working version of Dr. Mario.
+Can you make a small working version of Harvest Moon?
+Can you build a small working version of Heavy Rain?
+Please make a small working version of Wonder Boy III: The Dragon's Trap.
+Please build a small working version of Theme Park.
+I'd like a small working version of The Witcher 2: Assassins of Kings.
+Show me a small working version of Puyo Puyo.
+Put together a small working version of Bastion.
+How about a small working version of Blood?
+Could you make a small working version of F-Zero X?
+Let's make a small working version of PGA Tour Golf.
+Write me a small working version of Spy Hunter.
+Make a small working version of 1080° Snowboarding.
+Build a small working version of Golden Axe.
+Create a small working version of Star Wars: Dark Forces.
+Code a small working version of Kirby's Dream Land.
+Give me a small working version of Rainbow Islands: The Story of Bubble Bobble 2.
+I want a small working version of Bushido Blade.
+Make me a small working version of The Curse of Monkey Island.
+Build me a small working version of Micro Machines.
+Can you make a small working version of FS1 Flight Simulator?
+Can you build a small working version of Full Throttle?
+Please make a small working version of Maze War.
+Please build a small working version of Duck Hunt.
+I'd like a small working version of Space Channel 5.
+Show me a small working version of The Last Express.
+Put together a small working version of Grand Prix 2.
+How about a small working version of Donkey Kong Country 2: Diddy's Kong Quest?
+Could you make a small working version of Marvel Vs Capcom: Clash of Super Heroes?
+Let's make a small working version of Road Rash II.
+Write me a small working version of The Bard's Tale.
+Make a small working version of Microsoft Flight Simulator.
+Build a small working version of Burnout Revenge.
+Create a small working version of Eternal Darkness: Sanity's Requiem.
+Code a small working version of Cannon Fodder.
+Give me a small working version of Jet Set Willy.
+I want a small working version of Ecco the Dolphin.
+Make me a small working version of Valkyrie Profile.
+Build me a small working version of Frequency.
+Can you make a small working version of Mortal Kombat 3?
+Can you build a small working version of Samba De Amigo?
+Please make a small working version of Defender of the Crown.
+Please build a small working version of Computer Space.
+I'd like a small working version of Sonic Adventure.
+Show me a small working version of Where in the World is Carmen Sandiego.
+Put together a small working version of Gran Trak 10.
+How about a small working version of SSX 3?
+Could you make a small working version of Firewatch?
+Let's make a small working version of Galaxian.
+Write me a small working version of Jagged Alliance 2.
+Make a small working version of Tom Clancy's Splinter Cell.
+Build a small working version of Crysis.
+Create a small working version of Shining Force.
+Code a small working version of Far Cry 3.
+Give me a small working version of IL-2 Sturmovik.
+I want a small working version of Phantasy Star.
+Make me a small working version of Phantasy Star III: Generations of Doom.
+Build me a small working version of Quest For Glory: So You Want to Be a Hero.
+Can you make a small working version of Unreal Tournament 2004?
+Can you build a small working version of Zaxxon?
+Please make a small working version of Cart Life.
+Please build a small working version of Super Mario 3D World.
+I'd like a small working version of The Hitchhiker's Guide to the Galaxy.
+Show me a small working version of Ant Attack.
+Put together a small working version of ActRaiser.
+How about a small working version of Bully?
+Could you make a small working version of Strider?
+Let's make a small working version of Super Punch-Out!!.
+Write me a small working version of DEFCON.
+Make a small working version of Devil's Crush.
+Build a small working version of Persona 3.
+Create a small working version of Demon Attack.
+Code a small working version of Wonder Boy.
+Give me a small working version of Teenage Mutant Ninja Turtles.
+I want a small working version of Solitaire.
+Make me a small working version of Minesweeper.
+Build me a small working version of Mutant League Football.
+Can you make a small working version of Heretic?
+Can you build a small working version of Pinball Construction Set?
+Please make a small working version of Habitat.
+Please build a small working version of Aladdin.
+I'd like a small working version of Leisure Suit Larry in the Land of the Lounge Lizards.
+Show me a small working version of Pokemon Black/White.
+Put together a small working version of 80 Days.
+How about a small working version of Michael Jackson's Moonwalker?
+Could you make a small working version of X-Men?
+Let's make a small working version of Battlefield: Bad Company 2.
+Write me a small working version of Castle Wolfenstein.
+Make a small working version of Pokemon Ruby/Sapphire/Emerald.
+Build a small working version of R4: Ridge Racer Type 4.
+Create a small working version of Turrican II: The Final Fight.
+Code a small working version of Choplifter.
+Give me a small working version of Colin McRae Rally 2.0.
+I want a small working version of Desert Strike.
+Make me a small working version of Dragon Force.
+Build me a small working version of Wizball.
+Can you make a small working version of Call of Duty: Modern Warfare 2?
+Can you build a small working version of Power Stone 2?
+Please make a small working version of Blade Runner.
+Please build a small working version of Qbert.
+I'd like a small working version of Mario Paint.
+Show me a small working version of Road Rash.
+Put together a small working version of Bejeweled.
+How about a small working version of ET: The Extra-Terrestrial?
+Could you make a small working version of Shadowrun?
+Let's make a small working version of Mario's Picross.
+Write me a small working version of Panzer Dragoon.
+Make a small working version of Railroad Tycoon.
+Build a small working version of Aliens Versus Predator.
+Create a small working version of Super Star Wars.
+Code a small working version of Shenmue II.
+Give me a small working version of Metal Gear.
+I want a small working version of Virtua Fighter 3.
+Make me a small working version of Super Sprint.
+Build me a small working version of Killer Instinct.
+Can you make a small working version of Monster Hunter 4 Ultimate?
+Can you build a small working version of Tenchu: Stealth Assassins?
+Please make a small working version of You Don't Know Jack!.
+Please build a small working version of Miner 2049er.
+I'd like a small working version of Metal Gear Solid 4: Guns of the Patriots.
+Show me a small working version of Jungle Strike.
+Put together a small working version of Yakuza 0.
+How about a small working version of Vampire: The Masquerade – Redemption?
+Could you make a small working version of Amnesia: The Dark Descent?
+Let's make a small working version of Terminator 2: The Arcade Game.
+Write me a small working version of Wizardry VII: Crusaders of the Dark Savant.
+Make a small working version of Dwarf Fortress.
+Build a small working version of Metroid II: Return of Samus.
+Create a small working version of Pilotwings 64.
+Code a small working version of Game & Watch.
+Give me a small working version of Spyro the Dragon.
+I want a small working version of Manhunt.
+Make me a small working version of RC Pro-Am.
+Build me a small working version of Karate Champ.
+Can you make a small working version of Paper Mario?
+Can you build a small working version of Nier?
+Please make a small working version of Indy 500.
+Please build a small working version of Capcom vs. SNK 2: Mark of the Millennium 2001.
+I'd like a small working version of Counter-Strike: Global Offensive.
+Show me a small working version of Star Wars: Jedi Knight II - Jedi Outcast.
+Put together a small working version of Oddworld: Abe's Exoddus.
+How about a small working version of River Raid?
+Could you make a small working version of Ori and the Blind Forest?
+Let's make a small working version of Falcon 3.0.
+Write me a small working version of Exile.
+Make a small working version of Space Quest IV: Roger Wilco and the Time Rippers.
+Build a small working version of Command & Conquer: Red Alert 2.
+Create a small working version of Giants: Citizen Kabuto.
+Code a small working version of Tekken Tag Tournament.
+Give me a small working version of Dead Space 2.
+I want a small working version of Puzzle Quest: Challenge of the Warlords.
+Make me a small working version of Time Crisis.
+Build me a small working version of Tennis For Two.
+Can you make a small working version of Deus Ex: Human Revolution?
+Can you build a small working version of Jumpman Junior?
+Please make a small working version of Marathon.
+Please build a small working version of SimCity 4.
+I'd like a small working version of Far Cry 2.
+Show me a small working version of Command & Conquer: Tiberian Sun.
+Put together a small working version of Twisted Metal.
+How about a small working version of Asheron's Call?
+Could you make a small working version of TimeSplitters 2?
+Let's make a small working version of Red Baron II.
+Write me a small working version of Wonder Boy in Monster Land.
+Make a small working version of Operation Wolf.
+Build a small working version of Wing Commander III: Heart of the Tiger.
+Create a small working version of Resident Evil 3: Nemesis.
+Code a small working version of Mario Kart 7.
+Give me a small working version of Bushido Blade 2.
+I want a small working version of Bust-A-Move 2.
+Make me a small working version of Dead Rising.
+Build me a small working version of Return Fire.
+Can you make a small working version of Super Monaco GP?
+Can you build a small working version of Master of Orion?
+Please make a small working version of International Superstar Soccer.
+Please build a small working version of Dark Souls II.
+I'd like a small working version of BeatMania.
+Show me a small working version of Comanche: Maximum Overkill.
+Put together a small working version of Mafia.
+How about a small working version of Super Mario Land 2: 6 Golden Coins. Use nice 8-bit graphics, as close to the original as possible.
+Could you make a small working version of Commandos: Behind Enemy Lines?
+Let's make a small working version of X-COM: Terror from the Deep.
+Write me a small working version of Virtua Cop.
+Make a small working version of Myth: The Fallen Lords.
+Build a small working version of Baseball Stars.
+Create a small working version of AH-3 Thunderstrike.
+Code a small working version of Popeye. Use nice 8-bit graphics, as close to the original as possible.
+Give me a small working version of Balance of Power.
+I want a small working version of WWF No Mercy.
+Make me a small working version of Ratchet & Clank: Up Your Arsenal.
+Build me a small working version of Forza Motorsport 4.
+Can you make a small working version of Lethal Enforcers?
+Can you build a small working version of Samurai Shodown II?
+Please make a small working version of R-Type Final.
+Please build a small working version of One-On-One.
+I'd like a small working version of Castle Crashers.
+Show me a small working version of Star Control.
+Put together a small working version of Resident Evil Code: Veronica.
+How about a small working version of Kid Icarus. Use nice 8-bit graphics, as close to the original as possible.
+Could you make a small working version of Mirror's Edge?
+Let's make a small working version of Medieval II: Total War.
+Write me a small working version of Micro Machines 2: Turbo Tournament.
+Make a small working version of Xenon 2: Megablast.
+Build a small working version of Saints Row: The Third.
+Create a small working version of Knight Lore.
+Code a small working version of Lemonade Stand.
+Give me a small working version of Math Blaster.
+I want a small working version of Marvel Vs Capcom 3: Fate of Two Worlds.
+Make me a small working version of Ice Hockey.
+Build me a small working version of Blaster Master. Use nice 8-bit graphics, as close to the original as possible.
+Can you make a small working version of Adventures of Lolo?
+Can you build a small working version of Super Off Road?
+Please make a small working version of Bonk's Adventure.
+Please build a small working version of Yo Noid.
+I'd like a small working version of The Simpsons.
+Show me a small working version of Sunset Riders.
+Put together a small working version of Jazz Jackrabbit.
+How about a small working version of Live A Live?
+Could you make a small working version of Links?
+Let's make a small working version of Spy vs Spy.
+Write me a small working version of Pajama Sam: No Need to Hide When It's Dark Outside.
+Make a small working version of The House of the Dead.
+Build a small working version of Robotron X.
+Create a small working version of Snood.
+Code a small working version of X-Men Vs Street Fighter.
+Give me a small working version of Turok: Dinosaur Hunter.
+I want a small working version of Doom 64.
+Make me a small working version of MDK.
+Build me a small working version of The King of Fighters 97.
+Can you make a small working version of Armored Core?
+Can you build a small working version of WCW Vs NWO: World Tour?
+Please make a small working version of Bomberman 64.
+Please build a small working version of Pajama Sam 2: Thunder and Lightning Aren't so Frightening.
+I'd like a small working version of WWF War Zone.
+Show me a small working version of Star Wars: Rogue Squadron.
+Put together a small working version of Spyro 2: Ripto's Rage!.
+How about a small working version of WCW/NWO Revenge?
+Could you make a small working version of Turok 2: Seeds of Evil?
+Let's make a small working version of Detective Barbie In the Mystery of the Carnival Caper!.
+Write me a small working version of Destiny 2.
+Make a small working version of Rampart.
+Build a small working version of Mappy.
+Create a small working version of WarioWare: Twisted!.
+Code a small working version of Return to Castle Wolfenstein.
+Give me a small working version of The Hobbit.
+I want a small working version of Moon Patrol. Use nice 8-bit graphics, as close to the original as possible.
+Make me a small working version of Wasteland.
+Build me a small working version of Metal Gear Solid: Peace Walker.
+Can you make a small working version of Prince of Persia 2: The Shadow and the Flame?
+Can you build a small working version of Theme Hospital?
+Please make a small working version of Space Harrier. Use nice 8-bit graphics, as close to the original as possible.
+Please build a small working version of Fantasy Zone II.
+I'd like a small working version of Legacy of the Wizard.
+Show me a small working version of The Guardian Legend.
+Put together a small working version of MUSHA.
+How about a small working version of Gimmick?
+Could you make a small working version of Dragon Quest V: Hand of the Heavenly Bride?
+Let's make a small working version of Final Fantasy V.
+Write me a small working version of Violent Storm.
+Make a small working version of Castlevania: Rondo of Blood.
+Build a small working version of Gabriel Knight: Sins of the Father.
+Create a small working version of Batsugun.
+Code a small working version of Quest For Glory: Shadow of Darkness.
+Give me a small working version of Windjammers.
+I want a small working version of Alien Vs Predator.
+Make me a small working version of Puyo Puyo 2.
+Build me a small working version of Realms of Arkania: Star Trail.
+Can you make a small working version of Demon's Crest?
+Can you build a small working version of Medal of Honor: Allied Assault?
+Please make a small working version of Super C. Use nice 8-bit graphics, as close to the original as possible.
+Please build a small working version of Last Ninja 2: Back With A Vengeance.
+I'd like a small working version of Vampire: The Masquerade – Bloodlines.
+Show me a small working version of Cosmology of Kyoto.
+Put together a small working version of Trials of Mana.
+How about a small working version of Battle Garegga?
+Could you make a small working version of Sexy Parodius?
+Let's make a small working version of Broken Sword: The Shadow of the Templars.
+Write me a small working version of Tron.
+Make a small working version of Summer Games.
+Build a small working version of Twinkle Star Sprites.
+Create a small working version of Terranigma.
+Code a small working version of Gradius Gaiden.
+Give me a small working version of Shock Troopers.
+I want a small working version of Darkstalkers 3.
+Make me a small working version of Klonoa: Door to Phantomile.
+Build me a small working version of Mega Man Legends.
+Can you make a small working version of The Last Blade 2?
+Can you build a small working version of Star Wars: Knights of the Old Republic II – The Sith Lords?
+Please make a small working version of Hard Hat Mack.
+Please build a small working version of Boulderdash 2.
+I'd like a small working version of Sega Rally 2.
+Show me a small working version of The Ancient Art of War.
+Put together a small working version of Turbo OutRun.
+How about a small working version of Starsiege: Tribes?
+Could you make a small working version of Urban Strike?
+Let's make a small working version of Turmoil.
+Write me a small working version of Hitman 2: Silent Assassin.
+Make a small working version of Empire.
+Build a small working version of Space Race.
+Create a small working version of Spasim.
+Code a small working version of Shark Jaws.
+Give me a small working version of Gun Fight.
+I want a small working version of Pedit5.
+Make me a small working version of Heavyweight Champ.
+Build me a small working version of Atari Football.
+Can you make a small working version of Orbit?
+Can you build a small working version of Space Panic?
+Please make a small working version of Mario Bros. Use nice 8-bit graphics, as close to the original as possible.
+Please build a small working version of Populous II.
+I'd like a small working version of Ballblazer.
+Show me a small working version of Disgaea: Hour of Darkness.
+Put together a small working version of Buster Bros..
+How about a small working version of Metal Slug 3?
+Could you make a small working version of Smash TV?
+Let's make a small working version of Ice Climber. Use nice 8-bit graphics, as close to the original as possible.
+Write me a small working version of Rampage.
+Make a small working version of Mother.
+Build a small working version of Heroes of Might and Magic II.
+Create a small working version of DoDonPachi.
+Code a small working version of Realms of the Haunting.
+Give me a small working version of Body Harvest.
+I want a small working version of Myth II: Soulblighter.
+Make me a small working version of The Lurking Horror.
+Build me a small working version of Qix. Use nice 8-bit graphics, as close to the original as possible.
+Can you make a small working version of Lunar Lander. Use nice 8-bit graphics, as close to the original as possible.
+Can you build a small working version of The Need For Speed?
+Please make a small working version of NFL GameDay.
+Please build a small working version of Mario Party.
+I'd like a small working version of Team Fortress Classic.
+Show me a small working version of Star Wars: Episode I – Racer.
+Put together a small working version of Out of the Park Baseball.
+How about a small working version of Persona 2: Innocent Sin?
+Could you make a small working version of Mario Golf?
+Let's make a small working version of Pokemon Snap.
+Write me a small working version of Grand Theft Auto 2.
+Make a small working version of WWF WrestleMania 2000.
+Build a small working version of Underwurlde.
+Create a small working version of Kirby Super Star.
+Code a small working version of Tekken.
+Give me a small working version of Panzer Dragoon II Zwei.
+I want a small working version of Dungeons & Dragons: Pool of Radiance.
+Make me a small working version of Tactics Ogre: Let Us Cling Together.
+Build me a small working version of R-Type Delta.
+Can you make a small working version of Garou: Mark of the Wolves?
+Can you build a small working version of World Series Baseball?
+Please make a small working version of Fatal Frame II: Crimson Butterfly.
+Please build a small working version of Gauntlet II.
+I'd like a small working version of Pokemon Go.
+Show me a small working version of Donkey Kong Jr. Use nice 8-bit graphics, as close to the original as possible.
+Put together a small working version of Jak and Daxter: The Precursor Legacy.
+How about a small working version of I Have No Mouth and I Must Scream?
+Could you make a small working version of The House of the Dead 2?
+Let's make a small working version of Kirby: Canvas Curse.
+Write me a small working version of NCAA Football.
+Make a small working version of Discs of Tron.
+Build a small working version of Rave Racer.
+Create a small working version of Burnout 2: Point of Impact.
+Code a small working version of River City Ransom.
+Give me a small working version of Point Blank 2.
+I want a small working version of Bomb Jack. Use nice 8-bit graphics, as close to the original as possible.
+Make me a small working version of The Typing of the Dead.
+Build me a small working version of SingStar.
+Can you make a small working version of Crimson Skies?
+Can you build a small working version of Mercenary?
+Please make a small working version of Mystery House.
+Please build a small working version of Arcanum: Of Steamworks and Magick Obscura.
+I'd like a small working version of Xevious. Use nice 8-bit graphics, as close to the original as possible.
+Show me a small working version of Grid.
+Put together a small working version of Star Wars: X-Wing Alliance.
+How about a small working version of Star Wars: Rogue Squadron II - Rogue Leader?
+Could you make a small working version of King's Quest II: Romancing the Throne?
+Let's make a small working version of Castlevania: Aria of Sorrow.
+Write me a small working version of King's Quest III: To Heir Is Human.
+Make a small working version of Amplitude.
+Build a small working version of Koronis Rift.
+Create a small working version of Homeworld 2.
+Code a small working version of Skool Daze.
+Give me a small working version of Sabre Wulf.
+I want a small working version of 1942. Use nice 8-bit graphics, as close to the original as possible.
+Make me a small working version of Dungeons & Dragons.
+Build me a small working version of Uridium.
+Can you make a small working version of Deus Ex Machina?
+Can you build a small working version of Crossfire?
+Please make a small working version of Lucifer's Realm.
+Please build a small working version of MasterType.
+I'd like a small working version of Turbo.
+Show me a small working version of The Arcade Machine.
+Put together a small working version of Astro Chase.
+How about a small working version of Aztec?
+Could you make a small working version of Deadline?
+Let's make a small working version of Fort Apocalypse.
+Write me a small working version of Ken Uston's Professional Blackjack.
+Make a small working version of Kid Grid.
+Build a small working version of The Mask of the Sun.
+Create a small working version of Millionaire: The Stock Market Simulation.
+Code a small working version of Night Mission Pinball.
+Give me a small working version of Preppie.
+I want a small working version of Snooper Troops: Case #1 - The Granite Point Ghost.
+Make me a small working version of Snooper Troops: Case #2 - The Case of the Disappearing Dolphin.
+Build me a small working version of Spy's Demise.
+Can you make a small working version of Beach-Head?
+Can you build a small working version of Blue Max?
+Please make a small working version of Combat Leader.
+Please build a small working version of Drol.
+I'd like a small working version of Fax.
+Show me a small working version of International Soccer.
+Put together a small working version of Juice.
+How about a small working version of Jumpman?
+Could you make a small working version of Knights of the Desert?
+Let's make a small working version of Minit Man.
+Write me a small working version of Murder by the Dozen.
+Make a small working version of Murder on the Zinderneuf.
+Build a small working version of Oil Barons.
+Create a small working version of Oil's Well.
+Code a small working version of Operation Whirlwind.
+Give me a small working version of Pitstop.
+I want a small working version of Planetfall.
+Make me a small working version of Pogo Joe.
+Build me a small working version of Rally Speedway.
+Can you make a small working version of Repton?
+Can you build a small working version of Rescue Squad?
+Please make a small working version of Sargon III.
+Please build a small working version of Shamus: Case II.
+I'd like a small working version of Spare Change.
+Show me a small working version of Star League Baseball.
+Put together a small working version of The Witness (1983).
+How about a small working version of Zombies?
+Could you make a small working version of Adventure Construction Set?
+Let's make a small working version of Agent USA.
+Write me a small working version of Beyond Castle Wolfenstein.
+Make a small working version of Cutthroats.
+Build a small working version of Dimension X.
+Create a small working version of Dragonworld.
+Code a small working version of Earthly Delights.
+Give me a small working version of Fahrenheit 451.
+I want a small working version of Intellectual Decathlon.
+Make me a small working version of Mindshadow.
+Build me a small working version of Rescue on Fractalus.
+Can you make a small working version of Run For the Money?
+Can you build a small working version of The Seven Cities of Gold?
+Please make a small working version of Space Taxi.
+Please build a small working version of SunDog: Frozen Legacy.
+I'd like a small working version of Suspect.
+Show me a small working version of Timeship: Murder at the End of Time.
+Put together a small working version of Xyphus.
+How about a small working version of Plants vs Zombies?
+Could you make a small working version of Hang-On?
+Let's make a small working version of The Way of the Exploding Fist.
+Write me a small working version of Super Hang-On.
+Make a small working version of Castlevania II: Simon's Quest. Use nice 8-bit graphics, as close to the original as possible.
+Build a small working version of Kiwi Kraze.
+Create a small working version of Stunts.
+Code a small working version of Centurion: Defender of Rome.
+Give me a small working version of Colorado.
+I want a small working version of King's Bounty.
+Make me a small working version of Super Ghouls N Ghosts. Use nice 8-bit graphics, as close to the original as possible.
+Build me a small working version of Commander Keen: Goodbye Galaxy!.
+Can you make a small working version of Choplifter II?
+Can you build a small working version of Dizzy: Prince of the Yolkfolk?
+Please make a small working version of Gobliiins.
+Please build a small working version of Starfleet Orion.
+I'd like a small working version of Invasion Orion.
+Show me a small working version of Temple of Apshai.
+Put together a small working version of Datestones of Ryn.
+How about a small working version of Morloc's Tower?
+Could you make a small working version of Hellfire Warrior?
+Let's make a small working version of Rescue at Rigel.
+Write me a small working version of Star Warrior.
+Make a small working version of Crush, Crumble and Chomp!.
+Build a small working version of Upper Reaches of Apshai.
+Create a small working version of Curse of Ra.
+Code a small working version of The Keys of Acheron.
+Give me a small working version of Adventureland.
+I want a small working version of Pirate Adventure.
+Make me a small working version of Secret Mission.
+Build me a small working version of Voodoo Castle.
+Can you make a small working version of The Count?
+Can you build a small working version of Strange Odyssey?
+Please make a small working version of Mystery Fun House.
+Please build a small working version of Pyramid of Doom.
+I'd like a small working version of Ghost Town.
+Show me a small working version of Savage Island.
+Put together a small working version of Savage Island Part Two.
+How about a small working version of Golden Voyage?
+Could you make a small working version of Sorcerer of Claymorgue Castle?
+Let's make a small working version of Starcross.
+Write me a small working version of Suspended.
+Make a small working version of Enchanter.
+Build a small working version of Infidel.
+Create a small working version of Sorcerer.
+Code a small working version of Seastalker.
+Give me a small working version of Wishbringer.
+I want a small working version of Spellbreaker.
+Make me a small working version of Ballyhoo.
+Build me a small working version of Leather Goddesses of Phobos.
+Can you make a small working version of Trinity?
+Can you build a small working version of Moonmist?
+Please make a small working version of Hollywood Hijinx.
+Please build a small working version of Bureaucracy.
+I'd like a small working version of Stationfall.
+Show me a small working version of Plundered Hearts.
+Put together a small working version of Nord and Bert Couldn't Make Head or Tail of It.
+How about a small working version of Beyond Zork?
+Could you make a small working version of Border Zone?
+Let's make a small working version of Sherlock: The Riddle of the Crown Jewels.
+Write me a small working version of Zork II.
+Make a small working version of Zork III.
+Build a small working version of Hamurabi.
+Create a small working version of Eliza.
+Code a small working version of Super Star Trek.
+Give me a small working version of Ladder.
+I want a small working version of Sargon II.
+Make me a small working version of Mychess.
+Build me a small working version of Telengard.
+Can you make a small working version of Ali Baba and the Forty Thieves?
+Can you build a small working version of Dnieper River Line?
+Please make a small working version of Pengo. Use nice 8-bit graphics, as close to the original as possible.
+Please build a small working version of BurgerTime. Use nice 8-bit graphics, as close to the original as possible.
+I'd like a small working version of Berzerk. Use nice 8-bit graphics, as close to the original as possible.
+Show me a small working version of Scramble. Use nice 8-bit graphics, as close to the original as possible.
+Put together a small working version of Gorf. Use nice 8-bit graphics, as close to the original as possible.
+How about a small working version of Wizard of Wor?
+Could you make a small working version of Phoenix. Use nice 8-bit graphics, as close to the original as possible.
+Let's make a small working version of Venture.
+Write me a small working version of Amidar. Use nice 8-bit graphics, as close to the original as possible.
+Make a small working version of Millipede. Use nice 8-bit graphics, as close to the original as possible.
+Build a small working version of Crystal Castles. Use nice 8-bit graphics, as close to the original as possible.
+Create a small working version of Food Fight.
+Code a small working version of Kangaroo.
+Give me a small working version of Donkey Kong 3. Use nice 8-bit graphics, as close to the original as possible.
+I want a small working version of Elevator Action. Use nice 8-bit graphics, as close to the original as possible.
+Make me a small working version of Jungle Hunt. Use nice 8-bit graphics, as close to the original as possible.
+Build me a small working version of Tapper. Use nice 8-bit graphics, as close to the original as possible.
+Can you make a small working version of Mr. Do!. Use nice 8-bit graphics, as close to the original as possible.
+Can you build a small working version of Bosconian. Use nice 8-bit graphics, as close to the original as possible.
+Please make a small working version of Yie Ar Kung-Fu. Use nice 8-bit graphics, as close to the original as possible.
+Please build a small working version of Kung-Fu Master. Use nice 8-bit graphics, as close to the original as possible.
+I'd like a small working version of Gradius. Use nice 8-bit graphics, as close to the original as possible.
+Show me a small working version of Life Force. Use nice 8-bit graphics, as close to the original as possible.
+Put together a small working version of Chuckie Egg.
+How about a small working version of Jetpac. Use nice 8-bit graphics, as close to the original as possible.
+Could you make a small working version of Atic Atac?
+Let's make a small working version of Thrust.
+Write me a small working version of Karateka.
+Make a small working version of Bruce Lee.
+Build a small working version of Archon.
+Create a small working version of Archon II: Adept.
+Code a small working version of M.U.L.E..
+Give me a small working version of Pitfall II: Lost Caverns.
+I want a small working version of H.E.R.O. Use nice 8-bit graphics, as close to the original as possible.
+Make me a small working version of Kaboom!. Use nice 8-bit graphics, as close to the original as possible.
+Build me a small working version of Yars' Revenge. Use nice 8-bit graphics, as close to the original as possible.
+Can you make a small working version of Keystone Kapers?
+Can you build a small working version of Enduro?
+Please make a small working version of Barnstorming.
+Please build a small working version of Sinistar. Use nice 8-bit graphics, as close to the original as possible.
+I'd like a small working version of Stargate.
+Show me a small working version of Frenzy.
+Put together a small working version of Super Cobra. Use nice 8-bit graphics, as close to the original as possible.
+How about a small working version of Pac-Mania?
+Could you make a small working version of Jr. Pac-Man?
+Let's make a small working version of Super Pac-Man.
+Write me a small working version of Pac-Land. Use nice 8-bit graphics, as close to the original as possible.
+Make a small working version of Balloon Fight. Use nice 8-bit graphics, as close to the original as possible.
+Build a small working version of Clu Clu Land.
+Create a small working version of Pooyan.
+Code a small working version of Lady Bug.
+Give me a small working version of Front Line.
+I want a small working version of Rally-X. Use nice 8-bit graphics, as close to the original as possible.
+Make me a small working version of Time Pilot. Use nice 8-bit graphics, as close to the original as possible.
+Build me a small working version of Horace Goes Skiing.
+Can you make a small working version of Hungry Horace?
+Can you build a small working version of Lunar Jetman?
+Please make a small working version of Back to Skool.
+Please build a small working version of Alien 8.
+I'd like a small working version of Punch-Out!!.
+Show me a small working version of Decathlon.
+Put together a small working version of Winter Games.
+How about a small working version of Bump 'n' Jump?
+Could you make a small working version of Dig Dug II?
+Let's make a small working version of Pole Position II.
+Write me a small working version of Mr. Do's Castle.
+Make a small working version of The Tower of Druaga.
+Build a small working version of Dragon Buster.
+Create a small working version of Gravitar.
+Code a small working version of Black Widow.
+Give me a small working version of Major Havoc.
+I want a small working version of Moon Cresta.
+Make me a small working version of Pleiads.
+Build me a small working version of Bagman.
+Can you make a small working version of Mouse Trap?
+Can you build a small working version of Lock 'n' Chase?
+Please make a small working version of Make Trax.
+Please build a small working version of Zookeeper.
+I'd like a small working version of Satan's Hollow.
+Show me a small working version of Crisis Mountain.
+Put together a small working version of Mr. Robot and His Robot Factory.
+How about a small working version of Boulder Dash II?
+Could you make a small working version of Nebulus?
+Let's make a small working version of Klax.
+Write me a small working version of Pipemania.
+Make a small working version of Cauldron.
+Build a small working version of Spellbound.
+Create a small working version of Pssst.
+Code a small working version of Transversion.
+Give me a small working version of Hogan's Alley.
+I want a small working version of Wild Gunman.
+Make me a small working version of Wrecking Crew.
+Build me a small working version of Urban Champion.
+Can you make a small working version of Gyromite?
+Can you build a small working version of SonSon?
+Please make a small working version of Commando. Use nice 8-bit graphics, as close to the original as possible.
+Please build a small working version of Rush'n Attack.
+I'd like a small working version of 1943. Use nice 8-bit graphics, as close to the original as possible.
+Show me a small working version of TwinBee.
+Put together a small working version of Jackal.
+How about a small working version of Fantasy Zone?
+Could you make a small working version of Out Run?
+Let's make a small working version of Altered Beast.
+Write me a small working version of Renegade.
+Make a small working version of Barbarian: The Ultimate Warrior.
+Build a small working version of Rolling Thunder.
+Create a small working version of Blades of Steel.
+Code a small working version of One on One: Dr. J vs. Larry Bird.
+Give me a small working version of The Great Escape.
+I want a small working version of Section Z.
+Make me a small working version of Trojan.
+Build me a small working version of Side Arms.
+Can you make a small working version of Chase H.Q.?
+Can you build a small working version of Xenophobe?
+Please make a small working version of Toobin'.
+Please build a small working version of Skate or Die.
+I'd like a small working version of Joust 2.
+Show me a small working version of Questron.
+Put together a small working version of Space Quest.
+How about a small working version of Gaplus?
+Could you make a small working version of Sky Kid?
+Let's make a small working version of Motos.
+Write me a small working version of The Last of Us in three.js.
+Make a small working version of Half-Life 2 in three.js.
+Build a small working version of The Legend of Zelda: Breath of the Wild in three.js.
+Create a small working version of The Witcher 3: Wild Hunt in three.js.
+Code a small working version of The Legend of Zelda: Ocarina of Time in three.js.
+Give me a small working version of Super Mario 64 in three.js.
+I want a small working version of Mass Effect 2 in three.js.
+Make me a small working version of BioShock in three.js.
+Build me a small working version of Grand Theft Auto V in three.js.
+Can you make a small working version of Shadow of the Colossus in three.js?
+Can you build a small working version of God of War (2018) in three.js?
+Please make a small working version of Call of Duty 4: Modern Warfare in three.js.
+Please build a small working version of Red Dead Redemption in three.js.
+I'd like a small working version of Doom (1993) in three.js.
+Show me a small working version of The Elder Scrolls V: Skyrim in three.js.
+Put together a small working version of Halo: Combat Evolved in three.js.
+How about a small working version of GoldenEye 007 in three.js?
+Could you make a small working version of Red Dead Redemption 2 in three.js?
+Let's make a small working version of Bloodborne in three.js.
+Write me a small working version of Metal Gear Solid in three.js.
+Make a small working version of Portal in three.js.
+Build a small working version of Uncharted 2: Among Thieves in three.js.
+Create a small working version of Journey in three.js.
+Code a small working version of Portal 2 in three.js.
+Give me a small working version of Minecraft in three.js.
+I want a small working version of Dark Souls in three.js.
+Make me a small working version of Metroid Prime in three.js.
+Build me a small working version of Deus Ex in three.js.
+Can you make a small working version of The Last of Us Part II in three.js?
+Can you build a small working version of Half-Life in three.js?
+Please make a small working version of Counter-Strike in three.js.
+Please build a small working version of Silent Hill 2 in three.js.
+I'd like a small working version of Tomb Raider (1996) in three.js.
+Show me a small working version of Ico in three.js.
+Put together a small working version of Grand Theft Auto III in three.js.
+How about a small working version of Fallout 3 in three.js?
+Could you make a small working version of Super Mario Odyssey in three.js?
+Let's make a small working version of Super Mario Galaxy 2 in three.js.
+Write me a small working version of System Shock 2 in three.js.
+Make a small working version of Overwatch in three.js.
+Build a small working version of The Legend of Zelda: The Wind Waker in three.js.
+Create a small working version of Resident Evil in three.js.
+Code a small working version of Batman: Arkham Asylum in three.js.
+Give me a small working version of Okami in three.js.
+I want a small working version of Grand Theft Auto IV in three.js.
+Make me a small working version of Outer Wilds in three.js.
+Build me a small working version of Prince of Persia: The Sands of Time in three.js.
+Can you make a small working version of Half-Life: Alyx in three.js?
+Can you build a small working version of Grand Theft Auto: Vice City in three.js?
+Please make a small working version of Grand Theft Auto: San Andreas in three.js.
+Please build a small working version of Fortnite in three.js.
+I'd like a small working version of Quake in three.js.
+Show me a small working version of Assassin's Creed II in three.js.
+Put together a small working version of God of War (2005) in three.js.
+How about a small working version of Left 4 Dead 2 in three.js?
+Could you make a small working version of Burnout 3: Takedown in three.js?
+Let's make a small working version of Team Fortress 2 in three.js.
+Write me a small working version of Resident Evil 2 in three.js.
+Make a small working version of Rocket League in three.js.
+Build a small working version of The Elder Scrolls IV: Oblivion in three.js.
+Create a small working version of Wolfenstein 3D in three.js.
+Code a small working version of Halo 3 in three.js.
+Give me a small working version of Dishonored in three.js.
+I want a small working version of The Legend of Zelda: Majora's Mask in three.js.
+Make me a small working version of Thief: The Dark Project in three.js.
+Build me a small working version of Spider-Man in three.js.
+Can you make a small working version of Left 4 Dead in three.js?
+Can you build a small working version of Quake III Arena in three.js?
+Please make a small working version of Doom II in three.js.
+Please build a small working version of Star Fox 64 in three.js.
+I'd like a small working version of The Elder Scrolls III: Morrowind in three.js.
+Show me a small working version of Halo 2 in three.js.
+Put together a small working version of Dead Space in three.js.
+How about a small working version of Gears of War in three.js?
+Could you make a small working version of Doom Eternal in three.js?
+Let's make a small working version of Fallout: New Vegas in three.js.
+Write me a small working version of Mario Kart 64 in three.js.
+Make a small working version of BioShock Infinite in three.js.
+Build a small working version of Sekiro: Shadows Die Twice in three.js.
+Create a small working version of Quake II in three.js.
+Code a small working version of Unreal Tournament in three.js.
+Give me a small working version of The Legend of Zelda: Twilight Princess in three.js.
+I want a small working version of Perfect Dark in three.js.
+Make me a small working version of Metal Gear Solid V: The Phantom Pain in three.js.
+Build me a small working version of Alien: Isolation in three.js.
+Can you make a small working version of F-Zero GX in three.js?
+Can you build a small working version of Doom (2016) in three.js?
+Please make a small working version of Duke Nukem 3D in three.js.
+Please build a small working version of Horizon: Zero Dawn in three.js.
+I'd like a small working version of Control in three.js.
+Show me a small working version of Titanfall 2 in three.js.
+Put together a small working version of Banjo-Kazooie in three.js.
+How about a small working version of Super Mario Galaxy in three.js?
+Could you make a small working version of Crash Bandicoot: Warped in three.js?
+Let's make a small working version of Star Fox in three.js.
+Write me a small working version of Wipeout in three.js.
+Make a small working version of Mirror's Edge in three.js.
+Build a small working version of Turok: Dinosaur Hunter in three.js.
+Create a small working version of Return to Castle Wolfenstein in three.js.
+Code a small working version of Resident Evil 4 in three.js.
+Write me a game of hangman.
+Write me a two-player game of a maze chase.
+Write me a two-player game of pinball.
+Write me a timed one-minute game of whack-a-mole.
+Write me a kid-friendly game of simon says.
+Write me a game of a memory matching grid.
+Write me a two-player game of sudoku.
+Write me a timed one-minute game of klondike solitaire.
+Write me a kid-friendly game of freecell.
+Write me a game of checkers.
+Write me a one-screen game of chess.
+Write me a two-player game of reversi.
+Write me a timed one-minute game of connect four.
+Write me a kid-friendly game of tic tac toe.
+Write me a game of gomoku.
+Write me a one-screen game of battleship.
+Write me a two-player game of mastermind.
+Write me a timed one-minute game of wordle.
+Write me a kid-friendly game of boggle.
+Write me a game of blackjack.
+Write me a one-screen game of video poker.
+Write me a two-player game of yahtzee.
+Write me a timed one-minute game of bingo.
+Write me a kid-friendly game of higher or lower.
+Write me a game of crazy eights.
+Write me a one-screen game of go fish.
+Write me a two-player game of hearts.
+Write me a timed one-minute game of uno.
+Write me a kid-friendly game of war.
+Write me a game of flappy bird.
+Write me a one-screen game of a doodle-jump climber.
+Write me a two-player game of a runner that ducks and jumps.
+Write me a timed one-minute game of 2048.
+Write me a kid-friendly game of a sliding puzzle.
+Write me a game of a nonogram.
+Write me a one-screen game of a lights-out grid.
+Write me a two-player game of sokoban.
+Write me a timed one-minute game of a pipe-connecting puzzle.
+Write me a kid-friendly game of a match-three board.
+Write me a game of a bubble shooter.
+Write me a one-screen game of a tower of hanoi.
+Write me a two-player game of a typing racer.
+Write me a timed one-minute game of a falling-word typist.
+Write me a kid-friendly game of an anagram solver race.
+Write me a game of hangman with a drawing of a rocket.
+Write me a one-screen game of a crossword you fill by clicking.
+Write me a two-player game of a trivia quiz with four buttons.
+Write me a timed one-minute game of a flag quiz.
+Write me a kid-friendly game of a capital-city quiz.
+Write me a game of a times-table drill.
+Write me a one-screen game of a spelling bee.
+Write me a two-player game of a reaction-time test.
+Write me a timed one-minute game of a stroop color test.
+Write me a kid-friendly game of an aim trainer.
+Write me a game of a duck hunt.
+Write me a one-screen game of a carnival ring toss.
+Write me a two-player game of a balloon pop.
+Write me a timed one-minute game of a dart board.
+Write me a kid-friendly game of a bowling lane.
+Write me a game of a mini golf hole.
+Write me a one-screen game of a basketball free throw.
+Write me a two-player game of a soccer penalty kick.
+Write me a timed one-minute game of a tennis rally.
+Write me a kid-friendly game of a air-hockey table.
+Write me a game of a foosball flick.
+Write me a one-screen game of a curling sheet.
+Write me a two-player game of a shuffleboard deck.
+Write me a timed one-minute game of a horseshoe pit.
+Write me a kid-friendly game of a fishing cast.
+Write me a game of a ski slalom.
+Write me a one-screen game of a skateboard trick line.
+Write me a two-player game of a surfing wave.
+Write me a timed one-minute game of a kayak gate run.
+Write me a kid-friendly game of a bike hill climb.
+Write me a game of a boxing round.
+Write me a one-screen game of a fencing lunge drill.
+Write me a two-player game of a archery range.
+Write me a timed one-minute game of a cannon you angle and fire.
+Write me a kid-friendly game of a tank duel on a tiny map.
+Write me a game of a submarine that dodges depth charges.
+Write me a one-screen game of a helicopter that rescues people.
+Write me a two-player game of a lunar lander.
+Write me a timed one-minute game of a space docking sim.
+Write me a kid-friendly game of a asteroid miner.
+Write me a game of a planet defense turret.
+Write me a one-screen game of a zombie lane shooter.
+Write me a two-player game of a vampire survivors style arena.
+Write me a timed one-minute game of a top-down shooter in one room.
+Write me a kid-friendly game of a light-cycle arena.
+Write me a game of a snake that leaves a wall.
+Write me a one-screen game of a tron disk bounce.
+Write me a two-player game of a billiards break.
+Write me a timed one-minute game of a pool trick shot.
+Write me a kid-friendly game of a air hockey goal.
+Write me a game of a pong match against a second paddle you control.
+Write me a one-screen game of a breakout with falling power-ups.
+Write me a two-player game of a tetris that lets you hold one piece.
+Write me a timed one-minute game of a columns color stack.
+Write me a kid-friendly game of a dr mario bottle.
+Write me a game of a puzzle bobble chain.
+Write me a one-screen game of a q bert pyramid.
+Write me a two-player game of a frog that crosses a river of logs.
+Write me a timed one-minute game of a chicken that crosses the road.
+Write me a kid-friendly game of a kangaroo that punches boxers.
+Write me a game of a donkey kong style barrel climb.
+Write me a one-screen game of a platformer with one screen and a flag.
+Write me a two-player game of a metroid tiny corridor.
+Write me a timed one-minute game of a mega-man style hallway.
+Write me a kid-friendly game of a mario style pipe room.
+Write me a game of a celeste style climb of one cliff.
+Write me a one-screen game of a ice level where you slide.
+Write me a two-player game of a lava floor you hop across.
+Write me a timed one-minute game of a ghost house with disappearing blocks.
+Write me a kid-friendly game of a bomb you place like bomberman.
+Write me a game of a dig dug tunnel.
+Write me a one-screen game of a boulder dash cave.
+Write me a two-player game of a lemmings march with one job button.
+Write me a timed one-minute game of a the incredible machine style lever.
+Write me a kid-friendly game of a marble run you tilt.
+Write me a game of a labyrinth tilt maze.
+Write me a one-screen game of a maze you draw to guide a ball.
+Write me a two-player game of a pac-man style dot eater.
+Write me a timed one-minute game of a ms pac-man style moving maze.
+Write me a kid-friendly game of a lockpick minigame with a rotating pin.
+Write me a game of a safe cracker.
+Write me a one-screen game of a wire-cut bomb defusal.
+Write me a two-player game of a laser maze with mirrors.
+Write me a timed one-minute game of a ricochet shot.
+Write me a kid-friendly game of a pool of piranhas you cross on turtles.
+Write me a game of a lily pad jump.
+Write me a one-screen game of a firefly catch at night.
+Write me a two-player game of a bug squash.
+Write me a timed one-minute game of a garden where you water plants before they wilt.
+Write me a kid-friendly game of a tamagotchi pet.
+Write me a game of a virtual cat you pet and feed.
+Write me a one-screen game of a dog that learns one trick.
+Write me a two-player game of a farm plot you plant and harvest.
+Write me a timed one-minute game of a lemonade stand.
+Write me a kid-friendly game of a pizza shop with a timer.
+Write me a game of a sushi belt.
+Write me a one-screen game of a coffee shop orders.
+Write me a two-player game of a burger flip.
+Write me a timed one-minute game of a ice cream stack.
+Write me a kid-friendly game of a cake decorator.
+Write me a game of a sandwich builder.
+Write me a one-screen game of a food truck rush.
+Write me a two-player game of a restaurant with three tables.
+Write me a timed one-minute game of a hotel desk with arriving guests.
+Write me a kid-friendly game of a airport baggage claim matcher.
+Write me a game of a train platform you stop at stations.
+Write me a one-screen game of a subway runner on one track.
+Write me a two-player game of a traffic light crossing.
+Write me a timed one-minute game of a parking lot puzzle.
+Write me a kid-friendly game of a forklift warehouse.
+Write me a game of a crane that stacks containers.
+Write me a one-screen game of a tower crane and swinging wrecking ball.
+Write me a two-player game of a bridge builder of struts.
+Write me a timed one-minute game of a domino run you set up.
+Write me a kid-friendly game of a house of cards.
+Write me a game of a jenga tower.
+Write me a one-screen game of a block stacking balance.
+Write me a two-player game of a seesaw balance puzzle.
+Write me a timed one-minute game of a catapult that hits a target.
+Write me a kid-friendly game of a trebuchet angle toy.
+Write me a game of a paper airplane distance throw.
+Write me a one-screen game of a kite you keep in the wind.
+Write me a two-player game of a hot air balloon that avoids birds.
+Write me a timed one-minute game of a parachute landing on a pad.
+Write me a kid-friendly game of a skydiving ring dive.
+Write me a game of a base jump off one cliff.
+Write me a one-screen game of a wingsuit gate flight.
+Write me a two-player game of a drone obstacle course.
+Write me a timed one-minute game of a robot vacuum that cleans one room.
+Write me a kid-friendly game of a roomba race.
+Write me a game of a line-following robot.
+Write me a one-screen game of a sumo robot ring.
+Write me a two-player game of a robot that stacks boxes.
+Write me a timed one-minute game of a factory belt you sort colors.
+Write me a kid-friendly game of a conveyor sushi defense.
+Write me a game of a tower defense with one path.
+Write me a one-screen game of a plant versus a single lane of creeps.
+Write me a two-player game of a castle wall you repair.
+Write me a timed one-minute game of a moat and a drawbridge timing game.
+Write me a kid-friendly game of a knight that parries one dragon.
+Write me a game of a wizard duel of elements.
+Write me a one-screen game of a potion mixing puzzle.
+Write me a two-player game of a alchemy shelf.
+Write me a timed one-minute game of a spell typing game.
+Write me a kid-friendly game of a rune matching circle.
+Write me a game of a dungeon door with a riddle.
+Write me a one-screen game of a text adventure of three rooms.
+Write me a two-player game of a point and click desk.
+Write me a timed one-minute game of a hidden object scene.
+Write me a kid-friendly game of a where's waldo style scene.
+Write me a game of a spot the difference pair.
+Write me a one-screen game of a jigsaw of twelve pieces.
+Write me a two-player game of a tangram board.
+Write me a timed one-minute game of a origami folder of one crane.
+Write me a kid-friendly game of a paper doll dress up.
+Write me a game of a sticker scene.
+Write me a one-screen game of a coloring book page.
+Write me a two-player game of a pixel paint grid.
+Write me a timed one-minute game of a etch a sketch.
+Write me a kid-friendly game of a spirograph.
+Write me a game of a kaleidoscope you spin.
+Write me a one-screen game of a fireworks show you time.
+Write me a two-player game of a sparkler you draw with.
+Write me a timed one-minute game of a sand drawing that the tide erases.
+Write me a kid-friendly game of a zen garden rake.
+Write me a game of a koi pond you feed.
+Write me a one-screen game of a aquarium you stock.
+Write me a two-player game of a ant farm.
+Write me a timed one-minute game of a beehive you keep calm.
+Write me a kid-friendly game of a bird feeder and a checklist.
+Write me a game of a whale watch clicker.
+Write me a one-screen game of a safari photo hunt.
+Write me a two-player game of a dinosaur dig.
+Write me a timed one-minute game of a fossil cleaner.
+Write me a kid-friendly game of a museum placard quiz.
+Write me a game of a piano of one octave.
+Write me a one-screen game of a drum machine of four pads.
+Write me a two-player game of a guitar hero highway of four keys.
+Write me a timed one-minute game of a rhythm tap to a steady beat.
+Write me a kid-friendly game of a metronome you clap along with.
+Write me a game of a sequencer of sixteen steps.
+Write me a one-screen game of a theremin you move the mouse over.
+Write me a two-player game of a xylophone.
+Write me a timed one-minute game of a karaoke pitch meter.
+Write me a kid-friendly game of a name that tune of three notes.
+Write me a game of a musical chairs of dots.
+Write me a one-screen game of a dance pad of four arrows.
+Write me a two-player game of a simon melody that gets longer.
+Write me a timed one-minute game of a chord guesser.
+Write me a kid-friendly game of a interval trainer.
+Write me a game of a sight reading flash of one note.
+Write me a one-screen game of a bpm tap timer.
+Write me a two-player game of a loop station of two bars.
+Write me a timed one-minute game of a rain sound mixer of three sliders.
+Write me a kid-friendly game of a city noise box.
+Write me a game of a morse code tapper.
+Write me a one-screen game of a signal flag quiz.
+Write me a two-player game of a semaphore spelling toy.
+Write me a timed one-minute game of a lighthouse flash pattern you copy.
+Write me a kid-friendly game of a radio tuner that finds a station.
+Write me a game of a compass heading game.
+Write me a one-screen game of a map pin drop of countries.
+Write me a two-player game of a license plate spotter.
+Write me a timed one-minute game of a road sign quiz.
+Write me a kid-friendly game of a clock you set to the right time.
+Write me a game of a calendar you find a date on.
+Write me a one-screen game of a stopwatch with a lap button.
+Write me a two-player game of a egg timer.
+Write me a timed one-minute game of a pomodoro block.
+Write me a kid-friendly game of a alarm you dismiss with a math problem.
+Write me a game of a world clock of four cities.
+Write me a one-screen game of a sundial you rotate.
+Write me a two-player game of a moon phase clicker.
+Write me a timed one-minute game of a constellation connector.
+Write me a kid-friendly game of a planet order drag game.
+Write me a game of a solar system orrery.
+Write me a one-screen game of a gravity slingshot.
+Write me a two-player game of a orbit matching puzzle.
+Write me a timed one-minute game of a rocket staging toy.
+Write me a kid-friendly game of a spacewalk with a tether.
+Write me a game of a mars rover that avoids rocks.
+Write me a one-screen game of a moon buggy jump.
+Write me a two-player game of a satellite dish you aim.
+Write me a timed one-minute game of a weather vane.
+Write me a kid-friendly game of a barometer reading quiz.
+Write me a game of a cloud type flash cards.
+Write me a one-screen game of a rain collector.
+Write me a two-player game of a snowflake you design once.
+Write me a timed one-minute game of a ice skating figure of one routine.
+Write me a kid-friendly game of a hockey shootout.
+Write me a game of a baseball pitch you time.
+Write me a one-screen game of a cricket bowl.
+Write me a two-player game of a volleyball set and spike.
+Write me a timed one-minute game of a badminton rally.
+Write me a kid-friendly game of a table tennis serve.
+Write me a game of a squash front wall.
+Write me a one-screen game of a racquetball.
+Write me a two-player game of a lacrosse shot.
+Write me a timed one-minute game of a rugby conversion kick.
+Write me a kid-friendly game of a american football field goal.
+Write me a game of a golf putting green with a break.
+Write me a one-screen game of a bowling split you pick up.
+Write me a two-player game of a darts 501.
+Write me a timed one-minute game of a snooker red then color.
+Write me a kid-friendly game of a croquet wicket.
+Write me a game of a bocce court.
+Write me a one-screen game of a petanque throw.
+Write me a two-player game of a horseshoes ringer.
+Write me a timed one-minute game of a cornhole board.
+Write me a kid-friendly game of a ladder toss.
+Write me a game of a kan jam.
+Write me a one-screen game of a spikeball bump.
+Write me a two-player game of a four square court.
+Write me a timed one-minute game of a dodgeball one court.
+Write me a kid-friendly game of a kickball infield.
+Write me a game of a whiffle ball.
+Write me a one-screen game of a tee ball.
+Write me a two-player game of a catch with a growing distance.
+Write me a timed one-minute game of a frisbee accuracy.
+Write me a kid-friendly game of a boomerang return.
+Write me a game of a yo-yo trick of one string.
+Write me a one-screen game of a top you keep spinning.
+Write me a two-player game of a diabolo toss.
+Write me a timed one-minute game of a juggling of three balls.
+Write me a kid-friendly game of a card flourish trainer.
+Write me a game of a coin flip caller.
+Write me a one-screen game of a dice race of two dice.
+Write me a two-player game of a pig dice game.
+Write me a timed one-minute game of a liar's dice.
+Write me a kid-friendly game of a yacht dice.
+Write me a game of a backgammon race.
+Write me a one-screen game of a parcheesi.
+Write me a two-player game of a snakes and ladders.
+Write me a timed one-minute game of a sorry style board.
+Write me a kid-friendly game of a candyland style draw.
+Write me a game of a the game of life spinner.
+Write me a one-screen game of a monopoly style one block.
+Write me a two-player game of a clue style one room deduction.
+Write me a timed one-minute game of a stratego one battle.
+Write me a kid-friendly game of a risk style one continent.
+Write me a game of a chess puzzle of mate in one.
+Write me a one-screen game of a checkers force jump.
+Write me a two-player game of a go capture of one group.
+Write me a timed one-minute game of a mancala pit.
+Write me a kid-friendly game of a dominoes train.
+Write me a game of a mahjong solitaire of one layer.
+Write me a one-screen game of a spider solitaire.
+Write me a two-player game of a pyramid solitaire.
+Write me a timed one-minute game of a tripeaks.
+Write me a kid-friendly game of a accordion solitaire.
+Write me a game of a golf solitaire.
+Write me a one-screen game of a canfield.
+Write me a two-player game of a calculation solitaire.
+Write me a timed one-minute game of a clock solitaire.
+Write me a kid-friendly game of a forty thieves.
+Write me a game of klondike with a three card draw.
+Write me a one-screen game of a free cell that starts easy.
+Write me a two-player game of a memory path of lights.
+Write me a timed one-minute game of a sequence of arrows you repeat.
+Write me a kid-friendly game of a pattern copy on a grid.
+Write me a game of a odd one out.
+Write me a one-screen game of a which cup hides the ball.
+Write me a two-player game of a shell game.
+Write me a timed one-minute game of a three card monte you should not trust.
+Write me a kid-friendly game of a high low card streak.
+Write me a game of a twenty one counting toy.
+Write me a one-screen game of a red black streak.
+Write me a two-player game of a roulette wheel you just watch and bet one chip.
+Write me a timed one-minute game of a craps pass line.
+Write me a kid-friendly game of a keno pick of five.
+Write me a game of a lottery number match.
+Write me a one-screen game of a scratch card.
+Write me a two-player game of a slot machine of three reels.
+Write me a timed one-minute game of a prize wheel.
+Write me a kid-friendly game of a claw machine.
+Write me a game of a gacha capsule you should see the odds of.
+Write me a one-screen game of a blind bag opener.
+Write me a two-player game of a trading card pack.
+Write me a timed one-minute game of a deck builder of five cards.
+Write me a kid-friendly game of a auto battler of three units.
+Write me a game of a one lane card fight.
+Write me a one-screen game of a hero that has three spells.
+Write me a two-player game of a boss with a telegraphed stomp.
+Write me a timed one-minute game of a dodge the falling rocks.
+Write me a kid-friendly game of a bullet heaven of one minute.
+Write me a game of a survival of sixty seconds.
+Write me a one-screen game of a last balloon standing.
+Write me a two-player game of a king of the hill dot.
+Write me a timed one-minute game of a tag you're it.
+Write me a kid-friendly game of a hide and seek of one room.
+Write me a game of a capture the flag on a tiny field.
+Write me a one-screen game of a tug of war.
+Write me a two-player game of a arm wrestling meter.
+Write me a timed one-minute game of a thumb war.
+Write me a kid-friendly game of a rock paper scissors with a streak.
+Write me a game of a odds and evens.
+Write me a one-screen game of a chopstick finger count.
+Write me a two-player game of a twenty one sticks.
+Write me a timed one-minute game of a nim heap.
+Write me a kid-friendly game of a kayles bowling pins.
+Write me a game of a subtract a square.
+Write me a one-screen game of a geography chain of names.
+Write me a two-player game of a categories with a letter.
+Write me a timed one-minute game of a scattergories style list.
+Write me a kid-friendly game of a taboo describe the word.
+Write me a game of a pictionary one word.
+Write me a one-screen game of a charades pose buttons.
+Write me a two-player game of a two truths and a lie quiz.
+Write me a timed one-minute game of a would you rather.
+Write me a kid-friendly game of a this or that swipe.
+Write me a game of a personality quiz of five questions.
+Write me a one-screen game of a which pizza topping are you.
+Write me a two-player game of a name generator you roll.
+Write me a timed one-minute game of a diceware password toy.
+Write me a kid-friendly game of a coin that flips fairly.
+Write me a game of a wheel of names.
+Write me a one-screen game of a turn randomizer.
+Write me a two-player game of a scoreboard for two names.
+Write me a timed one-minute game of a tournament bracket of four.
+Write me a kid-friendly game of a best of five counter.
+Write me a game of a penalty shootout score.
+Write me a one-screen game of a overtime coin flip.
+Write me a two-player game of a referee whistle toy.
+Write me a timed one-minute game of a play clock you count down.
+Write me a kid-friendly game of a shot clock.
+Write me a game of a chess clock for two buttons.
+Write me a one-screen game of a cube scramble timer.
+Write me a two-player game of a rubik simulator of one face turns.
+Write me a timed one-minute game of a fifteen puzzle.
+Write me a kid-friendly game of a klotski block slide.
+Write me a game of a rush hour car park.
+Write me a one-screen game of a unblock the red car.
+Write me a two-player game of a parking jam.
+Write me a timed one-minute game of a flow free style links.
+Write me a kid-friendly game of a numberlink.
+Write me a game of a bridges hash i.
+Write me a one-screen game of a slitherlink loop.
+Write me a two-player game of a nurikabe islands.
+Write me a timed one-minute game of a heyawake rooms.
+Write me a kid-friendly game of a akari light bulbs.
+Write me a game of a tents and trees.
+Write me a one-screen game of a star battle.
+Write me a two-player game of a sudoku of four by four.
+Write me a timed one-minute game of a kenken cage.
+Write me a kid-friendly game of a futoshiki.
+Write me a game of a kakuro run.
+Write me a one-screen game of a killer sudoku cage of one house.
+Write me a two-player game of a word search of eight words.
+Write me a timed one-minute game of a word scramble.
+Write me a kid-friendly game of a anagram of one long word.
+Write me a game of a spelling hangman of animals.
+Write me a one-screen game of a vocabulary flash card.
+Write me a two-player game of a synonym match.
+Write me a timed one-minute game of a antonym match.
+Write me a kid-friendly game of a rhyming pair.
+Write me a game of a syllable count tap.
+Write me a one-screen game of a haiku checker of five seven five.
+Write me a two-player game of a mad lib you fill.
+Write me a timed one-minute game of a rebus puzzle.
+Write me a kid-friendly game of a emoji movie title.
+Write me a game of a cryptic clue of one word.
+Write me a one-screen game of a crossword clue and a letter bank.
+Write me a two-player game of a alphabet race.
+Write me a timed one-minute game of a keyboard row typist.
+Write me a kid-friendly game of a home row drill.
+Write me a game of a number pad drill.
+Write me a one-screen game of a code typing of a short function.
+Write me a two-player game of a css color you match by eye.
+Write me a timed one-minute game of a hex color guesser.
+Write me a kid-friendly game of a contrast checker of two swatches.
+Write me a game of a font pairing picker.
+Write me a one-screen game of a layout you nudge with arrow keys.
+Write me a two-player game of a pixel perfect align game.
+Write me a timed one-minute game of a bezier curve you match.
+Write me a kid-friendly game of a animation timing you stop on the beat.
+Write me a game of a sprite sheet clicker of frames.
+Write me a one-screen game of a walk cycle you step.
+Write me a two-player game of a lip flap you time.
+Write me a timed one-minute game of a camera pan of one scene.
+Write me a kid-friendly game of a cutscene of three captions.
+Write me a game of a dialogue tree of four lines.
+Write me a one-screen game of a shop with three items and gold.
+Write me a two-player game of a inventory of eight slots.
+Write me a timed one-minute game of a crafting of two ingredients.
+Write me a kid-friendly game of a campfire you keep lit.
+Write me a game of a hunger bar you snack.
+Write me a one-screen game of a thirst bar.
+Write me a two-player game of a stamina bar you sprint.
+Write me a timed one-minute game of a health potion you time.
+Write me a kid-friendly game of a shield you raise.
+Write me a game of a parry window.
+Write me a one-screen game of a dodge roll with cooldown.
+Write me a two-player game of a double jump.
+Write me a timed one-minute game of a wall slide.
+Write me a kid-friendly game of a grappling hook to one peg.
+Write me a game of a rope swing.
+Write me a one-screen game of a ladder climb.
+Write me a two-player game of a conveyor belt platform.
+Write me a timed one-minute game of a wind that pushes a balloon.
+Write me a kid-friendly game of a gravity flip.
+Write me a game of a magnet that attracts coins.
+Write me a one-screen game of a key and a locked door.
+Write me a two-player game of a pressure plate and a door.
+Write me a timed one-minute game of a torch that reveals fog.
+Write me a kid-friendly game of a battery that powers a lamp.
+Write me a game of a circuit of one switch and a bulb.
+Write me a one-screen game of a logic gate and or not toy.
+Write me a two-player game of a truth table you fill.
+Write me a timed one-minute game of a binary count clicker.
+Write me a kid-friendly game of a hex dump reader of four bytes.
+Write me a game of a morse you decode.
+Write me a one-screen game of a caesar cipher wheel.
+Write me a two-player game of a substitution cipher toy.
+Write me a timed one-minute game of a pig latin converter.
+Write me a kid-friendly game of a pigpen cipher.
+Write me a game of a semaphore you show a letter.
+Write me a one-screen game of a flag of the day quiz.
+Write me a two-player game of a state capital drag.
+Write me a timed one-minute game of a country outline quiz.
+Write me a kid-friendly game of a river you trace.
+Write me a game of a mountain height order.
+Write me a one-screen game of a ocean name match.
+Write me a two-player game of a biome matcher.
+Write me a timed one-minute game of a food chain you order.
+Write me a kid-friendly game of a water cycle you click in order.
+Write me a game of a photosynthesis labeling.
+Write me a one-screen game of a cell parts drag.
+Write me a two-player game of a skeleton you label.
+Write me a timed one-minute game of a tooth brushing timer.
+Write me a kid-friendly game of a hand wash timer of twenty seconds.
+Write me a game of a posture stretch reminder.
+Write me a one-screen game of a breathing bubble of four seconds.
+Write me a two-player game of a box breathing guide.
+Write me a timed one-minute game of a jumping jack counter.
+Write me a kid-friendly game of a squat counter.
+Write me a game of a plank timer.
+Write me a one-screen game of a step counter you click.
+Write me a two-player game of a water glass tracker of eight.
+Write me a timed one-minute game of a mood clicker of five faces.
+Write me a kid-friendly game of a gratitude line you type.
+Write me a game of a one sentence diary.
+Write me a one-screen game of a habit check of three boxes.
+Write me a two-player game of a kanban of three columns.
+Write me a timed one-minute game of a todo list of one list.
+Write me a kid-friendly game of a timer for a meeting.
+Write me a game of a poll of three choices.
+Write me a one-screen game of a spinner of chores.
+Write me a two-player game of a chore wheel for four names.
+Write me a timed one-minute game of a allowance calculator.
+Write me a kid-friendly game of a tip calculator.
+Write me a game of a split the bill.
+Write me a one-screen game of a unit converter of inches and centimeters.
+Write me a two-player game of a temperature converter.
+Write me a timed one-minute game of a percentage of a number.
+Write me a kid-friendly game of a fraction simplifier you guess.
+Write me a game of a roman numeral quiz.
+Write me a one-screen game of a clock angle quiz.
+Write me a two-player game of a change making game.
+Write me a timed one-minute game of a cash register.
+Write me a kid-friendly game of a coin counting jar.
+Write me a game of a budget of three envelopes.
+Write me a one-screen game of a lemonade profit.
+Write me a two-player game of a stock ticker you buy one share of a fake price.
+Write me a timed one-minute game of a savings jar fill.
+Write me a kid-friendly game of a interest calculator you step by year.
+Write me a game of a measurement you read off a ruler.
+Write me a one-screen game of a protractor angle guess.
+Write me a two-player game of a balance scale with weights.
+Write me a timed one-minute game of a spring scale.
+Write me a kid-friendly game of a thermometer you read.
+Write me a game of a speedometer needle.
+Write me a one-screen game of a odometer trip.
+Write me a two-player game of a gas gauge you don't run out.
+Write me a timed one-minute game of a battery charge icon game.
+Write me a kid-friendly game of a signal strength you find the spot.
+Write me a game of a volume slider ear test of louder.
+Write me a one-screen game of a brightness match.
+Write me a two-player game of a focus the blurry photo.
+Write me a timed one-minute game of a crop a photo to a square.
+Write me a kid-friendly game of a red eye click.
+Write me a game of a before and after slider.
+Write me a one-screen game of a panorama you align two photos.
+Write me a two-player game of a stamp album.
+Write me a timed one-minute game of a coin album.
+Write me a kid-friendly game of a bug collection.
+Write me a game of a leaf collection.
+Write me a one-screen game of a rock collection you label.
+Write me a two-player game of a sticker album of eight.
+Write me a timed one-minute game of a badge board.
+Write me a kid-friendly game of a achievement pop of one toast.
+Write me a game of a high score table of five.
+Write me a one-screen game of a replay of the last ten seconds as text.
+Write me a two-player game of a ghost race of your last run.
+Write me a timed one-minute game of a daily seed you can share as a number.
+Write me a kid-friendly game of a seed you type to replay a maze.
+Write me a game of a color by number.
+Write me a one-screen game of a paint by sticker.
+Write me a two-player game of a mosaic of tiles.
+Write me a timed one-minute game of a bead pattern.
+Write me a kid-friendly game of a friendship bracelet pattern.
+Write me a game of a scarf knit row counter.
+Write me a one-screen game of a cross stitch grid.
+Write me a two-player game of a pottery wheel you spin.
+Write me a timed one-minute game of a pottery wheel.
+Write me a kid-friendly game of a glass blowing bubble you heat.
+Write me a game of a blacksmith timing the hammer.
+Write me a one-screen game of a wood shop measure twice.
+Write me a two-player game of a nail you hammer straight.
+Write me a timed one-minute game of a screw you turn until flush.
+Write me a kid-friendly game of a paint the fence in one coat.
+Write me a game of a mow a lawn in rows.
+Write me a one-screen game of a rake the leaves into a pile.
+Write me a two-player game of a snow shovel a path.
+Write me a timed one-minute game of a ice scrape a windshield.
+Write me a kid-friendly game of a car wash sponge.
+Write me a game of a vacuum a rug in stripes.
+Write me a one-screen game of a wash the dishes in order.
+Write me a two-player game of a sort recycling into three bins.
+Write me a timed one-minute game of a compost what belongs.
+Write me a kid-friendly game of a plant a seed and wait a short timer.
+Write me a game of a water the plant when the soil looks dry.
+Write me a one-screen game of a prune one branch.
+Write me a two-player game of a harvest the red tomatoes only.
+Write me a timed one-minute game of a feed the chickens.
+Write me a kid-friendly game of a collect the eggs.
+Write me a game of a milk a cow with a timing bar.
+Write me a one-screen game of a shear a sheep.
+Write me a two-player game of a herd two sheep into a pen.
+Write me a timed one-minute game of a ride a horse along a fence.
+Write me a kid-friendly game of a saddle the horse in order.
+Write me a game of a walk a dog that pulls.
+Write me a one-screen game of a teach a parrot one word.
+Write me a two-player game of a fish tank temperature you keep in range.
+Write me a timed one-minute game of a camp stove you light safely in steps.
+Write me a kid-friendly game of a tent you pitch in order.
+Write me a game of a camp map with an x you pace off.
+Write me a one-screen game of a trail blaze you follow.
+Write me a two-player game of a compass bearing you walk.
+Write me a timed one-minute game of a knot tying of a bowline in steps.
+Write me a kid-friendly game of a rope coil.
+Write me a game of a flashlight battery swap.
+Write me a one-screen game of a first aid order of operations quiz.
+Write me a two-player game of a fire extinguisher pass toy.
+Write me a timed one-minute game of a stop drop roll quiz.
+Write me a kid-friendly game of a crosswalk look both ways.
+Write me a game of a seatbelt click.
+Write me a one-screen game of a bike helmet check.
+Write me a two-player game of a traffic quiz of three signs.
+Write me a timed one-minute game of a right of way intersection.
+Write me a kid-friendly game of a parallel park between two cars.
+Write me a game of a three point turn.
+Write me a one-screen game of a lane change mirror check.
+Write me a two-player game of a speed limit match.
+Write me a timed one-minute game of a following distance.
+Write me a kid-friendly game of a train crossing stop.
+Write me a game of a drawbridge wait.
+Write me a one-screen game of a ferry you drive onto.
+Write me a two-player game of a bus you pull the cord for your stop.
+Write me a timed one-minute game of a elevator you pick a floor.
+Write me a kid-friendly game of a vending machine with exact change.
+Write me a game of a payphone you dial a short number.
+Write me a one-screen game of a postcard you address.
+Write me a two-player game of a stamp you place in the corner.
+Write me a timed one-minute game of a envelope you seal.
+Write me a kid-friendly game of a mailbox flag you raise.
+Write me a game of a package you tape and label.
+Write me a one-screen game of a barcode you must align.
+Write me a two-player game of a qr code you pretend to scan by clicking.
+Write me a timed one-minute game of a library checkout desk.
+Write me a kid-friendly game of a due date stamp.
+Write me a game of a bookshelf sort by author.
+Write me a one-screen game of a card catalog search.
+Write me a two-player game of a quiet meter you keep low.
+Write me a timed one-minute game of a microscope focus.
+Write me a kid-friendly game of a slide you label.
+Write me a game of a telescope you find one star.
+Write me a one-screen game of a binocular bird id.
+Write me a two-player game of a camera exposure you set.
+Write me a timed one-minute game of a tripod timer.
+Write me a kid-friendly game of a film you wind.
+Write me a game of a darkroom tray order.
+Write me a one-screen game of a print you hang to dry.
+Write me a two-player game of a gallery wall you space evenly.
+Write me a timed one-minute game of a frame you hang level.
+Write me a kid-friendly game of a spotlight you aim.
+Write me a game of a curtain call bow.
+Write me a one-screen game of a script cue you hit.
+Write me a two-player game of a prop you hand off.
+Write me a timed one-minute game of a makeup mirror match.
+Write me a kid-friendly game of a costume change timer.
+Write me a game of a ticket booth.
+Write me a one-screen game of a usher seating of a row.
+Write me a two-player game of a popcorn bucket fill.
+Write me a timed one-minute game of a movie trivia of one decade.
+Write me a kid-friendly game of a intermission countdown.
+Write me a game of a encore button.
+Write me a one-screen game of a orchestra tune note.
+Write me a two-player game of a conductor you follow the beat.
+Write me a timed one-minute game of a choir you hold the pitch.
+Write me a kid-friendly game of a drum roll you time.
+Write me a game of a cymbal crash on the last beat.
+Write me a one-screen game of a jazz brush pattern.
+Write me a two-player game of a bass line of four notes.
+Write me a timed one-minute game of a melody you echo.
+Write me a kid-friendly game of a round you sing in two parts on one screen.
+Write me a game of a record you drop on a platter.
+Write me a one-screen game of a tape you rewind.
+Write me a two-player game of a cassette you flip to side b.
+Write me a timed one-minute game of a radio drama of three sound buttons.
+Write me a kid-friendly game of a foley pit you click the right sound.
+Write me a game of a audio waveform you find the clap.
+Write me a one-screen game of a mute the hiss.
+Write me a two-player game of a level match of two tracks.
+Write me a timed one-minute game of a pan a sound left and right.
+Write me a kid-friendly game of a delay you tap in time.
+Write me a game of a reverb you don't drown the voice.
+Write me a one-screen game of a equalizer of three bands.
+Write me a two-player game of a noise gate toy.
+Write me a timed one-minute game of a click track on off.
+Write me a kid-friendly game of a count in of four.
+Write me a game of a loop you trim to the bar.
+Write me a one-screen game of a sample you chop once.
+Write me a two-player game of a drum pad bank of four.
+Write me a timed one-minute game of a piano roll of one bar.
+Write me a kid-friendly game of a chord stamp.
+Write me a game of a scale practice highlighter.
+Write me a one-screen game of a finger number hint for one scale.
+Write me a two-player game of a tuner that says sharp or flat.
+Write me a timed one-minute game of a capo position quiz.
+Write me a kid-friendly game of a fretboard note quiz.
+Write me a game of a ukulele chord of one shape.
+Write me a one-screen game of a harmonica hole.
+Write me a two-player game of a recorder fingering chart quiz.
+Write me a timed one-minute game of a trumpet valve combo.
+Write me a kid-friendly game of a drum rudiment of a paradiddle you tap.
+Write me a game of a whistle a pitch.
+Write me a one-screen game of a clap on two and four.
+Write me a two-player game of a silence for a rest.
+Write me a timed one-minute game of a fermata you hold.
+Write me a kid-friendly game of a crescendo slider.
+Write me a game of a accent the offbeat.
+Write me a one-screen game of a swing the eighth notes.
+Write me a two-player game of a waltz count of three.
+Write me a timed one-minute game of a march count of two.
+Write me a kid-friendly game of a bossa nova click.
+Write me a game of a samba feet pattern.
+Write me a one-screen game of a tango step diagram you click through.
+Write me a two-player game of a waltz box step.
+Write me a timed one-minute game of a line dance of four moves.
+Write me a kid-friendly game of a hokey pokey of buttons.
+Write me a game of a head shoulders knees and toes clicker.
+Write me a one-screen game of a freeze dance.
+Write me a two-player game of a musical statues.
+Write me a timed one-minute game of a red light green light.
+Write me a kid-friendly game of a mother may i steps.
+Write me a game of a simon says body poses.
+Write me a one-screen game of a obstacle course of four stations.
+Write me a two-player game of a sack race.
+Write me a timed one-minute game of a egg and spoon.
+Write me a kid-friendly game of a three legged race of one pair.
+Write me a game of a wheelbarrow race.
+Write me a one-screen game of a tug of war rope.
+Write me a two-player game of a parachute raise in a circle of dots.
+Write me a timed one-minute game of a duck duck goose of a circle.
+Write me a kid-friendly game of a hot potato pass.
+Write me a game of a telephone message garble.
+Write me a one-screen game of a operator you connect a call.
+Write me a two-player game of a switchboard.
+Write me a timed one-minute game of a telegraph key.
+Write me a kid-friendly game of a pneumatic tube you send.
+Write me a game of a mail sort into zip piles.
+Write me a one-screen game of a letter you fold in thirds.
+Write me a two-player game of a paper airplane target.
+Write me a timed one-minute game of a paper football goal.
+Write me a kid-friendly game of a table hockey.
+Write me a game of a penny football.
+Write me a one-screen game of a finger skateboard.
+Write me a two-player game of a marble shooter.
+Write me a timed one-minute game of a pinball plunger timing.
+Write me a kid-friendly game of a pachinko drop.
+Write me a game of a plinko board.
+Write me a one-screen game of a coin pusher.
+Write me a two-player game of a skee ball.
+Write me a timed one-minute game of a ring the bell strength tester.
+Write me a kid-friendly game of a high striker.
+Write me a game of a love tester meter.
+Write me a one-screen game of a fortune teller.
+Write me a two-player game of a magic eight ball.
+Write me a timed one-minute game of a crystal ball shake.
+Write me a kid-friendly game of a tarot one card draw with a plain meaning.
+Write me a game of a dice oracle.
+Write me a one-screen game of a coin oracle.
+Write me a two-player game of a paper fortune teller.
+Write me a timed one-minute game of a chatterbox.
+Write me a kid-friendly game of a cootie catcher.
+Write me a game of a mad fold.
+Write me a one-screen game of a secret decoder ring.
+Write me a two-player game of a invisible ink reveal.
+Write me a timed one-minute game of a spy briefcase.
+Write me a kid-friendly game of a laser tripwire you crawl under.
+Write me a game of a vent you crawl.
+Write me a one-screen game of a keypad code of four digits you were shown.
+Write me a two-player game of a retina scan joke button.
+Write me a timed one-minute game of a badge you swipe.
+Write me a kid-friendly game of a door that asks a riddle.
+Write me a game of a maze of hedges from above.
+Write me a one-screen game of a corn maze map.
+Write me a two-player game of a haunted house of three rooms.
+Write me a timed one-minute game of a pumpkin you carve with clicks.
+Write me a kid-friendly game of a costume contest vote.
+Write me a game of a candy count.
+Write me a one-screen game of a trick or treat street of four doors.
+Write me a two-player game of a bonfire you add a log.
+Write me a timed one-minute game of a sparkler write a letter.
+Write me a kid-friendly game of a new year countdown.
+Write me a game of a ball drop.
+Write me a one-screen game of a resolution you type.
+Write me a two-player game of a birthday candle blow.
+Write me a timed one-minute game of a cake slice picker.
+Write me a kid-friendly game of a present you unwrap.
+Write me a game of a ribbon you tie.
+Write me a one-screen game of a card you sign.
+Write me a two-player game of a balloon you don't pop until the count.
+Write me a timed one-minute game of a pinata swing timing.
+Write me a kid-friendly game of a confetti cannon.
+Write me a game of a party playlist of five skips.
+Write me a one-screen game of a photo booth of three poses.
+Write me a two-player game of a guest book.
+Write me a timed one-minute game of a seating chart of eight.
+Write me a kid-friendly game of a name tag writer.
+Write me a game of a icebreaker question spinner.
+Write me a one-screen game of a two truths mixer.
+Write me a two-player game of a bingo of party squares.
+Write me a timed one-minute game of a scavenger hunt of five items in a picture.
+Write me a kid-friendly game of a treasure map grid.
+Write me a game of a x marks the spot dig.
+Write me a one-screen game of a bottle in the sand.
+Write me a two-player game of a message in a bottle you write.
+Write me a timed one-minute game of a island you walk the shore.
+Write me a kid-friendly game of a camp on the beach tide timer.
+Write me a game of a shell collect.
+Write me a one-screen game of a sandcastle you defend from a wave.
+Write me a two-player game of a tide pool clicker.
+Write me a timed one-minute game of a crab race.
+Write me a kid-friendly game of a seagull you shoo off the fries.
+Write me a game of a ice cream you eat before it melts.
+Write me a one-screen game of a sunscreen reminder timer.
+Write me a two-player game of a umbrella you open when the cloud arrives.
+Write me a timed one-minute game of a puddle jump.
+Write me a kid-friendly game of a rainbow you name the colors in order.
+Write me a game of a thunder count between flash and boom.
+Write me a one-screen game of a lightning distance toy.
+Write me a two-player game of a tornado drill positions.
+Write me a timed one-minute game of a earthquake drop cover hold quiz.
+Write me a kid-friendly game of a hurricane tracking map of one storm.
+Write me a game of a snow day checker of a fake forecast.
+Write me a one-screen game of a igloo you stack blocks.
+Write me a two-player game of a snowman of three circles.
+Write me a timed one-minute game of a snow angel click.
+Write me a kid-friendly game of a sled run with one jump.
+Write me a game of a ice fish over a hole.
+Write me a one-screen game of a hot cocoa you don't let boil.
+Write me a two-player game of a mitten match.
+Write me a timed one-minute game of a scarf wind.
+Write me a kid-friendly game of a boot tray.
+Write me a game of a fireplace you light in order.
+Write me a one-screen game of a stocking you fill.
+Write me a two-player game of a advent calendar of four doors.
+Write me a timed one-minute game of a wreath you decorate.
+Write me a kid-friendly game of a candle you don't leave unattended quiz.
+Write me a game of a carol lyric next line.
+Write me a one-screen game of a nutcracker click through poses.
+Write me a two-player game of a ice skate routine of three moves.
+Write me a timed one-minute game of a hockey faceoff.
+Write me a kid-friendly game of a curling broom sweep.
+Write me a game of a bobsled turn.
+Write me a one-screen game of a luge lie back.
+Write me a two-player game of a ski jump distance.
+Write me a timed one-minute game of a biathlon shoot then ski.
+Write me a kid-friendly game of a snowshoe path.
+Write me a game of a cross country track.
+Write me a one-screen game of a figure skate spin counter.
+Write me a two-player game of a hockey penalty box timer.
+Write me a timed one-minute game of a zamboni you drive in a pattern.
+Write me a kid-friendly game of a puck you shoot into the five hole.
+Write me a game of a goalie glove side.
+Write me a one-screen game of a baseball catcher signs.
+Write me a two-player game of a pitcher windup timing.
+Write me a timed one-minute game of a batter eye.
+Write me a kid-friendly game of a bunt down the line.
+Write me a game of a stolen base lead.
+Write me a one-screen game of a pop fly you call.
+Write me a two-player game of a grounder you charge.
+Write me a timed one-minute game of a double play turn.
+Write me a kid-friendly game of a outfield wall leap.
+Write me a game of a peanut toss into a glove.
+Write me a one-screen game of a seventh inning stretch timer.
+Write me a two-player game of a scoreboard operator.
+Write me a timed one-minute game of a organ charge fanfare button.
+Write me a kid-friendly game of a wave you start around a circle.
+Write me a game of a foam finger.
+Write me a one-screen game of a ticket stub collector.
+Write me a two-player game of a foul ball you duck or catch.
+Write me a timed one-minute game of a rain delay tarp.
+Write me a kid-friendly game of a ground crew drag the infield.
+Write me a game of a chalk the batter box.
+Write me a one-screen game of a rosin bag.
+Write me a two-player game of a pine tar check.
+Write me a timed one-minute game of a bat weight donut.
+Write me a kid-friendly game of a on deck circle timer.
+Write me a game of a bullpen warm up count.
+Write me a one-screen game of a manager challenge button.
+Write me a two-player game of a replay review of a still frame you call safe or out.
+Write me a timed one-minute game of a photo finish of a race.
+Write me a kid-friendly game of a starting blocks reaction.
+Write me a game of a hurdle you time the jump.
+Write me a one-screen game of a relay handoff.
+Write me a two-player game of a long jump takeoff board.
+Write me a timed one-minute game of a high jump arch.
+Write me a kid-friendly game of a pole vault plant.
+Write me a game of a shot put glide.
+Write me a one-screen game of a discus spin.
+Write me a two-player game of a javelin angle.
+Write me a timed one-minute game of a hammer throw spin.
+Write me a kid-friendly game of a triple jump hop step jump.
+Write me a game of a marathon split calculator.
+Write me a one-screen game of a water station click.
+Write me a two-player game of a finish line tape.
+Write me a timed one-minute game of a medal ceremony of three places.
+Write me a kid-friendly game of a podium you stand on.
+Write me a game of a anthem you stand still for a timer.
+Write me a one-screen game of a flag raise.
+Write me a two-player game of a torch you carry across one screen.
+Write me a timed one-minute game of a oath you click the words in order.
+Write me a kid-friendly game of a score you verify.
+Write me a game of a tape measure of a throw.
+Write me a one-screen game of a wind gauge.
+Write me a two-player game of a false start recall.
+Write me a timed one-minute game of a lane assignment.
+Write me a kid-friendly game of a heat sheet.
+Write me a game of a qualifying time you beat.
+Write me a one-screen game of a personal record flash.
+Write me a two-player game of a split negative you notice.
+Write me a timed one-minute game of a kick the last hundred.
+Write me a kid-friendly game of a wall you hit at mile temptation.
+Write me a game of a gel you take on time.
+Write me a one-screen game of a shoe you tie a double knot quiz.
+Write me a two-player game of a bib you pin.
+Write me a timed one-minute game of a chip you start on the mat.
+Write me a page that lets you draw and undo.
+Write me a single-screen tool that shows a big clock.
+Write me a little browser toy that counts down from ten.
+Write me a page that rolls a die.
+Write me a single-screen tool that flips a coin.
+Write me a little browser toy that picks a random name from a list you type.
+Write me a page that converts centimeters to inches.
+Write me a single-screen tool that adds a tip of fifteen percent.
+Write me a little browser toy that splits a restaurant bill.
+Write me a page that times a three minute egg.
+Write me a single-screen tool that shows a metronome.
+Write me a little browser toy that plays a one octave piano.
+Write me a page that lets you sketch with the mouse.
+Write me a single-screen tool that mixes two colors.
+Write me a little browser toy that shows the multiplication table.
+Write me a page that quizzes you on five state capitals.
+Write me a single-screen tool that reads a sentence aloud with the speech api if present otherwise shows it big.
+Write me a little browser toy that lets you check off a grocery list.
+Write me a page that sorts three tasks into now next later.
+Write me a single-screen tool that shows a breathing circle.
+Write me a little browser toy that counts jumping jacks you click.
+Write me a page that keeps score for two players.
+Write me a single-screen tool that shows a calendar month you can click.
+Write me a little browser toy that picks a chore for today.
+Write me a page that calculates how many days until a date you type.
+Write me a single-screen tool that shows a compass rose.
+Write me a little browser toy that lets you pan a tiny map.
+Write me a page that matches a hex color to a swatch.
+Write me a single-screen tool that lets you crop a rectangle on a photo you draw.
+Write me a little browser toy that builds a bar chart from three numbers.
+Write me a page that shows a pie of three slices.
+Write me a single-screen tool that lets you type a haiku and counts syllables roughly by vowels.
+Write me a little browser toy that turns a sentence into a big poster.
+Write me a page that makes a pattern of triangles.
+Write me a single-screen tool that animates a bouncing ball.
+Write me a little browser toy that shows a solar system you can pause.
+Write me a page that lets you water a plant.
+Write me a single-screen tool that hatches an egg if you keep it warm.
+Write me a little browser toy that lets you dress a paper doll.
+Write me a page that builds a snowman from three buttons.
+Write me a single-screen tool that lets you carve a pumpkin.
+Write me a little browser toy that counts candy.
+Write me a page that lights a menorah or a generic candle row of four.
+Write me a single-screen tool that counts down to midnight.
+Write me a little browser toy that lets you write a postcard.
+Write me a page that folds a paper airplane diagram you click through.
+Write me a single-screen tool that ties a bow in four steps.
+Write me a little browser toy that packs a suitcase checklist.
+Write me a page that plans a picnic checklist.
+Write me a single-screen tool that shows a bus timetable of four stops.
+Write me a little browser toy that lets you buy one item from a vending machine.
+Write me a page that dials a number on a keypad.
+Write me a single-screen tool that sorts mail into three bins.
+Write me a little browser toy that files a book by the first letter.
+Write me a page that checks out a library book.
+Write me a single-screen tool that focuses a microscope slider.

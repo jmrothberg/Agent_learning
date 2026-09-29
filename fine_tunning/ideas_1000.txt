@@ -1,0 +1,1003 @@
+# First 1,000 short prompts for synth_html.py. One request per line.
+# Games and toys
+Write me a game of hangman.
+Write me a one-screen game of snake.
+Write me a two-player game of breakout.
+Write me a timed one-minute game of pong.
+Write me a kid-friendly game of asteroids.
+Write me a game of space invaders.
+Write me a one-screen game of tetris.
+Write me a two-player game of a maze chase.
+Write me a timed one-minute game of frogger.
+Write me a kid-friendly game of centipede.
+Write me a game of missile command.
+Write me a one-screen game of galaga.
+Write me a two-player game of pinball.
+Write me a timed one-minute game of whack-a-mole.
+Write me a kid-friendly game of simon says.
+Write me a game of a memory matching grid.
+Write me a one-screen game of minesweeper.
+Write me a two-player game of sudoku.
+Write me a timed one-minute game of klondike solitaire.
+Write me a kid-friendly game of freecell.
+Write me a game of checkers.
+Write me a one-screen game of chess.
+Write me a two-player game of reversi.
+Write me a timed one-minute game of connect four.
+Write me a kid-friendly game of tic tac toe.
+Write me a game of gomoku.
+Write me a one-screen game of battleship.
+Write me a two-player game of mastermind.
+Write me a timed one-minute game of wordle.
+Write me a kid-friendly game of boggle.
+Write me a game of blackjack.
+Write me a one-screen game of video poker.
+Write me a two-player game of yahtzee.
+Write me a timed one-minute game of bingo.
+Write me a kid-friendly game of higher or lower.
+Write me a game of crazy eights.
+Write me a one-screen game of go fish.
+Write me a two-player game of hearts.
+Write me a timed one-minute game of uno.
+Write me a kid-friendly game of war.
+Write me a game of flappy bird.
+Write me a one-screen game of a doodle-jump climber.
+Write me a two-player game of a runner that ducks and jumps.
+Write me a timed one-minute game of 2048.
+Write me a kid-friendly game of a sliding puzzle.
+Write me a game of a nonogram.
+Write me a one-screen game of a lights-out grid.
+Write me a two-player game of sokoban.
+Write me a timed one-minute game of a pipe-connecting puzzle.
+Write me a kid-friendly game of a match-three board.
+Write me a game of a bubble shooter.
+Write me a one-screen game of a tower of hanoi.
+Write me a two-player game of a typing racer.
+Write me a timed one-minute game of a falling-word typist.
+Write me a kid-friendly game of an anagram solver race.
+Write me a game of hangman with a drawing of a rocket.
+Write me a one-screen game of a crossword you fill by clicking.
+Write me a two-player game of a trivia quiz with four buttons.
+Write me a timed one-minute game of a flag quiz.
+Write me a kid-friendly game of a capital-city quiz.
+Write me a game of a times-table drill.
+Write me a one-screen game of a spelling bee.
+Write me a two-player game of a reaction-time test.
+Write me a timed one-minute game of a stroop color test.
+Write me a kid-friendly game of an aim trainer.
+Write me a game of a duck hunt.
+Write me a one-screen game of a carnival ring toss.
+Write me a two-player game of a balloon pop.
+Write me a timed one-minute game of a dart board.
+Write me a kid-friendly game of a bowling lane.
+Write me a game of a mini golf hole.
+Write me a one-screen game of a basketball free throw.
+Write me a two-player game of a soccer penalty kick.
+Write me a timed one-minute game of a tennis rally.
+Write me a kid-friendly game of a air-hockey table.
+Write me a game of a foosball flick.
+Write me a one-screen game of a curling sheet.
+Write me a two-player game of a shuffleboard deck.
+Write me a timed one-minute game of a horseshoe pit.
+Write me a kid-friendly game of a fishing cast.
+Write me a game of a ski slalom.
+Write me a one-screen game of a skateboard trick line.
+Write me a two-player game of a surfing wave.
+Write me a timed one-minute game of a kayak gate run.
+Write me a kid-friendly game of a bike hill climb.
+Write me a game of a boxing round.
+Write me a one-screen game of a fencing lunge drill.
+Write me a two-player game of a archery range.
+Write me a timed one-minute game of a cannon you angle and fire.
+Write me a kid-friendly game of a tank duel on a tiny map.
+Write me a game of a submarine that dodges depth charges.
+Write me a one-screen game of a helicopter that rescues people.
+Write me a two-player game of a lunar lander.
+Write me a timed one-minute game of a space docking sim.
+Write me a kid-friendly game of a asteroid miner.
+Write me a game of a planet defense turret.
+Write me a one-screen game of a zombie lane shooter.
+Write me a two-player game of a vampire survivors style arena.
+Write me a timed one-minute game of a top-down shooter in one room.
+Write me a kid-friendly game of a light-cycle arena.
+Write me a game of a snake that leaves a wall.
+Write me a one-screen game of a tron disk bounce.
+Write me a two-player game of a billiards break.
+Write me a timed one-minute game of a pool trick shot.
+Write me a kid-friendly game of a air hockey goal.
+Write me a game of a pong match against a second paddle you control.
+Write me a one-screen game of a breakout with falling power-ups.
+Write me a two-player game of a tetris that lets you hold one piece.
+Write me a timed one-minute game of a columns color stack.
+Write me a kid-friendly game of a dr mario bottle.
+Write me a game of a puzzle bobble chain.
+Write me a one-screen game of a q bert pyramid.
+Write me a two-player game of a frog that crosses a river of logs.
+Write me a timed one-minute game of a chicken that crosses the road.
+Write me a kid-friendly game of a kangaroo that punches boxers.
+Write me a game of a donkey kong style barrel climb.
+Write me a one-screen game of a platformer with one screen and a flag.
+Write me a two-player game of a metroid tiny corridor.
+Write me a timed one-minute game of a mega-man style hallway.
+Write me a kid-friendly game of a mario style pipe room.
+Write me a game of a celeste style climb of one cliff.
+Write me a one-screen game of a ice level where you slide.
+Write me a two-player game of a lava floor you hop across.
+Write me a timed one-minute game of a ghost house with disappearing blocks.
+Write me a kid-friendly game of a bomb you place like bomberman.
+Write me a game of a dig dug tunnel.
+Write me a one-screen game of a boulder dash cave.
+Write me a two-player game of a lemmings march with one job button.
+Write me a timed one-minute game of a the incredible machine style lever.
+Write me a kid-friendly game of a marble run you tilt.
+Write me a game of a labyrinth tilt maze.
+Write me a one-screen game of a maze you draw to guide a ball.
+Write me a two-player game of a pac-man style dot eater.
+Write me a timed one-minute game of a ms pac-man style moving maze.
+Write me a kid-friendly game of a lockpick minigame with a rotating pin.
+Write me a game of a safe cracker.
+Write me a one-screen game of a wire-cut bomb defusal.
+Write me a two-player game of a laser maze with mirrors.
+Write me a timed one-minute game of a ricochet shot.
+Write me a kid-friendly game of a pool of piranhas you cross on turtles.
+Write me a game of a lily pad jump.
+Write me a one-screen game of a firefly catch at night.
+Write me a two-player game of a bug squash.
+Write me a timed one-minute game of a garden where you water plants before they wilt.
+Write me a kid-friendly game of a tamagotchi pet.
+Write me a game of a virtual cat you pet and feed.
+Write me a one-screen game of a dog that learns one trick.
+Write me a two-player game of a farm plot you plant and harvest.
+Write me a timed one-minute game of a lemonade stand.
+Write me a kid-friendly game of a pizza shop with a timer.
+Write me a game of a sushi belt.
+Write me a one-screen game of a coffee shop orders.
+Write me a two-player game of a burger flip.
+Write me a timed one-minute game of a ice cream stack.
+Write me a kid-friendly game of a cake decorator.
+Write me a game of a sandwich builder.
+Write me a one-screen game of a food truck rush.
+Write me a two-player game of a restaurant with three tables.
+Write me a timed one-minute game of a hotel desk with arriving guests.
+Write me a kid-friendly game of a airport baggage claim matcher.
+Write me a game of a train platform you stop at stations.
+Write me a one-screen game of a subway runner on one track.
+Write me a two-player game of a traffic light crossing.
+Write me a timed one-minute game of a parking lot puzzle.
+Write me a kid-friendly game of a forklift warehouse.
+Write me a game of a crane that stacks containers.
+Write me a one-screen game of a tower crane and swinging wrecking ball.
+Write me a two-player game of a bridge builder of struts.
+Write me a timed one-minute game of a domino run you set up.
+Write me a kid-friendly game of a house of cards.
+Write me a game of a jenga tower.
+Write me a one-screen game of a block stacking balance.
+Write me a two-player game of a seesaw balance puzzle.
+Write me a timed one-minute game of a catapult that hits a target.
+Write me a kid-friendly game of a trebuchet angle toy.
+Write me a game of a paper airplane distance throw.
+Write me a one-screen game of a kite you keep in the wind.
+Write me a two-player game of a hot air balloon that avoids birds.
+Write me a timed one-minute game of a parachute landing on a pad.
+Write me a kid-friendly game of a skydiving ring dive.
+Write me a game of a base jump off one cliff.
+Write me a one-screen game of a wingsuit gate flight.
+Write me a two-player game of a drone obstacle course.
+Write me a timed one-minute game of a robot vacuum that cleans one room.
+Write me a kid-friendly game of a roomba race.
+Write me a game of a line-following robot.
+Write me a one-screen game of a sumo robot ring.
+Write me a two-player game of a robot that stacks boxes.
+Write me a timed one-minute game of a factory belt you sort colors.
+Write me a kid-friendly game of a conveyor sushi defense.
+Write me a game of a tower defense with one path.
+Write me a one-screen game of a plant versus a single lane of creeps.
+Write me a two-player game of a castle wall you repair.
+Write me a timed one-minute game of a moat and a drawbridge timing game.
+Write me a kid-friendly game of a knight that parries one dragon.
+Write me a game of a wizard duel of elements.
+Write me a one-screen game of a potion mixing puzzle.
+Write me a two-player game of a alchemy shelf.
+Write me a timed one-minute game of a spell typing game.
+Write me a kid-friendly game of a rune matching circle.
+Write me a game of a dungeon door with a riddle.
+Write me a one-screen game of a text adventure of three rooms.
+Write me a two-player game of a point and click desk.
+Write me a timed one-minute game of a hidden object scene.
+Write me a kid-friendly game of a where's waldo style scene.
+Write me a game of a spot the difference pair.
+Write me a one-screen game of a jigsaw of twelve pieces.
+Write me a two-player game of a tangram board.
+Write me a timed one-minute game of a origami folder of one crane.
+Write me a kid-friendly game of a paper doll dress up.
+Write me a game of a sticker scene.
+Write me a one-screen game of a coloring book page.
+Write me a two-player game of a pixel paint grid.
+Write me a timed one-minute game of a etch a sketch.
+Write me a kid-friendly game of a spirograph.
+Write me a game of a kaleidoscope you spin.
+Write me a one-screen game of a fireworks show you time.
+Write me a two-player game of a sparkler you draw with.
+Write me a timed one-minute game of a sand drawing that the tide erases.
+Write me a kid-friendly game of a zen garden rake.
+Write me a game of a koi pond you feed.
+Write me a one-screen game of a aquarium you stock.
+Write me a two-player game of a ant farm.
+Write me a timed one-minute game of a beehive you keep calm.
+Write me a kid-friendly game of a bird feeder and a checklist.
+Write me a game of a whale watch clicker.
+Write me a one-screen game of a safari photo hunt.
+Write me a two-player game of a dinosaur dig.
+Write me a timed one-minute game of a fossil cleaner.
+Write me a kid-friendly game of a museum placard quiz.
+Write me a game of a piano of one octave.
+Write me a one-screen game of a drum machine of four pads.
+Write me a two-player game of a guitar hero highway of four keys.
+Write me a timed one-minute game of a rhythm tap to a steady beat.
+Write me a kid-friendly game of a metronome you clap along with.
+Write me a game of a sequencer of sixteen steps.
+Write me a one-screen game of a theremin you move the mouse over.
+Write me a two-player game of a xylophone.
+Write me a timed one-minute game of a karaoke pitch meter.
+Write me a kid-friendly game of a name that tune of three notes.
+Write me a game of a musical chairs of dots.
+Write me a one-screen game of a dance pad of four arrows.
+Write me a two-player game of a simon melody that gets longer.
+Write me a timed one-minute game of a chord guesser.
+Write me a kid-friendly game of a interval trainer.
+Write me a game of a sight reading flash of one note.
+Write me a one-screen game of a bpm tap timer.
+Write me a two-player game of a loop station of two bars.
+Write me a timed one-minute game of a rain sound mixer of three sliders.
+Write me a kid-friendly game of a city noise box.
+Write me a game of a morse code tapper.
+Write me a one-screen game of a signal flag quiz.
+Write me a two-player game of a semaphore spelling toy.
+Write me a timed one-minute game of a lighthouse flash pattern you copy.
+Write me a kid-friendly game of a radio tuner that finds a station.
+Write me a game of a compass heading game.
+Write me a one-screen game of a map pin drop of countries.
+Write me a two-player game of a license plate spotter.
+Write me a timed one-minute game of a road sign quiz.
+Write me a kid-friendly game of a clock you set to the right time.
+Write me a game of a calendar you find a date on.
+Write me a one-screen game of a stopwatch with a lap button.
+Write me a two-player game of a egg timer.
+Write me a timed one-minute game of a pomodoro block.
+Write me a kid-friendly game of a alarm you dismiss with a math problem.
+Write me a game of a world clock of four cities.
+Write me a one-screen game of a sundial you rotate.
+Write me a two-player game of a moon phase clicker.
+Write me a timed one-minute game of a constellation connector.
+Write me a kid-friendly game of a planet order drag game.
+Write me a game of a solar system orrery.
+Write me a one-screen game of a gravity slingshot.
+Write me a two-player game of a orbit matching puzzle.
+Write me a timed one-minute game of a rocket staging toy.
+Write me a kid-friendly game of a spacewalk with a tether.
+Write me a game of a mars rover that avoids rocks.
+Write me a one-screen game of a moon buggy jump.
+Write me a two-player game of a satellite dish you aim.
+Write me a timed one-minute game of a weather vane.
+Write me a kid-friendly game of a barometer reading quiz.
+Write me a game of a cloud type flash cards.
+Write me a one-screen game of a rain collector.
+Write me a two-player game of a snowflake you design once.
+Write me a timed one-minute game of a ice skating figure of one routine.
+Write me a kid-friendly game of a hockey shootout.
+Write me a game of a baseball pitch you time.
+Write me a one-screen game of a cricket bowl.
+Write me a two-player game of a volleyball set and spike.
+Write me a timed one-minute game of a badminton rally.
+Write me a kid-friendly game of a table tennis serve.
+Write me a game of a squash front wall.
+Write me a one-screen game of a racquetball.
+Write me a two-player game of a lacrosse shot.
+Write me a timed one-minute game of a rugby conversion kick.
+Write me a kid-friendly game of a american football field goal.
+Write me a game of a golf putting green with a break.
+Write me a one-screen game of a bowling split you pick up.
+Write me a two-player game of a darts 501.
+Write me a timed one-minute game of a snooker red then color.
+Write me a kid-friendly game of a croquet wicket.
+Write me a game of a bocce court.
+Write me a one-screen game of a petanque throw.
+Write me a two-player game of a horseshoes ringer.
+Write me a timed one-minute game of a cornhole board.
+Write me a kid-friendly game of a ladder toss.
+Write me a game of a kan jam.
+Write me a one-screen game of a spikeball bump.
+Write me a two-player game of a four square court.
+Write me a timed one-minute game of a dodgeball one court.
+Write me a kid-friendly game of a kickball infield.
+Write me a game of a whiffle ball.
+Write me a one-screen game of a tee ball.
+Write me a two-player game of a catch with a growing distance.
+Write me a timed one-minute game of a frisbee accuracy.
+Write me a kid-friendly game of a boomerang return.
+Write me a game of a yo-yo trick of one string.
+Write me a one-screen game of a top you keep spinning.
+Write me a two-player game of a diabolo toss.
+Write me a timed one-minute game of a juggling of three balls.
+Write me a kid-friendly game of a card flourish trainer.
+Write me a game of a coin flip caller.
+Write me a one-screen game of a dice race of two dice.
+Write me a two-player game of a pig dice game.
+Write me a timed one-minute game of a liar's dice.
+Write me a kid-friendly game of a yacht dice.
+Write me a game of a backgammon race.
+Write me a one-screen game of a parcheesi.
+Write me a two-player game of a snakes and ladders.
+Write me a timed one-minute game of a sorry style board.
+Write me a kid-friendly game of a candyland style draw.
+Write me a game of a the game of life spinner.
+Write me a one-screen game of a monopoly style one block.
+Write me a two-player game of a clue style one room deduction.
+Write me a timed one-minute game of a stratego one battle.
+Write me a kid-friendly game of a risk style one continent.
+Write me a game of a chess puzzle of mate in one.
+Write me a one-screen game of a checkers force jump.
+Write me a two-player game of a go capture of one group.
+Write me a timed one-minute game of a mancala pit.
+Write me a kid-friendly game of a dominoes train.
+Write me a game of a mahjong solitaire of one layer.
+Write me a one-screen game of a spider solitaire.
+Write me a two-player game of a pyramid solitaire.
+Write me a timed one-minute game of a tripeaks.
+Write me a kid-friendly game of a accordion solitaire.
+Write me a game of a golf solitaire.
+Write me a one-screen game of a canfield.
+Write me a two-player game of a calculation solitaire.
+Write me a timed one-minute game of a clock solitaire.
+Write me a kid-friendly game of a forty thieves.
+Write me a game of klondike with a three card draw.
+Write me a one-screen game of a free cell that starts easy.
+Write me a two-player game of a memory path of lights.
+Write me a timed one-minute game of a sequence of arrows you repeat.
+Write me a kid-friendly game of a pattern copy on a grid.
+Write me a game of a odd one out.
+Write me a one-screen game of a which cup hides the ball.
+Write me a two-player game of a shell game.
+Write me a timed one-minute game of a three card monte you should not trust.
+Write me a kid-friendly game of a high low card streak.
+Write me a game of a twenty one counting toy.
+Write me a one-screen game of a red black streak.
+Write me a two-player game of a roulette wheel you just watch and bet one chip.
+Write me a timed one-minute game of a craps pass line.
+Write me a kid-friendly game of a keno pick of five.
+Write me a game of a lottery number match.
+Write me a one-screen game of a scratch card.
+Write me a two-player game of a slot machine of three reels.
+Write me a timed one-minute game of a prize wheel.
+Write me a kid-friendly game of a claw machine.
+Write me a game of a gacha capsule you should see the odds of.
+Write me a one-screen game of a blind bag opener.
+Write me a two-player game of a trading card pack.
+Write me a timed one-minute game of a deck builder of five cards.
+Write me a kid-friendly game of a auto battler of three units.
+Write me a game of a one lane card fight.
+Write me a one-screen game of a hero that has three spells.
+Write me a two-player game of a boss with a telegraphed stomp.
+Write me a timed one-minute game of a dodge the falling rocks.
+Write me a kid-friendly game of a bullet heaven of one minute.
+Write me a game of a survival of sixty seconds.
+Write me a one-screen game of a last balloon standing.
+Write me a two-player game of a king of the hill dot.
+Write me a timed one-minute game of a tag you're it.
+Write me a kid-friendly game of a hide and seek of one room.
+Write me a game of a capture the flag on a tiny field.
+Write me a one-screen game of a tug of war.
+Write me a two-player game of a arm wrestling meter.
+Write me a timed one-minute game of a thumb war.
+Write me a kid-friendly game of a rock paper scissors with a streak.
+Write me a game of a odds and evens.
+Write me a one-screen game of a chopstick finger count.
+Write me a two-player game of a twenty one sticks.
+Write me a timed one-minute game of a nim heap.
+Write me a kid-friendly game of a kayles bowling pins.
+Write me a game of a subtract a square.
+Write me a one-screen game of a geography chain of names.
+Write me a two-player game of a categories with a letter.
+Write me a timed one-minute game of a scattergories style list.
+Write me a kid-friendly game of a taboo describe the word.
+Write me a game of a pictionary one word.
+Write me a one-screen game of a charades pose buttons.
+Write me a two-player game of a two truths and a lie quiz.
+Write me a timed one-minute game of a would you rather.
+Write me a kid-friendly game of a this or that swipe.
+Write me a game of a personality quiz of five questions.
+Write me a one-screen game of a which pizza topping are you.
+Write me a two-player game of a name generator you roll.
+Write me a timed one-minute game of a diceware password toy.
+Write me a kid-friendly game of a coin that flips fairly.
+Write me a game of a wheel of names.
+Write me a one-screen game of a turn randomizer.
+Write me a two-player game of a scoreboard for two names.
+Write me a timed one-minute game of a tournament bracket of four.
+Write me a kid-friendly game of a best of five counter.
+Write me a game of a penalty shootout score.
+Write me a one-screen game of a overtime coin flip.
+Write me a two-player game of a referee whistle toy.
+Write me a timed one-minute game of a play clock you count down.
+Write me a kid-friendly game of a shot clock.
+Write me a game of a chess clock for two buttons.
+Write me a one-screen game of a cube scramble timer.
+Write me a two-player game of a rubik simulator of one face turns.
+Write me a timed one-minute game of a fifteen puzzle.
+Write me a kid-friendly game of a klotski block slide.
+Write me a game of a rush hour car park.
+Write me a one-screen game of a unblock the red car.
+Write me a two-player game of a parking jam.
+Write me a timed one-minute game of a flow free style links.
+Write me a kid-friendly game of a numberlink.
+Write me a game of a bridges hash i.
+Write me a one-screen game of a slitherlink loop.
+Write me a two-player game of a nurikabe islands.
+Write me a timed one-minute game of a heyawake rooms.
+Write me a kid-friendly game of a akari light bulbs.
+Write me a game of a tents and trees.
+Write me a one-screen game of a star battle.
+Write me a two-player game of a sudoku of four by four.
+Write me a timed one-minute game of a kenken cage.
+Write me a kid-friendly game of a futoshiki.
+Write me a game of a kakuro run.
+Write me a one-screen game of a killer sudoku cage of one house.
+Write me a two-player game of a word search of eight words.
+Write me a timed one-minute game of a word scramble.
+Write me a kid-friendly game of a anagram of one long word.
+Write me a game of a spelling hangman of animals.
+Write me a one-screen game of a vocabulary flash card.
+Write me a two-player game of a synonym match.
+Write me a timed one-minute game of a antonym match.
+Write me a kid-friendly game of a rhyming pair.
+Write me a game of a syllable count tap.
+Write me a one-screen game of a haiku checker of five seven five.
+Write me a two-player game of a mad lib you fill.
+Write me a timed one-minute game of a rebus puzzle.
+Write me a kid-friendly game of a emoji movie title.
+Write me a game of a cryptic clue of one word.
+Write me a one-screen game of a crossword clue and a letter bank.
+Write me a two-player game of a alphabet race.
+Write me a timed one-minute game of a keyboard row typist.
+Write me a kid-friendly game of a home row drill.
+Write me a game of a number pad drill.
+Write me a one-screen game of a code typing of a short function.
+Write me a two-player game of a css color you match by eye.
+Write me a timed one-minute game of a hex color guesser.
+Write me a kid-friendly game of a contrast checker of two swatches.
+Write me a game of a font pairing picker.
+Write me a one-screen game of a layout you nudge with arrow keys.
+Write me a two-player game of a pixel perfect align game.
+Write me a timed one-minute game of a bezier curve you match.
+Write me a kid-friendly game of a animation timing you stop on the beat.
+Write me a game of a sprite sheet clicker of frames.
+Write me a one-screen game of a walk cycle you step.
+Write me a two-player game of a lip flap you time.
+Write me a timed one-minute game of a camera pan of one scene.
+Write me a kid-friendly game of a cutscene of three captions.
+Write me a game of a dialogue tree of four lines.
+Write me a one-screen game of a shop with three items and gold.
+Write me a two-player game of a inventory of eight slots.
+Write me a timed one-minute game of a crafting of two ingredients.
+Write me a kid-friendly game of a campfire you keep lit.
+Write me a game of a hunger bar you snack.
+Write me a one-screen game of a thirst bar.
+Write me a two-player game of a stamina bar you sprint.
+Write me a timed one-minute game of a health potion you time.
+Write me a kid-friendly game of a shield you raise.
+Write me a game of a parry window.
+Write me a one-screen game of a dodge roll with cooldown.
+Write me a two-player game of a double jump.
+Write me a timed one-minute game of a wall slide.
+Write me a kid-friendly game of a grappling hook to one peg.
+Write me a game of a rope swing.
+Write me a one-screen game of a ladder climb.
+Write me a two-player game of a conveyor belt platform.
+Write me a timed one-minute game of a wind that pushes a balloon.
+Write me a kid-friendly game of a gravity flip.
+Write me a game of a magnet that attracts coins.
+Write me a one-screen game of a key and a locked door.
+Write me a two-player game of a pressure plate and a door.
+Write me a timed one-minute game of a torch that reveals fog.
+Write me a kid-friendly game of a battery that powers a lamp.
+Write me a game of a circuit of one switch and a bulb.
+Write me a one-screen game of a logic gate and or not toy.
+Write me a two-player game of a truth table you fill.
+Write me a timed one-minute game of a binary count clicker.
+Write me a kid-friendly game of a hex dump reader of four bytes.
+Write me a game of a morse you decode.
+Write me a one-screen game of a caesar cipher wheel.
+Write me a two-player game of a substitution cipher toy.
+Write me a timed one-minute game of a pig latin converter.
+Write me a kid-friendly game of a pigpen cipher.
+Write me a game of a semaphore you show a letter.
+Write me a one-screen game of a flag of the day quiz.
+Write me a two-player game of a state capital drag.
+Write me a timed one-minute game of a country outline quiz.
+Write me a kid-friendly game of a river you trace.
+Write me a game of a mountain height order.
+Write me a one-screen game of a ocean name match.
+Write me a two-player game of a biome matcher.
+Write me a timed one-minute game of a food chain you order.
+Write me a kid-friendly game of a water cycle you click in order.
+Write me a game of a photosynthesis labeling.
+Write me a one-screen game of a cell parts drag.
+Write me a two-player game of a skeleton you label.
+Write me a timed one-minute game of a tooth brushing timer.
+Write me a kid-friendly game of a hand wash timer of twenty seconds.
+Write me a game of a posture stretch reminder.
+Write me a one-screen game of a breathing bubble of four seconds.
+Write me a two-player game of a box breathing guide.
+Write me a timed one-minute game of a jumping jack counter.
+Write me a kid-friendly game of a squat counter.
+Write me a game of a plank timer.
+Write me a one-screen game of a step counter you click.
+Write me a two-player game of a water glass tracker of eight.
+Write me a timed one-minute game of a mood clicker of five faces.
+Write me a kid-friendly game of a gratitude line you type.
+Write me a game of a one sentence diary.
+Write me a one-screen game of a habit check of three boxes.
+Write me a two-player game of a kanban of three columns.
+Write me a timed one-minute game of a todo list of one list.
+Write me a kid-friendly game of a timer for a meeting.
+Write me a game of a poll of three choices.
+Write me a one-screen game of a spinner of chores.
+Write me a two-player game of a chore wheel for four names.
+Write me a timed one-minute game of a allowance calculator.
+Write me a kid-friendly game of a tip calculator.
+Write me a game of a split the bill.
+Write me a one-screen game of a unit converter of inches and centimeters.
+Write me a two-player game of a temperature converter.
+Write me a timed one-minute game of a percentage of a number.
+Write me a kid-friendly game of a fraction simplifier you guess.
+Write me a game of a roman numeral quiz.
+Write me a one-screen game of a clock angle quiz.
+Write me a two-player game of a change making game.
+Write me a timed one-minute game of a cash register.
+Write me a kid-friendly game of a coin counting jar.
+Write me a game of a budget of three envelopes.
+Write me a one-screen game of a lemonade profit.
+Write me a two-player game of a stock ticker you buy one share of a fake price.
+Write me a timed one-minute game of a savings jar fill.
+Write me a kid-friendly game of a interest calculator you step by year.
+Write me a game of a measurement you read off a ruler.
+Write me a one-screen game of a protractor angle guess.
+Write me a two-player game of a balance scale with weights.
+Write me a timed one-minute game of a spring scale.
+Write me a kid-friendly game of a thermometer you read.
+Write me a game of a speedometer needle.
+Write me a one-screen game of a odometer trip.
+Write me a two-player game of a gas gauge you don't run out.
+Write me a timed one-minute game of a battery charge icon game.
+Write me a kid-friendly game of a signal strength you find the spot.
+Write me a game of a volume slider ear test of louder.
+Write me a one-screen game of a brightness match.
+Write me a two-player game of a focus the blurry photo.
+Write me a timed one-minute game of a crop a photo to a square.
+Write me a kid-friendly game of a red eye click.
+Write me a game of a before and after slider.
+Write me a one-screen game of a panorama you align two photos.
+Write me a two-player game of a stamp album.
+Write me a timed one-minute game of a coin album.
+Write me a kid-friendly game of a bug collection.
+Write me a game of a leaf collection.
+Write me a one-screen game of a rock collection you label.
+Write me a two-player game of a sticker album of eight.
+Write me a timed one-minute game of a badge board.
+Write me a kid-friendly game of a achievement pop of one toast.
+Write me a game of a high score table of five.
+Write me a one-screen game of a replay of the last ten seconds as text.
+Write me a two-player game of a ghost race of your last run.
+Write me a timed one-minute game of a daily seed you can share as a number.
+Write me a kid-friendly game of a seed you type to replay a maze.
+Write me a game of a color by number.
+Write me a one-screen game of a paint by sticker.
+Write me a two-player game of a mosaic of tiles.
+Write me a timed one-minute game of a bead pattern.
+Write me a kid-friendly game of a friendship bracelet pattern.
+Write me a game of a scarf knit row counter.
+Write me a one-screen game of a cross stitch grid.
+Write me a two-player game of a pottery wheel you spin.
+Write me a timed one-minute game of a pottery wheel.
+Write me a kid-friendly game of a glass blowing bubble you heat.
+Write me a game of a blacksmith timing the hammer.
+Write me a one-screen game of a wood shop measure twice.
+Write me a two-player game of a nail you hammer straight.
+Write me a timed one-minute game of a screw you turn until flush.
+Write me a kid-friendly game of a paint the fence in one coat.
+Write me a game of a mow a lawn in rows.
+Write me a one-screen game of a rake the leaves into a pile.
+Write me a two-player game of a snow shovel a path.
+Write me a timed one-minute game of a ice scrape a windshield.
+Write me a kid-friendly game of a car wash sponge.
+Write me a game of a vacuum a rug in stripes.
+Write me a one-screen game of a wash the dishes in order.
+Write me a two-player game of a sort recycling into three bins.
+Write me a timed one-minute game of a compost what belongs.
+Write me a kid-friendly game of a plant a seed and wait a short timer.
+Write me a game of a water the plant when the soil looks dry.
+Write me a one-screen game of a prune one branch.
+Write me a two-player game of a harvest the red tomatoes only.
+Write me a timed one-minute game of a feed the chickens.
+Write me a kid-friendly game of a collect the eggs.
+Write me a game of a milk a cow with a timing bar.
+Write me a one-screen game of a shear a sheep.
+Write me a two-player game of a herd two sheep into a pen.
+Write me a timed one-minute game of a ride a horse along a fence.
+Write me a kid-friendly game of a saddle the horse in order.
+Write me a game of a walk a dog that pulls.
+Write me a one-screen game of a teach a parrot one word.
+Write me a two-player game of a fish tank temperature you keep in range.
+Write me a timed one-minute game of a camp stove you light safely in steps.
+Write me a kid-friendly game of a tent you pitch in order.
+Write me a game of a camp map with an x you pace off.
+Write me a one-screen game of a trail blaze you follow.
+Write me a two-player game of a compass bearing you walk.
+Write me a timed one-minute game of a knot tying of a bowline in steps.
+Write me a kid-friendly game of a rope coil.
+Write me a game of a flashlight battery swap.
+Write me a one-screen game of a first aid order of operations quiz.
+Write me a two-player game of a fire extinguisher pass toy.
+Write me a timed one-minute game of a stop drop roll quiz.
+Write me a kid-friendly game of a crosswalk look both ways.
+Write me a game of a seatbelt click.
+Write me a one-screen game of a bike helmet check.
+Write me a two-player game of a traffic quiz of three signs.
+Write me a timed one-minute game of a right of way intersection.
+Write me a kid-friendly game of a parallel park between two cars.
+Write me a game of a three point turn.
+Write me a one-screen game of a lane change mirror check.
+Write me a two-player game of a speed limit match.
+Write me a timed one-minute game of a following distance.
+Write me a kid-friendly game of a train crossing stop.
+Write me a game of a drawbridge wait.
+Write me a one-screen game of a ferry you drive onto.
+Write me a two-player game of a bus you pull the cord for your stop.
+Write me a timed one-minute game of a elevator you pick a floor.
+Write me a kid-friendly game of a vending machine with exact change.
+Write me a game of a payphone you dial a short number.
+Write me a one-screen game of a postcard you address.
+Write me a two-player game of a stamp you place in the corner.
+Write me a timed one-minute game of a envelope you seal.
+Write me a kid-friendly game of a mailbox flag you raise.
+Write me a game of a package you tape and label.
+Write me a one-screen game of a barcode you must align.
+Write me a two-player game of a qr code you pretend to scan by clicking.
+Write me a timed one-minute game of a library checkout desk.
+Write me a kid-friendly game of a due date stamp.
+Write me a game of a bookshelf sort by author.
+Write me a one-screen game of a card catalog search.
+Write me a two-player game of a quiet meter you keep low.
+Write me a timed one-minute game of a microscope focus.
+Write me a kid-friendly game of a slide you label.
+Write me a game of a telescope you find one star.
+Write me a one-screen game of a binocular bird id.
+Write me a two-player game of a camera exposure you set.
+Write me a timed one-minute game of a tripod timer.
+Write me a kid-friendly game of a film you wind.
+Write me a game of a darkroom tray order.
+Write me a one-screen game of a print you hang to dry.
+Write me a two-player game of a gallery wall you space evenly.
+Write me a timed one-minute game of a frame you hang level.
+Write me a kid-friendly game of a spotlight you aim.
+Write me a game of a curtain call bow.
+Write me a one-screen game of a script cue you hit.
+Write me a two-player game of a prop you hand off.
+Write me a timed one-minute game of a makeup mirror match.
+Write me a kid-friendly game of a costume change timer.
+Write me a game of a ticket booth.
+Write me a one-screen game of a usher seating of a row.
+Write me a two-player game of a popcorn bucket fill.
+Write me a timed one-minute game of a movie trivia of one decade.
+Write me a kid-friendly game of a intermission countdown.
+Write me a game of a encore button.
+Write me a one-screen game of a orchestra tune note.
+Write me a two-player game of a conductor you follow the beat.
+Write me a timed one-minute game of a choir you hold the pitch.
+Write me a kid-friendly game of a drum roll you time.
+Write me a game of a cymbal crash on the last beat.
+Write me a one-screen game of a jazz brush pattern.
+Write me a two-player game of a bass line of four notes.
+Write me a timed one-minute game of a melody you echo.
+Write me a kid-friendly game of a round you sing in two parts on one screen.
+# More games and single-screen tools
+Write me a game of a record you drop on a platter.
+Write me a one-screen game of a tape you rewind.
+Write me a two-player game of a cassette you flip to side b.
+Write me a timed one-minute game of a radio drama of three sound buttons.
+Write me a kid-friendly game of a foley pit you click the right sound.
+Write me a game of a audio waveform you find the clap.
+Write me a one-screen game of a mute the hiss.
+Write me a two-player game of a level match of two tracks.
+Write me a timed one-minute game of a pan a sound left and right.
+Write me a kid-friendly game of a delay you tap in time.
+Write me a game of a reverb you don't drown the voice.
+Write me a one-screen game of a equalizer of three bands.
+Write me a two-player game of a noise gate toy.
+Write me a timed one-minute game of a click track on off.
+Write me a kid-friendly game of a count in of four.
+Write me a game of a loop you trim to the bar.
+Write me a one-screen game of a sample you chop once.
+Write me a two-player game of a drum pad bank of four.
+Write me a timed one-minute game of a piano roll of one bar.
+Write me a kid-friendly game of a chord stamp.
+Write me a game of a scale practice highlighter.
+Write me a one-screen game of a finger number hint for one scale.
+Write me a two-player game of a tuner that says sharp or flat.
+Write me a timed one-minute game of a capo position quiz.
+Write me a kid-friendly game of a fretboard note quiz.
+Write me a game of a ukulele chord of one shape.
+Write me a one-screen game of a harmonica hole.
+Write me a two-player game of a recorder fingering chart quiz.
+Write me a timed one-minute game of a trumpet valve combo.
+Write me a kid-friendly game of a drum rudiment of a paradiddle you tap.
+Write me a game of a whistle a pitch.
+Write me a one-screen game of a clap on two and four.
+Write me a two-player game of a silence for a rest.
+Write me a timed one-minute game of a fermata you hold.
+Write me a kid-friendly game of a crescendo slider.
+Write me a game of a accent the offbeat.
+Write me a one-screen game of a swing the eighth notes.
+Write me a two-player game of a waltz count of three.
+Write me a timed one-minute game of a march count of two.
+Write me a kid-friendly game of a bossa nova click.
+Write me a game of a samba feet pattern.
+Write me a one-screen game of a tango step diagram you click through.
+Write me a two-player game of a waltz box step.
+Write me a timed one-minute game of a line dance of four moves.
+Write me a kid-friendly game of a hokey pokey of buttons.
+Write me a game of a head shoulders knees and toes clicker.
+Write me a one-screen game of a freeze dance.
+Write me a two-player game of a musical statues.
+Write me a timed one-minute game of a red light green light.
+Write me a kid-friendly game of a mother may i steps.
+Write me a game of a simon says body poses.
+Write me a one-screen game of a obstacle course of four stations.
+Write me a two-player game of a sack race.
+Write me a timed one-minute game of a egg and spoon.
+Write me a kid-friendly game of a three legged race of one pair.
+Write me a game of a wheelbarrow race.
+Write me a one-screen game of a tug of war rope.
+Write me a two-player game of a parachute raise in a circle of dots.
+Write me a timed one-minute game of a duck duck goose of a circle.
+Write me a kid-friendly game of a hot potato pass.
+Write me a game of a telephone message garble.
+Write me a one-screen game of a operator you connect a call.
+Write me a two-player game of a switchboard.
+Write me a timed one-minute game of a telegraph key.
+Write me a kid-friendly game of a pneumatic tube you send.
+Write me a game of a mail sort into zip piles.
+Write me a one-screen game of a letter you fold in thirds.
+Write me a two-player game of a paper airplane target.
+Write me a timed one-minute game of a paper football goal.
+Write me a kid-friendly game of a table hockey.
+Write me a game of a penny football.
+Write me a one-screen game of a finger skateboard.
+Write me a two-player game of a marble shooter.
+Write me a timed one-minute game of a pinball plunger timing.
+Write me a kid-friendly game of a pachinko drop.
+Write me a game of a plinko board.
+Write me a one-screen game of a coin pusher.
+Write me a two-player game of a skee ball.
+Write me a timed one-minute game of a ring the bell strength tester.
+Write me a kid-friendly game of a high striker.
+Write me a game of a love tester meter.
+Write me a one-screen game of a fortune teller.
+Write me a two-player game of a magic eight ball.
+Write me a timed one-minute game of a crystal ball shake.
+Write me a kid-friendly game of a tarot one card draw with a plain meaning.
+Write me a game of a dice oracle.
+Write me a one-screen game of a coin oracle.
+Write me a two-player game of a paper fortune teller.
+Write me a timed one-minute game of a chatterbox.
+Write me a kid-friendly game of a cootie catcher.
+Write me a game of a mad fold.
+Write me a one-screen game of a secret decoder ring.
+Write me a two-player game of a invisible ink reveal.
+Write me a timed one-minute game of a spy briefcase.
+Write me a kid-friendly game of a laser tripwire you crawl under.
+Write me a game of a vent you crawl.
+Write me a one-screen game of a keypad code of four digits you were shown.
+Write me a two-player game of a retina scan joke button.
+Write me a timed one-minute game of a badge you swipe.
+Write me a kid-friendly game of a door that asks a riddle.
+Write me a game of a maze of hedges from above.
+Write me a one-screen game of a corn maze map.
+Write me a two-player game of a haunted house of three rooms.
+Write me a timed one-minute game of a pumpkin you carve with clicks.
+Write me a kid-friendly game of a costume contest vote.
+Write me a game of a candy count.
+Write me a one-screen game of a trick or treat street of four doors.
+Write me a two-player game of a bonfire you add a log.
+Write me a timed one-minute game of a sparkler write a letter.
+Write me a kid-friendly game of a new year countdown.
+Write me a game of a ball drop.
+Write me a one-screen game of a resolution you type.
+Write me a two-player game of a birthday candle blow.
+Write me a timed one-minute game of a cake slice picker.
+Write me a kid-friendly game of a present you unwrap.
+Write me a game of a ribbon you tie.
+Write me a one-screen game of a card you sign.
+Write me a two-player game of a balloon you don't pop until the count.
+Write me a timed one-minute game of a pinata swing timing.
+Write me a kid-friendly game of a confetti cannon.
+Write me a game of a party playlist of five skips.
+Write me a one-screen game of a photo booth of three poses.
+Write me a two-player game of a guest book.
+Write me a timed one-minute game of a seating chart of eight.
+Write me a kid-friendly game of a name tag writer.
+Write me a game of a icebreaker question spinner.
+Write me a one-screen game of a two truths mixer.
+Write me a two-player game of a bingo of party squares.
+Write me a timed one-minute game of a scavenger hunt of five items in a picture.
+Write me a kid-friendly game of a treasure map grid.
+Write me a game of a x marks the spot dig.
+Write me a one-screen game of a bottle in the sand.
+Write me a two-player game of a message in a bottle you write.
+Write me a timed one-minute game of a island you walk the shore.
+Write me a kid-friendly game of a camp on the beach tide timer.
+Write me a game of a shell collect.
+Write me a one-screen game of a sandcastle you defend from a wave.
+Write me a two-player game of a tide pool clicker.
+Write me a timed one-minute game of a crab race.
+Write me a kid-friendly game of a seagull you shoo off the fries.
+Write me a game of a ice cream you eat before it melts.
+Write me a one-screen game of a sunscreen reminder timer.
+Write me a two-player game of a umbrella you open when the cloud arrives.
+Write me a timed one-minute game of a puddle jump.
+Write me a kid-friendly game of a rainbow you name the colors in order.
+Write me a game of a thunder count between flash and boom.
+Write me a one-screen game of a lightning distance toy.
+Write me a two-player game of a tornado drill positions.
+Write me a timed one-minute game of a earthquake drop cover hold quiz.
+Write me a kid-friendly game of a hurricane tracking map of one storm.
+Write me a game of a snow day checker of a fake forecast.
+Write me a one-screen game of a igloo you stack blocks.
+Write me a two-player game of a snowman of three circles.
+Write me a timed one-minute game of a snow angel click.
+Write me a kid-friendly game of a sled run with one jump.
+Write me a game of a ice fish over a hole.
+Write me a one-screen game of a hot cocoa you don't let boil.
+Write me a two-player game of a mitten match.
+Write me a timed one-minute game of a scarf wind.
+Write me a kid-friendly game of a boot tray.
+Write me a game of a fireplace you light in order.
+Write me a one-screen game of a stocking you fill.
+Write me a two-player game of a advent calendar of four doors.
+Write me a timed one-minute game of a wreath you decorate.
+Write me a kid-friendly game of a candle you don't leave unattended quiz.
+Write me a game of a carol lyric next line.
+Write me a one-screen game of a nutcracker click through poses.
+Write me a two-player game of a ice skate routine of three moves.
+Write me a timed one-minute game of a hockey faceoff.
+Write me a kid-friendly game of a curling broom sweep.
+Write me a game of a bobsled turn.
+Write me a one-screen game of a luge lie back.
+Write me a two-player game of a ski jump distance.
+Write me a timed one-minute game of a biathlon shoot then ski.
+Write me a kid-friendly game of a snowshoe path.
+Write me a game of a cross country track.
+Write me a one-screen game of a figure skate spin counter.
+Write me a two-player game of a hockey penalty box timer.
+Write me a timed one-minute game of a zamboni you drive in a pattern.
+Write me a kid-friendly game of a puck you shoot into the five hole.
+Write me a game of a goalie glove side.
+Write me a one-screen game of a baseball catcher signs.
+Write me a two-player game of a pitcher windup timing.
+Write me a timed one-minute game of a batter eye.
+Write me a kid-friendly game of a bunt down the line.
+Write me a game of a stolen base lead.
+Write me a one-screen game of a pop fly you call.
+Write me a two-player game of a grounder you charge.
+Write me a timed one-minute game of a double play turn.
+Write me a kid-friendly game of a outfield wall leap.
+Write me a game of a peanut toss into a glove.
+Write me a one-screen game of a seventh inning stretch timer.
+Write me a two-player game of a scoreboard operator.
+Write me a timed one-minute game of a organ charge fanfare button.
+Write me a kid-friendly game of a wave you start around a circle.
+Write me a game of a foam finger.
+Write me a one-screen game of a ticket stub collector.
+Write me a two-player game of a foul ball you duck or catch.
+Write me a timed one-minute game of a rain delay tarp.
+Write me a kid-friendly game of a ground crew drag the infield.
+Write me a game of a chalk the batter box.
+Write me a one-screen game of a rosin bag.
+Write me a two-player game of a pine tar check.
+Write me a timed one-minute game of a bat weight donut.
+Write me a kid-friendly game of a on deck circle timer.
+Write me a game of a bullpen warm up count.
+Write me a one-screen game of a manager challenge button.
+Write me a two-player game of a replay review of a still frame you call safe or out.
+Write me a timed one-minute game of a photo finish of a race.
+Write me a kid-friendly game of a starting blocks reaction.
+Write me a game of a hurdle you time the jump.
+Write me a one-screen game of a relay handoff.
+Write me a two-player game of a long jump takeoff board.
+Write me a timed one-minute game of a high jump arch.
+Write me a kid-friendly game of a pole vault plant.
+Write me a game of a shot put glide.
+Write me a one-screen game of a discus spin.
+Write me a two-player game of a javelin angle.
+Write me a timed one-minute game of a hammer throw spin.
+Write me a kid-friendly game of a triple jump hop step jump.
+Write me a game of a marathon split calculator.
+Write me a one-screen game of a water station click.
+Write me a two-player game of a finish line tape.
+Write me a timed one-minute game of a medal ceremony of three places.
+Write me a kid-friendly game of a podium you stand on.
+Write me a game of a anthem you stand still for a timer.
+Write me a one-screen game of a flag raise.
+Write me a two-player game of a torch you carry across one screen.
+Write me a timed one-minute game of a oath you click the words in order.
+Write me a kid-friendly game of a score you verify.
+Write me a game of a tape measure of a throw.
+Write me a one-screen game of a wind gauge.
+Write me a two-player game of a false start recall.
+Write me a timed one-minute game of a lane assignment.
+Write me a kid-friendly game of a heat sheet.
+Write me a game of a qualifying time you beat.
+Write me a one-screen game of a personal record flash.
+Write me a two-player game of a split negative you notice.
+Write me a timed one-minute game of a kick the last hundred.
+Write me a kid-friendly game of a wall you hit at mile temptation.
+Write me a game of a gel you take on time.
+Write me a one-screen game of a shoe you tie a double knot quiz.
+Write me a two-player game of a bib you pin.
+Write me a timed one-minute game of a chip you start on the mat.
+Write me a page that lets you draw and undo.
+Write me a single-screen tool that shows a big clock.
+Write me a little browser toy that counts down from ten.
+Write me a page that rolls a die.
+Write me a single-screen tool that flips a coin.
+Write me a little browser toy that picks a random name from a list you type.
+Write me a page that converts centimeters to inches.
+Write me a single-screen tool that adds a tip of fifteen percent.
+Write me a little browser toy that splits a restaurant bill.
+Write me a page that times a three minute egg.
+Write me a single-screen tool that shows a metronome.
+Write me a little browser toy that plays a one octave piano.
+Write me a page that lets you sketch with the mouse.
+Write me a single-screen tool that mixes two colors.
+Write me a little browser toy that shows the multiplication table.
+Write me a page that quizzes you on five state capitals.
+Write me a single-screen tool that reads a sentence aloud with the speech api if present otherwise shows it big.
+Write me a little browser toy that lets you check off a grocery list.
+Write me a page that sorts three tasks into now next later.
+Write me a single-screen tool that shows a breathing circle.
+Write me a little browser toy that counts jumping jacks you click.
+Write me a page that keeps score for two players.
+Write me a single-screen tool that shows a calendar month you can click.
+Write me a little browser toy that picks a chore for today.
+Write me a page that calculates how many days until a date you type.
+Write me a single-screen tool that shows a compass rose.
+Write me a little browser toy that lets you pan a tiny map.
+Write me a page that matches a hex color to a swatch.
+Write me a single-screen tool that lets you crop a rectangle on a photo you draw.
+Write me a little browser toy that builds a bar chart from three numbers.
+Write me a page that shows a pie of three slices.
+Write me a single-screen tool that lets you type a haiku and counts syllables roughly by vowels.
+Write me a little browser toy that turns a sentence into a big poster.
+Write me a page that makes a pattern of triangles.
+Write me a single-screen tool that animates a bouncing ball.
+Write me a little browser toy that shows a solar system you can pause.
+Write me a page that lets you water a plant.
+Write me a single-screen tool that hatches an egg if you keep it warm.
+Write me a little browser toy that lets you dress a paper doll.
+Write me a page that builds a snowman from three buttons.
+Write me a single-screen tool that lets you carve a pumpkin.
+Write me a little browser toy that counts candy.
+Write me a page that lights a menorah or a generic candle row of four.
+Write me a single-screen tool that counts down to midnight.
+Write me a little browser toy that lets you write a postcard.
+Write me a page that folds a paper airplane diagram you click through.
+Write me a single-screen tool that ties a bow in four steps.
+Write me a little browser toy that packs a suitcase checklist.
+Write me a page that plans a picnic checklist.
+Write me a single-screen tool that shows a bus timetable of four stops.
+Write me a little browser toy that lets you buy one item from a vending machine.
+Write me a page that dials a number on a keypad.
+Write me a single-screen tool that sorts mail into three bins.
+Write me a little browser toy that files a book by the first letter.
+Write me a page that checks out a library book.
+Write me a single-screen tool that focuses a microscope slider.

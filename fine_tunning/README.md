@@ -90,7 +90,26 @@ pkill -f fine_tunning/serve_progress.py     # the monitor, if wanted
 | `rows.py`                             | Turns one HTML file into one training row in agent format (HTML-game project)                                                                                            |
 | `ingest.py`                           | Overnight downloader. It searches GitHub for HTML/JS games, clones them, and appends rows to `jsonl/added.jsonl` (HTML-game project)                                     |
 | `rebuild_corpus.py`                   | Rebuilds `jsonl/html_corpus.jsonl` from every HTML file on disk. Run it only while the trainer is stopped.                                                               |
+| `synth_html.py` + `ideas_3000.txt`    | Asks Qwen3.8-27B on oMLX for one HTML file per short prompt, keeps pages that pass headless Chrome, writes `jsonl/synth.jsonl`. Live stats at <http://127.0.0.1:8768/>. `expand_ideas.py` builds one prompt per game: the lines in `ideas_1000.txt`, plus one small working version of each top title that is not already there. |
 
+
+---
+
+
+
+## 2b. Synthetic HTML set (Qwen3.8-27B on oMLX)
+
+One short prompt in, one HTML file out. Twelve generations run at once against the oMLX server already on port 8000. This script does not start oMLX and does not load a second copy of the model. Stop the LoRA trainer first so the GPU is free, then load and pin `Qwen3.8-27B-mxfp8`.
+
+```bash
+cd ~/Agent_learning
+MLX_SERVER_URL=http://127.0.0.1:8000 \
+  .venv/bin/python fine_tunning/synth_html.py --jobs 12 --limit 3000
+```
+
+Open <http://127.0.0.1:8768/>. The big number is aggregate decode tokens per second over the last 10 seconds. Prefill time is shown apart from that. Buttons 4, 8, 12, 16, 32, and 64 change how many streams run without a restart. The page has two scrolling lists, Working and Buggy. Click a row in either list, then Run. Up sets `weight` to 1. Down sets `weight` to 0 on that row. `train_lora.py` skips weight 0.
+
+The model is told to skip thinking and explanations. Its reply must start with `<html_file>` and end with `</html_file>`, with a short complete document inside. The saved row still uses the short training system prompt, and `pack_row` adds the canned `<think>` line. A page is kept only when `tools.test_html_file` reports no console or page errors. A failure is not repaired and is not run again. It is written once to `$LORA_ROOT/jsonl/buggy.jsonl` in the same row shape as a training example, with an extra `bug` entry: the prompt, the code, and the Chrome report (the error text, and the line or stack when Chrome sent one). Kept rows go to `$LORA_ROOT/jsonl/synth.jsonl` (default `~/MLX_Models/html_game_sft`). They are not added to `added.jsonl` unless you pass `--into-added`. The prompt list is `ideas_3000.txt`. Each game or graphic is on one line. One hundred 3D games (Doom, Minecraft, and the others) also have a second line that says to use three.js. One hundred pixel-art games say to use nice 8-bit graphics, as close to the original as possible. Openings vary (Make, Build, Create, and the others). The list includes one small working version of each of the top 1,000 acclaimed games, and it does not repeat a game already in `ideas_1000.txt`. `--limit 0` asks the 27B for still more prompts. A rerun skips a game that is already in `synth.jsonl` or `buggy.jsonl`, including when the wording differs. On the monitor, "saved earlier" is that count.
 
 ---
 
