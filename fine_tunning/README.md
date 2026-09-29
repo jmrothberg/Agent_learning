@@ -431,14 +431,16 @@ SMALL_ROOT=/Volumes/DRIVE/html_js_small ./start.sh small
 | `./start.sh small-stack`                   | The Stack v2 download. Resumes `logs/stack_state.json`. 32 workers, stop after 8B new tokens                 |
 
 
-**Instruction pages (Vulcan, in this repo).** `fine_tunning/small/instruct/vulcan/` is the 5,000-row request→page set (MIT, about 8MB). On the other Mac, after `git pull` and with the base model already downloaded:
+**Instruction pages (Vulcan, in this repo).** `fine_tunning/small/instruct/vulcan/train.jsonl` and `val.jsonl` are the 5,000 request→page lessons (MIT, about 8.5MB). 1,800 answers were already a full HTML page. The other 3,200 were a stylesheet only; `data.py` wraps each of those into a complete page. The quality scorer does not drop them as near-duplicates. The trainer draws each page 400 times per pass, about 1 in 10 tokens.
+
+On the other Mac, after `git pull`, with the base model already downloaded:
 
 ```bash
 cd ~/Agent_learning/fine_tunning/small
 ~/Agents/.venv/bin/python data.py --source vulcan
 ```
 
-That writes `vulcan_*.bin` shards for whatever `SMALL_BASE` is set to. The trainer draws each of those pages 400 times per pass (about 1 in 10 tokens). Resume training after the shards exist. The token files are not in git, because they only match one tokenizer.
+That writes `vulcan_*.bin` shards for whatever `SMALL_BASE` is set to. Then press **Resume training** on http://127.0.0.1:8767/. The `.bin` token files are not in git. They only match the tokenizer of the model that built them, so the other Mac builds its own.
 
 Env vars: `SMALL_ROOT` (data/checkpoints), `SMALL_BASE` (model), `SMALL_PORT` (page, default 8767), `SMALL_TRAIN_ARGS` (extra trainer flags), `LORA_PY`, `BROWSER_PY`.
 
