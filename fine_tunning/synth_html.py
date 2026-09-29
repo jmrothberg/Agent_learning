@@ -58,9 +58,11 @@ GEN_SYS = (
     "update, draw, and a requestAnimationFrame loop. "
     "A famous title is one playable scene of that game, not the whole product. "
     "Finish that scene, then stop. Do not add another level, a second mode, or a long story. "
-    "Close </html> and </html_file>."
+    "If the file is getting long, stop adding objects and close it. "
+    "The last characters must be </html> and </html_file>."
 )
 # r128 has no CapsuleGeometry. The model mixes that old CDN with newer classes.
+# Uncapped scenery also runs past MAX_TOKENS before </html>, which is "no html".
 _THREE_SRC = "https://unpkg.com/three@0.160.0/build/three.min.js"
 _THREE_RIDER = (
     " For three.js, include this script and no other three.js file: "
@@ -69,7 +71,11 @@ _THREE_RIDER = (
     "Add a scene, a camera, an ambient light, a directional light, and a ground plane. "
     "Use MeshStandardMaterial in a few distinct colors. "
     "Build objects from BoxGeometry, SphereGeometry, CylinderGeometry, "
-    "ConeGeometry, or PlaneGeometry. Do not use CapsuleGeometry."
+    "ConeGeometry, or PlaneGeometry. Do not use CapsuleGeometry. "
+    "Use at most twelve meshes: a player, a goal, and a few obstacles. "
+    "Do not build a city or one mesh per prop. "
+    "After those meshes, write the controls, the win or lose check, "
+    "requestAnimationFrame, then </html> and </html_file>."
 )
 _EIGHT_RIDER = (
     " Draw with fillRect in a chunky pixel style. "

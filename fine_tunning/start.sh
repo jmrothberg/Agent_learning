@@ -84,7 +84,7 @@ if [[ "$what" == small* ]]; then
   echo "SMALL_BASE=$SMALL_BASE"
   # First run on a Mac: make the venv and fetch the default 1B base. Shards must already be copied.
   if [[ "$what" == "small" ]]; then
-    ls "$SMALL_ROOT"/shards/*.jsonl >/dev/null 2>&1 || { echo "no shards in $SMALL_ROOT/shards — copy shards/ and quality.sqlite first"; exit 1; }
+    ls "$SMALL_ROOT"/shards/*.jsonl >/dev/null 2>&1 || ls "$SMALL_ROOT"/sets/*/tokens/*.jsonl >/dev/null 2>&1 || { echo "no token shards in $SMALL_ROOT — copy sets/ or shards/ first"; exit 1; }
     if [[ ! -x "$LORA_PY" ]]; then
       echo "creating ${LORA_PY:h:h}"
       python3.12 -m venv "${LORA_PY:h:h}"
@@ -166,7 +166,7 @@ if [[ "$what" == small* ]]; then
     if pgrep -f "train_small.py" > /dev/null; then
       echo "train_small.py already running (pid $(pgrep -f train_small.py | head -1))"; return
     fi
-    ls shards/*.jsonl > /dev/null 2>&1 || { echo "no shards in $SMALL_ROOT/shards (run small-data or small-retok)"; exit 1; }
+    ls shards/*.jsonl > /dev/null 2>&1 || ls sets/*/tokens/*.jsonl > /dev/null 2>&1 || { echo "no token shards in $SMALL_ROOT (sets/*/tokens or shards/)"; exit 1; }
     detach "$SMALL_ROOT/logs/train.out" "$LORA_PY" "$HERE/small/train_small.py" ${=SMALL_TRAIN_ARGS}
     echo "trainer  (log: $SMALL_ROOT/logs/train.log)   tail -f $SMALL_ROOT/logs/train.log"
   }
@@ -244,6 +244,13 @@ if [[ "$what" == small* ]]; then
     small-synth)
       "$LORA_PY" -u "$HERE/small/data.py" --source synth
       ;;
+    small-export)
+      if pgrep -f "data.py --source export" > /dev/null; then
+        echo "export already running (pid $(pgrep -f 'data.py --source export' | head -1))"; return
+      fi
+      detach "$SMALL_ROOT/logs/export.out" "$LORA_PY" -u "$HERE/small/data.py" --source export
+      echo "export   train text from tokens (log: $SMALL_ROOT/logs/export.out)"
+      ;;
     small-stack)
       # Resumes logs/stack_state.json. Same workers and cap as the Sep 24 run.
       if pgrep -f "data.py --source stack" > /dev/null; then
@@ -251,7 +258,7 @@ if [[ "$what" == small* ]]; then
       fi
       detach "$SMALL_ROOT/logs/stack.out" nice -n 5 "$LORA_PY" -u "$HERE/small/data.py" --source stack --workers 32 --max-tokens 8000000000
       echo "stack    (log: $SMALL_ROOT/logs/stack.out)   resumes logs/stack_state.json" ;;
-    *) echo "usage: $0 [small|small-train|small-monitor|small-data|small-retok DIR|small-quality|small-stack|small-synth|small-watch]"; exit 1 ;;
+    *) echo "usage: $0 [small|small-train|small-monitor|small-data|small-retok DIR|small-quality|small-stack|small-synth|small-export|small-watch]"; exit 1 ;;
   esac
   exit 0
 fi

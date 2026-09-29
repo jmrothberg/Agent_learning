@@ -671,8 +671,17 @@ def _scan_shards() -> dict:
     docs = tokens = 0
     by_src: dict[str, int] = {}
     norms: set[str] = set()
-    shards = ROOT / "shards"
-    if shards.is_dir():
+    # sets/<name>/tokens is the layout. shards/ is the old mixed folder, still counted.
+    folders = []
+    if (ROOT / "shards").is_dir():
+        folders.append(ROOT / "shards")
+    sets = ROOT / "sets"
+    if sets.is_dir():
+        for folder in sorted(sets.iterdir()):
+            token_dir = folder / "tokens"
+            if token_dir.is_dir():
+                folders.append(token_dir)
+    for shards in folders:
         for meta in shards.glob("*.jsonl"):
             for line in meta.read_text(encoding="utf-8", errors="replace").splitlines():
                 try:

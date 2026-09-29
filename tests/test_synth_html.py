@@ -120,6 +120,7 @@ def test_gen_messages_require_a_closed_file() -> None:
     assert "unpkg.com/three@0.160.0/build/three.min.js" in three_sys
     assert "directional light" in three_sys
     assert "Do not use CapsuleGeometry" in three_sys
+    assert "at most twelve meshes" in three_sys
     assert "r128" in three_sys
     eight = sh.gen_messages("Write me a small working version of Tetris. Use nice 8-bit graphics.")
     assert "fillRect" in eight[0]["content"]

@@ -117,12 +117,16 @@ class Blocks:
         self._lru: list[int] = []
         docs = []  # (bin index, offset, ntok, weight)
         seen: set[str] = set()
-        # Synthetic games live in sets/synth/shards so this folder can grow
-        # without joining the pretrain files. Missing folder: the other sets still train.
-        folders = [SHARDS]
-        synth_dir = ROOT / "sets" / "synth" / "shards"
-        if synth_dir.is_dir():
-            folders.append(synth_dir)
+        # Each set keeps tokens in sets/<name>/tokens. shards/ is the old mixed folder.
+        folders = []
+        if SHARDS.is_dir():
+            folders.append(SHARDS)
+        sets = ROOT / "sets"
+        if sets.is_dir():
+            for folder in sorted(sets.iterdir()):
+                tokens = folder / "tokens"
+                if tokens.is_dir():
+                    folders.append(tokens)
         for folder in folders:
             for meta in sorted(folder.glob("*.jsonl")):
                 b = meta.with_suffix(".bin")

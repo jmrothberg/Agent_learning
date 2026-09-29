@@ -37,8 +37,9 @@ ROOT = Path(os.environ.get("SMALL_ROOT", "~/MLX_Models/html_js_small")).expandus
 BASE = Path(os.environ.get("SMALL_BASE", "~/MLX_Models/MiniCPM5-1B-Base")).expanduser()
 GAMES_DB = Path("~/MLX_Models/html_game_sft/games.sqlite").expanduser()
 SHARDS = ROOT / "shards"
-# Synthetic games stay out of SHARDS so the pretrain mix does not pick them up.
-SYNTH_SHARDS = ROOT / "sets" / "synth" / "shards"
+# Each set is sets/<name>/{original,train,tokens} so the folder can be moved as one piece.
+SYNTH_ROOT = ROOT / "sets" / "synth"
+SYNTH_SHARDS = SYNTH_ROOT / "tokens"
 SYNTH_JSONL = Path(os.environ.get(
     "SYNTH_JSONL", "~/MLX_Models/html_game_sft/jsonl/synth.jsonl")).expanduser()
 _HTML_FILE = re.compile(r"<html_file>\s*(.*?)\s*</html_file>", re.I | re.S)
@@ -353,11 +354,37 @@ def _page_from_assistant(text: str) -> str | None:
     return page
 
 
-def _synth_run() -> None:
-    """Prompt, newline, raw page. Shards stay in sets/synth/shards.
+def _synth_keep(row: dict) -> tuple[str, str] | None:
+    """Return (sha, training text) or None. Training text is prompt, newline, page."""
+    if row.get("weight") == 0:
+        return None
+    msgs = row.get("messages") or []
+    user = " ".join(m.get("content", "") for m in msgs if m.get("role") == "user").strip()
+    assistant = "\n".join(m.get("content", "") for m in msgs if m.get("role") == "assistant")
+    page = _page_from_assistant(assistant)
+    if len(user) < 8 or not page:
+        return None
+    text = user + "\n" + page
+    sha = row.get("sha") or hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()
+    return sha, text
 
-    A rerun skips a sha already written, so this is the command to run again
-    when synth.jsonl grows toward 3,000 games.
+
+def _synth_write_text(kept: list[tuple[dict, str, str]]) -> None:
+    """original/ is the chat row. train/ is the prompt-newline-page string."""
+    orig = SYNTH_ROOT / "original"
+    train = SYNTH_ROOT / "train"
+    orig.mkdir(parents=True, exist_ok=True)
+    train.mkdir(parents=True, exist_ok=True)
+    orig_lines = [json.dumps(row, ensure_ascii=False) for row, _, _ in kept]
+    train_lines = [json.dumps({"sha": sha, "text": text}, ensure_ascii=False) for _, sha, text in kept]
+    (orig / "rows.jsonl").write_text("\n".join(orig_lines) + ("\n" if orig_lines else ""))
+    (train / "docs.jsonl").write_text("\n".join(train_lines) + ("\n" if train_lines else ""))
+
+
+def _synth_run() -> None:
+    """Three folders under sets/synth: original, train, tokens.
+
+    A rerun rewrites the text folders from synth.jsonl and only tokenizes new rows.
     """
     if not SYNTH_JSONL.is_file():
         raise SystemExit(f"no synth rows at {SYNTH_JSONL}")
@@ -374,38 +401,33 @@ def _synth_run() -> None:
                 continue
             if sha:
                 seen.add(sha)
+    kept: list[tuple[dict, str, str]] = []
     docs: list[tuple[str, dict]] = []
     n_skip = n_drop = 0
+    seen_now: set[str] = set()
     for line in SYNTH_JSONL.read_text().splitlines():
         if not line.strip():
             continue
         row = json.loads(line)
-        if row.get("weight") == 0:
+        item = _synth_keep(row)
+        if item is None:
             n_drop += 1
             continue
-        sha = row.get("sha") or ""
-        if sha and sha in seen:
-            n_skip += 1
-            continue
-        msgs = row.get("messages") or []
-        user = " ".join(m.get("content", "") for m in msgs if m.get("role") == "user").strip()
-        assistant = "\n".join(m.get("content", "") for m in msgs if m.get("role") == "assistant")
-        page = _page_from_assistant(assistant)
-        if len(user) < 8 or not page:
+        sha, text = item
+        if sha in seen_now:
             n_drop += 1
             continue
-        text = user + "\n" + page
-        if not sha:
-            sha = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()
+        seen_now.add(sha)
+        kept.append((row, sha, text))
         if sha in seen:
             n_skip += 1
             continue
-        seen.add(sha)
         norm = hashlib.sha1(_WS.sub(" ", text).encode()).hexdigest()[:16]
         docs.append((text, {
             "sha": sha, "src": "synth", "path": f"synth/{sha[:16]}",
             "lang": "HTML", "rank": 2, "norm": norm}))
-    print(f"synth: new {len(docs)} skipped {n_skip} dropped {n_drop} from {SYNTH_JSONL}", flush=True)
+    _synth_write_text(kept)
+    print(f"synth: text {len(kept)} new tokens {len(docs)} skipped {n_skip} dropped {n_drop}", flush=True)
     if not docs:
         return
     start = len(list(SYNTH_SHARDS.glob("synth_*.jsonl")))
@@ -416,12 +438,70 @@ def _synth_run() -> None:
         total["tokens"] += part["tokens"]
     print(f"synth: wrote {total['docs']} docs, {total['tokens']/1e6:.2f}M tokens -> {SYNTH_SHARDS}", flush=True)
     (ROOT / "logs" / "data_synth.json").write_text(json.dumps({
-        "docs": total["docs"], "tokens": total["tokens"], "skipped": n_skip, "dropped": n_drop}))
+        "docs": total["docs"], "tokens": total["tokens"], "skipped": n_skip, "dropped": n_drop,
+        "text_rows": len(kept)}))
+
+
+_SOURCE_NOTE = {
+    "gcc": (
+        "GitHub HTML and JavaScript from codeparrot/github-code-clean.\n"
+        "The files were streamed and not saved. train/ is the text that was tokenized.\n"
+    ),
+    "stack": (
+        "HTML and JavaScript from The Stack.\n"
+        "The files were streamed and not saved. train/ is the text that was tokenized.\n"
+    ),
+}
+
+
+def _export_train() -> None:
+    """Fill sets/<name>/train from token shards. Own also copies source files into original/.
+
+    A shard whose train jsonl is already non-empty is skipped, so this can be re-run.
+    """
+    tok = _tokenizer()
+    for src in ("own", "gcc", "stack"):
+        tokens = ROOT / "sets" / src / "tokens"
+        train = ROOT / "sets" / src / "train"
+        orig = ROOT / "sets" / src / "original"
+        if not tokens.is_dir():
+            print(f"export {src}: no tokens", flush=True)
+            continue
+        train.mkdir(parents=True, exist_ok=True)
+        orig.mkdir(parents=True, exist_ok=True)
+        note = _SOURCE_NOTE.get(src)
+        if note:
+            (orig / "SOURCE.txt").write_text(note)
+        n_docs = 0
+        for meta_path in sorted(tokens.glob(f"{src}_*.jsonl")):
+            out = train / meta_path.name
+            orig_out = orig / meta_path.name
+            if out.exists() and out.stat().st_size > 0 and (src != "own" or orig_out.exists()):
+                continue
+            bin_path = meta_path.with_suffix(".bin")
+            ids = np.fromfile(bin_path, dtype=np.uint32)
+            train_lines = []
+            orig_lines = []
+            for line in meta_path.read_text().splitlines():
+                d = json.loads(line)
+                piece = ids[d["offset"] + 1:d["offset"] + d["ntok"] - 1]
+                text = tok.decode(piece.tolist(), skip_special_tokens=True)
+                train_lines.append(json.dumps({
+                    "sha": d.get("sha"), "path": d.get("path"), "text": text}, ensure_ascii=False))
+                if src == "own":
+                    orig_lines.append(json.dumps({
+                        "sha": d.get("sha"), "path": d.get("path"), "text": text}, ensure_ascii=False))
+                n_docs += 1
+            out.write_text("\n".join(train_lines) + ("\n" if train_lines else ""))
+            if src == "own":
+                orig_out.write_text("\n".join(orig_lines) + ("\n" if orig_lines else ""))
+            print(f"export {src}: {meta_path.name} docs={n_docs}", flush=True)
+        print(f"export {src}: done docs={n_docs}", flush=True)
 
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--source", choices=("own", "gcc", "retok", "stack", "synth"), required=True)
+    p.add_argument("--source", choices=("own", "gcc", "retok", "stack", "synth", "export"), required=True)
     p.add_argument("--from", dest="from_root", default="",
                    help="retok: another SMALL_ROOT whose shards/ (+ shards/tokenizer.json) to re-tokenize for SMALL_BASE")
     p.add_argument("--workers", type=int, default=20)
@@ -439,6 +519,9 @@ def main() -> None:
 
     if args.source == "synth":
         _synth_run()
+        return
+    if args.source == "export":
+        _export_train()
         return
     if args.source == "stack":
         _stack_run(args.workers, int(args.max_tokens), args.chunk)

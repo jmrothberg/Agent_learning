@@ -107,11 +107,20 @@ MLX_SERVER_URL=http://127.0.0.1:8000 \
   .venv/bin/python fine_tunning/synth_html.py --jobs 12 --limit 3000
 ```
 
-That command is the start. Run it again to restart. It reads the current `ideas_3000.txt` from the top. A game already stored in `synth.jsonl` or `buggy.jsonl` is skipped, including when the wording differs, so the run continues at the next line that is not done. The file is ordered with the longest instructions first: three.js, then 8-bit graphics, then Phaser, PixiJS, and Howler.js, then the plain lines.
+Restart with this. It stops only the generator. The model server on port 8000 keeps running. Saved rows stay. A reply still being written is dropped.
+
+```bash
+pkill -f '[f]ine_tunning/synth_html.py'
+cd ~/Agent_learning
+MLX_SERVER_URL=http://127.0.0.1:8000 \
+  .venv/bin/python fine_tunning/synth_html.py --jobs 12 --limit 3000
+```
+
+That command is the start. Run the restart block to load prompt changes. It reads the current `ideas_3000.txt` from the top. A game already stored in `synth.jsonl` or `buggy.jsonl` is skipped, including when the wording differs, so the run continues at the next line that is not done. The file is ordered with the longest instructions first: three.js, then 8-bit graphics, then Phaser, PixiJS, and Howler.js, then the plain lines.
 
 Open <http://127.0.0.1:8768/>. The big number is aggregate decode tokens per second over the last 10 seconds. Prefill time is shown apart from that. Buttons 4, 8, 12, 16, 24, 32, 48, and 64 change how many streams run without a restart. The page has two scrolling lists, Working and Buggy. Click a row in either list, then Run. Up sets `weight` to 1. Down sets `weight` to 0 on that row. `train_lora.py` skips weight 0.
 
-The model is told to skip thinking and explanations and to return one playable scene: a goal, controls, a drawn background in several colors, and a script split into state, input, update, and draw. It is told to finish that scene and then stop, with no second level. Generation ends at 6144 tokens. A saved row must fit in 8128. A reply that is still going at the cutoff is dropped, because the file never closes. The reply must start with `<html_file>` and end with `</html_file>`. The saved row still uses the short training system prompt, and `pack_row` adds the canned `<think>` line. A page is kept only when `tools.test_html_file` reports no console or page errors. Three.js requests load `https://unpkg.com/three@0.160.0/build/three.min.js` only, with a light and a ground, and they do not use `CapsuleGeometry` or r128. A failure is not repaired and is not run again. It is written once to `$LORA_ROOT/jsonl/buggy.jsonl` in the same row shape as a training example, with an extra `bug` entry: the prompt, the code, and the Chrome report (the error text, and the line or stack when Chrome sent one). Kept rows go to `$LORA_ROOT/jsonl/synth.jsonl` (default `~/MLX_Models/html_game_sft`). They are not added to `added.jsonl` unless you pass `--into-added`. The prompt list is `ideas_3000.txt`. Each game or graphic is on one line. One hundred 3D games (Doom, Minecraft, and the others) also have a second line that says to use three.js. Games that are a better fit for another library get one extra line instead: Phaser for 2D action, PixiJS for simple sprite games, and Howler.js for rhythm and music games. A game is in at most one of those. One hundred pixel-art games say to use nice 8-bit graphics, as close to the original as possible. Openings vary (Make, Build, Create, and the others). The list includes one small working version of each of the top 1,000 acclaimed games, and it does not repeat a game already in `ideas_1000.txt`. `--limit 0` asks the 27B for still more prompts. A rerun skips a game that is already in `synth.jsonl` or `buggy.jsonl`, including when the wording differs. On the monitor, "saved earlier" is that count.
+The model is told to skip thinking and explanations and to return one playable scene: a goal, controls, a drawn background in several colors, and a script split into state, input, update, and draw. It is told to finish that scene and then stop, with no second level. Generation ends at 6144 tokens. A saved row must fit in 8128. A reply that is still going at the cutoff is dropped, because the file never closes. The reply must start with `<html_file>` and end with `</html_file>`. The saved row still uses the short training system prompt, and `pack_row` adds the canned `<think>` line. A page is kept only when `tools.test_html_file` reports no console or page errors. Three.js requests load `https://unpkg.com/three@0.160.0/build/three.min.js` only, with a light and a ground, and they do not use `CapsuleGeometry` or r128. A three.js scene is at most twelve meshes, then the controls and the closing tags, so the file finishes inside the token cap. A failure is not repaired and is not run again. It is written once to `$LORA_ROOT/jsonl/buggy.jsonl` in the same row shape as a training example, with an extra `bug` entry: the prompt, the code, and the Chrome report (the error text, and the line or stack when Chrome sent one). Kept rows go to `$LORA_ROOT/jsonl/synth.jsonl` (default `~/MLX_Models/html_game_sft`). They are not added to `added.jsonl` unless you pass `--into-added`. The prompt list is `ideas_3000.txt`. Each game or graphic is on one line. One hundred 3D games (Doom, Minecraft, and the others) also have a second line that says to use three.js. Games that are a better fit for another library get one extra line instead: Phaser for 2D action, PixiJS for simple sprite games, and Howler.js for rhythm and music games. A game is in at most one of those. One hundred pixel-art games say to use nice 8-bit graphics, as close to the original as possible. Openings vary (Make, Build, Create, and the others). The list includes one small working version of each of the top 1,000 acclaimed games, and it does not repeat a game already in `ideas_1000.txt`. `--limit 0` asks the 27B for still more prompts. A rerun skips a game that is already in `synth.jsonl` or `buggy.jsonl`, including when the wording differs. On the monitor, "saved earlier" is that count.
 
 ---
 
@@ -451,7 +460,8 @@ SMALL_ROOT=/Volumes/DRIVE/html_js_small ./start.sh small
 | `./start.sh small-retok DIR`               | re-tokenize `DIR/shards` for `SMALL_BASE` into `SMALL_ROOT/shards`                                           |
 | `./start.sh small-quality`                 | file check (stays up), code quality, and browser. Starts only the ones that are down.                        |
 | `./start.sh small-stack`                   | The Stack v2 download. Resumes `logs/stack_state.json`. 32 workers, stop after 8B new tokens                 |
-| `./start.sh small-synth`                   | Turn `html_game_sft/jsonl/synth.jsonl` into small-model shards. Safe to run again as the file grows.        |
+| `./start.sh small-synth`                   | Refresh the synthetic-game set (original, train text, tokens). Safe to run again as `synth.jsonl` grows. |
+| `./start.sh small-export`                  | Rebuild `train/` text for own, GitHub, and Stack from `tokens/`. Skips shards already exported.         |
 
 
 **Set weights.** The files stay in separate folders. One training pass draws them at these weights (canvas game with a loop; a weaker file in the same set is 0.6× or 0.35×). The numbers are sized for about 3,000 synthetic games against the tokens already on disk.
@@ -470,7 +480,37 @@ cd ~/Agent_learning/fine_tunning
 ./start.sh small-synth
 ```
 
-Shards go to `~/MLX_Models/html_js_small/sets/synth/shards/`. The pretrain folders are not modified. These weights apply the next time `train_small.py` starts. A trainer that is already running keeps the weights it loaded at start.
+**Where the sets live.** One folder per set, under `~/MLX_Models/html_js_small/sets/`. Move a set by moving that folder. A short map sits beside them in `sets/README.md`.
+
+| Folder | What is in it |
+| --- | --- |
+| `original/` | The source, unchanged. Synthetic games: the chat JSONL row. Own games: the HTML file path and its bytes. GitHub and The Stack were streamed and not kept as files; `original/SOURCE.txt` names the dataset. |
+| `train/` | The exact string that is tokenized. Own, GitHub, and Stack: the file text. Synthetic games: the prompt, a newline, then the page, with the chat tags removed. |
+| `tokens/` | Token ids (`.bin`) plus one sidecar `.jsonl` per shard (`sha`, `path`, `rank`, `ntok`). This is what `train_small.py` reads. |
+
+```text
+sets/own/    original/  train/  tokens/
+sets/gcc/    original/  train/  tokens/
+sets/stack/  original/  train/  tokens/
+sets/synth/  original/  train/  tokens/
+```
+
+**What training streams.** There is no single training file, and the weights are not stored inside the data. `train_small.py` reads every `sets/<name>/tokens/*.bin`. The `.jsonl` beside each `.bin` is an index: which document, the byte offset, the token count, `src`, and `rank`. `train/` and `original/` are not read.
+
+The learning rate is one number for every token (`--lr`, default `5e-5` on the 1B). A higher set weight does not take a bigger step. It only puts that document into the draw list more times, so its tokens are seen more often and the same-sized step happens more often on them.
+
+On each start, and again every 30 minutes, the trainer builds a draw list:
+
+1. Open each sidecar under `sets/*/tokens/`.
+2. Look up that document's weight: set weight × rank factor × the quality score.
+3. Put that many copies of the document into one long list (weight 40 puts in 40 copies; weight 0.6 puts in one copy on about 60% of passes). Weight 0 is left out.
+4. Shuffle the whole list once, so the copies land in random places and are not shown back to back. Then read token ids from the `.bin` files and pack them into 4,096-token blocks. The loss on each token in the block is the same.
+
+The set weights are in `fine_tunning/small/train_small.py` (`SET_WEIGHT`). They travel with the code, not with the data folder. The per-file quality scores are `~/MLX_Models/html_js_small/quality.sqlite` (a multiplier, often 0 for a near-duplicate). A document's draw rate is those two numbers multiplied.
+
+To train on another machine, copy the code, the base model, `sets/*/tokens/`, and `quality.sqlite`. Copy `checkpoints/latest/` only to continue this run. `train/` is the readable text if you need to tokenize again for a different model.
+
+These weights apply the next time `train_small.py` starts. A trainer that is already running keeps the weights it loaded at start.
 
 Env vars: `SMALL_ROOT` (data/checkpoints), `SMALL_BASE` (model), `SMALL_PORT` (page, default 8767), `SMALL_TRAIN_ARGS` (extra trainer flags), `LORA_PY`, `BROWSER_PY`.
 
@@ -484,14 +524,14 @@ Env vars: `SMALL_ROOT` (data/checkpoints), `SMALL_BASE` (model), `SMALL_PORT` (p
 | [http://127.0.0.1:8767/](http://127.0.0.1:8767/)       | Title names the base; green tokens/s; updates counting |
 | `tail ~/MLX_Models/html_js_small/logs/train.log`       | `Iter N: … Tokens/sec …` every 10 updates              |
 | `pgrep -fl train_small`                                | one Python process                                     |
-| `ls ~/MLX_Models/html_js_small/shards/*.jsonl | wc -l` | many shard files (not 0)                               |
+| `ls ~/MLX_Models/html_js_small/sets/*/tokens/*.bin | wc -l` | thousands of token shards (not 0)                     |
 
 
 
 | Symptom                          | Fix                                                                                                                 |
 | -------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
 | `no model at SMALL_BASE`         | Step 3 did not finish; re-run `hf download …`                                                                       |
-| `no shards in …/shards`          | Step 4 missed `shards/`; re-rsync from the drive                                                                    |
+| `no token shards`                | `sets/*/tokens/` was not copied. Re-rsync `sets/` and `quality.sqlite`.                                        |
 | `train_small.py already running` | A trainer is up; open the page or `pkill -f train_small.py` first                                                   |
 | `No Metal device available`      | Run in Terminal.app, not a sandboxed Cursor shell                                                                   |
 | Page blank / old LoRA curves     | Wrong port — small model is **8767**, LoRA is 8766                                                                  |
@@ -537,7 +577,7 @@ cp ~/MLX_Models/html_js_small/quality.sqlite $SMALL_ROOT/
 
 | File                                  | Job                                                                                                                                                                                                                                                                                                                                                                  |
 | ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `small/data.py`                       | Builds `shards/`. `--source own` = games from `html_game_sft/games.sqlite`; `--source gcc` = [codeparrot/github-code-clean](https://huggingface.co/datasets/codeparrot/github-code-clean) HTML + JavaScript (streamed); `--source stack` = The Stack; `--source synth` = `synth.jsonl` into `sets/synth/shards/` (prompt, newline, page); `--source retok --from DIR` = re-tokenize for a new base. Filters size / minified / base64 / symbol soup / HTML without `<script>`. Resumes. |
+| `small/data.py`                       | Builds `sets/<name>/{original,train,tokens}`. `--source own` = games from `html_game_sft/games.sqlite`; `--source gcc` = [codeparrot/github-code-clean](https://huggingface.co/datasets/codeparrot/github-code-clean) HTML + JavaScript (streamed); `--source stack` = The Stack; `--source synth` = `synth.jsonl` (chat row, then prompt-newline-page, then tokens); `--source retok --from DIR` = re-tokenize for a new base. Filters size / minified / base64 / symbol soup / HTML without `<script>`. Resumes. |
 | `small/train_small.py`                | Trainer: weighted, deduplicated packing; compiled step; AdamW, warmup + cosine. Every 30 min overwrites `checkpoints/latest/` and re-reads `shards/` + `quality.sqlite`. Every 6 hours keeps a dated weights-only copy in `snapshots/`. Those copies are never deleted. Resumes from `checkpoints/latest/`.                                                          |
 | `small/quality_worker.py`             | CPU quality scoring (niced). Writes `quality.sqlite` → `quality(norm, weight)`.                                                                                                                                                                                                                                                                                      |
 | `start.sh small*`                     | One-line starts (§9b)                                                                                                                                                                                                                                                                                                                                                |
