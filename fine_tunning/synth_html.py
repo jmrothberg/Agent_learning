@@ -103,7 +103,7 @@ DEFAULT_JOBS = 12
 DEFAULT_PORT = 8768
 DEFAULT_MODEL = "Qwen3.8-27B-mxfp8"
 CHROME_WORKERS = 2
-ROLL_SECONDS = 10.0
+ROLL_SECONDS = 30.0
 PREVIEW_CHARS = 80_000
 JOB_CHOICES = (4, 8, 12, 16, 24, 32, 48, 64)
 
@@ -460,7 +460,7 @@ class Stats:
             self.prefill_n += 1
 
     def tok_s(self, now: float | None = None) -> float:
-        """Aggregate decode tokens per second over the last 10 seconds."""
+        """Aggregate decode tokens per second over the last 30 seconds."""
         now = time.time() if now is None else now
         with self.lock:
             self._trim(now)
@@ -680,7 +680,7 @@ document.querySelectorAll("button[data-n]").forEach(btn => {
 function show(s) {
   tok.textContent = s.tok_s.toFixed(0);
   const pf = s.prefill_s ? s.prefill_s.toFixed(1) + "s avg prefill" : "prefill —";
-  sub.textContent = "decode tok/s over the last 10s · " + pf;
+  sub.textContent = "decode tok/s over the last 30s · " + pf;
   const eta = s.eta_min == null ? "—" : s.eta_min + " min";
   const rate = Math.round(s.pass_rate * 100) + "%";
   grid.replaceChildren(
