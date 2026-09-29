@@ -36,11 +36,12 @@ This folder has everything needed to train, monitor, and use a LoRA adapter on a
 
 `./start.sh` detaches each job to launchd (PPID 1), so closing Terminal or quitting Cursor leaves it running.
 
-```bash
-http://127.0.0.1:8767/
-```
+Monitor: [http://127.0.0.1:8767/](http://127.0.0.1:8767/) (small HTML/JS model) · [http://127.0.0.1:8766/](http://127.0.0.1:8766/) (27B LoRA).
 
-Then open **[http://127.0.0.1:8766/](http://127.0.0.1:8766/)** (LoRA) or **[http://127.0.0.1:8767/](http://127.0.0.1:8767/)** (small model). That page is the monitor.
+```bash
+cd ~/Agent_learning/fine_tunning
+./start.sh small
+```
 
 
 | Command                     | Starts                                                                   |
@@ -440,7 +441,7 @@ cd ~/Agent_learning/fine_tunning/small
 ~/Agents/.venv/bin/python data.py --source vulcan
 ```
 
-That writes `vulcan_*.bin` shards for whatever `SMALL_BASE` is set to. Then press **Resume training** on http://127.0.0.1:8767/. The `.bin` token files are not in git. They only match the tokenizer of the model that built them, so the other Mac builds its own.
+That writes `vulcan_*.bin` shards for whatever `SMALL_BASE` is set to. Then open the monitor, [http://127.0.0.1:8767/](http://127.0.0.1:8767/), and press **Resume training**. The `.bin` token files are not in git. They only match the tokenizer of the model that built them, so the other Mac builds its own.
 
 Env vars: `SMALL_ROOT` (data/checkpoints), `SMALL_BASE` (model), `SMALL_PORT` (page, default 8767), `SMALL_TRAIN_ARGS` (extra trainer flags), `LORA_PY`, `BROWSER_PY`.
 
