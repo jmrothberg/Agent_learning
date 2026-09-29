@@ -392,25 +392,43 @@ def _gen_error(proc: subprocess.CompletedProcess) -> str:
     return err[-1500:]
 
 
+def _inference_fits_beside_training(vlm: bool) -> bool:
+    """The 27B trainer fills this Mac, so a second model has to wait.
+
+    The 1B trainer peaks near 57GB. A second 1B load is a few GB. On a machine
+    with at least 96GB that pair fits, so a small-model test does not stop training.
+    """
+    if vlm or _python_script_pids("train_lora.py") or _python_script_pids("run_slices.py"):
+        return False
+    if not _python_script_pids("train_small.py"):
+        return True
+    try:
+        mem = int(subprocess.check_output(["sysctl", "-n", "hw.memsize"], text=True).strip())
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return False
+    return mem >= 96 * (1024 ** 3)
+
+
 def test_checkpoint(prompt: str, max_tokens: int, which: str = "latest") -> dict:
-    """Generate from a menu choice. Stops the trainer first so the GPU is free."""
-    if (_python_script_pids("train_small.py") or _python_script_pids("train_lora.py")
-            or _python_script_pids("run_slices.py")):
-        _hold_trainers()
-    if (_python_script_pids("train_small.py") or _python_script_pids("train_lora.py")
-            or _python_script_pids("run_slices.py")):
-        return {"ok": False, "error": "Training is still using the GPU. Press Stop, then Generate again."}
-    # Left column (base or another local model) or right column (latest / a snapshot). No other path.
+    """Generate from a menu choice. The 27B stops training first. The 1B does not."""
+    # Resolve the model before deciding. A 27B test still has to free the GPU.
     ckpt, err = _resolve_test_model(which)
     if err or not ckpt:
         return {"ok": False, "error": err or "That model was not found."}
+    vlm = _is_vlm(ckpt)
+    if not _inference_fits_beside_training(vlm):
+        if (_python_script_pids("train_small.py") or _python_script_pids("train_lora.py")
+                or _python_script_pids("run_slices.py")):
+            _hold_trainers()
+        if (_python_script_pids("train_small.py") or _python_script_pids("train_lora.py")
+                or _python_script_pids("run_slices.py")):
+            return {"ok": False, "error": "Training is still using the GPU. Press Stop, then Generate again."}
     which = (which or "latest").strip()
     max_tokens = max(32, min(int(max_tokens or 400), 32000))
     # Qwen3.8 and the other vision models: same mlx_vlm load and chat template as chat.py.
     # Thinking stays off so the token count is the answer, not a hidden chain of thought.
     # MiniCPM is continued pretraining on HTML, not a chat model. A bare sentence
     # is the start of a page, or the model just repeats the sentence.
-    vlm = _is_vlm(ckpt)
     return {
         "ok": True,
         "vlm": vlm,
@@ -550,6 +568,8 @@ def stream_test(handler: BaseHTTPRequestHandler, prompt: str, max_tokens: int, w
 
     threading.Thread(target=drain_out, daemon=True).start()
     parts: list[str] = []
+    n_tokens = 0
+    t_first = 0.0
     deadline = time.time() + 7200
     timed_out = False
     while True:
@@ -574,7 +594,15 @@ def stream_test(handler: BaseHTTPRequestHandler, prompt: str, max_tokens: int, w
         if not piece:
             continue
         parts.append(piece)
-        if not send({"t": piece}):
+        n_tokens += 1
+        if t_first == 0.0:
+            t_first = time.time()
+        elapsed = time.time() - t_first
+        payload = {"t": piece}
+        # The first tokens are too few to time. Report once the rate is real.
+        if n_tokens >= 8:
+            payload["tps"] = round(n_tokens / max(elapsed, 1e-3))
+        if not send(payload):
             proc.kill()
             return
     try:
@@ -599,11 +627,13 @@ def stream_test(handler: BaseHTTPRequestHandler, prompt: str, max_tokens: int, w
     # Some builds echo the prompt; others return only the new tokens.
     if not text.startswith(ready["prompt"]):
         text = ready["prompt"] + text
+    tps = round(n_tokens / max(time.time() - t_first, 1e-3)) if n_tokens and t_first else 0
     send({
         "done": True,
         "text": text,
         "html": _html_from_answer(text),
         "checkpoint": ready["ckpt"],
+        "tps": tps,
     })
 
 

@@ -62,7 +62,7 @@
 </div>
 <h2>Try a prompt</h2>
 <div class="panel" id="testPanel">
-  <p id="testNote" class="sub" style="margin:0 0 8px">Stop training to free the GPU. Then pick one side and press its Generate. The other side is left as it is.</p>
+  <p id="testNote" class="sub" style="margin:0 0 8px">Pick a model on either side and press Generate. Training keeps running. The other side is left as it is.</p>
   <div class="row">
     <button id="smallStop" type="button">Stop training</button>
     <button id="smallResume" type="button">Resume training</button>
@@ -297,11 +297,14 @@ async function tick() {
       const cmp = (s.compare_models || []).some((m) => m.id === document.getElementById("compareModel").value);
       const ckpt = (s.test_models || []).some((m) => m.id === document.getElementById("testModel").value);
       trainerOn = !!s.trainer_running;
+      smallRun = !!s.small;
       document.getElementById("genLeft").disabled = busy || !cmp;
       document.getElementById("genRight").disabled = busy || !ckpt;
-      document.getElementById("testNote").textContent = s.trainer_running
+      document.getElementById("testNote").textContent = (s.small && s.trainer_running)
+        ? "Generate keeps training running. This model fits beside it. Tokens per second show once writing starts."
+        : (s.trainer_running
         ? "Generate is on. It stops training to free the GPU, then runs only the side you press. Resume starts training again."
-        : "GPU is free. Generate runs only the side you press. Resume starts training again.";
+        : "GPU is free. Generate runs only the side you press. Resume starts training again.");
       return;
     }
     document.getElementById("html").textContent = s.html_files ?? s.html_rows ?? 0;
@@ -474,6 +477,7 @@ function drawLoss(losses, xName) {
 }
 let busy = false;
 let trainerOn = false;
+let smallRun = false;
 let lastPage = "";
 let lastName = "";
 function esc(s) {
@@ -531,7 +535,7 @@ async function generateSide(which, label, outId, frameId) {
   const status = document.getElementById("testStatus");
   const pre = document.getElementById(outId);
   const userPrompt = document.getElementById("prompt").value;
-  status.textContent = (trainerOn ? "Stopping training to free the GPU, then loading " : "Loading ") + label + "…";
+  status.textContent = (trainerOn && !smallRun ? "Stopping training to free the GPU, then loading " : "Loading ") + label + "…";
   pre.textContent = "";
   const r = await fetch("/test", {
     method: "POST",
@@ -580,11 +584,14 @@ async function generateSide(which, label, outId, frameId) {
         shown += msg.t;
         pre.textContent = shown;
         pre.scrollTop = pre.scrollHeight;
-        status.textContent = "Writing " + label + "…";
+        const rate = msg.tps ? " · " + Number(msg.tps).toLocaleString() + " tok/s" : "";
+        status.textContent = "Writing " + label + rate;
       }
       if (msg.done) {
         showGenerated(outId, frameId, msg);
+        const rate = msg.tps ? " " + Number(msg.tps).toLocaleString() + " tok/s." : "";
         status.textContent = label + (msg.html ? " is on screen." : " did not produce an HTML page. The text is above. Press Run if the code is in the box.") +
+          rate +
           (msg.checkpoint ? " Loaded " + msg.checkpoint + "." : "");
       }
     }
