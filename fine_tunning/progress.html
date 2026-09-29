@@ -52,6 +52,7 @@
   <div class="card"><div class="num" id="cTok">–</div><div class="label" id="cTokLabel">Tokens in the set</div></div>
   <div class="card"><div class="num" id="cDrop">–</div><div class="label" id="cDropLabel">Near-duplicates dropped</div></div>
 </div>
+<p id="mixLine" class="sub" style="margin:8px 0 0"></p>
 <h2>Download</h2>
 <div class="panel" id="downloadPanel">
   <p id="downloadLine" class="sub" style="margin:0">Waiting for the Stack download.</p>
@@ -189,14 +190,21 @@ async function tick() {
       const perUpd = t.step ? t.tokens / t.step : 0;
       const total = perUpd * (t.iters_this_slice || 0);
       const uniqueTok = Number(c.tokens || 0);
-      const epochs = uniqueTok > 0 ? (t.tokens || 0) / uniqueTok : null;
+      // Same string the trainer writes. Cards must use these, not a second count.
+      const detail = String(t.detail || "");
+      const drawn = Number((detail.match(/docs=(\d+)/) || [])[1] || 0);
+      const sampled = Number((detail.match(/sampled_tokens=([0-9.]+)B/) || [])[1] || 0) * 1e9;
+      const passBase = sampled || uniqueTok;
+      const epochs = passBase > 0 ? (t.tokens || 0) / passBase : null;
       const left = tps > 0 ? (total - (t.tokens || 0)) / tps / 86400 : null;
       document.getElementById("banner").textContent =
         "Stage 1: continued pretraining on HTML and JavaScript only. Loss is averaged over the last 10 updates.";
       document.getElementById("epoch").textContent = epochs == null ? "–" : epochs.toFixed(2);
-      document.getElementById("epochLabel").textContent = uniqueTok
-        ? `Passes through ${(uniqueTok / 1e9).toFixed(2)}B unique tokens. 1.00 = one full pass.`
-        : "Passes through the unique set";
+      document.getElementById("epochLabel").textContent = sampled
+        ? `Passes through ${(sampled / 1e9).toFixed(2)}B sampled tokens. 1.00 = one draw of the mix below, repeats included.`
+        : (uniqueTok
+          ? `Passes through ${(uniqueTok / 1e9).toFixed(2)}B on disk. 1.00 = one full pass.`
+          : "Passes through the unique set");
       document.getElementById("sloss").textContent = t.loss == null ? "–" : Number(t.loss).toFixed(3);
       const losses = s.losses || [];
       const avg50 = losses.length ? losses.slice(-50).reduce((a, b) => a + b, 0) / Math.min(50, losses.length) : null;
@@ -216,11 +224,16 @@ async function tick() {
       document.getElementById("updLabel").textContent = `Updates of ${(t.iters_this_slice || 0).toLocaleString()} · peak ${t.peak_gb ? Number(t.peak_gb).toFixed(1) : "–"} GB · lr ${t.detail && /lr=([0-9.e-]+)/.test(t.detail) ? "" : ""}`.replace(" · lr ", "");
       const lr = String(t.detail || "").match(/lr=([0-9.eE+-]+)/);
       if (lr) document.getElementById("updLabel").textContent += ` · lr ${lr[1]}`;
-      document.getElementById("cDocs").textContent = (c.unique || 0).toLocaleString();
-      document.getElementById("cDocsLabel").textContent =
-        `Unique files after text-hash dedup (${(c.docs || 0).toLocaleString()} rows on disk, including copies)`;
-      document.getElementById("cTok").textContent = uniqueTok ? (uniqueTok / 1e9).toFixed(2) + "B" : "–";
-      document.getElementById("cTokLabel").textContent = "Tokens in the unique set (before quality weights)";
+      document.getElementById("cDocs").textContent = (drawn || c.unique || 0).toLocaleString();
+      document.getElementById("cDocsLabel").textContent = drawn
+        ? `Files the trainer draws (docs= in the train log). ${(c.unique || 0).toLocaleString()} unique on disk. ${(c.docs || 0).toLocaleString()} rows, copies included.`
+        : `Unique files after text-hash dedup (${(c.docs || 0).toLocaleString()} rows on disk, including copies)`;
+      document.getElementById("cTok").textContent = (sampled || uniqueTok) ? ((sampled || uniqueTok) / 1e9).toFixed(2) + "B" : "–";
+      document.getElementById("cTokLabel").textContent = sampled
+        ? `Sampled tokens one pass draws (sampled_tokens= in the train log). ${(uniqueTok / 1e9).toFixed(2)}B is every row on disk, before repeats.`
+        : "Tokens in the rows on disk, before repeats";
+      document.getElementById("mixLine").textContent =
+        "Repeats, the same weights that produce sampled_tokens: Vulcan pages ×400. Own canvas games ×3, other own games ×2. GitHub and Stack canvas ×1.5. Plain files ×1. Weaker files ×0.7. Weight 0 is not drawn. The review below can also scale a file (broken JavaScript ×0.3, a canvas that draws ×1.5).";
       const dropPct = c.unique ? Math.round(100 * (c.dropped || 0) / c.unique) : 0;
       document.getElementById("cDrop").textContent = (c.dropped || 0).toLocaleString();
       document.getElementById("cDropLabel").textContent = `Near-duplicates at weight 0 (${dropPct}% of unique)`;
