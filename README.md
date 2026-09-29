@@ -252,7 +252,7 @@ Two processes run in parallel — **both required**:
 
 **Watcher loop:** when `agent_monitor.json` shows `completed_count` advanced, timeline the newest trace (`scripts/enrich_trace.py <trace> --timeline`), classify `failure_class`, patch source — do **not** stop the Terminal batch.
 
-Legacy `tune_runNN.sh` recipes: **`eval/OPERATIONS.md`** (historical archive under HARD RULES).
+A new night uses `Overnight.command` / `overnight.sh`. It writes that night's goals into `games/tune_serial10/run_N/goals.txt`.
 
 ---
 
@@ -624,7 +624,7 @@ Battery: `memory/system_battery.jsonl`.
 
 ## HTML-game LoRA
 
-> **Full training guide: [`fine_tunning/README.md`](fine_tunning/README.md)**. It covers the data sources, processing, row format, every flag, training a new LoRA or another Qwen-style (mlx-vlm) base, and troubleshooting. `fine_tunning/` is the current code. `sft/` is the older copy.
+> **Full training guide: [`fine_tunning/README.md`](fine_tunning/README.md)**. It covers the data sources, processing, row format, every flag, training a new LoRA or another Qwen-style (mlx-vlm) base, and troubleshooting. `fine_tunning/` is the trainer.
 >
 > **Small HTML/JS model** (full fine-tune of MiniCPM5-1B): put `shards/` + `quality.sqlite` in `~/MLX_Models/html_js_small`, then `cd fine_tunning && ./start.sh small`. Monitor: [http://127.0.0.1:8767/](http://127.0.0.1:8767/). That starts the page, the trainer, and the review. Add `continue` only to also resume the Stack download. Full guide, top of [`fine_tunning/README.md`](fine_tunning/README.md).
 >
@@ -641,7 +641,7 @@ Battery: `memory/system_battery.jsonl`.
 
 Language-only LoRA on **Qwen3.8-27B-mxfp8** (mlx-vlm, rank 16, alpha 32, lr 5e-5 since Sep 23; was 1e-5). The base folder `~/MLX_Models/Qwen3.8-27B-mxfp8` is never rewritten, so the vision tower stays the original weights. There is no fused copy.
 
-**Speed settings (`sft/train_lora.py` defaults, ~10x vs the first runs — trained answer tokens per second 12 → ~125; 143 s per fragment → ~22 s per whole game):**
+**Speed settings (`fine_tunning/train_lora.py` defaults, ~10x vs the first runs — trained answer tokens per second 12 → ~125; 143 s per fragment → ~22 s per whole game):**
 
 | Flag | Default | Effect |
 |---|---|---|
@@ -680,7 +680,7 @@ tail -f ~/MLX_Models/html_game_sft/logs/train.log
 
 Stop `chat.py` before training if chat has the 27B loaded. The trainer loads the 27B itself. A second copy does not fit in 192 GB.
 
-The programs are `sft/` in this repo. Downloaded games, jsonl, logs, and adapter weights stay on disk under `~/MLX_Models/html_game_sft/` and are not committed.
+The programs are `fine_tunning/` in this repo. Downloaded games, jsonl, logs, and adapter weights stay on disk under `~/MLX_Models/html_game_sft/` and are not committed.
 
 | On disk (not in git) | What |
 |------|------|
@@ -693,7 +693,7 @@ The programs are `sft/` in this repo. Downloaded games, jsonl, logs, and adapter
 
 Most rows are ordinary HTML/JS games. The system text is `build_system_prompt("{goal}")` from `prompts_v1.py`, and the assistant text is the game inside `<html_file>`. Files under `~/JMR-JS-CSS-FPGA-COMPUTER/storage` are the `/640png` rows: same function with `jmr_png_mode=True`. Chip rules are applied when you run `/640png`, not by dropping games that use `fetch` or `sprite()`.
 
-Python is `~/Agents/.venv` (mlx-vlm). `sft/` in this repo is the git copy of those scripts. The running job uses `~/MLX_Models/html_game_sft/scripts/`. Rebuild the training file only when the trainer is stopped:
+Python is `~/Agents/.venv` (mlx-vlm). `fine_tunning/` in this repo is the git copy of those scripts. The running job uses `~/MLX_Models/html_game_sft/scripts/`. Rebuild the training file only when the trainer is stopped:
 
 ```bash
 PY=~/Agents/.venv/bin/python

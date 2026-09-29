@@ -5,7 +5,7 @@
 # Open overnight batch in REAL Terminal.app (never Cursor's integrated terminal).
 #
 # Usage (Cursor agent runs this — NEVER ask the human to paste):
-#   bash eval/launch_overnight_batch.sh eval/tune_run18.sh
+#   bash eval/overnight.sh --prompts 54,28 --model GLM-5.2-MLX-4bit --vlm no
 #
 # Then IMMEDIATELY start the watcher in a Cursor Shell with block_until_ms=0
 # so it appears in the IDE terminals panel. NEVER nohup / disown the watcher.

@@ -37,6 +37,18 @@ def test_ideas_3000_one_game_each() -> None:
     keys = [sh.subject_key(line) for line in ideas]
     assert len(ideas) > 1000
     assert len(keys) == len(set(keys))
+    def _rank(line: str) -> int:
+        low = line.lower()
+        if "three.js" in low:
+            return 0
+        if "8-bit" in low:
+            return 1
+        if " in phaser" in low or " in pixijs" in low or " in howler.js" in low:
+            return 2
+        return 3
+
+    assert _rank(ideas[0]) == 0
+    assert all(_rank(a) <= _rank(b) for a, b in zip(ideas, ideas[1:]))
     assert "tetris use nice 8 bit graphics as close to the original as possible" in keys
     assert "tetris" not in keys
     assert sum("three js" in k for k in keys) == 100
@@ -72,12 +84,14 @@ def test_buggy_row_keeps_prompt_code_and_chrome_report() -> None:
     assert row["messages"][3]["role"] == "bug"
     assert "game.html:42:5" in row["messages"][3]["content"]
     assert "game.html:42:5" in row["bug"]["errors"][0]
+    assert 24 in sh.JOB_CHOICES and 48 in sh.JOB_CHOICES
     assert 32 in sh.JOB_CHOICES and 64 in sh.JOB_CHOICES
 
 
 def test_subject_key_ignores_the_opening() -> None:
     assert sh.subject_key("Write me a game of hangman.") == "hangman"
     assert sh.subject_key("Make a small working version of Hades.") == "hades"
+    assert sh.subject_key("Make a complete working version of Hades.") == "hades"
     assert sh.subject_key("Build me a two-player game of breakout.") == "breakout"
 
 
@@ -94,10 +108,21 @@ def test_gen_messages_require_a_closed_file() -> None:
     msgs = sh.gen_messages(PROMPT)
     assert msgs[1] == {"role": "user", "content": PROMPT}
     system = msgs[0]["content"]
-    assert system.startswith("Reply with one small")
+    assert system.startswith("Reply with one complete")
     assert "<html_file>" in system and "</html_file>" in system
     assert "No thinking" in system
+    assert "requestAnimationFrame" in system
+    assert "several colors" in system
+    assert "CapsuleGeometry" not in system
     assert system != sh.SHORT_SYS
+    three = sh.gen_messages("Make a small working version of Shadow of the Colossus in three.js.")
+    three_sys = three[0]["content"]
+    assert "unpkg.com/three@0.160.0/build/three.min.js" in three_sys
+    assert "directional light" in three_sys
+    assert "Do not use CapsuleGeometry" in three_sys
+    assert "r128" in three_sys
+    eight = sh.gen_messages("Write me a small working version of Tetris. Use nice 8-bit graphics.")
+    assert "fillRect" in eight[0]["content"]
 
 
 def test_pack_row_matches_short_html_shape() -> None:

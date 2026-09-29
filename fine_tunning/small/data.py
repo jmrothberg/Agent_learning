@@ -1,17 +1,22 @@
 """HTML/JS pretraining shards for the small model (MiniCPM5-1B-Base).
 
 Sources:
-  own  — games indexed in ~/MLX_Models/html_game_sft/games.sqlite (kind html/gold)
-  gcc  — codeparrot/github-code-clean, languages HTML + JavaScript, streamed
-         over HTTP (parquet files are read, never stored on disk)
+  own   — games indexed in ~/MLX_Models/html_game_sft/games.sqlite (kind html/gold)
+  gcc   — codeparrot/github-code-clean, languages HTML + JavaScript, streamed
+          over HTTP (parquet files are read, never stored on disk)
+  stack — The Stack v2 HTML and JavaScript
+  synth — prompt, newline, raw page, from html_game_sft/jsonl/synth.jsonl.
+          Written under sets/synth/shards/, not into the pretrain mix.
 
 Output: ~/MLX_Models/html_js_small/shards/<src>_<chunk>.bin   uint32 tokens
         ~/MLX_Models/html_js_small/shards/<src>_<chunk>.jsonl one line per doc
         (offset, ntok, sha, norm hash, source, path, rank). A chunk is done
         when its .jsonl exists, so a rerun resumes.
+        Synthetic games use the same file pair under sets/synth/shards/.
 
   python data.py --source own
   python data.py --source gcc --workers 12
+  python data.py --source synth
 """
 from __future__ import annotations
 
@@ -32,6 +37,11 @@ ROOT = Path(os.environ.get("SMALL_ROOT", "~/MLX_Models/html_js_small")).expandus
 BASE = Path(os.environ.get("SMALL_BASE", "~/MLX_Models/MiniCPM5-1B-Base")).expanduser()
 GAMES_DB = Path("~/MLX_Models/html_game_sft/games.sqlite").expanduser()
 SHARDS = ROOT / "shards"
+# Synthetic games stay out of SHARDS so the pretrain mix does not pick them up.
+SYNTH_SHARDS = ROOT / "sets" / "synth" / "shards"
+SYNTH_JSONL = Path(os.environ.get(
+    "SYNTH_JSONL", "~/MLX_Models/html_game_sft/jsonl/synth.jsonl")).expanduser()
+_HTML_FILE = re.compile(r"<html_file>\s*(.*?)\s*</html_file>", re.I | re.S)
 
 def _special_ids() -> tuple[int, int]:
     """Doc separators from the base model's config (MiniCPM5: bos 0, eos 1).
@@ -93,7 +103,7 @@ def rank(text: str) -> int:
     return 1 if (canvas or loop) else 0
 
 
-def _write(name: str, docs: list[tuple[str, dict]]) -> dict:
+def _write(name: str, docs: list[tuple[str, dict]], folder: Path | None = None) -> dict:
     tok = _tokenizer()
     enc = tok.encode_batch([t for t, _ in docs], add_special_tokens=False)
     parts, off = [], 0
@@ -106,11 +116,12 @@ def _write(name: str, docs: list[tuple[str, dict]]) -> dict:
         meta.setdefault("norm", hashlib.sha1(_WS.sub(" ", text).encode()).hexdigest()[:16])
         meta_lines.append(json.dumps(meta))
         off += ids.size
+    dest = folder or SHARDS
     arr = np.concatenate(parts) if parts else np.zeros(0, np.uint32)
-    arr.tofile(SHARDS / f"{name}.bin")
-    tmp = SHARDS / f"{name}.jsonl.tmp"
+    arr.tofile(dest / f"{name}.bin")
+    tmp = dest / f"{name}.jsonl.tmp"
     tmp.write_text("\n".join(meta_lines) + ("\n" if meta_lines else ""))
-    tmp.rename(SHARDS / f"{name}.jsonl")
+    tmp.rename(dest / f"{name}.jsonl")
     return {"docs": len(docs), "tokens": int(off)}
 
 
@@ -326,112 +337,91 @@ def _stack_run(workers: int, max_tokens: int, chunk: int) -> None:
     (ROOT / "logs" / "data_stack.json").write_text(json.dumps({"docs": docs_n, "tokens": tokens, "drops": drops}))
 
 
-_CLASS = re.compile(r"(?:^|[\s,{])\.([A-Za-z_][\w-]*)")
-
-
-def _css_to_page(css: str) -> str:
-    """Wrap a stylesheet in a complete page that actually uses its classes."""
-    classes: list[str] = []
-    for m in _CLASS.finditer(css):
-        name = m.group(1)
-        if name not in classes:
-            classes.append(name)
-    root = classes[0] if classes else "page"
-    extra = "".join(f'<div class="{c}"></div>' for c in classes[1:8])
-    spans = "<span></span><span></span><span></span>" if "span" in css else ""
-    cells = "<div></div><div></div><div></div><div></div>"
-    return (
-        "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
-        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
-        "<title>Page</title>\n<style>\n" + css.strip() + "\n"
-        "body { margin: 0; min-height: 100vh; background: var(--bg, #111); "
-        "color: var(--text, #eee); font-family: var(--font, sans-serif); }\n"
-        "</style>\n</head>\n<body>\n"
-        f'<div class="{root}">{spans}{extra}{cells}</div>\n'
-        "</body>\n</html>\n"
-    )
-
-
-def _vulcan_page(assistant: str) -> str | None:
-    """Return one complete HTML page, or None if this answer is not usable."""
-    text = assistant.strip()
-    low = text.lower()
-    if "<!doctype" in low or "<html" in low:
-        at = low.find("<!doctype")
-        if at < 0:
-            at = low.find("<html")
-        page = text[at:]
-        if "</html>" not in page.lower():
-            return None
-        return page
-    if not text.startswith(":root") or "{" not in text:
+def _page_from_assistant(text: str) -> str | None:
+    """HTML document inside a synth.jsonl assistant turn. Drops the chat tags."""
+    wrapped = _HTML_FILE.search(text)
+    chunk = wrapped.group(1) if wrapped else text
+    low = chunk.lower()
+    at = low.find("<!doctype")
+    if at < 0:
+        at = low.find("<html")
+    if at < 0:
         return None
-    return _css_to_page(text)
+    page = chunk[at:].strip()
+    if "</html>" not in page.lower():
+        return None
+    return page
 
 
-def _vulcan_run() -> None:
-    """xlelords/vulcan: request, then a full HTML page. Heavy-weighted by train_small.
+def _synth_run() -> None:
+    """Prompt, newline, raw page. Shards stay in sets/synth/shards.
 
-    1,800 answers are already a whole page. The other 3,200 are a stylesheet only;
-    those are wrapped into a page that uses the classes, so every kept row is a
-    complete document. A row is dropped if it still is not one page.
+    A rerun skips a sha already written, so this is the command to run again
+    when synth.jsonl grows toward 3,000 games.
     """
-    from huggingface_hub import snapshot_download
-    bundled = Path(__file__).resolve().parent / "instruct" / "vulcan"
-    if (bundled / "train.jsonl").exists():
-        dest = bundled
-    else:
-        dest = ROOT / "instruct" / "vulcan"
-        dest.mkdir(parents=True, exist_ok=True)
-        if not (dest / "train.jsonl").exists():
-            snapshot_download("xlelords/vulcan", repo_type="dataset", local_dir=str(dest))
-    docs = []
+    if not SYNTH_JSONL.is_file():
+        raise SystemExit(f"no synth rows at {SYNTH_JSONL}")
+    SYNTH_SHARDS.mkdir(parents=True, exist_ok=True)
+    (ROOT / "logs").mkdir(parents=True, exist_ok=True)
+    if not (SYNTH_SHARDS / "tokenizer.json").exists():
+        shutil.copy2(BASE / "tokenizer.json", SYNTH_SHARDS / "tokenizer.json")
     seen: set[str] = set()
-    n_html = n_css = n_drop = 0
-    for name in ("train.jsonl", "val.jsonl"):
-        path = dest / name
-        if not path.exists():
+    for meta in SYNTH_SHARDS.glob("synth_*.jsonl"):
+        for line in meta.read_text().splitlines():
+            try:
+                sha = json.loads(line).get("sha")
+            except json.JSONDecodeError:
+                continue
+            if sha:
+                seen.add(sha)
+    docs: list[tuple[str, dict]] = []
+    n_skip = n_drop = 0
+    for line in SYNTH_JSONL.read_text().splitlines():
+        if not line.strip():
             continue
-        for line in path.read_text().splitlines():
-            row = json.loads(line)
-            msgs = row.get("messages") or []
-            user = " ".join(m.get("content", "") for m in msgs if m.get("role") == "user").strip()
-            assistant = " ".join(m.get("content", "") for m in msgs if m.get("role") == "assistant")
-            raw = assistant.strip()
-            if len(user) < 12 or not raw:
-                n_drop += 1
-                continue
-            kind_html = "<html" in raw.lower() or "<!doctype" in raw.lower()
-            page = _vulcan_page(raw)
-            if not page or "</html>" not in page.lower() or len(page) < 400:
-                n_drop += 1
-                continue
-            text = user + "\n" + page
-            norm = hashlib.sha1(_WS.sub(" ", text).encode()).hexdigest()[:16]
-            if norm in seen:
-                n_drop += 1
-                continue
-            seen.add(norm)
-            n_html += kind_html
-            n_css += not kind_html
-            docs.append((text, {
-                "sha": hashlib.sha1(text.encode("utf-8", "replace")).hexdigest(),
-                "src": "vulcan", "path": f"vulcan/{norm}", "lang": "HTML",
-                "rank": 2, "norm": norm}))
-    print(f"vulcan: kept {len(docs)} (full pages {n_html}, css wrapped {n_css}), dropped {n_drop}", flush=True)
+        row = json.loads(line)
+        if row.get("weight") == 0:
+            n_drop += 1
+            continue
+        sha = row.get("sha") or ""
+        if sha and sha in seen:
+            n_skip += 1
+            continue
+        msgs = row.get("messages") or []
+        user = " ".join(m.get("content", "") for m in msgs if m.get("role") == "user").strip()
+        assistant = "\n".join(m.get("content", "") for m in msgs if m.get("role") == "assistant")
+        page = _page_from_assistant(assistant)
+        if len(user) < 8 or not page:
+            n_drop += 1
+            continue
+        text = user + "\n" + page
+        if not sha:
+            sha = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()
+        if sha in seen:
+            n_skip += 1
+            continue
+        seen.add(sha)
+        norm = hashlib.sha1(_WS.sub(" ", text).encode()).hexdigest()[:16]
+        docs.append((text, {
+            "sha": sha, "src": "synth", "path": f"synth/{sha[:16]}",
+            "lang": "HTML", "rank": 2, "norm": norm}))
+    print(f"synth: new {len(docs)} skipped {n_skip} dropped {n_drop} from {SYNTH_JSONL}", flush=True)
+    if not docs:
+        return
+    start = len(list(SYNTH_SHARDS.glob("synth_*.jsonl")))
     total = {"docs": 0, "tokens": 0}
     for i in range(0, len(docs), 2000):
-        part = _write(f"vulcan_{i // 2000:05d}", docs[i:i + 2000])
+        part = _write(f"synth_{start + i // 2000:05d}", docs[i:i + 2000], SYNTH_SHARDS)
         total["docs"] += part["docs"]
         total["tokens"] += part["tokens"]
-    print(f"vulcan: tokens={total['tokens']/1e6:.1f}M", flush=True)
-    (ROOT / "logs" / "data_vulcan.json").write_text(json.dumps({"docs": total["docs"], "tokens": total["tokens"],
-                                                                "html": n_html, "css_wrapped": n_css, "dropped": n_drop}))
+    print(f"synth: wrote {total['docs']} docs, {total['tokens']/1e6:.2f}M tokens -> {SYNTH_SHARDS}", flush=True)
+    (ROOT / "logs" / "data_synth.json").write_text(json.dumps({
+        "docs": total["docs"], "tokens": total["tokens"], "skipped": n_skip, "dropped": n_drop}))
 
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--source", choices=("own", "gcc", "retok", "stack", "vulcan"), required=True)
+    p.add_argument("--source", choices=("own", "gcc", "retok", "stack", "synth"), required=True)
     p.add_argument("--from", dest="from_root", default="",
                    help="retok: another SMALL_ROOT whose shards/ (+ shards/tokenizer.json) to re-tokenize for SMALL_BASE")
     p.add_argument("--workers", type=int, default=20)
@@ -447,13 +437,12 @@ def main() -> None:
         shutil.copy2(BASE / "tokenizer.json", SHARDS / "tokenizer.json")
     print(f"base={BASE} bos={BOS} eos={EOS}", flush=True)
 
+    if args.source == "synth":
+        _synth_run()
+        return
     if args.source == "stack":
         _stack_run(args.workers, int(args.max_tokens), args.chunk)
         return
-    if args.source == "vulcan":
-        _vulcan_run()
-        return
-
     if args.source == "retok":
         src = Path(args.from_root).expanduser() / "shards"
         if src.resolve() == SHARDS.resolve():

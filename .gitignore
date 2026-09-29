@@ -13,12 +13,8 @@ env/
 # Dedicated video-generation venv (mlx-gen pins its own mlx; setup.sh step 7)
 .venv-video/
 
-# Generated game artifacts (huge + per-session, no point versioning).
-# Sessions now write games/<goal-slug>_<ts>.html (+ .best.html sibling),
-# so a single glob covers them all.
-games/*.html
-games/snapshots/
-games/traces/
+# Generated session output. Curated keepers live in goodgame/, not here.
+games/
 memory/*
 !memory/playbook.jsonl
 !memory/visual_playtests.jsonl
@@ -41,32 +37,6 @@ memory/*
 !memory/system_battery.jsonl
 !memory/skeletons/
 !memory/skeletons/*
-games/test_*.html
-games/tune/
-# Serial tune batches (nested HTML/traces — depth-1 globs miss these)
-games/tune_serial10/
-games/goals/
-games/**/overnight.log
-games/**/agent_monitor.json
-games/system-tests/run_*/
-games/eval-traces/
-# Asset-pipeline artifacts (PNGs are 50-200KB each; cache grows over time)
-games/_asset_cache/
-games/_smoke/
-games/_draw/
-games/_ask_scratch/
-games/*_assets/
-# Sound-pipeline artifacts (OGGs are 5-50KB each; cache grows over time)
-games/_sound_cache/
-games/*_sounds/
-# Video-pipeline artifacts (MP4s are ~1MB each; Wan2.2 cutscene clips)
-games/_video_cache/
-games/*_videos/
-# Playwright verification screenshots (e.g. dragons-lair-deluxe_shots/)
-games/*_shots/
-# Per-machine learned memory (won skeletons, live playbook overlay, mistakes).
-# Canonical playbook for git is memory/playbook.jsonl only.
-games/game-memory/
 
 # Editor / OS noise
 .vscode/
@@ -85,7 +55,6 @@ games/game-memory/
 
 # Local vLLM vs Ollama bench (machine-specific; never publish)
 scripts/bench_vllm_vs_ollama.py
-games/bench/
 
 # Local overnight launcher noise
 nohup.out

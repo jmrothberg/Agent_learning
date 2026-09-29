@@ -8,8 +8,8 @@ no auto-step on test failure (runs to completion or natural agent exit).
 
     cd /Users/jonathanrothberg/Agent_learning
     MLX_MODEL=~/MLX_Models/Qwen3.6-27B-mxfp8 .venv/bin/python eval/tune_serial_loop.py \\
-        --goals-file eval/tune_serial10_goals.txt \\
-        --out-dir games/tune_serial10/run_01
+        --goals-file games/tune_serial10/run_N/goals.txt \\
+        --out-dir games/tune_serial10/run_N
 
     # Overnight + Cursor watcher fixes between games (NO Enter in Terminal):
     .venv/bin/python eval/tune_serial_loop.py ... --wait-for-monitor 1800
@@ -36,7 +36,6 @@ import backend as backend_mod  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CODER = REPO_ROOT / "coder.py"
-DEFAULT_GOALS = REPO_ROOT / "eval" / "tune_serial10_goals.txt"
 DEFAULT_OUT_ROOT = REPO_ROOT / "games" / "tune_serial10"
 CHECKPOINT_NAME = "tune_checkpoint.json"
 
@@ -58,7 +57,7 @@ class JobResult:
 
 def _load_goals(args) -> list[tuple[str, str]]:
     goals: list[str] = list(args.goal or [])
-    goals_file = args.goals_file or str(DEFAULT_GOALS)
+    goals_file = args.goals_file
     if goals_file:
         text = Path(goals_file).read_text(encoding="utf-8")
         for line in text.splitlines():
@@ -623,8 +622,8 @@ def main() -> int:
     ap.add_argument("--goal", action="append", help="Build goal (repeatable)")
     ap.add_argument(
         "--goals-file",
-        default=str(DEFAULT_GOALS),
-        help=f"One goal per line (default: {DEFAULT_GOALS.name})",
+        default=None,
+        help="One goal per line. overnight.sh writes games/tune_serial10/run_N/goals.txt",
     )
     ap.add_argument(
         "--out-dir",

@@ -110,7 +110,7 @@ Thin `run()` delegates to phase methods. Grep helpers: `GameAgent.run_loop_inspe
 
 ## 2. Artifact tree — read for triage, never edit as source
 
-Session output under `games/` is **generated at runtime** for debugging. Prefer **not** committing it. `.gitignore` covers depth-1 `games/*.html`, caches, `tune_serial10/`, and similar — nested `games/<NAME>/` trees can still appear in `git status`; wipe with `./scripts/clean_artifacts.sh`. Curated keepers belong in **`goodgame/`** only.
+Session output under `games/` is **generated at runtime** for debugging. The whole directory is gitignored. Wipe with `./scripts/clean_artifacts.sh`. Curated keepers belong in **`goodgame/`** only.
 
 ### Trace and log paths
 

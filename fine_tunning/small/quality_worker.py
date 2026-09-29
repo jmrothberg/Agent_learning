@@ -214,14 +214,9 @@ def _combine(con: sqlite3.Connection) -> dict:
     out, stats = [], {"docs": len(feats), "near_dup": 0, "syntax": 0, "junk": 0, "browser": 0, "edu": len(edu)}
     for i, (norm, src, _, _, junk, syntax, _) in enumerate(feats):
         # Edu score only reweights github-code-clean; own games are the target style.
-        # Instruction pages stay at full weight. They share boilerplate on purpose,
-        # and near-dup / junk would otherwise drop almost all of them.
-        if src == "vulcan":
-            w = 1.0
-        else:
-            w = junk * (1.0 if syntax else W_SYNTAX) * browser.get(norm, 1.0) * (edu.get(norm, 1.0) if src == "gcc" else 1.0)
-            if i not in keep:
-                w, stats["near_dup"] = 0.0, stats["near_dup"] + 1
+        w = junk * (1.0 if syntax else W_SYNTAX) * browser.get(norm, 1.0) * (edu.get(norm, 1.0) if src == "gcc" else 1.0)
+        if i not in keep:
+            w, stats["near_dup"] = 0.0, stats["near_dup"] + 1
         stats["syntax"] += not syntax
         stats["junk"] += junk < 1.0
         stats["browser"] += norm in browser

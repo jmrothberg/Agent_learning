@@ -144,8 +144,6 @@ Slow canaries only. Battery: `memory/system_battery.jsonl`.
 | Prefix | Meaning |
 |--------|---------|
 | `_smoke_*` | GPU/model smoke — manual or optional CI |
-| `archive/_apply_*` | One-shot migrations — **do not re-run** |
-| `_gen_*` / `demo_*` / `live_test_*` | Session demos — ignore unless debugging that feature |
 | *(no prefix)* | Supported maintainer tool |
 
 | Script | Role | LLM |
@@ -163,7 +161,6 @@ Slow canaries only. Battery: `memory/system_battery.jsonl`.
 | `asset_studio.py`, `draw_game_art.py`, `build_stock_sounds.py` | Asset tooling | as needed |
 | `oneshot_game.py`, `play_folder.py` | Ad-hoc runs | optional |
 | `smoke_cloud_backends.py` | Cloud API smoke | optional |
-| `archive/_apply_agent_*.py`, `archive/_apply_qte_telegraph.py` | Historical splits | **ignore** |
 
 ## Eval (`eval/`)
 
@@ -171,8 +168,6 @@ Slow canaries only. Battery: `memory/system_battery.jsonl`.
 |--------|------|
 | `tune_serial_loop.py` | Serial N-game batch driver |
 | **`compare_runs.py`** | **Cross-run scoreboard** (fresh_pass / wasted_iters / failure_class) + avg ttft_s / cached_prompt / media_s / ttf_test_s |
-| `tune_serial_overnight.sh` | Watchdog wrapper for unattended batches |
-| `tune_run07_chain.sh` | Auto-chained run_07 A→B |
 | `tune_overnight_monitor.py` | Batch dashboard (`agent_monitor.json`) |
 | `tune_inter_game_ready.py` | Release next game after mid-batch fix |
 | `batch_parallel.py` | N clients → one `mlx_lm.server` |
@@ -283,7 +278,7 @@ Every `tests/test_*.py` must appear below (enforced by `tests/test_docs_index.py
 | `test_project_config.py` | `test_prompt_library.py` | `test_prompt_library_coverage.py` |
 | `test_prompt_memory_overhaul.py` | `test_prompt_size.py` | `test_qte_quality_hardening.py` |
 | `test_rejected_reply_stub.py` | `test_repetition.py` | `test_research_default_off.py` |
-| `test_research_planning.py` | `test_retrieval.py` | `test_revert.py` |
+| `test_retrieval.py` | `test_revert.py` | |
 | `test_run06_draw_contract.py` | `test_run18_quality_gates.py` | `test_run20_playtest_memory.py` |
 | `test_scoped_feedback.py` | `test_scoped_gate_permissive.py` | `test_seed_edit_eval.py` |
 | `test_seed_edit_scenarios.py` | `test_seed_intent.py` | `test_seed_media_rehydrate.py` |

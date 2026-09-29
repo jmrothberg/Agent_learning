@@ -13,12 +13,6 @@ Usage:
     MLX_SERVER_URL=http://127.0.0.1:8080 .venv/bin/python eval/batch_parallel.py \\
         --jobs 2 --goal "snake wraparound" --goal "breakout paddle"
 
-    # Art-heavy Round 1 — prefer --jobs 1 to avoid MLX stream_stalled under load
-    env -u PLAYWRIGHT_BROWSERS_PATH MLX_SERVER_URL=http://127.0.0.1:8080 \\
-        .venv/bin/python eval/batch_parallel.py \\
-        --jobs 1 --goals-file eval/tune_round1_goals.txt --headless --max-iters 6 \\
-        --stall-seconds 1200 --out-dir games/batch_parallel/tune_round1_r2
-
     # From a goals file (one goal per line; # comments ok)
     MLX_SERVER_URL=http://127.0.0.1:8080 .venv/bin/python eval/batch_parallel.py \\
         --jobs 5 --goals-file my_goals.txt --headless --max-iters 4

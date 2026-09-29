@@ -1,6 +1,6 @@
 """One prompt per game or graphic.
 
-Each title in TOP_GAMES is one small working version. A line from
+Each title in TOP_GAMES is one complete working version. A line from
 ideas_1000.txt is added only when that game is not already in TOP_GAMES.
 Openings rotate. The same game is not written twice.
 
@@ -1983,11 +1983,24 @@ def _with_note(line: str, note: str) -> str:
     return line.rstrip(".?") + "." + note
 
 
+def _descriptor_rank(line: str) -> int:
+    """Lower sorts first. Extra instructions outrank a plain title."""
+    low = line.lower()
+    if "three.js" in low:
+        return 0
+    if "8-bit" in low:
+        return 1
+    if " in phaser" in low or " in pixijs" in low or " in howler.js" in low:
+        return 2
+    return 3
+
+
 def unique_prompts(home: list[str], titles: list[str]) -> list[str]:
     """One miniature prompt per top title, then home lines that are still new games.
 
     Pixel originals get an 8-bit sentence on that same line. 3D games get a three.js line. Other games get Phaser, PixiJS, or Howler.js
     when that library is the best fit. A game is in at most one of those.
+    The returned list is sorted so three.js, then 8-bit, then the other libraries come first.
     """
     sh = _synth()
     out: list[str] = []
@@ -1995,7 +2008,7 @@ def unique_prompts(home: list[str], titles: list[str]) -> list[str]:
     n = len(OPENERS)
     eight = set(EIGHT_BIT)
     for i, title in enumerate(titles):
-        body = f"a small working version of {title}"
+        body = f"a complete working version of {title}"
         plain = sh.subject_key(body)
         key = sh.subject_key(_with_note(body, EIGHT_BIT_NOTE)) if title in eight else plain
         if not key or key in seen or (plain and plain in seen):
@@ -2014,7 +2027,7 @@ def unique_prompts(home: list[str], titles: list[str]) -> list[str]:
         ("Howler.js", HOWLER),
     ):
         for j, title in enumerate(picked):
-            body = f"a small working version of {title} in {library}"
+            body = f"a complete working version of {title} in {library}"
             key = sh.subject_key(body)
             if not key or key in seen:
                 continue
@@ -2026,6 +2039,9 @@ def unique_prompts(home: list[str], titles: list[str]) -> list[str]:
             continue
         seen.add(key)
         out.append(line.strip())
+    # Richest requests first, so a restart spends the GPU on them.
+    # three.js, then the 8-bit line, then Phaser / PixiJS / Howler.js.
+    out.sort(key=_descriptor_rank)
     return out
 
 
@@ -2042,8 +2058,9 @@ def main() -> None:
     lines = unique_prompts(home, list(TOP_GAMES))
     header = (
         "# One request per line. Each game or graphic appears once.\n"
-        "# A small working version of each top game, then ideas_1000.txt lines that are different.\n"
+        "# A complete working version of each top game, then ideas_1000.txt lines that are different.\n"
         "# Includes late 1970s CP/M games, TRS-80, Commodore 64, early Mac, and small 1980s games.\n"
+        "# three.js lines first, then 8-bit, then other library lines, then the rest.\n"
         "# Built by expand_ideas.py. Openings vary. Do not hand-edit.\n"
     )
     args.dest.write_text(header + "\n".join(lines) + "\n", encoding="utf-8")

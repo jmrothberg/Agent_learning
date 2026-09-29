@@ -28,33 +28,13 @@ This file = **parallel one-server / N-client lab** (one model load, N clients).
 | Requirement | Command / setting |
 |-------------|-------------------|
 | In-process MLX (VLM works) | `MLX_MODEL=~/MLX_Models/Qwen3.6-27B-mxfp8` + `--backend mlx` — **do not** set `MLX_SERVER_URL` |
-| Serial 10-game eval | [`eval/tune_serial_loop.py`](tune_serial_loop.py) + [`eval/tune_serial10_goals.txt`](tune_serial10_goals.txt) |
-| Round 2 (12 games, GLM) | [`eval/tune_serial10_round2_goals.txt`](tune_serial10_round2_goals.txt) → `games/tune_serial10/run_05` |
+| Serial batch | [`eval/tune_serial_loop.py`](tune_serial_loop.py). Old `tune_serial10` goal lists were removed. A night writes `games/tune_serial10/run_N/goals.txt` from `overnight.sh`. |
 
 **Today’s serial launch:** Terminal `Overnight.command` / `overnight.sh` + Cursor Shell watcher
-(`block_until_ms=0`). **Never** `nohup` the watcher (HARD RULES). The old `nohup bash
-eval/tune_serial_overnight.sh` recipe below is historical only.
+(`block_until_ms=0`). **Never** `nohup` the watcher (HARD RULES). The old
+`tune_serial_overnight.sh` watchdog was removed.
 
-```bash
-# ARCHIVE ONLY — superseded by Overnight.command / overnight.sh
-cd /Users/jonathanrothberg/Agent_learning
-mkdir -p games/tune_serial10/run_05
-caffeinate -dims env \
-  TUNE_OUT_DIR=games/tune_serial10/run_05 \
-  TUNE_GOALS_FILE=eval/tune_serial10_round2_goals.txt \
-  MLX_MODEL="$HOME/MLX_Models/GLM-5.2-MLX-4bit" \
-  bash eval/tune_serial_overnight.sh
-```
-
-**Post-batch triage:** `HARNESS_TUNING.md` · `AGENTS.md`. Optional `run_06` partial re-run via
-`eval/tune_serial10_round2_rerun.txt`.
-
-```bash
-cd /Users/jonathanrothberg/Agent_learning
-MLX_MODEL=~/MLX_Models/Qwen3.6-27B-mxfp8 .venv/bin/python eval/tune_serial_loop.py \
-  --goals-file eval/tune_serial10_goals.txt \
-  --out-dir games/tune_serial10/run_01
-```
+**Post-batch triage:** `HARNESS_TUNING.md` · `AGENTS.md`. `overnight.sh` writes that night's `goals.txt`.
 
 Interactive single game (preferred while iterating):
 

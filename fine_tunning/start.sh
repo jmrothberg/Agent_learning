@@ -241,6 +241,9 @@ if [[ "$what" == small* ]]; then
       echo "retok    $2/shards -> $SMALL_ROOT/shards   (log: $SMALL_ROOT/logs/data.out)" ;;
     small-quality) small_quality ;;
     small-watch)   small_watch ;;
+    small-synth)
+      "$LORA_PY" -u "$HERE/small/data.py" --source synth
+      ;;
     small-stack)
       # Resumes logs/stack_state.json. Same workers and cap as the Sep 24 run.
       if pgrep -f "data.py --source stack" > /dev/null; then
@@ -248,7 +251,7 @@ if [[ "$what" == small* ]]; then
       fi
       detach "$SMALL_ROOT/logs/stack.out" nice -n 5 "$LORA_PY" -u "$HERE/small/data.py" --source stack --workers 32 --max-tokens 8000000000
       echo "stack    (log: $SMALL_ROOT/logs/stack.out)   resumes logs/stack_state.json" ;;
-    *) echo "usage: $0 [small|small-train|small-monitor|small-data|small-retok DIR|small-quality|small-stack|small-watch]"; exit 1 ;;
+    *) echo "usage: $0 [small|small-train|small-monitor|small-data|small-retok DIR|small-quality|small-stack|small-synth|small-watch]"; exit 1 ;;
   esac
   exit 0
 fi

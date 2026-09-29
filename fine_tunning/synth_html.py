@@ -45,23 +45,61 @@ ASSISTANT_NOTE = "Complete HTML game file with canvas/script."
 # Asking for notes here uses up the token cap before </html>, which shows up
 # on the monitor as "no html".
 GEN_SYS = (
-    "Reply with one small single-file browser game and nothing else. "
+    "Reply with one complete single-file browser game and nothing else. "
     "No thinking, no explanation, no markdown fences. "
     "The first characters are <html_file> and the last characters are </html_file>. "
-    "Inside those tags, one complete document from <!DOCTYPE html> through </html>, "
-    "with inline CSS, one canvas, and one <script>. "
-    "Keep the game short so both end tags are in the reply."
+    "Inside those tags, one document from <!DOCTYPE html> through </html>, "
+    "with inline CSS and a script. "
+    "Make it playable: a start, a score or a goal, a way to win or lose, "
+    "and controls that work. "
+    "Draw a full scene. Use several colors, a background, and shapes that "
+    "read as the subject. Do not leave the canvas as one rectangle. "
+    "Put the script in clear parts: state, input with addEventListener, "
+    "update, draw, and a requestAnimationFrame loop. "
+    "A famous title is one playable scene of that game, not the whole product. "
+    "Finish that scene, then stop. Do not add another level, a second mode, or a long story. "
+    "Close </html> and </html_file>."
+)
+# r128 has no CapsuleGeometry. The model mixes that old CDN with newer classes.
+_THREE_SRC = "https://unpkg.com/three@0.160.0/build/three.min.js"
+_THREE_RIDER = (
+    " For three.js, include this script and no other three.js file: "
+    f'<script src="{_THREE_SRC}"></script> '
+    "Put it before your own script. Do not load r128. "
+    "Add a scene, a camera, an ambient light, a directional light, and a ground plane. "
+    "Use MeshStandardMaterial in a few distinct colors. "
+    "Build objects from BoxGeometry, SphereGeometry, CylinderGeometry, "
+    "ConeGeometry, or PlaneGeometry. Do not use CapsuleGeometry."
+)
+_EIGHT_RIDER = (
+    " Draw with fillRect in a chunky pixel style. "
+    "Paint a background, a player, and at least three other objects. "
+    "Use about six solid colors."
+)
+_PHASER_RIDER = (
+    " Load only https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.min.js . "
+    "One Phaser.Scene with create and update. "
+    "Draw the playfield with graphics or generated textures."
+)
+_PIXI_RIDER = (
+    " Load only https://cdn.jsdelivr.net/npm/pixi.js@7.4.2/dist/pixi.min.js . "
+    "Build a stage of Graphics or sprites, a ticker, and several colors."
+)
+_HOWLER_RIDER = (
+    " Load only https://cdnjs.cloudflare.com/ajax/libs/howler/2.2.4/howler.min.js . "
+    "Use at least two Howl sounds, a visible control for each, and a score or a goal."
 )
 # rows.TOKEN_BUDGET. A row over this does not fit the trainer window.
 TOKEN_BUDGET = 8128
-MAX_TOKENS = 4096
+# Generation cap. The packed training row must stay under TOKEN_BUDGET.
+MAX_TOKENS = 6144
 DEFAULT_JOBS = 12
 DEFAULT_PORT = 8768
 DEFAULT_MODEL = "Qwen3.8-27B-mxfp8"
 CHROME_WORKERS = 2
 ROLL_SECONDS = 10.0
 PREVIEW_CHARS = 80_000
-JOB_CHOICES = (4, 8, 12, 16, 32, 64)
+JOB_CHOICES = (4, 8, 12, 16, 24, 32, 48, 64)
 
 _HTML_FILE = re.compile(r"<html_file>\s*(.*?)\s*</html_file>", re.I | re.S)
 _DOCUMENT = re.compile(
@@ -112,6 +150,7 @@ _OPENER_PREFIXES = (
 )
 # One game or graphic, ignoring the opening and the "small version" wrapper.
 _SUBJECT_FILLERS = (
+    "a complete working version of ",
     "a small working version of ",
     "a timed one-minute game of ",
     "a kid-friendly game of ",
@@ -283,6 +322,7 @@ def bug_report(reason: str, report: dict | None) -> dict[str, Any]:
     """Chrome's own errors, including a line or stack when the browser sent one."""
     errors = [str(item) for item in ((report or {}).get("errors") or [])]
     warnings = [str(item) for item in ((report or {}).get("warnings") or [])]
+    soft = [str(item) for item in ((report or {}).get("soft_warnings") or [])]
     parts: list[str] = []
     if reason and reason.strip():
         parts.append(reason.strip())
@@ -290,6 +330,8 @@ def bug_report(reason: str, report: dict | None) -> dict[str, Any]:
         parts.append("Chrome errors:\n" + "\n".join(errors))
     if warnings:
         parts.append("Warnings:\n" + "\n".join(warnings))
+    if soft:
+        parts.append("Checks:\n" + "\n".join(soft))
     text = "\n\n".join(parts).strip() or "failed"
     return {"report": text, "errors": errors, "warnings": warnings}
 
@@ -436,7 +478,7 @@ class Stats:
             "sha": sha,
             "prompt": prompt,
             "status": status,
-            "error": error[:500],
+            "error": error[:1500],
             "weight": weight,
             "code": snippet,
         }
@@ -568,6 +610,7 @@ PAGE = """<!DOCTYPE html>
   .log .item { padding: 8px 10px; border-bottom: 1px solid #333; cursor: pointer; }
   .log .item.on { background: #243044; }
   .log .meta { color: #9ab; font-size: 12px; white-space: pre-wrap; }
+  .log .notes { color: #fc8; font-size: 12px; white-space: pre-wrap; margin-top: 4px; }
   .log pre { margin: 4px 0 0; white-space: pre-wrap; color: #cde; font-size: 12px; max-height: 72px; overflow: hidden; }
   #stage { flex: 1 1 auto; min-height: 0; width: calc(100% - 32px); height: auto; margin: 0 16px 12px; border: 0; background: #111; border-radius: 10px; }
   @media (max-width: 900px) { .cards { grid-template-columns: 1fr; } .tok { font-size: 64px; } }
@@ -585,7 +628,9 @@ PAGE = """<!DOCTYPE html>
   <button data-n="8">8</button>
   <button data-n="12">12</button>
   <button data-n="16">16</button>
+  <button data-n="24">24</button>
   <button data-n="32">32</button>
+  <button data-n="48">48</button>
   <button data-n="64">64</button>
 </div>
 <div class="err" id="err"></div>
@@ -666,8 +711,13 @@ function fillLog(log, rows) {
     const meta = document.createElement("div");
     meta.className = "meta";
     meta.textContent = (row.weight === 0 ? "weight 0" : "weight " + row.weight);
-    if (row.error) meta.textContent += String.fromCharCode(10) + row.error;
     item.append(title, meta);
+    if (row.error) {
+      const notes = document.createElement("div");
+      notes.className = "notes";
+      notes.textContent = row.error;
+      item.append(notes);
+    }
     if (row.code) {
       const pre = document.createElement("pre");
       pre.textContent = row.code;
@@ -762,7 +812,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(204, "text/plain", b"")
             return
         if n not in JOB_CHOICES or GATE is None or LOOP is None or STATS is None:
-            self._send(400, "text/plain", b"jobs must be 4, 8, 12, 16, 32, or 64")
+            self._send(400, "text/plain", b"jobs must be 4, 8, 12, 16, 24, 32, 48, or 64")
             return
         with STATS.lock:
             STATS.jobs = n
@@ -879,8 +929,20 @@ def append_jsonl(path: Path, obj: dict) -> None:
 
 
 def gen_messages(prompt: str) -> list[dict[str, str]]:
+    system = GEN_SYS
+    low = prompt.lower()
+    if "three.js" in low:
+        system += _THREE_RIDER
+    elif "8-bit" in low:
+        system += _EIGHT_RIDER
+    elif " in phaser" in low:
+        system += _PHASER_RIDER
+    elif " in pixijs" in low:
+        system += _PIXI_RIDER
+    elif " in howler.js" in low:
+        system += _HOWLER_RIDER
     return [
-        {"role": "system", "content": GEN_SYS},
+        {"role": "system", "content": system},
         {"role": "user", "content": prompt},
     ]
 
@@ -1123,7 +1185,8 @@ async def amain(args: argparse.Namespace) -> None:
             try:
                 text = await generate_held(messages)
             except httpx.HTTPError as exc:
-                return None, f"request failed: {exc}", "", None
+                detail = str(exc).strip() or type(exc).__name__
+                return None, f"request failed: {detail}", "", None
             html = extract_html(text)
             err = structure_error(html)
             if err:

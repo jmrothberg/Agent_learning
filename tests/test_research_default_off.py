@@ -19,15 +19,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import research  # noqa: E402
 from agent import GameAgent  # noqa: E402
 
 
-def test_research_fetch_is_inert_stub() -> None:
-    """research.fetch is a deprecated no-op that returns an empty string,
-    never a <reference> block or a network result."""
-    assert research.fetch("missile command, good graphics") == ""
-    assert research.fetch("anything at all") == ""
+def test_research_module_removed() -> None:
+    """Wikipedia research.py was removed. Do not restore the network lookup."""
+    root = Path(__file__).resolve().parent.parent
+    assert not (root / "research.py").is_file()
 
 
 def test_agent_has_no_research_toggle() -> None:

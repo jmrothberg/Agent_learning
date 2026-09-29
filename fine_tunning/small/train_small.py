@@ -39,14 +39,19 @@ LOG = ROOT / "logs" / "train.log"
 STATE = ROOT / "logs" / "state.json"
 QUALITY = ROOT / "quality.sqlite"
 
-# Sampling weight per (source, rank). Own games are the target domain, so they
-# repeat more; rank 2 = canvas/three.js game with a loop.
-# vulcan = instruction → full page. Weight 400 makes these about 1 in 10 training
-# tokens, instead of a few thousand pages disappearing inside billions of raw files.
-WEIGHTS = {("own", 2): 3.0, ("own", 1): 2.0, ("own", 0): 1.0,
-           ("gcc", 2): 1.5, ("gcc", 1): 1.0, ("gcc", 0): 0.7,
-           ("stack", 2): 1.5, ("stack", 1): 1.0, ("stack", 0): 0.7,
-           ("vulcan", 2): 400.0}
+# How often one file is drawn, before the quality score scales it.
+# Rank 2 = canvas or three.js with a loop. Rank 1 = canvas or a loop. Rank 0 = other.
+# Set weights are for rank 2. Rank 1 is 0.6× that, rank 0 is 0.35×.
+# Tuned for about 3,000 synthetic games. The first 118 measured 0.28M tokens
+# (~2,400 each), so 3,000 is about 7M tokens, against own 0.53B, GitHub 2.2B,
+# Stack 8.0B. One pass is then about:
+#   synthetic games 20%, own games 40%, GitHub 25%, The Stack 15%.
+# At 118 games the same weight is about 1% of a pass, on purpose.
+SET_WEIGHT = {"synth": 1500.0, "own": 40.0, "gcc": 6.0, "stack": 1.0}
+_RANK_FACTOR = {2: 1.0, 1: 0.6, 0: 0.35}
+WEIGHTS = {(src, rank): weight * _RANK_FACTOR[rank]
+           for src, weight in SET_WEIGHT.items()
+           for rank in _RANK_FACTOR}
 
 
 def _state(**kw) -> None:
@@ -112,20 +117,27 @@ class Blocks:
         self._lru: list[int] = []
         docs = []  # (bin index, offset, ntok, weight)
         seen: set[str] = set()
-        for meta in sorted(SHARDS.glob("*.jsonl")):
-            b = meta.with_suffix(".bin")
-            if not b.exists() or b.stat().st_size == 0:
-                continue
-            bi = len(self.paths)
-            self.paths.append(b)
-            for line in meta.read_text().splitlines():
-                d = json.loads(line)
-                if d["norm"] in seen:
+        # Synthetic games live in sets/synth/shards so this folder can grow
+        # without joining the pretrain files. Missing folder: the other sets still train.
+        folders = [SHARDS]
+        synth_dir = ROOT / "sets" / "synth" / "shards"
+        if synth_dir.is_dir():
+            folders.append(synth_dir)
+        for folder in folders:
+            for meta in sorted(folder.glob("*.jsonl")):
+                b = meta.with_suffix(".bin")
+                if not b.exists() or b.stat().st_size == 0:
                     continue
-                seen.add(d["norm"])
-                w = WEIGHTS.get((d["src"], d["rank"]), 1.0) * q.get(d["norm"], 1.0)
-                if w > 0:
-                    docs.append((bi, d["offset"], d["ntok"], w))
+                bi = len(self.paths)
+                self.paths.append(b)
+                for line in meta.read_text().splitlines():
+                    d = json.loads(line)
+                    if d["norm"] in seen:
+                        continue
+                    seen.add(d["norm"])
+                    w = WEIGHTS.get((d["src"], d["rank"]), 1.0) * q.get(d["norm"], 1.0)
+                    if w > 0:
+                        docs.append((bi, d["offset"], d["ntok"], w))
         rng = np.random.default_rng(seed)
         order = []
         for i, (_, _, _, w) in enumerate(docs):
