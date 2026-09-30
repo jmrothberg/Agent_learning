@@ -14,11 +14,11 @@ Run either line again any time. Anything already running is left alone, and anyt
 pkill -f "data.py --source stack"
 ```
 
-**Throw this out. Do not train it.** Good HTML and JavaScript only. Do not delete the files. Weight 0 leaves a file out of the draw. `train_small.py` re-reads `quality.sqlite` every 30 minutes. A trainer that is already running keeps the old weights until that save, or until it is started again.
+**Throw this out.** Good HTML and JavaScript only. These documents are removed from the shard files, not kept at a low weight. `train_small.py` also skips weight 0, and it re-reads `quality.sqlite` every 30 minutes. A trainer that is already running keeps its current draw until that save.
 
-On the 2B Mac the Vulcan shards were moved to `shards/not_trained/`. Do not copy that folder into `shards/` or `sets/*/tokens/`. The trainer only reads `*.jsonl` in those folders, not in a subfolder. `train_small.py` also forces `src=vulcan` to weight 0, so a later start cannot pick those pages up at the default weight of 1.
+Vulcan request-to-page lessons are not in the training folders. `train_small.py` forces `src=vulcan` to weight 0.
 
-Set weight 0 for every file in these buckets. The table in §9e still shows the old multipliers (0.2, 0.3, 0.5). Those were "train it less." That was wrong. Throw them out.
+The scorer writes weight 0 for every file in these buckets. The old multipliers (0.2, 0.3, 0.5) were "train it less." A quality job started after this change rewrites `quality.sqlite` once. On the other Mac, pull, then start the quality job again so that rewrite runs. The shard bytes there still hold the old documents until they are stripped the same way.
 
 | Throw out | How to recognize it | Old weight |
 | --- | --- | --- |
@@ -612,16 +612,16 @@ cp ~/MLX_Models/html_js_small/quality.sqlite $SMALL_ROOT/
 Where the data came from: own games (`html_game_sft/raw/`) → 14,470 unique files (~33M tokens) after dedup; github-code-clean (49 parquet files) → 916,493 docs, 2.22B tokens. The Stack added about 8.0B tokens. Sampling weights are in the table in §9b (synthetic ×1500, own ×40, GitHub ×6, Stack ×1 for a canvas game with a loop). `quality.sqlite` multiplies:
 
 
-The scorer still writes the old multipliers below. Do not train those files. The throw-out list at the top of this file is the rule: weight 0, files kept on disk.
+The scorer writes 0 for the rows marked "no" below. A score under 1.5 is boilerplate and is removed. Scores from 1.5 up stay, including the 0.7 band.
 
 | Pass                                                                                       | Weight the scorer writes                              | Train it? |
 | ------------------------------------------------------------------------------------------ | ----------------------------------------------------- | --------- |
-| Near-duplicate (MinHash, ~0.77 Jaccard), not the keeper                                    | 0 (25% of docs)                                       | no        |
-| JS syntax error (node `vm` parse, never run)                                               | 0.3                                                   | no. Set 0 |
-| Repeated lines / "generated, do not edit"                                                  | 0.3 / 0.2                                             | no. Set 0 |
-| Stack-Edu JavaScript classifier ([SmolLM2](https://arxiv.org/abs/2502.02737)), github only | score <1.5 → 0.3, <2.5 → 0.7, <3.5 → 1.3, else 2.0    | score <1.5: no, set 0. The rest stays |
-| Headless Chromium, 2 s, network blocked                                                    | self-contained page with errors 0.5, canvas drew 1.5 | errors: no, set 0. A canvas that draws stays at 1.5 |
-| Vulcan request-to-page (`src=vulcan`)                                                      | not in this table                                     | no. Shards in `shards/not_trained/`. Code forces weight 0 |
+| Near-duplicate (MinHash, ~0.77 Jaccard), not the keeper                                    | 0                                                     | no        |
+| JS syntax error (node `vm` parse, never run)                                               | 0                                                     | no        |
+| Repeated lines / "generated, do not edit"                                                  | 0                                                     | no        |
+| Stack-Edu JavaScript classifier ([SmolLM2](https://arxiv.org/abs/2502.02737)), github only | score <1.5 → 0, <2.5 → 0.7, <3.5 → 1.3, else 2.0      | score <1.5: no. The rest stays |
+| Headless Chromium, 2 s, network blocked                                                    | page error 0, canvas that draws 1.5                   | errors: no. A canvas that draws stays |
+| Vulcan request-to-page (`src=vulcan`)                                                      | 0                                                     | no |
 
 
 

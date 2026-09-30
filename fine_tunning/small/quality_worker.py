@@ -184,8 +184,10 @@ def _combine(con: sqlite3.Connection) -> dict:
     feats = con.execute("select norm, src, rank, ntok, junk, syntax, sig from feat").fetchall()
     browser = dict(con.execute("select norm, weight from browser"))
     # NULL score: HTML with no inline JS. Counted done, training weight stays 1.
-    edu = {}
+    # A real score under 1.5 is boilerplate. It is not trained.
+    edu, edu_score = {}, {}
     for n, s in con.execute("select norm, score from edu"):
+        edu_score[n] = s
         edu[n] = 1.0 if s is None else next(w for hi, w in EDU_WEIGHTS if s < hi)
     parent = list(range(len(feats)))
 
@@ -211,12 +213,21 @@ def _combine(con: sqlite3.Connection) -> dict:
         if r not in best or key(i) > key(best[r]):
             best[r] = i
     keep = set(best.values())
-    out, stats = [], {"docs": len(feats), "near_dup": 0, "syntax": 0, "junk": 0, "browser": 0, "edu": len(edu)}
+    out, stats = [], {"docs": len(feats), "near_dup": 0, "syntax": 0, "junk": 0, "browser": 0, "edu": len(edu), "dropped": 0}
     for i, (norm, src, _, _, junk, syntax, _) in enumerate(feats):
-        # Edu score only reweights github-code-clean; own games are the target style.
-        w = junk * (1.0 if syntax else W_SYNTAX) * browser.get(norm, 1.0) * (edu.get(norm, 1.0) if src == "gcc" else 1.0)
+        # Thrown out, not downweighted. Files stay in the table at weight 0.
+        # Edu score only applies to github-code-clean. Own games are not boilerplate-scored.
+        page_w = browser.get(norm, 1.0)
+        score = edu_score.get(norm)
+        boilerplate = src == "gcc" and score is not None and score < 1.5
+        page_error = abs(page_w - W_PAGE_ERROR) < 1e-6
+        if src == "vulcan" or i not in keep or not syntax or junk < 1.0 or page_error or boilerplate:
+            w = 0.0
+            stats["dropped"] += 1
+        else:
+            w = junk * (1.0 if syntax else W_SYNTAX) * page_w * (edu.get(norm, 1.0) if src == "gcc" else 1.0)
         if i not in keep:
-            w, stats["near_dup"] = 0.0, stats["near_dup"] + 1
+            stats["near_dup"] += 1
         stats["syntax"] += not syntax
         stats["junk"] += junk < 1.0
         stats["browser"] += norm in browser
@@ -438,6 +449,22 @@ def follow_edu(threads: int) -> None:
         time.sleep(20)
 
 
+# Bump when the throw-out rule changes. The next worker start rewrites quality.sqlite once.
+_DROP_RULES = "2026-09-29-drop-bad"
+
+
+def _apply_drop_rules() -> None:
+    """One rewrite after a rule change. A later start does not rebuild the table."""
+    stamp = ROOT / "logs" / "quality_rules.txt"
+    if stamp.is_file() and stamp.read_text().strip() == _DROP_RULES:
+        return
+    con = _db()
+    print("combine:", _combine(con), flush=True)
+    con.close()
+    stamp.parent.mkdir(parents=True, exist_ok=True)
+    stamp.write_text(_DROP_RULES + "\n")
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--workers", type=int, default=16)
@@ -447,6 +474,7 @@ def main() -> None:
     p.add_argument("--follow-browser", action="store_true", help="keep checking newly queued pages")
     args = p.parse_args()
     ROOT.mkdir(parents=True, exist_ok=True)
+    _apply_drop_rules()
     if args.follow and args.edu:
         follow_edu(args.workers)
     elif args.follow:
