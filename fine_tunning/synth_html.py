@@ -377,6 +377,18 @@ def decide_keep(html: str | None, report: dict | None, prompt: str) -> tuple[boo
     return True, ""
 
 
+def is_request_failure(row: dict) -> bool:
+    """A timeout or a dropped connection. The game was never generated."""
+    bug = row.get("bug") or {}
+    report = str(bug.get("report") or "") if isinstance(bug, dict) else ""
+    if not report:
+        for msg in row.get("messages") or []:
+            if msg.get("role") == "bug":
+                report = str(msg.get("content") or "")
+                break
+    return report.startswith("request failed:")
+
+
 def prompts_in_jsonl(path: Path) -> set[str]:
     seen: set[str] = set()
     if not path.is_file():
@@ -387,6 +399,9 @@ def prompts_in_jsonl(path: Path) -> set[str]:
         try:
             row = json.loads(line)
         except json.JSONDecodeError:
+            continue
+        # A timeout is not a finished game. Leave that prompt in the queue.
+        if is_request_failure(row):
             continue
         for msg in row.get("messages") or []:
             if msg.get("role") == "user" and msg.get("content"):
@@ -1114,7 +1129,10 @@ async def amain(args: argparse.Namespace) -> None:
         raise SystemExit(f"Could not listen on 127.0.0.1:{args.port} ({exc}).") from exc
     print(f"monitor http://127.0.0.1:{args.port}/", flush=True)
 
-    timeout = httpx.Timeout(connect=10.0, read=300.0, write=60.0, pool=10.0)
+    # Silence between bytes, not the whole reply. 48 streams can sit quiet
+    # while other prefills run. Longer than this means the request is stuck,
+    # and handle() puts that prompt back on the queue.
+    timeout = httpx.Timeout(connect=10.0, read=3 * 60 * 60, write=60.0, pool=10.0)
     queue: asyncio.Queue[str | None] = asyncio.Queue()
     for prompt in queued:
         queue.put_nowait(prompt)
@@ -1205,8 +1223,14 @@ async def amain(args: argparse.Namespace) -> None:
             return html, "" if ok else reason, text, report
 
         async def handle(prompt: str) -> None:
-            # One shot. A failed page is stored in the buggy set. No repair call.
+            # One shot for a page Chrome rejected. A timeout goes back on the queue.
             html, reason, raw, report = await produce(prompt, gen_messages(prompt))
+            if reason.startswith("request failed:"):
+                with stats.lock:
+                    stats.last_error = reason[:240]
+                await asyncio.sleep(2)
+                queue.put_nowait(prompt)
+                return
             if not reason and html:
                 await write_keep(prompt, html)
             else:

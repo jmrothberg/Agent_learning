@@ -8,6 +8,7 @@
 #   ./start.sh monitor    progress page only            http://127.0.0.1:$LORA_PORT/
 #   ./start.sh train      trainer (run_slices.py) only
 #   ./start.sh ingest     GitHub game downloader only   (HTML-game LoRA only)
+#   ./start.sh server     Qwen server on :8000, restarted if it exits
 #
 # Pick a LoRA project with env vars (defaults = HTML-game LoRA on Qwen3.8-27B):
 #   LORA_ROOT=~/MLX_Models/html_game_sft     data + adapters + snapshots + logs
@@ -280,6 +281,33 @@ start_train() {
   detach "$LORA_ROOT/logs/supervisor.log" "$LORA_PY" "$HERE/run_slices.py"
   echo "trainer  (log: $LORA_ROOT/logs/train.log)   tail -f $LORA_ROOT/logs/train.log"
 }
+# If port 8000 is open, only watch. If that process exits, start it again.
+start_mlx_server() {
+  if pgrep -f "MLX_SERVER_KEEPALIVE" >/dev/null; then
+    echo "server watchdog already running (log: $LORA_ROOT/logs/mlx_server.log)"
+    return
+  fi
+  detach "$LORA_ROOT/logs/mlx_server.log" env \
+    MLX_VLM_PRELOAD_MODEL="$LORA_BASE" \
+    MLX_VLM_MAX_NUM_SEQS="${MLX_VLM_MAX_NUM_SEQS:-64}" \
+    MLX_VLM_LOG_PROGRESS_INTERVAL=0 \
+    MLX_VLM_ENABLE_THINKING=0 \
+    LORA_PY="$LORA_PY" \
+    zsh -c '
+    # MLX_SERVER_KEEPALIVE
+    while true; do
+      if lsof -nP -iTCP:8000 -sTCP:LISTEN >/dev/null 2>&1; then
+        sleep 20
+        continue
+      fi
+      echo "mlx server starting $(date)"
+      "$LORA_PY" -c "import logging; logging.basicConfig(level=logging.WARNING); import uvicorn; uvicorn.run(\"mlx_vlm.server:app\", host=\"127.0.0.1\", port=8000, workers=1, access_log=False, log_level=\"warning\")"
+      echo "mlx server exited $(date), restarting in 5s"
+      sleep 5
+    done
+  '
+  echo "server watchdog  http://127.0.0.1:8000/  (log: $LORA_ROOT/logs/mlx_server.log)"
+}
 
 case "$what" in
   default) start_monitor; start_train ;;
@@ -287,5 +315,6 @@ case "$what" in
   monitor) start_monitor ;;
   train)   start_train ;;
   ingest)  start_ingest ;;
-  *) echo "usage: $0 [default|all|monitor|train|ingest]"; exit 1 ;;
+  server)  start_mlx_server ;;
+  *) echo "usage: $0 [default|all|monitor|train|ingest|server]"; exit 1 ;;
 esac

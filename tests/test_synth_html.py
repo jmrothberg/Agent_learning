@@ -221,6 +221,12 @@ def test_prompts_in_jsonl_reads_user_line(tmp_path: Path) -> None:
     path.write_text(json.dumps(row) + "\nnot json\n", encoding="utf-8")
     assert sh.prompts_in_jsonl(path) == {sh.normalize_prompt(PROMPT)}
     assert sh.prompts_in_jsonl(tmp_path / "missing.jsonl") == set()
+    timed_out = sh.pack_buggy_row(PROMPT, "", "request failed: ReadTimeout", None)
+    broken = sh.pack_buggy_row("Write me a game of snake.", PAGE, "fx is not defined", None)
+    buggy = tmp_path / "buggy.jsonl"
+    buggy.write_text(json.dumps(timed_out) + "\n" + json.dumps(broken) + "\n", encoding="utf-8")
+    assert sh.is_request_failure(timed_out)
+    assert sh.prompts_in_jsonl(buggy) == {sh.normalize_prompt("Write me a game of snake.")}
 
 
 def test_rolling_tok_s_is_tokens_over_the_window() -> None:
