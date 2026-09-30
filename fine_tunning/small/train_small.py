@@ -52,6 +52,10 @@ _RANK_FACTOR = {2: 1.0, 1: 0.6, 0: 0.35}
 WEIGHTS = {(src, rank): weight * _RANK_FACTOR[rank]
            for src, weight in SET_WEIGHT.items()
            for rank in _RANK_FACTOR}
+# Vulcan request-to-page pages are not trained. Weight 0, not the default 1.
+# The shard files stay on disk, outside the folders this loader reads.
+for _rank in _RANK_FACTOR:
+    WEIGHTS[("vulcan", _rank)] = 0.0
 
 
 def _state(**kw) -> None:
