@@ -27,11 +27,23 @@ export SMALL_ROOT=~/MLX_Models/html_js_small
 
 `--strip` rewrites `quality.sqlite` so those files are weight 0, then rewrites `shards/*.jsonl` and `sets/*/tokens/*.jsonl` without them.
 
-**Do not use Vulcan** (`xlelords/vulcan`, request-to-page lessons). It did not help and was removed on Sep 30, 2026, code included. Nothing blocks it now: a set name missing from `SET_WEIGHT` trains at weight 1. On a Mac that once had it, this must print nothing. If it prints files, stop the trainer and remove them:
+**Do not use Vulcan** (`xlelords/vulcan`, request-to-page lessons). It did not help and was removed on Sep 30, 2026, code included. Nothing blocks it now: a set name missing from `SET_WEIGHT` trains at weight 1. **Other computers, after `git pull`:** remove any Vulcan files. Press Stop training on the page first, so the trainer is not reading them. Then:
 
 ```bash
+export SMALL_ROOT=~/MLX_Models/html_js_small      # or that machine's data folder
+# 1) list them. Nothing printed = nothing to do, skip to Resume.
 find "$SMALL_ROOT/shards" "$SMALL_ROOT/sets" -name 'vulcan_*'
+# 2) delete them (the .jsonl and .bin files listed above)
+find "$SMALL_ROOT/shards" "$SMALL_ROOT/sets" -name 'vulcan_*' -delete
+# 3) drop their rows from the quality database
+sqlite3 "$SMALL_ROOT/quality.sqlite" ".timeout 60000" "BEGIN IMMEDIATE; \
+  DELETE FROM browser WHERE norm IN (SELECT norm FROM feat WHERE src='vulcan'); \
+  DELETE FROM done WHERE shard LIKE '%vulcan%'; \
+  DELETE FROM feat WHERE src='vulcan'; COMMIT;"
+rm -f "$SMALL_ROOT/logs/data_vulcan.json"
 ```
+
+Then press Resume. Step 1 should now print nothing.
 
 | Throw out | How to recognize it | Old weight |
 | --- | --- | --- |
