@@ -14,11 +14,18 @@ Run either line again any time. Anything already running is left alone, and anyt
 pkill -f "data.py --source stack"
 ```
 
-**Throw this out.** Good HTML and JavaScript only. These documents are removed from the shard files, not kept at a low weight. `train_small.py` also skips weight 0, and it re-reads `quality.sqlite` every 30 minutes. A trainer that is already running keeps its current draw until that save.
+**Other computers — clean the training data after you pull.** Good HTML and JavaScript only. The documents below are taken out of the shard files. They are not kept at a low weight. Checkpoints are not touched. Training can keep running. The next 30-minute save opens the cleaned shards. The loss will step up. That is the junk leaving, not a learning-rate blow-up. The page keeps the old `docs=` and `sampled_tokens=` numbers until the trainer is started again.
 
-Vulcan request-to-page lessons are not in the training folders. `train_small.py` forces `src=vulcan` to weight 0.
+Set `SMALL_ROOT` to the data folder on that machine if it is not `~/MLX_Models/html_js_small`.
 
-The scorer writes weight 0 for every file in these buckets. The old multipliers (0.2, 0.3, 0.5) were "train it less." A quality job started after this change rewrites `quality.sqlite` once. On the other Mac, pull, then start the quality job again so that rewrite runs. The shard bytes there still hold the old documents until they are stripped the same way.
+```bash
+cd ~/Agent_learning/fine_tunning
+git pull
+export SMALL_ROOT=~/MLX_Models/html_js_small
+~/Agents/.venv/bin/python small/quality_worker.py --strip
+```
+
+`--strip` rewrites `quality.sqlite` so those files are weight 0, then rewrites `shards/*.jsonl` and `sets/*/tokens/*.jsonl` without them. It also deletes any `vulcan_*.jsonl` and `vulcan_*.bin`. Do not copy those back into a folder the trainer reads. `train_small.py` forces `src=vulcan` to weight 0 either way.
 
 | Throw out | How to recognize it | Old weight |
 | --- | --- | --- |

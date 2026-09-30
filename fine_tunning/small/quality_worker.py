@@ -465,6 +465,84 @@ def _apply_drop_rules() -> None:
     stamp.write_text(_DROP_RULES + "\n")
 
 
+def _token_folders() -> list[Path]:
+    """Folders the trainer reads. Subfolders are not read."""
+    folders = []
+    shards = ROOT / "shards"
+    if shards.is_dir():
+        folders.append(shards)
+    sets = ROOT / "sets"
+    if sets.is_dir():
+        for name in sorted(sets.iterdir()):
+            tokens = name / "tokens"
+            if tokens.is_dir():
+                folders.append(tokens)
+    return folders
+
+
+def strip_bad() -> None:
+    """Remove thrown-out documents from the shard files. Weight 0 is written first.
+
+    The trainer's open maps keep the old bytes until the next 30-minute save.
+    That save opens the rewritten files. Checkpoints are not touched.
+    """
+    import numpy as np
+    _apply_drop_rules()
+    con = _db()
+    drop = {r[0] for r in con.execute("select norm from quality where weight = 0")}
+    try:
+        drop.update(r[0] for r in con.execute("select norm from feat where src = 'vulcan'"))
+    except sqlite3.OperationalError:
+        pass
+    con.close()
+    print(f"strip: {len(drop)} docs weight 0", flush=True)
+    removed = kept = 0
+    for folder in _token_folders():
+        for meta in list(folder.glob("vulcan_*.jsonl")) + list(folder.glob("not_trained/vulcan_*.jsonl")):
+            meta.with_suffix(".bin").unlink(missing_ok=True)
+            meta.unlink(missing_ok=True)
+            print(f"strip: removed {meta}", flush=True)
+        for meta in sorted(folder.glob("*.jsonl")):
+            bpath = meta.with_suffix(".bin")
+            if not bpath.is_file():
+                continue
+            ids = np.memmap(bpath, dtype=np.uint32, mode="r")
+            parts, lines = [], []
+            off = n_drop = 0
+            for line in meta.read_text().splitlines():
+                if not line.strip():
+                    continue
+                d = json.loads(line)
+                if d.get("norm") in drop or d.get("src") == "vulcan":
+                    n_drop += 1
+                    continue
+                sl = np.array(ids[int(d["offset"]): int(d["offset"]) + int(d["ntok"])], dtype=np.uint32)
+                parts.append(sl)
+                d["offset"] = off
+                d["ntok"] = int(sl.size)
+                off += int(sl.size)
+                lines.append(json.dumps(d, separators=(",", ":")))
+            del ids
+            removed += n_drop
+            kept += len(lines)
+            if n_drop == 0:
+                continue
+            if not lines:
+                meta.unlink()
+                bpath.unlink()
+                print(f"strip: empty {meta.name} drop {n_drop}", flush=True)
+                continue
+            arr = np.concatenate(parts)
+            tmpb = bpath.with_name(bpath.name + ".rewriting")
+            tmpj = meta.with_name(meta.name + ".rewriting")
+            arr.tofile(tmpb)
+            tmpj.write_text("\n".join(lines) + "\n")
+            os.replace(tmpb, bpath)
+            os.replace(tmpj, meta)
+            print(f"strip: {meta.name} drop {n_drop} keep {len(lines)}", flush=True)
+    print(f"strip: done removed_docs={removed} kept_docs={kept}", flush=True)
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--workers", type=int, default=16)
@@ -472,8 +550,12 @@ def main() -> None:
     p.add_argument("--edu", action="store_true", help="Stack-Edu classifier pass (CPU torch threads = --workers)")
     p.add_argument("--follow", action="store_true", help="keep scoring new shards")
     p.add_argument("--follow-browser", action="store_true", help="keep checking newly queued pages")
+    p.add_argument("--strip", action="store_true", help="remove thrown-out documents from the shard files")
     args = p.parse_args()
     ROOT.mkdir(parents=True, exist_ok=True)
+    if args.strip:
+        strip_bad()
+        return
     _apply_drop_rules()
     if args.follow and args.edu:
         follow_edu(args.workers)
