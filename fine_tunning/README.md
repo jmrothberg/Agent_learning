@@ -17,12 +17,18 @@ sqlite3 "$SMALL_ROOT/quality.sqlite" ".timeout 60000" "BEGIN IMMEDIATE; \
 rm -f "$SMALL_ROOT/logs/data_vulcan.json"
 ```
 
-> **Note to the other computers: new synthetic games are in git.** `small/synth_games/synth.jsonl` holds every game that passed Chrome (660 on Sep 30, 2026). Git carries the games, not tokens. After each `git pull`, `small-synth` tokenizes them with the 2B's `tokenizer.json` into `sets/synth/original`, `train`, and `tokens`. The 2B and the 1B share one tokenizer, so these are the same token ids as copied shards. Games already in `tokens/` (by `sha`) are skipped. Training can keep running; the next 30-minute save draws them. Details in §9b, "Synthetic games from git".
+> **Synthetic games are in git.** `small/synth_games/synth.jsonl` holds every game that passed Chrome (660 on Sep 30, 2026). Git carries the games, not tokens. `small-synth` tokenizes them with `SMALL_BASE`'s `tokenizer.json` into `sets/synth/original`, `train`, and `tokens`. The 1B and the 2B share one tokenizer, so both Macs get the same token ids. Games already in `tokens/` (by `sha`) are skipped. Training can keep running; the next 30-minute save draws them. Details in §9b, "Synthetic games from git".
 
 ```bash
-cd ~/Agent_learning && git pull && cd fine_tunning
+cd ~/Agent_learning/fine_tunning
+
+# This Mac (runs synth_html.py, trains the 1B). Defaults: ~/MLX_Models/html_js_small + MiniCPM5-1B-Base.
+./start.sh small-synth-share      # tokenize here, then commit + push the games
+
+# The other Mac (trains the 2B), after git pull:
+git pull
 export SMALL_ROOT=/Users/jonathanrothberg/Data/html_js_small   # the 2B run (§9f)
-export SMALL_BASE=~/MLX_Models/MiniCPM5-2B-Base                # its tokenizer.json is read
+export SMALL_BASE=~/MLX_Models/MiniCPM5-2B-Base
 ./start.sh small-synth
 ```
 
