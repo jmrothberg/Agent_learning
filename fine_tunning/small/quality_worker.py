@@ -221,7 +221,7 @@ def _combine(con: sqlite3.Connection) -> dict:
         score = edu_score.get(norm)
         boilerplate = src == "gcc" and score is not None and score < 1.5
         page_error = abs(page_w - W_PAGE_ERROR) < 1e-6
-        if src == "vulcan" or i not in keep or not syntax or junk < 1.0 or page_error or boilerplate:
+        if i not in keep or not syntax or junk < 1.0 or page_error or boilerplate:
             w = 0.0
             stats["dropped"] += 1
         else:
@@ -490,18 +490,10 @@ def strip_bad() -> None:
     _apply_drop_rules()
     con = _db()
     drop = {r[0] for r in con.execute("select norm from quality where weight = 0")}
-    try:
-        drop.update(r[0] for r in con.execute("select norm from feat where src = 'vulcan'"))
-    except sqlite3.OperationalError:
-        pass
     con.close()
     print(f"strip: {len(drop)} docs weight 0", flush=True)
     removed = kept = 0
     for folder in _token_folders():
-        for meta in list(folder.glob("vulcan_*.jsonl")) + list(folder.glob("not_trained/vulcan_*.jsonl")):
-            meta.with_suffix(".bin").unlink(missing_ok=True)
-            meta.unlink(missing_ok=True)
-            print(f"strip: removed {meta}", flush=True)
         for meta in sorted(folder.glob("*.jsonl")):
             bpath = meta.with_suffix(".bin")
             if not bpath.is_file():
@@ -513,7 +505,7 @@ def strip_bad() -> None:
                 if not line.strip():
                     continue
                 d = json.loads(line)
-                if d.get("norm") in drop or d.get("src") == "vulcan":
+                if d.get("norm") in drop:
                     n_drop += 1
                     continue
                 sl = np.array(ids[int(d["offset"]): int(d["offset"]) + int(d["ntok"])], dtype=np.uint32)

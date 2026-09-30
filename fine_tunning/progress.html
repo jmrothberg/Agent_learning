@@ -233,7 +233,7 @@ async function tick() {
         ? `Sampled tokens one pass draws (sampled_tokens= in the train log). ${(uniqueTok / 1e9).toFixed(2)}B is every row on disk, before repeats.`
         : "Tokens in the rows on disk, before repeats";
       document.getElementById("mixLine").textContent =
-        "Vulcan pages are not drawn. This run drops them at the next 30-minute save. docs= and sampled_tokens= stay the numbers from when this process started until training is started again. Next start draws canvas games at: synthetic ×1500, own ×40, GitHub ×6, Stack ×1. A canvas without a loop is 0.6× that, a plain file 0.35×. Weight 0 is not drawn.";
+        "Thrown-out files are dropped at the next 30-minute save. docs= and sampled_tokens= stay the numbers from when this process started until training is started again. Next start draws canvas games at: synthetic ×1500, own ×40, GitHub ×6, Stack ×1. A canvas without a loop is 0.6× that, a plain file 0.35×. Weight 0 is not drawn.";
       const dropPct = c.unique ? Math.round(100 * (c.dropped || 0) / c.unique) : 0;
       document.getElementById("cDrop").textContent = (c.dropped || 0).toLocaleString();
       document.getElementById("cDropLabel").textContent = `Near-duplicates at weight 0 (${dropPct}% of unique)`;

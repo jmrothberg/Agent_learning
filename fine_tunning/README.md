@@ -25,11 +25,16 @@ export SMALL_ROOT=~/MLX_Models/html_js_small
 ~/Agents/.venv/bin/python small/quality_worker.py --strip
 ```
 
-`--strip` rewrites `quality.sqlite` so those files are weight 0, then rewrites `shards/*.jsonl` and `sets/*/tokens/*.jsonl` without them. It also deletes any `vulcan_*.jsonl` and `vulcan_*.bin`. Do not copy those back into a folder the trainer reads. `train_small.py` forces `src=vulcan` to weight 0 either way.
+`--strip` rewrites `quality.sqlite` so those files are weight 0, then rewrites `shards/*.jsonl` and `sets/*/tokens/*.jsonl` without them.
+
+**Do not use Vulcan** (`xlelords/vulcan`, request-to-page lessons). It did not help and was removed on Sep 30, 2026, code included. Nothing blocks it now: a set name missing from `SET_WEIGHT` trains at weight 1. On a Mac that once had it, this must print nothing. If it prints files, stop the trainer and remove them:
+
+```bash
+find "$SMALL_ROOT/shards" "$SMALL_ROOT/sets" -name 'vulcan_*'
+```
 
 | Throw out | How to recognize it | Old weight |
 | --- | --- | --- |
-| Vulcan request-to-page lessons | `src=vulcan`, files `vulcan_*.jsonl` / `vulcan_*.bin` | 400, then 1 if the name was missing from `SET_WEIGHT` |
 | Near-duplicate, not the keeper | `quality.weight = 0` already | 0 |
 | JavaScript that does not parse | `feat.syntax = 0` | 0.3 |
 | Repeated lines, or "generated" / "do not edit" | `feat.junk < 1` | 0.2–0.3 |
@@ -628,8 +633,6 @@ The scorer writes 0 for the rows marked "no" below. A score under 1.5 is boilerp
 | Repeated lines / "generated, do not edit"                                                  | 0                                                     | no        |
 | Stack-Edu JavaScript classifier ([SmolLM2](https://arxiv.org/abs/2502.02737)), github only | score <1.5 → 0, <2.5 → 0.7, <3.5 → 1.3, else 2.0      | score <1.5: no. The rest stays |
 | Headless Chromium, 2 s, network blocked                                                    | page error 0, canvas that draws 1.5                   | errors: no. A canvas that draws stays |
-| Vulcan request-to-page (`src=vulcan`)                                                      | 0                                                     | no |
-
 
 
 
