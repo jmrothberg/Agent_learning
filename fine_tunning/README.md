@@ -14,6 +14,30 @@ Run either line again any time. Anything already running is left alone, and anyt
 pkill -f "data.py --source stack"
 ```
 
+**Other computers — clean the training data after you pull.** Good HTML and JavaScript only. The documents below are taken out of the shard files. They are not kept at a low weight. Checkpoints are not touched. Training can keep running. The next 30-minute save opens the cleaned shards. The loss will step up. That is the junk leaving, not a learning-rate blow-up. The page keeps the old `docs=` and `sampled_tokens=` numbers until the trainer is started again.
+
+Set `SMALL_ROOT` to the data folder on that machine if it is not `~/MLX_Models/html_js_small`.
+
+```bash
+cd ~/Agent_learning/fine_tunning
+git pull
+export SMALL_ROOT=~/MLX_Models/html_js_small
+~/Agents/.venv/bin/python small/quality_worker.py --strip
+```
+
+`--strip` rewrites `quality.sqlite` so those files are weight 0, then rewrites `shards/*.jsonl` and `sets/*/tokens/*.jsonl` without them. It also deletes any `vulcan_*.jsonl` and `vulcan_*.bin`. Do not copy those back into a folder the trainer reads. `train_small.py` forces `src=vulcan` to weight 0 either way.
+
+| Throw out | How to recognize it | Old weight |
+| --- | --- | --- |
+| Vulcan request-to-page lessons | `src=vulcan`, files `vulcan_*.jsonl` / `vulcan_*.bin` | 400, then 1 if the name was missing from `SET_WEIGHT` |
+| Near-duplicate, not the keeper | `quality.weight = 0` already | 0 |
+| JavaScript that does not parse | `feat.syntax = 0` | 0.3 |
+| Repeated lines, or "generated" / "do not edit" | `feat.junk < 1` | 0.2–0.3 |
+| GitHub boilerplate | `edu.score < 1.5` (github only) | 0.3 |
+| Page that errors in the headless browser | `browser.weight = 0.5` | 0.5 |
+
+Keep a file when the script parses, it is not a repeated or generated dump, its Edu score is not under 1.5, the browser did not flag an error, and it is the keeper of its near-duplicate cluster. Plain HTML and JavaScript that passes those checks stays. A canvas game is not required.
+
 **Try a prompt on the progress page.** Press Stop training. That frees the GPU and stays stopped until you press Resume (the 30-minute watcher will not start the trainer again). Type a prompt, pick how many new tokens, then press Generate on one side only. The left side is a model to compare against (this run's base, or another local model such as Qwen3.8-27B). The right side is a checkpoint (`checkpoints/latest` or a dated snapshot).
 
 `./start.sh small` reloads the page when `serve_progress.py` or `progress.html` is newer than the process. It does not start the trainer while `logs/hold.json` says held. Resume on the page continues from `checkpoints/latest` at the learning rate already in `logs/train.log`.
@@ -595,13 +619,16 @@ cp ~/MLX_Models/html_js_small/quality.sqlite $SMALL_ROOT/
 Where the data came from: own games (`html_game_sft/raw/`) → 14,470 unique files (~33M tokens) after dedup; github-code-clean (49 parquet files) → 916,493 docs, 2.22B tokens. The Stack added about 8.0B tokens. Sampling weights are in the table in §9b (synthetic ×1500, own ×40, GitHub ×6, Stack ×1 for a canvas game with a loop). `quality.sqlite` multiplies:
 
 
-| Pass                                                                                       | Weight                                               |
-| ------------------------------------------------------------------------------------------ | ---------------------------------------------------- |
-| Near-duplicate (MinHash, ~0.77 Jaccard), not the keeper                                    | 0 (25% of docs)                                      |
-| JS syntax error (node `vm` parse, never run)                                               | 0.3                                                  |
-| Repeated lines / "generated, do not edit"                                                  | 0.3 / 0.2                                            |
-| Stack-Edu JavaScript classifier ([SmolLM2](https://arxiv.org/abs/2502.02737)), github only | score <1.5 → 0.3, <2.5 → 0.7, <3.5 → 1.3, else 2.0   |
-| Headless Chromium, 2 s, network blocked                                                    | self-contained page with errors 0.5, canvas drew 1.5 |
+The scorer writes 0 for the rows marked "no" below. A score under 1.5 is boilerplate and is removed. Scores from 1.5 up stay, including the 0.7 band.
+
+| Pass                                                                                       | Weight the scorer writes                              | Train it? |
+| ------------------------------------------------------------------------------------------ | ----------------------------------------------------- | --------- |
+| Near-duplicate (MinHash, ~0.77 Jaccard), not the keeper                                    | 0                                                     | no        |
+| JS syntax error (node `vm` parse, never run)                                               | 0                                                     | no        |
+| Repeated lines / "generated, do not edit"                                                  | 0                                                     | no        |
+| Stack-Edu JavaScript classifier ([SmolLM2](https://arxiv.org/abs/2502.02737)), github only | score <1.5 → 0, <2.5 → 0.7, <3.5 → 1.3, else 2.0      | score <1.5: no. The rest stays |
+| Headless Chromium, 2 s, network blocked                                                    | page error 0, canvas that draws 1.5                   | errors: no. A canvas that draws stays |
+| Vulcan request-to-page (`src=vulcan`)                                                      | 0                                                     | no |
 
 
 

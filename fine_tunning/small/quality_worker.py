@@ -184,8 +184,10 @@ def _combine(con: sqlite3.Connection) -> dict:
     feats = con.execute("select norm, src, rank, ntok, junk, syntax, sig from feat").fetchall()
     browser = dict(con.execute("select norm, weight from browser"))
     # NULL score: HTML with no inline JS. Counted done, training weight stays 1.
-    edu = {}
+    # A real score under 1.5 is boilerplate. It is not trained.
+    edu, edu_score = {}, {}
     for n, s in con.execute("select norm, score from edu"):
+        edu_score[n] = s
         edu[n] = 1.0 if s is None else next(w for hi, w in EDU_WEIGHTS if s < hi)
     parent = list(range(len(feats)))
 
@@ -211,12 +213,21 @@ def _combine(con: sqlite3.Connection) -> dict:
         if r not in best or key(i) > key(best[r]):
             best[r] = i
     keep = set(best.values())
-    out, stats = [], {"docs": len(feats), "near_dup": 0, "syntax": 0, "junk": 0, "browser": 0, "edu": len(edu)}
+    out, stats = [], {"docs": len(feats), "near_dup": 0, "syntax": 0, "junk": 0, "browser": 0, "edu": len(edu), "dropped": 0}
     for i, (norm, src, _, _, junk, syntax, _) in enumerate(feats):
-        # Edu score only reweights github-code-clean; own games are the target style.
-        w = junk * (1.0 if syntax else W_SYNTAX) * browser.get(norm, 1.0) * (edu.get(norm, 1.0) if src == "gcc" else 1.0)
+        # Thrown out, not downweighted. Files stay in the table at weight 0.
+        # Edu score only applies to github-code-clean. Own games are not boilerplate-scored.
+        page_w = browser.get(norm, 1.0)
+        score = edu_score.get(norm)
+        boilerplate = src == "gcc" and score is not None and score < 1.5
+        page_error = abs(page_w - W_PAGE_ERROR) < 1e-6
+        if src == "vulcan" or i not in keep or not syntax or junk < 1.0 or page_error or boilerplate:
+            w = 0.0
+            stats["dropped"] += 1
+        else:
+            w = junk * (1.0 if syntax else W_SYNTAX) * page_w * (edu.get(norm, 1.0) if src == "gcc" else 1.0)
         if i not in keep:
-            w, stats["near_dup"] = 0.0, stats["near_dup"] + 1
+            stats["near_dup"] += 1
         stats["syntax"] += not syntax
         stats["junk"] += junk < 1.0
         stats["browser"] += norm in browser
@@ -438,6 +449,100 @@ def follow_edu(threads: int) -> None:
         time.sleep(20)
 
 
+# Bump when the throw-out rule changes. The next worker start rewrites quality.sqlite once.
+_DROP_RULES = "2026-09-29-drop-bad"
+
+
+def _apply_drop_rules() -> None:
+    """One rewrite after a rule change. A later start does not rebuild the table."""
+    stamp = ROOT / "logs" / "quality_rules.txt"
+    if stamp.is_file() and stamp.read_text().strip() == _DROP_RULES:
+        return
+    con = _db()
+    print("combine:", _combine(con), flush=True)
+    con.close()
+    stamp.parent.mkdir(parents=True, exist_ok=True)
+    stamp.write_text(_DROP_RULES + "\n")
+
+
+def _token_folders() -> list[Path]:
+    """Folders the trainer reads. Subfolders are not read."""
+    folders = []
+    shards = ROOT / "shards"
+    if shards.is_dir():
+        folders.append(shards)
+    sets = ROOT / "sets"
+    if sets.is_dir():
+        for name in sorted(sets.iterdir()):
+            tokens = name / "tokens"
+            if tokens.is_dir():
+                folders.append(tokens)
+    return folders
+
+
+def strip_bad() -> None:
+    """Remove thrown-out documents from the shard files. Weight 0 is written first.
+
+    The trainer's open maps keep the old bytes until the next 30-minute save.
+    That save opens the rewritten files. Checkpoints are not touched.
+    """
+    import numpy as np
+    _apply_drop_rules()
+    con = _db()
+    drop = {r[0] for r in con.execute("select norm from quality where weight = 0")}
+    try:
+        drop.update(r[0] for r in con.execute("select norm from feat where src = 'vulcan'"))
+    except sqlite3.OperationalError:
+        pass
+    con.close()
+    print(f"strip: {len(drop)} docs weight 0", flush=True)
+    removed = kept = 0
+    for folder in _token_folders():
+        for meta in list(folder.glob("vulcan_*.jsonl")) + list(folder.glob("not_trained/vulcan_*.jsonl")):
+            meta.with_suffix(".bin").unlink(missing_ok=True)
+            meta.unlink(missing_ok=True)
+            print(f"strip: removed {meta}", flush=True)
+        for meta in sorted(folder.glob("*.jsonl")):
+            bpath = meta.with_suffix(".bin")
+            if not bpath.is_file():
+                continue
+            ids = np.memmap(bpath, dtype=np.uint32, mode="r")
+            parts, lines = [], []
+            off = n_drop = 0
+            for line in meta.read_text().splitlines():
+                if not line.strip():
+                    continue
+                d = json.loads(line)
+                if d.get("norm") in drop or d.get("src") == "vulcan":
+                    n_drop += 1
+                    continue
+                sl = np.array(ids[int(d["offset"]): int(d["offset"]) + int(d["ntok"])], dtype=np.uint32)
+                parts.append(sl)
+                d["offset"] = off
+                d["ntok"] = int(sl.size)
+                off += int(sl.size)
+                lines.append(json.dumps(d, separators=(",", ":")))
+            del ids
+            removed += n_drop
+            kept += len(lines)
+            if n_drop == 0:
+                continue
+            if not lines:
+                meta.unlink()
+                bpath.unlink()
+                print(f"strip: empty {meta.name} drop {n_drop}", flush=True)
+                continue
+            arr = np.concatenate(parts)
+            tmpb = bpath.with_name(bpath.name + ".rewriting")
+            tmpj = meta.with_name(meta.name + ".rewriting")
+            arr.tofile(tmpb)
+            tmpj.write_text("\n".join(lines) + "\n")
+            os.replace(tmpb, bpath)
+            os.replace(tmpj, meta)
+            print(f"strip: {meta.name} drop {n_drop} keep {len(lines)}", flush=True)
+    print(f"strip: done removed_docs={removed} kept_docs={kept}", flush=True)
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--workers", type=int, default=16)
@@ -445,8 +550,13 @@ def main() -> None:
     p.add_argument("--edu", action="store_true", help="Stack-Edu classifier pass (CPU torch threads = --workers)")
     p.add_argument("--follow", action="store_true", help="keep scoring new shards")
     p.add_argument("--follow-browser", action="store_true", help="keep checking newly queued pages")
+    p.add_argument("--strip", action="store_true", help="remove thrown-out documents from the shard files")
     args = p.parse_args()
     ROOT.mkdir(parents=True, exist_ok=True)
+    if args.strip:
+        strip_bad()
+        return
+    _apply_drop_rules()
     if args.follow and args.edu:
         follow_edu(args.workers)
     elif args.follow:
