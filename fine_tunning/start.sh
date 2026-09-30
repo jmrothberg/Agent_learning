@@ -29,6 +29,8 @@
 #   ./start.sh small-quality      CPU quality passes (score, then edu + browser), niced
 #   ./start.sh small-stack        The Stack v2 download (resumes logs/stack_state.json)
 #   ./start.sh small-watch        every 30 min: keep last_good, resume it if loss blows up
+#   ./start.sh small-synth        synthetic games -> sets/synth/{original,train,tokens}
+#   ./start.sh small-synth-share  generator Mac: small-synth, copy games into git, push
 #   SMALL_ROOT=~/MLX_Models/html_js_small     shards + quality.sqlite + checkpoints + logs
 #   SMALL_BASE=~/MLX_Models/MiniCPM5-1B-Base  base model (never modified)
 #   SMALL_PORT=8767                           progress page port
@@ -243,7 +245,31 @@ if [[ "$what" == small* ]]; then
     small-quality) small_quality ;;
     small-watch)   small_watch ;;
     small-synth)
+      # Games -> sets/synth/{original,train,tokens}. A Mac that does not run
+      # synth_html.py has no generator file, so it reads the copy in git.
+      if [[ -z "$SYNTH_JSONL" && ! -f "$LORA_ROOT/jsonl/synth.jsonl" ]]; then
+        export SYNTH_JSONL="$HERE/small/synth_games/synth.jsonl"
+      fi
+      echo "SYNTH_JSONL=${SYNTH_JSONL:-$LORA_ROOT/jsonl/synth.jsonl}"
       "$LORA_PY" -u "$HERE/small/data.py" --source synth
+      ;;
+    small-synth-share)
+      # Generator Mac only: tokenize here, copy the kept games into git, push
+      # that one file. Other Macs then run: git pull && ./start.sh small-synth
+      src="${SYNTH_JSONL:-$LORA_ROOT/jsonl/synth.jsonl}"
+      dest="$HERE/small/synth_games/synth.jsonl"
+      [[ -f "$src" ]] || { echo "no games at $src"; exit 1; }
+      SYNTH_JSONL="$src" "$LORA_PY" -u "$HERE/small/data.py" --source synth
+      mkdir -p "${dest:h}"
+      cp "$src" "$dest"
+      echo "copied $(wc -l < "$dest" | tr -d ' ') games -> $dest"
+      if git -C "$HERE" diff --quiet -- "$dest" && git -C "$HERE" ls-files --error-unmatch "$dest" >/dev/null 2>&1; then
+        echo "git: no new games since the last share"
+      else
+        git -C "$HERE" add -- "$dest"
+        git -C "$HERE" commit -m "Synthetic games: $(wc -l < "$dest" | tr -d ' ') rows" -- "$dest"
+        git -C "$HERE" push origin HEAD
+      fi
       ;;
     small-export)
       if pgrep -f "data.py --source export" > /dev/null; then
@@ -259,7 +285,7 @@ if [[ "$what" == small* ]]; then
       fi
       detach "$SMALL_ROOT/logs/stack.out" nice -n 5 "$LORA_PY" -u "$HERE/small/data.py" --source stack --workers 32 --max-tokens 8000000000
       echo "stack    (log: $SMALL_ROOT/logs/stack.out)   resumes logs/stack_state.json" ;;
-    *) echo "usage: $0 [small|small-train|small-monitor|small-data|small-retok DIR|small-quality|small-stack|small-synth|small-export|small-watch]"; exit 1 ;;
+    *) echo "usage: $0 [small|small-train|small-monitor|small-data|small-retok DIR|small-quality|small-stack|small-synth|small-synth-share|small-export|small-watch]"; exit 1 ;;
   esac
   exit 0
 fi

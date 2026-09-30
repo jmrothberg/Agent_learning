@@ -17,6 +17,15 @@ sqlite3 "$SMALL_ROOT/quality.sqlite" ".timeout 60000" "BEGIN IMMEDIATE; \
 rm -f "$SMALL_ROOT/logs/data_vulcan.json"
 ```
 
+> **Note to the other computers: new synthetic games are in git.** `small/synth_games/synth.jsonl` holds every game that passed Chrome (660 on Sep 30, 2026). After each `git pull`, turn them into the three set folders (`sets/synth/original`, `train`, `tokens`). Only games not already tokenized are added. Training can keep running; the next 30-minute save draws them. Details in §9b, "Synthetic games from git".
+
+```bash
+cd ~/Agent_learning && git pull && cd fine_tunning
+export SMALL_ROOT=~/MLX_Models/html_js_small      # or that machine's data folder
+export SMALL_BASE=~/MLX_Models/MiniCPM5-1B-Base   # or that machine's base (the 2B uses the same tokenizer)
+./start.sh small-synth
+```
+
 **Other Mac — small HTML/JS model.** One command. Copy `shards/` and `quality.sqlite` into `~/MLX_Models/html_js_small` first (not the raw HTML). If `~/Agents/.venv` or `~/MLX_Models/MiniCPM5-1B-Base` is missing, the command creates them. Jobs stay running if you quit Cursor.
 
 ```bash
@@ -509,6 +518,7 @@ SMALL_ROOT=/Volumes/DRIVE/html_js_small ./start.sh small
 | `./start.sh small-quality`                 | file check (stays up), code quality, and browser. Starts only the ones that are down.                        |
 | `./start.sh small-stack`                   | The Stack v2 download. Resumes `logs/stack_state.json`. 32 workers, stop after 8B new tokens                 |
 | `./start.sh small-synth`                   | Refresh the synthetic-game set (original, train text, tokens). Safe to run again as `synth.jsonl` grows. |
+| `./start.sh small-synth-share`             | Generator Mac only: `small-synth`, then copy the games to `small/synth_games/synth.jsonl`, commit that one file, and push. |
 | `./start.sh small-export`                  | Rebuild `train/` text for own, GitHub, and Stack from `tokens/`. Skips shards already exported.         |
 
 
@@ -527,6 +537,32 @@ Rebuild the synthetic shards after more games land. Rows already tokenized are s
 cd ~/Agent_learning/fine_tunning
 ./start.sh small-synth
 ```
+
+**Synthetic games from git.** The games are small (8 MB at 660), so the kept games travel in git as `fine_tunning/small/synth_games/synth.jsonl`, the same chat rows `synth_html.py` writes. Token files do not go in git: each Mac tokenizes for its own base.
+
+On the Mac that runs `synth_html.py`, after more games land:
+
+```bash
+cd ~/Agent_learning/fine_tunning
+./start.sh small-synth-share    # tokenize here, copy the games into git, commit that file, push
+```
+
+On any other Mac:
+
+```bash
+cd ~/Agent_learning && git pull && cd fine_tunning
+./start.sh small-synth          # reads small/synth_games/synth.jsonl when there is no local generator file
+```
+
+`small-synth` reads `$LORA_ROOT/jsonl/synth.jsonl` when that file exists (the generator Mac), else the git copy. `SYNTH_JSONL=path` overrides both. It writes the three folders:
+
+| Folder | What `small-synth` writes |
+| --- | --- |
+| `sets/synth/original/rows.jsonl` | every kept chat row, unchanged (rewritten each run) |
+| `sets/synth/train/docs.jsonl` | `{"sha", "text"}` per game. The text is the user prompt, a newline, and the page, with the chat tags removed |
+| `sets/synth/tokens/synth_NNNNN.bin` + `.jsonl` | token ids, and one line per game (`sha`, `offset`, `ntok`, `src=synth`, `rank`). Only games whose `sha` is not already here are added, as a new `synth_NNNNN` pair |
+
+A row with `weight` 0 (thumbs-down on the synth page) is left out. The trainer reads only `tokens/`. It rebuilds its draw list at start and at every 30-minute save, so new games join without a restart.
 
 **Where the sets live.** One folder per set, under `~/MLX_Models/html_js_small/sets/`. Move a set by moving that folder. A short map sits beside them in `sets/README.md`.
 
