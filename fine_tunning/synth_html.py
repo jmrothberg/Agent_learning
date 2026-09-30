@@ -921,12 +921,37 @@ def seed_feed(stats: "Stats", path: Path, status: str = "kept") -> None:
         )
 
 
+# Preview only. A canvas under this many CSS pixels on both sides is the
+# small 8-bit field sitting in a black page. The saved HTML is unchanged.
+_TINY_CANVAS_PX = 480
+_PREVIEW_BUMP = (
+    "<script>(function(){function bump(){if(document.documentElement.style.zoom==='2')return;"
+    "var nodes=document.querySelectorAll('canvas');if(!nodes.length)return;"
+    "var w=0,h=0;for(var i=0;i<nodes.length;i++){var r=nodes[i].getBoundingClientRect();"
+    "if(r.width>w)w=r.width;if(r.height>h)h=r.height;}"
+    f"if(w>=40&&h>=40&&w<{_TINY_CANVAS_PX}&&h<{_TINY_CANVAS_PX})"
+    "document.documentElement.style.zoom='2';}"
+    "addEventListener('load',function(){bump();setTimeout(bump,500);});})();</script>"
+)
+
+
+def _preview_page(page: str) -> str:
+    """Copy of the page for the monitor, with a 2x zoom when the canvas is tiny."""
+    lower = page.lower()
+    for tag in ("</body>", "</html>"):
+        at = lower.rfind(tag)
+        if at != -1:
+            return page[:at] + _PREVIEW_BUMP + page[at:]
+    return page + _PREVIEW_BUMP
+
+
 def fit_html(page: str) -> str:
     """Show the whole game in the preview. Pages use a tall canvas plus a
     100vh column with overflow hidden, which clips the paddle and the caption.
     Lay the game out at 960x900, then scale that frame to the preview.
+    A canvas that is still under 480px on both sides is shown at 2x.
     """
-    payload = json.dumps(page).replace("<", "\\u003c")
+    payload = json.dumps(_preview_page(page)).replace("<", "\\u003c")
     return (
         "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><style>"
         "html,body{margin:0;height:100%;background:#111;overflow:hidden}"

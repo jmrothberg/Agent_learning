@@ -67,6 +67,7 @@ def test_fit_html_scales_the_page() -> None:
     wrapped = sh.fit_html(PAGE)
     assert "scale(" in wrapped
     assert "960" in wrapped and "900" in wrapped
+    assert "zoom" in wrapped and "480" in wrapped
     assert "\\u003cscript>" in wrapped
     assert "\\u003c/script>" in wrapped
 
