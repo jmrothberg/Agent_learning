@@ -59,6 +59,8 @@ GEN_SYS = (
     "A famous title is one playable scene of that game, not the whole product. "
     "Finish that scene, then stop. Do not add another level, a second mode, or a long story. "
     "If the file is getting long, stop adding objects and close it. "
+    # Cut-off replies often end inside a long hard-coded tile map.
+    "Do not write long tile maps or level strings. Build a level with a short loop. "
     "The last characters must be </html> and </html_file>."
 )
 # r128 has no CapsuleGeometry. The model mixes that old CDN with newer classes.
@@ -98,7 +100,8 @@ _HOWLER_RIDER = (
 # rows.TOKEN_BUDGET. A row over this does not fit the trainer window.
 TOKEN_BUDGET = 8128
 # Generation cap. The packed training row must stay under TOKEN_BUDGET.
-MAX_TOKENS = 6144
+# 7800 leaves ~300 for the short system prompt, user line, and think note.
+MAX_TOKENS = 7800
 DEFAULT_JOBS = 12
 DEFAULT_PORT = 8768
 DEFAULT_MODEL = "Qwen3.8-27B-mxfp8"
@@ -386,7 +389,13 @@ def is_request_failure(row: dict) -> bool:
             if msg.get("role") == "bug":
                 report = str(msg.get("content") or "")
                 break
-    return report.startswith("request failed:")
+    if report.startswith("request failed:"):
+        return True
+    # "no html" with an empty reply: the server killed the stream before the
+    # first token (older runs did not catch its error event).
+    msgs = row.get("messages") or []
+    reply = next((m.get("content") for m in msgs if m.get("role") == "assistant"), "")
+    return report.startswith("no html") and not str(reply or "").strip()
 
 
 def prompts_in_jsonl(path: Path) -> set[str]:
@@ -599,8 +608,10 @@ def chrome_smoke(path: str) -> dict:
     if root not in sys.path:
         sys.path.insert(0, root)
     from tools import test_html_file
-    # Headless only. One second is enough to catch a console or page error.
-    return test_html_file(path, run_seconds=1.0)
+    # Three seconds to boot, then a click, Enter, Space, and held arrows and
+    # WASD, then two more seconds. A throw in a key handler is a drop.
+    # The game-agent call does not pass exercise_keys.
+    return test_html_file(path, run_seconds=3.0, exercise_keys=True)
 
 
 PAGE = """<!DOCTYPE html>
@@ -1059,6 +1070,10 @@ async def complete(
                 obj = json.loads(data)
             except json.JSONDecodeError:
                 continue
+            # The server reports a killed stream as {"error": ...}. Raise so
+            # handle() requeues the prompt instead of writing "no html".
+            if isinstance(obj, dict) and obj.get("error"):
+                raise httpx.RemoteProtocolError(f"server error: {obj['error']}"[:240])
             delta = take_delta(obj)
             if delta:
                 if t_first is None:

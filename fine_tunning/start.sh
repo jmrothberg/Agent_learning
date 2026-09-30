@@ -282,6 +282,8 @@ start_train() {
   echo "trainer  (log: $LORA_ROOT/logs/train.log)   tail -f $LORA_ROOT/logs/train.log"
 }
 # If port 8000 is open, only watch. If that process exits, start it again.
+# Token queue timeout 3 h (default 600 s). At ~47 streams a queued request
+# waits past 600 s and the server ends it with an empty reply.
 start_mlx_server() {
   if pgrep -f "MLX_SERVER_KEEPALIVE" >/dev/null; then
     echo "server watchdog already running (log: $LORA_ROOT/logs/mlx_server.log)"
@@ -290,6 +292,7 @@ start_mlx_server() {
   detach "$LORA_ROOT/logs/mlx_server.log" env \
     MLX_VLM_PRELOAD_MODEL="$LORA_BASE" \
     MLX_VLM_MAX_NUM_SEQS="${MLX_VLM_MAX_NUM_SEQS:-64}" \
+    MLX_VLM_TOKEN_QUEUE_TIMEOUT="${MLX_VLM_TOKEN_QUEUE_TIMEOUT:-10800}" \
     MLX_VLM_LOG_PROGRESS_INTERVAL=0 \
     MLX_VLM_ENABLE_THINKING=0 \
     LORA_PY="$LORA_PY" \

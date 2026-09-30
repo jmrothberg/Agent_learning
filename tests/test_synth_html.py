@@ -228,6 +228,11 @@ def test_prompts_in_jsonl_reads_user_line(tmp_path: Path) -> None:
     buggy.write_text(json.dumps(timed_out) + "\n" + json.dumps(broken) + "\n", encoding="utf-8")
     assert sh.is_request_failure(timed_out)
     assert sh.prompts_in_jsonl(buggy) == {sh.normalize_prompt("Write me a game of snake.")}
+    # Empty "no html" = server killed the stream: retried. A cut-off page is not.
+    killed = sh.pack_buggy_row(PROMPT, "", "no html", None)
+    cut_off = sh.pack_buggy_row(PROMPT, "<html_file>\n<!DOCTYPE html><html><body>", "no html", None)
+    assert sh.is_request_failure(killed)
+    assert not sh.is_request_failure(cut_off)
 
 
 def test_rolling_tok_s_is_tokens_over_the_window() -> None:
@@ -250,3 +255,24 @@ def test_stream_delta_and_usage() -> None:
     assert sh.take_delta({"choices": []}) == ""
     assert sh.take_usage_completion({"usage": {"completion_tokens": 12}}) == 12
     assert sh.take_usage_completion({}) is None
+
+
+def test_held_key_throw_is_caught_only_when_keys_are_pressed(tmp_path: Path) -> None:
+    """A loop that throws only while ArrowLeft is held stays quiet until keys are sent."""
+    from tools import test_html_file
+    page = tmp_path / "game.html"
+    page.write_text(
+        "<!DOCTYPE html><html><body><canvas id=\"c\" width=\"200\" height=\"200\"></canvas>"
+        "<script>const down={};"
+        "addEventListener('keydown',e=>{down[e.code]=true});"
+        "addEventListener('keyup',e=>{down[e.code]=false});"
+        "function frame(){if(down.ArrowLeft)throw new Error('held arrow broke');"
+        "requestAnimationFrame(frame)}requestAnimationFrame(frame);</script>"
+        "</body></html>",
+        encoding="utf-8",
+    )
+    idle = test_html_file(page, run_seconds=0.4, exercise_keys=False)
+    assert idle["ok"], idle["errors"]
+    played = test_html_file(page, run_seconds=0.4, exercise_keys=True)
+    assert not played["ok"]
+    assert any("held arrow broke" in err for err in played["errors"])

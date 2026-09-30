@@ -3635,7 +3635,43 @@ def pointclick_opening_book_applicable(
     return False
 
 
-def test_html_file(path: str | Path, run_seconds: float = 3.0) -> dict[str, Any]:
+def _hold_key(page, key: str, seconds: float) -> None:
+    """Hold a key across several frames, then release it."""
+    try:
+        page.keyboard.down(key)
+        time.sleep(seconds)
+        page.keyboard.up(key)
+    except Exception:
+        return
+
+
+def _press_game_keys(page) -> None:
+    """Click, start, then move. The update loop has to be able to see the key."""
+    try:
+        canvas = page.locator("canvas")
+        box = canvas.first.bounding_box() if canvas.count() else None
+        if box:
+            page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        else:
+            page.mouse.click(480, 360)
+    except Exception:
+        pass
+    time.sleep(0.5)
+    for key in ("Enter", "Space"):
+        _hold_key(page, key, 0.2)
+    time.sleep(0.5)
+    for key in (
+        "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown",
+        "KeyA", "KeyD", "KeyW", "KeyS",
+    ):
+        _hold_key(page, key, 0.3)
+
+
+def test_html_file(
+    path: str | Path,
+    run_seconds: float = 3.0,
+    exercise_keys: bool = False,
+) -> dict[str, Any]:
     """Run an HTML file in headless Chromium and return a small report dict.
 
     Report shape (always these keys, so the agent can rely on it):
@@ -3724,6 +3760,22 @@ def test_html_file(path: str | Path, run_seconds: float = 3.0) -> dict[str, Any]
 
         # Let the game animate for a few seconds.
         time.sleep(run_seconds)
+
+        # Synth keep only. A handler that throws on a key never runs during
+        # the idle wait above. Pointer-lock errors from the click are the
+        # headless harness, not a broken game.
+        if exercise_keys:
+            _press_game_keys(page)
+            # Handlers throw on the next frames, not inside the key call.
+            time.sleep(2.0)
+            kept_errors: list[str] = []
+            for err in errors:
+                low = err.lower()
+                if "pointer lock" in low:
+                    warnings.append(err + "  [harness-env, not counted as regression]")
+                else:
+                    kept_errors.append(err)
+            errors[:] = kept_errors
 
         # --- collect post-run facts ---
         title = page.title() or ""
