@@ -125,6 +125,10 @@ def test_gen_messages_require_a_closed_file() -> None:
     assert "r128" in three_sys
     eight = sh.gen_messages("Write me a small working version of Tetris. Use nice 8-bit graphics.")
     assert "fillRect" in eight[0]["content"]
+    assert "pixel-by-pixel" in eight[0]["content"]
+    phaser = sh.gen_messages("Make a small working version of Super Mario Bros. in Phaser.")
+    assert "createCursorKeys" in phaser[0]["content"]
+    assert "this.physics.add" in phaser[0]["content"]
 
 
 def test_pack_row_matches_short_html_shape() -> None:

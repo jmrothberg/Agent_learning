@@ -59,8 +59,13 @@ GEN_SYS = (
     "A famous title is one playable scene of that game, not the whole product. "
     "Finish that scene, then stop. Do not add another level, a second mode, or a long story. "
     "If the file is getting long, stop adding objects and close it. "
-    # Cut-off replies often end inside a long hard-coded tile map.
+    # Cut-off replies often end inside a long hard-coded tile map or a pixel sprite.
     "Do not write long tile maps or level strings. Build a level with a short loop. "
+    "Draw each object with a few shapes. Do not draw a sprite pixel by pixel. "
+    # Phaser and Pixi pages crash on a const used before its line, or a name declared twice.
+    "Declare every const, let, and class before any line that uses it. "
+    "Do not declare the same name twice. "
+    "Create every array before the loop that reads it. "
     "The last characters must be </html> and </html_file>."
 )
 # r128 has no CapsuleGeometry. The model mixes that old CDN with newer classes.
@@ -81,17 +86,23 @@ _THREE_RIDER = (
 )
 _EIGHT_RIDER = (
     " Draw with fillRect in a chunky pixel style. "
+    "Each object is a few rectangles, not a pixel-by-pixel sprite. "
     "Paint a background, a player, and at least three other objects. "
     "Use about six solid colors."
 )
 _PHASER_RIDER = (
     " Load only https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.min.js . "
     "One Phaser.Scene with create and update. "
-    "Draw the playfield with graphics or generated textures."
+    "Draw each object with a few this.add.rectangle or graphics calls, not a pixel sprite. "
+    "In create, make keys with this.input.keyboard.createCursorKeys() "
+    "and read cursors.left.isDown. Do not call this.input.keyboard.isDown. "
+    "Call setVelocity, setImmovable, or setAllowGravity only on an object "
+    "made with this.physics.add, and only if config.physics.default is arcade."
 )
 _PIXI_RIDER = (
     " Load only https://cdn.jsdelivr.net/npm/pixi.js@7.4.2/dist/pixi.min.js . "
-    "Build a stage of Graphics or sprites, a ticker, and several colors."
+    "Use PIXI.Application, PIXI.Graphics, and app.ticker.add. "
+    "Draw with rect and fill. Do not call createLinearGradient."
 )
 _HOWLER_RIDER = (
     " Load only https://cdnjs.cloudflare.com/ajax/libs/howler/2.2.4/howler.min.js . "
