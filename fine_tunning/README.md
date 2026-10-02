@@ -17,7 +17,7 @@ sqlite3 "$SMALL_ROOT/quality.sqlite" ".timeout 60000" "BEGIN IMMEDIATE; \
 rm -f "$SMALL_ROOT/logs/data_vulcan.json"
 ```
 
-> **Synthetic games are in git.** `small/synth_games/synth.jsonl` holds every game that passed Chrome (660 on Sep 30, 2026). Git carries the games, not tokens. `small-synth` tokenizes them with `SMALL_BASE`'s `tokenizer.json` into `sets/synth/original`, `train`, and `tokens`. The 1B and the 2B share one tokenizer, so both Macs get the same token ids. Games already in `tokens/` (by `sha`) are skipped. Training can keep running; the next 30-minute save draws them. Details in §9b, "Synthetic games from git".
+> **Synthetic games are in git.** `small/synth_games/synth.jsonl` is the whole set, not a patch: 1,520 games on Oct 2, 2026 (660 from Sep 30, plus 860 new). Git carries the games, not tokens. After `git pull`, `small-synth` tokenizes with `SMALL_BASE`'s `tokenizer.json` into `sets/synth/original`, `train`, and `tokens`. It adds only games whose `sha` is not already in `tokens/`. The 1B and the 2B share one tokenizer. Training can keep running; the next 30-minute save draws the new games. Weight 2000 was set for the first 660 (about 72% of a pass). These extra games raise that share. Details in §9b, "Synthetic games from git".
 
 ```bash
 cd ~/Agent_learning/fine_tunning
@@ -544,7 +544,7 @@ cd ~/Agent_learning/fine_tunning
 ./start.sh small-synth
 ```
 
-**Synthetic games from git.** The games are small (8 MB at 660), so the kept games travel in git as `fine_tunning/small/synth_games/synth.jsonl`, the same chat rows `synth_html.py` writes. Token files do not go in git: each Mac tokenizes for its own base.
+**Synthetic games from git.** The kept games travel in git as one file, `fine_tunning/small/synth_games/synth.jsonl` (22 MB, 1,520 games on Oct 2, 2026). That file is the whole set each time it is shared. Token files do not go in git: each Mac tokenizes for its own base, and skips a game whose `sha` is already in `tokens/`.
 
 On the Mac that runs `synth_html.py`, after more games land:
 
