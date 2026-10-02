@@ -528,14 +528,14 @@ SMALL_ROOT=/Volumes/DRIVE/html_js_small ./start.sh small
 | `./start.sh small-export`                  | Rebuild `train/` text for own, GitHub, and Stack from `tokens/`. Skips shards already exported.         |
 
 
-**Set weights.** The files stay in separate folders. One training pass draws them at these weights (canvas game with a loop; a weaker file in the same set is 0.6× or 0.35×). The numbers are sized for about 3,000 synthetic games against the tokens already on disk.
+**Set weights.** The files stay in separate folders. One training pass draws them at these weights (canvas game with a loop; a weaker file in the same set is 0.6× or 0.35×). The synthetic weight is set so the 660 games in git are most of a pass. Shares below are the 2B draw after the bad files were removed (update 16566, Sep 30).
 
-| Set | What it is | On disk | Weight | Share of one pass |
+| Set | What it is | On disk (drawn) | Weight | Share of one pass |
 | --- | --- | --- | --- | --- |
-| Synthetic games | prompt, newline, page, from `synth.jsonl` | about 7M tokens at 3,000 games | 1500 | about 20% |
-| Own games | collected HTML games | 0.53B tokens | 40 | about 40% |
-| GitHub (`gcc`) | github-code-clean HTML and JavaScript | 2.2B tokens | 6 | about 25% |
-| The Stack | public HTML and JavaScript | 8.0B tokens | 1 | about 15% |
+| Synthetic games | prompt, newline, page, from `synth.jsonl` | 660 games, 2.72M tokens | 2000 | about 72% |
+| Own games | collected HTML games | 0.017B tokens | 40 | about 8% |
+| GitHub (`gcc`) | github-code-clean HTML and JavaScript | 0.76B tokens | 6 | about 19% |
+| The Stack | public HTML and JavaScript | 0.27B tokens | 1 | about 1% |
 
 Rebuild the synthetic shards after more games land. Rows already tokenized are skipped. The chat tags are removed. Each document is the user prompt, a newline, and the raw page.
 
@@ -674,7 +674,7 @@ cp ~/MLX_Models/html_js_small/quality.sqlite $SMALL_ROOT/
 | `serve_progress.py` + `progress.html` | Monitor; small-model root shows speed first                                                                                                                                                                                                                                                                                                                          |
 
 
-Where the data came from: own games (`html_game_sft/raw/`) → 14,470 unique files (~33M tokens) after dedup; github-code-clean (49 parquet files) → 916,493 docs, 2.22B tokens. The Stack added about 8.0B tokens. Sampling weights are in the table in §9b (synthetic ×1500, own ×40, GitHub ×6, Stack ×1 for a canvas game with a loop). `quality.sqlite` multiplies:
+Where the data came from: own games (`html_game_sft/raw/`) → 14,470 unique files (~33M tokens) after dedup; github-code-clean (49 parquet files) → 916,493 docs, 2.22B tokens. The Stack added about 8.0B tokens. Sampling weights are in the table in §9b (synthetic ×2000, own ×40, GitHub ×6, Stack ×1 for a canvas game with a loop). `quality.sqlite` multiplies:
 
 
 The scorer writes 0 for the rows marked "no" below. A score under 1.5 is boilerplate and is removed. Scores from 1.5 up stay, including the 0.7 band.

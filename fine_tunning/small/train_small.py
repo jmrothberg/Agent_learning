@@ -42,12 +42,10 @@ QUALITY = ROOT / "quality.sqlite"
 # How often one file is drawn, before the quality score scales it.
 # Rank 2 = canvas or three.js with a loop. Rank 1 = canvas or a loop. Rank 0 = other.
 # Set weights are for rank 2. Rank 1 is 0.6× that, rank 0 is 0.35×.
-# Tuned for about 3,000 synthetic games. The first 118 measured 0.28M tokens
-# (~2,400 each), so 3,000 is about 7M tokens, against own 0.53B, GitHub 2.2B,
-# Stack 8.0B. One pass is then about:
-#   synthetic games 20%, own games 40%, GitHub 25%, The Stack 15%.
-# At 118 games the same weight is about 1% of a pass, on purpose.
-SET_WEIGHT = {"synth": 1500.0, "own": 40.0, "gcc": 6.0, "stack": 1.0}
+# 660 games from git (2.72M tokens, Sep 30). Weight 2000 makes those games
+# about 70% of one pass. The rest is own ×40, GitHub ×6, Stack ×1 (0.58B,
+# 1.42B, 0.11B sampled on the cleaned set). Rank 1 is 0.6×, rank 0 is 0.35×.
+SET_WEIGHT = {"synth": 2000.0, "own": 40.0, "gcc": 6.0, "stack": 1.0}
 _RANK_FACTOR = {2: 1.0, 1: 0.6, 0: 0.35}
 WEIGHTS = {(src, rank): weight * _RANK_FACTOR[rank]
            for src, weight in SET_WEIGHT.items()
