@@ -1,0 +1,2 @@
+/Users/jonathanrothberg/MLX_Models/html_js_small/checkpoints/latest
+1790699876

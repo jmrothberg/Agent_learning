@@ -1,0 +1,2 @@
+fine_tunning/checkpoints/**/*.safetensors filter=lfs diff=lfs merge=lfs -text
+fine_tunning/checkpoints/**/*.safetensors.part-* filter=lfs diff=lfs merge=lfs -text

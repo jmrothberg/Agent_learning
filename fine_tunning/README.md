@@ -378,6 +378,8 @@ Speed on the 27B (M-series, 192 GB): ~15 s per game with the defaults (was 143 s
 
 ## 7. Using a trained LoRA in the agent (`chat.py`)
 
+`git commit` copies the newest checkpoint of each kind into this repo before the commit, then `git push` puts that pair on GitHub. One LoRA (`fine_tunning/checkpoints/lora/`, the newest `snapshots/<date>/`) and one full finetune (`fine_tunning/checkpoints/small/`, the newest `model.safetensors` under `checkpoints/` or `snapshots/`). A save that is not newer than the copy already in git is left alone. Older snapshots stay in `~/MLX_Models`. The optimizer file is not included. The weight files are Git LFS. GitHub refuses a file over 2 GiB, so a larger weight file is stored as `model.safetensors.part-aa` and `model.safetensors.part-ab`. Join them with `cat model.safetensors.part-aa model.safetensors.part-ab > model.safetensors`. On a Mac that should publish its own newer save, install the hook once: `cp fine_tunning/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit`.
+
 Stop training first (HOLD on the monitor) so the GPU is free. Then in the TUI:
 
 ```text

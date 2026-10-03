@@ -1,0 +1,10 @@
+#!/bin/zsh
+# Publish the newest LoRA and the newest full finetune, if either is newer.
+# Install: cp fine_tunning/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+repo=$(git rev-parse --show-toplevel) || exit 0
+py="$repo/.venv/bin/python"
+if [[ ! -x "$py" ]]; then
+  py=python3
+fi
+"$py" "$repo/fine_tunning/sync_latest_checkpoints.py" || exit 1
+git add -- "$repo/fine_tunning/checkpoints" "$repo/.gitattributes"
