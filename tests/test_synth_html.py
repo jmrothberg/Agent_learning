@@ -52,9 +52,10 @@ def test_ideas_3000_one_game_each() -> None:
     assert "tetris use nice 8 bit graphics as close to the original as possible" in keys
     assert "tetris" not in keys
     assert sum("three js" in k for k in keys) == 100
-    assert sum(k.endswith(" in phaser") for k in keys) == 122
-    assert sum(k.endswith(" in pixijs") for k in keys) == 57
-    assert sum(k.endswith(" in howler js") for k in keys) == 15
+    # A failed prompt keeps its library words and gains a hard-part note after them.
+    assert sum(" in phaser" in k for k in keys) == 122
+    assert sum(" in pixijs" in k for k in keys) == 57
+    assert sum(" in howler js" in k for k in keys) == 15
     assert "hades" in keys
     assert "god of war 2018" in keys
     assert "god of war 2005" in keys
@@ -103,6 +104,18 @@ def test_extract_html_from_wrapper_and_rejects_prose() -> None:
     assert sh.extract_html(fenced) == PAGE
     assert sh.extract_html("I could not write it.") is None
     assert sh.extract_html("") is None
+
+
+def test_needs_finish_only_when_the_file_was_cut_off() -> None:
+    assert not sh.needs_finish("")
+    assert not sh.needs_finish("no html")
+    opened = "<html_file>\n<!DOCTYPE html><html><body><script>function draw(){" + ("x" * 400)
+    assert sh.needs_finish(opened)
+    closed = opened + "}</script></body></html>\n</html_file>"
+    assert not sh.needs_finish(closed)
+    msgs = sh.finish_messages(opened + ("x" * 5000))
+    assert "cut off" in msgs[0]["content"]
+    assert len(msgs[1]["content"]) == 4000
 
 
 def test_gen_messages_require_a_closed_file() -> None:

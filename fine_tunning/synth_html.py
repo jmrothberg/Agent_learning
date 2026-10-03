@@ -294,6 +294,32 @@ def structure_error(html: str | None) -> str:
     return ""
 
 
+# A cut-off reply stops inside a function, so the file never closes.
+# One short continuation writes the ending. It does not shorten the game.
+FINISH_TOKENS = 1024
+
+
+def needs_finish(text: str) -> bool:
+    """True when a reply started an HTML file and did not close it."""
+    if not text or len(text) < 400:
+        return False
+    low = text.lower()
+    started = "<html" in low or "<!doctype" in low or "<html_file>" in low
+    return started and ("</html" not in low or "</html_file>" not in low)
+
+
+def finish_messages(partial: str) -> list[dict[str, str]]:
+    """Ask for the rest of a cut-off file, not a new one."""
+    return [
+        {"role": "system", "content": (
+            "The game file was cut off. Continue from the last characters. "
+            "Do not repeat them. Finish the current function, then close "
+            "the script and end with </html> and </html_file>."
+        )},
+        {"role": "user", "content": partial[-4000:]},
+    ]
+
+
 def assistant_text(html: str) -> str:
     page = html.strip()
     return (
@@ -1262,6 +1288,12 @@ async def amain(args: argparse.Namespace) -> None:
             except httpx.HTTPError as exc:
                 detail = str(exc).strip() or type(exc).__name__
                 return None, f"request failed: {detail}", "", None
+            if needs_finish(text):
+                try:
+                    text += await generate_held(finish_messages(text), FINISH_TOKENS)
+                except httpx.HTTPError as exc:
+                    detail = str(exc).strip() or type(exc).__name__
+                    return None, f"request failed: {detail}", "", None
             html = extract_html(text)
             err = structure_error(html)
             if err:
