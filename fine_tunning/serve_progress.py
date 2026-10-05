@@ -27,6 +27,10 @@ _LOSS = re.compile(r"Iter \d+: Train loss .*?([0-9]+\.[0-9]+)")
 # SMALL MODEL: train_small.py logs Tokens/sec on every Iter line; the page plots it.
 _SPEED = re.compile(r"Tokens/sec ([0-9]+\.?[0-9]*)")
 _STAMP = re.compile(r"\d{8}T\d{6}Z")
+# The page's Stop button kills this process. One generation at a time.
+_gen_lock = threading.Lock()
+_gen_proc: subprocess.Popen | None = None
+_gen_stop = threading.Event()
 
 
 def _python_script_pids(script_name: str) -> list[int]:
@@ -304,13 +308,19 @@ def resume_training() -> dict:
         base = _base_model()
         if base:
             env["SMALL_BASE"] = base
-        # Peak from the last train header. The default 5e-5 already blew up this 2B.
+        # Peak from the last train header. 5e-5 already wrecked this 2B.
         peak = "1e-5"
         log_path = ROOT / "logs" / "train.log"
         if log_path.is_file():
             for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
                 if line.startswith("train ") and " lr=" in line:
                     peak = line.split(" lr=", 1)[1].split()[0]
+        if base and "2B" in Path(base).name:
+            try:
+                if float(peak) > 1e-5:
+                    peak = "1e-5"
+            except ValueError:
+                peak = "1e-5"
         print(f"resume train_small lr={peak} base={env.get('SMALL_BASE', '')}", flush=True)
         subprocess.Popen(
             [PY, str(HERE / "small" / "train_small.py"), "--lr", peak],
@@ -509,8 +519,34 @@ def _html_from_answer(text: str) -> str:
     return ""
 
 
+def _kill_gen(proc: subprocess.Popen) -> None:
+    """Stop a generation started in its own session, so the page process stays up."""
+    if proc.poll() is not None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
+def stop_generation() -> dict:
+    """Stop the generation that is writing tokens. Safe when nothing is running."""
+    _gen_stop.set()
+    with _gen_lock:
+        proc = _gen_proc
+    if proc is None:
+        return {"ok": True, "stopped": False}
+    _kill_gen(proc)
+    return {"ok": True, "stopped": True}
+
+
 def stream_test(handler: BaseHTTPRequestHandler, prompt: str, max_tokens: int, which: str) -> None:
     """Write the answer as it is generated. One JSON object per line."""
+    # A Stop click from the previous run must not kill this one.
+    _gen_stop.clear()
     ready = test_checkpoint(prompt, max_tokens, which)
     if not ready.get("ok"):
         handler._send(200, (json.dumps({"error": ready.get("error") or "Generate failed."}) + "\n").encode(),
@@ -542,7 +578,14 @@ def stream_test(handler: BaseHTTPRequestHandler, prompt: str, max_tokens: int, w
         stderr=subprocess.PIPE,
         text=True,
         bufsize=1,
+        start_new_session=True,
     )
+    with _gen_lock:
+        global _gen_proc
+        _gen_proc = proc
+    # Stop can land while the model is still loading, before the loop starts.
+    if _gen_stop.is_set():
+        _kill_gen(proc)
     assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
     try:
         proc.stdin.write(ready["prompt"])
@@ -576,9 +619,12 @@ def stream_test(handler: BaseHTTPRequestHandler, prompt: str, max_tokens: int, w
         try:
             line = lines.get(timeout=1)
         except queue.Empty:
+            if _gen_stop.is_set():
+                _kill_gen(proc)
+                break
             if time.time() > deadline:
                 timed_out = True
-                proc.kill()
+                _kill_gen(proc)
                 break
             continue
         if line is None:
@@ -603,15 +649,34 @@ def stream_test(handler: BaseHTTPRequestHandler, prompt: str, max_tokens: int, w
         if n_tokens >= 8:
             payload["tps"] = round(n_tokens / max(elapsed, 1e-3))
         if not send(payload):
-            proc.kill()
+            _kill_gen(proc)
+            with _gen_lock:
+                if _gen_proc is proc:
+                    _gen_proc = None
             return
     try:
         proc.wait(timeout=20)
     except subprocess.TimeoutExpired:
-        proc.kill()
+        _kill_gen(proc)
     err_thread.join(timeout=5)
+    stopped = _gen_stop.is_set()
+    with _gen_lock:
+        if _gen_proc is proc:
+            _gen_proc = None
     if timed_out:
         send({"error": "Generation took more than 2 hours and was stopped."})
+        return
+    if stopped:
+        text = "".join(parts)
+        if not text.startswith(ready["prompt"]):
+            text = ready["prompt"] + text
+        send({
+            "done": True,
+            "stopped": True,
+            "text": text,
+            "html": _html_from_answer(text),
+            "checkpoint": ready["ckpt"],
+        })
         return
     if proc.returncode not in (0, None):
         err = "".join(err_box).strip() or "generate failed"
@@ -943,9 +1008,11 @@ def status() -> dict:
     speeds: list[float] = []  # SMALL MODEL: Tokens/sec per Iter line
     if log.exists():
         lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
+        # The plot is this run only. A LoRA fresh start says resume=None.
+        # The small-model fresh start says fresh=True. Lines before that stay in the log.
         start = 0
         for i, line in enumerate(lines):
-            if "resume=None" in line:
+            if "resume=None" in line or "fresh=True" in line:
                 start = i
         slice_starts = 0
         for line in lines[start:]:
@@ -1029,7 +1096,9 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(raw.decode("utf-8") or "{}") if raw else {}
         except json.JSONDecodeError:
             payload = {}
-        if path == "/hold":
+        if path == "/stop-test":
+            body = stop_generation()
+        elif path == "/hold":
             body = hold_training()
         elif path == "/resume":
             body = resume_training()

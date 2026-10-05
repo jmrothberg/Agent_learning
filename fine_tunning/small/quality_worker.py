@@ -221,8 +221,9 @@ def _combine(con: sqlite3.Connection) -> dict:
         score = edu_score.get(norm)
         boilerplate = src == "gcc" and score is not None and score < 1.5
         page_error = abs(page_w - W_PAGE_ERROR) < 1e-6
-        # Synthetic games are the priority set. Do not drop them as near-copies.
-        if src != "synth" and (i not in keep or not syntax or junk < 1.0 or page_error or boilerplate):
+        # Synthetic games, the request-plus-page copies, and the finish-the-page
+        # cuts are the priority set. Do not drop them as near-copies of each other.
+        if src not in ("synth", "close", "ask") and (i not in keep or not syntax or junk < 1.0 or page_error or boilerplate):
             w = 0.0
             stats["dropped"] += 1
         else:

@@ -17,7 +17,7 @@ sqlite3 "$SMALL_ROOT/quality.sqlite" ".timeout 60000" "BEGIN IMMEDIATE; \
 rm -f "$SMALL_ROOT/logs/data_vulcan.json"
 ```
 
-> **Synthetic games are in git.** `small/synth_games/synth.jsonl` is the whole set, not a patch: 3,299 games on Oct 4, 2026 (1,520 already shared, plus 1,779 new). Git carries the games, not tokens. After `git pull`, `small-synth` tokenizes with `SMALL_BASE`'s `tokenizer.json` into `sets/synth/original`, `train`, and `tokens`. It adds only games whose `sha` is not already in `tokens/`. The 1B and the 2B share one tokenizer. Training can keep running; the next 30-minute save draws the new games. Weight 2000 was set for the first 660 (about 72% of a pass). These extra games raise that share. Details in §9b, "Synthetic games from git".
+> **Synthetic games are in git.** `small/synth_games/synth.jsonl` is the whole set, not a patch: 3,299 games on Oct 4, 2026 (1,520 already shared, plus 1,779 new). Git carries the games, not tokens. After `git pull`, `small-synth` tokenizes with `SMALL_BASE`'s `tokenizer.json` into `sets/synth/original`, `train`, and `tokens`. It adds only games whose `sha` is not already in `tokens/`. The 1B and the 2B share one tokenizer. Training can keep running; the next 30-minute save draws the new games. Weight 2000 made those games most of a pass and the 2B memorized them. The weights in §9b keep synthetic games in the mix and let own games lead. Details in §9b, "Synthetic games from git".
 
 ```bash
 cd ~/Agent_learning/fine_tunning
@@ -421,7 +421,7 @@ Scripting/eval without the TUI: `MLX_MODEL=<base> MLX_ADAPTER=<snapshot dir>` (t
 
 ## 9. Small HTML/JS model (full fine-tune, `small/`)
 
-A ~1B model trained only on HTML and JavaScript. **Every weight is trained (not LoRA).** Stage 1 is continued pretraining on packed 4,096-token blocks, with loss on every token. Stage 2 (spec → whole game, planned) teaches it the short spec prompt the agent will send.
+A small model trained only on HTML and JavaScript. **Every weight is trained (not LoRA).** Packed 4,096-token blocks. Loss is on the page, not on the request in front of it. A plain file with no canvas and no loop is not drawn. A page longer than 4,000 trained tokens is drawn at 0.12×, so the model practices pages it can finish.
 
 
 |                                 |                                                                                    |
@@ -530,14 +530,16 @@ SMALL_ROOT=/Volumes/DRIVE/html_js_small ./start.sh small
 | `./start.sh small-export`                  | Rebuild `train/` text for own, GitHub, and Stack from `tokens/`. Skips shards already exported.         |
 
 
-**Set weights.** The files stay in separate folders. One training pass draws them at these weights (canvas game with a loop; a weaker file in the same set is 0.6× or 0.35×). The synthetic weight is set so the 660 games in git are most of a pass. Shares below are the 2B draw after the bad files were removed (update 16566, Sep 30).
+**Set weights.** The files stay in separate folders. One training pass draws them at these weights for a canvas game with a loop. A file with a canvas or a loop but not both is 0.6×. A plain file is not drawn. A page with more than 2,000 trained tokens is 0.45×, and more than 4,000 is 0.12×. The train log prints the resulting share (`mix[...]` is tokens read, `loss[...]` is tokens with loss).
 
-| Set | What it is | On disk (drawn) | Weight | Share of one pass |
-| --- | --- | --- | --- | --- |
-| Synthetic games | prompt, newline, page, from `synth.jsonl` | 660 games, 2.72M tokens | 2000 | about 72% |
-| Own games | collected HTML games | 0.017B tokens | 40 | about 8% |
-| GitHub (`gcc`) | github-code-clean HTML and JavaScript | 0.76B tokens | 6 | about 19% |
-| The Stack | public HTML and JavaScript | 0.27B tokens | 1 | about 1% |
+| Set | What it is | Weight |
+| --- | --- | ---: |
+| `ask` | request, then one of our own games (`data.py --source game-sft`) | 35 |
+| Own games | the same games, as a raw page | 25 |
+| Synthetic games | request, newline, page, from `synth.jsonl` | 12 |
+| `close` | the ending of a real page, including `</html>`, with the last part of that page in front of it | 40 |
+| GitHub (`gcc`) | github-code-clean HTML and JavaScript | 0.5 |
+| The Stack | public HTML and JavaScript | 0.1 |
 
 Rebuild the synthetic shards after more games land. Rows already tokenized are skipped. The chat tags are removed. Each document is the user prompt, a newline, and the raw page.
 
@@ -676,7 +678,7 @@ cp ~/MLX_Models/html_js_small/quality.sqlite $SMALL_ROOT/
 | `serve_progress.py` + `progress.html` | Monitor; small-model root shows speed first                                                                                                                                                                                                                                                                                                                          |
 
 
-Where the data came from: own games (`html_game_sft/raw/`) → 14,470 unique files (~33M tokens) after dedup; github-code-clean (49 parquet files) → 916,493 docs, 2.22B tokens. The Stack added about 8.0B tokens. Sampling weights are in the table in §9b (synthetic ×2000, own ×40, GitHub ×6, Stack ×1 for a canvas game with a loop). `quality.sqlite` multiplies:
+Where the data came from: own games (`html_game_sft/raw/`) → 14,470 unique files (~33M tokens) after dedup; github-code-clean (49 parquet files) → 916,493 docs, 2.22B tokens. The Stack added about 8.0B tokens. Sampling weights are in the table in §9b. `quality.sqlite` multiplies GitHub, Stack, and raw own games:
 
 
 The scorer writes 0 for the rows marked "no" below. A score under 1.5 is boilerplate and is removed. Scores from 1.5 up stay, including the 0.7 band.
@@ -699,8 +701,9 @@ The scorer writes 0 for the rows marked "no" below. A score under 1.5 is boilerp
 | `--block`           | 4096       | Tokens per packed sequence                                                                                                                                                |
 | `--batch`           | 2          | Sequences per micro-step. On the M2, batch 1/2/4 were the same tokens/s (2 = 57 GB). On the M3 Ultra with the 2B, batch 4 and 8 were no faster and used 180 GB and 343 GB |
 | `--accum`           | 4          | Micro-steps per optimizer update (update = 32,768 tokens)                                                                                                                 |
-| `--lr` / `--warmup` | 5e-5 / 200 | Peak LR, warmup updates; cosine to 10% after. Set with `SMALL_TRAIN_ARGS="--lr 1e-5"`. Default `5e-5` fits the 1B. The 2B diverged at that peak — use `1e-5`. |
-| `--total-tokens`    | 2e9        | Stop after this many trained tokens                                                                                                                                       |
+| `--lr` / `--warmup` | 1e-5 / 200 | Peak LR, warmup updates; cosine to 10% after. `5e-5` wrecked the 2B. The watcher and the page will not put `5e-5` back on a 2B. |
+| `--total-tokens`    | 2e8        | Stop after this many trained tokens. A fresh run stores this in `counters.json` and keeps it on resume. `2e9` on this game set memorizes the pages. |
+| `--fresh`           | off        | Load the base model, new optimizer, counters at 0. Refuses to run if `checkpoints/latest` exists. |
 | `--save-minutes`    | 30         | Overwrite `checkpoints/latest/` and re-read data and quality. A dated copy is kept every 6 hours.                                                                         |
 | `--bench N`         | 0          | Time N micro-steps, save nothing                                                                                                                                          |
 

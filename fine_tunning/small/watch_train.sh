@@ -148,6 +148,13 @@ next_lr() {
 
 restart_at() {
   local lr="$1"
+  # 5e-5 already wrecked the 2B: the loss fell because the pages were easy to
+  # memorize, and the model stopped finishing a short page. Do not put it back.
+  if [[ "$BASE" == *2B* ]]; then
+    case "$lr" in
+      5e-5|5e-05|0.00005) lr="1e-5" ;;
+    esac
+  fi
   say "restart lr=$lr"
   SMALL_ROOT="$ROOT" SMALL_BASE="$BASE" SMALL_TRAIN_ARGS="--lr $lr" "$START" small-train
 }

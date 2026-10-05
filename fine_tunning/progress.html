@@ -100,6 +100,7 @@
       <option value="16000">16,000</option>
       <option value="32000">32,000</option>
     </select>
+    <button id="stopGen" type="button" disabled>Stop generating</button>
   </div>
   <p id="testStatus" class="sub" style="margin:8px 0 0">No test yet.</p>
   <div class="row" style="align-items:flex-start;margin-top:12px">
@@ -233,7 +234,7 @@ async function tick() {
         ? `Sampled tokens one pass draws (sampled_tokens= in the train log). ${(uniqueTok / 1e9).toFixed(2)}B is every row on disk, before repeats.`
         : "Tokens in the rows on disk, before repeats";
       document.getElementById("mixLine").textContent =
-        "Thrown-out files are dropped at the next 30-minute save. docs= and sampled_tokens= stay the numbers from when this process started until training is started again. Next start draws canvas games at: synthetic ×2000, own ×40, GitHub ×6, Stack ×1. A canvas without a loop is 0.6× that, a plain file 0.35×. Weight 0 is not drawn.";
+        "Thrown-out files are dropped at the next 30-minute save. docs= and sampled_tokens= stay the numbers from when this process started until training is started again. Next start draws a canvas game with a loop at: request+own game ×35, own page ×25, synthetic ×12, finish-the-page ×40, GitHub ×0.5, Stack ×0.1. A canvas without a loop is 0.6× that. A plain file is not drawn. A page over 4,000 tokens is 0.12×. Weight 0 is not drawn.";
       const dropPct = c.unique ? Math.round(100 * (c.dropped || 0) / c.unique) : 0;
       document.getElementById("cDrop").textContent = (c.dropped || 0).toLocaleString();
       document.getElementById("cDropLabel").textContent = `Near-duplicates at weight 0 (${dropPct}% of unique)`;
@@ -313,6 +314,7 @@ async function tick() {
       smallRun = !!s.small;
       document.getElementById("genLeft").disabled = busy || !cmp;
       document.getElementById("genRight").disabled = busy || !ckpt;
+      document.getElementById("stopGen").disabled = !genRunning;
       document.getElementById("testNote").textContent = (s.small && s.trainer_running)
         ? "Generate keeps training running. This model fits beside it. Tokens per second show once writing starts."
         : (s.trainer_running
@@ -489,6 +491,7 @@ function drawLoss(losses, xName) {
   label.textContent = `green = last 18 steps (${last.toFixed(3)}). red = last 50 steps (${last50.toFixed(3)}). gray = each file. ${n} steps in this run. Until 50 steps exist, the red line uses however many have finished.`;
 }
 let busy = false;
+let genRunning = false;
 let trainerOn = false;
 let smallRun = false;
 let lastPage = "";
@@ -602,10 +605,14 @@ async function generateSide(which, label, outId, frameId) {
       }
       if (msg.done) {
         showGenerated(outId, frameId, msg);
-        const rate = msg.tps ? " " + Number(msg.tps).toLocaleString() + " tok/s." : "";
-        status.textContent = label + (msg.html ? " is on screen." : " did not produce an HTML page. The text is above. Press Run if the code is in the box.") +
-          rate +
-          (msg.checkpoint ? " Loaded " + msg.checkpoint + "." : "");
+        if (msg.stopped) {
+          status.textContent = "Stopped. The text above is what was written.";
+        } else {
+          const rate = msg.tps ? " " + Number(msg.tps).toLocaleString() + " tok/s." : "";
+          status.textContent = label + (msg.html ? " is on screen." : " did not produce an HTML page. The text is above. Press Run if the code is in the box.") +
+            rate +
+            (msg.checkpoint ? " Loaded " + msg.checkpoint + "." : "");
+        }
       }
     }
   }
@@ -643,17 +650,36 @@ document.getElementById("holdBtn").onclick = () => control("/hold");
 document.getElementById("resumeBtn").onclick = () => control("/resume");
 document.getElementById("smallStop").onclick = () => control("/hold");
 document.getElementById("smallResume").onclick = () => control("/resume");
+async function stopGenerating() {
+  document.getElementById("testStatus").textContent = "Stopping…";
+  const until = Date.now() + 15000;
+  try {
+    // The generator may still be loading, so keep asking until the process exists.
+    while (genRunning && Date.now() < until) {
+      const r = await fetch("/stop-test", {method: "POST"});
+      const body = await r.json();
+      if (body.stopped) return;
+      await new Promise((ok) => setTimeout(ok, 400));
+    }
+  } catch (e) {
+    document.getElementById("testStatus").textContent = "Stop failed. The generation may still be running.";
+  }
+}
+document.getElementById("stopGen").onclick = () => stopGenerating();
 async function onGenerate(selectId, outId, frameId) {
   const sel = document.getElementById(selectId);
   const label = sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].text : sel.value;
   busy = true;
+  genRunning = true;
   document.getElementById("genLeft").disabled = true;
   document.getElementById("genRight").disabled = true;
+  document.getElementById("stopGen").disabled = false;
   try {
     await generateSide(sel.value, label, outId, frameId);
   } catch (e) {
     document.getElementById("testStatus").textContent = "Generate request failed.";
   }
+  genRunning = false;
   busy = false;
   tick();
 }

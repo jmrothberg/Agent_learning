@@ -17,6 +17,7 @@ Output: ~/MLX_Models/html_js_small/shards/<src>_<chunk>.bin   uint32 tokens
   python data.py --source own
   python data.py --source gcc --workers 12
   python data.py --source synth
+  python data.py --source game-sft
 """
 from __future__ import annotations
 
@@ -113,6 +114,9 @@ def _write(name: str, docs: list[tuple[str, dict]], folder: Path | None = None) 
         ids = np.asarray([BOS] + e.ids + [EOS], dtype=np.uint32)
         parts.append(ids)
         meta.update(offset=off, ntok=int(ids.size))
+        # skip counts BOS plus the request. Never cover the last token (EOS).
+        if "skip" in meta:
+            meta["skip"] = max(1, min(int(meta["skip"]), int(ids.size) - 1))
         # retok keeps the original norm, so quality.sqlite scores still match.
         meta.setdefault("norm", hashlib.sha1(_WS.sub(" ", text).encode()).hexdigest()[:16])
         meta_lines.append(json.dumps(meta))
@@ -499,9 +503,210 @@ def _export_train() -> None:
         print(f"export {src}: done docs={n_docs}", flush=True)
 
 
+def _page_at(text: str) -> int:
+    low = text.lower()
+    for mark in ("<!doctype", "<html"):
+        at = low.find(mark)
+        if at >= 0:
+            return at
+    return -1
+
+
+def _request_skip(text: str, page_at: int) -> int:
+    """How many leading tokens are the request. _write puts BOS in front of these.
+
+    Loss starts at the page. The request stays in the context so the model
+    learns to follow it, and is not itself something the model is trained to emit.
+    """
+    enc = _tokenizer().encode(text, add_special_tokens=False)
+    idx = None
+    offsets = getattr(enc, "offsets", None) or []
+    for i, pair in enumerate(offsets):
+        if pair and pair[0] >= page_at and pair[1] > pair[0]:
+            idx = i
+            break
+    if idx is None:
+        idx = len(_tokenizer().encode(text[:page_at], add_special_tokens=False).ids)
+    return 1 + idx
+
+
+def _late_cut(page: str) -> tuple[str, str] | None:
+    """Split a finished page so the loss can sit on the ending, including </html>."""
+    low = page.lower()
+    end = low.rfind("</html>")
+    if end < 0:
+        return None
+    page = page[: end + len("</html>")]
+    lines = page.splitlines(keepends=True)
+    if len(lines) < 12:
+        return None
+    acc = 0
+    i = len(lines)
+    while i > 1 and acc < 800:
+        i -= 1
+        acc += len(lines[i])
+    context, completion = "".join(lines[:i]), "".join(lines[i:])
+    if "</html>" not in completion.lower() or len(completion) < 80:
+        return None
+    # The full page is already in the ask and own sets. This cut only has to
+    # teach the ending, so the context is the last part of the page, not all of it.
+    ctx_lines = context.splitlines(keepends=True)
+    acc = 0
+    j = len(ctx_lines)
+    while j > 0 and acc < 1500:
+        j -= 1
+        acc += len(ctx_lines[j])
+    context = "".join(ctx_lines[j:])
+    if len(context) < 200:
+        return None
+    return context, completion
+
+
+def _quality_zero() -> set[str]:
+    db = ROOT / "quality.sqlite"
+    if not db.is_file():
+        return set()
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=30)
+    try:
+        return {norm for norm, weight in con.execute("select norm, weight from quality") if weight == 0}
+    except sqlite3.Error:
+        return set()
+    finally:
+        con.close()
+
+
+def _mask_synth() -> None:
+    """Record where the HTML starts, so training can ignore the request tokens."""
+    docs = SYNTH_ROOT / "train" / "docs.jsonl"
+    if not docs.is_file():
+        raise SystemExit(f"no synth text at {docs}")
+    texts: dict[str, str] = {}
+    for line in docs.read_text().splitlines():
+        row = json.loads(line)
+        texts[row["sha"]] = row["text"]
+    ok = bad = 0
+    tok = _tokenizer()
+    for meta in sorted(SYNTH_SHARDS.glob("synth_*.jsonl")):
+        out = []
+        for line in meta.read_text().splitlines():
+            row = json.loads(line)
+            text = texts.get(row.get("sha") or "")
+            at = _page_at(text) if text else -1
+            if text and at >= 0:
+                n = len(tok.encode(text, add_special_tokens=False).ids)
+                if 1 + n + 1 == row["ntok"]:
+                    row["skip"] = max(1, min(_request_skip(text, at), row["ntok"] - 1))
+                    ok += 1
+                else:
+                    row["skip"] = 1
+                    bad += 1
+            else:
+                row["skip"] = 1
+                bad += 1
+            out.append(json.dumps(row))
+        tmp = meta.with_suffix(".jsonl.tmp")
+        tmp.write_text("\n".join(out) + ("\n" if out else ""))
+        tmp.replace(meta)
+    print(f"synth skip: aligned {ok} mismatched {bad}", flush=True)
+
+
+def _write_set(src: str, docs: list[tuple[str, dict]]) -> None:
+    folder = ROOT / "sets" / src / "tokens"
+    folder.mkdir(parents=True, exist_ok=True)
+    if not (folder / "tokenizer.json").exists():
+        shutil.copy2(BASE / "tokenizer.json", folder / "tokenizer.json")
+    if not docs:
+        print(f"{src}: nothing to write", flush=True)
+        return
+    total = {"docs": 0, "tokens": 0}
+    for i in range(0, len(docs), 2000):
+        part = _write(f"{src}_{i // 2000:05d}", docs[i:i + 2000], folder)
+        total["docs"] += part["docs"]
+        total["tokens"] += part["tokens"]
+    print(f"{src}: {total['docs']} docs, {total['tokens']/1e6:.2f}M tokens -> {folder}", flush=True)
+
+
+def _close_run() -> None:
+    """One cut per synthetic game: the model must finish a real page at </html>."""
+    docs_path = SYNTH_ROOT / "train" / "docs.jsonl"
+    if not docs_path.is_file():
+        raise SystemExit(f"no synth text at {docs_path}")
+    docs = []
+    for line in docs_path.read_text().splitlines():
+        row = json.loads(line)
+        at = _page_at(row["text"])
+        if at < 0:
+            continue
+        cut = _late_cut(row["text"][at:])
+        if cut is None:
+            continue
+        context, completion = cut
+        page = context + completion
+        norm = hashlib.sha1(_WS.sub(" ", page).encode()).hexdigest()[:16]
+        docs.append((page, {
+            "sha": f"{row['sha']}-close", "src": "close", "path": f"close/{row['sha'][:16]}",
+            "lang": "HTML", "rank": 2, "norm": norm, "skip": _request_skip(page, len(context)),
+        }))
+    _write_set("close", docs)
+
+
+def _ask_run() -> None:
+    """Own games that already look like games, with a request in front of the page."""
+    zero = _quality_zero()
+    docs = []
+    seen: set[str] = set()
+    kept = skipped = 0
+    for meta in sorted(SHARDS.glob("own_*.jsonl")):
+        bin_path = meta.with_suffix(".bin")
+        ids = np.fromfile(bin_path, dtype=np.uint32) if bin_path.is_file() else None
+        for line in meta.read_text().splitlines():
+            row = json.loads(line)
+            # Shards repeat files. One request per game, not one per copy.
+            norm_key = row.get("norm") or ""
+            if int(row.get("rank") or 0) < 1 or norm_key in zero or norm_key in seen:
+                skipped += 1
+                continue
+            seen.add(norm_key)
+            page = None
+            path = row.get("path") or ""
+            if path:
+                try:
+                    page = Path(path).read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    page = None
+            if not page and ids is not None:
+                piece = ids[row["offset"] + 1: row["offset"] + row["ntok"] - 1]
+                page = _tokenizer().decode(piece.tolist(), skip_special_tokens=True)
+            if not page or "</html>" not in page.lower() or "<script" not in page.lower():
+                skipped += 1
+                continue
+            title = Path(path).stem.replace("_", " ").replace("-", " ").strip()[:80] or "canvas game"
+            prefix = (
+                "Write one complete HTML game. Follow the request. End with </html>.\n"
+                f"Request: {title}\n"
+            )
+            text = prefix + page
+            norm = hashlib.sha1(_WS.sub(" ", text).encode()).hexdigest()[:16]
+            docs.append((text, {
+                "sha": f"{row.get('sha')}-ask", "src": "ask", "path": path, "lang": "HTML",
+                "rank": int(row.get("rank") or 1), "norm": norm,
+                "skip": _request_skip(text, len(prefix)),
+            }))
+            kept += 1
+        ids = None
+    print(f"ask: kept {kept} skipped {skipped}", flush=True)
+    _write_set("ask", docs)
+
+
+def _game_sft() -> None:
+    _mask_synth()
+    _close_run()
+    _ask_run()
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--source", choices=("own", "gcc", "retok", "stack", "synth", "export"), required=True)
+    p.add_argument("--source", choices=("own", "gcc", "retok", "stack", "synth", "export", "game-sft"), required=True)
     p.add_argument("--from", dest="from_root", default="",
                    help="retok: another SMALL_ROOT whose shards/ (+ shards/tokenizer.json) to re-tokenize for SMALL_BASE")
     p.add_argument("--workers", type=int, default=20)
@@ -519,6 +724,9 @@ def main() -> None:
 
     if args.source == "synth":
         _synth_run()
+        return
+    if args.source == "game-sft":
+        _game_sft()
         return
     if args.source == "export":
         _export_train()
