@@ -34,15 +34,34 @@ from pathlib import Path
 
 import numpy as np
 
-ROOT = Path(os.environ.get("SMALL_ROOT", "~/MLX_Models/html_js_small")).expanduser()
+def training_dir(env_var: str, name: str) -> Path:
+    """Same lookup as rows.training_dir. Copied so this script does not import the LoRA prompt stack."""
+    override = (os.environ.get(env_var) or "").strip()
+    if override:
+        return Path(override).expanduser()
+    home = Path.home()
+    moved = home / "HTML Training" / name
+    legacy = home / "MLX_Models" / name
+    for path in (moved, legacy):
+        if path.is_dir():
+            return path
+    raise SystemExit(
+        f"Training set {name!r} was not found.\n"
+        f"Looked in {moved} and {legacy}.\n"
+        f"Set {env_var} to the folder you moved it to, then run this again."
+    )
+
+
+ROOT = training_dir("SMALL_ROOT", "html_js_small")
 BASE = Path(os.environ.get("SMALL_BASE", "~/MLX_Models/MiniCPM5-1B-Base")).expanduser()
-GAMES_DB = Path("~/MLX_Models/html_game_sft/games.sqlite").expanduser()
+_LORA = training_dir("LORA_ROOT", "html_game_sft")
+GAMES_DB = _LORA / "games.sqlite"
 SHARDS = ROOT / "shards"
 # Each set is sets/<name>/{original,train,tokens} so the folder can be moved as one piece.
 SYNTH_ROOT = ROOT / "sets" / "synth"
 SYNTH_SHARDS = SYNTH_ROOT / "tokens"
-SYNTH_JSONL = Path(os.environ.get(
-    "SYNTH_JSONL", "~/MLX_Models/html_game_sft/jsonl/synth.jsonl")).expanduser()
+SYNTH_JSONL = Path(os.environ["SYNTH_JSONL"]).expanduser() if os.environ.get("SYNTH_JSONL") else (
+    _LORA / "jsonl" / "synth.jsonl")
 _HTML_FILE = re.compile(r"<html_file>\s*(.*?)\s*</html_file>", re.I | re.S)
 
 def _special_ids() -> tuple[int, int]:

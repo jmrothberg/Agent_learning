@@ -36,7 +36,7 @@ def test_server_off_and_on(monkeypatch):
     app._cmd_set_mlx_server("off")
     assert app._mlx_via_server is False
     monkeypatch.setattr(
-        "backend.ensure_omlx_server", lambda: "http://127.0.0.1:8000",
+        "backend.ensure_omlx_server", lambda **_k: "http://127.0.0.1:8000",
     )
     app._cmd_set_mlx_server("on")
     assert app._mlx_via_server is True
@@ -51,7 +51,7 @@ def test_model_n_server_stages_mlx_via_omlx(monkeypatch):
         ("mlx", "/Users/me/MLX_Models/Qwen3.8-27B-mxfp8"),
     ]
     monkeypatch.setattr(
-        "backend.ensure_omlx_server", lambda: "http://127.0.0.1:8000",
+        "backend.ensure_omlx_server", lambda **_k: "http://127.0.0.1:8000",
     )
     monkeypatch.setattr(
         "backend.omlx_api_model_id",
@@ -81,7 +81,7 @@ def test_model_server_ignored_on_ollama_pick(monkeypatch):
 def test_bare_model_server_is_server_on(monkeypatch):
     app = _bare_app()
     monkeypatch.setattr(
-        "backend.ensure_omlx_server", lambda: "http://127.0.0.1:8000",
+        "backend.ensure_omlx_server", lambda **_k: "http://127.0.0.1:8000",
     )
     app._cmd_set_model("server")
     assert app._mlx_via_server is True

@@ -11,7 +11,8 @@
 #   ./start.sh server     Qwen server on :8000, restarted if it exits
 #
 # Pick a LoRA project with env vars (defaults = HTML-game LoRA on Qwen3.8-27B):
-#   LORA_ROOT=~/MLX_Models/html_game_sft     data + adapters + snapshots + logs
+#   LORA_ROOT=~/"HTML Training"/html_game_sft   data + adapters + snapshots + logs
+#     (if that folder is not on this machine, set LORA_ROOT yourself)
 #   LORA_BASE=~/MLX_Models/Qwen3.8-27B-mxfp8 base model (never modified)
 #   LORA_PY=~/Agents/.venv/bin/python        python that has mlx-vlm
 #   LORA_PORT=8766                           progress page port
@@ -31,14 +32,40 @@
 #   ./start.sh small-watch        every 30 min: keep last_good, resume it if loss blows up
 #   ./start.sh small-synth        synthetic games -> sets/synth/{original,train,tokens}
 #   ./start.sh small-synth-share  generator Mac: small-synth, copy games into git, push
-#   SMALL_ROOT=~/MLX_Models/html_js_small     shards + quality.sqlite + checkpoints + logs
+#   SMALL_ROOT=~/"HTML Training"/html_js_small    shards + quality.sqlite + checkpoints + logs
+#     (if that folder is not on this machine, set SMALL_ROOT yourself)
 #   SMALL_BASE=~/MLX_Models/MiniCPM5-1B-Base  base model (never modified)
 #   SMALL_PORT=8767                           progress page port
 #   SMALL_TRAIN_ARGS="..."                    extra train_small.py flags
 #   BROWSER_PY=~/Agent_learning/.venv/bin/python   python with playwright (browser pass)
 set -e
 HERE="${0:A:h}"
-export LORA_ROOT="${LORA_ROOT:-$HOME/MLX_Models/html_game_sft}"
+
+# $1 is the env var name, $2 is the folder name (html_game_sft or html_js_small).
+# Env wins. Else ~/HTML Training/<name> if it exists, else ~/MLX_Models/<name>.
+# If neither directory is here, stop. Do not create an empty project.
+pick_training_dir() {
+  local envname="$1" name="$2" chosen
+  chosen="${(P)envname-}"
+  if [[ -n "$chosen" ]]; then
+    echo "$chosen"
+    return
+  fi
+  if [[ -d "$HOME/HTML Training/$name" ]]; then
+    echo "$HOME/HTML Training/$name"
+    return
+  fi
+  if [[ -d "$HOME/MLX_Models/$name" ]]; then
+    echo "$HOME/MLX_Models/$name"
+    return
+  fi
+  echo "Training set '$name' was not found." >&2
+  echo "Looked in ~/HTML Training/$name and ~/MLX_Models/$name." >&2
+  echo "Set $envname to the folder you moved it to, then run this again." >&2
+  exit 1
+}
+
+export LORA_ROOT="$(pick_training_dir LORA_ROOT html_game_sft)"
 export LORA_BASE="${LORA_BASE:-$HOME/MLX_Models/Qwen3.8-27B-mxfp8}"
 export LORA_PY="${LORA_PY:-$HOME/Agents/.venv/bin/python}"
 export LORA_PORT="${LORA_PORT:-8766}"
@@ -77,7 +104,7 @@ os.execvp(cmd[0], cmd)
 
 # SMALL MODEL: own env and folder; the LoRA folders below are not touched.
 if [[ "$what" == small* ]]; then
-  export SMALL_ROOT="${SMALL_ROOT:-$HOME/MLX_Models/html_js_small}"
+  export SMALL_ROOT="$(pick_training_dir SMALL_ROOT html_js_small)"
   export SMALL_BASE="${SMALL_BASE:-$HOME/MLX_Models/MiniCPM5-1B-Base}"
   export SMALL_PORT="${SMALL_PORT:-8767}"
   BROWSER_PY="${BROWSER_PY:-$HOME/Agent_learning/.venv/bin/python}"

@@ -15,7 +15,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 # MULTI-LORA: env overrides (see README.md). Defaults = the HTML-game LoRA.
-ROOT = Path(os.environ.get("LORA_ROOT", "/Users/jonathanrothberg/MLX_Models/html_game_sft")).expanduser()
+from rows import training_dir
+
+ROOT = training_dir("LORA_ROOT", "html_game_sft")
 HERE = Path(__file__).resolve().parent
 PORT = int(os.environ.get("LORA_PORT", "8766"))
 DB = ROOT / "games.sqlite"

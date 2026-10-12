@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 import sys
 from pathlib import Path
 from unittest.mock import patch  # noqa: F401 - retained for downstream test additions
@@ -81,8 +82,10 @@ def _fake_local_mlx(paths: list[str]):
 def clear_env(monkeypatch):
     """Strip env vars that would otherwise short-circuit detection."""
     for key in ("OLLAMA_MODEL", "CHAT_OLLAMA_MODEL", "MLX_MODEL", "LLM_BACKEND",
-                "OLLAMA_HOST", "MLX_SERVER_URL", "MLX_HOST"):
+                "OLLAMA_HOST", "MLX_SERVER_URL", "MLX_HOST", "OMLX_SERVER_URL"):
         monkeypatch.delenv(key, raising=False)
+    # A relocated oMLX port must not leak into the next test.
+    monkeypatch.setattr(backend, "_OMLX_ENDPOINT_OVERRIDE", None)
 
 
 @pytest.fixture(autouse=True)
@@ -886,6 +889,7 @@ def test_detect_prefers_omlx_resident_over_disk_order(monkeypatch):
     monkeypatch.setattr(
         backend, "_http_get_json",
         _fake_http({
+            "/api/status": {"version": "0.6.4"},
             "/v1/models/status": {
                 "models": [
                     {
@@ -993,7 +997,7 @@ def test_ensure_omlx_server_spawns_then_ready(monkeypatch):
 
     monkeypatch.setattr(backend, "omlx_reachable", reachable)
     monkeypatch.setattr(
-        backend, "_spawn_omlx_serve", lambda ep: (True, "spawned test")
+        backend, "_spawn_omlx_serve", lambda ep, **_k: (True, "spawned test")
     )
     monkeypatch.setattr(backend.time, "sleep", lambda *_: None)
     assert backend.ensure_omlx_server(timeout_s=5.0) == "http://127.0.0.1:8000"
@@ -1001,11 +1005,189 @@ def test_ensure_omlx_server_spawns_then_ready(monkeypatch):
 
 def test_ensure_omlx_server_fails_clearly(monkeypatch):
     monkeypatch.setattr(backend, "omlx_reachable", lambda *a, **k: False)
+    monkeypatch.setattr(backend, "_foreign_openai_server", lambda *a, **k: False)
     monkeypatch.setattr(
-        backend, "_spawn_omlx_serve", lambda ep: (False, "no binary")
+        backend, "_spawn_omlx_serve", lambda ep, **_k: (False, "no binary")
     )
     with pytest.raises(RuntimeError, match="oMLX"):
         backend.ensure_omlx_server(timeout_s=1.0)
+
+
+def test_omlx_reachable_requires_api_status(monkeypatch):
+    """mlx_vlm answers /v1/models and 404s /api/status. That is not oMLX."""
+    def http(url, timeout=5.0):
+        if url.endswith("/v1/models"):
+            return {"object": "list", "data": []}
+        return None
+
+    monkeypatch.setattr(backend, "_http_get_json", http)
+    assert backend.omlx_reachable("http://127.0.0.1:8000") is False
+
+    def http_omlx(url, timeout=5.0):
+        if url.endswith("/api/status"):
+            return {"version": "0.6.4"}
+        return None
+
+    monkeypatch.setattr(backend, "_http_get_json", http_omlx)
+    assert backend.omlx_reachable("http://127.0.0.1:8000") is True
+
+
+def test_ensure_omlx_leaves_foreign_8000_and_uses_8001(monkeypatch):
+    """LoRA mlx_vlm keeps :8000. Flash starts oMLX on a free port."""
+    spawned: list[str] = []
+
+    def http(url, timeout=5.0):
+        if "8000/api/status" in url:
+            return None
+        if "8000/v1/models" in url:
+            return {"object": "list", "data": []}
+        if "8001/api/status" in url and spawned:
+            return {"version": "0.6.4"}
+        return None
+
+    def spawn(ep, on_status=None):
+        spawned.append(ep)
+        return True, "spawned test"
+
+    monkeypatch.setattr(backend, "_http_get_json", http)
+    monkeypatch.setattr(backend, "_tcp_port_open", lambda *a, **k: False)
+    monkeypatch.setattr(backend, "_spawn_omlx_serve", spawn)
+    monkeypatch.setattr(backend.time, "sleep", lambda *_a, **_k: None)
+    assert backend.ensure_omlx_server(timeout_s=2.0) == "http://127.0.0.1:8001"
+    assert spawned == ["http://127.0.0.1:8001"]
+    assert backend.omlx_default_endpoint() == "http://127.0.0.1:8001"
+
+
+def test_ensure_omlx_reuses_fallback_without_second_spawn(monkeypatch):
+    def http(url, timeout=5.0):
+        if "8000/api/status" in url:
+            return None
+        if "8000/v1/models" in url:
+            return {"data": []}
+        if "8001/api/status" in url:
+            return {"version": "0.6.4"}
+        return None
+
+    def boom(ep):
+        raise AssertionError(f"should reuse 8001, spawned {ep}")
+
+    monkeypatch.setattr(backend, "_http_get_json", http)
+    monkeypatch.setattr(backend, "_spawn_omlx_serve", boom)
+    assert backend.ensure_omlx_server() == "http://127.0.0.1:8001"
+
+
+def test_spawn_uses_existing_cli_without_install(monkeypatch):
+    """A machine that already has omlx is not reinstalled."""
+    monkeypatch.setattr(backend, "_resolve_omlx_bin", lambda: "/tmp/omlx-existing")
+
+    def boom(*_a, **_k):
+        raise AssertionError("should not install")
+
+    monkeypatch.setattr(backend, "_install_omlx_cli", boom)
+    seen: dict = {}
+
+    class _P:
+        def __init__(self, cmd, **_kw):
+            seen["cmd"] = cmd
+
+    monkeypatch.setattr(backend.subprocess, "Popen", _P)
+    ok, detail = backend._spawn_omlx_serve("http://127.0.0.1:8001")
+    assert ok is True
+    assert seen["cmd"][0] == "/tmp/omlx-existing"
+    assert seen["cmd"][-1] == "8001"
+    assert "spawned" in detail
+
+
+def test_spawn_installs_cli_then_serves_on_requested_port(monkeypatch):
+    """First run on a Mac with no omlx CLI installs, then binds the free port."""
+    state = {"n": 0}
+
+    def resolve():
+        state["n"] += 1
+        if state["n"] == 1:
+            return None
+        return "/tmp/omlx-installed"
+
+    monkeypatch.setattr(backend, "_resolve_omlx_bin", resolve)
+    monkeypatch.setattr(
+        backend, "_install_omlx_cli", lambda *_a, **_k: (True, "/tmp/omlx-installed"),
+    )
+    seen: dict = {}
+
+    class _P:
+        def __init__(self, cmd, **_kw):
+            seen["cmd"] = cmd
+
+    monkeypatch.setattr(backend.subprocess, "Popen", _P)
+    notes: list[str] = []
+    ok, _detail = backend._spawn_omlx_serve(
+        "http://127.0.0.1:8002", on_status=notes.append,
+    )
+    assert ok is True
+    assert seen["cmd"][0] == "/tmp/omlx-installed"
+    assert seen["cmd"][-1] == "8002"
+    assert notes and "installing" in notes[0].lower()
+
+
+def test_install_omlx_cli_refuses_non_darwin(monkeypatch):
+    monkeypatch.setattr(backend.sys, "platform", "linux")
+    ok, detail = backend._install_omlx_cli()
+    assert ok is False
+    assert "macOS" in detail
+
+
+def test_install_omlx_cli_refuses_bad_hash(monkeypatch, tmp_path):
+    """A wheel whose sha256 doesn't match the pin is deleted, not pip-installed."""
+    monkeypatch.setattr(backend.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        backend, "_python_for_omlx_wheel", lambda: ("/usr/bin/python3", "cp312"),
+    )
+    monkeypatch.setattr(backend, "_sha256_file", lambda *_a, **_k: False)
+    real_expand = os.path.expanduser
+
+    def fake_expand(path: str) -> str:
+        if path == "~":
+            return str(tmp_path)
+        if path.startswith("~/"):
+            return str(tmp_path / path[2:])
+        return real_expand(path)
+
+    monkeypatch.setattr(backend.os.path, "expanduser", fake_expand)
+
+    def download(_url: str, dest: str) -> None:
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        with open(dest, "wb") as f:
+            f.write(b"not-a-wheel")
+
+    monkeypatch.setattr(backend, "_download_file", download)
+
+    def pip_boom(*_a, **_k):
+        raise AssertionError("pip should not run")
+
+    monkeypatch.setattr(backend.subprocess, "run", pip_boom)
+    ok, detail = backend._install_omlx_cli()
+    assert ok is False
+    assert "sha256" in detail
+
+
+def test_ensure_omlx_does_not_move_explicit_url(monkeypatch):
+    """A machine that set OMLX_SERVER_URL keeps that URL. No silent port hop."""
+    monkeypatch.setenv("OMLX_SERVER_URL", "http://127.0.0.1:8000")
+
+    def http(url, timeout=5.0):
+        if "/api/status" in url:
+            return None
+        if "/v1/models" in url:
+            return {"data": []}
+        return None
+
+    def boom(ep):
+        raise AssertionError(f"should not spawn, got {ep}")
+
+    monkeypatch.setattr(backend, "_http_get_json", http)
+    monkeypatch.setattr(backend, "_spawn_omlx_serve", boom)
+    with pytest.raises(RuntimeError, match="OMLX_SERVER_URL"):
+        backend.ensure_omlx_server()
 
 
 # --- HARD RULE: oMLX must have native Metal kernels -------------------------

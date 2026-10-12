@@ -15,8 +15,32 @@ import sqlite3
 import sys
 from pathlib import Path
 
+def training_dir(env_var: str, name: str) -> Path:
+    """Folder for one training set.
+
+    Use $ENV when it is set. Otherwise use ~/HTML Training/<name> if that
+    directory exists, then ~/MLX_Models/<name>. If neither is on this
+    machine, stop and say so — the set was moved, and another computer
+    has to point ENV at wherever it landed.
+    """
+    override = (os.environ.get(env_var) or "").strip()
+    if override:
+        return Path(override).expanduser()
+    home = Path.home()
+    moved = home / "HTML Training" / name
+    legacy = home / "MLX_Models" / name
+    for path in (moved, legacy):
+        if path.is_dir():
+            return path
+    raise SystemExit(
+        f"Training set {name!r} was not found.\n"
+        f"Looked in {moved} and {legacy}.\n"
+        f"Set {env_var} to the folder you moved it to, then run this again."
+    )
+
+
 # MULTI-LORA: env overrides (see README.md). Defaults = the HTML-game LoRA.
-ROOT = Path(os.environ.get("LORA_ROOT", "/Users/jonathanrothberg/MLX_Models/html_game_sft")).expanduser()
+ROOT = training_dir("LORA_ROOT", "html_game_sft")
 # Canonical /640png examples (only these get jmr_png_mode in labels).
 JMR_STORAGE = Path("/Users/jonathanrothberg/JMR-JS-CSS-FPGA-COMPUTER/storage")
 # Repo root = parent of fine_tunning/ (prompts_v1.py, prompt_library.py, goodgame/).

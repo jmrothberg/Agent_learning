@@ -1,2 +1,2 @@
-/Users/jonathanrothberg/MLX_Models/html_js_small/checkpoints/latest
+/Users/jonathanrothberg/HTML Training/html_js_small/checkpoints/latest
 1790699876

@@ -48,7 +48,7 @@ pkill -f "data.py --source stack"
 
 **Other computers — clean the training data after you pull.** Good HTML and JavaScript only. The documents below are taken out of the shard files. They are not kept at a low weight. Checkpoints are not touched. Training can keep running. The next 30-minute save opens the cleaned shards. The loss will step up. That is the junk leaving, not a learning-rate blow-up. The page keeps the old `docs=` and `sampled_tokens=` numbers until the trainer is started again.
 
-Set `SMALL_ROOT` to the data folder on that machine if it is not `~/MLX_Models/html_js_small`.
+On this Mac the sets live in `~/HTML Training/` (`html_js_small` and `html_game_sft`). Another machine that does not have that folder must set `SMALL_ROOT` (and `LORA_ROOT`) to wherever the set was copied. The old `~/MLX_Models/...` path is used only when `~/HTML Training` is absent and the old folder is still there.
 
 ```bash
 cd ~/Agent_learning/fine_tunning
@@ -76,10 +76,10 @@ Keep a file when the script parses, it is not a repeated or generated dump, its 
 This folder has everything needed to train, monitor, and use a LoRA adapter on a local MLX model: the code, the start script, and this guide. The first project is the **HTML-game LoRA** on `Qwen3.8-27B-mxfp8`. The same code trains other LoRAs by pointing it at a different project folder, as described below.
 
 - **Code (in git):** this folder, `Agent_learning/fine_tunning/`.
-- **Data, weights, and logs (not in git, large):** one project folder per LoRA under `~/MLX_Models/`, e.g. `~/MLX_Models/html_game_sft/`.
+- **Data, weights, and logs (not in git, large):** `~/HTML Training/html_game_sft/` on this Mac. Another computer sets `LORA_ROOT` to its own copy.
 - **Base models (never modified):** `~/MLX_Models/<model>/`, e.g. `~/MLX_Models/Qwen3.8-27B-mxfp8/`.
 
-> **Small HTML/JS model** (full fine-tune of a ~1B base, no LoRA): code in `small/`, data in `~/MLX_Models/html_js_small/`, start with `./start.sh small continue` (top of this file). Everything about it, including moving it to another Mac and trying another base model, is in **§9**.
+> **Small HTML/JS model** (full fine-tune of a ~1B base, no LoRA): code in `small/`, data in `~/HTML Training/html_js_small/` on this Mac (`SMALL_ROOT` on any other), start with `./start.sh small continue` (top of this file). Everything about it, including moving it to another Mac and trying another base model, is in **§9**.
 
 > `fine_tunning/` is the trainer: it has the HOLD/RESUME dashboard and the env-var settings. The Sep 21–23 run was started from `~/MLX_Models/html_game_sft/scripts/`, which is the same code without the env vars. A restart with `./start.sh` uses this folder.
 
@@ -300,7 +300,7 @@ Settings are env vars, all read by `start.sh`, `run_slices.py`, `train_lora.py`,
 
 | Env var            | Default                          | Meaning                                                                  |
 | ------------------ | -------------------------------- | ------------------------------------------------------------------------ |
-| `LORA_ROOT`        | `~/MLX_Models/html_game_sft`     | Project folder (data, adapters, snapshots, logs)                         |
+| `LORA_ROOT`        | `~/HTML Training/html_game_sft` if that folder exists, else `~/MLX_Models/html_game_sft` | Project folder (data, adapters, snapshots, logs). Set this when neither path exists. |
 | `LORA_BASE`        | `~/MLX_Models/Qwen3.8-27B-mxfp8` | Base model folder. Opened read-only.                                     |
 | `LORA_PY`          | `~/Agents/.venv/bin/python`      | Python with `mlx`, `mlx-vlm`, `datasets`, `tokenizers`                   |
 | `LORA_PORT`        | `8766`                           | Monitor port. Give each project its own. (8765 is chat.py Asset Studio.) |

@@ -4442,7 +4442,9 @@ class CodingBoxApp(App):
             return
         if want:
             try:
-                ep = backend_mod.ensure_omlx_server()
+                ep = backend_mod.ensure_omlx_server(
+                    on_status=lambda text: self._log_info(f"[dim]{text}[/dim]"),
+                )
             except RuntimeError as e:
                 self._log_error(str(e))
                 return
@@ -4488,7 +4490,9 @@ class CodingBoxApp(App):
                     "[dim]Loading via oMLX (parallel streams, /critic auto ON) "
                     f"at {backend_mod.omlx_default_endpoint()}…[/dim]"
                 )
-                ep = backend_mod.ensure_omlx_server()
+                ep = backend_mod.ensure_omlx_server(
+                    on_status=lambda text: self._log_info(f"[dim]{text}[/dim]"),
+                )
                 self._log_info(
                     f"[green]✓[/green] oMLX ready at [b]{ep}[/b] "
                     "[dim](MTP/pin still configured in /admin)[/dim]"
@@ -5627,7 +5631,8 @@ class CodingBoxApp(App):
             if not snaps:
                 self._log_info(
                     "no snapshot yet — training writes one under "
-                    "~/MLX_Models/html_game_sft/snapshots/"
+                    "~/HTML Training/html_game_sft/snapshots/ "
+                    "(or set LORA_ROOT if that folder is on another disk)"
                 )
                 return
             for i, p in enumerate(snaps, 1):
@@ -7368,11 +7373,20 @@ class CodingBoxApp(App):
         # used MLXBackend → "Model type glm5_next not supported", 0 tokens).
         if info.name == "mlx" and backend_mod.requires_omlx_server(info.model):
             try:
-                ep = backend_mod.ensure_omlx_server()
+                # Capture before ensure — a fallback port updates the default.
+                configured = backend_mod.omlx_default_endpoint()
+                ep = backend_mod.ensure_omlx_server(
+                    on_status=lambda text: self._log_info(f"[dim]{text}[/dim]"),
+                )
             except RuntimeError as e:
                 self._log_error(str(e))
                 self._session_done = True
                 return
+            if ep.rstrip("/") != configured.rstrip("/"):
+                self._log_info(
+                    f"[dim]oMLX at {ep} — left the other MLX server "
+                    f"on {configured} running[/dim]"
+                )
             info = backend_mod.BackendInfo(
                 name="mlx",
                 model=backend_mod.omlx_api_model_id(info.model),

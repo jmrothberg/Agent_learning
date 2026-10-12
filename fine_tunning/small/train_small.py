@@ -32,7 +32,9 @@ import numpy as np
 from mlx.utils import tree_flatten, tree_map, tree_unflatten
 from mlx_lm import load
 
-ROOT = Path(os.environ.get("SMALL_ROOT", "~/MLX_Models/html_js_small")).expanduser()
+from data import training_dir
+
+ROOT = training_dir("SMALL_ROOT", "html_js_small")
 BASE = Path(os.environ.get("SMALL_BASE", "~/MLX_Models/MiniCPM5-1B-Base")).expanduser()
 SHARDS = ROOT / "shards"
 CKPT = ROOT / "checkpoints"

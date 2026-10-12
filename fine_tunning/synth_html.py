@@ -1410,8 +1410,14 @@ async def amain(args: argparse.Namespace) -> None:
 
 
 def default_out() -> Path:
-    root = Path(os.environ.get("LORA_ROOT", "~/MLX_Models/html_game_sft")).expanduser()
-    return root / "jsonl" / "synth.jsonl"
+    # rows lives next to this file. Import here so tests can load the module
+    # without resolving the training folder.
+    import sys
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from rows import training_dir
+    return training_dir("LORA_ROOT", "html_game_sft") / "jsonl" / "synth.jsonl"
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

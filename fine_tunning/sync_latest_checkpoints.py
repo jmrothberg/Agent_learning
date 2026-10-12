@@ -12,8 +12,10 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 DEST_ROOT = HERE / "checkpoints"
-LORA_ROOT = Path(os.environ.get("LORA_ROOT", "~/MLX_Models/html_game_sft")).expanduser()
-SMALL_ROOT = Path(os.environ.get("SMALL_ROOT", "~/MLX_Models/html_js_small")).expanduser()
+from rows import training_dir
+
+LORA_ROOT = training_dir("LORA_ROOT", "html_game_sft")
+SMALL_ROOT = training_dir("SMALL_ROOT", "html_js_small")
 SKIP = {"optimizer.safetensors"}
 # GitHub LFS rejects a single file bigger than 2 GiB.
 MAX_LFS_BYTES = 2147483648

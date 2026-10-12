@@ -803,18 +803,25 @@ def lora_snapshot_dirs(root: str | os.PathLike | None = None, project: str | Non
     checkpoint. Named leftovers such as long-prompt-smoke stay in the
     list so they can be picked by number, and they are not `latest`.
 
-    MULTI-LORA: with no `root`, every ~/MLX_Models/<project>/snapshots/
-    folder is listed (one per LoRA project, e.g. html_game_sft). `project`
+    MULTI-LORA: with no `root`, every project under ~/HTML Training and
+    ~/MLX_Models that has snapshots/ is listed (e.g. html_game_sft).
+    HTML Training wins when the same project name is in both. `project`
     keeps only that one. Order is per project; `latest` is the newest
     dated checkpoint across the listed projects.
     """
     from pathlib import Path
 
     if root is None:
-        models = Path.home() / "MLX_Models"
-        folders = sorted(
-            p / "snapshots" for p in models.iterdir() if (p / "snapshots").is_dir()
-        ) if models.is_dir() else []
+        folders = []
+        seen: set[str] = set()
+        for models in (Path.home() / "HTML Training", Path.home() / "MLX_Models"):
+            if not models.is_dir():
+                continue
+            for p in sorted(models.iterdir()):
+                if p.name in seen or not (p / "snapshots").is_dir():
+                    continue
+                seen.add(p.name)
+                folders.append(p / "snapshots")
         if project:
             folders = [f for f in folders if f.parent.name == project]
     else:
@@ -4146,14 +4153,24 @@ def _try_mlx_server() -> BackendInfo | None:
 # MLX_SERVER_URL globally.
 
 
+# Set when :8000 is a different MLX server (LoRA mlx_vlm watchdog) and we
+# spawned oMLX on a fallback loopback port. Explicit OMLX_SERVER_URL wins.
+_OMLX_ENDPOINT_OVERRIDE: str | None = None
+# Do not kill whatever is on :8000 — other machines use that process for
+# training. These are only tried when the default port is not oMLX.
+_OMLX_FALLBACK_PORTS = (8001, 8002, 8003)
+
+
 def omlx_default_endpoint() -> str:
     """oMLX OpenAI base URL (default :8000). Override with OMLX_SERVER_URL."""
     raw = (os.environ.get("OMLX_SERVER_URL") or "").strip().rstrip("/")
-    if not raw:
-        return "http://127.0.0.1:8000"
-    if not raw.startswith("http"):
-        raw = "http://" + raw
-    return raw
+    if raw:
+        if not raw.startswith("http"):
+            raw = "http://" + raw
+        return raw
+    if _OMLX_ENDPOINT_OVERRIDE:
+        return _OMLX_ENDPOINT_OVERRIDE
+    return "http://127.0.0.1:8000"
 
 
 def requires_omlx_server(model: str) -> bool:
@@ -4362,10 +4379,70 @@ def endpoint_is_omlx(endpoint: str | None) -> bool:
 
 
 def omlx_reachable(endpoint: str | None = None, *, timeout: float = 1.0) -> bool:
-    """True when oMLX (or any OpenAI-compatible server) answers GET /v1/models."""
+    """True when this URL is oMLX (GET /api/status returns JSON).
+
+    /v1/models is not enough. mlx_vlm.server and mlx_lm.server answer it
+    too, and the LoRA watchdog (fine_tunning/start.sh) holds :8000 for
+    hours. Treating that as oMLX sent Flash-Next to mlx_vlm, which 400'd
+    trying to download the local folder name from Hugging Face
+    (ROGUELIK 20261012). oMLX 0.6.3+ serves /api/status; those servers 404 it.
+    """
     ep = (endpoint or omlx_default_endpoint()).rstrip("/")
-    data = _http_get_json(ep + "/v1/models", timeout=timeout)
+    status = _http_get_json(ep + "/api/status", timeout=timeout)
+    return isinstance(status, dict)
+
+
+def _endpoint_host_port(endpoint: str) -> tuple[str, int | None]:
+    from urllib.parse import urlparse
+
+    parsed = urlparse(endpoint if "://" in endpoint else "http://" + endpoint)
+    return (parsed.hostname or "127.0.0.1"), parsed.port
+
+
+def _endpoint_on_port(endpoint: str, port: int) -> str:
+    host, _port = _endpoint_host_port(endpoint)
+    return f"http://{host}:{port}"
+
+
+def _loopback_host(host: str) -> bool:
+    return host.lower() in ("127.0.0.1", "localhost", "::1")
+
+
+def _tcp_port_open(host: str, port: int, timeout: float = 0.3) -> bool:
+    import socket
+
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _foreign_openai_server(endpoint: str, *, timeout: float = 1.0) -> bool:
+    """OpenAI-compatible listener that is not oMLX. Leave it running."""
+    if omlx_reachable(endpoint, timeout=timeout):
+        return False
+    data = _http_get_json(endpoint.rstrip("/") + "/v1/models", timeout=timeout)
     return isinstance(data, dict)
+
+
+def _alternate_omlx_endpoint(occupied: str) -> str | None:
+    """Loopback port that is already oMLX, or free so we can spawn one.
+
+    Does not touch `occupied`. None when every fallback is some other
+    server, or the configured host is not loopback (a remote
+    OMLX_SERVER_URL must not grow a local server).
+    """
+    host, _port = _endpoint_host_port(occupied)
+    if not _loopback_host(host):
+        return None
+    for port in _OMLX_FALLBACK_PORTS:
+        ep = _endpoint_on_port(occupied, port)
+        if omlx_reachable(ep, timeout=0.5):
+            return ep
+        if not _tcp_port_open(host, port):
+            return ep
+    return None
 
 
 def omlx_missing_metal_kernels(
@@ -4422,7 +4499,11 @@ def omlx_require_metal_kernels(endpoint: str) -> None:
 
 
 def _resolve_omlx_bin() -> str | None:
-    """Find an `omlx` CLI: PATH, ~/.omlx/bin, or ~/MLX_Models/.omlx-venv."""
+    """Find an `omlx` CLI: PATH, ~/.omlx/bin, or ~/MLX_Models/.omlx-venv.
+
+    Does not download. First-run install is `_install_omlx_cli`, and only
+    when this returns None — a machine that already has oMLX is not touched.
+    """
     which = shutil.which("omlx")
     if which:
         return which
@@ -4434,6 +4515,170 @@ def _resolve_omlx_bin() -> str | None:
         if os.path.isfile(path) and os.access(path, os.X_OK):
             return path
     return None
+
+
+# Pinned prebuilt wheels (GitHub release asset digests). Do not follow
+# "latest": a .dev tag has broken Flash loads before. Do not
+# `pip install git+omlx` — that build ships no Metal `_ext`.
+_OMLX_AUTO_VERSION = "0.7.0"
+_OMLX_WHEEL_SHA256 = {
+    "cp311": "a25b0fbf86579512ced2a45b9aba420a51e6e8f3ee9ea3832ea1b9111d2cc4a7",
+    "cp312": "42ff3d25a40468781110933a64dc7037dcbe8590ab93851db82a12a5df81617b",
+    "cp313": "9231b604b8d8bd2d6c7c598847e01bedb2cedafd5d620c46aab940ddde8452bf",
+}
+
+
+def _omlx_venv_dir() -> str:
+    return os.path.join(os.path.expanduser("~"), "MLX_Models", ".omlx-venv")
+
+
+def _cp_abi_tag(exe: str) -> str | None:
+    """`cp312` for this interpreter, or by asking `exe` when it isn't us."""
+    if os.path.realpath(exe) == os.path.realpath(sys.executable):
+        return f"cp{sys.version_info.major}{sys.version_info.minor}"
+    try:
+        r = subprocess.run(
+            [exe, "-c", "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    tag = (r.stdout or "").strip()
+    return tag or None
+
+
+def _python_for_omlx_wheel() -> tuple[str, str] | None:
+    """(executable, cp tag) that has a pinned oMLX wheel. Chat's Python first."""
+    candidates: list[str] = []
+    if sys.version_info[:2] in ((3, 11), (3, 12), (3, 13)):
+        candidates.append(sys.executable)
+    for name in ("python3.12", "python3.13", "python3.11"):
+        found = shutil.which(name)
+        if found:
+            candidates.append(found)
+    seen: set[str] = set()
+    for exe in candidates:
+        real = os.path.realpath(exe)
+        if real in seen:
+            continue
+        seen.add(real)
+        tag = _cp_abi_tag(exe)
+        if tag in _OMLX_WHEEL_SHA256:
+            return exe, tag
+    return None
+
+
+def _sha256_file(path: str, expect: str) -> bool:
+    import hashlib
+
+    if not os.path.isfile(path):
+        return False
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest() == expect
+
+
+def _download_file(url: str, dest: str) -> None:
+    """Download to dest via a sibling temp file so a partial wheel is not kept."""
+    partial = dest + ".partial"
+    try:
+        urllib.request.urlretrieve(url, partial)
+        os.replace(partial, dest)
+    finally:
+        if os.path.isfile(partial):
+            try:
+                os.remove(partial)
+            except OSError:
+                pass
+
+
+def _tail_text(path: str, limit: int = 800) -> str:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return ""
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    return text[-limit:]
+
+
+def _install_omlx_cli(
+    on_status: Callable[[str], None] | None = None,
+) -> tuple[bool, str]:
+    """Install the prebuilt oMLX wheel into ~/MLX_Models/.omlx-venv.
+
+    Only called when `_resolve_omlx_bin` found nothing. An existing CLI
+    (PATH, app shim, or this venv) is not replaced, so other machines keep
+    the oMLX they already run.
+
+    The wheel file is the prebuilt `_ext` + `.metallib`. Its dependencies
+    (mlx, mlx-lm, fastapi, …) are installed too: `--no-deps` into an empty
+    venv cannot start `omlx serve`.
+    """
+    if sys.platform != "darwin":
+        return False, "oMLX auto-install is macOS-only (no prebuilt wheel for this OS)"
+    picked = _python_for_omlx_wheel()
+    if picked is None:
+        return False, "oMLX wheel needs Python 3.11, 3.12, or 3.13"
+    py, tag = picked
+    digest = _OMLX_WHEEL_SHA256[tag]
+    name = (
+        f"omlx-{_OMLX_AUTO_VERSION}-{tag}-{tag}-macosx_15_0_universal2.whl"
+    )
+    url = (
+        "https://github.com/jundot/omlx/releases/download/"
+        f"v{_OMLX_AUTO_VERSION}/{name}"
+    )
+    cache_dir = os.path.join(os.path.expanduser("~"), "MLX_Models", ".cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    wheel_path = os.path.join(cache_dir, name)
+    if on_status is not None:
+        on_status(f"Installing oMLX {_OMLX_AUTO_VERSION} (one time)…")
+    if not _sha256_file(wheel_path, digest):
+        try:
+            _download_file(url, wheel_path)
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+            return False, f"could not download oMLX wheel: {e}"
+        if not _sha256_file(wheel_path, digest):
+            try:
+                os.remove(wheel_path)
+            except OSError:
+                pass
+            return False, f"sha256 mismatch for {name}; refused to install"
+    venv = _omlx_venv_dir()
+    py_venv = os.path.join(venv, "bin", "python")
+    if not os.path.isfile(py_venv):
+        try:
+            subprocess.run(
+                [py, "-m", "venv", venv],
+                check=True, capture_output=True, text=True, timeout=120,
+            )
+        except (OSError, subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
+            err = getattr(e, "stderr", None) or repr(e)
+            return False, f"could not create {venv}: {str(err)[-500:]}"
+    log_path = os.path.join(cache_dir, "omlx-install.log")
+    pip = os.path.join(venv, "bin", "pip")
+    try:
+        with open(log_path, "w", encoding="utf-8") as log:
+            proc = subprocess.run(
+                [pip, "install", wheel_path],
+                stdout=log, stderr=subprocess.STDOUT, timeout=600,
+            )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, f"pip install oMLX failed: {e}"
+    if proc.returncode != 0:
+        tail = _tail_text(log_path)
+        return False, f"pip install oMLX failed (log {log_path}): {tail}"
+    cli = os.path.join(venv, "bin", "omlx")
+    if not (os.path.isfile(cli) and os.access(cli, os.X_OK)):
+        return False, f"pip finished but {cli} is missing"
+    return True, cli
 
 
 def _omlx_model_dir() -> str:
@@ -4449,9 +4694,24 @@ def _omlx_model_dir() -> str:
     return default
 
 
-def _spawn_omlx_serve(endpoint: str) -> tuple[bool, str]:
-    """Detached `omlx serve` or open oMLX.app. Does not wait for readiness."""
+def _spawn_omlx_serve(
+    endpoint: str,
+    on_status: Callable[[str], None] | None = None,
+) -> tuple[bool, str]:
+    """Detached `omlx serve`. Installs the CLI first if this Mac has none.
+
+    Does not wait for readiness. A found CLI is used as-is (no reinstall).
+    `open -a oMLX` is not used: it returns before we know the app exists,
+    then chat waits the full timeout on a server that never binds.
+    """
     bin_path = _resolve_omlx_bin()
+    install_detail = ""
+    if not bin_path:
+        if on_status is not None:
+            on_status("oMLX CLI not found — installing the prebuilt release wheel…")
+        ok, install_detail = _install_omlx_cli(on_status)
+        if ok:
+            bin_path = _resolve_omlx_bin()
     model_dir = _omlx_model_dir()
     # Parse port from endpoint for --port (default 8000).
     port = "8000"
@@ -4489,7 +4749,9 @@ def _spawn_omlx_serve(endpoint: str) -> tuple[bool, str]:
         except OSError as e:
             return False, f"failed to spawn omlx serve: {e!r}"
 
-    # Fall back to menu-bar app (auto_start_on_launch in ~/.omlx/settings.json).
+    # Menu-bar app only when the bundle is actually on disk. It binds its
+    # own port (usually 8000); chat cannot pass --port, so this is a last
+    # resort after the CLI install did not produce a binary.
     app_candidates = (
         "/Applications/oMLX.app",
         os.path.expanduser("~/Applications/oMLX.app"),
@@ -4507,39 +4769,60 @@ def _spawn_omlx_serve(endpoint: str) -> tuple[bool, str]:
                 return True, f"opened {app}"
             except OSError as e:
                 return False, f"failed to open {app}: {e!r}"
-    try:
-        subprocess.Popen(
-            ["open", "-a", "oMLX"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        return True, "open -a oMLX"
-    except OSError as e:
-        return False, (
-            "oMLX not installed (no `omlx` CLI and no oMLX.app). "
-            f"Install oMLX 0.6.3+ then retry. ({e!r})"
-        )
+    return False, install_detail or "oMLX CLI install did not produce a binary"
 
 
-def ensure_omlx_server(*, timeout_s: float = 120.0) -> str:
+def ensure_omlx_server(
+    *,
+    timeout_s: float = 120.0,
+    on_status: Callable[[str], None] | None = None,
+) -> str:
     """Ensure oMLX is reachable; spawn it if needed. Returns endpoint URL.
 
     Raises RuntimeError with an install/start hint when the server never comes up.
+
+    If the default port is mlx_vlm / mlx_lm (answers /v1/models, no
+    /api/status), leave that process alone and use 8001–8003. Other
+    machines run the LoRA watchdog on :8000; killing it would stop training.
+    An explicit OMLX_SERVER_URL is never moved.
     """
+    global _OMLX_ENDPOINT_OVERRIDE
     endpoint = omlx_default_endpoint()
     if omlx_reachable(endpoint):
         # HARD RULE (Mac): never build on an oMLX without Metal kernels.
         omlx_require_metal_kernels(endpoint)
         return endpoint
 
-    ok, detail = _spawn_omlx_serve(endpoint)
+    explicit = bool((os.environ.get("OMLX_SERVER_URL") or "").strip())
+    if _foreign_openai_server(endpoint):
+        if explicit:
+            raise RuntimeError(
+                f"{endpoint} answers /v1/models but is not oMLX "
+                "(no GET /api/status). That port is another MLX server "
+                "(mlx_vlm / mlx_lm — often the LoRA watchdog). "
+                "Flash-class models need oMLX 0.6.3+. "
+                "OMLX_SERVER_URL is set, so it was not moved. "
+                "Point OMLX_SERVER_URL at oMLX, or unset it."
+            )
+        moved = _alternate_omlx_endpoint(endpoint)
+        if not moved:
+            raise RuntimeError(
+                f"{endpoint} is not oMLX and ports "
+                f"{', '.join(str(p) for p in _OMLX_FALLBACK_PORTS)} "
+                "are not free. Left the server on "
+                f"{endpoint} running. Free one fallback port or set "
+                "OMLX_SERVER_URL to an oMLX base URL."
+            )
+        if omlx_reachable(moved):
+            omlx_require_metal_kernels(moved)
+            _OMLX_ENDPOINT_OVERRIDE = moved.rstrip("/")
+            return moved
+        endpoint = moved
+
+    ok, detail = _spawn_omlx_serve(endpoint, on_status=on_status)
     if not ok:
         raise RuntimeError(
-            f"This architecture needs oMLX but could not start it: {detail}\n"
-            "Install oMLX 0.6.3+ (app or `omlx` CLI), or start it once; "
-            "chat will reuse http://127.0.0.1:8000 afterward."
+            f"This architecture needs oMLX but could not start it at {endpoint}: {detail}"
         )
 
     # Longer poll than Ollama — oMLX cold start / Metal init is slower.
@@ -4547,6 +4830,11 @@ def ensure_omlx_server(*, timeout_s: float = 120.0) -> str:
     while time.monotonic() < deadline:
         if omlx_reachable(endpoint, timeout=1.5):
             omlx_require_metal_kernels(endpoint)  # HARD RULE, see above
+            # Remember a fallback port so the next /new does not talk to
+            # the foreign server on the default port again.
+            _host, port = _endpoint_host_port(endpoint)
+            if port and port != 8000 and not explicit:
+                _OMLX_ENDPOINT_OVERRIDE = endpoint.rstrip("/")
             return endpoint
         time.sleep(0.5)
 

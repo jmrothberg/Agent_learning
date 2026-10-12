@@ -9,10 +9,10 @@ import subprocess
 import time
 from pathlib import Path
 
-from rows import game_rank
+from rows import game_rank, training_dir
 
 # MULTI-LORA: env overrides (see README.md). Defaults = the HTML-game LoRA.
-ROOT = Path(os.environ.get("LORA_ROOT", "/Users/jonathanrothberg/MLX_Models/html_game_sft")).expanduser()
+ROOT = training_dir("LORA_ROOT", "html_game_sft")
 PY = os.path.expanduser(os.environ.get("LORA_PY", "/Users/jonathanrothberg/Agents/.venv/bin/python"))
 BASE = os.path.expanduser(os.environ.get("LORA_BASE", "/Users/jonathanrothberg/MLX_Models/Qwen3.8-27B-mxfp8"))
 # Extra train_lora.py flags, e.g. "--system full --whole-games 0" for non-game data.

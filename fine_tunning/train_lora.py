@@ -24,7 +24,9 @@ from mlx_vlm.trainer.sft_trainer import TrainingArgs, train
 from mlx_vlm.utils import load
 
 # MULTI-LORA: env overrides; defaults = the HTML-game LoRA on Qwen3.8-27B.
-ROOT = Path(os.environ.get("LORA_ROOT", "/Users/jonathanrothberg/MLX_Models/html_game_sft")).expanduser()
+from rows import training_dir
+
+ROOT = training_dir("LORA_ROOT", "html_game_sft")
 BASE = os.path.expanduser(os.environ.get("LORA_BASE", "/Users/jonathanrothberg/MLX_Models/Qwen3.8-27B-mxfp8"))
 
 
