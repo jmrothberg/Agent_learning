@@ -123,15 +123,17 @@ def _child_env_for_goal(base_env: dict[str, str], goal: str) -> dict[str, str]:
 
 
 def _is_game_delivered(out_path: Path) -> bool:
-    """True when a prior run left a playable artifact (resume / crash recovery).
+    """True when resume should skip this game.
 
-    NOTE: this is intentionally lenient (any .html >500 bytes) and is used ONLY
-    for resume/skip decisions — it does NOT decide PASS. See `_counts_as_pass`.
+    A crash mid-build leaves a partial `.html` and no checkpoint row.
+    That file is not finished work — the restarted batch must run the
+    game again. Skip only a shipped `.best.html`, or a trace whose last
+    iter already passed. Same bar as `_counts_as_pass`.
     """
     best = out_path.with_name(out_path.stem + ".best.html")
     if best.is_file() and best.stat().st_size > 500:
         return True
-    return out_path.is_file() and out_path.stat().st_size > 500
+    return _trace_last_iter_ok(out_path) is True
 
 
 def _trace_last_iter_ok(out_path: Path) -> bool | None:
@@ -659,7 +661,7 @@ def main() -> int:
         "--resume",
         action="store_true",
         default=True,
-        help="Skip games already in tune_checkpoint.json or with .best.html (default ON)",
+        help="Skip games in tune_checkpoint.json, with .best.html, or whose last iter passed (default ON). A partial .html from a crash is run again.",
     )
     ap.add_argument(
         "--no-resume",

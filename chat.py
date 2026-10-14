@@ -21,8 +21,9 @@ Type /help for slash commands; /help topics for the detail pages (tui_help.py).
 Model selection (when you press Enter on your game idea):
   1. backend.detect_backend() defaults to MLX on macOS (Apple GPU) unless
      you set LLM_BACKEND or use /backend. Flash /load auto-starts oMLX.
-     Dense Qwen3.8-27B / GLM-5.2 / MiniMax stay in-process unless you
-     type /server on or /model <N> server (then /critic auto runs parallel).
+     MLX picks load on oMLX so other processes share one weight copy
+     (/critic auto ON). If oMLX is down, chat starts it. /server off or
+     /model <N> local forces in-process.
        Ollama (port 11434) — loaded model from /api/ps, or OLLAMA_MODEL /
        CHAT_OLLAMA_MODEL overrides.
        MLX (in-process) — MLX_MODEL env, else single auto-discovered model
@@ -1143,11 +1144,11 @@ class CodingBoxApp(App):
         # None / "auto" = probe both daemons and pick whichever has a
         # model loaded (MLX wins ties). "ollama" / "mlx" = force.
         self._next_backend: str | None = None
-        # /server on (or /model N server): load MLX weights through oMLX
-        # so /critic auto can run a second stream. Sticky across /new.
-        # Flash-class models already use oMLX; this flag also covers
-        # dense Qwen3.8-27B / GLM-5.2 / MiniMax.
+        # /server on: sticky reminder that every MLX pick is on oMLX.
+        # Default is already oMLX (chat starts the server if it is down).
+        # /server off or /model N local sets _mlx_force_inprocess.
         self._mlx_via_server: bool = False
+        self._mlx_force_inprocess: bool = False
         # Secondary and tertiary model slots with configurable roles
         self._next_model2: str | None = None
         self._next_backend2: str | None = None
@@ -4404,30 +4405,38 @@ class CodingBoxApp(App):
         return arg, None
 
     def _mlx_uses_omlx(self, model: str = "") -> bool:
-        """True when this MLX pick talks HTTP to oMLX (Flash, or /server on)."""
+        """True when this MLX pick talks HTTP to oMLX.
+
+        Most MLX models do, and the caller starts oMLX if it is down.
+        Flash always does, even after /server off. /server off or
+        /model N local keeps a dense model in-process.
+        """
         if backend_mod.requires_omlx_server(model or ""):
             return True
-        return bool(getattr(self, "_mlx_via_server", False))
+        if getattr(self, "_mlx_force_inprocess", False):
+            return False
+        return True
 
     def _cmd_set_mlx_server(self, arg: str) -> None:
         """/server [on|off] — run MLX models through oMLX instead of in-process.
 
         Sticky across /new. ON makes /critic auto run in parallel (two
         streams share one weight load). Flash-class models already use
-        oMLX; this switch is how you put dense Qwen3.8-27B on the server
-        without LLM_BACKEND=mlx-server. Alias: /omlx. Same as adding
+        oMLX. MLX picks already do that, and chat starts oMLX if it is
+        down. /server off forces in-process. Alias: /omlx. Same as adding
         `server` on /model or /load.
         """
         a = arg.strip().lower().replace("_", "-")
         compact = a.replace("-", "")
         if not a or a in ("status", "?"):
             on = bool(getattr(self, "_mlx_via_server", False))
-            state = "ON" if on else "off"
-            hint = (
-                "/critic auto ON (parallel)"
-                if on
-                else "/critic auto off for Qwen3.8-27B (in-process)"
-            )
+            forced = bool(getattr(self, "_mlx_force_inprocess", False))
+            if forced:
+                state, hint = "off", "in-process until /server on"
+            elif on:
+                state, hint = "ON", "/critic auto ON (parallel)"
+            else:
+                state, hint = "ON", "MLX picks start oMLX if it is down"
             self._log_info(
                 f"MLX via oMLX: [b]{state}[/b]  [dim]{hint}[/dim]  "
                 "(/server on|off · /model <N> server)"
@@ -4440,6 +4449,8 @@ class CodingBoxApp(App):
         else:
             self._log_info("usage: /server on|off   or   /model <N|name> server")
             return
+        # off forces dense Qwen3.8-27B back in-process. on clears that.
+        self._mlx_force_inprocess = not want
         if want:
             try:
                 ep = backend_mod.ensure_omlx_server(
@@ -4457,7 +4468,7 @@ class CodingBoxApp(App):
         else:
             self._mlx_via_server = False
             self._log_info(
-                "MLX via oMLX [b]off[/b] — Qwen3.8-27B / GLM-5.2 load "
+                "MLX via oMLX [b]off[/b] — MLX models load "
                 "in-process [dim](/critic auto off unless you /critic on)[/dim]"
             )
         name = self._next_model or self._session_model
@@ -4483,7 +4494,7 @@ class CodingBoxApp(App):
         )
 
     def _mlx_endpoint_for_chosen(self, chosen_name: str) -> str:
-        """Resolve MLX endpoint; auto-start oMLX for Flash / /server on."""
+        """Resolve MLX endpoint. Starts oMLX when this pick uses it and it is down."""
         if self._mlx_uses_omlx(chosen_name):
             try:
                 self._log_info(
@@ -4810,10 +4821,13 @@ class CodingBoxApp(App):
         arg, role = self._parse_model_and_role(arg)
         arg, via_server = self._split_mlx_server_token(arg)
         prev_via = bool(getattr(self, "_mlx_via_server", False))
+        prev_force = bool(getattr(self, "_mlx_force_inprocess", False))
         if via_server is True:
             self._mlx_via_server = True
+            self._mlx_force_inprocess = False
         elif via_server is False:
             self._mlx_via_server = False
+            self._mlx_force_inprocess = True
 
         # Smart inheritance of model and backend from Model 1 if arg is empty but role is specified!
         if not arg and role is not None and slot > 1:
@@ -4872,6 +4886,7 @@ class CodingBoxApp(App):
 
         if via_server is True and chosen_backend != "mlx":
             self._mlx_via_server = prev_via
+            self._mlx_force_inprocess = prev_force
             self._log_info(
                 "[yellow]ignored `server`[/yellow] — that pick is not MLX "
                 "(Ollama already runs as a daemon)"
@@ -4912,7 +4927,7 @@ class CodingBoxApp(App):
         setattr(self, next_model_attr, chosen_name)
         setattr(self, next_role_attr, role)
 
-        # Flash / /server on: ensure oMLX is up when staging (even before /new).
+        # Most MLX picks: start oMLX now if it is not already up.
         if chosen_backend == "mlx" and self._mlx_uses_omlx(chosen_name):
             try:
                 self._mlx_endpoint_for_chosen(chosen_name)
@@ -5546,8 +5561,8 @@ class CodingBoxApp(App):
     def _cmd_launch_mlx(self, arg: str) -> None:
         """/launch <N|name|path> [server] — stage an MLX model for the next /new.
 
-        Default is in-process. Trailing `server` (or session /server on)
-        routes through oMLX so /critic auto can run in parallel.
+        MLX picks use oMLX and chat starts the server if it is down.
+        Trailing `local` forces in-process. /critic auto runs in parallel on oMLX.
         """
         raw = arg.strip()
         if not raw:
@@ -5559,8 +5574,10 @@ class CodingBoxApp(App):
         raw, via_server = self._split_mlx_server_token(raw)
         if via_server is True:
             self._mlx_via_server = True
+            self._mlx_force_inprocess = False
         elif via_server is False:
             self._mlx_via_server = False
+            self._mlx_force_inprocess = True
 
         backend_name, model_name = self._resolve_listing_arg(raw)
         if model_name is None:
@@ -5951,10 +5968,27 @@ class CodingBoxApp(App):
                 context_length=prev.context_length,
             )
         try:
-            return backend_mod.detect_backend(self._next_backend)
+            info = backend_mod.detect_backend(self._next_backend)
         except RuntimeError as e:
             self._log_error(str(e))
             return None
+        # Same share path as _start_session: Qwen3.8-27B and Flash on oMLX.
+        if info.name == "mlx" and self._mlx_uses_omlx(info.model):
+            try:
+                ep = backend_mod.ensure_omlx_server(
+                    on_status=lambda text: self._log_info(f"[dim]{text}[/dim]"),
+                )
+            except RuntimeError as e:
+                self._log_error(str(e))
+                return None
+            return backend_mod.BackendInfo(
+                name="mlx",
+                model=backend_mod.omlx_api_model_id(info.model),
+                source=info.source,
+                endpoint=ep,
+                context_length=info.context_length,
+            )
+        return info
 
     def _ensure_coder_backend_for_ask(self) -> bool:
         """Ensure `_session_backend` exists for /ask. Returns False on failure."""
@@ -6467,11 +6501,15 @@ class CodingBoxApp(App):
             eff_vlm_auto = self._vlm_critique_auto
             eff_arch_split = self._use_architect_split
             eff_arch_auto = self._architect_split_auto
+        if getattr(self, "_mlx_force_inprocess", False):
+            _omlx_status = "off"
+        else:
+            _omlx_status = "ON"
         lines = [
             "[bold cyan]── status ──[/bold cyan]",
             f"  backend (active):     {_esc(self._session_backend_info.name if self._session_backend_info else '—')}",
             f"  backend (next /new):  {_esc(self._next_backend or '(auto)')}",
-            f"  MLX via oMLX:         {'ON' if getattr(self, '_mlx_via_server', False) else 'off'}  [dim](/server on · /model N server)[/dim]",
+            f"  MLX via oMLX:         {_omlx_status}  [dim](/server on|off · /model N local)[/dim]",
             f"  model (active):       {_esc(self._session_model or '—')}",
             f"  model (next /new):    {_esc(self._next_model or '(auto-detect)')}",
             f"  LoRA (next /new):     {_esc(self._lora_status_label())}",
@@ -7109,9 +7147,9 @@ class CodingBoxApp(App):
             return "off"
         if mode == "on" or self._all_roles_enabled:
             return "ON"
-        if getattr(self, "_mlx_via_server", False):
-            return "auto (ON — /server on, oMLX parallel)"
-        return "auto (ON on oMLX / /server on, else off)"
+        if getattr(self, "_mlx_force_inprocess", False):
+            return "auto (off — /server off, in-process)"
+        return "auto (ON — MLX on oMLX, starts the server if down)"
 
     def _cmd_set_code_critic(self, arg: str) -> None:
         """/critic [on|off|auto] — read the game SOURCE after each iter.
@@ -7368,10 +7406,9 @@ class CodingBoxApp(App):
                 self._log_error(str(e))
                 self._session_done = True
                 return
-        # glm5_next cannot use in-process mlx_lm (BATTLEZ2 20260904_094928:
-        # user typed a goal because GLM was already in oMLX; session still
-        # used MLXBackend → "Model type glm5_next not supported", 0 tokens).
-        if info.name == "mlx" and backend_mod.requires_omlx_server(info.model):
+        # Flash cannot use in-process mlx_lm (BATTLEZ2 20260904_094928).
+        # Qwen3.8-27B uses the same oMLX load so other processes share it.
+        if info.name == "mlx" and self._mlx_uses_omlx(info.model):
             try:
                 # Capture before ensure — a fallback port updates the default.
                 configured = backend_mod.omlx_default_endpoint()

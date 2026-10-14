@@ -326,11 +326,24 @@ if [[ "$WAIT" != "0" && "$WAIT" != "0.0" ]]; then
   ARGS+=(--wait-for-monitor "$WAIT")
 fi
 
-exec caffeinate -dims env -u PLAYWRIGHT_BROWSERS_PATH \
-  LLM_BACKEND=mlx \
-  MLX_MODEL="$MODEL_PATH" \
-  PYTHONUNBUFFERED=1 \
-  TOKENIZERS_PARALLELISM=false \
-  "$REPO_ROOT/.venv/bin/python" "$REPO_ROOT/eval/tune_serial_loop.py" \
-  "${ARGS[@]}" \
-  2>&1 | tee -a "$LOG"
+# If the Python batch is killed (jetsam, Terminal close, Cursor crash),
+# start it again. --resume skips games that actually finished.
+while true; do
+  set +e
+  caffeinate -dims env -u PLAYWRIGHT_BROWSERS_PATH \
+    LLM_BACKEND=mlx \
+    MLX_MODEL="$MODEL_PATH" \
+    PYTHONUNBUFFERED=1 \
+    TOKENIZERS_PARALLELISM=false \
+    "$REPO_ROOT/.venv/bin/python" "$REPO_ROOT/eval/tune_serial_loop.py" \
+    "${ARGS[@]}" \
+    2>&1 | tee -a "$LOG"
+  code=${PIPESTATUS[0]}
+  set -e
+  if [[ "$code" -eq 0 ]]; then
+    echo "=== overnight ${RUN_ID} finished $(date -u +%Y-%m-%dT%H:%M:%SZ) ===" | tee -a "$LOG"
+    break
+  fi
+  echo "=== overnight ${RUN_ID} exited ${code} — restarting in 20s $(date -u +%Y-%m-%dT%H:%M:%SZ) ===" | tee -a "$LOG"
+  sleep 20
+done

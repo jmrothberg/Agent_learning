@@ -82,6 +82,8 @@ from memory import (
     CANVAS_SKELETON_V2_NAME,
     DEFAULT_SKELETON,
     DEFAULT_SKELETON_NAME,
+    JMR_CANVAS_SKELETON,
+    JMR_CANVAS_SKELETON_NAME,
     GameMemory,
     OpeningBookItem,
     Playbook,
@@ -2434,8 +2436,9 @@ class GameAgent(
             "LOCAL FIRST-BUILD CONTRACT: Plan is ACCEPTED — do NOT restate "
             "requirements or re-plan. Brief reasoning OK; first output tag "
             "must be `<html_file>` (raw tag, no ```html fence). Start the "
-            "loop: call requestAnimationFrame(loop) unconditionally after "
-            "asset load.",
+            "loop with requestAnimationFrame(loop) immediately. Do not "
+            "await loadAssets() before the loop — decoding runs in the "
+            "background.",
         ]
         n_assets = len(self._session_assets)
         n_sounds = len(self._session_sounds)
@@ -2574,6 +2577,15 @@ class GameAgent(
                     f"simulator /640: skeleton too large ({len(html)} chars) "
                     "— use default scaffold",
                 )
+            # Browser scaffolds (e.code, performance.now, Array.shift) pass
+            # Chromium and fail the mint. Start from the JMR scaffold instead.
+            from agent_memory import _JMR_COMPONENT_ILLEGAL
+            if any(tok in html for tok in _JMR_COMPONENT_ILLEGAL):
+                return (
+                    True,
+                    "simulator /640: skeleton uses a browser API the chip "
+                    "mint rejects — use the JMR scaffold",
+                )
         if not self._is_local_backend():
             return (False, "")
         if skel.source_goal is None:
@@ -2597,6 +2609,18 @@ class GameAgent(
                 f"(skeleton refs={len(refs)}, overlap={len(overlap)}, "
                 f"ratio={ratio:.2f})"
             ),
+        )
+
+    def _chip_scaffold_hit(self) -> SkeletonHit:
+        """First-build HTML for /640 and /640png.
+
+        Kept out of the skeleton pool so a browser game never retrieves it.
+        """
+        return SkeletonHit(
+            name=JMR_CANVAS_SKELETON_NAME,
+            html=JMR_CANVAS_SKELETON,
+            score=0.0,
+            source_goal=None,
         )
 
     def set_token_callback(self, cb, thinking_cb=None) -> None:
@@ -5947,13 +5971,17 @@ class GameAgent(
                 if self._skeleton_mode == "default":
                     # Force the bundled scaffold — used by tune mode so we
                     # measure the agent's reasoning, not skeleton-of-self
-                    # retrieval. Bypasses memory entirely.
-                    skel = SkeletonHit(
-                        name=DEFAULT_SKELETON_NAME,
-                        html=DEFAULT_SKELETON,
-                        score=0.0,
-                        source_goal=None,
-                    )
+                    # retrieval. Bypasses memory entirely. /640 starts from
+                    # the chip scaffold (browser canvas_basic uses e.code).
+                    if getattr(self, "_simulator_mode", False):
+                        skel = self._chip_scaffold_hit()
+                    else:
+                        skel = SkeletonHit(
+                            name=DEFAULT_SKELETON_NAME,
+                            html=DEFAULT_SKELETON,
+                            score=0.0,
+                            source_goal=None,
+                        )
                 elif self._skeleton_mode == "default_v2":
                     # Bigger bug-hardened scaffold — pre-empts focus-loss,
                     # restart-cleanup, dt-cap, DPR-resize and ~7 other
@@ -5971,12 +5999,15 @@ class GameAgent(
                     self._local_should_fallback_skeleton(skel)
                 )
                 if should_fallback:
-                    skel = SkeletonHit(
-                        name=DEFAULT_SKELETON_NAME,
-                        html=DEFAULT_SKELETON,
-                        score=0.0,
-                        source_goal=None,
-                    )
+                    if getattr(self, "_simulator_mode", False):
+                        skel = self._chip_scaffold_hit()
+                    else:
+                        skel = SkeletonHit(
+                            name=DEFAULT_SKELETON_NAME,
+                            html=DEFAULT_SKELETON,
+                            score=0.0,
+                            source_goal=None,
+                        )
                     yield self._record(AgentEvent(
                         "memory",
                         "local skeleton guard: fallback to default scaffold "
@@ -6027,10 +6058,19 @@ class GameAgent(
                 # extra snippet (k=4) and PIN the engine skeleton (game loop +
                 # buffered input) so a weak model copies a working loop instead
                 # of inventing a broken RAF/input from scratch.
-                _ensure_ids = (
-                    ["fixed-timestep-game-loop", "input-manager-buffered"]
-                    if open_domain_build else None
-                )
+                # Browser pins use performance.now and Object.create. The
+                # chip copies jmr-frame-loop + keyCode instead.
+                if open_domain_build and (
+                    getattr(self, "_simulator_mode", False)
+                    or getattr(self, "_jmr_png_mode", False)
+                ):
+                    _ensure_ids = ["jmr-frame-loop", "keyboard-input-jmr"]
+                elif open_domain_build:
+                    _ensure_ids = [
+                        "fixed-timestep-game-loop", "input-manager-buffered",
+                    ]
+                else:
+                    _ensure_ids = None
                 components_block = self._retrieve_components_block(
                     goal, stage="plan", k=4 if open_domain_build else 3,
                     ensure_ids=_ensure_ids,
@@ -6060,7 +6100,7 @@ class GameAgent(
                         ),
                         "floor": self._OPEN_DOMAIN_OUTLINE_FLOOR,
                         "components_k": 4,
-                        "pinned": ["fixed-timestep-game-loop", "input-manager-buffered"],
+                        "pinned": list(_ensure_ids or []),
                         "protect_components": True,
                     })
                 pb_kwargs = {"playbook_block": pb_block} if pb_block else {}

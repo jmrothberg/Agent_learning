@@ -137,6 +137,28 @@ def test_topdown_facing_probe_optional_for_fixed_shooters() -> None:
     )
     # Can't eval JS in pytest easily — structural check only.
     assert "if(!hasFacing&&!hasAngle&&!hasDir)returntrue;" in expr.replace(" ", "")
+
+
+def test_topdown_bullets_accept_angled_ship() -> None:
+    """A rotating ship fires along its facing, not only vy<0.
+
+    ASTEROID 20261013 matched canvas-top-down-action and failed
+    auto_shooter_bullets_move_up because shots had horizontal velocity.
+    Fixed-shooters (no player.angle) still require an upward shot.
+    """
+    recipes = _load_seeded_recipes()
+    topdown = [r for r in recipes if r.id == "canvas-top-down-action"][0]
+    bullets = next(
+        ap["expr"] for ap in (topdown.recipe.get("auto_probes") or [])
+        if ap["name"] == "auto_shooter_bullets_move_up"
+    )
+    enemies = next(
+        ap["expr"] for ap in (topdown.recipe.get("auto_probes") or [])
+        if ap["name"] == "auto_enemies_spawn_ahead_of_player"
+    )
+    assert "p.angle" in bullets
+    assert "vy<0" in bullets
+    assert "if(typeofp.angle==='number')returntrue;" in enemies.replace(" ", "")
     """canvas-grid-navigation must have a probe asserting the player
     isn't standing inside a wall cell."""
     recipes = _load_seeded_recipes()

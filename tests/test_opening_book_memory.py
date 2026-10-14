@@ -251,6 +251,28 @@ def test_opening_book_asset_recipe_execution(tmp_path: Path) -> None:
     assert checks[0]["hard"] is True
 
 
+def test_empty_assets_object_is_not_generated_art(tmp_path: Path) -> None:
+    """Vector games stub `const ASSETS = {}`. That is not a PNG sheet.
+
+    ASTEROID 20261013 stroked polygons and was hard-failed for missing drawImage.
+    """
+    html = tmp_path / "game.html"
+    html.write_text(
+        "<script>const ASSETS = {}; function draw(){ ctx.beginPath(); ctx.lineTo(1,2); ctx.stroke(); }</script>",
+        encoding="utf-8",
+    )
+    browser = LiveBrowser(headless=True)
+    checks = asyncio.run(browser._run_opening_book_recipes(
+        html,
+        [{"id": "asset-usage", "kind": "asset_audit", "recipe": {"type": "asset_usage"}}],
+        input_test={"ran": False},
+        canvas_info=None,
+        frozen=None,
+    ))
+    assert checks[0]["ok"] is True
+    assert checks[0]["hard"] is False
+
+
 def test_opening_book_sidecars_architect_backend_no_name_error(tmp_path: Path) -> None:
     """Regression: sidecar path used PLAYTESTS_FILENAME without importing it."""
     from ollama_io import StreamResult

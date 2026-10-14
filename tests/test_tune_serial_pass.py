@@ -79,6 +79,17 @@ def test_coder_stdout_ignores_closed_pipe(monkeypatch):
     assert token_pipe.writes == 1
 
 
+def test_partial_html_is_not_delivered_for_resume(tmp_path: Path):
+    """A crash that left only game.html must be run again, not skipped."""
+    out = tmp_path / "01_game.html"
+    out.write_text("x" * 600, encoding="utf-8")
+    assert loop._is_game_delivered(out) is False
+
+    best = tmp_path / "01_game.best.html"
+    best.write_text("x" * 600, encoding="utf-8")
+    assert loop._is_game_delivered(out) is True
+
+
 def test_counts_as_pass_requires_best_or_iter_ok(tmp_path: Path):
     out = tmp_path / "01_game.html"
     out.write_text("x" * 600, encoding="utf-8")

@@ -87,6 +87,21 @@ def test_bare_model_server_is_server_on(monkeypatch):
     assert app._mlx_via_server is True
 
 
+def test_mlx_picks_use_omlx_until_server_off(monkeypatch):
+    app = _bare_app()
+    monkeypatch.setattr(
+        "backend.ensure_omlx_server", lambda **_k: "http://127.0.0.1:8001",
+    )
+    qwen = "/Users/me/MLX_Models/Qwen3.8-27B-mxfp8"
+    mini = "/Users/me/MLX_Models/MiniCPM-V-4.7-35B-A3B-mxfp8"
+    assert app._mlx_uses_omlx(qwen) is True
+    assert app._mlx_uses_omlx(mini) is True
+    app._cmd_set_mlx_server("off")
+    assert app._mlx_uses_omlx(mini) is False
+    app._cmd_set_mlx_server("on")
+    assert app._mlx_uses_omlx(mini) is True
+
+
 def test_help_server_topic_is_simple():
     import tui_help
 

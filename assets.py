@@ -3426,14 +3426,26 @@ _JMR_SPR_SHIM = """<script data-host="chrome">
 // PNG list make_artx.py reads. Index N is jmr:spr:N.
 window.JMR_SPR = [__JMR_SPR_LIST__];
 (function () {
-  var d = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, "src");
-  Object.defineProperty(HTMLImageElement.prototype, "src", {
-    get: function () { return d.get.call(this); },
-    set: function (v) {
-      var m = /^jmr:spr:(\\d+)$/.exec(v);
-      d.set.call(this, m ? window.JMR_SPR[+m[1]] : v);
-    }
-  });
+  // Save the browser setter the first time we run. A model shim that
+  // only stores this._src never decodes the PNG: fillText still draws
+  // the score, blitSpr draws nothing (black playfield).
+  if (!window.__jmrNativeSrc) {
+    window.__jmrNativeSrc = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, "src");
+  }
+  if (!window.__jmrNativeImage) window.__jmrNativeImage = window.Image;
+  window.Image = window.__jmrNativeImage;
+  var d = window.__jmrNativeSrc;
+  if (!d || !d.set) return;
+  try {
+    Object.defineProperty(HTMLImageElement.prototype, "src", {
+      configurable: true,
+      get: function () { return d.get.call(this); },
+      set: function (v) {
+        var m = /^jmr:spr:(\\d+)$/.exec(v);
+        d.set.call(this, m ? window.JMR_SPR[+m[1]] : v);
+      }
+    });
+  } catch (e) {}
   var list = window.JMR_SPR || [];
   var n = 0;
   var need = list.length;
@@ -3453,6 +3465,10 @@ window.JMR_SPR = [__JMR_SPR_LIST__];
 """
 
 _JMR_SPR_ASSIGN = re.compile(r"window\.JMR_SPR\s*=\s*\[(.*?)\]", re.S)
+
+# Model data-host=chrome blocks. Mint strips them; Chromium runs them.
+# Keep only the harness shim (comment + native d.set.call).
+_SCRIPT_BLOCK_RE = re.compile(r"<script([^>]*)>([\s\S]*?)</script>", re.I)
 
 # True when Chrome maps jmr:spr:N via HTMLImageElement.prototype.src.
 # A bare window.JMR_SPR = [...] from the model is NOT enough — without this
@@ -3516,6 +3532,25 @@ def _ensure_jmr_blit_helper(
     return html
 
 
+def _strip_foreign_jmr_chrome_shims(html: str) -> str:
+    """Drop model data-host=chrome scripts. Keep the harness PNG shim.
+
+    The chip never runs data-host=chrome. In Chromium a model copy often
+    replaces Image.src with a setter that does not call the original, so
+    the PNG never decodes. fillText (score, lives) still paints. blitSpr
+    paints nothing, which is a black playfield.
+    """
+    def repl(m: re.Match) -> str:
+        attrs = m.group(1) or ""
+        if not re.search(r'data-host\s*=\s*["\']chrome["\']', attrs, re.I):
+            return m.group(0)
+        body = m.group(2) or ""
+        if "PNG list make_artx.py reads" in body and "d.set.call" in body:
+            return m.group(0)
+        return ""
+    return _SCRIPT_BLOCK_RE.sub(repl, html)
+
+
 def ensure_jmr_spr_shim(
     html: str,
     png_names: list[str],
@@ -3533,9 +3568,13 @@ def ensure_jmr_spr_shim(
 
     Also injects blitSpr + S0..Sn (game script, not chrome-only) so packed
     STEM-N.png strips crop with 9-arg drawImage.
+
+    Model chrome shims are removed first. They run before this shim and
+    steal Image.src; wrapping that broken setter still leaves naturalWidth 0.
     """
     if not html or not png_names:
         return html
+    html = _strip_foreign_jmr_chrome_shims(html)
     inner = ", ".join(f'"{n}"' for n in png_names)
     # Inject full shim whenever the src interceptor is missing (even if a
     # JMR_SPR list is already present). List-only refresh was the black-screen
@@ -3616,7 +3655,10 @@ def render_jmr_png_paths_block(
         "Never fillRect the whole canvas black then blit a splash (HDMI wipe).",
         "",
         "Put this Chrome-only manifest BEFORE the game <script> (mint strips",
-        "data-host=chrome). Copy the interceptor from the seed / keep this list:",
+        "data-host=chrome). Do NOT replace window.Image or",
+        "HTMLImageElement.prototype.src — a setter that does not call the",
+        "original leaves the PNG unloaded (black playfield, score still draws).",
+        "The harness shim maps jmr:spr:N. Keep this list:",
         f'  window.JMR_SPR = [{inner}];',
         "",
         "Sheets (frame index = 9-arg sx / cellW):",

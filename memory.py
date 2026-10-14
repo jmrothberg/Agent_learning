@@ -486,6 +486,69 @@ DEFAULT_SKELETON = """<!DOCTYPE html>
 </body></html>
 """
 
+# /640 and /640png first-build scaffold. The browser skeletons use e.code
+# and performance.now, which Chromium accepts and the JS-CSS mint rejects.
+# Not registered in the skeleton pool, so browser retrieval never picks it.
+JMR_CANVAS_SKELETON_NAME = "canvas_jmr_basic.html"
+JMR_CANVAS_SKELETON = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Game</title>
+<style>html,body{margin:0;background:#000}canvas{background:#111;display:block}</style>
+</head><body>
+<canvas id="c" width="640" height="480"></canvas>
+<script>
+var canvas = document.getElementById("c");
+var ctx = canvas.getContext("2d");
+var keys = {l:0, r:0, u:0, d:0, f:0};
+var frameN = 0;
+var state = {player:{x:320, y:400, w:16, h:16}, score:0, over:0};
+window.state = state;
+function onKey(e, down) {
+  var k = e.keyCode || 0;
+  if (k === 27) return;
+  if (k === 37 || e.key === "ArrowLeft") keys.l = down;
+  if (k === 39 || e.key === "ArrowRight") keys.r = down;
+  if (k === 38 || e.key === "ArrowUp") keys.u = down;
+  if (k === 40 || e.key === "ArrowDown") keys.d = down;
+  if (k === 32 || e.key === " ") keys.f = down;
+}
+window.addEventListener("keydown", function(e) { onKey(e, 1); });
+window.addEventListener("keyup", function(e) { onKey(e, 0); });
+function update() {
+  if (state.over) return;
+  var p = state.player;
+  if (keys.l) p.x = p.x - 2;
+  if (keys.r) p.x = p.x + 2;
+  if (keys.u) p.y = p.y - 2;
+  if (keys.d) p.y = p.y + 2;
+  if (p.x < 0) p.x = 0;
+  if (p.y < 0) p.y = 0;
+  if (p.x > 624) p.x = 624;
+  if (p.y > 464) p.y = 464;
+}
+function draw() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = "#111";
+  ctx.fillRect(0, 0, 640, 480);
+  var p = state.player;
+  ctx.fillStyle = "#3cf";
+  ctx.fillRect(p.x, p.y, p.w, p.h);
+  ctx.fillStyle = "#fff";
+  ctx.fillText("SCORE " + state.score, 8, 16);
+}
+function frame() {
+  frameN = frameN + 1;
+  update();
+  draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+window.game = {reset: function() {
+  state.player.x = 320; state.player.y = 400; state.score = 0; state.over = 0;
+}};
+</script>
+</body></html>
+"""
+
 
 # Larger, bug-hardened scaffold. Pre-empts ~half of the playbook bullets
 # by baking the right pattern into the seed itself, so the model only has
@@ -3301,7 +3364,15 @@ def find_best_visual_playtest(
             diag["fps_code_override"] = winner.id
             return winner, diag
         return None, diag
-    scored.sort(key=lambda t: (-t[0], t[2].id))  # highest score, then stable
+    # Highest score wins. On a tie, the generic backup
+    # (canvas-controllable-player) loses to a specific recipe — it is
+    # documented as lowest-precision. Alphabetical id alone made a dig/tunnel
+    # goal land on the backup when both scored 4 (Mr. Do library row).
+    scored.sort(key=lambda t: (
+        -t[0],
+        1 if t[2].id == "canvas-controllable-player" else 0,
+        t[2].id,
+    ))
     diag["top_candidates"] = [
         {"id": r.id, "score": round(s, 2), "via": via}
         for (s, _m, r, via) in scored[:3]

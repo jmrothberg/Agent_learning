@@ -364,9 +364,10 @@ class PromptBuildingMixin:
                     rel = path
                 asset_lines.append(f"- {name}: ./{rel}")
             asset_lines.append(
-                "Load with `new Image()` + `await img.decode()`, then "
-                "draw with `ctx.drawImage(img, x, y, w, h)`. Procedural "
-                "drawing for entities covered above IS A REGRESSION."
+                "Start requestAnimationFrame immediately; loadAssets() runs "
+                "in the background (await img.decode() inside it, never "
+                "before the loop). Draw with `ctx.drawImage` / sprite(key). "
+                "Procedural drawing for entities covered above IS A REGRESSION."
             )
             lines += asset_lines + [""]
 

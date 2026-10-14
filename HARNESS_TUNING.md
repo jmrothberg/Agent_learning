@@ -97,6 +97,26 @@ changes (see `tests/test_fix_round.py` source-grep guards, `tests/test_assets.py
 
 **Burned on run_18:** (1) batch in Cursor → `chrome-mac-x64` Playwright fail ×11; (2) asked human to paste; (3) watcher via `nohup` so Cursor showed nothing. Fix = Terminal launcher + visible Cursor Shell watcher.
 
+### 3c. Do not stop until the user says stop
+
+Run games. Test them in Chromium and, for `/640` `/640png`, on the PYTHON runtime. Fix the harness from those failures. Use the GPU for the model and the CPUs for the browser and the chip runtime. Do not sit idle. Do not arm a sleep that only wakes to think. The batch is `eval/overnight.sh` in Terminal.app plus the Cursor watcher. If that Python process dies, `overnight.sh` starts it again after 20s; `--resume` skips a game only when `.best.html` exists or the last iter passed. A partial `.html` from a crash is run again. Stop only when the user says stop.
+
+### 3d. Prove `/640png` on the PYTHON runtime
+
+A Cursor agent improving this harness keeps going until the user says stop. Browser games and `/640` / `/640png` both move. Game titles stay in `memory/*.jsonl`. Mechanism stays in Python.
+
+Chromium green is not chip-green. Before changing a JMR instruction, compile and run the snippet on the PYTHON functional model (not Vivado, not dukpy):
+
+```bash
+cd /Users/jonathanrothberg/JMR-JS-CSS-FPGA-COMPUTER
+# FPGA repo must be sys.path[0] so `import tools` is that repo, not Agent_learning/tools.py
+python3 -c "from functional_model.machine import Machine; ..."
+```
+
+`Machine._run_html_bytecode(html)` then `frame_tick()`. `storage/*.HTML` titles (INVF, DNKF, MRDOF, PACFAST, …) drew on 2026-10-12. `ARTSCAN` / `COMPILER` are toolchain programs and stay blank. The harness scaffold `JMR_CANVAS_SKELETON` draws a player rect and HUD text. `blitSpr` + quoted `jmr:spr:0` plus a sibling `.ARTX` draws sprite pixels.
+
+Host mint (`tools/compile_js.py`) measured that night: **CompileError** on `Array.shift`, `.every`, `.some`, `Math.sin` / `cos` / `pow` / `hypot`, `charAt`. **Runs** on `includes`, `unshift`, `.find`, `Math.round` (`1.6` → `2`), `e.key`, `keyCode`, and `e.code`. **VM fault** on `performance.now`, `Object.create`, and `isFinite` (native id 55). `Object.keys` / `for…in` run on PYTHON and still fault FPGA-SIM (`fsite=4183`) — keep them out of chip titles. Do not teach a wall the mint no longer rejects.
+
 ### 4. Do not
 
 - Patch **`games/*.html`** as source (artifacts only).
@@ -443,6 +463,8 @@ Per-run scores live in **`eval/OPERATIONS.md`** (run_06 snapshot). Mid-batch har
 | Phase 5 media A/B (optional) | `AGENT_SPRITE_SHEET_LORA` / `AGENT_SA3_SMALL_SFX` — off by default; missing weights fall back | `assets.py`, `sounds.py`, `DEV.md` |
 | run_20 playtest: Dig Dug too fast; Frogger HUD 3/state 1; Zelda no enemies/left flip/Controls; Centipede top-only mushrooms + solid-red death; Battlezone no fire / reversed move; Pac-Man maze+ghosts ignore walls / fancy ghosts; DK start at top / flat floors | Class playbook+outline traps + recipe auto_probes/`ensure_ids` (`when_any` so Pac-Man maze pins do not hit Dig Dug); title sentences only in `prompt_library` | `memory/playbook.jsonl`, outlines, `visual_playtests.jsonl`, `prompt_library.jsonl`; `tests/test_run20_playtest_memory.py` |
 | Policy pin: FPGA-only rule violations (`Object.keys`, `performance.now`, `"jmr:spr:"+i`, splice return, unicode `fillText`) must never fail Chrome-working code | Regression test only — harness already teach-only | `tests/test_simulator_mode.py::test_fpga_only_rule_violations_never_fail_micro_probes` |
+| qwen3.8-27B lean prompt + first-build nudge said `await img.decode()` / “RAF after asset load”, so the frame loop waited on every PNG (frozen canvas, undrawn art). 3D plan nudge offered babylon.js beside three.js. `/640png` hard rules omitted chip walls that mint-fail: `Array.shift`/`includes`, per-frame `{x,y}`, HUD `fillText` inside `setTransform`, `isFinite` | Lean asset/sound/video guidelines, HARD_RULES, plan text, draw contract, and the local first-build nudge start RAF first and draw PNGs with `sprite()`. 3D nudge is three.js only, with file:// textures and yaw copied into the camera. Critic role (it does not see the coder prompt) gets those media checks on browser games and the chip walls on `/640` `/640png`. Playbook `jmr-v1-runtime-walls` pinned on both JMR modes. Still teach-only — do not microprobe-fail Chromium | `prompts_v1.py`, `agent.py`, `agent_prompts.py`, `agent_critic.py`, `agent_memory.py`, `memory/plan_nudges.jsonl`, `memory/playbook.jsonl`; tests `test_qwen38_lean_prompt_starts_raf_before_asset_decode`, `test_code_critic_prompt_splits_browser_media_from_jmr_walls`, `test_jmr_png_first_build_asks_for_jmr_spr` |
+| `/640` and `/640png` first-build pasted the browser component library (`e.code`, `performance.now`, `Array.shift`, `Object.assign`) and playbook `ecode-not-ekey` / `draw-generated-sprites-not-boxes` (sprite + ASSETS). Chromium runs that code; the mint does not | On those modes only, drop chip-illegal component code and those playbook ids, then pin `jmr-frame-loop` + `keyboard-input-jmr`. Legal twins live in `components.jsonl` (`projectile-pool-jmr`, `chase-one-step-jmr`, `seeded-lcg-jmr`). A retrieved skeleton that uses `e.code` or `performance.now` is replaced by `JMR_CANVAS_SKELETON` (not in the browser skeleton pool). Browser retrieval is unchanged | `agent_memory.py`, `agent.py`, `memory.py`, `memory/components.jsonl`; tests `test_jmr_component_block_drops_chip_illegal_snippets`, `test_jmr_playbook_drops_browser_ecode_bullet`, `test_simulator_falls_back_browser_api_skeleton` |
 | Attack limb points away from opponent | Code EXTRA flip — no VLM (`attack-sprite-wrong-direction-flip-in-code`) | `memory/playbook.jsonl` |
 | Versus P2 incomplete pose roster → MISSING boxes | Same pose suffixes both prefixes (`versus-fighter-sprite-prefix`) | `memory/playbook.jsonl` |
 | Sprite opaque when figure touches image edge | Chroma: near-white 5/8 + border-majority fallback | `assets.py`, `tests/test_tier1_2.py` |

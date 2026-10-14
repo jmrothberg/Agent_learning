@@ -33,6 +33,14 @@ _STAMP = re.compile(r"\d{8}T\d{6}Z")
 _gen_lock = threading.Lock()
 _gen_proc: subprocess.Popen | None = None
 _gen_stop = threading.Event()
+# Base-model chat. One process stays loaded so the next message is decode speed.
+_chat_lock = threading.Lock()
+_chat_turn = threading.Lock()
+_chat_proc: subprocess.Popen | None = None
+_chat_model = ""
+_chat_ready = False
+_chat_q: queue.Queue | None = None
+_chat_err: list[str] = []
 
 
 def _python_script_pids(script_name: str) -> list[int]:
@@ -543,6 +551,315 @@ def stop_generation() -> dict:
         return {"ok": True, "stopped": False}
     _kill_gen(proc)
     return {"ok": True, "stopped": True}
+
+
+def _weights_complete(path: Path) -> bool:
+    """True when the safetensors are on disk and no shard is still downloading."""
+    if not (path / "config.json").is_file():
+        return False
+    weights = [item for item in path.glob("*.safetensors") if item.stat().st_size > 100_000]
+    if not weights:
+        return False
+    cache = path / ".cache" / "huggingface" / "download"
+    if cache.is_dir() and any(cache.glob("*.incomplete")):
+        return False
+    index = path / "model.safetensors.index.json"
+    if not index.is_file():
+        return True
+    try:
+        shards = set((json.loads(index.read_text(encoding="utf-8")).get("weight_map") or {}).values())
+    except (OSError, json.JSONDecodeError):
+        return True
+    for name in shards:
+        shard = path / name
+        if not shard.is_file() or shard.stat().st_size < 1000:
+            return False
+    return True
+
+
+def _chat_models() -> list[dict]:
+    """Every loadable folder under ~/MLX_Models. The chat panel uses this before training."""
+    root = Path.home() / "MLX_Models"
+    if not root.is_dir():
+        return []
+    models = []
+    for path in sorted(root.iterdir(), key=lambda item: item.name.lower()):
+        if not path.is_dir() or path.name.startswith(".") or path.name.startswith("html_"):
+            continue
+        if not re.fullmatch(r"[A-Za-z0-9._+-]+", path.name):
+            continue
+        if not (path / "config.json").is_file():
+            continue
+        ready = _weights_complete(path)
+        label = path.name if ready else f"{path.name} (still downloading)"
+        models.append({"id": path.name, "label": label, "path": str(path), "ready": ready})
+    return models
+
+
+def _resolve_chat_model(model_id: str) -> tuple[str | None, str | None]:
+    for item in _chat_models():
+        if item["id"] == (model_id or "").strip():
+            if not item["ready"]:
+                return None, "That model is still downloading."
+            return item["path"], None
+    return None, "Pick a model from the list."
+
+
+def _chat_script() -> str:
+    # One JSON line in, token lines out. The process stays up across messages.
+    return (
+        "import json, sys, time\n"
+        "from mlx_vlm import load, stream_generate\n"
+        "from mlx_vlm.prompt_utils import apply_chat_template\n"
+        "from mlx_vlm.utils import load_config\n"
+        "def emit(obj):\n"
+        "    sys.stdout.write(json.dumps(obj) + '\\n')\n"
+        "    sys.stdout.flush()\n"
+        "real_out = sys.stdout\n"
+        "sys.stdout = sys.stderr\n"
+        "try:\n"
+        "    model, processor = load(sys.argv[1])\n"
+        "    config = load_config(sys.argv[1])\n"
+        "except Exception as exc:\n"
+        "    sys.stdout = real_out\n"
+        "    emit({'error': str(exc)[:1500]})\n"
+        "    raise SystemExit(1)\n"
+        "sys.stdout = real_out\n"
+        "emit({'status': 'ready'})\n"
+        "for line in sys.stdin:\n"
+        "    line = line.strip()\n"
+        "    if not line:\n"
+        "        continue\n"
+        "    try:\n"
+        "        req = json.loads(line)\n"
+        "        messages = req.get('messages') or []\n"
+        "        max_tokens = int(req.get('max_tokens') or 256)\n"
+        "        t0 = time.perf_counter()\n"
+        "        prompt = apply_chat_template(processor, config, messages, num_images=0)\n"
+        "        first = None\n"
+        "        last = None\n"
+        "        for gen in stream_generate(model, processor, prompt, image=None,\n"
+        "                                   max_tokens=max_tokens, temperature=0.7):\n"
+        "            text = getattr(gen, 'text', '') or ''\n"
+        "            if text and first is None:\n"
+        "                first = time.perf_counter()\n"
+        "            last = gen\n"
+        "            payload = {\n"
+        "                'prompt_tps': round(float(getattr(gen, 'prompt_tps', 0) or 0), 1),\n"
+        "                'generation_tps': round(float(getattr(gen, 'generation_tps', 0) or 0), 1),\n"
+        "                'prompt_tokens': int(getattr(gen, 'prompt_tokens', 0) or 0),\n"
+        "                'generation_tokens': int(getattr(gen, 'generation_tokens', 0) or 0),\n"
+        "                'peak_memory': round(float(getattr(gen, 'peak_memory', 0) or 0), 2),\n"
+        "            }\n"
+        "            if first is not None:\n"
+        "                payload['ttft_s'] = round(first - t0, 3)\n"
+        "            if text:\n"
+        "                payload['t'] = text\n"
+        "            emit(payload)\n"
+        "        done = {'done': True}\n"
+        "        if last is not None:\n"
+        "            done.update({\n"
+        "                'prompt_tps': round(float(getattr(last, 'prompt_tps', 0) or 0), 1),\n"
+        "                'generation_tps': round(float(getattr(last, 'generation_tps', 0) or 0), 1),\n"
+        "                'prompt_tokens': int(getattr(last, 'prompt_tokens', 0) or 0),\n"
+        "                'generation_tokens': int(getattr(last, 'generation_tokens', 0) or 0),\n"
+        "                'peak_memory': round(float(getattr(last, 'peak_memory', 0) or 0), 2),\n"
+        "                'ttft_s': round((first or time.perf_counter()) - t0, 3),\n"
+        "            })\n"
+        "        emit(done)\n"
+        "    except Exception as exc:\n"
+        "        emit({'error': str(exc)[:1500]})\n"
+    )
+
+
+def _chat_fail(err_box: list[str], fallback: str) -> str:
+    text = (err_box[-1] if err_box else fallback).strip() or fallback
+    if "parameters not in model" in text or text.count("vision_tower") > 2:
+        return text.split("\n", 1)[0][:300]
+    return text[-1500:]
+
+
+def stop_chat() -> dict:
+    """Unload the chat model. The next message loads it again."""
+    global _chat_proc, _chat_ready
+    with _chat_lock:
+        proc = _chat_proc
+        _chat_ready = False
+        _chat_proc = None
+    if proc is None or proc.poll() is not None:
+        return {"ok": True, "stopped": False}
+    _kill_gen(proc)
+    return {"ok": True, "stopped": True}
+
+
+def _ensure_chat(path: str) -> str | None:
+    """Load path if it is not already the resident model. None means ready."""
+    global _chat_proc, _chat_model, _chat_ready, _chat_q, _chat_err
+    with _chat_lock:
+        if (_chat_proc is not None and _chat_proc.poll() is None
+                and _chat_ready and _chat_model == path):
+            return None
+        if _chat_proc is not None and _chat_proc.poll() is None:
+            _kill_gen(_chat_proc)
+        err_box: list[str] = []
+        line_q: queue.Queue = queue.Queue()
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        proc = subprocess.Popen(
+            [_chat_python(), "-c", _chat_script(), path],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            start_new_session=True,
+            env=env,
+        )
+        _chat_proc = proc
+        _chat_model = path
+        _chat_ready = False
+        _chat_q = line_q
+        _chat_err = err_box
+
+        def drain_out() -> None:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                line_q.put(line)
+            line_q.put(None)
+
+        def drain_err() -> None:
+            data = proc.stderr.read() if proc.stderr is not None else ""
+            if data:
+                err_box.append(data[-4000:])
+
+        threading.Thread(target=drain_out, daemon=True).start()
+        threading.Thread(target=drain_err, daemon=True).start()
+    # Wait outside the lock so Stop can unload this process.
+    deadline = time.time() + 900
+    while time.time() < deadline:
+        try:
+            line = line_q.get(timeout=1)
+        except queue.Empty:
+            if proc.poll() is not None:
+                return _chat_fail(err_box, "The model process exited while loading.")
+            continue
+        if line is None:
+            return _chat_fail(err_box, "The model process exited while loading.")
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if msg.get("error"):
+            return str(msg["error"])[:1500]
+        if msg.get("status") == "ready":
+            with _chat_lock:
+                if _chat_proc is proc:
+                    _chat_ready = True
+                    return None
+            return "The model was unloaded while it was loading."
+    _kill_gen(proc)
+    with _chat_lock:
+        if _chat_proc is proc:
+            _chat_ready = False
+            _chat_proc = None
+    return "The model was still loading after 15 minutes."
+
+
+def _clean_messages(raw: list) -> list[dict]:
+    cleaned = []
+    for item in raw[-40:]:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "")
+        if role not in ("system", "user", "assistant"):
+            continue
+        content = str(item.get("content") or "").strip()
+        if not content:
+            continue
+        cleaned.append({"role": role, "content": content[:8000]})
+    return cleaned
+
+
+def stream_chat(handler: BaseHTTPRequestHandler, model_id: str, messages: list, max_tokens: int) -> None:
+    """Stream one chat turn. The model process is reused for the next turn."""
+    if not _chat_turn.acquire(blocking=False):
+        handler._send(200, (json.dumps({"error": "A reply is already running."}) + "\n").encode(),
+                      "application/x-ndjson; charset=utf-8")
+        return
+    try:
+        _stream_chat_locked(handler, model_id, messages, max_tokens)
+    finally:
+        _chat_turn.release()
+
+
+def _stream_chat_locked(handler: BaseHTTPRequestHandler, model_id: str, messages: list, max_tokens: int) -> None:
+    path, err = _resolve_chat_model(model_id)
+    if err or not path:
+        handler._send(200, (json.dumps({"error": err or "That model was not found."}) + "\n").encode(),
+                      "application/x-ndjson; charset=utf-8")
+        return
+    turns = _clean_messages(messages)
+    if not turns or turns[-1]["role"] != "user":
+        handler._send(200, (json.dumps({"error": "Type a message first."}) + "\n").encode(),
+                      "application/x-ndjson; charset=utf-8")
+        return
+    handler.send_response(200)
+    handler.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+    handler.send_header("Cache-Control", "no-store")
+    handler.end_headers()
+
+    def send(obj: dict) -> bool:
+        try:
+            handler.wfile.write((json.dumps(obj) + "\n").encode())
+            handler.wfile.flush()
+            return True
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return False
+
+    if not send({"status": "loading"}):
+        return
+    t_load = time.perf_counter()
+    load_err = _ensure_chat(path)
+    if load_err:
+        send({"error": load_err})
+        return
+    if not send({"status": "loaded", "load_s": round(time.perf_counter() - t_load, 2)}):
+        return
+    max_tokens = max(16, min(int(max_tokens or 256), 16000))
+    with _chat_lock:
+        proc = _chat_proc
+        line_q = _chat_q
+        if proc is None or proc.poll() is not None or proc.stdin is None or line_q is None:
+            send({"error": "The model is not loaded."})
+            return
+        try:
+            proc.stdin.write(json.dumps({"messages": turns, "max_tokens": max_tokens}) + "\n")
+            proc.stdin.flush()
+        except (BrokenPipeError, OSError):
+            send({"error": "The model process closed."})
+            return
+    deadline = time.time() + 600
+    while time.time() < deadline:
+        try:
+            line = line_q.get(timeout=1)
+        except queue.Empty:
+            if proc.poll() is not None:
+                send({"error": _chat_fail(_chat_err, "The model process exited.")})
+                return
+            continue
+        if line is None:
+            send({"error": _chat_fail(_chat_err, "The model process exited.")})
+            return
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not send(msg):
+            return
+        if msg.get("done") or msg.get("error"):
+            return
+    send({"error": "That reply ran longer than 10 minutes and was stopped."})
+    stop_chat()
 
 
 def stream_test(handler: BaseHTTPRequestHandler, prompt: str, max_tokens: int, which: str) -> None:
@@ -1059,6 +1376,8 @@ def status() -> dict:
         "epoch_rows": rows_this,
         "epoch_days": epoch_days,
         "checkpoints": checkpoints,
+        # Local MLX folders the chat panel can load before a fine-tune starts.
+        "chat_models": _chat_models(),
         **_control(),
     }
 
@@ -1104,6 +1423,16 @@ class Handler(BaseHTTPRequestHandler):
             body = hold_training()
         elif path == "/resume":
             body = resume_training()
+        elif path == "/stop-chat":
+            body = stop_chat()
+        elif path == "/chat":
+            stream_chat(
+                self,
+                str(payload.get("model") or ""),
+                payload.get("messages") if isinstance(payload.get("messages"), list) else [],
+                int(payload.get("max_tokens") or 256),
+            )
+            return
         elif path == "/test":
             stream_test(
                 self,

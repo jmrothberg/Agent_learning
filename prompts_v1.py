@@ -180,9 +180,11 @@ SOUNDS_FORMAT = FormatSpec(
     ],
     guidelines_small=[
         "EMIT <sounds> for audible events (firing, hits, pickups, jumps) "
-        "or looping music. Load each returned OGG via `new Audio(path)` + "
-        "`.play()` (needs a user gesture first). Same `name` mid-session "
-        "re-renders that OGG in place.",
+        "or looping music. Load each returned OGG with `new Audio(exactPath)` "
+        "— use the path the harness printed, do not invent a filename. "
+        "Call AudioContext.resume() or audio.play() inside the first "
+        "keydown/pointerdown (autoplay is blocked until a gesture). "
+        "Same `name` mid-session re-renders that OGG in place.",
         "Entry {name, prompt, duration?, loop?}: SFX 0.2-1.5s; looping "
         "music 8-12s with \"loop\":true. Keep prompts short + audio-"
         "descriptive. Stock names jump/pickup/hit/win/lose/click/laser/"
@@ -231,9 +233,9 @@ VIDEOS_FORMAT = FormatSpec(
         "\"image\":\"<key-art asset name>\" so the clip matches your art; "
         "the prompt describes MOTION, not the still.",
         "WIRING: ONE absolutely-positioned muted <video> overlay over the "
-        "canvas (loader returned in the first-build prompt). Any key skips; "
-        "every failure path (missing file, autoplay block, onended/onerror) "
-        "MUST continue the game — a cutscene can never stall it.",
+        "canvas, src = the exact MP4 path the harness returned. Any key "
+        "skips; onended AND onerror call the same start/reset that enters "
+        "play — a missing file must not stall the game.",
     ],
 )
 
@@ -364,12 +366,17 @@ ASSETS_FORMAT = FormatSpec(
     ],
     guidelines_small=[
         "EMIT <assets> for any canvas game with visual entities the player "
-        "sees (characters, enemies, projectiles, terrain). Load each "
-        "returned PNG via `new Image()` + `await img.decode()`. Match the "
-        "ART STYLE to the goal (pixel-art only if the goal asks for retro). "
-        "Transparent backgrounds. Same `name` mid-session re-renders in "
-        "place; do NOT replace a sprite with procedural drawing on an "
-        "art-change request.",
+        "sees (characters, enemies, projectiles, terrain). Start "
+        "requestAnimationFrame immediately; loadAssets() runs in the "
+        "background and sets window._assetsReady=true when decodes finish "
+        "— do not await it before the loop. Draw with sprite(key)/drawImage; "
+        "a steady-state fillRect for an entity that has a PNG is a failure "
+        "(magenta MISSING box only until the image is ready). three.js must "
+        "not TextureLoader a relative file:// PNG — use the harness path "
+        "(data-URL or the injected loader). Match the ART STYLE to the goal "
+        "(pixel-art only if the goal asks for retro). Transparent backgrounds. "
+        "Same `name` mid-session re-renders in place; do NOT replace a sprite "
+        "with procedural drawing on an art-change request.",
         "ANIMATION: seed every motion frame from the idle base with "
         "`\"from_image\":\"<entity>_idle\"` + `\"strength\":0.5-0.6` and a "
         "SHORT prompt naming the moved part ('left leg forward'). Below "
@@ -601,8 +608,12 @@ HARD_RULES: list[str] = [
     "probes even when the game works.",
     # Added 2026-07-01 — harness asset-settle poll (tools.py) waits on
     # window._assetsReady before sampling drawImage events.
-    "After loadAssets() finishes (every Image decode/onload), set "
-    "`window._assetsReady = true` so the harness knows decoding is done.",
+    # 2026-10-12 — qwen3.8 lean prompts used to say only "await img.decode()",
+    # so the first build blocked RAF until every PNG finished (frozen canvas
+    # / ASSETS_LOADED_BUT_UNDRAWN). Start the loop first; decode in background.
+    "Start requestAnimationFrame before loadAssets() returns (decode in "
+    "the background). When every Image onload finishes, set "
+    "`window._assetsReady = true`.",
     # Added 2026-05-25 from OpenAI Codex review. Prevents the `probes_only` /
     # `media_only` `no_usable_code` failure shape. Tag names omitted so the
     # small-class prompt-size + drops-optional-tags asserts still hold.
@@ -633,13 +644,19 @@ HARD_RULES_SIMULATOR: list[str] = [
     "HUD/grid/range rings may use plain fillRect.",
     "Drive frames with requestAnimationFrame. Keys: read e.key AND keyCode "
     "(37/39/38/40/32/13). Do not steal Esc (machine BREAK).",
-    "Math: floor, abs, min, max, random, sqrt (+ Math.PI). No sin/cos/"
-    "atan2/round (shim round). No Object.keys / for…in. No negative "
+    "Math: floor, abs, min, max, random, sqrt, round (+ Math.PI). "
+    "Mint CompileError: sin/cos/atan2/pow. No Object.keys / for…in "
+    "(PYTHON runs them; FPGA-SIM faults). No negative "
     "setTransform/scale mirror — use L/R art or unmirrored draw.",
-    "Reuse one mutable object per entity; no per-tick maze BFS/flood; "
-    "≤16 locals per function. Chromium is NOT the chip: do not use the "
-    "return of arr.splice (FPGA is undefined — copy-down the tail); no "
-    "Object.create / performance.now / unicode fillText.",
+    "Reuse one mutable object per entity (no fresh {x,y} each frame — "
+    "heap fault); no per-tick maze BFS/flood; ≤16 locals per function. "
+    "Mint CompileError: Array.shift, .every, .some. includes and unshift "
+    "run. Clock: frame counter or Date.now(). performance.now, isFinite, "
+    "and Object.create fault the VM at run. "
+    "HUD fillText only after setTransform identity (8x8 font ignores "
+    "world scale). Chromium is NOT the chip: do not use the return of "
+    "arr.splice (FPGA is undefined — copy-down the tail); no "
+    "Object.create / unicode fillText. No gradients.",
     "Expose `window.state = state` and `window.game = { reset }` for probes.",
     "Phase A: <plan>/<criteria>/<probes> only (no media tags). Phase B: "
     "complete <html_file> then <patch>. Do not emit <assets>/<sounds>/<videos>.",
@@ -667,8 +684,9 @@ HARD_RULES_JMR_PNG: list[str] = [
     "32-48, never 16-24.",
     "Drive frames with requestAnimationFrame. Keys: read e.key AND keyCode "
     "(37/39/38/40/32/13). Do not steal Esc (machine BREAK).",
-    "Math: floor, abs, min, max, random, sqrt (+ Math.PI). No sin/cos/"
-    "atan2/round (shim round). No Object.keys / for…in. No negative "
+    "Math: floor, abs, min, max, random, sqrt, round (+ Math.PI). "
+    "Mint CompileError: sin/cos/atan2/pow. No Object.keys / for…in "
+    "(PYTHON runs them; FPGA-SIM faults). No negative "
     "setTransform/scale mirror — use L/R sheets or unmirrored draw.",
     "≤16 locals per function (an inlined blit counts in the caller). "
     "16 locals is not 16 PNG sheets. Ordinary arrays only, length ≤128. "
@@ -679,6 +697,13 @@ HARD_RULES_JMR_PNG: list[str] = [
     "Mouse only in data-host=chrome; keys + joy() play the same game. "
     "No 1-pixel drawImage columns. Never fillRect the whole 640x480 black "
     "then blit a splash.",
+    # JMR_JS_COMPATIBILITY.md V1 walls that /640png used to omit (the
+    # pixel-map path already taught them). Chip faults; Chromium does not.
+    "HEAP/CLOCK: reuse one object per entity (no fresh {x,y} each frame). "
+    "No per-tick maze BFS. Mint CompileError: Array.shift, .every, .some. "
+    "includes and unshift run. Clock is a frame counter or Date.now(). "
+    "performance.now, isFinite, and Object.create fault the VM at run. HUD fillText only after setTransform "
+    "identity — the 8x8 font does not scale with the world. No gradients.",
     "Expose `window.state = state` and `window.game = { reset }` for probes.",
     "Phase A: <plan>/<criteria>/<probes>/<assets> (no <sounds>/<videos>). "
     "Phase B: complete <html_file> then <patch>. ≤16 asset names, one "
@@ -795,8 +820,8 @@ INPUT: keydown/keyup; read e.key AND keyCode (37/39/38/40/32/13). Do not
 steal Esc (machine BREAK). No CDN, fetch/XHR, modules, Workers, eval,
 async/await, Audio.play.
 
-MATH: floor abs min max random sqrt (+ Math.PI). No sin/cos/atan2/round
-(shim round as floor(x+0.5); angles via LUT). No Object.keys / for…in.
+MATH: floor abs min max random sqrt round (+ Math.PI). Mint CompileError:
+sin/cos/atan2/pow. No Object.keys / for…in (PYTHON runs them; FPGA-SIM faults).
 No negative setTransform/scale mirror — L/R sheets or unmirrored draw.
 
 PERF: reuse one mutable object per entity; no per-tick maze BFS/flood;
@@ -2347,7 +2372,9 @@ the player will see (sprites, characters, projectiles, terrain).
 </assets>
 
 The harness saves generated PNGs next to your HTML file. Paths return in
-the first-build prompt; load with `new Image()` + `await img.decode()`.
+the first-build prompt. Start requestAnimationFrame immediately;
+loadAssets() decodes in the background (await img.decode() inside that
+function only). Draw each entity with sprite(key) / drawImage.
 
 SKIP <assets> ONLY for pure-DOM apps. If canvas entities have visual
 character, EMIT <assets> (do not silently downgrade to bare rectangles).
@@ -2484,7 +2511,9 @@ def generated_jmr_png_draw_contract() -> str:
         "window.JMR_SPR listing "
         "ONLY STEM-N.png (never the <assets> names) plus the chrome shim. "
         "SELF-CHECK: every listed sheet index appears in a drawImage via "
-        "jmr:spr:N in this first build.\n"
+        "jmr:spr:N in this first build. Reuse one object per entity; no "
+        "Array.shift/includes; clock is Date.now() or a frame counter; "
+        "HUD fillText after setTransform identity.\n"
         "Expose `window.state = state` (or `window.gameState = state`) "
         "after init so behavioral probes can read player position, score, "
         "and game flags."
@@ -2505,7 +2534,8 @@ def generated_sprite_draw_contract() -> str:
         "image is still decoding, or for entities with NO generated PNG "
         "(grid lines, particles, health bars). `loadAssets()` alone is "
         "insufficient — each entity draw path must call drawImage when the "
-        "sprite is ready.\n"
+        "sprite is ready. Start requestAnimationFrame immediately; do not "
+        "await loadAssets() before the loop.\n"
         # run_13: 3/10 games burned iter 1 on ASSETS_LOADED_BUT_UNDRAWN.
         "SELF-CHECK before emitting: every name listed in GENERATED ASSETS "
         "must appear in a draw call (`sprite('name')` or "
@@ -3276,11 +3306,31 @@ CODE_CRITIC_MAX_BULLETS = 5
 _CODE_CRITIC_640_RULES = (
     "TARGET RULES (JMR 640x480 FPGA target; rule breaks are severity=teach, "
     "NEVER 'remove working code'): no Object.keys / for..in; no Math.sin/"
-    "cos/atan2/round (LUT or floor(x+0.5)); splice() return value is "
-    "undefined on the FPGA (copy-down instead); no performance.now / "
-    "async/await / fetch / CDN / WebGL / gradients / shadows; fillText "
-    "ASCII 32-126 only; do not reassign canvas.width/height; <=16 locals "
-    "per function."
+    "cos/atan2/pow (Math.round is fine); splice() return value is "
+    "undefined on the FPGA (copy-down instead); mint CompileError on "
+    "Array.shift/.every/.some (includes and unshift run); no fresh "
+    "{x,y} each frame; no per-tick BFS; "
+    "no performance.now / isFinite / async/await / fetch / CDN / WebGL / "
+    "gradients; clock is a frame counter or Date.now(); fillText ASCII "
+    "32-126 only, drawn after setTransform identity; do not reassign "
+    "canvas.width/height; <=16 locals per function."
+)
+
+# /640png only — sheets, not the pixel-map path.
+_CODE_CRITIC_JMR_PNG_RULES = (
+    "PNG SHEETS (teach): img.src is a quoted \"jmr:spr:N\" (not concat); "
+    "blit with blitSpr or 9-arg drawImage; no sprite(), ASSETS, or data:image."
+)
+
+# Full HTML (qwen3.8 browser games). Probes miss these; the critic should not.
+_CODE_CRITIC_MEDIA_RULES = (
+    "BROWSER MEDIA (severity=bug when the file has the asset and ignores it): "
+    "an entity with a PNG/ASSETS/sprite path drawn as a steady-state fillRect; "
+    "requestAnimationFrame starts only after await loadAssets(); a <video> "
+    "whose onerror does not enter play; no AudioContext.resume or .play() on "
+    "the first keydown/pointerdown; state.player.yaw = camera.rotation (input "
+    "writes yaw, the camera copies FROM state). three.js must not TextureLoader "
+    "a relative file:// PNG."
 )
 
 
@@ -3290,6 +3340,7 @@ def code_critic_instruction(
     criteria: str,
     current_html: str,
     simulator_mode: bool = False,
+    jmr_png_mode: bool = False,
     micro_probe_summary: str = "",
 ) -> str:
     """User turn for the code critic. See CODE_CRITIC_SYSTEM.
@@ -3300,8 +3351,18 @@ def code_critic_instruction(
     where `anchor` is a SHORT verbatim snippet (≤80 chars) copied from the
     file so the harness can drop the bullet if that code has since changed.
     severity ∈ {blocker, bug, missing, teach}.
+
+    `jmr_png_mode` adds the STEM-N / jmr:spr contract. Browser games get
+    the media rules (sprites, video, audio unlock, three.js yaw) instead
+    of the FPGA teach-list.
     """
-    rules = ("\n" + _CODE_CRITIC_640_RULES + "\n") if simulator_mode else "\n"
+    if jmr_png_mode or simulator_mode:
+        rules = "\n" + _CODE_CRITIC_640_RULES
+        if jmr_png_mode:
+            rules += " " + _CODE_CRITIC_JMR_PNG_RULES
+        rules += "\n"
+    else:
+        rules = "\n" + _CODE_CRITIC_MEDIA_RULES + "\n"
     probes = (
         f"\nHARNESS STATIC CHECKS (already known to the coder):\n{micro_probe_summary.strip()}\n"
         if micro_probe_summary.strip() else ""

@@ -2912,6 +2912,7 @@ class CriticMixin:
                 criteria=criteria,
                 current_html=body,
                 simulator_mode=bool(getattr(self, "_simulator_mode", False)),
+                jmr_png_mode=bool(getattr(self, "_jmr_png_mode", False)),
                 micro_probe_summary=micro,
             )},
         ]

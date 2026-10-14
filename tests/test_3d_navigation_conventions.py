@@ -41,6 +41,9 @@ def test_canvas_3d_basic_uses_camera_relative_movement() -> None:
     assert "window.state" in src
     assert "camera.position.x -=" not in src
     assert "requestPointerLock" in src
+    # DOOM3DF3: writing yaw back from the camera every move discards mouse-look.
+    assert "state.player.yaw = camera.rotation.y" not in src
+    assert "camera.rotation.y = p.yaw" in src
 
 
 def test_canvas_vector_wireframe_forward_uses_plus_cos_z() -> None:

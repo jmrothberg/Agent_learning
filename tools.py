@@ -6424,6 +6424,21 @@ class LiveBrowser:
         out: list[dict[str, Any]] = []
         if not recipes:
             return out
+
+        def _declares_generated_assets(html: str) -> bool:
+            # Empty `const ASSETS = {}` is a vector-art stub, not generated
+            # PNGs. ASTEROID 20261013 stroked polygons and still hard-failed
+            # canvas-visible-entities-sprites because of that stub.
+            if "_assets/" in html or "ASSET_LIST" in html:
+                return True
+            m = re.search(r"const\s+ASSETS\s*=\s*\{([^}]*)\}", html)
+            if m and m.group(1).strip():
+                return True
+            if re.search(r"const\s+ASSETS\s*=\s*\{\s*\}", html) and (
+                ".png" in html or "new Image" in html
+            ):
+                return True
+            return False
         try:
             html_text = Path(path).read_text(encoding="utf-8", errors="replace")
         except Exception:
@@ -6442,7 +6457,7 @@ class LiveBrowser:
                     "err": "" if ok else "expected input to cause state or canvas delta",
                 })
             elif rtype == "asset_usage":
-                has_assets = "_assets/" in html_text or "ASSET_LIST" in html_text or "const ASSETS" in html_text
+                has_assets = _declares_generated_assets(html_text)
                 # 2D canvas consumes art via drawImage; WebGL/three.js (which
                 # the prompt steers 3D goals toward) NEVER calls drawImage — it
                 # binds the image as a texture. Accept either so a real 3D game
@@ -6460,7 +6475,7 @@ class LiveBrowser:
                     "err": "" if ok else "generated assets present but neither a drawImage call nor a WebGL texture binding uses them",
                 })
             elif rtype == "asset_stats":
-                has_assets = "_assets/" in html_text or "ASSET_LIST" in html_text or "const ASSETS" in html_text
+                has_assets = _declares_generated_assets(html_text)
                 # Fix round: `img.onload` is just as valid a load path as
                 # `img.decode()` — requiring decode() flagged correct
                 # onload-based loaders (fight trace 20260611_145321).

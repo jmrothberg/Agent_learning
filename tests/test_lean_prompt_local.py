@@ -76,6 +76,35 @@ def test_lean_media_goal_keeps_media_tags(tmp_path):
     assert "<assets>" in sp and "<sounds>" in sp and "<videos>" in sp
 
 
+def test_qwen38_lean_prompt_starts_raf_before_asset_decode(tmp_path):
+    """qwen3.8-27b is a local mid model, so it renders the small schema.
+    That schema used to say only `await img.decode()`, which blocked the
+    frame loop. The prompt the model actually sees must start RAF first,
+    draw PNGs with sprite()/drawImage, unlock audio on a gesture, and
+    keep a video from stalling on onerror."""
+    a = _agent(tmp_path, backend_name="mlx", model="qwen3.8-27b")
+    assert a._model_class == "mid"
+    assert a._system_prompt_class() == "small"
+    goal = (
+        "first-person maze with three.js, generated sprites, laser sounds, "
+        "and an intro cutscene video"
+    )
+    sp = prompts_v1.build_system_prompt(goal, model_class=a._system_prompt_class())
+    assert "requestAnimationFrame before loadAssets()" in sp
+    assert "do not await it before the loop" in sp
+    assert "TextureLoader" in sp
+    assert "AudioContext.resume" in sp
+    assert "onended AND onerror" in sp
+    assert "exact MP4" in sp
+    plan = prompts_v1.plan_instruction(goal=goal, model_class="small")
+    assert "babylon" not in plan.lower()
+    assert "three@0.160" in plan
+    assert "TextureLoader" in plan
+    assert "camera.rotation" in plan
+    assert "AudioContext.resume" in plan
+    assert "await img.decode()" not in plan or "inside that" in plan
+
+
 def test_lean_memory_budget_drops_lowest_priority(tmp_path):
     a = _agent(tmp_path, backend_name="mlx", model="qwen3.6-27b")
     opening = "O" * 1700

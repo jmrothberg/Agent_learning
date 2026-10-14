@@ -198,6 +198,66 @@ def test_agent_retrieve_components_block_renders_and_traces(tmp_path):
     assert row["ids"]
 
 
+def test_jmr_component_block_drops_chip_illegal_snippets(tmp_path):
+    """/640png used to paste e.code, Array.shift, and performance.now
+    into the first-build prompt because those snippets rank first.
+    The chip mint rejects them. Browser retrieval still keeps them."""
+    a = _make_agent(tmp_path)
+    a._memory = _repo_memory()
+    browser = a._retrieve_components_block(
+        "keyboard arrow keys space move player", stage="plan", k=4,
+    )
+    assert "e.code" in browser or "Object.create" in browser
+
+    a.set_jmr_png_mode(True)
+    block = a._retrieve_components_block(
+        "keyboard arrow keys space move player shooter bullets",
+        stage="plan", k=5,
+    )
+    js = "\n".join(
+        part.split("```", 1)[0]
+        for part in block.split("```js\n")[1:]
+    )
+    for bad in (
+        "performance.now", "Object.create", "preventDefault",
+        ".shift(", "AudioContext", "scale(-1", ">>>",
+    ):
+        assert bad not in js, bad
+    assert "keyCode" in js
+    assert "fireBullet" in js
+
+    chase = a._retrieve_components_block(
+        "maze chase enemy creep tunnel grid", stage="plan", k=4,
+    )
+    chase_js = "\n".join(
+        part.split("```", 1)[0]
+        for part in chase.split("```js\n")[1:]
+    )
+    assert ".shift(" not in chase_js
+    assert "chaseStep" in chase_js
+
+
+def test_jmr_open_domain_pins_chip_loop_not_performance_now(tmp_path):
+    """Open-domain /640png must copy a frame counter, not performance.now."""
+    a = _make_agent(tmp_path)
+    a._memory = _repo_memory()
+    a.set_jmr_png_mode(True)
+    block = a._retrieve_components_block(
+        "herd glowing fireflies into jars before dawn",
+        stage="plan", k=4,
+        ensure_ids=["jmr-frame-loop", "keyboard-input-jmr"],
+    )
+    assert "jmr-frame-loop" in block
+    assert "keyboard-input-jmr" in block
+    js = "\n".join(
+        part.split("```", 1)[0]
+        for part in block.split("```js\n")[1:]
+    )
+    assert "performance.now" not in js
+    assert "Object.create" not in js
+    assert "requestAnimationFrame(frame)" in js
+
+
 def test_both_first_build_paths_inject_components():
     """Seed-file build AND skeleton build must both inject a <components>
     block. The seed path previously skipped it, starving weak models of the

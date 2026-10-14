@@ -355,6 +355,44 @@ def test_code_critic_mode_resolution(tmp_path, monkeypatch):
     assert d._code_critic_mode == "off"  # explicit arg beats env
 
 
+def test_code_critic_prompt_splits_browser_media_from_jmr_walls():
+    """Critic is a separate role and does not see the coder system prompt.
+    Browser reviews must name the asset/audio/video/three.js misses probes
+    skip. /640png reviews teach chip walls and must not ask for sprite()."""
+    from prompts_v1 import code_critic_instruction
+
+    browser = code_critic_instruction(
+        goal="three.js maze with sprites and a video intro",
+        criteria="player moves",
+        current_html="<html></html>",
+    )
+    assert "AudioContext.resume" in browser
+    assert "onerror" in browser
+    assert "camera.rotation" in browser
+    assert "Array.shift" not in browser
+
+    png = code_critic_instruction(
+        goal="space invaders",
+        criteria="player moves",
+        current_html="<html></html>",
+        simulator_mode=True,
+        jmr_png_mode=True,
+    )
+    assert "Array.shift" in png
+    assert "jmr:spr:N" in png
+    assert "sprite()" in png
+    assert "AudioContext.resume" not in png
+
+    pixel = code_critic_instruction(
+        goal="asteroids",
+        criteria="ship turns",
+        current_html="<html></html>",
+        simulator_mode=True,
+    )
+    assert "Array.shift" in pixel
+    assert "jmr:spr" not in pixel
+
+
 def test_code_critic_bullet_parser():
     text = (
         "blocker | goal says first-person, code draws a top-down grid; add a horizon projection | `ctx.fillRect(tx, ty, 8, 8)`\n"

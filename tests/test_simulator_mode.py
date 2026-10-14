@@ -29,6 +29,8 @@ def test_build_system_prompt_simulator_drops_media_and_injects_jmr_block():
     assert "<simulator-target>" in sp
     assert "640" in sp
     assert "Object.keys" in sp
+    assert "Array.shift" in sp
+    assert "Date.now" in sp
     assert "pixel map" in sp.lower() or "Pixel maps" in sp
     assert "NOT colored circles" in sp or "placeholders" in sp.lower()
     # Lean: /640 must not ship the full large schema (~23KB).
@@ -107,6 +109,31 @@ def test_simulator_falls_back_skeleton_with_asset_refs():
     fallback, reason = a._local_should_fallback_skeleton(skel)
     assert fallback is True
     assert "simulator" in reason
+
+
+def test_simulator_falls_back_browser_api_skeleton():
+    """canvas_grid and canvas_basic teach e.code. The chip must start
+    from the JMR scaffold. A browser agent keeps the browser skeleton."""
+    from memory import SkeletonHit
+
+    a = GameAgent(model="stub", out_path=Path("games/test_sim_skel.html"))
+    a.set_simulator_mode(True)
+    skel = SkeletonHit(
+        name="canvas_grid_basic.html",
+        html="addEventListener('keydown', e => { keys[e.code] = true; });\nlet last = performance.now();",
+        score=0.8,
+        source_goal="maze",
+    )
+    fallback, reason = a._local_should_fallback_skeleton(skel)
+    assert fallback is True
+    assert "mint" in reason
+    chip = a._chip_scaffold_hit()
+    assert a._local_should_fallback_skeleton(chip) == (False, "")
+    assert "keyCode" in chip.html
+    assert "e.code" not in chip.html
+    assert "performance.now" not in chip.html
+    browser = GameAgent(model="stub", out_path=Path("games/test_browser_skel.html"))
+    assert browser._local_should_fallback_skeleton(skel)[0] is False
 
 
 def test_simulator_falls_back_oversized_skeleton():
@@ -347,6 +374,7 @@ def test_simulator_ensures_pixel_map_playbook():
     assert "classic-arcade-pixel-maps" in ids
     assert "jmr-filltext-ascii-hud" in ids
     assert "jmr-splice-return-undefined" in ids
+    assert "jmr-v1-runtime-walls" in ids
 
 
 def test_simulator_first_build_asks_for_pixel_art_upfront():
@@ -387,6 +415,8 @@ def test_jmr_png_system_prompt_keeps_assets_drops_sounds():
     assert "STEM-N.png" in sp or "STEM-0.png" in sp
     assert "Object.keys" in sp
     assert "quoted literal" in sp.lower() or "dest x,y" in sp.lower()
+    assert "Array.shift" in sp
+    assert "Date.now" in sp
     assert "640" in sp
     assert "Phaser, three.js" not in sp
     # Generic asset guidelines must not teach the calls /640png forbids.
@@ -430,6 +460,7 @@ def test_jmr_png_playbook_pin():
     assert "jmr-png-sheets" in ids
     assert "jmr-filltext-ascii-hud" in ids
     assert "jmr-splice-return-undefined" in ids
+    assert "jmr-v1-runtime-walls" in ids
     assert "classic-arcade-pixel-maps" not in ids
 
 
@@ -447,7 +478,9 @@ def test_jmr_png_no_threejs_footer_still_pins_sheets_not_webgl():
     assert ids is not None
     assert "jmr-png-sheets" in ids
     assert "classic-arcade-pixel-maps" not in ids
-    assert "draw-generated-sprites-not-boxes" in ids
+    # Browser draw bullet teaches sprite()/ASSETS/async. Chip art is jmr-png-sheets.
+    assert "draw-generated-sprites-not-boxes" not in ids
+    assert "image-load-race" not in ids
     assert "fps-camera-and-movement-vectors" not in ids
 
 
@@ -474,6 +507,26 @@ def test_jmr_png_playbook_retrieve_drops_inline_pixel_maps():
     ids = evs[-1].get("ids") or []
     assert "classic-arcade-pixel-maps" not in ids
     assert "jmr-png-sheets" in ids
+    assert "ecode-not-ekey" not in ids
+    assert "draw-generated-sprites-not-boxes" not in ids
+
+
+def test_jmr_playbook_drops_browser_ecode_bullet():
+    """ecode-not-ekey tells the model keyCode is deprecated. The chip
+    requires keyCode. Browser retrieval still keeps the bullet."""
+    a = GameAgent(model="stub", out_path=Path("games/test_jmr_keys.html"))
+    goal = "keyboard arrow keys space move the player"
+    events: list[dict] = []
+    a._trace = lambda obj: events.append(obj)
+    browser = a._retrieve_playbook_block(goal, code="", stage="plan")
+    assert "e.code" in browser or "ecode-not-ekey" in browser
+    a.set_jmr_png_mode(True)
+    events.clear()
+    block = a._retrieve_playbook_block(goal, code="", stage="plan")
+    evs = [e for e in events if e.get("kind") == "playbook_injected"]
+    ids = evs[-1].get("ids") or [] if evs else []
+    assert "ecode-not-ekey" not in ids
+    assert "Don't use e.key" not in block
 
 
 def test_jmr_png_first_build_asks_for_jmr_spr():
@@ -486,6 +539,8 @@ def test_jmr_png_first_build_asks_for_jmr_spr():
     assert "jmr:spr" in msg
     assert "sprite()" not in msg or "Do NOT use sprite()" in msg
     assert "640" in msg
+    assert "Array.shift" in msg
+    assert "Date.now()" in msg
 
 
 def test_jmr_png_maybe_generate_not_skipped():

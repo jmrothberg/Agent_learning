@@ -567,6 +567,39 @@ def test_ensure_jmr_spr_shim_injects_when_list_only_no_interceptor():
     assert "GAME-3.png" in out2
 
 
+def test_ensure_jmr_spr_shim_strips_model_src_setter():
+    """A model chrome setter that never calls the native src leaves blitSpr blank.
+
+    Score/lives are fillText, so the playfield goes black while the HUD stays.
+    The harness shim must be the one that calls d.set.
+    """
+    from assets import ensure_jmr_spr_shim
+    html = (
+        "<html><body>"
+        '<script data-host="chrome">'
+        'window.JMR_SPR = ["GAME-0.png"];'
+        "Object.defineProperty(HTMLImageElement.prototype, \"src\", {"
+        "  get: function(){ return this._src; },"
+        "  set: function(v){ this._src = v; }"
+        "});"
+        "</script>"
+        '<script data-host="chrome">'
+        "window.Image = function(){ return {}; };"
+        "</script>"
+        "<script>var S0 = new Image(); S0.src = \"jmr:spr:0\";</script>"
+        "</body></html>"
+    )
+    out = ensure_jmr_spr_shim(html, ["GAME-0.png"])
+    assert "this._src = v" not in out
+    assert "window.Image = function" not in out
+    assert out.count('data-host="chrome"') == 1
+    assert "PNG list make_artx.py reads" in out
+    assert "d.set.call" in out
+    assert "__jmrNativeSrc" in out
+    # Game script stays.
+    assert 'S0.src = "jmr:spr:0"' in out
+
+
 def test_render_jmr_png_paths_block_teaches_handles(tmp_path: Path):
     from assets import render_jmr_png_paths_block
     html = tmp_path / "game.html"

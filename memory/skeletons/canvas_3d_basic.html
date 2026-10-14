@@ -124,7 +124,8 @@
       camera.position.add(move);
       state.player.x = camera.position.x;
       state.player.z = camera.position.z;
-      state.player.yaw = camera.rotation.y;
+      // yaw/pitch stay in state. Do not copy camera.rotation back —
+      // that discards the mousemove write on the next frame.
     }
     syncCamera();
   }

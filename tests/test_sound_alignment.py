@@ -101,6 +101,8 @@ def test_jmr_first_build_nudge_does_not_demand_sprite(tmp_path: Path):
     assert "jmr:spr" in body
     assert "SPRITE DRAW" not in body
     assert "Keep first-build code compact" not in body
+    assert "after asset load" not in body
+    assert "Do not await loadAssets()" in body
 
 
 def test_local_skeleton_guard_fallback_on_low_overlap(tmp_path: Path):

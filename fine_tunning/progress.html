@@ -34,6 +34,51 @@
 <body>
 <h1>HTML game LoRA</h1>
 <p class="sub" id="banner">HTML and JavaScript games. The regular agent prompt is on the downloads. /640png is only the JMR storage files.</p>
+<h2>Base model chat</h2>
+<div class="panel" id="baseChat">
+  <p class="sub" id="chatNote" style="margin:0 0 8px">Talk to a model in ~/MLX_Models before a fine-tune. It stays loaded, so the second message is the chatbot speed. On this Mac, MLX runs it on the Apple GPU.</p>
+  <div class="row">
+    <select id="chatModel" class="wide"></select>
+    <span class="sub">New tokens</span>
+    <select id="chatMax">
+      <option value="128">128</option>
+      <option value="256" selected>256</option>
+      <option value="512">512</option>
+      <option value="1024">1,024</option>
+      <option value="2048">2,048</option>
+      <option value="4096">4,096</option>
+      <option value="8192">8,192</option>
+      <option value="16000">16,000</option>
+    </select>
+    <button id="chatClear" type="button">New chat</button>
+    <button id="chatStop" type="button">Unload</button>
+  </div>
+  <p class="sub" style="margin:8px 0 4px">Role</p>
+  <select id="chatRole">
+    <option value="html">HTML coder</option>
+    <option value="eliza" selected>Eliza</option>
+    <option value="plain">Plain chat</option>
+  </select>
+  <textarea id="chatSystem" rows="4" style="margin-top:8px"></textarea>
+  <div class="grid" style="margin-top:12px">
+    <div class="card"><div class="num" id="chatDecode">–</div><div class="label">Decode tokens / second</div></div>
+    <div class="card"><div class="num" id="chatPrefill">–</div><div class="label">Prefill tokens / second</div></div>
+    <div class="card"><div class="num" id="chatTtft">–</div><div class="label">Seconds to first token</div></div>
+  </div>
+  <div class="grid" style="margin-top:12px">
+    <div class="card"><div class="num" id="chatPromptN">–</div><div class="label">Prompt tokens</div></div>
+    <div class="card"><div class="num" id="chatGenN">–</div><div class="label">New tokens</div></div>
+    <div class="card"><div class="num" id="chatPeak">–</div><div class="label">Peak memory, GB</div></div>
+  </div>
+  <pre id="chatLog" style="max-height:360px;margin-top:12px"> </pre>
+  <textarea id="chatInput" rows="3" placeholder="Message"></textarea>
+  <div class="row" style="margin-top:8px">
+    <button id="chatSend" type="button">Send</button>
+    <button id="chatRun" type="button">Run</button>
+    <span class="sub" id="chatStatus">The model loads on the first message.</span>
+  </div>
+  <iframe id="chatPreview" class="preview" title="Generated page" sandbox="allow-scripts" style="margin-top:12px"></iframe>
+</div>
 <!-- SMALL MODEL: speed-first panel, shown only when the trainer is train_small.py -->
 <div id="speedPanel" style="display:none">
 <div class="grid">
@@ -177,6 +222,7 @@ async function tick() {
   try {
     const r = await fetch("/status.json", {cache: "no-store"});
     const s = await r.json();
+    fillChatMenu(s.chat_models || []);
     const t = s.train || {};
     const g = s.ingest || {};
     // SMALL MODEL: train_small.py run (full fine-tune of MiniCPM5-1B). Speed first, LoRA cards hidden.
@@ -922,6 +968,183 @@ document.getElementById("saveBtn").onclick = async () => {
   lastName = body.name;
   document.getElementById("saveName").value = body.name;
   status.textContent = "Saved " + body.path;
+};
+let chatMessages = [];
+let chatRunning = false;
+const CHAT_ROLES = {
+  html: "You are an HTML coder. Reply with one self-contained HTML page and nothing else. No explanation before or after the page. Start with <!DOCTYPE html>. Use a canvas when the user asks for a game.",
+  eliza: "You are ELIZA, the classic Rogerian psychiatrist. Speak in short, calm sentences. Reflect what the person said and ask one question. Focus on memorizing names so you show you are really listening.",
+  plain: "",
+};
+function applyChatRole() {
+  const role = document.getElementById("chatRole").value;
+  document.getElementById("chatSystem").value = CHAT_ROLES[role] || "";
+}
+function fillChatMenu(models) {
+  const sel = document.getElementById("chatModel");
+  if (!sel) return;
+  const key = models.map((m) => m.id + (m.ready ? "" : "?")).join("|");
+  if (sel.dataset.key !== key) {
+    const prev = sel.value;
+    sel.dataset.key = key;
+    sel.innerHTML = models.map((m) => `<option value="${esc(m.id)}">${esc(m.label)}</option>`).join("");
+    const ids = models.map((m) => m.id);
+    const prefer = "MiniCPM-V-4.7-1B-mxfp8";
+    if (ids.includes(prev)) sel.value = prev;
+    else if (ids.includes(prefer)) sel.value = prefer;
+    else if (ids.length) sel.value = ids[0];
+  }
+  const chosen = models.find((m) => m.id === sel.value);
+  document.getElementById("chatSend").disabled = chatRunning || !chosen || !chosen.ready;
+  if (!chatRunning && chosen && !chosen.ready) {
+    document.getElementById("chatStatus").textContent = chosen.label;
+  }
+}
+function chatTurn() {
+  const sys = document.getElementById("chatSystem").value.trim();
+  const turns = chatMessages.filter((m) => m.content && m.role !== "system");
+  return sys ? [{role: "system", content: sys}].concat(turns) : turns;
+}
+function lastAssistantHtml() {
+  for (let i = chatMessages.length - 1; i >= 0; i--) {
+    if (chatMessages[i].role === "assistant" && chatMessages[i].content) {
+      return pageFromText(chatMessages[i].content);
+    }
+  }
+  return "";
+}
+function runChatPage() {
+  const html = lastAssistantHtml();
+  const status = document.getElementById("chatStatus");
+  if (!html) {
+    status.textContent = "The last reply has no HTML to run.";
+    return;
+  }
+  document.getElementById("chatPreview").srcdoc = html;
+  status.textContent = "Running in the window below.";
+}
+function renderChat() {
+  const lines = [];
+  for (const msg of chatMessages) {
+    lines.push((msg.role === "user" ? "You" : "Model") + ": " + msg.content);
+  }
+  document.getElementById("chatLog").textContent = lines.join("\n\n") || " ";
+  const pre = document.getElementById("chatLog");
+  pre.scrollTop = pre.scrollHeight;
+}
+function showChatStats(msg) {
+  if (msg.generation_tps) document.getElementById("chatDecode").textContent = Math.round(msg.generation_tps).toLocaleString();
+  if (msg.prompt_tps) document.getElementById("chatPrefill").textContent = Math.round(msg.prompt_tps).toLocaleString();
+  if (msg.ttft_s != null) document.getElementById("chatTtft").textContent = Number(msg.ttft_s).toFixed(2);
+  if (msg.prompt_tokens) document.getElementById("chatPromptN").textContent = Number(msg.prompt_tokens).toLocaleString();
+  if (msg.generation_tokens) document.getElementById("chatGenN").textContent = Number(msg.generation_tokens).toLocaleString();
+  if (msg.peak_memory) document.getElementById("chatPeak").textContent = Number(msg.peak_memory).toFixed(1);
+}
+async function sendChat() {
+  const input = document.getElementById("chatInput");
+  const text = input.value.trim();
+  const status = document.getElementById("chatStatus");
+  if (!text || chatRunning) return;
+  const sel = document.getElementById("chatModel");
+  chatMessages.push({role: "user", content: text});
+  chatMessages.push({role: "assistant", content: ""});
+  input.value = "";
+  renderChat();
+  chatRunning = true;
+  document.getElementById("chatSend").disabled = true;
+  status.textContent = "Loading " + sel.options[sel.selectedIndex].text + "…";
+  try {
+    const r = await fetch("/chat", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        model: sel.value,
+        messages: chatTurn(),
+        max_tokens: Number(document.getElementById("chatMax").value || 256),
+      }),
+    });
+    if (!r.ok || !r.body) {
+      status.textContent = "The chat request failed.";
+      chatMessages.pop();
+      chatMessages.pop();
+      renderChat();
+      return;
+    }
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const step = await reader.read();
+      if (step.done) break;
+      buf += dec.decode(step.value, {stream: true});
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        if (!line.trim()) continue;
+        let msg;
+        try { msg = JSON.parse(line); } catch (e) { continue; }
+        if (msg.error) {
+          status.textContent = msg.error;
+          if (!chatMessages[chatMessages.length - 1].content) chatMessages.pop();
+          renderChat();
+          return;
+        }
+        if (msg.status === "loading") status.textContent = "Loading the model…";
+        if (msg.status === "loaded") {
+          status.textContent = msg.load_s ? "Loaded in " + msg.load_s + "s. Writing…" : "Writing…";
+        }
+        if (msg.t) {
+          chatMessages[chatMessages.length - 1].content += msg.t;
+          renderChat();
+          showChatStats(msg);
+          status.textContent = "Writing…";
+        } else {
+          showChatStats(msg);
+        }
+        if (msg.done) {
+          showChatStats(msg);
+          const rate = msg.generation_tps ? Math.round(msg.generation_tps).toLocaleString() + " tok/s decode." : "Done.";
+          if (lastAssistantHtml()) {
+            document.getElementById("chatPreview").srcdoc = lastAssistantHtml();
+            status.textContent = rate + " Running in the window below.";
+          } else {
+            status.textContent = rate + " The model stays loaded for the next message.";
+          }
+        }
+      }
+    }
+  } catch (e) {
+    status.textContent = "The chat request failed.";
+  } finally {
+    chatRunning = false;
+    document.getElementById("chatSend").disabled = false;
+  }
+}
+document.getElementById("chatRole").onchange = () => applyChatRole();
+applyChatRole();
+document.getElementById("chatSend").onclick = () => sendChat();
+document.getElementById("chatInput").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    sendChat();
+  }
+});
+document.getElementById("chatRun").onclick = () => runChatPage();
+document.getElementById("chatClear").onclick = () => {
+  chatMessages = [];
+  renderChat();
+  document.getElementById("chatPreview").srcdoc = "";
+  document.getElementById("chatStatus").textContent = "New chat. The model stays loaded.";
+};
+document.getElementById("chatStop").onclick = async () => {
+  document.getElementById("chatStatus").textContent = "Unloading…";
+  try {
+    await fetch("/stop-chat", {method: "POST"});
+    document.getElementById("chatStatus").textContent = "Unloaded. The next message loads the model again.";
+  } catch (e) {
+    document.getElementById("chatStatus").textContent = "Unload failed.";
+  }
 };
 document.getElementById("openBtn").onclick = async () => {
   const status = document.getElementById("testStatus");

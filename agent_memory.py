@@ -37,6 +37,46 @@ from memory import (
     VLM_CHECKLIST_SKIP_IDS,
 )
 
+# Browser snippets the PYTHON mint CompileErrors or the VM faults
+# (measured 2026-10-12: shift/sin/cos/pow, performance.now, Object.create).
+# includes / unshift / find / Math.round / new Map run — do not list them.
+# Object.keys stays out: PYTHON runs it, FPGA-SIM faults. Browser
+# retrieval is unchanged.
+_JMR_COMPONENT_ILLEGAL = (
+    "performance.now",
+    "Object.create",
+    "Object.keys",
+    "Object.entries",
+    "Object.assign",
+    "async ",
+    "await ",
+    "preventDefault",
+    ".shift(",
+    "Math.sin",
+    "Math.cos",
+    "Math.atan2",
+    "Math.pow",
+    "Math.exp",
+    "Math.hypot",
+    "requestPointerLock",
+    "localStorage",
+    "AudioContext",
+    "scale(-1",
+    ">>>",
+    "devicePixelRatio",
+    "e.code",
+)
+
+
+def _component_recipe_code(hit: OpeningBookHit) -> str:
+    rec = hit.item.recipe if isinstance(hit.item.recipe, dict) else {}
+    return str(rec.get("code") or "")
+
+
+def _jmr_component_illegal(hit: OpeningBookHit) -> bool:
+    code = _component_recipe_code(hit)
+    return any(tok in code for tok in _JMR_COMPONENT_ILLEGAL)
+
 
 class MemoryRetrievalMixin:
     """First-build / plan-turn memory retrieval for GameAgent (see docstring)."""
@@ -52,12 +92,25 @@ class MemoryRetrievalMixin:
     _PLAN_STAGE_CHAR_BUDGET = 4500       # ~1100 tokens, broad context
     _CODE_STAGE_CHAR_BUDGET = 2400       # ~600 tokens, tight context
 
+    # Browser playbook that names APIs the JS-CSS mint rejects. Dropped
+    # only when /640 or /640png is on. The browser path still retrieves them.
+    _JMR_PLAYBOOK_SUPPRESS = frozenset({
+        "ecode-not-ekey",
+        "qte-timed-input-window",
+        "qte-visual-telegraph",
+        "audio-autoplay-gesture",
+        "image-load-race",
+        "draw-generated-sprites-not-boxes",
+        "sprite-gen-wait-for-load",
+    })
+
     @staticmethod
     def _playbook_suppressed_bullet_ids(
         *,
         goal: str = "",
         active_skeleton: str | None,
         code: str,
+        jmr_target: bool = False,
     ) -> set[str]:
         """Drop cross-modality navigation bullets that misfire on the active scaffold."""
         from modality import detect_fps_navigation_modality
@@ -92,6 +145,8 @@ class MemoryRetrievalMixin:
         # and the first-build looped on inline_data_bloat).
         if "target=/640png" in (goal or "").lower():
             suppressed.add("classic-arcade-pixel-maps")
+        if jmr_target:
+            suppressed.update(MemoryRetrievalMixin._JMR_PLAYBOOK_SUPPRESS)
         return suppressed
 
     # Failing model probe name -> playbook ids to pin on fix turns (run_vlm10).
@@ -160,8 +215,15 @@ class MemoryRetrievalMixin:
             or ("pointer-lock" in g or "pointer lock" in g)
         )
 
+        # Browser art bullets teach sprite()/ASSETS/async/e.code. On the
+        # chip those contradict jmr-png-sheets and jmr-v1-runtime-walls.
+        jmr_target = bool(
+            getattr(self, "_jmr_png_mode", False)
+            or getattr(self, "_simulator_mode", False)
+        )
         if getattr(self, "_session_assets", None) and not (
             webgl_or_voxel or fps_class or voxel_class or wireframe_class
+            or jmr_target
         ):
             _add("draw-generated-sprites-not-boxes", "image-load-race")
 
@@ -206,12 +268,14 @@ class MemoryRetrievalMixin:
             _add("jmr-png-sheets")
             _add("jmr-filltext-ascii-hud")
             _add("jmr-splice-return-undefined")
+            _add("jmr-v1-runtime-walls")
         elif bool(getattr(self, "_simulator_mode", False)) and not (
             webgl_or_voxel or fps_class or voxel_class or wireframe_class
         ):
             _add("classic-arcade-pixel-maps")
             _add("jmr-filltext-ascii-hud")
             _add("jmr-splice-return-undefined")
+            _add("jmr-v1-runtime-walls")
 
         # Segmented-follower *class* (history trail) — class words only.
         if any(k in g for k in ("segmented", "segments", "segment chain", "body segments")):
@@ -247,12 +311,17 @@ class MemoryRetrievalMixin:
         warns = [str(w) for w in (report.get("warnings") or [])]
         all_w = soft + warns
         if any("ASSETS_LOADED_BUT_UNDRAWN" in w for w in all_w):
-            _add(
-                "draw-generated-sprites-not-boxes",
-                "animation-frames-consistent-character",
-                "sprite-gen-wait-for-load",
-                "image-load-race",
-            )
+            if bool(getattr(self, "_jmr_png_mode", False)):
+                _add("jmr-png-sheets", "jmr-v1-runtime-walls")
+            elif bool(getattr(self, "_simulator_mode", False)):
+                _add("classic-arcade-pixel-maps", "jmr-v1-runtime-walls")
+            else:
+                _add(
+                    "draw-generated-sprites-not-boxes",
+                    "animation-frames-consistent-character",
+                    "sprite-gen-wait-for-load",
+                    "image-load-race",
+                )
         if any("HOTSPOT_ALIGNMENT_MISS" in w for w in soft):
             _add("pointclick-hotspot-from-source-art")
         cnr = report.get("control_not_recovered")
@@ -385,10 +454,15 @@ class MemoryRetrievalMixin:
                 query, code=code, k=k, stage=stage,
                 modality_tokens=mod_toks,
             )
+            jmr_target = bool(
+                getattr(self, "_simulator_mode", False)
+                or getattr(self, "_jmr_png_mode", False)
+            )
             suppressed = self._playbook_suppressed_bullet_ids(
                 goal=goal,
                 active_skeleton=getattr(self, "_active_skeleton", None),
                 code=code or getattr(self, "_current_file", "") or "",
+                jmr_target=jmr_target,
             )
             if suppressed and hits:
                 hits = [h for h in hits if h.bullet.id not in suppressed]
@@ -415,6 +489,10 @@ class MemoryRetrievalMixin:
                     rest = [h for h in hits if h.bullet.id in by_id]
                     hits = pinned + rest
                     hits = hits[: max(k, len(pinned))]
+            # Pins run after the first drop, so a browser ensure_id must
+            # not be put back on a /640 or /640png turn.
+            if suppressed and hits:
+                hits = [h for h in hits if h.bullet.id not in suppressed]
             if hits:
                 ids = [h.bullet.id for h in hits]
                 self._active_bullet_ids = list(ids)
@@ -698,7 +776,18 @@ class MemoryRetrievalMixin:
                 )
             except Exception:
                 mod_toks = []
-            hits = self._memory.retrieve_components(query, mod_toks, k=k)
+            # /640 and /640png: the browser library's top hits are often
+            # chip-illegal (e.code, performance.now, Array.shift, Map).
+            # Over-fetch, then keep the legal ones so a shooter still gets
+            # a keyCode snippet instead of an empty block.
+            jmr_target = bool(
+                getattr(self, "_simulator_mode", False)
+                or getattr(self, "_jmr_png_mode", False)
+            )
+            fetch_k = max(k * 8, k) if jmr_target else k
+            hits = self._memory.retrieve_components(query, mod_toks, k=fetch_k)
+            if jmr_target:
+                hits = [h for h in hits if not _jmr_component_illegal(h)][:k]
             # Universal-fallback pinning: guarantee the engine-skeleton snippets
             # (game loop, input) are present AND FIRST for open-domain goals so
             # they survive the lean budget. Jaccard can either miss a pinned id
@@ -717,6 +806,8 @@ class MemoryRetrievalMixin:
                 if pinned:
                     rest = [h for h in hits if h.item.id in by_id]
                     hits = pinned + rest
+            if jmr_target:
+                hits = [h for h in hits if not _jmr_component_illegal(h)][:k]
             block = render_components_block(
                 hits, char_budget=2200 if stage == "plan" else 1400,
             )
