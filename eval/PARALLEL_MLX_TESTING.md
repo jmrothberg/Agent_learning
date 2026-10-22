@@ -98,8 +98,12 @@ below.
 ## oMLX (preferred server for DeepSeek-V4-Flash + stay-alive)
 
 Stock `mlx_lm.server` from this repo’s `.venv` **cannot** load Vontra
-`DeepSeek-V4-Flash-0731-MXFP4-MLX` (`model_type: deepseek_v4`). Use **[oMLX](https://omlx.ai/)
+`DeepSeek-V4-Flash-0731-MXFP4-MLX` (`model_type: deepseek_v4`) or
+`DeepSeek-V4.1-Flash-1017-oQ4e-mtp` (`model_type: deepseek_v41`). Use **[oMLX](https://omlx.ai/)
 0.5.7+** (native MTP). Weights: `~/MLX_Models/DeepSeek-V4-Flash-0731-MXFP4-MLX`.
+V4.1 Flash 1017 oQ4e (512 GB Mac, Engram-on-SSD friendly):
+`~/MLX_Models/DeepSeek-V4.1-Flash-1017-oQ4e-mtp`. **Not load-tested** —
+`requires_omlx_server` only. See README.
 
 **TUI:** `/model` / `/load` / `/launch` on DeepSeek-V4-Flash calls
 `backend.ensure_omlx_server()` (spawn `omlx serve` or open `oMLX.app`) and sets the

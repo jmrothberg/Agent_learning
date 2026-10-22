@@ -690,6 +690,13 @@ def test_requires_omlx_server_by_name():
     )
     assert backend.requires_omlx_server("DeepSeek-V4-Flash-0731-MXFP4-MLX")
     assert backend.requires_omlx_server("vontra/deepseek_v4_flash")
+    # V4.1 Flash 1017 oQ4e — same oMLX route. Not a live load test.
+    assert backend.requires_omlx_server(
+        "/Users/x/MLX_Models/DeepSeek-V4.1-Flash-1017-oQ4e-mtp"
+    )
+    assert backend.requires_omlx_server(
+        "mlx-community/DeepSeek-V4.1-Flash-1017-oQ4e-mtp"
+    )
     assert backend.requires_omlx_server("GLM-5.3-Flash-MLX-6bit")
     assert backend.requires_omlx_server(
         "/Users/x/MLX_Models/GLM-5.3-Flash-MLX-6bit"
@@ -836,6 +843,13 @@ def test_requires_omlx_server_from_config_json(tmp_path: Path):
         encoding="utf-8",
     )
     assert backend.requires_omlx_server(str(d))
+    # Folder name has no "deepseek" — only config.json model_type.
+    v41 = tmp_path / "custom_folder"
+    v41.mkdir()
+    (v41 / "config.json").write_text(
+        '{"model_type": "deepseek_v41"}\n', encoding="utf-8"
+    )
+    assert backend.requires_omlx_server(str(v41))
     other = tmp_path / "glm"
     other.mkdir()
     (other / "config.json").write_text(
@@ -869,6 +883,12 @@ def test_mlx_endpoint_for_model_routes_flash_to_omlx(monkeypatch):
     monkeypatch.delenv("LLM_BACKEND", raising=False)
     flash = "/m/DeepSeek-V4-Flash-0731-MXFP4-MLX"
     assert backend.mlx_endpoint_for_model(flash) == "http://127.0.0.1:8000"
+    assert backend.mlx_endpoint_for_model(
+        "/m/DeepSeek-V4.1-Flash-1017-oQ4e-mtp"
+    ) == "http://127.0.0.1:8000"
+    assert backend.omlx_api_model_id(
+        "/Users/x/MLX_Models/DeepSeek-V4.1-Flash-1017-oQ4e-mtp"
+    ) == "DeepSeek-V4.1-Flash-1017-oQ4e-mtp"
     assert backend.mlx_endpoint_for_model("/m/GLM-5.3-Flash-MLX-6bit") == (
         "http://127.0.0.1:8000"
     )

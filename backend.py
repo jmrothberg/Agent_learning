@@ -32,7 +32,8 @@ For MLX, "which model" comes from:
      merely discovered/unloaded; TUI can type a goal without `/load`)
   3. The first local MLX folder under `~/MLX_Models/`
   4. Otherwise: raise — there's nothing to load.
-  glm5_next / deepseek_v4 / qwen4_exp always talk to oMLX, never in-process mlx_lm.
+  glm5_next / deepseek_v4 / deepseek_v41 / qwen4_exp always talk to oMLX,
+  never in-process mlx_lm.
 """
 
 from __future__ import annotations
@@ -4146,7 +4147,7 @@ def _try_mlx_server() -> BackendInfo | None:
 
 
 # -----------------------------------------------------------------------------
-# oMLX — models stock mlx-lm cannot load (deepseek_v4, glm5_next)
+# oMLX — models stock mlx-lm cannot load (deepseek_v4, deepseek_v41, glm5_next)
 # -----------------------------------------------------------------------------
 # chat.py auto-starts oMLX when the user /model-picks DeepSeek-V4-Flash or
 # GLM-5.3-Flash. GLM-5.2 / Qwen / MiniMax stay in-process; we do NOT set
@@ -4176,9 +4177,10 @@ def omlx_default_endpoint() -> str:
 def requires_omlx_server(model: str) -> bool:
     """True when this MLX id/path needs oMLX (stock mlx-lm cannot load it).
 
-    Matches DeepSeek-V4-Flash (`deepseek_v4`), GLM-5.3-Flash (`glm5_next`),
-    and Qwen3.8-Flash-Next (`qwen4_exp`) by folder/HF name, or a local
-    config.json with those model_type values.
+    Matches DeepSeek-V4-Flash (`deepseek_v4`), DeepSeek-V4.1-Flash
+    including the 1017 oQ4e folder (`deepseek_v41`), GLM-5.3-Flash
+    (`glm5_next`), and Qwen3.8-Flash-Next (`qwen4_exp`) by folder/HF
+    name, or a local config.json with those model_type values.
     GLM-5.2 stays in-process mlx-lm — do not match a bare "glm-5" prefix.
     Dense Qwen3.8-27B stays in-process mlx-vlm — do not match bare "qwen3.8".
     """
@@ -4208,7 +4210,16 @@ def requires_omlx_server(model: str) -> bool:
             with open(cfg_path, encoding="utf-8") as f:
                 cfg = json.load(f)
             mt = str((cfg or {}).get("model_type") or "").lower()
-            if mt in ("deepseek_v4", "glm5_next", "qwen4_exp"):
+            # deepseek_v41 is V4.1 Flash (including 1017). The name check
+            # above already matches "deepseek-v4.1"; this is the config
+            # path when the folder name does not.
+            if mt in (
+                "deepseek_v4",
+                "deepseek_v41",
+                "deepseek_v41_text",
+                "glm5_next",
+                "qwen4_exp",
+            ):
                 return True
         except Exception:
             pass
@@ -4846,8 +4857,9 @@ def ensure_omlx_server(
 
 
 def mlx_endpoint_for_model(model: str) -> str:
-    """Endpoint for an MLX model pick: oMLX URL for deepseek_v4 / glm5_next /
-    qwen4_exp, else in-process unless the user explicitly requested mlx-server via env.
+    """Endpoint for an MLX model pick: oMLX URL for deepseek_v4 /
+    deepseek_v41 / glm5_next / qwen4_exp, else in-process unless the user
+    explicitly requested mlx-server via env.
     """
     if requires_omlx_server(model):
         return omlx_default_endpoint()

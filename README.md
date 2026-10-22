@@ -175,6 +175,22 @@ oMLX model settings instead.
 | GLM-5.2 / Qwen3.8-27B / MiniMax | Default **in-process** MLX. TUI: `/server on` or `/model N server` to run them on oMLX (`/critic auto` then ON). Flash / GLM-5.3 / Flash-Next already use oMLX. |
 | Leaving Flash → GLM-5.2 / GLM-5.3 | Chat **unloads** other oMLX models first. Qwen Flash-Next (~198GB) + GLM-5.3 6-bit (~289GB) exceeds the Metal cap (HTTP 507). Unpin Flash-Next in `/admin` if it was pinned. |
 
+#### DeepSeek-V4.1-Flash-1017 — not tested yet
+
+Oct 17, 2026 refresh of V4.1-Flash. Chat treats it like V4-Flash: `/model` or `/load` on the folder auto-starts oMLX and posts the **basename** as the API id. `model_type` in its `config.json` is `deepseek_v41` (stock `mlx-lm` cannot load it). **These weights have not been loaded or used in `chat.py` on this machine.** Routing is covered by `tests/test_backend_detection.py` only.
+
+| Item | Detail |
+|------|--------|
+| Weights | `~/MLX_Models/DeepSeek-V4.1-Flash-1017-oQ4e-mtp` — [mlx-community oQ4e + MTP](https://huggingface.co/mlx-community/DeepSeek-V4.1-Flash-1017-oQ4e-mtp), base [deepseek-ai/DeepSeek-V4.1-Flash-1017](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017) |
+| Why this build | On a 512 GB Mac Studio, **oQ4e** keeps DeepSeek’s shipped MXFP4 experts and MXFP8 projections and quantizes only the Engram tables (~402 GiB on disk, ~4.5 bits/weight). oMLX can serve Engram from SSD (~288 GiB resident). The folder includes DSpark MTP weights (`mtp_enabled` in oMLX). Lower oQ builds requantize the experts. |
+| API model id | `DeepSeek-V4.1-Flash-1017-oQ4e-mtp` |
+| oMLX | Same auto-start as V4-Flash. The quant was produced with oMLX 0.7.1 (fused V4.1 decode). The local venv checked while adding this was **0.7.0**. Neither version has been run on these weights here. |
+| Pick | `/list` → `/model` on that folder, or `MLX_MODEL=~/MLX_Models/DeepSeek-V4.1-Flash-1017-oQ4e-mtp` |
+| Earlier V4.1 folder | `~/MLX_Models/DeepSeek-V4.1-Flash-oQ4e-mtp` is the pre-1017 checkpoint. Leave it; do not point 1017 runs at it. |
+| Vision tower | The checkpoint includes a vision encoder. This repo still serves the model as a text coder through oMLX. Image input on this path is **not tested**. `MLXServerBackend` strips images. |
+
+Do not load it while another large model is already resident.
+
 **TUI — no env vars for the server:** `/list` → `/model` (or `/load` /
 `/launch`) on Flash auto-starts oMLX. For **Qwen3.8-27B** (or any in-process
 MLX pick) type **`/server on`** or **`/model N server`** — same oMLX path,
