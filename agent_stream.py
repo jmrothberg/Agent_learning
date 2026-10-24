@@ -1791,7 +1791,14 @@ class StreamMaterializeMixin:
                 getattr(self._backend, "info", None)
                 and self._backend.info.name
             ) or "unknown"
-            if getattr(result, "silent", False):
+            err_low = (getattr(result, "error_message", None) or "").lower()
+            if "404" in err_low or "not found" in err_low:
+                hint = (
+                    "That oMLX does not list this model. Leave it running. "
+                    "Restart chat so the next /model uses another port for "
+                    "~/MLX_Models."
+                )
+            elif getattr(result, "silent", False):
                 hint = (
                     "Model emitted no visible tokens (likely stuck in a "
                     "thinking/reasoning channel). Next turn should open "

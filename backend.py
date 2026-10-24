@@ -4361,6 +4361,47 @@ def omlx_list_loaded_model_ids(
     return out
 
 
+def omlx_advertised_model_ids(
+    endpoint: str | None = None,
+    *,
+    timeout: float = 1.5,
+) -> set[str] | None:
+    """Basenames on GET /v1/models. None when the server did not answer.
+
+    This is the discovery list, not the loaded set. A teacher oMLX whose
+    model dir is not ~/MLX_Models advertises only its own folders.
+    """
+    ep = (endpoint or omlx_default_endpoint()).rstrip("/")
+    data = _http_get_json(ep + "/v1/models", timeout=timeout)
+    if not isinstance(data, dict):
+        return None
+    rows = data.get("data")
+    if rows is None:
+        rows = data.get("models") or []
+    if not isinstance(rows, list):
+        return None
+    ids: set[str] = set()
+    for row in rows:
+        if isinstance(row, dict) and row.get("id"):
+            ids.add(omlx_api_model_id(str(row["id"])))
+        elif isinstance(row, str) and row:
+            ids.add(omlx_api_model_id(row))
+    return ids
+
+
+def omlx_serves_model(
+    model: str,
+    endpoint: str | None = None,
+    *,
+    timeout: float = 1.5,
+) -> bool:
+    """True when this oMLX advertises `model`. False if the list is missing."""
+    ids = omlx_advertised_model_ids(endpoint, timeout=timeout)
+    if not ids:
+        return False
+    return omlx_api_model_id(model) in ids
+
+
 def mlx_name_is_resident(
     name: str,
     *,
@@ -4402,6 +4443,11 @@ def omlx_unload_loaded_for_inprocess(
     # coder's per-stream unload evicts the critic's weights and vice versa.
     keep_ids = {keep_id} if keep_id else set()
     keep_ids |= {omlx_api_model_id(m) for m in OMLX_SESSION_KEEP_MODELS if m}
+    # Donkey Kong 20261023 23:07: :8000 was the Growingmodel teacher
+    # (only Qwen3.8-27B-mxfp8). Unload-everything-but-DeepSeek aborted
+    # that server's in-flight requests, then DeepSeek 404'd.
+    if keep_id and not omlx_serves_model(keep_id, endpoint):
+        return []
     freed: list[str] = []
     for mid in omlx_list_loaded_model_ids(endpoint):
         if mid in keep_ids:
@@ -4475,12 +4521,17 @@ def _foreign_openai_server(endpoint: str, *, timeout: float = 1.0) -> bool:
     return isinstance(data, dict)
 
 
-def _alternate_omlx_endpoint(occupied: str) -> str | None:
+def _alternate_omlx_endpoint(
+    occupied: str,
+    model: str | None = None,
+) -> str | None:
     """Loopback port that is already oMLX, or free so we can spawn one.
 
     Does not touch `occupied`. None when every fallback is some other
     server, or the configured host is not loopback (a remote
-    OMLX_SERVER_URL must not grow a local server).
+    OMLX_SERVER_URL must not grow a local server). When `model` is set,
+    an oMLX that does not advertise it is skipped so a teacher server
+    is not reused.
     """
     host, _port = _endpoint_host_port(occupied)
     if not _loopback_host(host):
@@ -4488,6 +4539,8 @@ def _alternate_omlx_endpoint(occupied: str) -> str | None:
     for port in _OMLX_FALLBACK_PORTS:
         ep = _endpoint_on_port(occupied, port)
         if omlx_reachable(ep, timeout=0.5):
+            if model and not omlx_serves_model(model, ep):
+                continue
             return ep
         if not _tcp_port_open(host, port):
             return ep
@@ -4518,12 +4571,111 @@ def omlx_missing_metal_kernels(
     )
 
 
-def omlx_require_metal_kernels(endpoint: str) -> None:
+def _omlx_required_mlx_version() -> str | None:
+    """``0.32.4`` from the installed oMLX wheel's ``mlx==`` pin, if present."""
+    py = os.path.join(_omlx_venv_dir(), "bin", "python")
+    if not os.path.isfile(py):
+        return None
+    try:
+        r = subprocess.run(
+            [py, "-c",
+             "import importlib.metadata as m\n"
+             "reqs = m.requires('omlx') or []\n"
+             "hit = next((x for x in reqs if x.split(';',1)[0].strip().startswith('mlx==')), '')\n"
+             "print(hit.split('==',1)[-1].strip() if '==' in hit else '')"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    ver = (r.stdout or "").strip()
+    return ver or None
+
+
+def _repair_omlx_mlx_abi(
+    endpoint: str,
+    on_status: Callable[[str], None] | None = None,
+) -> bool:
+    """Install the mlx build oMLX was compiled against, then restart oMLX.
+
+    0.7.2's ``_ext`` binaries need ``mlx==0.32.4``. A ``--no-deps`` wheel
+    install leaves the previous mlx (0.32.2 here) and every kernel fails
+    ``dlopen`` with ``Symbol not found`` in ``libmlx.dylib``. That is not a
+    missing-kernel install. Returns True when a restart was attempted.
+    """
+    status = _http_get_json(endpoint.rstrip("/") + "/api/status", timeout=3.0)
+    kernels = (status or {}).get("custom_kernels") if isinstance(status, dict) else None
+    if not isinstance(kernels, dict):
+        return False
+    errors = [
+        str(info.get("import_error") or "")
+        for info in kernels.values()
+        if isinstance(info, dict) and not info.get("available")
+    ]
+    if not errors or not any("libmlx" in err or "Symbol not found" in err for err in errors):
+        return False
+    ver = _omlx_required_mlx_version()
+    if not ver:
+        return False
+    pip = os.path.join(_omlx_venv_dir(), "bin", "pip")
+    if not os.path.isfile(pip):
+        return False
+    if on_status is not None:
+        on_status(f"oMLX kernels need mlx {ver}. Installing it and restarting oMLX…")
+    try:
+        proc = subprocess.run(
+            [pip, "install", f"mlx=={ver}", f"mlx-metal=={ver}"],
+            capture_output=True, text=True, timeout=300,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if proc.returncode != 0:
+        return False
+    try:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(endpoint if "://" in endpoint else "http://" + endpoint)
+        port = parsed.port or 8000
+    except Exception:
+        port = 8000
+    try:
+        listed = subprocess.run(
+            ["lsof", "-t", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        listed = None
+    if listed is not None and listed.returncode == 0:
+        for token in (listed.stdout or "").split():
+            try:
+                os.kill(int(token), signal.SIGTERM)
+            except (OSError, ValueError):
+                pass
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline and _tcp_port_open("127.0.0.1", port):
+            time.sleep(0.25)
+    ok, _detail = _spawn_omlx_serve(endpoint, on_status=on_status)
+    if not ok:
+        return False
+    deadline = time.monotonic() + 45.0
+    while time.monotonic() < deadline:
+        if omlx_reachable(endpoint, timeout=1.0):
+            return True
+        time.sleep(0.4)
+    return False
+
+
+def omlx_require_metal_kernels(
+    endpoint: str,
+    on_status: Callable[[str], None] | None = None,
+) -> None:
     """HARD RULE (Mac): refuse an oMLX server whose Metal kernels are missing.
 
     Escape hatch for deliberate experiments only: OMLX_ALLOW_NO_KERNELS=1.
-    Fix = install the prebuilt release wheel (ships `_ext` + `.metallib`) into
-    the venv, or use oMLX.app — see HARNESS_TUNING.md "oMLX Metal kernels".
+    A kernel that fails to load because libmlx is the wrong build is repaired
+    here (install the oMLX wheel's mlx pin and restart). A wheel with no
+    ``_ext`` at all is still refused.
     """
     missing = omlx_missing_metal_kernels(endpoint=endpoint)
     if not missing:
@@ -4535,14 +4687,17 @@ def omlx_require_metal_kernels(endpoint: str) -> None:
             file=sys.stderr,
         )
         return
+    if _repair_omlx_mlx_abi(endpoint, on_status):
+        missing = omlx_missing_metal_kernels(endpoint=endpoint)
+        if not missing:
+            return
     raise RuntimeError(
         f"oMLX at {endpoint} is running WITHOUT native Metal kernels "
         f"({', '.join(missing)}). This is a plain pip/git install — GLM/Qwen "
         "decode ~30x slower. Refusing to use it. Fix: install the prebuilt "
-        "release wheel into ~/MLX_Models/.omlx-venv (pip install --no-deps "
-        "--force-reinstall omlx-<ver>-cp312-*-macosx_15_0_universal2.whl from "
-        "github.com/jundot/omlx/releases) and restart the server; verify with "
-        "GET /api/status → custom_kernels all available. "
+        "release wheel into ~/MLX_Models/.omlx-venv (the wheel's mlx pin, "
+        "not a --no-deps install onto an older mlx) and restart the server; "
+        "verify with GET /api/status → custom_kernels all available. "
         "Override only for experiments: OMLX_ALLOW_NO_KERNELS=1."
     )
 
@@ -4821,10 +4976,176 @@ def _spawn_omlx_serve(
     return False, install_detail or "oMLX CLI install did not produce a binary"
 
 
+def _omlx_model_settings_path() -> str:
+    """Per-model oMLX settings. Read once when the server process starts."""
+    return os.path.join(os.path.expanduser("~"), ".omlx", "model_settings.json")
+
+
+def _mtp_heads_declared(cfg: dict) -> bool:
+    """True when config declares a native MTP / DSpark head.
+
+    Mirrors oMLX ``_has_mtp_heads`` / ``_has_dspark_heads`` well enough to
+    decide the speed default without opening weight shards.
+    """
+    cfgs: list[dict] = [cfg]
+    text = cfg.get("text_config")
+    if isinstance(text, dict):
+        cfgs.append(text)
+    for c in cfgs:
+        if int(c.get("dspark_block_size") or 0) > 0 and (
+            c.get("dspark_target_layer_ids") or ()
+        ):
+            return True
+        if int(c.get("mtp_num_hidden_layers") or 0) > 0:
+            return True
+        if int(c.get("num_nextn_predict_layers") or 0) > 0:
+            return True
+    mtp_cfg = cfg.get("mtp_config") or {}
+    if isinstance(mtp_cfg, dict) and int(mtp_cfg.get("num_nextn_predict_layers") or 0) > 0:
+        return True
+    return False
+
+
+def _lightning_mtp_model_type(model_type: str) -> bool:
+    """Model types whose Lightning MTP toggle oMLX will accept."""
+    mt = (model_type or "").strip()
+    if not mt:
+        return False
+    if mt == "qwen4_exp":
+        return True
+    return (
+        mt.startswith("qwen3_5")
+        or mt.startswith("qwen3_6")
+        or mt.startswith("deepseek_v4")
+        or mt.startswith("nemotron_h")
+        or mt in {
+            "mimo_v2",
+            "mimo_v2_flash",
+            "glm_moe_dsa",
+            "glm5_next",
+            "gemma4",
+            "gemma4_unified",
+            "inkling",
+            "inkling_mm_model",
+            "step3p7",
+        }
+    )
+
+
+def omlx_speed_flags_for_config(cfg: dict) -> dict:
+    """Speed flags for one checkpoint. Empty when the model does not benefit.
+
+    Native MTP only. ``vlm_mtp_enabled`` is Gemma's external drafter and
+    stays off. KV-cache quantization stays off: it trades quality for RAM
+    this machine does not need. Engram SSD offload stays off so tables
+    stay in RAM when they fit.
+    """
+    if not isinstance(cfg, dict):
+        return {}
+    quant = cfg.get("quantization_config") or {}
+    if isinstance(quant, dict) and str(quant.get("quant_method") or "").lower() == "paroquant":
+        return {}
+    mt = str(cfg.get("model_type") or "")
+    flags: dict = {}
+    if _lightning_mtp_model_type(mt) and _mtp_heads_declared(cfg):
+        flags["mtp_enabled"] = True
+    # V4.1 CED is the prefill path the 0.7.2 speed table measured.
+    # Unsupported layouts fall back inside oMLX.
+    if mt == "deepseek_v41":
+        flags["deepseek_v41_ced_prefill_enabled"] = True
+    # 8-bit Flash-Next is outside the oQe fused-decode allow-list.
+    if mt == "qwen4_exp" and flags.get("mtp_enabled"):
+        flags["qwen4_gdn_decode_wide_proj"] = True
+    return flags
+
+
+def apply_omlx_speed_defaults() -> list[str]:
+    """Merge speed flags into ~/.omlx/model_settings.json. Returns ids changed.
+
+    Called before oMLX is spawned. A process that is already listening
+    does not re-read this file; the next start does. Other keys on a
+    model (pin, sampling) are left as they are. Native MTP cannot share
+    a record with DFlash or Gemma ``vlm_mtp_enabled``, so those are
+    turned off when MTP is turned on — oMLX would otherwise drop the
+    whole record at load.
+    """
+    changed: list[str] = []
+    path = _omlx_model_settings_path()
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        data = {"version": 1, "models": {}}
+    except (OSError, json.JSONDecodeError, ValueError):
+        return changed
+    if not isinstance(data, dict):
+        return changed
+    models = data.get("models")
+    if models is None:
+        models = {}
+        data["models"] = models
+    if not isinstance(models, dict):
+        return changed
+    data.setdefault("version", 1)
+    for model_id, cfg in _iter_omlx_model_configs():
+        flags = omlx_speed_flags_for_config(cfg)
+        if not flags:
+            continue
+        rec = models.get(model_id)
+        if not isinstance(rec, dict):
+            rec = {}
+        new = dict(rec)
+        if flags.get("mtp_enabled"):
+            if new.get("dflash_enabled"):
+                new["dflash_enabled"] = False
+            if new.get("vlm_mtp_enabled"):
+                new["vlm_mtp_enabled"] = False
+        new.update(flags)
+        if model_id in models and new == rec:
+            continue
+        models[model_id] = new
+        changed.append(model_id)
+    if not changed:
+        return changed
+    parent = os.path.dirname(path)
+    os.makedirs(parent, exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+    return changed
+
+
+def _iter_omlx_model_configs() -> list[tuple[str, dict]]:
+    """(folder basename, config) for one level of the oMLX model dir."""
+    root = _omlx_model_dir()
+    found: list[tuple[str, dict]] = []
+    if not os.path.isdir(root):
+        return found
+    for name in sorted(os.listdir(root)):
+        if name.startswith(".") or _is_broken_glm53_6bit(name):
+            continue
+        cfg_path = os.path.join(root, name, "config.json")
+        if not os.path.isfile(cfg_path):
+            continue
+        try:
+            with open(cfg_path, encoding="utf-8") as f:
+                cfg = json.load(f)
+        except (OSError, json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(cfg, dict):
+            found.append((name, cfg))
+    return found
+
+
 def ensure_omlx_server(
     *,
     timeout_s: float = 120.0,
     on_status: Callable[[str], None] | None = None,
+    model: str | None = None,
 ) -> str:
     """Ensure oMLX is reachable; spawn it if needed. Returns endpoint URL.
 
@@ -4833,16 +5154,62 @@ def ensure_omlx_server(
     If the default port is mlx_vlm / mlx_lm (answers /v1/models, no
     /api/status), leave that process alone and use 8001–8003. Other
     machines run the LoRA watchdog on :8000; killing it would stop training.
-    An explicit OMLX_SERVER_URL is never moved.
+    An oMLX that does not advertise `model` is left running too (the
+    Growingmodel teacher on :8000 only has Qwen). An explicit
+    OMLX_SERVER_URL is never moved.
+
+    Before the reachability check, local checkpoints that benefit get
+    speed defaults in ``model_settings.json`` (native MTP, V4.1 CED
+    prefill, Flash-Next wide fused decode). The file is what a new
+    oMLX process loads.
     """
     global _OMLX_ENDPOINT_OVERRIDE
     endpoint = omlx_default_endpoint()
-    if omlx_reachable(endpoint):
-        # HARD RULE (Mac): never build on an oMLX without Metal kernels.
-        omlx_require_metal_kernels(endpoint)
-        return endpoint
-
+    try:
+        changed = apply_omlx_speed_defaults()
+    except OSError:
+        changed = []
+    if changed and on_status is not None:
+        names = ", ".join(changed)
+        if omlx_reachable(endpoint):
+            on_status(
+                f"Speed defaults saved for {names}. This oMLX is already "
+                "running, so they apply the next time it starts."
+            )
+        else:
+            on_status(f"Speed defaults on for {names}.")
     explicit = bool((os.environ.get("OMLX_SERVER_URL") or "").strip())
+    if omlx_reachable(endpoint):
+        if not model or omlx_serves_model(model, endpoint):
+            # HARD RULE (Mac): never build on an oMLX without Metal kernels.
+            omlx_require_metal_kernels(endpoint, on_status=on_status)
+            return endpoint
+        want = omlx_api_model_id(model)
+        if explicit:
+            raise RuntimeError(
+                f"{endpoint} is oMLX but does not serve {want}. "
+                "OMLX_SERVER_URL is set, so it was not moved. "
+                "Left that server running."
+            )
+        if on_status is not None:
+            on_status(
+                f"{endpoint} does not serve {want}. "
+                "Leaving that oMLX running."
+            )
+        moved = _alternate_omlx_endpoint(endpoint, model)
+        if not moved:
+            raise RuntimeError(
+                f"{endpoint} does not serve {want} and ports "
+                f"{', '.join(str(p) for p in _OMLX_FALLBACK_PORTS)} "
+                "are not free. Left the server on "
+                f"{endpoint} running."
+            )
+        if omlx_reachable(moved) and omlx_serves_model(model, moved):
+            omlx_require_metal_kernels(moved, on_status=on_status)
+            _OMLX_ENDPOINT_OVERRIDE = moved.rstrip("/")
+            return moved
+        endpoint = moved
+
     if _foreign_openai_server(endpoint):
         if explicit:
             raise RuntimeError(
@@ -4863,7 +5230,7 @@ def ensure_omlx_server(
                 "OMLX_SERVER_URL to an oMLX base URL."
             )
         if omlx_reachable(moved):
-            omlx_require_metal_kernels(moved)
+            omlx_require_metal_kernels(moved, on_status=on_status)
             _OMLX_ENDPOINT_OVERRIDE = moved.rstrip("/")
             return moved
         endpoint = moved
@@ -4878,7 +5245,7 @@ def ensure_omlx_server(
     deadline = time.monotonic() + max(5.0, float(timeout_s))
     while time.monotonic() < deadline:
         if omlx_reachable(endpoint, timeout=1.5):
-            omlx_require_metal_kernels(endpoint)  # HARD RULE, see above
+            omlx_require_metal_kernels(endpoint, on_status=on_status)  # HARD RULE, see above
             # Remember a fallback port so the next /new does not talk to
             # the foreign server on the default port again.
             _host, port = _endpoint_host_port(endpoint)

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import os
 import sys
 from pathlib import Path
@@ -713,6 +714,77 @@ def test_requires_omlx_server_by_name():
     assert not backend.requires_omlx_server("")
 
 
+def test_omlx_speed_defaults_for_mtp_models(tmp_path, monkeypatch):
+    """Native MTP + V4.1 CED + Flash-Next wide decode. Other keys stay."""
+    deepseek = tmp_path / "DeepSeek-V4.1-Flash-1017-oQ4e-mtp"
+    deepseek.mkdir()
+    (deepseek / "config.json").write_text(json.dumps({
+        "model_type": "deepseek_v41",
+        "text_config": {
+            "dspark_block_size": 5,
+            "dspark_target_layer_ids": [1],
+            "num_nextn_predict_layers": 3,
+        },
+    }))
+    flash = tmp_path / "Qwen3.8-Flash-Next-MLX-8bit-MTP"
+    flash.mkdir()
+    (flash / "config.json").write_text(json.dumps({
+        "model_type": "qwen4_exp",
+        "text_config": {"mtp_num_hidden_layers": 1},
+    }))
+    glm = tmp_path / "GLM-5.3-Flash-MLX-oQ4-MTP"
+    glm.mkdir()
+    (glm / "config.json").write_text(json.dumps({
+        "model_type": "glm5_next",
+        "text_config": {"num_nextn_predict_layers": 1},
+    }))
+    plain = tmp_path / "MiniCPM5-2B-Base"
+    plain.mkdir()
+    (plain / "config.json").write_text(json.dumps({"model_type": "llama"}))
+    # Has MTP heads but DFlash was on — MTP must win and DFlash go off.
+    qwen = tmp_path / "Qwen3.8-27B-mxfp8"
+    qwen.mkdir()
+    (qwen / "config.json").write_text(json.dumps({
+        "model_type": "qwen3_5",
+        "text_config": {"mtp_num_hidden_layers": 1},
+    }))
+    settings = tmp_path / "model_settings.json"
+    settings.write_text(json.dumps({
+        "version": 1,
+        "models": {
+            "Qwen3.8-Flash-Next-MLX-8bit-MTP": {
+                "is_pinned": False,
+                "mtp_num_draft_tokens": 4,
+            },
+            "Qwen3.8-27B-mxfp8": {"dflash_enabled": True, "vlm_mtp_enabled": True},
+        },
+    }))
+    monkeypatch.setattr(backend, "_omlx_model_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(backend, "_omlx_model_settings_path", lambda: str(settings))
+
+    changed = backend.apply_omlx_speed_defaults()
+    assert "DeepSeek-V4.1-Flash-1017-oQ4e-mtp" in changed
+    assert "Qwen3.8-Flash-Next-MLX-8bit-MTP" in changed
+    assert "GLM-5.3-Flash-MLX-oQ4-MTP" in changed
+    data = json.loads(settings.read_text())
+    ds = data["models"]["DeepSeek-V4.1-Flash-1017-oQ4e-mtp"]
+    assert ds["mtp_enabled"] is True
+    assert ds["deepseek_v41_ced_prefill_enabled"] is True
+    qn = data["models"]["Qwen3.8-Flash-Next-MLX-8bit-MTP"]
+    assert qn["mtp_enabled"] is True
+    assert qn["qwen4_gdn_decode_wide_proj"] is True
+    assert qn["is_pinned"] is False
+    assert qn["mtp_num_draft_tokens"] == 4
+    assert data["models"]["GLM-5.3-Flash-MLX-oQ4-MTP"]["mtp_enabled"] is True
+    assert "deepseek_v41_ced_prefill_enabled" not in data["models"]["GLM-5.3-Flash-MLX-oQ4-MTP"]
+    qw = data["models"]["Qwen3.8-27B-mxfp8"]
+    assert qw["mtp_enabled"] is True
+    assert qw["dflash_enabled"] is False
+    assert qw["vlm_mtp_enabled"] is False
+    assert "MiniCPM5-2B-Base" not in data["models"]
+    assert backend.apply_omlx_speed_defaults() == []
+
+
 def test_omlx_api_model_id_strips_path():
     # oMLX log 2026-08-04: POST with absolute path → 404; basename works.
     assert (
@@ -1033,6 +1105,56 @@ def test_ensure_omlx_server_already_up(monkeypatch):
     assert calls == []
 
 
+def test_ensure_omlx_leaves_teacher_that_lacks_model(monkeypatch):
+    """:8000 advertising only Qwen must not be reused or unloaded for DeepSeek."""
+    monkeypatch.setattr(backend, "_OMLX_ENDPOINT_OVERRIDE", None, raising=False)
+    backend._OMLX_ENDPOINT_OVERRIDE = None
+
+    def reachable(ep, **_k):
+        return str(ep).rstrip("/").endswith(":8000")
+
+    monkeypatch.setattr(backend, "omlx_reachable", reachable)
+    monkeypatch.setattr(backend, "_tcp_port_open", lambda *_a, **_k: False)
+    monkeypatch.setattr(
+        backend, "omlx_serves_model",
+        lambda model, ep=None, **_k: "Qwen" in str(model),
+    )
+    spawned: list[str] = []
+    monkeypatch.setattr(
+        backend, "_spawn_omlx_serve",
+        lambda ep, **_k: spawned.append(ep) or (True, "spawned"),
+    )
+    # After spawn, the fallback must look reachable or ensure times out.
+    def reachable_after(ep, **_k):
+        text = str(ep).rstrip("/")
+        return text.endswith(":8000") or text in spawned
+
+    monkeypatch.setattr(backend, "omlx_reachable", reachable_after)
+    monkeypatch.setattr(backend, "_foreign_openai_server", lambda *_a, **_k: False)
+    ep = backend.ensure_omlx_server(
+        timeout_s=2.0,
+        model="DeepSeek-V4.1-Flash-1017-oQ4e-mtp",
+    )
+    assert ep == "http://127.0.0.1:8001"
+    assert spawned == ["http://127.0.0.1:8001"]
+    unloaded: list[str] = []
+    monkeypatch.setattr(
+        backend, "omlx_list_loaded_model_ids",
+        lambda *_a, **_k: ["Qwen3.8-27B-mxfp8"],
+    )
+    monkeypatch.setattr(
+        backend, "omlx_unload_model",
+        lambda mid, *_a, **_k: unloaded.append(mid) or (True, "unloaded"),
+    )
+    freed = backend.omlx_unload_loaded_for_inprocess(
+        keep="DeepSeek-V4.1-Flash-1017-oQ4e-mtp",
+        endpoint="http://127.0.0.1:8000",
+    )
+    assert freed == []
+    assert unloaded == []
+    backend._OMLX_ENDPOINT_OVERRIDE = None
+
+
 def test_ensure_omlx_server_spawns_then_ready(monkeypatch):
     hits = {"n": 0}
 
@@ -1260,6 +1382,7 @@ def test_ensure_omlx_server_refuses_kernel_less_server(monkeypatch):
     monkeypatch.setattr(
         backend, "omlx_missing_metal_kernels", lambda *a, **k: ["glm_moe_dsa"]
     )
+    monkeypatch.setattr(backend, "_repair_omlx_mlx_abi", lambda *a, **k: False)
     monkeypatch.delenv("OMLX_ALLOW_NO_KERNELS", raising=False)
     with pytest.raises(RuntimeError, match="WITHOUT native Metal kernels"):
         backend.ensure_omlx_server()

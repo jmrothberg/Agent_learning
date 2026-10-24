@@ -156,24 +156,25 @@ rewritten to the oQ4 directory when that directory has `config.json` and a
 safetensors file. The affine 6-bit checkpoint fails on oMLX 0.7.0 (MTP expert
 `down_proj` is 8-bit; the loader builds it at 6-bit and returns 409).
 Flash-Next 8-bit MTP: `~/MLX_Models/Qwen3.8-Flash-Next-MLX-8bit-MTP` (~203 GB) —
-[Vontra](https://huggingface.co/Vontra/Qwen3.8-Flash-Next-MLX-8bit-MTP)
-(enable native MTP, draft depth 3 in oMLX `/admin`). `/model` / `/load`
+[Vontra](https://huggingface.co/Vontra/Qwen3.8-Flash-Next-MLX-8bit-MTP).
+Chat turns native MTP and the wide fused decode on for this folder before oMLX starts. `/model` / `/load`
 auto-starts oMLX. GLM-5.2 and dense Qwen3.8-27B stay in-process.
 
 ### DeepSeek-V4-Flash + oMLX (required)
 
 Stock `mlx-lm` **cannot** load `model_type: deepseek_v4`. Flash is served only
 through **[oMLX](https://omlx.ai/) 0.6.3+** (native DSpark MTP; GLM-5.3-Flash needs 0.6.3). Do **not** install
-the old companion speed-patch repo on oMLX 0.5.4rc2+ — turn on `mtp_enabled` in
-oMLX model settings instead.
+the old companion speed-patch repo on oMLX 0.5.4rc2+. Chat writes
+`mtp_enabled` (and V4.1 CED prefill) into `~/.omlx/model_settings.json`
+before it starts oMLX. Do not use `vlm_mtp_enabled` (Gemma's external drafter).
 
 | Item | Detail |
 |------|--------|
 | Weights | Older V4 id, used when the directory exists: `~/MLX_Models/DeepSeek-V4-Flash-0731-MXFP4-MLX` (~163 GB) — [Vontra MXFP4](https://huggingface.co/Vontra/DeepSeek-V4-Flash-0731-MXFP4-MLX). This machine’s DeepSeek folders are the V4.1 pair below. |
 | API model id | **basename only** (`DeepSeek-V4-Flash-0731-MXFP4-MLX`). Absolute paths → HTTP 404. Chat normalizes this automatically. |
 | RAM | First real chat completion loads weights into unified memory (~150 GB+). `/model` alone does **not**. macOS “Cached Files” for the safetensors is disk cache, not a loaded model. |
-| CLI / TUI | `/model` and `/load` start oMLX when :8000 is down. A server already listening is not restarted. Binary searched on `PATH`, `~/.omlx/bin/omlx`, or `~/MLX_Models/.omlx-venv/bin/omlx` |
-| **Metal kernels (required)** | Install oMLX from the **prebuilt release wheel** (`omlx-<ver>-cp312-…-macosx_15_0_universal2.whl`) or oMLX.app — **never** `pip install git+…` / `-e .` (no `_ext`, ~30x slower GLM prefill). Check `curl -s :8000/api/status \| jq .custom_kernels`; chat refuses a kernel-less server. |
+| CLI / TUI | `/model` and `/load` start oMLX when :8000 is down. A server that already lists the model is not restarted. If it is oMLX but does not list that model (the Growingmodel teacher on :8000 only has Qwen), chat leaves it running and uses the next free port, 8001–8003. Chat does not unload models on a server that does not host the pick. Binary searched on `PATH`, `~/.omlx/bin/omlx`, or `~/MLX_Models/.omlx-venv/bin/omlx` |
+| **Metal kernels (required)** | Install oMLX from the **prebuilt release wheel** (`omlx-<ver>-cp312-…-macosx_15_0_universal2.whl`) or oMLX.app — **never** `pip install git+…` / `-e .` (no `_ext`, ~30x slower GLM prefill). The 0.7.2 wheel's kernels need its `mlx==` pin (0.32.4); `--no-deps` onto an older mlx makes every kernel fail `dlopen`. Chat installs that pin and restarts its own oMLX when `/api/status` reports that symbol error. A wheel with no `_ext` at all is still refused. |
 | Hot prompt cache | `cache.hot_cache_max_size` e.g. `"32GB"` — **CLI rejects `"20%"`** |
 | GLM-5.2 / Qwen3.8-27B / MiniMax | Default **in-process** MLX. TUI: `/server on` or `/model N server` to run them on oMLX (`/critic auto` then ON). Flash / GLM-5.3 / Flash-Next already use oMLX. |
 | Leaving Flash → GLM-5.2 / GLM-5.3 | Chat **unloads** other oMLX models first. Two large oMLX models at once can exceed the Metal cap (HTTP 507). Unpin a pinned model in `/admin` before loading the next one. |
@@ -182,14 +183,14 @@ oMLX model settings instead.
 
 Oct 17, 2026 refresh of V4.1-Flash. Chat treats it like V4-Flash: `/model` or `/load` posts the **basename** as the API id. `model_type` in its `config.json` is `deepseek_v41` (stock `mlx-lm` cannot load it). `/list` badges the name `[VLM]`. **A successful generation has not been run.** One planning attempt returned HTTP 404 because oMLX’s in-memory model list was built while a shard was still missing.
 
-oMLX registers a folder only when every shard named in `model.safetensors.index.json` is on disk. `/model` and `/load` call `ensure_omlx_server`, which **starts** oMLX when port 8000 is down and **leaves a server that is already up** alone (no rescan). After a download finishes, restart oMLX or pick the model only once the port is down so the new process scans the complete folder.
+oMLX registers a folder only when every shard named in `model.safetensors.index.json` is on disk. `/model` and `/load` call `ensure_omlx_server`, which **starts** oMLX when nothing that lists the model is listening. A server already up that does list it is not restarted (no rescan). A server that does not list it is left running, and chat starts another oMLX on the next free port. After a download finishes, pick the model only once that process can see every shard.
 
 | Item | Detail |
 |------|--------|
 | Weights | `~/MLX_Models/DeepSeek-V4.1-Flash-1017-oQ4e-mtp` — [mlx-community oQ4e + MTP](https://huggingface.co/mlx-community/DeepSeek-V4.1-Flash-1017-oQ4e-mtp), base [deepseek-ai/DeepSeek-V4.1-Flash-1017](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017) |
-| Why this build | On a 512 GB Mac Studio, **oQ4e** keeps DeepSeek’s shipped MXFP4 experts and MXFP8 projections and quantizes only the Engram tables (~402 GiB on disk, ~4.5 bits/weight). oMLX can serve Engram from SSD (~288 GiB resident). The folder includes DSpark MTP weights (`mtp_enabled` in oMLX). Lower oQ builds requantize the experts. |
+| Why this build | On a 512 GB Mac Studio, **oQ4e** keeps DeepSeek’s shipped MXFP4 experts and MXFP8 projections and quantizes only the Engram tables (~402 GiB on disk, ~4.5 bits/weight). oMLX can serve Engram from SSD (~288 GiB resident). The folder includes DSpark MTP weights. Chat turns `mtp_enabled` and V4.1 CED prefill on before oMLX starts. Lower oQ builds requantize the experts. |
 | API model id | `DeepSeek-V4.1-Flash-1017-oQ4e-mtp` |
-| oMLX | Same auto-start as V4-Flash. The quant was produced with oMLX 0.7.1 (fused V4.1 decode). The local venv checked while adding this was **0.7.0**. Neither version has been run on these weights here. |
+| oMLX | Same auto-start as V4-Flash. Local venv is the prebuilt **0.7.2** wheel (fused V4.1 decode). Generation on these weights has not been run here. |
 | Pick | `/list` → `/model` on that folder, or `MLX_MODEL=~/MLX_Models/DeepSeek-V4.1-Flash-1017-oQ4e-mtp` |
 | Earlier V4.1 folder | `~/MLX_Models/DeepSeek-V4.1-Flash-oQ4e-mtp` is the pre-1017 checkpoint. Leave it; do not point 1017 runs at it. |
 | Vision | It is a VLM (`vision_config` in `config.json`). `/list` badges `deepseek-v4.1` as `[VLM]`. The July `DeepSeek-V4-Flash` folder stays `[text]`. Image input through oMLX has **not been load-tested**. |
@@ -205,7 +206,7 @@ and `/critic auto` turns on. `/help server`. Override base URL with
 **Parallel batches** (oMLX must already be up — `batch_parallel` does not auto-start):
 ```bash
 omlx serve --model-dir ~/MLX_Models --hot-cache-max-size 32GB --port 8000
-# /admin: load + pin DeepSeek-V4-Flash-0731-MXFP4-MLX, mtp_enabled=on
+# Chat writes mtp_enabled before it starts oMLX. Pin in /admin if the batch must stay resident.
 LLM_BACKEND=mlx-server MLX_SERVER_URL=http://127.0.0.1:8000 \
   .venv/bin/python eval/batch_parallel.py --jobs 2 …
 ```

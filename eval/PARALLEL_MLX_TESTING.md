@@ -132,7 +132,7 @@ MLX_SERVER_URL=http://127.0.0.1:8000 \
 | **Pin** the coder model in `/admin` | Survives LRU eviction when other models load |
 | Per-model **TTL off** for that model | Same as idle — no surprise unload mid-batch |
 | SSE keepalive **`chunk`** | Long prefill must not look like a hung socket to `MLXServerBackend` |
-| **`mtp_enabled`** on V4-Flash | Native DSpark MTP — do **not** install companion speed-patch repos |
+| **`mtp_enabled`** on V4-Flash / V4.1 / GLM-5.3 / Flash-Next | Chat writes native MTP (and V4.1 CED prefill) before oMLX starts — do **not** install companion speed-patch repos |
 | App / `omlx start` / `brew services` + `caffeinate -dims` on batches | Auto-restart + no Mac sleep killing the server |
 
 Admin UI: `http://127.0.0.1:8000/admin`. Durable file: `~/.omlx/settings.json`

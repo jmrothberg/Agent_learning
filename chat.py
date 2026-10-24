@@ -4503,10 +4503,10 @@ class CodingBoxApp(App):
                 )
                 ep = backend_mod.ensure_omlx_server(
                     on_status=lambda text: self._log_info(f"[dim]{text}[/dim]"),
+                    model=chosen_name,
                 )
                 self._log_info(
-                    f"[green]✓[/green] oMLX ready at [b]{ep}[/b] "
-                    "[dim](MTP/pin still configured in /admin)[/dim]"
+                    f"[green]✓[/green] oMLX ready at [b]{ep}[/b]"
                 )
                 return ep
             except RuntimeError as e:
@@ -5977,6 +5977,7 @@ class CodingBoxApp(App):
             try:
                 ep = backend_mod.ensure_omlx_server(
                     on_status=lambda text: self._log_info(f"[dim]{text}[/dim]"),
+                    model=info.model,
                 )
             except RuntimeError as e:
                 self._log_error(str(e))
@@ -7414,6 +7415,7 @@ class CodingBoxApp(App):
                 configured = backend_mod.omlx_default_endpoint()
                 ep = backend_mod.ensure_omlx_server(
                     on_status=lambda text: self._log_info(f"[dim]{text}[/dim]"),
+                    model=info.model,
                 )
             except RuntimeError as e:
                 self._log_error(str(e))

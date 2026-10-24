@@ -117,7 +117,7 @@ Stock PyPI `mlx-lm` / in-process `mlx-vlm` 0.6.17 lack those load paths
 | Parallel agents | `LLM_BACKEND=mlx-server` + `MLX_SERVER_URL=http://127.0.0.1:8000` — one resident model, continuous batch |
 | Idle unload / “server quit” | Global idle timeout **None**; **pin** the coder model; per-model TTL off |
 | Long SSE prefills | SSE keepalive `chunk`; `caffeinate` / menu-bar app auto-restart |
-| MTP speed | Per-model `mtp_enabled=true`, Flash-Next `mtp_num_draft_tokens=3` in `~/.omlx/model_settings.json` — **no** companion speed-patch repos on 0.5.4rc2+. Do **not** use `vlm_mtp_enabled` (that is Gemma’s external drafter) |
+| MTP speed | Chat writes `mtp_enabled=true` for local checkpoints that declare a native MTP head, plus V4.1 `deepseek_v41_ced_prefill_enabled` and Flash-Next `qwen4_gdn_decode_wide_proj`, into `~/.omlx/model_settings.json` before oMLX starts. A server already listening keeps its in-memory settings until its next start. **No** companion speed-patch repos. Do **not** use `vlm_mtp_enabled` (Gemma’s external drafter) |
 | GLM-5.2 coexistence | Separate weights folder; do not expect both ~390G + ~167G resident unless you have headroom |
 
 `OMLX_SERVER_URL` overrides the default `http://127.0.0.1:8000`. Config file:
