@@ -153,8 +153,13 @@ _VLM_NAME_SUBSTRINGS: tuple[str, ...] = (
     "muse-glimmer", "muse_glimmer",
     # LLaVA family
     "llava", "bakllava",
-    # DeepSeek vision
+    # DeepSeek vision. V4.1 Flash (including 1017) ships a vision
+    # encoder (config vision_config, pipeline image-text-to-text).
+    # Do not match bare "deepseek-v4" — the July V4-Flash folder is
+    # text-only. "deepseek-v4.1" does not match "deepseek-v4-flash".
     "deepseek-vl",
+    "deepseek-v4.1",
+    "deepseek_v41",
     # OpenGVLab InternVL
     "internvl",
     # MiniCPM vision
@@ -2280,6 +2285,31 @@ class MLXServerBackend(Backend):
                     json=body,
                     headers={"accept": "text/event-stream"},
                 ) as response:
+                    # Read a 4xx/5xx body before the stream context closes.
+                    # A bare status line hid oMLX "Model not found" (Donkey
+                    # Kong 20261023: 404, UI then suggested a Metal cap).
+                    if response.status_code >= 400:
+                        try:
+                            detail = (
+                                (await response.aread()).decode(
+                                    "utf-8", errors="replace"
+                                )
+                            ).strip()
+                        except Exception:
+                            detail = ""
+                        if len(detail) > 800:
+                            detail = detail[:800] + "…"
+                        error_message = (
+                            f"HTTP {response.status_code} from "
+                            f"{self.info.endpoint}/v1/chat/completions"
+                        )
+                        if detail:
+                            error_message = f"{error_message}: {detail}"
+                        raise httpx.HTTPStatusError(
+                            error_message,
+                            request=response.request,
+                            response=response,
+                        )
                     response.raise_for_status()
                     ait = response.aiter_lines().__aiter__()
                     while True:
@@ -2440,7 +2470,9 @@ class MLXServerBackend(Backend):
         except (httpx.HTTPError, OSError) as e:
             stalled = True
             crashed = True
-            error_message = f"{type(e).__name__}: {e}"
+            # Keep a body we already formatted (404 "Model not found").
+            if not error_message:
+                error_message = f"{type(e).__name__}: {e}"
             if stall_at is None:
                 stall_at = n_tokens
 

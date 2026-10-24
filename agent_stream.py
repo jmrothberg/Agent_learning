@@ -1636,7 +1636,16 @@ class StreamMaterializeMixin:
                 getattr(self._backend, "info", None)
                 and self._backend.info.name
             ) or "unknown"
-            if backend_name == "mlx":
+            err_low = err.lower()
+            if "404" in err or "not found" in err_low:
+                # Incomplete checkpoints are invisible to oMLX. A Metal-cap
+                # hint here sent the Donkey Kong 20261023 run at the wrong fix.
+                hint = (
+                    "oMLX does not have this model id. An interrupted download "
+                    "is skipped until every weight shard is on disk; then "
+                    "rescan models (restart oMLX) and /model again."
+                )
+            elif backend_name == "mlx":
                 hint = (
                     "GPU state has been reset — the next turn will reload the "
                     "model on a clean Metal context. If it keeps crashing on "

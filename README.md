@@ -187,7 +187,7 @@ Oct 17, 2026 refresh of V4.1-Flash. Chat treats it like V4-Flash: `/model` or `/
 | oMLX | Same auto-start as V4-Flash. The quant was produced with oMLX 0.7.1 (fused V4.1 decode). The local venv checked while adding this was **0.7.0**. Neither version has been run on these weights here. |
 | Pick | `/list` → `/model` on that folder, or `MLX_MODEL=~/MLX_Models/DeepSeek-V4.1-Flash-1017-oQ4e-mtp` |
 | Earlier V4.1 folder | `~/MLX_Models/DeepSeek-V4.1-Flash-oQ4e-mtp` is the pre-1017 checkpoint. Leave it; do not point 1017 runs at it. |
-| Vision tower | The checkpoint includes a vision encoder. This repo still serves the model as a text coder through oMLX. Image input on this path is **not tested**. `MLXServerBackend` strips images. |
+| Vision | It is a VLM (`vision_config` in `config.json`). `/list` badges `deepseek-v4.1` as `[VLM]`. The July `DeepSeek-V4-Flash` folder stays `[text]`. Image input through oMLX has **not been load-tested**. |
 
 Do not load it while another large model is already resident.
 

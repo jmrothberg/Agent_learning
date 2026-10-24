@@ -133,13 +133,27 @@ def test_qwen_non_vl_is_text():
 
 
 def test_deepseek_non_vl_is_text():
-    """DeepSeek-Coder / DeepSeek-V4 / DeepSeek-V3 are text-only.
-    Only deepseek-vl* is multimodal."""
+    """DeepSeek-Coder / July DeepSeek-V4-Flash / DeepSeek-V3 are text-only.
+    V4.1 Flash (vision_config) is a VLM; only the -vl* names were before."""
     for name in (
         "deepseek-coder-33b", "deepseek-v3.5", "deepseek-v4-flash",
         "deepseek-r1-distill-32b",
+        "DeepSeek-V4-Flash-0731-MXFP4-MLX",
     ):
         assert classify_model_modality(name) == "text", name
+
+
+def test_deepseek_v41_flash_is_vlm():
+    """V4.1 Flash 1017 is image-text-to-text. /list must not say [text]."""
+    names = (
+        "DeepSeek-V4.1-Flash-1017-oQ4e-mtp",
+        "/Users/x/MLX_Models/DeepSeek-V4.1-Flash-1017-oQ4e-mtp",
+        "mlx-community/DeepSeek-V4.1-Flash-1017-oQ4e-mtp",
+        "DeepSeek-V4.1-Flash-oQ4e-mtp",
+        "deepseek_v41",
+    )
+    for name in names:
+        assert classify_model_modality(name) == "vlm", name
 
 
 def test_llama_is_text():
