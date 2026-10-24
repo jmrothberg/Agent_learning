@@ -149,9 +149,12 @@ for 4-bit).
 
 **MLX upgrades — GLM-5.3-Flash (`glm5_next`) and Qwen3.8-Flash-Next (`qwen4_exp`):**
 stock in-process `mlx-lm` / `mlx-vlm` 0.6.17 cannot load these. Same path as
-DeepSeek-V4-Flash: **[oMLX](https://omlx.ai/) 0.6.3+**. GLM weights:
-`~/MLX_Models/GLM-5.3-Flash-MLX-6bit` (~296 GB) —
-[orcarouter 6-bit](https://huggingface.co/orcarouter/GLM-5.3-Flash-MLX).
+DeepSeek-V4-Flash: **[oMLX](https://omlx.ai/) 0.6.3+**. GLM weights chat
+launches: `~/MLX_Models/GLM-5.3-Flash-MLX-oQ4-MTP`. `/list` does not offer
+`GLM-5.3-Flash-MLX-6bit`. A request that still names that 6-bit folder is
+rewritten to the oQ4 directory when that directory has `config.json` and a
+safetensors file. The affine 6-bit checkpoint fails on oMLX 0.7.0 (MTP expert
+`down_proj` is 8-bit; the loader builds it at 6-bit and returns 409).
 Flash-Next 8-bit MTP: `~/MLX_Models/Qwen3.8-Flash-Next-MLX-8bit-MTP` (~203 GB) —
 [Vontra](https://huggingface.co/Vontra/Qwen3.8-Flash-Next-MLX-8bit-MTP)
 (enable native MTP, draft depth 3 in oMLX `/admin`). `/model` / `/load`
@@ -166,18 +169,20 @@ oMLX model settings instead.
 
 | Item | Detail |
 |------|--------|
-| Weights | `~/MLX_Models/DeepSeek-V4-Flash-0731-MXFP4-MLX` (~163 GB on disk) — [Vontra MXFP4](https://huggingface.co/Vontra/DeepSeek-V4-Flash-0731-MXFP4-MLX) |
+| Weights | Older V4 id, used when the directory exists: `~/MLX_Models/DeepSeek-V4-Flash-0731-MXFP4-MLX` (~163 GB) — [Vontra MXFP4](https://huggingface.co/Vontra/DeepSeek-V4-Flash-0731-MXFP4-MLX). This machine’s DeepSeek folders are the V4.1 pair below. |
 | API model id | **basename only** (`DeepSeek-V4-Flash-0731-MXFP4-MLX`). Absolute paths → HTTP 404. Chat normalizes this automatically. |
 | RAM | First real chat completion loads weights into unified memory (~150 GB+). `/model` alone does **not**. macOS “Cached Files” for the safetensors is disk cache, not a loaded model. |
-| CLI / TUI | Chat auto-starts oMLX; binary searched on `PATH`, `~/.omlx/bin/omlx`, or `~/MLX_Models/.omlx-venv/bin/omlx` |
+| CLI / TUI | `/model` and `/load` start oMLX when :8000 is down. A server already listening is not restarted. Binary searched on `PATH`, `~/.omlx/bin/omlx`, or `~/MLX_Models/.omlx-venv/bin/omlx` |
 | **Metal kernels (required)** | Install oMLX from the **prebuilt release wheel** (`omlx-<ver>-cp312-…-macosx_15_0_universal2.whl`) or oMLX.app — **never** `pip install git+…` / `-e .` (no `_ext`, ~30x slower GLM prefill). Check `curl -s :8000/api/status \| jq .custom_kernels`; chat refuses a kernel-less server. |
 | Hot prompt cache | `cache.hot_cache_max_size` e.g. `"32GB"` — **CLI rejects `"20%"`** |
 | GLM-5.2 / Qwen3.8-27B / MiniMax | Default **in-process** MLX. TUI: `/server on` or `/model N server` to run them on oMLX (`/critic auto` then ON). Flash / GLM-5.3 / Flash-Next already use oMLX. |
-| Leaving Flash → GLM-5.2 / GLM-5.3 | Chat **unloads** other oMLX models first. Qwen Flash-Next (~198GB) + GLM-5.3 6-bit (~289GB) exceeds the Metal cap (HTTP 507). Unpin Flash-Next in `/admin` if it was pinned. |
+| Leaving Flash → GLM-5.2 / GLM-5.3 | Chat **unloads** other oMLX models first. Two large oMLX models at once can exceed the Metal cap (HTTP 507). Unpin a pinned model in `/admin` before loading the next one. |
 
-#### DeepSeek-V4.1-Flash-1017 — not tested yet
+#### DeepSeek-V4.1-Flash-1017 — generation not run yet
 
-Oct 17, 2026 refresh of V4.1-Flash. Chat treats it like V4-Flash: `/model` or `/load` on the folder auto-starts oMLX and posts the **basename** as the API id. `model_type` in its `config.json` is `deepseek_v41` (stock `mlx-lm` cannot load it). **These weights have not been loaded or used in `chat.py` on this machine.** Routing is covered by `tests/test_backend_detection.py` only.
+Oct 17, 2026 refresh of V4.1-Flash. Chat treats it like V4-Flash: `/model` or `/load` posts the **basename** as the API id. `model_type` in its `config.json` is `deepseek_v41` (stock `mlx-lm` cannot load it). `/list` badges the name `[VLM]`. **A successful generation has not been run.** One planning attempt returned HTTP 404 because oMLX’s in-memory model list was built while a shard was still missing.
+
+oMLX registers a folder only when every shard named in `model.safetensors.index.json` is on disk. `/model` and `/load` call `ensure_omlx_server`, which **starts** oMLX when port 8000 is down and **leaves a server that is already up** alone (no rescan). After a download finishes, restart oMLX or pick the model only once the port is down so the new process scans the complete folder.
 
 | Item | Detail |
 |------|--------|
@@ -192,7 +197,7 @@ Oct 17, 2026 refresh of V4.1-Flash. Chat treats it like V4-Flash: `/model` or `/
 Do not load it while another large model is already resident.
 
 **TUI — no env vars for the server:** `/list` → `/model` (or `/load` /
-`/launch`) on Flash auto-starts oMLX. For **Qwen3.8-27B** (or any in-process
+`/launch`) on Flash starts oMLX if it is down. For **Qwen3.8-27B** (or any in-process
 MLX pick) type **`/server on`** or **`/model N server`** — same oMLX path,
 and `/critic auto` turns on. `/help server`. Override base URL with
 `OMLX_SERVER_URL` (default `http://127.0.0.1:8000`).

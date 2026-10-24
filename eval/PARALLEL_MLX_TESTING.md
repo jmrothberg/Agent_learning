@@ -105,9 +105,11 @@ V4.1 Flash 1017 oQ4e (512 GB Mac, Engram-on-SSD friendly):
 `~/MLX_Models/DeepSeek-V4.1-Flash-1017-oQ4e-mtp`. **Not load-tested** —
 `requires_omlx_server` only. See README.
 
-**TUI:** `/model` / `/load` / `/launch` on DeepSeek-V4-Flash calls
-`backend.ensure_omlx_server()` (spawn `omlx serve` or open `oMLX.app`) and sets the
-session `BackendInfo.endpoint` to `:8000` — **no** `MLX_SERVER_URL` env required.
+**TUI:** `/model` / `/load` / `/launch` on DeepSeek-V4-Flash or
+DeepSeek-V4.1-Flash-1017 calls `backend.ensure_omlx_server()` when nothing is
+already listening (spawn `omlx serve --model-dir ~/MLX_Models`). A live server
+is left as-is and is not rescanned. Session `BackendInfo.endpoint` is `:8000`
+— **no** `MLX_SERVER_URL` env required.
 GLM-5.2 / Qwen / MiniMax stay in-process. GLM-5.3-Flash (`glm5_next`) uses oMLX like V4-Flash.
 
 **Parallel batches** (`eval/batch_parallel.py`) do **not** auto-start oMLX — start the

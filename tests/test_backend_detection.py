@@ -913,7 +913,7 @@ def test_detect_prefers_omlx_resident_over_disk_order(monkeypatch):
             "/v1/models/status": {
                 "models": [
                     {
-                        "id": "GLM-5.3-Flash-MLX-6bit",
+                        "id": "Qwen3.8-Flash-Next-MLX-8bit-MTP",
                         "loaded": True,
                         "pinned": True,
                     },
@@ -924,15 +924,15 @@ def test_detect_prefers_omlx_resident_over_disk_order(monkeypatch):
                     },
                 ]
             },
-            "/v1/models": {"data": [{"id": "GLM-5.3-Flash-MLX-6bit"}]},
+            "/v1/models": {"data": [{"id": "Qwen3.8-Flash-Next-MLX-8bit-MTP"}]},
         }),
     )
     monkeypatch.setattr(
         backend, "list_local_mlx_models",
-        _fake_local_mlx(["/m/AAA-first-on-disk", "/m/GLM-5.3-Flash-MLX-6bit"]),
+        _fake_local_mlx(["/m/AAA-first-on-disk", "/m/Qwen3.8-Flash-Next-MLX-8bit-MTP"]),
     )
     info = backend.detect_backend("mlx")
-    assert info.model == "GLM-5.3-Flash-MLX-6bit"
+    assert info.model == "Qwen3.8-Flash-Next-MLX-8bit-MTP"
     assert "already loaded" in info.source
     assert info.endpoint == "http://127.0.0.1:8000"
 
@@ -963,6 +963,9 @@ def test_detect_omlx_unloaded_does_not_count_as_resident(monkeypatch):
 
 def test_detect_glm53_on_disk_uses_omlx_not_inprocess(monkeypatch):
     monkeypatch.setattr(backend, "_http_get_json", _fake_http({}))
+    # This test names the 6-bit folder on purpose. Don't let a real oQ4
+    # download on the machine rewrite it.
+    monkeypatch.setattr(backend, "_find_glm53_oq4_dir", lambda: None)
     monkeypatch.setattr(
         backend, "list_local_mlx_models",
         _fake_local_mlx([
@@ -972,6 +975,28 @@ def test_detect_glm53_on_disk_uses_omlx_not_inprocess(monkeypatch):
     )
     info = backend.detect_backend("mlx")
     assert info.model == "GLM-5.3-Flash-MLX-6bit"
+    assert info.endpoint == "http://127.0.0.1:8000"
+
+
+def test_scan_skips_broken_glm53_6bit_keeps_oq4(tmp_path):
+    root = tmp_path / "MLX_Models"
+    for name in ("GLM-5.3-Flash-MLX-6bit", "GLM-5.3-Flash-MLX-oQ4-MTP"):
+        d = root / name
+        d.mkdir(parents=True)
+        (d / "config.json").write_text("{}\n", encoding="utf-8")
+        (d / "model.safetensors").write_bytes(b"x")
+    found = [Path(p).name for p in backend._scan_mlx_models_dir(str(root))]
+    assert found == ["GLM-5.3-Flash-MLX-oQ4-MTP"]
+
+
+def test_broken_glm53_6bit_resolves_to_oq4(monkeypatch, tmp_path):
+    oq4 = tmp_path / "GLM-5.3-Flash-MLX-oQ4-MTP"
+    monkeypatch.setattr(backend, "_find_glm53_oq4_dir", lambda: str(oq4))
+    info = backend._mlx_backend_info_for_model(
+        "/Users/x/MLX_Models/GLM-5.3-Flash-MLX-6bit",
+        source="test",
+    )
+    assert info.model == "GLM-5.3-Flash-MLX-oQ4-MTP"
     assert info.endpoint == "http://127.0.0.1:8000"
 
 

@@ -102,7 +102,9 @@ MLX upgrades: MiniMax-M3 (`minimax_m3.py` copy after mlx-lm upgrade), GLM-5.2
 `~/MLX_Models/DeepSeek-V4.1-Flash-1017-oQ4e-mtp` —
 [mlx-community](https://huggingface.co/mlx-community/DeepSeek-V4.1-Flash-1017-oQ4e-mtp);
 **not load-tested** — routing only, see README),
-**GLM-5.3-Flash** (`glm5_next`, e.g. `~/MLX_Models/GLM-5.3-Flash-MLX-6bit`),
+**GLM-5.3-Flash** (`glm5_next`, e.g. `~/MLX_Models/GLM-5.3-Flash-MLX-oQ4-MTP`;
+`/list` hides `GLM-5.3-Flash-MLX-6bit` and a request for that name uses the
+oQ4 dir when it is a real model),
 and **Qwen3.8-Flash-Next** (`qwen4_exp` + native MTP, e.g.
 `~/MLX_Models/Qwen3.8-Flash-Next-MLX-8bit-MTP`).
 Stock PyPI `mlx-lm` / in-process `mlx-vlm` 0.6.17 lack those load paths
@@ -110,7 +112,7 @@ Stock PyPI `mlx-lm` / in-process `mlx-vlm` 0.6.17 lack those load paths
 
 | Concern | Setting |
 |---------|---------|
-| **TUI pick Flash** | `/model` / `/load` / `/launch` on DeepSeek-V4-Flash, DeepSeek-V4.1-Flash-1017, GLM-5.3-Flash, or Qwen3.8-Flash-Next **auto-starts oMLX** and routes that session to `:8000`. Dense Qwen3.8-27B / GLM-5.2 / MiniMax stay in-process unless TUI **`/server on`** or **`/model N server`**. Typing a goal **without** `/load` uses whatever oMLX already has `loaded=true`. V4.1-Flash-1017 routing is unit-tested and **not load-tested**. |
+| **TUI pick Flash** | `/model` / `/load` / `/launch` on DeepSeek-V4-Flash, DeepSeek-V4.1-Flash-1017, GLM-5.3-Flash, or Qwen3.8-Flash-Next **starts oMLX when :8000 is down** and routes that session there. A server that is already listening is not restarted, so it keeps the model list from its last scan. Dense Qwen3.8-27B / GLM-5.2 / MiniMax stay in-process unless TUI **`/server on`** or **`/model N server`**. Typing a goal **without** `/load` uses whatever oMLX already has `loaded=true`. V4.1-Flash-1017 routing is unit-tested. A full generation on the 1017 weights has **not** succeeded yet. |
 | **Prompt cache (check first)** | `cache.hot_cache_max_size` ≠ `"0"` (e.g. `"32GB"`). Admin UI: **Memory Management → Memory Limit (In-Memory Hot Cache)** — **not** the CACHE panel. Default `"0"` disabled; enabling cut a repeated ~24K prompt **51s → 4.6s**. oMLX CLI rejects `"20%"` — use absolute GB in `settings.json` / `omlx serve` |
 | Parallel agents | `LLM_BACKEND=mlx-server` + `MLX_SERVER_URL=http://127.0.0.1:8000` — one resident model, continuous batch |
 | Idle unload / “server quit” | Global idle timeout **None**; **pin** the coder model; per-model TTL off |

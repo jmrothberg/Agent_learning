@@ -4008,6 +4008,12 @@ def _mlx_process_model_arg() -> str | None:
 def _mlx_backend_info_for_model(model: str, *, source: str) -> BackendInfo:
     """Attach oMLX HTTP for glm5_next / deepseek_v4 / qwen4_exp, else in-process."""
     raw = (model or "").strip()
+    # A request still naming the broken 6-bit folder uses the oQ4
+    # download instead, once that directory is a real model.
+    if _is_broken_glm53_6bit(raw):
+        repl = _find_glm53_oq4_dir()
+        if repl:
+            raw = repl
     ep = mlx_endpoint_for_model(raw)
     mid = omlx_api_model_id(raw) if requires_omlx_server(raw) else raw
     ctx_src = os.path.expanduser(raw)
@@ -4038,7 +4044,7 @@ def _try_omlx_already_loaded() -> BackendInfo | None:
         if not isinstance(m, dict) or not m.get("loaded") or not m.get("id"):
             continue
         mid = str(m["id"])
-        if not _is_chat_capable_tag(mid):
+        if not _is_chat_capable_tag(mid) or _is_broken_glm53_6bit(mid):
             continue
         loaded_rows.append(m)
     if not loaded_rows:
@@ -5094,8 +5100,16 @@ def list_mlx_inventory() -> tuple[list[str], str | None]:
             or (os.environ.get("MLX_MODEL") or "").strip()
             or None
         )
-        downloaded = [name for name in all_ids if _is_chat_capable_tag(name)]
-        if active and active not in downloaded and active in all_ids:
+        downloaded = [
+            name for name in all_ids
+            if _is_chat_capable_tag(name) and not _is_broken_glm53_6bit(name)
+        ]
+        if (
+            active
+            and active not in downloaded
+            and active in all_ids
+            and not _is_broken_glm53_6bit(active)
+        ):
             downloaded.append(active)
         return downloaded, active
 
@@ -5112,12 +5126,12 @@ def list_mlx_inventory() -> tuple[list[str], str | None]:
         # layouts put the SHA in basename and the model id 2 levels up
         # (`hub/models--<org>--<name>/snapshots/<sha>`), so checking
         # only `base` would let embedding models slip through.
-        if not _is_chat_capable_tag(path):
+        if not _is_chat_capable_tag(path) or _is_broken_glm53_6bit(path):
             continue
         merged.append(path)
         seen.add(path)
         seen.add(base)
-    if active and active not in seen:
+    if active and active not in seen and not _is_broken_glm53_6bit(active):
         merged.append(active)
     return merged, active
 
@@ -5163,6 +5177,53 @@ def _default_mlx_search_dirs() -> list[str]:
     ]
 
 
+# Affine GLM-5.3 6-bit does not load on oMLX 0.7.0: the MTP expert
+# down_proj is 8-bit and the loader builds that block at 6-bit
+# (expected 384, got 512), then caches a 409. The oQ4 folder is the
+# GLM-5.3 chat should launch. The 6-bit files stay on disk.
+_BROKEN_GLM53_6BIT_BASENAME = "GLM-5.3-Flash-MLX-6bit"
+
+
+def _is_broken_glm53_6bit(name: str) -> bool:
+    """True for the GLM-5.3 affine 6-bit folder or its oMLX model id."""
+    base = os.path.basename(str(name or "").replace("\\", "/").rstrip("/"))
+    return base == _BROKEN_GLM53_6BIT_BASENAME
+
+
+def _is_glm53_oq4_name(name: str) -> bool:
+    low = os.path.basename(str(name or "").replace("\\", "/").rstrip("/")).lower()
+    return "glm-5.3" in low and "oq4" in low
+
+
+def _find_glm53_oq4_dir() -> str | None:
+    """Local GLM-5.3 oQ4 directory, once its weights are on disk."""
+    roots: list[str] = []
+    raw_env = (os.environ.get("MLX_MODELS_DIR") or "").strip()
+    if raw_env:
+        roots.extend(p.strip() for p in raw_env.split(":") if p.strip())
+    roots.extend(_default_mlx_search_dirs())
+    found: list[str] = []
+    seen: set[str] = set()
+    for root in roots:
+        root = os.path.expanduser(root)
+        if not root or root in seen or not os.path.isdir(root):
+            continue
+        seen.add(root)
+        try:
+            children = list(os.scandir(root))
+        except OSError:
+            continue
+        for entry in children:
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+            if not _is_glm53_oq4_name(entry.name):
+                continue
+            if _is_mlx_model_dir(entry.path):
+                found.append(os.path.abspath(entry.path))
+    found.sort()
+    return found[0] if found else None
+
+
 def _is_mlx_model_dir(path: str) -> bool:
     """A directory looks like an MLX model when it has config.json plus
     at least one .safetensors file."""
@@ -5194,6 +5255,9 @@ def _scan_mlx_models_dir(root: str) -> list[str]:
         return out
     for entry in children:
         if not entry.is_dir(follow_symlinks=False):
+            continue
+        # Leave GLM-5.3-Flash-MLX-6bit on disk, but never offer it.
+        if _is_broken_glm53_6bit(entry.name):
             continue
         if _is_mlx_model_dir(entry.path):
             ap = os.path.abspath(entry.path)
